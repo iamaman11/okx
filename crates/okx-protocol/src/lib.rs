@@ -2207,11 +2207,10 @@ pub enum HostControlOperation {
     RecoverReadOnlySelection,
     StopAgent,
     RestartAgent,
-    /// Offline storage cutover only. CONTROL must be STOPPED and own an
-    /// empty exclusive Windows Job; no exchange mutation or trading grant.
-    MigrateLedgerToSqlite {
+    /// Explicit fresh SQLite genesis only. Requires stopped CONTROL and
+    /// independent flat venue readback; no legacy history is imported.
+    InitializeFreshLedger {
         expected_uid_fingerprint: String,
-        expected_v14_sha256: String,
     },
     InstallAutostart,
     AutostartStatus,
@@ -2242,12 +2241,8 @@ impl HostControlOperation {
                 }
             }
             Self::RegisterReadOnlyAccount { entry } => entry.validate(),
-            Self::MigrateLedgerToSqlite {
-                expected_uid_fingerprint,
-                expected_v14_sha256,
-            } => {
-                validate_sha256(expected_uid_fingerprint)?;
-                validate_sha256(expected_v14_sha256)
+            Self::InitializeFreshLedger { expected_uid_fingerprint } => {
+                validate_sha256(expected_uid_fingerprint)
             }
             Self::ConfigureProductionTrading { policy } => policy.validate(),
             Self::StopProductionTrading { expected_revision } => {
@@ -4631,28 +4626,20 @@ mod native_drain_source_tests {
     }
 
     #[test]
-    fn sqlite_cutover_requires_exact_typed_uid_and_legacy_hash() {
-        let operation = HostControlOperation::MigrateLedgerToSqlite {
-            expected_uid_fingerprint: "a".repeat(64),
-            expected_v14_sha256: "b".repeat(64),
+    fn fresh_sqlite_owner_genesis_requires_exact_typed_uid_only() {
+        let operation=HostControlOperation::InitializeFreshLedger {
+            expected_uid_fingerprint:"a".repeat(64),
         };
         assert!(operation.validate().is_ok());
-        let serialized = serde_json::to_value(&operation).unwrap();
-        assert_eq!(serialized["type"], "migrate_ledger_to_sqlite");
-        assert_eq!(
-            serde_json::from_value::<HostControlOperation>(serialized).unwrap(),
-            operation
-        );
-        let invalid = HostControlOperation::MigrateLedgerToSqlite {
-            expected_uid_fingerprint: "a".repeat(63),
-            expected_v14_sha256: "b".repeat(64),
-        };
-        assert!(invalid.validate().is_err());
-        let invalid = HostControlOperation::MigrateLedgerToSqlite {
-            expected_uid_fingerprint: "a".repeat(64),
-            expected_v14_sha256: "NOT_A_SHA256".to_owned(),
-        };
-        assert!(invalid.validate().is_err());
+        let serialized=serde_json::to_value(&operation).unwrap();
+        assert_eq!(serialized["type"],"initialize_fresh_ledger");
+        assert_eq!(serde_json::from_value::<HostControlOperation>(serialized).unwrap(),operation);
+        assert!(HostControlOperation::InitializeFreshLedger {
+            expected_uid_fingerprint:"a".repeat(63),
+        }.validate().is_err());
+        assert!(HostControlOperation::InitializeFreshLedger {
+            expected_uid_fingerprint:"INVALID".to_owned(),
+        }.validate().is_err());
     }
 
     #[test]

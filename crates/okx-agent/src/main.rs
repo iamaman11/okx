@@ -85,13 +85,11 @@ enum Command {
     /// Store the separate Read + Trade OKX Demo executor credential payload from stdin.
     SetDemoExecutorOkxCredentials,
 
-    /// Offline one-writer storage cutover under existing stopped CONTROL.
-    /// Called only after CONTROL has fenced its exclusive Windows Job.
-    StorageCutover {
+    /// Single fresh SQL owner installation. Never imports v14 data.
+    /// CONTROL must be STOPPED; exchange verification is read-only.
+    StorageInitialize {
         #[arg(long)]
         expected_uid_fingerprint: String,
-        #[arg(long)]
-        expected_v14_sha256: String,
     },
 
     /// Process one encrypted mailbox envelope from a file or stdin.
@@ -236,60 +234,64 @@ async fn run(cli: Cli) -> AgentResult<()> {
                 })
             );
         }
-        Command::StorageCutover {
-            expected_uid_fingerprint,
-            expected_v14_sha256,
-        } => {
-            // Existing CONTROL has already selected this exact native
-            // Production/Demo root and verified the v14 UID and hash.
-            // Bind the immutable account identity to SQLite BEFORE the owner
-            // receipt is published; never infer the account from a UI toggle.
-            let account_identity = SqliteAccountIdentity {
-                venue: LedgerVenue::Okx,
-                environment: if environment.demo {
+        Command::StorageInitialize { expected_uid_fingerprint } => {
+            let observer_credentials=load_native_okx_credentials_for_environment(environment)?;
+            let observer=OkxRestClient::with_rate_budget(
+                environment,observer_credentials,RateBudget::new(),
+            )?;
+            let account=AccountBootstrapper::new(observer);
+            let snapshot=account.snapshot().await.map_err(|e|
+                AgentError::FinancialCaptureTask(e.to_string()))?;
+            let facts=account.ledger_facts(&snapshot).await.map_err(|e|
+                AgentError::FinancialCaptureTask(e.to_string()))?;
+            let algo=account.pending_derivative_risk_algos().await.map_err(|e|
+                AgentError::FinancialCaptureTask(e.to_string()))?;
+            // A fresh financial baseline is possible only when the venue,
+            // not the old local manifest, independently proves no live risk.
+            if facts.summary.authority.account_uid_fingerprint!=expected_uid_fingerprint
+                || facts.summary.open_positions!=0
+                || facts.summary.pending_orders!=0
+                || !algo.complete_within_bound
+                || algo.rows!=0
+                || algo.received_at_ms==0
+            {
+                return Err(okx_execution::ExecutionLedgerError::CapitalReservationUnattested.into());
+            }
+            let account_identity=SqliteAccountIdentity {
+                venue:LedgerVenue::Okx,
+                environment:if environment.demo {
                     LedgerEnvironment::Demo
                 } else {
                     LedgerEnvironment::Production
                 },
-                account_id: if environment.demo { "demo" } else { "real" }.to_owned(),
-                uid_fingerprint: expected_uid_fingerprint.clone(),
-                bound_at_ms: u64::try_from(Utc::now().timestamp_millis()).unwrap_or_default(),
+                account_id:if environment.demo {"demo"}else{"real"}.to_owned(),
+                uid_fingerprint:expected_uid_fingerprint,
+                bound_at_ms:u64::try_from(Utc::now().timestamp_millis()).unwrap_or_default(),
             };
-            let chosen = ExecutionLedgerStore::migrate_to_sqlite_offline_for_account(
-                &config.root,
-                &expected_uid_fingerprint,
-                &expected_v14_sha256,
-                &account_identity,
+            let chosen=ExecutionLedgerStore::initialize_fresh_account(
+                &config.root,&account_identity,
             )?;
-            let proof = chosen.attest_storage()?;
-            let bound = chosen
-                .bound_native_account_identity()?
+            let proof=chosen.attest_storage()?;
+            let bound=chosen.bound_native_account_identity()?
                 .ok_or(okx_execution::ExecutionLedgerError::AccountScopeMismatch)?;
-            if bound.venue != account_identity.venue
-                || bound.environment != account_identity.environment
-                || bound.account_id != account_identity.account_id
-                || bound.uid_fingerprint != account_identity.uid_fingerprint
-            {
+            if bound!=account_identity {
                 return Err(okx_execution::ExecutionLedgerError::AccountScopeMismatch.into());
             }
-            println!(
-                "{}",
-                serde_json::json!({
-                    "schema": "okx.native-storage-cutover/v1",
-                    "owner": "SQLITE",
-                    "format": proof.on_disk_schema,
-                    "integrity": proof.integrity,
-                    "manifest_sha256": proof.manifest_sha256,
-                    "account_binding": {
-                        "venue": bound.venue.as_str(),
-                        "environment": if environment.demo { "demo" } else { "production" },
-                        "account_id": bound.account_id,
-                        "uid_fingerprint": bound.uid_fingerprint,
-                        "immutable": true
-                    },
-                    "trading_authorized": false
-                })
-            );
+            println!("{}",serde_json::json!({
+                "schema":"okx.native-storage-initialization/v1",
+                "owner":"SQLITE",
+                "format":proof.on_disk_schema,
+                "integrity":proof.integrity,
+                "manifest_sha256":proof.manifest_sha256,
+                "account_binding":{
+                    "venue":bound.venue.as_str(),
+                    "environment":if environment.demo {"demo"}else{"production"},
+                    "account_id":bound.account_id,
+                    "uid_fingerprint":bound.uid_fingerprint,
+                    "immutable":true
+                },
+                "trading_authorized":false
+            }));
         }
         Command::Once { input } => {
             let payload = read_input(input)?;

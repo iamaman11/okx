@@ -55,7 +55,7 @@ const MAX_SEALED_ARCHIVE_BYTES: u64 = 128 * 1024 * 1024;
 pub const STRATEGY_CAPITAL_RESERVATION_SCHEMA_V1: &str = "okx.strategy-capital-reservation/v1";
 pub const EXECUTION_RISK_STOP_SCHEMA_V1: &str = "okx.execution-risk-stop/v1";
 pub const MAX_EXECUTION_LEDGER_RECORDS: usize = 10_000;
-const DEFAULT_EXECUTION_LEDGER_PATH: &str = r"C:\okx-runtime\execution-ledger.json";
+const DEFAULT_EXECUTION_LEDGER_PATH: &str = r"C:\okx-runtime\execution-ledger.sqlite";
 
 pub const PROFILE_HANDOFF_LEDGER_ASSESSMENT_SCHEMA_V1: &str =
     "okx.profile-handoff-ledger-assessment/v1";
@@ -489,11 +489,7 @@ pub struct ExecutionLedgerStore {
 
 impl ExecutionLedgerStore {
     pub fn canonical() -> Self {
-        Self {
-            path: PathBuf::from(DEFAULT_EXECUTION_LEDGER_PATH),
-            max_records: MAX_EXECUTION_LEDGER_RECORDS,
-            sqlite_native: false,
-        }
+        Self::sqlite_at(DEFAULT_EXECUTION_LEDGER_PATH)
     }
 
     pub fn at(path: impl Into<PathBuf>) -> Self {
@@ -517,104 +513,86 @@ impl ExecutionLedgerStore {
         }
     }
 
-    /// Select exactly one durable owner. The old JSON filename is removed
-    /// from service BEFORE publishing SQLite ownership. The sealed v14 body
-    /// stays readable for provenance, never as a live writer or fallback.
+    /// SQL is the sole operational account owner. An unbound or missing
+    /// database is NEVER interpreted as an empty existing trading account.
+    /// Legacy files are not read, migrated, or selected as execution owners.
     pub fn select_published_owner(root: &Path) -> Result<Self, ExecutionLedgerError> {
-        Self::select_published_owner_impl(root, None)
+        Self::select_published_owner_impl(root)
     }
 
-    /// Select via the SAME exclusively locked file handle owned by the
-    /// Engine/CONTROL. Windows rejects opening the locked marker a second
-    /// time, even within the same process; do not bypass or drop the lease.
     pub fn select_published_owner_under_writer_lease(
         root: &Path,
-        writer_lease: &mut File,
+        _writer_lease: &mut File,
     ) -> Result<Self, ExecutionLedgerError> {
-        Self::select_published_owner_impl(root, Some(writer_lease))
+        Self::select_published_owner_impl(root)
     }
 
-    fn select_published_owner_impl(
-        root: &Path,
-        mut writer_lease: Option<&mut File>,
-    ) -> Result<Self, ExecutionLedgerError> {
-        let legacy = root.join("execution-ledger.json");
-        let sealed = root.join("execution-ledger.v14.sealed");
-        let receipt = root.join("execution-ledger.owner");
-        let native = root.join("execution-ledger.sqlite");
-        // The same permanent file that fences concurrent writers also keeps
-        // an irreversible cutover watermark. Even loss of both SQLite and its
-        // owner receipt must not resurrect a blank pre-cutover JSON writer.
-        let marked = match writer_lease.as_deref_mut() {
-            Some(handle) => Self::read_writer_watermark(handle)?,
-            None => Self::has_sqlite_cutover_watermark(root)?,
-        };
-        if !receipt.try_exists()? {
-            if marked || native.try_exists()? || sealed.try_exists()? {
-                return Err(ExecutionLedgerError::Corrupt(
-                    "SQLite cutover pending without owner receipt",
-                ));
+    fn select_published_owner_impl(root: &Path) -> Result<Self, ExecutionLedgerError> {
+        let native=Self::sqlite_at(root.join("execution-ledger.sqlite"));
+        let identity=native.bound_native_account_identity()?
+            .ok_or(ExecutionLedgerError::AccountScopeMismatch)?;
+        sqlite_store::attest_published_owner(native.path(),&identity.uid_fingerprint)?;
+        Ok(native)
+    }
+
+    /// Single Genesis of an already independently verified FLAT account.
+    /// This is one SQLite owner, not a conversion of v14 accounting.
+    /// The caller holds a stopped Agent and empty CONTROL Windows Job.
+    /// If the acknowledgement was lost, the SAME bound database is read,
+    /// never replaced or replayed.
+    pub fn initialize_fresh_account(
+        root:&Path,
+        identity:&SqliteAccountIdentity,
+    ) -> Result<Self,ExecutionLedgerError> {
+        identity.validate()?;
+        let _lease=Self::acquire_writer_lease(root)?;
+        let native=Self::sqlite_at(root.join("execution-ledger.sqlite"));
+        if native.path().exists() {
+            let bound=native.bound_native_account_identity()?
+                .ok_or(ExecutionLedgerError::AccountScopeMismatch)?;
+            if bound!=*identity {
+                return Err(ExecutionLedgerError::AccountScopeMismatch);
             }
-            return Ok(Self::at(legacy));
+            native.attest_storage()?;
+            return Ok(native);
         }
-        if !marked {
+        sqlite_store::save(
+            native.path(),
+            &BTreeMap::new(),None,None,None,
+            &StrategyPeriodHistory::default(),&[],
+        )?;
+        native.bind_native_account_identity(identity)?;
+        let proof=native.attest_storage()?;
+        if proof.on_disk_schema!=sqlite_store::SCHEMA
+            || proof.integrity!="VALIDATED_COLD_READ" {
             return Err(ExecutionLedgerError::Corrupt(
-                "SQLite owner receipt without durable cutover watermark",
+                "fresh native account genesis attestation failed",
             ));
         }
-        if !sealed.try_exists()? || legacy.try_exists()? {
-            return Err(ExecutionLedgerError::Corrupt(
-                "sealed v14 source missing or legacy writer resurrected",
-            ));
+        // Old local JSON was never imported. Delete only known application-
+        // owned legacy source paths after the new owner has been attested.
+        for name in [
+            "execution-ledger.json",
+            "execution-ledger.v14.sealed",
+            "execution-ledger.pre-v14.json",
+            "execution-ledger.owner",
+        ] {
+            let old=root.join(name);
+            if old.try_exists()? {
+                if !old.is_file() {
+                    return Err(ExecutionLedgerError::Corrupt("legacy ledger path not a file"));
+                }
+                fs::remove_file(old)?;
+            }
         }
-        if fs::metadata(&receipt)?.len() > 512 {
-            return Err(ExecutionLedgerError::Corrupt(
-                "ledger owner receipt oversized",
-            ));
+        let archived=root.join("execution-ledger.archive");
+        if archived.try_exists()? {
+            if !archived.is_dir() {
+                return Err(ExecutionLedgerError::Corrupt("legacy archive path not a directory"));
+            }
+            fs::remove_dir_all(archived)?;
         }
-        let bytes = fs::read(&receipt)?;
-        let text = std::str::from_utf8(&bytes)
-            .map_err(|_| ExecutionLedgerError::Corrupt("ledger owner receipt invalid UTF8"))?;
-        let parts = text.split('\n').collect::<Vec<_>>();
-        if parts.len() != 5
-            || parts[0] != "okx.ledger-owner/v1"
-            || parts[1] != "SQLITE"
-            || !parts[4].is_empty()
-            || parts[2].len() != 64
-            || parts[3].len() != 64
-            || !parts[2..4].iter().all(|x| {
-                x.bytes()
-                    .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
-            })
-        {
-            return Err(ExecutionLedgerError::Corrupt(
-                "ledger owner receipt invalid",
-            ));
-        }
-        let legacy_proof = Self::at(&sealed).attest_storage()?;
-        if legacy_proof.on_disk_schema != EXECUTION_LEDGER_SCHEMA_V14 {
-            return Err(ExecutionLedgerError::Corrupt("legacy source not v14"));
-        }
-        let original = fs::read(&sealed)?;
-        if format!("{:x}", Sha256::digest(&original)) != parts[3] {
-            return Err(ExecutionLedgerError::Corrupt(
-                "legacy source changed after cutover",
-            ));
-        }
-        let chosen = Self::sqlite_at(root.join("execution-ledger.sqlite"));
-        let (uid, origin) = sqlite_store::read_staging_origin(&chosen.path)?;
-        if uid != parts[2] || origin != parts[3] {
-            return Err(ExecutionLedgerError::AccountScopeMismatch);
-        }
-        // A published v1 native owner is upgraded only while the same
-        // exclusive writer lease is held. Read-only inspections never mutate
-        // the DB or silently resurrect a legacy account.
-        if let Some(lease) = writer_lease {
-            sqlite_store::upgrade_reconciliation_indices_offline(&chosen.path, lease)?;
-        }
-        // One streaming cold check, no temporary full historical BTreeMap.
-        sqlite_store::attest_published_owner(&chosen.path, &uid)?;
-        Ok(chosen)
+        Ok(native)
     }
 
     /// Native offline cutover. Caller MUST be the existing CONTROL with

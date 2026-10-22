@@ -263,10 +263,9 @@ impl HostExecutor {
             HostControlOperation::RecoverReadOnlySelection => self.recover_read_only_selection(),
             HostControlOperation::StopAgent => self.stop_agent(),
             HostControlOperation::RestartAgent => self.restart_agent(),
-            HostControlOperation::MigrateLedgerToSqlite {
+            HostControlOperation::InitializeFreshLedger {
                 expected_uid_fingerprint,
-                expected_v14_sha256,
-            } => self.migrate_ledger_to_sqlite(&expected_uid_fingerprint, &expected_v14_sha256),
+            } => self.initialize_fresh_ledger(&expected_uid_fingerprint),
             HostControlOperation::InstallAutostart => autostart::install(),
             HostControlOperation::AutostartStatus => autostart::status_value(),
             HostControlOperation::HandoffToAutostart
@@ -1051,14 +1050,13 @@ impl HostExecutor {
         }))
     }
 
-    /// One offline transition under the existing CONTROL authority. It is
+    /// Fresh native ledger genesis with the existing CONTROL as sole owner. It is
     /// impossible to enter this branch while CONTROL desires an active Agent,
     /// while its Job contains a process, or while release provenance differs.
     /// A crash leaves the desired state STOPPED, not an automatic restart.
-    fn migrate_ledger_to_sqlite(
+    fn initialize_fresh_ledger(
         &mut self,
         expected_uid: &str,
-        expected_v14_sha256: &str,
     ) -> HostControlResult<Value> {
         if self.desired_error.is_some()
             || self.desired_store.is_pending()?
@@ -1079,7 +1077,7 @@ impl HostExecutor {
             || status["installed_agent"]["state"] != "VERIFIED"
         {
             return Err(HostControlError::ArtifactVerification(
-                "native storage cutover requires matched ReleaseSet",
+                "fresh native SQLite genesis requires matched ReleaseSet",
             ));
         }
         let root = runtime_dir(self.desired_profile);
@@ -1090,11 +1088,9 @@ impl HostExecutor {
             command.arg("--demo");
         }
         command
-            .arg("storage-cutover")
+            .arg("storage-initialize")
             .arg("--expected-uid-fingerprint")
             .arg(expected_uid)
-            .arg("--expected-v14-sha256")
-            .arg(expected_v14_sha256)
             .current_dir(&self.repo_root);
         let stdout = bounded_storage_cutover_output(&mut command, STORAGE_CUTOVER_TIMEOUT)?;
         let reply: Value = serde_json::from_slice(&stdout)?;
@@ -1102,7 +1098,7 @@ impl HostExecutor {
             AgentProfile::Production => ("real", "production"),
             AgentProfile::DemoAcceptance => ("demo", "demo"),
         };
-        if reply["schema"] != "okx.native-storage-cutover/v1"
+        if reply["schema"] != "okx.native-storage-initialization/v1"
             || reply["owner"] != "SQLITE"
             || reply["integrity"] != "VALIDATED_COLD_READ"
             || reply["trading_authorized"] != false
@@ -1118,8 +1114,8 @@ impl HostExecutor {
         }
         // No implicit restart, read-only switch, account change or grant.
         Ok(json!({
-            "schema": "okx.host-control.storage-cutover/v1",
-            "status": "SQLITE_OWNER_VERIFIED",
+            "schema": "okx.host-control.storage-initialization/v1",
+            "status": "FRESH_SQLITE_OWNER_VERIFIED",
             "profile": self.desired_profile,
             "ledger": reply,
             "agent_desired": self.desired_agent,

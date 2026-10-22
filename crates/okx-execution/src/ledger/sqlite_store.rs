@@ -1039,9 +1039,8 @@ where
     Ok(())
 }
 
-/// A binding is created only by an authenticated native owner for an
-/// ALREADY VALID, nonempty, UID-scoped ledger. This is not a registration
-/// endpoint or a separate authorizer.
+/// Exactly-once typed account binding. The first empty fresh native ledger
+/// may acquire its UID; a populated existing account is never rebound.
 pub(super) fn bind_account_identity(
     path: &Path,
     identity: &SqliteAccountIdentity,
@@ -1058,7 +1057,6 @@ pub(super) fn bind_account_identity(
             .as_ref()
             .is_some_and(|r| r.account_uid_fingerprint != expected)
         || source.as_ref().is_some_and(|e| e.account_uid != expected)
-        || (entries.is_empty() && reservation.is_none() && source.is_none())
     {
         return Err(ExecutionLedgerError::AccountScopeMismatch);
     }
@@ -1071,7 +1069,34 @@ pub(super) fn bind_account_identity(
         .query_row("SELECT uid FROM ledger_state WHERE key=1", [], |r| r.get(0))
         .map_err(io)?;
     if persisted_uid != expected {
-        return Err(ExecutionLedgerError::AccountScopeMismatch);
+        // One explicit empty-SQLite genesis; no imported v14 intent/source.
+        let is_new=entries.is_empty()
+            && reservation.is_none()
+            && source.is_none()
+            && persisted_uid.is_empty();
+        if !is_new {
+            return Err(ExecutionLedgerError::AccountScopeMismatch);
+        }
+        let old:Option<i64>=tx.query_row(
+            "SELECT 1 FROM account_identity WHERE singleton=1",
+            [],|row|row.get(0),
+        ).optional().map_err(io)?;
+        let intent_count:i64=tx.query_row(
+            "SELECT COUNT(*) FROM ledger_entries",[],|row|row.get(0),
+        ).map_err(io)?;
+        let source_count:i64=tx.query_row(
+            "SELECT COUNT(*) FROM native_source_runs",[],|row|row.get(0),
+        ).map_err(io)?;
+        if old.is_some() || intent_count!=0 || source_count!=0 {
+            return Err(ExecutionLedgerError::AccountScopeMismatch);
+        }
+        let count=tx.execute(
+            "UPDATE ledger_state SET uid=?1 WHERE key=1 AND uid=''",
+            params![expected],
+        ).map_err(io)?;
+        if count!=1 {
+            return Err(ExecutionLedgerError::AccountScopeMismatch);
+        }
     }
     let previous: Option<(String, String, String, String)> = tx
         .query_row(
