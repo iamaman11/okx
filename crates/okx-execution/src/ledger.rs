@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs::{self, File},
-    io::{Read, Seek, Write},
+    io::Write,
     path::{Path, PathBuf},
     str::FromStr,
 };
