@@ -2641,12 +2641,12 @@ mod tests {
                 .expect("sealed native ledger");
         }
         let baseline = runtime
-            .profile_handoff_ledger_assessment("a".repeat(64))
+            .profile_handoff_ledger_assessment(&"a".repeat(64))
             .await
             .expect("baseline durable ledger");
         assert!(runtime.admit_mutating_request().await.is_some());
         let drained = runtime
-            .drain_mutation_ingress("a".repeat(64))
+            .drain_mutation_ingress(&"a".repeat(64))
             .await
             .expect("bounded source drain");
         assert_eq!(
@@ -2665,7 +2665,7 @@ mod tests {
             MutationAuthority::Disabled
         );
         let after = runtime
-            .profile_handoff_ledger_assessment("a".repeat(64))
+            .profile_handoff_ledger_assessment(&"a".repeat(64))
             .await
             .expect("read-only durable ledger");
         assert_eq!(
