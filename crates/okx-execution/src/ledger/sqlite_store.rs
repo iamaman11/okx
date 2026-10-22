@@ -3759,6 +3759,61 @@ mod tests {
     }
 
     #[test]
+    fn native_restart_keeps_source_sql_owned_and_retains_pointer_across_stop() {
+        let root = test_root("native-sql-source-cold-ownership");
+        let db = root.join("account.sqlite");
+        let uid = "a".repeat(64);
+        let run = StrategyCapitalReservation {
+            schema: STRATEGY_CAPITAL_RESERVATION_SCHEMA_V1.to_owned(),
+            allocation_id: "native_sql_source_cold_owner_run_000001".to_owned(),
+            account_uid_fingerprint: uid,
+            origin_schema: "test/v1".to_owned(),
+            origin_version: "v1".to_owned(),
+            mandate_version: "1".to_owned(),
+            allocated_usdt: "100".to_owned(),
+            opening_account_usdt_equity: "127".to_owned(),
+            account_generation: "g1".to_owned(),
+            operator_authority_id: format!("sha256:{}", "a".repeat(64)),
+            started_at_ms: 1000,
+        };
+        let source = DurableExchangeEvidence::new(&run).unwrap();
+        save(
+            &db,
+            &BTreeMap::new(),
+            None,
+            Some(&run),
+            Some(&source),
+            &StrategyPeriodHistory::default(),
+            &[],
+        )
+        .unwrap();
+        let store = ExecutionLedgerStore::sqlite_at(&db);
+        let mut ledger = DurableExecutionLedger::open(store.clone(), 2000).unwrap();
+        assert!(ledger.exchange_evidence.is_none(), "native source must not stay resident");
+        assert_eq!(
+            ledger.current_source().unwrap().unwrap().checksum_sha256,
+            source.checksum_sha256,
+        );
+        let before = ledger.exchange_evidence_summary().unwrap().unwrap();
+        ledger.stop_new_risk("OPERATOR_HALT", 3000).unwrap();
+        assert!(ledger.exchange_evidence.is_none());
+        assert_eq!(
+            ledger.exchange_evidence_summary().unwrap().unwrap().checksum_sha256,
+            before.checksum_sha256,
+        );
+        drop(ledger);
+        let reopened = DurableExecutionLedger::open(store, 4000).unwrap();
+        assert!(reopened.exchange_evidence.is_none());
+        assert_eq!(
+            reopened.current_source().unwrap().unwrap().checksum_sha256,
+            source.checksum_sha256,
+        );
+        assert_eq!(reopened.risk_stop.unwrap().reason, "OPERATOR_HALT");
+        drop(reopened);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn native_sqlite_transition_survives_evicted_memory_without_replaying_post() {
         let root = test_root("native-cached-intent-eviction");
         let db = root.join("account.sqlite");
