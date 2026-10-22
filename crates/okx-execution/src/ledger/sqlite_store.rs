@@ -3145,7 +3145,8 @@ mod tests {
         let path = root.join("account.sqlite");
         let uid = "b".repeat(64);
         let reservation = StrategyCapitalReservation {
-            schema: STRATEGY_CAPITAL_RESERVATION_SCHEMA_V1.to_owned(),
+            schema: STRATEGY_CAPITAL_RESERVATION_SCHEMA_V2.to_owned(),
+            strategy_id: "test_strategy_v1".to_owned(),
             allocation_id: "account_identity_test_run_000001".to_owned(),
             account_uid_fingerprint: uid.clone(),
             origin_schema: "test/v1".to_owned(),
@@ -3782,7 +3783,8 @@ mod tests {
         let db = root.join("account.sqlite");
         let uid = "a".repeat(64);
         let run = StrategyCapitalReservation {
-            schema: STRATEGY_CAPITAL_RESERVATION_SCHEMA_V1.to_owned(),
+            schema: STRATEGY_CAPITAL_RESERVATION_SCHEMA_V2.to_owned(),
+            strategy_id: "test_strategy_v1".to_owned(),
             allocation_id: "native_sql_source_cold_owner_run_000001".to_owned(),
             account_uid_fingerprint: uid,
             origin_schema: "test/v1".to_owned(),
@@ -4476,7 +4478,8 @@ mod tests {
         let root = test_root("exchange-evidence");
         let p = root.join("account.sqlite");
         let run = StrategyCapitalReservation {
-            schema: STRATEGY_CAPITAL_RESERVATION_SCHEMA_V1.to_owned(),
+            schema: STRATEGY_CAPITAL_RESERVATION_SCHEMA_V2.to_owned(),
+            strategy_id: "test_strategy_v1".to_owned(),
             allocation_id: "sqlite_test_run_000001".to_owned(),
             account_uid_fingerprint: "uid-test-one".to_owned(),
             origin_schema: "okx.manual-research/v1".to_owned(),

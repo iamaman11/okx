@@ -1164,6 +1164,7 @@ pub enum AgentOperation {
     /// Local capital allocation: no native exchange mutation.
     BeginStrategyRun {
         allocation_id: String,
+        strategy_id: String,
         origin_schema: String,
         origin_version: String,
         mandate_version: String,
@@ -1450,6 +1451,7 @@ impl AgentOperation {
             }
             Self::BeginStrategyRun {
                 allocation_id,
+                strategy_id,
                 origin_schema,
                 origin_version,
                 mandate_version,
@@ -1458,6 +1460,12 @@ impl AgentOperation {
                 rearm,
             } => {
                 validate_request_id(allocation_id)?;
+                if !(2..=64).contains(&strategy_id.len())
+                    || !strategy_id.as_bytes()[0].is_ascii_alphabetic()
+                    || !strategy_id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+                {
+                    return Err(ProtocolError::InvalidAnalyticalQuery("strategy_id"));
+                }
                 validate_version(origin_schema)?;
                 validate_version(origin_version)?;
                 validate_version(mandate_version)?;
@@ -4410,6 +4418,7 @@ mod direct_transport_tests {
     fn native_strategy_begin_is_strict_demo_only_and_cannot_be_replayed_as_read_only() {
         let begin = AgentOperation::BeginStrategyRun {
             allocation_id: "strategy_run_new_20261013_01".to_owned(),
+            strategy_id: "real_manual_v1".to_owned(),
             origin_schema: "okx.research.live-decision/v1".to_owned(),
             origin_version: "run-2026-10-13".to_owned(),
             mandate_version: "demo-mandate-v1".to_owned(),

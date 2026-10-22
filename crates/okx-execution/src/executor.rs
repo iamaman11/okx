@@ -4703,7 +4703,8 @@ mod tests {
         let uid = "a".repeat(64);
         let authority = format!("sha256:{}", "b".repeat(64));
         let run = crate::StrategyCapitalReservation {
-            schema: crate::STRATEGY_CAPITAL_RESERVATION_SCHEMA_V1.to_owned(),
+            schema: crate::STRATEGY_CAPITAL_RESERVATION_SCHEMA_V2.to_owned(),
+            strategy_id: "test_strategy_v1".to_owned(),
             allocation_id: "run_policy_20261017_fixture".to_owned(),
             account_uid_fingerprint: uid.clone(),
             origin_schema: "okx.test".to_owned(),
@@ -4828,7 +4829,8 @@ mod tests {
             max_total_modelled_loss_usdt: "10".to_owned(),
         };
         let run = crate::StrategyCapitalReservation {
-            schema: crate::STRATEGY_CAPITAL_RESERVATION_SCHEMA_V1.to_owned(),
+            schema: crate::STRATEGY_CAPITAL_RESERVATION_SCHEMA_V2.to_owned(),
+            strategy_id: "test_strategy_v1".to_owned(),
             allocation_id: policy.strategy_run_id.clone(),
             account_uid_fingerprint: policy.account_uid_fingerprint.clone(),
             origin_schema: "test".to_owned(),

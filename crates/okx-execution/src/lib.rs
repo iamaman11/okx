@@ -41,7 +41,7 @@ pub use ledger::{
     LedgerStorageAttestation, LedgerVenue, LeverageAttemptState, LeverageChangeAttempt,
     MAX_EXECUTION_LEDGER_RECORDS, MutationPrepareDisposition,
     PROFILE_HANDOFF_LEDGER_ASSESSMENT_SCHEMA_V1, PrepareDisposition,
-    ProfileHandoffLedgerAssessment, STRATEGY_CAPITAL_RESERVATION_SCHEMA_V1, SqliteAccountIdentity,
+    ProfileHandoffLedgerAssessment, STRATEGY_CAPITAL_RESERVATION_SCHEMA_V2, SqliteAccountIdentity,
     SqliteIntentPage, StrategyAllocationOpening, StrategyCapitalReservation,
     StrategyStopRearmRequest,
 };

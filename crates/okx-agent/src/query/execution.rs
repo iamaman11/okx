@@ -13,7 +13,7 @@ use okx_execution::{
     ExecutionTcaMechanicsBinding, ExecutionTransitionError, FencedProtectiveShrinkRequest,
     OrderExecutorError, OrderSide as ExecutionOrderSide, OrderType,
     PositionSide as ExecutionPositionSide, PrepareDeferral, PrepareFailure, PrepareOutcome,
-    PrepareRejection, ReverseContinuation, ReverseLeg, STRATEGY_CAPITAL_RESERVATION_SCHEMA_V1,
+    PrepareRejection, ReverseContinuation, ReverseLeg, STRATEGY_CAPITAL_RESERVATION_SCHEMA_V2,
     StrategyAllocationOpening, StrategyCapitalReservation, TradeMode, prepare_execution,
     revalidate_amend_execution_plan, revalidate_execution_plan, revalidate_hard_risk_policy,
     revalidate_venue_execution,
@@ -201,6 +201,7 @@ pub(super) async fn dispatch(
         }
         AgentOperation::BeginStrategyRun {
             allocation_id,
+            strategy_id,
             origin_schema,
             origin_version,
             mandate_version,
@@ -214,6 +215,7 @@ pub(super) async fn dispatch(
                 generated_at,
                 StrategyOpeningRequest {
                     allocation_id,
+                    strategy_id,
                     origin_schema,
                     origin_version,
                     mandate_version,
@@ -383,6 +385,7 @@ pub(super) fn strategy_opening_source_blockers(
 /// the *allocation choice* only; REST/WS/account/OCO proof is sourced here.
 struct StrategyOpeningRequest<'a> {
     allocation_id: &'a str,
+    strategy_id: &'a str,
     origin_schema: &'a str,
     origin_version: &'a str,
     mandate_version: &'a str,
@@ -399,6 +402,7 @@ async fn begin_strategy_run(
 ) -> AgentResult<AgentResponse> {
     let StrategyOpeningRequest {
         allocation_id,
+        strategy_id,
         origin_schema,
         origin_version,
         mandate_version,
@@ -496,6 +500,7 @@ async fn begin_strategy_run(
     let observed_at_ms = utc_now_ms();
     let opening = StrategyAllocationOpening {
         account_uid_fingerprint: preflight.account_uid_fingerprint.clone(),
+        strategy_id: strategy_id.to_owned(),
         account_generation: snapshot.account_generation.clone(),
         observed_usdt_equity: usdt_equity.to_owned(),
         observed_at_ms,
@@ -506,7 +511,8 @@ async fn begin_strategy_run(
         operator_authority_id: operator_authority_id.to_owned(),
     };
     let reservation = StrategyCapitalReservation {
-        schema: STRATEGY_CAPITAL_RESERVATION_SCHEMA_V1.to_owned(),
+        schema: STRATEGY_CAPITAL_RESERVATION_SCHEMA_V2.to_owned(),
+        strategy_id: strategy_id.to_owned(),
         allocation_id: allocation_id.to_owned(),
         account_uid_fingerprint: opening.account_uid_fingerprint.clone(),
         origin_schema: origin_schema.to_owned(),
@@ -548,7 +554,7 @@ async fn begin_strategy_run(
         Some(Ok(value)) => Ok(completed(
             request,
             generated_at,
-            STRATEGY_CAPITAL_RESERVATION_SCHEMA_V1,
+            STRATEGY_CAPITAL_RESERVATION_SCHEMA_V2,
             serde_json::to_value(value)?,
         )),
         Some(Err(error)) => Ok(deny(format!(

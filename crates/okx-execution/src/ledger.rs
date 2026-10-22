@@ -52,7 +52,7 @@ pub const EXECUTION_LEDGER_SCHEMA_V14: &str = "okx.execution-ledger/v14";
 pub const LEVERAGE_ATTEMPT_SCHEMA_V1: &str = "okx.leverage-change-attempt/v1";
 const MAX_LEVERAGE_ATTEMPTS: usize = 256;
 const MAX_SEALED_ARCHIVE_BYTES: u64 = 128 * 1024 * 1024;
-pub const STRATEGY_CAPITAL_RESERVATION_SCHEMA_V1: &str = "okx.strategy-capital-reservation/v1";
+pub const STRATEGY_CAPITAL_RESERVATION_SCHEMA_V2: &str = "okx.strategy-capital-reservation/v2";
 pub const EXECUTION_RISK_STOP_SCHEMA_V1: &str = "okx.execution-risk-stop/v1";
 pub const MAX_EXECUTION_LEDGER_RECORDS: usize = 10_000;
 const DEFAULT_EXECUTION_LEDGER_PATH: &str = r"C:\okx-runtime\execution-ledger.sqlite";
@@ -212,6 +212,7 @@ fn validate_risk_stop(value: &ExecutionRiskStop) -> Result<(), ExecutionLedgerEr
 #[serde(deny_unknown_fields)]
 pub struct StrategyCapitalReservation {
     pub schema: String,
+    pub strategy_id: String,
     pub allocation_id: String,
     pub account_uid_fingerprint: String,
     pub origin_schema: String,
@@ -227,6 +228,7 @@ pub struct StrategyCapitalReservation {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StrategyAllocationOpening {
     pub account_uid_fingerprint: String,
+    pub strategy_id: String,
     pub account_generation: String,
     pub observed_usdt_equity: String,
     pub observed_at_ms: u64,
@@ -242,8 +244,11 @@ fn validate_capital_reservation(
 ) -> Result<(), ExecutionLedgerError> {
     let allocated = Decimal::from_str(&r.allocated_usdt).ok();
     let equity = Decimal::from_str(&r.opening_account_usdt_equity).ok();
-    if r.schema != STRATEGY_CAPITAL_RESERVATION_SCHEMA_V1
+    if r.schema != STRATEGY_CAPITAL_RESERVATION_SCHEMA_V2
         || !valid_intent_id(&r.allocation_id)
+        || !(2..=64).contains(&r.strategy_id.len())
+        || !r.strategy_id.as_bytes()[0].is_ascii_alphabetic()
+        || !r.strategy_id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
         || r.account_uid_fingerprint.trim().is_empty()
         || r.account_generation.trim().is_empty()
         || r.origin_schema.trim().is_empty()
@@ -2746,7 +2751,8 @@ impl DurableExecutionLedger {
         {
             return Err(ExecutionLedgerError::CapitalReservationConflict);
         }
-        let exact = reservation.account_uid_fingerprint == opening.account_uid_fingerprint
+        let exact = reservation.strategy_id == opening.strategy_id
+            && reservation.account_uid_fingerprint == opening.account_uid_fingerprint
             && reservation.account_generation == opening.account_generation
             && reservation.operator_authority_id == opening.operator_authority_id
             && reservation.started_at_ms == opening.observed_at_ms
@@ -4772,7 +4778,8 @@ mod tests {
     #[test]
     fn daily_strategy_loss_counts_fifo_attributed_exit_bills_and_rejects_partial_source() {
         let run = StrategyCapitalReservation {
-            schema: STRATEGY_CAPITAL_RESERVATION_SCHEMA_V1.to_owned(),
+            schema: STRATEGY_CAPITAL_RESERVATION_SCHEMA_V2.to_owned(),
+            strategy_id: "test_strategy_v1".to_owned(),
             allocation_id: "stage5a_daily_loss_fixture_012345".to_owned(),
             account_uid_fingerprint: "uid-fingerprint".to_owned(),
             origin_schema: "origin/v1".to_owned(),
@@ -4973,6 +4980,7 @@ mod tests {
         let store = ExecutionLedgerStore::at(root.join("ledger.json"));
         let opening = StrategyAllocationOpening {
             account_uid_fingerprint: "uid-fingerprint".to_owned(),
+            strategy_id: "test_strategy_v1".to_owned(),
             account_generation: "opening_generation".to_owned(),
             observed_usdt_equity: "1000".to_owned(),
             observed_at_ms: 1000,
@@ -4983,7 +4991,8 @@ mod tests {
             operator_authority_id: format!("sha256:{}", "a".repeat(64)),
         };
         let reservation = StrategyCapitalReservation {
-            schema: STRATEGY_CAPITAL_RESERVATION_SCHEMA_V1.to_owned(),
+            schema: STRATEGY_CAPITAL_RESERVATION_SCHEMA_V2.to_owned(),
+            strategy_id: "test_strategy_v1".to_owned(),
             allocation_id: "stage5a_ledger_leverage_run_1234".to_owned(),
             account_uid_fingerprint: opening.account_uid_fingerprint.clone(),
             origin_schema: "origin/v1".to_owned(),
@@ -5172,7 +5181,8 @@ mod tests {
         fs::create_dir_all(&root).unwrap();
         let store = ExecutionLedgerStore::at(root.join("ledger.json"));
         let prior = StrategyCapitalReservation {
-            schema: STRATEGY_CAPITAL_RESERVATION_SCHEMA_V1.to_owned(),
+            schema: STRATEGY_CAPITAL_RESERVATION_SCHEMA_V2.to_owned(),
+            strategy_id: "test_strategy_v1".to_owned(),
             allocation_id: "stage5a_old_finalized_123456".to_owned(),
             account_uid_fingerprint: "uid-fingerprint".to_owned(),
             origin_schema: "origin/v1".to_owned(),
@@ -5236,6 +5246,7 @@ mod tests {
         let next_at = 86_400_101;
         let opening = StrategyAllocationOpening {
             account_uid_fingerprint: prior.account_uid_fingerprint.clone(),
+            strategy_id: "test_strategy_v1".to_owned(),
             account_generation: "new-generation".to_owned(),
             observed_usdt_equity: "1000".to_owned(),
             observed_at_ms: next_at,
@@ -5339,7 +5350,8 @@ mod tests {
         fs::create_dir_all(&root).unwrap();
         let store = ExecutionLedgerStore::at(root.join("ledger.json"));
         let prior = StrategyCapitalReservation {
-            schema: STRATEGY_CAPITAL_RESERVATION_SCHEMA_V1.to_owned(),
+            schema: STRATEGY_CAPITAL_RESERVATION_SCHEMA_V2.to_owned(),
+            strategy_id: "test_strategy_v1".to_owned(),
             allocation_id: "run_archived_source_0123456789".to_owned(),
             account_uid_fingerprint: "uid-fingerprint".to_owned(),
             origin_schema: "okx.research.live-decision/v1".to_owned(),
@@ -5572,7 +5584,8 @@ mod tests {
         let mut archive = Vec::new();
         for i in 0..17u64 {
             let run = StrategyCapitalReservation {
-                schema: STRATEGY_CAPITAL_RESERVATION_SCHEMA_V1.to_owned(),
+                schema: STRATEGY_CAPITAL_RESERVATION_SCHEMA_V2.to_owned(),
+                strategy_id: "test_strategy_v1".to_owned(),
                 allocation_id: format!("stage5b_sealed_run_{i:04}"),
                 account_uid_fingerprint: "uid-fingerprint".to_owned(),
                 origin_schema: "okx.market-intelligence/v1".to_owned(),
@@ -5740,7 +5753,8 @@ mod tests {
         let mut ledger = DurableExecutionLedger::open(store.clone(), 100).unwrap();
         let approval = format!("sha256:{}", "b".repeat(64));
         let reservation = StrategyCapitalReservation {
-            schema: STRATEGY_CAPITAL_RESERVATION_SCHEMA_V1.to_owned(),
+            schema: STRATEGY_CAPITAL_RESERVATION_SCHEMA_V2.to_owned(),
+            strategy_id: "test_strategy_v1".to_owned(),
             allocation_id: "strategy-demo-budget-20261013".to_owned(),
             account_uid_fingerprint: "uid-fingerprint".to_owned(),
             origin_schema: "okx.research.live-decision/v1".to_owned(),
@@ -5754,6 +5768,7 @@ mod tests {
         };
         let evidence = StrategyAllocationOpening {
             account_uid_fingerprint: "uid-fingerprint".to_owned(),
+            strategy_id: "test_strategy_v1".to_owned(),
             account_generation: "fresh-generation".to_owned(),
             observed_usdt_equity: "1000".to_owned(),
             observed_at_ms: 1000,
@@ -5989,7 +6004,8 @@ mod tests {
         let store = ExecutionLedgerStore::at(root.join("ledger.json"));
         let authority = format!("sha256:{}", "a".repeat(64));
         let run = StrategyCapitalReservation {
-            schema: STRATEGY_CAPITAL_RESERVATION_SCHEMA_V1.to_owned(),
+            schema: STRATEGY_CAPITAL_RESERVATION_SCHEMA_V2.to_owned(),
+            strategy_id: "test_strategy_v1".to_owned(),
             allocation_id: "run_owner_test_20261013".to_owned(),
             account_uid_fingerprint: "uid-fingerprint".to_owned(),
             origin_schema: "okx.research.live-decision/v1".to_owned(),
@@ -6003,6 +6019,7 @@ mod tests {
         };
         let opening = StrategyAllocationOpening {
             account_uid_fingerprint: run.account_uid_fingerprint.clone(),
+            strategy_id: "test_strategy_v1".to_owned(),
             account_generation: run.account_generation.clone(),
             observed_usdt_equity: run.opening_account_usdt_equity.clone(),
             observed_at_ms: run.started_at_ms,

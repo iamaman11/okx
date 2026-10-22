@@ -939,11 +939,12 @@ mod tests {
         assert!(!bytes.is_empty());
     }
 
-    use crate::STRATEGY_CAPITAL_RESERVATION_SCHEMA_V1;
+    use crate::STRATEGY_CAPITAL_RESERVATION_SCHEMA_V2;
 
     fn reservation() -> StrategyCapitalReservation {
         StrategyCapitalReservation {
-            schema: STRATEGY_CAPITAL_RESERVATION_SCHEMA_V1.to_owned(),
+            schema: STRATEGY_CAPITAL_RESERVATION_SCHEMA_V2.to_owned(),
+            strategy_id: "test_strategy_v1".to_owned(),
             allocation_id: "run_finalization_demo_01234".to_owned(),
             account_uid_fingerprint: "uid-demo".to_owned(),
             origin_schema: "okx.research.live-decision/v1".to_owned(),

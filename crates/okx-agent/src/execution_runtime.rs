@@ -2269,7 +2269,8 @@ mod tests {
     #[test]
     fn native_financial_admission_works_after_many_completed_filled_cycles() {
         let run = StrategyCapitalReservation {
-            schema: okx_execution::STRATEGY_CAPITAL_RESERVATION_SCHEMA_V1.to_owned(),
+            schema: okx_execution::STRATEGY_CAPITAL_RESERVATION_SCHEMA_V2.to_owned(),
+            strategy_id: "test_strategy_v1".to_owned(),
             allocation_id: "strategy_run_multiple_flat_cycles_20261019".to_owned(),
             account_uid_fingerprint: "a".repeat(64),
             origin_schema: "okx.manual/v1".to_owned(),
@@ -2735,6 +2736,7 @@ mod tests {
         let credential = preflight(true).credential;
         let opening = StrategyAllocationOpening {
             account_uid_fingerprint: credential.account_uid_fingerprint.clone(),
+            strategy_id: "test_strategy_v1".to_owned(),
             account_generation: "fresh".to_owned(),
             observed_usdt_equity: "1000".to_owned(),
             observed_at_ms: 101,
@@ -2745,7 +2747,8 @@ mod tests {
             operator_authority_id: authorization.clone(),
         };
         let reservation = StrategyCapitalReservation {
-            schema: okx_execution::STRATEGY_CAPITAL_RESERVATION_SCHEMA_V1.to_owned(),
+            schema: okx_execution::STRATEGY_CAPITAL_RESERVATION_SCHEMA_V2.to_owned(),
+            strategy_id: "test_strategy_v1".to_owned(),
             allocation_id: "strategy_owner_fence_20261013".to_owned(),
             account_uid_fingerprint: opening.account_uid_fingerprint.clone(),
             origin_schema: "okx.research.live-decision/v1".to_owned(),

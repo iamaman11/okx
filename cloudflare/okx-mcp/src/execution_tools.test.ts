@@ -73,7 +73,7 @@ assert(buildExecutionOperation(uidAction("prepare",{
   ...basePrepare,spec:{action:"close",position_side:"long",size:"0.02",price:"80000"},
 }))?.type==="prepare_execution","risk-bound reduce/close must be typed");
 const begin = uidAction("begin_strategy_run",{
-  origin_schema:"okx.research.live-decision/v1",origin_version:"run-2026-10-13",
+  strategy_id:"real_manual_v1",origin_schema:"okx.research.live-decision/v1",origin_version:"run-2026-10-13",
   mandate_version:"demo-mandate-v1",allocated_usdt:"100",
   operator_authority_id:"sha256:"+"f".repeat(64),
 });
@@ -83,6 +83,7 @@ assert(beginOperation?.type==="begin_strategy_run" &&
   beginOperation.allocated_usdt==="100","capital run is typed and has no gateway order fields");
 for (const invalid of [
   {...begin,allocated_usdt:"0"},
+  {...begin,strategy_id:"invalid strategy"},
   {...begin,operator_authority_id:"not-a-proof"},
   {...begin,origin_schema:"bad !!"},
   {...begin,spec:{action:"open"}},
@@ -200,7 +201,7 @@ for (const action of ["prepare", "submit", "begin_strategy_run", "finalize_strat
   const op=buildExecutionOperation(uidAction(action,
     action==="prepare" ? {...basePrepare,spec:{action:"close",position_side:"long",size:"0.02",price:"80000"}} :
     action==="begin_strategy_run" ? {
-      origin_schema:"okx.research.live-decision/v1",origin_version:"run-2026-10-17",
+      strategy_id:"real_manual_v1",origin_schema:"okx.research.live-decision/v1",origin_version:"run-2026-10-17",
       mandate_version:"native-v1",allocated_usdt:"100",
       operator_authority_id:"sha256:"+"f".repeat(64)
     } : {}));
