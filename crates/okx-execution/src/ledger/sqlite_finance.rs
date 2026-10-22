@@ -778,16 +778,24 @@ impl NativeFinanceReader {
             return Err(ExecutionLedgerError::AccountScopeMismatch);
         }
         let identity = super::sqlite_source::attest_indexed(&connection, &run.allocation_id, &uid)?;
-        let authoritative:i64=connection.query_row(
-            "SELECT COUNT(*) FROM native_source_events WHERE run_id=?1",
-            params![&run.allocation_id],|r|r.get(0),
-        ).map_err(io)?;
-        let indexed:i64=connection.query_row(
-            "SELECT COUNT(*) FROM native_source_finance_order WHERE run_id=?1",
-            params![&run.allocation_id],|r|r.get(0),
-        ).map_err(io)?;
-        if authoritative!=indexed {
-            return Err(ExecutionLedgerError::Corrupt("native finance/source index inventory mismatch"));
+        let authoritative: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM native_source_events WHERE run_id=?1",
+                params![&run.allocation_id],
+                |r| r.get(0),
+            )
+            .map_err(io)?;
+        let indexed: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM native_source_finance_order WHERE run_id=?1",
+                params![&run.allocation_id],
+                |r| r.get(0),
+            )
+            .map_err(io)?;
+        if authoritative != indexed {
+            return Err(ExecutionLedgerError::Corrupt(
+                "native finance/source index inventory mismatch",
+            ));
         }
         Ok(Self {
             connection,
@@ -891,11 +899,14 @@ impl crate::strategy_finance::FinanceSourceReader for NativeFinanceReader {
     }
     fn visit_fills(
         &self,
-        visit: &mut dyn FnMut(&StoredExchangeEvent) -> Result<(),ExecutionLedgerError>,
-    ) -> Result<(),ExecutionLedgerError> {
+        visit: &mut dyn FnMut(&StoredExchangeEvent) -> Result<(), ExecutionLedgerError>,
+    ) -> Result<(), ExecutionLedgerError> {
         super::sqlite_source::visit_financial_kind(
-            &self.connection,&self.run.allocation_id,&self.run.account_uid_fingerprint,
-            "FILL",|_,event|visit(event),
+            &self.connection,
+            &self.run.allocation_id,
+            &self.run.account_uid_fingerprint,
+            "FILL",
+            |_, event| visit(event),
         )
     }
     fn bill(&self, key: &str) -> Result<Option<StoredExchangeEvent>, ExecutionLedgerError> {
@@ -903,11 +914,14 @@ impl crate::strategy_finance::FinanceSourceReader for NativeFinanceReader {
     }
     fn visit_bills(
         &self,
-        visitor:&mut dyn FnMut(&str,&StoredExchangeEvent)->Result<(),ExecutionLedgerError>,
-    ) -> Result<(),ExecutionLedgerError> {
+        visitor: &mut dyn FnMut(&str, &StoredExchangeEvent) -> Result<(), ExecutionLedgerError>,
+    ) -> Result<(), ExecutionLedgerError> {
         super::sqlite_source::visit_financial_kind(
-            &self.connection,&self.run.allocation_id,&self.run.account_uid_fingerprint,
-            "BILL",|key,event|visitor(key,event),
+            &self.connection,
+            &self.run.allocation_id,
+            &self.run.account_uid_fingerprint,
+            "BILL",
+            |key, event| visitor(key, event),
         )
     }
     fn entry(

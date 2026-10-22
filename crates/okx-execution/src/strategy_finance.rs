@@ -262,15 +262,21 @@ impl FinanceSourceReader for LegacyFinanceReader<'_> {
             &crate::exchange_evidence::StoredExchangeEvent,
         ) -> Result<(), ExecutionLedgerError>,
     ) -> Result<(), ExecutionLedgerError> {
-        let mut fills = self.source.events.values()
+        let mut fills = self
+            .source
+            .events
+            .values()
             .filter(|e| e.payload["source"] == "OKX_REST_FILL")
             .collect::<Vec<_>>();
-        fills.sort_by(|a,b| {
-            timestamp(&a.payload,"ts").cmp(&timestamp(&b.payload,"ts"))
-                .then(string(&a.payload,"instId").cmp(&string(&b.payload,"instId")))
-                .then(string(&a.payload,"tradeId").cmp(&string(&b.payload,"tradeId")))
+        fills.sort_by(|a, b| {
+            timestamp(&a.payload, "ts")
+                .cmp(&timestamp(&b.payload, "ts"))
+                .then(string(&a.payload, "instId").cmp(&string(&b.payload, "instId")))
+                .then(string(&a.payload, "tradeId").cmp(&string(&b.payload, "tradeId")))
         });
-        for fill in fills {visit(fill)?;}
+        for fill in fills {
+            visit(fill)?;
+        }
         Ok(())
     }
     fn bill(
@@ -854,30 +860,65 @@ pub(crate) fn assess_persisted_financial_period_from_reader(
         reader.validate_entry(entry, run.started_at_ms, &mut reasons)?;
     }
     // One ordered stream; no historical fill collection is retained.
-    let mut previous_fill: Option<(u64,String,String,String)> = None;
+    let mut previous_fill: Option<(u64, String, String, String)> = None;
     reader.visit_fills(&mut |item| {
-        let p=&item.payload;
-        let (Some(ts),Some(inst),Some(pos),Some(side),Some(ord),Some(client),Some(trade),Some(bill),Some(size),Some(price))=(
-            timestamp(p,"ts"),string(p,"instId"),string(p,"posSide"),
-            string(p,"side"),string(p,"ordId"),string(p,"clOrdId"),
-            string(p,"tradeId"),string(p,"billId"),amount(p,"fillSz"),amount(p,"fillPx"),
-        ) else {
+        let p = &item.payload;
+        let (
+            Some(ts),
+            Some(inst),
+            Some(pos),
+            Some(side),
+            Some(ord),
+            Some(client),
+            Some(trade),
+            Some(bill),
+            Some(size),
+            Some(price),
+        ) = (
+            timestamp(p, "ts"),
+            string(p, "instId"),
+            string(p, "posSide"),
+            string(p, "side"),
+            string(p, "ordId"),
+            string(p, "clOrdId"),
+            string(p, "tradeId"),
+            string(p, "billId"),
+            amount(p, "fillSz"),
+            amount(p, "fillPx"),
+        )
+        else {
             reasons.insert("missing_source_fill_identity");
             return Ok(());
         };
-        if ts<run.started_at_ms || size<=Decimal::ZERO || price<=Decimal::ZERO {
+        if ts < run.started_at_ms || size <= Decimal::ZERO || price <= Decimal::ZERO {
             reasons.insert("missing_source_fill_identity");
             return Ok(());
         }
-        let f=FilledLeg {
-            source:item,ts,inst:inst.to_owned(),pos:pos.to_owned(),side:side.to_owned(),
-            ord:ord.to_owned(),client:client.to_owned(),trade:trade.to_owned(),
-            bill:bill.to_owned(),size,price,
+        let f = FilledLeg {
+            source: item,
+            ts,
+            inst: inst.to_owned(),
+            pos: pos.to_owned(),
+            side: side.to_owned(),
+            ord: ord.to_owned(),
+            client: client.to_owned(),
+            trade: trade.to_owned(),
+            bill: bill.to_owned(),
+            size,
+            price,
         };
-        if previous_fill.as_ref().is_some_and(|(prior_ts,prior_inst,prior_pos,prior_side)|
-            *prior_ts==f.ts && prior_inst==&f.inst && prior_pos==&f.pos && prior_side!=&f.side)
-        {reasons.insert("same_timestamp_opposite_fill_sequence");}
-        previous_fill=Some((f.ts,f.inst.clone(),f.pos.clone(),f.side.clone()));
+        if previous_fill
+            .as_ref()
+            .is_some_and(|(prior_ts, prior_inst, prior_pos, prior_side)| {
+                *prior_ts == f.ts
+                    && prior_inst == &f.inst
+                    && prior_pos == &f.pos
+                    && prior_side != &f.side
+            })
+        {
+            reasons.insert("same_timestamp_opposite_fill_sequence");
+        }
+        previous_fill = Some((f.ts, f.inst.clone(), f.pos.clone(), f.side.clone()));
         let item = f.source;
         let Some(intent) = item.source_intent_id.as_deref() else {
             reasons.insert("unattributed_account_fill");

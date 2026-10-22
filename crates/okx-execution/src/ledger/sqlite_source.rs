@@ -82,32 +82,52 @@ fn index_financial_source_event(
     event_key: &str,
     event: &StoredExchangeEvent,
 ) -> Result<(), ExecutionLedgerError> {
-    let source=event.payload.get("source").and_then(serde_json::Value::as_str)
+    let source = event
+        .payload
+        .get("source")
+        .and_then(serde_json::Value::as_str)
         .ok_or(ExecutionLedgerError::Corrupt("missing native event source"))?;
-    let (kind,field)=match source {
-        "OKX_REST_ORDER"=>("ORDER","uTime"),
-        "OKX_REST_FILL"=>("FILL","ts"),
-        "OKX_REST_BILL"=>("BILL","ts"),
-        _=>return Err(ExecutionLedgerError::Corrupt("unknown native financial event source")),
+    let (kind, field) = match source {
+        "OKX_REST_ORDER" => ("ORDER", "uTime"),
+        "OKX_REST_FILL" => ("FILL", "ts"),
+        "OKX_REST_BILL" => ("BILL", "ts"),
+        _ => {
+            return Err(ExecutionLedgerError::Corrupt(
+                "unknown native financial event source",
+            ));
+        }
     };
-    let ts=event.payload.get(field)
-        .and_then(|value| value.as_i64().or_else(||value.as_str().and_then(|s|s.parse::<i64>().ok())))
-        .filter(|n|*n>0)
-        .ok_or(ExecutionLedgerError::Corrupt("invalid native indexed financial time"))?;
-    let digest=checksum(&encode(event)?);
-    let inserted=tx.execute(
-        "INSERT INTO native_source_finance_order
+    let ts = event
+        .payload
+        .get(field)
+        .and_then(|value| {
+            value
+                .as_i64()
+                .or_else(|| value.as_str().and_then(|s| s.parse::<i64>().ok()))
+        })
+        .filter(|n| *n > 0)
+        .ok_or(ExecutionLedgerError::Corrupt(
+            "invalid native indexed financial time",
+        ))?;
+    let digest = checksum(&encode(event)?);
+    let inserted = tx
+        .execute(
+            "INSERT INTO native_source_finance_order
          (run_id,event_key,event_kind,exchange_time_ms,payload_digest)
          VALUES(?1,?2,?3,?4,?5) ON CONFLICT(run_id,event_key) DO NOTHING",
-        params![run_id,event_key,kind,ts,&digest],
-    ).map_err(io)?;
-    if inserted==0 {
-        let saved:(String,i64,String)=tx.query_row(
-            "SELECT event_kind,exchange_time_ms,payload_digest
+            params![run_id, event_key, kind, ts, &digest],
+        )
+        .map_err(io)?;
+    if inserted == 0 {
+        let saved: (String, i64, String) = tx
+            .query_row(
+                "SELECT event_kind,exchange_time_ms,payload_digest
              FROM native_source_finance_order WHERE run_id=?1 AND event_key=?2",
-            params![run_id,event_key],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)),
-        ).map_err(io)?;
-        if saved.0!=kind || saved.1!=ts || saved.2!=digest {
+                params![run_id, event_key],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .map_err(io)?;
+        if saved.0 != kind || saved.1 != ts || saved.2 != digest {
             return Err(ExecutionLedgerError::ExchangeEvidenceConflict);
         }
     }
@@ -126,38 +146,54 @@ pub(super) fn visit_financial_kind<F>(
 where
     F: FnMut(&str, &StoredExchangeEvent) -> Result<(), ExecutionLedgerError>,
 {
-    let uid:String=connection.query_row(
-        "SELECT uid FROM native_source_runs WHERE run_id=?1",params![run_id],|r|r.get(0)
-    ).map_err(io)?;
-    if uid!=expected_uid || !matches!(kind,"FILL"|"BILL") {
+    let uid: String = connection
+        .query_row(
+            "SELECT uid FROM native_source_runs WHERE run_id=?1",
+            params![run_id],
+            |r| r.get(0),
+        )
+        .map_err(io)?;
+    if uid != expected_uid || !matches!(kind, "FILL" | "BILL") {
         return Err(ExecutionLedgerError::AccountScopeMismatch);
     }
-    let mut stmt=connection.prepare(
-        "SELECT e.event_key,e.payload_digest,length(e.payload),e.payload,
+    let mut stmt = connection
+        .prepare(
+            "SELECT e.event_key,e.payload_digest,length(e.payload),e.payload,
                 i.payload_digest,i.exchange_time_ms
          FROM native_source_finance_order i
          JOIN native_source_events e ON e.run_id=i.run_id AND e.event_key=i.event_key
          WHERE i.run_id=?1 AND i.event_kind=?2
-         ORDER BY i.exchange_time_ms,i.event_key"
-    ).map_err(io)?;
-    let mut rows=stmt.query(params![run_id,kind]).map_err(io)?;
-    while let Some(row)=rows.next().map_err(io)? {
-        let key:String=row.get(0).map_err(io)?;
-        let digest:String=row.get(1).map_err(io)?;
-        let bytes=source_row_bytes(row,2)?;
-        let indexed_digest:String=row.get(4).map_err(io)?;
-        let indexed_time:i64=row.get(5).map_err(io)?;
-        if checksum(&bytes)!=digest || digest!=indexed_digest {
-            return Err(ExecutionLedgerError::Corrupt("native ordered finance source digest"));
+         ORDER BY i.exchange_time_ms,i.event_key",
+        )
+        .map_err(io)?;
+    let mut rows = stmt.query(params![run_id, kind]).map_err(io)?;
+    while let Some(row) = rows.next().map_err(io)? {
+        let key: String = row.get(0).map_err(io)?;
+        let digest: String = row.get(1).map_err(io)?;
+        let bytes = source_row_bytes(row, 2)?;
+        let indexed_digest: String = row.get(4).map_err(io)?;
+        let indexed_time: i64 = row.get(5).map_err(io)?;
+        if checksum(&bytes) != digest || digest != indexed_digest {
+            return Err(ExecutionLedgerError::Corrupt(
+                "native ordered finance source digest",
+            ));
         }
-        let event:StoredExchangeEvent=decode(&bytes)?;
-        let expected=if kind=="FILL" {"OKX_REST_FILL"} else {"OKX_REST_BILL"};
-        let actual_time=event.payload.get("ts")
-            .and_then(|v|v.as_i64().or_else(||v.as_str().and_then(|s|s.parse::<i64>().ok())));
-        if event.payload["source"]!=expected || actual_time!=Some(indexed_time) {
-            return Err(ExecutionLedgerError::Corrupt("native ordered finance source identity"));
+        let event: StoredExchangeEvent = decode(&bytes)?;
+        let expected = if kind == "FILL" {
+            "OKX_REST_FILL"
+        } else {
+            "OKX_REST_BILL"
+        };
+        let actual_time = event.payload.get("ts").and_then(|v| {
+            v.as_i64()
+                .or_else(|| v.as_str().and_then(|s| s.parse::<i64>().ok()))
+        });
+        if event.payload["source"] != expected || actual_time != Some(indexed_time) {
+            return Err(ExecutionLedgerError::Corrupt(
+                "native ordered finance source identity",
+            ));
         }
-        visit(&key,&event)?;
+        visit(&key, &event)?;
     }
     Ok(())
 }
@@ -273,7 +309,7 @@ pub(super) fn persist(
         )
         .map_err(io)?;
         super::sqlite_finance::persist_event(tx, &source.run_id, key, event)?;
-        index_financial_source_event(tx,&source.run_id,key,event)?;
+        index_financial_source_event(tx, &source.run_id, key, event)?;
     }
     let new_cursors = new_source_keys(
         tx,
@@ -366,7 +402,7 @@ pub(super) fn append_window_delta(
         )
         .map_err(io)?;
         super::sqlite_finance::persist_event(tx, &delta.run_id, key, event)?;
-        index_financial_source_event(tx,&delta.run_id,key,event)?;
+        index_financial_source_event(tx, &delta.run_id, key, event)?;
         changed = true;
     }
     for (key, cursor) in &delta.cursors {
@@ -1124,7 +1160,11 @@ mod tests {
             Ok(())
         })
         .unwrap();
-        assert_eq!(seen_times, vec![1500, 2500], "out-of-order REST arrivals must be processed chronologically");
+        assert_eq!(
+            seen_times,
+            vec![1500, 2500],
+            "out-of-order REST arrivals must be processed chronologically"
+        );
         let mut bills = 0usize;
         visit_bill_events(&c, &empty.run_id, &empty.account_uid, |_, _| {
             bills += 1;
