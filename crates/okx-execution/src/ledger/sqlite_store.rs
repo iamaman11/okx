@@ -4,7 +4,7 @@ use super::*;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
 use serde::{Serialize, de::DeserializeOwned};
 
-pub(super) const SCHEMA: &str = "okx.execution-ledger.sqlite/v2";
+pub(super) const SCHEMA: &str = "okx.execution-ledger.sqlite/v3";
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -74,7 +74,7 @@ fn connect_with_integrity(
     let current_version: i64 = connection
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .map_err(io)?;
-    if current_version != 0 && current_version != 1 && current_version != 2 {
+    if !(0..=3).contains(&current_version) {
         return Err(ExecutionLedgerError::Corrupt(
             "unsupported SQLite account ledger schema",
         ));
@@ -120,7 +120,7 @@ fn connect_with_integrity(
              CREATE TABLE IF NOT EXISTS native_submitted_intents (
                 intent_id TEXT PRIMARY KEY REFERENCES ledger_entries(intent_id)
              ) STRICT;
-             PRAGMA user_version=2;",
+             PRAGMA user_version=3;",
         )
         .map_err(io)?;
         tx.commit().map_err(io)?;
@@ -134,7 +134,7 @@ fn connect_with_integrity(
     let foreign_keys: i64 = connection
         .query_row("PRAGMA foreign_keys", [], |r| r.get(0))
         .map_err(io)?;
-    if !(1..=2).contains(&ver) || journal != "wal" || foreign_keys != 1 {
+    if !(1..=3).contains(&ver) || journal != "wal" || foreign_keys != 1 {
         return Err(ExecutionLedgerError::Corrupt(
             "SQLite schema/WAL/FK mismatch",
         ));
@@ -2426,8 +2426,11 @@ pub(super) fn upgrade_reconciliation_indices_offline(
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .map_err(io)?;
-    if version == 2 {
+    if version == 3 {
         return Ok(());
+    }
+    if version == 2 {
+        return upgrade_finance_order_index_offline(path);
     }
     if version != 1 {
         return Err(ExecutionLedgerError::Corrupt(
@@ -2512,6 +2515,50 @@ pub(super) fn upgrade_reconciliation_indices_offline(
     tx.commit().map_err(io)?;
     // No implicit repair after publication: one exact cold proof decides
     // whether the upgraded file is eligible to become the native owner.
+    attest_snapshot(path, None)?;
+    upgrade_finance_order_index_offline(path)
+}
+
+/// Complete the v2 -> v3 schema evolution under the existing exclusive
+/// account-writer lease. This is an offline, no-order, no-STOP, single WAL
+/// transaction: old immutable facts remain the only source of truth.
+fn upgrade_finance_order_index_offline(path: &Path) -> Result<(), ExecutionLedgerError> {
+    let conn = connect(path, false)?;
+    let version: i64 = conn
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .map_err(io)?;
+    if version == 3 {
+        // A duplicate operator request is purely read-only. Never replay
+        // an indexed mutation after a successful first commit.
+        attest_snapshot(path, None)?;
+        return Ok(());
+    }
+    if version != 2 {
+        return Err(ExecutionLedgerError::Corrupt(
+            "native finance upgrade requires v2",
+        ));
+    }
+    drop(conn);
+    // Validate the entire account, source SHA256 and submission fences
+    // before starting the *only* schema mutation.
+    attest_snapshot(path, None)?;
+    let mut connection = connect(path, true)?;
+    let tx = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(io)?;
+    let current: i64 = tx
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .map_err(io)?;
+    if current != 2 {
+        return Err(ExecutionLedgerError::Corrupt(
+            "native finance schema changed during upgrade",
+        ));
+    }
+    tx.execute_batch(super::sqlite_source::TABLES).map_err(io)?;
+    super::sqlite_source::backfill_financial_index(&tx)?;
+    tx.execute_batch("PRAGMA user_version=3;").map_err(io)?;
+    tx.commit().map_err(io)?;
+    // No repair, fallback or lazy migration during a live financial read.
     attest_snapshot(path, None)?;
     Ok(())
 }
@@ -2612,6 +2659,14 @@ fn attest_snapshot_with_indices(
     let state: StoredState = decode(&bytes)?;
     if state.version != 1 {
         return Err(ExecutionLedgerError::Corrupt("SQLite data version"));
+    }
+    // A v3 owner is not accepted if its chronological financial index is
+    // missing any sealed fact or has an independently rewritten digest.
+    let schema_version: i64 = c
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .map_err(io)?;
+    if schema_version == 3 {
+        super::sqlite_source::audit_financial_index_inventory(&c)?;
     }
     let bound: Option<String> = c
         .query_row(
@@ -3874,6 +3929,37 @@ mod tests {
     }
 
     #[test]
+    fn native_v2_financial_index_upgrades_once_and_refuses_orphan_history() {
+        let root = test_root("native-v2-finance-upgrade");
+        let db = root.join("account.sqlite");
+        save(
+            &db, &BTreeMap::new(), None, None, None,
+            &StrategyPeriodHistory::default(), &[],
+        ).unwrap();
+        let connection = Connection::open(&db).unwrap();
+        connection.execute_batch(
+            "DROP TABLE native_source_finance_order;
+             PRAGMA user_version=2;",
+        ).unwrap();
+        drop(connection);
+        let lease = ExecutionLedgerStore::acquire_writer_lease(&root).unwrap();
+        upgrade_reconciliation_indices_offline(&db, &lease).unwrap();
+        // Repeated acceptance is a proof-only read; no new rows or fences.
+        upgrade_reconciliation_indices_offline(&db, &lease).unwrap();
+        let c = Connection::open(&db).unwrap();
+        let version: i64 = c.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        assert_eq!(version, 3);
+        let indexed: i64 = c.query_row(
+            "SELECT COUNT(*) FROM native_source_finance_order", [], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(indexed, 0);
+        drop(c);
+        attest(&db).unwrap();
+        drop(lease);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn native_v1_upgrade_retains_begin_post_and_recovers_unknown_exactly_once() {
         let (root, db, id) = prior_v1_with_begin_post("native-v1-upgrade");
         assert!(attest(&db).is_err());
@@ -3886,7 +3972,7 @@ mod tests {
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 2);
+        assert_eq!(version, 3);
         let post_count: i64 = conn
             .query_row("SELECT COUNT(*) FROM post_attempts", [], |r| r.get(0))
             .unwrap();

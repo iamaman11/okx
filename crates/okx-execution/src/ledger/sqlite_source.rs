@@ -198,6 +198,73 @@ where
     Ok(())
 }
 
+/// Offline v2 -> v3 backfill. All original immutable source rows and
+/// their SHA256 tuple are proved before publication; no trading mutations.
+pub(super) fn backfill_financial_index(
+    tx: &Transaction<'_>,
+) -> Result<(), ExecutionLedgerError> {
+    let mut source_runs = tx.prepare(
+        "SELECT run_id,uid FROM native_source_runs ORDER BY run_id",
+    ).map_err(io)?;
+    let mut sources = source_runs.query([]).map_err(io)?;
+    while let Some(row) = sources.next().map_err(io)? {
+        let run: String = row.get(0).map_err(io)?;
+        let uid: String = row.get(1).map_err(io)?;
+        attest_indexed(tx, &run, &uid)?;
+    }
+    drop(sources);
+    drop(source_runs);
+    let mut query = tx.prepare(
+        "SELECT run_id,event_key,payload_digest,length(payload),payload
+         FROM native_source_events ORDER BY run_id,event_key",
+    ).map_err(io)?;
+    let mut rows = query.query([]).map_err(io)?;
+    while let Some(row) = rows.next().map_err(io)? {
+        let run_id: String = row.get(0).map_err(io)?;
+        let key: String = row.get(1).map_err(io)?;
+        let proof: String = row.get(2).map_err(io)?;
+        let bytes = source_row_bytes(row, 3)?;
+        if checksum(&bytes) != proof {
+            return Err(ExecutionLedgerError::Corrupt(
+                "financial index backfill source checksum mismatch",
+            ));
+        }
+        let event: StoredExchangeEvent = decode(&bytes)?;
+        index_financial_source_event(tx, &run_id, &key, &event)?;
+    }
+    drop(rows);
+    drop(query);
+    audit_financial_index_inventory(tx)
+}
+
+/// Cold, read-only inventory verification: both directions are checked.
+/// The primary event is authoritative; every index row must match its
+/// source hash, and every source must have exactly one projected row.
+pub(super) fn audit_financial_index_inventory(
+    c: &Connection,
+) -> Result<(), ExecutionLedgerError> {
+    let missing: i64 = c.query_row(
+        "SELECT COUNT(*) FROM native_source_events e
+         LEFT JOIN native_source_finance_order i
+           ON i.run_id=e.run_id AND i.event_key=e.event_key
+         WHERE i.event_key IS NULL OR i.payload_digest<>e.payload_digest",
+        [], |row| row.get(0),
+    ).map_err(io)?;
+    let orphan: i64 = c.query_row(
+        "SELECT COUNT(*) FROM native_source_finance_order i
+         LEFT JOIN native_source_events e
+           ON e.run_id=i.run_id AND e.event_key=i.event_key
+         WHERE e.event_key IS NULL OR i.payload_digest<>e.payload_digest",
+        [], |row| row.get(0),
+    ).map_err(io)?;
+    if missing != 0 || orphan != 0 {
+        return Err(ExecutionLedgerError::Corrupt(
+            "native chronological financial index/source mismatch",
+        ));
+    }
+    Ok(())
+}
+
 /// Merge source keys in their canonical index order: prior rows must
 /// reappear byte-for-byte, and only NEW keys are held temporarily. Avoid
 /// loading a duplicate BTreeMap of all historical exchange receipts.
@@ -496,9 +563,6 @@ pub(super) fn summary(
         .map_err(io)?;
     let events = usize::try_from(event_rows)
         .map_err(|_| ExecutionLedgerError::Corrupt("native event inventory overflow"))?;
-    if events > crate::exchange_evidence::MAX_EVENTS {
-        return Err(ExecutionLedgerError::ExchangeEvidenceCapacity);
-    }
     let mut stmt = connection
         .prepare(
             "SELECT cursor_key,receipt_ms,payload_digest,length(payload),payload
@@ -550,9 +614,6 @@ pub(super) fn summary(
             Some(latest_asof.map_or(cursor.account_as_of_ms, |v| v.max(cursor.account_as_of_ms)));
         latest_complete = cursor.order_complete && cursor.fill_complete && cursor.bill_complete;
         cursors += 1;
-        if cursors > crate::exchange_evidence::MAX_CURSORS {
-            return Err(ExecutionLedgerError::ExchangeEvidenceCapacity);
-        }
     }
     Ok(ExchangeEvidenceSummary {
         schema: crate::exchange_evidence::EXCHANGE_EVIDENCE_SCHEMA_V1,
@@ -567,8 +628,9 @@ pub(super) fn summary(
         largest_persisted_gap_ms: largest_gap,
         source_gap_over_two_hours: largest_gap
             .is_some_and(|gap| gap > crate::exchange_evidence::MAX_SOURCE_COVERAGE_GAP_MS),
-        remaining_source_cursors: crate::exchange_evidence::MAX_CURSORS - cursors,
-        remaining_events: crate::exchange_evidence::MAX_EVENTS - events,
+        // Native histories have no fixed number-of-rows limit.
+        remaining_source_cursors: usize::MAX.saturating_sub(cursors),
+        remaining_events: usize::MAX.saturating_sub(events),
         next_source_coverage_deadline_ms: previous_receipt.and_then(|last| {
             last.checked_add(crate::exchange_evidence::MAX_SOURCE_COVERAGE_GAP_MS)
         }),
@@ -721,9 +783,6 @@ fn scan_indexed(
         writer.push(b":");
         writer.json(&event)?;
         count += 1;
-        if count > crate::exchange_evidence::MAX_EVENTS {
-            return Err(ExecutionLedgerError::ExchangeEvidenceCapacity);
-        }
     }
     drop(rows);
     drop(stmt);
@@ -767,9 +826,6 @@ fn scan_indexed(
         writer.push(b":");
         writer.json(&cursor)?;
         count += 1;
-        if count > crate::exchange_evidence::MAX_CURSORS {
-            return Err(ExecutionLedgerError::ExchangeEvidenceCapacity);
-        }
     }
     drop(rows);
     drop(stmt);
@@ -784,9 +840,9 @@ fn scan_indexed(
     let serialized_bytes = tuple_len
         .checked_add(source_struct_overhead(&schema, &uid, run_id, &proof)?)
         .ok_or(ExecutionLedgerError::ExchangeEvidenceCapacity)?;
-    if serialized_bytes > crate::exchange_evidence::MAX_BYTES {
-        return Err(ExecutionLedgerError::ExchangeEvidenceCapacity);
-    }
+    // Canonical hash/bytes are streamed. Total historical bytes are not
+    // subject to the old v14 document cap; each row stays size-limited.
+    let _authenticated_source_bytes = serialized_bytes;
     let summary = summary(connection, run_id, expected_uid)?;
     Ok(crate::strategy_lifecycle::SourceIdentity {
         account_uid: uid,
@@ -926,9 +982,6 @@ where
             ));
         }
         count += 1;
-        if count > crate::exchange_evidence::MAX_EVENTS {
-            return Err(ExecutionLedgerError::ExchangeEvidenceCapacity);
-        }
         visit(&key, &event)?;
     }
     Ok(())
