@@ -1462,7 +1462,9 @@ impl AgentOperation {
                 validate_request_id(allocation_id)?;
                 if !(2..=64).contains(&strategy_id.len())
                     || !strategy_id.as_bytes()[0].is_ascii_alphabetic()
-                    || !strategy_id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+                    || !strategy_id
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
                 {
                     return Err(ProtocolError::InvalidAnalyticalQuery("strategy_id"));
                 }

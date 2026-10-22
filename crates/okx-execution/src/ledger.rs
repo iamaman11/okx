@@ -248,7 +248,10 @@ fn validate_capital_reservation(
         || !valid_intent_id(&r.allocation_id)
         || !(2..=64).contains(&r.strategy_id.len())
         || !r.strategy_id.as_bytes()[0].is_ascii_alphabetic()
-        || !r.strategy_id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+        || !r
+            .strategy_id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
         || r.account_uid_fingerprint.trim().is_empty()
         || r.account_generation.trim().is_empty()
         || r.origin_schema.trim().is_empty()
