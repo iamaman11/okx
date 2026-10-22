@@ -198,45 +198,6 @@ where
     Ok(())
 }
 
-/// Offline v2 -> v3 backfill. All original immutable source rows and
-/// their SHA256 tuple are proved before publication; no trading mutations.
-pub(super) fn backfill_financial_index(tx: &Transaction<'_>) -> Result<(), ExecutionLedgerError> {
-    let mut source_runs = tx
-        .prepare("SELECT run_id,uid FROM native_source_runs ORDER BY run_id")
-        .map_err(io)?;
-    let mut sources = source_runs.query([]).map_err(io)?;
-    while let Some(row) = sources.next().map_err(io)? {
-        let run: String = row.get(0).map_err(io)?;
-        let uid: String = row.get(1).map_err(io)?;
-        attest_indexed(tx, &run, &uid)?;
-    }
-    drop(sources);
-    drop(source_runs);
-    let mut query = tx
-        .prepare(
-            "SELECT run_id,event_key,payload_digest,length(payload),payload
-         FROM native_source_events ORDER BY run_id,event_key",
-        )
-        .map_err(io)?;
-    let mut rows = query.query([]).map_err(io)?;
-    while let Some(row) = rows.next().map_err(io)? {
-        let run_id: String = row.get(0).map_err(io)?;
-        let key: String = row.get(1).map_err(io)?;
-        let proof: String = row.get(2).map_err(io)?;
-        let bytes = source_row_bytes(row, 3)?;
-        if checksum(&bytes) != proof {
-            return Err(ExecutionLedgerError::Corrupt(
-                "financial index backfill source checksum mismatch",
-            ));
-        }
-        let event: StoredExchangeEvent = decode(&bytes)?;
-        index_financial_source_event(tx, &run_id, &key, &event)?;
-    }
-    drop(rows);
-    drop(query);
-    audit_financial_index_inventory(tx)
-}
-
 /// Cold, read-only inventory verification: both directions are checked.
 /// The primary event is authoritative; every index row must match its
 /// source hash, and every source must have exactly one projected row.
