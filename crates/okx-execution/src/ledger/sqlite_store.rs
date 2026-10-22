@@ -3410,7 +3410,8 @@ mod tests {
         assert_eq!(post_count, 1);
         // UNKNOWN is still financially charged and visible in a bounded
         // native census, even with an empty current exchange window.
-        let source_clients = BTreeSet::from([prepared.record.plan.client_order_id.as_str()]);
+        let client = derive_client_order_id(id);
+        let source_clients = BTreeSet::from([client.as_str()]);
         let census =
             native_reconciliation_inventory(&db, &source_clients, &BTreeSet::new(), 16).unwrap();
         assert_eq!((census.total, census.submitted), (1, 1));
