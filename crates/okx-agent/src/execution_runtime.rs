@@ -511,6 +511,35 @@ impl ExecutionRuntimeRegistry {
 }
 
 impl ExecutionRuntime {
+    /// One account context chooses its own environment; process/profile selection
+    /// never changes this route. Native admission still runs for every mutation.
+    pub(crate) fn new_registered_account(
+        root: &Path,
+        environment: OkxEnvironment,
+        credentials: Credentials,
+        expected_uid: &str,
+        observed_at_ms: u64,
+        rate_budget: RateBudget,
+    ) -> AgentResult<Self> {
+        let mode = if environment.demo {
+            ExecutionRuntimeMode::DemoAcceptance
+        } else {
+            ExecutionRuntimeMode::Production
+        };
+        let runtime = Self::new_with_mode(
+            root,
+            environment,
+            credentials,
+            observed_at_ms,
+            rate_budget,
+            mode,
+        )?;
+        if runtime.native_account_key.uid_fingerprint != expected_uid {
+            return Err(ExecutionLedgerError::AccountScopeMismatch.into());
+        }
+        Ok(runtime)
+    }
+
     pub fn new(
         root: &Path,
         environment: OkxEnvironment,
@@ -907,6 +936,12 @@ impl ExecutionRuntime {
             return None;
         }
         attested_flat_nav_for_new_risk(&run, &projection, point, current_equity, asof)
+    }
+
+    pub(crate) async fn verified_uid_matches(&self, uid: &str) -> AgentResult<bool> {
+        let config = self.executor_account.config().await?;
+        Ok(okx_api::account_uid_fingerprint(&config.uid) == uid
+            && self.native_account_key.uid_fingerprint == uid)
     }
 
     pub async fn preflight(

@@ -41,7 +41,7 @@ use okx_runtime::{
 };
 
 use crate::{
-    AgentResult,
+    AgentError, AgentResult,
     account_bootstrap::{
         AccountBootstrapError, AccountBootstrapper, AccountLedgerBootstrapError,
         FeeScheduleBootstrapError, TradingCapabilitiesBootstrapError,
@@ -178,6 +178,7 @@ pub struct ObservationQueryContext<'a> {
     transport_generation: u64,
     verified_governance_challenge: bool,
     risk_client: Option<&'a crate::risk_bridge::NativeRiskClient>,
+    account_registry: Option<&'a crate::accounts::AccountRuntimeRegistry>,
 }
 
 impl<'a> ObservationQueryContext<'a> {
@@ -196,6 +197,7 @@ impl<'a> ObservationQueryContext<'a> {
             transport_generation: 0,
             verified_governance_challenge: false,
             risk_client: None,
+            account_registry: None,
         }
     }
 
@@ -225,6 +227,7 @@ impl<'a> ObservationQueryContext<'a> {
             transport_generation: 0,
             verified_governance_challenge: false,
             risk_client: None,
+            account_registry: None,
         }
     }
 
@@ -325,7 +328,16 @@ impl<'a> ObservationQueryContext<'a> {
             transport_generation: 0,
             verified_governance_challenge: false,
             risk_client: None,
+            account_registry: None,
         }
+    }
+
+    pub const fn with_account_registry(
+        mut self,
+        registry: Option<&'a crate::accounts::AccountRuntimeRegistry>,
+    ) -> Self {
+        self.account_registry = registry;
+        self
     }
 
     pub const fn with_transport_generation(mut self, generation: u64) -> Self {
@@ -460,7 +472,47 @@ pub(crate) async fn dispatch(
     context: ObservationQueryContext<'_>,
     generated_at: &str,
 ) -> AgentResult<AgentResponse> {
+    if request.operation.requires_account() && request.account.is_none() {
+        return Ok(AgentResponse {
+            schema: AGENT_RESPONSE_SCHEMA_V1.into(),
+            request_id: request.request_id.clone(),
+            status: AgentResponseStatus::Rejected,
+            generated_at: generated_at.into(),
+            quality: DataQuality::NotReady,
+            warnings: Vec::new(),
+            result_schema: None,
+            result: None,
+            failure: Some(okx_protocol::AgentFailure {
+                code: "ACCOUNT_REFERENCE_REQUIRED".into(),
+                message: "Use an explicit connected account reference".into(),
+                retryable: false,
+            }),
+        });
+    }
     match &request.operation {
+        AgentOperation::ConnectAccount {
+            credential_ref,
+            alias,
+            operation_id,
+        } => {
+            let registry = context.account_registry.ok_or_else(|| {
+                AgentError::FinancialCaptureTask("ACCOUNT_REGISTRY_UNAVAILABLE".into())
+            })?;
+            let config = registry
+                .connect(credential_ref, alias, operation_id)
+                .await?;
+            Ok(AgentResponse {
+                schema: AGENT_RESPONSE_SCHEMA_V1.into(),
+                request_id: request.request_id.clone(),
+                status: AgentResponseStatus::Completed,
+                generated_at: generated_at.into(),
+                quality: DataQuality::Fresh,
+                warnings: Vec::new(),
+                result_schema: Some("okx.connected-account/v1".into()),
+                result: Some(serde_json::to_value(config)?),
+                failure: None,
+            })
+        }
         AgentOperation::MarketSnapshot { .. }
         | AgentOperation::InstrumentRules { .. }
         | AgentOperation::FindInstruments { .. }
@@ -1188,6 +1240,7 @@ mod tests {
     #[tokio::test]
     async fn instrument_rules_uses_reference_registry_and_reports_bootstrap_quality() {
         let request = AgentRequest {
+            account: None,
             schema: AGENT_REQUEST_SCHEMA_V1.to_owned(),
             request_id: "req_rules_0123456789".to_owned(),
             operation: AgentOperation::InstrumentRules {
@@ -1212,6 +1265,7 @@ mod tests {
                 transport_generation: 0,
                 verified_governance_challenge: false,
                 risk_client: None,
+                account_registry: None,
             },
             "2026-09-27T00:00:01.000Z",
         )
@@ -1231,6 +1285,7 @@ mod tests {
     #[tokio::test]
     async fn find_instruments_uses_reference_registry_without_guessing_ids() {
         let request = AgentRequest {
+            account: None,
             schema: AGENT_REQUEST_SCHEMA_V1.to_owned(),
             request_id: "req_find_012345678901".to_owned(),
             operation: AgentOperation::FindInstruments {
@@ -1257,6 +1312,7 @@ mod tests {
                 transport_generation: 0,
                 verified_governance_challenge: false,
                 risk_client: None,
+                account_registry: None,
             },
             "2026-09-27T00:00:01.000Z",
         )
@@ -1279,6 +1335,7 @@ mod tests {
     #[tokio::test]
     async fn snapshot_quality_explains_rest_only_m2_state() {
         let request = AgentRequest {
+            account: None,
             schema: AGENT_REQUEST_SCHEMA_V1.to_owned(),
             request_id: "req_quality_012345678".to_owned(),
             operation: AgentOperation::SnapshotQuality {
@@ -1303,6 +1360,7 @@ mod tests {
                 transport_generation: 0,
                 verified_governance_challenge: false,
                 risk_client: None,
+                account_registry: None,
             },
             "2026-09-27T00:00:01.000Z",
         )

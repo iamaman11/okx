@@ -303,6 +303,7 @@ mod tests {
         let client_public = public_key_from_private(client_private);
         let nonce = *b"0123456789ab";
         let request = crate::AgentRequest {
+            account: None,
             schema: crate::AGENT_REQUEST_SCHEMA_V1.to_owned(),
             request_id: REQUEST_ID.to_owned(),
             operation: crate::AgentOperation::MarketSnapshot {
@@ -340,6 +341,7 @@ mod tests {
     fn client_envelope_preflight_rejects_malformed_transport_encoding() {
         let client_private = [7_u8; 32];
         let request = crate::AgentRequest {
+            account: None,
             schema: crate::AGENT_REQUEST_SCHEMA_V1.to_owned(),
             request_id: REQUEST_ID.to_owned(),
             operation: crate::AgentOperation::MarketSnapshot {
@@ -366,6 +368,7 @@ mod tests {
     fn client_envelope_preflight_rejects_request_id_mismatch_before_post() {
         let client_private = [11_u8; 32];
         let request = crate::AgentRequest {
+            account: None,
             schema: crate::AGENT_REQUEST_SCHEMA_V1.to_owned(),
             request_id: "req_aaaaaaaaaaaaaaaa".to_owned(),
             operation: crate::AgentOperation::MarketSnapshot {

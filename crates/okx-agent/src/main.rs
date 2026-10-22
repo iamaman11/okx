@@ -11,10 +11,11 @@ use clap::{Parser, Subcommand};
 use okx_agent::{
     AgentError, AgentResult,
     account_bootstrap::AccountBootstrapper,
+    accounts::{AccountRuntimeRegistry, initialize_installation},
     cloudflare_auth::{load_native_cloudflare_token, store_native_cloudflare_token},
     cloudflare_transport::CloudflareTransportConfig,
     config::{AgentConfig, default_root},
-    execution_runtime::{ExecutionRuntime, ExecutionRuntimeRegistry},
+    execution_runtime::ExecutionRuntime,
     github_auth::{load_native_github_token, store_native_github_token},
     github_mailbox::GitHubMailboxClient,
     identity::{
@@ -22,7 +23,6 @@ use okx_agent::{
     },
     market_bootstrap::MarketBootstrapper,
     okx_credentials::{
-        load_native_executor_okx_credentials_for_environment,
         load_native_okx_credentials_for_environment, store_native_demo_executor_okx_credentials,
         store_native_demo_okx_credentials, store_native_executor_okx_credentials,
         store_native_okx_credentials,
@@ -66,6 +66,16 @@ enum Command {
 
     /// Print only the public agent identity.
     Identity,
+    /// Initialize a clean installation catalog once; normal Run never initializes it.
+    InitializeInstallation {
+        #[arg(long)]
+        installation_id: String,
+    },
+    /// Store a named observer/executor bundle in the native secret owner.
+    SetAccountCredentials {
+        #[arg(long)]
+        credential_ref: String,
+    },
 
     /// Store the GitHub mailbox token from stdin in Windows Credential Manager.
     SetGithubToken,
@@ -142,6 +152,26 @@ async fn run(cli: Cli) -> AgentResult<()> {
     let market_environment = environment.production_public();
 
     match cli.command {
+        Command::InitializeInstallation { installation_id } => {
+            initialize_installation(&config.root, &installation_id)?;
+            println!(
+                "{}",
+                serde_json::json!({"status":"initialized","installation_id":installation_id})
+            );
+        }
+        Command::SetAccountCredentials { credential_ref } => {
+            let mut payload = read_stdin()?;
+            let result = okx_agent::okx_credentials::store_native_account_credentials(
+                &credential_ref,
+                payload.as_bytes(),
+            );
+            payload.zeroize();
+            result?;
+            println!(
+                "{}",
+                serde_json::json!({"status":"stored","credential_ref":credential_ref})
+            );
+        }
         Command::InitKey => {
             let identity = initialize_native_identity(&config.key_id)?;
             println!("{}", serde_json::to_string_pretty(&identity)?);
@@ -364,45 +394,24 @@ async fn run(cli: Cli) -> AgentResult<()> {
                     reference.len()
                 );
                 let market = MarketBootstrapper::new(public_client);
-                let (account, private_ws_coordinator, private_ws) =
-                    optional_private_components(environment, rate_budget.clone());
+                let accounts =
+                    AccountRuntimeRegistry::open(&config.root, rate_budget.clone()).await?;
+                let account: Option<AccountBootstrapper> = None;
+                let private_ws_coordinator: Option<PrivateWsCoordinator> = None;
+                let private_ws: Option<PrivateWsHandle> = None;
+                let execution: Option<std::sync::Arc<ExecutionRuntime>> = None;
                 let (public_ws_coordinator, public_ws) = PublicWsCoordinator::new_with_rate_budget(
                     market_environment,
                     reference,
                     rate_budget.clone(),
                 );
-                let candidate_execution = optional_execution_runtime(
-                    &config,
-                    environment,
-                    rate_budget.clone(),
-                    demo_mutation_acceptance,
-                    production_trading,
-                )
-                .map(std::sync::Arc::new);
-                // Exactly one registered native account executor for the
-                // selected CONTROL identity. A missing SQL account never
-                // becomes a legacy runtime or a second transport.
-                let mut account_runtimes = ExecutionRuntimeRegistry::new();
-                let execution = match candidate_execution {
-                    Some(owner) => {
-                        let key = account_runtimes
-                            .register_existing(owner)
-                            .map_err(AgentError::from)?;
-                        account_runtimes.get(&key)
-                    }
-                    None => None,
-                };
                 let cloudflare = cloudflare_ws_url.and_then(|ws_url| {
                     match load_native_cloudflare_token() {
                         Ok(token) => match CloudflareTransportConfig::new(
                             ws_url,
                             cloudflare_runtime_id.clone(),
                             token,
-                            if environment.demo {
-                                DirectRuntimeProfile::DemoAcceptance
-                            } else {
-                                DirectRuntimeProfile::Production
-                            },
+                            DirectRuntimeProfile::Engine,
                         ) {
                             Ok(config) => Some(config),
                             Err(error) => {
@@ -423,6 +432,7 @@ async fn run(cli: Cli) -> AgentResult<()> {
                 let mut private_key = load_native_private_key(&config.key_id)?;
                 let result = run_mailbox_until_shutdown(
                     MailboxRuntimeContext {
+                        accounts: Some(&accounts),
                         config: &config,
                         identity: &identity,
                         mailbox: &mailbox,
@@ -450,111 +460,6 @@ async fn run(cli: Cli) -> AgentResult<()> {
     }
 
     Ok(())
-}
-
-fn optional_execution_runtime(
-    config: &AgentConfig,
-    environment: OkxEnvironment,
-    rate_budget: RateBudget,
-    demo_mutation_acceptance: bool,
-    production_trading: bool,
-) -> Option<ExecutionRuntime> {
-    let credentials = match load_native_executor_okx_credentials_for_environment(environment) {
-        Ok(value) => value,
-        Err(
-            AgentError::ExecutorOkxCredentialsNotFound
-            | AgentError::DemoExecutorOkxCredentialsNotFound,
-        ) => {
-            eprintln!(
-                "OKX executor credential for the selected environment is not provisioned; execution operations are NOT_READY"
-            );
-            return None;
-        }
-        Err(error) => {
-            eprintln!("OKX executor credential unavailable: {error}");
-            return None;
-        }
-    };
-
-    let observed_at_ms = Utc::now().timestamp_millis().max(1) as u64;
-    let runtime = if production_trading {
-        ExecutionRuntime::new_production(
-            &config.root,
-            environment,
-            credentials,
-            observed_at_ms,
-            rate_budget,
-        )
-    } else if demo_mutation_acceptance {
-        ExecutionRuntime::new_demo_acceptance(
-            &config.root,
-            environment,
-            credentials,
-            observed_at_ms,
-            rate_budget,
-        )
-    } else {
-        ExecutionRuntime::new(
-            &config.root,
-            environment,
-            credentials,
-            observed_at_ms,
-            rate_budget,
-        )
-    };
-    match runtime {
-        Ok(value) => Some(value),
-        Err(error) => {
-            eprintln!("execution runtime unavailable: {error}");
-            None
-        }
-    }
-}
-
-fn optional_private_components(
-    environment: OkxEnvironment,
-    rate_budget: RateBudget,
-) -> (
-    Option<AccountBootstrapper>,
-    Option<PrivateWsCoordinator>,
-    Option<PrivateWsHandle>,
-) {
-    match load_native_okx_credentials_for_environment(environment) {
-        Ok(credentials) => match OkxRestClient::with_rate_budget(
-            environment,
-            credentials.clone(),
-            rate_budget.clone(),
-        ) {
-            Ok(client) => {
-                let account = AccountBootstrapper::new(client);
-                let (private_ws_coordinator, private_ws) =
-                    PrivateWsCoordinator::new_with_rate_budget(
-                        environment,
-                        credentials,
-                        rate_budget,
-                    );
-                (
-                    Some(account),
-                    Some(private_ws_coordinator),
-                    Some(private_ws),
-                )
-            }
-            Err(error) => {
-                eprintln!("OKX observer REST client unavailable: {error}");
-                (None, None, None)
-            }
-        },
-        Err(AgentError::OkxCredentialsNotFound | AgentError::DemoOkxCredentialsNotFound) => {
-            eprintln!(
-                "OKX observer credential for the selected environment is not provisioned; private queries are NOT_READY"
-            );
-            (None, None, None)
-        }
-        Err(error) => {
-            eprintln!("OKX observer credential unavailable: {error}");
-            (None, None, None)
-        }
-    }
 }
 
 fn optional_account_bootstrapper(

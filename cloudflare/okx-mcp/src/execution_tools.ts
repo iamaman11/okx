@@ -190,7 +190,7 @@ function lineageInput(v: unknown): boolean {
 }
 export function isExecutionMutation(operationType: unknown): boolean {
   return [
-    "prepare_execution", "submit_prepared_execution",
+    "connect_account", "prepare_execution", "submit_prepared_execution",
     "mutate_execution", "abort_reverse_execution", "abandon_prepared_execution",
     "begin_strategy_run", "finalize_strategy_run", "quarantine_unverified_strategy_run", "set_leverage",
     "reconcile_unsent_prepared",
@@ -203,7 +203,7 @@ export function isExecutionMutation(operationType: unknown): boolean {
 // Unauthenticated/unrecognized sessions remain fail-closed.
 export function executionProfilePermitsOperation(profile: string | undefined, operationType: unknown): boolean {
   if (!isExecutionMutation(operationType)) return true;
-  return profile === "demo_acceptance" || profile === "production";
+  return profile === "engine" || profile === "demo_acceptance" || profile === "production";
 }
 
 /** Return exactly one whitelisted native Rust AgentOperation, never arbitrary operation JSON. */

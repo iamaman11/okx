@@ -24,12 +24,12 @@ export interface Env {
   OAUTH_PROVIDER: OAuthHelpers;
 }
 
-export type RuntimeProfile = "production" | "demo_acceptance" | "unverified";
+export type RuntimeProfile = "engine" | "production" | "demo_acceptance" | "unverified";
 
 /** An old agent has an unverified profile until its Hello is upgraded. */
 export function decodeRuntimeProfile(value: unknown): RuntimeProfile | null {
   if (value === undefined) return "unverified";
-  if (value === "production" || value === "demo_acceptance") return value;
+  if (value === "engine" || value === "production" || value === "demo_acceptance") return value;
   return null;
 }
 

@@ -5895,7 +5895,7 @@ mod tests {
         };
         let store = ExecutionLedgerStore::initialize_fresh_account(&root, &identity).unwrap();
         assert!(store.is_sqlite_native());
-        assert!(!old.exists());
+        assert_eq!(std::fs::read(&old).unwrap(), b"obsolete local v14 history");
         assert_eq!(
             store.bound_native_account_identity().unwrap(),
             Some(identity.clone())

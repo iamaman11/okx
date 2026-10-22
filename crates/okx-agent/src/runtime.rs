@@ -132,6 +132,7 @@ pub async fn run_until_shutdown(config: &AgentConfig, identity: &AgentIdentity) 
 }
 
 pub struct MailboxRuntimeContext<'a> {
+    pub accounts: Option<&'a crate::accounts::AccountRuntimeRegistry>,
     pub config: &'a AgentConfig,
     pub identity: &'a AgentIdentity,
     pub mailbox: &'a GitHubMailboxClient,
@@ -153,6 +154,7 @@ pub async fn run_mailbox_until_shutdown(
     poll_seconds: u64,
 ) -> AgentResult<()> {
     let MailboxRuntimeContext {
+        accounts,
         config,
         identity,
         mailbox,
@@ -208,6 +210,7 @@ pub async fn run_mailbox_until_shutdown(
 
     let cloudflare_shutdown_rx = runtime_shutdown_tx.subscribe();
     let cloudflare_context = CloudflareQueryRuntimeContext {
+        accounts,
         public_ws,
         market,
         account,
@@ -456,6 +459,7 @@ pub async fn run_mailbox_until_shutdown(
                 // all OCO/conditional scopes, UID and immutable source hash.
                 let source = if drained.is_ok() {
                     let probe = AgentRequest {
+                        account: None,
                         schema: AGENT_REQUEST_SCHEMA_V1.to_owned(),
                         request_id: request.request_id.clone(),
                         operation: AgentOperation::ProfileHandoffReadiness,
@@ -745,6 +749,9 @@ pub async fn run_mailbox_until_shutdown(
     }
 
     let _ = runtime_shutdown_tx.send(true);
+    if let Some(accounts) = accounts {
+        accounts.shutdown().await;
+    }
     match public_runtime_task.await {
         Ok(Ok(())) => {}
         Ok(Err(error)) => return Err(error.into()),
@@ -915,7 +922,7 @@ async fn capture_native_finance_on_private_events(
     }
 }
 
-async fn capture_one_native_financial_source(
+pub(crate) async fn capture_one_native_financial_source(
     account: &AccountBootstrapper,
     private_ws: &PrivateWsHandle,
     execution: &ExecutionRuntime,

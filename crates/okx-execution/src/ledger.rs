@@ -577,34 +577,6 @@ impl ExecutionLedgerStore {
         if !identity.same_account_as(&bound) {
             return Err(ExecutionLedgerError::AccountScopeMismatch);
         }
-        // Local v14 evidence is not imported. Only application-owned legacy
-        // paths are discarded, and only AFTER cold attestation of the new
-        // immutable SQL owner. Retrying cleanup is idempotent.
-        for name in [
-            "execution-ledger.json",
-            "execution-ledger.v14.sealed",
-            "execution-ledger.pre-v14.json",
-            "execution-ledger.owner",
-        ] {
-            let old = root.join(name);
-            if old.try_exists()? {
-                if !old.is_file() {
-                    return Err(ExecutionLedgerError::Corrupt(
-                        "legacy ledger path not a file",
-                    ));
-                }
-                fs::remove_file(old)?;
-            }
-        }
-        let archived = root.join("execution-ledger.archive");
-        if archived.try_exists()? {
-            if !archived.is_dir() {
-                return Err(ExecutionLedgerError::Corrupt(
-                    "legacy archive path not a directory",
-                ));
-            }
-            fs::remove_dir_all(archived)?;
-        }
         Ok(native)
     }
 

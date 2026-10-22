@@ -4702,6 +4702,7 @@ mod tests {
 
     fn request() -> AgentRequest {
         AgentRequest {
+            account: None,
             schema: AGENT_REQUEST_SCHEMA_V1.to_owned(),
             request_id: "req_prepare_outcome_012345".to_owned(),
             operation: AgentOperation::ExecutionStatus {

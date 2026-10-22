@@ -165,7 +165,8 @@ async fn process_once_with_size_telemetry(
 
 fn response_budget(operation: &AgentOperation) -> ResponseBudget {
     let plaintext_bytes = match operation {
-        AgentOperation::InstrumentRules { .. }
+        AgentOperation::ConnectAccount { .. }
+        | AgentOperation::InstrumentRules { .. }
         | AgentOperation::ExecutorPreflight
         | AgentOperation::BeginStrategyRun { .. }
         | AgentOperation::FinalizeStrategyRun { .. }
@@ -520,6 +521,7 @@ mod tests {
         ] {
             let request_id = format!("req_mailbox_{suffix}_0123456789");
             let request = AgentRequest {
+                account: None,
                 schema: AGENT_REQUEST_SCHEMA_V1.to_owned(),
                 request_id: request_id.clone(),
                 operation,
@@ -842,6 +844,7 @@ mod tests {
         );
 
         let request = AgentRequest {
+            account: None,
             schema: AGENT_REQUEST_SCHEMA_V1.to_owned(),
             request_id: "req_0123456789abcdef".to_owned(),
             operation: AgentOperation::MarketSnapshot {

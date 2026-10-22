@@ -17,7 +17,7 @@ interface Result {
 }
 interface Session {
   connection_generation:number;
-  runtime_profile:"production"|"demo_acceptance"|"unverified";
+  runtime_profile:"engine"|"production"|"demo_acceptance"|"unverified";
   hello:boolean;
 }
 function deny(id:string,reason:string):Result {
@@ -53,7 +53,7 @@ export async function handleNativeRiskCommand(
 ):Promise<Result>{
   const id=isObject(raw)&&typeof raw.command_id==="string"&&TOKEN.test(raw.command_id)
     ?raw.command_id:"invalid_risk_command";
-  if(session.runtime_profile!=="production"||!session.hello||
+  if((session.runtime_profile!=="production"&&session.runtime_profile!=="engine")||!session.hello||
     !Number.isSafeInteger(session.connection_generation)||session.connection_generation<1)
     return deny(id,"NATIVE_PRODUCTION_SESSION_REQUIRED");
   if(!isObject(raw)||raw.schema!==COMMAND_SCHEMA||!TOKEN.test(id)

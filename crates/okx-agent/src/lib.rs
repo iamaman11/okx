@@ -1,4 +1,5 @@
 pub mod account_bootstrap;
+pub mod accounts;
 pub mod cloudflare_auth;
 pub mod cloudflare_transport;
 pub mod config;

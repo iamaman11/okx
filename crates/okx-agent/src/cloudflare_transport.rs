@@ -255,6 +255,7 @@ pub struct CloudflareQueryRuntimeContext<'a> {
     pub private_ws: Option<&'a PrivateWsHandle>,
     pub execution: Option<&'a ExecutionRuntime>,
     pub research_root: &'a Path,
+    pub accounts: Option<&'a crate::accounts::AccountRuntimeRegistry>,
     pub research_session: &'a ResearchSessionHandle,
 }
 
@@ -389,11 +390,11 @@ async fn run_session(
     let mut next_source_proof_at = Instant::now() + Duration::from_secs(SOURCE_PROOF_FIRST_SECONDS);
     // No two exchange-affecting commands may be outstanding on the same
     // transport generation. Read/status requests remain independently bounded.
-    let mut active_mutation: Option<String> = None;
+    let mut active_mutations: HashMap<String, String> = HashMap::new();
     // Request-scoped Worker ping challenges. No scheduler or second owner.
     let mut pending_delivery_challenges: HashMap<String, Instant> = HashMap::new();
     // One existing transport and exactly one outbound mutation owner.
-    let (risk_tx, mut risk_rx) = mpsc::channel::<OutboundRiskCommand>(4);
+    let (risk_tx, mut risk_rx) = mpsc::channel::<OutboundRiskCommand>(32);
     let risk_client = NativeRiskClient::new(risk_tx);
     let mut pending_risk: HashMap<
         String,
@@ -439,7 +440,7 @@ async fn run_session(
                 // AccountSummary owns the REST/WS proof and ledger checkpoint.
                 // Never invent missing historical coverage after reconnect.
                 let proof_due = if context.account.is_some()
-                    && active_mutation.is_none()
+                    && active_mutations.is_empty()
                     && source_proof_flight.is_empty()
                     && Instant::now() >= next_source_proof_at
                 {
@@ -468,6 +469,7 @@ async fn run_session(
                             Some(context.research_session),
                         );
                     let request = AgentRequest {
+                        account: None,
                         schema: AGENT_REQUEST_SCHEMA_V1.to_owned(),
                         request_id: format!(
                             "native_source_checkpoint_{}",
@@ -510,7 +512,7 @@ async fn run_session(
             }
             outbound_risk = risk_rx.recv() => {
                 if let Some(outbound) = outbound_risk {
-                    if active_mutation.is_none() || pending_risk.len() >= 4 {
+                    if active_mutations.is_empty() || pending_risk.len() >= 32 {
                         drop(outbound.return_to);
                         continue;
                     }
@@ -556,9 +558,7 @@ async fn run_session(
                 let Some((request_id, kind, result)) = completed else {
                     continue;
                 };
-                if active_mutation.as_deref() == Some(request_id.as_str()) {
-                    active_mutation = None;
-                }
+                active_mutations.retain(|_,id|id!=&request_id);
                 let response = completed_direct_response(&request_id, kind, result);
                 response.validate()?;
                 send_frame(
@@ -684,9 +684,28 @@ async fn run_session(
                         // immutable Rust prepare/submit/mutate executor and policy.
                         // Production is denied even if Worker/OAuth sends a write
                         // through this otherwise authenticated read transport.
+                        let routed = match (context.accounts,request.account.as_deref()) {
+                            (Some(registry),Some(account))=>registry.resolve(account).await,
+                            _=>None,
+                        };
+                        if request.operation.requires_account() && routed.is_none() {
+                            let response=direct_rejection(&request.request_id,"ACCOUNT_ROUTE_NOT_READY","Explicit account is missing or its native context is unavailable",false);
+                            send_frame(&mut sink,&DirectTransportFrame::Response{schema:DIRECT_TRANSPORT_FRAME_SCHEMA_V2.into(),session_id:session_id.clone(),connection_generation,response}).await?;
+                            continue;
+                        }
+                        let routed_mode=routed.as_ref().map(|r|r.execution.mode()).or_else(||context.execution.map(ExecutionRuntime::mode));
+                        let delivery_profile=if config.runtime_profile==DirectRuntimeProfile::Engine {
+                            if routed_mode==Some(ExecutionRuntimeMode::DemoAcceptance){DirectRuntimeProfile::DemoAcceptance}else{DirectRuntimeProfile::Production}
+                        }else{config.runtime_profile};
                         let request_kind = DirectRequestKind::from_operation(&request.operation);
                         let mutating = request_kind.is_mutating();
-                        let terminal_status = config.runtime_profile == DirectRuntimeProfile::Production
+                        if mutating && request.operation.requires_account() && let Some(account)=routed.as_ref()
+                            && !account.source_identity_ready().await {
+                            let response=direct_rejection(&request.request_id,"SOURCE_GENERATION_AWAITING_IDENTITY","Account sources are refreshing automatically",true);
+                            send_frame(&mut sink,&DirectTransportFrame::Response{schema:DIRECT_TRANSPORT_FRAME_SCHEMA_V2.into(),session_id:session_id.clone(),connection_generation,response}).await?;
+                            continue;
+                        }
+                        let terminal_status = delivery_profile == DirectRuntimeProfile::Production
                             && matches!(&request.operation, AgentOperation::ExecutionStatus { .. });
                         let governance_challenge_fresh = if mutating || terminal_status {
                             consume_fresh_delivery_challenge(
@@ -699,14 +718,14 @@ async fn run_session(
                             false
                         };
                         let terminal_risk_owner = terminal_risk_status_owner(
-                            config.runtime_profile,
+                            delivery_profile,
                             &request.operation,
                             operator_governance.is_some(),
                             governance_challenge_fresh,
                         );
                         let delivery = central_production_delivery_admission(
-                            config.runtime_profile,
-                            context.execution.map(ExecutionRuntime::mode),
+                            delivery_profile,
+                            routed_mode,
                             &request.operation,
                             operator_governance.as_ref(),
                             frame_generation,
@@ -715,10 +734,10 @@ async fn run_session(
                             },
                         );
                         let allowed = direct_operation_allowed(
-                            config.runtime_profile,
-                            context.execution.map(ExecutionRuntime::mode),
+                            delivery_profile,
+                            routed_mode,
                             &request.operation,
-                        ) || delivery.is_ok();
+                        ) || delivery.is_ok() || matches!(request.operation,AgentOperation::ConnectAccount{..}) && config.runtime_profile==DirectRuntimeProfile::Engine;
                         if !allowed {
                             // A specific typed native reason avoids repeated
                             // permission/configuration changes on an unknown gate.
@@ -747,8 +766,10 @@ async fn run_session(
                             continue;
                         }
 
+                        let mutation_account=routed.as_ref().map(|r|r.configuration.account_key.wire())
+                            .unwrap_or_else(||match &request.operation{AgentOperation::ConnectAccount{alias,..}=>format!("connect:{alias}"),_=>"unrouted".into()});
                         if in_flight.len() >= MAX_INFLIGHT_READ_QUERIES
-                            || ((mutating || terminal_risk_owner) && active_mutation.is_some())
+                            || ((mutating || terminal_risk_owner) && active_mutations.contains_key(&mutation_account))
                         {
                             let response = direct_rejection(
                                 &request.request_id,
@@ -769,26 +790,20 @@ async fn run_session(
                             continue;
                         }
 
-                        let query_context =
-                            ObservationQueryContext::live_with_execution_research_and_session(
-                                context.public_ws,
-                                context.market,
-                                None,
-                                context.account,
-                                context.private_ws,
-                                context.execution,
-                                Some(context.research_root),
-                                Some(context.research_session),
-                            );
                         let generated_at =
                             Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
                         let response_request_id = request.request_id.clone();
                         if mutating || terminal_risk_owner {
-                            active_mutation = Some(response_request_id.clone());
+                            active_mutations.insert(mutation_account,response_request_id.clone());
                         }
                         let risk_client = risk_client.clone();
                         in_flight.push(
                             async move {
+                                let account=routed.as_ref();
+                                let query_context=ObservationQueryContext::live_with_execution_research_and_session(
+                                    context.public_ws,context.market,None,account.map(|r|&r.observer),account.map(|r|&r.private_ws),
+                                    account.map(|r|r.execution.as_ref()),Some(context.research_root),Some(context.research_session))
+                                    .with_account_registry(context.accounts);
                                 let query_context = query_context
                                     .with_transport_generation(frame_generation)
                                     .with_operator_governance(operator_governance.as_ref())
@@ -1053,6 +1068,7 @@ mod tests {
     #[test]
     fn internal_source_checkpoint_cannot_mint_exchange_authority() {
         let request = AgentRequest {
+            account: None,
             schema: AGENT_REQUEST_SCHEMA_V1.to_owned(),
             request_id: "native_source_checkpoint_1792489000000".to_owned(),
             operation: AgentOperation::AccountSummary,

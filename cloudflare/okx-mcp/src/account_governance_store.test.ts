@@ -22,7 +22,7 @@ ok((await governanceRequest(s,"GET")).body.complete_all_account_census==="not_ev
 ok(s.reads.every(k=>!k.endsWith("_v2")&&!k.includes("policy_v1")&&!k.includes("risk_book_v1")),"legacy_stop_claims_and_epochs_are_never_read");
 ok((await initializeGovernance(s,initial)).status===409,"installation cannot reset existing state");
 const observation={uid_fingerprint:"a".repeat(64),venue:"okx" as const,environment:"real" as const,label:"Primary",
- alias:"primary",enabled:true,limits,idempotency_key:"connect_primary_01"};
+ alias:"primary",credential_ref:"ref_primary",enabled:true,limits,idempotency_key:"connect_primary_01"};
 const connected=await enrollObservedAccount(s,observation);
 ok(connected.status===200&&(connected.body.account as any).enabled,"connect saves access and limits together");
 ok((await enrollObservedAccount(s,observation)).body.status==="CONNECTED","same key returns original outcome");

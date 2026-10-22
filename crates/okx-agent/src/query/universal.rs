@@ -761,6 +761,7 @@ mod tests {
         let mut stale_plan = plan(10, QuerySortDirection::Desc);
         stale_plan.catalog_version = "okx.query.catalog/2026-09-01.1".to_owned();
         let request = AgentRequest {
+            account: None,
             schema: okx_protocol::AGENT_REQUEST_SCHEMA_V1.to_owned(),
             request_id: "req_query_stale_catalog_0001".to_owned(),
             operation: AgentOperation::Query { plan: stale_plan },

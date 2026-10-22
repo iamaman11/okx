@@ -73,7 +73,7 @@ export async function governanceRequest(storage:any,method:string,raw?:unknown):
  */
 export async function enrollObservedAccount(storage:any,observed:{uid_fingerprint:string;venue:"okx";
   environment:"real"|"demo";label:string;alias:string;limits:Limits;enabled:boolean;
-  idempotency_key:string}):Promise<Reply>{
+  idempotency_key:string;credential_ref:string}):Promise<Reply>{
   if(!/^[0-9a-f]{64}$/.test(observed.uid_fingerprint)||observed.venue!=="okx"
     ||!["real","demo"].includes(observed.environment)||typeof observed.label!=="string"
     ||observed.label.length<1||observed.label.length>80||!/^[A-Za-z][A-Za-z0-9_-]{1,63}$/.test(observed.alias)

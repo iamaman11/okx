@@ -339,6 +339,8 @@ impl MailboxEnvelope {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
     pub schema: String,
     pub request_id: String,
     pub operation: AgentOperation,
@@ -350,6 +352,13 @@ impl AgentRequest {
             return Err(ProtocolError::UnsupportedSchema(self.schema.clone()));
         }
         validate_request_id(&self.request_id)?;
+        if self
+            .account
+            .as_ref()
+            .is_some_and(|a| a.is_empty() || a.len() > 128 || a.chars().any(char::is_control))
+        {
+            return Err(ProtocolError::InvalidRequestId);
+        }
         self.operation.validate()
     }
 }
@@ -1118,6 +1127,11 @@ pub struct StrategyStopRearmInput {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum AgentOperation {
+    ConnectAccount {
+        credential_ref: String,
+        alias: String,
+        operation_id: String,
+    },
     MarketSnapshot {
         instrument: String,
     },
@@ -1277,6 +1291,31 @@ impl AgentOperation {
     /// Exact production-intended typed executor surface. The direct transport
     /// may admit this ONLY for a profile-verified Demo runtime. Live remains
     /// disabled, irrespective of OAuth or user-supplied operation fields.
+    pub const fn requires_account(&self) -> bool {
+        matches!(
+            self,
+            Self::AccountSnapshot
+                | Self::AccountSummary
+                | Self::TraderSnapshot
+                | Self::ProfileHandoffReadiness
+                | Self::LedgerStorageAudit
+                | Self::PortfolioRisk { .. }
+                | Self::TradingCapabilities { .. }
+                | Self::ExecutorPreflight
+                | Self::BeginStrategyRun { .. }
+                | Self::FinalizeStrategyRun { .. }
+                | Self::QuarantineUnverifiedStrategyRun { .. }
+                | Self::SetLeverage { .. }
+                | Self::PrepareExecution { .. }
+                | Self::SubmitPreparedExecution { .. }
+                | Self::MutateExecution { .. }
+                | Self::AbortReverseExecution { .. }
+                | Self::AbandonPreparedExecution { .. }
+                | Self::ReconcileUnsentPrepared { .. }
+                | Self::ExecutionStatus { .. }
+        )
+    }
+
     pub const fn direct_transport_demo_execution(&self) -> bool {
         matches!(
             self,
@@ -1295,7 +1334,8 @@ impl AgentOperation {
     pub const fn direct_transport_read_only(&self) -> bool {
         !matches!(
             self,
-            Self::BeginStrategyRun { .. }
+            Self::ConnectAccount { .. }
+                | Self::BeginStrategyRun { .. }
                 | Self::SetLeverage { .. }
                 | Self::FinalizeStrategyRun { .. }
                 | Self::QuarantineUnverifiedStrategyRun { .. }
@@ -1310,6 +1350,16 @@ impl AgentOperation {
 
     pub fn validate(&self) -> Result<(), ProtocolError> {
         match self {
+            Self::ConnectAccount {
+                credential_ref,
+                alias,
+                operation_id,
+            } => {
+                if !accounts::valid_reference(credential_ref) || !accounts::valid_reference(alias) {
+                    return Err(ProtocolError::InvalidRequestId);
+                }
+                validate_direct_token(operation_id, 8, 128)
+            }
             Self::MarketSnapshot { instrument }
             | Self::InstrumentRules { instrument }
             | Self::MarketOverview { instrument }
@@ -1631,6 +1681,7 @@ impl AgentOperation {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DirectRuntimeProfile {
+    Engine,
     Production,
     DemoAcceptance,
 }
@@ -3296,6 +3347,7 @@ mod tests {
     #[test]
     fn trading_capabilities_request_is_strict_and_round_trips() {
         let request = AgentRequest {
+            account: None,
             schema: AGENT_REQUEST_SCHEMA_V1.to_owned(),
             request_id: "req_caps_0123456789".to_owned(),
             operation: AgentOperation::TradingCapabilities {
@@ -3313,6 +3365,7 @@ mod tests {
         decoded.validate().expect("valid decoded request");
 
         let invalid = AgentRequest {
+            account: None,
             schema: AGENT_REQUEST_SCHEMA_V1.to_owned(),
             request_id: "req_caps_invalid_012345".to_owned(),
             operation: AgentOperation::TradingCapabilities {
@@ -3326,6 +3379,7 @@ mod tests {
     #[test]
     fn execution_operations_are_strict_and_bounded() {
         let open = AgentRequest {
+            account: None,
             schema: AGENT_REQUEST_SCHEMA_V1.to_owned(),
             request_id: request_id(),
             operation: AgentOperation::PrepareExecution {
@@ -3352,6 +3406,7 @@ mod tests {
         open.validate().expect("valid open execution request");
 
         let close = AgentRequest {
+            account: None,
             schema: AGENT_REQUEST_SCHEMA_V1.to_owned(),
             request_id: "req_close_0123456789".to_owned(),
             operation: AgentOperation::PrepareExecution {
@@ -3371,6 +3426,7 @@ mod tests {
         close.validate().expect("valid close execution request");
 
         let submit = AgentRequest {
+            account: None,
             schema: AGENT_REQUEST_SCHEMA_V1.to_owned(),
             request_id: "req_submit_0123456789".to_owned(),
             operation: AgentOperation::SubmitPreparedExecution {
@@ -3380,6 +3436,7 @@ mod tests {
         submit.validate().expect("valid submit request");
 
         let status = AgentRequest {
+            account: None,
             schema: AGENT_REQUEST_SCHEMA_V1.to_owned(),
             request_id: "req_status_0123456789".to_owned(),
             operation: AgentOperation::ExecutionStatus {
@@ -3389,6 +3446,7 @@ mod tests {
         status.validate().expect("valid execution status request");
 
         let invalid = AgentRequest {
+            account: None,
             schema: AGENT_REQUEST_SCHEMA_V1.to_owned(),
             request_id: "req_invalid_exec_012345".to_owned(),
             operation: AgentOperation::PrepareExecution {
@@ -3611,6 +3669,7 @@ mod tests {
     #[test]
     fn typed_request_round_trips_without_loss() {
         let request = AgentRequest {
+            account: None,
             schema: AGENT_REQUEST_SCHEMA_V1.to_owned(),
             request_id: request_id(),
             operation: AgentOperation::AnalyzeCandidateOrder {
@@ -3774,6 +3833,7 @@ mod tests {
     #[test]
     fn malformed_request_id_fails_closed() {
         let request = AgentRequest {
+            account: None,
             schema: AGENT_REQUEST_SCHEMA_V1.to_owned(),
             request_id: "../bad".to_owned(),
             operation: AgentOperation::AccountSnapshot,
@@ -4136,6 +4196,7 @@ mod direct_transport_tests {
 
     fn request() -> AgentRequest {
         AgentRequest {
+            account: None,
             schema: AGENT_REQUEST_SCHEMA_V1.to_owned(),
             request_id: "req_direct_0123456789".to_owned(),
             operation: AgentOperation::MarketOverview {

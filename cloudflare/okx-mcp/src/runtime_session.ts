@@ -66,11 +66,11 @@ export class RuntimeSession {
       if(!r||typeof r.uid_fingerprint!=="string"||r.venue!=="okx"
         ||!["real","demo"].includes(String(r.environment))
         ||typeof r.label!=="string"||typeof r.alias!=="string"||typeof r.enabled!=="boolean"
-        ||typeof r.idempotency_key!=="string"||!validLimits(r.limits))
+        ||typeof r.idempotency_key!=="string"||typeof r.credential_ref!=="string"||!validLimits(r.limits))
         return Response.json({status:"FAILED",reason:"INVALID_ENROLLMENT"},{status:400});
       const out=await enrollObservedAccount(this.state.storage,{
         uid_fingerprint:r.uid_fingerprint,venue:"okx",
-        environment:r.environment as "real"|"demo",label:r.label,alias:r.alias,enabled:r.enabled,limits:r.limits,idempotency_key:r.idempotency_key,
+        environment:r.environment as "real"|"demo",label:r.label,alias:r.alias,enabled:r.enabled,limits:r.limits,idempotency_key:r.idempotency_key,credential_ref:r.credential_ref,
       });
       return Response.json(out.body,{status:out.status,headers:{"cache-control":"no-store"}});
     }
@@ -299,11 +299,11 @@ export class RuntimeSession {
       // Production writes and exact-intent terminal status both need the
       // current native governance cohort. The latter is ONLY for a proven
       // terminal RELEASE, not permission to introduce new exposure.
-      const tradeMutation = isExecutionMutation(request.operation?.type);
+      const tradeMutation = isExecutionMutation(request.operation?.type)&&request.operation?.type!=="connect_account";
       const terminalStatus = request.operation?.type === "execution_status";
       let operator_governance: Record<string, unknown> | undefined;
       if ((tradeMutation || terminalStatus) &&
-          active.attachment.runtimeProfile === "production") {
+          (active.attachment.runtimeProfile === "production"||active.attachment.runtimeProfile === "engine")) {
         const current:unknown=await this.state.storage.get(GOVERNANCE_STORAGE_KEY);
         if(current!==undefined){
           if(!validGovernance(current))

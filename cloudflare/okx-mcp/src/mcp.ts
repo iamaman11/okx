@@ -584,9 +584,20 @@ export const mcpApi = {
               expected_revision:args.expected_revision,idempotency_key:args.idempotency_key,explicit_pause:args.action==="pause"})})));
         }
         if(args.action==="connect"&&hasOnlyKeys(args,["action","alias","label","limits","enabled","credential_ref","idempotency_key"])){
-          // Multi-account credential routing is implemented by the native account catalog.
-          // Never use whichever profile happens to be selected for a credential reference.
-          return jsonRpc(id,toolResult({status:"FAILED",reason:"ACCOUNT_CREDENTIAL_ROUTE_NOT_AVAILABLE"}));
+          if(typeof args.alias!=="string"||typeof args.credential_ref!=="string"||typeof args.idempotency_key!=="string"
+            ||typeof args.enabled!=="boolean"||!isObject(args.limits))return jsonRpcError(id,-32602,"invalid account connection");
+          const snapshot=await dispatchRuntime(env,{schema:"okx.agent.request/v1",request_id:requestId(),
+            operation:{type:"connect_account",credential_ref:args.credential_ref,alias:args.alias,operation_id:args.idempotency_key}});
+          if(!isObject(snapshot)||snapshot.status!=="completed"||!isObject(snapshot.result)||!isObject(snapshot.result.account_key)
+            ||snapshot.result.alias!==args.alias||snapshot.result.credential_ref!==args.credential_ref
+            ||snapshot.result.connect_operation_id!==args.idempotency_key||snapshot.result.account_key.venue!=="okx"
+            ||!["real","demo"].includes(String(snapshot.result.account_key.environment))
+            ||typeof snapshot.result.account_key.verified_uid!=="string"||!/^[0-9a-f]{64}$/.test(snapshot.result.account_key.verified_uid))
+            return jsonRpc(id,toolResult(snapshot));
+          return jsonRpc(id,toolResult(await runtimeFetch(env,"/account-governance/enroll",{method:"POST",headers:{"content-type":"application/json"},
+            body:JSON.stringify({venue:"okx",environment:snapshot.result.account_key.environment,
+              uid_fingerprint:snapshot.result.account_key.verified_uid,alias:args.alias,label:args.label??args.alias,
+              credential_ref:args.credential_ref,limits:args.limits,enabled:args.enabled,idempotency_key:args.idempotency_key})})));
         }
         if(args.action==="set_limits"&&hasOnlyKeys(args,["action","expected_revision","idempotency_key","accounts","max_total_modelled_loss_usdt"])){
           return jsonRpc(id,toolResult(await runtimeFetch(env,"/account-governance",{method:"POST",headers:{"content-type":"application/json"},
