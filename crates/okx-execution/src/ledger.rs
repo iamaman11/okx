@@ -1304,6 +1304,39 @@ impl ExecutionLedgerStore {
         }
     }
 
+    /// Publish a source-attested opening and its typed SQLite financial
+    /// epoch in the SAME WAL commit. Never infer an opening from a mutable
+    /// account selector or invent an exchange balance.
+    fn save_capital_opening(
+        &self,
+        entries: &BTreeMap<String, ExecutionLedgerEntry>,
+        stop: Option<&ExecutionRiskStop>,
+        reservation: &StrategyCapitalReservation,
+        opening: &StrategyAllocationOpening,
+        history: &StrategyPeriodHistory,
+        leverage: &[LeverageChangeAttempt],
+    ) -> Result<(), ExecutionLedgerError> {
+        if self.sqlite_native {
+            sqlite_store::save_opening_metadata(
+                &self.path,
+                stop,
+                reservation,
+                opening,
+                history,
+                leverage,
+            )
+        } else {
+            self.save(
+                entries,
+                stop,
+                Some(reservation),
+                None,
+                history,
+                leverage,
+            )
+        }
+    }
+
     fn save(
         &self,
         entries: &BTreeMap<String, ExecutionLedgerEntry>,
@@ -2864,15 +2897,15 @@ impl DurableExecutionLedger {
             next.stop_rearms.push(proof);
         }
         next.validate(Some(&reservation), None)?;
-        self.store.save_metadata(
+        self.store.save_capital_opening(
             &self.entries,
             if rearm.is_some() {
                 None
             } else {
                 self.risk_stop.as_ref()
             },
-            Some(&reservation),
-            None,
+            &reservation,
+            opening,
             &next,
             &self.leverage_attempts,
         )?;

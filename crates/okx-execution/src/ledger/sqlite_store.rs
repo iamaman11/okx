@@ -1898,6 +1898,204 @@ pub(super) fn save_metadata(
     periods: &StrategyPeriodHistory,
     leverage: &[LeverageChangeAttempt],
 ) -> Result<(), ExecutionLedgerError> {
+    save_metadata_inner(path, stop, reservation, source, periods, leverage, None)
+}
+
+/// Only this typed opening path creates a new capital epoch. A later NAV
+/// observation or order cannot silently synthesize a missing period owner.
+pub(super) fn save_opening_metadata(
+    path: &Path,
+    stop: Option<&ExecutionRiskStop>,
+    reservation: &StrategyCapitalReservation,
+    opening: &StrategyAllocationOpening,
+    periods: &StrategyPeriodHistory,
+    leverage: &[LeverageChangeAttempt],
+) -> Result<(), ExecutionLedgerError> {
+    save_metadata_inner(
+        path,
+        stop,
+        Some(reservation),
+        None,
+        periods,
+        leverage,
+        Some(opening),
+    )
+}
+
+fn persist_verified_capital_opening(
+    tx: &rusqlite::Transaction<'_>,
+    run: &StrategyCapitalReservation,
+    opening: &StrategyAllocationOpening,
+) -> Result<(), ExecutionLedgerError> {
+    if opening.strategy_id != run.strategy_id
+        || opening.account_uid_fingerprint != run.account_uid_fingerprint
+        || opening.account_generation != run.account_generation
+        || opening.observed_usdt_equity != run.opening_account_usdt_equity
+        || opening.observed_at_ms != run.started_at_ms
+        || opening.operator_authority_id != run.operator_authority_id
+        || !opening.source_history_complete
+        || !opening.zero_positions
+        || !opening.zero_pending_orders
+        || !opening.zero_native_protection
+    {
+        return Err(ExecutionLedgerError::CapitalReservationUnattested);
+    }
+    let bound_uid: String = tx
+        .query_row(
+            "SELECT uid_fingerprint FROM account_identity WHERE singleton=1",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(io)?;
+    if bound_uid != run.account_uid_fingerprint {
+        return Err(ExecutionLedgerError::AccountScopeMismatch);
+    }
+    let opening_ms = i64::try_from(run.started_at_ms)
+        .map_err(|_| ExecutionLedgerError::InvalidTimestamp)?;
+    // This is a local, typed and replayable attestation of a VERIFIED
+    // native opening. It is NOT a REST history coverage receipt. The body
+    // is reconstructed from the immutable reservation fields and native
+    // verification flags, never from a caller-supplied digest.
+    let body = encode(&(
+        "okx.native-account-opening/v1",
+        &run.account_uid_fingerprint,
+        &run.strategy_id,
+        &run.allocation_id,
+        &run.account_generation,
+        &run.opening_account_usdt_equity,
+        &run.allocated_usdt,
+        &run.operator_authority_id,
+        run.started_at_ms,
+        opening.source_history_complete,
+        opening.zero_positions,
+        opening.zero_pending_orders,
+        opening.zero_native_protection,
+    ))?;
+    let digest = checksum(&body);
+    let locator = format!("ledger_state/opening/{}", run.allocation_id);
+    tx.execute(
+        "INSERT INTO evidence_objects
+         (evidence_sha256,evidence_kind,codec,relative_path,size_bytes,native_source_time_ms)
+         VALUES(?1,'NATIVE_VERIFIED_CAPITAL_OPENING','sqlite-msgpack',?2,?3,?4)
+         ON CONFLICT(evidence_sha256) DO NOTHING",
+        params![&digest, &locator, body.len() as i64, opening_ms],
+    )
+    .map_err(io)?;
+    let stored: (String, String, i64, Option<i64>, String) = tx
+        .query_row(
+            "SELECT evidence_kind,codec,size_bytes,native_source_time_ms,relative_path
+             FROM evidence_objects WHERE evidence_sha256=?1",
+            params![&digest],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+        )
+        .map_err(io)?;
+    if stored
+        != (
+            "NATIVE_VERIFIED_CAPITAL_OPENING".to_owned(),
+            "sqlite-msgpack".to_owned(),
+            body.len() as i64,
+            Some(opening_ms),
+            locator,
+        )
+    {
+        return Err(ExecutionLedgerError::ExchangeEvidenceConflict);
+    }
+    let receipt = checksum(&encode(&(
+        "okx.native-opening-point/v1",
+        &run.allocation_id,
+        &digest,
+    ))?);
+    tx.execute(
+        "INSERT INTO source_receipts
+         (receipt_sha256,stream_kind,scope_key,interval_start_ms,
+          interval_end_ms,received_at_ms,completeness,evidence_sha256)
+         VALUES(?1,'ACCOUNT_OPENING',?2,?3,?3,?3,'COMPLETE',?4)
+         ON CONFLICT(receipt_sha256) DO NOTHING",
+        params![&receipt, &run.account_uid_fingerprint, opening_ms, &digest],
+    )
+    .map_err(io)?;
+    let receipt_saved: (String, String, i64, String) = tx
+        .query_row(
+            "SELECT stream_kind,scope_key,received_at_ms,evidence_sha256
+             FROM source_receipts WHERE receipt_sha256=?1",
+            params![&receipt],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .map_err(io)?;
+    if receipt_saved
+        != (
+            "ACCOUNT_OPENING".to_owned(),
+            run.account_uid_fingerprint.clone(),
+            opening_ms,
+            digest,
+        )
+    {
+        return Err(ExecutionLedgerError::ExchangeEvidenceConflict);
+    }
+    let allocation = Decimal::from_str(&run.allocated_usdt)
+        .map_err(|_| ExecutionLedgerError::CapitalReservationUnattested)?
+        .normalize()
+        .to_string();
+    tx.execute(
+        "INSERT INTO capital_epochs
+         (epoch_id,strategy_id,epoch_kind,origin_schema,origin_version,
+          opening_at_ms,opening_receipt_sha256,allocation_currency,
+          allocation_decimal,state,closing_at_ms,closing_evidence_sha256)
+         VALUES(?1,?2,'STRATEGY_RUN',?3,?4,?5,?6,'USDT',?7,'ACTIVE',NULL,NULL)
+         ON CONFLICT(epoch_id) DO NOTHING",
+        params![
+            &run.allocation_id,
+            &run.strategy_id,
+            &run.origin_schema,
+            &run.origin_version,
+            opening_ms,
+            &receipt,
+            &allocation
+        ],
+    )
+    .map_err(io)?;
+    let actual: (String, String, String, String, i64, String, String, String, String) = tx
+        .query_row(
+            "SELECT strategy_id,epoch_kind,origin_schema,origin_version,
+                    opening_at_ms,opening_receipt_sha256,allocation_currency,
+                    allocation_decimal,state
+             FROM capital_epochs WHERE epoch_id=?1",
+            params![&run.allocation_id],
+            |r| {
+                Ok((
+                    r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?,
+                    r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?,
+                ))
+            },
+        )
+        .map_err(io)?;
+    if actual
+        != (
+            run.strategy_id.clone(),
+            "STRATEGY_RUN".to_owned(),
+            run.origin_schema.clone(),
+            run.origin_version.clone(),
+            opening_ms,
+            receipt,
+            "USDT".to_owned(),
+            allocation,
+            "ACTIVE".to_owned(),
+        )
+    {
+        return Err(ExecutionLedgerError::CapitalReservationConflict);
+    }
+    Ok(())
+}
+
+fn save_metadata_inner(
+    path: &Path,
+    stop: Option<&ExecutionRiskStop>,
+    reservation: Option<&StrategyCapitalReservation>,
+    source: Option<&DurableExchangeEvidence>,
+    periods: &StrategyPeriodHistory,
+    leverage: &[LeverageChangeAttempt],
+    opening: Option<&StrategyAllocationOpening>,
+) -> Result<(), ExecutionLedgerError> {
     if !path.exists() {
         return Err(ExecutionLedgerError::Corrupt(
             "native metadata mutation has no account DB",
@@ -2030,6 +2228,10 @@ pub(super) fn save_metadata(
         };
         super::sqlite_source::indexed_cursor(&tx, run_id, key)
     })?;
+    if let Some(opening) = opening {
+        let run = reservation.ok_or(ExecutionLedgerError::CapitalReservationUnattested)?;
+        persist_verified_capital_opening(&tx, run, opening)?;
+    }
     tx.commit().map_err(io)?;
     Ok(())
 }
