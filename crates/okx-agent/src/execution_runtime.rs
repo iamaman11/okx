@@ -2449,6 +2449,25 @@ mod tests {
         std::env::temp_dir().join(format!("okx-{label}-{}-{nonce}", process::id()))
     }
 
+    // Test setup uses the same explicit genesis as STOPPED CONTROL.
+    // Runtime construction itself must never manufacture a trading ledger.
+    fn initialize_test_account(root: &Path, demo: bool) {
+        let identity = okx_execution::SqliteAccountIdentity {
+            venue: okx_execution::LedgerVenue::Okx,
+            environment: if demo {
+                okx_execution::LedgerEnvironment::Demo
+            } else {
+                okx_execution::LedgerEnvironment::Production
+            },
+            account_id: if demo {"demo"} else {"real"}.to_owned(),
+            uid_fingerprint: "a".repeat(64),
+            bound_at_ms: 100,
+        };
+        ExecutionLedgerStore::initialize_fresh_account(root,&identity)
+            .expect("explicit fresh test account");
+    }
+
+
     fn preflight(accepted: bool) -> ExecutorPreflightSnapshot {
         let credential = ExecutorCredentialPreflight {
             schema: crate::execution_preflight::EXECUTOR_CREDENTIAL_PREFLIGHT_SCHEMA_V1,
@@ -2460,7 +2479,7 @@ mod tests {
             executor_withdraw_permission: false,
             executor_ip_bound: true,
             account_identity_match: true,
-            account_uid_fingerprint: "uid-fingerprint".to_owned(),
+            account_uid_fingerprint: "a".repeat(64).to_owned(),
             futures_mode: true,
             long_short_mode: true,
             subaccount: true,
@@ -2526,7 +2545,7 @@ mod tests {
     }
 
     #[test]
-    fn existing_demo_and_production_roots_preserve_both_historical_ledger_files() {
+    fn fresh_sqlite_requires_explicit_genesis_and_never_selects_old_json() {
         let base = temp_root("disjoint-profile-ledger");
         let demo_root = base.join("demo");
         fs::create_dir_all(&demo_root).unwrap();
@@ -2546,6 +2565,7 @@ mod tests {
             )
             .is_err()
         );
+        initialize_test_account(&demo_root, true);
         let demo = ExecutionRuntime::new_demo_acceptance(
             &demo_root,
             OkxEnvironment::new(Region::Global, true),
@@ -2556,20 +2576,18 @@ mod tests {
         .expect("different accepted Demo root");
         assert_eq!(demo.mode(), ExecutionRuntimeMode::DemoAcceptance);
         assert!(!demo_path.exists());
+        drop(demo);
         fs::write(&demo_path, marker).unwrap();
-        assert!(
-            ExecutionRuntime::new_demo_acceptance(
-                &demo_root,
-                OkxEnvironment::new(Region::Global, true),
-                credentials(),
-                101,
-                RateBudget::new(),
-            )
-            .is_err()
-        );
+        let reopened=ExecutionRuntime::new_demo_acceptance(
+            &demo_root,
+            OkxEnvironment::new(Region::Global, true),
+            credentials(),
+            101,
+            RateBudget::new(),
+        ).expect("bound SQL ignores deprecated JSON file");
+        drop(reopened);
         assert_eq!(fs::read(&production_path).unwrap(), marker);
         assert_eq!(fs::read(&demo_path).unwrap(), marker);
-        drop(demo);
         let _ = fs::remove_dir_all(base);
     }
 
@@ -2577,6 +2595,7 @@ mod tests {
     async fn shared_demo_mutation_gate_rejects_foreign_or_missing_uid_and_production_claim() {
         let root = temp_root("one-demo-gate");
         fs::create_dir_all(&root).unwrap();
+        initialize_test_account(&root, true);
         let runtime = ExecutionRuntime::new_demo_acceptance(
             &root,
             OkxEnvironment::new(Region::Global, true),
@@ -2603,6 +2622,7 @@ mod tests {
     async fn native_runtime_drain_preserves_manifest_and_never_grants_new_mutation_authority() {
         let root = temp_root("drain-runtime-unchanged-ledger");
         fs::create_dir_all(&root).unwrap();
+        initialize_test_account(&root, true);
         let runtime = ExecutionRuntime::new_demo_acceptance(
             &root,
             OkxEnvironment::new(Region::Global, true),
@@ -2621,12 +2641,12 @@ mod tests {
                 .expect("sealed native ledger");
         }
         let baseline = runtime
-            .profile_handoff_ledger_assessment("uid-fingerprint")
+            .profile_handoff_ledger_assessment("a".repeat(64))
             .await
             .expect("baseline durable ledger");
         assert!(runtime.admit_mutating_request().await.is_some());
         let drained = runtime
-            .drain_mutation_ingress("uid-fingerprint")
+            .drain_mutation_ingress("a".repeat(64))
             .await
             .expect("bounded source drain");
         assert_eq!(
@@ -2645,7 +2665,7 @@ mod tests {
             MutationAuthority::Disabled
         );
         let after = runtime
-            .profile_handoff_ledger_assessment("uid-fingerprint")
+            .profile_handoff_ledger_assessment("a".repeat(64))
             .await
             .expect("read-only durable ledger");
         assert_eq!(
@@ -2677,6 +2697,7 @@ mod tests {
     async fn demo_acceptance_runtime_starts_with_exchange_mutation_disabled() {
         let root = temp_root("demo-runtime-disabled");
         fs::create_dir_all(&root).expect("root");
+        initialize_test_account(&root, true);
         let runtime = ExecutionRuntime::new_demo_acceptance(
             &root,
             OkxEnvironment::new(Region::Global, true),
@@ -2701,6 +2722,7 @@ mod tests {
     async fn read_only_runtime_cannot_authorize_order_mutation_even_with_accepted_preflight() {
         let root = temp_root("read-only-mutation-disabled");
         fs::create_dir_all(&root).expect("root");
+        initialize_test_account(&root, false);
         let runtime = ExecutionRuntime::new(
             &root,
             OkxEnvironment::new(Region::Global, false),
@@ -2733,6 +2755,7 @@ mod tests {
     async fn strategy_opening_cannot_write_in_read_only_or_on_rejected_demo_preflight() {
         let root = temp_root("capital-opening-owner-fence");
         fs::create_dir_all(&root).expect("root");
+        initialize_test_account(&root, true);
         let authorization = format!("sha256:{}", "a".repeat(64));
         let credential = preflight(true).credential;
         let opening = StrategyAllocationOpening {
@@ -2820,6 +2843,7 @@ mod tests {
     async fn rejected_demo_preflight_does_not_submit_or_touch_ledger() {
         let root = temp_root("demo-submit-rejected-preflight");
         fs::create_dir_all(&root).expect("root");
+        initialize_test_account(&root, true);
         let runtime = ExecutionRuntime::new_demo_acceptance(
             &root,
             OkxEnvironment::new(Region::Global, true),
@@ -2846,6 +2870,7 @@ mod tests {
     async fn rejected_demo_preflight_cannot_authorize_order_mutation() {
         let root = temp_root("demo-mutation-rejected-preflight");
         fs::create_dir_all(&root).expect("root");
+        initialize_test_account(&root, true);
         let runtime = ExecutionRuntime::new_demo_acceptance(
             &root,
             OkxEnvironment::new(Region::Global, true),
