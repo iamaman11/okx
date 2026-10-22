@@ -2459,14 +2459,13 @@ mod tests {
             } else {
                 okx_execution::LedgerEnvironment::Production
             },
-            account_id: if demo {"demo"} else {"real"}.to_owned(),
+            account_id: if demo { "demo" } else { "real" }.to_owned(),
             uid_fingerprint: "a".repeat(64),
             bound_at_ms: 100,
         };
-        ExecutionLedgerStore::initialize_fresh_account(root,&identity)
+        ExecutionLedgerStore::initialize_fresh_account(root, &identity)
             .expect("explicit fresh test account");
     }
-
 
     fn preflight(accepted: bool) -> ExecutorPreflightSnapshot {
         let credential = ExecutorCredentialPreflight {
@@ -2578,13 +2577,14 @@ mod tests {
         assert!(!demo_path.exists());
         drop(demo);
         fs::write(&demo_path, marker).unwrap();
-        let reopened=ExecutionRuntime::new_demo_acceptance(
+        let reopened = ExecutionRuntime::new_demo_acceptance(
             &demo_root,
             OkxEnvironment::new(Region::Global, true),
             credentials(),
             101,
             RateBudget::new(),
-        ).expect("bound SQL ignores deprecated JSON file");
+        )
+        .expect("bound SQL ignores deprecated JSON file");
         drop(reopened);
         assert_eq!(fs::read(&production_path).unwrap(), marker);
         assert_eq!(fs::read(&demo_path).unwrap(), marker);
