@@ -854,10 +854,9 @@ mod tests {
             "order:external-1:1000".to_owned(),
             order("external-1", "1000"),
         );
-        first.cursors.insert(
-            "receipt-1".to_owned(),
-            cursor("2026-10-20T12:00:00Z"),
-        );
+        first
+            .cursors
+            .insert("receipt-1".to_owned(), cursor("2026-10-20T12:00:00Z"));
         first.seal().unwrap();
         {
             let tx = c.transaction().unwrap();
@@ -875,10 +874,9 @@ mod tests {
             "order:external-2:2000".to_owned(),
             order("external-2", "2000"),
         );
-        second.cursors.insert(
-            "receipt-2".to_owned(),
-            cursor("2026-10-20T12:05:00Z"),
-        );
+        second
+            .cursors
+            .insert("receipt-2".to_owned(), cursor("2026-10-20T12:05:00Z"));
         second.seal().unwrap();
         {
             let tx = c.transaction().unwrap();
@@ -902,8 +900,11 @@ mod tests {
             tx.commit().unwrap();
         }
         let mut conflict = first.clone();
-        conflict.events.get_mut("order:external-1:1000").unwrap().payload["state"] =
-            serde_json::json!("canceled");
+        conflict
+            .events
+            .get_mut("order:external-1:1000")
+            .unwrap()
+            .payload["state"] = serde_json::json!("canceled");
         conflict.seal().unwrap();
         {
             let tx = c.transaction().unwrap();

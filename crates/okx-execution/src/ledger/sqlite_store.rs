@@ -1376,6 +1376,21 @@ pub(super) fn capture_native_exchange_source(
             &uid,
         )?)
     } else {
+        // A new run cannot adopt an orphan historical source row merely
+        // because its caller reused the old run ID.
+        let orphan: Option<i64> = tx
+            .query_row(
+                "SELECT 1 FROM native_source_runs WHERE run_id=?1",
+                params![&run.allocation_id],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(io)?;
+        if orphan.is_some() {
+            return Err(ExecutionLedgerError::Corrupt(
+                "native capture references an unowned source run",
+            ));
+        }
         None
     };
     let now = crate::exchange_evidence::source_receipt_ms(&facts.summary.source_received_at)
