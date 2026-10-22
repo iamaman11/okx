@@ -301,13 +301,17 @@ fn match_bill_gap(
         )
         .optional()
         .map_err(io)?;
-    let Some((stream, scope, from, through, materiality, reason, existing_resolution)) = prior else {
+    let Some((stream, scope, from, through, materiality, reason, existing_resolution)) = prior
+    else {
         return Ok(());
     };
     if stream != "BILLS"
         || scope != bill
         || from != timestamp
-        || through != timestamp.checked_add(1).ok_or(ExecutionLedgerError::Corrupt("bill time overflow"))?
+        || through
+            != timestamp
+                .checked_add(1)
+                .ok_or(ExecutionLedgerError::Corrupt("bill time overflow"))?
         || materiality != "FINANCIAL"
         || reason != "MISSING_EXACT_BALANCE_CHANGE"
     {
@@ -351,14 +355,25 @@ fn insert_bill(tx: &Transaction<'_>, v: &Value, proof: &str) -> Result<(), Execu
             "SELECT instrument_id,trade_id,exchange_time_ms,currency,bill_kind,delta_decimal
              FROM bills WHERE bill_id=?1",
             params![bill],
-            |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?)),
+            |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                ))
+            },
         )
         .optional()
         .map_err(io)?;
     // An incomplete duplicate must not reopen a financial gap after an
     // earlier complete observation. Reused bill IDs with changed identity
     // always fail closed, even when balChg is missing.
-    if let Some((prior_inst, prior_trade, prior_time, prior_ccy, prior_kind, prior_delta)) = existing.as_ref() {
+    if let Some((prior_inst, prior_trade, prior_time, prior_ccy, prior_kind, prior_delta)) =
+        existing.as_ref()
+    {
         if prior_inst.as_deref() != inst
             || prior_trade.as_deref() != trade
             || *prior_time != timestamp
@@ -402,7 +417,16 @@ fn insert_bill(tx: &Transaction<'_>, v: &Value, proof: &str) -> Result<(), Execu
             "SELECT instrument_id,trade_id,exchange_time_ms,currency,bill_kind,delta_decimal
              FROM bills WHERE bill_id=?1",
             params![bill],
-            |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?)),
+            |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                ))
+            },
         )
         .map_err(io)?;
     if stored.0.as_deref() != inst
@@ -1222,12 +1246,17 @@ mod snapshot_tests {
             tx.commit().unwrap();
         }
         let read = |conn: &rusqlite::Connection| -> (Option<String>, Option<String>, i64) {
-            let gap: (Option<String>, Option<String>) = conn.query_row(
-                "SELECT opening_evidence_sha256,resolution_evidence_sha256
+            let gap: (Option<String>, Option<String>) = conn
+                .query_row(
+                    "SELECT opening_evidence_sha256,resolution_evidence_sha256
                  FROM source_gaps WHERE gap_id='bill-financial-missing:bill-17'",
-                [], |r| Ok((r.get(0).unwrap(),r.get(1).unwrap())),
-            ).unwrap();
-            let n: i64 = conn.query_row("SELECT COUNT(*) FROM bills", [], |r| r.get(0)).unwrap();
+                    [],
+                    |r| Ok((r.get(0).unwrap(), r.get(1).unwrap())),
+                )
+                .unwrap();
+            let n: i64 = conn
+                .query_row("SELECT COUNT(*) FROM bills", [], |r| r.get(0))
+                .unwrap();
             (gap.0, gap.1, n)
         };
         assert_eq!(read(&c), (Some(first.clone()), None, 0));
