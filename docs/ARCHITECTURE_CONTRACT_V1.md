@@ -199,8 +199,9 @@ An addition is complete only when:
 **A — SQLite-native Engine:** make indexed account history, exchange facts,
 capital epochs, source coverage, NAV, daily risk and reconciliation the working
 model. Remove live v14 snapshot dependencies and historical capacity ceilings
-instead of increasing those ceilings. Keep sealed v14 bytes only for migration
-proof and forbid a second writer or implicit rollback.
+instead of increasing those ceilings. Fresh SQLite genesis has no v14 import,
+compatibility adapter or old writer. An unresolved native risk obligation
+blocks admission rather than being erased by a new financial-period label.
 
 **B — AccountContexts and product:** register independent verified account
 contexts under one process, one writer per account, concurrent strategy epochs
@@ -209,8 +210,8 @@ queries through the existing typed application and MCP interfaces.
 
 **Physical acceptance:** exact Windows ReleaseSet and offline CONTROL cutover,
 recovery/fault/load proofs, protected Demo cycle and financial reconciliation.
-Real may mutate only through its existing native admission; neither the SQLite
-migration nor a green CI grants new-risk permission.
+Real may mutate only through its existing native admission; neither a fresh
+SQLite genesis nor a green CI grants new-risk permission.
 
 ### Evidence/status separation
 
@@ -234,9 +235,10 @@ architecture policy is needed.
 ## 8. Accepted account storage and accounting epochs (2026-10-20)
 
 **Decision:** replace operational JSON snapshot persistence with **embedded SQLite
-in WAL mode**. This section is a *target and migration invariant*, not a claim
+in WAL mode**. This section defines the fresh-genesis invariant, not a claim
 that the installed Windows agent currently writes SQLite. The existing v14
-Ledger remains the only production execution authority until verified cutover.
+Ledger remains the only production execution authority until verified shutdown,
+new SQL installation and native owner publication. No v14 import is permitted.
 
 ### Storage boundaries, designed not to change for new strategies or venues
 
@@ -272,12 +274,17 @@ Ledger remains the only production execution authority until verified cutover.
   JSON remains at required OKX/GitHub/MCP wire boundaries and as immutable
   historical original source bytes when byte-for-byte evidence matters.
   Remove JSON from live internal persistence, not from external protocols.
-- Schema migrations are additive/versioned where possible. No dangerous
-  JSON-to-SQL dual writer: freeze old writer, verify v14 original/archives and
-  account identity, import on a staging DB, compare **all** states/receipts/
-  positions/fills/bills/NAV/UNKNOWN/STOP/cashflows, integrity_check, backup,
-  atomically install the new owner, retain old immutable bytes, prohibit
-  automatic fallback to old write paths. Crash tests at every cutover stage.
+- **Fresh SQL genesis only; no schema upgrades, v14 imports, historical RAM
+  snapshots or compatibility adapters.** Existing application-owned v14 files
+  are retired only by the existing CONTROL owner after a stopped-agent check,
+  exact UID/account verification, natively confirmed FLAT inventory, absence
+  of pending exchange orders/protection and unresolved mutation/STOP claims,
+  and fresh SQLite WAL/FK/integrity attestation. Any uncertain old order, loss
+  or identity is a hard NO_GO, not silently converted into a zero. The new
+  financial timeline starts at its explicitly witnessed opening; no claim of
+  historical completeness before that opening. Do not resurrect an old writer
+  or synthesize account performance. Power-loss/restart tests must prove that
+  one and only one owner is published.
 
 ### Permanent financial timeline vs strategy capital epochs
 
@@ -335,22 +342,24 @@ This query is **READ ONLY** and **NOT** account risk admission, strategy NAV,
 period finalization, or a permit to submit an order.
 
 Database source facts are written by the single owner, not by this query. The
-Production Agent still reads v14 JSON; this opt-in SQLite API becomes usable
-only after the explicit, verified, one-owner migration. Tests check that
+Production Agent still reads v14 JSON; this SQLite API becomes authoritative
+only after explicit native CONTROL installation of the fresh SQL owner. No
+historic bytes are imported. Tests check that
 account identity cannot be rebound, a missing bill balance cannot become
 a zero, and no account summary is incorrectly promoted to strategy PnL.
 
 ### Acceptance before SQLite becomes execution authority
 
-- Exact original v14 source, 100% inventory/byte hash and archived histories
-  copied without semantic reinterpretation; verified account identity and
-  source-bound intent collision checks. No old proof rewritten.
+- Native FLAT/zero-order/zero-protection and absence of unresolved execution
+  mutations independently confirmed *before* fresh genesis; STOP and unknown
+  risk are never silently cleared by the storage change.
 - Real/Demo isolated, account-keyed writer; no global mutation serialization;
-  migration restarted after crash without creating a parallel active writer.
+  restart never manufactures another database or a parallel active writer.
 - Deterministic replay of event/projection consistency, 1/10/50/100 account
   scoped concurrent requests (not 100 simultaneous POSTs on one account),
   measured p95/p99, no duplicate POST on ACK loss/crash, STOP and daily
-  loss conserved across epoch boundaries, backup/restore checked with WAL.
+  loss conserved across epochs of the **new** SQL financial timeline,
+  backup/restore checked with WAL; no invented carry-over or legacy import.
 - Current Real P0 financial NO_GO is unchanged until native facts establish
   permission. A green schema test does **not** mean SQLite is installed or
   authorize Real trading.
