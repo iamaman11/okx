@@ -2740,9 +2740,9 @@ impl DurableExecutionLedger {
             self.current_source()?
         };
         if !self.store.sqlite_native
-            && legacy_source.as_ref().is_none_or(|source| {
-                source.checksum_sha256 != report.evidence_sha256
-            })
+            && legacy_source
+                .as_ref()
+                .is_none_or(|source| source.checksum_sha256 != report.evidence_sha256)
         {
             return Ok(None);
         }
@@ -2768,49 +2768,46 @@ impl DurableExecutionLedger {
         } else {
             Some(self.run_entries(run)?)
         };
-        let (source_cursor_key, source_cursor, source_receipt_ms, gross_loss) =
-            if self.store.sqlite_native {
-                let Some(proof) = sqlite_store::nav_cursor_and_daily_loss(
-                    &self.store.path,
-                    run,
-                    report,
-                    day,
-                    as_of,
-                )? else {
-                    return Ok(None);
-                };
-                proof
-            } else {
-                let evidence = legacy_source
-                    .as_ref()
-                    .ok_or(ExecutionLedgerError::ExchangeSourceIncomplete)?;
-                let (key, cursor, received) = evidence
-                    .cursors
-                    .iter()
-                    .filter_map(|(key, cursor)| {
-                        let received = crate::exchange_evidence::source_receipt_ms(
-                            &cursor.source_received_at,
-                        )?;
-                        (received <= as_of).then_some((key, cursor, received))
-                    })
-                    .max_by_key(|(_, _, received)| *received)
-                    .ok_or(ExecutionLedgerError::ExchangeSourceIncomplete)?;
-                if as_of - received > crate::exchange_evidence::MAX_SOURCE_COVERAGE_GAP_MS {
-                    return Ok(None);
-                }
-                let owned = run_history
-                    .as_ref()
-                    .expect("legacy run history")
-                    .iter()
-                    .map(|entry| (entry.record.plan.intent_id.clone(), entry.clone()))
-                    .collect();
-                let Some(loss) = verified_daily_strategy_bill_loss(
-                    evidence, &owned, run, report, day, as_of,
-                )? else {
-                    return Ok(None);
-                };
-                (key.clone(), cursor.clone(), received, loss)
+        let (source_cursor_key, source_cursor, source_receipt_ms, gross_loss) = if self
+            .store
+            .sqlite_native
+        {
+            let Some(proof) =
+                sqlite_store::nav_cursor_and_daily_loss(&self.store.path, run, report, day, as_of)?
+            else {
+                return Ok(None);
             };
+            proof
+        } else {
+            let evidence = legacy_source
+                .as_ref()
+                .ok_or(ExecutionLedgerError::ExchangeSourceIncomplete)?;
+            let (key, cursor, received) = evidence
+                .cursors
+                .iter()
+                .filter_map(|(key, cursor)| {
+                    let received =
+                        crate::exchange_evidence::source_receipt_ms(&cursor.source_received_at)?;
+                    (received <= as_of).then_some((key, cursor, received))
+                })
+                .max_by_key(|(_, _, received)| *received)
+                .ok_or(ExecutionLedgerError::ExchangeSourceIncomplete)?;
+            if as_of - received > crate::exchange_evidence::MAX_SOURCE_COVERAGE_GAP_MS {
+                return Ok(None);
+            }
+            let owned = run_history
+                .as_ref()
+                .expect("legacy run history")
+                .iter()
+                .map(|entry| (entry.record.plan.intent_id.clone(), entry.clone()))
+                .collect();
+            let Some(loss) =
+                verified_daily_strategy_bill_loss(evidence, &owned, run, report, day, as_of)?
+            else {
+                return Ok(None);
+            };
+            (key.clone(), cursor.clone(), received, loss)
+        };
         let cursor_sha256 = format!("{:x}", Sha256::digest(serde_json::to_vec(&source_cursor)?));
         let prior = self.strategy_periods.nav_points.last();
         if prior.is_some_and(|p| p.observed_at_ms >= now) {

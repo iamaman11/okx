@@ -1335,7 +1335,15 @@ pub(super) fn nav_cursor_and_daily_loss(
     report: &StrategyFinancialPeriod,
     day: u64,
     as_of: u64,
-) -> Result<Option<(String, crate::exchange_evidence::ExchangeCoverageCursor, u64, Decimal)>, ExecutionLedgerError> {
+) -> Result<
+    Option<(
+        String,
+        crate::exchange_evidence::ExchangeCoverageCursor,
+        u64,
+        Decimal,
+    )>,
+    ExecutionLedgerError,
+> {
     let c = connect_indexed_read(path)?;
     c.execute_batch("BEGIN DEFERRED TRANSACTION").map_err(io)?;
     let (uid, digest, bytes): (String, String, Vec<u8>) = c
@@ -1352,7 +1360,10 @@ pub(super) fn nav_cursor_and_daily_loss(
     let state: StoredState = decode(&bytes)?;
     if state.version != 1
         || uid != run.account_uid_fingerprint
-        || state.reservation.as_ref().is_none_or(|active| active != run)
+        || state
+            .reservation
+            .as_ref()
+            .is_none_or(|active| active != run)
         || state.source_run_id.as_deref() != Some(run.allocation_id.as_str())
         || report.run_id != run.allocation_id
     {
@@ -1367,7 +1378,10 @@ pub(super) fn nav_cursor_and_daily_loss(
             "SELECT cursor_key,receipt_ms FROM native_source_cursors
              WHERE run_id=?1 AND receipt_ms<=?2
              ORDER BY receipt_ms DESC,cursor_key DESC LIMIT 1",
-            params![run.allocation_id, i64::try_from(as_of).map_err(|_| ExecutionLedgerError::InvalidTimestamp)?],
+            params![
+                run.allocation_id,
+                i64::try_from(as_of).map_err(|_| ExecutionLedgerError::InvalidTimestamp)?
+            ],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()
@@ -1379,10 +1393,10 @@ pub(super) fn nav_cursor_and_daily_loss(
         .map_err(|_| ExecutionLedgerError::Corrupt("invalid NAV receipt index"))?;
     let proof = super::sqlite_source::indexed_cursor(&c, &run.allocation_id, &key)?
         .ok_or(ExecutionLedgerError::ExchangeSourceIncomplete)?;
-    if crate::exchange_evidence::source_receipt_ms(&proof.source_received_at)
-        != Some(receipt_ms)
-    {
-        return Err(ExecutionLedgerError::Corrupt("native NAV cursor index mismatch"));
+    if crate::exchange_evidence::source_receipt_ms(&proof.source_received_at) != Some(receipt_ms) {
+        return Err(ExecutionLedgerError::Corrupt(
+            "native NAV cursor index mismatch",
+        ));
     }
     if as_of - receipt_ms > crate::exchange_evidence::MAX_SOURCE_COVERAGE_GAP_MS {
         return Ok(None);
@@ -1453,7 +1467,8 @@ pub(super) fn nav_cursor_and_daily_loss(
             source_ahead = true;
             return Ok(());
         }
-        linked = linked.checked_add(1)
+        linked = linked
+            .checked_add(1)
             .ok_or(ExecutionLedgerError::ExchangeEvidenceCapacity)?;
         fees += fee;
         realized += pnl;
@@ -1480,7 +1495,10 @@ pub(super) fn nav_cursor_and_daily_loss(
         let allocation = Decimal::from_str(&run.allocated_usdt)
             .map_err(|_| ExecutionLedgerError::CapitalReservationUnattested)?;
         let nav = Decimal::from_str(
-            report.nav_usdt.as_deref().ok_or(ExecutionLedgerError::ExchangeSourceIncomplete)?,
+            report
+                .nav_usdt
+                .as_deref()
+                .ok_or(ExecutionLedgerError::ExchangeSourceIncomplete)?,
         )
         .map_err(|_| ExecutionLedgerError::ExchangeSourceIncomplete)?;
         if gross_loss < (allocation - nav).max(Decimal::ZERO) {
