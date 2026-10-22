@@ -3408,6 +3408,15 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM post_attempts", [], |r| r.get(0))
             .unwrap();
         assert_eq!(post_count, 1);
+        // UNKNOWN is still financially charged and visible in a bounded
+        // native census, even with an empty current exchange window.
+        let source_clients = BTreeSet::from([prepared.record.plan.client_order_id.as_str()]);
+        let census =
+            native_reconciliation_inventory(&db, &source_clients, &BTreeSet::new(), 16).unwrap();
+        assert_eq!((census.total, census.submitted), (1, 1));
+        assert_eq!(census.candidates.len(), 1);
+        assert_eq!(census.candidates[0].record.state, ExecutionState::UnknownSubmission);
+        assert_eq!(census.historical_sample.len(), 1);
         assert!(reopened.begin_submission(id, 1004).is_err());
         // Windows keeps the SQLite file locked while any connection or
         // prepared owner is alive. Explicitly release both before cleanup.
@@ -3481,6 +3490,20 @@ mod tests {
             owner.entries.values().next().unwrap().record.state,
             ExecutionState::Prepared
         );
+        let last = "bounded_historical_intent_000511";
+        let exact_client = entries.get(last).unwrap().record.plan.client_order_id.as_str();
+        let observed_clients = BTreeSet::from([exact_client]);
+        let census = native_reconciliation_inventory(
+            &db,
+            &observed_clients,
+            &BTreeSet::new(),
+            16,
+        )
+        .unwrap();
+        assert_eq!((census.total, census.submitted), (512, 0));
+        assert_eq!(census.candidates.len(), 1);
+        assert_eq!(census.candidates[0].record.plan.intent_id, last);
+        assert!(census.historical_sample.is_empty());
         assert_eq!(store.load().unwrap().0, entries);
         assert_eq!(
             owner
