@@ -118,27 +118,8 @@ for (const invalid of [
   assert(buildExecutionOperation({action:"set_leverage",intent_id:"stage5a_leverage_20261014",...invalid})===null,
     "unsafe leverage wire shape rejected");
 }
-const storageMigration = uidAction("migrate_finalized_ledger_storage", {
-  expected_manifest_sha256:"a".repeat(64),
-  expected_finalized_checksum_sha256:"b".repeat(64),
-  expected_stopped_at_ms:1792022959136,
-});
-assert(buildExecutionOperation(storageMigration)?.type==="migrate_finalized_ledger_storage",
-  "migration uses exact typed local file proof and no OKX order fields");
-for (const bad of [
-  {expected_manifest_sha256:"bad"},
-  {expected_finalized_checksum_sha256:"b".repeat(63)},
-  {expected_stopped_at_ms:0},
-  {instrument:"BTC-USDT-SWAP"},
-  {rearm:{expected_stopped_at_ms:1}},
-]) {
-  assert(buildExecutionOperation({...storageMigration,...bad})===null,
-    "forged hash/STOP or injected trading fields must be rejected by MCP");
-}
-assert(isExecutionMutation("migrate_finalized_ledger_storage"),
-  "local financial storage writes require the Demo mutation profile fence");
-assert(executionProfilePermitsOperation("production", "migrate_finalized_ledger_storage"),
-  "same typed transport delegates storage safety to the native account owner");
+assert(buildExecutionOperation(uidAction("migrate_finalized_ledger_storage"))===null,
+  "retired v14 storage migration is not an executable native action");
 assert(isExecutionMutation("set_leverage"),"leverage POST must require Demo profile");
 assert(executionProfilePermitsOperation("production","set_leverage"),"native account admission rejects unsupported leverage writes");
 assert(isExecutionMutation("begin_strategy_run"),"capital mutation requires native owner");
@@ -203,7 +184,7 @@ for (const op of [
   "prepare_execution","submit_prepared_execution","mutate_execution",
   "abort_reverse_execution","abandon_prepared_execution","begin_strategy_run",
   "finalize_strategy_run","quarantine_unverified_strategy_run","set_leverage",
-  "migrate_finalized_ledger_storage","reconcile_unsent_prepared",
+  "reconcile_unsent_prepared",
 ]) {
   assert(isExecutionMutation(op), "every typed mutation remains UNKNOWN on lost ACK");
   for (const profile of ["demo_acceptance","production"]) {
@@ -226,9 +207,8 @@ for (const action of ["prepare", "submit", "begin_strategy_run", "finalize_strat
   assert(!!op && executionProfilePermitsOperation("production",op.type),
     "supported normal Production action is typed and not hard-gated by Worker: "+action);
 }
-for (const action of ["set_leverage","amend","cancel","shrink_protection_size","migrate_finalized_ledger_storage"]) {
-  const type=action==="set_leverage" ? "set_leverage" :
-    action==="migrate_finalized_ledger_storage" ? "migrate_finalized_ledger_storage" : "mutate_execution";
+for (const action of ["set_leverage","amend","cancel","shrink_protection_size"]) {
+  const type=action==="set_leverage" ? "set_leverage" : "mutate_execution";
   assert(executionProfilePermitsOperation("production",type),
     "one transport delivers typed action to independent native Rust safety gate: "+action);
 }
@@ -236,7 +216,7 @@ assert(executionProfilePermitsOperation("production","account_summary"),"read is
 assert(!isExecutionMutation("account_summary"),"read must not be misclassified as exchange mutation");
 assert(EXECUTION_TOOLS.length===2,"one read preflight + one explicit write surface");
 const advertisedActions = (EXECUTION_TOOLS[1] as any).inputSchema.properties.action.enum as string[];
-assert(TOOL_CONTRACT_VERSION === "okx.mcp.tools/2026-10-19.1",
+assert(TOOL_CONTRACT_VERSION === "okx.mcp.tools/2026-10-22.1",
   "typed action schema changed; the advertised MCP contract version must advance");
 assert(advertisedActions.includes("quarantine_unverified_strategy_run"),
   "UNVERIFIED must be distinct from financial FINALIZED");

@@ -1,5 +1,5 @@
 //! In-process SQLite WAL persistence for the existing execution ledger.
-//! Explicitly selected; Production v14 stays authoritative until a cutover.
+//! Only an explicitly UID-bound fresh SQLite owner can be published for production.
 use super::*;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
 use serde::{Serialize, de::DeserializeOwned};

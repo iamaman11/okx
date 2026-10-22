@@ -1,6 +1,6 @@
 //! Indexed and immutable exchange source evidence in the SAME account SQLite transaction.
-//! Exchange payload bytes are encoded as MessagePack; original legacy JSON evidence
-//! stays inside the separately sealed and unmodified pre-cutover v14 archive.
+//! Exchange payload bytes are encoded as MessagePack. No v14 history is imported
+//! into a freshly initialized account.
 use super::sqlite_store::{checksum, decode, encode, io};
 use super::*;
 use crate::exchange_evidence::{ExchangeCoverageCursor, StoredExchangeEvent};

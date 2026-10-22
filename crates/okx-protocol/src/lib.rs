@@ -1229,13 +1229,6 @@ pub enum AgentOperation {
     ProfileHandoffReadiness,
     /// Explicit on-disk audit of the one local execution ledger. Never POST.
     LedgerStorageAudit,
-    /// Explicit Demo-profile storage-only migration. No exchange operation.
-    MigrateFinalizedLedgerStorage {
-        allocation_id: String,
-        expected_manifest_sha256: String,
-        expected_finalized_checksum_sha256: String,
-        expected_stopped_at_ms: u64,
-    },
     PortfolioRisk {
         mandate: Box<PortfolioMandateRequest>,
         policy: Box<HardRiskPolicyRequest>,
@@ -1284,7 +1277,6 @@ impl AgentOperation {
         matches!(
             self,
             Self::BeginStrategyRun { .. }
-                | Self::MigrateFinalizedLedgerStorage { .. }
                 | Self::SetLeverage { .. }
                 | Self::FinalizeStrategyRun { .. }
                 | Self::QuarantineUnverifiedStrategyRun { .. }
@@ -1300,7 +1292,6 @@ impl AgentOperation {
         !matches!(
             self,
             Self::BeginStrategyRun { .. }
-                | Self::MigrateFinalizedLedgerStorage { .. }
                 | Self::SetLeverage { .. }
                 | Self::FinalizeStrategyRun { .. }
                 | Self::QuarantineUnverifiedStrategyRun { .. }
@@ -1442,29 +1433,6 @@ impl AgentOperation {
                 Ok(())
             }
             Self::TradingCapabilities { instrument, .. } => validate_instrument(instrument),
-            Self::MigrateFinalizedLedgerStorage {
-                allocation_id,
-                expected_manifest_sha256,
-                expected_finalized_checksum_sha256,
-                expected_stopped_at_ms,
-            } => {
-                validate_request_id(allocation_id)?;
-                if expected_manifest_sha256.len() != 64
-                    || expected_finalized_checksum_sha256.len() != 64
-                    || *expected_stopped_at_ms == 0
-                    || !expected_manifest_sha256
-                        .bytes()
-                        .all(|b| b.is_ascii_hexdigit())
-                    || !expected_finalized_checksum_sha256
-                        .bytes()
-                        .all(|b| b.is_ascii_hexdigit())
-                {
-                    return Err(ProtocolError::InvalidAnalyticalQuery(
-                        "exact finalized ledger migration proof",
-                    ));
-                }
-                Ok(())
-            }
             Self::SetLeverage {
                 mutation_id,
                 instrument,
@@ -3172,16 +3140,6 @@ mod tests {
         assert!(preview.direct_transport_read_only());
         assert!(!preview.direct_transport_demo_execution());
         assert!(preview.validate().is_ok());
-        let migrate = AgentOperation::MigrateFinalizedLedgerStorage {
-            allocation_id: "stage5a_daily_loss_run_20261015_g".to_owned(),
-            expected_manifest_sha256: "a".repeat(64),
-            expected_finalized_checksum_sha256: "b".repeat(64),
-            expected_stopped_at_ms: 1792022959136,
-        };
-        assert!(migrate.direct_transport_demo_execution());
-        assert!(!migrate.direct_transport_read_only());
-        assert!(migrate.validate().is_ok());
-
         let generic = AgentOperation::PrepareExecution {
             intent_id: "intent_generic_01234567".to_owned(),
             instrument: "DOGE-USDT-SWAP".to_owned(),

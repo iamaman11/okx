@@ -92,7 +92,7 @@ export const EXECUTION_TOOLS: Json[] = [
     inputSchema: {
       type: "object", additionalProperties: false,
       properties: {
-        action: { type: "string", enum: ["prepare","submit","amend","cancel","cancel_protection","confirm_protection_size","shrink_protection_size","abort_reverse","abandon_prepared","begin_strategy_run","finalize_strategy_run","quarantine_unverified_strategy_run","set_leverage","migrate_finalized_ledger_storage","reconcile_unsent_prepared"] },
+        action: { type: "string", enum: ["prepare","submit","amend","cancel","cancel_protection","confirm_protection_size","shrink_protection_size","abort_reverse","abandon_prepared","begin_strategy_run","finalize_strategy_run","quarantine_unverified_strategy_run","set_leverage","reconcile_unsent_prepared"] },
         intent_id: ID, instrument: INSTRUMENT,
         trade_mode: { type: "string", enum: ["cross","isolated"] },
         order_type: { type: "string", enum: ["limit","post_only","fok","ioc"] },
@@ -100,8 +100,6 @@ export const EXECUTION_TOOLS: Json[] = [
         expected_manifest_sha256: { type: "string", pattern: "^[0-9a-f]{64}$" },
         account_uid_fingerprint: { type: "string", pattern: "^[0-9a-f]{64}$" },
         intent_ids: { type: "array", minItems: 1, maxItems: 32, uniqueItems: true, items: ID },
-        expected_finalized_checksum_sha256: { type: "string", pattern: "^[0-9a-f]{64}$" },
-        expected_stopped_at_ms: { type: "integer", minimum: 1 },
         origin_schema: VERSION, origin_version: VERSION, mandate_version: VERSION,
         allocated_usdt: POSITIVE, operator_authority_id: EVIDENCE_ID, leverage: POSITIVE,
         rearm: { type: "object", additionalProperties: false, properties: {
@@ -194,7 +192,7 @@ export function isExecutionMutation(operationType: unknown): boolean {
     "prepare_execution", "submit_prepared_execution",
     "mutate_execution", "abort_reverse_execution", "abandon_prepared_execution",
     "begin_strategy_run", "finalize_strategy_run", "quarantine_unverified_strategy_run", "set_leverage",
-    "migrate_finalized_ledger_storage", "reconcile_unsent_prepared",
+    "reconcile_unsent_prepared",
   ].includes(String(operationType));
 }
 
@@ -232,24 +230,6 @@ export function buildExecutionOperation(args: Record<string, unknown>): Record<s
         expected_manifest_sha256:args.expected_manifest_sha256,
         account_uid_fingerprint:args.account_uid_fingerprint,
         intent_ids:ids,
-      };
-    }
-    case "migrate_finalized_ledger_storage": {
-      if (!exactKeys(args,[
-        "action","intent_id","expected_manifest_sha256",
-        "expected_finalized_checksum_sha256","expected_stopped_at_ms"
-      ]) || typeof args.expected_manifest_sha256 !== "string"
-        || !/^[0-9a-f]{64}$/.test(args.expected_manifest_sha256)
-        || typeof args.expected_finalized_checksum_sha256 !== "string"
-        || !/^[0-9a-f]{64}$/.test(args.expected_finalized_checksum_sha256)
-        || !Number.isSafeInteger(args.expected_stopped_at_ms)
-        || Number(args.expected_stopped_at_ms) <= 0) return null;
-      return {
-        type:"migrate_finalized_ledger_storage",
-        allocation_id:intent_id,
-        expected_manifest_sha256:args.expected_manifest_sha256,
-        expected_finalized_checksum_sha256:args.expected_finalized_checksum_sha256,
-        expected_stopped_at_ms:args.expected_stopped_at_ms,
       };
     }
     case "set_leverage": {

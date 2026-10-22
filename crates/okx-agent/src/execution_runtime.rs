@@ -1140,31 +1140,6 @@ impl ExecutionRuntime {
         executor.stop_new_risk(reason, observed_at_ms).map(Some)
     }
 
-    /// Storage maintenance lives under the SAME local executor mutex.
-    /// This is not a strategy rearm, account change, or exchange operation.
-    pub async fn migrate_finalized_storage_v14_demo(
-        &self,
-        run_id: &str,
-        expected_manifest_sha256: &str,
-        expected_finalized_checksum_sha256: &str,
-        expected_stopped_at_ms: u64,
-    ) -> Result<Option<okx_execution::LedgerStorageAttestation>, OrderExecutorError> {
-        if !self.environment.demo || self.mode != ExecutionRuntimeMode::DemoAcceptance {
-            return Ok(None);
-        }
-        let owner = self.executor.lock().await;
-        owner
-            .ledger()
-            .migrate_finalized_storage_v14(
-                run_id,
-                expected_manifest_sha256,
-                expected_finalized_checksum_sha256,
-                expected_stopped_at_ms,
-            )
-            .map(Some)
-            .map_err(Into::into)
-    }
-
     /// Verified Demo-only administrative ledger mutation, no exchange POST.
     /// Source truth and profile are acquired by the existing execution query.
     pub async fn begin_strategy_run_demo_authorized(
