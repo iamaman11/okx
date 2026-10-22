@@ -1,13 +1,10 @@
 name: Cloudflare MCP Deploy
 
+# A code merge must never change the production MCP tool contract ahead of
+# its installed Windows Agent. Publish this Worker explicitly as one matched
+# ReleaseSet operation only after the native runtime is accepted.
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - main
-    paths:
-      - "cloudflare/okx-mcp/**"
-      - ".github/workflows/cloudflare-mcp-deploy.yml"
 
 concurrency:
   group: cloudflare-mcp-production
