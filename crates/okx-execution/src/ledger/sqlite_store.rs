@@ -4,7 +4,7 @@ use super::*;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
 use serde::{Serialize, de::DeserializeOwned};
 
-pub(super) const SCHEMA: &str = "okx.execution-ledger.sqlite/v3";
+pub(super) const SCHEMA: &str = "okx.execution-ledger.sqlite/v4";
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -74,7 +74,7 @@ fn connect_with_integrity(
     let current_version: i64 = connection
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .map_err(io)?;
-    if current_version != 0 && current_version != 3 {
+    if current_version != 0 && current_version != 4 {
         return Err(ExecutionLedgerError::Corrupt(
             "unsupported SQLite account ledger schema",
         ));
@@ -120,7 +120,7 @@ fn connect_with_integrity(
              CREATE TABLE IF NOT EXISTS native_submitted_intents (
                 intent_id TEXT PRIMARY KEY REFERENCES ledger_entries(intent_id)
              ) STRICT;
-             PRAGMA user_version=3;",
+             PRAGMA user_version=4;",
         )
         .map_err(io)?;
         tx.commit().map_err(io)?;
@@ -134,7 +134,7 @@ fn connect_with_integrity(
     let foreign_keys: i64 = connection
         .query_row("PRAGMA foreign_keys", [], |r| r.get(0))
         .map_err(io)?;
-    if ver != 3 || journal != "wal" || foreign_keys != 1 {
+    if ver != 4 || journal != "wal" || foreign_keys != 1 {
         return Err(ExecutionLedgerError::Corrupt(
             "SQLite schema/WAL/FK mismatch",
         ));
@@ -2980,7 +2980,7 @@ fn attest_snapshot_with_indices(
     let schema_version: i64 = c
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .map_err(io)?;
-    if schema_version == 3 {
+    if schema_version == 4 {
         super::sqlite_source::audit_financial_index_inventory(&c)?;
     }
     let bound: Option<String> = c
