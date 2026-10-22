@@ -633,8 +633,11 @@ pub(super) fn summary(
         source_gap_over_two_hours: largest_gap
             .is_some_and(|gap| gap > crate::exchange_evidence::MAX_SOURCE_COVERAGE_GAP_MS),
         // Native histories have no fixed number-of-rows limit.
-        remaining_source_cursors: usize::MAX.saturating_sub(cursors),
-        remaining_events: usize::MAX.saturating_sub(events),
+        // Retain v1 observer-counter semantics for wire compatibility.
+        // A zero here is not a SQL persistence limit; native epochs have
+        // no historic row-count capacity ceiling.
+        remaining_source_cursors: crate::exchange_evidence::MAX_CURSORS.saturating_sub(cursors),
+        remaining_events: crate::exchange_evidence::MAX_EVENTS.saturating_sub(events),
         next_source_coverage_deadline_ms: previous_receipt.and_then(|last| {
             last.checked_add(crate::exchange_evidence::MAX_SOURCE_COVERAGE_GAP_MS)
         }),
@@ -1328,7 +1331,7 @@ mod tests {
     }
 
     #[test]
-    fn indexed_source_exact_legacy_struct_byte_limit() {
+    fn native_source_ignores_legacy_cumulative_bytes_but_bounds_each_row() {
         let c = Connection::open_in_memory().unwrap();
         c.execute_batch(TABLES).unwrap();
         let mut source = DurableExchangeEvidence {
@@ -1378,9 +1381,10 @@ mod tests {
         .unwrap();
         assert!(attest_indexed(&c, &source.run_id, &source.account_uid).is_ok());
 
-        // Individually bounded BLOBs are allowed to be read, but together
-        // exceed the same legacy WHOLE-source serialized JSON byte limit.
-        // This proves we enforce cumulative size, not only row size.
+        // v14 has a cumulative document limit, while the SQLite-native
+        // historical account ledger must scale beyond it. Each row
+        // stays individually bounded and the full source digest is
+        // still verified by the streaming authenticator.
         for i in 0..2 {
             let event = StoredExchangeEvent {
                 payload: serde_json::json!({
@@ -1407,10 +1411,9 @@ mod tests {
             params![&source.checksum_sha256, &source.run_id],
         )
         .unwrap();
-        assert!(matches!(
-            attest_indexed(&c, &source.run_id, &source.account_uid),
-            Err(ExecutionLedgerError::ExchangeEvidenceCapacity)
-        ));
+        let authenticated = attest_indexed(&c, &source.run_id, &source.account_uid).unwrap();
+        assert_eq!(authenticated.checksum_sha256, source.checksum_sha256);
+        assert_eq!(authenticated.run_id, source.run_id);
     }
 
     #[test]
