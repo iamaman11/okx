@@ -639,89 +639,89 @@ fn reconcile_exchange_evidence(
     let mut skipped_submitted = 0usize;
     let mut duplicate_managed_client = None;
     let mut visit_entry = |entry: &ExecutionLedgerEntry| {
-            historical_count += 1;
-            let plan = &entry.record.plan;
-            if observed_clients.contains(plan.client_order_id.as_str()) {
-                relevant_managed_clients.insert(plan.client_order_id.clone());
+        historical_count += 1;
+        let plan = &entry.record.plan;
+        if observed_clients.contains(plan.client_order_id.as_str()) {
+            relevant_managed_clients.insert(plan.client_order_id.clone());
+        }
+        if let Some(id) = entry.record.order_id.as_deref()
+            && observed_order_ids.contains(id)
+        {
+            relevant_managed_order_ids.insert(id.to_owned());
+        }
+        let matches = by_client.get(plan.client_order_id.as_str());
+        if matches.is_some_and(|orders| orders.len() > 1) {
+            duplicate_managed_client = Some(plan.client_order_id.clone());
+            return false;
+        }
+
+        let observed = matches.and_then(|orders| orders.first().copied());
+        if let Some(order) = observed {
+            if order.instrument_id != plan.instrument_id {
+                identity_mismatches += 1;
+                if !matches!(
+                    entry.record.state,
+                    ExecutionState::Prepared | ExecutionState::Rejected
+                ) {
+                    skipped_submitted += 1;
+                }
+                return true;
             }
-            if let Some(id) = entry.record.order_id.as_deref()
-                && observed_order_ids.contains(id)
+            if let Some(expected_order_id) = entry.record.order_id.as_deref()
+                && order.order_id != expected_order_id
             {
-                relevant_managed_order_ids.insert(id.to_owned());
+                identity_mismatches += 1;
+                if !matches!(
+                    entry.record.state,
+                    ExecutionState::Prepared | ExecutionState::Rejected
+                ) {
+                    skipped_submitted += 1;
+                }
+                return true;
             }
-            let matches = by_client.get(plan.client_order_id.as_str());
-            if matches.is_some_and(|orders| orders.len() > 1) {
-                duplicate_managed_client = Some(plan.client_order_id.clone());
-                return false;
-            }
+        }
 
-            let observed = matches.and_then(|orders| orders.first().copied());
-            if let Some(order) = observed {
-                if order.instrument_id != plan.instrument_id {
-                    identity_mismatches += 1;
-                    if !matches!(
-                        entry.record.state,
-                        ExecutionState::Prepared | ExecutionState::Rejected
-                    ) {
-                        skipped_submitted += 1;
-                    }
-                    return true;
+        let fill_observed = observed_fill_clients.contains(plan.client_order_id.as_str())
+            || entry
+                .record
+                .order_id
+                .as_deref()
+                .is_some_and(|order_id| observed_order_ids.contains(order_id));
+
+        match entry.record.state {
+            ExecutionState::Prepared | ExecutionState::Rejected => {
+                if observed.is_some() {
+                    unexpected_orders += 1;
                 }
-                if let Some(expected_order_id) = entry.record.order_id.as_deref()
-                    && order.order_id != expected_order_id
-                {
-                    identity_mismatches += 1;
-                    if !matches!(
-                        entry.record.state,
-                        ExecutionState::Prepared | ExecutionState::Rejected
-                    ) {
-                        skipped_submitted += 1;
-                    }
-                    return true;
+                if fill_observed {
+                    unexpected_fills += 1;
                 }
             }
-
-            let fill_observed = observed_fill_clients.contains(plan.client_order_id.as_str())
-                || entry
-                    .record
-                    .order_id
-                    .as_deref()
-                    .is_some_and(|order_id| observed_order_ids.contains(order_id));
-
-            match entry.record.state {
-                ExecutionState::Prepared | ExecutionState::Rejected => {
-                    if observed.is_some() {
-                        unexpected_orders += 1;
-                    }
-                    if fill_observed {
-                        unexpected_fills += 1;
-                    }
-                }
-                ExecutionState::Submitting
-                | ExecutionState::Acknowledged
-                | ExecutionState::UnknownSubmission
-                | ExecutionState::Live
-                | ExecutionState::PartiallyFilled
-                | ExecutionState::Filled
-                | ExecutionState::Canceled => {
-                    if observed.is_some() {
-                        matched += 1;
-                    } else {
-                        unresolved += 1;
-                        if unmatched_historical.len() < MAX_UNMATCHED_HISTORICAL_ROWS {
-                            unmatched_historical.push(ManagedIntentOutsideExchangeWindow {
-                                intent_id: plan.intent_id.clone(),
-                                state: entry.record.state,
-                                ledger_terminal: entry.record.state.is_terminal(),
-                                recorded_order_id: entry.record.order_id.clone(),
-                                evidence_status: "NOT_OBSERVABLE_IN_BOUNDED_EXCHANGE_WINDOW",
-                            });
-                        }
+            ExecutionState::Submitting
+            | ExecutionState::Acknowledged
+            | ExecutionState::UnknownSubmission
+            | ExecutionState::Live
+            | ExecutionState::PartiallyFilled
+            | ExecutionState::Filled
+            | ExecutionState::Canceled => {
+                if observed.is_some() {
+                    matched += 1;
+                } else {
+                    unresolved += 1;
+                    if unmatched_historical.len() < MAX_UNMATCHED_HISTORICAL_ROWS {
+                        unmatched_historical.push(ManagedIntentOutsideExchangeWindow {
+                            intent_id: plan.intent_id.clone(),
+                            state: entry.record.state,
+                            ledger_terminal: entry.record.state.is_terminal(),
+                            recorded_order_id: entry.record.order_id.clone(),
+                            evidence_status: "NOT_OBSERVABLE_IN_BOUNDED_EXCHANGE_WINDOW",
+                        });
                     }
                 }
             }
-            true
-        };
+        }
+        true
+    };
     if let Some(ref census) = native {
         for entry in &census.candidates {
             if !visit_entry(entry) {
