@@ -11,7 +11,8 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::{
-    DurableExchangeEvidence, ExecutionAction, ExecutionLedgerEntry, ExecutionLedgerError, StrategyCapitalReservation,
+    DurableExchangeEvidence, ExecutionAction, ExecutionLedgerEntry, ExecutionLedgerError,
+    StrategyCapitalReservation,
     account_cashflow::{AccountBillClass, AccountBillSource, classify_native_account_bill},
 };
 
@@ -70,7 +71,9 @@ impl DailyStrategyLossAccumulator {
             self.source_ahead = true;
             return Ok(());
         }
-        self.linked = self.linked.checked_add(1)
+        self.linked = self
+            .linked
+            .checked_add(1)
             .ok_or(ExecutionLedgerError::ExchangeEvidenceCapacity)?;
         self.fees += fee;
         self.realized += pnl;
