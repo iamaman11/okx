@@ -3933,25 +3933,39 @@ mod tests {
         let root = test_root("native-v2-finance-upgrade");
         let db = root.join("account.sqlite");
         save(
-            &db, &BTreeMap::new(), None, None, None,
-            &StrategyPeriodHistory::default(), &[],
-        ).unwrap();
+            &db,
+            &BTreeMap::new(),
+            None,
+            None,
+            None,
+            &StrategyPeriodHistory::default(),
+            &[],
+        )
+        .unwrap();
         let connection = Connection::open(&db).unwrap();
-        connection.execute_batch(
-            "DROP TABLE native_source_finance_order;
+        connection
+            .execute_batch(
+                "DROP TABLE native_source_finance_order;
              PRAGMA user_version=2;",
-        ).unwrap();
+            )
+            .unwrap();
         drop(connection);
         let lease = ExecutionLedgerStore::acquire_writer_lease(&root).unwrap();
         upgrade_reconciliation_indices_offline(&db, &lease).unwrap();
         // Repeated acceptance is a proof-only read; no new rows or fences.
         upgrade_reconciliation_indices_offline(&db, &lease).unwrap();
         let c = Connection::open(&db).unwrap();
-        let version: i64 = c.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        let version: i64 = c
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(version, 3);
-        let indexed: i64 = c.query_row(
-            "SELECT COUNT(*) FROM native_source_finance_order", [], |r| r.get(0),
-        ).unwrap();
+        let indexed: i64 = c
+            .query_row(
+                "SELECT COUNT(*) FROM native_source_finance_order",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(indexed, 0);
         drop(c);
         attest(&db).unwrap();

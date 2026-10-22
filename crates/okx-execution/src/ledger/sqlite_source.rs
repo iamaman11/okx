@@ -200,12 +200,10 @@ where
 
 /// Offline v2 -> v3 backfill. All original immutable source rows and
 /// their SHA256 tuple are proved before publication; no trading mutations.
-pub(super) fn backfill_financial_index(
-    tx: &Transaction<'_>,
-) -> Result<(), ExecutionLedgerError> {
-    let mut source_runs = tx.prepare(
-        "SELECT run_id,uid FROM native_source_runs ORDER BY run_id",
-    ).map_err(io)?;
+pub(super) fn backfill_financial_index(tx: &Transaction<'_>) -> Result<(), ExecutionLedgerError> {
+    let mut source_runs = tx
+        .prepare("SELECT run_id,uid FROM native_source_runs ORDER BY run_id")
+        .map_err(io)?;
     let mut sources = source_runs.query([]).map_err(io)?;
     while let Some(row) = sources.next().map_err(io)? {
         let run: String = row.get(0).map_err(io)?;
@@ -214,10 +212,12 @@ pub(super) fn backfill_financial_index(
     }
     drop(sources);
     drop(source_runs);
-    let mut query = tx.prepare(
-        "SELECT run_id,event_key,payload_digest,length(payload),payload
+    let mut query = tx
+        .prepare(
+            "SELECT run_id,event_key,payload_digest,length(payload),payload
          FROM native_source_events ORDER BY run_id,event_key",
-    ).map_err(io)?;
+        )
+        .map_err(io)?;
     let mut rows = query.query([]).map_err(io)?;
     while let Some(row) = rows.next().map_err(io)? {
         let run_id: String = row.get(0).map_err(io)?;
@@ -240,23 +240,27 @@ pub(super) fn backfill_financial_index(
 /// Cold, read-only inventory verification: both directions are checked.
 /// The primary event is authoritative; every index row must match its
 /// source hash, and every source must have exactly one projected row.
-pub(super) fn audit_financial_index_inventory(
-    c: &Connection,
-) -> Result<(), ExecutionLedgerError> {
-    let missing: i64 = c.query_row(
-        "SELECT COUNT(*) FROM native_source_events e
+pub(super) fn audit_financial_index_inventory(c: &Connection) -> Result<(), ExecutionLedgerError> {
+    let missing: i64 = c
+        .query_row(
+            "SELECT COUNT(*) FROM native_source_events e
          LEFT JOIN native_source_finance_order i
            ON i.run_id=e.run_id AND i.event_key=e.event_key
          WHERE i.event_key IS NULL OR i.payload_digest<>e.payload_digest",
-        [], |row| row.get(0),
-    ).map_err(io)?;
-    let orphan: i64 = c.query_row(
-        "SELECT COUNT(*) FROM native_source_finance_order i
+            [],
+            |row| row.get(0),
+        )
+        .map_err(io)?;
+    let orphan: i64 = c
+        .query_row(
+            "SELECT COUNT(*) FROM native_source_finance_order i
          LEFT JOIN native_source_events e
            ON e.run_id=i.run_id AND e.event_key=i.event_key
          WHERE e.event_key IS NULL OR i.payload_digest<>e.payload_digest",
-        [], |row| row.get(0),
-    ).map_err(io)?;
+            [],
+            |row| row.get(0),
+        )
+        .map_err(io)?;
     if missing != 0 || orphan != 0 {
         return Err(ExecutionLedgerError::Corrupt(
             "native chronological financial index/source mismatch",
