@@ -245,6 +245,8 @@ CREATE TABLE IF NOT EXISTS nav_points (
     source_cursor_sha256 TEXT NOT NULL,
     previous_sha256 TEXT NOT NULL,
     checkpoint_sha256 TEXT NOT NULL UNIQUE,
+    -- Full typed checkpoint; indexed decimal columns are verified projections.
+    point_payload BLOB NOT NULL,
     PRIMARY KEY(epoch_id, observed_at_ms)
 ) STRICT;
 CREATE INDEX IF NOT EXISTS idx_nav_chronological

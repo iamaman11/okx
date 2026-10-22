@@ -1512,6 +1512,8 @@ pub struct DurableExecutionLedger {
     capital_reservation: Option<StrategyCapitalReservation>,
     exchange_evidence: Option<DurableExchangeEvidence>,
     strategy_periods: StrategyPeriodHistory,
+    native_nav_current: Option<StrategyNavPoint>,
+    native_nav_count: usize,
     leverage_attempts: Vec<LeverageChangeAttempt>,
 }
 
@@ -1713,6 +1715,21 @@ impl DurableExecutionLedger {
             }
         }
 
+        // The working Engine retains ONE active NAV, never a historical Vec.
+        let (native_nav_current, native_nav_count) = if store.sqlite_native {
+            if !strategy_periods.nav_points.is_empty() {
+                return Err(ExecutionLedgerError::Corrupt("native NAV Vec forbidden"));
+            }
+            if let Some(run) = capital_reservation.as_ref() {
+                sqlite_store::nav_watermark(
+                    &store.path, &run.account_uid_fingerprint, &run.allocation_id,
+                )?
+            } else {
+                (None, 0)
+            }
+        } else {
+            (None, 0)
+        };
         Ok(Self {
             store,
             entries,
@@ -1720,6 +1737,8 @@ impl DurableExecutionLedger {
             capital_reservation,
             exchange_evidence,
             strategy_periods,
+            native_nav_current,
+            native_nav_count,
             leverage_attempts,
         })
     }
@@ -2252,12 +2271,12 @@ impl DurableExecutionLedger {
                 (key.clone(), cursor.clone(), received, loss)
             };
         let cursor_sha256 = format!("{:x}", Sha256::digest(serde_json::to_vec(&source_cursor)?));
-        let prior = self
-            .strategy_periods
-            .nav_points
-            .iter()
-            .rev()
-            .find(|p| p.run_id == run.allocation_id);
+        let prior = if self.store.sqlite_native {
+            self.native_nav_current.as_ref().filter(|p| p.run_id == run.allocation_id)
+        } else {
+            self.strategy_periods.nav_points.iter().rev()
+                .find(|p| p.run_id == run.allocation_id)
+        };
         if prior.is_some_and(|p| p.observed_at_ms >= now) {
             return Ok(None);
         }
@@ -2277,7 +2296,9 @@ impl DurableExecutionLedger {
         }) {
             return Ok(None);
         }
-        if self.strategy_periods.nav_points.len() >= MAX_STRATEGY_NAV_POINTS {
+        if !self.store.sqlite_native
+            && self.strategy_periods.nav_points.len() >= MAX_STRATEGY_NAV_POINTS
+        {
             return Err(ExecutionLedgerError::ExchangeEvidenceCapacity);
         }
         let mut point = StrategyNavPoint {
@@ -2331,14 +2352,6 @@ impl DurableExecutionLedger {
                 }
             }
         }
-        let mut next = self.strategy_periods.clone();
-        next.nav_points.push(point.clone());
-        // Native save_metadata() checks this point against the indexed
-        // source cursor under the same WAL transaction. The old source
-        // object is required only for the legacy v14 branch.
-        if let Some(evidence) = legacy_source.as_ref() {
-            next.validate(self.capital_reservation.as_ref(), Some(evidence))?;
-        }
         let new_stop = if self.risk_stop.is_none() {
             reason.map(|value| ExecutionRiskStop {
                 schema: EXECUTION_RISK_STOP_SCHEMA_V1.to_owned(),
@@ -2348,15 +2361,40 @@ impl DurableExecutionLedger {
         } else {
             None
         };
-        self.store.save_metadata(
-            &self.entries,
-            new_stop.as_ref().or(self.risk_stop.as_ref()),
-            self.capital_reservation.as_ref(),
-            self.exchange_evidence.as_ref(),
-            &next,
-            &self.leverage_attempts,
-        )?;
-        self.strategy_periods = next;
+        if self.store.sqlite_native {
+            // Atomic NAV + STOP + daily-risk projection. No historical cache.
+            sqlite_store::save_nav_metadata(
+                &self.store.path,
+                new_stop.as_ref().or(self.risk_stop.as_ref()),
+                run,
+                &self.strategy_periods,
+                &self.leverage_attempts,
+                &point,
+            )?;
+            let (latest, n) = sqlite_store::nav_watermark(
+                &self.store.path, &run.account_uid_fingerprint, &run.allocation_id,
+            )?;
+            if latest.as_ref() != Some(&point) {
+                return Err(ExecutionLedgerError::ExchangeEvidenceConflict);
+            }
+            self.native_nav_current = latest;
+            self.native_nav_count = n;
+        } else {
+            let mut next = self.strategy_periods.clone();
+            next.nav_points.push(point.clone());
+            if let Some(evidence) = legacy_source.as_ref() {
+                next.validate(self.capital_reservation.as_ref(), Some(evidence))?;
+            }
+            self.store.save_metadata(
+                &self.entries,
+                new_stop.as_ref().or(self.risk_stop.as_ref()),
+                self.capital_reservation.as_ref(),
+                self.exchange_evidence.as_ref(),
+                &next,
+                &self.leverage_attempts,
+            )?;
+            self.strategy_periods = next;
+        }
         if let Some(stop) = new_stop {
             self.risk_stop = Some(stop);
         }
@@ -2364,15 +2402,24 @@ impl DurableExecutionLedger {
     }
 
     pub fn strategy_nav_watermark(&self) -> Option<&StrategyNavPoint> {
+        if self.store.sqlite_native {
+            return self.native_nav_current.as_ref().filter(|p| {
+                self.capital_reservation.as_ref()
+                    .is_some_and(|r| r.allocation_id == p.run_id)
+            });
+        }
         self.strategy_periods.nav_points.last().filter(|p| {
-            self.capital_reservation
-                .as_ref()
+            self.capital_reservation.as_ref()
                 .is_some_and(|r| r.allocation_id == p.run_id)
         })
     }
 
     pub fn strategy_nav_point_count(&self) -> usize {
-        self.strategy_periods.nav_points.len()
+        if self.store.sqlite_native {
+            self.native_nav_count
+        } else {
+            self.strategy_periods.nav_points.len()
+        }
     }
 
     pub fn unverified_run(&self) -> Option<&StrategyUnverifiedClosure> {
@@ -2908,6 +2955,8 @@ impl DurableExecutionLedger {
             &self.leverage_attempts,
         )?;
         self.strategy_periods = next;
+        self.native_nav_current = None;
+        self.native_nav_count = 0;
         if rearm.is_some() {
             self.risk_stop = None;
         }

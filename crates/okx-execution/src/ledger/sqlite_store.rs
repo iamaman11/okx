@@ -1898,7 +1898,7 @@ pub(super) fn save_metadata(
     periods: &StrategyPeriodHistory,
     leverage: &[LeverageChangeAttempt],
 ) -> Result<(), ExecutionLedgerError> {
-    save_metadata_inner(path, stop, reservation, source, periods, leverage, None)
+    save_metadata_inner(path, stop, reservation, source, periods, leverage, None, None)
 }
 
 /// Only this typed opening path creates a new capital epoch. A later NAV
@@ -1919,6 +1919,7 @@ pub(super) fn save_opening_metadata(
         periods,
         leverage,
         Some(opening),
+        None,
     )
 }
 
@@ -2432,8 +2433,8 @@ fn persist_native_nav_point(
          (epoch_id,observed_at_ms,nav_decimal,high_water_decimal,
           gross_daily_loss_decimal,currency,finance_completeness,
           source_receipt_sha256,source_evidence_sha256,source_cursor_sha256,
-          previous_sha256,checkpoint_sha256)
-         VALUES(?1,?2,?3,?4,?5,'USDT','PARTIAL',?6,?7,?8,?9,?10)",
+          previous_sha256,checkpoint_sha256,point_payload)
+         VALUES(?1,?2,?3,?4,?5,'USDT','PARTIAL',?6,?7,?8,?9,?10,?11)",
         params![
             &point.run_id,
             observed,
@@ -2444,12 +2445,66 @@ fn persist_native_nav_point(
             &point.evidence_sha256,
             &point.source_cursor_sha256,
             &point.previous_sha256,
-            &point.checksum_sha256
+            &point.checksum_sha256,
+            encode(point)?
         ],
     )
     .map_err(io)?;
     persist_native_daily_risk(tx, point, &strategy_id, stop)?;
     Ok(())
+}
+
+/// One indexed NAV checkpoint; never materialize historical NAV into the Engine.
+pub(super) fn nav_watermark(
+    path: &Path,
+    uid: &str,
+    epoch_id: &str,
+) -> Result<(Option<StrategyNavPoint>, usize), ExecutionLedgerError> {
+    let c = connect_indexed_read(path)?;
+    c.execute_batch("BEGIN DEFERRED TRANSACTION").map_err(io)?;
+    require_account_read_scope(&c, uid, true)?;
+    let count: i64 = c.query_row(
+        "SELECT COUNT(*) FROM nav_points WHERE epoch_id=?1",
+        params![epoch_id], |r| r.get(0),
+    ).map_err(io)?;
+    let row: Option<(Vec<u8>,String,String,String,String,String,i64)> = c.query_row(
+        "SELECT point_payload,checkpoint_sha256,nav_decimal,
+                high_water_decimal,gross_daily_loss_decimal,previous_sha256,observed_at_ms
+         FROM nav_points WHERE epoch_id=?1 ORDER BY observed_at_ms DESC LIMIT 1",
+        params![epoch_id],
+        |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?)),
+    ).optional().map_err(io)?;
+    let latest = row.map(|(raw,digest,nav,peak,loss,prev,at)| {
+        let p: StrategyNavPoint = decode(&raw)?;
+        p.validate()?;
+        if p.run_id != epoch_id || p.checksum_sha256 != digest
+            || p.nav_usdt != nav || p.high_water_usdt != peak
+            || p.daily_gross_loss_usdt != loss || p.previous_sha256 != prev
+            || i64::try_from(p.observed_at_ms).ok() != Some(at)
+        {
+            return Err(ExecutionLedgerError::ExchangeEvidenceConflict);
+        }
+        Ok(p)
+    }).transpose()?;
+    if (count == 0) != latest.is_none() {
+        return Err(ExecutionLedgerError::Corrupt("native NAV index mismatch"));
+    }
+    Ok((latest, usize::try_from(count).map_err(|_| ExecutionLedgerError::ExchangeEvidenceConflict)?))
+}
+
+/// The STOP, NAV, source receipt and daily risk remain ONE WAL commit.
+pub(super) fn save_nav_metadata(
+    path: &Path,
+    stop: Option<&ExecutionRiskStop>,
+    reservation: &StrategyCapitalReservation,
+    periods: &StrategyPeriodHistory,
+    leverage: &[LeverageChangeAttempt],
+    point: &StrategyNavPoint,
+) -> Result<(), ExecutionLedgerError> {
+    if !periods.nav_points.is_empty() || point.run_id != reservation.allocation_id {
+        return Err(ExecutionLedgerError::CapitalReservationScopeMismatch);
+    }
+    save_metadata_inner(path, stop, Some(reservation), None, periods, leverage, None, Some(point))
 }
 
 fn save_metadata_inner(
@@ -2460,6 +2515,7 @@ fn save_metadata_inner(
     periods: &StrategyPeriodHistory,
     leverage: &[LeverageChangeAttempt],
     opening: Option<&StrategyAllocationOpening>,
+    nav_point: Option<&StrategyNavPoint>,
 ) -> Result<(), ExecutionLedgerError> {
     if !path.exists() {
         return Err(ExecutionLedgerError::Corrupt(
@@ -2604,6 +2660,9 @@ fn save_metadata_inner(
         return Err(ExecutionLedgerError::ExchangeEvidenceConflict);
     }
     for point in periods.nav_points.iter().skip(old.periods.nav_points.len()) {
+        persist_native_nav_point(&tx, point, expected, stop)?;
+    }
+    if let Some(point) = nav_point {
         persist_native_nav_point(&tx, point, expected, stop)?;
     }
     tx.commit().map_err(io)?;
@@ -3662,6 +3721,9 @@ mod tests {
         assert_eq!(nav.0, "100");
         assert_eq!(nav.1, "PARTIAL");
         assert_eq!(nav.2, point.checksum_sha256);
+        let (indexed, n) = nav_watermark(&path, &uid, &reservation.allocation_id).unwrap();
+        assert_eq!(indexed, Some(point.clone()));
+        assert_eq!(n, 1);
         drop(c);
         // Two independent strategy epochs may report at the exact same
         // timestamp; their predecessor hashes and daily loss are separate.
@@ -3722,6 +3784,9 @@ mod tests {
             )
             .unwrap();
         assert_eq!(counts, (2, 3));
+        let (latest, n) = nav_watermark(&path, &uid, &second.run_id).unwrap();
+        assert_eq!(latest, Some(later));
+        assert_eq!(n, 2);
         let per_strategy: String = c
             .query_row(
                 "SELECT gross_loss_decimal FROM strategy_daily_risk
