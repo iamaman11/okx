@@ -476,6 +476,19 @@ pub(super) fn client_order_id_exists(
     Ok(prior_uid.is_some())
 }
 
+/// A test-only pinned reader verifies that legacy source-owner lookup
+/// semantics agree with the new in-transaction SQL capture.
+#[cfg(test)]
+fn source_owner_reader(
+    path: &Path,
+    expected_uid: &str,
+) -> Result<Connection, ExecutionLedgerError> {
+    let c = connect_indexed_read(path)?;
+    c.execute_batch("BEGIN DEFERRED TRANSACTION").map_err(io)?;
+    require_indexed_scope(&c, expected_uid)?;
+    Ok(c)
+}
+
 /// Resolve one independently observed exchange order to its original intent.
 /// The immutable client ID is UNIQUE; order ID, instrument, side, position
 /// and run start are checked AFTER authenticating the full indexed row.
@@ -1322,7 +1335,9 @@ pub(super) fn capture_native_exchange_source(
     require_fresh_cursor: bool,
 ) -> Result<ExchangeEvidenceSummary, ExecutionLedgerError> {
     if !path.exists() {
-        return Err(ExecutionLedgerError::Corrupt("native source capture has no ledger"));
+        return Err(ExecutionLedgerError::Corrupt(
+            "native source capture has no ledger",
+        ));
     }
     let mut connection = connect(path, true)?;
     let tx = connection
@@ -1337,7 +1352,9 @@ pub(super) fn capture_native_exchange_source(
         )
         .map_err(io)?;
     if checksum(&bytes) != digest {
-        return Err(ExecutionLedgerError::Corrupt("native capture state digest mismatch"));
+        return Err(ExecutionLedgerError::Corrupt(
+            "native capture state digest mismatch",
+        ));
     }
     let mut state: StoredState = decode(&bytes)?;
     if uid != run.account_uid_fingerprint
@@ -1353,15 +1370,21 @@ pub(super) fn capture_native_exchange_source(
     }
     let previous = if state.source_run_id.is_some() {
         super::sqlite_source::attest_indexed(&tx, &run.allocation_id, &uid)?;
-        Some(super::sqlite_source::summary(&tx, &run.allocation_id, &uid)?)
+        Some(super::sqlite_source::summary(
+            &tx,
+            &run.allocation_id,
+            &uid,
+        )?)
     } else {
         None
     };
-    let now = crate::exchange_evidence::source_receipt_ms(
-        &facts.summary.source_received_at,
-    )
-    .ok_or(ExecutionLedgerError::Corrupt("invalid native source receipt"))?;
-    let prior_at = previous.as_ref().and_then(|p| p.latest_source_received_at_ms);
+    let now = crate::exchange_evidence::source_receipt_ms(&facts.summary.source_received_at)
+        .ok_or(ExecutionLedgerError::Corrupt(
+            "invalid native source receipt",
+        ))?;
+    let prior_at = previous
+        .as_ref()
+        .and_then(|p| p.latest_source_received_at_ms);
     if prior_at.is_some_and(|old| now < old) {
         return Err(ExecutionLedgerError::ExchangeEvidenceConflict);
     }
@@ -1369,25 +1392,20 @@ pub(super) fn capture_native_exchange_source(
     // The legacy builder is used only to encode the finite NEW REST window,
     // never to read or reconstruct any earlier source event/cursor.
     let mut window = DurableExchangeEvidence::new(run)?;
-    window.capture_with_owner(
-        facts,
-        run,
-        true,
-        |ord, cl, inst, side, pos| {
-            indexed_source_owner(
-                &tx,
-                &run.account_uid_fingerprint,
-                run.started_at_ms,
-                SourceOwnerKey {
-                    order_id: ord,
-                    client_order_id: cl,
-                    instrument_id: inst,
-                    side,
-                    position_side: pos,
-                },
-            )
-        },
-    )?;
+    window.capture_with_owner(facts, run, true, |ord, cl, inst, side, pos| {
+        indexed_source_owner(
+            &tx,
+            &run.account_uid_fingerprint,
+            run.started_at_ms,
+            SourceOwnerKey {
+                order_id: ord,
+                client_order_id: cl,
+                instrument_id: inst,
+                side,
+                position_side: pos,
+            },
+        )
+    })?;
     // Existing rows never leave the WAL. Key-level checks identify whether
     // the observed window actually adds any fact; a quiet source sample must
     // not consume a cursor on every command or falsify interval coverage.
@@ -1422,12 +1440,16 @@ pub(super) fn capture_native_exchange_source(
         }
         state.source_run_id = Some(run.allocation_id.clone());
         let payload = encode(&state)?;
-        let n = tx.execute(
-            "UPDATE ledger_state SET digest=?1,bytes=?2 WHERE key=1 AND uid=?3 AND digest=?4",
-            params![checksum(&payload), payload, &uid, &digest],
-        ).map_err(io)?;
+        let n = tx
+            .execute(
+                "UPDATE ledger_state SET digest=?1,bytes=?2 WHERE key=1 AND uid=?3 AND digest=?4",
+                params![checksum(&payload), payload, &uid, &digest],
+            )
+            .map_err(io)?;
         if n != 1 {
-            return Err(ExecutionLedgerError::Corrupt("native capture state CAS lost"));
+            return Err(ExecutionLedgerError::Corrupt(
+                "native capture state CAS lost",
+            ));
         }
     }
     let result = super::sqlite_source::summary(&tx, &run.allocation_id, &uid)?;

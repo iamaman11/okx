@@ -241,7 +241,9 @@ pub(super) fn append_window_delta(
             .map_err(io)?;
         if let Some((prior_digest, body)) = existing {
             if checksum(&body) != prior_digest {
-                return Err(ExecutionLedgerError::Corrupt("native source event digest mismatch"));
+                return Err(ExecutionLedgerError::Corrupt(
+                    "native source event digest mismatch",
+                ));
             }
             let earlier: StoredExchangeEvent = decode(&body)?;
             if earlier != *event
@@ -277,14 +279,20 @@ pub(super) fn append_window_delta(
         }
         let body = encode(cursor)?;
         let receipt = crate::exchange_evidence::source_receipt_ms(&cursor.source_received_at)
-            .ok_or(ExecutionLedgerError::Corrupt("native cursor receipt time missing"))?;
+            .ok_or(ExecutionLedgerError::Corrupt(
+                "native cursor receipt time missing",
+            ))?;
         tx.execute(
             "INSERT INTO native_source_cursors VALUES(?1,?2,?3,?4,?5)",
             params![&delta.run_id, key, receipt, checksum(&body), body],
         )
         .map_err(io)?;
         super::sqlite_finance::persist_source_receipt(
-            tx, &delta.account_uid, &delta.run_id, key, cursor,
+            tx,
+            &delta.account_uid,
+            &delta.run_id,
+            key,
+            cursor,
         )?;
         changed = true;
     }
@@ -292,12 +300,16 @@ pub(super) fn append_window_delta(
         // One streaming pass recalculates the original cryptographic v1 tuple.
         // No complete historical event object or duplicate RAM index exists.
         let identity = scan_indexed(tx, &delta.run_id, &delta.account_uid, false)?;
-        let written = tx.execute(
-            "UPDATE native_source_runs SET proof_digest=?1 WHERE run_id=?2",
-            params![identity.checksum_sha256, &delta.run_id],
-        ).map_err(io)?;
+        let written = tx
+            .execute(
+                "UPDATE native_source_runs SET proof_digest=?1 WHERE run_id=?2",
+                params![identity.checksum_sha256, &delta.run_id],
+            )
+            .map_err(io)?;
         if written != 1 {
-            return Err(ExecutionLedgerError::Corrupt("native source proof publication lost"));
+            return Err(ExecutionLedgerError::Corrupt(
+                "native source proof publication lost",
+            ));
         }
     }
     Ok(changed)
@@ -798,6 +810,119 @@ pub(super) fn read(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_sql_window_deltas_match_exact_full_source_and_reject_rewrites() {
+        let mut c = Connection::open_in_memory().unwrap();
+        c.execute_batch(include_str!("../../schema/account-ledger-v1.sql"))
+            .unwrap();
+        c.execute_batch(TABLES).unwrap();
+        let mut empty = DurableExchangeEvidence {
+            schema: crate::EXCHANGE_EVIDENCE_SCHEMA_V1.to_owned(),
+            account_uid: "a".repeat(64),
+            run_id: "sqlite_native_delta_period_001".to_owned(),
+            events: BTreeMap::new(),
+            cursors: BTreeMap::new(),
+            checksum_sha256: String::new(),
+        };
+        empty.seal().unwrap();
+        let order = |id: &str, time: &str| StoredExchangeEvent {
+            payload: serde_json::json!({
+                "source": "OKX_REST_ORDER",
+                "ordId": id,
+                "instId": "BTC-USDT-SWAP",
+                "clOrdId": null,
+                "state": "live",
+                "uTime": time
+            }),
+            source_intent_id: None,
+            strategy_run_id: None,
+            allocation: "UNALLOCATED".to_owned(),
+        };
+        let cursor = |receipt: &str| ExchangeCoverageCursor {
+            source: "OKX_REST_ACCOUNT_HISTORY".to_owned(),
+            source_received_at: receipt.to_owned(),
+            generation: receipt.to_owned(),
+            account_as_of_ms: 1000,
+            order_complete: true,
+            fill_complete: true,
+            bill_complete: true,
+            covered_ranges: serde_json::json!({}),
+        };
+        let mut first = empty.clone();
+        first.events.insert(
+            "order:external-1:1000".to_owned(),
+            order("external-1", "1000"),
+        );
+        first.cursors.insert(
+            "receipt-1".to_owned(),
+            cursor("2026-10-20T12:00:00Z"),
+        );
+        first.seal().unwrap();
+        {
+            let tx = c.transaction().unwrap();
+            assert!(append_window_delta(&tx, &first).unwrap());
+            tx.commit().unwrap();
+        }
+        assert_eq!(
+            attest_indexed(&c, &empty.run_id, &empty.account_uid)
+                .unwrap()
+                .checksum_sha256,
+            first.checksum_sha256
+        );
+        let mut second = empty.clone();
+        second.events.insert(
+            "order:external-2:2000".to_owned(),
+            order("external-2", "2000"),
+        );
+        second.cursors.insert(
+            "receipt-2".to_owned(),
+            cursor("2026-10-20T12:05:00Z"),
+        );
+        second.seal().unwrap();
+        {
+            let tx = c.transaction().unwrap();
+            assert!(append_window_delta(&tx, &second).unwrap());
+            tx.commit().unwrap();
+        }
+        let mut combined = first.clone();
+        combined.events.extend(second.events.clone());
+        combined.cursors.extend(second.cursors.clone());
+        combined.seal().unwrap();
+        assert_eq!(
+            attest_indexed(&c, &empty.run_id, &empty.account_uid)
+                .unwrap()
+                .checksum_sha256,
+            combined.checksum_sha256,
+            "SQL incremental writes must preserve original v1 canonical hash"
+        );
+        {
+            let tx = c.transaction().unwrap();
+            assert!(!append_window_delta(&tx, &first).unwrap());
+            tx.commit().unwrap();
+        }
+        let mut conflict = first.clone();
+        conflict.events.get_mut("order:external-1:1000").unwrap().payload["state"] =
+            serde_json::json!("canceled");
+        conflict.seal().unwrap();
+        {
+            let tx = c.transaction().unwrap();
+            assert!(matches!(
+                append_window_delta(&tx, &conflict),
+                Err(ExecutionLedgerError::ExchangeEvidenceConflict)
+            ));
+        }
+        assert_eq!(
+            attest_indexed(&c, &empty.run_id, &empty.account_uid)
+                .unwrap()
+                .checksum_sha256,
+            combined.checksum_sha256
+        );
+        let count: i64 = c
+            .query_row("SELECT COUNT(*) FROM exchange_orders", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 2);
+    }
 
     #[test]
     fn native_source_summary_matches_exact_legacy_receipt_semantics_and_denies_tampering() {

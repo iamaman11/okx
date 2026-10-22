@@ -151,7 +151,10 @@ impl DurableExchangeEvidence {
     /// immutable v1 captures may be absent in an already-sealed historical bill.
     /// Preserve the exact original bytes; never backfill or rewrite a prior
     /// checksum, and reject all differences in previously captured fields.
-    pub(crate) fn same_legacy_bill_source(old: &StoredExchangeEvent, current: &StoredExchangeEvent) -> bool {
+    pub(crate) fn same_legacy_bill_source(
+        old: &StoredExchangeEvent,
+        current: &StoredExchangeEvent,
+    ) -> bool {
         if old.payload.get("source").and_then(Value::as_str) != Some("OKX_REST_BILL")
             || current.payload.get("source").and_then(Value::as_str) != Some("OKX_REST_BILL")
         {
