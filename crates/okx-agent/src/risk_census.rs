@@ -222,7 +222,7 @@ impl AccountRiskEvidence {
             .profile_handoff_ledger_assessment(uid)
             .map_err(|_| E::UnknownMutation)?;
         let prepared = prepared_intent
-            .and_then(|id| ledger.get(id))
+            .and_then(|id| ledger.read_intent(id).ok().flatten())
             .is_some_and(|entry| exact_local_unsent_prepared(&entry.record, uid));
         if (prepared_intent.is_some() && !prepared)
             || !ledger_flat_except_exact_prepared(&native, prepared, ledger.risk_stop().is_some())

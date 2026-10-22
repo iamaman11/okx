@@ -530,46 +530,54 @@ where
     /// Read-only native invariant. The ledger, not a caller-provided Boolean,
     /// decides whether an uncertain in-flight mutation blocks another order.
     /// The exact candidate's unsent PREPARED protection is not in-flight.
-    fn has_unresolved_native_mutation(&self, candidate_intent_id: &str) -> bool {
-        self.ledger.entries().any(|entry| {
-            let record = &entry.record;
-            let other = record.plan.intent_id != candidate_intent_id;
-            (other
-                && record.plan.action.is_risk_increasing()
-                && record.state == ExecutionState::Prepared)
-                || matches!(
-                    record.state,
-                    ExecutionState::Submitting | ExecutionState::UnknownSubmission
-                )
-                || record.mutations.iter().any(|mutation| {
-                    matches!(
-                        mutation.state,
-                        OrderMutationState::Submitting | OrderMutationState::Unknown
+    fn has_unresolved_native_mutation(
+        &self,
+        account_uid: &str,
+        candidate_intent_id: &str,
+    ) -> Result<bool, ExecutionLedgerError> {
+        Ok(self
+            .ledger
+            .operational_entries(account_uid, None)?
+            .iter()
+            .any(|entry| {
+                let record = &entry.record;
+                let other = record.plan.intent_id != candidate_intent_id;
+                (other
+                    && record.plan.action.is_risk_increasing()
+                    && record.state == ExecutionState::Prepared)
+                    || matches!(
+                        record.state,
+                        ExecutionState::Submitting | ExecutionState::UnknownSubmission
                     )
-                })
-                || record.protection.as_ref().is_some_and(|protection| {
-                    (other
-                        && matches!(
-                            protection.status,
-                            crate::ProtectiveOrderStatus::Pending
-                                | crate::ProtectiveOrderStatus::Failed
-                        ))
-                        || protection.cleanup.as_ref().is_some_and(|cleanup| {
-                            matches!(
-                                cleanup.state,
-                                ProtectiveCleanupState::Submitting
-                                    | ProtectiveCleanupState::Unknown
-                            )
-                        })
-                        || protection.size_amend.as_ref().is_some_and(|amend| {
-                            matches!(
-                                amend.state,
-                                ProtectiveSizeAmendState::Submitting
-                                    | ProtectiveSizeAmendState::Unknown
-                            )
-                        })
-                })
-        })
+                    || record.mutations.iter().any(|mutation| {
+                        matches!(
+                            mutation.state,
+                            OrderMutationState::Submitting | OrderMutationState::Unknown
+                        )
+                    })
+                    || record.protection.as_ref().is_some_and(|protection| {
+                        (other
+                            && matches!(
+                                protection.status,
+                                crate::ProtectiveOrderStatus::Pending
+                                    | crate::ProtectiveOrderStatus::Failed
+                            ))
+                            || protection.cleanup.as_ref().is_some_and(|cleanup| {
+                                matches!(
+                                    cleanup.state,
+                                    ProtectiveCleanupState::Submitting
+                                        | ProtectiveCleanupState::Unknown
+                                )
+                            })
+                            || protection.size_amend.as_ref().is_some_and(|amend| {
+                                matches!(
+                                    amend.state,
+                                    ProtectiveSizeAmendState::Submitting
+                                        | ProtectiveSizeAmendState::Unknown
+                                )
+                            })
+                    })
+            }))
     }
 
     /// The single executor must cross-check a policy against its OWN durable
@@ -593,13 +601,18 @@ where
             .ledger
             .capital_reservation()
             .ok_or(Reject::SourceUnattested)?;
-        let entry = self.ledger.get(intent_id).ok_or(Reject::ScopeMismatch)?;
+        let entry = self
+            .ledger
+            .account_intent(&run.account_uid_fingerprint, intent_id)
+            .map_err(|_| Reject::ScopeMismatch)?
+            .ok_or(Reject::ScopeMismatch)?;
         if entry.record.state != ExecutionState::Prepared
             || entry.record.plan.intent_id != intent_id
             || entry.record.plan.account_uid_fingerprint != run.account_uid_fingerprint
-            || self.ledger.entries().any(|record| {
-                record.record.plan.account_uid_fingerprint != run.account_uid_fingerprint
-            })
+            || !self
+                .ledger
+                .account_scope_matches(&run.account_uid_fingerprint)
+                .map_err(|_| Reject::ScopeMismatch)?
         {
             return Err(Reject::ScopeMismatch);
         }
@@ -607,7 +620,9 @@ where
         // unrelated parent is UNKNOWN. Exact owned reduce-only venue evidence
         // remains mandatory for every CLOSE.
         if entry.record.plan.action.is_risk_increasing()
-            && self.has_unresolved_native_mutation(intent_id)
+            && self
+                .has_unresolved_native_mutation(&run.account_uid_fingerprint, intent_id)
+                .map_err(|_| Reject::SourceUnattested)?
         {
             return Err(Reject::SourceUnattested);
         }
@@ -626,6 +641,7 @@ where
         let source = self
             .ledger
             .exchange_evidence_summary()
+            .map_err(|_| Reject::SourceUnattested)?
             .ok_or(Reject::SourceUnattested)?;
         if source.run_id != run.allocation_id
             || !source.latest_source_complete
@@ -847,7 +863,7 @@ where
         require_live_trading_enabled(self.mutation_authority.allows_exchange_mutation())?;
         let entry = self
             .ledger
-            .get(intent_id)
+            .read_intent(intent_id)?
             .ok_or_else(|| ExecutionLedgerError::IntentNotFound(intent_id.to_owned()))?;
         if entry.record.state != ExecutionState::Prepared {
             return Err(OrderExecutorError::NotPrepared(entry.record.state));
@@ -912,12 +928,10 @@ where
         }
         let records: Vec<_> = self
             .ledger
-            .entries()
-            .filter(|entry| {
-                entry.record.plan.instrument_id == plan.instrument_id
-                    && entry.record.plan.intent_id != plan.intent_id
-            })
-            .map(|entry| entry.record.clone())
+            .operational_entries(&plan.account_uid_fingerprint, Some(&plan.instrument_id))?
+            .into_iter()
+            .filter(|entry| entry.record.plan.intent_id != plan.intent_id)
+            .map(|entry| entry.record)
             .collect();
         if !records.iter().any(|record| {
             record.state == ExecutionState::Filled
@@ -1020,8 +1034,7 @@ where
     ) -> Result<ExecutionPlan, OrderExecutorError> {
         let entry = self
             .ledger
-            .get(intent_id)
-            .cloned()
+            .read_intent(intent_id)?
             .ok_or_else(|| ExecutionLedgerError::IntentNotFound(intent_id.to_owned()))?;
         if entry.record.protection.is_some() {
             return Err(OrderExecutorError::ProtectedOrderAmendUnsupported);
@@ -1088,8 +1101,7 @@ where
         let _ = self.amend_revalidation_plan(intent_id, new_size.clone(), new_price.clone())?;
         let entry = self
             .ledger
-            .get(intent_id)
-            .cloned()
+            .read_intent(intent_id)?
             .ok_or_else(|| ExecutionLedgerError::IntentNotFound(intent_id.to_owned()))?;
         if entry.record.protection.is_some() {
             return Err(OrderExecutorError::ProtectedOrderAmendUnsupported);
@@ -1174,8 +1186,7 @@ where
         require_live_trading_enabled(self.mutation_authority.allows_exchange_mutation())?;
         let entry = self
             .ledger
-            .get(intent_id)
-            .cloned()
+            .read_intent(intent_id)?
             .ok_or_else(|| ExecutionLedgerError::IntentNotFound(intent_id.to_owned()))?;
         let protection = entry
             .record
@@ -1201,12 +1212,19 @@ where
         // Single-lot only: multi-lot/other Hedge-side permission needs the
         // separate zero-gap ADD/HEDGE acceptance. An unresolved or foreign
         // managed parent cannot borrow this lot's protective coverage.
-        if self.ledger.entries().any(|other| {
-            other.record.plan.instrument_id == entry.record.plan.instrument_id
-                && other.record.plan.intent_id != intent_id
-                && (!other.record.state.is_terminal()
-                    || other.record.protection_blocks_new_managed_intent())
-        }) {
+        if self
+            .ledger
+            .operational_entries(
+                &entry.record.plan.account_uid_fingerprint,
+                Some(&entry.record.plan.instrument_id),
+            )?
+            .iter()
+            .any(|other| {
+                other.record.plan.intent_id != intent_id
+                    && (!other.record.state.is_terminal()
+                        || other.record.protection_blocks_new_managed_intent())
+            })
+        {
             return Err(OrderExecutorError::ProtectionCoverageUnproven);
         }
         validate_protective_amend_coverage(&entry.record, account, inventory, target)?;
@@ -1344,8 +1362,7 @@ where
     {
         let entry = self
             .ledger
-            .get(intent_id)
-            .cloned()
+            .read_intent(intent_id)?
             .ok_or_else(|| ExecutionLedgerError::IntentNotFound(intent_id.to_owned()))?;
         let protection = entry
             .record
@@ -1393,9 +1410,12 @@ where
         // The agent caller must fence all reads with one private-WS cursor.
         let records: Vec<_> = self
             .ledger
-            .entries()
-            .filter(|item| item.record.plan.instrument_id == entry.record.plan.instrument_id)
-            .map(|item| item.record.clone())
+            .operational_entries(
+                &entry.record.plan.account_uid_fingerprint,
+                Some(&entry.record.plan.instrument_id),
+            )?
+            .into_iter()
+            .map(|item| item.record)
             .collect();
         let mut details = vec![current];
         for other in &records {
@@ -1470,8 +1490,7 @@ where
         require_live_trading_enabled(self.mutation_authority.allows_exchange_mutation())?;
         let entry = self
             .ledger
-            .get(intent_id)
-            .cloned()
+            .read_intent(intent_id)?
             .ok_or_else(|| ExecutionLedgerError::IntentNotFound(intent_id.to_owned()))?;
         let cleanup = entry
             .record
@@ -1602,8 +1621,7 @@ where
 
         let entry = self
             .ledger
-            .get(intent_id)
-            .cloned()
+            .read_intent(intent_id)?
             .ok_or_else(|| ExecutionLedgerError::IntentNotFound(intent_id.to_owned()))?;
 
         if entry.record.state != ExecutionState::Prepared {
@@ -1723,8 +1741,7 @@ where
 
         let entry = self
             .ledger
-            .get(intent_id)
-            .cloned()
+            .read_intent(intent_id)?
             .ok_or_else(|| ExecutionLedgerError::IntentNotFound(intent_id.to_owned()))?;
         let mutation = entry
             .record
@@ -1834,8 +1851,7 @@ where
     ) -> Result<ReconcileDisposition, OrderExecutorError> {
         let entry = self
             .ledger
-            .get(intent_id)
-            .cloned()
+            .read_intent(intent_id)?
             .ok_or_else(|| ExecutionLedgerError::IntentNotFound(intent_id.to_owned()))?;
 
         if !(matches!(
@@ -4687,7 +4703,8 @@ mod tests {
         let uid = "a".repeat(64);
         let authority = format!("sha256:{}", "b".repeat(64));
         let run = crate::StrategyCapitalReservation {
-            schema: crate::STRATEGY_CAPITAL_RESERVATION_SCHEMA_V1.to_owned(),
+            schema: crate::STRATEGY_CAPITAL_RESERVATION_SCHEMA_V2.to_owned(),
+            strategy_id: "test_strategy_v1".to_owned(),
             allocation_id: "run_policy_20261017_fixture".to_owned(),
             account_uid_fingerprint: uid.clone(),
             origin_schema: "okx.test".to_owned(),
@@ -4812,7 +4829,8 @@ mod tests {
             max_total_modelled_loss_usdt: "10".to_owned(),
         };
         let run = crate::StrategyCapitalReservation {
-            schema: crate::STRATEGY_CAPITAL_RESERVATION_SCHEMA_V1.to_owned(),
+            schema: crate::STRATEGY_CAPITAL_RESERVATION_SCHEMA_V2.to_owned(),
+            strategy_id: "test_strategy_v1".to_owned(),
             allocation_id: policy.strategy_run_id.clone(),
             account_uid_fingerprint: policy.account_uid_fingerprint.clone(),
             origin_schema: "test".to_owned(),
@@ -4856,7 +4874,11 @@ mod tests {
         let plan = protected_plan();
         ledger.prepare(plan.clone(), 101).expect("prepare");
         let executor = OrderExecutor::new(ledger, MockGateway::new(vec![], vec![]));
-        assert!(!executor.has_unresolved_native_mutation(&plan.intent_id));
+        assert!(
+            !executor
+                .has_unresolved_native_mutation(&plan.account_uid_fingerprint, &plan.intent_id)
+                .unwrap()
+        );
         assert_eq!(executor.gateway().place_calls(), 0);
         drop(executor);
 
@@ -4872,7 +4894,11 @@ mod tests {
 
         let restarted = DurableExecutionLedger::open(store, 105).expect("restart");
         let executor = OrderExecutor::new(restarted, MockGateway::new(vec![], vec![]));
-        assert!(executor.has_unresolved_native_mutation(&plan.intent_id));
+        assert!(
+            executor
+                .has_unresolved_native_mutation(&plan.account_uid_fingerprint, &plan.intent_id)
+                .unwrap()
+        );
         assert_eq!(executor.gateway().place_calls(), 0);
         let _ = fs::remove_dir_all(root);
     }

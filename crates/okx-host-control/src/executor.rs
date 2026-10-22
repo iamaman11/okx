@@ -2,7 +2,7 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
-    process::{Child, ChildStdin, Stdio},
+    process::{Child, ChildStdin, Command, Stdio},
     sync::mpsc::{self, Receiver},
     time::{Duration, Instant},
 };
@@ -47,6 +47,89 @@ const RUNTIME_DIAGNOSTIC_TAIL_BYTES: u64 = 64 * 1024;
 // drain + 8s authenticated REST/WS/OCO source proof + bounded delivery slack.
 // A 27s parent timeout was shorter than its own child's 33s worst-case path.
 const NATIVE_SELECT_REPLY_TIMEOUT_SECS: u64 = 45;
+// One bounded, offline-only cutover. A timeout is an UNKNOWN storage
+// outcome, never permission to replay or fall back to the sealed v14 writer.
+const STORAGE_CUTOVER_TIMEOUT: Duration = Duration::from_secs(300);
+const STORAGE_CUTOVER_REPLY_MAX_BYTES: u64 = 4096;
+
+/// Run the existing installed Agent exactly once, without a pipe deadlock.
+/// Windows waits on the native process handle; an ephemeral OS Job owns every
+/// descendant so a timed-out migration cannot continue behind CONTROL.
+fn bounded_storage_cutover_output(
+    command: &mut Command,
+    timeout: Duration,
+) -> HostControlResult<Vec<u8>> {
+    #[cfg(not(windows))]
+    {
+        let _ = (command, timeout);
+        Err(HostControlError::UnsupportedPlatform)
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Foundation::{WAIT_OBJECT_0, WAIT_TIMEOUT};
+        use windows_sys::Win32::System::Threading::WaitForSingleObject;
+
+        let millis: u32 = timeout
+            .as_millis()
+            .try_into()
+            .map_err(|_| HostControlError::ControlResponseBudgetInvariant)?;
+        if millis == 0 {
+            return Err(HostControlError::ControlResponseBudgetInvariant);
+        }
+        let mut nonce = [0u8; 16];
+        getrandom::fill(&mut nonce).map_err(|error| HostControlError::Random(error.to_string()))?;
+        let token = nonce
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let output_path = std::env::temp_dir().join(format!(
+            "okx-native-storage-cutover-{}-{token}.receipt",
+            std::process::id()
+        ));
+        let mut receipt = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&output_path)?;
+        let result = (|| -> HostControlResult<Vec<u8>> {
+            let job = AgentJob::new()?;
+            let mut child = command
+                .stdout(Stdio::from(receipt.try_clone()?))
+                .stderr(Stdio::null())
+                .spawn()?;
+            job.assign(&mut child)?;
+            let outcome = unsafe { WaitForSingleObject(child.as_raw_handle() as _, millis) };
+            if outcome != WAIT_OBJECT_0 {
+                let error = std::io::Error::last_os_error();
+                // A failed/timed-out wait cannot permit an orphaned migration.
+                // The temporary KILL_ON_JOB_CLOSE Job also owns descendants.
+                let _ = child.kill();
+                let _ = child.wait();
+                if outcome == WAIT_TIMEOUT {
+                    return Err(HostControlError::StorageCutoverOutcomeUnknown);
+                }
+                return Err(error.into());
+            }
+            if !child.wait()?.success() {
+                return Err(HostControlError::StorageCutoverOutcomeUnknown);
+            }
+            if receipt.metadata()?.len() > STORAGE_CUTOVER_REPLY_MAX_BYTES {
+                return Err(HostControlError::ControlResponseBudgetInvariant);
+            }
+            receipt.rewind()?;
+            let mut bytes = Vec::new();
+            receipt.read_to_end(&mut bytes)?;
+            Ok(bytes)
+        })();
+        drop(receipt);
+        // An interrupted cutover receipt is diagnostic debris only; never
+        // an owner marker, restart signal, authorization or replay target.
+        let _ = fs::remove_file(output_path);
+        result
+    }
+}
+
 // Compile-time admission: parent always outlives the serial native child deadlines.
 const _: () = assert!(NATIVE_SELECT_REPLY_TIMEOUT_SECS > 10 + 15 + 8);
 const ALLOWED_REMOTES: &[&str] = &[
@@ -180,6 +263,9 @@ impl HostExecutor {
             HostControlOperation::RecoverReadOnlySelection => self.recover_read_only_selection(),
             HostControlOperation::StopAgent => self.stop_agent(),
             HostControlOperation::RestartAgent => self.restart_agent(),
+            HostControlOperation::InitializeFreshLedger {
+                expected_uid_fingerprint,
+            } => self.initialize_fresh_ledger(&expected_uid_fingerprint),
             HostControlOperation::InstallAutostart => autostart::install(),
             HostControlOperation::AutostartStatus => autostart::status_value(),
             HostControlOperation::HandoffToAutostart
@@ -961,6 +1047,76 @@ impl HostExecutor {
             "mailbox_issue": mailbox_issue(profile),
             "runtime_root": runtime_dir(profile),
             "cloudflare_attached": true
+        }))
+    }
+
+    /// Fresh native ledger genesis with the existing CONTROL as sole owner. It is
+    /// impossible to enter this branch while CONTROL desires an active Agent,
+    /// while its Job contains a process, or while release provenance differs.
+    /// A crash leaves the desired state STOPPED, not an automatic restart.
+    fn initialize_fresh_ledger(&mut self, expected_uid: &str) -> HostControlResult<Value> {
+        if self.desired_error.is_some()
+            || self.desired_store.is_pending()?
+            || self.desired_agent != AgentDesired::Stopped
+        {
+            return Err(HostControlError::ProfileHandoffProofRequired);
+        }
+        self.require_agent_stopped()?;
+        if self.agent_child.is_some()
+            || self.native_child_pipe.is_some()
+            || !self.agent_job.is_empty()?
+        {
+            return Err(HostControlError::AgentRunning);
+        }
+        self.require_agent_binary()?;
+        let status = self.status()?;
+        if status["release_parity"]["state"] != "MATCHED"
+            || status["installed_agent"]["state"] != "VERIFIED"
+        {
+            return Err(HostControlError::ArtifactVerification(
+                "fresh native SQLite genesis requires matched ReleaseSet",
+            ));
+        }
+        let root = runtime_dir(self.desired_profile);
+        let root_text = root.to_string_lossy();
+        let mut command = hidden_command(self.agent_binary());
+        command.arg("--root").arg(root_text.as_ref());
+        if self.desired_profile == AgentProfile::DemoAcceptance {
+            command.arg("--demo");
+        }
+        command
+            .arg("storage-initialize")
+            .arg("--expected-uid-fingerprint")
+            .arg(expected_uid)
+            .current_dir(&self.repo_root);
+        let stdout = bounded_storage_cutover_output(&mut command, STORAGE_CUTOVER_TIMEOUT)?;
+        let reply: Value = serde_json::from_slice(&stdout)?;
+        let (expected_account_id, expected_environment) = match self.desired_profile {
+            AgentProfile::Production => ("real", "production"),
+            AgentProfile::DemoAcceptance => ("demo", "demo"),
+        };
+        if reply["schema"] != "okx.native-storage-initialization/v1"
+            || reply["owner"] != "SQLITE"
+            || reply["integrity"] != "VALIDATED_COLD_READ"
+            || reply["trading_authorized"] != false
+            || reply["account_binding"]["venue"] != "okx"
+            || reply["account_binding"]["environment"] != expected_environment
+            || reply["account_binding"]["account_id"] != expected_account_id
+            || reply["account_binding"]["uid_fingerprint"] != expected_uid
+            || reply["account_binding"]["immutable"] != true
+        {
+            return Err(HostControlError::ArtifactVerification(
+                "native SQLite account identity/ownership receipt invalid",
+            ));
+        }
+        // No implicit restart, read-only switch, account change or grant.
+        Ok(json!({
+            "schema": "okx.host-control.storage-initialization/v1",
+            "status": "FRESH_SQLITE_OWNER_VERIFIED",
+            "profile": self.desired_profile,
+            "ledger": reply,
+            "agent_desired": self.desired_agent,
+            "trading_authorized": false
         }))
     }
 
@@ -2743,6 +2899,29 @@ mod tests {
             HostControlError::ReadOnlyTargetProofDenied("TARGET_VERIFY_TIMEOUT").code(),
             "READ_ONLY_TARGET_PROOF_DENIED"
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn native_cutover_child_has_bounded_output_and_one_terminal_result() {
+        let mut command = Command::new("cmd");
+        command.arg("/C").arg("echo BOUNDED-CUTOVER-RECEIPT");
+        let bytes = bounded_storage_cutover_output(&mut command, Duration::from_secs(15))
+            .expect("native completed once");
+        assert_eq!(
+            String::from_utf8(bytes).expect("UTF-8 receipt").trim(),
+            "BOUNDED-CUTOVER-RECEIPT"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn timed_out_native_cutover_is_typed_unknown_not_replayed() {
+        let mut command = Command::new("cmd");
+        command.arg("/C").arg("ping -n 30 127.0.0.1 >nul");
+        let error = bounded_storage_cutover_output(&mut command, Duration::from_millis(30))
+            .expect_err("the child must be terminated and its outcome uncertain");
+        assert_eq!(error.code(), "STORAGE_CUTOVER_OUTCOME_UNKNOWN");
     }
 
     #[test]

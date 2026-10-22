@@ -539,7 +539,6 @@ pub(crate) async fn dispatch(
             account::dispatch(request, context, generated_at).await
         }
         AgentOperation::ExecutorPreflight
-        | AgentOperation::MigrateFinalizedLedgerStorage { .. }
         | AgentOperation::BeginStrategyRun { .. }
         | AgentOperation::FinalizeStrategyRun { .. }
         | AgentOperation::QuarantineUnverifiedStrategyRun { .. }

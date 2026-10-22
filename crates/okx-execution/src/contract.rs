@@ -235,13 +235,16 @@ pub fn execution_status_with_ledger(
     ledger: &DurableExecutionLedger,
     intent_id: &str,
 ) -> Result<Option<ExecutionStatusEnvelope>, serde_json::Error> {
-    let Some(entry) = ledger.get(intent_id) else {
+    let Some(entry) = ledger
+        .read_intent(intent_id)
+        .map_err(|error| serde_json::Error::io(std::io::Error::other(error.to_string())))?
+    else {
         return Ok(None);
     };
-    let reverse = reverse_status(ledger, entry);
+    let reverse = reverse_status(ledger, &entry)?;
     Ok(Some(ExecutionStatusEnvelope {
         schema: EXECUTION_STATUS_SCHEMA_V3,
-        execution: execution_status(entry)?,
+        execution: execution_status(&entry)?,
         reverse,
         lineage: entry.record.lineage.clone(),
         protection: entry
@@ -282,14 +285,28 @@ pub fn execution_status_with_ledger(
 fn reverse_status(
     ledger: &DurableExecutionLedger,
     entry: &ExecutionLedgerEntry,
-) -> Option<ReverseExecutionStatus> {
-    let link = entry.record.reverse.as_ref()?;
-    let (root, open) = match link.leg {
-        ReverseLeg::Close => (entry, ledger.get(&link.open_intent_id)),
-        ReverseLeg::Open => (ledger.get(&link.root_intent_id)?, Some(entry)),
+) -> Result<Option<ReverseExecutionStatus>, serde_json::Error> {
+    let Some(link) = entry.record.reverse.as_ref() else {
+        return Ok(None);
     };
-    let root_link = root.record.reverse.as_ref()?;
-    let open_state = open.map(|value| value.record.state);
+    let read = |id: &str| {
+        ledger
+            .read_intent(id)
+            .map_err(|error| serde_json::Error::io(std::io::Error::other(error.to_string())))
+    };
+    let (root, open) = match link.leg {
+        ReverseLeg::Close => (entry.clone(), read(&link.open_intent_id)?),
+        ReverseLeg::Open => {
+            let Some(root) = read(&link.root_intent_id)? else {
+                return Ok(None);
+            };
+            (root, Some(entry.clone()))
+        }
+    };
+    let Some(root_link) = root.record.reverse.as_ref() else {
+        return Ok(None);
+    };
+    let open_state = open.as_ref().map(|value| value.record.state);
     let stage = if root_link.continuation == ReverseContinuation::Aborted {
         ReverseExecutionStage::Aborted
     } else if root.record.state != ExecutionState::Filled {
@@ -308,14 +325,14 @@ fn reverse_status(
             Some(_) => ReverseExecutionStage::Opening,
         }
     };
-    Some(ReverseExecutionStatus {
+    Ok(Some(ReverseExecutionStatus {
         root_intent_id: root_link.root_intent_id.clone(),
         open_intent_id: root_link.open_intent_id.clone(),
         target_position_side: root_link.target_position_side,
         stage,
         close_state: root.record.state,
         open_state,
-    })
+    }))
 }
 
 fn plan_fingerprint(plan: &ExecutionPlan) -> Result<String, serde_json::Error> {

@@ -168,7 +168,6 @@ fn response_budget(operation: &AgentOperation) -> ResponseBudget {
         AgentOperation::InstrumentRules { .. }
         | AgentOperation::ExecutorPreflight
         | AgentOperation::BeginStrategyRun { .. }
-        | AgentOperation::MigrateFinalizedLedgerStorage { .. }
         | AgentOperation::FinalizeStrategyRun { .. }
         | AgentOperation::QuarantineUnverifiedStrategyRun { .. }
         | AgentOperation::SetLeverage { .. }

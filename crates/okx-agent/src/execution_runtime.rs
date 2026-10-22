@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, path::Path, str::FromStr, time::Duration};
+use std::{collections::BTreeMap, path::Path, str::FromStr, sync::Arc, time::Duration};
 
 use chrono::{SecondsFormat, Utc};
 use okx_analysis::{PortfolioRiskAnalysis, StrategyNavRiskEvidence, durable_account_stop_reason};
@@ -8,15 +8,16 @@ use okx_api::{
     RateBudget, RateBudgetSnapshot, TradeApi,
 };
 use okx_execution::{
-    AccountLedgerReconciliation, DurableExchangeEvidence, DurableExecutionLedger, ExecutionAction,
-    ExecutionLedgerEntry, ExecutionLedgerError, ExecutionLedgerStore, ExecutionLineageBinding,
-    ExecutionPlan, ExecutionRiskStop, ExecutionState, ExecutionStatusEnvelope,
-    FencedProtectiveShrinkRequest, LeverageAttemptState, ManagedExecutionInventory,
-    MutationAuthority, MutationPrepareDisposition, MutationSubmitDisposition, OrderExecutor,
-    OrderExecutorError, PositionSide, PrepareOutcome, ProductionMarkEvidence,
-    StrategyAllocationOpening, StrategyCapitalReservation, StrategyFinalization,
-    StrategyFinancialPeriod, StrategyNavPoint, StrategyUnverifiedClosure, SubmitDisposition,
-    execution_status_with_ledger, managed_execution_inventory, reconcile_account_ledger,
+    AccountKey, AccountLedgerReconciliation, DurableExchangeEvidence, DurableExecutionLedger,
+    ExecutionAction, ExecutionLedgerEntry, ExecutionLedgerError, ExecutionLedgerStore,
+    ExecutionLineageBinding, ExecutionPlan, ExecutionRiskStop, ExecutionState,
+    ExecutionStatusEnvelope, FencedProtectiveShrinkRequest, LeverageAttemptState,
+    ManagedExecutionInventory, MutationAuthority, MutationPrepareDisposition,
+    MutationSubmitDisposition, OrderExecutor, OrderExecutorError, PositionSide, PrepareOutcome,
+    ProductionMarkEvidence, StrategyAllocationOpening, StrategyCapitalReservation,
+    StrategyFinalization, StrategyFinancialPeriod, StrategyNavPoint, StrategyUnverifiedClosure,
+    SubmitDisposition, execution_status_with_ledger, managed_execution_inventory,
+    reconcile_account_ledger,
 };
 use okx_observation::{
     AccountLedgerFacts, AccountSnapshot, InstrumentRulesSnapshot, VenueExecutionEvidence,
@@ -467,6 +468,7 @@ impl MutationIngress {
 }
 
 pub struct ExecutionRuntime {
+    native_account_key: AccountKey,
     mutation_ingress: MutationIngress,
     environment: OkxEnvironment,
     mode: ExecutionRuntimeMode,
@@ -474,6 +476,60 @@ pub struct ExecutionRuntime {
     executor_account: AccountApi,
     public_data: PublicDataApi,
     executor: Mutex<OrderExecutor<TradeApi>>,
+    // Held for the full lifetime, including read-only source checkpoints.
+    // CONTROL offline migration acquires the same cross-process file lock.
+    _writer_lease: std::fs::File,
+}
+
+/// Account-local execution routing inside the EXISTING Agent process.
+///
+/// Each entry is the complete existing execution owner (its own trade
+/// gateway, mutation ingress, SQLite WAL and writer lease). A second owner
+/// for an already-bound account or UID is rejected; routing does not fall
+/// back to another account, does not create a new service, and cannot bypass
+/// the existing Real/Demo native admission or global CAS RiskBook.
+#[derive(Default)]
+pub struct ExecutionRuntimeRegistry {
+    routes: BTreeMap<AccountKey, Arc<ExecutionRuntime>>,
+}
+
+impl ExecutionRuntimeRegistry {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Registration can only consume an already opened SQLite-native runtime.
+    /// v14 has no immutable typed AccountKey, so it cannot enter this router.
+    pub fn register_existing(
+        &mut self,
+        owner: Arc<ExecutionRuntime>,
+    ) -> Result<AccountKey, ExecutionLedgerError> {
+        let key = owner.native_account_key().clone();
+        if self.routes.keys().any(|prior| {
+            prior.venue == key.venue
+                && prior.environment == key.environment
+                && (prior.account_id == key.account_id
+                    || prior.uid_fingerprint == key.uid_fingerprint)
+        }) {
+            return Err(ExecutionLedgerError::AccountScopeMismatch);
+        }
+        self.routes.insert(key.clone(), owner);
+        Ok(key)
+    }
+
+    /// Exact route only. Missing or cross-environment accounts are NOT_READY,
+    /// never rerouted to the one currently selected Demo/Real account.
+    pub fn get(&self, key: &AccountKey) -> Option<Arc<ExecutionRuntime>> {
+        self.routes.get(key).cloned()
+    }
+
+    pub fn len(&self) -> usize {
+        self.routes.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.routes.is_empty()
+    }
 }
 
 impl ExecutionRuntime {
@@ -558,14 +614,34 @@ impl ExecutionRuntime {
         let executor_clock = rest.clone();
         let executor_account = AccountApi::new(rest.clone());
         let trade = TradeApi::new(rest);
-        let ledger = DurableExecutionLedger::open(
-            // The existing Windows owner already supplies disjoint roots:
-            // Demo C:\okx-runtime\demo and Production C:\okx-runtime.
-            // Never silently strand either profile's durable history.
-            ExecutionLedgerStore::at(root.join("execution-ledger.json")),
-            observed_at_ms,
+        let mut writer_lease = ExecutionLedgerStore::acquire_writer_lease(root)?;
+        // Exact existing native CONTROL-selected root. A SQLite database
+        // cannot be silently reused under the other environment/account;
+        // check its immutable binding before opening any executor.
+        let store = ExecutionLedgerStore::select_published_owner_under_writer_lease(
+            root,
+            &mut writer_lease,
         )?;
+        let bound = store
+            .bound_native_account_identity()?
+            .ok_or(okx_execution::ExecutionLedgerError::AccountScopeMismatch)?;
+        let expected_environment = if environment.demo {
+            okx_execution::LedgerEnvironment::Demo
+        } else {
+            okx_execution::LedgerEnvironment::Production
+        };
+        if bound.venue != okx_execution::LedgerVenue::Okx
+            || bound.environment != expected_environment
+        {
+            return Err(okx_execution::ExecutionLedgerError::AccountScopeMismatch.into());
+        }
+        let native_account_key = AccountKey::from(&bound);
+        let ledger = DurableExecutionLedger::open(store, observed_at_ms)?;
+        if !ledger.account_scope_matches(&native_account_key.uid_fingerprint)? {
+            return Err(okx_execution::ExecutionLedgerError::AccountScopeMismatch.into());
+        }
         Ok(Self {
+            native_account_key,
             mutation_ingress: MutationIngress::new(),
             environment,
             mode,
@@ -573,11 +649,18 @@ impl ExecutionRuntime {
             executor_account,
             public_data,
             executor: Mutex::new(OrderExecutor::new(ledger, trade)),
+            _writer_lease: writer_lease,
         })
     }
 
     pub const fn mode(&self) -> ExecutionRuntimeMode {
         self.mode
+    }
+
+    /// The immutable, CONTROL-verified route of this owner. No user-supplied
+    /// account selector or runtime mode can create this binding.
+    pub fn native_account_key(&self) -> &AccountKey {
+        &self.native_account_key
     }
 
     /// The request holds the returned guard THROUGH the final executor
@@ -627,10 +710,9 @@ impl ExecutionRuntime {
             && preflight.credential.accepted
             && !preflight.credential.production_environment
             && !preflight.credential.account_uid_fingerprint.is_empty()
-            && ledger.entries().all(|entry| {
-                entry.record.plan.account_uid_fingerprint
-                    == preflight.credential.account_uid_fingerprint
-            })
+            && ledger
+                .account_scope_matches(&preflight.credential.account_uid_fingerprint)
+                .unwrap_or(false)
     }
 
     pub const fn demo_mutation_acceptance_requested(&self) -> bool {
@@ -684,6 +766,8 @@ impl ExecutionRuntime {
             run.started_at_ms,
             ledger
                 .exchange_evidence_summary()
+                .ok()
+                .flatten()
                 .and_then(|source| source.latest_source_received_at_ms),
             now_ms,
         )
@@ -702,7 +786,7 @@ impl ExecutionRuntime {
         let capture_guard = self.mutation_ingress.admit().await;
         let mut executor = self.executor.lock().await;
         let mut reconciliation = reconcile_account_ledger(executor.ledger(), facts)?;
-        let inventory = managed_execution_inventory(executor.ledger());
+        let inventory = managed_execution_inventory(executor.ledger())?;
         // Never capture a contradictory or private-WS-incoherent snapshot.
         let mut current_source_captured = false;
         if executor.ledger().capital_reservation().is_some()
@@ -719,7 +803,7 @@ impl ExecutionRuntime {
                 reconciliation.source_checkpoint_deferred = true;
             }
         }
-        reconciliation.exchange_evidence = executor.ledger().exchange_evidence_summary();
+        reconciliation.exchange_evidence = executor.ledger().exchange_evidence_summary()?;
         reconciliation.financial_period = if executor.ledger().unverified_run().is_some() {
             None
         } else {
@@ -791,9 +875,9 @@ impl ExecutionRuntime {
             || run.account_uid_fingerprint != plan.account_uid_fingerprint
             || run.mandate_version != binding.mandate.version
             || run.allocated_usdt != binding.mandate.capital_base_usd
-            || ledger.entries().any(|e| {
-                e.created_at_ms >= run.started_at_ms
-                    && ((e.record.state == ExecutionState::Rejected
+            || ledger
+                .any_entry_created_since(&run.account_uid_fingerprint, run.started_at_ms, |e| {
+                    (e.record.state == ExecutionState::Rejected
                         && !inert_terminal_rejection(
                             &e.record,
                             &run.account_uid_fingerprint,
@@ -802,8 +886,9 @@ impl ExecutionRuntime {
                         || (!e.record.state.is_terminal()
                             && (e.record.plan.intent_id != plan.intent_id
                                 || e.record.plan != *plan
-                                || e.record.state != ExecutionState::Prepared)))
-            })
+                                || e.record.state != ExecutionState::Prepared))
+                })
+                .ok()?
             || !reconcile_account_ledger(ledger, facts).ok()?.consistent
         {
             return None;
@@ -813,7 +898,7 @@ impl ExecutionRuntime {
         executor
             .capture_exchange_evidence_fresh_cursor(facts)
             .ok()?;
-        let source = executor.ledger().exchange_evidence_summary()?;
+        let source = executor.ledger().exchange_evidence_summary().ok()??;
         if source.run_id != run.allocation_id
             || !source.latest_source_complete
             || source.source_gap_over_two_hours
@@ -837,6 +922,12 @@ impl ExecutionRuntime {
             return None;
         }
         let point = ledger.strategy_nav_watermark()?;
+        if !ledger
+            .daily_risk_allows_new_risk(point, &binding.policy.max_daily_realized_loss_usd)
+            .ok()?
+        {
+            return None;
+        }
         attested_flat_nav_for_new_risk(&run, &projection, point, current_equity, asof)
     }
 
@@ -905,11 +996,11 @@ impl ExecutionRuntime {
                     &preflight.account_uid_fingerprint,
                 )
             })
-            || executor.ledger().entries().any(|e| {
+            || executor.ledger().capital_reservation().is_some_and(|r| {
                 executor
                     .ledger()
-                    .capital_reservation()
-                    .is_some_and(|r| e.created_at_ms >= r.started_at_ms)
+                    .any_entry_created_since(&r.account_uid_fingerprint, r.started_at_ms, |_| true)
+                    .unwrap_or(true)
             })
         {
             return None;
@@ -1055,31 +1146,6 @@ impl ExecutionRuntime {
         executor.stop_new_risk(reason, observed_at_ms).map(Some)
     }
 
-    /// Storage maintenance lives under the SAME local executor mutex.
-    /// This is not a strategy rearm, account change, or exchange operation.
-    pub async fn migrate_finalized_storage_v14_demo(
-        &self,
-        run_id: &str,
-        expected_manifest_sha256: &str,
-        expected_finalized_checksum_sha256: &str,
-        expected_stopped_at_ms: u64,
-    ) -> Result<Option<okx_execution::LedgerStorageAttestation>, OrderExecutorError> {
-        if !self.environment.demo || self.mode != ExecutionRuntimeMode::DemoAcceptance {
-            return Ok(None);
-        }
-        let owner = self.executor.lock().await;
-        owner
-            .ledger()
-            .migrate_finalized_storage_v14(
-                run_id,
-                expected_manifest_sha256,
-                expected_finalized_checksum_sha256,
-                expected_stopped_at_ms,
-            )
-            .map(Some)
-            .map_err(Into::into)
-    }
-
     /// Verified Demo-only administrative ledger mutation, no exchange POST.
     /// Source truth and profile are acquired by the existing execution query.
     pub async fn begin_strategy_run_demo_authorized(
@@ -1098,8 +1164,8 @@ impl ExecutionRuntime {
             || preflight.account_uid_fingerprint != opening.account_uid_fingerprint
             || !executor
                 .ledger()
-                .entries()
-                .all(|e| e.record.plan.account_uid_fingerprint == preflight.account_uid_fingerprint)
+                .account_scope_matches(&preflight.account_uid_fingerprint)
+                .unwrap_or(false)
         {
             return Ok(None);
         }
@@ -1163,9 +1229,11 @@ impl ExecutionRuntime {
             return Ok(None);
         }
         let mut executor = self.executor.lock().await;
-        if !executor.ledger().entries().all(|entry| {
-            entry.record.plan.account_uid_fingerprint == preflight.account_uid_fingerprint
-        }) {
+        if !executor
+            .ledger()
+            .account_scope_matches(&preflight.account_uid_fingerprint)
+            .unwrap_or(false)
+        {
             return Ok(None);
         }
         Ok(Some(executor.reserve_strategy_capital_with_rearm(
@@ -1333,7 +1401,7 @@ impl ExecutionRuntime {
             return Ok(None);
         };
         let mut executor = self.executor.lock().await;
-        let Some(entry) = executor.ledger().get(intent_id) else {
+        let Some(entry) = executor.ledger().read_intent(intent_id).ok().flatten() else {
             return Ok(None);
         };
         let Some(run) = executor.ledger().capital_reservation() else {
@@ -1413,14 +1481,21 @@ impl ExecutionRuntime {
                             && rust_decimal::Decimal::from_str(&plan.size).ok() == Some(quantity)
                     })
                 && executor.ledger().capital_reservation().is_some_and(|run| {
-                    executor.ledger().entries().any(|owned| {
-                        owned.record.plan.action == ExecutionAction::Open
-                            && owned.record.strategy_run_id.as_deref()
-                                == Some(run.allocation_id.as_str())
-                            && owned.record.plan.instrument_id == plan.instrument_id
-                            && owned.record.plan.position_side == plan.position_side
-                            && owned.record.order_id.is_some()
-                    })
+                    executor
+                        .ledger()
+                        .any_entry_created_since(
+                            &run.account_uid_fingerprint,
+                            run.started_at_ms,
+                            |owned| {
+                                owned.record.plan.action == ExecutionAction::Open
+                                    && owned.record.strategy_run_id.as_deref()
+                                        == Some(run.allocation_id.as_str())
+                                    && owned.record.plan.instrument_id == plan.instrument_id
+                                    && owned.record.plan.position_side == plan.position_side
+                                    && owned.record.order_id.is_some()
+                            },
+                        )
+                        .unwrap_or(false)
                 })
         } else {
             false
@@ -1428,15 +1503,20 @@ impl ExecutionRuntime {
         let finance_complete = if new_risk {
             let ledger = executor.ledger();
             let historical_rejections_safe = ledger.capital_reservation().is_some_and(|run| {
-                ledger.entries().all(|entry| {
-                    entry.created_at_ms < run.started_at_ms
-                        || entry.record.state != ExecutionState::Rejected
-                        || inert_terminal_rejection(
-                            &entry.record,
-                            &run.account_uid_fingerprint,
-                            &run.allocation_id,
-                        )
-                })
+                !ledger
+                    .any_entry_created_since(
+                        &run.account_uid_fingerprint,
+                        run.started_at_ms,
+                        |entry| {
+                            entry.record.state == ExecutionState::Rejected
+                                && !inert_terminal_rejection(
+                                    &entry.record,
+                                    &run.account_uid_fingerprint,
+                                    &run.allocation_id,
+                                )
+                        },
+                    )
+                    .unwrap_or(true)
             });
             historical_rejections_safe
                 && ledger
@@ -1444,6 +1524,16 @@ impl ExecutionRuntime {
                     .zip(ledger.financial_period_for_new_risk(facts, true, plan))
                     .zip(ledger.strategy_nav_watermark())
                     .and_then(|((run, period), point)| {
+                        let policy = plan.risk_binding.as_ref()?;
+                        if !ledger
+                            .daily_risk_allows_new_risk(
+                                point,
+                                &policy.policy.max_daily_realized_loss_usd,
+                            )
+                            .ok()?
+                        {
+                            return None;
+                        }
                         let asof = facts
                             .summary
                             .current_account_as_of_ms
@@ -1775,7 +1865,7 @@ impl ExecutionRuntime {
         intent_id: &str,
     ) -> Option<StrategyCapitalReservation> {
         let owner = self.executor.lock().await;
-        let entry = owner.ledger().get(intent_id)?;
+        let entry = owner.ledger().read_intent(intent_id).ok()??;
         let run = owner.ledger().capital_reservation()?;
         (entry.record.state == ExecutionState::Prepared
             && entry.record.plan.action.is_risk_increasing()
@@ -1821,49 +1911,60 @@ impl ExecutionRuntime {
             return Vec::new();
         };
         ledger
-            .entries()
-            .filter_map(|entry| {
-                let record = &entry.record;
-                if !record.plan.action.is_risk_increasing()
-                    || record.plan.account_uid_fingerprint != run.account_uid_fingerprint
-                    || record.strategy_run_id.as_deref() != Some(run.allocation_id.as_str())
-                {
-                    return None;
-                }
-                let state = match record.state {
-                    ExecutionState::Filled => "FILLED",
-                    ExecutionState::Canceled => "CANCELED",
-                    ExecutionState::Rejected => "REJECTED",
-                    _ => return None,
-                };
-                let plan_sha256 = format!(
-                    "{:x}",
-                    Sha256::digest(serde_json::to_vec(&record.plan).ok()?)
-                );
-                let record_digest =
-                    format!("{:x}", Sha256::digest(serde_json::to_vec(record).ok()?));
-                Some(NativeTerminalRiskCandidate {
-                    reservation_key: native_risk_reservation_key(
-                        &run.account_uid_fingerprint,
-                        &run.allocation_id,
-                        &record.plan.intent_id,
-                    ),
-                    plan_sha256,
-                    ledger: okx_protocol::risk_authority::TerminalRiskLedgerProof {
-                        account_uid: run.account_uid_fingerprint.clone(),
-                        run_id: run.allocation_id.clone(),
-                        intent_id: record.plan.intent_id.clone(),
-                        state: state.to_owned(),
-                        record_digest,
-                    },
-                })
-            })
-            .take(32)
-            .collect()
+            .bounded_run_entries(
+                &run.account_uid_fingerprint,
+                run.started_at_ms,
+                32,
+                |entry| {
+                    let record = &entry.record;
+                    if !record.plan.action.is_risk_increasing()
+                        || record.plan.account_uid_fingerprint != run.account_uid_fingerprint
+                        || record.strategy_run_id.as_deref() != Some(run.allocation_id.as_str())
+                    {
+                        return None;
+                    }
+                    let state = match record.state {
+                        ExecutionState::Filled => "FILLED",
+                        ExecutionState::Canceled => "CANCELED",
+                        ExecutionState::Rejected => "REJECTED",
+                        _ => return None,
+                    };
+                    let plan_sha256 = format!(
+                        "{:x}",
+                        Sha256::digest(serde_json::to_vec(&record.plan).ok()?)
+                    );
+                    let record_digest =
+                        format!("{:x}", Sha256::digest(serde_json::to_vec(record).ok()?));
+                    Some(NativeTerminalRiskCandidate {
+                        reservation_key: native_risk_reservation_key(
+                            &run.account_uid_fingerprint,
+                            &run.allocation_id,
+                            &record.plan.intent_id,
+                        ),
+                        plan_sha256,
+                        ledger: okx_protocol::risk_authority::TerminalRiskLedgerProof {
+                            account_uid: run.account_uid_fingerprint.clone(),
+                            run_id: run.allocation_id.clone(),
+                            intent_id: record.plan.intent_id.clone(),
+                            state: state.to_owned(),
+                            record_digest,
+                        },
+                    })
+                },
+            )
+            // No release candidate can be published from a corrupt, unreadable
+            // or account-mismatched ledger.
+            .unwrap_or_default()
     }
 
     pub async fn entry(&self, intent_id: &str) -> Option<ExecutionLedgerEntry> {
-        self.executor.lock().await.ledger().get(intent_id).cloned()
+        self.executor
+            .lock()
+            .await
+            .ledger()
+            .read_intent(intent_id)
+            .ok()
+            .flatten()
     }
 
     pub async fn reconcile_once(
@@ -1878,7 +1979,7 @@ impl ExecutionRuntime {
             return Ok(ExecutionReconciliation::Unavailable);
         };
         let mut executor = self.executor.lock().await;
-        if executor.ledger().get(intent_id).is_none() {
+        if executor.ledger().read_intent(intent_id)?.is_none() {
             return Err(ExecutionLedgerError::IntentNotFound(intent_id.to_owned()).into());
         }
         match executor.reconcile(intent_id, observed_at_ms).await {
@@ -1905,7 +2006,11 @@ impl ExecutionRuntime {
         intent_id: &str,
     ) -> AgentResult<Option<(ExecutionLedgerEntry, ExecutionStatusEnvelope)>> {
         let executor = self.executor.lock().await;
-        let Some(entry) = executor.ledger().get(intent_id).cloned() else {
+        let Some(entry) = executor
+            .ledger()
+            .read_intent(intent_id)
+            .map_err(AgentError::ExecutionLedger)?
+        else {
             return Ok(None);
         };
         let status =
@@ -2180,7 +2285,8 @@ mod tests {
     #[test]
     fn native_financial_admission_works_after_many_completed_filled_cycles() {
         let run = StrategyCapitalReservation {
-            schema: okx_execution::STRATEGY_CAPITAL_RESERVATION_SCHEMA_V1.to_owned(),
+            schema: okx_execution::STRATEGY_CAPITAL_RESERVATION_SCHEMA_V2.to_owned(),
+            strategy_id: "test_strategy_v1".to_owned(),
             allocation_id: "strategy_run_multiple_flat_cycles_20261019".to_owned(),
             account_uid_fingerprint: "a".repeat(64),
             origin_schema: "okx.manual/v1".to_owned(),
@@ -2335,6 +2441,24 @@ mod tests {
         std::env::temp_dir().join(format!("okx-{label}-{}-{nonce}", process::id()))
     }
 
+    // Test setup uses the same explicit genesis as STOPPED CONTROL.
+    // Runtime construction itself must never manufacture a trading ledger.
+    fn initialize_test_account(root: &Path, demo: bool) {
+        let identity = okx_execution::SqliteAccountIdentity {
+            venue: okx_execution::LedgerVenue::Okx,
+            environment: if demo {
+                okx_execution::LedgerEnvironment::Demo
+            } else {
+                okx_execution::LedgerEnvironment::Production
+            },
+            account_id: if demo { "demo" } else { "real" }.to_owned(),
+            uid_fingerprint: "a".repeat(64),
+            bound_at_ms: 100,
+        };
+        ExecutionLedgerStore::initialize_fresh_account(root, &identity)
+            .expect("explicit fresh test account");
+    }
+
     fn preflight(accepted: bool) -> ExecutorPreflightSnapshot {
         let credential = ExecutorCredentialPreflight {
             schema: crate::execution_preflight::EXECUTOR_CREDENTIAL_PREFLIGHT_SCHEMA_V1,
@@ -2346,7 +2470,7 @@ mod tests {
             executor_withdraw_permission: false,
             executor_ip_bound: true,
             account_identity_match: true,
-            account_uid_fingerprint: "uid-fingerprint".to_owned(),
+            account_uid_fingerprint: "a".repeat(64).to_owned(),
             futures_mode: true,
             long_short_mode: true,
             subaccount: true,
@@ -2412,7 +2536,7 @@ mod tests {
     }
 
     #[test]
-    fn existing_demo_and_production_roots_preserve_both_historical_ledger_files() {
+    fn fresh_sqlite_requires_explicit_genesis_and_never_selects_old_json() {
         let base = temp_root("disjoint-profile-ledger");
         let demo_root = base.join("demo");
         fs::create_dir_all(&demo_root).unwrap();
@@ -2432,6 +2556,7 @@ mod tests {
             )
             .is_err()
         );
+        initialize_test_account(&demo_root, true);
         let demo = ExecutionRuntime::new_demo_acceptance(
             &demo_root,
             OkxEnvironment::new(Region::Global, true),
@@ -2442,20 +2567,19 @@ mod tests {
         .expect("different accepted Demo root");
         assert_eq!(demo.mode(), ExecutionRuntimeMode::DemoAcceptance);
         assert!(!demo_path.exists());
+        drop(demo);
         fs::write(&demo_path, marker).unwrap();
-        assert!(
-            ExecutionRuntime::new_demo_acceptance(
-                &demo_root,
-                OkxEnvironment::new(Region::Global, true),
-                credentials(),
-                101,
-                RateBudget::new(),
-            )
-            .is_err()
-        );
+        let reopened = ExecutionRuntime::new_demo_acceptance(
+            &demo_root,
+            OkxEnvironment::new(Region::Global, true),
+            credentials(),
+            101,
+            RateBudget::new(),
+        )
+        .expect("bound SQL ignores deprecated JSON file");
+        drop(reopened);
         assert_eq!(fs::read(&production_path).unwrap(), marker);
         assert_eq!(fs::read(&demo_path).unwrap(), marker);
-        drop(demo);
         let _ = fs::remove_dir_all(base);
     }
 
@@ -2463,6 +2587,7 @@ mod tests {
     async fn shared_demo_mutation_gate_rejects_foreign_or_missing_uid_and_production_claim() {
         let root = temp_root("one-demo-gate");
         fs::create_dir_all(&root).unwrap();
+        initialize_test_account(&root, true);
         let runtime = ExecutionRuntime::new_demo_acceptance(
             &root,
             OkxEnvironment::new(Region::Global, true),
@@ -2489,6 +2614,7 @@ mod tests {
     async fn native_runtime_drain_preserves_manifest_and_never_grants_new_mutation_authority() {
         let root = temp_root("drain-runtime-unchanged-ledger");
         fs::create_dir_all(&root).unwrap();
+        initialize_test_account(&root, true);
         let runtime = ExecutionRuntime::new_demo_acceptance(
             &root,
             OkxEnvironment::new(Region::Global, true),
@@ -2507,12 +2633,12 @@ mod tests {
                 .expect("sealed native ledger");
         }
         let baseline = runtime
-            .profile_handoff_ledger_assessment("uid-fingerprint")
+            .profile_handoff_ledger_assessment(&"a".repeat(64))
             .await
             .expect("baseline durable ledger");
         assert!(runtime.admit_mutating_request().await.is_some());
         let drained = runtime
-            .drain_mutation_ingress("uid-fingerprint")
+            .drain_mutation_ingress(&"a".repeat(64))
             .await
             .expect("bounded source drain");
         assert_eq!(
@@ -2531,7 +2657,7 @@ mod tests {
             MutationAuthority::Disabled
         );
         let after = runtime
-            .profile_handoff_ledger_assessment("uid-fingerprint")
+            .profile_handoff_ledger_assessment(&"a".repeat(64))
             .await
             .expect("read-only durable ledger");
         assert_eq!(
@@ -2563,6 +2689,7 @@ mod tests {
     async fn demo_acceptance_runtime_starts_with_exchange_mutation_disabled() {
         let root = temp_root("demo-runtime-disabled");
         fs::create_dir_all(&root).expect("root");
+        initialize_test_account(&root, true);
         let runtime = ExecutionRuntime::new_demo_acceptance(
             &root,
             OkxEnvironment::new(Region::Global, true),
@@ -2587,6 +2714,7 @@ mod tests {
     async fn read_only_runtime_cannot_authorize_order_mutation_even_with_accepted_preflight() {
         let root = temp_root("read-only-mutation-disabled");
         fs::create_dir_all(&root).expect("root");
+        initialize_test_account(&root, false);
         let runtime = ExecutionRuntime::new(
             &root,
             OkxEnvironment::new(Region::Global, false),
@@ -2619,10 +2747,12 @@ mod tests {
     async fn strategy_opening_cannot_write_in_read_only_or_on_rejected_demo_preflight() {
         let root = temp_root("capital-opening-owner-fence");
         fs::create_dir_all(&root).expect("root");
+        initialize_test_account(&root, true);
         let authorization = format!("sha256:{}", "a".repeat(64));
         let credential = preflight(true).credential;
         let opening = StrategyAllocationOpening {
             account_uid_fingerprint: credential.account_uid_fingerprint.clone(),
+            strategy_id: "test_strategy_v1".to_owned(),
             account_generation: "fresh".to_owned(),
             observed_usdt_equity: "1000".to_owned(),
             observed_at_ms: 101,
@@ -2633,7 +2763,8 @@ mod tests {
             operator_authority_id: authorization.clone(),
         };
         let reservation = StrategyCapitalReservation {
-            schema: okx_execution::STRATEGY_CAPITAL_RESERVATION_SCHEMA_V1.to_owned(),
+            schema: okx_execution::STRATEGY_CAPITAL_RESERVATION_SCHEMA_V2.to_owned(),
+            strategy_id: "test_strategy_v1".to_owned(),
             allocation_id: "strategy_owner_fence_20261013".to_owned(),
             account_uid_fingerprint: opening.account_uid_fingerprint.clone(),
             origin_schema: "okx.research.live-decision/v1".to_owned(),
@@ -2706,6 +2837,7 @@ mod tests {
     async fn rejected_demo_preflight_does_not_submit_or_touch_ledger() {
         let root = temp_root("demo-submit-rejected-preflight");
         fs::create_dir_all(&root).expect("root");
+        initialize_test_account(&root, true);
         let runtime = ExecutionRuntime::new_demo_acceptance(
             &root,
             OkxEnvironment::new(Region::Global, true),
@@ -2732,6 +2864,7 @@ mod tests {
     async fn rejected_demo_preflight_cannot_authorize_order_mutation() {
         let root = temp_root("demo-mutation-rejected-preflight");
         fs::create_dir_all(&root).expect("root");
+        initialize_test_account(&root, true);
         let runtime = ExecutionRuntime::new_demo_acceptance(
             &root,
             OkxEnvironment::new(Region::Global, true),

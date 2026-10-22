@@ -20,6 +20,28 @@ pub const MAX_ARCHIVED_STRATEGY_RUNS: usize = 256;
 pub const STRATEGY_NAV_POINT_SCHEMA_V1: &str = "okx.strategy-nav-point/v1";
 pub const MAX_STRATEGY_NAV_POINTS: usize = 4096;
 
+/// Native SQL audit supplies the same sealed source identity without
+/// reconstructing all historical exchange events and receipts in memory.
+/// It is only constructed after exact streaming hash verification.
+#[derive(Clone, Debug)]
+pub(crate) struct SourceIdentity {
+    pub account_uid: String,
+    pub run_id: String,
+    pub checksum_sha256: String,
+    pub source_gap_over_two_hours: bool,
+}
+
+impl SourceIdentity {
+    fn from_legacy(evidence: &DurableExchangeEvidence) -> Self {
+        Self {
+            account_uid: evidence.account_uid.clone(),
+            run_id: evidence.run_id.clone(),
+            checksum_sha256: evidence.checksum_sha256.clone(),
+            source_gap_over_two_hours: evidence.summary().source_gap_over_two_hours,
+        }
+    }
+}
+
 /// Bounded, append-only, hash-linked observations owned by the SAME
 /// execution ledger. Sparse observations are not proof of intraday peak
 /// coverage or permission to increase trading risk.
@@ -134,17 +156,27 @@ impl StrategyUnverifiedClosure {
         evidence: &DurableExchangeEvidence,
         closed_at_ms: u64,
     ) -> Result<Self, ExecutionLedgerError> {
+        evidence.validate()?;
+        Self::new_with_source_identity(run, &SourceIdentity::from_legacy(evidence), closed_at_ms)
+    }
+
+    /// A fully authenticated SQL identity replaces the in-memory source map.
+    pub(crate) fn new_with_source_identity(
+        run: &StrategyCapitalReservation,
+        source: &SourceIdentity,
+        closed_at_ms: u64,
+    ) -> Result<Self, ExecutionLedgerError> {
         let mut value = Self {
             schema: STRATEGY_UNVERIFIED_CLOSURE_SCHEMA_V1.to_owned(),
             run_id: run.allocation_id.clone(),
             account_uid: run.account_uid_fingerprint.clone(),
             closed_at_ms,
-            evidence_sha256: evidence.checksum_sha256.clone(),
+            evidence_sha256: source.checksum_sha256.clone(),
             reason: "SOURCE_CONTINUITY_NOT_PROVEN".to_owned(),
             checksum_sha256: String::new(),
         };
         value.checksum_sha256 = value.hash()?;
-        value.validate(run, evidence)?;
+        value.validate_source_identity(run, source)?;
         Ok(value)
     }
 
@@ -168,14 +200,22 @@ impl StrategyUnverifiedClosure {
         evidence: &DurableExchangeEvidence,
     ) -> Result<(), ExecutionLedgerError> {
         evidence.validate()?;
+        self.validate_source_identity(run, &SourceIdentity::from_legacy(evidence))
+    }
+
+    pub(crate) fn validate_source_identity(
+        &self,
+        run: &StrategyCapitalReservation,
+        source: &SourceIdentity,
+    ) -> Result<(), ExecutionLedgerError> {
         if self.schema != STRATEGY_UNVERIFIED_CLOSURE_SCHEMA_V1
             || self.run_id != run.allocation_id
             || self.account_uid != run.account_uid_fingerprint
-            || evidence.run_id != run.allocation_id
-            || evidence.account_uid != run.account_uid_fingerprint
+            || source.run_id != run.allocation_id
+            || source.account_uid != run.account_uid_fingerprint
             || self.closed_at_ms <= run.started_at_ms
-            || self.evidence_sha256 != evidence.checksum_sha256
-            || !evidence.summary().source_gap_over_two_hours
+            || self.evidence_sha256 != source.checksum_sha256
+            || !source.source_gap_over_two_hours
             || self.reason != "SOURCE_CONTINUITY_NOT_PROVEN"
             || self.checksum_sha256 != self.hash()?
         {
@@ -252,14 +292,28 @@ impl StrategyFinalization {
         report: &StrategyFinancialPeriod,
         finalized_at_ms: u64,
     ) -> Result<Self, ExecutionLedgerError> {
+        evidence.validate()?;
+        Self::new_with_source_identity(
+            run,
+            &SourceIdentity::from_legacy(evidence),
+            report,
+            finalized_at_ms,
+        )
+    }
+
+    /// Native finalization uses an authenticated SQL source digest directly,
+    /// without materializing a historical DurableExchangeEvidence object.
+    pub(crate) fn new_with_source_identity(
+        run: &StrategyCapitalReservation,
+        source: &SourceIdentity,
+        report: &StrategyFinancialPeriod,
+        finalized_at_ms: u64,
+    ) -> Result<Self, ExecutionLedgerError> {
         if report.state != "FLAT_RECONCILED"
             || report.run_id != run.allocation_id
-            || report.evidence_sha256 != evidence.checksum_sha256
+            || report.evidence_sha256 != source.checksum_sha256
             || !report.reasons.is_empty()
             || report.linked_bills != report.linked_fills
-            // Source-complete financial assessment attests zero funding.
-            // Unknown/non-zero amounts cannot be finalized without exact
-            // native strategy attribution and a versioned finalization model.
             || report.funding_usdt.as_deref() != Some("0")
             || finalized_at_ms <= run.started_at_ms
         {
@@ -274,14 +328,14 @@ impl StrategyFinalization {
             run_id: run.allocation_id.clone(),
             account_uid: run.account_uid_fingerprint.clone(),
             finalized_at_ms,
-            evidence_sha256: evidence.checksum_sha256.clone(),
+            evidence_sha256: source.checksum_sha256.clone(),
             nav_usdt,
             realized_usdt: report.realized_usdt.clone(),
             fees_usdt: report.fees_usdt.clone(),
             checksum_sha256: String::new(),
         };
         value.checksum_sha256 = value.hash()?;
-        value.validate(run, evidence)?;
+        value.validate_source_identity(run, source)?;
         Ok(value)
     }
 
@@ -305,12 +359,20 @@ impl StrategyFinalization {
         evidence: &DurableExchangeEvidence,
     ) -> Result<(), ExecutionLedgerError> {
         evidence.validate()?;
+        self.validate_source_identity(run, &SourceIdentity::from_legacy(evidence))
+    }
+
+    pub(crate) fn validate_source_identity(
+        &self,
+        run: &StrategyCapitalReservation,
+        source: &SourceIdentity,
+    ) -> Result<(), ExecutionLedgerError> {
         if self.schema != STRATEGY_FINALIZATION_SCHEMA_V1
             || self.run_id != run.allocation_id
             || self.account_uid != run.account_uid_fingerprint
-            || evidence.run_id != run.allocation_id
-            || evidence.account_uid != run.account_uid_fingerprint
-            || self.evidence_sha256 != evidence.checksum_sha256
+            || source.run_id != run.allocation_id
+            || source.account_uid != run.account_uid_fingerprint
+            || self.evidence_sha256 != source.checksum_sha256
             || self.finalized_at_ms <= run.started_at_ms
             || self.checksum_sha256 != self.hash()?
             || [&self.nav_usdt, &self.realized_usdt, &self.fees_usdt]
@@ -436,6 +498,32 @@ impl StrategyPeriodHistory {
         active: Option<&StrategyCapitalReservation>,
         evidence: Option<&DurableExchangeEvidence>,
     ) -> Result<(), ExecutionLedgerError> {
+        if let Some(source) = evidence {
+            source.validate()?;
+        }
+        let identity = evidence.map(SourceIdentity::from_legacy);
+        self.validate_indexed(active, identity.as_ref(), |key| {
+            Ok(evidence.and_then(|source| source.cursors.get(key).cloned()))
+        })
+    }
+
+    /// Same lineage rules for native SQLite and sealed legacy v14.
+    /// The supplied source identity must already be stream-attested, and
+    /// every active-run cursor is read exactly by immutable source key.
+    pub(crate) fn validate_indexed<F>(
+        &self,
+        active: Option<&StrategyCapitalReservation>,
+        source: Option<&SourceIdentity>,
+        mut source_cursor: F,
+    ) -> Result<(), ExecutionLedgerError>
+    where
+        F: FnMut(
+            &str,
+        ) -> Result<
+            Option<crate::exchange_evidence::ExchangeCoverageCursor>,
+            ExecutionLedgerError,
+        >,
+    {
         if self.archived_runs.len() + self.unverified_runs.len() > MAX_ARCHIVED_STRATEGY_RUNS {
             return Err(ExecutionLedgerError::ExchangeEvidenceCapacity);
         }
@@ -495,7 +583,7 @@ impl StrategyPeriodHistory {
                     "next run predates prior financial close",
                 ));
             }
-        } else if evidence.is_some()
+        } else if source.is_some()
             || self.finalized_run.is_some()
             || !self.archived_runs.is_empty()
             || !self.unverified_runs.is_empty()
@@ -511,12 +599,12 @@ impl StrategyPeriodHistory {
             ));
         }
         if let Some(unverified) = &self.unverified_run {
-            let (Some(run), Some(source)) = (active, evidence) else {
+            let (Some(run), Some(source)) = (active, source) else {
                 return Err(ExecutionLedgerError::Corrupt(
                     "orphaned unverified strategy closure",
                 ));
             };
-            unverified.validate(run, source)?;
+            unverified.validate_source_identity(run, source)?;
         }
         if self.stop_rearms.len() > MAX_ARCHIVED_STRATEGY_RUNS {
             return Err(ExecutionLedgerError::ExchangeEvidenceCapacity);
@@ -569,8 +657,7 @@ impl StrategyPeriodHistory {
             let owner = active
                 .filter(|r| r.allocation_id == point.run_id)
                 .and_then(|r| {
-                    evidence
-                        .map(|source| (r.started_at_ms, None, r.allocated_usdt.as_str(), source))
+                    source.map(|_| (r.started_at_ms, None, r.allocated_usdt.as_str(), None))
                 })
                 .or_else(|| {
                     self.archived_runs
@@ -581,7 +668,7 @@ impl StrategyPeriodHistory {
                                 r.reservation.started_at_ms,
                                 Some(r.finalization.finalized_at_ms),
                                 r.reservation.allocated_usdt.as_str(),
-                                &r.evidence,
+                                Some(&r.evidence),
                             )
                         })
                 })
@@ -594,7 +681,7 @@ impl StrategyPeriodHistory {
                                 r.reservation.started_at_ms,
                                 Some(r.closure.closed_at_ms),
                                 r.reservation.allocated_usdt.as_str(),
-                                &r.evidence,
+                                Some(&r.evidence),
                             )
                         })
                 });
@@ -603,20 +690,21 @@ impl StrategyPeriodHistory {
                     "NAV checkpoint has no run owner",
                 ));
             };
-            let cursor_proven = source
-                .cursors
-                .get(&point.source_cursor_key)
-                .is_some_and(|c| {
-                    c.order_complete
-                        && c.fill_complete
-                        && c.bill_complete
-                        && c.account_as_of_ms <= point.account_as_of_ms
-                        && point.account_as_of_ms - c.account_as_of_ms
-                            <= crate::exchange_evidence::MAX_SOURCE_COVERAGE_GAP_MS
-                        && serde_json::to_vec(c).ok().is_some_and(|data| {
-                            format!("{:x}", Sha256::digest(data)) == point.source_cursor_sha256
-                        })
-                });
+            let cursor = match source {
+                Some(archived) => archived.cursors.get(&point.source_cursor_key).cloned(),
+                None => source_cursor(&point.source_cursor_key)?,
+            };
+            let cursor_proven = cursor.as_ref().is_some_and(|c| {
+                c.order_complete
+                    && c.fill_complete
+                    && c.bill_complete
+                    && c.account_as_of_ms <= point.account_as_of_ms
+                    && point.account_as_of_ms - c.account_as_of_ms
+                        <= crate::exchange_evidence::MAX_SOURCE_COVERAGE_GAP_MS
+                    && serde_json::to_vec(c).ok().is_some_and(|data| {
+                        format!("{:x}", Sha256::digest(data)) == point.source_cursor_sha256
+                    })
+            });
             if point.account_as_of_ms < started_at_ms
                 || ended_at_ms.is_some_and(|end| point.observed_at_ms > end)
                 || previous.is_some_and(|p| {
@@ -658,12 +746,12 @@ impl StrategyPeriodHistory {
             previous = Some(point);
         }
         if let Some(finalized) = &self.finalized_run {
-            let (Some(run), Some(source)) = (active, evidence) else {
+            let (Some(run), Some(source)) = (active, source) else {
                 return Err(ExecutionLedgerError::Corrupt(
                     "finalized period without source events",
                 ));
             };
-            finalized.validate(run, source)?;
+            finalized.validate_source_identity(run, source)?;
         }
         Ok(())
     }
@@ -851,11 +939,12 @@ mod tests {
         assert!(!bytes.is_empty());
     }
 
-    use crate::STRATEGY_CAPITAL_RESERVATION_SCHEMA_V1;
+    use crate::STRATEGY_CAPITAL_RESERVATION_SCHEMA_V2;
 
     fn reservation() -> StrategyCapitalReservation {
         StrategyCapitalReservation {
-            schema: STRATEGY_CAPITAL_RESERVATION_SCHEMA_V1.to_owned(),
+            schema: STRATEGY_CAPITAL_RESERVATION_SCHEMA_V2.to_owned(),
+            strategy_id: "test_strategy_v1".to_owned(),
             allocation_id: "run_finalization_demo_01234".to_owned(),
             account_uid_fingerprint: "uid-demo".to_owned(),
             origin_schema: "okx.research.live-decision/v1".to_owned(),
@@ -1126,7 +1215,23 @@ mod tests {
             usable_for_new_risk: false,
             reasons: vec![],
         };
-        assert!(StrategyFinalization::new(&run, &evidence, &report, 2000).is_ok());
+        let legacy = StrategyFinalization::new(&run, &evidence, &report, 2000).unwrap();
+        let indexed = StrategyFinalization::new_with_source_identity(
+            &run,
+            &SourceIdentity::from_legacy(&evidence),
+            &report,
+            2000,
+        )
+        .unwrap();
+        assert_eq!(
+            legacy, indexed,
+            "native and legacy finalization proofs must match"
+        );
+        let mut tampered = SourceIdentity::from_legacy(&evidence);
+        tampered.checksum_sha256 = "0".repeat(64);
+        assert!(
+            StrategyFinalization::new_with_source_identity(&run, &tampered, &report, 2000).is_err()
+        );
         for funding in [None, Some("1"), Some("-0.01"), Some("invalid")] {
             report.funding_usdt = funding.map(str::to_owned);
             assert!(matches!(

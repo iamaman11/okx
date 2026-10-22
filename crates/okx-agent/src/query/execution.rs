@@ -13,7 +13,7 @@ use okx_execution::{
     ExecutionTcaMechanicsBinding, ExecutionTransitionError, FencedProtectiveShrinkRequest,
     OrderExecutorError, OrderSide as ExecutionOrderSide, OrderType,
     PositionSide as ExecutionPositionSide, PrepareDeferral, PrepareFailure, PrepareOutcome,
-    PrepareRejection, ReverseContinuation, ReverseLeg, STRATEGY_CAPITAL_RESERVATION_SCHEMA_V1,
+    PrepareRejection, ReverseContinuation, ReverseLeg, STRATEGY_CAPITAL_RESERVATION_SCHEMA_V2,
     StrategyAllocationOpening, StrategyCapitalReservation, TradeMode, prepare_execution,
     revalidate_amend_execution_plan, revalidate_execution_plan, revalidate_hard_risk_policy,
     revalidate_venue_execution,
@@ -199,25 +199,9 @@ pub(super) async fn dispatch(
         AgentOperation::ExecutorPreflight => {
             executor_preflight(request, context, generated_at).await
         }
-        AgentOperation::MigrateFinalizedLedgerStorage {
-            allocation_id,
-            expected_manifest_sha256,
-            expected_finalized_checksum_sha256,
-            expected_stopped_at_ms,
-        } => {
-            migrate_finalized_storage(
-                request,
-                context,
-                generated_at,
-                allocation_id,
-                expected_manifest_sha256,
-                expected_finalized_checksum_sha256,
-                *expected_stopped_at_ms,
-            )
-            .await
-        }
         AgentOperation::BeginStrategyRun {
             allocation_id,
+            strategy_id,
             origin_schema,
             origin_version,
             mandate_version,
@@ -231,6 +215,7 @@ pub(super) async fn dispatch(
                 generated_at,
                 StrategyOpeningRequest {
                     allocation_id,
+                    strategy_id,
                     origin_schema,
                     origin_version,
                     mandate_version,
@@ -324,66 +309,6 @@ pub(super) async fn dispatch(
     }
 }
 
-/// Locally migrate only the exact FINALIZED, stopped and hash-pinned
-/// financial storage. No OKX REST/WS, orders, risk rearm or new strategy run.
-async fn migrate_finalized_storage(
-    request: &AgentRequest,
-    context: ObservationQueryContext<'_>,
-    generated_at: &str,
-    run_id: &str,
-    expected_manifest_sha256: &str,
-    expected_finalized_checksum_sha256: &str,
-    expected_stopped_at_ms: u64,
-) -> AgentResult<AgentResponse> {
-    let Some(owner) = context.execution else {
-        return Ok(execution_unavailable(request, generated_at));
-    };
-    if !owner.demo_mutation_acceptance_requested() {
-        return Ok(failure_response(
-            request,
-            generated_at,
-            AgentResponseStatus::Rejected,
-            LIVE_TRADING_DISABLED_CODE,
-            "storage maintenance requires the verified active Demo owner; Production remains read-only".to_owned(),
-            false,
-        ));
-    }
-    match owner
-        .migrate_finalized_storage_v14_demo(
-            run_id,
-            expected_manifest_sha256,
-            expected_finalized_checksum_sha256,
-            expected_stopped_at_ms,
-        )
-        .await
-    {
-        Ok(Some(proof)) => Ok(completed(
-            request,
-            generated_at,
-            okx_execution::LEDGER_STORAGE_ATTESTATION_SCHEMA_V1,
-            serde_json::to_value(proof)?,
-        )),
-        Ok(None) => Ok(failure_response(
-            request,
-            generated_at,
-            AgentResponseStatus::Rejected,
-            LIVE_TRADING_DISABLED_CODE,
-            "storage maintenance forbidden outside native Demo profile".to_owned(),
-            false,
-        )),
-        Err(error) => Ok(failure_response(
-            request,
-            generated_at,
-            AgentResponseStatus::Failed,
-            EXECUTION_LEDGER_CAPACITY_EXHAUSTED_CODE,
-            format!(
-                "storage migration failed or result uncertain; read-only storage audit required before any repeat: {error}"
-            ),
-            false,
-        )),
-    }
-}
-
 /// Native source-only readiness shared by read-only account diagnostics and
 /// the authoritative Demo BEGIN operation. Does not attest executor credentials,
 /// WS convergence, or capital allocation. No financial values are disclosed.
@@ -460,6 +385,7 @@ pub(super) fn strategy_opening_source_blockers(
 /// the *allocation choice* only; REST/WS/account/OCO proof is sourced here.
 struct StrategyOpeningRequest<'a> {
     allocation_id: &'a str,
+    strategy_id: &'a str,
     origin_schema: &'a str,
     origin_version: &'a str,
     mandate_version: &'a str,
@@ -476,6 +402,7 @@ async fn begin_strategy_run(
 ) -> AgentResult<AgentResponse> {
     let StrategyOpeningRequest {
         allocation_id,
+        strategy_id,
         origin_schema,
         origin_version,
         mandate_version,
@@ -573,6 +500,7 @@ async fn begin_strategy_run(
     let observed_at_ms = utc_now_ms();
     let opening = StrategyAllocationOpening {
         account_uid_fingerprint: preflight.account_uid_fingerprint.clone(),
+        strategy_id: strategy_id.to_owned(),
         account_generation: snapshot.account_generation.clone(),
         observed_usdt_equity: usdt_equity.to_owned(),
         observed_at_ms,
@@ -583,7 +511,8 @@ async fn begin_strategy_run(
         operator_authority_id: operator_authority_id.to_owned(),
     };
     let reservation = StrategyCapitalReservation {
-        schema: STRATEGY_CAPITAL_RESERVATION_SCHEMA_V1.to_owned(),
+        schema: STRATEGY_CAPITAL_RESERVATION_SCHEMA_V2.to_owned(),
+        strategy_id: strategy_id.to_owned(),
         allocation_id: allocation_id.to_owned(),
         account_uid_fingerprint: opening.account_uid_fingerprint.clone(),
         origin_schema: origin_schema.to_owned(),
@@ -625,7 +554,7 @@ async fn begin_strategy_run(
         Some(Ok(value)) => Ok(completed(
             request,
             generated_at,
-            STRATEGY_CAPITAL_RESERVATION_SCHEMA_V1,
+            STRATEGY_CAPITAL_RESERVATION_SCHEMA_V2,
             serde_json::to_value(value)?,
         )),
         Some(Err(error)) => Ok(deny(format!(
@@ -1938,15 +1867,15 @@ async fn reserve_native_risk_for_submit(
                 && a.uid_fingerprint == plan.account_uid_fingerprint
         })
         .ok_or("RISK_ACCOUNT_NOT_REGISTERED")?;
-    // Strategy identity is the persisted run mandate, not a name chosen by
-    // ChatGPT for this reservation. Unmapped mandates cannot mint a grant.
-    if !account
+    // Strategy identity comes from the immutable run binding. Mandate
+    // version is independent policy metadata and cannot impersonate a
+    // registered strategy or acquire its RiskBook reservation.
+    let strategy_id = account
         .strategies
         .iter()
-        .any(|strategy| strategy.enabled && strategy.id == run.mandate_version)
-    {
-        return Err("RISK_STRATEGY_NOT_REGISTERED");
-    }
+        .find(|strategy| strategy.enabled && strategy.id == run.strategy_id)
+        .map(|strategy| strategy.id.as_str())
+        .ok_or("RISK_STRATEGY_NOT_REGISTERED")?;
     let requested = plan
         .open_risk
         .as_ref()
@@ -1964,7 +1893,7 @@ async fn reserve_native_risk_for_submit(
             account_uid: plan.account_uid_fingerprint.clone(),
             run_id: run.allocation_id.clone(),
             intent_id: intent_id.to_owned(),
-            strategy_id: run.mandate_version.clone(),
+            strategy_id: strategy_id.to_owned(),
             instrument_id: plan.instrument_id.clone(),
             plan_sha256: plan_sha256.clone(),
             requested_loss_usdt: requested,

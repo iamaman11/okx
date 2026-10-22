@@ -2,6 +2,7 @@ name: CI
 
 on:
   pull_request:
+    types: [opened, reopened, synchronize, ready_for_review]
   push:
     branches:
       - main
@@ -95,6 +96,10 @@ jobs:
       - name: Enforce accepted local-crate dependency graph
         run: python3 scripts/check_architecture.py
 
+      - name: Verify versioned SQLite account ledger schema
+        run: python3 scripts/check_ledger_sql.py
+
+
   linux-rust:
     name: linux-rust
     needs: classify
@@ -120,6 +125,11 @@ jobs:
 
       - name: Test portable crates
         run: cargo test --locked --workspace --exclude okx-agent --exclude okx-host-control
+
+      - name: Accept one million native SQLite terminal intents
+        if: github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.head_ref == 'feat/sqlite-ledger-accounting-epochs-20261020' && github.event.pull_request.draft == false)
+        timeout-minutes: 30
+        run: cargo test --locked -p okx-execution --lib sqlite_million_history_bounded_rss -- --ignored --nocapture
 
 
   cloudflare-mcp:

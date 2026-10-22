@@ -30,6 +30,11 @@ use crate::{
     model::{valid_intent_id, valid_mutation_id},
 };
 
+mod sqlite_finance;
+mod sqlite_source;
+pub use sqlite_finance::{AccountCashflowBucket, AccountFinanceWindow};
+mod sqlite_store;
+
 pub const EXECUTION_LEDGER_SCHEMA_V1: &str = "okx.execution-ledger/v1";
 pub const EXECUTION_LEDGER_SCHEMA_V2: &str = "okx.execution-ledger/v2";
 pub const EXECUTION_LEDGER_SCHEMA_V3: &str = "okx.execution-ledger/v3";
@@ -47,10 +52,10 @@ pub const EXECUTION_LEDGER_SCHEMA_V14: &str = "okx.execution-ledger/v14";
 pub const LEVERAGE_ATTEMPT_SCHEMA_V1: &str = "okx.leverage-change-attempt/v1";
 const MAX_LEVERAGE_ATTEMPTS: usize = 256;
 const MAX_SEALED_ARCHIVE_BYTES: u64 = 128 * 1024 * 1024;
-pub const STRATEGY_CAPITAL_RESERVATION_SCHEMA_V1: &str = "okx.strategy-capital-reservation/v1";
+pub const STRATEGY_CAPITAL_RESERVATION_SCHEMA_V2: &str = "okx.strategy-capital-reservation/v2";
 pub const EXECUTION_RISK_STOP_SCHEMA_V1: &str = "okx.execution-risk-stop/v1";
 pub const MAX_EXECUTION_LEDGER_RECORDS: usize = 10_000;
-const DEFAULT_EXECUTION_LEDGER_PATH: &str = r"C:\okx-runtime\execution-ledger.json";
+const DEFAULT_EXECUTION_LEDGER_PATH: &str = r"C:\okx-runtime\execution-ledger.sqlite";
 
 pub const PROFILE_HANDOFF_LEDGER_ASSESSMENT_SCHEMA_V1: &str =
     "okx.profile-handoff-ledger-assessment/v1";
@@ -207,6 +212,7 @@ fn validate_risk_stop(value: &ExecutionRiskStop) -> Result<(), ExecutionLedgerEr
 #[serde(deny_unknown_fields)]
 pub struct StrategyCapitalReservation {
     pub schema: String,
+    pub strategy_id: String,
     pub allocation_id: String,
     pub account_uid_fingerprint: String,
     pub origin_schema: String,
@@ -222,6 +228,7 @@ pub struct StrategyCapitalReservation {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StrategyAllocationOpening {
     pub account_uid_fingerprint: String,
+    pub strategy_id: String,
     pub account_generation: String,
     pub observed_usdt_equity: String,
     pub observed_at_ms: u64,
@@ -237,8 +244,14 @@ fn validate_capital_reservation(
 ) -> Result<(), ExecutionLedgerError> {
     let allocated = Decimal::from_str(&r.allocated_usdt).ok();
     let equity = Decimal::from_str(&r.opening_account_usdt_equity).ok();
-    if r.schema != STRATEGY_CAPITAL_RESERVATION_SCHEMA_V1
+    if r.schema != STRATEGY_CAPITAL_RESERVATION_SCHEMA_V2
         || !valid_intent_id(&r.allocation_id)
+        || !(2..=64).contains(&r.strategy_id.len())
+        || !r.strategy_id.as_bytes()[0].is_ascii_alphabetic()
+        || !r
+            .strategy_id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
         || r.account_uid_fingerprint.trim().is_empty()
         || r.account_generation.trim().is_empty()
         || r.origin_schema.trim().is_empty()
@@ -359,6 +372,11 @@ impl ArchivedRunKind {
     }
 }
 
+mod account_context;
+pub use account_context::{
+    AccountContext, AccountContextHandle, AccountContextRegistry, AccountKey,
+};
+
 type LoadedExecutionLedger = (
     BTreeMap<String, ExecutionLedgerEntry>,
     Option<ExecutionRiskStop>,
@@ -391,25 +409,236 @@ pub struct LedgerStorageAttestation {
     pub trading_admission: &'static str,
 }
 
+/// Storage identity is native to the execution domain, independent of
+/// transport DTOs. At the Agent boundary we map the verified native route.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum LedgerVenue {
+    Okx,
+    Bybit,
+}
+
+impl LedgerVenue {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Okx => "okx",
+            Self::Bybit => "bybit",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum LedgerEnvironment {
+    Production,
+    Demo,
+}
+
+/// Persisted account ownership is a type-safe storage identity, not a
+/// credential or trading authorization. The caller MUST derive it from the
+/// existing authenticated native account route, never an MCP/JSON claim.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SqliteAccountIdentity {
+    pub venue: LedgerVenue,
+    pub environment: LedgerEnvironment,
+    pub account_id: String,
+    pub uid_fingerprint: String,
+    pub bound_at_ms: u64,
+}
+
+impl SqliteAccountIdentity {
+    fn validate(&self) -> Result<(), ExecutionLedgerError> {
+        let id = self.account_id.as_bytes();
+        let uid = self.uid_fingerprint.as_bytes();
+        if id.is_empty()
+            || id.len() > 32
+            || !id[0].is_ascii_lowercase()
+            || !id
+                .iter()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == b'-')
+            || id.last() == Some(&b'-')
+            || uid.len() != 64
+            || !uid
+                .iter()
+                .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(c))
+            || self.bound_at_ms == 0
+            || i64::try_from(self.bound_at_ms).is_err()
+        {
+            return Err(ExecutionLedgerError::AccountScopeMismatch);
+        }
+        Ok(())
+    }
+
+    /// Identity comparison for an idempotent fresh genesis. The original
+    /// creation timestamp is immutable metadata, NOT part of the account key.
+    /// A retried request may have a later observation time but can never
+    /// change venue, environment, account ID or authenticated UID.
+    pub fn same_account_as(&self, existing: &Self) -> bool {
+        self.venue == existing.venue
+            && self.environment == existing.environment
+            && self.account_id == existing.account_id
+            && self.uid_fingerprint == existing.uid_fingerprint
+    }
+
+    fn venue_key(&self) -> &'static str {
+        self.venue.as_str()
+    }
+
+    fn environment_key(&self) -> &'static str {
+        match self.environment {
+            LedgerEnvironment::Production => "production",
+            LedgerEnvironment::Demo => "demo",
+        }
+    }
+}
+
+/// Bounded historical page from the immutable SQLite intent index.
+/// The cursor is the last returned intent ID (keyset pagination), never an
+/// offset into an ever-growing ledger or an execution/replay capability.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SqliteIntentPage {
+    pub entries: Vec<ExecutionLedgerEntry>,
+    pub next_after: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct ExecutionLedgerStore {
     path: PathBuf,
     max_records: usize,
+    sqlite_native: bool,
 }
 
 impl ExecutionLedgerStore {
     pub fn canonical() -> Self {
-        Self {
-            path: PathBuf::from(DEFAULT_EXECUTION_LEDGER_PATH),
-            max_records: MAX_EXECUTION_LEDGER_RECORDS,
-        }
+        Self::sqlite_at(DEFAULT_EXECUTION_LEDGER_PATH)
     }
 
     pub fn at(path: impl Into<PathBuf>) -> Self {
         Self {
             path: path.into(),
             max_records: MAX_EXECUTION_LEDGER_RECORDS,
+            sqlite_native: false,
         }
+    }
+
+    /// New embedded native storage. Production remains on v14 until a
+    /// fully verified native cutover explicitly selects this store.
+    pub fn sqlite_at(path: impl Into<PathBuf>) -> Self {
+        Self {
+            path: path.into(),
+            // The fixed v14 manifest cap is not a SQLite database limit.
+            // Indexes and query bounds, not artificial lifetime ceilings,
+            // limit the native store. Hot-path delta APIs follow separately.
+            max_records: usize::MAX,
+            sqlite_native: true,
+        }
+    }
+
+    /// SQL is the sole operational account owner. An unbound or missing
+    /// database is NEVER interpreted as an empty existing trading account.
+    /// Legacy files are not read, migrated, or selected as execution owners.
+    pub fn select_published_owner(root: &Path) -> Result<Self, ExecutionLedgerError> {
+        Self::select_published_owner_impl(root)
+    }
+
+    pub fn select_published_owner_under_writer_lease(
+        root: &Path,
+        _writer_lease: &mut File,
+    ) -> Result<Self, ExecutionLedgerError> {
+        Self::select_published_owner_impl(root)
+    }
+
+    fn select_published_owner_impl(root: &Path) -> Result<Self, ExecutionLedgerError> {
+        let native = Self::sqlite_at(root.join("execution-ledger.sqlite"));
+        let identity = native
+            .bound_native_account_identity()?
+            .ok_or(ExecutionLedgerError::AccountScopeMismatch)?;
+        sqlite_store::attest_published_owner(native.path(), &identity.uid_fingerprint)?;
+        Ok(native)
+    }
+
+    /// Single Genesis of an already independently verified FLAT account.
+    /// This is one SQLite owner, not a conversion of v14 accounting.
+    /// The caller holds a stopped Agent and empty CONTROL Windows Job.
+    /// If the acknowledgement was lost, the SAME bound database is read,
+    /// never replaced or replayed.
+    pub fn initialize_fresh_account(
+        root: &Path,
+        identity: &SqliteAccountIdentity,
+    ) -> Result<Self, ExecutionLedgerError> {
+        identity.validate()?;
+        let _lease = Self::acquire_writer_lease(root)?;
+        let native = Self::sqlite_at(root.join("execution-ledger.sqlite"));
+        // One transaction owns both the empty state and immutable identity.
+        // An uncommitted schema-only DB is safe to finish after a crash.
+        sqlite_store::initialize_account(native.path(), identity)?;
+        sqlite_store::attest_published_owner(native.path(), &identity.uid_fingerprint)?;
+        let bound = native
+            .bound_native_account_identity()?
+            .ok_or(ExecutionLedgerError::AccountScopeMismatch)?;
+        if !identity.same_account_as(&bound) {
+            return Err(ExecutionLedgerError::AccountScopeMismatch);
+        }
+        // Local v14 evidence is not imported. Only application-owned legacy
+        // paths are discarded, and only AFTER cold attestation of the new
+        // immutable SQL owner. Retrying cleanup is idempotent.
+        for name in [
+            "execution-ledger.json",
+            "execution-ledger.v14.sealed",
+            "execution-ledger.pre-v14.json",
+            "execution-ledger.owner",
+        ] {
+            let old = root.join(name);
+            if old.try_exists()? {
+                if !old.is_file() {
+                    return Err(ExecutionLedgerError::Corrupt(
+                        "legacy ledger path not a file",
+                    ));
+                }
+                fs::remove_file(old)?;
+            }
+        }
+        let archived = root.join("execution-ledger.archive");
+        if archived.try_exists()? {
+            if !archived.is_dir() {
+                return Err(ExecutionLedgerError::Corrupt(
+                    "legacy archive path not a directory",
+                ));
+            }
+            fs::remove_dir_all(archived)?;
+        }
+        Ok(native)
+    }
+
+    /// Exclusive filesystem lease shared by the live SQL account writer and
+    /// the verified CONTROL genesis operation. Unlike in-process mutexes this excludes a second
+    /// process even if it starts outside the current Windows Job.
+    pub fn acquire_writer_lease(root: &Path) -> Result<File, ExecutionLedgerError> {
+        fs::create_dir_all(root)?;
+        let lease = File::options()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(root.join("execution-ledger.writer-lock"))?;
+        lease
+            .try_lock()
+            .map_err(|_| ExecutionLedgerError::Corrupt("ledger writer lease unavailable"))?;
+        Ok(lease)
+    }
+
+    /// Account-level, read-only observed financial movements from immutable
+    /// native bills. Never an independent NAV, strategy attribution, or permit.
+    pub fn observed_finance_window(
+        &self,
+        expected_uid: &str,
+        from_ms: u64,
+        through_ms: u64,
+    ) -> Result<AccountFinanceWindow, ExecutionLedgerError> {
+        if !self.sqlite_native {
+            return Err(ExecutionLedgerError::Corrupt(
+                "SQLite finance storage not active",
+            ));
+        }
+        sqlite_finance::finance_window(&self.path, expected_uid, from_ms, through_ms)
     }
 
     #[cfg(test)]
@@ -417,7 +646,86 @@ impl ExecutionLedgerStore {
         Self {
             path: path.into(),
             max_records,
+            sqlite_native: false,
         }
+    }
+
+    /// Exact native writer read, including historical terminal intents that
+    /// are deliberately absent from the operational guard map. The returned
+    /// value is owned and verified against the durable SQL projection.
+    pub fn read_intent(
+        &self,
+        intent_id: &str,
+    ) -> Result<Option<ExecutionLedgerEntry>, ExecutionLedgerError> {
+        if self.sqlite_native {
+            sqlite_store::owner_intent(&self.path, intent_id)
+        } else {
+            let (entries, _, _, _, _, _) = self.load()?;
+            Ok(entries.get(intent_id).cloned())
+        }
+    }
+
+    /// Read historical account intents without materializing the whole
+    /// ledger. This read-only API is explicitly independent of the hot
+    /// in-memory execution state machine. It never grants POST authority.
+    pub fn indexed_intent_page(
+        &self,
+        expected_uid: &str,
+        after_intent_id: Option<&str>,
+        limit: usize,
+    ) -> Result<SqliteIntentPage, ExecutionLedgerError> {
+        if !self.sqlite_native {
+            return Err(ExecutionLedgerError::Corrupt(
+                "indexed history requires native SQLite owner",
+            ));
+        }
+        sqlite_store::indexed_intent_page(&self.path, expected_uid, after_intent_id, limit)
+    }
+
+    /// Exact ID read with indexed lookup and per-row digest + projection
+    /// validation. A missing ID returns None, never an empty new account.
+    pub fn indexed_intent(
+        &self,
+        expected_uid: &str,
+        intent_id: &str,
+    ) -> Result<Option<ExecutionLedgerEntry>, ExecutionLedgerError> {
+        if !self.sqlite_native {
+            return Err(ExecutionLedgerError::Corrupt(
+                "indexed history requires native SQLite owner",
+            ));
+        }
+        sqlite_store::indexed_intent(&self.path, expected_uid, intent_id)
+    }
+
+    /// Bind a native-authenticated account once to an existing SQLite
+    /// ledger. Never creates a new ledger, never replaces a foreign owner,
+    /// and does not change risk or exchange mutation permissions.
+    pub fn bind_native_account_identity(
+        &self,
+        identity: &SqliteAccountIdentity,
+    ) -> Result<(), ExecutionLedgerError> {
+        if !self.sqlite_native {
+            return Err(ExecutionLedgerError::Corrupt(
+                "account identity binding requires existing SQLite",
+            ));
+        }
+        identity.validate()?;
+        sqlite_store::bind_account_identity(&self.path, identity)
+    }
+
+    pub fn bound_native_account_identity(
+        &self,
+    ) -> Result<Option<SqliteAccountIdentity>, ExecutionLedgerError> {
+        if !self.sqlite_native {
+            return Err(ExecutionLedgerError::Corrupt(
+                "account identity lookup requires existing SQLite",
+            ));
+        }
+        sqlite_store::bound_account_identity(&self.path)
+    }
+
+    pub fn is_sqlite_native(&self) -> bool {
+        self.sqlite_native
     }
 
     pub fn path(&self) -> &Path {
@@ -429,6 +737,9 @@ impl ExecutionLedgerStore {
     /// It verifies all v14 sealed records through the normal fail-closed
     /// decoder and reports the installed on-disk format without assuming v14.
     pub fn attest_storage(&self) -> Result<LedgerStorageAttestation, ExecutionLedgerError> {
+        if self.sqlite_native {
+            return sqlite_store::attest(&self.path);
+        }
         if !self.path.exists() {
             return Err(ExecutionLedgerError::Corrupt("ledger not initialized"));
         }
@@ -463,7 +774,16 @@ impl ExecutionLedgerStore {
                 "verified archive inventory mismatch",
             ));
         }
-        let snapshot_path = self.path.with_extension("pre-v14.json");
+        // A sealed cutover keeps the original pre-v14 proof at its
+        // historical canonical filename, not relative to the new sealed
+        // extension. Both proofs remain in the same immutable source root.
+        let snapshot_path = if self.path.file_name().and_then(|v| v.to_str())
+            == Some("execution-ledger.v14.sealed")
+        {
+            self.path.with_file_name("execution-ledger.pre-v14.json")
+        } else {
+            self.path.with_extension("pre-v14.json")
+        };
         let (snapshot_state, snapshot_sha) = if snapshot_path.exists() {
             let legacy_bytes = fs::read(snapshot_path)?;
             let legacy: ExecutionLedgerFile = serde_json::from_slice(&legacy_bytes)?;
@@ -558,10 +878,14 @@ impl ExecutionLedgerStore {
         if !valid_intent_id(run_id) {
             return Err(ExecutionLedgerError::Corrupt("invalid archive run ID"));
         }
-        Ok(self
-            .path
-            .with_extension("archive")
-            .join(format!("{}-{run_id}.json", kind.as_str())))
+        let directory = if self.path.file_name().and_then(|v| v.to_str())
+            == Some("execution-ledger.v14.sealed")
+        {
+            self.path.with_file_name("execution-ledger.archive")
+        } else {
+            self.path.with_extension("archive")
+        };
+        Ok(directory.join(format!("{}-{run_id}.json", kind.as_str())))
     }
 
     /// Seal native evidence before atomically committing the primary manifest.
@@ -674,6 +998,9 @@ impl ExecutionLedgerStore {
     }
 
     fn load(&self) -> Result<LoadedExecutionLedger, ExecutionLedgerError> {
+        if self.sqlite_native {
+            return sqlite_store::load(&self.path, self.max_records);
+        }
         if !self.path.exists() {
             return Ok((
                 BTreeMap::new(),
@@ -879,6 +1206,130 @@ impl ExecutionLedgerStore {
         ))
     }
 
+    /// Fast native path for an individual intent. The active in-memory
+    /// ledger shares the Rust state machine; SQLite commits only
+    /// one changed record. JSON v14 continues through the full legacy save.
+    fn save_changed_intent(
+        &self,
+        changed: &ExecutionLedgerEntry,
+        ledger: &DurableExecutionLedger,
+    ) -> Result<(), ExecutionLedgerError> {
+        let DurableExecutionLedger {
+            entries: all_entries,
+            risk_stop,
+            capital_reservation,
+            exchange_evidence,
+            strategy_periods: history,
+            leverage_attempts,
+            ..
+        } = ledger;
+        if !self.sqlite_native {
+            return self.save(
+                all_entries,
+                risk_stop.as_ref(),
+                capital_reservation.as_ref(),
+                exchange_evidence.as_ref(),
+                history,
+                leverage_attempts,
+            );
+        }
+        // The native writer verifies the exact old row and immutable plan
+        // inside its SQLite transaction. It is independent of whether the
+        // current working set has cached this historical intent.
+        validate_entry(changed)?;
+        validate_strategy_run_binding(
+            changed,
+            capital_reservation.as_ref(),
+            &history.archived_runs,
+            &history.unverified_runs,
+        )?;
+        if let Some(stop) = risk_stop {
+            validate_risk_stop(stop)?;
+        }
+        if let Some(run) = capital_reservation {
+            validate_capital_reservation(run)?;
+        }
+        // The account source, periods and leverage are untouched by
+        // commit_new/mutate. Their original full proofs were validated at
+        // ledger open or at the transaction that changed them; validating
+        // thousands of old fills on every BEGIN_POST would be quadratic.
+        if let Some(source) = exchange_evidence
+            && capital_reservation.as_ref().is_none_or(|run| {
+                source.account_uid != run.account_uid_fingerprint
+                    || source.run_id != run.allocation_id
+            })
+        {
+            return Err(ExecutionLedgerError::AccountScopeMismatch);
+        }
+        sqlite_store::save_one(
+            &self.path,
+            changed,
+            risk_stop.as_ref(),
+            capital_reservation.as_ref(),
+            exchange_evidence.as_ref(),
+            history,
+            leverage_attempts,
+        )
+    }
+
+    /// Native state-only WAL update. Legacy v14 keeps its original complete
+    /// manifest/atomic rename path until independently verified cutover.
+    fn save_metadata(
+        &self,
+        entries: &BTreeMap<String, ExecutionLedgerEntry>,
+        risk_stop: Option<&ExecutionRiskStop>,
+        capital_reservation: Option<&StrategyCapitalReservation>,
+        exchange_evidence: Option<&DurableExchangeEvidence>,
+        history: &StrategyPeriodHistory,
+        leverage_attempts: &[LeverageChangeAttempt],
+    ) -> Result<(), ExecutionLedgerError> {
+        if self.sqlite_native {
+            sqlite_store::save_metadata(
+                &self.path,
+                risk_stop,
+                capital_reservation,
+                exchange_evidence,
+                history,
+                leverage_attempts,
+            )
+        } else {
+            self.save(
+                entries,
+                risk_stop,
+                capital_reservation,
+                exchange_evidence,
+                history,
+                leverage_attempts,
+            )
+        }
+    }
+
+    /// Publish a source-attested opening and its typed SQLite financial
+    /// epoch in the SAME WAL commit. Never infer an opening from a mutable
+    /// account selector or invent an exchange balance.
+    fn save_capital_opening(
+        &self,
+        entries: &BTreeMap<String, ExecutionLedgerEntry>,
+        stop: Option<&ExecutionRiskStop>,
+        reservation: &StrategyCapitalReservation,
+        opening: &StrategyAllocationOpening,
+        history: &StrategyPeriodHistory,
+        leverage: &[LeverageChangeAttempt],
+    ) -> Result<(), ExecutionLedgerError> {
+        if self.sqlite_native {
+            sqlite_store::save_opening_metadata(
+                &self.path,
+                stop,
+                reservation,
+                opening,
+                history,
+                leverage,
+            )
+        } else {
+            self.save(entries, stop, Some(reservation), None, history, leverage)
+        }
+    }
+
     fn save(
         &self,
         entries: &BTreeMap<String, ExecutionLedgerEntry>,
@@ -936,6 +1387,17 @@ impl ExecutionLedgerStore {
         }
         history.validate(capital_reservation, exchange_evidence)?;
         validate_leverage_attempts(leverage_attempts, capital_reservation)?;
+        if self.sqlite_native {
+            return sqlite_store::save(
+                &self.path,
+                entries,
+                risk_stop,
+                capital_reservation,
+                exchange_evidence,
+                history,
+                leverage_attempts,
+            );
+        }
         let parent = self
             .path
             .parent()
@@ -1003,10 +1465,7 @@ fn verified_daily_strategy_bill_loss(
     day: u64,
     as_of: u64,
 ) -> Result<Option<Decimal>, ExecutionLedgerError> {
-    let mut linked = 0usize;
-    let mut all_fees = Decimal::ZERO;
-    let mut all_pnl = Decimal::ZERO;
-    let mut gross_loss = Decimal::ZERO;
+    let mut loss = crate::strategy_finance::DailyStrategyLossAccumulator::default();
     for event in evidence.events.values() {
         if event.payload["source"] != "OKX_REST_BILL" {
             continue;
@@ -1028,68 +1487,21 @@ fn verified_daily_strategy_bill_loss(
         let run_reducer = entry.record.plan.action.is_risk_reducing()
             && event.strategy_run_id.is_none()
             && entry.record.strategy_run_id.is_none();
-        if !direct_run && !run_reducer {
-            continue;
-        }
-        // The financial projection already matched every trade bill to one
-        // exact native fill and proven lot. The 3 totals below must match it.
-        if event.payload["ccy"] != "USDT" {
-            return Err(ExecutionLedgerError::ExchangeSourceIncomplete);
-        }
-        let fee = event.payload["fee"]
-            .as_str()
-            .and_then(|v| Decimal::from_str(v).ok())
-            .ok_or(ExecutionLedgerError::ExchangeSourceIncomplete)?;
-        let pnl = event.payload["pnl"]
-            .as_str()
-            .and_then(|v| Decimal::from_str(v).ok())
-            .ok_or(ExecutionLedgerError::ExchangeSourceIncomplete)?;
-        let ts = event.payload["ts"]
-            .as_u64()
-            .ok_or(ExecutionLedgerError::ExchangeSourceIncomplete)?;
-        if ts < run.started_at_ms {
-            return Err(ExecutionLedgerError::ExchangeSourceIncomplete);
-        }
-        // Account REST snapshot can precede a bill already in the bounded
-        // history response. Defer the checkpoint rather than undercounting.
-        if ts > as_of {
-            return Ok(None);
-        }
-        linked += 1;
-        all_fees += fee;
-        all_pnl += pnl;
-        if ts >= day {
-            if fee < Decimal::ZERO {
-                gross_loss -= fee;
-            }
-            if pnl < Decimal::ZERO {
-                gross_loss -= pnl;
-            }
+        if direct_run || run_reducer {
+            loss.accept(&event.payload, run, day, as_of)?;
         }
     }
-    if linked != report.linked_bills
-        || Decimal::from_str(&report.fees_usdt).ok() != Some(all_fees)
-        || Decimal::from_str(&report.realized_usdt).ok() != Some(all_pnl)
-    {
-        return Err(ExecutionLedgerError::ExchangeSourceIncomplete);
-    }
-    // For a run opened today and now FLAT, all negative cashflow is bounded
-    // by the gross debit sum. Refuse a false low-loss watermark if not.
-    if run.started_at_ms >= day && report.state == "FLAT_RECONCILED" {
-        let allocation = Decimal::from_str(&run.allocated_usdt)
-            .map_err(|_| ExecutionLedgerError::CapitalReservationUnattested)?;
-        let nav = Decimal::from_str(
-            report
-                .nav_usdt
-                .as_deref()
-                .ok_or(ExecutionLedgerError::ExchangeSourceIncomplete)?,
-        )
-        .map_err(|_| ExecutionLedgerError::ExchangeSourceIncomplete)?;
-        if gross_loss < (allocation - nav).max(Decimal::ZERO) {
-            return Err(ExecutionLedgerError::ExchangeSourceIncomplete);
-        }
-    }
-    Ok(Some(gross_loss))
+    loss.finish(run, report, day)
+}
+
+/// Readback census of the native WAL: only observed accounts/order IDs and
+/// a finite diagnostic sample are decoded into process memory. Any failure
+/// is an explicit integrity error, never an implicit flat-account witness.
+pub(crate) struct NativeReconciliationInventory {
+    pub total: usize,
+    pub submitted: usize,
+    pub candidates: Vec<ExecutionLedgerEntry>,
+    pub historical_sample: Vec<ExecutionLedgerEntry>,
 }
 
 #[derive(Debug)]
@@ -1100,10 +1512,33 @@ pub struct DurableExecutionLedger {
     capital_reservation: Option<StrategyCapitalReservation>,
     exchange_evidence: Option<DurableExchangeEvidence>,
     strategy_periods: StrategyPeriodHistory,
+    native_nav_current: Option<StrategyNavPoint>,
+    native_nav_count: usize,
     leverage_attempts: Vec<LeverageChangeAttempt>,
 }
 
 impl DurableExecutionLedger {
+    /// Bounded convenience cache for the existing borrowed `get()` API.
+    /// This never decides admission or reconciles exchange orders: those
+    /// paths read the verified SQL row. Every active protection, mutation,
+    /// unresolved submission or reverse obligation is retained.
+    fn compact_native_entries(&mut self) {
+        if !self.store.sqlite_native {
+            return;
+        }
+        const RECENT_TERMINAL_CACHE: usize = 32;
+        let terminal = self
+            .entries
+            .iter()
+            .filter(|(_, entry)| !sqlite_store::needs_instrument_guard(entry))
+            .map(|(id, _)| id.clone())
+            .collect::<Vec<_>>();
+        let remove = terminal.len().saturating_sub(RECENT_TERMINAL_CACHE);
+        for id in terminal.into_iter().take(remove) {
+            self.entries.remove(&id);
+        }
+    }
+
     /// Read-only on-disk bundle verification; never changes in-memory executor
     /// state or triggers its first-open UNKNOWN/POST recovery transitions.
     pub fn attest_storage(&self) -> Result<LedgerStorageAttestation, ExecutionLedgerError> {
@@ -1116,6 +1551,9 @@ impl DurableExecutionLedger {
         &self,
         account_uid: &str,
     ) -> Result<ProfileHandoffLedgerAssessment, ExecutionLedgerError> {
+        if self.store.sqlite_native {
+            return sqlite_store::assess_profile(&self.store.path, account_uid);
+        }
         let physical = self.store.attest_storage()?;
         let mut nonterminal_intents = 0usize;
         let mut unresolved_order_mutations = 0usize;
@@ -1171,104 +1609,6 @@ impl DurableExecutionLedger {
         })
     }
 
-    /// One explicitly authorized *storage-only* migration. Keep all financial
-    /// states and STOP byte-for-byte equivalent. No clock, exchange or policy
-    /// mutation is permitted. The caller must supply the exact observed legacy
-    /// source hash, FINALIZED checksum, run identity, and STOP identity.
-    ///
-    /// The same executor mutex that serializes all financial writes must own
-    /// this operation. If ACK is lost, an identical request only verifies the
-    /// already committed v14 and immutable legacy snapshot: never repeats a
-    /// trading operation or fabricates another run.
-    pub fn migrate_finalized_storage_v14(
-        &self,
-        run_id: &str,
-        expected_manifest_sha256: &str,
-        expected_finalized_checksum_sha256: &str,
-        expected_stopped_at_ms: u64,
-    ) -> Result<LedgerStorageAttestation, ExecutionLedgerError> {
-        let before = self.store.attest_storage()?;
-        let stop = self
-            .risk_stop
-            .as_ref()
-            .ok_or(ExecutionLedgerError::NewRiskStopped)?;
-        let finalized = self
-            .strategy_periods
-            .finalized_run
-            .as_ref()
-            .ok_or(ExecutionLedgerError::StrategyRunNotFinalizable)?;
-        if expected_stopped_at_ms == 0
-            || stop.stopped_at_ms != expected_stopped_at_ms
-            || finalized.run_id != run_id
-            || finalized.checksum_sha256 != expected_finalized_checksum_sha256
-            || self
-                .capital_reservation
-                .as_ref()
-                .is_none_or(|run| run.allocation_id != run_id)
-            || before.active_risk_stop_reason.as_deref() != Some(stop.reason.as_str())
-            || before.finalized_run_checksum_sha256.as_deref()
-                != Some(expected_finalized_checksum_sha256)
-        {
-            return Err(ExecutionLedgerError::Corrupt(
-                "storage migration STOP/finalization identity mismatch",
-            ));
-        }
-        // POST-commit duplicate is a verified read, not a second writer.
-        if before.on_disk_schema == EXECUTION_LEDGER_SCHEMA_V14 {
-            if before.original_snapshot_sha256.as_deref() == Some(expected_manifest_sha256)
-                && before.original_snapshot == "PRE_V14_SNAPSHOT_PRESENT"
-            {
-                return Ok(before);
-            }
-            return Err(ExecutionLedgerError::Corrupt(
-                "migration replay has mismatched original source",
-            ));
-        }
-        if before.on_disk_schema != EXECUTION_LEDGER_SCHEMA_V13
-            || before.manifest_sha256 != expected_manifest_sha256
-        {
-            return Err(ExecutionLedgerError::Corrupt(
-                "storage migration legacy source hash/schema mismatch",
-            ));
-        }
-        // Do not silently migrate a stale disk snapshot over the active owner.
-        let (entries, disk_stop, reservation, evidence, periods, leverage) = self.store.load()?;
-        if entries != self.entries
-            || disk_stop.as_ref() != self.risk_stop.as_ref()
-            || reservation.as_ref() != self.capital_reservation.as_ref()
-            || evidence.as_ref() != self.exchange_evidence.as_ref()
-            || periods != self.strategy_periods
-            || leverage != self.leverage_attempts
-        {
-            return Err(ExecutionLedgerError::Corrupt(
-                "in-memory ledger differs from migration source",
-            ));
-        }
-        self.store.save(
-            &self.entries,
-            self.risk_stop.as_ref(),
-            self.capital_reservation.as_ref(),
-            self.exchange_evidence.as_ref(),
-            &self.strategy_periods,
-            &self.leverage_attempts,
-        )?;
-        let after = self.store.attest_storage()?;
-        if after.on_disk_schema != EXECUTION_LEDGER_SCHEMA_V14
-            || after.original_snapshot_sha256.as_deref() != Some(expected_manifest_sha256)
-            || after.original_snapshot != "PRE_V14_SNAPSHOT_PRESENT"
-            || after.active_risk_stop_reason != before.active_risk_stop_reason
-            || after.finalized_run_checksum_sha256 != before.finalized_run_checksum_sha256
-            || after.sealed_finalized_runs + after.sealed_unverified_runs
-                != self.strategy_periods.archived_runs.len()
-                    + self.strategy_periods.unverified_runs.len()
-        {
-            return Err(ExecutionLedgerError::Corrupt(
-                "storage migration post-commit financial proof failed",
-            ));
-        }
-        Ok(after)
-    }
-
     pub fn canonical(observed_at_ms: u64) -> Result<Self, ExecutionLedgerError> {
         Self::open(ExecutionLedgerStore::canonical(), observed_at_ms)
     }
@@ -1285,32 +1625,113 @@ impl DurableExecutionLedger {
             exchange_evidence,
             strategy_periods,
             leverage_attempts,
-        ) = store.load()?;
-        let mut recovered = false;
+        ) = if store.sqlite_native {
+            sqlite_store::load_operational(&store.path)?
+        } else {
+            store.load()?
+        };
+        let mut recovered = BTreeMap::new();
 
-        for entry in entries.values_mut() {
-            if entry.record.state == ExecutionState::Submitting {
-                entry.record.mark_unknown_submission()?;
-                entry.updated_at_ms = monotonic_timestamp(entry, observed_at_ms)?;
-                recovered = true;
+        if store.sqlite_native {
+            // Native recovery only visits material active guards; historical
+            // terminal intents are verified by the cold storage attestation,
+            // never scanned again to discover a pending POST/mutation.
+            if let Some(first) = entries.values().next() {
+                let uid = first.record.plan.account_uid_fingerprint.clone();
+                for candidate in sqlite_store::indexed_recovery_candidates(&store.path, &uid)? {
+                    let id = candidate.record.plan.intent_id.clone();
+                    let entry = entries.get_mut(&id).ok_or(ExecutionLedgerError::Corrupt(
+                        "native recovery intent absent from cold snapshot",
+                    ))?;
+                    if *entry != candidate {
+                        return Err(ExecutionLedgerError::Corrupt(
+                            "native recovery WAL snapshot mismatch",
+                        ));
+                    }
+                    let mut changed = false;
+                    if entry.record.state == ExecutionState::Submitting {
+                        entry.record.mark_unknown_submission()?;
+                        entry.updated_at_ms = monotonic_timestamp(entry, observed_at_ms)?;
+                        changed = true;
+                    }
+                    if entry.record.recover_inflight_mutation() {
+                        entry.updated_at_ms = monotonic_timestamp(entry, observed_at_ms)?;
+                        changed = true;
+                    }
+                    if changed {
+                        recovered.insert(id, entry.clone());
+                    }
+                }
             }
-            if entry.record.recover_inflight_mutation() {
-                entry.updated_at_ms = monotonic_timestamp(entry, observed_at_ms)?;
-                recovered = true;
+        } else {
+            // The pre-cutover v14 owner preserves its original full-snapshot
+            // recovery semantics until the native storage switch.
+            for (id, entry) in &mut entries {
+                let mut changed = false;
+                if entry.record.state == ExecutionState::Submitting {
+                    entry.record.mark_unknown_submission()?;
+                    entry.updated_at_ms = monotonic_timestamp(entry, observed_at_ms)?;
+                    changed = true;
+                }
+                if entry.record.recover_inflight_mutation() {
+                    entry.updated_at_ms = monotonic_timestamp(entry, observed_at_ms)?;
+                    changed = true;
+                }
+                if changed {
+                    recovered.insert(id.clone(), entry.clone());
+                }
             }
         }
 
-        if recovered {
-            store.save(
-                &entries,
-                risk_stop.as_ref(),
-                capital_reservation.as_ref(),
-                exchange_evidence.as_ref(),
-                &strategy_periods,
-                &leverage_attempts,
-            )?;
+        if !recovered.is_empty() {
+            if store.sqlite_native {
+                for changed in recovered.values() {
+                    validate_entry(changed)?;
+                    validate_strategy_run_binding(
+                        changed,
+                        capital_reservation.as_ref(),
+                        &strategy_periods.archived_runs,
+                        &strategy_periods.unverified_runs,
+                    )?;
+                }
+                sqlite_store::save_recovered(
+                    &store.path,
+                    &recovered,
+                    risk_stop.as_ref(),
+                    capital_reservation.as_ref(),
+                    exchange_evidence.as_ref(),
+                    &strategy_periods,
+                    &leverage_attempts,
+                )?;
+            } else {
+                store.save(
+                    &entries,
+                    risk_stop.as_ref(),
+                    capital_reservation.as_ref(),
+                    exchange_evidence.as_ref(),
+                    &strategy_periods,
+                    &leverage_attempts,
+                )?;
+            }
         }
 
+        // The working Engine retains ONE active NAV, never a historical Vec.
+        let (native_nav_current, native_nav_count) = if store.sqlite_native {
+            if !strategy_periods.nav_points.is_empty() {
+                return Err(ExecutionLedgerError::Corrupt("native NAV Vec forbidden"));
+            }
+            if let Some(run) = capital_reservation.as_ref() {
+                sqlite_store::nav_watermark(
+                    &store.path,
+                    &run.account_uid_fingerprint,
+                    &run.allocation_id,
+                )?
+            } else {
+                (None, 0)
+            }
+        } else {
+            (None, 0)
+        };
         Ok(Self {
             store,
             entries,
@@ -1318,6 +1739,8 @@ impl DurableExecutionLedger {
             capital_reservation,
             exchange_evidence,
             strategy_periods,
+            native_nav_current,
+            native_nav_count,
             leverage_attempts,
         })
     }
@@ -1342,7 +1765,7 @@ impl DurableExecutionLedger {
             stopped_at_ms: observed_at_ms,
             reason,
         };
-        self.store.save(
+        self.store.save_metadata(
             &self.entries,
             Some(&stop),
             self.capital_reservation.as_ref(),
@@ -1352,6 +1775,17 @@ impl DurableExecutionLedger {
         )?;
         self.risk_stop = Some(stop.clone());
         Ok(stop)
+    }
+
+    /// Load the authenticated source only for the duration of one financial
+    /// operation. Native engine cold start deliberately keeps no historical
+    /// source events in RAM. Legacy v14 retains its original snapshot model.
+    fn current_source(&self) -> Result<Option<DurableExchangeEvidence>, ExecutionLedgerError> {
+        if self.store.sqlite_native {
+            sqlite_store::current_source(&self.store.path)
+        } else {
+            Ok(self.exchange_evidence.clone())
+        }
     }
 
     /// Append exact account-sourced events to the existing atomic ledger.
@@ -1379,28 +1813,32 @@ impl DurableExecutionLedger {
     ) -> Result<ExchangeEvidenceSummary, ExecutionLedgerError> {
         if self.strategy_periods.finalized_run.is_some() {
             return self
-                .exchange_evidence
-                .as_ref()
-                .map(DurableExchangeEvidence::summary)
+                .exchange_evidence_summary()?
                 .ok_or(ExecutionLedgerError::StrategyRunNotFinalizable);
         }
         let run = self
             .capital_reservation
             .as_ref()
             .ok_or(ExecutionLedgerError::CapitalReservationUnattested)?;
-        let mut next = if let Some(old) = &self.exchange_evidence {
-            old.clone()
-        } else {
-            DurableExchangeEvidence::new(run)?
+        if self.store.sqlite_native {
+            return sqlite_store::capture_native_exchange_source(
+                &self.store.path,
+                run,
+                facts,
+                require_fresh_cursor,
+            );
+        }
+        // Only the sealed v14 migration owner still holds its source object.
+        let previous = self.current_source()?;
+        let prior_proof = previous.as_ref().map(|value| value.checksum_sha256.clone());
+        let mut next = match previous {
+            Some(value) => value,
+            None => DurableExchangeEvidence::new(run)?,
         };
-        next.capture(
-            facts,
-            &self.entries.values().cloned().collect::<Vec<_>>(),
-            run,
-            require_fresh_cursor,
-        )?;
-        if self.exchange_evidence.as_ref() != Some(&next) {
-            self.store.save(
+        let owned = self.run_entries(run)?;
+        next.capture(facts, &owned, run, require_fresh_cursor)?;
+        if prior_proof.as_deref() != Some(next.checksum_sha256.as_str()) {
+            self.store.save_metadata(
                 &self.entries,
                 self.risk_stop.as_ref(),
                 self.capital_reservation.as_ref(),
@@ -1408,13 +1846,9 @@ impl DurableExecutionLedger {
                 &self.strategy_periods,
                 &self.leverage_attempts,
             )?;
-            self.exchange_evidence = Some(next);
+            self.exchange_evidence = Some(next.clone());
         }
-        Ok(self
-            .exchange_evidence
-            .as_ref()
-            .expect("persisted")
-            .summary())
+        Ok(next.summary())
     }
 
     /// Recompute the run from immutable source events after restart.
@@ -1435,16 +1869,200 @@ impl DurableExecutionLedger {
         coherent: bool,
         production_marks: &BTreeMap<String, ProductionMarkEvidence>,
     ) -> Option<StrategyFinancialPeriod> {
-        self.capital_reservation.as_ref().map(|run| {
+        let run = self.capital_reservation.as_ref()?;
+        if self.store.sqlite_native {
+            return self
+                .native_financial_period(run, facts, coherent, production_marks, false, None)
+                .ok();
+        }
+        let entries = self.run_entries(run).ok()?;
+        Some(
             crate::assess_persisted_financial_period_with_production_marks(
                 run,
                 self.exchange_evidence.as_ref(),
-                &self.entries.values().cloned().collect::<Vec<_>>(),
+                &entries,
                 facts,
                 coherent,
                 production_marks,
-            )
-        })
+            ),
+        )
+    }
+
+    /// A run-specific mandate is checked on every original risk-increasing
+    /// intent, including intents that never produced an exchange event.
+    /// This is the exact same policy shared by native SQL streaming and v14.
+    fn nav_stop_policy(
+        entry: &ExecutionLedgerEntry,
+        run: &StrategyCapitalReservation,
+        nav: Decimal,
+        peak: Decimal,
+        gross_loss: Decimal,
+    ) -> Result<Option<&'static str>, ExecutionLedgerError> {
+        if entry.record.strategy_run_id.as_deref() != Some(run.allocation_id.as_str())
+            || !entry.record.plan.action.is_risk_increasing()
+        {
+            return Ok(None);
+        }
+        let binding = entry
+            .record
+            .plan
+            .risk_binding
+            .as_ref()
+            .ok_or(ExecutionLedgerError::Corrupt("missing run risk policy"))?;
+        if binding.mandate.version != run.mandate_version {
+            return Err(ExecutionLedgerError::CapitalReservationScopeMismatch);
+        }
+        let mandate_dd = Decimal::from_str(&binding.mandate.max_drawdown_ratio)
+            .map_err(|_| ExecutionLedgerError::Corrupt("invalid mandate drawdown"))?;
+        let policy_dd = Decimal::from_str(&binding.policy.max_drawdown_ratio)
+            .map_err(|_| ExecutionLedgerError::Corrupt("invalid policy drawdown"))?;
+        let daily = Decimal::from_str(&binding.policy.max_daily_realized_loss_usd)
+            .map_err(|_| ExecutionLedgerError::Corrupt("invalid policy daily loss"))?;
+        Ok(strategy_nav_stop_reason(
+            nav, peak, gross_loss, mandate_dd, policy_dd, daily,
+        ))
+    }
+
+    /// Native finance has exactly one SQL source reader. The same FIFO,
+    /// bill, ownership, funding and valuation policy is shared with legacy
+    /// import, but no full historical exchange BTreeMap is reconstructed.
+    fn native_financial_period(
+        &self,
+        run: &StrategyCapitalReservation,
+        facts: &AccountLedgerFacts,
+        coherent: bool,
+        production_marks: &BTreeMap<String, ProductionMarkEvidence>,
+        captured: bool,
+        excluded_candidate: Option<&ExecutionPlan>,
+    ) -> Result<StrategyFinancialPeriod, ExecutionLedgerError> {
+        use crate::strategy_finance::FinanceSourceReader;
+        let reader = sqlite_finance::NativeFinanceReader::open(&self.store.path, run)?;
+        let mut reasons = BTreeSet::new();
+        let mut excluded_seen = false;
+        let mut finance_error = None;
+        sqlite_store::visit_entries_created_since(
+            &self.store.path,
+            &run.account_uid_fingerprint,
+            run.started_at_ms,
+            |entry| {
+                if excluded_candidate.is_some_and(|p| p.intent_id == entry.record.plan.intent_id) {
+                    excluded_seen = true;
+                    if !Self::inert_candidate_for_financial_projection(
+                        &entry.record,
+                        excluded_candidate.expect("checked candidate"),
+                        &run.allocation_id,
+                    ) {
+                        finance_error = Some(ExecutionLedgerError::Corrupt(
+                            "non-inert financial new-risk candidate",
+                        ));
+                        return false;
+                    }
+                    return true;
+                }
+                if entry.created_at_ms > run.started_at_ms && !entry.record.state.is_terminal() {
+                    reasons.insert("unresolved_managed_execution");
+                }
+                if entry.record.order_id.is_some()
+                    && let Err(err) = reader.validate_entry(entry, run.started_at_ms, &mut reasons)
+                {
+                    finance_error = Some(err);
+                    return false;
+                }
+                true
+            },
+        )?;
+        if let Some(err) = finance_error {
+            return Err(err);
+        }
+        if let Some(candidate) = excluded_candidate
+            && !excluded_seen
+            && self
+                .read_intent(&candidate.intent_id)?
+                .is_some_and(|entry| {
+                    !Self::inert_candidate_for_financial_projection(
+                        &entry.record,
+                        candidate,
+                        &run.allocation_id,
+                    )
+                })
+        {
+            return Err(ExecutionLedgerError::Corrupt(
+                "non-inert financial new-risk candidate",
+            ));
+        }
+        let mut report = crate::strategy_finance::assess_persisted_financial_period_from_reader(
+            run,
+            &reader,
+            &[],
+            facts,
+            coherent,
+            production_marks,
+            captured,
+        )?;
+        for reason in reasons {
+            if !report.reasons.contains(&reason) {
+                report.reasons.push(reason);
+            }
+        }
+        if !report.reasons.is_empty() {
+            report.reasons.sort_unstable();
+            report.state = "INCOMPLETE";
+            report.funding_usdt = None;
+            report.unrealized_usdt = None;
+            report.nav_usdt = None;
+            report.usable_for_new_risk = false;
+        }
+        Ok(report)
+    }
+
+    /// Visit all account intents created in an epoch without materializing
+    /// history. This is the single read-only owner path for reconciliation,
+    /// finance and risk checks. In native mode every row and UID is verified
+    /// under one indexed SQLite cursor; no secondary ledger is opened.
+    pub(crate) fn visit_entries_created_since<F>(
+        &self,
+        expected_uid: &str,
+        started_at_ms: u64,
+        mut visit: F,
+    ) -> Result<(), ExecutionLedgerError>
+    where
+        F: FnMut(&ExecutionLedgerEntry) -> bool,
+    {
+        if self.store.sqlite_native {
+            return sqlite_store::visit_entries_created_since(
+                &self.store.path,
+                expected_uid,
+                started_at_ms,
+                visit,
+            );
+        }
+        for entry in self.entries.values() {
+            if entry.created_at_ms < started_at_ms {
+                continue;
+            }
+            if entry.record.plan.account_uid_fingerprint != expected_uid {
+                return Err(ExecutionLedgerError::AccountScopeMismatch);
+            }
+            if !visit(entry) {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    /// Legacy v14 alone keeps the historical borrowed financial snapshot.
+    /// Native SQLite callers MUST use indexed source links + full-run
+    /// streaming checks, never silently resurrect a materialized epoch map.
+    pub(crate) fn run_entries(
+        &self,
+        _run: &StrategyCapitalReservation,
+    ) -> Result<Vec<ExecutionLedgerEntry>, ExecutionLedgerError> {
+        if self.store.sqlite_native {
+            return Err(ExecutionLedgerError::Corrupt(
+                "native finance cannot materialize epoch intents",
+            ));
+        }
+        Ok(self.entries.values().cloned().collect())
     }
 
     /// An unsent risk-increasing candidate is a planned operation, not a
@@ -1485,18 +2103,31 @@ impl DurableExecutionLedger {
         plan: &ExecutionPlan,
     ) -> Option<StrategyFinancialPeriod> {
         let run = self.capital_reservation.as_ref()?;
-        let mut entries = Vec::with_capacity(self.entries.len());
-        for entry in self.entries.values() {
-            if entry.record.plan.intent_id == plan.intent_id {
-                let record = &entry.record;
-                if !Self::inert_candidate_for_financial_projection(record, plan, &run.allocation_id)
-                {
-                    return None;
-                }
-                continue;
-            }
-            entries.push(entry.clone());
+        if self.store.sqlite_native {
+            return self
+                .native_financial_period(run, facts, coherent, &BTreeMap::new(), true, Some(plan))
+                .ok();
         }
+        let mut entries = self.run_entries(run).ok()?;
+        let mut active_candidate_seen = false;
+        entries.retain(|entry| {
+            if entry.record.plan.intent_id == plan.intent_id {
+                active_candidate_seen = true;
+                return false;
+            }
+            true
+        });
+        if active_candidate_seen {
+            let candidate = self.read_intent(&plan.intent_id).ok()??;
+            if !Self::inert_candidate_for_financial_projection(
+                &candidate.record,
+                plan,
+                &run.allocation_id,
+            ) {
+                return None;
+            }
+        }
+
         Some(
             crate::assess_persisted_financial_period_with_verified_source(
                 run,
@@ -1519,17 +2150,24 @@ impl DurableExecutionLedger {
         marks: &BTreeMap<String, ProductionMarkEvidence>,
         captured: bool,
     ) -> Option<StrategyFinancialPeriod> {
-        self.capital_reservation.as_ref().map(|run| {
+        let run = self.capital_reservation.as_ref()?;
+        if self.store.sqlite_native {
+            return self
+                .native_financial_period(run, facts, coherent, marks, captured, None)
+                .ok();
+        }
+        let entries = self.run_entries(run).ok()?;
+        Some(
             crate::assess_persisted_financial_period_with_verified_source(
                 run,
                 self.exchange_evidence.as_ref(),
-                &self.entries.values().cloned().collect::<Vec<_>>(),
+                &entries,
                 facts,
                 coherent,
                 marks,
                 captured,
-            )
-        })
+            ),
+        )
     }
 
     /// One atomic writer for NAV, high-water, source-exact daily gross loss
@@ -1550,10 +2188,21 @@ impl DurableExecutionLedger {
             || report.usable_for_new_risk
             || facts.summary.authority.account_uid_fingerprint != run.account_uid_fingerprint
             || !DurableExchangeEvidence::complete_source_checkpoint(facts)
-            || self
-                .exchange_evidence
+        {
+            return Ok(None);
+        }
+        // The native branch uses one authenticated SQL snapshot below,
+        // not the historical Rust source map. The legacy import path keeps
+        // the established source validation until offline cutover.
+        let legacy_source = if self.store.sqlite_native {
+            None
+        } else {
+            self.current_source()?
+        };
+        if !self.store.sqlite_native
+            && legacy_source
                 .as_ref()
-                .is_none_or(|e| e.checksum_sha256 != report.evidence_sha256)
+                .is_none_or(|source| source.checksum_sha256 != report.evidence_sha256)
         {
             return Ok(None);
         }
@@ -1572,32 +2221,69 @@ impl DurableExecutionLedger {
             return Ok(None);
         }
         // A depleted or negative NAV is an auditable terminal observation:
-        // persist both the value and the irreversible STOP in one file.
-        let evidence = self
-            .exchange_evidence
-            .as_ref()
-            .ok_or(ExecutionLedgerError::ExchangeSourceIncomplete)?;
-        let (source_cursor_key, source_cursor, source_receipt_ms) = evidence
-            .cursors
-            .iter()
-            .filter_map(|(key, cursor)| {
-                let received =
-                    crate::exchange_evidence::source_receipt_ms(&cursor.source_received_at)?;
-                (received <= as_of).then_some((key, cursor, received))
-            })
-            .max_by_key(|(_, _, received)| *received)
-            .ok_or(ExecutionLedgerError::ExchangeSourceIncomplete)?;
-        if as_of - source_receipt_ms > crate::exchange_evidence::MAX_SOURCE_COVERAGE_GAP_MS {
-            return Ok(None);
-        }
-        let cursor_sha256 = format!("{:x}", Sha256::digest(serde_json::to_vec(source_cursor)?));
+        // persist both the value and the irreversible STOP in one transaction.
         let day = as_of / 86_400_000 * 86_400_000;
-        let Some(gross_loss) =
-            verified_daily_strategy_bill_loss(evidence, &self.entries, run, report, day, as_of)?
-        else {
-            return Ok(None);
+        let run_history = if self.store.sqlite_native {
+            None
+        } else {
+            Some(self.run_entries(run)?)
         };
-        let prior = self.strategy_periods.nav_points.last();
+        let (source_cursor_key, source_cursor, _source_receipt_ms, gross_loss) =
+            if self.store.sqlite_native {
+                let Some(proof) = sqlite_finance::nav_cursor_and_daily_loss(
+                    &self.store.path,
+                    run,
+                    report,
+                    day,
+                    as_of,
+                )?
+                else {
+                    return Ok(None);
+                };
+                proof
+            } else {
+                let evidence = legacy_source
+                    .as_ref()
+                    .ok_or(ExecutionLedgerError::ExchangeSourceIncomplete)?;
+                let (key, cursor, received) = evidence
+                    .cursors
+                    .iter()
+                    .filter_map(|(key, cursor)| {
+                        let received = crate::exchange_evidence::source_receipt_ms(
+                            &cursor.source_received_at,
+                        )?;
+                        (received <= as_of).then_some((key, cursor, received))
+                    })
+                    .max_by_key(|(_, _, received)| *received)
+                    .ok_or(ExecutionLedgerError::ExchangeSourceIncomplete)?;
+                if as_of - received > crate::exchange_evidence::MAX_SOURCE_COVERAGE_GAP_MS {
+                    return Ok(None);
+                }
+                let owned = run_history
+                    .as_ref()
+                    .expect("legacy run history")
+                    .iter()
+                    .map(|entry| (entry.record.plan.intent_id.clone(), entry.clone()))
+                    .collect();
+                let Some(loss) =
+                    verified_daily_strategy_bill_loss(evidence, &owned, run, report, day, as_of)?
+                else {
+                    return Ok(None);
+                };
+                (key.clone(), cursor.clone(), received, loss)
+            };
+        let cursor_sha256 = format!("{:x}", Sha256::digest(serde_json::to_vec(&source_cursor)?));
+        let prior = if self.store.sqlite_native {
+            self.native_nav_current
+                .as_ref()
+                .filter(|p| p.run_id == run.allocation_id)
+        } else {
+            self.strategy_periods
+                .nav_points
+                .iter()
+                .rev()
+                .find(|p| p.run_id == run.allocation_id)
+        };
         if prior.is_some_and(|p| p.observed_at_ms >= now) {
             return Ok(None);
         }
@@ -1617,7 +2303,9 @@ impl DurableExecutionLedger {
         }) {
             return Ok(None);
         }
-        if self.strategy_periods.nav_points.len() >= MAX_STRATEGY_NAV_POINTS {
+        if !self.store.sqlite_native
+            && self.strategy_periods.nav_points.len() >= MAX_STRATEGY_NAV_POINTS
+        {
             return Err(ExecutionLedgerError::ExchangeEvidenceCapacity);
         }
         let mut point = StrategyNavPoint {
@@ -1626,7 +2314,7 @@ impl DurableExecutionLedger {
             observed_at_ms: now,
             account_as_of_ms: as_of,
             evidence_sha256: report.evidence_sha256.clone(),
-            source_cursor_key: source_cursor_key.clone(),
+            source_cursor_key,
             source_cursor_sha256: cursor_sha256,
             nav_usdt: nav.normalize().to_string(),
             high_water_usdt: peak.normalize().to_string(),
@@ -1638,39 +2326,39 @@ impl DurableExecutionLedger {
         point.checksum_sha256 = point.hash()?;
         point.validate()?;
         let mut reason = (nav <= Decimal::ZERO).then_some("STRATEGY_NAV_DEPLETED");
-        // Only exact immutable run-bound plans may supply risk limits.
-        for entry in self.entries.values() {
-            if entry.record.strategy_run_id.as_deref() != Some(run.allocation_id.as_str())
-                || !entry.record.plan.action.is_risk_increasing()
-            {
-                continue;
+        // Always scan every risk-increasing mandate in the epoch. The SQL
+        // cursor releases each verified row immediately, so 10,000+ inert
+        // historical intents do not exhaust the financial working set.
+        if self.store.sqlite_native {
+            let mut scan_error = None;
+            sqlite_store::visit_entries_created_since(
+                &self.store.path,
+                &run.account_uid_fingerprint,
+                run.started_at_ms,
+                |entry| match Self::nav_stop_policy(entry, run, nav, peak, gross_loss) {
+                    Ok(stop) => {
+                        if reason.is_none() {
+                            reason = stop;
+                        }
+                        true
+                    }
+                    Err(err) => {
+                        scan_error = Some(err);
+                        false
+                    }
+                },
+            )?;
+            if let Some(err) = scan_error {
+                return Err(err);
             }
-            let binding = entry
-                .record
-                .plan
-                .risk_binding
-                .as_ref()
-                .ok_or(ExecutionLedgerError::Corrupt("missing run risk policy"))?;
-            if binding.mandate.version != run.mandate_version {
-                return Err(ExecutionLedgerError::CapitalReservationScopeMismatch);
-            }
-            let mandate_dd = Decimal::from_str(&binding.mandate.max_drawdown_ratio)
-                .map_err(|_| ExecutionLedgerError::Corrupt("invalid mandate drawdown"))?;
-            let policy_dd = Decimal::from_str(&binding.policy.max_drawdown_ratio)
-                .map_err(|_| ExecutionLedgerError::Corrupt("invalid policy drawdown"))?;
-            let daily = Decimal::from_str(&binding.policy.max_daily_realized_loss_usd)
-                .map_err(|_| ExecutionLedgerError::Corrupt("invalid policy daily loss"))?;
-            if reason.is_none() {
-                reason =
-                    strategy_nav_stop_reason(nav, peak, gross_loss, mandate_dd, policy_dd, daily);
+        } else {
+            for entry in run_history.as_ref().expect("legacy run history") {
+                let stop = Self::nav_stop_policy(entry, run, nav, peak, gross_loss)?;
+                if reason.is_none() {
+                    reason = stop;
+                }
             }
         }
-        let mut next = self.strategy_periods.clone();
-        next.nav_points.push(point.clone());
-        next.validate(
-            self.capital_reservation.as_ref(),
-            self.exchange_evidence.as_ref(),
-        )?;
         let new_stop = if self.risk_stop.is_none() {
             reason.map(|value| ExecutionRiskStop {
                 schema: EXECUTION_RISK_STOP_SCHEMA_V1.to_owned(),
@@ -1680,15 +2368,42 @@ impl DurableExecutionLedger {
         } else {
             None
         };
-        self.store.save(
-            &self.entries,
-            new_stop.as_ref().or(self.risk_stop.as_ref()),
-            self.capital_reservation.as_ref(),
-            self.exchange_evidence.as_ref(),
-            &next,
-            &self.leverage_attempts,
-        )?;
-        self.strategy_periods = next;
+        if self.store.sqlite_native {
+            // Atomic NAV + STOP + daily-risk projection. No historical cache.
+            sqlite_store::save_nav_metadata(
+                &self.store.path,
+                new_stop.as_ref().or(self.risk_stop.as_ref()),
+                run,
+                &self.strategy_periods,
+                &self.leverage_attempts,
+                &point,
+            )?;
+            let (latest, n) = sqlite_store::nav_watermark(
+                &self.store.path,
+                &run.account_uid_fingerprint,
+                &run.allocation_id,
+            )?;
+            if latest.as_ref() != Some(&point) {
+                return Err(ExecutionLedgerError::ExchangeEvidenceConflict);
+            }
+            self.native_nav_current = latest;
+            self.native_nav_count = n;
+        } else {
+            let mut next = self.strategy_periods.clone();
+            next.nav_points.push(point.clone());
+            if let Some(evidence) = legacy_source.as_ref() {
+                next.validate(self.capital_reservation.as_ref(), Some(evidence))?;
+            }
+            self.store.save_metadata(
+                &self.entries,
+                new_stop.as_ref().or(self.risk_stop.as_ref()),
+                self.capital_reservation.as_ref(),
+                self.exchange_evidence.as_ref(),
+                &next,
+                &self.leverage_attempts,
+            )?;
+            self.strategy_periods = next;
+        }
         if let Some(stop) = new_stop {
             self.risk_stop = Some(stop);
         }
@@ -1696,6 +2411,13 @@ impl DurableExecutionLedger {
     }
 
     pub fn strategy_nav_watermark(&self) -> Option<&StrategyNavPoint> {
+        if self.store.sqlite_native {
+            return self.native_nav_current.as_ref().filter(|p| {
+                self.capital_reservation
+                    .as_ref()
+                    .is_some_and(|r| r.allocation_id == p.run_id)
+            });
+        }
         self.strategy_periods.nav_points.last().filter(|p| {
             self.capital_reservation
                 .as_ref()
@@ -1704,7 +2426,37 @@ impl DurableExecutionLedger {
     }
 
     pub fn strategy_nav_point_count(&self) -> usize {
-        self.strategy_periods.nav_points.len()
+        if self.store.sqlite_native {
+            self.native_nav_count
+        } else {
+            self.strategy_periods.nav_points.len()
+        }
+    }
+
+    /// Native new-risk admission must consume the SAME durable daily-risk
+    /// projections as NAV. The legacy owner keeps its original admission.
+    pub fn daily_risk_allows_new_risk(
+        &self,
+        point: &StrategyNavPoint,
+        policy_daily_limit_usd: &str,
+    ) -> Result<bool, ExecutionLedgerError> {
+        if !self.store.sqlite_native {
+            return Ok(true);
+        }
+        let run = self
+            .capital_reservation
+            .as_ref()
+            .ok_or(ExecutionLedgerError::CapitalReservationUnattested)?;
+        if run.allocation_id != point.run_id {
+            return Ok(false);
+        }
+        sqlite_store::daily_risk_allows_new_risk(
+            &self.store.path,
+            &run.account_uid_fingerprint,
+            &run.strategy_id,
+            point,
+            policy_daily_limit_usd,
+        )
     }
 
     pub fn unverified_run(&self) -> Option<&StrategyUnverifiedClosure> {
@@ -1730,14 +2482,47 @@ impl DurableExecutionLedger {
             .capital_reservation
             .as_ref()
             .ok_or(ExecutionLedgerError::StrategyRunNotQuarantinable)?;
-        let source = self
-            .exchange_evidence
-            .as_ref()
-            .ok_or(ExecutionLedgerError::StrategyRunNotQuarantinable)?;
+        let native_source = if self.store.sqlite_native {
+            Some(sqlite_store::indexed_source_identity(
+                &self.store.path,
+                &run.account_uid_fingerprint,
+                &run.allocation_id,
+            )?)
+        } else {
+            None
+        };
+        let legacy_source = if self.store.sqlite_native {
+            None
+        } else {
+            self.current_source()?
+        };
         if let Some(closed) = self.strategy_periods.unverified_run.as_ref() {
-            closed.validate(run, source)?;
+            if let Some(source) = native_source.as_ref() {
+                closed.validate_source_identity(run, source)?;
+            } else {
+                closed.validate(
+                    run,
+                    legacy_source
+                        .as_ref()
+                        .ok_or(ExecutionLedgerError::StrategyRunNotQuarantinable)?,
+                )?;
+            }
             return Ok(closed.clone());
         }
+        let source_gap = native_source.as_ref().map_or_else(
+            || {
+                legacy_source
+                    .as_ref()
+                    .is_some_and(|s| s.summary().source_gap_over_two_hours)
+            },
+            |s| s.source_gap_over_two_hours,
+        );
+        let source_empty = if self.store.sqlite_native {
+            sqlite_store::source_summary(&self.store.path)?
+                .is_some_and(|summary| summary.events == 0)
+        } else {
+            legacy_source.as_ref().is_some_and(|s| s.events.is_empty())
+        };
         let as_of = crate::exchange_evidence::source_receipt_ms(&facts.summary.source_received_at)
             .ok_or(ExecutionLedgerError::StrategyRunNotQuarantinable)?;
         if self.strategy_periods.finalized_run.is_some()
@@ -1749,13 +2534,26 @@ impl DurableExecutionLedger {
             || facts.summary.pending_orders != 0
             || facts.summary.authority.account_uid_fingerprint != run.account_uid_fingerprint
             || !DurableExchangeEvidence::complete_source_checkpoint(facts)
-            || !source.summary().source_gap_over_two_hours
-            || !source.events.is_empty()
+            || !source_gap
+            || !source_empty
             || self.risk_stop.is_some()
-            || self.entries.values().any(|e| {
-                e.created_at_ms >= run.started_at_ms
-                    || e.record.strategy_run_id.as_deref() == Some(run.allocation_id.as_str())
-                    || !e.record.state.is_terminal()
+            || (if self.store.sqlite_native {
+                self.any_entry_created_since(
+                    &run.account_uid_fingerprint,
+                    run.started_at_ms,
+                    |_| true,
+                )
+                .unwrap_or(true)
+                    || self.entries.values().any(|e| {
+                        e.record.strategy_run_id.as_deref() == Some(run.allocation_id.as_str())
+                            || !e.record.state.is_terminal()
+                    })
+            } else {
+                self.entries.values().any(|e| {
+                    e.created_at_ms >= run.started_at_ms
+                        || e.record.strategy_run_id.as_deref() == Some(run.allocation_id.as_str())
+                        || !e.record.state.is_terminal()
+                })
             })
             || facts
                 .exchange_fills
@@ -1775,14 +2573,25 @@ impl DurableExecutionLedger {
         }
         // Source remains immutable and explicitly incomplete: no NAV, PnL,
         // or financial finalization is inferred from the current FLAT state.
-        let closed = StrategyUnverifiedClosure::new(run, source, observed_at_ms)?;
+        let closed = if let Some(source) = native_source.as_ref() {
+            StrategyUnverifiedClosure::new_with_source_identity(run, source, observed_at_ms)?
+        } else {
+            StrategyUnverifiedClosure::new(
+                run,
+                legacy_source
+                    .as_ref()
+                    .ok_or(ExecutionLedgerError::StrategyRunNotQuarantinable)?,
+                observed_at_ms,
+            )?
+        };
         let mut next = self.strategy_periods.clone();
         next.unverified_run = Some(closed.clone());
-        next.validate(
-            self.capital_reservation.as_ref(),
-            self.exchange_evidence.as_ref(),
-        )?;
-        self.store.save(
+        if let Some(source) = legacy_source.as_ref() {
+            next.validate(self.capital_reservation.as_ref(), Some(source))?;
+        }
+        // Native persistence validates the same period against the SQL source
+        // identity and exact indexed cursor inside its WAL write transaction.
+        self.store.save_metadata(
             &self.entries,
             self.risk_stop.as_ref(),
             self.capital_reservation.as_ref(),
@@ -1862,17 +2671,33 @@ impl DurableExecutionLedger {
         if let Some(done) = &self.strategy_periods.finalized_run {
             return Ok(done.clone());
         }
-        let evidence = self
-            .exchange_evidence
-            .as_ref()
-            .ok_or(ExecutionLedgerError::StrategyRunNotFinalizable)?;
+        // Complete financial reconciliation FIRST. Native finalization
+        // then verifies the SQL source digest without loading old events;
+        // legacy v14 still validates its sealed in-memory source.
         let result = self
             .financial_period(facts, coherent)
             .ok_or(ExecutionLedgerError::StrategyRunNotFinalizable)?;
-        let closed = StrategyFinalization::new(reservation, evidence, &result, observed_at_ms)?;
+        let closed = if self.store.sqlite_native {
+            let source = sqlite_store::indexed_source_identity(
+                &self.store.path,
+                &reservation.account_uid_fingerprint,
+                &reservation.allocation_id,
+            )?;
+            StrategyFinalization::new_with_source_identity(
+                reservation,
+                &source,
+                &result,
+                observed_at_ms,
+            )?
+        } else {
+            let evidence = self
+                .current_source()?
+                .ok_or(ExecutionLedgerError::StrategyRunNotFinalizable)?;
+            StrategyFinalization::new(reservation, &evidence, &result, observed_at_ms)?
+        };
         let mut next = self.strategy_periods.clone();
         next.finalized_run = Some(closed.clone());
-        self.store.save(
+        self.store.save_metadata(
             &self.entries,
             self.risk_stop.as_ref(),
             self.capital_reservation.as_ref(),
@@ -1884,10 +2709,23 @@ impl DurableExecutionLedger {
         Ok(closed)
     }
 
-    pub fn exchange_evidence_summary(&self) -> Option<ExchangeEvidenceSummary> {
-        self.exchange_evidence
-            .as_ref()
-            .map(DurableExchangeEvidence::summary)
+    /// A source summary is an authenticated read of the account's native
+    /// SQLite owner. SQL errors propagate; they are never an empty account
+    /// or positive coverage witness.
+    pub fn exchange_evidence_summary(
+        &self,
+    ) -> Result<Option<ExchangeEvidenceSummary>, ExecutionLedgerError> {
+        if self.store.sqlite_native {
+            let summary = sqlite_store::source_summary(&self.store.path)?;
+            // SQLite is the only source owner. Its authenticated summary
+            // cannot be contradicted by a separate Rust history cache.
+            Ok(summary)
+        } else {
+            Ok(self
+                .exchange_evidence
+                .as_ref()
+                .map(DurableExchangeEvidence::summary))
+        }
     }
 
     pub fn risk_stop(&self) -> Option<&ExecutionRiskStop> {
@@ -1950,7 +2788,7 @@ impl DurableExecutionLedger {
         };
         let mut next = self.leverage_attempts.clone();
         next.push(attempt.clone());
-        self.store.save(
+        self.store.save_metadata(
             &self.entries,
             self.risk_stop.as_ref(),
             self.capital_reservation.as_ref(),
@@ -1975,7 +2813,7 @@ impl DurableExecutionLedger {
             .ok_or_else(|| ExecutionLedgerError::IntentNotFound(mutation_id.to_owned()))?;
         entry.state = LeverageAttemptState::Verified;
         let result = entry.clone();
-        self.store.save(
+        self.store.save_metadata(
             &self.entries,
             self.risk_stop.as_ref(),
             self.capital_reservation.as_ref(),
@@ -2031,7 +2869,8 @@ impl DurableExecutionLedger {
         {
             return Err(ExecutionLedgerError::CapitalReservationConflict);
         }
-        let exact = reservation.account_uid_fingerprint == opening.account_uid_fingerprint
+        let exact = reservation.strategy_id == opening.strategy_id
+            && reservation.account_uid_fingerprint == opening.account_uid_fingerprint
             && reservation.account_generation == opening.account_generation
             && reservation.operator_authority_id == opening.operator_authority_id
             && reservation.started_at_ms == opening.observed_at_ms
@@ -2045,11 +2884,19 @@ impl DurableExecutionLedger {
             || !opening.zero_pending_orders
             || !opening.zero_native_protection
             || self.risk_stop.is_some() != rearm.is_some()
-            || self.entries.values().any(|e| {
-                !e.record.state.is_terminal() || e.created_at_ms >= reservation.started_at_ms
-            })
-            || self.entries.values().any(|e| {
-                e.record.plan.account_uid_fingerprint != reservation.account_uid_fingerprint
+            || (if self.store.sqlite_native {
+                !sqlite_store::clear_for_capital_opening(
+                    &self.store.path,
+                    &reservation.account_uid_fingerprint,
+                    reservation.started_at_ms,
+                )
+                .unwrap_or(false)
+            } else {
+                self.entries.values().any(|e| {
+                    !e.record.state.is_terminal() || e.created_at_ms >= reservation.started_at_ms
+                }) || self.entries.values().any(|e| {
+                    e.record.plan.account_uid_fingerprint != reservation.account_uid_fingerprint
+                })
             })
         {
             return Err(ExecutionLedgerError::CapitalReservationUnattested);
@@ -2110,8 +2957,7 @@ impl DurableExecutionLedger {
                 return Err(ExecutionLedgerError::ExchangeEvidenceCapacity);
             }
             let old_source = self
-                .exchange_evidence
-                .clone()
+                .current_source()?
                 .ok_or(ExecutionLedgerError::StrategyRunNotFinalizable)?;
             if let Some(finalized) = next.finalized_run.take() {
                 next.archived_runs.push(ArchivedStrategyRun {
@@ -2133,19 +2979,21 @@ impl DurableExecutionLedger {
             next.stop_rearms.push(proof);
         }
         next.validate(Some(&reservation), None)?;
-        self.store.save(
+        self.store.save_capital_opening(
             &self.entries,
             if rearm.is_some() {
                 None
             } else {
                 self.risk_stop.as_ref()
             },
-            Some(&reservation),
-            None,
+            &reservation,
+            opening,
             &next,
             &self.leverage_attempts,
         )?;
         self.strategy_periods = next;
+        self.native_nav_current = None;
+        self.native_nav_count = 0;
         if rearm.is_some() {
             self.risk_stop = None;
         }
@@ -2202,6 +3050,81 @@ impl DurableExecutionLedger {
         Ok(())
     }
 
+    /// Historical total is read from SQLite, not inferred from the small
+    /// operational cache. An error is never an empty account witness.
+    pub fn total_intents(&self) -> Result<usize, ExecutionLedgerError> {
+        if self.store.sqlite_native {
+            sqlite_store::count_account_intents(&self.store.path)
+        } else {
+            Ok(self.entries.len())
+        }
+    }
+
+    /// Bounded, authenticated recent history including terminal intents.
+    /// Diagnostic sampling never grants trade admission.
+    pub(crate) fn recent_intents(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<ExecutionLedgerEntry>, ExecutionLedgerError> {
+        if !(1..=256).contains(&limit) {
+            return Err(ExecutionLedgerError::Corrupt("invalid recent intent limit"));
+        }
+        if self.store.sqlite_native {
+            sqlite_store::recent_intents(&self.store.path, limit)
+        } else {
+            let mut recent = self.entries.values().cloned().collect::<Vec<_>>();
+            recent.sort_by(|a, b| {
+                b.updated_at_ms
+                    .cmp(&a.updated_at_ms)
+                    .then_with(|| a.record.plan.intent_id.cmp(&b.record.plan.intent_id))
+            });
+            recent.truncate(limit);
+            Ok(recent)
+        }
+    }
+
+    /// Native account reconciliation counts all immutable historical states
+    /// using indexed SQL projections, but decodes only venue-observed intents
+    /// and a bounded sorted sample. No full historical RAM materialization.
+    pub(crate) fn native_reconciliation_inventory(
+        &self,
+        observed_clients: &std::collections::BTreeSet<&str>,
+        observed_order_ids: &std::collections::BTreeSet<&str>,
+        sample_limit: usize,
+    ) -> Result<Option<NativeReconciliationInventory>, ExecutionLedgerError> {
+        if !self.store.sqlite_native {
+            return Ok(None);
+        }
+        sqlite_store::native_reconciliation_inventory(
+            &self.store.path,
+            observed_clients,
+            observed_order_ids,
+            sample_limit,
+        )
+        .map(Some)
+    }
+
+    /// Full-history read-only streaming cursor retained for forensic audits.
+    /// Each decoded and authenticated SQL row is released after the callback.
+    pub(crate) fn visit_historical_entries<F>(
+        &self,
+        mut visit: F,
+    ) -> Result<(), ExecutionLedgerError>
+    where
+        F: FnMut(&ExecutionLedgerEntry) -> bool,
+    {
+        if self.store.sqlite_native {
+            sqlite_store::visit_account_history(&self.store.path, visit)
+        } else {
+            for entry in self.entries.values() {
+                if !visit(entry) {
+                    break;
+                }
+            }
+            Ok(())
+        }
+    }
+
     pub fn len(&self) -> usize {
         self.entries.len()
     }
@@ -2214,8 +3137,165 @@ impl DurableExecutionLedger {
         self.entries.get(intent_id)
     }
 
+    /// Runtime-safe exact ID read. SQLite's historical rows never need to be
+    /// retained as borrowed references; v14 returns its original cached row.
+    pub fn read_intent(
+        &self,
+        intent_id: &str,
+    ) -> Result<Option<ExecutionLedgerEntry>, ExecutionLedgerError> {
+        if self.store.sqlite_native {
+            sqlite_store::owner_intent(&self.store.path, intent_id)
+        } else {
+            Ok(self.entries.get(intent_id).cloned())
+        }
+    }
+
     pub fn entries(&self) -> impl Iterator<Item = &ExecutionLedgerEntry> {
         self.entries.values()
+    }
+
+    /// Verify the account identity of this *same* ledger owner. Native
+    /// SQLite uses the durable UID/state proof instead of a repeated full
+    /// historical scan. Old v14 retains the original in-memory census.
+    pub fn account_scope_matches(&self, expected_uid: &str) -> Result<bool, ExecutionLedgerError> {
+        if self.store.sqlite_native {
+            sqlite_store::validate_account_scope(&self.store.path, expected_uid)?;
+            Ok(true)
+        } else {
+            Ok(self
+                .entries
+                .values()
+                .all(|entry| entry.record.plan.account_uid_fingerprint == expected_uid))
+        }
+    }
+
+    /// Exact immutable native intent lookup for an already-authenticated
+    /// account. The caller receives an owned row; it never borrows from a
+    /// historical RAM map, mutates a ledger or authorizes venue execution.
+    pub fn account_intent(
+        &self,
+        expected_uid: &str,
+        intent_id: &str,
+    ) -> Result<Option<ExecutionLedgerEntry>, ExecutionLedgerError> {
+        if self.store.sqlite_native {
+            sqlite_store::indexed_intent(&self.store.path, expected_uid, intent_id)
+        } else {
+            let entry = self.entries.get(intent_id).cloned();
+            if entry
+                .as_ref()
+                .is_some_and(|entry| entry.record.plan.account_uid_fingerprint != expected_uid)
+            {
+                return Err(ExecutionLedgerError::AccountScopeMismatch);
+            }
+            Ok(entry)
+        }
+    }
+
+    /// Evaluate a caller's typed predicate over this account's current
+    /// run history. Native reads stream one verified SQLite row at a time;
+    /// v14 preserves the previous in-memory semantics. Never treats a
+    /// failed read or corrupt projection as a negative trading witness.
+    pub fn any_entry_created_since<F>(
+        &self,
+        expected_uid: &str,
+        since_ms: u64,
+        mut predicate: F,
+    ) -> Result<bool, ExecutionLedgerError>
+    where
+        F: FnMut(&ExecutionLedgerEntry) -> bool,
+    {
+        if self.store.sqlite_native {
+            sqlite_store::any_entry_created_since(
+                &self.store.path,
+                expected_uid,
+                since_ms,
+                predicate,
+            )
+        } else {
+            if !self.account_scope_matches(expected_uid)? {
+                return Err(ExecutionLedgerError::AccountScopeMismatch);
+            }
+            Ok(self
+                .entries
+                .values()
+                .any(|entry| entry.created_at_ms >= since_ms && predicate(entry)))
+        }
+    }
+
+    /// Collect at most 32 native run facts for governance release evidence,
+    /// streamed by one verified indexed cursor. This is a *bounded result*,
+    /// not a second financial ledger or account-wide snapshot.
+    pub fn bounded_run_entries<T, F>(
+        &self,
+        expected_uid: &str,
+        since_ms: u64,
+        limit: usize,
+        mut select: F,
+    ) -> Result<Vec<T>, ExecutionLedgerError>
+    where
+        F: FnMut(&ExecutionLedgerEntry) -> Option<T>,
+    {
+        if !(1..=32).contains(&limit) {
+            return Err(ExecutionLedgerError::Corrupt(
+                "invalid bounded run inventory",
+            ));
+        }
+        let mut selected = Vec::new();
+        if self.store.sqlite_native {
+            sqlite_store::visit_entries_created_since(
+                &self.store.path,
+                expected_uid,
+                since_ms,
+                |entry| {
+                    if let Some(value) = select(entry) {
+                        selected.push(value);
+                    }
+                    selected.len() < limit
+                },
+            )?;
+        } else {
+            if !self.account_scope_matches(expected_uid)? {
+                return Err(ExecutionLedgerError::AccountScopeMismatch);
+            }
+            for entry in self.entries.values() {
+                if entry.created_at_ms >= since_ms {
+                    if let Some(value) = select(entry) {
+                        selected.push(value);
+                    }
+                    if selected.len() >= limit {
+                        break;
+                    }
+                }
+            }
+        }
+        Ok(selected)
+    }
+
+    /// Operational view of all durable *material* native obligations.
+    /// The native SQLite path reads verified active guards, so terminal
+    /// history is not scanned on each risk/protection decision. The legacy
+    /// v14 path retains its original full account inventory semantics.
+    pub(crate) fn operational_entries(
+        &self,
+        account_uid: &str,
+        instrument_id: Option<&str>,
+    ) -> Result<Vec<ExecutionLedgerEntry>, ExecutionLedgerError> {
+        if self.store.sqlite_native {
+            if let Some(instrument) = instrument_id {
+                sqlite_store::indexed_instrument_guards(&self.store.path, account_uid, instrument)
+            } else {
+                sqlite_store::indexed_account_guards(&self.store.path, account_uid)
+            }
+        } else {
+            Ok(self
+                .entries
+                .values()
+                .filter(|entry| {
+                    instrument_id.is_none_or(|inst| entry.record.plan.instrument_id == inst)
+                })
+                .cloned()
+                .collect())
+        }
     }
 
     pub fn prepare(
@@ -2297,11 +3377,13 @@ impl DurableExecutionLedger {
         plan: ExecutionPlan,
         observed_at_ms: u64,
     ) -> Result<PrepareDisposition, ExecutionLedgerError> {
-        let root = self
-            .entries
-            .get(root_intent_id)
-            .cloned()
-            .ok_or_else(|| ExecutionLedgerError::IntentNotFound(root_intent_id.to_owned()))?;
+        let root = if self.store.sqlite_native {
+            let uid = &plan.account_uid_fingerprint;
+            sqlite_store::indexed_intent(&self.store.path, uid, root_intent_id)?
+        } else {
+            self.entries.get(root_intent_id).cloned()
+        }
+        .ok_or_else(|| ExecutionLedgerError::IntentNotFound(root_intent_id.to_owned()))?;
         let reverse = root
             .record
             .reverse
@@ -2349,14 +3431,17 @@ impl DurableExecutionLedger {
         intent_id: &str,
         observed_at_ms: u64,
     ) -> Result<ExecutionLedgerEntry, ExecutionLedgerError> {
-        let entry = self
-            .get(intent_id)
-            .ok_or_else(|| ExecutionLedgerError::IntentNotFound(intent_id.to_owned()))?;
+        let entry = if self.store.sqlite_native {
+            sqlite_store::owner_intent(&self.store.path, intent_id)?
+        } else {
+            self.get(intent_id).cloned()
+        }
+        .ok_or_else(|| ExecutionLedgerError::IntentNotFound(intent_id.to_owned()))?;
         if entry.record.state == ExecutionState::Rejected
             && entry.record.rejection_code.as_deref()
                 == Some(crate::state::LOCAL_PREPARED_ABANDONED_CODE)
         {
-            return Ok(entry.clone());
+            return Ok(entry);
         }
         self.mutate(intent_id, observed_at_ms, |record| {
             record.abandon_prepared()
@@ -2385,49 +3470,100 @@ impl DurableExecutionLedger {
         }
         // Exact set equality avoids accidentally clearing only a subset and
         // reporting readiness while other unsent records remain outstanding.
-        let pending = self
-            .entries
-            .iter()
-            .filter(|(_, entry)| entry.record.state == ExecutionState::Prepared)
-            .map(|(id, _)| id.as_str())
-            .collect::<Vec<_>>();
-        if pending != expected_ids.iter().map(String::as_str).collect::<Vec<_>>() {
-            return Err(ExecutionLedgerError::Corrupt("prepared inventory mismatch"));
-        }
-        if self.entries.values().any(|entry| {
-            entry.record.plan.account_uid_fingerprint != account_uid
-                || matches!(
-                    entry.record.state,
-                    ExecutionState::Submitting | ExecutionState::UnknownSubmission
-                )
-        }) {
-            return Err(ExecutionLedgerError::Corrupt(
-                "ledger account or unresolved POST mismatch",
-            ));
-        }
-        let mut next = self.entries.clone();
+        let native_pending = if self.store.sqlite_native {
+            Some(sqlite_store::indexed_exact_prepared_batch(
+                &self.store.path,
+                account_uid,
+                expected_ids,
+            )?)
+        } else {
+            let pending = self
+                .entries
+                .iter()
+                .filter(|(_, entry)| entry.record.state == ExecutionState::Prepared)
+                .map(|(id, _)| id.as_str())
+                .collect::<Vec<_>>();
+            if pending != expected_ids.iter().map(String::as_str).collect::<Vec<_>>() {
+                return Err(ExecutionLedgerError::Corrupt("prepared inventory mismatch"));
+            }
+            if self.entries.values().any(|entry| {
+                entry.record.plan.account_uid_fingerprint != account_uid
+                    || matches!(
+                        entry.record.state,
+                        ExecutionState::Submitting | ExecutionState::UnknownSubmission
+                    )
+            }) {
+                return Err(ExecutionLedgerError::Corrupt(
+                    "ledger account or unresolved POST mismatch",
+                ));
+            }
+            None
+        };
+        // Validate every changed entry before the one SQLite transaction.
+        // The existing executor holds its sole account writer lease; there
+        // is no partial in-memory commit or second authority.
+        let mut changed = BTreeMap::new();
         for id in expected_ids {
-            let entry = next
-                .get_mut(id)
-                .ok_or_else(|| ExecutionLedgerError::IntentNotFound(id.clone()))?;
-            let timestamp = monotonic_timestamp(entry, observed_at_ms)?;
-            // This enforces the same protection, reverse and mutation
-            // invariants as single-intent abandon_prepared().
+            let mut entry = if let Some(pending) = &native_pending {
+                pending
+                    .iter()
+                    .find(|entry| entry.record.plan.intent_id == *id)
+                    .cloned()
+                    .ok_or_else(|| ExecutionLedgerError::IntentNotFound(id.clone()))?
+            } else {
+                self.entries
+                    .get(id)
+                    .cloned()
+                    .ok_or_else(|| ExecutionLedgerError::IntentNotFound(id.clone()))?
+            };
+            let timestamp = monotonic_timestamp(&entry, observed_at_ms)?;
+            // Keep the same state machine used by single-intent abandon:
+            // only an unsent PREPARED is eligible, never BEGIN_POST/UNKNOWN.
             entry.record.abandon_prepared()?;
             entry.updated_at_ms = timestamp;
-            validate_entry(entry)?;
+            validate_entry(&entry)?;
+            validate_strategy_run_binding(
+                &entry,
+                self.capital_reservation.as_ref(),
+                &self.strategy_periods.archived_runs,
+                &self.strategy_periods.unverified_runs,
+            )?;
+            changed.insert(id.clone(), entry);
         }
-        // One durable save / one atomic rename. On any failure, the original
-        // in-memory ledger and all of its immutable financial proofs survive.
-        self.store.save(
-            &next,
-            self.risk_stop.as_ref(),
-            self.capital_reservation.as_ref(),
-            self.exchange_evidence.as_ref(),
-            &self.strategy_periods,
-            &self.leverage_attempts,
-        )?;
-        self.entries = next;
+        if self.store.sqlite_native {
+            // One BEGIN IMMEDIATE, one WAL commit for the exact batch.
+            // Historical rows, source bills, STOP and capital are untouched.
+            sqlite_store::save_recovered(
+                &self.store.path,
+                &changed,
+                self.risk_stop.as_ref(),
+                self.capital_reservation.as_ref(),
+                self.exchange_evidence.as_ref(),
+                &self.strategy_periods,
+                &self.leverage_attempts,
+            )?;
+        } else {
+            // Preserve JSON-v14 atomic snapshot/rename semantics until the
+            // exact source account is explicitly cut over to native SQLite.
+            let mut next = self.entries.clone();
+            next.extend(
+                changed
+                    .iter()
+                    .map(|(id, entry)| (id.clone(), entry.clone())),
+            );
+            self.store.save(
+                &next,
+                self.risk_stop.as_ref(),
+                self.capital_reservation.as_ref(),
+                self.exchange_evidence.as_ref(),
+                &self.strategy_periods,
+                &self.leverage_attempts,
+            )?;
+        }
+        // Only after the durable commit do changed intents become visible
+        // in the current account's authoritative in-process state machine.
+        self.entries.extend(changed);
+        self.compact_native_entries();
         Ok(expected_ids.len())
     }
 
@@ -2455,51 +3591,94 @@ impl DurableExecutionLedger {
         self.validate_capital_intent(&record, observed_at_ms)?;
         // One ledger is owned by exactly one authenticated exchange UID,
         // even after FLAT or when the previous managed intents are terminal.
-        if self.entries.values().any(|entry| {
-            entry.record.plan.account_uid_fingerprint != record.plan.account_uid_fingerprint
-        }) {
+        if !self.store.sqlite_native
+            && self.entries.values().any(|entry| {
+                entry.record.plan.account_uid_fingerprint != record.plan.account_uid_fingerprint
+            })
+        {
             return Err(ExecutionLedgerError::AccountScopeMismatch);
         }
 
-        if let Some(existing) = self.entries.get(&record.plan.intent_id) {
+        // An old ID is immutable regardless of whether its completed
+        // record is present in the active in-memory working set. Native
+        // SQLite resolves exact identity by indexed durable plan/row proof.
+        let prior = if self.store.sqlite_native {
+            sqlite_store::indexed_intent(
+                &self.store.path,
+                &record.plan.account_uid_fingerprint,
+                &record.plan.intent_id,
+            )?
+        } else {
+            self.entries.get(&record.plan.intent_id).cloned()
+        };
+        if let Some(existing) = prior {
             return if existing.record == record {
-                Ok(PrepareDisposition::Existing(existing.clone()))
+                Ok(PrepareDisposition::Existing(existing))
             } else {
                 Err(ExecutionLedgerError::IntentConflict)
             };
         }
 
-        if self.entries.len() >= self.store.max_records {
+        if !self.store.sqlite_native && self.entries.len() >= self.store.max_records {
             return Err(ExecutionLedgerError::CapacityExceeded(
                 self.store.max_records,
             ));
         }
 
-        let busy = if confirmed_coverage {
+        let busy = if self.store.sqlite_native {
+            // Only currently material guards matter; exact reverse-continuation
+            // lookup is a fallible SQL proof, never an in-memory shortcut.
+            let guards = sqlite_store::indexed_instrument_guards(
+                &self.store.path,
+                &record.plan.account_uid_fingerprint,
+                &record.plan.instrument_id,
+            )?;
+            let mut busy = false;
+            for entry in &guards {
+                if self.entry_blocks_instrument(
+                    entry,
+                    &record.plan.intent_id,
+                    record.plan.action,
+                    reverse_root_bypass,
+                    confirmed_coverage,
+                )? {
+                    busy = true;
+                    break;
+                }
+            }
+            busy
+        } else if confirmed_coverage {
             self.instrument_reserved_with_confirmed_coverage(
                 &record.plan.instrument_id,
                 &record.plan.intent_id,
                 record.plan.action,
                 reverse_root_bypass,
                 true,
-            )
+            )?
         } else {
             self.instrument_reserved(
                 &record.plan.instrument_id,
                 &record.plan.intent_id,
                 record.plan.action,
                 reverse_root_bypass,
-            )
+            )?
         };
         if busy {
             return Err(ExecutionLedgerError::InstrumentBusy);
         }
 
-        if self
-            .entries
-            .values()
-            .any(|entry| entry.record.plan.client_order_id == record.plan.client_order_id)
-        {
+        let duplicate_client_id = if self.store.sqlite_native {
+            sqlite_store::client_order_id_exists(
+                &self.store.path,
+                &record.plan.account_uid_fingerprint,
+                &record.plan.client_order_id,
+            )?
+        } else {
+            self.entries
+                .values()
+                .any(|entry| entry.record.plan.client_order_id == record.plan.client_order_id)
+        };
+        if duplicate_client_id {
             return Err(ExecutionLedgerError::ClientOrderIdCollision);
         }
 
@@ -2520,7 +3699,7 @@ impl DurableExecutionLedger {
         incoming_intent_id: &str,
         incoming_action: ExecutionAction,
         reverse_root_bypass: Option<&str>,
-    ) -> bool {
+    ) -> Result<bool, ExecutionLedgerError> {
         self.instrument_reserved_with_confirmed_coverage(
             instrument_id,
             incoming_intent_id,
@@ -2537,52 +3716,87 @@ impl DurableExecutionLedger {
         incoming_action: ExecutionAction,
         reverse_root_bypass: Option<&str>,
         confirmed_coverage: bool,
-    ) -> bool {
-        self.entries.values().any(|entry| {
-            if entry.record.plan.instrument_id != instrument_id {
-                return false;
-            }
-            if !entry.record.state.is_terminal() {
-                return true;
-            }
-            // The ONLY newly permitted reservation is a terminal, fully
-            // filled, actively protected old lot proved under the same
-            // executor lock by exact venue GET + complete OCO inventory +
-            // per-Hedge-side aggregate quantities + final private WS fence.
-            // UNKNOWN, failed, canceled, pending amend/cleanup and reverse
-            // linkage can never borrow that permission.
-            if entry.record.protection_blocks_new_managed_intent()
-                && (incoming_action.is_risk_increasing()
-                    || incoming_action == ExecutionAction::Reduce)
+    ) -> Result<bool, ExecutionLedgerError> {
+        for entry in self.entries.values() {
+            if entry.record.plan.instrument_id == instrument_id
+                && self.entry_blocks_instrument(
+                    entry,
+                    incoming_intent_id,
+                    incoming_action,
+                    reverse_root_bypass,
+                    confirmed_coverage,
+                )?
             {
-                let proven_old_lot = confirmed_coverage
-                    && matches!(
-                        incoming_action,
-                        ExecutionAction::Add | ExecutionAction::Hedge
-                    )
-                    && entry.record.state == ExecutionState::Filled
-                    && entry.record.active_mutation().is_none()
-                    && entry.record.protection.as_ref().is_some_and(|protection| {
-                        protection.status == ProtectiveOrderStatus::Active
-                            && protection.cleanup.is_none()
-                            && protection.size_amend.as_ref().is_none_or(|amend| {
-                                amend.state == ProtectiveSizeAmendState::Confirmed
-                            })
-                    });
-                if !proven_old_lot {
-                    return true;
-                }
+                return Ok(true);
             }
-            let Some(reverse) = entry.record.reverse.as_ref() else {
-                return false;
-            };
-            reverse.leg == ReverseLeg::Close
-                && reverse.continuation == ReverseContinuation::Required
+        }
+        Ok(false)
+    }
+
+    fn entry_blocks_instrument(
+        &self,
+        entry: &ExecutionLedgerEntry,
+        incoming_intent_id: &str,
+        incoming_action: ExecutionAction,
+        reverse_root_bypass: Option<&str>,
+        confirmed_coverage: bool,
+    ) -> Result<bool, ExecutionLedgerError> {
+        if !entry.record.state.is_terminal() {
+            return Ok(true);
+        }
+        // A terminal parent does not retire an unresolved amend/cancel.
+        // Until native reconciliation proves the mutation terminal, an
+        // additional new-risk/reduce operation cannot borrow its slot.
+        if entry.record.active_mutation().is_some()
+            && (incoming_action.is_risk_increasing() || incoming_action == ExecutionAction::Reduce)
+        {
+            return Ok(true);
+        }
+        // The ONLY newly permitted reservation is a terminal, fully
+        // filled, actively protected old lot proved under the same
+        // executor lock by exact venue GET + complete OCO inventory +
+        // per-Hedge-side aggregate quantities + final private WS fence.
+        // UNKNOWN, failed, canceled, pending amend/cleanup and reverse
+        // linkage can never borrow that permission.
+        if entry.record.protection_blocks_new_managed_intent()
+            && (incoming_action.is_risk_increasing() || incoming_action == ExecutionAction::Reduce)
+        {
+            let proven_old_lot = confirmed_coverage
+                && matches!(
+                    incoming_action,
+                    ExecutionAction::Add | ExecutionAction::Hedge
+                )
                 && entry.record.state == ExecutionState::Filled
-                && !self.entries.contains_key(&reverse.open_intent_id)
-                && !(reverse_root_bypass == Some(reverse.root_intent_id.as_str())
-                    && incoming_intent_id == reverse.open_intent_id)
-        })
+                && entry.record.active_mutation().is_none()
+                && entry.record.protection.as_ref().is_some_and(|protection| {
+                    protection.status == ProtectiveOrderStatus::Active
+                        && protection.cleanup.is_none()
+                        && protection
+                            .size_amend
+                            .as_ref()
+                            .is_none_or(|amend| amend.state == ProtectiveSizeAmendState::Confirmed)
+                });
+            if !proven_old_lot {
+                return Ok(true);
+            }
+        }
+        let Some(reverse) = entry.record.reverse.as_ref() else {
+            return Ok(false);
+        };
+        if reverse.leg != ReverseLeg::Close
+            || reverse.continuation != ReverseContinuation::Required
+            || entry.record.state != ExecutionState::Filled
+            || (reverse_root_bypass == Some(reverse.root_intent_id.as_str())
+                && incoming_intent_id == reverse.open_intent_id)
+        {
+            return Ok(false);
+        }
+        let open_exists = if self.store.sqlite_native {
+            sqlite_store::owner_intent(&self.store.path, &reverse.open_intent_id)?.is_some()
+        } else {
+            self.entries.contains_key(&reverse.open_intent_id)
+        };
+        Ok(!open_exists)
     }
 
     pub fn begin_submission(
@@ -2599,9 +3813,15 @@ impl DurableExecutionLedger {
         request_exchange_time_ms: Option<u64>,
         observed_at_ms: u64,
     ) -> Result<ExecutionLedgerEntry, ExecutionLedgerError> {
-        let entry = self
-            .get(intent_id)
-            .ok_or_else(|| ExecutionLedgerError::IntentNotFound(intent_id.to_owned()))?;
+        // PRE-POST checks must read the very same durable owner as mutate:
+        // a safely evicted historical or inactive in-memory cache cannot
+        // produce a false IntentNotFound or weaken immutable capital proof.
+        let entry = if self.store.sqlite_native {
+            sqlite_store::owner_intent(&self.store.path, intent_id)?
+        } else {
+            self.get(intent_id).cloned()
+        }
+        .ok_or_else(|| ExecutionLedgerError::IntentNotFound(intent_id.to_owned()))?;
         self.require_new_risk_allowed(entry.record.plan.action)?;
         self.validate_capital_intent(&entry.record, entry.created_at_ms)?;
         self.mutate(intent_id, observed_at_ms, move |record| {
@@ -2961,15 +4181,17 @@ impl DurableExecutionLedger {
         intent_id: String,
         entry: ExecutionLedgerEntry,
     ) -> Result<(), ExecutionLedgerError> {
-        self.entries.insert(intent_id.clone(), entry);
-        if let Err(error) = self.store.save(
-            &self.entries,
-            self.risk_stop.as_ref(),
-            self.capital_reservation.as_ref(),
-            self.exchange_evidence.as_ref(),
-            &self.strategy_periods,
-            &self.leverage_attempts,
-        ) {
+        if self.store.sqlite_native {
+            // Commit the record and its BEGIN_POST/guard projections before
+            // publishing it to the in-process working set. No full-history
+            // map is required to validate the SQLite durable mutation.
+            self.store.save_changed_intent(&entry, self)?;
+            self.entries.insert(intent_id, entry);
+            self.compact_native_entries();
+            return Ok(());
+        }
+        self.entries.insert(intent_id.clone(), entry.clone());
+        if let Err(error) = self.store.save_changed_intent(&entry, self) {
             self.entries.remove(&intent_id);
             return Err(error);
         }
@@ -2986,6 +4208,30 @@ impl DurableExecutionLedger {
         F: FnOnce(&mut ExecutionRecord) -> Result<(), ExecutionTransitionError>,
     {
         require_timestamp(observed_at_ms)?;
+        if self.store.sqlite_native {
+            // All native transitions read one authenticated SQL row, apply
+            // the original Rust state machine, and write exactly one WAL
+            // delta. A historical intent can be evicted from RAM safely.
+            let mut next = sqlite_store::owner_intent(&self.store.path, intent_id)?
+                .ok_or_else(|| ExecutionLedgerError::IntentNotFound(intent_id.to_owned()))?;
+            if self
+                .entries
+                .get(intent_id)
+                .is_some_and(|cached| cached != &next)
+            {
+                return Err(ExecutionLedgerError::Corrupt(
+                    "SQLite cached intent differs from durable owner",
+                ));
+            }
+            let next_timestamp = monotonic_timestamp(&next, observed_at_ms)?;
+            mutation(&mut next.record)?;
+            next.updated_at_ms = next_timestamp;
+            validate_entry(&next)?;
+            self.store.save_changed_intent(&next, self)?;
+            self.entries.insert(intent_id.to_owned(), next.clone());
+            self.compact_native_entries();
+            return Ok(next);
+        }
         let original = self
             .entries
             .get(intent_id)
@@ -3003,14 +4249,12 @@ impl DurableExecutionLedger {
             validate_entry(entry)?;
         }
 
-        if let Err(error) = self.store.save(
-            &self.entries,
-            self.risk_stop.as_ref(),
-            self.capital_reservation.as_ref(),
-            self.exchange_evidence.as_ref(),
-            &self.strategy_periods,
-            &self.leverage_attempts,
-        ) {
+        let changed = self
+            .entries
+            .get(intent_id)
+            .expect("mutated entry exists")
+            .clone();
+        if let Err(error) = self.store.save_changed_intent(&changed, self) {
             self.entries.insert(intent_id.to_owned(), original);
             return Err(error);
         }
@@ -3654,7 +4898,8 @@ mod tests {
     #[test]
     fn daily_strategy_loss_counts_fifo_attributed_exit_bills_and_rejects_partial_source() {
         let run = StrategyCapitalReservation {
-            schema: STRATEGY_CAPITAL_RESERVATION_SCHEMA_V1.to_owned(),
+            schema: STRATEGY_CAPITAL_RESERVATION_SCHEMA_V2.to_owned(),
+            strategy_id: "test_strategy_v1".to_owned(),
             allocation_id: "stage5a_daily_loss_fixture_012345".to_owned(),
             account_uid_fingerprint: "uid-fingerprint".to_owned(),
             origin_schema: "origin/v1".to_owned(),
@@ -3855,6 +5100,7 @@ mod tests {
         let store = ExecutionLedgerStore::at(root.join("ledger.json"));
         let opening = StrategyAllocationOpening {
             account_uid_fingerprint: "uid-fingerprint".to_owned(),
+            strategy_id: "test_strategy_v1".to_owned(),
             account_generation: "opening_generation".to_owned(),
             observed_usdt_equity: "1000".to_owned(),
             observed_at_ms: 1000,
@@ -3865,7 +5111,8 @@ mod tests {
             operator_authority_id: format!("sha256:{}", "a".repeat(64)),
         };
         let reservation = StrategyCapitalReservation {
-            schema: STRATEGY_CAPITAL_RESERVATION_SCHEMA_V1.to_owned(),
+            schema: STRATEGY_CAPITAL_RESERVATION_SCHEMA_V2.to_owned(),
+            strategy_id: "test_strategy_v1".to_owned(),
             allocation_id: "stage5a_ledger_leverage_run_1234".to_owned(),
             account_uid_fingerprint: opening.account_uid_fingerprint.clone(),
             origin_schema: "origin/v1".to_owned(),
@@ -4048,164 +5295,14 @@ mod tests {
     }
 
     #[test]
-    fn explicit_finalized_storage_migration_preserves_stop_and_is_idempotent() {
-        let root = temp_root("explicit-finalized-storage-v14");
-        let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(&root).unwrap();
-        let store = ExecutionLedgerStore::at(root.join("ledger.json"));
-        let run = StrategyCapitalReservation {
-            schema: STRATEGY_CAPITAL_RESERVATION_SCHEMA_V1.to_owned(),
-            allocation_id: "storage_migrate_finalized_0123456789".to_owned(),
-            account_uid_fingerprint: "uid-fingerprint".to_owned(),
-            origin_schema: "okx.research.live-decision/v1".to_owned(),
-            origin_version: "v1".to_owned(),
-            mandate_version: "mandate-v1".to_owned(),
-            allocated_usdt: "100".to_owned(),
-            opening_account_usdt_equity: "1000".to_owned(),
-            account_generation: "generation".to_owned(),
-            operator_authority_id: format!("sha256:{}", "a".repeat(64)),
-            started_at_ms: 1000,
-        };
-        let source = DurableExchangeEvidence::new(&run).unwrap();
-        let report = StrategyFinancialPeriod {
-            schema: crate::STRATEGY_FINANCIAL_PERIOD_SCHEMA_V1,
-            run_id: run.allocation_id.clone(),
-            state: "FLAT_RECONCILED",
-            evidence_sha256: source.checksum_sha256.clone(),
-            allocation_usdt: "100".to_owned(),
-            linked_fills: 0,
-            linked_bills: 0,
-            realized_usdt: "0".to_owned(),
-            fees_usdt: "0".to_owned(),
-            funding_usdt: Some("0".to_owned()),
-            unrealized_usdt: Some("0".to_owned()),
-            nav_usdt: Some("100".to_owned()),
-            positions: Vec::new(),
-            usable_for_new_risk: false,
-            reasons: Vec::new(),
-        };
-        let finalization = StrategyFinalization::new(&run, &source, &report, 2000).unwrap();
-        let stop = ExecutionRiskStop {
-            schema: EXECUTION_RISK_STOP_SCHEMA_V1.to_owned(),
-            stopped_at_ms: 1500,
-            reason: "STRATEGY_UTC_DAILY_GROSS_LOSS".to_owned(),
-        };
-        let history = StrategyPeriodHistory {
-            finalized_run: Some(finalization.clone()),
-            ..StrategyPeriodHistory::default()
-        };
-        let legacy = ExecutionLedgerFile {
-            schema: EXECUTION_LEDGER_SCHEMA_V13.to_owned(),
-            records: Vec::new(),
-            risk_stop: Some(stop.clone()),
-            capital_reservation: Some(run.clone()),
-            exchange_evidence: Some(source),
-            strategy_periods: history,
-            archive_refs: Vec::new(),
-            leverage_attempts: Vec::new(),
-        };
-        fs::write(store.path(), serde_json::to_vec_pretty(&legacy).unwrap()).unwrap();
-        let ledger = DurableExecutionLedger::open(store.clone(), 3000).unwrap();
-        let old = store.attest_storage().unwrap();
-        let original = fs::read(store.path()).unwrap();
-        assert_eq!(old.on_disk_schema, EXECUTION_LEDGER_SCHEMA_V13);
-
-        for (hash, check, ts) in [
-            (
-                "b".repeat(64),
-                finalization.checksum_sha256.clone(),
-                stop.stopped_at_ms,
-            ),
-            (
-                old.manifest_sha256.clone(),
-                "f".repeat(64),
-                stop.stopped_at_ms,
-            ),
-            (
-                old.manifest_sha256.clone(),
-                finalization.checksum_sha256.clone(),
-                1,
-            ),
-        ] {
-            assert!(
-                ledger
-                    .migrate_finalized_storage_v14(&run.allocation_id, &hash, &check, ts)
-                    .is_err(),
-                "incorrect supplied identity must not touch financial storage"
-            );
-            assert_eq!(fs::read(store.path()).unwrap(), original);
-            assert!(!store.path().with_extension("pre-v14.json").exists());
-        }
-        assert!(
-            ledger
-                .migrate_finalized_storage_v14(
-                    "foreign_strategy_run_0123456789",
-                    &old.manifest_sha256,
-                    &finalization.checksum_sha256,
-                    stop.stopped_at_ms,
-                )
-                .is_err()
-        );
-        assert_eq!(fs::read(store.path()).unwrap(), original);
-
-        let after = ledger
-            .migrate_finalized_storage_v14(
-                &run.allocation_id,
-                &old.manifest_sha256,
-                &finalization.checksum_sha256,
-                stop.stopped_at_ms,
-            )
-            .unwrap();
-        assert_eq!(after.on_disk_schema, EXECUTION_LEDGER_SCHEMA_V14);
-        assert_eq!(
-            after.original_snapshot_sha256.as_deref(),
-            Some(old.manifest_sha256.as_str())
-        );
-        assert_eq!(
-            fs::read(store.path().with_extension("pre-v14.json")).unwrap(),
-            original
-        );
-        assert_eq!(after.active_risk_stop_reason, old.active_risk_stop_reason);
-        assert_eq!(
-            after.finalized_run_checksum_sha256,
-            old.finalized_run_checksum_sha256
-        );
-        let after_bytes = fs::read(store.path()).unwrap();
-        let duplicate = ledger
-            .migrate_finalized_storage_v14(
-                &run.allocation_id,
-                &old.manifest_sha256,
-                &finalization.checksum_sha256,
-                stop.stopped_at_ms,
-            )
-            .unwrap();
-        assert_eq!(duplicate.manifest_sha256, after.manifest_sha256);
-        assert_eq!(fs::read(store.path()).unwrap(), after_bytes);
-        let reopened = DurableExecutionLedger::open(store.clone(), 3500).unwrap();
-        assert_eq!(reopened.risk_stop(), Some(&stop));
-        assert_eq!(reopened.finalized_run(), Some(&finalization));
-        assert!(
-            reopened
-                .migrate_finalized_storage_v14(
-                    &run.allocation_id,
-                    &"c".repeat(64),
-                    &finalization.checksum_sha256,
-                    stop.stopped_at_ms,
-                )
-                .is_err()
-        );
-        assert_eq!(fs::read(store.path()).unwrap(), after_bytes);
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
     fn operator_rearm_rejects_same_day_and_forged_stop_then_preserves_history_on_restart() {
         let root = temp_root("operator-stop-rearm");
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
         let store = ExecutionLedgerStore::at(root.join("ledger.json"));
         let prior = StrategyCapitalReservation {
-            schema: STRATEGY_CAPITAL_RESERVATION_SCHEMA_V1.to_owned(),
+            schema: STRATEGY_CAPITAL_RESERVATION_SCHEMA_V2.to_owned(),
+            strategy_id: "test_strategy_v1".to_owned(),
             allocation_id: "stage5a_old_finalized_123456".to_owned(),
             account_uid_fingerprint: "uid-fingerprint".to_owned(),
             origin_schema: "origin/v1".to_owned(),
@@ -4269,6 +5366,7 @@ mod tests {
         let next_at = 86_400_101;
         let opening = StrategyAllocationOpening {
             account_uid_fingerprint: prior.account_uid_fingerprint.clone(),
+            strategy_id: "test_strategy_v1".to_owned(),
             account_generation: "new-generation".to_owned(),
             observed_usdt_equity: "1000".to_owned(),
             observed_at_ms: next_at,
@@ -4372,7 +5470,8 @@ mod tests {
         fs::create_dir_all(&root).unwrap();
         let store = ExecutionLedgerStore::at(root.join("ledger.json"));
         let prior = StrategyCapitalReservation {
-            schema: STRATEGY_CAPITAL_RESERVATION_SCHEMA_V1.to_owned(),
+            schema: STRATEGY_CAPITAL_RESERVATION_SCHEMA_V2.to_owned(),
+            strategy_id: "test_strategy_v1".to_owned(),
             allocation_id: "run_archived_source_0123456789".to_owned(),
             account_uid_fingerprint: "uid-fingerprint".to_owned(),
             origin_schema: "okx.research.live-decision/v1".to_owned(),
@@ -4605,7 +5704,8 @@ mod tests {
         let mut archive = Vec::new();
         for i in 0..17u64 {
             let run = StrategyCapitalReservation {
-                schema: STRATEGY_CAPITAL_RESERVATION_SCHEMA_V1.to_owned(),
+                schema: STRATEGY_CAPITAL_RESERVATION_SCHEMA_V2.to_owned(),
+                strategy_id: "test_strategy_v1".to_owned(),
                 allocation_id: format!("stage5b_sealed_run_{i:04}"),
                 account_uid_fingerprint: "uid-fingerprint".to_owned(),
                 origin_schema: "okx.market-intelligence/v1".to_owned(),
@@ -4773,7 +5873,8 @@ mod tests {
         let mut ledger = DurableExecutionLedger::open(store.clone(), 100).unwrap();
         let approval = format!("sha256:{}", "b".repeat(64));
         let reservation = StrategyCapitalReservation {
-            schema: STRATEGY_CAPITAL_RESERVATION_SCHEMA_V1.to_owned(),
+            schema: STRATEGY_CAPITAL_RESERVATION_SCHEMA_V2.to_owned(),
+            strategy_id: "test_strategy_v1".to_owned(),
             allocation_id: "strategy-demo-budget-20261013".to_owned(),
             account_uid_fingerprint: "uid-fingerprint".to_owned(),
             origin_schema: "okx.research.live-decision/v1".to_owned(),
@@ -4787,6 +5888,7 @@ mod tests {
         };
         let evidence = StrategyAllocationOpening {
             account_uid_fingerprint: "uid-fingerprint".to_owned(),
+            strategy_id: "test_strategy_v1".to_owned(),
             account_generation: "fresh-generation".to_owned(),
             observed_usdt_equity: "1000".to_owned(),
             observed_at_ms: 1000,
@@ -4904,6 +6006,113 @@ mod tests {
     }
 
     #[test]
+    fn sqlite_historical_unsent_batch_is_single_delta_transaction_and_never_replays_post() {
+        let root = temp_root("sqlite-historical-unsent-batch");
+        let _ = fs::remove_dir_all(&root);
+        let path = root.join("account.sqlite");
+        let store = ExecutionLedgerStore::sqlite_at(&path);
+        let uid = "a".repeat(64);
+        let ids = vec![
+            "intent_sqlite_batch_A_0123456789".to_owned(),
+            "intent_sqlite_batch_B_0123456789".to_owned(),
+        ];
+        let mut originals = BTreeMap::new();
+        for (i, id) in ids.iter().enumerate() {
+            let mut request = plan(id);
+            request.account_uid_fingerprint = uid.clone();
+            request.instrument_id = if i == 0 {
+                "BTC-USDT-SWAP".to_owned()
+            } else {
+                "ETH-USDT-SWAP".to_owned()
+            };
+            let entry = ExecutionLedgerEntry {
+                record: ExecutionRecord::new(request),
+                created_at_ms: 100 + i as u64,
+                updated_at_ms: 100 + i as u64,
+            };
+            originals.insert(id.clone(), entry);
+        }
+        store
+            .save(
+                &originals,
+                None,
+                None,
+                None,
+                &StrategyPeriodHistory::default(),
+                &[],
+            )
+            .unwrap();
+        store
+            .bind_native_account_identity(&SqliteAccountIdentity {
+                venue: LedgerVenue::Okx,
+                environment: LedgerEnvironment::Demo,
+                account_id: "demo".to_owned(),
+                uid_fingerprint: uid.clone(),
+                bound_at_ms: 200,
+            })
+            .unwrap();
+        let mut ledger = DurableExecutionLedger::open(store.clone(), 210).unwrap();
+        let before = store.load().unwrap().0;
+        assert_eq!(before, originals);
+        assert!(
+            ledger
+                .abandon_prepared_batch(&uid, &ids[0..1], 300)
+                .is_err()
+        );
+        assert!(
+            ledger
+                .abandon_prepared_batch(&"f".repeat(64), &ids, 300)
+                .is_err()
+        );
+        assert_eq!(store.load().unwrap().0, before);
+
+        // Force the second row to fail after the first has been processed:
+        // the SQLite transaction must roll back ALL local changes, with no
+        // in-memory transition and no artificial POST attempt.
+        let c = rusqlite::Connection::open(&path).unwrap();
+        c.execute_batch(&format!(
+            "CREATE TRIGGER test_batch_abort BEFORE UPDATE ON ledger_entries
+             WHEN NEW.intent_id='{}'
+             BEGIN SELECT RAISE(ABORT,'TEST_SECOND_ROW_ABORT'); END;",
+            ids[1]
+        ))
+        .unwrap();
+        drop(c);
+        assert!(ledger.abandon_prepared_batch(&uid, &ids, 300).is_err());
+        assert_eq!(store.load().unwrap().0, before);
+        assert_eq!(ledger.get(&ids[0]), originals.get(&ids[0]));
+        let c = rusqlite::Connection::open(&path).unwrap();
+        c.execute_batch("DROP TRIGGER test_batch_abort").unwrap();
+        drop(c);
+
+        assert_eq!(ledger.abandon_prepared_batch(&uid, &ids, 300).unwrap(), 2);
+        for id in &ids {
+            let saved = store.indexed_intent(&uid, id).unwrap().unwrap();
+            assert_eq!(saved.record.state, ExecutionState::Rejected);
+            assert_eq!(
+                saved.record.rejection_code.as_deref(),
+                Some(crate::state::LOCAL_PREPARED_ABANDONED_CODE)
+            );
+            assert_eq!(ledger.get(id), Some(&saved));
+        }
+        let c = rusqlite::Connection::open(&path).unwrap();
+        let posts: i64 = c
+            .query_row("SELECT COUNT(*) FROM post_attempts", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(posts, 0);
+        drop(c);
+        let reopened = DurableExecutionLedger::open(store, 310).unwrap();
+        for id in &ids {
+            assert_eq!(
+                reopened.read_intent(id).unwrap().unwrap().record.state,
+                ExecutionState::Rejected
+            );
+        }
+        assert!(ledger.abandon_prepared_batch(&uid, &ids, 320).is_err());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn strategy_run_id_is_owner_derived_durable_and_rejects_tampering() {
         use okx_analysis::{
             HARD_RISK_POLICY_SCHEMA_V1, HardRiskPolicy, RiskDegradedMode, RiskMinimumQuality,
@@ -4915,7 +6124,8 @@ mod tests {
         let store = ExecutionLedgerStore::at(root.join("ledger.json"));
         let authority = format!("sha256:{}", "a".repeat(64));
         let run = StrategyCapitalReservation {
-            schema: STRATEGY_CAPITAL_RESERVATION_SCHEMA_V1.to_owned(),
+            schema: STRATEGY_CAPITAL_RESERVATION_SCHEMA_V2.to_owned(),
+            strategy_id: "test_strategy_v1".to_owned(),
             allocation_id: "run_owner_test_20261013".to_owned(),
             account_uid_fingerprint: "uid-fingerprint".to_owned(),
             origin_schema: "okx.research.live-decision/v1".to_owned(),
@@ -4929,6 +6139,7 @@ mod tests {
         };
         let opening = StrategyAllocationOpening {
             account_uid_fingerprint: run.account_uid_fingerprint.clone(),
+            strategy_id: "test_strategy_v1".to_owned(),
             account_generation: run.account_generation.clone(),
             observed_usdt_equity: run.opening_account_usdt_equity.clone(),
             observed_at_ms: run.started_at_ms,
@@ -5328,12 +6539,16 @@ mod tests {
             restarted.prepare(plan("intent_blocked_01234567"), 201),
             Err(ExecutionLedgerError::InstrumentBusy)
         ));
-        assert!(!restarted.instrument_reserved(
-            "DOGE-USDT-SWAP",
-            "intent_close_pending_012345",
-            ExecutionAction::Close,
-            None,
-        ));
+        assert!(
+            !restarted
+                .instrument_reserved(
+                    "DOGE-USDT-SWAP",
+                    "intent_close_pending_012345",
+                    ExecutionAction::Close,
+                    None,
+                )
+                .unwrap()
+        );
 
         let resolved = restarted
             .reconcile_found_with_resolutions(
@@ -5362,12 +6577,16 @@ mod tests {
             Err(ExecutionLedgerError::InstrumentBusy)
         ));
         // A partial reduce cannot safely resize the active venue OCO yet.
-        assert!(restarted.instrument_reserved(
-            "DOGE-USDT-SWAP",
-            "intent_partial_reduce_01234567",
-            ExecutionAction::Reduce,
-            None
-        ));
+        assert!(
+            restarted
+                .instrument_reserved(
+                    "DOGE-USDT-SWAP",
+                    "intent_partial_reduce_01234567",
+                    ExecutionAction::Reduce,
+                    None,
+                )
+                .unwrap()
+        );
         assert!(matches!(
             restarted
                 .prepare(

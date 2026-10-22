@@ -11,7 +11,8 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::{
-    DurableExchangeEvidence, ExecutionAction, ExecutionLedgerEntry, StrategyCapitalReservation,
+    DurableExchangeEvidence, ExecutionAction, ExecutionLedgerEntry, ExecutionLedgerError,
+    StrategyCapitalReservation,
     account_cashflow::{AccountBillClass, AccountBillSource, classify_native_account_bill},
 };
 
@@ -24,6 +25,100 @@ pub struct ProductionMarkEvidence {
     pub price: String,
     pub exchange_timestamp_ms: u64,
     pub received_at_ms: u64,
+}
+
+/// The ONE exact daily cash-debit calculation used by native SQLite and
+/// sealed v14. Callers independently prove bill-to-intent ownership; this
+/// pure accumulator handles currency, timestamps, Decimal, completeness and
+/// the FLAT capital-to-NAV lower bound identically on both storage paths.
+#[derive(Default)]
+pub(crate) struct DailyStrategyLossAccumulator {
+    linked: usize,
+    fees: Decimal,
+    realized: Decimal,
+    gross_loss: Decimal,
+    source_ahead: bool,
+}
+
+impl DailyStrategyLossAccumulator {
+    pub(crate) fn accept(
+        &mut self,
+        payload: &Value,
+        run: &StrategyCapitalReservation,
+        day: u64,
+        as_of: u64,
+    ) -> Result<(), ExecutionLedgerError> {
+        if payload["ccy"] != "USDT" {
+            return Err(ExecutionLedgerError::ExchangeSourceIncomplete);
+        }
+        let fee = payload["fee"]
+            .as_str()
+            .and_then(|v| Decimal::from_str(v).ok())
+            .ok_or(ExecutionLedgerError::ExchangeSourceIncomplete)?;
+        let pnl = payload["pnl"]
+            .as_str()
+            .and_then(|v| Decimal::from_str(v).ok())
+            .ok_or(ExecutionLedgerError::ExchangeSourceIncomplete)?;
+        let ts = payload["ts"]
+            .as_u64()
+            .ok_or(ExecutionLedgerError::ExchangeSourceIncomplete)?;
+        if ts < run.started_at_ms {
+            return Err(ExecutionLedgerError::ExchangeSourceIncomplete);
+        }
+        // Out-of-order REST windows cannot certify a day before the
+        // immutable source's latest related bill was actually received.
+        if ts > as_of {
+            self.source_ahead = true;
+            return Ok(());
+        }
+        self.linked = self
+            .linked
+            .checked_add(1)
+            .ok_or(ExecutionLedgerError::ExchangeEvidenceCapacity)?;
+        self.fees += fee;
+        self.realized += pnl;
+        if ts >= day {
+            if fee < Decimal::ZERO {
+                self.gross_loss -= fee;
+            }
+            if pnl < Decimal::ZERO {
+                self.gross_loss -= pnl;
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn finish(
+        self,
+        run: &StrategyCapitalReservation,
+        report: &StrategyFinancialPeriod,
+        day: u64,
+    ) -> Result<Option<Decimal>, ExecutionLedgerError> {
+        if self.source_ahead {
+            return Ok(None);
+        }
+        if self.linked != report.linked_bills
+            || Decimal::from_str(&report.fees_usdt).ok() != Some(self.fees)
+            || Decimal::from_str(&report.realized_usdt).ok() != Some(self.realized)
+        {
+            return Err(ExecutionLedgerError::ExchangeSourceIncomplete);
+        }
+        if run.started_at_ms >= day && report.state == "FLAT_RECONCILED" {
+            let allocation = Decimal::from_str(&run.allocated_usdt)
+                .map_err(|_| ExecutionLedgerError::CapitalReservationUnattested)?;
+            let nav = Decimal::from_str(
+                report
+                    .nav_usdt
+                    .as_deref()
+                    .ok_or(ExecutionLedgerError::ExchangeSourceIncomplete)?,
+            )
+            .map_err(|_| ExecutionLedgerError::ExchangeSourceIncomplete)?;
+            if self.gross_loss < (allocation - nav).max(Decimal::ZERO) {
+                return Err(ExecutionLedgerError::ExchangeSourceIncomplete);
+            }
+        }
+        Ok(Some(self.gross_loss))
+    }
 }
 
 const MAX_STRATEGY_MARK_AGE_MS: u64 = 30_000;
@@ -84,6 +179,203 @@ pub struct StrategyFinancialPeriod {
     pub reasons: Vec<&'static str>,
 }
 
+/// Single financial source read contract for authenticated legacy evidence and SQLite.
+/// Proof of a sorted, authenticated source timeline. Retains only the
+/// first/last receipt and largest gap, not the entire historical receipt list.
+/// The same rule is used for in-memory test evidence and native SQL cursors.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct SourceReceiptCoverage {
+    first: Option<u64>,
+    last: Option<u64>,
+    largest_gap_ms: u64,
+    out_of_order: bool,
+}
+
+impl SourceReceiptCoverage {
+    pub(crate) fn observe(&mut self, receipt: u64) {
+        if let Some(last) = self.last {
+            if receipt < last {
+                self.out_of_order = true;
+            } else {
+                self.largest_gap_ms = self.largest_gap_ms.max(receipt - last);
+            }
+        } else {
+            self.first = Some(receipt);
+        }
+        self.last = Some(receipt);
+    }
+
+    pub(crate) fn latest(&self) -> Option<u64> {
+        self.last
+    }
+
+    pub(crate) fn attests(&self, run_started_at_ms: u64, current_as_of: Option<u64>) -> bool {
+        let (Some(first), Some(last), Some(current)) = (self.first, self.last, current_as_of)
+        else {
+            return false;
+        };
+        let window = crate::exchange_evidence::MAX_SOURCE_COVERAGE_GAP_MS;
+        !self.out_of_order
+            && first >= run_started_at_ms
+            && first - run_started_at_ms <= window
+            && self.largest_gap_ms <= window
+            && current >= last
+            && current - last <= window
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct FinanceSourceAudit {
+    pub uid: String,
+    pub run_id: String,
+    pub digest: String,
+    pub coverage: SourceReceiptCoverage,
+    pub truncated: bool,
+}
+pub(crate) trait FinanceSourceReader {
+    fn audit(&self) -> Result<FinanceSourceAudit, ExecutionLedgerError>;
+    fn visit_fills(
+        &self,
+        visit: &mut dyn FnMut(
+            &crate::exchange_evidence::StoredExchangeEvent,
+        ) -> Result<(), ExecutionLedgerError>,
+    ) -> Result<(), ExecutionLedgerError>;
+    fn bill(
+        &self,
+        key: &str,
+    ) -> Result<Option<crate::exchange_evidence::StoredExchangeEvent>, ExecutionLedgerError>;
+    fn visit_bills(
+        &self,
+        visitor: &mut dyn FnMut(
+            &str,
+            &crate::exchange_evidence::StoredExchangeEvent,
+        ) -> Result<(), ExecutionLedgerError>,
+    ) -> Result<(), ExecutionLedgerError>;
+    fn entry(
+        &self,
+        id: &str,
+        entries: &[ExecutionLedgerEntry],
+    ) -> Result<Option<ExecutionLedgerEntry>, ExecutionLedgerError>;
+    fn exact_order(
+        &self,
+        order: &str,
+        client: &str,
+        inst: &str,
+        intent: &str,
+    ) -> Result<bool, ExecutionLedgerError>;
+    fn validate_entry(
+        &self,
+        entry: &ExecutionLedgerEntry,
+        since: u64,
+        reasons: &mut BTreeSet<&'static str>,
+    ) -> Result<(), ExecutionLedgerError>;
+}
+struct LegacyFinanceReader<'a> {
+    source: &'a DurableExchangeEvidence,
+    index: &'a SourceOrderIndex<'a>,
+}
+impl FinanceSourceReader for LegacyFinanceReader<'_> {
+    fn audit(&self) -> Result<FinanceSourceAudit, ExecutionLedgerError> {
+        self.source.validate()?;
+        let receipts = self
+            .source
+            .cursors
+            .values()
+            .map(|c| {
+                crate::exchange_evidence::source_receipt_ms(&c.source_received_at)
+                    .ok_or(ExecutionLedgerError::ExchangeSourceIncomplete)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut receipts = receipts;
+        receipts.sort_unstable();
+        let mut coverage = SourceReceiptCoverage::default();
+        for receipt in receipts {
+            coverage.observe(receipt);
+        }
+        Ok(FinanceSourceAudit {
+            uid: self.source.account_uid.clone(),
+            run_id: self.source.run_id.clone(),
+            digest: self.source.checksum_sha256.clone(),
+            coverage,
+            truncated: self
+                .source
+                .cursors
+                .values()
+                .any(|c| !c.order_complete || !c.fill_complete || !c.bill_complete),
+        })
+    }
+    fn visit_fills(
+        &self,
+        visit: &mut dyn FnMut(
+            &crate::exchange_evidence::StoredExchangeEvent,
+        ) -> Result<(), ExecutionLedgerError>,
+    ) -> Result<(), ExecutionLedgerError> {
+        let mut fills = self
+            .source
+            .events
+            .values()
+            .filter(|e| e.payload["source"] == "OKX_REST_FILL")
+            .collect::<Vec<_>>();
+        fills.sort_by(|a, b| {
+            timestamp(&a.payload, "ts")
+                .cmp(&timestamp(&b.payload, "ts"))
+                .then(string(&a.payload, "instId").cmp(&string(&b.payload, "instId")))
+                .then(string(&a.payload, "tradeId").cmp(&string(&b.payload, "tradeId")))
+        });
+        for fill in fills {
+            visit(fill)?;
+        }
+        Ok(())
+    }
+    fn bill(
+        &self,
+        key: &str,
+    ) -> Result<Option<crate::exchange_evidence::StoredExchangeEvent>, ExecutionLedgerError> {
+        Ok(self.source.events.get(key).cloned())
+    }
+    fn visit_bills(
+        &self,
+        visitor: &mut dyn FnMut(
+            &str,
+            &crate::exchange_evidence::StoredExchangeEvent,
+        ) -> Result<(), ExecutionLedgerError>,
+    ) -> Result<(), ExecutionLedgerError> {
+        for (key, event) in &self.source.events {
+            if key.starts_with("bill:") {
+                visitor(key, event)?;
+            }
+        }
+        Ok(())
+    }
+    fn entry(
+        &self,
+        id: &str,
+        entries: &[ExecutionLedgerEntry],
+    ) -> Result<Option<ExecutionLedgerEntry>, ExecutionLedgerError> {
+        Ok(entries
+            .iter()
+            .find(|entry| entry.record.plan.intent_id == id)
+            .cloned())
+    }
+    fn exact_order(
+        &self,
+        order: &str,
+        client: &str,
+        inst: &str,
+        intent: &str,
+    ) -> Result<bool, ExecutionLedgerError> {
+        Ok(self.index.contains_exact_order(order, client, inst, intent))
+    }
+    fn validate_entry(
+        &self,
+        entry: &ExecutionLedgerEntry,
+        since: u64,
+        reasons: &mut BTreeSet<&'static str>,
+    ) -> Result<(), ExecutionLedgerError> {
+        self.index.validate_entry(entry, since, reasons);
+        Ok(())
+    }
+}
 #[derive(Clone)]
 struct Lot {
     contracts: Decimal,
@@ -187,65 +479,111 @@ fn latest_order_state(orders: &[&crate::exchange_evidence::StoredExchangeEvent])
     latest.map(|(_, state)| state)
 }
 
-fn validate_terminal_order_coverage(
-    evidence: &DurableExchangeEvidence,
-    entries: &[ExecutionLedgerEntry],
-    run_started_at_ms: u64,
-    reasons: &mut BTreeSet<&'static str>,
-) {
-    for entry in entries
-        .iter()
-        .filter(|entry| entry.created_at_ms > run_started_at_ms)
-    {
+/// One source-bounded lookup index for original orders and fills. This
+/// replaces a quadratic search during million-intent SQL attestation.
+pub(crate) struct SourceOrderIndex<'a> {
+    orders: BTreeMap<&'a str, Vec<&'a crate::exchange_evidence::StoredExchangeEvent>>,
+    fills: BTreeMap<&'a str, Vec<&'a crate::exchange_evidence::StoredExchangeEvent>>,
+}
+
+impl<'a> SourceOrderIndex<'a> {
+    pub(crate) fn new(evidence: &'a DurableExchangeEvidence) -> Self {
+        let mut orders = BTreeMap::new();
+        let mut fills = BTreeMap::new();
+        for event in evidence.events.values() {
+            let Some(id) = string(&event.payload, "ordId") else {
+                continue;
+            };
+            match string(&event.payload, "source") {
+                Some("OKX_REST_ORDER") => {
+                    orders.entry(id).or_insert_with(Vec::new).push(event);
+                }
+                Some("OKX_REST_FILL") => {
+                    fills.entry(id).or_insert_with(Vec::new).push(event);
+                }
+                _ => {}
+            }
+        }
+        Self { orders, fills }
+    }
+
+    /// Exact read from the same source index used for terminal native order
+    /// coverage. Previous finance performed a full event-map scan for each
+    /// fill; both lookups now share one immutable index.
+    fn contains_exact_order(
+        &self,
+        order_id: &str,
+        client_id: &str,
+        instrument_id: &str,
+        intent_id: &str,
+    ) -> bool {
+        self.orders.get(order_id).is_some_and(|history| {
+            history.iter().any(|event| {
+                string(&event.payload, "clOrdId") == Some(client_id)
+                    && string(&event.payload, "instId") == Some(instrument_id)
+                    && event.source_intent_id.as_deref() == Some(intent_id)
+            })
+        })
+    }
+
+    pub(crate) fn validate_entry(
+        &self,
+        entry: &ExecutionLedgerEntry,
+        run_started_at_ms: u64,
+        reasons: &mut BTreeSet<&'static str>,
+    ) {
+        if entry.created_at_ms <= run_started_at_ms {
+            return;
+        }
         let record = &entry.record;
         let Some(order_id) = record.order_id.as_deref() else {
-            continue;
+            return;
         };
-        let orders = evidence
-            .events
-            .values()
+        let orders = self
+            .orders
+            .get(order_id)
+            .into_iter()
+            .flatten()
+            .copied()
             .filter(|event| {
-                event.payload["source"] == "OKX_REST_ORDER"
-                    && string(&event.payload, "ordId") == Some(order_id)
-                    && string(&event.payload, "clOrdId")
-                        == Some(record.plan.client_order_id.as_str())
+                string(&event.payload, "clOrdId") == Some(record.plan.client_order_id.as_str())
                     && string(&event.payload, "instId") == Some(record.plan.instrument_id.as_str())
                     && event.source_intent_id.as_deref() == Some(record.plan.intent_id.as_str())
             })
             .collect::<Vec<_>>();
         if orders.is_empty() {
             reasons.insert("managed_exchange_order_missing");
-            continue;
+            return;
         }
         let Some(last_state) = latest_order_state(&orders) else {
             reasons.insert("managed_order_terminal_state_unproven");
-            continue;
+            return;
         };
         if !matches!(last_state.as_str(), "filled" | "canceled" | "mmp_canceled")
             || !record.state.is_terminal()
         {
             reasons.insert("managed_order_terminal_state_unproven");
-            continue;
+            return;
         }
-        let fills = evidence
-            .events
-            .values()
+        let fills = self
+            .fills
+            .get(order_id)
+            .into_iter()
+            .flatten()
+            .copied()
             .filter(|event| {
-                event.payload["source"] == "OKX_REST_FILL"
-                    && string(&event.payload, "ordId") == Some(order_id)
-                    && string(&event.payload, "clOrdId")
-                        == Some(record.plan.client_order_id.as_str())
+                string(&event.payload, "clOrdId") == Some(record.plan.client_order_id.as_str())
                     && string(&event.payload, "instId") == Some(record.plan.instrument_id.as_str())
                     && event.source_intent_id.as_deref() == Some(record.plan.intent_id.as_str())
             })
             .collect::<Vec<_>>();
         let Some(expected) = Decimal::from_str(&record.plan.size).ok() else {
             reasons.insert("invalid_managed_order_size");
-            continue;
+            return;
         };
         let Some((exchange_size, accumulated)) = native_terminal_quantities(&orders) else {
             reasons.insert("native_order_accumulated_fill_missing_or_conflicting");
-            continue;
+            return;
         };
         let parts = fills
             .iter()
@@ -339,28 +677,17 @@ fn put_lot(
 /// used for this assessment, never inferred from the workstation clock.
 /// A fresh complete REST observation is evidence only if it closes the last
 /// <=2h interval; it cannot bridge a longer outage after restart.
+#[cfg(test)]
 fn source_continuity_attested(
     sorted_cursor_times: &[u64],
     run_started_at_ms: u64,
     current_as_of_ms: Option<u64>,
 ) -> bool {
-    let Some(current) = current_as_of_ms else {
-        return false;
-    };
-    let Some(first) = sorted_cursor_times.first().copied() else {
-        return false;
-    };
-    let Some(last) = sorted_cursor_times.last().copied() else {
-        return false;
-    };
-    let window = crate::exchange_evidence::MAX_SOURCE_COVERAGE_GAP_MS;
-    first >= run_started_at_ms
-        && first - run_started_at_ms <= window
-        && sorted_cursor_times
-            .windows(2)
-            .all(|pair| pair[1] >= pair[0] && pair[1] - pair[0] <= window)
-        && current >= last
-        && current - last <= window
+    let mut coverage = SourceReceiptCoverage::default();
+    for &receipt in sorted_cursor_times {
+        coverage.observe(receipt);
+    }
+    coverage.attests(run_started_at_ms, current_as_of_ms)
 }
 
 /// Conservative default used by settlement/finalization paths. It never
@@ -417,6 +744,92 @@ pub fn assess_persisted_financial_period_with_verified_source(
     production_marks: &BTreeMap<String, ProductionMarkEvidence>,
     current_source_captured: bool,
 ) -> StrategyFinancialPeriod {
+    let source_index = evidence.map(SourceOrderIndex::new);
+    assess_persisted_financial_period_with_index(
+        run,
+        evidence,
+        entries,
+        facts,
+        coherent,
+        production_marks,
+        current_source_captured,
+        source_index.as_ref(),
+    )
+}
+
+/// Use the identical immutable source index already required by native
+/// terminal-order reconciliation. Only one proof/index is built per financial
+/// calculation, never one for each linked fill or risk candidate.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn assess_persisted_financial_period_with_index(
+    run: &StrategyCapitalReservation,
+    evidence: Option<&DurableExchangeEvidence>,
+    entries: &[ExecutionLedgerEntry],
+    facts: &AccountLedgerFacts,
+    coherent: bool,
+    production_marks: &BTreeMap<String, ProductionMarkEvidence>,
+    current_source_captured: bool,
+    source_index: Option<&SourceOrderIndex<'_>>,
+) -> StrategyFinancialPeriod {
+    let (Some(evidence), Some(index)) = (evidence, source_index) else {
+        let mut reasons = BTreeSet::new();
+        reasons.insert(if evidence.is_none() {
+            "durable_exchange_evidence_absent"
+        } else {
+            "source_order_index_unavailable"
+        });
+        return incomplete(
+            run,
+            Decimal::from_str(&run.allocated_usdt).unwrap_or(Decimal::ZERO),
+            evidence.map_or(String::new(), |e| e.checksum_sha256.clone()),
+            0,
+            0,
+            Decimal::ZERO,
+            Decimal::ZERO,
+            Vec::new(),
+            reasons,
+        );
+    };
+    let reader = LegacyFinanceReader {
+        source: evidence,
+        index,
+    };
+    assess_persisted_financial_period_from_reader(
+        run,
+        &reader,
+        entries,
+        facts,
+        coherent,
+        production_marks,
+        current_source_captured,
+    )
+    .unwrap_or_else(|_| {
+        let mut reasons = BTreeSet::new();
+        reasons.insert("invalid_persisted_source_integrity");
+        incomplete(
+            run,
+            Decimal::from_str(&run.allocated_usdt).unwrap_or(Decimal::ZERO),
+            evidence.checksum_sha256.clone(),
+            0,
+            0,
+            Decimal::ZERO,
+            Decimal::ZERO,
+            Vec::new(),
+            reasons,
+        )
+    })
+}
+/// The ONE financial policy, not separate v14 and native FIFO/PnL engines.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn assess_persisted_financial_period_from_reader(
+    run: &StrategyCapitalReservation,
+    reader: &dyn FinanceSourceReader,
+    entries: &[ExecutionLedgerEntry],
+    facts: &AccountLedgerFacts,
+    coherent: bool,
+    production_marks: &BTreeMap<String, ProductionMarkEvidence>,
+    current_source_captured: bool,
+) -> Result<StrategyFinancialPeriod, ExecutionLedgerError> {
     let mut reasons = BTreeSet::new();
     let mut realized = Decimal::ZERO;
     let mut fees = Decimal::ZERO;
@@ -424,35 +837,17 @@ pub fn assess_persisted_financial_period_with_verified_source(
     let mut linked_bills = BTreeSet::<String>::new();
     let mut processed = 0usize;
     let allocation = Decimal::from_str(&run.allocated_usdt).unwrap_or(Decimal::ZERO);
-    let evidence_sha256 = evidence
-        .map(|e| e.checksum_sha256.clone())
-        .unwrap_or_default();
+    let audit = reader.audit()?;
+    let evidence_sha256 = audit.digest.clone();
     if !coherent {
         reasons.insert("account_snapshot_not_coherent");
     }
     if facts.summary.authority.account_uid_fingerprint != run.account_uid_fingerprint {
         reasons.insert("financial_account_uid_mismatch");
     }
-    let Some(e) = evidence else {
-        reasons.insert("durable_exchange_evidence_absent");
-        return incomplete(
-            run,
-            allocation,
-            evidence_sha256,
-            0,
-            0,
-            realized,
-            fees,
-            Vec::new(),
-            reasons,
-        );
-    };
-    if e.validate().is_err()
-        || e.run_id != run.allocation_id
-        || e.account_uid != run.account_uid_fingerprint
-    {
+    if audit.uid != run.account_uid_fingerprint || audit.run_id != run.allocation_id {
         reasons.insert("invalid_persisted_source_integrity");
-        return incomplete(
+        return Ok(incomplete(
             run,
             allocation,
             evidence_sha256,
@@ -462,20 +857,16 @@ pub fn assess_persisted_financial_period_with_verified_source(
             fees,
             Vec::new(),
             reasons,
-        );
+        ));
     }
-    if e.cursors.is_empty() {
+    if audit.coverage.latest().is_none() {
         reasons.insert("source_coverage_missing");
     }
     // Source coverage is measured by authenticated receipt times, NOT the
     // venue balance/position last-change uTime (which can be days old).
     let current_as_of =
         crate::exchange_evidence::source_receipt_ms(&facts.summary.source_received_at);
-    let newest = e
-        .cursors
-        .values()
-        .filter_map(|c| crate::exchange_evidence::source_receipt_ms(&c.source_received_at))
-        .max();
+    let newest = audit.coverage.latest();
     let coalesced_source_attested = current_source_captured
         && coherent
         && DurableExchangeEvidence::complete_source_checkpoint(facts);
@@ -486,27 +877,10 @@ pub fn assess_persisted_financial_period_with_verified_source(
     {
         reasons.insert("financial_source_asof_not_current");
     }
-    // Preserve all sealed cursor bytes. If ANY legacy receipt is malformed,
-    // coverage stays unproven; no last-change-time fallback is permitted.
-    let cursor_receipts = e
-        .cursors
-        .values()
-        .map(|c| crate::exchange_evidence::source_receipt_ms(&c.source_received_at))
-        .collect::<Option<Vec<_>>>();
-    let mut cursor_times = cursor_receipts.clone().unwrap_or_default();
-    cursor_times.sort_unstable();
-    cursor_times.dedup();
-    // Canceled unfilled exchange orders may vanish after 2 hours. Gaps cannot
-    // be silently bridged by a later historical query or an empty response.
-    if cursor_receipts.is_none()
-        || !source_continuity_attested(&cursor_times, run.started_at_ms, current_as_of)
-    {
+    if !audit.coverage.attests(run.started_at_ms, current_as_of) {
         reasons.insert("source_continuity_not_proven");
     }
-    if e.cursors
-        .values()
-        .any(|c| !c.order_complete || !c.fill_complete || !c.bill_complete)
-    {
+    if audit.truncated {
         reasons.insert("persisted_source_window_truncated");
     }
     if !facts.exchange_orders_history_complete
@@ -516,19 +890,25 @@ pub fn assess_persisted_financial_period_with_verified_source(
         reasons.insert("current_source_window_truncated");
     }
 
-    let by_intent = entries
-        .iter()
-        .map(|x| (x.record.plan.intent_id.as_str(), x))
-        .collect::<BTreeMap<_, _>>();
-    validate_terminal_order_coverage(e, entries, run.started_at_ms, &mut reasons);
-    let mut fills = Vec::<FilledLeg>::new();
-    for item in e
-        .events
-        .values()
-        .filter(|v| v.payload["source"] == "OKX_REST_FILL")
-    {
+    for entry in entries {
+        reader.validate_entry(entry, run.started_at_ms, &mut reasons)?;
+    }
+    // One ordered stream; no historical fill collection is retained.
+    let mut previous_fill: Option<(u64, String, String, String)> = None;
+    reader.visit_fills(&mut |item| {
         let p = &item.payload;
-        match (
+        let (
+            Some(ts),
+            Some(inst),
+            Some(pos),
+            Some(side),
+            Some(ord),
+            Some(client),
+            Some(trade),
+            Some(bill),
+            Some(size),
+            Some(price),
+        ) = (
             timestamp(p, "ts"),
             string(p, "instId"),
             string(p, "posSide"),
@@ -539,61 +919,48 @@ pub fn assess_persisted_financial_period_with_verified_source(
             string(p, "billId"),
             amount(p, "fillSz"),
             amount(p, "fillPx"),
-        ) {
-            (
-                Some(ts),
-                Some(inst),
-                Some(pos),
-                Some(side),
-                Some(ord),
-                Some(client),
-                Some(trade),
-                Some(bill),
-                Some(size),
-                Some(price),
-            ) if ts >= run.started_at_ms && size > Decimal::ZERO && price > Decimal::ZERO => {
-                fills.push(FilledLeg {
-                    source: item,
-                    ts,
-                    inst: inst.to_owned(),
-                    pos: pos.to_owned(),
-                    side: side.to_owned(),
-                    ord: ord.to_owned(),
-                    client: client.to_owned(),
-                    trade: trade.to_owned(),
-                    bill: bill.to_owned(),
-                    size,
-                    price,
-                });
-            }
-            _ => {
-                reasons.insert("missing_source_fill_identity");
-            }
+        )
+        else {
+            reasons.insert("missing_source_fill_identity");
+            return Ok(());
+        };
+        if ts < run.started_at_ms || size <= Decimal::ZERO || price <= Decimal::ZERO {
+            reasons.insert("missing_source_fill_identity");
+            return Ok(());
         }
-    }
-    fills.sort_by(|a, b| {
-        a.ts.cmp(&b.ts)
-            .then(a.inst.cmp(&b.inst))
-            .then(a.trade.cmp(&b.trade))
-    });
-    for pair in fills.windows(2) {
-        if pair[0].ts == pair[1].ts
-            && pair[0].inst == pair[1].inst
-            && pair[0].pos == pair[1].pos
-            && pair[0].side != pair[1].side
+        let f = FilledLeg {
+            source: item,
+            ts,
+            inst: inst.to_owned(),
+            pos: pos.to_owned(),
+            side: side.to_owned(),
+            ord: ord.to_owned(),
+            client: client.to_owned(),
+            trade: trade.to_owned(),
+            bill: bill.to_owned(),
+            size,
+            price,
+        };
+        if previous_fill
+            .as_ref()
+            .is_some_and(|(prior_ts, prior_inst, prior_pos, prior_side)| {
+                *prior_ts == f.ts
+                    && prior_inst == &f.inst
+                    && prior_pos == &f.pos
+                    && prior_side != &f.side
+            })
         {
             reasons.insert("same_timestamp_opposite_fill_sequence");
         }
-    }
-    for f in fills {
+        previous_fill = Some((f.ts, f.inst.clone(), f.pos.clone(), f.side.clone()));
         let item = f.source;
         let Some(intent) = item.source_intent_id.as_deref() else {
             reasons.insert("unattributed_account_fill");
-            continue;
+            return Ok(());
         };
-        let Some(entry) = by_intent.get(intent) else {
+        let Some(entry) = reader.entry(intent, entries)? else {
             reasons.insert("source_intent_not_present");
-            continue;
+            return Ok(());
         };
         let plan = &entry.record.plan;
         if entry.record.order_id.as_deref() != Some(f.ord.as_str())
@@ -605,7 +972,7 @@ pub fn assess_persisted_financial_period_with_verified_source(
             || entry.created_at_ms <= run.started_at_ms
         {
             reasons.insert("source_order_intent_identity_mismatch");
-            continue;
+            return Ok(());
         }
         if plan.action.is_risk_increasing()
             && (item.strategy_run_id.as_deref() != Some(run.allocation_id.as_str())
@@ -619,26 +986,20 @@ pub fn assess_persisted_financial_period_with_verified_source(
                     .is_none_or(|b| b.mandate.version != run.mandate_version))
         {
             reasons.insert("risk_increase_not_owned_by_run");
-            continue;
+            return Ok(());
         }
         if plan.action.is_risk_reducing()
             && (item.strategy_run_id.is_some() || entry.record.strategy_run_id.is_some())
         {
             reasons.insert("unsupported_reducer_run_binding");
-            continue;
+            return Ok(());
         }
         // Only exact originating order identity and native fill source can
         // establish this leg. A shared instrument is not a sufficient link.
-        let matching_order = e.events.values().any(|x| {
-            x.payload["source"] == "OKX_REST_ORDER"
-                && string(&x.payload, "ordId") == Some(f.ord.as_str())
-                && string(&x.payload, "clOrdId") == Some(f.client.as_str())
-                && string(&x.payload, "instId") == Some(f.inst.as_str())
-                && x.source_intent_id.as_deref() == Some(intent)
-        });
+        let matching_order = reader.exact_order(&f.ord, &f.client, &f.inst, intent)?;
         if !matching_order {
             reasons.insert("exact_source_order_missing");
-            continue;
+            return Ok(());
         }
         let mechanics = entry
             .record
@@ -662,12 +1023,12 @@ pub fn assess_persisted_financial_period_with_verified_source(
         });
         let Some(ct) = ct else {
             reasons.insert("linear_contract_mechanics_unattested");
-            continue;
+            return Ok(());
         };
         let bill_key = format!("bill:{}", f.bill);
-        let Some(b) = e.events.get(&bill_key) else {
+        let Some(b) = reader.bill(&bill_key)? else {
             reasons.insert("native_fill_bill_missing");
-            continue;
+            return Ok(());
         };
         let bp = &b.payload;
         if bp["source"] != "OKX_REST_BILL"
@@ -682,7 +1043,7 @@ pub fn assess_persisted_financial_period_with_verified_source(
             || b.source_intent_id.as_deref() != Some(intent)
         {
             reasons.insert("fill_bill_provenance_or_currency_mismatch");
-            continue;
+            return Ok(());
         }
         let (Some(native_fee), Some(bill_fee), Some(native_pnl), Some(bill_pnl)) = (
             amount(&item.payload, "fee"),
@@ -691,15 +1052,15 @@ pub fn assess_persisted_financial_period_with_verified_source(
             amount(bp, "pnl"),
         ) else {
             reasons.insert("missing_native_fee_or_pnl");
-            continue;
+            return Ok(());
         };
         if native_fee != bill_fee || native_pnl != bill_pnl {
             reasons.insert("native_bill_fee_or_pnl_mismatch");
-            continue;
+            return Ok(());
         }
         if linked_bills.contains(&f.bill) {
             reasons.insert("duplicate_bill_consumption");
-            continue;
+            return Ok(());
         }
         if let Err(reason) = put_lot(
             &mut lots,
@@ -714,20 +1075,18 @@ pub fn assess_persisted_financial_period_with_verified_source(
             },
         ) {
             reasons.insert(reason);
-            continue;
+            return Ok(());
         }
         linked_bills.insert(f.bill.clone());
         realized += native_pnl;
         fees += native_fee;
         processed += 1;
-    }
+        Ok(())
+    })?;
 
     // A separate bill, even for the same symbol, is not strategy-owned.
     // Funding subTypes carry no exact strategy/side link; never allocate them.
-    for (key, bill) in &e.events {
-        if !key.starts_with("bill:") {
-            continue;
-        }
+    reader.visit_bills(&mut |key, bill| {
         if matches!(string(&bill.payload, "subType"), Some("173" | "174")) {
             reasons.insert("funding_unallocated");
         } else if !linked_bills.contains(key.trim_start_matches("bill:")) {
@@ -752,8 +1111,8 @@ pub fn assess_persisted_financial_period_with_verified_source(
                 AccountBillClass::Other => "unattributed_account_bill",
             });
         }
-    }
-
+        Ok(())
+    })?;
     let mut open_positions = Vec::new();
     let mut unrealized = Decimal::ZERO;
     for ((inst, pos), book) in &lots {
@@ -828,7 +1187,7 @@ pub fn assess_persisted_financial_period_with_verified_source(
     }
     let complete = reasons.is_empty();
     let nav = allocation + realized + fees + unrealized;
-    StrategyFinancialPeriod {
+    Ok(StrategyFinancialPeriod {
         schema: STRATEGY_FINANCIAL_PERIOD_SCHEMA_V1,
         run_id: run.allocation_id.clone(),
         state: if complete && open_positions.is_empty() {
@@ -856,7 +1215,7 @@ pub fn assess_persisted_financial_period_with_verified_source(
         // any new-risk permission from this period projection alone.
         usable_for_new_risk: false,
         reasons: reasons.into_iter().collect(),
-    }
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -973,6 +1332,33 @@ mod tests {
             run_start,
             Some(receipts[3] + 2 * hour + 1),
         ));
+    }
+
+    #[test]
+    fn source_coverage_streaming_matches_full_vector_for_long_history() {
+        let start = 1_000_000_u64;
+        let step = 1_000_u64;
+        let mut stream = SourceReceiptCoverage::default();
+        let mut receipt_times = Vec::new();
+        for i in 0..20_000_u64 {
+            let t = start + i * step;
+            stream.observe(t);
+            receipt_times.push(t);
+        }
+        let current = Some(start + 20_000 * step);
+        assert_eq!(
+            stream.attests(start, current),
+            source_continuity_attested(&receipt_times, start, current)
+        );
+        assert!(stream.attests(start, current));
+        stream.observe(
+            start + 20_000 * step + crate::exchange_evidence::MAX_SOURCE_COVERAGE_GAP_MS + 1,
+        );
+        assert!(!stream.attests(start, stream.latest()));
+        let mut out_of_order = SourceReceiptCoverage::default();
+        out_of_order.observe(start + step);
+        out_of_order.observe(start);
+        assert!(!out_of_order.attests(start, Some(start + step)));
     }
 
     #[test]
@@ -1174,7 +1560,10 @@ mod tests {
         );
         let no_entries: Vec<ExecutionLedgerEntry> = vec![];
         let mut reasons = BTreeSet::new();
-        validate_terminal_order_coverage(&evidence, &no_entries, 1, &mut reasons);
+        let index = SourceOrderIndex::new(&evidence);
+        for entry in &no_entries {
+            index.validate_entry(entry, 1, &mut reasons);
+        }
         assert!(
             reasons.is_empty(),
             "no invented owner from account-only history"

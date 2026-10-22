@@ -1164,6 +1164,7 @@ pub enum AgentOperation {
     /// Local capital allocation: no native exchange mutation.
     BeginStrategyRun {
         allocation_id: String,
+        strategy_id: String,
         origin_schema: String,
         origin_version: String,
         mandate_version: String,
@@ -1229,13 +1230,6 @@ pub enum AgentOperation {
     ProfileHandoffReadiness,
     /// Explicit on-disk audit of the one local execution ledger. Never POST.
     LedgerStorageAudit,
-    /// Explicit Demo-profile storage-only migration. No exchange operation.
-    MigrateFinalizedLedgerStorage {
-        allocation_id: String,
-        expected_manifest_sha256: String,
-        expected_finalized_checksum_sha256: String,
-        expected_stopped_at_ms: u64,
-    },
     PortfolioRisk {
         mandate: Box<PortfolioMandateRequest>,
         policy: Box<HardRiskPolicyRequest>,
@@ -1284,7 +1278,6 @@ impl AgentOperation {
         matches!(
             self,
             Self::BeginStrategyRun { .. }
-                | Self::MigrateFinalizedLedgerStorage { .. }
                 | Self::SetLeverage { .. }
                 | Self::FinalizeStrategyRun { .. }
                 | Self::QuarantineUnverifiedStrategyRun { .. }
@@ -1300,7 +1293,6 @@ impl AgentOperation {
         !matches!(
             self,
             Self::BeginStrategyRun { .. }
-                | Self::MigrateFinalizedLedgerStorage { .. }
                 | Self::SetLeverage { .. }
                 | Self::FinalizeStrategyRun { .. }
                 | Self::QuarantineUnverifiedStrategyRun { .. }
@@ -1442,29 +1434,6 @@ impl AgentOperation {
                 Ok(())
             }
             Self::TradingCapabilities { instrument, .. } => validate_instrument(instrument),
-            Self::MigrateFinalizedLedgerStorage {
-                allocation_id,
-                expected_manifest_sha256,
-                expected_finalized_checksum_sha256,
-                expected_stopped_at_ms,
-            } => {
-                validate_request_id(allocation_id)?;
-                if expected_manifest_sha256.len() != 64
-                    || expected_finalized_checksum_sha256.len() != 64
-                    || *expected_stopped_at_ms == 0
-                    || !expected_manifest_sha256
-                        .bytes()
-                        .all(|b| b.is_ascii_hexdigit())
-                    || !expected_finalized_checksum_sha256
-                        .bytes()
-                        .all(|b| b.is_ascii_hexdigit())
-                {
-                    return Err(ProtocolError::InvalidAnalyticalQuery(
-                        "exact finalized ledger migration proof",
-                    ));
-                }
-                Ok(())
-            }
             Self::SetLeverage {
                 mutation_id,
                 instrument,
@@ -1482,6 +1451,7 @@ impl AgentOperation {
             }
             Self::BeginStrategyRun {
                 allocation_id,
+                strategy_id,
                 origin_schema,
                 origin_version,
                 mandate_version,
@@ -1490,6 +1460,14 @@ impl AgentOperation {
                 rearm,
             } => {
                 validate_request_id(allocation_id)?;
+                if !(2..=64).contains(&strategy_id.len())
+                    || !strategy_id.as_bytes()[0].is_ascii_alphabetic()
+                    || !strategy_id
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+                {
+                    return Err(ProtocolError::InvalidAnalyticalQuery("strategy_id"));
+                }
                 validate_version(origin_schema)?;
                 validate_version(origin_version)?;
                 validate_version(mandate_version)?;
@@ -2207,6 +2185,11 @@ pub enum HostControlOperation {
     RecoverReadOnlySelection,
     StopAgent,
     RestartAgent,
+    /// Explicit fresh SQLite genesis only. Requires stopped CONTROL and
+    /// independent flat venue readback; no legacy history is imported.
+    InitializeFreshLedger {
+        expected_uid_fingerprint: String,
+    },
     InstallAutostart,
     AutostartStatus,
     HandoffToAutostart,
@@ -2236,6 +2219,9 @@ impl HostControlOperation {
                 }
             }
             Self::RegisterReadOnlyAccount { entry } => entry.validate(),
+            Self::InitializeFreshLedger {
+                expected_uid_fingerprint,
+            } => validate_sha256(expected_uid_fingerprint),
             Self::ConfigureProductionTrading { policy } => policy.validate(),
             Self::StopProductionTrading { expected_revision } => {
                 if *expected_revision == 0 {
@@ -3164,16 +3150,6 @@ mod tests {
         assert!(preview.direct_transport_read_only());
         assert!(!preview.direct_transport_demo_execution());
         assert!(preview.validate().is_ok());
-        let migrate = AgentOperation::MigrateFinalizedLedgerStorage {
-            allocation_id: "stage5a_daily_loss_run_20261015_g".to_owned(),
-            expected_manifest_sha256: "a".repeat(64),
-            expected_finalized_checksum_sha256: "b".repeat(64),
-            expected_stopped_at_ms: 1792022959136,
-        };
-        assert!(migrate.direct_transport_demo_execution());
-        assert!(!migrate.direct_transport_read_only());
-        assert!(migrate.validate().is_ok());
-
         let generic = AgentOperation::PrepareExecution {
             intent_id: "intent_generic_01234567".to_owned(),
             instrument: "DOGE-USDT-SWAP".to_owned(),
@@ -4444,6 +4420,7 @@ mod direct_transport_tests {
     fn native_strategy_begin_is_strict_demo_only_and_cannot_be_replayed_as_read_only() {
         let begin = AgentOperation::BeginStrategyRun {
             allocation_id: "strategy_run_new_20261013_01".to_owned(),
+            strategy_id: "real_manual_v1".to_owned(),
             origin_schema: "okx.research.live-decision/v1".to_owned(),
             origin_version: "run-2026-10-13".to_owned(),
             mandate_version: "demo-mandate-v1".to_owned(),
@@ -4611,6 +4588,34 @@ mod native_drain_source_tests {
             HostControlOperation::SelectAccount {
                 venue: TradingVenue::Okx,
                 account_id: "demo_acceptance".to_owned()
+            }
+            .validate()
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn fresh_sqlite_owner_genesis_requires_exact_typed_uid_only() {
+        let operation = HostControlOperation::InitializeFreshLedger {
+            expected_uid_fingerprint: "a".repeat(64),
+        };
+        assert!(operation.validate().is_ok());
+        let serialized = serde_json::to_value(&operation).unwrap();
+        assert_eq!(serialized["type"], "initialize_fresh_ledger");
+        assert_eq!(
+            serde_json::from_value::<HostControlOperation>(serialized).unwrap(),
+            operation
+        );
+        assert!(
+            HostControlOperation::InitializeFreshLedger {
+                expected_uid_fingerprint: "a".repeat(63),
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            HostControlOperation::InitializeFreshLedger {
+                expected_uid_fingerprint: "INVALID".to_owned(),
             }
             .validate()
             .is_err()

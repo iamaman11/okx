@@ -92,7 +92,7 @@ export const EXECUTION_TOOLS: Json[] = [
     inputSchema: {
       type: "object", additionalProperties: false,
       properties: {
-        action: { type: "string", enum: ["prepare","submit","amend","cancel","cancel_protection","confirm_protection_size","shrink_protection_size","abort_reverse","abandon_prepared","begin_strategy_run","finalize_strategy_run","quarantine_unverified_strategy_run","set_leverage","migrate_finalized_ledger_storage","reconcile_unsent_prepared"] },
+        action: { type: "string", enum: ["prepare","submit","amend","cancel","cancel_protection","confirm_protection_size","shrink_protection_size","abort_reverse","abandon_prepared","begin_strategy_run","finalize_strategy_run","quarantine_unverified_strategy_run","set_leverage","reconcile_unsent_prepared"] },
         intent_id: ID, instrument: INSTRUMENT,
         trade_mode: { type: "string", enum: ["cross","isolated"] },
         order_type: { type: "string", enum: ["limit","post_only","fok","ioc"] },
@@ -100,8 +100,7 @@ export const EXECUTION_TOOLS: Json[] = [
         expected_manifest_sha256: { type: "string", pattern: "^[0-9a-f]{64}$" },
         account_uid_fingerprint: { type: "string", pattern: "^[0-9a-f]{64}$" },
         intent_ids: { type: "array", minItems: 1, maxItems: 32, uniqueItems: true, items: ID },
-        expected_finalized_checksum_sha256: { type: "string", pattern: "^[0-9a-f]{64}$" },
-        expected_stopped_at_ms: { type: "integer", minimum: 1 },
+        strategy_id: { type: "string", minLength: 2, maxLength: 64, pattern: "^[A-Za-z][A-Za-z0-9_-]*$" },
         origin_schema: VERSION, origin_version: VERSION, mandate_version: VERSION,
         allocated_usdt: POSITIVE, operator_authority_id: EVIDENCE_ID, leverage: POSITIVE,
         rearm: { type: "object", additionalProperties: false, properties: {
@@ -194,7 +193,7 @@ export function isExecutionMutation(operationType: unknown): boolean {
     "prepare_execution", "submit_prepared_execution",
     "mutate_execution", "abort_reverse_execution", "abandon_prepared_execution",
     "begin_strategy_run", "finalize_strategy_run", "quarantine_unverified_strategy_run", "set_leverage",
-    "migrate_finalized_ledger_storage", "reconcile_unsent_prepared",
+    "reconcile_unsent_prepared",
   ].includes(String(operationType));
 }
 
@@ -234,24 +233,6 @@ export function buildExecutionOperation(args: Record<string, unknown>): Record<s
         intent_ids:ids,
       };
     }
-    case "migrate_finalized_ledger_storage": {
-      if (!exactKeys(args,[
-        "action","intent_id","expected_manifest_sha256",
-        "expected_finalized_checksum_sha256","expected_stopped_at_ms"
-      ]) || typeof args.expected_manifest_sha256 !== "string"
-        || !/^[0-9a-f]{64}$/.test(args.expected_manifest_sha256)
-        || typeof args.expected_finalized_checksum_sha256 !== "string"
-        || !/^[0-9a-f]{64}$/.test(args.expected_finalized_checksum_sha256)
-        || !Number.isSafeInteger(args.expected_stopped_at_ms)
-        || Number(args.expected_stopped_at_ms) <= 0) return null;
-      return {
-        type:"migrate_finalized_ledger_storage",
-        allocation_id:intent_id,
-        expected_manifest_sha256:args.expected_manifest_sha256,
-        expected_finalized_checksum_sha256:args.expected_finalized_checksum_sha256,
-        expected_stopped_at_ms:args.expected_stopped_at_ms,
-      };
-    }
     case "set_leverage": {
       if (!exactKeys(args,["action","intent_id","instrument","trade_mode","leverage"])
         || !token(args.instrument,3,64)
@@ -269,7 +250,8 @@ export function buildExecutionOperation(args: Record<string, unknown>): Record<s
       return {type:"quarantine_unverified_strategy_run",allocation_id:intent_id};
     }
     case "begin_strategy_run": {
-      if (!exactKeys(args,["action","intent_id","origin_schema","origin_version","mandate_version","allocated_usdt","operator_authority_id","rearm"])
+      if (!exactKeys(args,["action","intent_id","strategy_id","origin_schema","origin_version","mandate_version","allocated_usdt","operator_authority_id","rearm"])
+        || !token(args.strategy_id,2,64)
         || ![args.origin_schema,args.origin_version,args.mandate_version].every(v =>
           typeof v==="string" && v.length>0 && v.length<=64 && /^[A-Za-z0-9._/-]+$/.test(v))
         || !decimal(args.allocated_usdt)
@@ -282,6 +264,7 @@ export function buildExecutionOperation(args: Record<string, unknown>): Record<s
             || Number(args.rearm.expected_stopped_at_ms) <= 0
             || !/^[0-9a-f]{64}$/.test(String(args.rearm.prior_finalization_sha256))))) return null;
       return {type:"begin_strategy_run",allocation_id:intent_id,
+        strategy_id:args.strategy_id,
         origin_schema:args.origin_schema,origin_version:args.origin_version,
         mandate_version:args.mandate_version,allocated_usdt:args.allocated_usdt,
         operator_authority_id:args.operator_authority_id,

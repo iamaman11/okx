@@ -12,8 +12,8 @@ use serde::Serialize;
 use thiserror::Error;
 
 use crate::{
-    DurableExecutionLedger, ExecutionAction, ExecutionState, PositionSide, ProtectiveOrderStatus,
-    StrategyCapitalReservation,
+    DurableExecutionLedger, ExecutionAction, ExecutionLedgerEntry, ExecutionLedgerError,
+    ExecutionState, PositionSide, ProtectiveOrderStatus, StrategyCapitalReservation,
     account_cashflow::{AccountBillClass, AccountBillSource, classify_native_account_bill},
 };
 
@@ -257,6 +257,9 @@ pub struct AccountLedgerReconciliation {
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum AccountLedgerReconciliationError {
+    #[error("native SQLite historical intent coverage requires indexed account reconciliation")]
+    HistoricalCoverageUnattested,
+
     #[error("multiple exchange orders resolve to managed client order id '{client_order_id}'")]
     DuplicateManagedExchangeOrder { client_order_id: String },
 
@@ -298,14 +301,16 @@ pub struct ManagedExecutionInventory {
 
 /// Bounded deterministic inventory for resolving pre-existing Demo intent IDs.
 /// Truncation is explicit and cannot be used as a proof of absence.
-pub fn managed_execution_inventory(ledger: &DurableExecutionLedger) -> ManagedExecutionInventory {
-    let mut entries = ledger.entries().collect::<Vec<_>>();
-    let total = entries.len();
-    entries.sort_by(|a, b| {
-        b.updated_at_ms
-            .cmp(&a.updated_at_ms)
-            .then_with(|| a.record.plan.intent_id.cmp(&b.record.plan.intent_id))
-    });
+pub fn managed_execution_inventory(
+    ledger: &DurableExecutionLedger,
+) -> Result<ManagedExecutionInventory, ExecutionLedgerError> {
+    let entries = ledger.recent_intents(MAX_MANAGED_EXECUTION_INVENTORY_ROWS)?;
+    let total = ledger.total_intents()?;
+    if entries.len() != total.min(MAX_MANAGED_EXECUTION_INVENTORY_ROWS) {
+        return Err(ExecutionLedgerError::Corrupt(
+            "historical inventory differs from authoritative count",
+        ));
+    }
     let rows = entries
         .into_iter()
         .take(MAX_MANAGED_EXECUTION_INVENTORY_ROWS)
@@ -330,13 +335,13 @@ pub fn managed_execution_inventory(ledger: &DurableExecutionLedger) -> ManagedEx
             }
         })
         .collect::<Vec<_>>();
-    ManagedExecutionInventory {
+    Ok(ManagedExecutionInventory {
         schema: MANAGED_EXECUTION_INVENTORY_SCHEMA_V1,
         total,
         shown: rows.len(),
         complete_within_bound: total <= MAX_MANAGED_EXECUTION_INVENTORY_ROWS,
         rows,
-    }
+    })
 }
 
 pub fn reconcile_account_ledger(
@@ -353,7 +358,9 @@ pub fn reconcile_account_ledger(
         .capital_reservation()
         .map(|capital| assess_flat_strategy_nav(capital, ledger, facts))
         .transpose()?;
-    result.exchange_evidence = ledger.exchange_evidence_summary();
+    result.exchange_evidence = ledger
+        .exchange_evidence_summary()
+        .map_err(|_| AccountLedgerReconciliationError::HistoricalCoverageUnattested)?;
     result.strategy_nav_watermark = ledger.strategy_nav_watermark().cloned();
     result.strategy_nav_checkpoint_count = ledger.strategy_nav_point_count();
     result.strategy_risk_stop = ledger.risk_stop().cloned();
@@ -579,33 +586,31 @@ fn reconcile_exchange_evidence(
     exchange_orders: &[ExchangeOrderIdentity],
     exchange_fills: &[ExchangeFillIdentity],
 ) -> Result<AccountLedgerReconciliation, AccountLedgerReconciliationError> {
-    let entries = ledger.entries().collect::<Vec<_>>();
-    let managed_clients = entries
+    let observed_clients = exchange_orders
         .iter()
-        .map(|entry| entry.record.plan.client_order_id.as_str())
+        .map(|order| order.client_order_id.as_str())
+        .chain(
+            exchange_fills
+                .iter()
+                .map(|fill| fill.client_order_id.as_str()),
+        )
         .collect::<BTreeSet<_>>();
-    let managed_order_ids = entries
+    // Build the bounded venue-side identity sets ONCE. Comparing every
+    // historical intent to every exchange fill makes a routine read-only
+    // reconciliation O(history × current fills), even when SQLite keeps
+    // historical intent RAM bounded. Membership is exact on either venue
+    // order ID or client order ID, as in the original owner predicate.
+    let observed_fill_clients = exchange_fills
         .iter()
-        .filter_map(|entry| entry.record.order_id.as_deref())
+        .map(|fill| fill.client_order_id.as_str())
         .collect::<BTreeSet<_>>();
-
-    let managed_exchange_orders_observed = exchange_orders
+    let observed_order_ids = exchange_fills
         .iter()
-        .filter(|order| managed_clients.contains(order.client_order_id.as_str()))
-        .count();
-    let unattributed_orders = exchange_orders.len() - managed_exchange_orders_observed;
-
-    let managed_exchange_fills_observed = exchange_fills
-        .iter()
-        .filter(|fill| {
-            managed_clients.contains(fill.client_order_id.as_str())
-                || fill
-                    .order_id
-                    .as_deref()
-                    .is_some_and(|order_id| managed_order_ids.contains(order_id))
-        })
-        .count();
-    let unattributed_fills = exchange_fills.len() - managed_exchange_fills_observed;
+        .filter_map(|fill| fill.order_id.as_deref())
+        .collect::<BTreeSet<_>>();
+    let mut relevant_managed_clients = BTreeSet::<String>::new();
+    let mut relevant_managed_order_ids = BTreeSet::<String>::new();
+    let mut historical_count = 0usize;
 
     let mut by_client = BTreeMap::<&str, Vec<_>>::new();
     for order in exchange_orders {
@@ -624,42 +629,64 @@ fn reconcile_exchange_evidence(
     let mut unexpected_fills = 0usize;
     let mut identity_mismatches = 0usize;
 
-    for entry in entries {
+    let native = ledger
+        .native_reconciliation_inventory(
+            &observed_clients,
+            &observed_order_ids,
+            MAX_UNMATCHED_HISTORICAL_ROWS,
+        )
+        .map_err(|_| AccountLedgerReconciliationError::HistoricalCoverageUnattested)?;
+    let mut skipped_submitted = 0usize;
+    let mut duplicate_managed_client = None;
+    let mut visit_entry = |entry: &ExecutionLedgerEntry| {
+        historical_count += 1;
         let plan = &entry.record.plan;
-        let matches = by_client
-            .get(plan.client_order_id.as_str())
-            .cloned()
-            .unwrap_or_default();
-        if matches.len() > 1 {
-            return Err(
-                AccountLedgerReconciliationError::DuplicateManagedExchangeOrder {
-                    client_order_id: plan.client_order_id.clone(),
-                },
-            );
+        if observed_clients.contains(plan.client_order_id.as_str()) {
+            relevant_managed_clients.insert(plan.client_order_id.clone());
+        }
+        if let Some(id) = entry.record.order_id.as_deref()
+            && observed_order_ids.contains(id)
+        {
+            relevant_managed_order_ids.insert(id.to_owned());
+        }
+        let matches = by_client.get(plan.client_order_id.as_str());
+        if matches.is_some_and(|orders| orders.len() > 1) {
+            duplicate_managed_client = Some(plan.client_order_id.clone());
+            return false;
         }
 
-        let observed = matches.first().copied();
+        let observed = matches.and_then(|orders| orders.first().copied());
         if let Some(order) = observed {
             if order.instrument_id != plan.instrument_id {
                 identity_mismatches += 1;
-                continue;
+                if !matches!(
+                    entry.record.state,
+                    ExecutionState::Prepared | ExecutionState::Rejected
+                ) {
+                    skipped_submitted += 1;
+                }
+                return true;
             }
             if let Some(expected_order_id) = entry.record.order_id.as_deref()
                 && order.order_id != expected_order_id
             {
                 identity_mismatches += 1;
-                continue;
+                if !matches!(
+                    entry.record.state,
+                    ExecutionState::Prepared | ExecutionState::Rejected
+                ) {
+                    skipped_submitted += 1;
+                }
+                return true;
             }
         }
 
-        let fill_observed = exchange_fills.iter().any(|fill| {
-            fill.client_order_id == plan.client_order_id
-                || entry
-                    .record
-                    .order_id
-                    .as_deref()
-                    .is_some_and(|order_id| fill.order_id.as_deref() == Some(order_id))
-        });
+        let fill_observed = observed_fill_clients.contains(plan.client_order_id.as_str())
+            || entry
+                .record
+                .order_id
+                .as_deref()
+                .is_some_and(|order_id| observed_order_ids.contains(order_id));
 
         match entry.record.state {
             ExecutionState::Prepared | ExecutionState::Rejected => {
@@ -681,19 +708,96 @@ fn reconcile_exchange_evidence(
                     matched += 1;
                 } else {
                     unresolved += 1;
-                    unmatched_historical.push(ManagedIntentOutsideExchangeWindow {
-                        intent_id: plan.intent_id.clone(),
-                        state: entry.record.state,
-                        ledger_terminal: entry.record.state.is_terminal(),
-                        recorded_order_id: entry.record.order_id.clone(),
-                        evidence_status: "NOT_OBSERVABLE_IN_BOUNDED_EXCHANGE_WINDOW",
-                    });
+                    if unmatched_historical.len() < MAX_UNMATCHED_HISTORICAL_ROWS {
+                        unmatched_historical.push(ManagedIntentOutsideExchangeWindow {
+                            intent_id: plan.intent_id.clone(),
+                            state: entry.record.state,
+                            ledger_terminal: entry.record.state.is_terminal(),
+                            recorded_order_id: entry.record.order_id.clone(),
+                            evidence_status: "NOT_OBSERVABLE_IN_BOUNDED_EXCHANGE_WINDOW",
+                        });
+                    }
                 }
             }
         }
+        true
+    };
+    if let Some(ref census) = native {
+        for entry in &census.candidates {
+            if !visit_entry(entry) {
+                break;
+            }
+        }
+    } else {
+        ledger
+            .visit_historical_entries(&mut visit_entry)
+            .map_err(|_| AccountLedgerReconciliationError::HistoricalCoverageUnattested)?;
     }
+    if let Some(census) = native {
+        historical_count = census.total;
+        unresolved = census
+            .submitted
+            .checked_sub(matched)
+            .and_then(|count| count.checked_sub(skipped_submitted))
+            .ok_or(AccountLedgerReconciliationError::HistoricalCoverageUnattested)?;
+        unmatched_historical.clear();
+        for entry in census.historical_sample {
+            let plan = &entry.record.plan;
+            // Exact client matches were already processed in the bounded
+            // venue-side census; do not count them as historical gaps.
+            if by_client.contains_key(plan.client_order_id.as_str()) {
+                continue;
+            }
+            if unmatched_historical.len() == MAX_UNMATCHED_HISTORICAL_ROWS {
+                break;
+            }
+            unmatched_historical.push(ManagedIntentOutsideExchangeWindow {
+                intent_id: plan.intent_id.clone(),
+                state: entry.record.state,
+                ledger_terminal: entry.record.state.is_terminal(),
+                recorded_order_id: entry.record.order_id.clone(),
+                evidence_status: "NOT_OBSERVABLE_IN_BOUNDED_EXCHANGE_WINDOW",
+            });
+        }
+    }
+    if let Some(client_order_id) = duplicate_managed_client {
+        return Err(
+            AccountLedgerReconciliationError::DuplicateManagedExchangeOrder { client_order_id },
+        );
+    }
+    if historical_count
+        != ledger
+            .total_intents()
+            .map_err(|_| AccountLedgerReconciliationError::HistoricalCoverageUnattested)?
+    {
+        return Err(AccountLedgerReconciliationError::HistoricalCoverageUnattested);
+    }
+    let managed_clients = relevant_managed_clients
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    let managed_order_ids = relevant_managed_order_ids
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    let managed_exchange_orders_observed = exchange_orders
+        .iter()
+        .filter(|order| managed_clients.contains(order.client_order_id.as_str()))
+        .count();
+    let unattributed_orders = exchange_orders.len() - managed_exchange_orders_observed;
+    let managed_exchange_fills_observed = exchange_fills
+        .iter()
+        .filter(|fill| {
+            managed_clients.contains(fill.client_order_id.as_str())
+                || fill
+                    .order_id
+                    .as_deref()
+                    .is_some_and(|order_id| managed_order_ids.contains(order_id))
+        })
+        .count();
+    let unattributed_fills = exchange_fills.len() - managed_exchange_fills_observed;
     unmatched_historical.sort_by(|a, b| a.intent_id.cmp(&b.intent_id));
-    let unmatched_historical_total = unmatched_historical.len();
+    let unmatched_historical_total = unresolved;
     let unmatched_historical_truncated = unmatched_historical_total > MAX_UNMATCHED_HISTORICAL_ROWS;
     unmatched_historical.truncate(MAX_UNMATCHED_HISTORICAL_ROWS);
 
@@ -718,7 +822,7 @@ fn reconcile_exchange_evidence(
 
     Ok(AccountLedgerReconciliation {
         schema: ACCOUNT_LEDGER_RECONCILIATION_SCHEMA_V1,
-        managed_intents: managed_clients.len(),
+        managed_intents: historical_count,
         managed_exchange_orders_observed,
         managed_exchange_fills_observed,
         unattributed_external_or_exchange_system_orders: unattributed_orders,
@@ -797,136 +901,152 @@ fn attribute_strategy_exchange_evidence(
         AttributionCohortAccumulator,
     >::new();
 
-    for entry in ledger.entries() {
-        let Some(lineage) = entry.record.lineage.as_ref() else {
-            continue;
-        };
-        lineage_bound_intents += 1;
-        let plan = &entry.record.plan;
-        let key = (
-            lineage.origin_schema.clone(),
-            lineage.origin_version.clone(),
-            plan.risk_binding
-                .as_ref()
-                .map(|risk| risk.mandate.version.clone()),
-            plan.risk_binding
-                .as_ref()
-                .map(|risk| risk.mandate.capital_base_usd.clone()),
-            plan.account_uid_fingerprint.clone(),
-        );
-        cohorts.entry(key.clone()).or_default().intents += 1;
-        let Some(order_id) = entry.record.order_id.as_deref() else {
-            continue;
-        };
-        if !orders.iter().any(|order| {
-            order.instrument_id == plan.instrument_id
-                && order.client_order_id == plan.client_order_id
-                && order.order_id == order_id
-        }) {
-            continue;
-        }
-        exact_orders += 1;
+    let mut visit_error = None;
+    ledger
+        .visit_historical_entries(|entry| {
+            let result = (|| -> Result<(), AccountLedgerReconciliationError> {
+                let Some(lineage) = entry.record.lineage.as_ref() else {
+                    return Ok(());
+                };
+                lineage_bound_intents += 1;
+                let plan = &entry.record.plan;
+                let key = (
+                    lineage.origin_schema.clone(),
+                    lineage.origin_version.clone(),
+                    plan.risk_binding
+                        .as_ref()
+                        .map(|risk| risk.mandate.version.clone()),
+                    plan.risk_binding
+                        .as_ref()
+                        .map(|risk| risk.mandate.capital_base_usd.clone()),
+                    plan.account_uid_fingerprint.clone(),
+                );
+                cohorts.entry(key.clone()).or_default().intents += 1;
+                let Some(order_id) = entry.record.order_id.as_deref() else {
+                    return Ok(());
+                };
+                if !orders.iter().any(|order| {
+                    order.instrument_id == plan.instrument_id
+                        && order.client_order_id == plan.client_order_id
+                        && order.order_id == order_id
+                }) {
+                    return Ok(());
+                }
+                exact_orders += 1;
 
-        // A fill matching only one of the two independently bound order IDs,
-        // or having the wrong position side, must not be silently discarded.
-        for fill in fills.iter().filter(|fill| {
-            fill.client_order_id == plan.client_order_id
-                || fill.order_id.as_deref() == Some(order_id)
-        }) {
-            if fill.instrument_id != plan.instrument_id
-                || fill.client_order_id != plan.client_order_id
-                || fill.order_id.as_deref() != Some(order_id)
-                || fill.position_side != plan.position_side.as_str()
-                || fill.side != plan.side.as_str()
-            {
-                unmatched_lineage_fills += 1;
-                continue;
-            }
-            let fill_key = (&fill.instrument_id, &fill.trade_id);
-            if !seen_fills.insert(fill_key) {
-                duplicate_claims += 1;
-                continue;
-            }
-            exact_fills += 1;
+                // A fill matching only one of the two independently bound order IDs,
+                // or having the wrong position side, must not be silently discarded.
+                for fill in fills.iter().filter(|fill| {
+                    fill.client_order_id == plan.client_order_id
+                        || fill.order_id.as_deref() == Some(order_id)
+                }) {
+                    if fill.instrument_id != plan.instrument_id
+                        || fill.client_order_id != plan.client_order_id
+                        || fill.order_id.as_deref() != Some(order_id)
+                        || fill.position_side != plan.position_side.as_str()
+                        || fill.side != plan.side.as_str()
+                    {
+                        unmatched_lineage_fills += 1;
+                        continue;
+                    }
+                    let fill_key = (&fill.instrument_id, &fill.trade_id);
+                    if !seen_fills.insert(fill_key) {
+                        duplicate_claims += 1;
+                        continue;
+                    }
+                    exact_fills += 1;
 
-            let Some(bill_id) = fill.bill_id.as_deref() else {
-                missing_exact_bill_links += 1;
-                continue;
-            };
-            let linked = bills
-                .iter()
-                .filter(|bill| bill.bill_id == bill_id)
-                .collect::<Vec<_>>();
-            if linked.len() > 1 {
-                duplicate_claims += linked.len() - 1;
-            }
-            let Some(bill) = linked.first() else {
-                missing_exact_bill_links += 1;
-                continue;
-            };
-            if !claimed_bills.insert(&bill.bill_id) {
-                duplicate_claims += 1;
-                continue;
-            }
-            // Funding and unrelated bills are never allowed to inherit a
-            // fill's strategy identity just because billId happens to match.
-            if matches!(bill.sub_type.as_str(), "173" | "174")
-                || bill.instrument_id != fill.instrument_id
-                || bill.trade_id.as_deref() != Some(fill.trade_id.as_str())
-                || bill.order_id.as_deref().is_some_and(|id| id != order_id)
-                || bill
-                    .client_order_id
-                    .as_deref()
-                    .is_some_and(|id| id != plan.client_order_id)
-            {
-                unmatched_lineage_fills += 1;
-                continue;
-            }
+                    let Some(bill_id) = fill.bill_id.as_deref() else {
+                        missing_exact_bill_links += 1;
+                        continue;
+                    };
+                    let linked = bills
+                        .iter()
+                        .filter(|bill| bill.bill_id == bill_id)
+                        .collect::<Vec<_>>();
+                    if linked.len() > 1 {
+                        duplicate_claims += linked.len() - 1;
+                    }
+                    let Some(bill) = linked.first() else {
+                        missing_exact_bill_links += 1;
+                        continue;
+                    };
+                    if !claimed_bills.insert(&bill.bill_id) {
+                        duplicate_claims += 1;
+                        continue;
+                    }
+                    // Funding and unrelated bills are never allowed to inherit a
+                    // fill's strategy identity just because billId happens to match.
+                    if matches!(bill.sub_type.as_str(), "173" | "174")
+                        || bill.instrument_id != fill.instrument_id
+                        || bill.trade_id.as_deref() != Some(fill.trade_id.as_str())
+                        || bill.order_id.as_deref().is_some_and(|id| id != order_id)
+                        || bill
+                            .client_order_id
+                            .as_deref()
+                            .is_some_and(|id| id != plan.client_order_id)
+                    {
+                        unmatched_lineage_fills += 1;
+                        continue;
+                    }
 
-            let (Some(fill_fee), Some(fill_currency), Some(bill_fee)) = (
-                fill.fee.as_deref(),
-                fill.fee_currency.as_deref(),
-                bill.fee.as_deref(),
-            ) else {
-                fee_bill_mismatches += 1;
-                continue;
-            };
-            if fill_currency != bill.currency
-                || fill_currency.trim().is_empty()
-                || decimal("attribution.fill_fee", fill_fee)?
-                    != decimal("attribution.bill_fee", bill_fee)?
-            {
-                fee_bill_mismatches += 1;
-                continue;
-            }
+                    let (Some(fill_fee), Some(fill_currency), Some(bill_fee)) = (
+                        fill.fee.as_deref(),
+                        fill.fee_currency.as_deref(),
+                        bill.fee.as_deref(),
+                    ) else {
+                        fee_bill_mismatches += 1;
+                        continue;
+                    };
+                    if fill_currency != bill.currency
+                        || fill_currency.trim().is_empty()
+                        || decimal("attribution.fill_fee", fill_fee)?
+                            != decimal("attribution.bill_fee", bill_fee)?
+                    {
+                        fee_bill_mismatches += 1;
+                        continue;
+                    }
 
-            let (Some(fill_pnl), Some(bill_pnl)) = (fill.fill_pnl.as_deref(), bill.pnl.as_deref())
-            else {
-                fill_pnl_bill_mismatches += 1;
-                continue;
-            };
-            let fill_realized = decimal("attribution.fill_pnl", fill_pnl)?;
-            let bill_realized = decimal("attribution.bill_pnl", bill_pnl)?;
-            if fill_realized != bill_realized {
-                fill_pnl_bill_mismatches += 1;
-                continue;
-            }
+                    let (Some(fill_pnl), Some(bill_pnl)) =
+                        (fill.fill_pnl.as_deref(), bill.pnl.as_deref())
+                    else {
+                        fill_pnl_bill_mismatches += 1;
+                        continue;
+                    };
+                    let fill_realized = decimal("attribution.fill_pnl", fill_pnl)?;
+                    let bill_realized = decimal("attribution.bill_pnl", bill_pnl)?;
+                    if fill_realized != bill_realized {
+                        fill_pnl_bill_mismatches += 1;
+                        continue;
+                    }
 
-            // Only source-complete, independently cross-checked financial
-            // events enter either total; bill fee is NOT added to fill fee.
-            exact_trade_bills += 1;
-            verified_bills.insert(&bill.bill_id);
-            *fees.entry(fill_currency.to_owned()).or_default() +=
-                decimal("attribution.verified_fee", fill_fee)?;
-            *pnl.entry(bill.currency.clone()).or_default() += bill_realized;
-            let cohort = cohorts.entry(key.clone()).or_default();
-            cohort.exact_trade_bills += 1;
-            *cohort.fees.entry(fill_currency.to_owned()).or_default() +=
-                decimal("attribution.verified_fee", fill_fee)?;
-            *cohort.pnl.entry(bill.currency.clone()).or_default() += bill_realized;
-        }
+                    // Only source-complete, independently cross-checked financial
+                    // events enter either total; bill fee is NOT added to fill fee.
+                    exact_trade_bills += 1;
+                    verified_bills.insert(&bill.bill_id);
+                    *fees.entry(fill_currency.to_owned()).or_default() +=
+                        decimal("attribution.verified_fee", fill_fee)?;
+                    *pnl.entry(bill.currency.clone()).or_default() += bill_realized;
+                    let cohort = cohorts.entry(key.clone()).or_default();
+                    cohort.exact_trade_bills += 1;
+                    *cohort.fees.entry(fill_currency.to_owned()).or_default() +=
+                        decimal("attribution.verified_fee", fill_fee)?;
+                    *cohort.pnl.entry(bill.currency.clone()).or_default() += bill_realized;
+                }
+                Ok(())
+            })();
+            match result {
+                Ok(()) => true,
+                Err(error) => {
+                    visit_error = Some(error);
+                    false
+                }
+            }
+        })
+        .map_err(|_| AccountLedgerReconciliationError::HistoricalCoverageUnattested)?;
+    if let Some(error) = visit_error {
+        return Err(error);
     }
-
     let mut unallocated_funding_bills = 0usize;
     let mut unlinked_nonfunding_bills = 0usize;
     let mut unlinked_other_bills = 0usize;
@@ -992,7 +1112,9 @@ fn attribute_strategy_exchange_evidence(
         unlinked_nonfunding_bill_samples.len() > MAX_UNLINKED_BILL_SAMPLES;
     unlinked_nonfunding_bill_samples.truncate(MAX_UNLINKED_BILL_SAMPLES);
 
-    let managed_intents = ledger.len();
+    let managed_intents = ledger
+        .total_intents()
+        .map_err(|_| AccountLedgerReconciliationError::HistoricalCoverageUnattested)?;
     let mut reasons = Vec::new();
     if lineage_bound_intents < managed_intents {
         reasons.push("historical_intents_missing_immutable_lineage");
@@ -1184,28 +1306,78 @@ fn assess_flat_strategy_nav(
     {
         reasons.push("nav_open_position_or_pending_order");
     }
-    let entries = ledger
-        .entries()
-        .filter(|e| e.created_at_ms > capital.started_at_ms)
-        .collect::<Vec<_>>();
-    if entries.iter().any(|e| {
-        !e.record.state.is_terminal()
-            || e.record.plan.account_uid_fingerprint != capital.account_uid_fingerprint
-            || (e.record.plan.action.is_risk_increasing()
-                && (e.record.strategy_run_id.as_deref() != Some(capital.allocation_id.as_str())
-                    || e.record.lineage.as_ref().is_none_or(|l| {
-                        l.origin_schema != capital.origin_schema
-                            || l.origin_version != capital.origin_version
-                    })
-                    || e.record
-                        .plan
-                        .risk_binding
-                        .as_ref()
-                        .is_none_or(|b| b.mandate.version != capital.mandate_version)))
-            || (e.record.plan.action.is_risk_reducing() && e.record.strategy_run_id.is_some())
-    }) {
+    // One owner stream verifies EVERY epoch intent against immutable account
+    // history. Retain only exact current venue order owners; otherwise even a
+    // million historical intents would be cloned merely to reconcile a short
+    // authenticated REST window. Conflicting owners cannot become a NAV PASS.
+    let observed_orders = facts
+        .exchange_orders
+        .iter()
+        .map(|order| {
+            (
+                order.order_id.as_str(),
+                (order.client_order_id.as_str(), order.instrument_id.as_str()),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    if observed_orders.len() != facts.exchange_orders.len() {
+        reasons.push("nav_duplicate_exchange_order_identity");
+    }
+    let mut matched = BTreeMap::<String, crate::ExecutionLedgerEntry>::new();
+    let mut invalid_intent = false;
+    let mut duplicate_owner = false;
+    ledger
+        .visit_entries_created_since(
+            &capital.account_uid_fingerprint,
+            capital.started_at_ms,
+            |entry| {
+                if entry.created_at_ms <= capital.started_at_ms {
+                    return true;
+                }
+                if !entry.record.state.is_terminal()
+                    || entry.record.plan.account_uid_fingerprint != capital.account_uid_fingerprint
+                    || (entry.record.plan.action.is_risk_increasing()
+                        && (entry.record.strategy_run_id.as_deref()
+                            != Some(capital.allocation_id.as_str())
+                            || entry.record.lineage.as_ref().is_none_or(|lineage| {
+                                lineage.origin_schema != capital.origin_schema
+                                    || lineage.origin_version != capital.origin_version
+                            })
+                            || entry
+                                .record
+                                .plan
+                                .risk_binding
+                                .as_ref()
+                                .is_none_or(|binding| {
+                                    binding.mandate.version != capital.mandate_version
+                                })))
+                    || (entry.record.plan.action.is_risk_reducing()
+                        && entry.record.strategy_run_id.is_some())
+                {
+                    invalid_intent = true;
+                }
+                if let Some(order_id) = entry.record.order_id.as_deref()
+                    && observed_orders
+                        .get(order_id)
+                        .is_some_and(|(client, instrument)| {
+                            *client == entry.record.plan.client_order_id.as_str()
+                                && *instrument == entry.record.plan.instrument_id.as_str()
+                        })
+                    && matched.insert(order_id.to_owned(), entry.clone()).is_some()
+                {
+                    duplicate_owner = true;
+                }
+                true
+            },
+        )
+        .map_err(|_| AccountLedgerReconciliationError::HistoricalCoverageUnattested)?;
+    if invalid_intent {
         reasons.push("nav_unowned_or_pending_intent");
     }
+    if duplicate_owner {
+        reasons.push("nav_unowned_or_duplicate_fill");
+    }
+    let entries = matched.into_values().collect::<Vec<_>>();
     for order in facts.exchange_orders.iter().filter(|o| {
         o.update_time_ms
             .parse::<u64>()
@@ -2549,7 +2721,7 @@ mod tests {
             plan.instrument_id = format!("TOKEN{time}-USDT-SWAP");
             ledger.prepare(plan, time).expect("prepare");
         }
-        let inventory = managed_execution_inventory(&ledger);
+        let inventory = managed_execution_inventory(&ledger).unwrap();
         assert_eq!(inventory.schema, MANAGED_EXECUTION_INVENTORY_SCHEMA_V1);
         assert_eq!(inventory.total, 2);
         assert_eq!(inventory.shown, 2);
@@ -2565,7 +2737,7 @@ mod tests {
             derive_client_order_id(&inventory.rows[0].intent_id)
         );
         assert_eq!(
-            managed_execution_inventory(&ledger),
+            managed_execution_inventory(&ledger).unwrap(),
             inventory,
             "read-only repeat must not mutate ledger"
         );
@@ -2583,7 +2755,7 @@ mod tests {
             plan.instrument_id = format!("TOKEN{n}-USDT-SWAP");
             ledger.prepare(plan, (n + 100) as u64).expect("prepare");
         }
-        let inventory = managed_execution_inventory(&ledger);
+        let inventory = managed_execution_inventory(&ledger).unwrap();
         assert_eq!(inventory.total, MAX_MANAGED_EXECUTION_INVENTORY_ROWS + 1);
         assert_eq!(inventory.shown, MAX_MANAGED_EXECUTION_INVENTORY_ROWS);
         assert!(!inventory.complete_within_bound);
