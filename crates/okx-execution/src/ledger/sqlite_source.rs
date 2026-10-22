@@ -772,10 +772,15 @@ where
         let event: StoredExchangeEvent = decode(&bytes)?;
         if only_bills
             && (!key.starts_with("bill:")
-                || event.payload.get("source").and_then(serde_json::Value::as_str)
+                || event
+                    .payload
+                    .get("source")
+                    .and_then(serde_json::Value::as_str)
                     != Some("OKX_REST_BILL"))
         {
-            return Err(ExecutionLedgerError::Corrupt("indexed bill source kind mismatch"));
+            return Err(ExecutionLedgerError::Corrupt(
+                "indexed bill source kind mismatch",
+            ));
         }
         count += 1;
         if count > crate::exchange_evidence::MAX_EVENTS {
@@ -916,6 +921,29 @@ mod tests {
         second
             .cursors
             .insert("receipt-2".to_owned(), cursor("2026-10-20T12:05:00Z"));
+        second.events.insert(
+            "bill:bill-native-1".to_owned(),
+            StoredExchangeEvent {
+                payload: serde_json::json!({
+                    "source": "OKX_REST_BILL",
+                    "billId": "bill-native-1",
+                    "instId": "BTC-USDT-SWAP",
+                    "tradeId": null,
+                    "ordId": null,
+                    "clOrdId": null,
+                    "ccy": "USDT",
+                    "type": "2",
+                    "subType": "5",
+                    "balChg": "-0.02",
+                    "fee": "-0.02",
+                    "pnl": "0",
+                    "ts": 2000
+                }),
+                source_intent_id: None,
+                strategy_run_id: None,
+                allocation: "UNALLOCATED".to_owned(),
+            },
+        );
         second.seal().unwrap();
         {
             let tx = c.transaction().unwrap();
@@ -968,7 +996,11 @@ mod tests {
             Ok(())
         })
         .unwrap();
-        assert_eq!(bills, 0, "order events are excluded by the bill key index");
+        assert_eq!(bills, 1, "only the canonical bill event is visited");
+        let persisted_bills: i64 = c
+            .query_row("SELECT COUNT(*) FROM bills", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(persisted_bills, 1, "bill and source must commit together");
     }
 
     #[test]
