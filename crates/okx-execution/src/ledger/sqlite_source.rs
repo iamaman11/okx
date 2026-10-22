@@ -420,7 +420,14 @@ pub(super) fn persist(
             .ok_or(ExecutionLedgerError::Corrupt("invalid REST receipt time"))?;
         tx.execute(
             "INSERT INTO native_source_cursors VALUES(?1,?2,?3,?4,?5)",
-            params![source.run_id, key, time, checksum(&body), body],
+            params![
+                source.run_id,
+                key,
+                i64::try_from(time)
+                    .map_err(|_| ExecutionLedgerError::Corrupt("SQL time overflow"))?,
+                checksum(&body),
+                body
+            ],
         )
         .map_err(io)?;
         super::sqlite_finance::persist_source_receipt(
@@ -633,7 +640,14 @@ pub(super) fn append_window_delta(
             ))?;
         tx.execute(
             "INSERT INTO native_source_cursors VALUES(?1,?2,?3,?4,?5)",
-            params![&delta.run_id, key, receipt, checksum(&body), body],
+            params![
+                &delta.run_id,
+                key,
+                i64::try_from(receipt)
+                    .map_err(|_| ExecutionLedgerError::Corrupt("SQL time overflow"))?,
+                checksum(&body),
+                body
+            ],
         )
         .map_err(io)?;
         super::sqlite_finance::persist_source_receipt(
@@ -1379,7 +1393,13 @@ mod tests {
                 crate::exchange_evidence::source_receipt_ms(&cursor.source_received_at).unwrap();
             c.execute(
                 "INSERT INTO native_source_cursors VALUES(?1,?2,?3,?4,?5)",
-                params![run_id, key, at, checksum(&bytes), bytes],
+                params![
+                    run_id,
+                    key,
+                    i64::try_from(at).unwrap(),
+                    checksum(&bytes),
+                    bytes
+                ],
             )
             .unwrap();
         }

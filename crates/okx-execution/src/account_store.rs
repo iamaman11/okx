@@ -1,0 +1,314 @@
+//! Sole durable owner of operations created after T0. No import or implicit initialization.
+use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
+use rust_decimal::Decimal;
+use serde::{Deserialize, Serialize};
+use std::{
+    path::{Path, PathBuf},
+    str::FromStr,
+    time::Duration,
+};
+#[cfg(test)]
+#[path = "account_store_tests.rs"]
+mod tests;
+
+#[derive(Debug, thiserror::Error)]
+pub enum StoreError {
+    #[error("ACCOUNT_STORAGE_UNAVAILABLE: {0}")]
+    Sql(#[from] rusqlite::Error),
+    #[error("ACCOUNT_STORAGE_UNAVAILABLE: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("{0}")]
+    Invalid(&'static str),
+}
+pub type StoreResult<T> = Result<T, StoreError>;
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AccountMeta {
+    pub initialize_operation_id: String,
+    pub release_id: String,
+    pub account_key: String,
+    pub installation_id: String,
+    pub initialized_at: i64,
+    pub opening_source: String,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Decision {
+    pub decision_id: String,
+    pub instance_id: Option<String>,
+    pub decision_at: i64,
+    pub input_digest: String,
+    pub policy_revision: i64,
+    pub code_version: String,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NewIntent {
+    pub plan: IntentPlan,
+    pub intent_id: String,
+    pub idempotency_key: String,
+    pub request_hash: String,
+    pub client_order_id: String,
+    pub deadline: i64,
+    pub plan_hash: String,
+    pub policy_revision: i64,
+    pub risk_increase: bool,
+    pub instrument_id: String,
+}
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum IntentState {
+    Prepared,
+    Reserved,
+    Posting,
+    Unknown,
+    Acknowledged,
+    PartiallyFilled,
+    Filled,
+    Cancelled,
+    Rejected,
+}
+impl IntentState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Prepared => "PREPARED",
+            Self::Reserved => "RESERVED",
+            Self::Posting => "POSTING",
+            Self::Unknown => "UNKNOWN",
+            Self::Acknowledged => "ACKNOWLEDGED",
+            Self::PartiallyFilled => "PARTIALLY_FILLED",
+            Self::Filled => "FILLED",
+            Self::Cancelled => "CANCELLED",
+            Self::Rejected => "REJECTED",
+        }
+    }
+    pub fn terminal(self) -> bool {
+        matches!(self, Self::Filled | Self::Cancelled | Self::Rejected)
+    }
+    fn parse(s: &str) -> StoreResult<Self> {
+        Ok(match s {
+            "PREPARED" => Self::Prepared,
+            "RESERVED" => Self::Reserved,
+            "POSTING" => Self::Posting,
+            "UNKNOWN" => Self::Unknown,
+            "ACKNOWLEDGED" => Self::Acknowledged,
+            "PARTIALLY_FILLED" => Self::PartiallyFilled,
+            "FILLED" => Self::Filled,
+            "CANCELLED" => Self::Cancelled,
+            "REJECTED" => Self::Rejected,
+            _ => return Err(StoreError::Invalid("CORRUPT_INTENT_STATE")),
+        })
+    }
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoredIntent {
+    pub plan: IntentPlan,
+    pub intent_id: String,
+    pub idempotency_key: String,
+    pub request_hash: String,
+    pub client_order_id: String,
+    pub state: IntentState,
+    pub revision: i64,
+    pub deadline: i64,
+    pub plan_hash: String,
+    pub policy_revision: i64,
+    pub risk_increase: bool,
+    pub instrument_id: String,
+    pub exchange_order_id: Option<String>,
+    pub incident: Option<String>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CentralReceipt {
+    pub reservation_key: String,
+    pub account_key: String,
+    pub installation_id: String,
+    pub instance_id: Option<String>,
+    pub intent_id: String,
+    pub plan_hash: String,
+    pub policy_revision: i64,
+    pub receipt_hash: String,
+    pub requested_loss_usd: Decimal,
+    pub conversion_digest: String,
+}
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct IntentPlan {
+    pub operation: String,
+    pub side: String,
+    pub quantity: Decimal,
+    pub limit_price: Decimal,
+    pub stop_price: Option<Decimal>,
+    pub strategy_instance: String,
+    pub planned_loss_usd: Decimal,
+    pub source_generation: i64,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProtectionReceipt {
+    pub intent_id: String,
+    pub algo_id: String,
+    pub side: String,
+    pub quantity: Decimal,
+    pub trigger_price: Decimal,
+    pub trigger_basis: String,
+    pub verified_at: i64,
+    pub source_digest: String,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OperationReceipt {
+    pub operation_id: String,
+    pub kind: String,
+    pub request_hash: String,
+    pub result_ref: String,
+    pub committed_at: i64,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum FillEffect {
+    Open { side: String },
+    Reduce,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UsdConversionEvidence {
+    pub observed_at: i64,
+    pub source_digest: String,
+    pub usd_per_currency: std::collections::BTreeMap<String, Decimal>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StrategyInstance {
+    pub instance_id: String,
+    pub definition_id: String,
+    pub definition_version: String,
+    pub parameters: String,
+    pub enabled: bool,
+    pub policy_revision: i64,
+    pub budget: Decimal,
+    pub last_decision_key: Option<String>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FinanceEntry {
+    pub entry_id: String,
+    pub economic_event_key: String,
+    pub component: String,
+    pub allocation_leg: String,
+    pub amount: Decimal,
+    pub currency: String,
+    pub instance_id: Option<String>,
+    pub source_ref: String,
+    pub time: i64,
+    pub reverses_entry_id: Option<String>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Fill {
+    pub side: String,
+    pub fill_id: String,
+    pub instrument_id: String,
+    pub trade_id: String,
+    pub exchange_order_id: String,
+    pub intent_id: Option<String>,
+    pub time: i64,
+    pub qty: Decimal,
+    pub price: Decimal,
+    pub fee: Decimal,
+    pub currency: String,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Bill {
+    pub bill_id: String,
+    pub kind: String,
+    pub time: i64,
+    pub amount: Decimal,
+    pub currency: String,
+    pub economic_event_key: String,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SourceCursor {
+    pub source: String,
+    pub stream_partition: String,
+    pub cursor: String,
+    pub watermark: i64,
+    pub generation: i64,
+    pub coverage_gaps: String,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct IngestPage {
+    pub fills: Vec<Fill>,
+    pub bills: Vec<Bill>,
+    pub finance: Vec<FinanceEntry>,
+    pub cash_flows: Vec<CashFlow>,
+    pub allocations: Vec<Allocation>,
+    pub lots: Vec<StoredLot>,
+    pub nav: Vec<NavPoint>,
+    pub projected_fill_ids: Vec<String>,
+    pub cursor: Option<SourceCursor>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CashFlow {
+    pub event_id: String,
+    pub kind: String,
+    pub currency: String,
+    pub amount: Decimal,
+    pub time: i64,
+    pub source_ref: String,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Allocation {
+    pub event_id: String,
+    pub instance_id: String,
+    pub delta: Decimal,
+    pub currency: String,
+    pub time: i64,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoredLot {
+    pub lot_id: String,
+    pub instance_id: Option<String>,
+    pub intent_id: Option<String>,
+    pub fill_id: Option<String>,
+    pub instrument_id: String,
+    pub side: String,
+    pub remaining_qty: Decimal,
+    pub cost: Decimal,
+    pub opened_at: i64,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NavPoint {
+    pub scope_id: String,
+    pub time: i64,
+    pub source_version: String,
+    pub equity: Decimal,
+    pub pnl: Decimal,
+    pub flows: Decimal,
+    pub currency: String,
+    pub coverage: String,
+    pub mark_source: String,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OpeningSnapshot {
+    pub source_ref: String,
+    pub observed_at: i64,
+    pub positions: usize,
+    pub orders: usize,
+    pub conditional_orders: usize,
+    pub liabilities: Decimal,
+    pub balances: Vec<(String, Decimal)>,
+}
+
+/// Connection stays on its owning blocking worker. It is never a network transaction.
+#[derive(Debug)]
+pub struct AccountStore {
+    connection: Connection,
+    path: PathBuf,
+    meta: AccountMeta,
+    _lease: std::fs::File,
+    maintenance_error: Option<String>,
+}
+pub fn exact(value: Decimal) -> String {
+    value.normalize().to_string()
+}
+fn decimal(value: String) -> StoreResult<Decimal> {
+    Decimal::from_str(&value).map_err(|_| StoreError::Invalid("INVALID_EXACT_DECIMAL"))
+}
+#[path = "ledger/sql/mod.rs"]
+mod sql;
+
+fn wall_time_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|v| v.as_millis().min(i64::MAX as u128) as i64)
+        .unwrap_or(0)
+}

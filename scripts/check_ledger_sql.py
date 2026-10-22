@@ -1,113 +1,88 @@
 #!/usr/bin/env python3
-"""Standard-library schema conformance, no DB server or external packages."""
+"""Exercise the canonical T0 DDL, constraints, atomicity and hot query plans."""
 import pathlib
 import sqlite3
-from decimal import Decimal
 import tempfile
+from decimal import Decimal
 
-DDL = pathlib.Path(__file__).resolve().parents[1] / "crates/okx-execution/schema/account-ledger-v1.sql"
+DDL = pathlib.Path(__file__).resolve().parents[1] / "crates/okx-execution/schema/account-v2.sql"
+
 
 def main():
     with tempfile.TemporaryDirectory() as root:
-        dbpath = pathlib.Path(root) / "account.sqlite"
-        a = sqlite3.connect(dbpath, timeout=1.0, isolation_level=None)
-        b = sqlite3.connect(dbpath, timeout=1.0, isolation_level=None)
+        path = pathlib.Path(root) / "account.sqlite"
+        a = sqlite3.connect(path, isolation_level=None)
+        b = sqlite3.connect(path, isolation_level=None)
         try:
             assert a.execute("PRAGMA journal_mode=WAL").fetchone()[0] == "wal"
             a.execute("PRAGMA synchronous=FULL")
-            a.execute("PRAGMA foreign_keys=ON")
-            b.execute("PRAGMA foreign_keys=ON")
+            for connection in (a, b):
+                connection.execute("PRAGMA foreign_keys=ON")
             a.executescript(DDL.read_text(encoding="utf-8"))
-            assert a.execute("PRAGMA user_version").fetchone()[0] == 1
-            a.execute("""INSERT INTO account_identity VALUES
-                (1,'okx','real','account-a','uid-a',1,1)""")
-            a.execute("""INSERT INTO evidence_objects
-                (evidence_sha256,evidence_kind,codec,relative_path,size_bytes)
-                VALUES ('sha-source','order_history','raw_bytes','a.bin',1),
-                       ('sha-decision','decision','binary','b.bin',2)""")
-            a.execute("""INSERT INTO source_receipts
-                VALUES ('receipt-a','orders','SWAP',1,2,3,'COMPLETE','sha-source')""")
-            a.execute("""INSERT INTO capital_epochs VALUES
-                ('epoch-a','strategy-a','manual','okx.manual/v1','1',3,
-                 'receipt-a','USDT','100','ACTIVE',NULL,NULL)""")
-            a.execute("""INSERT INTO decisions
-                (decision_id,epoch_id,decision_kind,decision_at_ms,instrument_id,
-                 source_evidence_sha256,decision_evidence_sha256,quality)
-                VALUES ('decision-a','epoch-a','TRADE',4,'BTC-USDT-SWAP',
-                        'sha-source','sha-decision','FRESH')""")
-            a.execute("""INSERT INTO intents
-                VALUES ('intent-a','epoch-a','decision-a','BTC-USDT-SWAP',
-                        'OPEN','sha-plan','PREPARED',5)""")
-            a.execute("""INSERT INTO domain_events
-                (event_id,event_type,event_version,subject_kind,subject_id,
-                 effective_at_ms,recorded_at_ms,event_sha256)
-                VALUES ('post-a','BEGIN_POST',1,'INTENT','intent-a',6,6,'hash-a')""")
-            a.execute("""INSERT INTO post_attempts
-                VALUES ('intent-a','client-a','post-a',6,'UNKNOWN')""")
-            a.execute("""INSERT INTO epoch_daily_risk
-                VALUES('epoch-a','1970-01-01','0.1',0,'post-a')""")
-            assert a.execute("SELECT COUNT(*) FROM epoch_daily_risk").fetchone()[0] == 1
-            a.execute("""INSERT INTO fills
-                (instrument_id,trade_id,intent_id,exchange_time_ms,side,
-                 position_side,price_decimal,contracts_decimal,source_evidence_sha256)
-                VALUES ('BTC-USDT-SWAP','trade-a','intent-a',7,'BUY','LONG',
-                        '12345.6789','0.01','sha-source')""")
-            a.execute("""INSERT INTO bills VALUES
-                ('bill-a','BTC-USDT-SWAP','trade-a',7,'USDT','FEE',
-                '-0.1','sha-source')""")
-            a.execute("""INSERT INTO bill_attribution VALUES
-                ('bill-a','epoch-a','-0.04','sha-source')""")
-            assert b.execute("SELECT COUNT(*) FROM fills").fetchone()[0] == 1
-            assert a.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
-            assert a.execute("PRAGMA foreign_key_check").fetchall() == []
-            def must_reject(sql):
+            assert a.execute("PRAGMA user_version").fetchone()[0] == 2
+            tables = a.execute("PRAGMA table_list").fetchall()
+            assert all(row[5] == 1 for row in tables if not row[1].startswith("sqlite_"))
+            a.execute("INSERT INTO account_meta VALUES(1,'okx:real:uid','installation',2,1,'flat-source','initialize-op','release')")
+            a.execute("INSERT INTO strategy_instances VALUES('a','ema','1','{}',1,1,'100',NULL)")
+            a.execute("INSERT INTO strategy_instances VALUES('b','ema','1','{}',1,1,'100',NULL)")
+            a.execute("INSERT INTO decisions VALUES('decision','a',2,'input-digest',1,'code')")
+            intent = "INSERT INTO intents(intent_id,idempotency_key,request_hash,decision_id,state,revision,client_order_id,deadline,plan_hash,policy_revision,risk_increase,instrument_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
+            values = ('intent', 'request', 'hash', 'decision', 'PREPARED', 0, 'client', 100, 'plan', 1, 1, 'BTC', 2, 2)
+            a.execute(intent, values)
+            a.execute("INSERT INTO intent_plans VALUES('intent','open','buy','1','100','95','a','5',1)")
+            a.execute("INSERT INTO fills VALUES('fill','BTC','trade','order','intent',3,'1','100','-0.1','USDT','buy')")
+            a.execute("INSERT INTO bills VALUES('bill','FEE',3,'-0.1','USDT','trade-event')")
+            a.execute("INSERT INTO finance_entries VALUES('fee-a','trade-event','FEE','a','-0.04','USDT','a','fill',3,NULL)")
+            a.execute("INSERT INTO finance_entries VALUES('fee-b','trade-event','FEE','b','-0.06','USDT','b','bill',3,NULL)")
+            portions = [Decimal(row[0]) for row in a.execute("SELECT amount FROM finance_entries")]
+            assert sum(portions) == Decimal('-0.1')
+
+            def reject(sql, params=()):
                 try:
-                    a.execute(sql)
+                    a.execute(sql, params)
                 except sqlite3.IntegrityError:
                     return
-                raise AssertionError("Expected constraint failure: " + sql)
-            must_reject("""UPDATE domain_events SET event_type='FAKE' WHERE event_id='post-a'""")
-            must_reject("""DELETE FROM domain_events WHERE event_id='post-a'""")
-            must_reject("""INSERT INTO post_attempts VALUES
-                ('intent-a','client-b','post-a',7,'POSTED')""")
-            must_reject("""INSERT INTO bill_attribution VALUES
-                ('bill-a','epoch-a','-0.04','sha-source')""")
-            must_reject("""INSERT INTO intents VALUES
-                ('broken','nonexistent',NULL,'BTC','OPEN','sha','PREPARED',5)""")
-            a.execute("""INSERT INTO capital_epochs VALUES
-                ('epoch-b','strategy-a','manual','okx.manual/v1','1',5,
-                 'receipt-a','USDT','100','ACTIVE',NULL,NULL)""")
-            a.execute("""INSERT INTO bill_attribution VALUES
-                ('bill-a','epoch-b','-0.06','sha-source')""")
-            portions = [Decimal(r[0]) for r in a.execute(
-                "SELECT allocated_decimal FROM bill_attribution WHERE bill_id='bill-a'")]
-            assert sum(portions) == Decimal('-0.1')
-            assert a.execute(
-                "SELECT COUNT(*) FROM capital_epochs WHERE strategy_id='strategy-a'").fetchone()[0] == 2
-            must_reject("""UPDATE fills SET price_decimal='999' WHERE trade_id='trade-a'""")
-            must_reject("""UPDATE bills SET delta_decimal='0' WHERE bill_id='bill-a'""")
-            must_reject("""INSERT INTO domain_events
-                (event_id,event_type,event_version,subject_kind,subject_id,
-                 effective_at_ms,recorded_at_ms,event_sha256)
-                VALUES ('bad-chain','OBSERVE',1,'ACCOUNT','account-a',8,9,'hash-bad')""")
-            a.execute("""INSERT INTO source_gaps VALUES
-                ('gap-a','orders','SWAP',7,30000000,'EXECUTION_ONLY','HISTORY_WINDOW',NULL,NULL)""")
-            assert a.execute("SELECT materiality FROM source_gaps").fetchone()[0] == "EXECUTION_ONLY"
-            # WAL readers remain available while another connection has a write txn.
-            b.execute("BEGIN")
-            b.execute("SELECT COUNT(*) FROM domain_events").fetchone()
+                raise AssertionError("expected constraint failure: " + sql)
+
+            reject(intent, ('duplicate',) + values[1:])  # stable idempotency/client IDs
+            reject(intent, ('bad', 'bad-key', 'hash', 'missing', 'PREPARED', 0, 'bad-client', 100, 'plan', 1, 1, 'BTC', 2, 2))
+            reject("INSERT INTO finance_entries VALUES('duplicate-fee','trade-event','FEE','a','-0.04','USDT','a','bill',3,NULL)")
+            reject("INSERT INTO finance_entries VALUES('bad-fk','different','FEE','a','1','USDT','missing','bill',3,NULL)")
+            reject("UPDATE account_meta SET account_key='other'")
+            reject("UPDATE intent_plans SET quantity='99'")
+            reject("UPDATE fills SET price='99'")
+            reject("DELETE FROM bills")
+            reject("UPDATE finance_entries SET amount='0'")
+            reject("INSERT INTO bills VALUES('bill2','FEE','not-time','-0.1','USDT','event')")
+            for query, index in [
+                ("SELECT intent_id FROM intents WHERE state IN('PREPARED','RESERVED','POSTING','UNKNOWN','ACKNOWLEDGED','PARTIALLY_FILLED') ORDER BY state,updated_at,intent_id LIMIT 100", "idx_intents_active"),
+                ("SELECT entry_id FROM finance_entries WHERE instance_id='a' AND time>=1 AND time<=100 ORDER BY time,entry_id LIMIT 100", "idx_finance_instance"),
+                ("SELECT lot_id FROM position_lots WHERE instrument_id='BTC' AND side='long' AND instance_id='a'", "idx_lots_active"),
+            ]:
+                plan = a.execute("EXPLAIN QUERY PLAN " + query).fetchall()
+                assert any(index in row[3] for row in plan), plan
+            # Failure rolls back both facts and source watermark.
             a.execute("BEGIN IMMEDIATE")
-            a.execute("""INSERT INTO domain_events
-                (event_id,event_type,event_version,subject_kind,subject_id,
-                 effective_at_ms,recorded_at_ms,previous_event_sha256,event_sha256)
-                VALUES ('post-b','OBSERVE',1,'ACCOUNT','account-a',8,9,'hash-a','hash-b')""")
-            a.execute("COMMIT")
+            a.execute("INSERT INTO source_cursors VALUES('fills','BTC','next',10,1,'')")
+            a.execute("INSERT INTO bills VALUES('uncommitted','FEE',4,'1','USDT','event')")
+            a.execute("ROLLBACK")
+            assert a.execute("SELECT count(*) FROM source_cursors").fetchone()[0] == 0
+            assert a.execute("SELECT count(*) FROM bills WHERE bill_id='uncommitted'").fetchone()[0] == 0
+            # WAL readers keep a consistent snapshot while the writer commits.
+            b.execute("BEGIN")
+            assert b.execute("SELECT count(*) FROM bills").fetchone()[0] == 1
+            a.execute("INSERT INTO bills VALUES('new','FEE',4,'1','USDT','event')")
+            assert b.execute("SELECT count(*) FROM bills").fetchone()[0] == 1
             b.execute("ROLLBACK")
-            assert b.execute("SELECT COUNT(*) FROM domain_events").fetchone()[0] == 2
+            assert b.execute("SELECT count(*) FROM bills").fetchone()[0] == 2
+            assert a.execute("PRAGMA integrity_check").fetchone()[0] == 'ok'
+            assert not a.execute("PRAGMA foreign_key_check").fetchall()
         finally:
             b.close()
             a.close()
-    print("ACCOUNT_SQLITE_SCHEMA_V1=PASS")
+    print("ACCOUNT_SQLITE_SCHEMA_V2=PASS")
 
-if __name__ == "__main__":
+
+if __name__ == '__main__':
     main()
+

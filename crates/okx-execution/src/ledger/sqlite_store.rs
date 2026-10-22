@@ -1135,7 +1135,8 @@ pub(super) fn bind_account_identity(
                 identity.environment_key(),
                 identity.account_id,
                 expected,
-                identity.bound_at_ms,
+                i64::try_from(identity.bound_at_ms)
+                    .map_err(|_| ExecutionLedgerError::Corrupt("SQL time overflow"))?,
             ],
         )
         .map_err(io)?;
@@ -1240,7 +1241,8 @@ pub(super) fn initialize_account(
             identity.environment_key(),
             &identity.account_id,
             &identity.uid_fingerprint,
-            identity.bound_at_ms
+            i64::try_from(identity.bound_at_ms)
+                .map_err(|_| ExecutionLedgerError::Corrupt("SQL time overflow"))?
         ],
     )
     .map_err(io)?;
@@ -3069,7 +3071,8 @@ fn save_snapshot(
                     id,
                     &e.record.plan.client_order_id,
                     &e.record.plan.account_uid_fingerprint,
-                    e.updated_at_ms,
+                    i64::try_from(e.updated_at_ms)
+                        .map_err(|_| ExecutionLedgerError::Corrupt("SQL time overflow"))?,
                     &entry_digest,
                     bytes
                 ])
@@ -3091,7 +3094,7 @@ fn save_snapshot(
                    AND intents.requested_action=excluded.requested_action
                    AND intents.plan_sha256=excluded.plan_sha256
                    AND intents.created_at_ms=excluded.created_at_ms",
-                params![id, &e.record.plan.instrument_id, action, plan_hash, stage, e.created_at_ms],
+                params![id, &e.record.plan.instrument_id, action, plan_hash, stage, i64::try_from(e.created_at_ms).map_err(|_|ExecutionLedgerError::Corrupt("SQL time overflow"))?],
             ).map_err(io)?;
             if projection != 1 {
                 return Err(ExecutionLedgerError::Corrupt(
@@ -3198,7 +3201,8 @@ fn save_snapshot(
                 params![
                     event_id,
                     id,
-                    e.updated_at_ms,
+                    i64::try_from(e.updated_at_ms)
+                        .map_err(|_| ExecutionLedgerError::Corrupt("SQL time overflow"))?,
                     prev_hash,
                     event_hash,
                     if is_begin_post {
@@ -3222,7 +3226,8 @@ fn save_snapshot(
                         id,
                         &e.record.plan.client_order_id,
                         event_id,
-                        e.updated_at_ms
+                        i64::try_from(e.updated_at_ms)
+                            .map_err(|_| ExecutionLedgerError::Corrupt("SQL time overflow"))?
                     ],
                 )
                 .map_err(io)?;
@@ -4392,7 +4397,7 @@ mod tests {
                             &plan.intent_id,
                             &plan.client_order_id,
                             &uid,
-                            e.updated_at_ms,
+                            i64::try_from(e.updated_at_ms).expect("bounded fixture timestamp"),
                             &digest,
                             original
                         ])
@@ -4404,7 +4409,7 @@ mod tests {
                             format!("{:?}", plan.action),
                             checksum(&encode(plan).unwrap()),
                             format!("{:?}", e.record.state),
-                            e.created_at_ms
+                            i64::try_from(e.created_at_ms).expect("bounded fixture timestamp")
                         ])
                         .unwrap();
                     seq += 1;
@@ -4417,7 +4422,7 @@ mod tests {
                             &event_id,
                             &plan.intent_id,
                             &digest,
-                            e.updated_at_ms,
+                            i64::try_from(e.updated_at_ms).expect("bounded fixture timestamp"),
                         ))
                         .unwrap(),
                     );
@@ -4425,7 +4430,7 @@ mod tests {
                         .execute(params![
                             event_id,
                             &plan.intent_id,
-                            e.updated_at_ms,
+                            i64::try_from(e.updated_at_ms).expect("bounded fixture timestamp"),
                             &prior_hash,
                             &event_hash
                         ])
