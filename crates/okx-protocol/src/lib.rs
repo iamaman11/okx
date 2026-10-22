@@ -2241,9 +2241,9 @@ impl HostControlOperation {
                 }
             }
             Self::RegisterReadOnlyAccount { entry } => entry.validate(),
-            Self::InitializeFreshLedger { expected_uid_fingerprint } => {
-                validate_sha256(expected_uid_fingerprint)
-            }
+            Self::InitializeFreshLedger {
+                expected_uid_fingerprint,
+            } => validate_sha256(expected_uid_fingerprint),
             Self::ConfigureProductionTrading { policy } => policy.validate(),
             Self::StopProductionTrading { expected_revision } => {
                 if *expected_revision == 0 {
@@ -4627,19 +4627,30 @@ mod native_drain_source_tests {
 
     #[test]
     fn fresh_sqlite_owner_genesis_requires_exact_typed_uid_only() {
-        let operation=HostControlOperation::InitializeFreshLedger {
-            expected_uid_fingerprint:"a".repeat(64),
+        let operation = HostControlOperation::InitializeFreshLedger {
+            expected_uid_fingerprint: "a".repeat(64),
         };
         assert!(operation.validate().is_ok());
-        let serialized=serde_json::to_value(&operation).unwrap();
-        assert_eq!(serialized["type"],"initialize_fresh_ledger");
-        assert_eq!(serde_json::from_value::<HostControlOperation>(serialized).unwrap(),operation);
-        assert!(HostControlOperation::InitializeFreshLedger {
-            expected_uid_fingerprint:"a".repeat(63),
-        }.validate().is_err());
-        assert!(HostControlOperation::InitializeFreshLedger {
-            expected_uid_fingerprint:"INVALID".to_owned(),
-        }.validate().is_err());
+        let serialized = serde_json::to_value(&operation).unwrap();
+        assert_eq!(serialized["type"], "initialize_fresh_ledger");
+        assert_eq!(
+            serde_json::from_value::<HostControlOperation>(serialized).unwrap(),
+            operation
+        );
+        assert!(
+            HostControlOperation::InitializeFreshLedger {
+                expected_uid_fingerprint: "a".repeat(63),
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            HostControlOperation::InitializeFreshLedger {
+                expected_uid_fingerprint: "INVALID".to_owned(),
+            }
+            .validate()
+            .is_err()
+        );
     }
 
     #[test]

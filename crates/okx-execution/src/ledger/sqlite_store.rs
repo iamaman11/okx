@@ -1070,31 +1070,39 @@ pub(super) fn bind_account_identity(
         .map_err(io)?;
     if persisted_uid != expected {
         // One explicit empty-SQLite genesis; no imported v14 intent/source.
-        let is_new=entries.is_empty()
+        let is_new = entries.is_empty()
             && reservation.is_none()
             && source.is_none()
             && persisted_uid.is_empty();
         if !is_new {
             return Err(ExecutionLedgerError::AccountScopeMismatch);
         }
-        let old:Option<i64>=tx.query_row(
-            "SELECT 1 FROM account_identity WHERE singleton=1",
-            [],|row|row.get(0),
-        ).optional().map_err(io)?;
-        let intent_count:i64=tx.query_row(
-            "SELECT COUNT(*) FROM ledger_entries",[],|row|row.get(0),
-        ).map_err(io)?;
-        let source_count:i64=tx.query_row(
-            "SELECT COUNT(*) FROM native_source_runs",[],|row|row.get(0),
-        ).map_err(io)?;
-        if old.is_some() || intent_count!=0 || source_count!=0 {
+        let old: Option<i64> = tx
+            .query_row(
+                "SELECT 1 FROM account_identity WHERE singleton=1",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(io)?;
+        let intent_count: i64 = tx
+            .query_row("SELECT COUNT(*) FROM ledger_entries", [], |row| row.get(0))
+            .map_err(io)?;
+        let source_count: i64 = tx
+            .query_row("SELECT COUNT(*) FROM native_source_runs", [], |row| {
+                row.get(0)
+            })
+            .map_err(io)?;
+        if old.is_some() || intent_count != 0 || source_count != 0 {
             return Err(ExecutionLedgerError::AccountScopeMismatch);
         }
-        let count=tx.execute(
-            "UPDATE ledger_state SET uid=?1 WHERE key=1 AND uid=''",
-            params![expected],
-        ).map_err(io)?;
-        if count!=1 {
+        let count = tx
+            .execute(
+                "UPDATE ledger_state SET uid=?1 WHERE key=1 AND uid=''",
+                params![expected],
+            )
+            .map_err(io)?;
+        if count != 1 {
             return Err(ExecutionLedgerError::AccountScopeMismatch);
         }
     }

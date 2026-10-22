@@ -528,10 +528,11 @@ impl ExecutionLedgerStore {
     }
 
     fn select_published_owner_impl(root: &Path) -> Result<Self, ExecutionLedgerError> {
-        let native=Self::sqlite_at(root.join("execution-ledger.sqlite"));
-        let identity=native.bound_native_account_identity()?
+        let native = Self::sqlite_at(root.join("execution-ledger.sqlite"));
+        let identity = native
+            .bound_native_account_identity()?
             .ok_or(ExecutionLedgerError::AccountScopeMismatch)?;
-        sqlite_store::attest_published_owner(native.path(),&identity.uid_fingerprint)?;
+        sqlite_store::attest_published_owner(native.path(), &identity.uid_fingerprint)?;
         Ok(native)
     }
 
@@ -541,16 +542,17 @@ impl ExecutionLedgerStore {
     /// If the acknowledgement was lost, the SAME bound database is read,
     /// never replaced or replayed.
     pub fn initialize_fresh_account(
-        root:&Path,
-        identity:&SqliteAccountIdentity,
-    ) -> Result<Self,ExecutionLedgerError> {
+        root: &Path,
+        identity: &SqliteAccountIdentity,
+    ) -> Result<Self, ExecutionLedgerError> {
         identity.validate()?;
-        let _lease=Self::acquire_writer_lease(root)?;
-        let native=Self::sqlite_at(root.join("execution-ledger.sqlite"));
+        let _lease = Self::acquire_writer_lease(root)?;
+        let native = Self::sqlite_at(root.join("execution-ledger.sqlite"));
         if native.path().exists() {
-            let bound=native.bound_native_account_identity()?
+            let bound = native
+                .bound_native_account_identity()?
                 .ok_or(ExecutionLedgerError::AccountScopeMismatch)?;
-            if bound!=*identity {
+            if bound != *identity {
                 return Err(ExecutionLedgerError::AccountScopeMismatch);
             }
             native.attest_storage()?;
@@ -558,13 +560,17 @@ impl ExecutionLedgerStore {
         }
         sqlite_store::save(
             native.path(),
-            &BTreeMap::new(),None,None,None,
-            &StrategyPeriodHistory::default(),&[],
+            &BTreeMap::new(),
+            None,
+            None,
+            None,
+            &StrategyPeriodHistory::default(),
+            &[],
         )?;
         native.bind_native_account_identity(identity)?;
-        let proof=native.attest_storage()?;
-        if proof.on_disk_schema!=sqlite_store::SCHEMA
-            || proof.integrity!="VALIDATED_COLD_READ" {
+        let proof = native.attest_storage()?;
+        if proof.on_disk_schema != sqlite_store::SCHEMA || proof.integrity != "VALIDATED_COLD_READ"
+        {
             return Err(ExecutionLedgerError::Corrupt(
                 "fresh native account genesis attestation failed",
             ));
@@ -577,18 +583,22 @@ impl ExecutionLedgerStore {
             "execution-ledger.pre-v14.json",
             "execution-ledger.owner",
         ] {
-            let old=root.join(name);
+            let old = root.join(name);
             if old.try_exists()? {
                 if !old.is_file() {
-                    return Err(ExecutionLedgerError::Corrupt("legacy ledger path not a file"));
+                    return Err(ExecutionLedgerError::Corrupt(
+                        "legacy ledger path not a file",
+                    ));
                 }
                 fs::remove_file(old)?;
             }
         }
-        let archived=root.join("execution-ledger.archive");
+        let archived = root.join("execution-ledger.archive");
         if archived.try_exists()? {
             if !archived.is_dir() {
-                return Err(ExecutionLedgerError::Corrupt("legacy archive path not a directory"));
+                return Err(ExecutionLedgerError::Corrupt(
+                    "legacy archive path not a directory",
+                ));
             }
             fs::remove_dir_all(archived)?;
         }
@@ -751,24 +761,6 @@ impl ExecutionLedgerStore {
                 "invalid persistent SQLite cutover watermark",
             )),
         }
-    }
-
-    fn has_sqlite_cutover_watermark(root: &Path) -> Result<bool, ExecutionLedgerError> {
-        let path = root.join("execution-ledger.writer-lock");
-        let bytes = match fs::read(path) {
-            Ok(bytes) => bytes,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-            Err(error) => return Err(error.into()),
-        };
-        if bytes.is_empty() {
-            return Ok(false);
-        }
-        if bytes != Self::SQLITE_CUTOVER_WATERMARK {
-            return Err(ExecutionLedgerError::Corrupt(
-                "invalid persistent SQLite cutover watermark",
-            ));
-        }
-        Ok(true)
     }
 
     fn mark_sqlite_cutover(lease: &mut File) -> Result<(), ExecutionLedgerError> {

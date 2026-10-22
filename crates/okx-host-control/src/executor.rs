@@ -1054,10 +1054,7 @@ impl HostExecutor {
     /// impossible to enter this branch while CONTROL desires an active Agent,
     /// while its Job contains a process, or while release provenance differs.
     /// A crash leaves the desired state STOPPED, not an automatic restart.
-    fn initialize_fresh_ledger(
-        &mut self,
-        expected_uid: &str,
-    ) -> HostControlResult<Value> {
+    fn initialize_fresh_ledger(&mut self, expected_uid: &str) -> HostControlResult<Value> {
         if self.desired_error.is_some()
             || self.desired_store.is_pending()?
             || self.desired_agent != AgentDesired::Stopped
