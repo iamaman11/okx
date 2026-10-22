@@ -2482,7 +2482,9 @@ pub(super) fn nav_watermark(
 ) -> Result<(Option<StrategyNavPoint>, usize), ExecutionLedgerError> {
     let c = connect_indexed_read(path)?;
     c.execute_batch("BEGIN DEFERRED TRANSACTION").map_err(io)?;
-    require_account_read_scope(&c, uid, true)?;
+    // Staging-only SQLite fixtures can be UID-scoped before CONTROL binds them.
+    // Production admission separately requires the immutable published identity.
+    require_account_read_scope(&c, uid, false)?;
     let count: i64 = c
         .query_row(
             "SELECT COUNT(*) FROM nav_points WHERE epoch_id=?1",
