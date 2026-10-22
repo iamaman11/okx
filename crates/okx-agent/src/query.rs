@@ -30,9 +30,9 @@ use okx_observation::{
 };
 use okx_protocol::{
     AGENT_RESPONSE_SCHEMA_V1, AgentFailure, AgentOperation, AgentRequest, AgentResponse,
-    AgentResponseStatus, CentralAccountPolicy, DataQuality, HardRiskPolicyRequest,
-    InstrumentTypeFilter, LiquidityRole as ProtocolLiquidityRole, PortfolioMandateRequest,
-    PortfolioStatisticsRequest, PositionSide, RiskDegradedMode as ProtocolRiskDegradedMode,
+    AgentResponseStatus, DataQuality, HardRiskPolicyRequest, InstrumentTypeFilter,
+    LiquidityRole as ProtocolLiquidityRole, PortfolioMandateRequest, PortfolioStatisticsRequest,
+    PositionSide, RiskDegradedMode as ProtocolRiskDegradedMode,
     RiskMinimumQuality as ProtocolRiskMinimumQuality, VirtualPortfolioRequest,
 };
 use okx_runtime::{
@@ -174,8 +174,7 @@ pub struct ObservationQueryContext<'a> {
     execution: Option<&'a ExecutionRuntime>,
     research_root: Option<&'a Path>,
     research_session: Option<&'a ResearchSessionHandle>,
-    operator_policy: Option<&'a CentralAccountPolicy>,
-    operator_governance: Option<&'a okx_protocol::account_governance::CentralGovernanceSnapshotV2>,
+    operator_governance: Option<&'a okx_protocol::account_governance::CentralGovernanceSnapshot>,
     transport_generation: u64,
     verified_governance_challenge: bool,
     risk_client: Option<&'a crate::risk_bridge::NativeRiskClient>,
@@ -193,7 +192,6 @@ impl<'a> ObservationQueryContext<'a> {
             execution: None,
             research_root: None,
             research_session: None,
-            operator_policy: None,
             operator_governance: None,
             transport_generation: 0,
             verified_governance_challenge: false,
@@ -223,7 +221,6 @@ impl<'a> ObservationQueryContext<'a> {
             execution: None,
             research_root: None,
             research_session: None,
-            operator_policy: None,
             operator_governance: None,
             transport_generation: 0,
             verified_governance_challenge: false,
@@ -324,7 +321,6 @@ impl<'a> ObservationQueryContext<'a> {
             execution,
             research_root,
             research_session,
-            operator_policy: None,
             operator_governance: None,
             transport_generation: 0,
             verified_governance_challenge: false,
@@ -332,14 +328,7 @@ impl<'a> ObservationQueryContext<'a> {
         }
     }
 
-    /// Only direct authenticated Worker transport may bind this fresh policy.
-    /// Ordinary GitHub mailbox, local tests and saved files have no grant.
-    pub const fn with_operator_policy(
-        mut self,
-        policy: Option<&'a CentralAccountPolicy>,
-        generation: u64,
-    ) -> Self {
-        self.operator_policy = policy;
+    pub const fn with_transport_generation(mut self, generation: u64) -> Self {
         self.transport_generation = generation;
         self
     }
@@ -347,7 +336,7 @@ impl<'a> ObservationQueryContext<'a> {
     /// A typed v2 snapshot is a delivery scope only; it never reserves risk.
     pub const fn with_operator_governance(
         mut self,
-        governance: Option<&'a okx_protocol::account_governance::CentralGovernanceSnapshotV2>,
+        governance: Option<&'a okx_protocol::account_governance::CentralGovernanceSnapshot>,
     ) -> Self {
         self.operator_governance = governance;
         self
@@ -389,73 +378,33 @@ impl<'a> ObservationQueryContext<'a> {
         &self,
     ) -> Option<crate::execution_runtime::CentralAuthorizationBinding<'a>> {
         use crate::execution_runtime::CentralAuthorizationBinding;
-        if self.operator_governance.is_some() && self.operator_policy.is_some() {
-            return None;
-        }
         self.central_governance_binding()
             .map(CentralAuthorizationBinding::Governance)
-            .or_else(|| {
-                self.central_policy_binding()
-                    .map(CentralAuthorizationBinding::Legacy)
-            })
-    }
-
-    pub fn central_policy_binding(
-        &self,
-    ) -> Option<crate::execution_runtime::CentralPolicyBinding<'a>> {
-        self.operator_policy
-            .map(|policy| crate::execution_runtime::CentralPolicyBinding {
-                policy,
-                session_generation: self.transport_generation,
-            })
     }
 
     /// Delivery-only check for the two supported central rollout formats.
     /// Never treats a Worker envelope as authority to send an exchange POST:
     /// the native executor and the single durable RiskBook still have to agree.
     /// Mixed v1/v2 envelopes fail closed rather than select a convenient grant.
-    pub fn central_trading_delivery_fresh(&self, now_ms: u64) -> bool {
-        match (self.operator_policy, self.operator_governance) {
-            (Some(policy), None) => {
-                policy.valid()
-                    && policy.trading_requested
-                    && policy.revision > 0
-                    && policy.session_generation == self.transport_generation
-                    && policy.issued_at_ms <= now_ms
-                    && now_ms.saturating_sub(policy.issued_at_ms)
-                        <= okx_protocol::CENTRAL_ACCOUNT_POLICY_MAX_AGE_MS
-            }
-            (None, Some(governance)) => {
-                governance.valid()
-                    && governance.session_generation == self.transport_generation
-                    && self.verified_governance_challenge
-                    && governance.delivery_challenge.is_some()
-                    && governance.state.revision > 0
-                    && governance.state.trading_requested
-                    && governance.state.operator_authorization.status
-                        == okx_protocol::account_governance::AuthorizationStatus::Active
-                    && governance.state.accounts.iter().any(|account| {
-                        account.venue == "okx"
-                            && account.environment
-                                == okx_protocol::account_governance::AccountEnvironmentV2::Real
-                            && account.enabled
-                            && account.identity_verified
-                    })
-            }
-            _ => false,
-        }
+    pub fn central_trading_delivery_fresh(&self, _now_ms: u64) -> bool {
+        self.operator_governance.is_some_and(|g| {
+            g.valid()
+                && g.session_generation == self.transport_generation
+                && self.verified_governance_challenge
+                && g.delivery_challenge.is_some()
+                && g.state.revision > 0
+                && g.state.has_real_access()
+        })
     }
 
-    pub fn central_uid_admitted(&self, uid: &str, now_ms: u64) -> bool {
+    pub fn central_uid_admitted(&self, uid: &str, _now_ms: u64) -> bool {
         self.operator_governance.is_some_and(|scope| {
             scope.authorizes_challenge_bound_delivery(
                 uid,
                 self.transport_generation,
                 self.verified_governance_challenge,
             )
-        }) || self
-            .operator_policy
-            .is_some_and(|policy| policy.authorizes_uid(uid, now_ms, self.transport_generation))
+        })
     }
 }
 
@@ -1259,7 +1208,6 @@ mod tests {
                 execution: None,
                 research_root: None,
                 research_session: None,
-                operator_policy: None,
                 operator_governance: None,
                 transport_generation: 0,
                 verified_governance_challenge: false,
@@ -1305,7 +1253,6 @@ mod tests {
                 execution: None,
                 research_root: None,
                 research_session: None,
-                operator_policy: None,
                 operator_governance: None,
                 transport_generation: 0,
                 verified_governance_challenge: false,
@@ -1352,7 +1299,6 @@ mod tests {
                 execution: None,
                 research_root: None,
                 research_session: None,
-                operator_policy: None,
                 operator_governance: None,
                 transport_generation: 0,
                 verified_governance_challenge: false,
@@ -1413,30 +1359,29 @@ mod tests {
     #[test]
     fn production_governance_delivery_is_typed_and_fails_closed() {
         use okx_protocol::account_governance::{
-            AccountControlV2, AccountEnvironmentV2, AccountGovernanceV2, AccountLimitsV2,
-            AuthorizationStatus, CentralGovernanceSnapshotV2, GOVERNANCE_SCHEMA_V2,
-            OperatorAuthorizationV2, StrategyLimitsV2,
+            AccountControl, AccountEnvironment, AccountGovernance, AccountLimits,
+            CentralGovernanceSnapshot, GOVERNANCE_SCHEMA, StrategyLimits,
         };
-        let governance = CentralGovernanceSnapshotV2 {
-            state: AccountGovernanceV2 {
-                schema: GOVERNANCE_SCHEMA_V2.to_owned(),
+        let governance = CentralGovernanceSnapshot {
+            state: AccountGovernance {
+                schema: GOVERNANCE_SCHEMA.to_owned(),
                 revision: 3,
-                trading_requested: true,
-                operator_authorization: OperatorAuthorizationV2 {
-                    id: format!("sha256:{}", "b".repeat(64)),
-                    status: AuthorizationStatus::Active,
-                    ceiling_usdt: "10".to_owned(),
-                },
+                installation_id: "installation_test".into(),
+                campaign_id: format!("sha256:{}", "b".repeat(64)),
+                campaign_loss_limit_usd: "20".into(),
                 max_total_modelled_loss_usdt: "5".to_owned(),
-                accounts: vec![AccountControlV2 {
+                accounts: vec![AccountControl {
                     id: "account_test_001".to_owned(),
                     label: "real".to_owned(),
                     venue: "okx".to_owned(),
-                    environment: AccountEnvironmentV2::Real,
+                    environment: AccountEnvironment::Real,
                     uid_fingerprint: "a".repeat(64),
                     identity_verified: true,
                     enabled: true,
-                    limits: AccountLimitsV2 {
+                    explicit_pause: false,
+                    policy_revision: 1,
+                    account_key: format!("okx:real:{}", "a".repeat(64)),
+                    limits: AccountLimits {
                         max_modelled_loss_usdt: "5".to_owned(),
                         max_order_loss_usdt: "1".to_owned(),
                         max_notional_usdt: Some("100".to_owned()),
@@ -1445,7 +1390,7 @@ mod tests {
                         max_drawdown_ratio: Some("0.2".to_owned()),
                         allowed_instruments: vec!["BTC-USDT-SWAP".to_owned()],
                     },
-                    strategies: vec![StrategyLimitsV2 {
+                    strategies: vec![StrategyLimits {
                         id: "strategy_test_001".to_owned(),
                         enabled: true,
                         allocated_capital_usdt: "10".to_owned(),
@@ -1461,7 +1406,7 @@ mod tests {
         };
         assert!(governance.valid());
         let context = ObservationQueryContext::unavailable()
-            .with_operator_policy(None, 11)
+            .with_transport_generation(11)
             .with_operator_governance(Some(&governance))
             .with_verified_governance_challenge(true);
         assert!(context.central_trading_delivery_fresh(20_000));
@@ -1476,21 +1421,25 @@ mod tests {
         );
         assert!(
             !ObservationQueryContext::unavailable()
-                .with_operator_policy(None, 11)
+                .with_transport_generation(11)
                 .with_operator_governance(Some(&governance))
                 .central_trading_delivery_fresh(20_000)
         );
         assert!(
             !ObservationQueryContext::unavailable()
-                .with_operator_policy(None, 12)
+                .with_transport_generation(12)
                 .with_operator_governance(Some(&governance))
                 .central_trading_delivery_fresh(20_000)
         );
         let mut revoked = governance.clone();
-        revoked.state.operator_authorization.status = AuthorizationStatus::Revoked;
+        revoked
+            .state
+            .accounts
+            .iter_mut()
+            .for_each(|a| a.explicit_pause = true);
         assert!(
             !ObservationQueryContext::unavailable()
-                .with_operator_policy(None, 11)
+                .with_transport_generation(11)
                 .with_operator_governance(Some(&revoked))
                 .central_trading_delivery_fresh(20_000)
         );

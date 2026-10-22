@@ -1,4 +1,4 @@
-import {validGovernance,projectRiskPolicy} from "./account_governance.js";
+import {validGovernance,projectRiskPolicy,accessEnabled,GOVERNANCE_STORAGE_KEY} from "./account_governance.js";
 
 /**
  * Durable Object risk ledger primitive. This is NOT an exchange admission endpoint.
@@ -220,7 +220,7 @@ export async function reserveRisk(
     // One transaction snapshots BOTH central policy and risk occupancy.
     // A caller-supplied policy (or a snapshot from a prior CAS revision)
     // can never mint risk capacity independently of the DO's persisted grant.
-    const governance:unknown=await tx.get("account_governance_v2");
+    const governance:unknown=await tx.get(GOVERNANCE_STORAGE_KEY);
     if(!validGovernance(governance))
       return {status:"DENIED",reason:"AUTHORITATIVE_GOVERNANCE_UNAVAILABLE"};
     const authority=projectRiskPolicy(governance);
@@ -252,7 +252,7 @@ export async function reserveRisk(
     if (book.entries.length >= MAX_ENTRIES) return {status:"DENIED", reason:"RISK_BOOK_CAPACITY"};
     const account=governance.accounts.find(a=>
       a.venue===input.venue && a.environment==="real" && a.uid_fingerprint===input.uid &&
-      a.identity_verified && a.enabled);
+      accessEnabled(a));
     const strategy=account?.strategies.find(s=>s.id===input.strategy_id && s.enabled);
     if(!account||!strategy)return {status:"DENIED",reason:"ACCOUNT_OR_STRATEGY_NOT_ACTIVE"};
     if(!account.limits.allowed_instruments.includes(input.instrument_id))
@@ -362,7 +362,7 @@ export async function transitionRisk(
         ||!proof.source_proof.native_ledger_evidence_complete
         ||proof.census.source_read_floor_ms<=entry.posted_at_ms)
         return {status:"DENIED" as const,reason:"TERMINAL_NATIVE_PROOF_UNAVAILABLE"};
-      const governance:unknown=await tx.get("account_governance_v2");
+      const governance:unknown=await tx.get(GOVERNANCE_STORAGE_KEY);
       const policy=validGovernance(governance)?projectRiskPolicy(governance):null;
       const occupied=policy?censusRisk(proof.census,policy,proof.now_ms):null;
       if(!occupied||[...occupied.values()].some(value=>value!==0n))
@@ -405,9 +405,8 @@ export async function beginRiskPost(
     const generation:unknown=await tx.get("generation");
     if(generation!==native.connection_generation)
       return {status:"DENIED" as const,reason:"STALE_RUNTIME_GENERATION"};
-    const governance:unknown=await tx.get("account_governance_v2");
-    if(!validGovernance(governance)||!governance.trading_requested||
-      governance.revision!==policy_revision)
+    const governance:unknown=await tx.get(GOVERNANCE_STORAGE_KEY);
+    if(!validGovernance(governance)||governance.revision!==policy_revision)
       return {status:"DENIED" as const,reason:"CENTRAL_REVOCATION_OR_POLICY_CHANGE"};
     const authority=projectRiskPolicy(governance);
     if(!authority?.enabled)
@@ -440,7 +439,7 @@ export async function beginRiskPost(
       return {status:"DENIED" as const,reason:"POST_CENSUS_SOURCE_REUSED_OR_UNKNOWN"};
     const account=governance.accounts.find(a=>
       a.venue===entry.venue&&a.environment==="real"&&a.uid_fingerprint===entry.uid
-      &&a.enabled&&a.identity_verified);
+      &&accessEnabled(a));
     if(!account||!account.limits.allowed_instruments.includes(entry.instrument_id))
       return {status:"DENIED" as const,reason:"ACCOUNT_OR_INSTRUMENT_REVOKED"};
     for(const held of stored.entries)if(held.state!=="RELEASED"){

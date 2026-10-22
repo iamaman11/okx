@@ -32,11 +32,15 @@ try {
     [tsc, "--rootDir", "src", "--outDir", output, "--noEmit", "false"],
     { stdio: "inherit" },
   );
-  for (const file of ["shared.test.js", "execution_tools.test.js", "account_policy.test.js", "risk_book.test.js", "account_governance.test.js", "account_governance_store.test.js", "risk_authority.test.js"]) {
+  let executed=0;
+  for (const file of ["shared.test.js", "execution_tools.test.js", "risk_book.test.js", "account_governance.test.js", "account_governance_store.test.js", "risk_authority.test.js", "runtime_session.test.js", "mcp.test.js"]) {
     execFileSync(process.execPath, [join(output, file)], {
       stdio: "inherit",
     });
+    executed++;
   }
+  if(executed===0)throw new Error("empty Worker test suite");
+  console.log(`Worker test files passed: ${executed}`);
 } finally {
   rmSync(output, { recursive: true, force: true });
 }

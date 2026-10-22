@@ -2,10 +2,10 @@ use std::{collections::HashMap, path::Path, time::Duration};
 
 use chrono::{SecondsFormat, Utc};
 use futures_util::{FutureExt, SinkExt, StreamExt, future::BoxFuture, stream::FuturesUnordered};
-use okx_protocol::account_governance::{AuthorizationStatus, CentralGovernanceSnapshotV2};
+use okx_protocol::account_governance::CentralGovernanceSnapshot;
 use okx_protocol::{
     AGENT_REQUEST_SCHEMA_V1, AGENT_RESPONSE_SCHEMA_V1, AgentFailure, AgentOperation, AgentRequest,
-    AgentResponse, AgentResponseStatus, CentralAccountPolicy, DIRECT_TRANSPORT_FRAME_SCHEMA_V1,
+    AgentResponse, AgentResponseStatus, DIRECT_TRANSPORT_FRAME_SCHEMA_V2,
     DIRECT_TRANSPORT_MAX_PAYLOAD_BYTES, DataQuality, DirectRuntimeProfile, DirectTransportFrame,
 };
 use okx_runtime::{PrivateWsHandle, PublicWsHandle};
@@ -163,10 +163,9 @@ fn consume_fresh_delivery_challenge(
         .is_some_and(|seen_at| seen_at.elapsed() <= DELIVERY_CHALLENGE_MAX_AGE)
 }
 
-/// Only the existing legacy v1 scope uses an absolute wall time.
+/// One-use monotonic challenge freshness from this authenticated connection.
 #[derive(Clone, Copy)]
 struct DeliveryFreshness {
-    now_ms: u64,
     challenge_verified: bool,
 }
 
@@ -176,8 +175,7 @@ fn central_production_delivery_admission(
     profile: DirectRuntimeProfile,
     mode: Option<ExecutionRuntimeMode>,
     operation: &AgentOperation,
-    policy: Option<&CentralAccountPolicy>,
-    governance: Option<&CentralGovernanceSnapshotV2>,
+    governance: Option<&CentralGovernanceSnapshot>,
     generation: u64,
     freshness: DeliveryFreshness,
 ) -> Result<(), &'static str> {
@@ -201,41 +199,19 @@ fn central_production_delivery_admission(
     // rejection. Positive trade rights remain with native Rust/RiskBook.
     if let Some(scope) = governance {
         if !scope.valid() {
-            return Err("CENTRAL_GOVERNANCE_V2_INVALID");
+            return Err("CENTRAL_ACCESS_INVALID");
         }
         if scope.session_generation != generation {
-            return Err("CENTRAL_GOVERNANCE_V2_GENERATION_MISMATCH");
+            return Err("CENTRAL_ACCESS_GENERATION_MISMATCH");
         }
         // Challenge was issued for THIS request by the authenticated Worker
         // after a successful ping/pong. A nonce is consumed only once on the
         // native WebSocket, and its lifetime uses Instant (not wall clocks).
         if !freshness.challenge_verified {
-            return Err("CENTRAL_GOVERNANCE_V2_CHALLENGE_NOT_FRESH");
+            return Err("CENTRAL_ACCESS_CHALLENGE_NOT_FRESH");
         }
-        if !scope.state.trading_requested
-            || scope.state.operator_authorization.status != AuthorizationStatus::Active
-        {
-            return Err("CENTRAL_GOVERNANCE_V2_STOPPED");
-        }
-        return Ok(());
-    }
-    // Historical v1 delivery schema is retained for older sessions only;
-    // it still cannot replace the native v2 RiskBook permit for a Real POST.
-    if let Some(scope) = policy {
-        if !scope.valid() {
-            return Err("CENTRAL_POLICY_V1_INVALID");
-        }
-        if !scope.trading_requested || scope.revision == 0 {
-            return Err("CENTRAL_POLICY_V1_STOPPED");
-        }
-        if scope.session_generation != generation {
-            return Err("CENTRAL_POLICY_V1_GENERATION_MISMATCH");
-        }
-        if scope.issued_at_ms > freshness.now_ms
-            || freshness.now_ms.saturating_sub(scope.issued_at_ms)
-                > okx_protocol::CENTRAL_ACCOUNT_POLICY_MAX_AGE_MS
-        {
-            return Err("CENTRAL_POLICY_V1_NOT_FRESH");
+        if !scope.state.has_real_access() {
+            return Err("CENTRAL_ACCESS_STOPPED");
         }
         return Ok(());
     }
@@ -357,7 +333,7 @@ async fn run_session(
     send_frame(
         &mut sink,
         &DirectTransportFrame::Hello {
-            schema: DIRECT_TRANSPORT_FRAME_SCHEMA_V1.to_owned(),
+            schema: DIRECT_TRANSPORT_FRAME_SCHEMA_V2.to_owned(),
             runtime_id: config.runtime_id.clone(),
             connection_id,
             runtime_profile: Some(config.runtime_profile),
@@ -446,7 +422,7 @@ async fn run_session(
                 send_frame(
                     &mut sink,
                     &DirectTransportFrame::Ping {
-                        schema: DIRECT_TRANSPORT_FRAME_SCHEMA_V1.to_owned(),
+                        schema: DIRECT_TRANSPORT_FRAME_SCHEMA_V2.to_owned(),
                         session_id: session_id.clone(),
                         connection_generation,
                         nonce: nonce.clone(),
@@ -547,7 +523,7 @@ async fn run_session(
                     send_frame(
                         &mut sink,
                         &DirectTransportFrame::RiskControl {
-                            schema: DIRECT_TRANSPORT_FRAME_SCHEMA_V1.to_owned(),
+                            schema: DIRECT_TRANSPORT_FRAME_SCHEMA_V2.to_owned(),
                             session_id: session_id.clone(),
                             connection_generation,
                             command: outbound.command,
@@ -588,7 +564,7 @@ async fn run_session(
                 send_frame(
                     &mut sink,
                     &DirectTransportFrame::Response {
-                        schema: DIRECT_TRANSPORT_FRAME_SCHEMA_V1.to_owned(),
+                        schema: DIRECT_TRANSPORT_FRAME_SCHEMA_V2.to_owned(),
                         session_id: session_id.clone(),
                         connection_generation,
                         response,
@@ -622,7 +598,7 @@ async fn run_session(
                         send_frame(
                             &mut sink,
                             &DirectTransportFrame::Pong {
-                                schema: DIRECT_TRANSPORT_FRAME_SCHEMA_V1.to_owned(),
+                                schema: DIRECT_TRANSPORT_FRAME_SCHEMA_V2.to_owned(),
                                 session_id: session_id.clone(),
                                 connection_generation,
                                 nonce,
@@ -660,7 +636,6 @@ async fn run_session(
                         session_id: frame_session,
                         connection_generation: frame_generation,
                         request,
-                        operator_policy,
                         operator_governance,
                         ..
                     } => {
@@ -676,7 +651,7 @@ async fn run_session(
                         send_frame(
                             &mut sink,
                             &DirectTransportFrame::DeliveryAck {
-                                schema: DIRECT_TRANSPORT_FRAME_SCHEMA_V1.to_owned(),
+                                schema: DIRECT_TRANSPORT_FRAME_SCHEMA_V2.to_owned(),
                                 session_id: session_id.clone(),
                                 connection_generation,
                                 request_id: request.request_id.clone(),
@@ -695,7 +670,7 @@ async fn run_session(
                             send_frame(
                                 &mut sink,
                                 &DirectTransportFrame::Response {
-                                    schema: DIRECT_TRANSPORT_FRAME_SCHEMA_V1.to_owned(),
+                                    schema: DIRECT_TRANSPORT_FRAME_SCHEMA_V2.to_owned(),
                                     session_id: session_id.clone(),
                                     connection_generation,
                                     response,
@@ -733,11 +708,9 @@ async fn run_session(
                             config.runtime_profile,
                             context.execution.map(ExecutionRuntime::mode),
                             &request.operation,
-                            operator_policy.as_ref(),
                             operator_governance.as_ref(),
                             frame_generation,
                             DeliveryFreshness {
-                                now_ms: Utc::now().timestamp_millis().max(1) as u64,
                                 challenge_verified: governance_challenge_fresh,
                             },
                         );
@@ -764,7 +737,7 @@ async fn run_session(
                             send_frame(
                                 &mut sink,
                                 &DirectTransportFrame::Response {
-                                    schema: DIRECT_TRANSPORT_FRAME_SCHEMA_V1.to_owned(),
+                                    schema: DIRECT_TRANSPORT_FRAME_SCHEMA_V2.to_owned(),
                                     session_id: session_id.clone(),
                                     connection_generation,
                                     response,
@@ -786,7 +759,7 @@ async fn run_session(
                             send_frame(
                                 &mut sink,
                                 &DirectTransportFrame::Response {
-                                    schema: DIRECT_TRANSPORT_FRAME_SCHEMA_V1.to_owned(),
+                                    schema: DIRECT_TRANSPORT_FRAME_SCHEMA_V2.to_owned(),
                                     session_id: session_id.clone(),
                                     connection_generation,
                                     response,
@@ -817,7 +790,7 @@ async fn run_session(
                         in_flight.push(
                             async move {
                                 let query_context = query_context
-                                    .with_operator_policy(operator_policy.as_ref(), frame_generation)
+                                    .with_transport_generation(frame_generation)
                                     .with_operator_governance(operator_governance.as_ref())
                                     .with_verified_governance_challenge(governance_challenge_fresh)
                                     .with_risk_client(Some(&risk_client));
@@ -1137,109 +1110,34 @@ mod tests {
     }
 
     #[test]
-    fn central_policy_gates_production_delivery_without_granting_trade() {
-        let submit = AgentOperation::SubmitPreparedExecution {
-            intent_id: "intent_central_policy_012345".to_owned(),
-        };
-        let p = CentralAccountPolicy {
-            schema: okx_protocol::CENTRAL_ACCOUNT_POLICY_SCHEMA_V1.to_owned(),
-            revision: 3,
-            trading_requested: true,
-            allowed_account_uids: vec!["a".repeat(64)],
-            max_total_modelled_loss_usdt: "10".to_owned(),
-            issued_at_ms: 1_000,
-            session_generation: 7,
-        };
-        let admit = |policy: Option<&CentralAccountPolicy>, profile, mode, generation, now| {
-            central_production_delivery_admission(
-                profile,
-                mode,
-                &submit,
-                policy,
-                None,
-                generation,
-                DeliveryFreshness {
-                    now_ms: now,
-                    challenge_verified: false,
-                },
-            )
-            .is_ok()
-        };
-        assert!(admit(
-            Some(&p),
-            DirectRuntimeProfile::Production,
-            Some(ExecutionRuntimeMode::Production),
-            7,
-            1_001
-        ));
-        assert!(!admit(
-            None,
-            DirectRuntimeProfile::Production,
-            Some(ExecutionRuntimeMode::Production),
-            7,
-            1_001
-        ));
-        assert!(!admit(
-            Some(&p),
-            DirectRuntimeProfile::Production,
-            Some(ExecutionRuntimeMode::ReadOnly),
-            7,
-            1_001
-        ));
-        assert!(!admit(
-            Some(&p),
-            DirectRuntimeProfile::Production,
-            Some(ExecutionRuntimeMode::Production),
-            8,
-            1_001
-        ));
-        assert!(!admit(
-            Some(&p),
-            DirectRuntimeProfile::Production,
-            Some(ExecutionRuntimeMode::Production),
-            7,
-            16_001
-        ));
-        let mut revoked = p;
-        revoked.trading_requested = false;
-        assert!(!admit(
-            Some(&revoked),
-            DirectRuntimeProfile::Production,
-            Some(ExecutionRuntimeMode::Production),
-            7,
-            1_001
-        ));
-    }
-
-    #[test]
     fn production_governance_v2_delivery_reports_exact_blocker() {
         use okx_protocol::account_governance::{
-            AccountControlV2, AccountEnvironmentV2, AccountGovernanceV2, AccountLimitsV2,
-            GOVERNANCE_SCHEMA_V2, OperatorAuthorizationV2, StrategyLimitsV2,
+            AccountControl, AccountEnvironment, AccountGovernance, AccountLimits,
+            GOVERNANCE_SCHEMA, StrategyLimits,
         };
         let submit = AgentOperation::SubmitPreparedExecution {
             intent_id: "intent_governance_delivery_20261019".to_owned(),
         };
-        let mut scope = CentralGovernanceSnapshotV2 {
-            state: AccountGovernanceV2 {
-                schema: GOVERNANCE_SCHEMA_V2.to_owned(),
+        let mut scope = CentralGovernanceSnapshot {
+            state: AccountGovernance {
+                schema: GOVERNANCE_SCHEMA.to_owned(),
                 revision: 3,
-                trading_requested: true,
-                operator_authorization: OperatorAuthorizationV2 {
-                    id: format!("sha256:{}", "a".repeat(64)),
-                    status: AuthorizationStatus::Active,
-                    ceiling_usdt: "10".to_owned(),
-                },
+                installation_id: "installation_test".into(),
+                campaign_id: format!("sha256:{}", "a".repeat(64)),
+                campaign_loss_limit_usd: "20".into(),
                 max_total_modelled_loss_usdt: "10".to_owned(),
-                accounts: vec![AccountControlV2 {
+                accounts: vec![AccountControl {
                     id: "okx_real_1beb3c684155".to_owned(),
                     label: "OKX Real".to_owned(),
                     venue: "okx".to_owned(),
-                    environment: AccountEnvironmentV2::Real,
+                    environment: AccountEnvironment::Real,
                     uid_fingerprint: "b".repeat(64),
                     identity_verified: true,
                     enabled: true,
-                    limits: AccountLimitsV2 {
+                    explicit_pause: false,
+                    policy_revision: 1,
+                    account_key: format!("okx:real:{}", "b".repeat(64)),
+                    limits: AccountLimits {
                         max_modelled_loss_usdt: "10".to_owned(),
                         max_order_loss_usdt: "10".to_owned(),
                         max_notional_usdt: Some("200".to_owned()),
@@ -1248,7 +1146,7 @@ mod tests {
                         max_drawdown_ratio: Some("0.1".to_owned()),
                         allowed_instruments: vec!["DOGE-USDT-SWAP".to_owned()],
                     },
-                    strategies: vec![StrategyLimitsV2 {
+                    strategies: vec![StrategyLimits {
                         id: "real_manual_v1".to_owned(),
                         enabled: true,
                         allocated_capital_usdt: "100".to_owned(),
@@ -1263,16 +1161,14 @@ mod tests {
             delivery_challenge: Some("ping_valid_governance_probe".to_owned()),
         };
         assert!(scope.valid());
-        let admitted = |value: Option<&CentralGovernanceSnapshotV2>, generation, now| {
+        let admitted = |value: Option<&CentralGovernanceSnapshot>, generation, _now| {
             central_production_delivery_admission(
                 DirectRuntimeProfile::Production,
                 Some(ExecutionRuntimeMode::Production),
                 &submit,
-                None,
                 value,
                 generation,
                 DeliveryFreshness {
-                    now_ms: now,
                     challenge_verified: true,
                 },
             )
@@ -1284,7 +1180,7 @@ mod tests {
         );
         assert_eq!(
             admitted(Some(&scope), 515, 1_001),
-            Err("CENTRAL_GOVERNANCE_V2_GENERATION_MISMATCH")
+            Err("CENTRAL_ACCESS_GENERATION_MISMATCH")
         );
         // No cross-machine clock agreement is required when the exact
         // request-scoped challenge passed the native monotonic freshness gate.
@@ -1294,31 +1190,31 @@ mod tests {
                 DirectRuntimeProfile::Production,
                 Some(ExecutionRuntimeMode::Production),
                 &submit,
-                None,
                 Some(&scope),
                 514,
                 DeliveryFreshness {
-                    now_ms: 1_001,
                     challenge_verified: false,
                 },
             ),
-            Err("CENTRAL_GOVERNANCE_V2_CHALLENGE_NOT_FRESH")
+            Err("CENTRAL_ACCESS_CHALLENGE_NOT_FRESH")
         );
-        scope.state.trading_requested = false;
+        scope
+            .state
+            .accounts
+            .iter_mut()
+            .for_each(|a| a.explicit_pause = true);
         assert_eq!(
             admitted(Some(&scope), 514, 1_001),
-            Err("CENTRAL_GOVERNANCE_V2_STOPPED")
+            Err("CENTRAL_ACCESS_STOPPED")
         );
         assert_eq!(
             central_production_delivery_admission(
                 DirectRuntimeProfile::Production,
                 Some(ExecutionRuntimeMode::ReadOnly),
                 &submit,
-                None,
                 Some(&scope),
                 514,
                 DeliveryFreshness {
-                    now_ms: 1_001,
                     challenge_verified: true,
                 },
             ),

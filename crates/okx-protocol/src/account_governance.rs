@@ -1,10 +1,10 @@
-//! Typed account-governance v2 contract shared with Cloudflare.
+//! Clean-install persistent account access shared with Cloudflare.
 //! Configuration does NOT constitute a native Real exchange-post permit.
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
-pub const GOVERNANCE_SCHEMA_V2: &str = "okx.governance/v2";
+pub const GOVERNANCE_SCHEMA: &str = "okx.governance/v3";
 const SCALE: u128 = 1_000_000_000;
 
 fn units(text: &str) -> Option<u128> {
@@ -63,25 +63,9 @@ fn token(text: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
-pub enum AuthorizationStatus {
-    Unverified,
-    Active,
-    Revoked,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct OperatorAuthorizationV2 {
-    pub id: String,
-    pub status: AuthorizationStatus,
-    pub ceiling_usdt: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct AccountLimitsV2 {
+pub struct AccountLimits {
     pub max_modelled_loss_usdt: String,
     pub max_order_loss_usdt: String,
     pub max_notional_usdt: Option<String>,
@@ -91,7 +75,7 @@ pub struct AccountLimitsV2 {
     pub allowed_instruments: Vec<String>,
 }
 
-impl AccountLimitsV2 {
+impl AccountLimits {
     pub fn valid(&self) -> bool {
         let (Some(account), Some(order)) = (
             positive(&self.max_modelled_loss_usdt),
@@ -125,7 +109,7 @@ impl AccountLimitsV2 {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct StrategyLimitsV2 {
+pub struct StrategyLimits {
     pub id: String,
     pub enabled: bool,
     pub allocated_capital_usdt: String,
@@ -134,7 +118,7 @@ pub struct StrategyLimitsV2 {
     pub max_drawdown_ratio: Option<String>,
 }
 
-impl StrategyLimitsV2 {
+impl StrategyLimits {
     pub fn valid(&self) -> bool {
         token(&self.id)
             && positive(&self.allocated_capital_usdt).is_some_and(|capital| {
@@ -150,26 +134,32 @@ impl StrategyLimitsV2 {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum AccountEnvironmentV2 {
+pub enum AccountEnvironment {
     Real,
     Demo,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct AccountControlV2 {
+pub struct AccountControl {
     pub id: String,
     pub label: String,
     pub venue: String,
-    pub environment: AccountEnvironmentV2,
+    pub environment: AccountEnvironment,
     pub uid_fingerprint: String,
     pub identity_verified: bool,
     pub enabled: bool,
-    pub limits: AccountLimitsV2,
-    pub strategies: Vec<StrategyLimitsV2>,
+    pub explicit_pause: bool,
+    pub policy_revision: u64,
+    pub account_key: String,
+    pub limits: AccountLimits,
+    pub strategies: Vec<StrategyLimits>,
 }
 
-impl AccountControlV2 {
+impl AccountControl {
+    pub fn access_enabled(&self) -> bool {
+        self.identity_verified && self.enabled && !self.explicit_pause
+    }
     pub fn valid(&self) -> bool {
         let venue_valid = (2..=32).contains(&self.venue.len())
             && self.venue.starts_with(|c: char| c.is_ascii_lowercase())
@@ -181,13 +171,24 @@ impl AccountControlV2 {
             || !venue_valid
             || !lower_sha256(&self.uid_fingerprint)
             || (self.enabled && !self.identity_verified)
+            || self.policy_revision == 0
+            || self.account_key
+                != format!(
+                    "{}:{}:{}",
+                    self.venue,
+                    match self.environment {
+                        AccountEnvironment::Real => "real",
+                        AccountEnvironment::Demo => "demo",
+                    },
+                    self.uid_fingerprint
+                )
             || !self.limits.valid()
             || self.strategies.len() > 32
         {
             return false;
         }
         if self.enabled
-            && self.environment == AccountEnvironmentV2::Real
+            && self.environment == AccountEnvironment::Real
             && (self.limits.max_notional_usdt.is_none()
                 || self.limits.max_leverage.is_none()
                 || self.limits.max_daily_realized_loss_usdt.is_none()
@@ -218,28 +219,24 @@ impl AccountControlV2 {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct AccountGovernanceV2 {
+pub struct AccountGovernance {
     pub schema: String,
     pub revision: u64,
-    pub trading_requested: bool,
-    pub operator_authorization: OperatorAuthorizationV2,
+    pub installation_id: String,
+    pub campaign_id: String,
+    pub campaign_loss_limit_usd: String,
     pub max_total_modelled_loss_usdt: String,
-    pub accounts: Vec<AccountControlV2>,
+    pub accounts: Vec<AccountControl>,
 }
 
-impl AccountGovernanceV2 {
+impl AccountGovernance {
     pub fn valid(&self) -> bool {
-        let Some(ceiling) = positive(&self.operator_authorization.ceiling_usdt) else {
-            return false;
-        };
-        let Some(global) = positive(&self.max_total_modelled_loss_usdt) else {
-            return false;
-        };
-        if self.schema != GOVERNANCE_SCHEMA_V2
-            || (self.trading_requested && self.revision == 0)
-            || !self.operator_authorization.id.starts_with("sha256:")
-            || !lower_sha256(&self.operator_authorization.id[7..])
-            || global > ceiling
+        if self.schema != GOVERNANCE_SCHEMA
+            || !token(&self.installation_id)
+            || !self.campaign_id.starts_with("sha256:")
+            || !lower_sha256(&self.campaign_id[7..])
+            || positive(&self.campaign_loss_limit_usd).is_none()
+            || positive(&self.max_total_modelled_loss_usdt).is_none()
             || self.accounts.len() > 32
         {
             return false;
@@ -247,7 +244,10 @@ impl AccountGovernanceV2 {
         let mut ids = BTreeSet::new();
         let mut identities = BTreeSet::new();
         for account in &self.accounts {
-            if !account.valid() || !ids.insert(&account.id) {
+            if !account.valid()
+                || account.policy_revision > self.revision
+                || !ids.insert(&account.id)
+            {
                 return false;
             }
             if !identities.insert((
@@ -258,11 +258,13 @@ impl AccountGovernanceV2 {
                 return false;
             }
         }
-        !self.trading_requested
-            || (self.operator_authorization.status == AuthorizationStatus::Active
-                && self.accounts.iter().any(|account| {
-                    account.enabled && account.environment == AccountEnvironmentV2::Real
-                }))
+        true
+    }
+
+    pub fn has_real_access(&self) -> bool {
+        self.accounts
+            .iter()
+            .any(|a| a.environment == AccountEnvironment::Real && a.access_enabled())
     }
 
     /// Never make native POST admission from configuration alone. This must
@@ -276,8 +278,8 @@ impl AccountGovernanceV2 {
 /// It is a delivery/UID scope proof, not a reservation or POST permit.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct CentralGovernanceSnapshotV2 {
-    pub state: AccountGovernanceV2,
+pub struct CentralGovernanceSnapshot {
+    pub state: AccountGovernance,
     pub issued_at_ms: u64,
     pub session_generation: u64,
     /// Worker request-scoped ping challenge; validated and consumed by the
@@ -286,7 +288,7 @@ pub struct CentralGovernanceSnapshotV2 {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delivery_challenge: Option<String>,
 }
-impl CentralGovernanceSnapshotV2 {
+impl CentralGovernanceSnapshot {
     pub fn valid(&self) -> bool {
         self.state.valid() && self.issued_at_ms > 0 && self.session_generation > 0
     }
@@ -304,12 +306,10 @@ impl CentralGovernanceSnapshotV2 {
             && self.delivery_challenge.is_some()
             && self.session_generation == generation
             && self.state.revision > 0
-            && self.state.trading_requested
-            && self.state.operator_authorization.status == AuthorizationStatus::Active
             && self.state.accounts.iter().any(|a| {
                 a.venue == "okx"
-                    && a.environment == AccountEnvironmentV2::Real
-                    && a.enabled
+                    && a.environment == AccountEnvironment::Real
+                    && a.access_enabled()
                     && a.identity_verified
                     && a.uid_fingerprint == uid
             })
@@ -321,12 +321,10 @@ impl CentralGovernanceSnapshotV2 {
             && self.issued_at_ms <= now_ms
             && now_ms.saturating_sub(self.issued_at_ms) <= 15_000
             && self.state.revision > 0
-            && self.state.trading_requested
-            && self.state.operator_authorization.status == AuthorizationStatus::Active
             && self.state.accounts.iter().any(|a| {
                 a.venue == "okx"
-                    && a.environment == AccountEnvironmentV2::Real
-                    && a.enabled
+                    && a.environment == AccountEnvironment::Real
+                    && a.access_enabled()
                     && a.identity_verified
                     && a.uid_fingerprint == uid
             })
@@ -336,41 +334,22 @@ impl CentralGovernanceSnapshotV2 {
 #[cfg(test)]
 mod tests {
     use super::*;
-
     #[test]
-    fn governance_v2_is_typed_and_does_not_grant_live() {
-        let state = AccountGovernanceV2 {
-            schema: GOVERNANCE_SCHEMA_V2.to_owned(),
+    fn clean_governance_does_not_grant_post() {
+        let state = AccountGovernance {
+            schema: GOVERNANCE_SCHEMA.into(),
             revision: 0,
-            trading_requested: false,
-            operator_authorization: OperatorAuthorizationV2 {
-                id: format!("sha256:{}", "0".repeat(64)),
-                status: AuthorizationStatus::Unverified,
-                ceiling_usdt: "10".to_owned(),
-            },
-            max_total_modelled_loss_usdt: "2.75".to_owned(),
-            accounts: Vec::new(),
+            installation_id: "installation_test".into(),
+            campaign_id: format!("sha256:{}", "a".repeat(64)),
+            campaign_loss_limit_usd: "20".into(),
+            max_total_modelled_loss_usdt: "5".into(),
+            accounts: vec![],
         };
         assert!(state.valid());
+        assert!(!state.has_real_access());
         assert!(!state.native_new_risk_admitted());
-        let roundtrip = serde_json::to_string(&state).unwrap();
-        let decoded: AccountGovernanceV2 = serde_json::from_str(&roundtrip).unwrap();
-        assert_eq!(decoded, state);
-        let mut altered = state;
-        altered.max_total_modelled_loss_usdt = "10.000000001".to_owned();
-        assert!(!altered.valid());
-        altered.max_total_modelled_loss_usdt = "1e1".to_owned();
-        assert!(!altered.valid());
-        altered.max_total_modelled_loss_usdt = "1".to_owned();
-        altered.trading_requested = true;
-        assert!(!altered.valid());
-        let scope = CentralGovernanceSnapshotV2 {
-            state: altered,
-            issued_at_ms: 1000,
-            session_generation: 42,
-            delivery_challenge: None,
-        };
-        assert!(!scope.authorizes_delivery(&"a".repeat(64), 2000, 42));
-        assert!(!scope.authorizes_delivery(&"a".repeat(64), 20_000, 42));
+        let mut wire = serde_json::to_value(&state).unwrap();
+        wire["trading_requested"] = true.into();
+        assert!(serde_json::from_value::<AccountGovernance>(wire).is_err());
     }
 }

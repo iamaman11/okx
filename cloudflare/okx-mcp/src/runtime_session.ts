@@ -1,8 +1,6 @@
 import { executionProfilePermitsOperation, isExecutionMutation } from "./execution_tools.js";
-import { defaultAccountPolicy, validAccountPolicy } from "./account_policy.js";
-import { accountPolicyRequest } from "./account_policy.js";
-import { governanceRequest, enrollObservedAccount, stopNewRealRisk, activateExistingOperatorGrant, GOVERNANCE_STORAGE_KEY } from "./account_governance_store.js";
-import {validGovernance} from "./account_governance.js";
+import { governanceRequest, enrollObservedAccount, stopNewRealRisk, setAccountPause, GOVERNANCE_STORAGE_KEY } from "./account_governance_store.js";
+import {validGovernance,accessEnabled,validLimits} from "./account_governance.js";
 import { handleNativeRiskCommand } from "./risk_authority.js";
 import {
   ACK_DEADLINE_MS,
@@ -20,13 +18,14 @@ import {
   sha256Hex,
   type SocketAttachment,
   transportFailure,
-} from "./shared";
+} from "./shared.js";
 
 export class RuntimeSession {
   private state: any;
   private env: Env;
   private pending = new Map<string, Pending>();
   private inflight = 0;
+  private activeRequests=new Set<string>();
 
   constructor(state: any, env: Env) {
     this.state = state;
@@ -43,30 +42,22 @@ export class RuntimeSession {
       return Response.json(await this.status(url.searchParams.get("probe") === "1"));
     }
     if(url.pathname==="/account-governance/stop"&&request.method==="POST"){
-      await governanceRequest(this.state.storage,"GET");
-      const value=await stopNewRealRisk(this.state.storage);
+      let raw:any;try{raw=await request.json();}catch{return Response.json({reason:"INVALID_STOP_REQUEST"},{status:400});}
+      const value=await stopNewRealRisk(this.state.storage,raw?.idempotency_key);
       return Response.json(value.body,{status:value.status,headers:{"cache-control":"no-store"}});
     }
-    if(url.pathname==="/account-governance/authorize"&&request.method==="POST"){
-      const body=await request.text();
-      if(body.length>512)return Response.json({status:"FAILED",reason:"AUTHORIZATION_TOO_LARGE"},{status:413});
-      let value:unknown;
-      try{value=JSON.parse(body);}catch{
-        return Response.json({status:"FAILED",reason:"INVALID_AUTHORIZATION"},{status:400});
-      }
-      const args=value as Record<string,unknown>;
-      if(!args||!Number.isSafeInteger(args.expected_revision)||
-        typeof args.approval_id!=="string")
-        return Response.json({status:"FAILED",reason:"INVALID_AUTHORIZATION"},{status:400});
-      const result=await activateExistingOperatorGrant(this.state.storage,
-        args.expected_revision as number,args.approval_id);
-      return Response.json(result.body,{status:result.status,headers:{"cache-control":"no-store"}});
+    if(url.pathname==="/account-governance/pause"&&request.method==="POST"){
+      const text=await request.text();
+      if(text.length>1024)return Response.json({reason:"REQUEST_TOO_LARGE"},{status:413});
+      let body:unknown;try{body=JSON.parse(text);}catch{return Response.json({reason:"INVALID_REQUEST"},{status:400});}
+      const result=await setAccountPause(this.state.storage,body);
+      return Response.json(result.body,{status:result.status});
     }
     if(url.pathname==="/account-governance/enroll"&&request.method==="POST"){
       // Internal DO endpoint; Worker alone constructs the observation from
       // an authenticated native trader_snapshot. It is never an MCP UID field.
       const body=await request.text();
-      if(body.length>1024)return Response.json({status:"FAILED",reason:"ENROLLMENT_TOO_LARGE"},{status:413});
+      if(body.length>8192)return Response.json({status:"FAILED",reason:"ENROLLMENT_TOO_LARGE"},{status:413});
       let raw:unknown;
       try{raw=JSON.parse(body);}catch{
         return Response.json({status:"FAILED",reason:"INVALID_ENROLLMENT"},{status:400});
@@ -74,11 +65,12 @@ export class RuntimeSession {
       const r=raw as Record<string,unknown>;
       if(!r||typeof r.uid_fingerprint!=="string"||r.venue!=="okx"
         ||!["real","demo"].includes(String(r.environment))
-        ||typeof r.label!=="string")
+        ||typeof r.label!=="string"||typeof r.alias!=="string"||typeof r.enabled!=="boolean"
+        ||typeof r.idempotency_key!=="string"||!validLimits(r.limits))
         return Response.json({status:"FAILED",reason:"INVALID_ENROLLMENT"},{status:400});
       const out=await enrollObservedAccount(this.state.storage,{
         uid_fingerprint:r.uid_fingerprint,venue:"okx",
-        environment:r.environment as "real"|"demo",label:r.label,
+        environment:r.environment as "real"|"demo",label:r.label,alias:r.alias,enabled:r.enabled,limits:r.limits,idempotency_key:r.idempotency_key,
       });
       return Response.json(out.body,{status:out.status,headers:{"cache-control":"no-store"}});
     }
@@ -93,24 +85,6 @@ export class RuntimeSession {
       }
       const answer=await governanceRequest(this.state.storage,request.method,update);
       return Response.json(answer.body,{status:answer.status,headers:{"cache-control":"no-store"}});
-    }
-    if (url.pathname === "/account-policy") {
-      // Internal Durable Object endpoint, reachable from authenticated OAuth
-      // MCP only; NOT exposed through the public Worker default handler.
-      let update: unknown;
-      if (request.method === "POST") {
-        if (Number(request.headers.get("content-length") ?? "0") > 4096) {
-          return Response.json({status:"FAILED",reason:"POLICY_TOO_LARGE"}, {status:413});
-        }
-        const body = await request.text();
-        if (body.length > 4096) {
-          return Response.json({status:"FAILED",reason:"POLICY_TOO_LARGE"}, {status:413});
-        }
-        try { update = JSON.parse(body); }
-        catch { return Response.json({status:"FAILED",reason:"INVALID_POLICY_UPDATE"}, {status:400}); }
-      }
-      const result = await accountPolicyRequest(this.state.storage, request.method, update);
-      return Response.json(result.body, { status: result.status, headers: {"cache-control":"no-store"} });
     }
     if (url.pathname === "/dispatch" && request.method === "POST") {
       const body = await request.json() as any;
@@ -283,13 +257,17 @@ export class RuntimeSession {
       active.attachment.generation,
       PONG_DEADLINE_MS,
     );
-    active.ws.send(JSON.stringify({
-      type: "ping",
-      schema: FRAME_SCHEMA,
-      session_id: active.attachment.sessionId,
-      connection_generation: active.attachment.generation,
-      nonce,
-    }));
+    try {
+      active.ws.send(JSON.stringify({
+        type: "ping",
+        schema: FRAME_SCHEMA,
+        session_id: active.attachment.sessionId,
+        connection_generation: active.attachment.generation,
+        nonce,
+      }));
+    } catch {
+      this.rejectGeneration(active.attachment.generation,"RUNTIME_OFFLINE");
+    }
     await wait;
     return nonce;
   }
@@ -311,26 +289,18 @@ export class RuntimeSession {
       return transportFailure("EXECUTION_PROFILE_OPERATION_UNSUPPORTED", false);
     }
 
+    if(this.activeRequests.has(request.request_id))
+      return transportFailure("REQUEST_ALREADY_IN_FLIGHT",false);
+    this.activeRequests.add(request.request_id);
     this.inflight += 1;
     try {
       const deliveryChallenge = await this.proveFresh(active);
 
-      const ack = this.waitFor(
-        `ack:${request.request_id}`,
-        active.attachment.generation,
-        ACK_DEADLINE_MS,
-      );
-      const response = this.waitFor(
-        `response:${request.request_id}`,
-        active.attachment.generation,
-        RESPONSE_DEADLINE_MS,
-      );
       // Production writes and exact-intent terminal status both need the
       // current native governance cohort. The latter is ONLY for a proven
       // terminal RELEASE, not permission to introduce new exposure.
       const tradeMutation = isExecutionMutation(request.operation?.type);
       const terminalStatus = request.operation?.type === "execution_status";
-      let operator_policy: Record<string, unknown> | undefined;
       let operator_governance: Record<string, unknown> | undefined;
       if ((tradeMutation || terminalStatus) &&
           active.attachment.runtimeProfile === "production") {
@@ -339,7 +309,7 @@ export class RuntimeSession {
           if(!validGovernance(current))
             return transportFailure("CENTRAL_GOVERNANCE_CORRUPT",false);
           if(tradeMutation &&
-             (!current.trading_requested||current.operator_authorization.status!=="ACTIVE"))
+             !current.accounts.some(accessEnabled))
             return transportFailure("CENTRAL_NEW_RISK_STOPPED",false);
           // Typed fresh request-scoped delivery proof. This is NOT the POST
           // permit; the native executor still needs an exact DO reservation.
@@ -351,34 +321,33 @@ export class RuntimeSession {
             delivery_challenge:deliveryChallenge
           };
         }else if(tradeMutation){
-          const stored: unknown = await this.state.storage.get("account_policy_v1");
-          if (stored !== undefined && !validAccountPolicy(stored)) {
-            return transportFailure("CENTRAL_POLICY_CORRUPT", false);
-          }
-          const policy = stored ?? defaultAccountPolicy();
-          if (!validAccountPolicy(policy))
-            return transportFailure("CENTRAL_POLICY_UNAVAILABLE", false);
-          operator_policy = {
-            schema: policy.schema,revision:policy.revision,
-            trading_requested:policy.trading_requested,
-            allowed_account_uids:policy.allowed_account_uids,
-            max_total_modelled_loss_usdt:policy.max_total_modelled_loss_usdt,
-            issued_at_ms:Date.now(),
-            session_generation:active.attachment.generation,
-          };
+          return transportFailure("INSTALLATION_ACCESS_MISSING_OR_CORRUPT",false);
         }
       }
+      const ack = this.waitFor(
+        `ack:${request.request_id}`,
+        active.attachment.generation,
+        ACK_DEADLINE_MS,
+      );
+      const response = this.waitFor(
+        `response:${request.request_id}`,
+        active.attachment.generation,
+        RESPONSE_DEADLINE_MS,
+      );
+      const completion=Promise.all([ack,response]);
+      // Install a rejection observer before send: synchronous WS failure and
+      // disconnect can reject both stages before the await is reached.
+      void completion.catch(()=>undefined);
       active.ws.send(JSON.stringify({
         type: "request",
         schema: FRAME_SCHEMA,
         session_id: active.attachment.sessionId,
         connection_generation: active.attachment.generation,
         request,
-        ...(operator_policy === undefined ? {} : { operator_policy }),
         ...(operator_governance === undefined ? {} : { operator_governance }),
       }));
-      await ack;
-      return await response as Json;
+      const [,reply]=await completion;
+      return reply as Json;
     } catch (error) {
       // An exchange request may already have reached the one Rust owner
       // even when this HTTP/WS envelope loses ACK or response. Returning a
@@ -396,8 +365,9 @@ export class RuntimeSession {
       return transportFailure(error instanceof Error ? error.message : "TRANSPORT_FAILURE");
     } finally {
       this.inflight -= 1;
-      this.clearPending(`ack:${request.request_id}`);
-      this.clearPending(`response:${request.request_id}`);
+      this.activeRequests.delete(request.request_id);
+      this.clearPending(`ack:${request.request_id}`,active.attachment.generation);
+      this.clearPending(`response:${request.request_id}`,active.attachment.generation);
     }
   }
 
@@ -438,7 +408,7 @@ export class RuntimeSession {
   }
 
   private waitFor(key: string, generation: number, timeoutMs: number): Promise<any> {
-    this.clearPending(key);
+    if(this.pending.has(key))return Promise.reject(new Error("REQUEST_ALREADY_IN_FLIGHT"));
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         const current = this.pending.get(key);
@@ -459,11 +429,12 @@ export class RuntimeSession {
     pending.resolve(value);
   }
 
-  private clearPending(key: string): void {
+  private clearPending(key: string,generation:number): void {
     const pending = this.pending.get(key);
-    if (!pending) return;
+    if (!pending||pending.generation!==generation) return;
     clearTimeout(pending.timer);
     this.pending.delete(key);
+    pending.reject(new Error("REQUEST_FINISHED"));
   }
 
   private rejectGeneration(generation: number, reason: string): void {

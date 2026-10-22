@@ -22,7 +22,6 @@ use okx_execution::{
 use okx_observation::{
     AccountLedgerFacts, AccountSnapshot, InstrumentRulesSnapshot, VenueExecutionEvidence,
 };
-use okx_protocol::CentralAccountPolicy;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use tokio::sync::{Mutex, RwLock, RwLockReadGuard};
@@ -170,24 +169,10 @@ fn native_risk_receipt_identity_matches_riskbook_key() {
     );
 }
 
-/// One immutable, Worker-sourced policy for exactly this authenticated
-/// transport generation and one native execution request. Never persisted.
-#[derive(Clone, Copy)]
-pub struct CentralPolicyBinding<'a> {
-    pub policy: &'a CentralAccountPolicy,
-    pub session_generation: u64,
-}
-
-impl CentralPolicyBinding<'_> {
-    pub fn authorizes_uid(self, uid: &str, now_ms: u64) -> bool {
-        self.policy
-            .authorizes_uid(uid, now_ms, self.session_generation)
-    }
-}
 /// Typed central delivery scope; a DO risk receipt remains mandatory for POST.
 #[derive(Clone, Copy)]
 pub struct CentralGovernanceBinding<'a> {
-    pub scope: &'a okx_protocol::account_governance::CentralGovernanceSnapshotV2,
+    pub scope: &'a okx_protocol::account_governance::CentralGovernanceSnapshot,
     pub session_generation: u64,
     pub delivery_challenge_verified: bool,
 }
@@ -200,24 +185,20 @@ impl CentralGovernanceBinding<'_> {
         )
     }
 }
-/// One central delivery binding per intent. V1 is rolling-upgrade only;
-/// both forms still require a separate transactional risk POST fence.
+/// One central access binding per intent; POST requires a transactional risk fence.
 #[derive(Clone, Copy)]
 pub enum CentralAuthorizationBinding<'a> {
-    Legacy(CentralPolicyBinding<'a>),
     Governance(CentralGovernanceBinding<'a>),
 }
 impl CentralAuthorizationBinding<'_> {
     pub fn authorizes_uid(self, uid: &str, now_ms: u64) -> bool {
         match self {
-            Self::Legacy(v) => v.authorizes_uid(uid, now_ms),
             Self::Governance(v) => v.authorizes_uid(uid, now_ms),
         }
     }
 
     pub fn budget(self) -> Option<rust_decimal::Decimal> {
         let text = match self {
-            Self::Legacy(v) => &v.policy.max_total_modelled_loss_usdt,
             Self::Governance(v) => &v.scope.state.max_total_modelled_loss_usdt,
         };
         rust_decimal::Decimal::from_str(text).ok()
@@ -333,17 +314,17 @@ fn central_executor_policy(
     instrument: &str,
     now_ms: u64,
 ) -> Option<okx_execution::ProductionTradingPolicy> {
-    use okx_protocol::account_governance::AccountEnvironmentV2;
+    use okx_protocol::account_governance::AccountEnvironment;
     if !scope.authorizes_uid(&run.account_uid_fingerprint, now_ms)
-        || run.operator_authority_id != scope.scope.state.operator_authorization.id
+        || run.operator_authority_id != scope.scope.state.campaign_id
     {
         return None;
     }
     let account = scope.scope.state.accounts.iter().find(|a| {
         a.venue == "okx"
-            && a.environment == AccountEnvironmentV2::Real
+            && a.environment == AccountEnvironment::Real
             && a.identity_verified
-            && a.enabled
+            && a.access_enabled()
             && a.uid_fingerprint == run.account_uid_fingerprint
     })?;
     if !account
@@ -354,16 +335,13 @@ fn central_executor_policy(
         || !account
             .strategies
             .iter()
-            .any(|strategy| strategy.enabled && strategy.id == run.mandate_version)
+            .any(|strategy| strategy.enabled && strategy.id == run.strategy_id)
     {
         return None;
     }
     let global =
         rust_decimal::Decimal::from_str(&scope.scope.state.max_total_modelled_loss_usdt).ok()?;
-    let ceiling =
-        rust_decimal::Decimal::from_str(&scope.scope.state.operator_authorization.ceiling_usdt)
-            .ok()?;
-    if global <= rust_decimal::Decimal::ZERO || global > ceiling {
+    if global <= rust_decimal::Decimal::ZERO {
         return None;
     }
     Some(okx_execution::ProductionTradingPolicy {
@@ -1209,15 +1187,14 @@ impl ExecutionRuntime {
         require_native_production_lifecycle()?;
         if reservation.account_uid_fingerprint != preflight.account_uid_fingerprint
             || opening.account_uid_fingerprint != preflight.account_uid_fingerprint
-            || reservation.operator_authority_id != scope.scope.state.operator_authorization.id
+            || reservation.operator_authority_id != scope.scope.state.campaign_id
         {
             return Ok(None);
         }
         let matched = scope.scope.state.accounts.iter().any(|account| {
             account.venue == "okx"
-                && account.environment
-                    == okx_protocol::account_governance::AccountEnvironmentV2::Real
-                && account.enabled
+                && account.environment == okx_protocol::account_governance::AccountEnvironment::Real
+                && account.access_enabled()
                 && account.identity_verified
                 && account.uid_fingerprint == preflight.account_uid_fingerprint
                 && account

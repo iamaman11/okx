@@ -25,7 +25,7 @@ const sa=new Storage();
 function account(uid:string){
  return {
   id:"acct_"+uid.slice(0,8),label:uid.slice(0,8),venue:"okx",
-  environment:"real",uid_fingerprint:uid,identity_verified:true,enabled:true,
+  environment:"real",uid_fingerprint:uid,identity_verified:true,enabled:true,explicit_pause:false,policy_revision:1,account_key:"okx:real:"+uid,
   strategies:[{id:"momentum_A",enabled:true,allocated_capital_usdt:"6",
     max_modelled_loss_usdt:"6",max_daily_realized_loss_usdt:"2",max_drawdown_ratio:"0.1"}],
   limits:{max_modelled_loss_usdt:"10",max_order_loss_usdt:"6",max_notional_usdt:"100",
@@ -34,11 +34,10 @@ function account(uid:string){
  };
 }
 const governance={
- schema:"okx.governance/v2",revision:1,trading_requested:true,
- operator_authorization:{id:"sha256:"+d,status:"ACTIVE",ceiling_usdt:"10"},
+ schema:"okx.governance/v3",revision:1,installation_id:"installation_test",campaign_id:"sha256:"+d,campaign_loss_limit_usd:"20",
  max_total_modelled_loss_usdt:"10",accounts:[account(a),account(b)]
 };
-await sa.put("account_governance_v2",governance);
+await sa.put("account_access_v1",governance);
 const unattested=await reserveRisk(sa,policy,census,{...base,uid:a,
   intent_id:"intent_20261018_unproof",loss_usdt:"1"});
 check(unattested.status==="DENIED","raw census digest is not native attestation");
@@ -180,14 +179,14 @@ const v=await readRiskBook(sa);
 check(v?.entries.length===2&&v.entries[0].state==="RELEASED"&&v.entries[1].state==="HELD","durability");
 const disabled={...governance,accounts:governance.accounts.map(ac=>
   ac.uid_fingerprint===b?{...ac,enabled:false}:ac)};
-await sa.put("account_governance_v2",disabled);
+await sa.put("account_access_v1",disabled);
 check((await reserve(sa,policy,census,{...base,uid:b,
   intent_id:"intent_20261018_disabled",loss_usdt:"1"})).status==="DENIED",
  "disabled account cannot open new risk");
-await sa.put("account_governance_v2",governance);
+await sa.put("account_access_v1",governance);
 // A second UID's independently observed risk must never be replaced by zero.
 const weighted=new Storage();
-await weighted.put("account_governance_v2",governance);
+await weighted.put("account_access_v1",governance);
 await weighted.put("generation",77);
 const weightedCensus={...census,occupied:[census.occupied[0],
  {...census.occupied[1],occupied_usdt:"2"}]};

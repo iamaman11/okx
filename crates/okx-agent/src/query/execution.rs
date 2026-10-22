@@ -1779,7 +1779,7 @@ async fn complete_native_risk_census(
 ) -> Result<NativeRiskCensus, &'static str> {
     let scope = context
         .operator_governance
-        .ok_or("RISK_GOVERNANCE_V2_REQUIRED")?;
+        .ok_or("RISK_ACCOUNT_ACCESS_REQUIRED")?;
     let observer = context
         .account_fallback
         .ok_or("RISK_OBSERVER_UNAVAILABLE")?;
@@ -1842,7 +1842,7 @@ async fn reserve_native_risk_for_submit(
         .ok_or("RISK_AUTHORITY_TRANSPORT_UNAVAILABLE")?;
     let scope = context
         .operator_governance
-        .ok_or("RISK_GOVERNANCE_V2_REQUIRED")?;
+        .ok_or("RISK_ACCOUNT_ACCESS_REQUIRED")?;
     let plan = &entry.record.plan;
     if !context.central_uid_admitted(&plan.account_uid_fingerprint, utc_now_ms()) {
         return Err("RISK_CENTRAL_UID_NOT_AUTHORIZED");
@@ -1852,7 +1852,7 @@ async fn reserve_native_risk_for_submit(
         .await
         .ok_or("RISK_PREPARED_RUN_NOT_ATTESTED")?;
     if run.account_uid_fingerprint != plan.account_uid_fingerprint
-        || run.operator_authority_id != scope.state.operator_authorization.id
+        || run.operator_authority_id != scope.state.campaign_id
     {
         return Err("RISK_RUN_SCOPE_MISMATCH");
     }
@@ -1862,8 +1862,8 @@ async fn reserve_native_risk_for_submit(
         .iter()
         .find(|a| {
             a.venue == "okx"
-                && a.environment == okx_protocol::account_governance::AccountEnvironmentV2::Real
-                && a.enabled
+                && a.environment == okx_protocol::account_governance::AccountEnvironment::Real
+                && a.access_enabled()
                 && a.uid_fingerprint == plan.account_uid_fingerprint
         })
         .ok_or("RISK_ACCOUNT_NOT_REGISTERED")?;

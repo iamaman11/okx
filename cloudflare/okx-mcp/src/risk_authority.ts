@@ -1,4 +1,4 @@
-import {validGovernance,projectRiskPolicy} from "./account_governance.js";
+import {validGovernance,projectRiskPolicy,accessEnabled,GOVERNANCE_STORAGE_KEY} from "./account_governance.js";
 import {beginRiskPost,readRiskBook,reserveRisk,transitionRisk,
   type CompleteRiskCensus,type NativeSessionRiskProof,type RiskReservation,
   type TerminalRiskReleaseProof} from "./risk_book.js";
@@ -86,7 +86,7 @@ export async function handleNativeRiskCommand(
       typeof a.plan_sha256!=="string"||typeof a.requested_loss_usdt!=="string"||
       !Number.isSafeInteger(a.policy_revision))
       return deny(id,"INVALID_RESERVATION_INPUT");
-    const governance:unknown=await storage.get("account_governance_v2");
+    const governance:unknown=await storage.get(GOVERNANCE_STORAGE_KEY);
     if(!validGovernance(governance))
       return deny(id,"CENTRAL_GOVERNANCE_UNAVAILABLE");
     const policy=projectRiskPolicy(governance);

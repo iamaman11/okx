@@ -7,9 +7,7 @@ use okx_execution::{
     ProtectiveOrderLink, ProtectiveOrderStatus,
 };
 use okx_observation::{AccountLedgerFacts, AccountSnapshot};
-#[cfg(test)]
-use okx_protocol::account_governance::AuthorizationStatus;
-use okx_protocol::account_governance::{AccountEnvironmentV2, CentralGovernanceSnapshotV2};
+use okx_protocol::account_governance::{AccountEnvironment, CentralGovernanceSnapshot};
 use okx_protocol::risk_authority::{NativeRiskCensus, RiskAccountOccupancy};
 use okx_runtime::{PrivateConnectionState, PrivateConvergenceWindow};
 use rust_decimal::Decimal;
@@ -251,7 +249,7 @@ impl PortfolioRiskSources {
     /// authenticated DO governance snapshot. Missing/unverified account
     /// sources must fail later at census(), never silently disappear.
     pub fn from_governance(
-        scope: &CentralGovernanceSnapshotV2,
+        scope: &CentralGovernanceSnapshot,
         observed: Vec<AccountRiskEvidence>,
         now_ms: u64,
         delivery_challenge_verified: bool,
@@ -268,7 +266,7 @@ impl PortfolioRiskSources {
         }
         let mut keys = Vec::new();
         for account in &scope.state.accounts {
-            if account.environment != AccountEnvironmentV2::Real {
+            if account.environment != AccountEnvironment::Real {
                 continue;
             }
             // Cross-venue aggregation needs an equally source-proven reader
@@ -495,20 +493,22 @@ mod tests {
             all_exposure_modelled_loss_usdt: Some(if v == 'a' { "0" } else { "2.25" }.into()),
         }
     }
-    fn governance() -> CentralGovernanceSnapshotV2 {
+    fn governance() -> CentralGovernanceSnapshot {
         use okx_protocol::account_governance::{
-            AccountControlV2, AccountGovernanceV2, AccountLimitsV2, GOVERNANCE_SCHEMA_V2,
-            OperatorAuthorizationV2,
+            AccountControl, AccountGovernance, AccountLimits, GOVERNANCE_SCHEMA,
         };
-        let account = |id: &str, uid: char, enabled: bool| AccountControlV2 {
+        let account = |id: &str, uid: char, enabled: bool| AccountControl {
             id: id.to_owned(),
             label: id.to_owned(),
             venue: "okx".to_owned(),
-            environment: AccountEnvironmentV2::Real,
+            environment: AccountEnvironment::Real,
             uid_fingerprint: uid.to_string().repeat(64),
             identity_verified: true,
             enabled,
-            limits: AccountLimitsV2 {
+            explicit_pause: false,
+            policy_revision: 1,
+            account_key: format!("okx:real:{}", uid.to_string().repeat(64)),
+            limits: AccountLimits {
                 max_modelled_loss_usdt: "10".into(),
                 max_order_loss_usdt: "5".into(),
                 max_notional_usdt: Some("100".into()),
@@ -519,16 +519,13 @@ mod tests {
             },
             strategies: Vec::new(),
         };
-        CentralGovernanceSnapshotV2 {
-            state: AccountGovernanceV2 {
-                schema: GOVERNANCE_SCHEMA_V2.into(),
+        CentralGovernanceSnapshot {
+            state: AccountGovernance {
+                schema: GOVERNANCE_SCHEMA.into(),
                 revision: 4,
-                trading_requested: true,
-                operator_authorization: OperatorAuthorizationV2 {
-                    id: format!("sha256:{}", "c".repeat(64)),
-                    status: AuthorizationStatus::Active,
-                    ceiling_usdt: "10".into(),
-                },
+                installation_id: "installation_test".into(),
+                campaign_id: format!("sha256:{}", "c".repeat(64)),
+                campaign_loss_limit_usd: "20".into(),
                 max_total_modelled_loss_usdt: "10".into(),
                 accounts: vec![account("acct_a", 'a', true), account("acct_b", 'b', false)],
             },
@@ -549,8 +546,11 @@ mod tests {
             vec![key('a'), key('b')]
         );
         let mut stopped = governance();
-        stopped.state.trading_requested = false;
-        stopped.state.operator_authorization.status = AuthorizationStatus::Revoked;
+        stopped
+            .state
+            .accounts
+            .iter_mut()
+            .for_each(|a| a.explicit_pause = true);
         let read_only =
             PortfolioRiskSources::from_governance(&stopped, vec![row('a'), row('b')], 1_000, true)
                 .expect("revoked new trade never blocks native read for release");
