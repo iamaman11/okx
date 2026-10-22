@@ -1811,10 +1811,7 @@ fn verified_daily_strategy_bill_loss(
     day: u64,
     as_of: u64,
 ) -> Result<Option<Decimal>, ExecutionLedgerError> {
-    let mut linked = 0usize;
-    let mut all_fees = Decimal::ZERO;
-    let mut all_pnl = Decimal::ZERO;
-    let mut gross_loss = Decimal::ZERO;
+    let mut loss = crate::strategy_finance::DailyStrategyLossAccumulator::default();
     for event in evidence.events.values() {
         if event.payload["source"] != "OKX_REST_BILL" {
             continue;
@@ -1836,68 +1833,11 @@ fn verified_daily_strategy_bill_loss(
         let run_reducer = entry.record.plan.action.is_risk_reducing()
             && event.strategy_run_id.is_none()
             && entry.record.strategy_run_id.is_none();
-        if !direct_run && !run_reducer {
-            continue;
-        }
-        // The financial projection already matched every trade bill to one
-        // exact native fill and proven lot. The 3 totals below must match it.
-        if event.payload["ccy"] != "USDT" {
-            return Err(ExecutionLedgerError::ExchangeSourceIncomplete);
-        }
-        let fee = event.payload["fee"]
-            .as_str()
-            .and_then(|v| Decimal::from_str(v).ok())
-            .ok_or(ExecutionLedgerError::ExchangeSourceIncomplete)?;
-        let pnl = event.payload["pnl"]
-            .as_str()
-            .and_then(|v| Decimal::from_str(v).ok())
-            .ok_or(ExecutionLedgerError::ExchangeSourceIncomplete)?;
-        let ts = event.payload["ts"]
-            .as_u64()
-            .ok_or(ExecutionLedgerError::ExchangeSourceIncomplete)?;
-        if ts < run.started_at_ms {
-            return Err(ExecutionLedgerError::ExchangeSourceIncomplete);
-        }
-        // Account REST snapshot can precede a bill already in the bounded
-        // history response. Defer the checkpoint rather than undercounting.
-        if ts > as_of {
-            return Ok(None);
-        }
-        linked += 1;
-        all_fees += fee;
-        all_pnl += pnl;
-        if ts >= day {
-            if fee < Decimal::ZERO {
-                gross_loss -= fee;
-            }
-            if pnl < Decimal::ZERO {
-                gross_loss -= pnl;
-            }
+        if direct_run || run_reducer {
+            loss.accept(&event.payload, run, day, as_of)?;
         }
     }
-    if linked != report.linked_bills
-        || Decimal::from_str(&report.fees_usdt).ok() != Some(all_fees)
-        || Decimal::from_str(&report.realized_usdt).ok() != Some(all_pnl)
-    {
-        return Err(ExecutionLedgerError::ExchangeSourceIncomplete);
-    }
-    // For a run opened today and now FLAT, all negative cashflow is bounded
-    // by the gross debit sum. Refuse a false low-loss watermark if not.
-    if run.started_at_ms >= day && report.state == "FLAT_RECONCILED" {
-        let allocation = Decimal::from_str(&run.allocated_usdt)
-            .map_err(|_| ExecutionLedgerError::CapitalReservationUnattested)?;
-        let nav = Decimal::from_str(
-            report
-                .nav_usdt
-                .as_deref()
-                .ok_or(ExecutionLedgerError::ExchangeSourceIncomplete)?,
-        )
-        .map_err(|_| ExecutionLedgerError::ExchangeSourceIncomplete)?;
-        if gross_loss < (allocation - nav).max(Decimal::ZERO) {
-            return Err(ExecutionLedgerError::ExchangeSourceIncomplete);
-        }
-    }
-    Ok(Some(gross_loss))
+    loss.finish(run, report, day)
 }
 
 /// Readback census of the native WAL: only observed accounts/order IDs and

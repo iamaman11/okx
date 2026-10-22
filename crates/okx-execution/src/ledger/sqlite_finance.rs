@@ -485,11 +485,7 @@ pub(super) fn nav_cursor_and_daily_loss(
 
     let sql = format!("{INDEXED_INTENT_COLUMNS} WHERE e.intent_id=?1");
     let mut stmt = c.prepare(&sql).map_err(io)?;
-    let mut linked = 0usize;
-    let mut fees = Decimal::ZERO;
-    let mut realized = Decimal::ZERO;
-    let mut gross_loss = Decimal::ZERO;
-    let mut source_ahead = false;
+    let mut loss = crate::strategy_finance::DailyStrategyLossAccumulator::default();
     super::sqlite_source::visit_events(&c, &run.allocation_id, &uid, |_, event| {
         if event.payload["source"] != "OKX_REST_BILL" {
             return Ok(());
@@ -527,65 +523,12 @@ pub(super) fn nav_cursor_and_daily_loss(
         if !direct_run && !run_reducer {
             return Ok(());
         }
-        if event.payload["ccy"] != "USDT" {
-            return Err(ExecutionLedgerError::ExchangeSourceIncomplete);
-        }
-        let fee = event.payload["fee"]
-            .as_str()
-            .and_then(|v| Decimal::from_str(v).ok())
-            .ok_or(ExecutionLedgerError::ExchangeSourceIncomplete)?;
-        let pnl = event.payload["pnl"]
-            .as_str()
-            .and_then(|v| Decimal::from_str(v).ok())
-            .ok_or(ExecutionLedgerError::ExchangeSourceIncomplete)?;
-        let ts = event.payload["ts"]
-            .as_u64()
-            .ok_or(ExecutionLedgerError::ExchangeSourceIncomplete)?;
-        if ts < run.started_at_ms {
-            return Err(ExecutionLedgerError::ExchangeSourceIncomplete);
-        }
-        if ts > as_of {
-            source_ahead = true;
-            return Ok(());
-        }
-        linked = linked
-            .checked_add(1)
-            .ok_or(ExecutionLedgerError::ExchangeEvidenceCapacity)?;
-        fees += fee;
-        realized += pnl;
-        if ts >= day {
-            if fee < Decimal::ZERO {
-                gross_loss -= fee;
-            }
-            if pnl < Decimal::ZERO {
-                gross_loss -= pnl;
-            }
-        }
+        loss.accept(&event.payload, run, day, as_of)?;
         Ok(())
     })?;
-    if source_ahead {
+    let Some(gross_loss) = loss.finish(run, report, day)? else {
         return Ok(None);
-    }
-    if linked != report.linked_bills
-        || Decimal::from_str(&report.fees_usdt).ok() != Some(fees)
-        || Decimal::from_str(&report.realized_usdt).ok() != Some(realized)
-    {
-        return Err(ExecutionLedgerError::ExchangeSourceIncomplete);
-    }
-    if run.started_at_ms >= day && report.state == "FLAT_RECONCILED" {
-        let allocation = Decimal::from_str(&run.allocated_usdt)
-            .map_err(|_| ExecutionLedgerError::CapitalReservationUnattested)?;
-        let nav = Decimal::from_str(
-            report
-                .nav_usdt
-                .as_deref()
-                .ok_or(ExecutionLedgerError::ExchangeSourceIncomplete)?,
-        )
-        .map_err(|_| ExecutionLedgerError::ExchangeSourceIncomplete)?;
-        if gross_loss < (allocation - nav).max(Decimal::ZERO) {
-            return Err(ExecutionLedgerError::ExchangeSourceIncomplete);
-        }
-    }
+    };
     Ok(Some((key, proof, receipt_ms, gross_loss)))
 }
 

@@ -11,7 +11,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::{
-    DurableExchangeEvidence, ExecutionAction, ExecutionLedgerEntry, StrategyCapitalReservation,
+    DurableExchangeEvidence, ExecutionAction, ExecutionLedgerEntry, ExecutionLedgerError, StrategyCapitalReservation,
     account_cashflow::{AccountBillClass, AccountBillSource, classify_native_account_bill},
 };
 
@@ -24,6 +24,98 @@ pub struct ProductionMarkEvidence {
     pub price: String,
     pub exchange_timestamp_ms: u64,
     pub received_at_ms: u64,
+}
+
+/// The ONE exact daily cash-debit calculation used by native SQLite and
+/// sealed v14. Callers independently prove bill-to-intent ownership; this
+/// pure accumulator handles currency, timestamps, Decimal, completeness and
+/// the FLAT capital-to-NAV lower bound identically on both storage paths.
+#[derive(Default)]
+pub(crate) struct DailyStrategyLossAccumulator {
+    linked: usize,
+    fees: Decimal,
+    realized: Decimal,
+    gross_loss: Decimal,
+    source_ahead: bool,
+}
+
+impl DailyStrategyLossAccumulator {
+    pub(crate) fn accept(
+        &mut self,
+        payload: &Value,
+        run: &StrategyCapitalReservation,
+        day: u64,
+        as_of: u64,
+    ) -> Result<(), ExecutionLedgerError> {
+        if payload["ccy"] != "USDT" {
+            return Err(ExecutionLedgerError::ExchangeSourceIncomplete);
+        }
+        let fee = payload["fee"]
+            .as_str()
+            .and_then(|v| Decimal::from_str(v).ok())
+            .ok_or(ExecutionLedgerError::ExchangeSourceIncomplete)?;
+        let pnl = payload["pnl"]
+            .as_str()
+            .and_then(|v| Decimal::from_str(v).ok())
+            .ok_or(ExecutionLedgerError::ExchangeSourceIncomplete)?;
+        let ts = payload["ts"]
+            .as_u64()
+            .ok_or(ExecutionLedgerError::ExchangeSourceIncomplete)?;
+        if ts < run.started_at_ms {
+            return Err(ExecutionLedgerError::ExchangeSourceIncomplete);
+        }
+        // Out-of-order REST windows cannot certify a day before the
+        // immutable source's latest related bill was actually received.
+        if ts > as_of {
+            self.source_ahead = true;
+            return Ok(());
+        }
+        self.linked = self.linked.checked_add(1)
+            .ok_or(ExecutionLedgerError::ExchangeEvidenceCapacity)?;
+        self.fees += fee;
+        self.realized += pnl;
+        if ts >= day {
+            if fee < Decimal::ZERO {
+                self.gross_loss -= fee;
+            }
+            if pnl < Decimal::ZERO {
+                self.gross_loss -= pnl;
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn finish(
+        self,
+        run: &StrategyCapitalReservation,
+        report: &StrategyFinancialPeriod,
+        day: u64,
+    ) -> Result<Option<Decimal>, ExecutionLedgerError> {
+        if self.source_ahead {
+            return Ok(None);
+        }
+        if self.linked != report.linked_bills
+            || Decimal::from_str(&report.fees_usdt).ok() != Some(self.fees)
+            || Decimal::from_str(&report.realized_usdt).ok() != Some(self.realized)
+        {
+            return Err(ExecutionLedgerError::ExchangeSourceIncomplete);
+        }
+        if run.started_at_ms >= day && report.state == "FLAT_RECONCILED" {
+            let allocation = Decimal::from_str(&run.allocated_usdt)
+                .map_err(|_| ExecutionLedgerError::CapitalReservationUnattested)?;
+            let nav = Decimal::from_str(
+                report
+                    .nav_usdt
+                    .as_deref()
+                    .ok_or(ExecutionLedgerError::ExchangeSourceIncomplete)?,
+            )
+            .map_err(|_| ExecutionLedgerError::ExchangeSourceIncomplete)?;
+            if self.gross_loss < (allocation - nav).max(Decimal::ZERO) {
+                return Err(ExecutionLedgerError::ExchangeSourceIncomplete);
+            }
+        }
+        Ok(Some(self.gross_loss))
+    }
 }
 
 const MAX_STRATEGY_MARK_AGE_MS: u64 = 30_000;
