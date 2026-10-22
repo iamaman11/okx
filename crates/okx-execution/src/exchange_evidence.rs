@@ -142,7 +142,7 @@ impl DurableExchangeEvidence {
         )
     }
 
-    fn seal(&mut self) -> Result<(), ExecutionLedgerError> {
+    pub(crate) fn seal(&mut self) -> Result<(), ExecutionLedgerError> {
         self.checksum_sha256 = self.hash()?;
         self.validate()
     }
@@ -151,7 +151,7 @@ impl DurableExchangeEvidence {
     /// immutable v1 captures may be absent in an already-sealed historical bill.
     /// Preserve the exact original bytes; never backfill or rewrite a prior
     /// checksum, and reject all differences in previously captured fields.
-    fn same_legacy_bill_source(old: &StoredExchangeEvent, current: &StoredExchangeEvent) -> bool {
+    pub(crate) fn same_legacy_bill_source(old: &StoredExchangeEvent, current: &StoredExchangeEvent) -> bool {
         if old.payload.get("source").and_then(Value::as_str) != Some("OKX_REST_BILL")
             || current.payload.get("source").and_then(Value::as_str) != Some("OKX_REST_BILL")
         {
@@ -470,7 +470,7 @@ impl DurableExchangeEvidence {
 
 /// A native fill/order/bill is recorded at once; quiet snapshots use bounded
 /// checkpoint spacing. This NEVER fills a missing two-hour source interval.
-fn should_persist_source_cursor(
+pub(crate) fn should_persist_source_cursor(
     previous: Option<u64>,
     now: u64,
     has_new_native_event: bool,

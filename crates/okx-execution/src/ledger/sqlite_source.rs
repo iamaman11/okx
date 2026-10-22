@@ -199,6 +199,110 @@ pub(super) fn persist(
     Ok(())
 }
 
+/// Append ONLY facts observed in the current authenticated venue window.
+/// Previously sealed facts stay in SQLite and are never materialized into a
+/// Rust event map. Every insert, financial projection and source proof shares
+/// the caller's one immediate WAL transaction.
+pub(super) fn append_window_delta(
+    tx: &Transaction<'_>,
+    delta: &DurableExchangeEvidence,
+) -> Result<bool, ExecutionLedgerError> {
+    delta.validate()?;
+    let old: Option<(String, String)> = tx
+        .query_row(
+            "SELECT uid,source_schema FROM native_source_runs WHERE run_id=?1",
+            params![&delta.run_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(io)?;
+    if let Some((uid, schema)) = &old {
+        if uid != &delta.account_uid || schema != &delta.schema {
+            return Err(ExecutionLedgerError::AccountScopeMismatch);
+        }
+        // A prior sealed source cannot be overwritten to repair missing rows.
+        attest_indexed(tx, &delta.run_id, &delta.account_uid)?;
+    } else {
+        tx.execute(
+            "INSERT INTO native_source_runs(run_id,uid,source_schema,proof_digest) VALUES(?1,?2,?3,?4)",
+            params![&delta.run_id, &delta.account_uid, &delta.schema, &delta.checksum_sha256],
+        )
+        .map_err(io)?;
+    }
+    let mut changed = old.is_none();
+    for (key, event) in &delta.events {
+        let existing: Option<(String, Vec<u8>)> = tx
+            .query_row(
+                "SELECT payload_digest,payload FROM native_source_events WHERE run_id=?1 AND event_key=?2",
+                params![&delta.run_id, key],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(io)?;
+        if let Some((prior_digest, body)) = existing {
+            if checksum(&body) != prior_digest {
+                return Err(ExecutionLedgerError::Corrupt("native source event digest mismatch"));
+            }
+            let earlier: StoredExchangeEvent = decode(&body)?;
+            if earlier != *event
+                && !DurableExchangeEvidence::same_legacy_bill_source(&earlier, event)
+            {
+                return Err(ExecutionLedgerError::ExchangeEvidenceConflict);
+            }
+            continue;
+        }
+        let body = encode(event)?;
+        tx.execute(
+            "INSERT INTO native_source_events VALUES(?1,?2,?3,?4)",
+            params![&delta.run_id, key, checksum(&body), body],
+        )
+        .map_err(io)?;
+        super::sqlite_finance::persist_event(tx, &delta.run_id, key, event)?;
+        changed = true;
+    }
+    for (key, cursor) in &delta.cursors {
+        let prior: Option<(String, Vec<u8>)> = tx
+            .query_row(
+                "SELECT payload_digest,payload FROM native_source_cursors WHERE run_id=?1 AND cursor_key=?2",
+                params![&delta.run_id, key],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(io)?;
+        if let Some((digest, body)) = prior {
+            if checksum(&body) != digest || decode::<ExchangeCoverageCursor>(&body)? != *cursor {
+                return Err(ExecutionLedgerError::ExchangeEvidenceConflict);
+            }
+            continue;
+        }
+        let body = encode(cursor)?;
+        let receipt = crate::exchange_evidence::source_receipt_ms(&cursor.source_received_at)
+            .ok_or(ExecutionLedgerError::Corrupt("native cursor receipt time missing"))?;
+        tx.execute(
+            "INSERT INTO native_source_cursors VALUES(?1,?2,?3,?4,?5)",
+            params![&delta.run_id, key, receipt, checksum(&body), body],
+        )
+        .map_err(io)?;
+        super::sqlite_finance::persist_source_receipt(
+            tx, &delta.account_uid, &delta.run_id, key, cursor,
+        )?;
+        changed = true;
+    }
+    if changed {
+        // One streaming pass recalculates the original cryptographic v1 tuple.
+        // No complete historical event object or duplicate RAM index exists.
+        let identity = scan_indexed(tx, &delta.run_id, &delta.account_uid, false)?;
+        let written = tx.execute(
+            "UPDATE native_source_runs SET proof_digest=?1 WHERE run_id=?2",
+            params![identity.checksum_sha256, &delta.run_id],
+        ).map_err(io)?;
+        if written != 1 {
+            return Err(ExecutionLedgerError::Corrupt("native source proof publication lost"));
+        }
+    }
+    Ok(changed)
+}
+
 /// Exact, bounded-memory native source summary. Cursors are scanned in
 /// receipt order and individually authenticated; old events remain indexed
 /// in SQLite rather than being reconstructed as a historical Rust map.
@@ -396,6 +500,17 @@ pub(super) fn attest_indexed(
     run_id: &str,
     expected_uid: &str,
 ) -> Result<crate::strategy_lifecycle::SourceIdentity, ExecutionLedgerError> {
+    scan_indexed(connection, run_id, expected_uid, true)
+}
+
+/// The same canonical streaming digest validates both cold attestation and
+/// the new append-only source image before its proof is published.
+fn scan_indexed(
+    connection: &Connection,
+    run_id: &str,
+    expected_uid: &str,
+    enforce_previous_proof: bool,
+) -> Result<crate::strategy_lifecycle::SourceIdentity, ExecutionLedgerError> {
     let (uid, schema, proof): (String, String, String) = connection
         .query_row(
             "SELECT uid,source_schema,proof_digest FROM native_source_runs WHERE run_id=?1",
@@ -505,11 +620,12 @@ pub(super) fn attest_indexed(
     drop(stmt);
     writer.push(b"}]");
     let (actual, tuple_len) = writer.finish();
-    if actual != proof {
+    if enforce_previous_proof && actual != proof {
         return Err(ExecutionLedgerError::Corrupt(
             "indexed source canonical digest mismatch",
         ));
     }
+    let proof = actual;
     let serialized_bytes = tuple_len
         .checked_add(source_struct_overhead(&schema, &uid, run_id, &proof)?)
         .ok_or(ExecutionLedgerError::ExchangeEvidenceCapacity)?;

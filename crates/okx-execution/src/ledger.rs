@@ -2243,44 +2243,23 @@ impl DurableExecutionLedger {
             .capital_reservation
             .as_ref()
             .ok_or(ExecutionLedgerError::CapitalReservationUnattested)?;
-        // Own the one authenticated source snapshot for this operation.
-        // Native SQL already read it once; cloning that full historical map
-        // again doubles peak RAM and introduces an O(history) copy per capture.
+        if self.store.sqlite_native {
+            return sqlite_store::capture_native_exchange_source(
+                &self.store.path,
+                run,
+                facts,
+                require_fresh_cursor,
+            );
+        }
+        // Only the sealed v14 migration owner still holds its source object.
         let previous = self.current_source()?;
         let prior_proof = previous.as_ref().map(|value| value.checksum_sha256.clone());
         let mut next = match previous {
             Some(value) => value,
             None => DurableExchangeEvidence::new(run)?,
         };
-        if self.store.sqlite_native {
-            // Keep one authenticated WAL read snapshot for every source fact:
-            // a long-running epoch may contain any number of old intents.
-            // Only exact indexed account+client+order matches are considered.
-            let reader =
-                sqlite_store::source_owner_reader(&self.store.path, &run.account_uid_fingerprint)?;
-            next.capture_with_owner(
-                facts,
-                run,
-                require_fresh_cursor,
-                |ord, cl, inst, side, pos| {
-                    sqlite_store::indexed_source_owner(
-                        &reader,
-                        &run.account_uid_fingerprint,
-                        run.started_at_ms,
-                        sqlite_store::SourceOwnerKey {
-                            order_id: ord,
-                            client_order_id: cl,
-                            instrument_id: inst,
-                            side,
-                            position_side: pos,
-                        },
-                    )
-                },
-            )?;
-        } else {
-            let owned = self.run_entries(run)?;
-            next.capture(facts, &owned, run, require_fresh_cursor)?;
-        }
+        let owned = self.run_entries(run)?;
+        next.capture(facts, &owned, run, require_fresh_cursor)?;
         if prior_proof.as_deref() != Some(next.checksum_sha256.as_str()) {
             self.store.save_metadata(
                 &self.entries,
@@ -2290,9 +2269,7 @@ impl DurableExecutionLedger {
                 &self.strategy_periods,
                 &self.leverage_attempts,
             )?;
-            if !self.store.sqlite_native {
-                self.exchange_evidence = Some(next.clone());
-            }
+            self.exchange_evidence = Some(next.clone());
         }
         Ok(next.summary())
     }
