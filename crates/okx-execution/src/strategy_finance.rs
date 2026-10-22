@@ -179,7 +179,6 @@ pub struct StrategyFinancialPeriod {
     pub reasons: Vec<&'static str>,
 }
 
-#[derive(Clone)]
 /// Single financial source read contract for authenticated legacy evidence and SQLite.
 #[derive(Debug, Clone)]
 pub(crate) struct FinanceSourceAudit {
@@ -314,6 +313,7 @@ impl FinanceSourceReader for LegacyFinanceReader<'_> {
         Ok(())
     }
 }
+#[derive(Clone)]
 struct Lot {
     contracts: Decimal,
     price: Decimal,
