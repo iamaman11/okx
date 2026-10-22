@@ -1,6 +1,6 @@
 import {initializeRiskBook} from "./risk_book.js";
 import {handleNativeRiskCommand} from "./risk_authority.js";
-import {initial} from "./account_governance.test.js";
+import {initial,account} from "./account_governance.test.js";
 function check(v:boolean,n:string){if(!v)throw Error(n);}
 class Store{
   map=new Map<string,unknown>();
@@ -43,5 +43,14 @@ check((await s.get("risk_book_v1"))===undefined,"denials make no reservation");
 await initializeRiskBook(s,initial.installation_id);
 const summary=await handleNativeRiskCommand(s,session,{schema:"okx.risk-command/v1",command_id:"summary_12345",installation_id:initial.installation_id,action:{action:"SUMMARY"}},now);
 check(summary.status==="OBSERVED"&&summary.budget?.remaining_loss_usd==="20"&&summary.budget.source_as_of_ms===null,"global summary comes from central owner with explicit source quality");
+const own=account.account_key,other="okx:real:"+"b".repeat(64);
+await s.put("account_access_v1",{...initial,revision:1,accounts:[account,{...account,id:"secondary",account_key:other,uid_fingerprint:"b".repeat(64)}]});
+const meta:any=await s.get("risk_meta_v2");
+await s.put("risk_meta_v2",{...meta,occupied_usdt:"2",occupied_usd:"2",accounts:{[other]:"2"}});
+await s.put("risk_account_v2:"+other,{active_reservations:1,occupied_usd:"2",occupied_usdt:"2",latest_activity_ms:now});
+const addressed=await handleNativeRiskCommand(s,session,{schema:"okx.risk-command/v1",command_id:"recovery_12345",installation_id:initial.installation_id,action:{action:"ACCOUNT_SUMMARY",account_key:own}},now);
+check(addressed.status==="OBSERVED"&&addressed.account_budget?.active_reservations===0&&addressed.account_budget?.occupied_usd==="0","own flat recovery does not require other account flat");
+s.map.delete("risk_account_v2:"+other);
+check((await handleNativeRiskCommand(s,session,{schema:"okx.risk-command/v1",command_id:"recovery_12346",installation_id:initial.installation_id,action:{action:"ACCOUNT_SUMMARY",account_key:other}},now)).reason==="RISK_ACCOUNT_AGGREGATE_MISSING","missing addressed aggregate is never zero");
 s.map.delete("risk_meta_v2");
 check((await handleNativeRiskCommand(s,session,{schema:"okx.risk-command/v1",command_id:"summary_12346",installation_id:initial.installation_id,action:{action:"SUMMARY"}},now)).reason==="RISK_BOOK_MISSING_OR_CORRUPT","missing central state is never zero budget");

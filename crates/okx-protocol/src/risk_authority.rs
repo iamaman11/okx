@@ -147,6 +147,9 @@ pub enum RiskReservationState {
 )]
 pub enum RiskCommandAction {
     Summary {},
+    AccountSummary {
+        account_key: String,
+    },
     Inspect {
         reservation_key: String,
         plan_sha256: String,
@@ -201,6 +204,11 @@ impl RiskCommand {
         }
         match &self.action {
             RiskCommandAction::Summary {} => true,
+            RiskCommandAction::AccountSummary { account_key } => {
+                account_key.starts_with("okx:real:")
+                    && account_key.len() == 73
+                    && hash(&account_key[9..])
+            }
             RiskCommandAction::Inspect {
                 reservation_key,
                 plan_sha256,
@@ -331,6 +339,27 @@ impl RiskBudgetSnapshot {
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct RiskAccountBudget {
+    pub account_key: String,
+    pub active_reservations: u64,
+    pub occupied_usd: String,
+    pub cumulative_loss_usd: String,
+    pub latest_activity_ms: u64,
+}
+impl RiskAccountBudget {
+    fn valid(&self) -> bool {
+        self.account_key.starts_with("okx:real:")
+            && self.account_key.len() == 73
+            && hash(&self.account_key[9..])
+            && (self.active_reservations == 0) == (self.occupied_usd == "0")
+            && (self.active_reservations == 0 || self.latest_activity_ms > 0)
+            && [&self.occupied_usd, &self.cumulative_loss_usd]
+                .iter()
+                .all(|v| v.as_str() == "0" || positive(v))
+    }
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RiskResult {
     pub schema: String,
     pub command_id: String,
@@ -345,6 +374,8 @@ pub struct RiskResult {
     #[serde(default)]
     pub reservation_state: Option<RiskReservationState>,
     pub budget: Option<RiskBudgetSnapshot>,
+    #[serde(default)]
+    pub account_budget: Option<RiskAccountBudget>,
 }
 impl RiskResult {
     pub fn valid(&self) -> bool {
@@ -352,7 +383,11 @@ impl RiskResult {
             && token(&self.command_id)
             && (self.status == RiskDecisionStatus::Denied
                 || self.status == RiskDecisionStatus::Observed
-                    && self.budget.as_ref().is_some_and(RiskBudgetSnapshot::valid)
+                    && (self.budget.as_ref().is_some_and(RiskBudgetSnapshot::valid)
+                        || self
+                            .account_budget
+                            .as_ref()
+                            .is_some_and(RiskAccountBudget::valid))
                     && self.reservation_key.is_none()
                     && self.risk_book_sequence.is_some()
                     && self.reservation_state.is_none()
@@ -369,7 +404,11 @@ impl RiskResult {
             }
             && (self.status == RiskDecisionStatus::Observed
                 && (self.reservation_state.is_some()
-                    || self.budget.as_ref().is_some_and(RiskBudgetSnapshot::valid))
+                    || (self.budget.as_ref().is_some_and(RiskBudgetSnapshot::valid)
+                        || self
+                            .account_budget
+                            .as_ref()
+                            .is_some_and(RiskAccountBudget::valid)))
                 || self.status != RiskDecisionStatus::Observed && self.reservation_state.is_none())
             && self
                 .reason
@@ -513,6 +552,7 @@ mod tests {
             existing_modelled_loss_usdt: None,
             reservation_state: None,
             budget: None,
+            account_budget: None,
         };
         assert!(result.valid());
         result.status = RiskDecisionStatus::PostAuthorized;

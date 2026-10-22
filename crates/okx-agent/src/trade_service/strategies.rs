@@ -73,6 +73,7 @@ impl TradeService {
                 let Some(r) = self.accounts.resolve(&config.alias).await else {
                     return;
                 };
+                let _ = self.reconcile_restored(&r).await;
                 let reconcile = async {
                     if let Ok(intents) = r
                         .execution

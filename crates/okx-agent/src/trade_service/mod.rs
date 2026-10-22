@@ -26,6 +26,7 @@ use tokio::sync::RwLock;
 mod execute;
 mod plan;
 mod reconcile;
+mod recovery;
 mod strategies;
 pub struct TradeService {
     accounts: Arc<AccountRuntimeRegistry>,

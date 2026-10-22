@@ -32,7 +32,12 @@ impl TradeService {
         let market = loop {
             match self
                 .public_ws
-                .fresh_snapshot(instrument, now() as u64, 2000, Utc::now().to_rfc3339())
+                .fresh_snapshot(
+                    instrument,
+                    now() as u64,
+                    crate::config::QUOTE_MAX_AGE_MS,
+                    Utc::now().to_rfc3339(),
+                )
                 .await
             {
                 Ok(m) => break m,
@@ -62,7 +67,7 @@ impl TradeService {
         let received = chrono::DateTime::parse_from_rfc3339(&snap.source_received_at)
             .map_err(err)?
             .timestamp_millis();
-        if now() - received > 5000
+        if !crate::config::evidence_fresh(received, now(), crate::config::ACCOUNT_MAX_AGE_MS)
             || received > now()
             || snap.account_uid_fingerprint != r.configuration.account_key.verified_uid
             || snap.position_mode != "long_short_mode"
@@ -285,7 +290,12 @@ impl TradeService {
         }
         let fresh = self
             .public_ws
-            .fresh_snapshot(instrument, now() as u64, 2000, Utc::now().to_rfc3339())
+            .fresh_snapshot(
+                instrument,
+                now() as u64,
+                crate::config::QUOTE_MAX_AGE_MS,
+                Utc::now().to_rfc3339(),
+            )
             .await
             .map_err(err)?;
         if fresh.generation != market.generation
@@ -293,7 +303,7 @@ impl TradeService {
         {
             return Err("PUBLIC_SOURCE_GENERATION_CHANGED".into());
         }
-        if now() - received > 5000 {
+        if !crate::config::evidence_fresh(received, now(), crate::config::ACCOUNT_MAX_AGE_MS) {
             return Err("ACCOUNT_EVIDENCE_EXPIRED_DURING_PLAN".into());
         }
         if Instant::now() >= until {
@@ -358,7 +368,13 @@ impl TradeService {
             .store
             .call(deadline(), move |s| {
                 let risk = s.financial_risk(now(), None)?;
-                if !risk.nav_complete || now() - risk.source_as_of > 5000 {
+                if !risk.nav_complete
+                    || !crate::config::evidence_fresh(
+                        risk.source_as_of,
+                        now(),
+                        crate::config::ACCOUNT_MAX_AGE_MS,
+                    )
+                {
                     return Err(okx_execution::StoreError::Invalid(
                         "FINANCIAL_SOURCE_INCOMPLETE_OR_STALE",
                     ));

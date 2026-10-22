@@ -147,6 +147,16 @@ export async function inspectRisk(storage:any,key:string):Promise<{meta:RiskMeta
 async function saveEntry(tx:any,meta:RiskMeta,entry:RiskEntry,delta:bigint){
  const a=accountKey(entry),s="risk_strategy_v2:"+strategyKey(entry);
  const strategy=units(await tx.get(s)??"0");if(strategy===null)throw Error("RISK_STRATEGY_AGGREGATE_CORRUPT");
+ const aggregateKey="risk_account_v2:"+a;
+ const prior=await tx.get(aggregateKey);
+ if(prior===undefined && meta.accounts[a]!==undefined)throw Error("RISK_ACCOUNT_AGGREGATE_MISSING");
+ const aggregate=prior??{active_reservations:0,occupied_usd:"0",occupied_usdt:"0",latest_activity_ms:0};
+ if(aggregate.occupied_usdt!==(meta.accounts[a]??"0"))throw Error("RISK_ACCOUNT_AGGREGATE_CORRUPT");
+ if(!Number.isSafeInteger(aggregate.active_reservations)||aggregate.active_reservations<0||units(aggregate.occupied_usd)===null)throw Error("RISK_ACCOUNT_AGGREGATE_CORRUPT");
+ const count=aggregate.active_reservations+(delta>0n?1:delta<0n?-1:0);
+ const usd=units(aggregate.occupied_usd)!+(delta===0n?0n:delta>0n?units(entry.loss_usd)!:-units(entry.loss_usd)!);
+ if(count<0||usd<0n)throw Error("RISK_ACCOUNT_AGGREGATE_CORRUPT");
+ await tx.put(aggregateKey,{active_reservations:count,occupied_usd:amount(usd),occupied_usdt:amount(units(aggregate.occupied_usdt)!+delta),latest_activity_ms:Date.now()});
  const next={...meta,sequence:meta.sequence+1,occupied_usdt:amount(units(meta.occupied_usdt)!+delta),occupied_usd:amount(units(meta.occupied_usd)!+(delta===0n?0n:delta>0n?units(entry.loss_usd)!:-units(entry.loss_usd)!)),accounts:{...meta.accounts,[a]:amount(units(meta.accounts[a]??"0")!+delta)}};
  await tx.put(s,amount(strategy+delta));
  await tx.put(entryKey(entry.key),entry);await tx.put(KEY,next);return next;

@@ -10,7 +10,16 @@ impl AccountStore {
         let generation = self
             .cursor("account_snapshot", "account")?
             .map(|c| c.generation);
-        let mut coverage_complete = generation.is_some();
+        let audit = self.cursor("recovery_audit", "account")?;
+        let audit_watermark = audit.as_ref().map(|c| c.watermark);
+        let mut coverage_complete = generation.is_some()
+            && audit.is_some_and(|c| {
+                Some(c.generation) == generation
+                    && c.watermark >= threshold
+                    && c.watermark <= now
+                    && c.cursor.is_empty()
+                    && c.coverage_gaps.is_empty()
+            });
         for (source, part) in [
             ("fills", "SPOT"),
             ("fills", "SWAP"),
@@ -20,14 +29,15 @@ impl AccountStore {
             ("orders", "account"),
             ("account_snapshot", "account"),
         ] {
-            let cursor = self.cursor(source, part)?;
-            coverage_complete &= cursor.is_some_and(|c| {
+            let historical = matches!(source, "fills" | "bills");
+            coverage_complete &= self.cursor(source, part)?.is_some_and(|c| {
                 Some(c.generation) == generation
                     && c.watermark >= threshold
+                    && c.watermark <= now
                     && c.coverage_gaps.is_empty()
                     && c.cursor.is_empty()
-                    && now >= c.watermark
-                    && now - c.watermark <= 5000
+                    && audit_watermark.is_some_and(|watermark| c.watermark >= watermark)
+                    && (historical || now - c.watermark <= 5000)
             });
         }
         let ids = {

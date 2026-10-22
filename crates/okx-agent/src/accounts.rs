@@ -609,7 +609,7 @@ pub(crate) async fn verify_credentials(
     Ok(result.account_uid_fingerprint)
 }
 
-fn acquire_identity_lease(root: &Path, key: &AccountKey) -> AgentResult<File> {
+pub(crate) fn acquire_identity_lease(root: &Path, key: &AccountKey) -> AgentResult<File> {
     fs::create_dir_all(root)?;
     let lease = OpenOptions::new()
         .read(true)

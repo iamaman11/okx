@@ -10,6 +10,7 @@ const SHA=/^[0-9a-f]{64}$/;
 type ResultStatus="DENIED"|"HELD"|"POST_AUTHORIZED"|"UPDATED"|"OBSERVED";
 interface Result {
   schema:typeof RESULT_SCHEMA;command_id:string;status:ResultStatus;
+  account_budget?:{account_key:string;active_reservations:number;occupied_usd:string;cumulative_loss_usd:string;latest_activity_ms:number};
   budget?:{campaign_limit_usd:string;consumed_loss_usd:string;reserved_loss_usd:string;remaining_loss_usd:string;occupied_modelled_loss_usdt:string;source_as_of_ms:number|null};
   reason:string|null;reservation_key:string|null;
   risk_book_sequence:number|null;policy_revision:number|null;
@@ -63,6 +64,21 @@ export async function handleNativeRiskCommand(
   const installation=await storage.get(GOVERNANCE_STORAGE_KEY);
   if(!validGovernance(installation)||raw.installation_id!==installation.installation_id)return deny(id,"INSTALLATION_ID_MISMATCH");
   const a=raw.action;
+  if(a.action==="ACCOUNT_SUMMARY"){
+    if(await storage.get("generation")!==session.connection_generation)return deny(id,"STALE_NATIVE_INSPECTION_SESSION");
+    if(typeof a.account_key!=="string"||!/^okx:real:[0-9a-f]{64}$/.test(a.account_key)||!installation.accounts.some((v:any)=>v.account_key===a.account_key))return deny(id,"ACCOUNT_ACCESS_MISSING");
+    const accountKey=a.account_key;
+    return storage.transaction(async(tx:any)=>{
+      const meta=await readRiskBook(tx);if(!meta)return deny(id,"RISK_BOOK_MISSING_OR_CORRUPT");
+      const stored=await tx.get("risk_account_v2:"+a.account_key);
+      if(!stored&&meta.accounts[accountKey]!==undefined)return deny(id,"RISK_ACCOUNT_AGGREGATE_MISSING");
+      const row=stored??{active_reservations:0,occupied_usd:"0",occupied_usdt:"0",latest_activity_ms:0};
+      const loss=await tx.get("risk_loss_v2:"+a.account_key)??"0";
+      if(row.occupied_usdt!==(meta.accounts[accountKey]??"0")||(row.active_reservations===0)!==(row.occupied_usd==="0"))return deny(id,"RISK_ACCOUNT_AGGREGATE_CORRUPT");
+      if(!Number.isSafeInteger(row.active_reservations)||row.active_reservations<0||units(row.occupied_usd)===null||units(loss)===null||!Number.isSafeInteger(row.latest_activity_ms))return deny(id,"RISK_ACCOUNT_AGGREGATE_CORRUPT");
+      return {...deny(id,""),reason:null,status:"OBSERVED",risk_book_sequence:meta.sequence,policy_revision:installation.revision,account_budget:{account_key:accountKey,active_reservations:row.active_reservations,occupied_usd:row.occupied_usd,latest_activity_ms:row.latest_activity_ms,cumulative_loss_usd:loss}} as Result;
+    });
+  }
   if(a.action==="SUMMARY"){
     if(await storage.get("generation")!==session.connection_generation)return deny(id,"STALE_NATIVE_INSPECTION_SESSION");
     const meta=await readRiskBook(storage);if(!meta)return deny(id,"RISK_BOOK_MISSING_OR_CORRUPT");

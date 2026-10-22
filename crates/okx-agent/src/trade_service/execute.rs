@@ -275,7 +275,12 @@ impl TradeService {
         }
         let market = self
             .public_ws
-            .fresh_snapshot(instrument, now() as u64, 2000, Utc::now().to_rfc3339())
+            .fresh_snapshot(
+                instrument,
+                now() as u64,
+                crate::config::QUOTE_MAX_AGE_MS,
+                Utc::now().to_rfc3339(),
+            )
             .await
             .map_err(err)?;
         validate_generation(plan.source_generation, market.generation as i64)?;
@@ -295,7 +300,7 @@ impl TradeService {
                 until
                     .saturating_duration_since(Instant::now())
                     .as_millis()
-                    .min(5000) as u64,
+                    .min(crate::config::ACCOUNT_MAX_AGE_MS as u128) as u64,
             )
             .map_err(err)?;
         let attached = plan
@@ -689,7 +694,7 @@ impl TradeService {
         keys.sort();
         occupied.sort_by(|a, b| a.account_key.cmp(&b.account_key));
         let generated = now();
-        if generated - floor > 5000 {
+        if !crate::config::evidence_fresh(floor, generated, crate::config::ACCOUNT_MAX_AGE_MS) {
             return Err("COHORT_EVIDENCE_STALE".into());
         }
         let content = digest(&evidence)?;

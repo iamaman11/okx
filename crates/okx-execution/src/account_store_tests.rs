@@ -1368,3 +1368,67 @@ fn strategy_status_bounds_owned_positions_and_uses_instance_index() {
     let plan:String=s.connection.query_row("EXPLAIN QUERY PLAN SELECT lot_id FROM position_lots WHERE instance_id='manual' AND remaining_qty<>'0' ORDER BY instrument_id,side,opened_at,lot_id LIMIT 51",[],|r|r.get(3)).unwrap();
     assert!(plan.contains("idx_lots_instance_active"));
 }
+
+#[test]
+fn recovery_history_age_is_separate_from_current_evidence_freshness() {
+    let mut s = store();
+    let now = 20000;
+    for (source, part) in [
+        ("fills", "SPOT"),
+        ("fills", "SWAP"),
+        ("fills", "FUTURES"),
+        ("fills", "OPTION"),
+        ("bills", "account"),
+        ("recovery_audit", "account"),
+        ("orders", "account"),
+        ("account_snapshot", "account"),
+    ] {
+        let watermark = if matches!(source, "orders" | "account_snapshot") {
+            now
+        } else {
+            10000
+        };
+        s.ingest_page(&IngestPage {
+            cursor: Some(SourceCursor {
+                source: source.into(),
+                stream_partition: part.into(),
+                cursor: String::new(),
+                watermark,
+                generation: 1,
+                coverage_gaps: String::new(),
+            }),
+            ..Default::default()
+        })
+        .unwrap();
+    }
+    assert!(s.recovery_snapshot(now).unwrap().coverage_complete);
+    s.connection
+        .execute(
+            "UPDATE source_cursors SET watermark=9999 WHERE source='bills'",
+            [],
+        )
+        .unwrap();
+    assert!(!s.recovery_snapshot(now).unwrap().coverage_complete);
+    s.connection
+        .execute(
+            "UPDATE source_cursors SET watermark=10000,generation=2 WHERE source='bills'",
+            [],
+        )
+        .unwrap();
+    assert!(!s.recovery_snapshot(now).unwrap().coverage_complete);
+    s.connection
+        .execute(
+            "UPDATE source_cursors SET generation=1,coverage_gaps='missing' WHERE source='bills'",
+            [],
+        )
+        .unwrap();
+    assert!(!s.recovery_snapshot(now).unwrap().coverage_complete);
+    s.connection
+        .execute(
+            "UPDATE source_cursors SET coverage_gaps='' WHERE source='bills'",
+            [],
+        )
+        .unwrap();
+    assert!(s.recovery_snapshot(now).unwrap().coverage_complete);
+    assert!(!s.recovery_snapshot(now + 5001).unwrap().coverage_complete);
+}

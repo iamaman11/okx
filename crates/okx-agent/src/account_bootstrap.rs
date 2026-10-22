@@ -347,6 +347,9 @@ impl AccountBootstrapper {
 
     pub async fn snapshot(&self) -> Result<AccountSnapshot, AccountBootstrapError> {
         let config = self.api.config().await?;
+        // Config completes first; every parallel response below is newer.
+        // Keep that oldest receipt so a slow batch cannot appear freshly read.
+        let source_received_at = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
         let permissions = strict_read_only_permissions(&config.perm)?;
 
         let (balance, positions, pending_orders) = tokio::try_join!(
@@ -354,8 +357,6 @@ impl AccountBootstrapper {
             self.api.positions(),
             self.api.pending_orders(),
         )?;
-        let source_received_at = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
-
         Ok(AccountSnapshot::from_rest_bootstrap(
             source_received_at,
             config,

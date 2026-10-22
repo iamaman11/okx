@@ -179,6 +179,10 @@ pub async fn initialize_account(
     if installation(root)? != installation_id {
         return Err(error("INSTALLATION_MISMATCH"));
     }
+    let _identity_lease = crate::accounts::acquire_identity_lease(
+        &crate::config::default_root().join("account-leases"),
+        key,
+    )?;
     let config = catalog(root, key)?;
     if config.connect_operation_id != operation_id {
         return Err(error("INITIALIZE_OPERATION_CONFLICT"));

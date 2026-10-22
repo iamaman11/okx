@@ -132,7 +132,7 @@ async fn execute(
                 .map_err(|_| "ACCOUNT_SOURCE_TIME_INVALID")?
                 .timestamp_millis();
             let now = Utc::now().timestamp_millis();
-            if now < observed || now - observed > 5000 {
+            if !crate::config::evidence_fresh(observed, now, crate::config::ACCOUNT_MAX_AGE_MS) {
                 return Err("WAITING_ACCOUNT_EVIDENCE".into());
             }
             Ok(
@@ -170,7 +170,7 @@ async fn execute(
                 .fresh_snapshot(
                     instrument,
                     Utc::now().timestamp_millis() as u64,
-                    2000,
+                    crate::config::QUOTE_MAX_AGE_MS,
                     Utc::now().to_rfc3339(),
                 )
                 .await;

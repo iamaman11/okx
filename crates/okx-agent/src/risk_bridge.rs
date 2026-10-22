@@ -178,6 +178,7 @@ mod tests {
             },
             reservation_state: None,
             budget: None,
+            account_budget: None,
         }
     }
     fn post(held: &RiskResult) -> RiskCommand {
