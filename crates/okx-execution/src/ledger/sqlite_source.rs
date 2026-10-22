@@ -47,6 +47,22 @@ CREATE TABLE IF NOT EXISTS native_source_cursors (
 ) STRICT;
 CREATE INDEX IF NOT EXISTS idx_source_receipt ON
  native_source_cursors(run_id,receipt_ms);
+CREATE TABLE IF NOT EXISTS native_source_finance_order (
+    run_id TEXT NOT NULL,
+    event_key TEXT NOT NULL,
+    event_kind TEXT NOT NULL CHECK(event_kind IN ('ORDER','FILL','BILL')),
+    exchange_time_ms INTEGER NOT NULL CHECK(exchange_time_ms > 0),
+    payload_digest TEXT NOT NULL,
+    PRIMARY KEY(run_id,event_key),
+    FOREIGN KEY(run_id,event_key) REFERENCES native_source_events(run_id,event_key)
+) STRICT;
+CREATE INDEX IF NOT EXISTS idx_native_financial_chrono
+ ON native_source_finance_order(run_id,event_kind,exchange_time_ms,event_key);
+CREATE TRIGGER IF NOT EXISTS immutable_finance_order_update
+ BEFORE UPDATE ON native_source_finance_order BEGIN SELECT RAISE(ABORT,'IMMUTABLE_FINANCIAL_SOURCE'); END;
+CREATE TRIGGER IF NOT EXISTS immutable_finance_order_delete
+ BEFORE DELETE ON native_source_finance_order BEGIN SELECT RAISE(ABORT,'IMMUTABLE_FINANCIAL_SOURCE'); END;
+
 CREATE TRIGGER IF NOT EXISTS immutable_native_event_update
 BEFORE UPDATE ON native_source_events BEGIN SELECT RAISE(ABORT,'IMMUTABLE_SOURCE'); END;
 CREATE TRIGGER IF NOT EXISTS immutable_native_event_delete
@@ -56,6 +72,95 @@ BEFORE UPDATE ON native_source_cursors BEGIN SELECT RAISE(ABORT,'IMMUTABLE_SOURC
 CREATE TRIGGER IF NOT EXISTS immutable_native_cursor_delete
 BEFORE DELETE ON native_source_cursors BEGIN SELECT RAISE(ABORT,'IMMUTABLE_SOURCE'); END;
 ";
+
+/// An append-only SQL ordering projection, derived from the SAME sealed
+/// source fact and inserted in the SAME WAL transaction. It is never an
+/// independent execution or financial authority.
+fn index_financial_source_event(
+    tx: &Transaction<'_>,
+    run_id: &str,
+    event_key: &str,
+    event: &StoredExchangeEvent,
+) -> Result<(), ExecutionLedgerError> {
+    let source=event.payload.get("source").and_then(serde_json::Value::as_str)
+        .ok_or(ExecutionLedgerError::Corrupt("missing native event source"))?;
+    let (kind,field)=match source {
+        "OKX_REST_ORDER"=>("ORDER","uTime"),
+        "OKX_REST_FILL"=>("FILL","ts"),
+        "OKX_REST_BILL"=>("BILL","ts"),
+        _=>return Err(ExecutionLedgerError::Corrupt("unknown native financial event source")),
+    };
+    let ts=event.payload.get(field)
+        .and_then(|value| value.as_i64().or_else(||value.as_str().and_then(|s|s.parse::<i64>().ok())))
+        .filter(|n|*n>0)
+        .ok_or(ExecutionLedgerError::Corrupt("invalid native indexed financial time"))?;
+    let digest=checksum(&encode(event)?);
+    let inserted=tx.execute(
+        "INSERT INTO native_source_finance_order
+         (run_id,event_key,event_kind,exchange_time_ms,payload_digest)
+         VALUES(?1,?2,?3,?4,?5) ON CONFLICT(run_id,event_key) DO NOTHING",
+        params![run_id,event_key,kind,ts,&digest],
+    ).map_err(io)?;
+    if inserted==0 {
+        let saved:(String,i64,String)=tx.query_row(
+            "SELECT event_kind,exchange_time_ms,payload_digest
+             FROM native_source_finance_order WHERE run_id=?1 AND event_key=?2",
+            params![run_id,event_key],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)),
+        ).map_err(io)?;
+        if saved.0!=kind || saved.1!=ts || saved.2!=digest {
+            return Err(ExecutionLedgerError::ExchangeEvidenceConflict);
+        }
+    }
+    Ok(())
+}
+
+/// Every active finance read consumes ordered, typed SQL rows. Historical
+/// events remain sealed on disk; the callback never stores a full source map.
+pub(super) fn visit_financial_kind<F>(
+    connection: &Connection,
+    run_id: &str,
+    expected_uid: &str,
+    kind: &str,
+    mut visit: F,
+) -> Result<(), ExecutionLedgerError>
+where
+    F: FnMut(&str, &StoredExchangeEvent) -> Result<(), ExecutionLedgerError>,
+{
+    let uid:String=connection.query_row(
+        "SELECT uid FROM native_source_runs WHERE run_id=?1",params![run_id],|r|r.get(0)
+    ).map_err(io)?;
+    if uid!=expected_uid || !matches!(kind,"FILL"|"BILL") {
+        return Err(ExecutionLedgerError::AccountScopeMismatch);
+    }
+    let mut stmt=connection.prepare(
+        "SELECT e.event_key,e.payload_digest,length(e.payload),e.payload,
+                i.payload_digest,i.exchange_time_ms
+         FROM native_source_finance_order i
+         JOIN native_source_events e ON e.run_id=i.run_id AND e.event_key=i.event_key
+         WHERE i.run_id=?1 AND i.event_kind=?2
+         ORDER BY i.exchange_time_ms,i.event_key"
+    ).map_err(io)?;
+    let mut rows=stmt.query(params![run_id,kind]).map_err(io)?;
+    while let Some(row)=rows.next().map_err(io)? {
+        let key:String=row.get(0).map_err(io)?;
+        let digest:String=row.get(1).map_err(io)?;
+        let bytes=source_row_bytes(row,2)?;
+        let indexed_digest:String=row.get(4).map_err(io)?;
+        let indexed_time:i64=row.get(5).map_err(io)?;
+        if checksum(&bytes)!=digest || digest!=indexed_digest {
+            return Err(ExecutionLedgerError::Corrupt("native ordered finance source digest"));
+        }
+        let event:StoredExchangeEvent=decode(&bytes)?;
+        let expected=if kind=="FILL" {"OKX_REST_FILL"} else {"OKX_REST_BILL"};
+        let actual_time=event.payload.get("ts")
+            .and_then(|v|v.as_i64().or_else(||v.as_str().and_then(|s|s.parse::<i64>().ok())));
+        if event.payload["source"]!=expected || actual_time!=Some(indexed_time) {
+            return Err(ExecutionLedgerError::Corrupt("native ordered finance source identity"));
+        }
+        visit(&key,&event)?;
+    }
+    Ok(())
+}
 
 /// Merge source keys in their canonical index order: prior rows must
 /// reappear byte-for-byte, and only NEW keys are held temporarily. Avoid
@@ -168,6 +273,7 @@ pub(super) fn persist(
         )
         .map_err(io)?;
         super::sqlite_finance::persist_event(tx, &source.run_id, key, event)?;
+        index_financial_source_event(tx,&source.run_id,key,event)?;
     }
     let new_cursors = new_source_keys(
         tx,
@@ -260,6 +366,7 @@ pub(super) fn append_window_delta(
         )
         .map_err(io)?;
         super::sqlite_finance::persist_event(tx, &delta.run_id, key, event)?;
+        index_financial_source_event(tx,&delta.run_id,key,event)?;
         changed = true;
     }
     for (key, cursor) in &delta.cursors {
@@ -883,6 +990,19 @@ mod tests {
             strategy_run_id: None,
             allocation: "UNALLOCATED".to_owned(),
         };
+        let fill = |trade: &str, order: &str, time: u64| StoredExchangeEvent {
+            payload: serde_json::json!({
+                "source": "OKX_REST_FILL",
+                "instType": "SWAP", "instId": "BTC-USDT-SWAP",
+                "tradeId": trade, "ordId": order,
+                "side": "buy", "posSide": "long",
+                "fillPx": "100", "fillSz": "0.01",
+                "fee": "-0.01", "feeCcy": "USDT", "ts": time
+            }),
+            source_intent_id: None,
+            strategy_run_id: None,
+            allocation: "UNALLOCATED".to_owned(),
+        };
         let cursor = |receipt: &str| ExchangeCoverageCursor {
             source: "OKX_REST_ACCOUNT_HISTORY".to_owned(),
             source_received_at: receipt.to_owned(),
@@ -897,6 +1017,10 @@ mod tests {
         first.events.insert(
             "order:external-1:1000".to_owned(),
             order("external-1", "1000"),
+        );
+        first.events.insert(
+            "fill:SWAP:BTC-USDT-SWAP:fill-later".to_owned(),
+            fill("fill-later", "external-1", 2500),
         );
         first
             .cursors
@@ -917,6 +1041,10 @@ mod tests {
         second.events.insert(
             "order:external-2:2000".to_owned(),
             order("external-2", "2000"),
+        );
+        second.events.insert(
+            "fill:SWAP:BTC-USDT-SWAP:fill-earlier".to_owned(),
+            fill("fill-earlier", "external-2", 1500),
         );
         second
             .cursors
@@ -990,6 +1118,13 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM exchange_orders", [], |r| r.get(0))
             .unwrap();
         assert_eq!(count, 2);
+        let mut seen_times = Vec::new();
+        visit_financial_kind(&c, &empty.run_id, &empty.account_uid, "FILL", |_, event| {
+            seen_times.push(event.payload["ts"].as_u64().unwrap());
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(seen_times, vec![1500, 2500], "out-of-order REST arrivals must be processed chronologically");
         let mut bills = 0usize;
         visit_bill_events(&c, &empty.run_id, &empty.account_uid, |_, _| {
             bills += 1;

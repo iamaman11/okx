@@ -191,9 +191,12 @@ pub(crate) struct FinanceSourceAudit {
 }
 pub(crate) trait FinanceSourceReader {
     fn audit(&self) -> Result<FinanceSourceAudit, ExecutionLedgerError>;
-    fn fills(
+    fn visit_fills(
         &self,
-    ) -> Result<Vec<crate::exchange_evidence::StoredExchangeEvent>, ExecutionLedgerError>;
+        visit: &mut dyn FnMut(
+            &crate::exchange_evidence::StoredExchangeEvent,
+        ) -> Result<(), ExecutionLedgerError>,
+    ) -> Result<(), ExecutionLedgerError>;
     fn bill(
         &self,
         key: &str,
@@ -253,16 +256,22 @@ impl FinanceSourceReader for LegacyFinanceReader<'_> {
                 .any(|c| !c.order_complete || !c.fill_complete || !c.bill_complete),
         })
     }
-    fn fills(
+    fn visit_fills(
         &self,
-    ) -> Result<Vec<crate::exchange_evidence::StoredExchangeEvent>, ExecutionLedgerError> {
-        Ok(self
-            .source
-            .events
-            .values()
+        visit: &mut dyn FnMut(
+            &crate::exchange_evidence::StoredExchangeEvent,
+        ) -> Result<(), ExecutionLedgerError>,
+    ) -> Result<(), ExecutionLedgerError> {
+        let mut fills = self.source.events.values()
             .filter(|e| e.payload["source"] == "OKX_REST_FILL")
-            .cloned()
-            .collect())
+            .collect::<Vec<_>>();
+        fills.sort_by(|a,b| {
+            timestamp(&a.payload,"ts").cmp(&timestamp(&b.payload,"ts"))
+                .then(string(&a.payload,"instId").cmp(&string(&b.payload,"instId")))
+                .then(string(&a.payload,"tradeId").cmp(&string(&b.payload,"tradeId")))
+        });
+        for fill in fills {visit(fill)?;}
+        Ok(())
     }
     fn bill(
         &self,
@@ -844,76 +853,39 @@ pub(crate) fn assess_persisted_financial_period_from_reader(
     for entry in entries {
         reader.validate_entry(entry, run.started_at_ms, &mut reasons)?;
     }
-    let mut fills = Vec::<FilledLeg>::new();
-    let fill_events = reader.fills()?;
-    for item in &fill_events {
-        let p = &item.payload;
-        match (
-            timestamp(p, "ts"),
-            string(p, "instId"),
-            string(p, "posSide"),
-            string(p, "side"),
-            string(p, "ordId"),
-            string(p, "clOrdId"),
-            string(p, "tradeId"),
-            string(p, "billId"),
-            amount(p, "fillSz"),
-            amount(p, "fillPx"),
-        ) {
-            (
-                Some(ts),
-                Some(inst),
-                Some(pos),
-                Some(side),
-                Some(ord),
-                Some(client),
-                Some(trade),
-                Some(bill),
-                Some(size),
-                Some(price),
-            ) if ts >= run.started_at_ms && size > Decimal::ZERO && price > Decimal::ZERO => {
-                fills.push(FilledLeg {
-                    source: item,
-                    ts,
-                    inst: inst.to_owned(),
-                    pos: pos.to_owned(),
-                    side: side.to_owned(),
-                    ord: ord.to_owned(),
-                    client: client.to_owned(),
-                    trade: trade.to_owned(),
-                    bill: bill.to_owned(),
-                    size,
-                    price,
-                });
-            }
-            _ => {
-                reasons.insert("missing_source_fill_identity");
-            }
+    // One ordered stream; no historical fill collection is retained.
+    let mut previous_fill: Option<(u64,String,String,String)> = None;
+    reader.visit_fills(&mut |item| {
+        let p=&item.payload;
+        let (Some(ts),Some(inst),Some(pos),Some(side),Some(ord),Some(client),Some(trade),Some(bill),Some(size),Some(price))=(
+            timestamp(p,"ts"),string(p,"instId"),string(p,"posSide"),
+            string(p,"side"),string(p,"ordId"),string(p,"clOrdId"),
+            string(p,"tradeId"),string(p,"billId"),amount(p,"fillSz"),amount(p,"fillPx"),
+        ) else {
+            reasons.insert("missing_source_fill_identity");
+            return Ok(());
+        };
+        if ts<run.started_at_ms || size<=Decimal::ZERO || price<=Decimal::ZERO {
+            reasons.insert("missing_source_fill_identity");
+            return Ok(());
         }
-    }
-    fills.sort_by(|a, b| {
-        a.ts.cmp(&b.ts)
-            .then(a.inst.cmp(&b.inst))
-            .then(a.trade.cmp(&b.trade))
-    });
-    for pair in fills.windows(2) {
-        if pair[0].ts == pair[1].ts
-            && pair[0].inst == pair[1].inst
-            && pair[0].pos == pair[1].pos
-            && pair[0].side != pair[1].side
-        {
-            reasons.insert("same_timestamp_opposite_fill_sequence");
-        }
-    }
-    for f in fills {
+        let f=FilledLeg {
+            source:item,ts,inst:inst.to_owned(),pos:pos.to_owned(),side:side.to_owned(),
+            ord:ord.to_owned(),client:client.to_owned(),trade:trade.to_owned(),
+            bill:bill.to_owned(),size,price,
+        };
+        if previous_fill.as_ref().is_some_and(|(prior_ts,prior_inst,prior_pos,prior_side)|
+            *prior_ts==f.ts && prior_inst==&f.inst && prior_pos==&f.pos && prior_side!=&f.side)
+        {reasons.insert("same_timestamp_opposite_fill_sequence");}
+        previous_fill=Some((f.ts,f.inst.clone(),f.pos.clone(),f.side.clone()));
         let item = f.source;
         let Some(intent) = item.source_intent_id.as_deref() else {
             reasons.insert("unattributed_account_fill");
-            continue;
+            return Ok(());
         };
         let Some(entry) = reader.entry(intent, entries)? else {
             reasons.insert("source_intent_not_present");
-            continue;
+            return Ok(());
         };
         let plan = &entry.record.plan;
         if entry.record.order_id.as_deref() != Some(f.ord.as_str())
@@ -925,7 +897,7 @@ pub(crate) fn assess_persisted_financial_period_from_reader(
             || entry.created_at_ms <= run.started_at_ms
         {
             reasons.insert("source_order_intent_identity_mismatch");
-            continue;
+            return Ok(());
         }
         if plan.action.is_risk_increasing()
             && (item.strategy_run_id.as_deref() != Some(run.allocation_id.as_str())
@@ -939,20 +911,20 @@ pub(crate) fn assess_persisted_financial_period_from_reader(
                     .is_none_or(|b| b.mandate.version != run.mandate_version))
         {
             reasons.insert("risk_increase_not_owned_by_run");
-            continue;
+            return Ok(());
         }
         if plan.action.is_risk_reducing()
             && (item.strategy_run_id.is_some() || entry.record.strategy_run_id.is_some())
         {
             reasons.insert("unsupported_reducer_run_binding");
-            continue;
+            return Ok(());
         }
         // Only exact originating order identity and native fill source can
         // establish this leg. A shared instrument is not a sufficient link.
         let matching_order = reader.exact_order(&f.ord, &f.client, &f.inst, intent)?;
         if !matching_order {
             reasons.insert("exact_source_order_missing");
-            continue;
+            return Ok(());
         }
         let mechanics = entry
             .record
@@ -976,12 +948,12 @@ pub(crate) fn assess_persisted_financial_period_from_reader(
         });
         let Some(ct) = ct else {
             reasons.insert("linear_contract_mechanics_unattested");
-            continue;
+            return Ok(());
         };
         let bill_key = format!("bill:{}", f.bill);
         let Some(b) = reader.bill(&bill_key)? else {
             reasons.insert("native_fill_bill_missing");
-            continue;
+            return Ok(());
         };
         let bp = &b.payload;
         if bp["source"] != "OKX_REST_BILL"
@@ -996,7 +968,7 @@ pub(crate) fn assess_persisted_financial_period_from_reader(
             || b.source_intent_id.as_deref() != Some(intent)
         {
             reasons.insert("fill_bill_provenance_or_currency_mismatch");
-            continue;
+            return Ok(());
         }
         let (Some(native_fee), Some(bill_fee), Some(native_pnl), Some(bill_pnl)) = (
             amount(&item.payload, "fee"),
@@ -1005,15 +977,15 @@ pub(crate) fn assess_persisted_financial_period_from_reader(
             amount(bp, "pnl"),
         ) else {
             reasons.insert("missing_native_fee_or_pnl");
-            continue;
+            return Ok(());
         };
         if native_fee != bill_fee || native_pnl != bill_pnl {
             reasons.insert("native_bill_fee_or_pnl_mismatch");
-            continue;
+            return Ok(());
         }
         if linked_bills.contains(&f.bill) {
             reasons.insert("duplicate_bill_consumption");
-            continue;
+            return Ok(());
         }
         if let Err(reason) = put_lot(
             &mut lots,
@@ -1028,13 +1000,14 @@ pub(crate) fn assess_persisted_financial_period_from_reader(
             },
         ) {
             reasons.insert(reason);
-            continue;
+            return Ok(());
         }
         linked_bills.insert(f.bill.clone());
         realized += native_pnl;
         fees += native_fee;
         processed += 1;
-    }
+        Ok(())
+    })?;
 
     // A separate bill, even for the same symbol, is not strategy-owned.
     // Funding subTypes carry no exact strategy/side link; never allocate them.

@@ -778,6 +778,17 @@ impl NativeFinanceReader {
             return Err(ExecutionLedgerError::AccountScopeMismatch);
         }
         let identity = super::sqlite_source::attest_indexed(&connection, &run.allocation_id, &uid)?;
+        let authoritative:i64=connection.query_row(
+            "SELECT COUNT(*) FROM native_source_events WHERE run_id=?1",
+            params![&run.allocation_id],|r|r.get(0),
+        ).map_err(io)?;
+        let indexed:i64=connection.query_row(
+            "SELECT COUNT(*) FROM native_source_finance_order WHERE run_id=?1",
+            params![&run.allocation_id],|r|r.get(0),
+        ).map_err(io)?;
+        if authoritative!=indexed {
+            return Err(ExecutionLedgerError::Corrupt("native finance/source index inventory mismatch"));
+        }
         Ok(Self {
             connection,
             run: run.clone(),
@@ -878,38 +889,25 @@ impl crate::strategy_finance::FinanceSourceReader for NativeFinanceReader {
             truncated: incomplete,
         })
     }
-    fn fills(&self) -> Result<Vec<StoredExchangeEvent>, ExecutionLedgerError> {
-        let mut result = Vec::new();
-        super::sqlite_source::visit_events(
-            &self.connection,
-            &self.run.allocation_id,
-            &self.run.account_uid_fingerprint,
-            |key, event| {
-                if key.starts_with("fill:") {
-                    if event.payload["source"] != "OKX_REST_FILL" {
-                        return Err(ExecutionLedgerError::Corrupt(
-                            "native indexed fill provenance",
-                        ));
-                    }
-                    result.push(event.clone());
-                }
-                Ok(())
-            },
-        )?;
-        Ok(result)
+    fn visit_fills(
+        &self,
+        visit: &mut dyn FnMut(&StoredExchangeEvent) -> Result<(),ExecutionLedgerError>,
+    ) -> Result<(),ExecutionLedgerError> {
+        super::sqlite_source::visit_financial_kind(
+            &self.connection,&self.run.allocation_id,&self.run.account_uid_fingerprint,
+            "FILL",|_,event|visit(event),
+        )
     }
     fn bill(&self, key: &str) -> Result<Option<StoredExchangeEvent>, ExecutionLedgerError> {
         self.source_event(key)
     }
     fn visit_bills(
         &self,
-        visitor: &mut dyn FnMut(&str, &StoredExchangeEvent) -> Result<(), ExecutionLedgerError>,
-    ) -> Result<(), ExecutionLedgerError> {
-        super::sqlite_source::visit_bill_events(
-            &self.connection,
-            &self.run.allocation_id,
-            &self.run.account_uid_fingerprint,
-            visitor,
+        visitor:&mut dyn FnMut(&str,&StoredExchangeEvent)->Result<(),ExecutionLedgerError>,
+    ) -> Result<(),ExecutionLedgerError> {
+        super::sqlite_source::visit_financial_kind(
+            &self.connection,&self.run.allocation_id,&self.run.account_uid_fingerprint,
+            "BILL",|key,event|visitor(key,event),
         )
     }
     fn entry(
