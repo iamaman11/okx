@@ -2914,15 +2914,19 @@ impl DurableExecutionLedger {
             } else {
                 closed.validate(
                     run,
-                    legacy_source.as_ref().ok_or(
-                        ExecutionLedgerError::StrategyRunNotQuarantinable,
-                    )?,
+                    legacy_source
+                        .as_ref()
+                        .ok_or(ExecutionLedgerError::StrategyRunNotQuarantinable)?,
                 )?;
             }
             return Ok(closed.clone());
         }
         let source_gap = native_source.as_ref().map_or_else(
-            || legacy_source.as_ref().is_some_and(|s| s.summary().source_gap_over_two_hours),
+            || {
+                legacy_source
+                    .as_ref()
+                    .is_some_and(|s| s.summary().source_gap_over_two_hours)
+            },
             |s| s.source_gap_over_two_hours,
         );
         let source_empty = if self.store.sqlite_native {
@@ -2986,9 +2990,9 @@ impl DurableExecutionLedger {
         } else {
             StrategyUnverifiedClosure::new(
                 run,
-                legacy_source.as_ref().ok_or(
-                    ExecutionLedgerError::StrategyRunNotQuarantinable,
-                )?,
+                legacy_source
+                    .as_ref()
+                    .ok_or(ExecutionLedgerError::StrategyRunNotQuarantinable)?,
                 observed_at_ms,
             )?
         };
@@ -3079,9 +3083,9 @@ impl DurableExecutionLedger {
         if let Some(done) = &self.strategy_periods.finalized_run {
             return Ok(done.clone());
         }
-        // Complete financial reconciliation FIRST: that operation owns and
-        // drops its source snapshot. Loading the finalization proof afterward
-        // avoids retaining two full historical maps concurrently.
+        // Complete financial reconciliation FIRST. Native finalization
+        // then verifies the SQL source digest without loading old events;
+        // legacy v14 still validates its sealed in-memory source.
         let result = self
             .financial_period(facts, coherent)
             .ok_or(ExecutionLedgerError::StrategyRunNotFinalizable)?;

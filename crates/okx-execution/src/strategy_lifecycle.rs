@@ -157,11 +157,7 @@ impl StrategyUnverifiedClosure {
         closed_at_ms: u64,
     ) -> Result<Self, ExecutionLedgerError> {
         evidence.validate()?;
-        Self::new_with_source_identity(
-            run,
-            &SourceIdentity::from_legacy(evidence),
-            closed_at_ms,
-        )
+        Self::new_with_source_identity(run, &SourceIdentity::from_legacy(evidence), closed_at_ms)
     }
 
     /// A fully authenticated SQL identity replaces the in-memory source map.
@@ -1226,12 +1222,15 @@ mod tests {
             2000,
         )
         .unwrap();
-        assert_eq!(legacy, indexed, "native and legacy finalization proofs must match");
+        assert_eq!(
+            legacy, indexed,
+            "native and legacy finalization proofs must match"
+        );
         let mut tampered = SourceIdentity::from_legacy(&evidence);
         tampered.checksum_sha256 = "0".repeat(64);
-        assert!(StrategyFinalization::new_with_source_identity(
-            &run, &tampered, &report, 2000
-        ).is_err());
+        assert!(
+            StrategyFinalization::new_with_source_identity(&run, &tampered, &report, 2000).is_err()
+        );
         for funding in [None, Some("1"), Some("-0.01"), Some("invalid")] {
             report.funding_usdt = funding.map(str::to_owned);
             assert!(matches!(
