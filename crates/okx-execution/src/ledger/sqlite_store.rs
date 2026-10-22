@@ -1955,7 +1955,10 @@ fn save_snapshot(
             // The native state census is a derived index, not a competing
             // order authority. A known REJECTED/unsent PREPARED does not
             // count as exchange-submitted risk; UNKNOWN always does.
-            if matches!(e.record.state, ExecutionState::Prepared | ExecutionState::Rejected) {
+            if matches!(
+                e.record.state,
+                ExecutionState::Prepared | ExecutionState::Rejected
+            ) {
                 tx.execute(
                     "DELETE FROM native_submitted_intents WHERE intent_id=?1",
                     params![id],
@@ -2347,10 +2350,17 @@ fn attest_snapshot(
         let payload = encode(&entry)?;
         // Ordered simultaneous cursors prove completeness, not merely
         // presence, of every native derived trading identity projection.
-        if !matches!(entry.record.state, ExecutionState::Prepared | ExecutionState::Rejected) {
-            let submitted_row = submitted.next().map_err(io)?.ok_or(
-                ExecutionLedgerError::Corrupt("missing native submitted intent"),
-            )?;
+        if !matches!(
+            entry.record.state,
+            ExecutionState::Prepared | ExecutionState::Rejected
+        ) {
+            let submitted_row =
+                submitted
+                    .next()
+                    .map_err(io)?
+                    .ok_or(ExecutionLedgerError::Corrupt(
+                        "missing native submitted intent",
+                    ))?;
             let submitted_id: String = submitted_row.get(0).map_err(io)?;
             if submitted_id != *id {
                 return Err(ExecutionLedgerError::Corrupt(
@@ -2359,9 +2369,12 @@ fn attest_snapshot(
             }
         }
         if let Some(order_id) = entry.record.order_id.as_deref() {
-            let link_row = links.next().map_err(io)?.ok_or(
-                ExecutionLedgerError::Corrupt("missing native venue order identity"),
-            )?;
+            let link_row = links
+                .next()
+                .map_err(io)?
+                .ok_or(ExecutionLedgerError::Corrupt(
+                    "missing native venue order identity",
+                ))?;
             let link_id: String = link_row.get(0).map_err(io)?;
             let link_order: String = link_row.get(1).map_err(io)?;
             if link_id != *id || link_order != order_id {
