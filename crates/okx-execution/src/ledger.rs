@@ -1892,6 +1892,16 @@ fn verified_daily_strategy_bill_loss(
     Ok(Some(gross_loss))
 }
 
+/// Readback census of the native WAL: only observed accounts/order IDs and
+/// a finite diagnostic sample are decoded into process memory. Any failure
+/// is an explicit integrity error, never an implicit flat-account witness.
+pub(crate) struct NativeReconciliationInventory {
+    pub total: usize,
+    pub submitted: usize,
+    pub candidates: Vec<ExecutionLedgerEntry>,
+    pub historical_sample: Vec<ExecutionLedgerEntry>,
+}
+
 #[derive(Debug)]
 pub struct DurableExecutionLedger {
     store: ExecutionLedgerStore,
@@ -3452,7 +3462,28 @@ impl DurableExecutionLedger {
         }
     }
 
-    /// Full-history read-only streaming cursor for account reconciliation.
+    /// Native account reconciliation counts all immutable historical states
+    /// using indexed SQL projections, but decodes only venue-observed intents
+    /// and a bounded sorted sample. No full historical RAM materialization.
+    pub(crate) fn native_reconciliation_inventory(
+        &self,
+        observed_clients: &std::collections::BTreeSet<&str>,
+        observed_order_ids: &std::collections::BTreeSet<&str>,
+        sample_limit: usize,
+    ) -> Result<Option<NativeReconciliationInventory>, ExecutionLedgerError> {
+        if !self.store.sqlite_native {
+            return Ok(None);
+        }
+        sqlite_store::native_reconciliation_inventory(
+            &self.store.path,
+            observed_clients,
+            observed_order_ids,
+            sample_limit,
+        )
+        .map(Some)
+    }
+
+    /// Full-history read-only streaming cursor retained for forensic audits.
     /// Each decoded and authenticated SQL row is released after the callback.
     pub(crate) fn visit_historical_entries<F>(
         &self,

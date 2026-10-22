@@ -112,7 +112,11 @@ fn connect_with_integrity(
                 entry_digest TEXT NOT NULL
              ) STRICT;
              CREATE INDEX IF NOT EXISTS idx_native_guard_instrument
-                ON native_guarded_intents(instrument_id, intent_id);",
+                ON native_guarded_intents(instrument_id, intent_id);
+             CREATE TABLE IF NOT EXISTS native_intent_order_link (
+                intent_id TEXT PRIMARY KEY REFERENCES ledger_entries(intent_id),
+                venue_order_id TEXT NOT NULL UNIQUE
+             ) STRICT;",
         )
         .map_err(io)?;
         tx.commit().map_err(io)?;
@@ -711,6 +715,125 @@ pub(super) fn source_linked_intents(
         out.insert(id.clone(), value);
     }
     Ok(out)
+}
+
+/// A verified point-in-time source read: O(observed IDs + requested sample)
+/// Rust objects, independently of the total historical execution count.
+/// The ledger is cold-attested on owner open; selected rows are fully decoded
+/// and checked against their immutable plan, current state and SHA256.
+pub(super) fn native_reconciliation_inventory(
+    path: &Path,
+    observed_clients: &BTreeSet<&str>,
+    observed_order_ids: &BTreeSet<&str>,
+    sample_limit: usize,
+) -> Result<NativeReconciliationInventory, ExecutionLedgerError> {
+    if sample_limit > 256 {
+        return Err(ExecutionLedgerError::Corrupt("reconciliation sample limit"));
+    }
+    let c = connect_indexed_read(path)?;
+    c.execute_batch("BEGIN DEFERRED TRANSACTION").map_err(io)?;
+    let uid: String = c.query_row(
+        "SELECT uid FROM ledger_state WHERE key=1", [], |r| r.get(0),
+    ).map_err(io)?;
+    require_account_read_scope(&c, &uid, false)?;
+    let mut total = 0usize;
+    let mut submitted = 0usize;
+    let mut stmt = c.prepare(
+        "SELECT current_state,COUNT(*) FROM intents GROUP BY current_state",
+    ).map_err(io)?;
+    let mut rows = stmt.query([]).map_err(io)?;
+    while let Some(row) = rows.next().map_err(io)? {
+        let state: String = row.get(0).map_err(io)?;
+        let count: i64 = row.get(1).map_err(io)?;
+        let count = usize::try_from(count).map_err(|_| {
+            ExecutionLedgerError::Corrupt("negative intent count")
+        })?;
+        total = total.checked_add(count).ok_or(
+            ExecutionLedgerError::Corrupt("intent census overflow")
+        )?;
+        match state.as_str() {
+            "Prepared" | "Rejected" => {}
+            "Submitting" | "Acknowledged" | "UnknownSubmission"
+            | "Live" | "PartiallyFilled" | "Filled" | "Canceled" => {
+                submitted = submitted.checked_add(count).ok_or(
+                    ExecutionLedgerError::Corrupt("submitted census overflow")
+                )?;
+            }
+            _ => return Err(ExecutionLedgerError::Corrupt("unknown SQL intent state")),
+        }
+    }
+    drop(rows);
+    drop(stmt);
+    let rows: i64 = c.query_row(
+        "SELECT COUNT(*) FROM ledger_entries", [], |r| r.get(0),
+    ).map_err(io)?;
+    if usize::try_from(rows).ok() != Some(total) {
+        return Err(ExecutionLedgerError::Corrupt("reconciliation census missing entries"));
+    }
+
+    let query = format!("{INDEXED_INTENT_COLUMNS} WHERE e.client_order_id=?1");
+    let mut by_client = c.prepare(&query).map_err(io)?;
+    let query = format!(
+        "{INDEXED_INTENT_COLUMNS}
+         JOIN native_intent_order_link link ON link.intent_id=e.intent_id
+         WHERE link.venue_order_id=?1"
+    );
+    let mut by_order = c.prepare(&query).map_err(io)?;
+    let mut candidates = BTreeMap::<String, ExecutionLedgerEntry>::new();
+    for client in observed_clients {
+        let mut rows = by_client.query(params![client]).map_err(io)?;
+        if let Some(row) = rows.next().map_err(io)? {
+            let value = verified_indexed_entry(row, &uid)?;
+            candidates.insert(value.record.plan.intent_id.clone(), value);
+            if rows.next().map_err(io)?.is_some() {
+                return Err(ExecutionLedgerError::Corrupt("duplicate native client owner"));
+            }
+        }
+    }
+    for order in observed_order_ids {
+        let mut rows = by_order.query(params![order]).map_err(io)?;
+        if let Some(row) = rows.next().map_err(io)? {
+            let value = verified_indexed_entry(row, &uid)?;
+            if value.record.order_id.as_deref() != Some(*order) {
+                return Err(ExecutionLedgerError::Corrupt(
+                    "native venue order identity projection mismatch",
+                ));
+            }
+            candidates.insert(value.record.plan.intent_id.clone(), value);
+            if rows.next().map_err(io)?.is_some() {
+                return Err(ExecutionLedgerError::Corrupt("duplicate native venue owner"));
+            }
+        }
+    }
+    drop(by_client);
+    drop(by_order);
+    // Over-fetch only the number of current venue matches: after the caller
+    // discards these, there must still be a full bounded unmatched sample.
+    let scan_bound = sample_limit.checked_add(candidates.len()).ok_or(
+        ExecutionLedgerError::Corrupt("reconciliation sample overflow")
+    )?;
+    let query = format!(
+        "{INDEXED_INTENT_COLUMNS}
+         WHERE i.current_state NOT IN ('Prepared','Rejected')
+         ORDER BY e.intent_id LIMIT ?1"
+    );
+    let mut historical_sample = Vec::new();
+    if scan_bound != 0 {
+        let limit = i64::try_from(scan_bound).map_err(|_| {
+            ExecutionLedgerError::Corrupt("reconciliation sample overflow")
+        })?;
+        let mut stmt = c.prepare(&query).map_err(io)?;
+        let mut rows = stmt.query(params![limit]).map_err(io)?;
+        while let Some(row) = rows.next().map_err(io)? {
+            historical_sample.push(verified_indexed_entry(row, &uid)?);
+        }
+    }
+    Ok(NativeReconciliationInventory {
+        total,
+        submitted,
+        candidates: candidates.into_values().collect(),
+        historical_sample,
+    })
 }
 
 /// Read a risk predicate over intents CREATED during the current
@@ -1799,6 +1922,34 @@ fn save_snapshot(
                 return Err(ExecutionLedgerError::Corrupt(
                     "SQLite intent projection lost",
                 ));
+            }
+            // The exchange order identity is permanently bound to its
+            // intent. The index is derived in the SAME WAL commit as the
+            // full signed record; it is never a parallel order authority.
+            if let Some(order_id) = e.record.order_id.as_deref() {
+                if order_id.is_empty() {
+                    return Err(ExecutionLedgerError::ExchangeEvidenceConflict);
+                }
+                let changed = tx.execute(
+                    "INSERT INTO native_intent_order_link(intent_id,venue_order_id)
+                     VALUES(?1,?2)
+                     ON CONFLICT(intent_id) DO UPDATE
+                     SET venue_order_id=excluded.venue_order_id
+                     WHERE native_intent_order_link.venue_order_id=excluded.venue_order_id",
+                    params![id, order_id],
+                ).map_err(io)?;
+                if changed != 1 {
+                    return Err(ExecutionLedgerError::ExchangeEvidenceConflict);
+                }
+            } else {
+                let prior: Option<String> = tx.query_row(
+                    "SELECT venue_order_id FROM native_intent_order_link WHERE intent_id=?1",
+                    params![id],
+                    |row| row.get(0),
+                ).optional().map_err(io)?;
+                if prior.is_some() {
+                    return Err(ExecutionLedgerError::ExchangeEvidenceConflict);
+                }
             }
             // Same WAL transaction as the authoritative intent and its
             // relational plan projection. A terminal historical intent
