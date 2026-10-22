@@ -1899,14 +1899,8 @@ pub(super) fn save_metadata(
     leverage: &[LeverageChangeAttempt],
 ) -> Result<(), ExecutionLedgerError> {
     save_metadata_inner(
-        path,
-        stop,
-        reservation,
-        source,
-        periods,
-        leverage,
-        None,
-        None,
+        path, stop, reservation, source, periods, leverage,
+        NativeMetadataChange::default(),
     )
 }
 
@@ -1927,8 +1921,10 @@ pub(super) fn save_opening_metadata(
         None,
         periods,
         leverage,
-        Some(opening),
-        None,
+        NativeMetadataChange {
+            opening: Some(opening),
+            nav_point: None,
+        },
     )
 }
 
@@ -2463,6 +2459,16 @@ fn persist_native_nav_point(
     Ok(())
 }
 
+struct IndexedNavPointRow {
+    payload: Vec<u8>,
+    digest: String,
+    nav: String,
+    peak: String,
+    loss: String,
+    previous: String,
+    observed_ms: i64,
+}
+
 /// One indexed NAV checkpoint; never materialize historical NAV into the Engine.
 pub(super) fn nav_watermark(
     path: &Path,
@@ -2479,37 +2485,35 @@ pub(super) fn nav_watermark(
             |r| r.get(0),
         )
         .map_err(io)?;
-    let row: Option<(Vec<u8>, String, String, String, String, String, i64)> = c
+    let row: Option<IndexedNavPointRow> = c
         .query_row(
             "SELECT point_payload,checkpoint_sha256,nav_decimal,
                 high_water_decimal,gross_daily_loss_decimal,previous_sha256,observed_at_ms
          FROM nav_points WHERE epoch_id=?1 ORDER BY observed_at_ms DESC LIMIT 1",
             params![epoch_id],
-            |r| {
-                Ok((
-                    r.get(0)?,
-                    r.get(1)?,
-                    r.get(2)?,
-                    r.get(3)?,
-                    r.get(4)?,
-                    r.get(5)?,
-                    r.get(6)?,
-                ))
-            },
+            |r| Ok(IndexedNavPointRow {
+                payload: r.get(0)?,
+                digest: r.get(1)?,
+                nav: r.get(2)?,
+                peak: r.get(3)?,
+                loss: r.get(4)?,
+                previous: r.get(5)?,
+                observed_ms: r.get(6)?,
+            }),
         )
         .optional()
         .map_err(io)?;
     let latest = row
-        .map(|(raw, digest, nav, peak, loss, prev, at)| {
-            let p: StrategyNavPoint = decode(&raw)?;
+        .map(|saved| {
+            let p: StrategyNavPoint = decode(&saved.payload)?;
             p.validate()?;
             if p.run_id != epoch_id
-                || p.checksum_sha256 != digest
-                || p.nav_usdt != nav
-                || p.high_water_usdt != peak
-                || p.daily_gross_loss_usdt != loss
-                || p.previous_sha256 != prev
-                || i64::try_from(p.observed_at_ms).ok() != Some(at)
+                || p.checksum_sha256 != saved.digest
+                || p.nav_usdt != saved.nav
+                || p.high_water_usdt != saved.peak
+                || p.daily_gross_loss_usdt != saved.loss
+                || p.previous_sha256 != saved.previous
+                || i64::try_from(p.observed_at_ms).ok() != Some(saved.observed_ms)
             {
                 return Err(ExecutionLedgerError::ExchangeEvidenceConflict);
             }
@@ -2523,6 +2527,12 @@ pub(super) fn nav_watermark(
         latest,
         usize::try_from(count).map_err(|_| ExecutionLedgerError::ExchangeEvidenceConflict)?,
     ))
+}
+
+#[derive(Default)]
+struct NativeMetadataChange<'a> {
+    opening: Option<&'a StrategyAllocationOpening>,
+    nav_point: Option<&'a StrategyNavPoint>,
 }
 
 /// The STOP, NAV, source receipt and daily risk remain ONE WAL commit.
@@ -2544,8 +2554,10 @@ pub(super) fn save_nav_metadata(
         None,
         periods,
         leverage,
-        None,
-        Some(point),
+        NativeMetadataChange {
+            opening: None,
+            nav_point: Some(point),
+        },
     )
 }
 
@@ -2556,9 +2568,9 @@ fn save_metadata_inner(
     source: Option<&DurableExchangeEvidence>,
     periods: &StrategyPeriodHistory,
     leverage: &[LeverageChangeAttempt],
-    opening: Option<&StrategyAllocationOpening>,
-    nav_point: Option<&StrategyNavPoint>,
+    change: NativeMetadataChange<'_>,
 ) -> Result<(), ExecutionLedgerError> {
+    let NativeMetadataChange { opening, nav_point } = change;
     if !path.exists() {
         return Err(ExecutionLedgerError::Corrupt(
             "native metadata mutation has no account DB",
