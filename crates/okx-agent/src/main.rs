@@ -376,20 +376,18 @@ async fn run(cli: Cli) -> AgentResult<()> {
                     production_trading,
                 )
                 .map(std::sync::Arc::new);
-                // The existing single-account owner remains available before
-                // the one-way v14 -> SQLite cutover. Once native, dispatch is
-                // selected by the immutable CONTROL-bound account identity,
-                // not a hard-coded "real"/"demo" string or request payload.
-                // The registry owns no additional executor, gateway or lease.
+                // Exactly one registered native account executor for the
+                // selected CONTROL identity. A missing SQL account never
+                // becomes a legacy runtime or a second transport.
                 let mut account_runtimes = ExecutionRuntimeRegistry::new();
                 let execution = match candidate_execution {
-                    Some(owner) if owner.native_account_key().is_some() => {
+                    Some(owner) => {
                         let key = account_runtimes
                             .register_existing(owner)
                             .map_err(AgentError::from)?;
                         account_runtimes.get(&key)
                     }
-                    legacy => legacy,
+                    None => None,
                 };
                 let cloudflare = cloudflare_ws_url.and_then(|ws_url| {
                     match load_native_cloudflare_token() {

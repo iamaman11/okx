@@ -468,7 +468,7 @@ impl MutationIngress {
 }
 
 pub struct ExecutionRuntime {
-    native_account_key: Option<AccountKey>,
+    native_account_key: AccountKey,
     mutation_ingress: MutationIngress,
     environment: OkxEnvironment,
     mode: ExecutionRuntimeMode,
@@ -504,10 +504,7 @@ impl ExecutionRuntimeRegistry {
         &mut self,
         owner: Arc<ExecutionRuntime>,
     ) -> Result<AccountKey, ExecutionLedgerError> {
-        let key = owner
-            .native_account_key()
-            .cloned()
-            .ok_or(ExecutionLedgerError::AccountScopeMismatch)?;
+        let key = owner.native_account_key().clone();
         if self.routes.keys().any(|prior| {
             prior.venue == key.venue
                 && prior.environment == key.environment
@@ -625,32 +622,22 @@ impl ExecutionRuntime {
             root,
             &mut writer_lease,
         )?;
-        let native_account_key = if store.is_sqlite_native() {
-            let bound = store
-                .bound_native_account_identity()?
-                .ok_or(okx_execution::ExecutionLedgerError::AccountScopeMismatch)?;
-            let expected_environment = if environment.demo {
-                okx_execution::LedgerEnvironment::Demo
-            } else {
-                okx_execution::LedgerEnvironment::Production
-            };
-            if bound.venue != okx_execution::LedgerVenue::Okx
-                || bound.environment != expected_environment
-            {
-                return Err(okx_execution::ExecutionLedgerError::AccountScopeMismatch.into());
-            }
-            // Account ID is an immutable CONTROL-bound identity. Never assume
-            // all Demo/Real credentials refer to literal "demo"/"real".
-            // The existing native credential preflight independently proves
-            // the exact UID before any venue mutation can be admitted.
-            Some(AccountKey::from(&bound))
+        let bound = store
+            .bound_native_account_identity()?
+            .ok_or(okx_execution::ExecutionLedgerError::AccountScopeMismatch)?;
+        let expected_environment = if environment.demo {
+            okx_execution::LedgerEnvironment::Demo
         } else {
-            None
+            okx_execution::LedgerEnvironment::Production
         };
-        let ledger = DurableExecutionLedger::open(store, observed_at_ms)?;
-        if let Some(key) = &native_account_key
-            && !ledger.account_scope_matches(&key.uid_fingerprint)?
+        if bound.venue != okx_execution::LedgerVenue::Okx
+            || bound.environment != expected_environment
         {
+            return Err(okx_execution::ExecutionLedgerError::AccountScopeMismatch.into());
+        }
+        let native_account_key = AccountKey::from(&bound);
+        let ledger = DurableExecutionLedger::open(store, observed_at_ms)?;
+        if !ledger.account_scope_matches(&native_account_key.uid_fingerprint)? {
             return Err(okx_execution::ExecutionLedgerError::AccountScopeMismatch.into());
         }
         Ok(Self {
@@ -672,8 +659,8 @@ impl ExecutionRuntime {
 
     /// The immutable, CONTROL-verified route of this owner. No user-supplied
     /// account selector or runtime mode can create this binding.
-    pub fn native_account_key(&self) -> Option<&AccountKey> {
-        self.native_account_key.as_ref()
+    pub fn native_account_key(&self) -> &AccountKey {
+        &self.native_account_key
     }
 
     /// The request holds the returned guard THROUGH the final executor
