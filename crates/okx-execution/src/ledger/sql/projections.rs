@@ -89,7 +89,17 @@ impl AccountStore {
             if prior != input_digest {
                 return Err(StoreError::Invalid("STRATEGY_DECISION_INPUT_CONFLICT"));
             }
-            return Ok(false);
+            // A pending decision is NOT a completed bar. If planning failed
+            // before the durable intent commit, resume the exact same key.
+            let has_intent: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM intents WHERE idempotency_key=?1)",
+                [decision_key], |r| r.get(0),
+            )?;
+            let terminal: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM operation_receipts WHERE operation_id=?1)",
+                [format!("strategy-no-trade:{id}")], |r| r.get(0),
+            )?;
+            return Ok(!has_intent && !terminal);
         }
         let enabled: bool = tx.query_row(
             "SELECT enabled FROM strategy_instances WHERE instance_id=?1",
@@ -103,12 +113,43 @@ impl AccountStore {
             "INSERT INTO decisions VALUES(?1,?2,?3,?4,?5,'strategy-bar/v1')",
             params![id, instance_id, now, input_digest, policy_revision],
         )?;
+        // Do not advance last_decision_key until an intent is prepared
+        // atomically, or the signal is durably recorded as no-trade.
+        tx.commit()?;
+        Ok(true)
+    }
+    pub fn finish_strategy_no_trade(
+        &mut self,
+        instance_id: &str,
+        decision_key: &str,
+        now: i64,
+    ) -> StoreResult<()> {
+        let version = self.strategy_definition(instance_id)?.version;
+        let id = format!("strategy:{instance_id}:{version}:{decision_key}");
+        let tx = self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let digest: String = tx.query_row(
+            "SELECT input_digest FROM decisions WHERE decision_id=?1 AND instance_id=?2",
+            params![id, instance_id], |r| r.get(0),
+        )?;
+        let has_intent: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM intents WHERE idempotency_key=?1)",
+            [decision_key], |r| r.get(0),
+        )?;
+        if has_intent {
+            return Err(StoreError::Invalid("STRATEGY_ALREADY_HAS_INTENT"));
+        }
+        tx.execute(
+            "INSERT INTO operation_receipts(operation_id,kind,request_hash,result_ref,committed_at)
+             VALUES(?1,'strategy_no_trade',?2,'NO_TRADE',?3)
+             ON CONFLICT(operation_id) DO NOTHING",
+            params![format!("strategy-no-trade:{id}"), digest, now],
+        )?;
         tx.execute(
             "UPDATE strategy_instances SET last_decision_key=?2 WHERE instance_id=?1",
             params![instance_id, decision_key],
         )?;
         tx.commit()?;
-        Ok(true)
+        Ok(())
     }
     pub fn account_summary(&self) -> StoreResult<serde_json::Value> {
         let mut s=self.connection.prepare("SELECT state,count(*) FROM intents WHERE state IN('PREPARED','RESERVED','POSTING','UNKNOWN','ACKNOWLEDGED','PARTIALLY_FILLED') GROUP BY state")?;
