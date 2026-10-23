@@ -14,7 +14,7 @@ impl AnalyticsService {
         &self,
         request: &MarketRequest,
         cancel: Arc<std::sync::atomic::AtomicBool>,
-    ) -> Result<Vec<Value>, String> {
+    ) -> Result<(Vec<Value>, Option<Value>), String> {
         let plan = planner::AnalysisPlan::build(&request.fields, request.start_ms, request.end_ms)?;
         let need_candles = plan.sources.contains("candles");
         let count = (request.end_ms - request.start_ms) / request.timeframe_ms;
@@ -111,6 +111,11 @@ impl AnalyticsService {
         let request = request.clone();
         self.cpu
             .run(cancel, move |cancel| {
+                let matrix = if matches!(request.action, MarketAction::Compare)
+                    && request.fields.iter().any(|field| field == "pearson_correlation") {
+                    if loaded.len() > 8 { return Err("CORRELATION_MATRIX_LIMIT:8".into()) }
+                    Some(pairwise_matrix(&loaded, request.timeframe_ms))
+                } else { None };
                 let peer = loaded
                     .first()
                     .and_then(|row| row.bars.as_ref().ok())
@@ -143,7 +148,7 @@ impl AnalyticsService {
                         }
                     });
                 }
-                Ok(rows)
+                Ok((rows, matrix))
             })
             .await
     }
@@ -167,6 +172,10 @@ fn compute_row(
     let high = bars.iter().map(|b| b.high).collect::<Vec<_>>();
     let low = bars.iter().map(|b| b.low).collect::<Vec<_>>();
     let volume = bars.iter().map(|b| b.volume).collect::<Vec<_>>();
+    let interior_gap = bars.windows(2).any(|pair| {
+        pair[1].time != pair[0].time.saturating_add(request.timeframe_ms)
+    });
+    if interior_gap { gaps.push("CANDLE_INTERIOR_GAP".into()); }
     if !bars.is_empty()
         && (bars.first().unwrap().time > request.start_ms.saturating_add(request.timeframe_ms)
             || bars
@@ -202,8 +211,8 @@ fn compute_row(
                 .and_then(|v| v.as_ref().ok())
                 .map(|v| v.iter().map(|(_, v)| v).sum()),
             Operator::PearsonCorrelation => peer.and_then(|peer| {
-                let a = bars.iter().map(|b| (b.time, b.close)).collect::<Vec<_>>();
-                let b = peer.iter().map(|b| (b.time, b.close)).collect::<Vec<_>>();
+                let a = log_returns(&bars, request.timeframe_ms)?;
+                let b = log_returns(peer, request.timeframe_ms)?;
                 okx_analysis::operators::correlation(&a, &b)
             }),
             Operator::VolumeChange => {
@@ -258,6 +267,9 @@ fn compute_row(
                 )?
             }
         };
+        let value = if interior_gap && !matches!(op,
+            Operator::SpreadBps | Operator::FundingSum | Operator::OiChange |
+            Operator::PositionSize | Operator::CostEstimate) { None } else { value };
         if value.is_none() {
             gaps.push(format!("MISSING_INPUT_OR_MINIMUM_SAMPLES:{field}"));
         }
@@ -268,9 +280,93 @@ fn compute_row(
         json!({"instrument":row.instrument,"metrics":metrics,"units":units,"parameters":{"ema_period":request.parameters.get("ema_period").unwrap_or(&14.0),"atr_period":request.parameters.get("atr_period").unwrap_or(&14.0),"rsi_period":request.parameters.get("rsi_period").unwrap_or(&14.0)},"source_start_ms":bars.first().map(|b|b.time),"source_end_ms":bars.last().map(|b|b.time),"unclosed_candles_excluded":row.excluded,"quality":if gaps.is_empty(){"complete"}else{"partial"},"gaps":gaps}),
     )
 }
+
+/// Closed-bar log returns indexed by the *later* candle. Missing, duplicate,
+/// out-of-order, nonpositive and nonfinite prices invalidate the series.
+fn log_returns(bars: &[Bar], timeframe_ms: u64) -> Option<Vec<(u64, f64)>> {
+    if bars.len() < 2 || timeframe_ms == 0 { return None; }
+    let mut out = Vec::with_capacity(bars.len() - 1);
+    for pair in bars.windows(2) {
+        if pair[1].time != pair[0].time.checked_add(timeframe_ms)?
+            || !pair[0].close.is_finite() || !pair[1].close.is_finite()
+            || pair[0].close <= 0.0 || pair[1].close <= 0.0 { return None; }
+        out.push((pair[1].time, (pair[1].close / pair[0].close).ln()));
+    }
+    Some(out)
+}
+fn aligned_samples(left: &[(u64, f64)], right: &[(u64, f64)]) -> usize {
+    let (mut a, mut b, mut count)=(0,0,0);
+    while a<left.len() && b<right.len() {
+        match left[a].0.cmp(&right[b].0) {
+            std::cmp::Ordering::Less=>a+=1,
+            std::cmp::Ordering::Greater=>b+=1,
+            std::cmp::Ordering::Equal=>{count+=1;a+=1;b+=1;}
+        }
+    }
+    count
+}
+fn pairwise_matrix(loaded: &[Loaded], timeframe_ms: u64) -> Value {
+    let series=loaded.iter().map(|row|row.bars.as_ref().ok()
+        .and_then(|bars|log_returns(bars,timeframe_ms))).collect::<Vec<_>>();
+    let mut values=Vec::with_capacity(loaded.len());
+    let mut counts=Vec::with_capacity(loaded.len());
+    let mut complete=true;
+    for left in &series {
+        let mut row=Vec::with_capacity(series.len());
+        let mut samples=Vec::with_capacity(series.len());
+        for right in &series {
+            let (correlation,n)=match (left,right) {
+                (Some(a),Some(b))=>(
+                    okx_analysis::operators::correlation(a,b),
+                    aligned_samples(a,b)
+                ),
+                _=>(None,0),
+            };
+            if correlation.is_none(){complete=false;}
+            row.push(correlation);
+            samples.push(n);
+        }
+        values.push(row);counts.push(samples);
+    }
+    json!({"basis":"aligned_closed_bar_log_returns","instruments":loaded.iter()
+        .map(|r|r.instrument.clone()).collect::<Vec<_>>(),"values":values,
+        "sample_counts":counts,"quality":if complete{"complete"}else{"partial"}})
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn correlation_3x3_log_returns() {
+        let mut series=Vec::new();
+        for (k, id) in ["BTC-USDT","ETH-USDT","SOL-USDT"].iter().enumerate() {
+            let mut price=100.0;
+            let bars=(0..100).map(|i| {
+                if i>0 { price *= (0.002 + ((i%7) as f64 - 3.0)*0.0007 * if k==2 {-1.0}else{1.0}).exp(); }
+                Bar {time:i*60000,open:price,high:price*1.01,low:price*0.99,close:price,volume:1.0,funding_rate:None}
+            }).collect();
+            series.push(Loaded {instrument:id.to_string(),bars:Ok(Arc::new(bars)),
+                ticker:None,funding:None,oi:None,excluded:None});
+        }
+        let m=pairwise_matrix(&series,60000);
+        assert_eq!(m["basis"],"aligned_closed_bar_log_returns");
+        assert_eq!(m["instruments"].as_array().unwrap().len(),3);
+        assert_eq!(m["sample_counts"][1][2],99);
+        assert_eq!(m["values"][0][1],m["values"][1][0]);
+        assert_eq!(m["values"][1][2],m["values"][2][1]);
+        assert!(m["values"][0][0].as_f64().unwrap()>0.99);
+        assert!(m["values"][0][2].as_f64().unwrap()<0.0);
+    }
+    #[test]
+    fn interior_gap_never_imputed() {
+        let mut missing=row();
+        Arc::make_mut(missing.bars.as_mut().unwrap()).remove(43);
+        let v=compute_row(missing,&request(vec!["returns"]),None).unwrap();
+        assert_eq!(v["quality"],"partial");
+        assert_eq!(v["metrics"]["returns"],Value::Null);
+        assert!(v["gaps"].as_array().unwrap().contains(&json!("CANDLE_INTERIOR_GAP")));
+    }
+
     fn request(fields: Vec<&str>) -> MarketRequest {
         serde_json::from_value(json!({"action":"screen","instruments":["BTC-USDT"],"fields":fields,"timeframe_ms":60000,"start_ms":0,"end_ms":6000000})).unwrap()
     }
