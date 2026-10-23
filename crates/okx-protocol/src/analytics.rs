@@ -69,6 +69,15 @@ pub enum ResearchDataMode {
     HistoricalObserved,
     Counterfactual,
 }
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResearchResultView {
+    #[default]
+    Trades,
+    Summary,
+    Variants,
+    Equity,
+}
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ResearchRequest {
@@ -111,6 +120,8 @@ pub enum ResearchRequest {
         cursor: Option<String>,
         #[serde(default = "page_limit")]
         limit: u16,
+        #[serde(default)]
+        view: ResearchResultView,
     },
 }
 
