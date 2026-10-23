@@ -56,9 +56,7 @@ impl TradeService {
  // notional allocation and NOT a central reservation. Only actual plans
  // reserve aggregate campaign capacity through RiskBook CAS.
  let ceiling=Decimal::from_str(&campaign_limit_usd).map_err(|_|okx_execution::StoreError::Invalid("INVALID_CAMPAIGN_BUDGET"))?;
- if instance.budget<=Decimal::ZERO || instance.budget>ceiling {
-     return Err(okx_execution::StoreError::Invalid("STRATEGY_RISK_BUDGET_USD_OUT_OF_RANGE"));
- }
+ validate_strategy_risk_budget_usd(instance.budget,ceiling)?;
  let receipt=s.mutate_instance(&operation,&request_hash,action,&instance,expected,now())?;
  serde_json::from_str::<StrategyInstance>(&receipt.result_ref).map_err(|_|okx_execution::StoreError::Invalid("STRATEGY_RECEIPT_CORRUPT"))
  }).await.map_err(err)?;
@@ -275,5 +273,40 @@ impl TradeService {
                 .await?;
         }
         Ok(())
+    }
+}
+
+fn validate_strategy_risk_budget_usd(
+    budget_usd: Decimal,
+    campaign_limit_usd: Decimal,
+) -> Result<(), okx_execution::StoreError> {
+    if budget_usd<=Decimal::ZERO || budget_usd>campaign_limit_usd {
+        return Err(okx_execution::StoreError::Invalid("STRATEGY_RISK_BUDGET_USD_OUT_OF_RANGE"));
+    }
+    // This is a per-order modeled LOSS limit. It is not capital or notional,
+    // and must never be compared to venue max_notional_usdt. Total occupied
+    // risk remains exclusively bounded by central per-intent CAS reservations.
+    Ok(())
+}
+
+#[cfg(test)]
+mod budget_contract_tests {
+    use super::*;
+    #[test]
+    fn strategy_risk_budget_not_notional() {
+        let campaign_limit_usd=Decimal::from(10);
+        let permitted_per_order_loss_usd=Decimal::from(2);
+        // Notional is irrelevant to checking a USD loss budget. Notional and
+        // leverage have their own venue rules at later plan admission.
+        let _notional_usdt=Decimal::from(1000);
+        assert!(validate_strategy_risk_budget_usd(
+            permitted_per_order_loss_usd,campaign_limit_usd,
+        ).is_ok());
+        assert!(validate_strategy_risk_budget_usd(
+            Decimal::from(11),campaign_limit_usd,
+        ).is_err());
+        assert!(validate_strategy_risk_budget_usd(
+            Decimal::ZERO,campaign_limit_usd,
+        ).is_err());
     }
 }
