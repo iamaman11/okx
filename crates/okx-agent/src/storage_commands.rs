@@ -240,7 +240,9 @@ pub async fn initialize_account(
         if first.account_uid_fingerprint != uid || last.account_uid_fingerprint != uid {
             return Err(error("ACCOUNT_IDENTITY_MISMATCH"));
         }
-        if first.balance != last.balance
+        if !first
+            .balance
+            .same_values_ignoring_update_times(&last.balance)
             || first.positions != last.positions
             || first.pending_orders != last.pending_orders
         {

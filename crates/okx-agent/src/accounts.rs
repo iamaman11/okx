@@ -440,7 +440,9 @@ impl AccountRuntimeRegistry {
                         "ACCOUNT_IDENTITY_MISMATCH".into(),
                     ));
                 }
-                if first.balance != last.balance
+                if !first
+                    .balance
+                    .same_values_ignoring_update_times(&last.balance)
                     || first.positions != last.positions
                     || first.pending_orders != last.pending_orders
                 {

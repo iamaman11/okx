@@ -49,6 +49,24 @@ pub struct AccountBalanceState {
     pub details: Vec<AccountBalanceDetail>,
 }
 
+impl AccountBalanceState {
+    /// Compare the full balance evidence while ignoring provider receipt timestamps.
+    /// Currency identities, row order, and every financial field remain significant.
+    pub fn same_values_ignoring_update_times(&self, other: &Self) -> bool {
+        let mut left = self.clone();
+        let mut right = other.clone();
+        left.update_time_ms = None;
+        right.update_time_ms = None;
+        for detail in &mut left.details {
+            detail.update_time_ms = None;
+        }
+        for detail in &mut right.details {
+            detail.update_time_ms = None;
+        }
+        left == right
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AccountPositionState {
@@ -707,6 +725,55 @@ mod tests {
             creation_time: "1790519999000".to_owned(),
             update_time: update_time.to_owned(),
         }
+    }
+
+    #[test]
+    fn balance_stability_ignores_only_root_and_detail_update_times() {
+        let first = normalize_balance(balance()).expect("balance");
+        let mut changed = first.clone();
+        changed.update_time_ms = Some("new-root-time".into());
+        changed.details[0].update_time_ms = None;
+        assert_ne!(first, changed);
+        assert!(first.same_values_ignoring_update_times(&changed));
+        assert!(changed.same_values_ignoring_update_times(&first));
+        // Every serialized value except the two timestamp paths must remain relevant.
+        let original = serde_json::to_value(&first).unwrap();
+        for field in original
+            .as_object()
+            .unwrap()
+            .keys()
+            .filter(|k| k.as_str() != "details" && k.as_str() != "update_time_ms")
+        {
+            let mut value = original.clone();
+            value[field] = serde_json::json!("123.456");
+            let different: AccountBalanceState = serde_json::from_value(value).unwrap();
+            assert!(
+                !first.same_values_ignoring_update_times(&different),
+                "root field {field}"
+            );
+        }
+        for field in original["details"][0]
+            .as_object()
+            .unwrap()
+            .keys()
+            .filter(|k| k.as_str() != "update_time_ms")
+        {
+            let mut value = original.clone();
+            value["details"][0][field] = serde_json::json!("123.456");
+            let different: AccountBalanceState = serde_json::from_value(value).unwrap();
+            assert!(
+                !first.same_values_ignoring_update_times(&different),
+                "detail field {field}"
+            );
+        }
+        let mut two = first.clone();
+        let mut other = two.details[0].clone();
+        other.currency = "OTHER".into();
+        two.details.push(other);
+        assert!(!first.same_values_ignoring_update_times(&two));
+        let mut reordered = two.clone();
+        reordered.details.reverse();
+        assert!(!two.same_values_ignoring_update_times(&reordered));
     }
 
     #[test]
