@@ -1,5 +1,72 @@
 use super::*;
 use okx_api::MarginMode;
+
+/// Select the actual venue price before calculating stop, size or reserving risk.
+///
+/// A limit is a hard adverse-price bound.  Rounding it in the adverse direction
+/// (the old behaviour) can silently turn an otherwise valid command into a
+/// price outside that bound.  We instead select the best tick that remains
+/// inside the bound and require it to still cross the current quote for orders
+/// which must be immediately executable.
+fn quantize_executable_price(
+    quote: Decimal,
+    explicit_limit: Option<Decimal>,
+    max_slippage_bps: u32,
+    tick: Decimal,
+    buy: bool,
+    order_type: &str,
+) -> Result<Decimal, String> {
+    if quote <= Decimal::ZERO || tick <= Decimal::ZERO {
+        return Err("INVALID_INSTRUMENT_RULES".into());
+    }
+    let slip = Decimal::from(max_slippage_bps) / Decimal::from(10_000_u32);
+    let market_bound = quote
+        * if buy {
+            Decimal::ONE + slip
+        } else {
+            Decimal::ONE - slip
+        };
+    let bound = match (buy, explicit_limit) {
+        (true, Some(limit)) if limit > market_bound => return Err("ORDER_SLIPPAGE_LIMIT".into()),
+        (false, Some(limit)) if limit < market_bound => {
+            return Err("ORDER_SLIPPAGE_LIMIT".into());
+        }
+        (true, Some(limit)) => limit.min(market_bound),
+        (false, Some(limit)) => limit.max(market_bound),
+        (_, None) => market_bound,
+    };
+
+    // Post-only is deliberately not made marketable: it must keep the user's
+    // price constraint and must not cross the current book after quantization.
+    if order_type == "post_only" {
+        let limit = explicit_limit.ok_or("POST_ONLY_LIMIT_REQUIRED")?;
+        let price = if buy {
+            (limit / tick).floor() * tick
+        } else {
+            (limit / tick).ceil() * tick
+        };
+        if (buy && price >= quote) || (!buy && price <= quote) {
+            return Err("POST_ONLY_WOULD_CROSS".into());
+        }
+        return Ok(price);
+    }
+
+    // For a buy, floor the upper bound; for a sell, ceil the lower bound.  Both
+    // choices preserve the requested slippage and any explicit limit.
+    let price = if buy {
+        (bound / tick).floor() * tick
+    } else {
+        (bound / tick).ceil() * tick
+    };
+    if price <= Decimal::ZERO
+        || (buy && (price > bound || price < quote))
+        || (!buy && (price < bound || price > quote))
+    {
+        return Err("NO_EXECUTABLE_PRICE_WITHIN_SLIPPAGE".into());
+    }
+    Ok(price)
+}
+
 impl TradeService {
     #[allow(clippy::too_many_arguments)] // Explicit typed command fields share one admission path.
     pub(super) async fn plan(
@@ -84,7 +151,6 @@ impl TradeService {
         } else {
             side == PositionSide::Short
         };
-        let slip = Decimal::from(order.max_slippage_bps) / Decimal::from(10000);
         let quote = dec(if buy {
             &market.market.ticker.best_ask
         } else {
@@ -104,29 +170,16 @@ impl TradeService {
         {
             return Err("INVALID_INSTRUMENT_RULES".into());
         }
-        let market_limit = quote
-            * if buy {
-                Decimal::ONE + slip
-            } else {
-                Decimal::ONE - slip
-            };
-        let raw_price = order
-            .limit_price
-            .as_ref()
-            .map(|p| dec(p))
-            .transpose()?
-            .unwrap_or(market_limit);
-        if (buy && raw_price > market_limit) || (!buy && raw_price < market_limit) {
-            return Err("ORDER_SLIPPAGE_LIMIT".into());
-        }
-        let price = if buy {
-            (raw_price / tick).ceil() * tick
-        } else {
-            (raw_price / tick).floor() * tick
-        };
-        if (buy && price > market_limit) || (!buy && price < market_limit) {
-            return Err("QUANTIZED_PRICE_EXCEEDS_SLIPPAGE".into());
-        }
+        let explicit_limit = order.limit_price.as_ref().map(|p| dec(p)).transpose()?;
+        let price = quantize_executable_price(
+            quote,
+            explicit_limit,
+            order.max_slippage_bps,
+            tick,
+            buy,
+            &order.order_type,
+        )?;
+        let slip = Decimal::from(order.max_slippage_bps) / Decimal::from(10_000_u32);
         let stop = match protection {
             Some(Protection::Price { stop_price }) => Some(dec(stop_price)?),
             Some(Protection::Distance { stop_distance_bps }) => Some(
@@ -451,5 +504,82 @@ impl TradeService {
                 .map_err(err)?
                 .timestamp_millis() as u64,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn d(value: &str) -> Decimal {
+        Decimal::from_str(value).unwrap()
+    }
+
+    #[test]
+    fn auto_fok_buy_rounds_inside_slippage() {
+        let price =
+            quantize_executable_price(d("100.01"), None, 5, d("0.01"), true, "fok").unwrap();
+        assert_eq!(price, d("100.06"));
+        assert!(price <= d("100.01") * d("1.0005"));
+    }
+
+    #[test]
+    fn auto_fok_sell_rounds_inside_slippage() {
+        let price =
+            quantize_executable_price(d("100.01"), None, 5, d("0.01"), false, "fok").unwrap();
+        assert_eq!(price, d("99.96"));
+        assert!(price >= d("100.01") * d("0.9995"));
+    }
+
+    #[test]
+    fn exact_tick_bound_unchanged() {
+        assert_eq!(
+            quantize_executable_price(d("100"), None, 10, d("0.1"), true, "ioc").unwrap(),
+            d("100.1")
+        );
+    }
+
+    #[test]
+    fn coarse_tick_no_marketable_price() {
+        let result = quantize_executable_price(d("100.01"), None, 0, d("1"), true, "fok");
+        assert_eq!(result.unwrap_err(), "NO_EXECUTABLE_PRICE_WITHIN_SLIPPAGE");
+    }
+
+    #[test]
+    fn explicit_limit_never_worsened() {
+        let price =
+            quantize_executable_price(d("100.01"), Some(d("100.065")), 10, d("0.01"), true, "fok")
+                .unwrap();
+        assert_eq!(price, d("100.06"));
+        assert!(price <= d("100.065"));
+    }
+
+    #[test]
+    fn close_price_respects_limit() {
+        // Closing a long sells; its lower limit must remain intact after rounding.
+        let price = quantize_executable_price(
+            d("100.01"),
+            Some(d("99.959995")),
+            5,
+            d("0.01"),
+            false,
+            "ioc",
+        )
+        .unwrap();
+        assert_eq!(price, d("99.96"));
+        assert!(price >= d("99.959995"));
+    }
+
+    #[test]
+    fn post_only_does_not_cross() {
+        let result = quantize_executable_price(
+            d("100.01"),
+            Some(d("100.015")),
+            10,
+            d("0.01"),
+            true,
+            "post_only",
+        );
+        assert_eq!(result.unwrap_err(), "POST_ONLY_WOULD_CROSS");
     }
 }

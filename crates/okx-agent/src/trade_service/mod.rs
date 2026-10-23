@@ -99,6 +99,29 @@ impl TradeService {
             return Err("POLICY_REVISION_CONFLICT".into());
         }
         *latest = Some(snapshot.clone());
+        drop(latest);
+
+        // A policy frame is the authoritative update.  Persist the campaign
+        // ceiling for every currently connected account before returning the
+        // frame acknowledgement, so a restart or read-only diagnostic cannot
+        // retain an older ceiling until somebody submits a trade.
+        let limit = dec(&snapshot.state.campaign_loss_limit_usd)?;
+        for account in &snapshot.state.accounts {
+            let Some(resources) = self.accounts.resolve(&account.account_key).await else {
+                continue;
+            };
+            let revision = snapshot.state.revision as i64;
+            let paused = !account.access_enabled();
+            let campaign = snapshot.state.campaign_id.clone();
+            resources
+                .execution
+                .store
+                .call(deadline(), move |store| {
+                    store.apply_authority_policy(revision, paused, &campaign, limit)
+                })
+                .await
+                .map_err(err)?;
+        }
         Ok(())
     }
     pub async fn diagnostic_access(&self, key: &str) -> Value {

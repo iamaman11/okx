@@ -38,6 +38,7 @@ const lowered=await lowerCampaignLimit(s,{expected_revision:revision,campaign_lo
 ok(lowered.status===200&&lowered.body.campaign_loss_limit_usd==="8","owner may only lower campaign ceiling");
 ok((await lowerCampaignLimit(s,{expected_revision:revision+1,campaign_loss_limit_usd:"10",idempotency_key:"raise_campaign_01"})).status===409,"campaign ceiling cannot increase");
 ok(JSON.stringify(await lowerCampaignLimit(s,{expected_revision:revision,campaign_loss_limit_usd:"8",idempotency_key:"lower_campaign_01"}))===JSON.stringify(lowered),"campaign lowering is body-bound idempotent");
+console.log("account_governance_lower_campaign_limit_monotonic PASS");
 const restarted=new Storage();restarted.map=structuredClone(s.map);
 ok(((await governanceRequest(restarted,"GET")).body.accounts as any[])[0].enabled,"access_survives_restart");
 console.log("access_restart_and_account_registration PASS");
