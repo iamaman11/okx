@@ -1,5 +1,5 @@
 import {PUBLIC_TOOLS,validTool} from './execution_tools.js';
-import {dispatchRuntime,type Env,isObject,type Json,jsonRpc,jsonRpcError,MAX_BODY_BYTES,MCP_PROTOCOL_VERSION,MCP_SERVER_VERSION,requestId,runtimeFetch,toolResult as baseToolResult,sha256Hex,transportFailure} from './shared.js';
+import {dispatchRuntime,type Env,isObject,type Json,jsonRpc,jsonRpcError,MAX_BODY_BYTES,MCP_PROTOCOL_VERSION,MCP_SERVER_VERSION,TOOL_CONTRACT_VERSION,requestId,runtimeFetch,toolResult as baseToolResult,sha256Hex,transportFailure} from './shared.js';
 const NORMAL_RESULT_BYTES=12_288;
 function hasOnlyKeys(v:Record<string,unknown>,keys:string[]){return Object.keys(v).every(k=>keys.includes(k));}
 function canonical(v:unknown):string{if(Array.isArray(v))return '['+v.map(canonical).join(',')+']';if(isObject(v))return '{'+Object.keys(v).sort().map(k=>JSON.stringify(k)+':'+canonical(v[k])).join(',')+'}';return JSON.stringify(v);}
@@ -167,6 +167,29 @@ export const mcpApi={async fetch(request:Request,env:Env,ctx:any):Promise<Respon
         return jsonRpcError(id,-32602,"invalid accounts request");
       }
 
+      if(name==='diagnostics'&&args.action==='runtime'){
+        // The Durable Object owns the authenticated transport session. Query
+        // it directly; never synthesize readiness from a cached Agent reply.
+        const observed=await runtimeFetch(env,'/status?probe=1');
+        if(!isObject(observed)||observed.schema!=='okx.direct-transport.status/v1'||
+          typeof observed.connected!=='boolean'||typeof observed.session_fresh!=='boolean'||
+          !['PASS','STALE','OFFLINE'].includes(String(observed.status))){
+          return jsonRpc(id,toolResult({status:'failed',data:null,quality:'not_ready',
+            reason_code:'INVALID_RUNTIME_STATUS',scope:'transport',retryable:false,
+            next_action:'inspect_diagnostics'}));
+        }
+        const fresh=observed.status==='PASS'&&observed.connected===true&&observed.session_fresh===true;
+        return jsonRpc(id,toolResult({status:fresh?'completed':'partial',
+          data:{schema:'okx.runtime-status/v1',
+            worker_version:MCP_SERVER_VERSION,tool_contract:TOOL_CONTRACT_VERSION,
+            transport:{schema:'okx.direct-transport.status/v1',status:stringField(observed,'status')??'OFFLINE',connected:observed.connected,
+              session_fresh:observed.session_fresh,runtime_id:stringField(observed,'runtime_id')??null,
+              runtime_profile:stringField(observed,'runtime_profile')??null,
+              connection_generation:numericField(observed,'connection_generation')??null},
+            reason_code:fresh?null:'RUNTIME_SESSION_NOT_FRESH'},
+          quality:fresh?'fresh':'partial',
+          warnings:fresh?[]:['RUNTIME_SESSION_NOT_FRESH']}));
+      }
  const {account,...body}=args;
  const payload=name==='portfolio'?args:name==='diagnostics'?{reference:args.reference??null,account:args.account??null}:body;
  const operation={type:name,request:payload};

@@ -1265,6 +1265,18 @@
               "limit"
             ],
             "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "action": {
+                "const": "capabilities"
+              }
+            },
+            "required": [
+              "action"
+            ],
+            "additionalProperties": false
           }
         ]
       }
@@ -1904,6 +1916,18 @@
                 ]
               }
             ]
+          },
+          {
+            "type": "object",
+            "properties": {
+              "action": {
+                "const": "runtime"
+              }
+            },
+            "required": [
+              "action"
+            ],
+            "additionalProperties": false
           }
         ]
       }

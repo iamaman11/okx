@@ -873,6 +873,23 @@
     ]
   },
   {
+    "tool": "research",
+    "action": "capabilities",
+    "positive": {
+      "action": "capabilities"
+    },
+    "negative": [
+      {
+        "action": "capabilities",
+        "raw_rpc": "forbidden"
+      },
+      {},
+      {
+        "action": 12
+      }
+    ]
+  },
+  {
     "tool": "trade",
     "action": "preview",
     "positive": {
@@ -1229,6 +1246,23 @@
       {
         "action": 12,
         "reference": "intent_fixture"
+      }
+    ]
+  },
+  {
+    "tool": "diagnostics",
+    "action": "runtime",
+    "positive": {
+      "action": "runtime"
+    },
+    "negative": [
+      {
+        "action": "runtime",
+        "raw_rpc": "forbidden"
+      },
+      {},
+      {
+        "action": 12
       }
     ]
   },
