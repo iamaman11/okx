@@ -35,7 +35,7 @@ impl AnalyticsService {
                 bootstrap: bootstrapper,
             },
             cpu: Default::default(),
-            jobs: jobs::Jobs::open(root.join("research-catalog.json"))?,
+            jobs: jobs::Jobs::open(root.join("research-catalog.sqlite"))?,
             artifacts: ResearchArtifactStore::at(root),
             heavy: Arc::new(tokio::sync::Semaphore::new(2)),
         };
@@ -652,45 +652,34 @@ fn publish_replay(
 impl AnalyticsService {
     /// Seven-day default retention. Active jobs protect their complete working set.
     pub fn apply_retention(&self, now_ms: u64) -> Result<usize, String> {
-        let snapshot = self.jobs.snapshot();
-        if snapshot
-            .iter()
-            .any(|j| matches!(j.state, jobs::State::Queued | jobs::State::Running))
-        {
+        // A bounded SQL candidate page, not a full historical jobs snapshot.
+        // Keep shared evidence safe when a root is pinned or still referenced.
+        if self.jobs.any_running()? {
             return Ok(0);
         }
-        let expired = snapshot
-            .iter()
-            .filter(|j| {
-                !j.pinned
-                    && j.created_ms.saturating_add(7 * 86400000) < now_ms
-                    && j.artifact.is_some()
-            })
-            .collect::<Vec<_>>();
+        let cutoff = now_ms.saturating_sub(7 * 86400000);
+        let expired = self.jobs.retention_candidates(cutoff, 128)?;
+        if expired.is_empty() {
+            return Ok(0);
+        }
+        let expired_roots = expired.iter().filter_map(|j| j.artifact.clone())
+            .collect::<std::collections::BTreeSet<_>>();
         let mut protected = std::collections::BTreeSet::new();
-        for j in &snapshot {
-            if !expired.iter().any(|old| old.id == j.id)
-                && let Some(id) = &j.artifact
-            {
-                self.artifact_graph(id, &mut protected)?;
+        for root in self.jobs.artifact_roots()? {
+            if !expired_roots.contains(&root) {
+                self.artifact_graph(&root, &mut protected)?;
             }
         }
         let mut garbage = std::collections::BTreeSet::new();
-        for j in &expired {
-            self.artifact_graph(j.artifact.as_deref().unwrap(), &mut garbage)?;
+        for root in &expired_roots {
+            self.artifact_graph(root, &mut garbage)?;
         }
         for id in garbage.difference(&protected) {
-            self.artifacts
-                .remove_evidence(id)
-                .map_err(|e| e.to_string())?;
+            self.artifacts.remove_evidence(id).map_err(|e| e.to_string())?;
         }
-        for j in &expired {
-            self.jobs.update(
-                &j.id,
-                j.state.clone(),
-                None,
-                Some("RESULT_EXPIRED_BY_7_DAY_RETENTION".into()),
-            )?;
+        for job in &expired {
+            self.jobs.update(&job.id, job.state.clone(), None,
+                Some("RESULT_EXPIRED_BY_7_DAY_RETENTION".into()))?;
         }
         Ok(expired.len())
     }
@@ -1108,7 +1097,7 @@ mod artifact_job_fixtures {
         assert_eq!(page["total_rows"], 120);
         assert_eq!(page["rows"][0]["time"], 47);
         assert_eq!(page["next_cursor"], "52");
-        let reloaded = jobs::Jobs::open(root.join("research-catalog.json")).unwrap();
+        let reloaded = jobs::Jobs::open(root.join("research-catalog.sqlite")).unwrap();
         assert_eq!(reloaded.get(&id).unwrap().state, jobs::State::Completed);
         assert!(
             reloaded
