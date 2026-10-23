@@ -276,11 +276,15 @@ mod batch_tests {
     use super::*;
     #[test]
     fn research_capabilities_strict_read_only_wire() {
-        let r:ResearchRequest=serde_json::from_str(r#"{"action":"capabilities"}"#).unwrap();
-        assert!(matches!(r,ResearchRequest::Capabilities{}));
+        let r: ResearchRequest = serde_json::from_str(r#"{"action":"capabilities"}"#).unwrap();
+        assert!(matches!(r, ResearchRequest::Capabilities {}));
         assert!(r.valid());
-        assert!(serde_json::from_str::<ResearchRequest>(
-            r#"{"action":"capabilities","raw_rpc":"forbidden"}"#).is_err());
+        assert!(
+            serde_json::from_str::<ResearchRequest>(
+                r#"{"action":"capabilities","raw_rpc":"forbidden"}"#
+            )
+            .is_err()
+        );
     }
     #[test]
     fn research_batch_wire_roundtrip_and_total_bar_budget() {
