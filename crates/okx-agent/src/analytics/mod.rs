@@ -696,7 +696,10 @@ impl AnalyticsService {
                 break;
             }
             for root in &roots {
-                if !expired_roots.contains(root) {
+                let retiring_refs = expired.iter().filter(|job| job.artifact.as_deref()==Some(root)).count() as u64;
+                // The same content-addressed artifact can be owned by
+                // multiple jobs. Retiring one must not delete a live twin.
+                if self.jobs.artifact_reference_count(root)? > retiring_refs {
                     let mut shared = std::collections::BTreeSet::new();
                     self.artifact_graph(root, &mut shared)?;
                     garbage.retain(|id| !shared.contains(id));

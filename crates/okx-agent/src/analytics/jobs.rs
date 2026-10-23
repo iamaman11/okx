@@ -341,6 +341,13 @@ impl Jobs {
             .collect::<rusqlite::Result<Vec<_>>>()
             .map_err(|e| e.to_string())
     }
+    pub fn artifact_reference_count(&self, artifact: &str) -> Result<u64, String> {
+        let db = self.db.lock().map_err(|_| "CATALOG_LOCK_POISONED")?;
+        db.query_row(
+            "SELECT COUNT(*) FROM research_jobs WHERE artifact=?1",
+            [artifact], |row| row.get::<_, u64>(0),
+        ).map_err(|e| e.to_string())
+    }
     pub fn any_running(&self) -> Result<bool, String> {
         let db = self.db.lock().map_err(|_| "CATALOG_LOCK_POISONED")?;
         db.query_row(
@@ -478,6 +485,29 @@ mod tests {
         assert_eq!(old.error.as_deref(),Some("RESULT_EXPIRED_BY_7_DAY_RETENTION"));
         assert_eq!(old.artifact,None);
         assert_eq!(old.state,State::Completed);
+    }
+    #[tokio::test(flavor = "current_thread")]
+    async fn research_io_does_not_block_trade_loop() {
+        let jobs=Jobs::open(path("nonblocking")).unwrap();
+        jobs.enqueue("key".into(),"job".into()).unwrap();
+        let holder=jobs.clone();
+        let (ready_tx,ready_rx)=std::sync::mpsc::channel();
+        let thread=std::thread::spawn(move||{
+            let _lock=holder.db.lock().unwrap();
+            ready_tx.send(()).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(160));
+        });
+        ready_rx.recv().unwrap();
+        let operation=jobs.get_async("job".into());
+        tokio::pin!(operation);
+        let timer=tokio::time::sleep(std::time::Duration::from_millis(25));
+        tokio::pin!(timer);
+        tokio::select! {
+            _=&mut timer=>{},
+            _=&mut operation=>panic!("SQLite lock unexpectedly ran on Tokio event-loop thread"),
+        }
+        thread.join().unwrap();
+        assert_eq!(operation.await.unwrap().state,State::Queued);
     }
     #[test]
     fn job_status_reads_bounded_rows_at_100k_jobs() {
