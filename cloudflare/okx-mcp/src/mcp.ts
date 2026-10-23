@@ -182,7 +182,7 @@ export const mcpApi={async fetch(request:Request,env:Env,ctx:any):Promise<Respon
         return jsonRpc(id,toolResult({status:fresh?'completed':'partial',
           data:{schema:'okx.runtime-status/v1',
             worker_version:MCP_SERVER_VERSION,tool_contract:TOOL_CONTRACT_VERSION,
-            transport:{schema:observed.schema,status:observed.status,connected:observed.connected,
+            transport:{schema:'okx.direct-transport.status/v1',status:stringField(observed,'status')??'OFFLINE',connected:observed.connected,
               session_fresh:observed.session_fresh,runtime_id:stringField(observed,'runtime_id')??null,
               runtime_profile:stringField(observed,'runtime_profile')??null,
               connection_generation:numericField(observed,'connection_generation')??null},
