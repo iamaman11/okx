@@ -202,14 +202,50 @@ impl AnalyticsService {
                 end_ms,
                 ..
             } => {
-                let unsupported = matches!(data_mode, ResearchDataMode::HistoricalObserved);
+                if matches!(data_mode, ResearchDataMode::HistoricalObserved) {
+                    return Ok(json!({"schema":"okx.research.validation/v1","status":"blocked",
+                        "reason_code":"HISTORICAL_RULES_AND_FEES_UNAVAILABLE",
+                        "side_effects":"none","job_created":false,"quality":"partial"}));
+                }
+                if (end_ms - start_ms) / timeframe_ms > 2000 {
+                    return Err("VALIDATION_RANGE_LIMIT:2000_CANDLES_PER_INSTRUMENT".into());
+                }
+                let mut rows=Vec::new();
+                let mut complete=true;
+                for symbol in instruments {
+                    let result=self.sources.candles(&symbol,timeframe_ms,start_ms,end_ms).await;
+                    match result {
+                        Ok(bars) => {
+                            let expected=(end_ms-start_ms)/timeframe_ms;
+                            let aligned = start_ms % timeframe_ms == 0
+                                && end_ms % timeframe_ms == 0;
+                            let coverage=aligned && bars.len() as u64 == expected
+                                && bars.first().is_some_and(|b|b.time==start_ms)
+                                && bars.last().is_some_and(|b|b.time.saturating_add(timeframe_ms)==end_ms)
+                                && bars.windows(2).all(|pair|
+                                    pair[1].time==pair[0].time.saturating_add(timeframe_ms));
+                            if !coverage { complete=false; }
+                            rows.push(json!({"instrument":symbol,"source":"confirmed_closed_candles",
+                                "first_candle_ms":bars.first().map(|b|b.time),
+                                "last_candle_ms":bars.last().map(|b|b.time),
+                                "observed_bars":bars.len(),"expected_bars":expected,
+                                "coverage":if coverage{"complete"}else{"partial"},
+                                "reason_code":if coverage{None}else{Some("CANDLE_RANGE_INCOMPLETE_OR_GAPPED")}}));
+                        },
+                        Err(e) => {
+                            complete=false;
+                            rows.push(json!({"instrument":symbol,"coverage":"unavailable",
+                                "reason_code":e}));
+                        }
+                    }
+                }
                 Ok(json!({"schema":"okx.research.validation/v1",
-                    "status":if unsupported{"blocked"}else{"valid_request"},
-                    "reason_code":if unsupported{Some("HISTORICAL_RULES_AND_FEES_UNAVAILABLE")}else{None},
-                    "side_effects":"none","job_created":false,
-                    "source_coverage":"not_evaluated","quality":"partial",
-                    "instruments":instruments,"timeframe_ms":timeframe_ms,
-                    "start_ms":start_ms,"end_ms":end_ms}))
+                    "status":if complete{"validated"}else{"blocked"},
+                    "quality":if complete{"complete"}else{"partial"},
+                    "data_mode":"counterfactual","historical_rules_and_fees":"not_observed",
+                    "source_coverage":rows,"timeframe_ms":timeframe_ms,
+                    "start_ms":start_ms,"end_ms":end_ms,"side_effects":"none",
+                    "job_created":false}))
             }
             ResearchRequest::Status { job_id } => {
                 serde_json::to_value(self.jobs.get_async(job_id).await?).map_err(|e| e.to_string())

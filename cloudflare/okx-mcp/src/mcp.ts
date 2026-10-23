@@ -186,7 +186,9 @@ export const mcpApi={async fetch(request:Request,env:Env,ctx:any):Promise<Respon
               session_fresh:observed.session_fresh,runtime_id:stringField(observed,'runtime_id')??null,
               runtime_profile:stringField(observed,'runtime_profile')??null,
               connection_generation:numericField(observed,'connection_generation')??null},
-            reason_code:fresh?null:'RUNTIME_SESSION_NOT_FRESH'},
+            reason_code:fresh?null:'RUNTIME_SESSION_NOT_FRESH',
+            release_attestation:{verified:false,reason_code:'EXACT_CONTROL_RELEASE_RECEIPT_REQUIRED',
+              source_tree:null,agent_binary_sha256:null,artifact_id:null}},
           quality:fresh?'fresh':'partial',
           warnings:fresh?[]:['RUNTIME_SESSION_NOT_FRESH']}));
       }
@@ -208,8 +210,9 @@ export const mcpApi={async fetch(request:Request,env:Env,ctx:any):Promise<Respon
      operation:{type:'market_capabilities'}})));
  }
  if(name==='portfolio'&&args.action==='scenario'){
+   const {action:scopedAction,...scenario}=args;
    return jsonRpc(id,toolResult(await dispatchRuntime(env,{schema:'okx.agent.request/v1',request_id:requestId(),
-      operation:{type:'portfolio_scenario',request:args}})));
+      operation:{type:'portfolio_scenario',request:scenario}})));
  }
  const {account,...body}=args;
  const payload=name==='portfolio'?args:name==='diagnostics'?{reference:args.reference??null,account:args.account??null}:body;
