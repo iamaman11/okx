@@ -128,35 +128,64 @@ pub enum PortfolioAction {
     History,
 }
 
-#[derive(Debug,Clone,PartialEq,Serialize,Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ScenarioPosition {
- pub instrument:String, pub side:PositionSide, pub notional_usd:String, pub margin_usd:String,
- pub price_shock_bps:i32, pub volatility_bps:u32, pub liquidity_cost_bps:u32,
+    pub instrument: String,
+    pub side: PositionSide,
+    pub notional_usd: String,
+    pub margin_usd: String,
+    pub price_shock_bps: i32,
+    pub volatility_bps: u32,
+    pub liquidity_cost_bps: u32,
 }
-#[derive(Debug,Clone,PartialEq,Serialize,Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ScenarioCorrelation { pub left:usize, pub right:usize, pub rho:f64 }
-#[derive(Debug,Clone,PartialEq,Serialize,Deserialize)]
+pub struct ScenarioCorrelation {
+    pub left: usize,
+    pub right: usize,
+    pub rho: f64,
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PortfolioScenarioRequest {
- pub equity_usd:String, pub positions:Vec<ScenarioPosition>, pub correlations:Vec<ScenarioCorrelation>,
+    pub equity_usd: String,
+    pub positions: Vec<ScenarioPosition>,
+    pub correlations: Vec<ScenarioCorrelation>,
 }
 impl PortfolioScenarioRequest {
- pub fn valid(&self)->bool {
-  if !decimal(&self.equity_usd)||self.positions.is_empty()||self.positions.len()>8||
-   self.correlations.len()!=self.positions.len()*(self.positions.len()-1)/2 {return false}
-  let mut pairs=std::collections::BTreeSet::new();
-  for p in &self.positions {
-   if !name(&p.instrument)||!decimal(&p.notional_usd)||!decimal(&p.margin_usd)||
-    p.price_shock_bps.abs()>10000||p.volatility_bps>10000||p.liquidity_cost_bps>10000{return false}
-  }
-  for c in &self.correlations {
-   if c.left>=c.right||c.right>=self.positions.len()||!c.rho.is_finite()||
-    !(-1.0..=1.0).contains(&c.rho)||!pairs.insert((c.left,c.right)){return false}
-  }
-  true
- }
+    pub fn valid(&self) -> bool {
+        if !decimal(&self.equity_usd)
+            || self.positions.is_empty()
+            || self.positions.len() > 8
+            || self.correlations.len() != self.positions.len() * (self.positions.len() - 1) / 2
+        {
+            return false;
+        }
+        let mut pairs = std::collections::BTreeSet::new();
+        for p in &self.positions {
+            if !name(&p.instrument)
+                || !decimal(&p.notional_usd)
+                || !decimal(&p.margin_usd)
+                || p.price_shock_bps.abs() > 10000
+                || p.volatility_bps > 10000
+                || p.liquidity_cost_bps > 10000
+            {
+                return false;
+            }
+        }
+        for c in &self.correlations {
+            if c.left >= c.right
+                || c.right >= self.positions.len()
+                || !c.rho.is_finite()
+                || !(-1.0..=1.0).contains(&c.rho)
+                || !pairs.insert((c.left, c.right))
+            {
+                return false;
+            }
+        }
+        true
+    }
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

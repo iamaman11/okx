@@ -103,18 +103,33 @@ async fn execute(
             let mut universe_page = None;
             if let Some(universe) = &request.universe {
                 let reference = ctx.public_ws.reference_snapshot().await;
-                let mut names = reference.iter()
+                let mut names = reference
+                    .iter()
                     .filter(|spec| spec.state == "live")
-                    .filter(|spec| format!("{:?}", spec.instrument_type).to_uppercase() == universe.instrument_type)
-                    .filter(|spec| universe.settle_currency.as_ref()
-                        .is_none_or(|settle| spec.settle_currency.as_ref() == Some(settle)))
-                    .filter(|spec| universe.after_instrument.as_ref()
-                        .is_none_or(|cursor| &spec.instrument_id > cursor))
+                    .filter(|spec| {
+                        format!("{:?}", spec.instrument_type).to_uppercase()
+                            == universe.instrument_type
+                    })
+                    .filter(|spec| {
+                        universe
+                            .settle_currency
+                            .as_ref()
+                            .is_none_or(|settle| spec.settle_currency.as_ref() == Some(settle))
+                    })
+                    .filter(|spec| {
+                        universe
+                            .after_instrument
+                            .as_ref()
+                            .is_none_or(|cursor| &spec.instrument_id > cursor)
+                    })
                     .map(|spec| spec.instrument_id.clone())
-                    .take(usize::from(universe.limit) + 1).collect::<Vec<_>>();
+                    .take(usize::from(universe.limit) + 1)
+                    .collect::<Vec<_>>();
                 let has_more = names.len() > usize::from(universe.limit);
                 names.truncate(usize::from(universe.limit));
-                if names.is_empty() { return Err("UNIVERSE_PAGE_EMPTY".into()); }
+                if names.is_empty() {
+                    return Err("UNIVERSE_PAGE_EMPTY".into());
+                }
                 universe_page = Some(json!({
                     "schema":"okx.market.universe-page/v1",
                     "source":"venue_reference_registry",
@@ -136,7 +151,7 @@ async fn execute(
                 }
             }
             Ok(result)
-        },
+        }
         AgentOperation::MarketCapabilities => Ok(ctx.analytics.market_capabilities()),
         AgentOperation::MarketMicrostructure {
             instrument,

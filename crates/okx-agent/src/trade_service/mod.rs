@@ -219,12 +219,19 @@ impl TradeService {
                 let access = self
                     .diagnostic_access(&r.configuration.account_key.wire())
                     .await;
-                let snapshot=r.latest_snapshot.read().await.clone();
-                let fresh=snapshot.as_ref().and_then(|v|
-                    chrono::DateTime::parse_from_rfc3339(&v.source_received_at).ok())
-                    .is_some_and(|t|crate::config::evidence_fresh(
-                        t.timestamp_millis(),now(),crate::config::ACCOUNT_MAX_AGE_MS));
-                Ok(json!({"schema":"okx.trade.capabilities/v1","account":r.configuration.account_key.wire(),
+                let snapshot = r.latest_snapshot.read().await.clone();
+                let fresh = snapshot
+                    .as_ref()
+                    .and_then(|v| chrono::DateTime::parse_from_rfc3339(&v.source_received_at).ok())
+                    .is_some_and(|t| {
+                        crate::config::evidence_fresh(
+                            t.timestamp_millis(),
+                            now(),
+                            crate::config::ACCOUNT_MAX_AGE_MS,
+                        )
+                    });
+                Ok(
+                    json!({"schema":"okx.trade.capabilities/v1","account":r.configuration.account_key.wire(),
                     "order_types":["limit","market","post_only","ioc","fok"],
                     "operations":["open","add","reduce","close","replace"],
                     "protection":["stop_price","stop_distance_bps"],
@@ -235,7 +242,8 @@ impl TradeService {
                     "account_source_fresh":fresh,"governance":access,
                     "quality":if fresh{"complete"}else{"partial"},
                     "ready_for_post":false,
-                    "reason_code":"VENUE_PER_INSTRUMENT_ADMISSION_REQUIRES_TRADE_PLAN"}))
+                    "reason_code":"VENUE_PER_INSTRUMENT_ADMISSION_REQUIRES_TRADE_PLAN"}),
+                )
             }
             TradeRequest::Preflight {} => {
                 let access = self
