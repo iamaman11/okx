@@ -7,35 +7,106 @@ function bytes(value:Json):number{return new TextEncoder().encode(JSON.stringify
 function stringField(value:Record<string,unknown>,field:string):string|undefined{return typeof value[field]==='string'?value[field]:undefined;}
 function numericField(value:Record<string,unknown>,field:string):number|undefined{return typeof value[field]==='number'&&Number.isFinite(value[field])?value[field]:undefined;}
 function warnings(...sources:Record<string,unknown>[]):string[]{return sources.flatMap(source=>Array.isArray(source.warnings)?source.warnings.filter((v):v is string=>typeof v==='string'):[]);}
-function partial(value:unknown):boolean{if(typeof value==='string')return ['partial','missing','stale','degraded'].includes(value.toLowerCase());return isObject(value)&&(partial(value.state)||partial(value.status));}
-function jobState(value:Record<string,unknown>):string|undefined{const state=stringField(value,'state')?.toLowerCase();return state&&['queued','running','completed','failed','cancelled','partial'].includes(state)?state:undefined;}
-function projectedStatus(outer:Record<string,unknown>,payload:Record<string,unknown>|undefined):string{
- const outerStatus=stringField(outer,'status')?.toLowerCase(),nestedStatus=payload&&stringField(payload,'status')?.toLowerCase();
- const reason=[stringField(outer,'reason_code'),stringField(outer,'reason'),payload&&stringField(payload,'reason_code'),payload&&stringField(payload,'reason')].filter((v):v is string=>!!v).join(' ');
- if(reason.toUpperCase().includes('UNKNOWN')||nestedStatus==='unknown')return 'unknown';
- if(outerStatus==='failed'||outerStatus==='rejected')return outerStatus;
- if(nestedStatus==='failed'||nestedStatus==='rejected')return nestedStatus;
- const state=payload&&jobState(payload);
- if(state==='queued'||state==='running')return 'accepted';
- if(state==='failed'||state==='cancelled')return 'failed';
- if(nestedStatus==='accepted')return nestedStatus;
- if(partial(payload?.quality)||partial(outer.quality)||state==='partial')return 'partial';
- if(nestedStatus==='partial'||nestedStatus==='completed')return nestedStatus;
- if(['configured','connected','observed','updated'].includes(nestedStatus??outerStatus??''))return 'completed';
- return outerStatus==='completed'||!outerStatus?'completed':'failed';
+function jobState(value:Record<string,unknown>):string|undefined {
+ const state=stringField(value,'state')?.toLowerCase();
+ return state&&['queued','running','completed','failed','cancelled','partial','interrupted','expired'].includes(state)?state:undefined;
 }
-/** Project a typed native envelope without turning nested uncertainty into success. */
+function partialQuality(value:unknown):boolean {
+ // Inspect real result rows as well as the top-level quality. A bounded walk
+ // prevents adversarially deep or oversized native JSON from blocking the Worker.
+ const stack:[unknown,number][]=[[value,0]];let visited=0;
+ while(stack.length){
+   const [next,depth]=stack.pop()!;
+   if(++visited>4096||depth>24)return true;
+   if(!isObject(next)&&!Array.isArray(next))continue;
+   if(Array.isArray(next)){for(const child of next)stack.push([child,depth+1]);continue;}
+   for(const [key,child] of Object.entries(next)){
+     if((key==='quality'||key==='coverage')&&typeof child==='string'&&
+       ['partial','missing','stale','degraded','not_ready','unavailable'].includes(child.toLowerCase()))return true;
+     if(key==='state'&&typeof child==='string'&&child.toLowerCase()==='partial')return true;
+     if(isObject(child)||Array.isArray(child))stack.push([child,depth+1]);
+   }
+ }
+ return false;
+}
+function nativeEnvelope(value:Record<string,unknown>):Record<string,unknown>|undefined {
+ // /dispatch returns the native AgentResponse as the DO reply. Test harnesses
+ // and intermediate transports may contain one or two typed wrapping layers.
+ // Only the exact schema is unwrapped, never an arbitrary result.data object.
+ let current=value;
+ for(let i=0;i<3;i++){
+   if(current.schema==='okx.agent.response/v1')return current;
+   const nested=isObject(current.data)&&current.data.schema==='okx.agent.response/v1'
+     ?current.data:isObject(current.result)&&current.result.schema==='okx.agent.response/v1'?current.result:undefined;
+   if(nested)return nested;
+   if(isObject(current.data)&&isObject(current.data.result)&&
+      current.data.result.schema==='okx.agent.response/v1'){current=current.data;continue;}
+   if(isObject(current.result)&&isObject(current.result.data)&&
+      current.result.data.schema==='okx.agent.response/v1'){current=current.result;continue;}
+   break;
+ }
+ return undefined;
+}
+function normalizedStatus(outer:Record<string,unknown>,frame:Record<string,unknown>,result:Record<string,unknown>|undefined):string{
+ const outerStatus=stringField(outer,'status')?.toLowerCase();
+ const nativeStatus=stringField(frame,'status')?.toLowerCase();
+ const resultStatus=stringField(result??{},'status')?.toLowerCase();
+ const reason=stringField(frame,'reason')??stringField(frame,'reason_code')??stringField(outer,'reason')??'';
+ // Only the canonical delivery-unknown code means an uncertain exchange POST.
+ // UNKNOWN_ACCOUNT, UNKNOWN_FIELD, etc. are ordinary deterministic failures.
+ if([outerStatus,nativeStatus,resultStatus].includes('unknown')||
+    reason==='MUTATION_OUTCOME_UNKNOWN_RECONCILE_EXACT_INTENT')return 'unknown';
+ if(['failed','rejected'].includes(nativeStatus??''))return nativeStatus!;
+ if(['failed','rejected'].includes(outerStatus??''))return outerStatus!;
+ if(['failed','rejected'].includes(resultStatus??''))return resultStatus!;
+ const job=jobState(result??{});
+ if(job==='queued'||job==='running')return 'accepted';
+ if(['failed','cancelled','interrupted','expired'].includes(job??''))return 'failed';
+ if(job==='partial'||partialQuality(frame.quality)||partialQuality(result)||partialQuality(outer.quality))return 'partial';
+ if(resultStatus==='accepted'||nativeStatus==='accepted')return 'accepted';
+ if(['completed','configured','connected','observed','updated'].includes(nativeStatus??'')||
+    ['completed','configured','connected','observed','updated'].includes(outerStatus??''))return 'completed';
+ return nativeStatus??outerStatus??'completed';
+}
+/** Normalize exactly one native product response, not a nested JSON passthrough. */
 export function projectNativeResponse(value:Json):Record<string,Json>{
- const outer=isObject(value)?value:{data:value},payload=isObject(outer.result)?outer.result:isObject(outer.data)?outer.data:undefined,failure=isObject(outer.failure)?outer.failure:undefined;
- const status=projectedStatus(outer,payload),state=payload&&jobState(payload);
- const reason=stringField(payload??{},'reason_code')??stringField(payload??{},'reason')??stringField(failure??{},'code')??stringField(outer,'reason_code')??stringField(outer,'reason');
- const data=isObject(outer.result)?outer.result:('data' in outer?outer.data:failure?null:value);
- const result:Record<string,Json>={request_id:stringField(outer,'request_id')??stringField(payload??{},'request_id')??requestId(),status,as_of_ms:numericField(payload??{},'as_of_ms')??numericField(outer,'as_of_ms')??Date.now(),data:data as Json,quality:(payload?.quality??outer.quality??{state:'not_evaluated'}) as Json,warnings:warnings(outer,payload??{})};
- if(['failed','rejected','unknown'].includes(status)){result.reason_code=reason??(state==='cancelled'?'JOB_CANCELLED':'REQUEST_FAILED');result.scope=(payload?.scope??outer.scope??'request') as Json;result.retryable=status==='unknown'?false:!!(payload?.retryable??outer.retryable??failure?.retryable);result.next_action=(payload?.next_action??outer.next_action??(status==='unknown'?'inspect_exact_intent':'inspect_diagnostics')) as Json;}
- const jobId=stringField(payload??{},'job_id')??stringField(outer,'job_id')??(state?stringField(payload??{},'id'):undefined);if(jobId)result.job_id=jobId;
- const cursor=stringField(payload??{},'cursor')??stringField(outer,'cursor');if(cursor)result.cursor=cursor;
- const artifact=stringField(payload??{},'artifact_id')??stringField(payload??{},'artifact')??stringField(outer,'artifact_id');if(artifact)result.artifact_id=artifact;
- return result;
+ const outer=isObject(value)?value:{data:value};
+ const native=nativeEnvelope(outer);
+ if(native&&(typeof native.request_id!=='string'||typeof native.status!=='string'||!('result' in native||'failure' in native))){
+   return {request_id:stringField(outer,'request_id')??requestId(),status:'failed',as_of_ms:Date.now(),
+     data:null,quality:'NOT_READY',warnings:[],reason_code:'INVALID_NATIVE_ENVELOPE',scope:'transport',retryable:false,next_action:'inspect_diagnostics'};
+ }
+ const frame=native??outer;
+ const rawResult=native?frame.result:('result' in frame?frame.result:'data' in frame?frame.data:frame);
+ const result=isObject(rawResult)?rawResult:undefined;
+ const failure=isObject(frame.failure)?frame.failure:undefined;
+ const status=normalizedStatus(outer,frame,result);
+ const job=jobState(result??{});
+ const reason=stringField(failure??{},'code')??stringField(result??{},'reason_code')??
+   stringField(result??{},'reason')??stringField(frame,'reason_code')??stringField(frame,'reason')??
+   stringField(outer,'reason_code')??stringField(outer,'reason');
+ // Rejects carry null product data, never an entire AgentResponse nested inside
+ // data. Completed research results preserve their bounded typed product fields.
+ const data=native?(failure?null:rawResult??null):rawResult;
+ const quality=(frame.quality??outer.quality??{state:'not_evaluated'}) as Json;
+ const projected:Record<string,Json>={
+   request_id:stringField(frame,'request_id')??stringField(outer,'request_id')??requestId(),
+   status,as_of_ms:numericField(frame,'as_of_ms')??numericField(outer,'as_of_ms')??Date.now(),
+   data:data as Json,quality,warnings:warnings(outer,...(frame===outer?[]:[frame]))
+ };
+ if(['failed','rejected','unknown'].includes(status)){
+   projected.reason_code=reason??(job==='cancelled'?'JOB_CANCELLED':'REQUEST_FAILED');
+   projected.scope=(frame.scope??outer.scope??'request') as Json;
+   projected.retryable=status==='unknown'?false:!!(frame.retryable??failure?.retryable??outer.retryable);
+   projected.next_action=(frame.next_action??outer.next_action??
+     (status==='unknown'?'inspect_exact_intent':'inspect_diagnostics')) as Json;
+ }
+ const jobId=stringField(result??{},'job_id')??(job?stringField(result??{},'id'):undefined)??stringField(frame,'job_id');
+ if(jobId)projected.job_id=jobId;
+ const cursor=stringField(result??{},'cursor')??stringField(frame,'cursor');if(cursor)projected.cursor=cursor;
+ const artifact=stringField(result??{},'artifact_id')??stringField(result??{},'artifact')??stringField(frame,'artifact_id');
+ if(artifact)projected.artifact_id=artifact;
+ return projected;
 }
 function toolResult(value:Json):Json{
  const projected=projectNativeResponse(value);

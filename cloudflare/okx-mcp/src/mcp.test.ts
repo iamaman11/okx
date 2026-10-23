@@ -32,3 +32,55 @@ const budgetEnv:any={RUNTIME:{idFromName:()=>0,get:()=>({fetch:async()=>Response
 const budget:any=await(await mcpApi.fetch(new Request('https://fixture/mcp',{method:'POST',body:JSON.stringify({id:3,method:'tools/call',params:{name:'market',arguments:payloadFixtures.find(x=>x.tool==='market')!.positive}})}),budgetEnv,ctx)).json();
 const budgetResult=budget.result.structuredContent;
 if(budgetResult.status!=='failed'||budgetResult.reason_code!=='RESPONSE_TOO_LARGE'||budgetResult.data.response_budget_bytes!==12_288||budgetResult.data.response_bytes<=12_288)throw Error('oversized native result must terminalize as bounded MCP failure');
+
+const nativeResponse=(response:unknown):any=>({RUNTIME:{idFromName:()=>0,get:()=>({fetch:async()=>Response.json(response)})}});
+const mcpResponse=async(tool:string,args:unknown,response:unknown):Promise<any>=>{
+ const env=nativeResponse(response);
+ const reply:any=await(await mcpApi.fetch(new Request('https://fixture/mcp',{method:'POST',
+  body:JSON.stringify({jsonrpc:'2.0',id:99,method:'tools/call',params:{name:tool,arguments:args}})}),env,ctx)).json();
+ if(reply.error)throw Error(JSON.stringify(reply.error));
+ return reply.result.structuredContent;
+};
+const rawFailure=(code:string)=>({schema:'okx.agent.response/v1',request_id:'native_fail_398',
+ status:'rejected',generated_at:'2026-10-23T00:00:00Z',quality:'NOT_READY',result_schema:'okx.product/v1',
+ result:null,failure:{code,message:code,retryable:false},warnings:[]});
+const nativeNotFound=await mcpResponse('research',{action:'status',job_id:'missing_job_398'},
+ {status:'completed',data:rawFailure('JOB_NOT_FOUND')});
+if(nativeNotFound.status!=='rejected'||nativeNotFound.reason_code!=='JOB_NOT_FOUND'||
+ nativeNotFound.data!==null||nativeNotFound.retryable!==false||
+ nativeNotFound.request_id!=='native_fail_398')throw Error('DO wrapped JOB_NOT_FOUND code lost');
+console.log('native_failure_code_passthrough PASS');
+
+const previewFixture=payloadFixtures.find(x=>x.tool==='trade'&&x.action==='preview')!;
+const nativeNotional=await mcpResponse('trade',previewFixture.positive,
+ {status:'completed',result:rawFailure('ORDER_NOTIONAL_LIMIT')});
+if(nativeNotional.status!=='rejected'||nativeNotional.reason_code!=='ORDER_NOTIONAL_LIMIT'||
+ nativeNotional.data!==null)throw Error('DO wrapped ORDER_NOTIONAL_LIMIT code lost');
+
+const gridFixture=payloadFixtures.find(x=>x.tool==='research'&&x.action==='grid')!;
+const nativeQueued=await mcpResponse('research',gridFixture.positive,
+ {schema:'okx.agent.response/v1',request_id:'queued_native_398',status:'completed',quality:'FRESH',
+  result:{id:'queued_job_398',state:'queued',progress:0},failure:null,warnings:[]});
+if(nativeQueued.status!=='accepted'||nativeQueued.job_id!=='queued_job_398'||
+ nativeQueued.data.state!=='queued')throw Error('DO wrapped queued job projected complete');
+console.log('do_wrapped_queued_job_is_accepted PASS');
+
+const nativePartial=await mcpResponse('market',payloadFixtures.find(x=>x.tool==='market')!.positive,
+ {schema:'okx.agent.response/v1',request_id:'partial_398',status:'completed',quality:'FRESH',
+  result:{rows:[{instrument:'BTC-USDT-SWAP',quality:'partial',metrics:{returns:null}}]},failure:null,warnings:[]});
+if(nativePartial.status!=='partial'||nativePartial.data.rows[0].quality!=='partial')
+ throw Error('partial input row promoted to completed');
+console.log('partial_coverage_not_fresh PASS');
+
+const deliveredUnknown=await mcpResponse('trade',payloadFixtures.find(x=>x.tool==='trade'&&x.action==='execute')!.positive,
+ {schema:'okx.direct-transport.result/v1',status:'FAILED',reason:'MUTATION_OUTCOME_UNKNOWN_RECONCILE_EXACT_INTENT',retryable:false});
+if(deliveredUnknown.status!=='unknown'||deliveredUnknown.retryable!==false||
+ deliveredUnknown.next_action!=='inspect_exact_intent')throw Error('UNKNOWN exchange outcome can be retried');
+const deterministicUnknown=projectNativeResponse({status:'FAILED',reason:'UNKNOWN_ACCOUNT',retryable:false});
+if(deterministicUnknown.status!=='failed'||deterministicUnknown.reason_code!=='UNKNOWN_ACCOUNT')
+ throw Error('deterministic unknown reason incorrectly became uncertain POST');
+console.log('transport_unknown_without_resubmit PASS');
+
+const invalidNative=projectNativeResponse({schema:'okx.agent.response/v1',status:'completed',result:{id:'bad'}});
+if(invalidNative.status!=='failed'||invalidNative.reason_code!=='INVALID_NATIVE_ENVELOPE')
+ throw Error('malformed native response must fail closed');
