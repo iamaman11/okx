@@ -325,12 +325,14 @@ impl Jobs {
     /// A failed compare-and-swap aborts garbage collection before file deletion.
     pub fn expire_terminal_artifact(&self, id: &str, artifact: &str) -> Result<(), String> {
         let db = self.db.lock().map_err(|_| "CATALOG_LOCK_POISONED")?;
-        let changed = db.execute(
-            "UPDATE research_jobs SET artifact=NULL,error='RESULT_EXPIRED_BY_7_DAY_RETENTION'
+        let changed = db
+            .execute(
+                "UPDATE research_jobs SET artifact=NULL,error='RESULT_EXPIRED_BY_7_DAY_RETENTION'
              WHERE id=?1 AND artifact=?2 AND pinned=0
              AND state NOT IN ('queued','running')",
-            params![id, artifact],
-        ).map_err(|e| e.to_string())?;
+                params![id, artifact],
+            )
+            .map_err(|e| e.to_string())?;
         if changed != 1 {
             return Err("RESEARCH_RETENTION_CONFLICT".into());
         }
@@ -498,25 +500,44 @@ mod tests {
     #[test]
     fn cancelled_partial_job_retention_tombstones_before_delete() {
         let catalog = Jobs::open(path("cancel-expire")).unwrap();
-        catalog.enqueue("cancel-key".into(), "cancelled-job".into()).unwrap();
-        catalog.update(
-            "cancelled-job", State::Running, Some("partial-artifact".into()), None,
-        ).unwrap();
+        catalog
+            .enqueue("cancel-key".into(), "cancelled-job".into())
+            .unwrap();
+        catalog
+            .update(
+                "cancelled-job",
+                State::Running,
+                Some("partial-artifact".into()),
+                None,
+            )
+            .unwrap();
         let cancelled = catalog.cancel("cancelled-job", "cancel-receipt").unwrap();
         assert_eq!(cancelled.state, State::Cancelled);
         assert_eq!(cancelled.artifact.as_deref(), Some("partial-artifact"));
         // General late async writes cannot mutate a cancelled job.
-        catalog.update("cancelled-job", State::Completed, None, None).unwrap();
-        assert_eq!(catalog.get("cancelled-job").unwrap().state, State::Cancelled);
+        catalog
+            .update("cancelled-job", State::Completed, None, None)
+            .unwrap();
+        assert_eq!(
+            catalog.get("cancelled-job").unwrap().state,
+            State::Cancelled
+        );
         // The dedicated terminal CAS is allowed to expire this reference.
-        catalog.expire_terminal_artifact("cancelled-job", "partial-artifact").unwrap();
+        catalog
+            .expire_terminal_artifact("cancelled-job", "partial-artifact")
+            .unwrap();
         let after = catalog.get("cancelled-job").unwrap();
         assert_eq!(after.state, State::Cancelled);
         assert!(after.artifact.is_none());
         assert_eq!(
-            after.error.as_deref(), Some("RESULT_EXPIRED_BY_7_DAY_RETENTION")
+            after.error.as_deref(),
+            Some("RESULT_EXPIRED_BY_7_DAY_RETENTION")
         );
-        assert!(catalog.expire_terminal_artifact("cancelled-job","partial-artifact").is_err());
+        assert!(
+            catalog
+                .expire_terminal_artifact("cancelled-job", "partial-artifact")
+                .is_err()
+        );
     }
     #[test]
     fn expired_result_returns_expired_not_rerun() {
