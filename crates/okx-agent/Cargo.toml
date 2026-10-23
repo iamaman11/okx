@@ -24,6 +24,7 @@ okx-protocol = { path = "../okx-protocol" }
 okx-runtime = { path = "../okx-runtime" }
 okx-research = { path = "../okx-research" }
 rust_decimal = "1"
+rusqlite = { version = "=0.40.2", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"

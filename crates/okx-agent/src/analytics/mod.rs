@@ -35,7 +35,7 @@ impl AnalyticsService {
                 bootstrap: bootstrapper,
             },
             cpu: Default::default(),
-            jobs: jobs::Jobs::open(root.join("research-catalog.json"))?,
+            jobs: jobs::Jobs::open(root.join("research-catalog.sqlite"))?,
             artifacts: ResearchArtifactStore::at(root),
             heavy: Arc::new(tokio::sync::Semaphore::new(2)),
         };
@@ -60,7 +60,10 @@ impl AnalyticsService {
         let hash = okx_research::canonical_sha256(&("market/398.1", &request, bucket))
             .map_err(|e| e.to_string())?;
         let hash = hash.strip_prefix("sha256:").unwrap_or(&hash).to_owned();
-        let (job, new, cancel) = self.jobs.enqueue(format!("market-{hash}"), hash.clone())?;
+        let (job, new, cancel) = self
+            .jobs
+            .enqueue_async(format!("market-{hash}"), hash.clone())
+            .await?;
         if !new {
             if let Some(artifact) = job.artifact {
                 let store = self.artifacts.clone();
@@ -77,7 +80,9 @@ impl AnalyticsService {
         }
         let this = self.clone();
         let mut task = tokio::spawn(async move {
-            this.jobs.update(&hash, jobs::State::Running, None, None)?;
+            this.jobs
+                .update_async(hash.clone(), jobs::State::Running, None, None)
+                .await?;
             let mut outcome = this.market_execute(request, cancel.clone()).await;
             if let Ok(value) = &mut outcome {
                 value
@@ -96,19 +101,22 @@ impl AnalyticsService {
                         })
                         .await?;
                     this.jobs
-                        .update(&hash, jobs::State::Completed, Some(artifact), None)?;
+                        .update_async(hash.clone(), jobs::State::Completed, Some(artifact), None)
+                        .await?;
                 }
                 Err(e) => {
-                    this.jobs.update(
-                        &hash,
-                        if cancel.load(Ordering::Acquire) {
-                            jobs::State::Cancelled
-                        } else {
-                            jobs::State::Failed
-                        },
-                        None,
-                        Some(e.clone()),
-                    )?;
+                    this.jobs
+                        .update_async(
+                            hash.clone(),
+                            if cancel.load(Ordering::Acquire) {
+                                jobs::State::Cancelled
+                            } else {
+                                jobs::State::Failed
+                            },
+                            None,
+                            Some(e.clone()),
+                        )
+                        .await?;
                 }
             }
             outcome
@@ -175,12 +183,12 @@ impl AnalyticsService {
         }
         match request {
             ResearchRequest::Status { job_id } => {
-                serde_json::to_value(self.jobs.get(&job_id)?).map_err(|e| e.to_string())
+                serde_json::to_value(self.jobs.get_async(job_id).await?).map_err(|e| e.to_string())
             }
             ResearchRequest::Cancel {
                 job_id,
                 idempotency_key,
-            } => serde_json::to_value(self.jobs.cancel(&job_id, &idempotency_key)?)
+            } => serde_json::to_value(self.jobs.cancel_async(job_id, idempotency_key).await?)
                 .map_err(|e| e.to_string()),
             ResearchRequest::Result {
                 job_id,
@@ -209,6 +217,9 @@ impl AnalyticsService {
         view: ResearchResultView,
     ) -> Result<Value, String> {
         let j = self.jobs.get(&job_id)?;
+        if j.error.as_deref() == Some("RESULT_EXPIRED_BY_7_DAY_RETENTION") {
+            return Err("RESULT_EXPIRED".into());
+        }
         let artifact = j.artifact.ok_or("RESULT_NOT_READY")?;
         let mut value: Value = self
             .artifacts
@@ -378,7 +389,7 @@ impl AnalyticsService {
             } => idempotency_key.clone(),
             _ => return Err("INVALID_JOB_REQUEST".into()),
         };
-        let (job, new, cancel) = self.jobs.enqueue(key, hash.clone())?;
+        let (job, new, cancel) = self.jobs.enqueue_async(key, hash.clone()).await?;
         if !new {
             return Ok(json!(job));
         }
@@ -390,7 +401,7 @@ impl AnalyticsService {
                     .clone()
                     .try_acquire_owned()
                     .map_err(|_| "HEAVY_JOBS_LIMIT:2")?;
-                this.jobs.update(&hash, jobs::State::Running, None, None)?;
+                this.jobs.update_async(hash.clone(), jobs::State::Running, None, None).await?;
                 let instruments = match &request { ResearchRequest::Backtest{instruments,..}|ResearchRequest::Grid{instruments,..}=>instruments.clone(),_=>unreachable!() };
                 if instruments.len()==1 { return this.execute_one(request,cancel.clone()).await; }
                 let mut work=stream::iter(instruments.into_iter().enumerate().map(|(index,instrument)|{
@@ -413,16 +424,17 @@ impl AnalyticsService {
                         Ok((rows,artifacts,manifest))
                     }).await?;
                     rows=next_rows;artifacts=next_artifacts;
-                    this.jobs.update(&hash,jobs::State::Running,Some(manifest),None)?;
+                    this.jobs.update_async(hash.clone(),jobs::State::Running,Some(manifest),None).await?;
                 }
-                this.jobs.get(&hash)?.artifact.ok_or_else(||"EMPTY_BATCH".into())
+                this.jobs.get_async(hash.clone()).await?.artifact.ok_or_else(||"EMPTY_BATCH".into())
             }
             .await;
             match outcome {
                 Ok(a) => {
                     let _ = this
                         .jobs
-                        .update(&hash, jobs::State::Completed, Some(a), None);
+                        .update_async(hash.clone(), jobs::State::Completed, Some(a), None)
+                        .await;
                 }
                 Err(e) => {
                     let state = if cancel.load(Ordering::Acquire) {
@@ -430,12 +442,16 @@ impl AnalyticsService {
                     } else {
                         jobs::State::Failed
                     };
-                    let _ = this.jobs.update(
-                        &hash,
-                        state,
-                        this.jobs.get(&hash).ok().and_then(|j| j.artifact),
-                        Some(e),
-                    );
+                    let artifact = this
+                        .jobs
+                        .get_async(hash.clone())
+                        .await
+                        .ok()
+                        .and_then(|j| j.artifact);
+                    let _ = this
+                        .jobs
+                        .update_async(hash.clone(), state, artifact, Some(e))
+                        .await;
                 }
             }
         });
@@ -652,45 +668,62 @@ fn publish_replay(
 impl AnalyticsService {
     /// Seven-day default retention. Active jobs protect their complete working set.
     pub fn apply_retention(&self, now_ms: u64) -> Result<usize, String> {
-        let snapshot = self.jobs.snapshot();
-        if snapshot
-            .iter()
-            .any(|j| matches!(j.state, jobs::State::Queued | jobs::State::Running))
-        {
+        // A bounded SQL candidate page, not a full historical jobs snapshot.
+        // Keep shared evidence safe when a root is pinned or still referenced.
+        if self.jobs.any_running()? {
             return Ok(0);
         }
-        let expired = snapshot
+        let cutoff = now_ms.saturating_sub(7 * 86400000);
+        let expired = self.jobs.retention_candidates(cutoff, 128)?;
+        if expired.is_empty() {
+            return Ok(0);
+        }
+        let expired_roots = expired
             .iter()
-            .filter(|j| {
-                !j.pinned
-                    && j.created_ms.saturating_add(7 * 86400000) < now_ms
-                    && j.artifact.is_some()
-            })
-            .collect::<Vec<_>>();
-        let mut protected = std::collections::BTreeSet::new();
-        for j in &snapshot {
-            if !expired.iter().any(|old| old.id == j.id)
-                && let Some(id) = &j.artifact
-            {
-                self.artifact_graph(id, &mut protected)?;
+            .filter_map(|j| j.artifact.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        // The candidates alone define a bounded garbage set. Scan current
+        // reference roots in small indexed pages; never materialize every job
+        // or every historical artifact in memory just to expire one result.
+        let mut garbage = std::collections::BTreeSet::new();
+        for root in &expired_roots {
+            self.artifact_graph(root, &mut garbage)?;
+        }
+        let mut cursor: Option<String> = None;
+        loop {
+            let roots = self.jobs.artifact_roots_page(cursor.as_deref(), 64)?;
+            if roots.is_empty() {
+                break;
+            }
+            for root in &roots {
+                let retiring_refs = expired
+                    .iter()
+                    .filter(|job| job.artifact.as_deref() == Some(root))
+                    .count() as u64;
+                // The same content-addressed artifact can be owned by
+                // multiple jobs. Retiring one must not delete a live twin.
+                if self.jobs.artifact_reference_count(root)? > retiring_refs {
+                    let mut shared = std::collections::BTreeSet::new();
+                    self.artifact_graph(root, &mut shared)?;
+                    garbage.retain(|id| !shared.contains(id));
+                }
+            }
+            cursor = roots.last().cloned();
+            if roots.len() < 64 || garbage.is_empty() {
+                break;
             }
         }
-        let mut garbage = std::collections::BTreeSet::new();
-        for j in &expired {
-            self.artifact_graph(j.artifact.as_deref().unwrap(), &mut garbage)?;
+        // Mark jobs expired FIRST. Crashing before file deletion can leak
+        // collectable files, but never leave an accepted job referring to a
+        // deleted immutable result.
+        for job in &expired {
+            let artifact = job.artifact.as_deref().ok_or("RESEARCH_ARTIFACT_MISSING")?;
+            self.jobs.expire_terminal_artifact(&job.id, artifact)?;
         }
-        for id in garbage.difference(&protected) {
+        for id in &garbage {
             self.artifacts
                 .remove_evidence(id)
                 .map_err(|e| e.to_string())?;
-        }
-        for j in &expired {
-            self.jobs.update(
-                &j.id,
-                j.state.clone(),
-                None,
-                Some("RESULT_EXPIRED_BY_7_DAY_RETENTION".into()),
-            )?;
         }
         Ok(expired.len())
     }
@@ -842,6 +875,7 @@ mod tests {
                 .await
                 .is_err()
         );
+        drop(service);
         std::fs::remove_dir_all(root).unwrap();
     }
 }
@@ -928,6 +962,7 @@ mod artifact_job_fixtures {
                 .unwrap()
                 .starts_with(std::env::temp_dir().canonicalize().unwrap())
         );
+        drop(s);
         std::fs::remove_dir_all(root).unwrap();
     }
     #[tokio::test]
@@ -1047,6 +1082,7 @@ mod artifact_job_fixtures {
                 .unwrap()
                 .starts_with(std::env::temp_dir().canonicalize().unwrap())
         );
+        drop(s);
         std::fs::remove_dir_all(root).unwrap();
     }
     #[tokio::test]
@@ -1108,7 +1144,7 @@ mod artifact_job_fixtures {
         assert_eq!(page["total_rows"], 120);
         assert_eq!(page["rows"][0]["time"], 47);
         assert_eq!(page["next_cursor"], "52");
-        let reloaded = jobs::Jobs::open(root.join("research-catalog.json")).unwrap();
+        let reloaded = jobs::Jobs::open(root.join("research-catalog.sqlite")).unwrap();
         assert_eq!(reloaded.get(&id).unwrap().state, jobs::State::Completed);
         assert!(
             reloaded
@@ -1134,6 +1170,8 @@ mod artifact_job_fixtures {
                 .unwrap()
                 .starts_with(std::env::temp_dir().canonicalize().unwrap())
         );
+        drop(reloaded);
+        drop(s);
         std::fs::remove_dir_all(root).unwrap();
     }
 }
