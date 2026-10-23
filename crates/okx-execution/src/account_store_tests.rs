@@ -101,10 +101,10 @@ fn allocation_and_bar_claim_survive_retry_and_restart() {
     let m = s.meta.clone();
     drop(s);
     let mut s = AccountStore::open_existing(p, &m.account_key, &m.installation_id).unwrap();
-    // Updating the strategy creates a new definition version. The old
-    // version's terminal bar is not a claim for the new strategy code.
+    // A budget-only revision retains the same immutable strategy
+    // definition; the terminal bar must not run a second time.
     assert!(
-        s.claim_strategy_decision("a", "bar-100", "inputs", 2, 7)
+        !s.claim_strategy_decision("a", "bar-100", "inputs", 2, 7)
             .unwrap()
     );
     assert_eq!(
