@@ -93,11 +93,13 @@ impl AccountStore {
             // before the durable intent commit, resume the exact same key.
             let has_intent: bool = tx.query_row(
                 "SELECT EXISTS(SELECT 1 FROM intents WHERE idempotency_key=?1)",
-                [decision_key], |r| r.get(0),
+                [decision_key],
+                |r| r.get(0),
             )?;
             let terminal: bool = tx.query_row(
                 "SELECT EXISTS(SELECT 1 FROM operation_receipts WHERE operation_id=?1)",
-                [format!("strategy-no-trade:{id}")], |r| r.get(0),
+                [format!("strategy-no-trade:{id}")],
+                |r| r.get(0),
             )?;
             return Ok(!has_intent && !terminal);
         }
@@ -126,14 +128,18 @@ impl AccountStore {
     ) -> StoreResult<()> {
         let version = self.strategy_definition(instance_id)?.version;
         let id = format!("strategy:{instance_id}:{version}:{decision_key}");
-        let tx = self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let digest: String = tx.query_row(
             "SELECT input_digest FROM decisions WHERE decision_id=?1 AND instance_id=?2",
-            params![id, instance_id], |r| r.get(0),
+            params![id, instance_id],
+            |r| r.get(0),
         )?;
         let has_intent: bool = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM intents WHERE idempotency_key=?1)",
-            [decision_key], |r| r.get(0),
+            [decision_key],
+            |r| r.get(0),
         )?;
         if has_intent {
             return Err(StoreError::Invalid("STRATEGY_ALREADY_HAS_INTENT"));

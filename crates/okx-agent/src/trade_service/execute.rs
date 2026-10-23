@@ -30,8 +30,15 @@ impl TradeService {
         version: String,
         decision_digest: String,
     ) -> Result<Value, String> {
-        self.execute_inner(r, request, supplied, None, Some(version), Some(decision_digest))
-            .await
+        self.execute_inner(
+            r,
+            request,
+            supplied,
+            None,
+            Some(version),
+            Some(decision_digest),
+        )
+        .await
     }
     async fn execute_inner(
         &self,
@@ -133,7 +140,9 @@ impl TradeService {
                 format!(
                     "strategy:{}:{}:{}",
                     strategy_instance,
-                    expected_definition.as_deref().ok_or("STRATEGY_DEFINITION_MISSING")?,
+                    expected_definition
+                        .as_deref()
+                        .ok_or("STRATEGY_DEFINITION_MISSING")?,
                     idempotency_key,
                 )
             } else {

@@ -662,7 +662,9 @@ impl AnalyticsService {
         if expired.is_empty() {
             return Ok(0);
         }
-        let expired_roots = expired.iter().filter_map(|j| j.artifact.clone())
+        let expired_roots = expired
+            .iter()
+            .filter_map(|j| j.artifact.clone())
             .collect::<std::collections::BTreeSet<_>>();
         let mut protected = std::collections::BTreeSet::new();
         for root in self.jobs.artifact_roots()? {
@@ -675,11 +677,17 @@ impl AnalyticsService {
             self.artifact_graph(root, &mut garbage)?;
         }
         for id in garbage.difference(&protected) {
-            self.artifacts.remove_evidence(id).map_err(|e| e.to_string())?;
+            self.artifacts
+                .remove_evidence(id)
+                .map_err(|e| e.to_string())?;
         }
         for job in &expired {
-            self.jobs.update(&job.id, job.state.clone(), None,
-                Some("RESULT_EXPIRED_BY_7_DAY_RETENTION".into()))?;
+            self.jobs.update(
+                &job.id,
+                job.state.clone(),
+                None,
+                Some("RESULT_EXPIRED_BY_7_DAY_RETENTION".into()),
+            )?;
         }
         Ok(expired.len())
     }

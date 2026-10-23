@@ -187,9 +187,13 @@ impl TradeService {
             if desired == 0 {
                 let id = instance.instance_id.clone();
                 let key = decision_key.clone();
-                r.execution.store.call(deadline(), move |s| {
-                    s.finish_strategy_no_trade(&id, &key, now())
-                }).await.map_err(err)?;
+                r.execution
+                    .store
+                    .call(deadline(), move |s| {
+                        s.finish_strategy_no_trade(&id, &key, now())
+                    })
+                    .await
+                    .map_err(err)?;
                 continue;
             }
             let inst = instrument.to_owned();
@@ -223,9 +227,13 @@ impl TradeService {
             if !lots.is_empty() {
                 let id = instance.instance_id.clone();
                 let key = decision_key.clone();
-                r.execution.store.call(deadline(), move |s| {
-                    s.finish_strategy_no_trade(&id, &key, now())
-                }).await.map_err(err)?;
+                r.execution
+                    .store
+                    .call(deadline(), move |s| {
+                        s.finish_strategy_no_trade(&id, &key, now())
+                    })
+                    .await
+                    .map_err(err)?;
                 continue;
             }
             let command = TradeRequest::Execute {

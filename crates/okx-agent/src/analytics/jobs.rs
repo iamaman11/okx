@@ -71,7 +71,10 @@ impl Jobs {
     pub fn open(path: PathBuf) -> Result<Self, String> {
         std::fs::create_dir_all(path.parent().ok_or("INVALID_CATALOG_PATH")?)
             .map_err(|e| e.to_string())?;
-        if path.extension().is_none_or(|extension| extension != "sqlite") {
+        if path
+            .extension()
+            .is_none_or(|extension| extension != "sqlite")
+        {
             return Err("RESEARCH_SQLITE_PATH_REQUIRED".into());
         }
         let connection = Connection::open(path).map_err(|e| e.to_string())?;
@@ -229,7 +232,10 @@ impl Jobs {
         }
         drop(db);
         if !matches!(state, State::Queued | State::Running) {
-            self.cancel.lock().map_err(|_| "CATALOG_LOCK_POISONED")?.remove(id);
+            self.cancel
+                .lock()
+                .map_err(|_| "CATALOG_LOCK_POISONED")?
+                .remove(id);
         }
         Ok(())
     }
@@ -268,7 +274,12 @@ impl Jobs {
         let job = Self::read(&db, id)?.ok_or("JOB_NOT_FOUND")?;
         drop(db);
         if job.state == State::Cancelled {
-            if let Some(token) = self.cancel.lock().map_err(|_| "CATALOG_LOCK_POISONED")?.remove(id) {
+            if let Some(token) = self
+                .cancel
+                .lock()
+                .map_err(|_| "CATALOG_LOCK_POISONED")?
+                .remove(id)
+            {
                 token.store(true, Ordering::Release);
             }
         }
@@ -278,32 +289,40 @@ impl Jobs {
     #[cfg(test)]
     pub fn snapshot(&self) -> Vec<Job> {
         let db = self.db.lock().unwrap();
-        let mut stmt = db.prepare(
-            "SELECT id FROM research_jobs ORDER BY id LIMIT 1000",
-        ).unwrap();
-        stmt.query_map([], |row| row.get::<_, String>(0)).unwrap()
+        let mut stmt = db
+            .prepare("SELECT id FROM research_jobs ORDER BY id LIMIT 1000")
+            .unwrap();
+        stmt.query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
             .filter_map(Result::ok)
             .filter_map(|id| Self::read(&db, &id).ok().flatten())
             .collect()
     }
     pub fn retention_candidates(&self, now_ms: u64, limit: usize) -> Result<Vec<Job>, String> {
         let db = self.db.lock().map_err(|_| "CATALOG_LOCK_POISONED")?;
-        let mut stmt = db.prepare(
-            "SELECT id FROM research_jobs WHERE pinned=0 AND artifact IS NOT NULL
+        let mut stmt = db
+            .prepare(
+                "SELECT id FROM research_jobs WHERE pinned=0 AND artifact IS NOT NULL
              AND created_ms < ?1 AND state NOT IN ('queued','running')
              ORDER BY created_ms,id LIMIT ?2",
-        ).map_err(|e| e.to_string())?;
+            )
+            .map_err(|e| e.to_string())?;
         let ids = stmt
-            .query_map(params![now_ms.min(i64::MAX as u64) as i64, limit as i64],
-                |row| row.get::<_, String>(0))
+            .query_map(
+                params![now_ms.min(i64::MAX as u64) as i64, limit as i64],
+                |row| row.get::<_, String>(0),
+            )
             .map_err(|e| e.to_string())?
             .collect::<rusqlite::Result<Vec<_>>>()
             .map_err(|e| e.to_string())?;
-        ids.iter().map(|id| Self::read(&db, id)?.ok_or("JOB_NOT_FOUND".into())).collect()
+        ids.iter()
+            .map(|id| Self::read(&db, id)?.ok_or("JOB_NOT_FOUND".into()))
+            .collect()
     }
     pub fn artifact_roots(&self) -> Result<Vec<String>, String> {
         let db = self.db.lock().map_err(|_| "CATALOG_LOCK_POISONED")?;
-        let mut stmt = db.prepare("SELECT DISTINCT artifact FROM research_jobs WHERE artifact IS NOT NULL")
+        let mut stmt = db
+            .prepare("SELECT DISTINCT artifact FROM research_jobs WHERE artifact IS NOT NULL")
             .map_err(|e| e.to_string())?;
         stmt.query_map([], |row| row.get::<_, String>(0))
             .map_err(|e| e.to_string())?
@@ -314,15 +333,21 @@ impl Jobs {
         let db = self.db.lock().map_err(|_| "CATALOG_LOCK_POISONED")?;
         db.query_row(
             "SELECT EXISTS(SELECT 1 FROM research_jobs WHERE state IN ('queued','running'))",
-            [], |row| row.get::<_, bool>(0),
-        ).map_err(|e| e.to_string())
+            [],
+            |row| row.get::<_, bool>(0),
+        )
+        .map_err(|e| e.to_string())
     }
     pub fn pin(&self, id: &str, pinned: bool) -> Result<(), String> {
         let db = self.db.lock().map_err(|_| "CATALOG_LOCK_POISONED")?;
-        if db.execute(
-            "UPDATE research_jobs SET pinned=?2 WHERE id=?1",
-            params![id, pinned],
-        ).map_err(|e| e.to_string())? == 0 {
+        if db
+            .execute(
+                "UPDATE research_jobs SET pinned=?2 WHERE id=?1",
+                params![id, pinned],
+            )
+            .map_err(|e| e.to_string())?
+            == 0
+        {
             return Err("JOB_NOT_FOUND".into());
         }
         Ok(())
@@ -352,15 +377,33 @@ mod tests {
     fn transient_rate_defer_is_requeued_instead_of_cached_as_failed() {
         let p = path("retry");
         let s = Jobs::open(p).unwrap();
-        s.enqueue("fixture-key".into(), "rate-defer".into()).unwrap();
-        s.update("rate-defer", State::Failed, None,
-            Some("OKX rate/backpressure defer: fixture".into())).unwrap();
-        let (job, new, _) = s.enqueue("fixture-key".into(), "rate-defer".into()).unwrap();
+        s.enqueue("fixture-key".into(), "rate-defer".into())
+            .unwrap();
+        s.update(
+            "rate-defer",
+            State::Failed,
+            None,
+            Some("OKX rate/backpressure defer: fixture".into()),
+        )
+        .unwrap();
+        let (job, new, _) = s
+            .enqueue("fixture-key".into(), "rate-defer".into())
+            .unwrap();
         assert!(new);
         assert_eq!(job.state, State::Queued);
         assert!(job.error.is_none());
-        s.update("rate-defer", State::Failed, None, Some("SOURCE_INVALID".into())).unwrap();
-        assert!(!s.enqueue("fixture-key".into(), "rate-defer".into()).unwrap().1);
+        s.update(
+            "rate-defer",
+            State::Failed,
+            None,
+            Some("SOURCE_INVALID".into()),
+        )
+        .unwrap();
+        assert!(
+            !s.enqueue("fixture-key".into(), "rate-defer".into())
+                .unwrap()
+                .1
+        );
     }
     #[test]
     fn job_status_reads_bounded_rows_at_100k_jobs() {
@@ -375,7 +418,8 @@ mod tests {
                      VALUES(?1,?1,?2,'completed',100,0,0)",
                 ).unwrap();
                 for i in 0..100_000 {
-                    stmt.execute(params![format!("job_{i:06}"),format!("key_{i:06}")]).unwrap();
+                    stmt.execute(params![format!("job_{i:06}"), format!("key_{i:06}")])
+                        .unwrap();
                 }
             }
             tx.commit().unwrap();
@@ -385,13 +429,19 @@ mod tests {
             "EXPLAIN QUERY PLAN SELECT id,request_hash,idempotency_key,state,progress,artifact,error,created_ms,pinned
              FROM research_jobs WHERE id=?1",
         ).unwrap();
-        let plan = stmt.query_map(["job_099999"], |row| row.get::<_, String>(3))
-            .unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
+        let plan = stmt
+            .query_map(["job_099999"], |row| row.get::<_, String>(3))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
         drop(stmt);
         drop(connection);
         assert!(plan.iter().any(|detail| detail.contains("INDEX")));
         for i in [0, 1, 50_000, 99_999] {
-            assert_eq!(s.get(&format!("job_{i:06}")).unwrap().state, State::Completed);
+            assert_eq!(
+                s.get(&format!("job_{i:06}")).unwrap().state,
+                State::Completed
+            );
         }
         assert_eq!(s.retention_candidates(u64::MAX, 64).unwrap().len(), 0);
     }

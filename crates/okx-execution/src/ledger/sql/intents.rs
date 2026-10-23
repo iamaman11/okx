@@ -156,8 +156,12 @@ impl AccountStore {
             tx.execute(
                 "INSERT INTO decisions VALUES(?1,?2,?3,?4,?5,?6)",
                 params![
-                    decision.decision_id, decision.instance_id, decision.decision_at,
-                    decision.input_digest, decision.policy_revision, decision.code_version
+                    decision.decision_id,
+                    decision.instance_id,
+                    decision.decision_at,
+                    decision.input_digest,
+                    decision.policy_revision,
+                    decision.code_version
                 ],
             )?;
         }
