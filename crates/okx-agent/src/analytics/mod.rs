@@ -193,8 +193,15 @@ impl AnalyticsService {
         }
         match request {
             ResearchRequest::Capabilities {} => Ok(research_capabilities()),
-            ResearchRequest::Validate {data_mode,instruments,timeframe_ms,start_ms,end_ms,..} => {
-                let unsupported=matches!(data_mode,ResearchDataMode::HistoricalObserved);
+            ResearchRequest::Validate {
+                data_mode,
+                instruments,
+                timeframe_ms,
+                start_ms,
+                end_ms,
+                ..
+            } => {
+                let unsupported = matches!(data_mode, ResearchDataMode::HistoricalObserved);
                 Ok(json!({"schema":"okx.research.validation/v1",
                     "status":if unsupported{"blocked"}else{"valid_request"},
                     "reason_code":if unsupported{Some("HISTORICAL_RULES_AND_FEES_UNAVAILABLE")}else{None},
@@ -202,7 +209,7 @@ impl AnalyticsService {
                     "source_coverage":"not_evaluated","quality":"partial",
                     "instruments":instruments,"timeframe_ms":timeframe_ms,
                     "start_ms":start_ms,"end_ms":end_ms}))
-            },
+            }
             ResearchRequest::Status { job_id } => {
                 serde_json::to_value(self.jobs.get_async(job_id).await?).map_err(|e| e.to_string())
             }

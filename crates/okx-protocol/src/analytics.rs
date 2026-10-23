@@ -204,13 +204,28 @@ impl ResearchRequest {
     pub fn valid(&self) -> bool {
         match self {
             Self::Capabilities {} => true,
-            Self::Validate { instruments, timeframe_ms, start_ms, end_ms, strategy_id,
-                parameters, costs, data_mode } => Self::Backtest {
-                idempotency_key: "validation_only".into(), instruments: instruments.clone(),
-                timeframe_ms: *timeframe_ms, start_ms: *start_ms, end_ms: *end_ms,
-                strategy_id: strategy_id.clone(), parameters: parameters.clone(),
-                costs: costs.clone(), data_mode: *data_mode, seed: 0,
-            }.valid(),
+            Self::Validate {
+                instruments,
+                timeframe_ms,
+                start_ms,
+                end_ms,
+                strategy_id,
+                parameters,
+                costs,
+                data_mode,
+            } => Self::Backtest {
+                idempotency_key: "validation_only".into(),
+                instruments: instruments.clone(),
+                timeframe_ms: *timeframe_ms,
+                start_ms: *start_ms,
+                end_ms: *end_ms,
+                strategy_id: strategy_id.clone(),
+                parameters: parameters.clone(),
+                costs: costs.clone(),
+                data_mode: *data_mode,
+                seed: 0,
+            }
+            .valid(),
             Self::Backtest {
                 idempotency_key,
                 instruments,
