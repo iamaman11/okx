@@ -717,12 +717,8 @@ impl AnalyticsService {
         // collectable files, but never leave an accepted job referring to a
         // deleted immutable result.
         for job in &expired {
-            self.jobs.update(
-                &job.id,
-                job.state.clone(),
-                None,
-                Some("RESULT_EXPIRED_BY_7_DAY_RETENTION".into()),
-            )?;
+            let artifact = job.artifact.as_deref().ok_or("RESEARCH_ARTIFACT_MISSING")?;
+            self.jobs.expire_terminal_artifact(&job.id, artifact)?;
         }
         for id in &garbage {
             self.artifacts
