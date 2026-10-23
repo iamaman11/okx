@@ -721,9 +721,55 @@ impl AnalyticsService {
     }
 }
 #[cfg(test)]
+mod tests {
+    use super::*;
+    #[tokio::test]
+    async fn grid_result_includes_selected_train_test_and_equity() {
+        let (root, service)=super::artifact_job_fixtures::service();
+        let dataset=service.artifacts.publish_evidence(&json!({"chunks":[]})).unwrap().0;
+        let summary=replay::Summary {
+            pnl:1.0,pnl_exact:"1".into(),fees_exact:"0.1".into(),funding_exact:"0".into(),
+            max_drawdown:0.05,sharpe:1.2,trades:0,turnover:2.0,fees:0.1,funding:0.0,
+            benchmark:0.0,assumptions:vec!["COUNTERFACTUAL".into()],
+        };
+        let result=replay::ReplayResult {
+            dataset_hash:"dataset-398".into(),code_version:"test".into(),hash:"result-398".into(),
+            summary:summary.clone(),equity:(0..100).map(|i|(i,10000.0+i as f64)).collect(),
+            trades:vec![],
+        };
+        let grid=json!({"selected":{"fast":3,"slow":8},"train":summary,
+            "split_index":70,"selection_warning":"Counterfactual only",
+            "variants":[{"parameters":{"fast":3,"slow":8},"train":summary}]});
+        let manifest=publish_replay(&service.artifacts,&result,&dataset,Some(grid),&||false).unwrap();
+        let id="c".repeat(64);
+        service.jobs.enqueue("f05-proof".into(),id.clone()).unwrap();
+        service.jobs.update(&id,jobs::State::Completed,Some(manifest),None).unwrap();
+        let get=|view,cursor:Option<String>| ResearchRequest::Result {
+            job_id:id.clone(),cursor,limit:5,view
+        };
+        let summary_view=service.research(get(ResearchResultView::Summary,None)).await.unwrap();
+        assert_eq!(summary_view["metadata"]["grid"]["selected"]["fast"],3);
+        assert_eq!(summary_view["metadata"]["grid"]["train"]["pnl"],1.0);
+        assert_eq!(summary_view["metadata"]["summary"]["pnl"],1.0);
+        assert_eq!(summary_view["returned_rows"],0);
+        let variants=service.research(get(ResearchResultView::Variants,None)).await.unwrap();
+        assert_eq!(variants["total_rows"],1);
+        assert_eq!(variants["rows"][0]["parameters"]["slow"],8);
+        let first=service.research(get(ResearchResultView::Equity,None)).await.unwrap();
+        assert_eq!(first["total_rows"],100);
+        assert_eq!(first["returned_rows"],5);
+        assert_eq!(first["next_cursor"],"5");
+        let next=service.research(get(ResearchResultView::Equity,Some("5".into()))).await.unwrap();
+        assert_eq!(next["rows"][0][0],5);
+        assert!(service.research(get(ResearchResultView::Equity,Some("invalid".into()))).await.is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(test)]
 mod artifact_job_fixtures {
     use super::*;
-    fn service() -> (PathBuf, AnalyticsService) {
+    pub(super) fn service() -> (PathBuf, AnalyticsService) {
         let root = std::env::temp_dir().join(format!(
             "okx-analytics-{}-{}",
             std::process::id(),
