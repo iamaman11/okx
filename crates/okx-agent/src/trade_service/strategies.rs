@@ -33,7 +33,8 @@ impl TradeService {
             .mutation_capacity
             .try_acquire()
             .map_err(|_| "ACCOUNT_MUTATION_BUSY")?;
-        let (_, control) = self.authority(&r, supplied).await?;
+        let (state, control) = self.authority(&r, supplied).await?;
+        let campaign_limit_usd = state.state.campaign_loss_limit_usd.clone();
         let request_hash = digest(&(r.configuration.account_key.wire(), request))?;
         let body = request.clone();
         let result=r.execution.store.call(deadline(),move|s|{
@@ -51,8 +52,13 @@ impl TradeService {
  StrategyRequest::Start{idempotency_key,instance_id}|StrategyRequest::Stop{idempotency_key,instance_id}=>{let mut i=instances.iter().find(|i|&i.instance_id==instance_id).cloned().ok_or(okx_execution::StoreError::Invalid("STRATEGY_INSTANCE_NOT_FOUND"))?;let expected=i.policy_revision;i.policy_revision+=1;i.enabled=matches!(&body,StrategyRequest::Start{..});(idempotency_key.clone(),if i.enabled{"start"}else{"stop"},i,Some(expected))},_=>return Err(okx_execution::StoreError::Invalid("STRATEGY_MUTATION_REQUIRED"))
  };
  if action=="start"&&!control.access_enabled(){return Err(okx_execution::StoreError::Invalid("ACCOUNT_NEW_RISK_PAUSED"));}
- instances.retain(|i|i.instance_id!=instance.instance_id);let allocated=instances.iter().try_fold(instance.budget,|sum,i|sum.checked_add(i.budget).ok_or(okx_execution::StoreError::Invalid("MONEY_OVERFLOW")))?;
- if allocated>Decimal::from_str(&control.limits.max_notional_usdt.unwrap_or(control.limits.max_modelled_loss_usdt)).map_err(|_|okx_execution::StoreError::Invalid("INVALID_ACCOUNT_BUDGET"))?{return Err(okx_execution::StoreError::Invalid("INSTANCE_BUDGET_TOTAL_EXCEEDS_ACCOUNT_LIMIT"));}
+ // Strategy budget is a per-decision maximum modeled loss in USD, NOT a
+ // notional allocation and NOT a central reservation. Only actual plans
+ // reserve aggregate campaign capacity through RiskBook CAS.
+ let ceiling=Decimal::from_str(&campaign_limit_usd).map_err(|_|okx_execution::StoreError::Invalid("INVALID_CAMPAIGN_BUDGET"))?;
+ if instance.budget<=Decimal::ZERO || instance.budget>ceiling {
+     return Err(okx_execution::StoreError::Invalid("STRATEGY_RISK_BUDGET_USD_OUT_OF_RANGE"));
+ }
  let receipt=s.mutate_instance(&operation,&request_hash,action,&instance,expected,now())?;
  serde_json::from_str::<StrategyInstance>(&receipt.result_ref).map_err(|_|okx_execution::StoreError::Invalid("STRATEGY_RECEIPT_CORRUPT"))
  }).await.map_err(err)?;
@@ -178,6 +184,11 @@ impl TradeService {
             }
             let desired = signal.unwrap_or(0);
             if desired == 0 {
+                let id = instance.instance_id.clone();
+                let key = decision_key.clone();
+                r.execution.store.call(deadline(), move |s| {
+                    s.finish_strategy_no_trade(&id, &key, now())
+                }).await.map_err(err)?;
                 continue;
             }
             let inst = instrument.to_owned();
@@ -209,6 +220,11 @@ impl TradeService {
                 continue;
             }
             if !lots.is_empty() {
+                let id = instance.instance_id.clone();
+                let key = decision_key.clone();
+                r.execution.store.call(deadline(), move |s| {
+                    s.finish_strategy_no_trade(&id, &key, now())
+                }).await.map_err(err)?;
                 continue;
             }
             let command = TradeRequest::Execute {
@@ -225,7 +241,7 @@ impl TradeService {
                     max_loss_usd: exact(
                         instance
                             .budget
-                            .min(dec(&control.limits.max_order_loss_usdt)?),
+                            .min(dec(&state.state.campaign_loss_limit_usd)?),
                     ),
                 },
                 order: OrderConstraints {
