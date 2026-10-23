@@ -105,7 +105,7 @@ def build(args):
     value["mcp"]={"physical_network":"NOT_RUN","account_count":None,"instance_count":None,"reason":"installed MCP observations are required","tool_count":int(inventory[1])if inventory else None,"tools_list_utf8_bytes":int(inventory[2])if inventory else None}
     value["mcp"].update(physical.get("mcp",{}))
     value["release_hashes"]=physical.get("release_hashes",{})
-    value["physical_evidence_location"]="https://github.com/iamaman11/okx/releases/latest/download/acceptance.json"
+    value["physical_evidence_location"]=None  # final exact release tag is unknown before F09
     for key in ["INSTALLED_MATCHED","PHYSICAL_MULTI_ACCOUNT","REAL_CYCLE_ACCEPTED"]:value[key]=physical.get(key,{}).get("result","NOT_RUN")
     validate(value);out.write_text(json.dumps(value,ensure_ascii=False,indent=2)+"\n",encoding="utf-8");print(out)
     return 0 if code_ok else 1
