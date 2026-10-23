@@ -1,25 +1,20 @@
-# OKX
+# OKX — clean Engine
 
-[#398](https://github.com/iamaman11/okx/issues/398) is the sole implementation and acceptance specification. PR #397 is the merged baseline; previous staged Live gates are historical.
+**[Issue #398](https://github.com/iamaman11/okx/issues/398) is the sole active requirements and acceptance source.** Its [acceptance and testing checklist](https://github.com/iamaman11/okx/issues/398#issuecomment-6373732525) is mandatory. Older Stage 5 and W01–W10 plans are historical, not prerequisites.
 
-One Rust Engine routes independent accounts and strategy instances. Persistent account access, addressed account SQL owners, one central RiskBook, seven compact MCP tools and shared causal Rust analytics form the current product. Installation starts clean from current verified identity and credential references. Old application financial history, grants, STOP and obligations are neither read nor imported. Ordinary restart retains new-format state and never initializes a replacement database.
+One Rust Engine routes independent AccountKey contexts, addressed SQLite WAL and a central governance/RiskBook. The public MCP has exactly seven typed tools: `accounts`, `strategies`, `market`, `research`, `trade`, `portfolio`, `diagnostics`. No Demo-only Agent, CONTROL profile handoff, v14 import or arbitrary shell/SQL/RPC route.
 
-Delivery uses one integration PR, a matched CI ReleaseSet and one Windows/MCP acceptance program. Intermediate checkpoints are not deployed. The authorized Real campaign has a cumulative loss ceiling of USD10 including costs across accounts, strategies and restart; profits do not refill it. Fixture success and CI promotion do not establish physical acceptance.
+**Verified 23 October 2026:** PR [#403](https://github.com/iamaman11/okx/pull/403) is merged, Agent/Controller/Launcher are installed with `release_parity=MATCHED`, and central/native SQL campaign policy is USD10, revision 2. F03, F05, F07, F08 and final F09 remain open. This is not a Real-trade authorization. The second Real UID is absent: `PHYSICAL_MULTI_ACCOUNT=BLOCKED`. Consult #398 for newer facts.
 
-- [Current architecture](docs/ARCHITECTURE_CONTRACT_V1.md)
-- [Operator workflow](docs/chatgpt-operator-contract.md)
-- [Defaults, transitions and install/backup/restore runbook](docs/PRODUCT_ACCEPTANCE.md)
-- [Published checkpoints and remaining acceptance](docs/ROADMAP.md)
-- [Preinstallation code acceptance](acceptance.json)
-- [Final manifest attached to the exact accepted release](https://github.com/iamaman11/okx/releases/latest/download/acceptance.json)
-
-The tracked manifest precedes physical deployment. The release asset supplies the final installed/exchange observations and exact binary hashes; NOT_RUN/BLOCKED never means PASS. Prior documents are retained in [history](docs/history/README-before-398.md) without imposing activation or migration prerequisites.
-
-Run complete local code acceptance from PowerShell:
+- [Architecture and owners](docs/ARCHITECTURE_CONTRACT_V1.md)
+- [Operator rules](docs/chatgpt-operator-contract.md)
+- [Operational acceptance and CONTROL](docs/PRODUCT_ACCEPTANCE.md)
+- [Observed requirement status](docs/ROADMAP.md) — not another plan
+- [Historical non-normative evidence](docs/history/README-before-398.md)
 
 ```powershell
-$env:NO_PROXY = '127.0.0.1,localhost'
+python scripts/acceptance_product.py --self-test
 python scripts/acceptance_product.py --run
 ```
 
-This runs format, architecture/SQL/product guards, locked Rust tests and Clippy, plus Worker checks. Exact CI and physical acceptance remain separate requirements.
+The checked-in [acceptance.json](acceptance.json) is **preinstallation code evidence**, not installed product proof. Final acceptance must cite the **specific immutable release tag and asset SHA256**, never a mutable latest-release URL. Do not reinitialize current SQL or reset the campaign while fixing F01–F09.
