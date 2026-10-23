@@ -380,11 +380,15 @@ mod tests {
             }
             tx.commit().unwrap();
         }
-        let plan = s.db.lock().unwrap().prepare(
+        let connection = s.db.lock().unwrap();
+        let mut stmt = connection.prepare(
             "EXPLAIN QUERY PLAN SELECT id,request_hash,idempotency_key,state,progress,artifact,error,created_ms,pinned
              FROM research_jobs WHERE id=?1",
-        ).unwrap().query_map(["job_099999"], |row| row.get::<_, String>(3))
+        ).unwrap();
+        let plan = stmt.query_map(["job_099999"], |row| row.get::<_, String>(3))
             .unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
+        drop(stmt);
+        drop(connection);
         assert!(plan.iter().any(|detail| detail.contains("INDEX")));
         for i in [0, 1, 50_000, 99_999] {
             assert_eq!(s.get(&format!("job_{i:06}")).unwrap().state, State::Completed);
