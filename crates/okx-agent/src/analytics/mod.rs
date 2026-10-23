@@ -182,6 +182,7 @@ impl AnalyticsService {
             return Err("INVALID_RESEARCH_REQUEST".into());
         }
         match request {
+            ResearchRequest::Capabilities {} => Ok(research_capabilities()),
             ResearchRequest::Status { job_id } => {
                 serde_json::to_value(self.jobs.get_async(job_id).await?).map_err(|e| e.to_string())
             }
@@ -1173,5 +1174,37 @@ mod artifact_job_fixtures {
         drop(reloaded);
         drop(s);
         std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+fn research_capabilities() -> Value {
+    // Report only what the current public product can actually execute.
+    // HistoricalObserved remains unavailable until authenticated historical
+    // venue mechanics + fees are captured, not merely a validation enum.
+    json!({
+        "schema":"okx.research.capabilities/v1",
+        "quality":"fresh",
+        "strategy_ids":["ema_cross_v1"],
+        "supported_data_modes":["counterfactual"],
+        "unavailable_data_modes":[{"mode":"historical_observed",
+            "reason_code":"HISTORICAL_RULES_AND_FEES_UNAVAILABLE"}],
+        "timeframes_ms":[60000,180000,300000,900000,1800000,3600000,14400000,86400000],
+        "limits":{"max_instruments":8,"max_bars_total":1000000,"max_grid_variants":64,
+            "max_result_page_rows":50,"max_heavy_concurrent_jobs":2},
+        "result_views":["summary","trades","variants","equity"],
+        "oos":{"grid_train_test_split":true,"selected_variant_from_train_only":true},
+        "source_evidence":{"closed_candles_only":true,"no_forward_fill":true}
+    })
+}
+#[cfg(test)]
+mod research_capabilities_contract {
+    use super::*;
+    #[test]
+    fn native_capabilities_do_not_advertise_unavailable_historical_mode() {
+        let report=research_capabilities();
+        assert_eq!(report["supported_data_modes"],json!(["counterfactual"]));
+        assert_eq!(report["unavailable_data_modes"][0]["reason_code"],
+            "HISTORICAL_RULES_AND_FEES_UNAVAILABLE");
+        assert_eq!(report["limits"]["max_grid_variants"],64);
     }
 }

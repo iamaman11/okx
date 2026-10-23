@@ -81,6 +81,7 @@ pub enum ResearchResultView {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ResearchRequest {
+    Capabilities {},
     Backtest {
         idempotency_key: String,
         instruments: Vec<String>,
@@ -192,6 +193,7 @@ impl ResearchCosts {
 impl ResearchRequest {
     pub fn valid(&self) -> bool {
         match self {
+            Self::Capabilities {} => true,
             Self::Backtest {
                 idempotency_key,
                 instruments,
@@ -272,6 +274,14 @@ fn valid_job(id: &str) -> bool {
 #[cfg(test)]
 mod batch_tests {
     use super::*;
+    #[test]
+    fn research_capabilities_strict_read_only_wire() {
+        let r:ResearchRequest=serde_json::from_str(r#"{"action":"capabilities"}"#).unwrap();
+        assert!(matches!(r,ResearchRequest::Capabilities{}));
+        assert!(r.valid());
+        assert!(serde_json::from_str::<ResearchRequest>(
+            r#"{"action":"capabilities","raw_rpc":"forbidden"}"#).is_err());
+    }
     #[test]
     fn research_batch_wire_roundtrip_and_total_bar_budget() {
         let request = ResearchRequest::Backtest {

@@ -873,6 +873,23 @@
     ]
   },
   {
+    "tool": "research",
+    "action": "capabilities",
+    "positive": {
+      "action": "capabilities"
+    },
+    "negative": [
+      {
+        "action": "capabilities",
+        "raw_rpc": "forbidden"
+      },
+      {},
+      {
+        "action": 12
+      }
+    ]
+  },
+  {
     "tool": "trade",
     "action": "preview",
     "positive": {
