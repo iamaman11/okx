@@ -73,6 +73,11 @@ fn allocation_and_bar_claim_survive_retry_and_restart() {
             .unwrap()
     );
     assert!(
+        s.claim_strategy_decision("a", "bar-100", "inputs", 1, 5)
+            .unwrap()
+    );
+    s.finish_strategy_no_trade("a", "bar-100", 5).unwrap();
+    assert!(
         !s.claim_strategy_decision("a", "bar-100", "inputs", 1, 5)
             .unwrap()
     );
@@ -1431,4 +1436,57 @@ fn recovery_history_age_is_separate_from_current_evidence_freshness() {
         .unwrap();
     assert!(s.recovery_snapshot(now).unwrap().coverage_complete);
     assert!(!s.recovery_snapshot(now + 5001).unwrap().coverage_complete);
+}
+
+#[test]
+fn strategy_crash_pending_decision_to_intent() {
+    let mut s = store();
+    owned_fill(&mut s, "a", "fixture-filled", 100, "long", 3);
+    let version = s.strategy_definition("a").unwrap();
+    assert!(s.claim_strategy_decision("a", "bar-next", "inputs-next", 1, 7).unwrap());
+    // Simulate a process crash before the plan and intent were committed.
+    let p = s.path.clone();
+    let meta = s.meta.clone();
+    drop(s);
+    let mut s = AccountStore::open_existing(p, &meta.account_key, &meta.installation_id).unwrap();
+    assert!(s.claim_strategy_decision("a", "bar-next", "inputs-next", 1, 8).unwrap());
+    assert!(s.instances().unwrap().iter().find(|i| i.instance_id=="a").unwrap()
+        .last_decision_key.as_deref() != Some("bar-next"));
+    let plan = IntentPlan {
+        strategy_definition_id: version.definition_id.clone(),
+        strategy_definition_version: version.version.clone(),
+        strategy_parameters_digest: version.parameters_digest.clone(),
+        operation: "open".into(), side: "buy".into(), position_side: "long".into(),
+        quantity: Decimal::ONE, limit_price: Decimal::from(100),
+        stop_price: Some(Decimal::from(90)), strategy_instance: "a".into(),
+        planned_loss_usd: Decimal::ONE, source_generation: 1,
+        private_source_generation: 1, contract_value: Decimal::ONE,
+        inverse: false, settlement_currency: "USDT".into(),
+    };
+    let decision = Decision {
+        decision_id: format!("strategy:a:{}:bar-next", version.version),
+        instance_id: Some("a".into()), decision_at: 9,
+        input_digest: "inputs-next".into(), policy_revision: 1,
+        code_version: "strategy-bar/v1".into(),
+    };
+    let intent = NewIntent {
+        plan, intent_id: "f07-next".into(), idempotency_key: "bar-next".into(),
+        request_hash: "f07-body".into(), client_order_id: "f07-client".into(),
+        deadline: 1000, plan_hash: "f07-plan".into(), policy_revision: 1,
+        risk_increase: true, instrument_id: "BTC".into(),
+    };
+    s.prepare(&decision, &intent).unwrap();
+    let decisions: i64 = s.connection.query_row(
+        "SELECT count(*) FROM decisions WHERE decision_id=?1",
+        [&decision.decision_id], |r| r.get(0),
+    ).unwrap();
+    assert_eq!(decisions, 1);
+    let bound: String = s.connection.query_row(
+        "SELECT decision_id FROM intents WHERE idempotency_key='bar-next'",
+        [], |r| r.get(0),
+    ).unwrap();
+    assert_eq!(bound, decision.decision_id);
+    assert!(!s.claim_strategy_decision("a", "bar-next", "inputs-next", 1, 10).unwrap());
+    assert_eq!(s.instances().unwrap().iter().find(|i|i.instance_id=="a").unwrap()
+        .last_decision_key.as_deref(), Some("bar-next"));
 }

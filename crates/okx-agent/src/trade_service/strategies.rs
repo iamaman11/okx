@@ -164,6 +164,7 @@ impl TradeService {
             }
             let id = instance.instance_id.clone();
             let dk = decision_key.clone();
+            let input_for_execute = decision_digest.clone();
             let revision = state.state.revision as i64;
             let expected_version = instance.definition_version.clone();
             let claimed = r
@@ -261,6 +262,7 @@ impl TradeService {
                     &command,
                     Some(&state),
                     instance.definition_version.clone(),
+                    input_for_execute,
                 )
                 .await?;
         }

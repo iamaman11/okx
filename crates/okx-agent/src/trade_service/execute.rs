@@ -19,7 +19,7 @@ impl TradeService {
         supplied: Option<&CentralGovernanceSnapshot>,
         bound_hash: Option<String>,
     ) -> Result<Value, String> {
-        self.execute_inner(r, request, supplied, bound_hash, None)
+        self.execute_inner(r, request, supplied, bound_hash, None, None)
             .await
     }
     pub(super) async fn execute_for_definition(
@@ -28,8 +28,9 @@ impl TradeService {
         request: &TradeRequest,
         supplied: Option<&CentralGovernanceSnapshot>,
         version: String,
+        decision_digest: String,
     ) -> Result<Value, String> {
-        self.execute_inner(r, request, supplied, None, Some(version))
+        self.execute_inner(r, request, supplied, None, Some(version), Some(decision_digest))
             .await
     }
     async fn execute_inner(
@@ -39,6 +40,7 @@ impl TradeService {
         supplied: Option<&CentralGovernanceSnapshot>,
         bound_hash: Option<String>,
         expected_definition: Option<String>,
+        claimed_input_digest: Option<String>,
     ) -> Result<Value, String> {
         let TradeRequest::Execute {
             idempotency_key,
@@ -127,10 +129,22 @@ impl TradeService {
         let id = format!("intent_{}", &body_hash[..32]);
         let client_id = body_hash[..32].to_owned();
         let decision = Decision {
-            decision_id: format!("decision_{}", &body_hash[..32]),
+            decision_id: if claimed_input_digest.is_some() {
+                format!(
+                    "strategy:{}:{}:{}",
+                    strategy_instance,
+                    expected_definition.as_deref().ok_or("STRATEGY_DEFINITION_MISSING")?,
+                    idempotency_key,
+                )
+            } else {
+                format!("decision_{}", &body_hash[..32])
+            },
             instance_id: Some(strategy_instance.clone()),
             decision_at: now(),
-            input_digest: digest(&(body_hash.clone(), &plan))?,
+            input_digest: match claimed_input_digest {
+                Some(digest) => digest,
+                None => digest(&(body_hash.clone(), &plan))?,
+            },
             policy_revision: state.state.revision as i64,
             code_version: crate::accounts::build_release().into(),
         };
