@@ -273,15 +273,14 @@ impl Jobs {
         tx.commit().map_err(|e| e.to_string())?;
         let job = Self::read(&db, id)?.ok_or("JOB_NOT_FOUND")?;
         drop(db);
-        if job.state == State::Cancelled {
-            if let Some(token) = self
+        if job.state == State::Cancelled
+            && let Some(token) = self
                 .cancel
                 .lock()
                 .map_err(|_| "CATALOG_LOCK_POISONED")?
                 .remove(id)
-            {
-                token.store(true, Ordering::Release);
-            }
+        {
+            token.store(true, Ordering::Release);
         }
         Ok(job)
     }

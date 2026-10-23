@@ -40,7 +40,7 @@ impl TradeService {
         let result=r.execution.store.call(deadline(),move|s|{
  let operation=match &body {StrategyRequest::Create{idempotency_key,..}|StrategyRequest::Update{idempotency_key,..}|StrategyRequest::Start{idempotency_key,..}|StrategyRequest::Stop{idempotency_key,..}=>idempotency_key,_=>return Err(okx_execution::StoreError::Invalid("STRATEGY_MUTATION_REQUIRED"))};
  if let Some(old)=s.operation(operation)? {if old.request_hash!=request_hash {return Err(okx_execution::StoreError::Invalid("IDEMPOTENCY_CONFLICT"));}return serde_json::from_str::<StrategyInstance>(&old.result_ref).map_err(|_|okx_execution::StoreError::Invalid("STRATEGY_RECEIPT_CORRUPT"));}
- let mut instances=s.instances()?;
+ let instances=s.instances()?;
  let (operation,action,instance,expected)=match &body{
  StrategyRequest::Create{idempotency_key,instance_id,definition_id,version,parameters,instruments,timeframe_ms,budget_usd}=>{
  if !matches!(definition_id.as_str(),"ema_cross_v1"|"no_trade"|"close_momentum"|"two_bar_momentum"){return Err(okx_execution::StoreError::Invalid("STRATEGY_DEFINITION_UNSUPPORTED"));}
