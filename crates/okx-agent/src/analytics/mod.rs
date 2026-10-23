@@ -60,7 +60,7 @@ impl AnalyticsService {
         let hash = okx_research::canonical_sha256(&("market/398.1", &request, bucket))
             .map_err(|e| e.to_string())?;
         let hash = hash.strip_prefix("sha256:").unwrap_or(&hash).to_owned();
-        let (job, new, cancel) = self.jobs.enqueue(format!("market-{hash}"), hash.clone())?;
+        let (job, new, cancel) = self.jobs.enqueue_async(format!("market-{hash}"), hash.clone()).await?;
         if !new {
             if let Some(artifact) = job.artifact {
                 let store = self.artifacts.clone();
@@ -77,7 +77,7 @@ impl AnalyticsService {
         }
         let this = self.clone();
         let mut task = tokio::spawn(async move {
-            this.jobs.update(&hash, jobs::State::Running, None, None)?;
+            this.jobs.update_async(hash.clone(), jobs::State::Running, None, None).await?;
             let mut outcome = this.market_execute(request, cancel.clone()).await;
             if let Ok(value) = &mut outcome {
                 value
@@ -96,11 +96,11 @@ impl AnalyticsService {
                         })
                         .await?;
                     this.jobs
-                        .update(&hash, jobs::State::Completed, Some(artifact), None)?;
+                        .update_async(hash.clone(), jobs::State::Completed, Some(artifact), None).await?;
                 }
                 Err(e) => {
-                    this.jobs.update(
-                        &hash,
+                    this.jobs.update_async(
+                        hash.clone(),
                         if cancel.load(Ordering::Acquire) {
                             jobs::State::Cancelled
                         } else {
@@ -108,7 +108,7 @@ impl AnalyticsService {
                         },
                         None,
                         Some(e.clone()),
-                    )?;
+                    ).await?;
                 }
             }
             outcome
@@ -175,12 +175,12 @@ impl AnalyticsService {
         }
         match request {
             ResearchRequest::Status { job_id } => {
-                serde_json::to_value(self.jobs.get(&job_id)?).map_err(|e| e.to_string())
+                serde_json::to_value(self.jobs.get_async(job_id).await?).map_err(|e| e.to_string())
             }
             ResearchRequest::Cancel {
                 job_id,
                 idempotency_key,
-            } => serde_json::to_value(self.jobs.cancel(&job_id, &idempotency_key)?)
+            } => serde_json::to_value(self.jobs.cancel_async(job_id, idempotency_key).await?)
                 .map_err(|e| e.to_string()),
             ResearchRequest::Result {
                 job_id,
@@ -378,7 +378,7 @@ impl AnalyticsService {
             } => idempotency_key.clone(),
             _ => return Err("INVALID_JOB_REQUEST".into()),
         };
-        let (job, new, cancel) = self.jobs.enqueue(key, hash.clone())?;
+        let (job, new, cancel) = self.jobs.enqueue_async(key, hash.clone()).await?;
         if !new {
             return Ok(json!(job));
         }
@@ -390,7 +390,7 @@ impl AnalyticsService {
                     .clone()
                     .try_acquire_owned()
                     .map_err(|_| "HEAVY_JOBS_LIMIT:2")?;
-                this.jobs.update(&hash, jobs::State::Running, None, None)?;
+                this.jobs.update_async(hash.clone(), jobs::State::Running, None, None).await?;
                 let instruments = match &request { ResearchRequest::Backtest{instruments,..}|ResearchRequest::Grid{instruments,..}=>instruments.clone(),_=>unreachable!() };
                 if instruments.len()==1 { return this.execute_one(request,cancel.clone()).await; }
                 let mut work=stream::iter(instruments.into_iter().enumerate().map(|(index,instrument)|{
@@ -413,16 +413,16 @@ impl AnalyticsService {
                         Ok((rows,artifacts,manifest))
                     }).await?;
                     rows=next_rows;artifacts=next_artifacts;
-                    this.jobs.update(&hash,jobs::State::Running,Some(manifest),None)?;
+                    this.jobs.update_async(hash.clone(),jobs::State::Running,Some(manifest),None).await?;
                 }
-                this.jobs.get(&hash)?.artifact.ok_or_else(||"EMPTY_BATCH".into())
+                this.jobs.get_async(hash.clone()).await?.artifact.ok_or_else(||"EMPTY_BATCH".into())
             }
             .await;
             match outcome {
                 Ok(a) => {
                     let _ = this
                         .jobs
-                        .update(&hash, jobs::State::Completed, Some(a), None);
+                        .update_async(hash.clone(), jobs::State::Completed, Some(a), None).await;
                 }
                 Err(e) => {
                     let state = if cancel.load(Ordering::Acquire) {
@@ -430,12 +430,10 @@ impl AnalyticsService {
                     } else {
                         jobs::State::Failed
                     };
-                    let _ = this.jobs.update(
-                        &hash,
-                        state,
-                        this.jobs.get(&hash).ok().and_then(|j| j.artifact),
-                        Some(e),
-                    );
+                    let artifact=this.jobs.get_async(hash.clone()).await.ok().and_then(|j|j.artifact);
+                    let _ = this.jobs.update_async(
+                        hash.clone(), state, artifact, Some(e)
+                    ).await;
                 }
             }
         });

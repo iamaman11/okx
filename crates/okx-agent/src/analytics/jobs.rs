@@ -354,6 +354,35 @@ impl Jobs {
     }
 }
 
+
+impl Jobs {
+    pub async fn enqueue_async(
+        &self, idempotency_key: String, hash: String,
+    ) -> Result<(Job, bool, Arc<AtomicBool>), String> {
+        let owner=self.clone();
+        tokio::task::spawn_blocking(move||owner.enqueue(idempotency_key,hash))
+            .await.map_err(|_|"RESEARCH_SQL_WORKER_FAILED".to_owned())?
+    }
+    pub async fn get_async(&self, id: String) -> Result<Job, String> {
+        let owner=self.clone();
+        tokio::task::spawn_blocking(move||owner.get(&id))
+            .await.map_err(|_|"RESEARCH_SQL_WORKER_FAILED".to_owned())?
+    }
+    pub async fn update_async(
+        &self, id: String, state: State,
+        artifact: Option<String>, error: Option<String>,
+    ) -> Result<(), String> {
+        let owner=self.clone();
+        tokio::task::spawn_blocking(move||owner.update(&id,state,artifact,error))
+            .await.map_err(|_|"RESEARCH_SQL_WORKER_FAILED".to_owned())?
+    }
+    pub async fn cancel_async(&self, id: String, key: String) -> Result<Job, String> {
+        let owner=self.clone();
+        tokio::task::spawn_blocking(move||owner.cancel(&id,&key))
+            .await.map_err(|_|"RESEARCH_SQL_WORKER_FAILED".to_owned())?
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
