@@ -60,7 +60,10 @@ impl AnalyticsService {
         let hash = okx_research::canonical_sha256(&("market/398.1", &request, bucket))
             .map_err(|e| e.to_string())?;
         let hash = hash.strip_prefix("sha256:").unwrap_or(&hash).to_owned();
-        let (job, new, cancel) = self.jobs.enqueue_async(format!("market-{hash}"), hash.clone()).await?;
+        let (job, new, cancel) = self
+            .jobs
+            .enqueue_async(format!("market-{hash}"), hash.clone())
+            .await?;
         if !new {
             if let Some(artifact) = job.artifact {
                 let store = self.artifacts.clone();
@@ -77,7 +80,9 @@ impl AnalyticsService {
         }
         let this = self.clone();
         let mut task = tokio::spawn(async move {
-            this.jobs.update_async(hash.clone(), jobs::State::Running, None, None).await?;
+            this.jobs
+                .update_async(hash.clone(), jobs::State::Running, None, None)
+                .await?;
             let mut outcome = this.market_execute(request, cancel.clone()).await;
             if let Ok(value) = &mut outcome {
                 value
@@ -96,19 +101,22 @@ impl AnalyticsService {
                         })
                         .await?;
                     this.jobs
-                        .update_async(hash.clone(), jobs::State::Completed, Some(artifact), None).await?;
+                        .update_async(hash.clone(), jobs::State::Completed, Some(artifact), None)
+                        .await?;
                 }
                 Err(e) => {
-                    this.jobs.update_async(
-                        hash.clone(),
-                        if cancel.load(Ordering::Acquire) {
-                            jobs::State::Cancelled
-                        } else {
-                            jobs::State::Failed
-                        },
-                        None,
-                        Some(e.clone()),
-                    ).await?;
+                    this.jobs
+                        .update_async(
+                            hash.clone(),
+                            if cancel.load(Ordering::Acquire) {
+                                jobs::State::Cancelled
+                            } else {
+                                jobs::State::Failed
+                            },
+                            None,
+                            Some(e.clone()),
+                        )
+                        .await?;
                 }
             }
             outcome
@@ -425,7 +433,8 @@ impl AnalyticsService {
                 Ok(a) => {
                     let _ = this
                         .jobs
-                        .update_async(hash.clone(), jobs::State::Completed, Some(a), None).await;
+                        .update_async(hash.clone(), jobs::State::Completed, Some(a), None)
+                        .await;
                 }
                 Err(e) => {
                     let state = if cancel.load(Ordering::Acquire) {
@@ -433,10 +442,16 @@ impl AnalyticsService {
                     } else {
                         jobs::State::Failed
                     };
-                    let artifact=this.jobs.get_async(hash.clone()).await.ok().and_then(|j|j.artifact);
-                    let _ = this.jobs.update_async(
-                        hash.clone(), state, artifact, Some(e)
-                    ).await;
+                    let artifact = this
+                        .jobs
+                        .get_async(hash.clone())
+                        .await
+                        .ok()
+                        .and_then(|j| j.artifact);
+                    let _ = this
+                        .jobs
+                        .update_async(hash.clone(), state, artifact, Some(e))
+                        .await;
                 }
             }
         });
@@ -677,7 +692,9 @@ impl AnalyticsService {
         let mut cursor: Option<String> = None;
         loop {
             let roots = self.jobs.artifact_roots_page(cursor.as_deref(), 64)?;
-            if roots.is_empty() { break; }
+            if roots.is_empty() {
+                break;
+            }
             for root in &roots {
                 if !expired_roots.contains(root) {
                     let mut shared = std::collections::BTreeSet::new();
@@ -686,17 +703,25 @@ impl AnalyticsService {
                 }
             }
             cursor = roots.last().cloned();
-            if roots.len() < 64 || garbage.is_empty() { break; }
+            if roots.len() < 64 || garbage.is_empty() {
+                break;
+            }
         }
         // Mark jobs expired FIRST. Crashing before file deletion can leak
         // collectable files, but never leave an accepted job referring to a
         // deleted immutable result.
         for job in &expired {
-            self.jobs.update(&job.id, job.state.clone(), None,
-                Some("RESULT_EXPIRED_BY_7_DAY_RETENTION".into()))?;
+            self.jobs.update(
+                &job.id,
+                job.state.clone(),
+                None,
+                Some("RESULT_EXPIRED_BY_7_DAY_RETENTION".into()),
+            )?;
         }
         for id in &garbage {
-            self.artifacts.remove_evidence(id).map_err(|e| e.to_string())?;
+            self.artifacts
+                .remove_evidence(id)
+                .map_err(|e| e.to_string())?;
         }
         Ok(expired.len())
     }

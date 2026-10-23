@@ -329,11 +329,13 @@ impl Jobs {
             return Err("RESEARCH_ROOT_PAGE_LIMIT:1..128".into());
         }
         let db = self.db.lock().map_err(|_| "CATALOG_LOCK_POISONED")?;
-        let mut stmt = db.prepare(
-            "SELECT DISTINCT artifact FROM research_jobs
+        let mut stmt = db
+            .prepare(
+                "SELECT DISTINCT artifact FROM research_jobs
              WHERE artifact IS NOT NULL AND (?1 IS NULL OR artifact>?1)
              ORDER BY artifact LIMIT ?2",
-        ).map_err(|e| e.to_string())?;
+            )
+            .map_err(|e| e.to_string())?;
         stmt.query_map(params![after, limit as i64], |row| row.get::<_, String>(0))
             .map_err(|e| e.to_string())?
             .collect::<rusqlite::Result<Vec<_>>>()
@@ -364,32 +366,40 @@ impl Jobs {
     }
 }
 
-
 impl Jobs {
     pub async fn enqueue_async(
-        &self, idempotency_key: String, hash: String,
+        &self,
+        idempotency_key: String,
+        hash: String,
     ) -> Result<(Job, bool, Arc<AtomicBool>), String> {
-        let owner=self.clone();
-        tokio::task::spawn_blocking(move||owner.enqueue(idempotency_key,hash))
-            .await.map_err(|_|"RESEARCH_SQL_WORKER_FAILED".to_owned())?
+        let owner = self.clone();
+        tokio::task::spawn_blocking(move || owner.enqueue(idempotency_key, hash))
+            .await
+            .map_err(|_| "RESEARCH_SQL_WORKER_FAILED".to_owned())?
     }
     pub async fn get_async(&self, id: String) -> Result<Job, String> {
-        let owner=self.clone();
-        tokio::task::spawn_blocking(move||owner.get(&id))
-            .await.map_err(|_|"RESEARCH_SQL_WORKER_FAILED".to_owned())?
+        let owner = self.clone();
+        tokio::task::spawn_blocking(move || owner.get(&id))
+            .await
+            .map_err(|_| "RESEARCH_SQL_WORKER_FAILED".to_owned())?
     }
     pub async fn update_async(
-        &self, id: String, state: State,
-        artifact: Option<String>, error: Option<String>,
+        &self,
+        id: String,
+        state: State,
+        artifact: Option<String>,
+        error: Option<String>,
     ) -> Result<(), String> {
-        let owner=self.clone();
-        tokio::task::spawn_blocking(move||owner.update(&id,state,artifact,error))
-            .await.map_err(|_|"RESEARCH_SQL_WORKER_FAILED".to_owned())?
+        let owner = self.clone();
+        tokio::task::spawn_blocking(move || owner.update(&id, state, artifact, error))
+            .await
+            .map_err(|_| "RESEARCH_SQL_WORKER_FAILED".to_owned())?
     }
     pub async fn cancel_async(&self, id: String, key: String) -> Result<Job, String> {
-        let owner=self.clone();
-        tokio::task::spawn_blocking(move||owner.cancel(&id,&key))
-            .await.map_err(|_|"RESEARCH_SQL_WORKER_FAILED".to_owned())?
+        let owner = self.clone();
+        tokio::task::spawn_blocking(move || owner.cancel(&id, &key))
+            .await
+            .map_err(|_| "RESEARCH_SQL_WORKER_FAILED".to_owned())?
     }
 }
 
