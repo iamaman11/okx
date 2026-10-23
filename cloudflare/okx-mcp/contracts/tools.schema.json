@@ -1,0 +1,1912 @@
+{
+  "tools": [
+    {
+      "name": "accounts",
+      "description": "accounts actions. Mutations require body-bound idempotency. Responses contain bounded results and quality diagnostics.",
+      "inputSchema": {
+        "oneOf": [
+          {
+            "type": "object",
+            "properties": {
+              "action": {
+                "const": "list"
+              }
+            },
+            "required": [
+              "action"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "action": {
+                "const": "status"
+              },
+              "account": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              }
+            },
+            "required": [
+              "action",
+              "account"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "action": {
+                "const": "connect"
+              },
+              "idempotency_key": {
+                "type": "string",
+                "minLength": 8,
+                "maxLength": 128,
+                "pattern": "^[A-Za-z0-9_-]+$"
+              },
+              "credential_ref": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "alias": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64
+              },
+              "label": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "limits": {
+                "type": "object",
+                "properties": {
+                  "max_modelled_loss_usdt": {
+                    "type": "string",
+                    "pattern": "^(?!0+(?:\\.0+)?$)(?:0|[1-9][0-9]{0,14})(?:\\.[0-9]{1,9})?$",
+                    "maxLength": 32
+                  },
+                  "max_order_loss_usdt": {
+                    "type": "string",
+                    "pattern": "^(?!0+(?:\\.0+)?$)(?:0|[1-9][0-9]{0,14})(?:\\.[0-9]{1,9})?$",
+                    "maxLength": 32
+                  },
+                  "max_notional_usdt": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "pattern": "^(?!0+(?:\\.0+)?$)(?:0|[1-9][0-9]{0,14})(?:\\.[0-9]{1,9})?$",
+                        "maxLength": 32
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "max_leverage": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "pattern": "^(?!0+(?:\\.0+)?$)(?:0|[1-9][0-9]{0,14})(?:\\.[0-9]{1,9})?$",
+                        "maxLength": 32
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "max_daily_realized_loss_usdt": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "pattern": "^(?!0+(?:\\.0+)?$)(?:0|[1-9][0-9]{0,14})(?:\\.[0-9]{1,9})?$",
+                        "maxLength": 32
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "max_drawdown_ratio": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "pattern": "^(?:0(?:\\.[0-9]{1,9})?|1(?:\\.0{1,9})?)$",
+                        "maxLength": 11
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "allowed_instruments": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 64
+                    },
+                    "maxItems": 32,
+                    "uniqueItems": true
+                  }
+                },
+                "required": [
+                  "max_modelled_loss_usdt",
+                  "max_order_loss_usdt",
+                  "max_notional_usdt",
+                  "max_leverage",
+                  "max_daily_realized_loss_usdt",
+                  "max_drawdown_ratio",
+                  "allowed_instruments"
+                ],
+                "additionalProperties": false
+              },
+              "enabled": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "action",
+              "idempotency_key",
+              "credential_ref",
+              "alias",
+              "limits",
+              "enabled"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "action": {
+                "const": "pause"
+              },
+              "account": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "idempotency_key": {
+                "type": "string",
+                "minLength": 8,
+                "maxLength": 128,
+                "pattern": "^[A-Za-z0-9_-]+$"
+              },
+              "expected_revision": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              }
+            },
+            "required": [
+              "action",
+              "account",
+              "idempotency_key",
+              "expected_revision"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "action": {
+                "const": "resume"
+              },
+              "account": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "idempotency_key": {
+                "type": "string",
+                "minLength": 8,
+                "maxLength": 128,
+                "pattern": "^[A-Za-z0-9_-]+$"
+              },
+              "expected_revision": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              }
+            },
+            "required": [
+              "action",
+              "account",
+              "idempotency_key",
+              "expected_revision"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "action": {
+                "const": "set_limits"
+              },
+              "account": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "idempotency_key": {
+                "type": "string",
+                "minLength": 8,
+                "maxLength": 128,
+                "pattern": "^[A-Za-z0-9_-]+$"
+              },
+              "expected_revision": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "limits": {
+                "type": "object",
+                "properties": {
+                  "max_modelled_loss_usdt": {
+                    "type": "string",
+                    "pattern": "^(?!0+(?:\\.0+)?$)(?:0|[1-9][0-9]{0,14})(?:\\.[0-9]{1,9})?$",
+                    "maxLength": 32
+                  },
+                  "max_order_loss_usdt": {
+                    "type": "string",
+                    "pattern": "^(?!0+(?:\\.0+)?$)(?:0|[1-9][0-9]{0,14})(?:\\.[0-9]{1,9})?$",
+                    "maxLength": 32
+                  },
+                  "max_notional_usdt": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "pattern": "^(?!0+(?:\\.0+)?$)(?:0|[1-9][0-9]{0,14})(?:\\.[0-9]{1,9})?$",
+                        "maxLength": 32
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "max_leverage": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "pattern": "^(?!0+(?:\\.0+)?$)(?:0|[1-9][0-9]{0,14})(?:\\.[0-9]{1,9})?$",
+                        "maxLength": 32
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "max_daily_realized_loss_usdt": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "pattern": "^(?!0+(?:\\.0+)?$)(?:0|[1-9][0-9]{0,14})(?:\\.[0-9]{1,9})?$",
+                        "maxLength": 32
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "max_drawdown_ratio": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "pattern": "^(?:0(?:\\.[0-9]{1,9})?|1(?:\\.0{1,9})?)$",
+                        "maxLength": 11
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "allowed_instruments": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 64
+                    },
+                    "maxItems": 32,
+                    "uniqueItems": true
+                  }
+                },
+                "required": [
+                  "max_modelled_loss_usdt",
+                  "max_order_loss_usdt",
+                  "max_notional_usdt",
+                  "max_leverage",
+                  "max_daily_realized_loss_usdt",
+                  "max_drawdown_ratio",
+                  "allowed_instruments"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "action",
+              "account",
+              "idempotency_key",
+              "expected_revision",
+              "limits"
+            ],
+            "additionalProperties": false
+          }
+        ]
+      }
+    },
+    {
+      "name": "strategies",
+      "description": "strategies actions. Mutations require body-bound idempotency. Responses contain bounded results and quality diagnostics.",
+      "inputSchema": {
+        "oneOf": [
+          {
+            "type": "object",
+            "properties": {
+              "action": {
+                "const": "list"
+              },
+              "account": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              }
+            },
+            "required": [
+              "action",
+              "account"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "action": {
+                "const": "status"
+              },
+              "account": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "instance_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64
+              }
+            },
+            "required": [
+              "action",
+              "account",
+              "instance_id"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "action": {
+                "const": "create"
+              },
+              "account": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "idempotency_key": {
+                "type": "string",
+                "minLength": 8,
+                "maxLength": 128,
+                "pattern": "^[A-Za-z0-9_-]+$"
+              },
+              "instance_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64
+              },
+              "definition_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64
+              },
+              "version": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 9007199254740991
+              },
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "fast": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 10000
+                  },
+                  "slow": {
+                    "type": "integer",
+                    "minimum": 2,
+                    "maximum": 10000
+                  }
+                },
+                "required": [
+                  "fast",
+                  "slow"
+                ],
+                "additionalProperties": false
+              },
+              "instruments": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 64
+                },
+                "maxItems": 32,
+                "uniqueItems": true
+              },
+              "timeframe_ms": {
+                "type": "integer",
+                "minimum": 1000,
+                "maximum": 9007199254740991
+              },
+              "budget_usd": {
+                "type": "string",
+                "pattern": "^(?!0+(?:\\.0+)?$)(?:0|[1-9][0-9]{0,14})(?:\\.[0-9]{1,9})?$",
+                "maxLength": 32
+              }
+            },
+            "required": [
+              "action",
+              "account",
+              "idempotency_key",
+              "instance_id",
+              "definition_id",
+              "version",
+              "parameters",
+              "instruments",
+              "timeframe_ms",
+              "budget_usd"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "action": {
+                "const": "update"
+              },
+              "account": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "idempotency_key": {
+                "type": "string",
+                "minLength": 8,
+                "maxLength": 128,
+                "pattern": "^[A-Za-z0-9_-]+$"
+              },
+              "instance_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64
+              },
+              "expected_revision": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "fast": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 10000
+                  },
+                  "slow": {
+                    "type": "integer",
+                    "minimum": 2,
+                    "maximum": 10000
+                  }
+                },
+                "required": [
+                  "fast",
+                  "slow"
+                ],
+                "additionalProperties": false
+              },
+              "budget_usd": {
+                "type": "string",
+                "pattern": "^(?!0+(?:\\.0+)?$)(?:0|[1-9][0-9]{0,14})(?:\\.[0-9]{1,9})?$",
+                "maxLength": 32
+              }
+            },
+            "required": [
+              "action",
+              "account",
+              "idempotency_key",
+              "instance_id",
+              "expected_revision",
+              "parameters",
+              "budget_usd"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "action": {
+                "const": "start"
+              },
+              "account": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "idempotency_key": {
+                "type": "string",
+                "minLength": 8,
+                "maxLength": 128,
+                "pattern": "^[A-Za-z0-9_-]+$"
+              },
+              "instance_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64
+              }
+            },
+            "required": [
+              "action",
+              "account",
+              "idempotency_key",
+              "instance_id"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "action": {
+                "const": "stop"
+              },
+              "account": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "idempotency_key": {
+                "type": "string",
+                "minLength": 8,
+                "maxLength": 128,
+                "pattern": "^[A-Za-z0-9_-]+$"
+              },
+              "instance_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64
+              }
+            },
+            "required": [
+              "action",
+              "account",
+              "idempotency_key",
+              "instance_id"
+            ],
+            "additionalProperties": false
+          }
+        ]
+      }
+    },
+    {
+      "name": "market",
+      "description": "market actions. Mutations require body-bound idempotency. Responses contain bounded results and quality diagnostics.",
+      "inputSchema": {
+        "oneOf": [
+          {
+            "type": "object",
+            "properties": {
+              "action": {
+                "const": "screen"
+              },
+              "instruments": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 64
+                },
+                "maxItems": 100,
+                "uniqueItems": true
+              },
+              "timeframe_ms": {
+                "type": "integer",
+                "minimum": 1000,
+                "maximum": 2678400000
+              },
+              "start_ms": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 9007199254740991
+              },
+              "end_ms": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 9007199254740991
+              },
+              "fields": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 64
+                },
+                "maxItems": 32,
+                "uniqueItems": true
+              },
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "ema_period": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 1000
+                  },
+                  "atr_period": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 1000
+                  },
+                  "rsi_period": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 1000
+                  },
+                  "budget": {
+                    "type": "number",
+                    "minimum": 1e-9,
+                    "maximum": 9007199254740991
+                  },
+                  "price": {
+                    "type": "number",
+                    "minimum": 1e-9,
+                    "maximum": 9007199254740991
+                  },
+                  "stop_distance": {
+                    "type": "number",
+                    "minimum": 1e-9,
+                    "maximum": 0.999999999
+                  },
+                  "notional": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "fee_bps": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 10000
+                  },
+                  "slippage_bps": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 10000
+                  }
+                },
+                "required": [],
+                "additionalProperties": false
+              },
+              "filters": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "field": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 64
+                    },
+                    "min": {
+                      "type": "number",
+                      "minimum": -9007199254740991,
+                      "maximum": 9007199254740991
+                    },
+                    "max": {
+                      "type": "number",
+                      "minimum": -9007199254740991,
+                      "maximum": 9007199254740991
+                    }
+                  },
+                  "required": [
+                    "field"
+                  ],
+                  "additionalProperties": false
+                },
+                "maxItems": 16,
+                "uniqueItems": true
+              },
+              "sort": {
+                "type": "object",
+                "properties": {
+                  "field": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64
+                  },
+                  "descending": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "field",
+                  "descending"
+                ],
+                "additionalProperties": false
+              },
+              "limit": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 50
+              },
+              "cursor": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512
+              }
+            },
+            "required": [
+              "action",
+              "instruments",
+              "fields",
+              "timeframe_ms",
+              "start_ms",
+              "end_ms",
+              "limit"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "action": {
+                "const": "compare"
+              },
+              "instruments": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 64
+                },
+                "maxItems": 100,
+                "uniqueItems": true
+              },
+              "timeframe_ms": {
+                "type": "integer",
+                "minimum": 1000,
+                "maximum": 2678400000
+              },
+              "start_ms": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 9007199254740991
+              },
+              "end_ms": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 9007199254740991
+              },
+              "fields": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 64
+                },
+                "maxItems": 32,
+                "uniqueItems": true
+              },
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "ema_period": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 1000
+                  },
+                  "atr_period": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 1000
+                  },
+                  "rsi_period": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 1000
+                  },
+                  "budget": {
+                    "type": "number",
+                    "minimum": 1e-9,
+                    "maximum": 9007199254740991
+                  },
+                  "price": {
+                    "type": "number",
+                    "minimum": 1e-9,
+                    "maximum": 9007199254740991
+                  },
+                  "stop_distance": {
+                    "type": "number",
+                    "minimum": 1e-9,
+                    "maximum": 0.999999999
+                  },
+                  "notional": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "fee_bps": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 10000
+                  },
+                  "slippage_bps": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 10000
+                  }
+                },
+                "required": [],
+                "additionalProperties": false
+              },
+              "filters": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "field": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 64
+                    },
+                    "min": {
+                      "type": "number",
+                      "minimum": -9007199254740991,
+                      "maximum": 9007199254740991
+                    },
+                    "max": {
+                      "type": "number",
+                      "minimum": -9007199254740991,
+                      "maximum": 9007199254740991
+                    }
+                  },
+                  "required": [
+                    "field"
+                  ],
+                  "additionalProperties": false
+                },
+                "maxItems": 16,
+                "uniqueItems": true
+              },
+              "sort": {
+                "type": "object",
+                "properties": {
+                  "field": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64
+                  },
+                  "descending": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "field",
+                  "descending"
+                ],
+                "additionalProperties": false
+              },
+              "limit": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 50
+              },
+              "cursor": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512
+              }
+            },
+            "required": [
+              "action",
+              "instruments",
+              "fields",
+              "timeframe_ms",
+              "start_ms",
+              "end_ms",
+              "limit"
+            ],
+            "additionalProperties": false
+          }
+        ]
+      }
+    },
+    {
+      "name": "research",
+      "description": "research actions. Mutations require body-bound idempotency. Responses contain bounded results and quality diagnostics.",
+      "inputSchema": {
+        "oneOf": [
+          {
+            "type": "object",
+            "properties": {
+              "action": {
+                "const": "backtest"
+              },
+              "idempotency_key": {
+                "type": "string",
+                "minLength": 8,
+                "maxLength": 128,
+                "pattern": "^[A-Za-z0-9_-]+$"
+              },
+              "instruments": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 64
+                },
+                "maxItems": 8,
+                "uniqueItems": true,
+                "minItems": 1
+              },
+              "timeframe_ms": {
+                "type": "integer",
+                "minimum": 1000,
+                "maximum": 2678400000
+              },
+              "start_ms": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 9007199254740991
+              },
+              "end_ms": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 9007199254740991
+              },
+              "strategy_id": {
+                "type": "string",
+                "enum": [
+                  "ema_cross_v1"
+                ]
+              },
+              "costs": {
+                "type": "object",
+                "properties": {
+                  "maker_fee_bps": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 1000
+                  },
+                  "taker_fee_bps": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 1000
+                  },
+                  "slippage_bps": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 1000
+                  },
+                  "funding_mode": {
+                    "type": "string",
+                    "enum": [
+                      "observed",
+                      "zero_assumption"
+                    ]
+                  }
+                },
+                "required": [
+                  "maker_fee_bps",
+                  "taker_fee_bps",
+                  "slippage_bps",
+                  "funding_mode"
+                ],
+                "additionalProperties": false
+              },
+              "data_mode": {
+                "type": "string",
+                "enum": [
+                  "historical_observed",
+                  "counterfactual"
+                ]
+              },
+              "seed": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "fast": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 10000
+                  },
+                  "slow": {
+                    "type": "integer",
+                    "minimum": 2,
+                    "maximum": 10000
+                  }
+                },
+                "required": [
+                  "fast",
+                  "slow"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "action",
+              "idempotency_key",
+              "instruments",
+              "timeframe_ms",
+              "start_ms",
+              "end_ms",
+              "strategy_id",
+              "costs",
+              "data_mode",
+              "parameters"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "action": {
+                "const": "grid"
+              },
+              "idempotency_key": {
+                "type": "string",
+                "minLength": 8,
+                "maxLength": 128,
+                "pattern": "^[A-Za-z0-9_-]+$"
+              },
+              "instruments": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 64
+                },
+                "maxItems": 8,
+                "uniqueItems": true,
+                "minItems": 1
+              },
+              "timeframe_ms": {
+                "type": "integer",
+                "minimum": 1000,
+                "maximum": 2678400000
+              },
+              "start_ms": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 9007199254740991
+              },
+              "end_ms": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 9007199254740991
+              },
+              "strategy_id": {
+                "type": "string",
+                "enum": [
+                  "ema_cross_v1"
+                ]
+              },
+              "costs": {
+                "type": "object",
+                "properties": {
+                  "maker_fee_bps": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 1000
+                  },
+                  "taker_fee_bps": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 1000
+                  },
+                  "slippage_bps": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 1000
+                  },
+                  "funding_mode": {
+                    "type": "string",
+                    "enum": [
+                      "observed",
+                      "zero_assumption"
+                    ]
+                  }
+                },
+                "required": [
+                  "maker_fee_bps",
+                  "taker_fee_bps",
+                  "slippage_bps",
+                  "funding_mode"
+                ],
+                "additionalProperties": false
+              },
+              "data_mode": {
+                "type": "string",
+                "enum": [
+                  "historical_observed",
+                  "counterfactual"
+                ]
+              },
+              "seed": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "variants": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "fast": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 10000
+                    },
+                    "slow": {
+                      "type": "integer",
+                      "minimum": 2,
+                      "maximum": 10000
+                    }
+                  },
+                  "required": [
+                    "fast",
+                    "slow"
+                  ],
+                  "additionalProperties": false
+                },
+                "maxItems": 64,
+                "uniqueItems": true
+              }
+            },
+            "required": [
+              "action",
+              "idempotency_key",
+              "instruments",
+              "timeframe_ms",
+              "start_ms",
+              "end_ms",
+              "strategy_id",
+              "costs",
+              "data_mode",
+              "variants"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "action": {
+                "const": "status"
+              },
+              "job_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              }
+            },
+            "required": [
+              "action",
+              "job_id"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "action": {
+                "const": "cancel"
+              },
+              "job_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "idempotency_key": {
+                "type": "string",
+                "minLength": 8,
+                "maxLength": 128,
+                "pattern": "^[A-Za-z0-9_-]+$"
+              }
+            },
+            "required": [
+              "action",
+              "job_id",
+              "idempotency_key"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "action": {
+                "const": "result"
+              },
+              "job_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "cursor": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512
+              },
+              "limit": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 50
+              }
+            },
+            "required": [
+              "action",
+              "job_id",
+              "limit"
+            ],
+            "additionalProperties": false
+          }
+        ]
+      }
+    },
+    {
+      "name": "trade",
+      "description": "trade actions. Mutations require body-bound idempotency. Responses contain bounded results and quality diagnostics.",
+      "inputSchema": {
+        "oneOf": [
+          {
+            "type": "object",
+            "properties": {
+              "action": {
+                "const": "preview"
+              },
+              "account": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "operation": {
+                "type": "string",
+                "enum": [
+                  "open",
+                  "add",
+                  "reduce",
+                  "close",
+                  "replace"
+                ]
+              },
+              "strategy_instance": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64
+              },
+              "instrument": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64
+              },
+              "side": {
+                "type": "string",
+                "enum": [
+                  "long",
+                  "short"
+                ]
+              },
+              "sizing": {
+                "oneOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "contracts": {
+                        "type": "string",
+                        "pattern": "^(?!0+(?:\\.0+)?$)(?:0|[1-9][0-9]{0,14})(?:\\.[0-9]{1,9})?$",
+                        "maxLength": 32
+                      }
+                    },
+                    "required": [
+                      "contracts"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "max_loss_usd": {
+                        "type": "string",
+                        "pattern": "^(?!0+(?:\\.0+)?$)(?:0|[1-9][0-9]{0,14})(?:\\.[0-9]{1,9})?$",
+                        "maxLength": 32
+                      }
+                    },
+                    "required": [
+                      "max_loss_usd"
+                    ],
+                    "additionalProperties": false
+                  }
+                ]
+              },
+              "order": {
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "enum": [
+                      "limit",
+                      "market",
+                      "post_only",
+                      "ioc",
+                      "fok"
+                    ]
+                  },
+                  "limit_price": {
+                    "type": "string",
+                    "pattern": "^(?!0+(?:\\.0+)?$)(?:0|[1-9][0-9]{0,14})(?:\\.[0-9]{1,9})?$",
+                    "maxLength": 32
+                  },
+                  "reference": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128
+                  },
+                  "max_slippage_bps": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 10000
+                  }
+                },
+                "required": [
+                  "type",
+                  "max_slippage_bps"
+                ],
+                "additionalProperties": false
+              },
+              "protection": {
+                "oneOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "stop_price": {
+                        "type": "string",
+                        "pattern": "^(?!0+(?:\\.0+)?$)(?:0|[1-9][0-9]{0,14})(?:\\.[0-9]{1,9})?$",
+                        "maxLength": 32
+                      }
+                    },
+                    "required": [
+                      "stop_price"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "stop_distance_bps": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 10000
+                      }
+                    },
+                    "required": [
+                      "stop_distance_bps"
+                    ],
+                    "additionalProperties": false
+                  }
+                ]
+              }
+            },
+            "required": [
+              "action",
+              "account",
+              "operation",
+              "strategy_instance",
+              "instrument",
+              "side",
+              "sizing",
+              "order"
+            ],
+            "additionalProperties": false,
+            "allOf": [
+              {
+                "if": {
+                  "properties": {
+                    "operation": {
+                      "enum": [
+                        "open",
+                        "add",
+                        "replace"
+                      ]
+                    }
+                  }
+                },
+                "then": {
+                  "required": [
+                    "protection"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "type": "object",
+            "properties": {
+              "action": {
+                "const": "execute"
+              },
+              "account": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "idempotency_key": {
+                "type": "string",
+                "minLength": 8,
+                "maxLength": 128,
+                "pattern": "^[A-Za-z0-9_-]+$"
+              },
+              "operation": {
+                "type": "string",
+                "enum": [
+                  "open",
+                  "add",
+                  "reduce",
+                  "close",
+                  "replace"
+                ]
+              },
+              "strategy_instance": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64
+              },
+              "instrument": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64
+              },
+              "side": {
+                "type": "string",
+                "enum": [
+                  "long",
+                  "short"
+                ]
+              },
+              "sizing": {
+                "oneOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "contracts": {
+                        "type": "string",
+                        "pattern": "^(?!0+(?:\\.0+)?$)(?:0|[1-9][0-9]{0,14})(?:\\.[0-9]{1,9})?$",
+                        "maxLength": 32
+                      }
+                    },
+                    "required": [
+                      "contracts"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "max_loss_usd": {
+                        "type": "string",
+                        "pattern": "^(?!0+(?:\\.0+)?$)(?:0|[1-9][0-9]{0,14})(?:\\.[0-9]{1,9})?$",
+                        "maxLength": 32
+                      }
+                    },
+                    "required": [
+                      "max_loss_usd"
+                    ],
+                    "additionalProperties": false
+                  }
+                ]
+              },
+              "order": {
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "enum": [
+                      "limit",
+                      "market",
+                      "post_only",
+                      "ioc",
+                      "fok"
+                    ]
+                  },
+                  "limit_price": {
+                    "type": "string",
+                    "pattern": "^(?!0+(?:\\.0+)?$)(?:0|[1-9][0-9]{0,14})(?:\\.[0-9]{1,9})?$",
+                    "maxLength": 32
+                  },
+                  "reference": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128
+                  },
+                  "max_slippage_bps": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 10000
+                  }
+                },
+                "required": [
+                  "type",
+                  "max_slippage_bps"
+                ],
+                "additionalProperties": false
+              },
+              "protection": {
+                "oneOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "stop_price": {
+                        "type": "string",
+                        "pattern": "^(?!0+(?:\\.0+)?$)(?:0|[1-9][0-9]{0,14})(?:\\.[0-9]{1,9})?$",
+                        "maxLength": 32
+                      }
+                    },
+                    "required": [
+                      "stop_price"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "stop_distance_bps": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 10000
+                      }
+                    },
+                    "required": [
+                      "stop_distance_bps"
+                    ],
+                    "additionalProperties": false
+                  }
+                ]
+              },
+              "expires_in_ms": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 30000
+              }
+            },
+            "required": [
+              "action",
+              "account",
+              "idempotency_key",
+              "operation",
+              "strategy_instance",
+              "instrument",
+              "side",
+              "sizing",
+              "order",
+              "expires_in_ms"
+            ],
+            "additionalProperties": false,
+            "allOf": [
+              {
+                "if": {
+                  "properties": {
+                    "operation": {
+                      "enum": [
+                        "open",
+                        "add",
+                        "replace"
+                      ]
+                    }
+                  }
+                },
+                "then": {
+                  "required": [
+                    "protection"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "type": "object",
+            "properties": {
+              "action": {
+                "const": "status"
+              },
+              "account": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "reference": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              }
+            },
+            "required": [
+              "action",
+              "account",
+              "reference"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "action": {
+                "const": "cancel"
+              },
+              "account": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "idempotency_key": {
+                "type": "string",
+                "minLength": 8,
+                "maxLength": 128,
+                "pattern": "^[A-Za-z0-9_-]+$"
+              },
+              "reference": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              }
+            },
+            "required": [
+              "action",
+              "account",
+              "idempotency_key",
+              "reference"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "action": {
+                "const": "close"
+              },
+              "account": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "idempotency_key": {
+                "type": "string",
+                "minLength": 8,
+                "maxLength": 128,
+                "pattern": "^[A-Za-z0-9_-]+$"
+              },
+              "reference": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "expires_in_ms": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 30000
+              }
+            },
+            "required": [
+              "action",
+              "account",
+              "idempotency_key",
+              "reference",
+              "expires_in_ms"
+            ],
+            "additionalProperties": false
+          }
+        ]
+      }
+    },
+    {
+      "name": "portfolio",
+      "description": "portfolio actions. Mutations require body-bound idempotency. Responses contain bounded results and quality diagnostics.",
+      "inputSchema": {
+        "oneOf": [
+          {
+            "type": "object",
+            "properties": {
+              "action": {
+                "const": "summary"
+              },
+              "accounts": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                },
+                "maxItems": 32,
+                "uniqueItems": true
+              },
+              "start_ms": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "end_ms": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 9007199254740991
+              },
+              "strategies": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                },
+                "maxItems": 32,
+                "uniqueItems": true
+              },
+              "currencies": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 16
+                },
+                "maxItems": 32,
+                "uniqueItems": true
+              },
+              "cursor": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512
+              },
+              "limit": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 50
+              }
+            },
+            "required": [
+              "action",
+              "accounts",
+              "start_ms",
+              "end_ms",
+              "limit"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "action": {
+                "const": "history"
+              },
+              "accounts": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                },
+                "maxItems": 32,
+                "uniqueItems": true
+              },
+              "start_ms": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "end_ms": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 9007199254740991
+              },
+              "strategies": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                },
+                "maxItems": 32,
+                "uniqueItems": true
+              },
+              "currencies": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 16
+                },
+                "maxItems": 32,
+                "uniqueItems": true
+              },
+              "cursor": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512
+              },
+              "limit": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 50
+              }
+            },
+            "required": [
+              "action",
+              "accounts",
+              "start_ms",
+              "end_ms",
+              "limit"
+            ],
+            "additionalProperties": false
+          }
+        ]
+      }
+    },
+    {
+      "name": "diagnostics",
+      "description": "diagnostics actions. Mutations require body-bound idempotency. Responses contain bounded results and quality diagnostics.",
+      "inputSchema": {
+        "oneOf": [
+          {
+            "type": "object",
+            "properties": {
+              "action": {
+                "const": "explain"
+              },
+              "reference": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "account": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              }
+            },
+            "required": [
+              "action"
+            ],
+            "additionalProperties": false,
+            "allOf": [
+              {
+                "anyOf": [
+                  {
+                    "required": [
+                      "account"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "reference"
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

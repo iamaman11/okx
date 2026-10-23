@@ -125,19 +125,29 @@ async fn run(cli: Cli) -> HostControlResult<()> {
             activation_request_id,
         } => {
             let _single_instance = SingleInstanceGuard::acquire()?;
-            let token = load_native_github_token()?;
-            let github = GitHubClient::new(token, "iamaman11-okx-host-control/0.1")?;
-            let mut executor = HostExecutor::canonical()?;
-            if let Some(request_id) = activation_request_id.as_deref() {
-                okx_host_control::autostart::ensure_policy_valid()?;
-                if okx_host_launcher::consume_fail_next_activation(request_id)? {
-                    return Err(
-                        okx_host_control::HostControlError::AcceptanceActivationFailureInjected,
-                    );
+            let _log_capture = okx_host_launcher::stdio_capture::ProcessLogCapture::install(
+                okx_host_launcher::CONTROL_ROOT,
+            )?;
+            let result = async {
+                let token = load_native_github_token()?;
+                let github = GitHubClient::new(token, "iamaman11-okx-host-control/0.1")?;
+                let mut executor = HostExecutor::canonical()?;
+                if let Some(request_id) = activation_request_id.as_deref() {
+                    okx_host_control::autostart::ensure_policy_valid()?;
+                    if okx_host_launcher::consume_fail_next_activation(request_id)? {
+                        return Err(
+                            okx_host_control::HostControlError::AcceptanceActivationFailureInjected,
+                        );
+                    }
+                    okx_host_launcher::signal_controller_ready(request_id)?;
                 }
-                okx_host_launcher::signal_controller_ready(request_id)?;
+                run_until_shutdown(&github, &mut executor, poll_seconds).await
             }
-            run_until_shutdown(&github, &mut executor, poll_seconds).await?;
+            .await;
+            if let Err(error) = &result {
+                eprintln!("Error: {error}");
+            }
+            result?;
         }
     }
 

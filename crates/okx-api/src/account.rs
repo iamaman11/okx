@@ -183,6 +183,8 @@ pub struct BalanceSnapshot {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct BalanceDetail {
+    #[serde(rename = "liab", default)]
+    pub liabilities: String,
     #[serde(default)]
     pub ccy: String,
     #[serde(rename = "eq", default)]

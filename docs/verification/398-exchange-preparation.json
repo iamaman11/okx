@@ -1,0 +1,17 @@
+{
+  "observed_at": "2026-10-22T23:31:49.863381+00:00",
+  "read_only": true,
+  "matching_uid": true,
+  "observer_read_only": true,
+  "executor_read_trade_no_withdraw": true,
+  "account_level": "2",
+  "position_mode": "long_short_mode",
+  "current_exchange_counts": {
+    "positions": 0,
+    "orders": 0,
+    "algos": 0,
+    "liabilities": 0
+  },
+  "flat": true,
+  "scope": "Independent preinstallation read-only preparation; not installed acceptance or authorization for a later POST"
+}

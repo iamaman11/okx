@@ -1,7 +1,10 @@
 pub mod account_bootstrap;
+pub mod accounts;
+pub mod analytics;
 pub mod cloudflare_auth;
 pub mod cloudflare_transport;
 pub mod config;
+pub mod diagnostics;
 pub mod execution_preflight;
 pub mod execution_runtime;
 pub mod github_auth;
@@ -10,11 +13,15 @@ pub mod identity;
 pub mod market_bootstrap;
 pub mod okx_credentials;
 pub mod once;
-mod query;
+mod portfolio;
+pub mod query;
 pub mod reference_bootstrap;
-pub mod research_session;
+pub mod source_capture;
+pub mod storage_commands;
+pub mod trade_service;
+
 pub mod risk_bridge;
-pub mod risk_census;
+
 pub mod runtime;
 
 use thiserror::Error;
@@ -144,14 +151,8 @@ pub enum AgentError {
     #[error("native source mutation drain did not quiesce before the 15-second deadline")]
     SourceDrainTimeout,
 
-    #[error("account ledger reconciliation error: {0}")]
-    AccountReconciliation(#[from] okx_execution::AccountLedgerReconciliationError),
-
-    #[error("execution ledger error: {0}")]
-    ExecutionLedger(#[from] okx_execution::ExecutionLedgerError),
-
-    #[error("order executor error: {0}")]
-    OrderExecutor(#[from] okx_execution::OrderExecutorError),
+    #[error("account storage error: {0}")]
+    Store(#[from] okx_execution::StoreError),
 }
 
 pub type AgentResult<T> = Result<T, AgentError>;

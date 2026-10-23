@@ -1,6 +1,8 @@
+pub mod logging;
+pub mod stdio_capture;
 use std::{
     ffi::OsStr,
-    fs::{self, File, OpenOptions},
+    fs::{self, File},
     io::{Read, Write},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
@@ -999,15 +1001,6 @@ fn spawn_controller(
     activation_request_id: Option<&str>,
 ) -> LauncherResult<Child> {
     verify_version(version)?;
-    let stdout = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(Path::new(CONTROL_ROOT).join("controller.stdout.log"))?;
-    let stderr = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(Path::new(CONTROL_ROOT).join("controller.stderr.log"))?;
-
     let mut command = hidden_command(version.binary_path()?);
     command.arg("run");
     if let Some(request_id) = activation_request_id {
@@ -1016,8 +1009,8 @@ fn spawn_controller(
     command
         .current_dir(CONTROL_ROOT)
         .stdin(Stdio::null())
-        .stdout(Stdio::from(stdout))
-        .stderr(Stdio::from(stderr))
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .spawn()
         .map_err(|_| LauncherError::ControllerLaunch)
 }

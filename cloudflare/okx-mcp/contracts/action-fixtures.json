@@ -1,0 +1,1447 @@
+[
+  {
+    "tool": "accounts",
+    "action": "list",
+    "positive": {
+      "action": "list"
+    },
+    "negative": [
+      {
+        "action": "list",
+        "raw_rpc": "forbidden"
+      },
+      {},
+      {
+        "action": 12
+      }
+    ]
+  },
+  {
+    "tool": "accounts",
+    "action": "status",
+    "positive": {
+      "action": "status",
+      "account": "fixture"
+    },
+    "negative": [
+      {
+        "action": "status",
+        "account": "fixture",
+        "raw_rpc": "forbidden"
+      },
+      {
+        "account": "fixture"
+      },
+      {
+        "action": 12,
+        "account": "fixture"
+      }
+    ]
+  },
+  {
+    "tool": "accounts",
+    "action": "connect",
+    "positive": {
+      "action": "connect",
+      "idempotency_key": "command_0001",
+      "credential_ref": "fixture",
+      "alias": "fixture",
+      "limits": {
+        "max_modelled_loss_usdt": "1",
+        "max_order_loss_usdt": "1",
+        "max_notional_usdt": "1",
+        "max_leverage": "1",
+        "max_daily_realized_loss_usdt": "1",
+        "max_drawdown_ratio": "1",
+        "allowed_instruments": [
+          "fixture"
+        ]
+      },
+      "enabled": true
+    },
+    "negative": [
+      {
+        "action": "connect",
+        "idempotency_key": "command_0001",
+        "credential_ref": "fixture",
+        "alias": "fixture",
+        "limits": {
+          "max_modelled_loss_usdt": "1",
+          "max_order_loss_usdt": "1",
+          "max_notional_usdt": "1",
+          "max_leverage": "1",
+          "max_daily_realized_loss_usdt": "1",
+          "max_drawdown_ratio": "1",
+          "allowed_instruments": [
+            "fixture"
+          ]
+        },
+        "enabled": true,
+        "raw_rpc": "forbidden"
+      },
+      {
+        "idempotency_key": "command_0001",
+        "credential_ref": "fixture",
+        "alias": "fixture",
+        "limits": {
+          "max_modelled_loss_usdt": "1",
+          "max_order_loss_usdt": "1",
+          "max_notional_usdt": "1",
+          "max_leverage": "1",
+          "max_daily_realized_loss_usdt": "1",
+          "max_drawdown_ratio": "1",
+          "allowed_instruments": [
+            "fixture"
+          ]
+        },
+        "enabled": true
+      },
+      {
+        "action": 12,
+        "idempotency_key": "command_0001",
+        "credential_ref": "fixture",
+        "alias": "fixture",
+        "limits": {
+          "max_modelled_loss_usdt": "1",
+          "max_order_loss_usdt": "1",
+          "max_notional_usdt": "1",
+          "max_leverage": "1",
+          "max_daily_realized_loss_usdt": "1",
+          "max_drawdown_ratio": "1",
+          "allowed_instruments": [
+            "fixture"
+          ]
+        },
+        "enabled": true
+      }
+    ]
+  },
+  {
+    "tool": "accounts",
+    "action": "pause",
+    "positive": {
+      "action": "pause",
+      "account": "fixture",
+      "idempotency_key": "command_0001",
+      "expected_revision": 0
+    },
+    "negative": [
+      {
+        "action": "pause",
+        "account": "fixture",
+        "idempotency_key": "command_0001",
+        "expected_revision": 0,
+        "raw_rpc": "forbidden"
+      },
+      {
+        "account": "fixture",
+        "idempotency_key": "command_0001",
+        "expected_revision": 0
+      },
+      {
+        "action": 12,
+        "account": "fixture",
+        "idempotency_key": "command_0001",
+        "expected_revision": 0
+      }
+    ]
+  },
+  {
+    "tool": "accounts",
+    "action": "resume",
+    "positive": {
+      "action": "resume",
+      "account": "fixture",
+      "idempotency_key": "command_0001",
+      "expected_revision": 0
+    },
+    "negative": [
+      {
+        "action": "resume",
+        "account": "fixture",
+        "idempotency_key": "command_0001",
+        "expected_revision": 0,
+        "raw_rpc": "forbidden"
+      },
+      {
+        "account": "fixture",
+        "idempotency_key": "command_0001",
+        "expected_revision": 0
+      },
+      {
+        "action": 12,
+        "account": "fixture",
+        "idempotency_key": "command_0001",
+        "expected_revision": 0
+      }
+    ]
+  },
+  {
+    "tool": "accounts",
+    "action": "set_limits",
+    "positive": {
+      "action": "set_limits",
+      "account": "fixture",
+      "idempotency_key": "command_0001",
+      "expected_revision": 0,
+      "limits": {
+        "max_modelled_loss_usdt": "1",
+        "max_order_loss_usdt": "1",
+        "max_notional_usdt": "1",
+        "max_leverage": "1",
+        "max_daily_realized_loss_usdt": "1",
+        "max_drawdown_ratio": "1",
+        "allowed_instruments": [
+          "fixture"
+        ]
+      }
+    },
+    "negative": [
+      {
+        "action": "set_limits",
+        "account": "fixture",
+        "idempotency_key": "command_0001",
+        "expected_revision": 0,
+        "limits": {
+          "max_modelled_loss_usdt": "1",
+          "max_order_loss_usdt": "1",
+          "max_notional_usdt": "1",
+          "max_leverage": "1",
+          "max_daily_realized_loss_usdt": "1",
+          "max_drawdown_ratio": "1",
+          "allowed_instruments": [
+            "fixture"
+          ]
+        },
+        "raw_rpc": "forbidden"
+      },
+      {
+        "account": "fixture",
+        "idempotency_key": "command_0001",
+        "expected_revision": 0,
+        "limits": {
+          "max_modelled_loss_usdt": "1",
+          "max_order_loss_usdt": "1",
+          "max_notional_usdt": "1",
+          "max_leverage": "1",
+          "max_daily_realized_loss_usdt": "1",
+          "max_drawdown_ratio": "1",
+          "allowed_instruments": [
+            "fixture"
+          ]
+        }
+      },
+      {
+        "action": 12,
+        "account": "fixture",
+        "idempotency_key": "command_0001",
+        "expected_revision": 0,
+        "limits": {
+          "max_modelled_loss_usdt": "1",
+          "max_order_loss_usdt": "1",
+          "max_notional_usdt": "1",
+          "max_leverage": "1",
+          "max_daily_realized_loss_usdt": "1",
+          "max_drawdown_ratio": "1",
+          "allowed_instruments": [
+            "fixture"
+          ]
+        }
+      }
+    ]
+  },
+  {
+    "tool": "strategies",
+    "action": "list",
+    "positive": {
+      "action": "list",
+      "account": "fixture"
+    },
+    "negative": [
+      {
+        "action": "list",
+        "account": "fixture",
+        "raw_rpc": "forbidden"
+      },
+      {
+        "account": "fixture"
+      },
+      {
+        "action": 12,
+        "account": "fixture"
+      }
+    ]
+  },
+  {
+    "tool": "strategies",
+    "action": "status",
+    "positive": {
+      "action": "status",
+      "account": "fixture",
+      "instance_id": "fixture"
+    },
+    "negative": [
+      {
+        "action": "status",
+        "account": "fixture",
+        "instance_id": "fixture",
+        "raw_rpc": "forbidden"
+      },
+      {
+        "account": "fixture",
+        "instance_id": "fixture"
+      },
+      {
+        "action": 12,
+        "account": "fixture",
+        "instance_id": "fixture"
+      }
+    ]
+  },
+  {
+    "tool": "strategies",
+    "action": "create",
+    "positive": {
+      "action": "create",
+      "account": "fixture",
+      "idempotency_key": "command_0001",
+      "instance_id": "fixture",
+      "definition_id": "fixture",
+      "version": 1,
+      "parameters": {
+        "fast": 1,
+        "slow": 2
+      },
+      "instruments": [
+        "fixture"
+      ],
+      "timeframe_ms": 1000,
+      "budget_usd": "1"
+    },
+    "negative": [
+      {
+        "action": "create",
+        "account": "fixture",
+        "idempotency_key": "command_0001",
+        "instance_id": "fixture",
+        "definition_id": "fixture",
+        "version": 1,
+        "parameters": {
+          "fast": 1,
+          "slow": 2
+        },
+        "instruments": [
+          "fixture"
+        ],
+        "timeframe_ms": 1000,
+        "budget_usd": "1",
+        "raw_rpc": "forbidden"
+      },
+      {
+        "account": "fixture",
+        "idempotency_key": "command_0001",
+        "instance_id": "fixture",
+        "definition_id": "fixture",
+        "version": 1,
+        "parameters": {
+          "fast": 1,
+          "slow": 2
+        },
+        "instruments": [
+          "fixture"
+        ],
+        "timeframe_ms": 1000,
+        "budget_usd": "1"
+      },
+      {
+        "action": 12,
+        "account": "fixture",
+        "idempotency_key": "command_0001",
+        "instance_id": "fixture",
+        "definition_id": "fixture",
+        "version": 1,
+        "parameters": {
+          "fast": 1,
+          "slow": 2
+        },
+        "instruments": [
+          "fixture"
+        ],
+        "timeframe_ms": 1000,
+        "budget_usd": "1"
+      }
+    ]
+  },
+  {
+    "tool": "strategies",
+    "action": "update",
+    "positive": {
+      "action": "update",
+      "account": "fixture",
+      "idempotency_key": "command_0001",
+      "instance_id": "fixture",
+      "expected_revision": 0,
+      "parameters": {
+        "fast": 1,
+        "slow": 2
+      },
+      "budget_usd": "1"
+    },
+    "negative": [
+      {
+        "action": "update",
+        "account": "fixture",
+        "idempotency_key": "command_0001",
+        "instance_id": "fixture",
+        "expected_revision": 0,
+        "parameters": {
+          "fast": 1,
+          "slow": 2
+        },
+        "budget_usd": "1",
+        "raw_rpc": "forbidden"
+      },
+      {
+        "account": "fixture",
+        "idempotency_key": "command_0001",
+        "instance_id": "fixture",
+        "expected_revision": 0,
+        "parameters": {
+          "fast": 1,
+          "slow": 2
+        },
+        "budget_usd": "1"
+      },
+      {
+        "action": 12,
+        "account": "fixture",
+        "idempotency_key": "command_0001",
+        "instance_id": "fixture",
+        "expected_revision": 0,
+        "parameters": {
+          "fast": 1,
+          "slow": 2
+        },
+        "budget_usd": "1"
+      }
+    ]
+  },
+  {
+    "tool": "strategies",
+    "action": "start",
+    "positive": {
+      "action": "start",
+      "account": "fixture",
+      "idempotency_key": "command_0001",
+      "instance_id": "fixture"
+    },
+    "negative": [
+      {
+        "action": "start",
+        "account": "fixture",
+        "idempotency_key": "command_0001",
+        "instance_id": "fixture",
+        "raw_rpc": "forbidden"
+      },
+      {
+        "account": "fixture",
+        "idempotency_key": "command_0001",
+        "instance_id": "fixture"
+      },
+      {
+        "action": 12,
+        "account": "fixture",
+        "idempotency_key": "command_0001",
+        "instance_id": "fixture"
+      }
+    ]
+  },
+  {
+    "tool": "strategies",
+    "action": "stop",
+    "positive": {
+      "action": "stop",
+      "account": "fixture",
+      "idempotency_key": "command_0001",
+      "instance_id": "fixture"
+    },
+    "negative": [
+      {
+        "action": "stop",
+        "account": "fixture",
+        "idempotency_key": "command_0001",
+        "instance_id": "fixture",
+        "raw_rpc": "forbidden"
+      },
+      {
+        "account": "fixture",
+        "idempotency_key": "command_0001",
+        "instance_id": "fixture"
+      },
+      {
+        "action": 12,
+        "account": "fixture",
+        "idempotency_key": "command_0001",
+        "instance_id": "fixture"
+      }
+    ]
+  },
+  {
+    "tool": "market",
+    "action": "screen",
+    "positive": {
+      "action": "screen",
+      "instruments": [
+        "fixture"
+      ],
+      "timeframe_ms": 1000,
+      "start_ms": 1,
+      "end_ms": 100001,
+      "fields": [
+        "fixture"
+      ],
+      "limit": 1
+    },
+    "negative": [
+      {
+        "action": "screen",
+        "instruments": [
+          "fixture"
+        ],
+        "timeframe_ms": 1000,
+        "start_ms": 1,
+        "end_ms": 100001,
+        "fields": [
+          "fixture"
+        ],
+        "limit": 1,
+        "raw_rpc": "forbidden"
+      },
+      {
+        "instruments": [
+          "fixture"
+        ],
+        "timeframe_ms": 1000,
+        "start_ms": 1,
+        "end_ms": 100001,
+        "fields": [
+          "fixture"
+        ],
+        "limit": 1
+      },
+      {
+        "action": 12,
+        "instruments": [
+          "fixture"
+        ],
+        "timeframe_ms": 1000,
+        "start_ms": 1,
+        "end_ms": 100001,
+        "fields": [
+          "fixture"
+        ],
+        "limit": 1
+      }
+    ]
+  },
+  {
+    "tool": "market",
+    "action": "compare",
+    "positive": {
+      "action": "compare",
+      "instruments": [
+        "fixture"
+      ],
+      "timeframe_ms": 1000,
+      "start_ms": 1,
+      "end_ms": 100001,
+      "fields": [
+        "fixture"
+      ],
+      "limit": 1
+    },
+    "negative": [
+      {
+        "action": "compare",
+        "instruments": [
+          "fixture"
+        ],
+        "timeframe_ms": 1000,
+        "start_ms": 1,
+        "end_ms": 100001,
+        "fields": [
+          "fixture"
+        ],
+        "limit": 1,
+        "raw_rpc": "forbidden"
+      },
+      {
+        "instruments": [
+          "fixture"
+        ],
+        "timeframe_ms": 1000,
+        "start_ms": 1,
+        "end_ms": 100001,
+        "fields": [
+          "fixture"
+        ],
+        "limit": 1
+      },
+      {
+        "action": 12,
+        "instruments": [
+          "fixture"
+        ],
+        "timeframe_ms": 1000,
+        "start_ms": 1,
+        "end_ms": 100001,
+        "fields": [
+          "fixture"
+        ],
+        "limit": 1
+      }
+    ]
+  },
+  {
+    "tool": "research",
+    "action": "backtest",
+    "positive": {
+      "action": "backtest",
+      "idempotency_key": "command_0001",
+      "instruments": [
+        "fixture"
+      ],
+      "timeframe_ms": 1000,
+      "start_ms": 1,
+      "end_ms": 100001,
+      "strategy_id": "ema_cross_v1",
+      "costs": {
+        "maker_fee_bps": 0,
+        "taker_fee_bps": 0,
+        "slippage_bps": 0,
+        "funding_mode": "observed"
+      },
+      "data_mode": "historical_observed",
+      "parameters": {
+        "fast": 1,
+        "slow": 2
+      }
+    },
+    "negative": [
+      {
+        "action": "backtest",
+        "idempotency_key": "command_0001",
+        "instruments": [
+          "fixture"
+        ],
+        "timeframe_ms": 1000,
+        "start_ms": 1,
+        "end_ms": 100001,
+        "strategy_id": "ema_cross_v1",
+        "costs": {
+          "maker_fee_bps": 0,
+          "taker_fee_bps": 0,
+          "slippage_bps": 0,
+          "funding_mode": "observed"
+        },
+        "data_mode": "historical_observed",
+        "parameters": {
+          "fast": 1,
+          "slow": 2
+        },
+        "raw_rpc": "forbidden"
+      },
+      {
+        "idempotency_key": "command_0001",
+        "instruments": [
+          "fixture"
+        ],
+        "timeframe_ms": 1000,
+        "start_ms": 1,
+        "end_ms": 100001,
+        "strategy_id": "ema_cross_v1",
+        "costs": {
+          "maker_fee_bps": 0,
+          "taker_fee_bps": 0,
+          "slippage_bps": 0,
+          "funding_mode": "observed"
+        },
+        "data_mode": "historical_observed",
+        "parameters": {
+          "fast": 1,
+          "slow": 2
+        }
+      },
+      {
+        "action": 12,
+        "idempotency_key": "command_0001",
+        "instruments": [
+          "fixture"
+        ],
+        "timeframe_ms": 1000,
+        "start_ms": 1,
+        "end_ms": 100001,
+        "strategy_id": "ema_cross_v1",
+        "costs": {
+          "maker_fee_bps": 0,
+          "taker_fee_bps": 0,
+          "slippage_bps": 0,
+          "funding_mode": "observed"
+        },
+        "data_mode": "historical_observed",
+        "parameters": {
+          "fast": 1,
+          "slow": 2
+        }
+      }
+    ]
+  },
+  {
+    "tool": "research",
+    "action": "grid",
+    "positive": {
+      "action": "grid",
+      "idempotency_key": "command_0001",
+      "instruments": [
+        "fixture"
+      ],
+      "timeframe_ms": 1000,
+      "start_ms": 1,
+      "end_ms": 100001,
+      "strategy_id": "ema_cross_v1",
+      "costs": {
+        "maker_fee_bps": 0,
+        "taker_fee_bps": 0,
+        "slippage_bps": 0,
+        "funding_mode": "observed"
+      },
+      "data_mode": "historical_observed",
+      "variants": [
+        {
+          "fast": 1,
+          "slow": 2
+        }
+      ]
+    },
+    "negative": [
+      {
+        "action": "grid",
+        "idempotency_key": "command_0001",
+        "instruments": [
+          "fixture"
+        ],
+        "timeframe_ms": 1000,
+        "start_ms": 1,
+        "end_ms": 100001,
+        "strategy_id": "ema_cross_v1",
+        "costs": {
+          "maker_fee_bps": 0,
+          "taker_fee_bps": 0,
+          "slippage_bps": 0,
+          "funding_mode": "observed"
+        },
+        "data_mode": "historical_observed",
+        "variants": [
+          {
+            "fast": 1,
+            "slow": 2
+          }
+        ],
+        "raw_rpc": "forbidden"
+      },
+      {
+        "idempotency_key": "command_0001",
+        "instruments": [
+          "fixture"
+        ],
+        "timeframe_ms": 1000,
+        "start_ms": 1,
+        "end_ms": 100001,
+        "strategy_id": "ema_cross_v1",
+        "costs": {
+          "maker_fee_bps": 0,
+          "taker_fee_bps": 0,
+          "slippage_bps": 0,
+          "funding_mode": "observed"
+        },
+        "data_mode": "historical_observed",
+        "variants": [
+          {
+            "fast": 1,
+            "slow": 2
+          }
+        ]
+      },
+      {
+        "action": 12,
+        "idempotency_key": "command_0001",
+        "instruments": [
+          "fixture"
+        ],
+        "timeframe_ms": 1000,
+        "start_ms": 1,
+        "end_ms": 100001,
+        "strategy_id": "ema_cross_v1",
+        "costs": {
+          "maker_fee_bps": 0,
+          "taker_fee_bps": 0,
+          "slippage_bps": 0,
+          "funding_mode": "observed"
+        },
+        "data_mode": "historical_observed",
+        "variants": [
+          {
+            "fast": 1,
+            "slow": 2
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "tool": "research",
+    "action": "status",
+    "positive": {
+      "action": "status",
+      "job_id": "fixture"
+    },
+    "negative": [
+      {
+        "action": "status",
+        "job_id": "fixture",
+        "raw_rpc": "forbidden"
+      },
+      {
+        "job_id": "fixture"
+      },
+      {
+        "action": 12,
+        "job_id": "fixture"
+      }
+    ]
+  },
+  {
+    "tool": "research",
+    "action": "cancel",
+    "positive": {
+      "action": "cancel",
+      "job_id": "fixture",
+      "idempotency_key": "command_0001"
+    },
+    "negative": [
+      {
+        "action": "cancel",
+        "job_id": "fixture",
+        "idempotency_key": "command_0001",
+        "raw_rpc": "forbidden"
+      },
+      {
+        "job_id": "fixture",
+        "idempotency_key": "command_0001"
+      },
+      {
+        "action": 12,
+        "job_id": "fixture",
+        "idempotency_key": "command_0001"
+      }
+    ]
+  },
+  {
+    "tool": "research",
+    "action": "result",
+    "positive": {
+      "action": "result",
+      "job_id": "fixture",
+      "limit": 1
+    },
+    "negative": [
+      {
+        "action": "result",
+        "job_id": "fixture",
+        "limit": 1,
+        "raw_rpc": "forbidden"
+      },
+      {
+        "job_id": "fixture",
+        "limit": 1
+      },
+      {
+        "action": 12,
+        "job_id": "fixture",
+        "limit": 1
+      }
+    ]
+  },
+  {
+    "tool": "trade",
+    "action": "preview",
+    "positive": {
+      "action": "preview",
+      "account": "fixture",
+      "operation": "open",
+      "strategy_instance": "fixture",
+      "instrument": "fixture",
+      "side": "long",
+      "sizing": {
+        "contracts": "1"
+      },
+      "order": {
+        "type": "fok",
+        "max_slippage_bps": 0
+      },
+      "protection": {
+        "stop_distance_bps": 50
+      }
+    },
+    "negative": [
+      {
+        "action": "preview",
+        "account": "fixture",
+        "operation": "open",
+        "strategy_instance": "fixture",
+        "instrument": "fixture",
+        "side": "long",
+        "sizing": {
+          "contracts": "1"
+        },
+        "order": {
+          "type": "fok",
+          "max_slippage_bps": 0
+        },
+        "protection": {
+          "stop_distance_bps": 50
+        },
+        "raw_rpc": "forbidden"
+      },
+      {
+        "account": "fixture",
+        "operation": "open",
+        "strategy_instance": "fixture",
+        "instrument": "fixture",
+        "side": "long",
+        "sizing": {
+          "contracts": "1"
+        },
+        "order": {
+          "type": "fok",
+          "max_slippage_bps": 0
+        },
+        "protection": {
+          "stop_distance_bps": 50
+        }
+      },
+      {
+        "action": 12,
+        "account": "fixture",
+        "operation": "open",
+        "strategy_instance": "fixture",
+        "instrument": "fixture",
+        "side": "long",
+        "sizing": {
+          "contracts": "1"
+        },
+        "order": {
+          "type": "fok",
+          "max_slippage_bps": 0
+        },
+        "protection": {
+          "stop_distance_bps": 50
+        }
+      }
+    ]
+  },
+  {
+    "tool": "trade",
+    "action": "execute",
+    "positive": {
+      "action": "execute",
+      "account": "fixture",
+      "idempotency_key": "command_0001",
+      "operation": "open",
+      "strategy_instance": "fixture",
+      "instrument": "fixture",
+      "side": "long",
+      "sizing": {
+        "contracts": "1"
+      },
+      "order": {
+        "type": "fok",
+        "max_slippage_bps": 0
+      },
+      "expires_in_ms": 1,
+      "protection": {
+        "stop_distance_bps": 50
+      }
+    },
+    "negative": [
+      {
+        "action": "execute",
+        "account": "fixture",
+        "idempotency_key": "command_0001",
+        "operation": "open",
+        "strategy_instance": "fixture",
+        "instrument": "fixture",
+        "side": "long",
+        "sizing": {
+          "contracts": "1"
+        },
+        "order": {
+          "type": "fok",
+          "max_slippage_bps": 0
+        },
+        "expires_in_ms": 1,
+        "protection": {
+          "stop_distance_bps": 50
+        },
+        "raw_rpc": "forbidden"
+      },
+      {
+        "account": "fixture",
+        "idempotency_key": "command_0001",
+        "operation": "open",
+        "strategy_instance": "fixture",
+        "instrument": "fixture",
+        "side": "long",
+        "sizing": {
+          "contracts": "1"
+        },
+        "order": {
+          "type": "fok",
+          "max_slippage_bps": 0
+        },
+        "expires_in_ms": 1,
+        "protection": {
+          "stop_distance_bps": 50
+        }
+      },
+      {
+        "action": 12,
+        "account": "fixture",
+        "idempotency_key": "command_0001",
+        "operation": "open",
+        "strategy_instance": "fixture",
+        "instrument": "fixture",
+        "side": "long",
+        "sizing": {
+          "contracts": "1"
+        },
+        "order": {
+          "type": "fok",
+          "max_slippage_bps": 0
+        },
+        "expires_in_ms": 1,
+        "protection": {
+          "stop_distance_bps": 50
+        }
+      }
+    ]
+  },
+  {
+    "tool": "trade",
+    "action": "status",
+    "positive": {
+      "action": "status",
+      "account": "fixture",
+      "reference": "fixture"
+    },
+    "negative": [
+      {
+        "action": "status",
+        "account": "fixture",
+        "reference": "fixture",
+        "raw_rpc": "forbidden"
+      },
+      {
+        "account": "fixture",
+        "reference": "fixture"
+      },
+      {
+        "action": 12,
+        "account": "fixture",
+        "reference": "fixture"
+      }
+    ]
+  },
+  {
+    "tool": "trade",
+    "action": "cancel",
+    "positive": {
+      "action": "cancel",
+      "account": "fixture",
+      "idempotency_key": "command_0001",
+      "reference": "fixture"
+    },
+    "negative": [
+      {
+        "action": "cancel",
+        "account": "fixture",
+        "idempotency_key": "command_0001",
+        "reference": "fixture",
+        "raw_rpc": "forbidden"
+      },
+      {
+        "account": "fixture",
+        "idempotency_key": "command_0001",
+        "reference": "fixture"
+      },
+      {
+        "action": 12,
+        "account": "fixture",
+        "idempotency_key": "command_0001",
+        "reference": "fixture"
+      }
+    ]
+  },
+  {
+    "tool": "trade",
+    "action": "close",
+    "positive": {
+      "action": "close",
+      "account": "fixture",
+      "idempotency_key": "command_0001",
+      "reference": "fixture",
+      "expires_in_ms": 1
+    },
+    "negative": [
+      {
+        "action": "close",
+        "account": "fixture",
+        "idempotency_key": "command_0001",
+        "reference": "fixture",
+        "expires_in_ms": 1,
+        "raw_rpc": "forbidden"
+      },
+      {
+        "account": "fixture",
+        "idempotency_key": "command_0001",
+        "reference": "fixture",
+        "expires_in_ms": 1
+      },
+      {
+        "action": 12,
+        "account": "fixture",
+        "idempotency_key": "command_0001",
+        "reference": "fixture",
+        "expires_in_ms": 1
+      }
+    ]
+  },
+  {
+    "tool": "portfolio",
+    "action": "summary",
+    "positive": {
+      "action": "summary",
+      "accounts": [
+        "fixture"
+      ],
+      "start_ms": 0,
+      "end_ms": 100000,
+      "limit": 1
+    },
+    "negative": [
+      {
+        "action": "summary",
+        "accounts": [
+          "fixture"
+        ],
+        "start_ms": 0,
+        "end_ms": 100000,
+        "limit": 1,
+        "raw_rpc": "forbidden"
+      },
+      {
+        "accounts": [
+          "fixture"
+        ],
+        "start_ms": 0,
+        "end_ms": 100000,
+        "limit": 1
+      },
+      {
+        "action": 12,
+        "accounts": [
+          "fixture"
+        ],
+        "start_ms": 0,
+        "end_ms": 100000,
+        "limit": 1
+      }
+    ]
+  },
+  {
+    "tool": "portfolio",
+    "action": "history",
+    "positive": {
+      "action": "history",
+      "accounts": [
+        "fixture"
+      ],
+      "start_ms": 0,
+      "end_ms": 100000,
+      "limit": 1
+    },
+    "negative": [
+      {
+        "action": "history",
+        "accounts": [
+          "fixture"
+        ],
+        "start_ms": 0,
+        "end_ms": 100000,
+        "limit": 1,
+        "raw_rpc": "forbidden"
+      },
+      {
+        "accounts": [
+          "fixture"
+        ],
+        "start_ms": 0,
+        "end_ms": 100000,
+        "limit": 1
+      },
+      {
+        "action": 12,
+        "accounts": [
+          "fixture"
+        ],
+        "start_ms": 0,
+        "end_ms": 100000,
+        "limit": 1
+      }
+    ]
+  },
+  {
+    "tool": "diagnostics",
+    "action": "explain",
+    "positive": {
+      "action": "explain",
+      "reference": "intent_fixture"
+    },
+    "negative": [
+      {
+        "action": "explain",
+        "reference": "intent_fixture",
+        "raw_rpc": "forbidden"
+      },
+      {
+        "reference": "intent_fixture"
+      },
+      {
+        "action": 12,
+        "reference": "intent_fixture"
+      }
+    ]
+  },
+  {
+    "tool": "research",
+    "action": "backtest_batch",
+    "positive": {
+      "action": "backtest",
+      "idempotency_key": "command_0001",
+      "instruments": [
+        "BTC-USDT-SWAP",
+        "ETH-USDT-SWAP"
+      ],
+      "timeframe_ms": 1000,
+      "start_ms": 1,
+      "end_ms": 100001,
+      "strategy_id": "ema_cross_v1",
+      "costs": {
+        "maker_fee_bps": 0,
+        "taker_fee_bps": 0,
+        "slippage_bps": 0,
+        "funding_mode": "observed"
+      },
+      "data_mode": "historical_observed",
+      "parameters": {
+        "fast": 1,
+        "slow": 2
+      }
+    },
+    "negative": [
+      {
+        "action": "backtest",
+        "idempotency_key": "command_0001",
+        "instruments": [
+          "ASSET0-USDT-SWAP",
+          "ASSET1-USDT-SWAP",
+          "ASSET2-USDT-SWAP",
+          "ASSET3-USDT-SWAP",
+          "ASSET4-USDT-SWAP",
+          "ASSET5-USDT-SWAP",
+          "ASSET6-USDT-SWAP",
+          "ASSET7-USDT-SWAP",
+          "ASSET8-USDT-SWAP"
+        ],
+        "timeframe_ms": 1000,
+        "start_ms": 1,
+        "end_ms": 100001,
+        "strategy_id": "ema_cross_v1",
+        "costs": {
+          "maker_fee_bps": 0,
+          "taker_fee_bps": 0,
+          "slippage_bps": 0,
+          "funding_mode": "observed"
+        },
+        "data_mode": "historical_observed",
+        "parameters": {
+          "fast": 1,
+          "slow": 2
+        }
+      },
+      {
+        "action": "backtest",
+        "idempotency_key": "command_0001",
+        "instruments": [
+          "BTC-USDT-SWAP",
+          "BTC-USDT-SWAP"
+        ],
+        "timeframe_ms": 1000,
+        "start_ms": 1,
+        "end_ms": 100001,
+        "strategy_id": "ema_cross_v1",
+        "costs": {
+          "maker_fee_bps": 0,
+          "taker_fee_bps": 0,
+          "slippage_bps": 0,
+          "funding_mode": "observed"
+        },
+        "data_mode": "historical_observed",
+        "parameters": {
+          "fast": 1,
+          "slow": 2
+        }
+      },
+      {
+        "action": "backtest",
+        "idempotency_key": "command_0001",
+        "instruments": [],
+        "timeframe_ms": 1000,
+        "start_ms": 1,
+        "end_ms": 100001,
+        "strategy_id": "ema_cross_v1",
+        "costs": {
+          "maker_fee_bps": 0,
+          "taker_fee_bps": 0,
+          "slippage_bps": 0,
+          "funding_mode": "observed"
+        },
+        "data_mode": "historical_observed",
+        "parameters": {
+          "fast": 1,
+          "slow": 2
+        }
+      }
+    ]
+  },
+  {
+    "tool": "research",
+    "action": "grid_batch",
+    "positive": {
+      "action": "grid",
+      "idempotency_key": "command_0001",
+      "instruments": [
+        "BTC-USDT-SWAP",
+        "ETH-USDT-SWAP"
+      ],
+      "timeframe_ms": 1000,
+      "start_ms": 1,
+      "end_ms": 100001,
+      "strategy_id": "ema_cross_v1",
+      "costs": {
+        "maker_fee_bps": 0,
+        "taker_fee_bps": 0,
+        "slippage_bps": 0,
+        "funding_mode": "observed"
+      },
+      "data_mode": "historical_observed",
+      "variants": [
+        {
+          "fast": 1,
+          "slow": 2
+        }
+      ]
+    },
+    "negative": [
+      {
+        "action": "grid",
+        "idempotency_key": "command_0001",
+        "instruments": [
+          "ASSET0-USDT-SWAP",
+          "ASSET1-USDT-SWAP",
+          "ASSET2-USDT-SWAP",
+          "ASSET3-USDT-SWAP",
+          "ASSET4-USDT-SWAP",
+          "ASSET5-USDT-SWAP",
+          "ASSET6-USDT-SWAP",
+          "ASSET7-USDT-SWAP",
+          "ASSET8-USDT-SWAP"
+        ],
+        "timeframe_ms": 1000,
+        "start_ms": 1,
+        "end_ms": 100001,
+        "strategy_id": "ema_cross_v1",
+        "costs": {
+          "maker_fee_bps": 0,
+          "taker_fee_bps": 0,
+          "slippage_bps": 0,
+          "funding_mode": "observed"
+        },
+        "data_mode": "historical_observed",
+        "variants": [
+          {
+            "fast": 1,
+            "slow": 2
+          }
+        ]
+      },
+      {
+        "action": "grid",
+        "idempotency_key": "command_0001",
+        "instruments": [
+          "BTC-USDT-SWAP",
+          "BTC-USDT-SWAP"
+        ],
+        "timeframe_ms": 1000,
+        "start_ms": 1,
+        "end_ms": 100001,
+        "strategy_id": "ema_cross_v1",
+        "costs": {
+          "maker_fee_bps": 0,
+          "taker_fee_bps": 0,
+          "slippage_bps": 0,
+          "funding_mode": "observed"
+        },
+        "data_mode": "historical_observed",
+        "variants": [
+          {
+            "fast": 1,
+            "slow": 2
+          }
+        ]
+      },
+      {
+        "action": "grid",
+        "idempotency_key": "command_0001",
+        "instruments": [],
+        "timeframe_ms": 1000,
+        "start_ms": 1,
+        "end_ms": 100001,
+        "strategy_id": "ema_cross_v1",
+        "costs": {
+          "maker_fee_bps": 0,
+          "taker_fee_bps": 0,
+          "slippage_bps": 0,
+          "funding_mode": "observed"
+        },
+        "data_mode": "historical_observed",
+        "variants": [
+          {
+            "fast": 1,
+            "slow": 2
+          }
+        ]
+      }
+    ]
+  }
+]

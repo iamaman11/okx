@@ -77,11 +77,11 @@ pub enum ApiTriggerPriceType {
 pub struct AttachedAlgoOrderRequest {
     #[serde(rename = "attachAlgoClOrdId")]
     pub client_order_id: String,
-    #[serde(rename = "tpTriggerPx")]
+    #[serde(rename = "tpTriggerPx", skip_serializing_if = "String::is_empty")]
     pub take_profit_trigger_price: String,
     #[serde(rename = "tpTriggerPxType")]
     pub take_profit_trigger_price_type: ApiTriggerPriceType,
-    #[serde(rename = "tpOrdPx")]
+    #[serde(rename = "tpOrdPx", skip_serializing_if = "String::is_empty")]
     pub take_profit_order_price: String,
     #[serde(rename = "slTriggerPx")]
     pub stop_loss_trigger_price: String,
@@ -315,7 +315,7 @@ impl<T> From<ApiEnvelope<T>> for TradeResponse<T> {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TradeOrderDetails {
     #[serde(rename = "instId", default)]
     pub instrument_id: String,
@@ -347,7 +347,7 @@ pub struct TradeOrderDetails {
     pub update_time_ms: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TradeAlgoOrderDetails {
     #[serde(rename = "instId", default)]
     pub instrument_id: String,
@@ -433,11 +433,49 @@ pub struct PendingDerivativeAlgoRiskInventory {
     pub scopes_checked: usize,
     pub rows: usize,
     pub complete_within_bound: bool,
-    /// Native REST completion receipt; zero on synthetic normalized test data.
+    /// Earliest actual REST response receipt across all scopes; zero on synthetic test data.
     pub received_at_ms: u64,
     pub samples: Vec<PendingProtectiveAlgoSample>,
 }
 
+async fn read_derivative_scope(
+    client: OkxRestClient,
+    kind: String,
+    order_type: String,
+) -> Result<ReceiptedDerivativeScope, OkxError> {
+    let rows: Vec<PendingAlgoOrderDetails> = client
+        .private_get(
+            ALGO_PENDING_PATH,
+            &[
+                ("ordType", order_type.clone()),
+                ("instType", kind.clone()),
+                ("limit", PROTECTIVE_ALGO_PAGE_LIMIT.to_string()),
+            ],
+        )
+        .await?;
+    Ok((
+        (kind, order_type, rows),
+        chrono::Utc::now().timestamp_millis().max(1) as u64,
+    ))
+}
+type ReceiptedDerivativeScope = ((String, String, Vec<PendingAlgoOrderDetails>), u64);
+fn receipted_derivative_inventory(
+    responses: Vec<ReceiptedDerivativeScope>,
+) -> Result<PendingDerivativeAlgoRiskInventory, OkxError> {
+    let earliest = responses
+        .iter()
+        .map(|(_, received)| *received)
+        .min()
+        .unwrap_or(0);
+    let mut batches = responses
+        .into_iter()
+        .map(|(batch, _)| batch)
+        .collect::<Vec<_>>();
+    batches.sort_by(|a, b| (&a.0, &a.1).cmp(&(&b.0, &b.1)));
+    let mut result = normalize_derivative_algo_risk_inventory(batches)?;
+    result.received_at_ms = earliest;
+    Ok(result)
+}
 fn normalize_derivative_algo_risk_inventory(
     batches: Vec<(String, String, Vec<PendingAlgoOrderDetails>)>,
 ) -> Result<PendingDerivativeAlgoRiskInventory, OkxError> {
@@ -604,26 +642,26 @@ impl TradeApi {
     pub async fn pending_derivative_risk_algos(
         &self,
     ) -> Result<PendingDerivativeAlgoRiskInventory, OkxError> {
-        let mut batches = Vec::with_capacity(DERIVATIVE_ALGO_TYPES.len() * 2);
-        for instrument_type in ["SWAP", "FUTURES"] {
-            for order_type in DERIVATIVE_ALGO_TYPES {
-                let rows: Vec<PendingAlgoOrderDetails> = self
-                    .client
-                    .private_get(
-                        ALGO_PENDING_PATH,
-                        &[
-                            ("ordType", order_type.to_owned()),
-                            ("instType", instrument_type.to_owned()),
-                            ("limit", PROTECTIVE_ALGO_PAGE_LIMIT.to_string()),
-                        ],
-                    )
-                    .await?;
-                batches.push((instrument_type.to_owned(), order_type.to_owned(), rows));
-            }
-        }
-        let mut result = normalize_derivative_algo_risk_inventory(batches)?;
-        result.received_at_ms = chrono::Utc::now().timestamp_millis().max(1) as u64;
-        Ok(result)
+        use futures_util::{StreamExt, TryStreamExt, stream};
+        let scopes = ["SWAP", "FUTURES"]
+            .into_iter()
+            .flat_map(|kind| {
+                DERIVATIVE_ALGO_TYPES
+                    .iter()
+                    .map(move |order_type| (kind, *order_type))
+            })
+            .collect::<Vec<_>>();
+        let calls = scopes
+            .into_iter()
+            .map(|(kind, order_type)| {
+                read_derivative_scope(self.client.clone(), kind.to_owned(), order_type.to_owned())
+            })
+            .collect::<Vec<_>>();
+        let responses = stream::iter(calls)
+            .buffer_unordered(4)
+            .try_collect::<Vec<_>>()
+            .await?;
+        receipted_derivative_inventory(responses)
     }
 
     pub fn admit_place_order(
@@ -1076,8 +1114,12 @@ fn validate_place(request: &PlaceOrderRequest) -> Result<(), OkxError> {
     validate_nonempty("px", &request.price)?;
     for attached in &request.attached_algo_orders {
         validate_client_id("attachAlgoClOrdId", &attached.client_order_id)?;
-        validate_nonempty("tpTriggerPx", &attached.take_profit_trigger_price)?;
-        validate_nonempty("tpOrdPx", &attached.take_profit_order_price)?;
+        if !attached.take_profit_trigger_price.is_empty()
+            || !attached.take_profit_order_price.is_empty()
+        {
+            validate_nonempty("tpTriggerPx", &attached.take_profit_trigger_price)?;
+            validate_nonempty("tpOrdPx", &attached.take_profit_order_price)?;
+        }
         validate_nonempty("slTriggerPx", &attached.stop_loss_trigger_price)?;
         validate_nonempty("slOrdPx", &attached.stop_loss_order_price)?;
     }
@@ -1157,6 +1199,19 @@ mod tests {
                     .map(move |kind| ((*instrument).to_owned(), (*kind).to_owned(), Vec::new()))
             })
             .collect()
+    }
+
+    #[test]
+    fn derivative_inventory_retains_earliest_scope_receipt() {
+        let responses = all_derivative_scopes()
+            .into_iter()
+            .enumerate()
+            .map(|(i, batch)| (batch, 1000 + i as u64))
+            .collect();
+        let inventory = receipted_derivative_inventory(responses).unwrap();
+        assert!(inventory.complete_within_bound);
+        assert_eq!(inventory.scopes_checked, 16);
+        assert_eq!(inventory.received_at_ms, 1000);
     }
 
     #[test]

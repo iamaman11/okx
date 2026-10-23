@@ -22,10 +22,7 @@ use crate::{
     autostart,
     background_process::hidden_command,
     controller_update,
-    desired::{
-        AgentDesired, AgentDesiredState, AgentProfile, BoundSourceIdentity, DesiredStateStore,
-        FrozenSourceWitness, VerifiedReadOnlyDestination,
-    },
+    desired::{AgentDesired, AgentDesiredState, DesiredStateStore},
     job::AgentJob,
     provenance::InstalledAgentProvenanceStore,
 };
@@ -33,8 +30,6 @@ use crate::{
 const CANONICAL_ROOT: &str = r"C:\okx";
 const RUNTIME_ROOT: &str = r"C:\okx-runtime";
 const AGENT_MAILBOX_ISSUE: &str = "10";
-const DEMO_MAILBOX_ISSUE: &str = "234";
-const DEMO_RUNTIME_ROOT: &str = r"C:\okx-runtime\demo";
 const AGENT_CLOUDFLARE_WS_URL: &str = "wss://okx-cloudflare-mcp.okx-794.workers.dev/runtime";
 const AGENT_CLOUDFLARE_RUNTIME_ID: &str = "windows-primary";
 const HOST_CONTROL_CAPABILITIES_SCHEMA_V1: &str = "okx.host-control.capabilities/v1";
@@ -43,22 +38,12 @@ const RESTART_BACKOFF_SECS: [u64; 5] = [1, 5, 15, 30, 60];
 const WORKSPACE_STATUS_MAX_CHANGES: usize = 16;
 const WORKSPACE_STATUS_MAX_CHANGE_BYTES: usize = 512;
 const RUNTIME_DIAGNOSTIC_TAIL_BYTES: u64 = 64 * 1024;
-// Max source handshake: 10s native account identity + 15s ingress/ledger
-// drain + 8s authenticated REST/WS/OCO source proof + bounded delivery slack.
-// A 27s parent timeout was shorter than its own child's 33s worst-case path.
-const NATIVE_SELECT_REPLY_TIMEOUT_SECS: u64 = 45;
-// One bounded, offline-only cutover. A timeout is an UNKNOWN storage
-// outcome, never permission to replay or fall back to the sealed v14 writer.
-const STORAGE_CUTOVER_TIMEOUT: Duration = Duration::from_secs(300);
-const STORAGE_CUTOVER_REPLY_MAX_BYTES: u64 = 4096;
+const NATIVE_INITIALIZATION_TIMEOUT: Duration = Duration::from_secs(300);
+const NATIVE_REPLY_MAX_BYTES: u64 = 4096;
 
 /// Run the existing installed Agent exactly once, without a pipe deadlock.
 /// Windows waits on the native process handle; an ephemeral OS Job owns every
-/// descendant so a timed-out migration cannot continue behind CONTROL.
-fn bounded_storage_cutover_output(
-    command: &mut Command,
-    timeout: Duration,
-) -> HostControlResult<Vec<u8>> {
+fn bounded_native_output(command: &mut Command, timeout: Duration) -> HostControlResult<Vec<u8>> {
     #[cfg(not(windows))]
     {
         let _ = (command, timeout);
@@ -84,7 +69,7 @@ fn bounded_storage_cutover_output(
             .map(|byte| format!("{byte:02x}"))
             .collect::<String>();
         let output_path = std::env::temp_dir().join(format!(
-            "okx-native-storage-cutover-{}-{token}.receipt",
+            "okx-native-operation-{}-{token}.receipt",
             std::process::id()
         ));
         let mut receipt = OpenOptions::new()
@@ -102,19 +87,18 @@ fn bounded_storage_cutover_output(
             let outcome = unsafe { WaitForSingleObject(child.as_raw_handle() as _, millis) };
             if outcome != WAIT_OBJECT_0 {
                 let error = std::io::Error::last_os_error();
-                // A failed/timed-out wait cannot permit an orphaned migration.
                 // The temporary KILL_ON_JOB_CLOSE Job also owns descendants.
                 let _ = child.kill();
                 let _ = child.wait();
                 if outcome == WAIT_TIMEOUT {
-                    return Err(HostControlError::StorageCutoverOutcomeUnknown);
+                    return Err(HostControlError::NativeStorageOutcomeUnknown);
                 }
                 return Err(error.into());
             }
             if !child.wait()?.success() {
-                return Err(HostControlError::StorageCutoverOutcomeUnknown);
+                return Err(HostControlError::NativeStorageOutcomeUnknown);
             }
-            if receipt.metadata()?.len() > STORAGE_CUTOVER_REPLY_MAX_BYTES {
+            if receipt.metadata()?.len() > NATIVE_REPLY_MAX_BYTES {
                 return Err(HostControlError::ControlResponseBudgetInvariant);
             }
             receipt.rewind()?;
@@ -123,29 +107,24 @@ fn bounded_storage_cutover_output(
             Ok(bytes)
         })();
         drop(receipt);
-        // An interrupted cutover receipt is diagnostic debris only; never
         // an owner marker, restart signal, authorization or replay target.
         let _ = fs::remove_file(output_path);
         result
     }
 }
 
-// Compile-time admission: parent always outlives the serial native child deadlines.
-const _: () = assert!(NATIVE_SELECT_REPLY_TIMEOUT_SECS > 10 + 15 + 8);
 const ALLOWED_REMOTES: &[&str] = &[
     "https://github.com/iamaman11/okx",
     "https://github.com/iamaman11/okx.git",
 ];
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 struct AgentLaunchEvidence {
-    profile: AgentProfile,
     pid: u32,
     stdout_offset: u64,
     stderr_offset: u64,
-    // Locally generated at each exact child launch, unavailable after a
-    // controller crash. Neither a remote caller nor an old PID can replay it.
-    launch_lease_sha256: [u8; 32],
+    stdout_health: okx_host_launcher::logging::LogHealth,
+    stderr_health: okx_host_launcher::logging::LogHealth,
 }
 
 struct NativeChildPipe {
@@ -162,13 +141,10 @@ pub struct HostExecutor {
     agent_job: AgentJob,
     desired_store: DesiredStateStore,
     desired_agent: AgentDesired,
-    desired_profile: AgentProfile,
-    running_profile: Option<AgentProfile>,
     desired_error: Option<String>,
     restart_attempt: usize,
     next_restart_at: Option<Instant>,
     last_reconcile: String,
-    last_profile_selection_failure: Option<Value>,
 }
 
 impl HostExecutor {
@@ -188,49 +164,27 @@ impl HostExecutor {
             agent_job: AgentJob::new()?,
             desired_store,
             desired_agent: desired_state.agent,
-            desired_profile: desired_state.profile,
-            running_profile: None,
             desired_error,
             restart_attempt: 0,
             next_restart_at: None,
             last_reconcile: "NOT_RUN".to_owned(),
-            last_profile_selection_failure: None,
         })
     }
 
     pub fn execute(&mut self, operation: HostControlOperation) -> HostControlResult<Value> {
-        self.profile_transition_gate(&operation)?;
+        self.lifecycle_gate(&operation)?;
         match operation {
             HostControlOperation::Status => self.status(),
             HostControlOperation::AccountCatalog => AccountCatalogStore::canonical().status(),
-            HostControlOperation::RegisterReadOnlyAccount { entry } => {
-                AccountCatalogStore::canonical().register(entry)
-            }
-            HostControlOperation::ConfigureProductionTrading { .. } => {
-                Err(HostControlError::InvalidExecutionPath)
-            }
-            HostControlOperation::StopProductionTrading { .. } => {
-                Err(HostControlError::InvalidExecutionPath)
-            }
-            HostControlOperation::SetProductionReadOnly { read_only } => {
-                if !read_only {
-                    // Clearing the negative latch requires both persisted STOPPED
-                    // and a physically empty exclusive Windows Job.
-                    self.require_agent_stopped()?;
-                    if !self.agent_job.is_empty()? {
-                        return Err(HostControlError::AgentRunning);
-                    }
-                }
-                self.desired_store.set_production_read_only(read_only)?;
-                self.desired_store.production_policy_status()
-            }
             HostControlOperation::Sync => self.sync(),
             HostControlOperation::BuildAgent => Err(HostControlError::InvalidExecutionPath),
             HostControlOperation::DeployAgent { .. }
             | HostControlOperation::InstallLauncherRoot { .. }
             | HostControlOperation::UpgradeLauncherRoot { .. }
             | HostControlOperation::StageControllerUpdate { .. }
-            | HostControlOperation::HandoffControllerUpdate => {
+            | HostControlOperation::HandoffControllerUpdate
+            | HostControlOperation::HandoffToAutostart
+            | HostControlOperation::AcceptanceCrashController => {
                 Err(HostControlError::InvalidExecutionPath)
             }
             HostControlOperation::AbortControllerUpdate => controller_update::abort(),
@@ -244,34 +198,41 @@ impl HostExecutor {
                 self.provision_cloudflare_runtime_token()
             }
             HostControlOperation::StartAgent => self.start_agent(),
-            HostControlOperation::StartDemoAcceptance
-            | HostControlOperation::RestoreProductionAgent => {
-                Err(HostControlError::InvalidExecutionPath)
-            }
-            HostControlOperation::SelectAccount { venue, account_id } => {
-                self.select_account(venue, &account_id)
-            }
-            HostControlOperation::SelectReadOnlyAccount {
-                target_profile,
-                expected_source_uid_fingerprint,
-                expected_target_uid_fingerprint,
-            } => self.select_read_only_account(
-                &target_profile,
-                &expected_source_uid_fingerprint,
-                &expected_target_uid_fingerprint,
-            ),
-            HostControlOperation::RecoverReadOnlySelection => self.recover_read_only_selection(),
             HostControlOperation::StopAgent => self.stop_agent(),
             HostControlOperation::RestartAgent => self.restart_agent(),
-            HostControlOperation::InitializeFreshLedger {
-                expected_uid_fingerprint,
-            } => self.initialize_fresh_ledger(&expected_uid_fingerprint),
+            HostControlOperation::InitializeInstallation {
+                installation_id,
+                expected_release,
+                operation_id,
+            } => self.initialize_native(None, &installation_id, &expected_release, &operation_id),
+            HostControlOperation::InitializeAccount {
+                account_key,
+                installation_id,
+                expected_release,
+                operation_id,
+            } => self.initialize_native(
+                Some(&account_key),
+                &installation_id,
+                &expected_release,
+                &operation_id,
+            ),
+            HostControlOperation::BackupAccount { account_key } => {
+                self.storage_maintenance("backup-account", &account_key, None, None, None)
+            }
+            HostControlOperation::RestoreAccount {
+                account_key,
+                snapshot_id,
+                expected_release,
+                operation_id,
+            } => self.storage_maintenance(
+                "restore-account",
+                &account_key,
+                Some(&snapshot_id),
+                Some(&expected_release),
+                Some(&operation_id),
+            ),
             HostControlOperation::InstallAutostart => autostart::install(),
             HostControlOperation::AutostartStatus => autostart::status_value(),
-            HostControlOperation::HandoffToAutostart
-            | HostControlOperation::AcceptanceCrashController => {
-                Err(HostControlError::InvalidExecutionPath)
-            }
             HostControlOperation::AcceptanceKillAgent => self.acceptance_kill_agent(),
             HostControlOperation::AcceptanceFailNextControllerActivation => {
                 Ok(okx_host_launcher::arm_fail_next_activation()?)
@@ -283,10 +244,7 @@ impl HostExecutor {
     /// Single common gate for both ordinary CONTROL dispatch and privileged
     /// runtime operations (release install, launcher and controller handoff).
     /// A corrupt file is not an absent file: its read returns an error.
-    pub fn profile_transition_gate(
-        &self,
-        operation: &HostControlOperation,
-    ) -> HostControlResult<()> {
+    pub fn lifecycle_gate(&self, operation: &HostControlOperation) -> HostControlResult<()> {
         if matches!(
             operation,
             HostControlOperation::Status
@@ -295,13 +253,11 @@ impl HostExecutor {
                 | HostControlOperation::ControllerUpdateStatus
                 | HostControlOperation::AgentIdentity
                 | HostControlOperation::AutostartStatus
-                | HostControlOperation::RecoverReadOnlySelection
+                | HostControlOperation::StopAgent
         ) {
             return Ok(());
         }
-        if self.desired_store.is_pending()? {
-            return Err(HostControlError::ProfileTransitionPending);
-        }
+        self.desired_store.load()?;
         Ok(())
     }
 
@@ -310,16 +266,6 @@ impl HostExecutor {
     }
 
     pub fn reconcile_desired(&mut self) -> HostControlResult<Value> {
-        // A pending profile journal outlives controller crashes. Never
-        // implicitly stop or respawn either owner across an unknown handoff.
-        if self.desired_store.is_pending()? {
-            self.last_reconcile = "BLOCKED_UNFINALIZED_PROFILE_TRANSITION".to_owned();
-            return Ok(json!({
-                "disposition": self.last_reconcile,
-                "reason": HostControlError::ProfileTransitionPending.code(),
-                "desired_profile": self.desired_profile,
-            }));
-        }
         let running = self.agent_is_running()?;
 
         if let Some(error) = self.desired_error.clone() {
@@ -330,20 +276,6 @@ impl HostExecutor {
                 "disposition": self.last_reconcile.clone(),
                 "desired": AgentDesired::Stopped,
                 "error": error
-            }));
-        }
-
-        // A mismatch must never terminate a still-running owner. The desired state
-        // can be restored after a controller crash, so this guard belongs in
-        // automatic reconciliation as well as in the manual profile command.
-        // No verified native quiescence witness exists yet: fail closed.
-        if running && self.running_profile != Some(self.desired_profile) {
-            self.last_reconcile = "BLOCKED_PROFILE_HANDOFF_NO_QUIESCENCE_PROOF".to_owned();
-            return Ok(json!({
-                "disposition": self.last_reconcile,
-                "reason": HostControlError::ProfileHandoffProofRequired.code(),
-                "running_profile": self.running_profile,
-                "desired_profile": self.desired_profile
             }));
         }
 
@@ -366,10 +298,9 @@ impl HostExecutor {
                     }
                     self.last_reconcile = "READY_RUNNING".to_owned();
                 } else if self.restart_due() {
-                    match self.start_agent_process(self.desired_profile) {
+                    match self.start_agent_process() {
                         Ok(pid) => {
-                            self.last_reconcile =
-                                format!("RESTORED_{:?}_AGENT_PID_{pid}", self.desired_profile);
+                            self.last_reconcile = format!("RESTORED_ENGINE_PID_{pid}");
                         }
                         Err(error) => {
                             self.schedule_restart();
@@ -415,7 +346,6 @@ impl HostExecutor {
             InstalledAgentProvenanceStore::canonical().status_value(&agent_binary);
         // Read-only release identity: the controller must not mistake an
         // independently updated agent for the same tested release set.
-        // Same-profile recovery is deliberately not gated by this diagnostic.
         let launcher = okx_host_launcher::status_value();
         let current_controller_sha256 = std::env::current_exe()
             .ok()
@@ -453,21 +383,15 @@ impl HostExecutor {
             "agent_owned_running": running,
             "agent_pid": if running { self.agent_child.as_ref().map(Child::id) } else { None },
             "agent_desired": self.desired_agent,
-            "desired_profile": self.desired_profile,
-            "running_profile": self.running_profile,
             "desired_state_path": self.desired_store.path(),
             "desired_state_error": self.desired_error.clone(),
-            "profile_transition": self.desired_store.status_value(),
-            "production_policy": self.desired_store.production_policy_status()?,
             "job_object_owned": true,
             "native_child_control_pipe_attached": running && self.native_child_pipe.is_some(),
             "restart_attempt": self.restart_attempt,
             "retry_in_ms": self.retry_in_ms(),
             "last_reconcile": self.last_reconcile.clone(),
-            "last_profile_selection_failure": self.last_profile_selection_failure.clone(),
             "runtime_diagnostics": {
-                "production": runtime_log_summary(AgentProfile::Production, owned_launch),
-                "demo_acceptance": runtime_log_summary(AgentProfile::DemoAcceptance, owned_launch)
+                "engine": runtime_log_summary(owned_launch)
             }
         }))
     }
@@ -661,467 +585,149 @@ impl HostExecutor {
     }
 
     fn start_agent(&mut self) -> HostControlResult<Value> {
-        // Start the account already selected by the one durable CONTROL owner.
-        // Starting a process is not permission to change its account or trade.
-        self.switch_agent_profile(self.desired_profile)
-    }
-
-    fn switch_agent_profile(&mut self, profile: AgentProfile) -> HostControlResult<Value> {
-        if self.desired_store.is_pending()? {
-            return Err(HostControlError::ProfileTransitionPending);
-        }
-        // The CONTROL command is not a flat-account witness. Do not persist a
-        // different desired profile before proof, even if the child is down:
-        // old exchange exposure or an UNKNOWN durable intent may survive.
-        let running = self.agent_is_running()?;
-        ensure_profile_unchanged(self.desired_profile, self.running_profile, running, profile)?;
-        self.require_agent_binary()?;
-        if running && self.running_profile == Some(profile) {
-            self.persist_desired(AgentDesiredState {
-                agent: AgentDesired::Running,
-                profile,
-            })?;
-            return Ok(json!({
-                "disposition": "ALREADY_RUNNING",
-                "desired": self.desired_agent,
-                "profile": profile,
-                "mailbox_issue": mailbox_issue(profile),
-                "runtime_root": runtime_dir(profile),
-                "cloudflare_attached": true
-            }));
-        }
-
-        self.persist_desired(AgentDesiredState {
-            agent: AgentDesired::Running,
-            profile,
-        })?;
-        if running {
-            self.terminate_agent_owned()?;
-        }
-
-        let pid = match self.start_agent_process(profile) {
-            Ok(pid) => pid,
-            Err(error) => {
-                // A failed Demo launch is NOT authority to start Production.
-                // Keep the committed environment for same-profile recovery.
-                self.schedule_restart();
-                return Err(error);
-            }
-        };
-        self.restart_attempt = 0;
-        self.next_restart_at = None;
-
-        Ok(json!({
-            "disposition": "STARTED",
-            "pid": pid,
-            "desired": self.desired_agent,
-            "profile": profile,
-            "mailbox_issue": mailbox_issue(profile),
-            "runtime_root": runtime_dir(profile),
-            "cloudflare_attached": true
-        }))
-    }
-
-    /// Single owner sequence, never a production trading grant.
-    /// Every uncertain condition blocks new risk. The target is started
-    /// ONLY after native drain, consumed exact witness and an empty Job.
-    fn select_account(
-        &mut self,
-        venue: okx_protocol::TradingVenue,
-        account_id: &str,
-    ) -> HostControlResult<Value> {
-        // AccountRegistry owns the venue+account route; CONTROL owns the
-        // physically fenced transition. No caller-supplied profile/UID.
-        let target = match crate::account_catalog::AccountCatalogStore::canonical()
-            .resolve(venue, account_id)?
-        {
-            crate::account_catalog::AccountRoute::Real => AgentProfile::Production,
-            crate::account_catalog::AccountRoute::Demo => AgentProfile::DemoAcceptance,
-        };
-        // Selecting an already active account is harmless and idempotent.
-        // It never changes trading admission or revokes its existing rights.
-        if target == self.desired_profile && self.agent_is_running()? {
-            return Ok(json!({
-                "venue": venue.as_str(),
-                "account_id": account_id,
-                "disposition": "ALREADY_SELECTED",
-                "pid": self.agent_child.as_ref().map(Child::id),
-                "selection_changed_trading_rights": false,
-            }));
-        }
-        let target_profile = if target == AgentProfile::Production {
-            "production"
-        } else {
-            "demo_acceptance"
-        };
-        let selected =
-            self.select_read_only_account_internal(target_profile, None, Some(account_id))?;
-        // Public selection view: do not leak internal profile names, PID, STOP
-        // or historical financial-audit state into the account chooser.
-        Ok(json!({
-            "venue": venue.as_str(),
-            "account_id": account_id,
-            "selected": true,
-            "changed": true,
-            "positions": selected["positions_observed"],
-            "orders": selected["orders_observed"],
-            "selection_changed_trading_rights": false,
-        }))
-    }
-
-    fn select_read_only_account(
-        &mut self,
-        target_profile: &str,
-        expected_source_uid: &str,
-        expected_target_uid: &str,
-    ) -> HostControlResult<Value> {
-        self.select_read_only_account_internal(
-            target_profile,
-            Some((expected_source_uid, expected_target_uid)),
-            None,
-        )
-    }
-
-    fn select_read_only_account_internal(
-        &mut self,
-        target_profile: &str,
-        supplied_uids: Option<(&str, &str)>,
-        account_id: Option<&str>,
-    ) -> HostControlResult<Value> {
-        let (expected_source_uid, legacy_target_uid) = supplied_uids.unwrap_or(("", ""));
-        let target = match target_profile {
-            "production" => AgentProfile::Production,
-            "demo_acceptance" => AgentProfile::DemoAcceptance,
-            _ => return Err(HostControlError::ProfileHandoffProofRequired),
-        };
-        if self.desired_store.is_pending()?
-            || !self.agent_is_running()?
-            || target == self.desired_profile
-        {
-            return Err(HostControlError::ProfileHandoffProofRequired);
-        }
-        if account_id.is_none()
-            && (expected_source_uid == legacy_target_uid
-                || expected_source_uid.len() != 64
-                || legacy_target_uid.len() != 64)
-        {
-            return Err(HostControlError::ProfileHandoffProofRequired);
-        }
-        // Commit a crash-surviving hold BEFORE the child's first drain
-        // response can become uncertain. A CONTROL crash here must never
-        // respawn the Demo mutation-authorized agent automatically.
-        let source_pid = self
-            .agent_child
-            .as_ref()
-            .map(Child::id)
-            .ok_or(HostControlError::ProfileHandoffProofRequired)?;
-        self.desired_store
-            .begin_source_drain_hold(self.desired_profile, target, source_pid)?;
-        let (ticket, bound, selected_target_uid) =
-            self.bound_native_source_candidate(expected_source_uid, target, account_id)?;
-        let expected_target_uid = match account_id {
-            Some(_) => selected_target_uid.ok_or(HostControlError::ProfileHandoffProofRequired)?,
-            None => legacy_target_uid.to_owned(),
-        };
-        if bound.account_uid_fingerprint == expected_target_uid {
-            return Err(HostControlError::ProfileHandoffProofRequired);
-        }
-        let source_pid = bound.source_pid;
-        let now = u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or_default();
-        self.desired_store.stage_frozen(ticket, now)?;
-        self.desired_store.consume_once(&bound, now)?;
-        // This native termination is safe ONLY after the single executor's
-        // bounded drain has finished and all current REST/WS/OCO gates passed.
-        self.terminate_agent_owned()?;
-        if !self.agent_job.is_empty()? {
-            return Err(HostControlError::ProfileHandoffProofRequired);
-        }
-        self.desired_store.mark_source_exited(
-            &bound,
-            source_pid,
-            u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or_default(),
-        )?;
-
-        let mut target_pid_observed = None;
-        let transition_result = (|| -> HostControlResult<Value> {
-            let target_pid = self.start_transition_read_only_process(target)?;
-            target_pid_observed = Some(target_pid);
-            // Independent target inquiry: target UID must differ from the
-            // frozen source, with strictly ReadOnly OKX observer permissions.
-            let evidence = self.verify_native_read_only_target(&expected_target_uid)?;
-            if !self.agent_is_running()?
-                || self.agent_child.as_ref().map(Child::id) != Some(target_pid)
-                || self.running_profile != Some(target)
-                || self.agent_job.is_empty()?
-            {
-                return Err(HostControlError::ProfileHandoffProofRequired);
-            }
-            let state = self.status()?;
-            if state["release_parity"]["state"] != "MATCHED"
-                || state["installed_agent"]["state"] != "VERIFIED"
-                || state["agent_pid"] != target_pid
-            {
-                return Err(HostControlError::ProfileHandoffProofRequired);
-            }
-            let verified = VerifiedReadOnlyDestination {
-                profile: target,
-                pid: target_pid,
-                account_uid_fingerprint: evidence.account_uid_fingerprint,
-                private_ws_generation: evidence.private_ws_generation,
-                account_snapshot_received_ms: evidence.snapshot_received_ms,
-                agent_sha256: bound.agent_sha256.clone(),
-                controller_sha256: bound.controller_sha256.clone(),
-                has_trade_authority: !evidence.executor_mutations_disabled
-                    || !evidence.read_only_credentials,
-            };
-            self.desired_store.complete_verified_read_only(
-                &bound,
-                &verified,
-                u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or_default(),
-            )?;
-            self.desired_agent = AgentDesired::Running;
-            self.desired_profile = target;
-            self.desired_error = None;
-            self.restart_attempt = 0;
-            self.next_restart_at = None;
-            Ok(json!({
-                "disposition": "SWITCHED_READ_ONLY",
-                "account_id": account_id.unwrap_or(if target == AgentProfile::Production { "real" } else { "demo" }),
-                "profile": target,
-                "pid": target_pid,
-                "account_uid_fingerprint": expected_target_uid,
-                "private_ws_generation": verified.private_ws_generation,
-                "positions_observed": evidence.positions,
-                "orders_observed": evidence.orders,
-                "native_oco_observed": if evidence.native_oco_complete {
-                    Some(evidence.native_oco)
-                } else {
-                    None
-                },
-                "native_oco_complete": evidence.native_oco_complete,
-                "read_only_data_quality": if evidence.private_ws_generation == 0
-                    || !evidence.native_oco_complete {
-                    "DEGRADED"
-                } else {
-                    "NOT_RECONCILED"
-                },
-                "live_trading": "DISABLED",
-                "ledger_migrated": false,
-                "source_pid_exited": source_pid,
-                "durable_owner": "host-state.pb"
-            }))
-        })();
-
-        if let Err(error) = &transition_result {
-            let recovered_stopped = self.terminate_agent_owned().is_ok()
-                && self.agent_job.is_empty().unwrap_or(false)
-                && self
-                    .desired_store
-                    .recover_stopped_after_empty_job(&bound, source_pid)
-                    .is_ok();
-            if recovered_stopped {
-                self.desired_profile = bound.source;
-                self.desired_agent = AgentDesired::Stopped;
-                self.next_restart_at = None;
-            }
-            self.last_profile_selection_failure = Some(json!({
-                "phase": if target_pid_observed.is_some() {
-                    "TARGET_VERIFY_OR_FINALIZE"
-                } else {
-                    "TARGET_LAUNCH"
-                },
-                "source_pid": source_pid,
-                "target_pid": target_pid_observed,
-                "target_profile": target,
-                "reason": error.code(),
-                "detail": match error {
-                    HostControlError::ReadOnlyTargetProofDenied(code) => Some(*code),
-                    _ => None,
-                },
-                "recovery": if recovered_stopped {
-                    "STOPPED_SAFE"
-                } else {
-                    "BLOCKED_UNCERTAIN"
-                }
-            }));
-        } else {
-            self.last_profile_selection_failure = None;
-        }
-        transition_result
-    }
-
-    /// Explicit recovery of a controller crash while transitioning. The
-    /// original Job's KILL_ON_JOB_CLOSE guarantee applies; new native CONTROL
-    /// must additionally see no child/active process in its exclusive Job.
-    fn recover_read_only_selection(&mut self) -> HostControlResult<Value> {
-        // A failed first drain may leave the SAME verified ReadOnly source
-        // still running under the durable hold, with its one-shot pipe already
-        // consumed. Explicit recovery is safe only for that exact Job-owned
-        // child and an immutable persisted ReadOnly right (zero trade posts).
-        // No mutation-authorized source, unknown descendant or target process
-        // can be force-resumed or switched by this operation.
         if self.agent_is_running()? {
-            let source_pid = self
-                .agent_child
-                .as_ref()
-                .map(Child::id)
-                .ok_or(HostControlError::ProfileHandoffProofRequired)?;
-            if !self
-                .desired_store
-                .permits_verified_read_only_source(self.desired_profile, source_pid)?
-            {
-                return Err(HostControlError::ProfileHandoffProofRequired);
+            self.persist_desired(AgentDesiredState::running())?;
+            return Ok(json!({"disposition":"ALREADY_RUNNING"}));
+        }
+        self.require_agent_binary()?;
+        self.persist_desired(AgentDesiredState::running())?;
+        let pid = match self.start_agent_process() {
+            Ok(pid) => pid,
+            Err(e) => {
+                self.schedule_restart();
+                return Err(e);
             }
-            self.terminate_agent_owned()?;
-        }
-        if !self.agent_job.is_empty()? {
-            return Err(HostControlError::ProfileHandoffProofRequired);
-        }
-        let restored = self.desired_store.recover_stopped_explicit()?;
-        self.desired_agent = restored.agent;
-        self.desired_profile = restored.profile;
-        self.next_restart_at = None;
+        };
         self.restart_attempt = 0;
-        Ok(json!({
-            "disposition": "RECOVERED_STOPPED",
-            "profile": restored.profile,
-            "live_trading": "DISABLED",
-            "requires_fresh_source_revalidation": true
-        }))
+        self.next_restart_at = None;
+        Ok(json!({"disposition":"STARTED","pid":pid,"runtime_root":RUNTIME_ROOT}))
     }
 
+    /// Stop decisions and drain the owned process before terminating its Job.
     fn stop_agent(&mut self) -> HostControlResult<Value> {
-        self.profile_transition_gate(&HostControlOperation::StopAgent)?;
-        let was_running = self.agent_is_running()?;
-        ensure_profile_unchanged(
-            self.desired_profile,
-            self.running_profile,
-            was_running,
-            self.desired_profile,
-        )?;
-        // STOP is not a change of environment; preserve the Demo identity so
-        // a later START/RESTART cannot silently become Production.
-        self.persist_desired(AgentDesiredState::stopped_on(self.desired_profile))?;
-        if was_running {
-            self.terminate_agent_owned()?;
-        }
+        self.persist_desired(AgentDesiredState::stopped())?;
+        self.terminate_agent_owned()?;
         self.restart_attempt = 0;
         self.next_restart_at = None;
-
-        Ok(json!({
-            "disposition": if was_running { "STOPPED" } else { "ALREADY_STOPPED" },
-            "desired": self.desired_agent,
-            "profile": self.desired_profile
-        }))
+        Ok(json!({"disposition":"STOPPED","auto_close":false}))
     }
 
     fn restart_agent(&mut self) -> HostControlResult<Value> {
-        if self.desired_store.is_pending()? {
-            return Err(HostControlError::ProfileTransitionPending);
-        }
-        let profile = self.desired_profile;
-        let running = self.agent_is_running()?;
-        ensure_profile_unchanged(self.desired_profile, self.running_profile, running, profile)?;
-        self.persist_desired(AgentDesiredState {
-            agent: AgentDesired::Running,
-            profile,
-        })?;
-        // A failed termination is not proof that the previous owner exited.
-        // Never launch a second agent on this uncertain result.
+        self.persist_desired(AgentDesiredState::running())?;
         self.terminate_agent_owned()?;
-        let pid = match self.start_agent_process(profile) {
-            Ok(pid) => pid,
-            Err(error) => {
-                self.schedule_restart();
-                return Err(error);
-            }
-        };
-        self.restart_attempt = 0;
-        self.next_restart_at = None;
-
-        Ok(json!({
-            "disposition": "RESTARTED",
-            "pid": pid,
-            "desired": self.desired_agent,
-            "profile": profile,
-            "mailbox_issue": mailbox_issue(profile),
-            "runtime_root": runtime_dir(profile),
-            "cloudflare_attached": true
-        }))
+        let pid = self.start_agent_process()?;
+        Ok(json!({"disposition":"RESTARTED","pid":pid}))
     }
 
     /// Fresh native ledger genesis with the existing CONTROL as sole owner. It is
     /// impossible to enter this branch while CONTROL desires an active Agent,
     /// while its Job contains a process, or while release provenance differs.
     /// A crash leaves the desired state STOPPED, not an automatic restart.
-    fn initialize_fresh_ledger(&mut self, expected_uid: &str) -> HostControlResult<Value> {
-        if self.desired_error.is_some()
-            || self.desired_store.is_pending()?
-            || self.desired_agent != AgentDesired::Stopped
-        {
-            return Err(HostControlError::ProfileHandoffProofRequired);
+    fn initialize_native(
+        &mut self,
+        account: Option<&str>,
+        installation: &str,
+        release: &str,
+        operation: &str,
+    ) -> HostControlResult<Value> {
+        self.require_storage_stopped()?;
+        self.require_release(release)?;
+        if let Some(key) = account {
+            AccountCatalogStore::canonical().require_account(key, installation)?;
         }
+        let mut command = hidden_command(self.agent_binary());
+        command
+            .arg("--root")
+            .arg(RUNTIME_ROOT)
+            .arg(if account.is_some() {
+                "initialize-account"
+            } else {
+                "initialize-installation"
+            })
+            .arg("--installation-id")
+            .arg(installation)
+            .arg("--expected-release")
+            .arg(release)
+            .arg("--operation-id")
+            .arg(operation);
+        if let Some(key) = account {
+            command.arg("--account-key").arg(key);
+        }
+        let bytes = bounded_native_output(&mut command, NATIVE_INITIALIZATION_TIMEOUT)?;
+        let reply: Value = serde_json::from_slice(&bytes)?;
+        if reply["installation_id"] != installation
+            || reply["operation_id"] != operation
+            || reply["release"] != release
+            || reply["status"] != "completed"
+            || account.is_some_and(|key| reply["account_key"] != key)
+        {
+            return Err(HostControlError::ArtifactVerification(
+                "native initialization receipt binding invalid",
+            ));
+        }
+        Ok(reply)
+    }
+    fn require_storage_stopped(&mut self) -> HostControlResult<()> {
         self.require_agent_stopped()?;
-        if self.agent_child.is_some()
-            || self.native_child_pipe.is_some()
+        if self.desired_agent != AgentDesired::Stopped
             || !self.agent_job.is_empty()?
+            || self.agent_child.is_some()
+            || self.native_child_pipe.is_some()
         {
             return Err(HostControlError::AgentRunning);
         }
+        Ok(())
+    }
+    fn require_release(&mut self, release: &str) -> HostControlResult<()> {
         self.require_agent_binary()?;
         let status = self.status()?;
         if status["release_parity"]["state"] != "MATCHED"
-            || status["installed_agent"]["state"] != "VERIFIED"
+            || status["release_parity"]["source_tree"] != release
         {
             return Err(HostControlError::ArtifactVerification(
-                "fresh native SQLite genesis requires matched ReleaseSet",
+                "native operation requires exact matched ReleaseSet",
             ));
         }
-        let root = runtime_dir(self.desired_profile);
-        let root_text = root.to_string_lossy();
+        Ok(())
+    }
+    fn storage_maintenance(
+        &mut self,
+        command_name: &str,
+        key: &str,
+        snapshot: Option<&str>,
+        release: Option<&str>,
+        operation: Option<&str>,
+    ) -> HostControlResult<Value> {
+        self.require_storage_stopped()?;
+        let c = AccountCatalogStore::canonical().load()?;
+        AccountCatalogStore::canonical().require_account(key, &c.installation_id)?;
+        if let Some(r) = release {
+            self.require_release(r)?;
+        }
         let mut command = hidden_command(self.agent_binary());
-        command.arg("--root").arg(root_text.as_ref());
-        if self.desired_profile == AgentProfile::DemoAcceptance {
-            command.arg("--demo");
-        }
         command
-            .arg("storage-initialize")
-            .arg("--expected-uid-fingerprint")
-            .arg(expected_uid)
-            .current_dir(&self.repo_root);
-        let stdout = bounded_storage_cutover_output(&mut command, STORAGE_CUTOVER_TIMEOUT)?;
-        let reply: Value = serde_json::from_slice(&stdout)?;
-        let (expected_account_id, expected_environment) = match self.desired_profile {
-            AgentProfile::Production => ("real", "production"),
-            AgentProfile::DemoAcceptance => ("demo", "demo"),
-        };
-        if reply["schema"] != "okx.native-storage-initialization/v1"
-            || reply["owner"] != "SQLITE"
-            || reply["integrity"] != "VALIDATED_COLD_READ"
-            || reply["trading_authorized"] != false
-            || reply["account_binding"]["venue"] != "okx"
-            || reply["account_binding"]["environment"] != expected_environment
-            || reply["account_binding"]["account_id"] != expected_account_id
-            || reply["account_binding"]["uid_fingerprint"] != expected_uid
-            || reply["account_binding"]["immutable"] != true
-        {
-            return Err(HostControlError::ArtifactVerification(
-                "native SQLite account identity/ownership receipt invalid",
-            ));
+            .arg("--root")
+            .arg(RUNTIME_ROOT)
+            .arg(command_name)
+            .arg("--account-key")
+            .arg(key);
+        if let Some(s) = snapshot {
+            command.arg("--snapshot-id").arg(s);
         }
-        // No implicit restart, read-only switch, account change or grant.
-        Ok(json!({
-            "schema": "okx.host-control.storage-initialization/v1",
-            "status": "FRESH_SQLITE_OWNER_VERIFIED",
-            "profile": self.desired_profile,
-            "ledger": reply,
-            "agent_desired": self.desired_agent,
-            "trading_authorized": false
-        }))
+        if let Some(r) = release {
+            command.arg("--expected-release").arg(r);
+        }
+        if let Some(o) = operation {
+            command.arg("--operation-id").arg(o);
+        }
+        Ok(serde_json::from_slice(&bounded_native_output(
+            &mut command,
+            NATIVE_INITIALIZATION_TIMEOUT,
+        )?)?)
     }
 
     fn acceptance_kill_agent(&mut self) -> HostControlResult<Value> {
-        self.profile_transition_gate(&HostControlOperation::AcceptanceKillAgent)?;
+        self.lifecycle_gate(&HostControlOperation::AcceptanceKillAgent)?;
         if !self.agent_is_running()? {
             return Ok(json!({
                 "disposition": "NO_OWNED_AGENT",
@@ -1171,21 +777,7 @@ impl HostExecutor {
                     "ws_url": AGENT_CLOUDFLARE_WS_URL,
                     "github_fallback_preserved": true
                 },
-                "agent_profiles": {
-                    "production": {
-                        "runtime_root": RUNTIME_ROOT,
-                        "mailbox_issue": 10,
-                        "cloudflare_attached": true
-                    },
-                    "demo_acceptance": {
-                        "runtime_root": DEMO_RUNTIME_ROOT,
-                        "mailbox_issue": 234,
-                        "cloudflare_attached": true,
-                        "direct_transport_read_only": true,
-                        "mutation_acceptance_explicit": true
-                    },
-                    "single_owner": true
-                }
+                "engine": {"runtime_root":RUNTIME_ROOT,"mailbox_issue":10,"cloudflare_attached":true,"single_owner":true}
             }
         }))
     }
@@ -1216,17 +808,8 @@ impl HostExecutor {
     }
 
     pub fn install_verified_agent(&mut self, bytes: &[u8]) -> HostControlResult<()> {
-        if self.desired_store.is_pending()? {
-            return Err(HostControlError::ProfileTransitionPending);
-        }
         let should_restore = self.desired_agent == AgentDesired::Running;
         let running = self.agent_is_running()?;
-        ensure_profile_unchanged(
-            self.desired_profile,
-            self.running_profile,
-            running,
-            self.desired_profile,
-        )?;
         if running {
             self.terminate_agent_owned()?;
         }
@@ -1253,7 +836,7 @@ impl HostExecutor {
             return Err(error.into());
         }
 
-        if should_restore && let Err(error) = self.start_agent_process(self.desired_profile) {
+        if should_restore && let Err(error) = self.start_agent_process() {
             self.schedule_restart();
             return Err(error);
         }
@@ -1261,122 +844,58 @@ impl HostExecutor {
         Ok(())
     }
 
-    fn start_agent_process(&mut self, profile: AgentProfile) -> HostControlResult<u32> {
-        self.start_agent_process_inner(profile, false)
+    fn start_agent_process(&mut self) -> HostControlResult<u32> {
+        self.start_agent_process_inner()
     }
 
-    fn start_transition_read_only_process(
-        &mut self,
-        profile: AgentProfile,
-    ) -> HostControlResult<u32> {
-        self.start_agent_process_inner(profile, true)
-    }
-
-    fn start_agent_process_inner(
-        &mut self,
-        profile: AgentProfile,
-        transition_read_only: bool,
-    ) -> HostControlResult<u32> {
-        if transition_read_only {
-            if !self.desired_store.permits_read_only_target_spawn(profile)?
-                || self.agent_child.is_some()
-                || !self.agent_job.is_empty()?
-            {
-                return Err(HostControlError::ProfileHandoffProofRequired);
-            }
-        } else if self.desired_store.is_pending()? {
-            return Err(HostControlError::ProfileTransitionPending);
+    fn start_agent_process_inner(&mut self) -> HostControlResult<u32> {
+        if self.agent_child.is_some() || !self.agent_job.is_empty()? {
+            return Err(HostControlError::AgentRunning);
         }
         self.require_agent_binary()?;
-        let runtime_dir = runtime_dir(profile);
+        let runtime_dir = PathBuf::from(RUNTIME_ROOT);
         fs::create_dir_all(&runtime_dir)?;
 
-        let stdout = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(runtime_dir.join("okx-agent.stdout.log"))?;
-        let stderr = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(runtime_dir.join("okx-agent.stderr.log"))?;
-
-        // Capture append-only log boundaries before launching the owned child.
-        // Old profile tails must never be presented as this process's errors.
-        let stdout_offset = stdout.metadata()?.len();
-        let stderr_offset = stderr.metadata()?.len();
-        let mut lease_nonce = [0u8; 32];
-        getrandom::fill(&mut lease_nonce)
-            .map_err(|error| HostControlError::Random(error.to_string()))?;
-        // A verified ReadOnly target stays ReadOnly after CONTROL/agent
-        // restart. The transient transition flag alone is never sufficient.
-        let read_only = if transition_read_only {
-            // The pending journal still names the source profile. Its
-            // one-use destination permission was checked above; never
-            // consult ordinary desired state for a transition target.
-            true
-        } else {
-            self.desired_store.read_only_for(profile)?
-        };
-        let args = agent_args_with_mode(profile, read_only);
+        let stdout = okx_host_launcher::logging::RotatingLog::open(
+            runtime_dir.join("okx-agent.stdout.log"),
+        )?;
+        let stderr = okx_host_launcher::logging::RotatingLog::open(
+            runtime_dir.join("okx-agent.stderr.log"),
+        )?;
+        let stdout_offset = stdout.offset();
+        let stderr_offset = stderr.offset();
+        let stdout_health = stdout.health();
+        let stderr_health = stderr.health();
+        let args = ENGINE_AGENT_ARGS;
         let mut child = hidden_command(self.agent_binary())
             .args(args)
             .arg("--native-child-control-stdio")
             .current_dir(&self.repo_root)
             .stdin(Stdio::piped())
-            .stdout(Stdio::from(stdout))
+            .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()?;
 
         self.agent_job.assign(&mut child)?;
         let pid = child.id();
-        let mut lease_hasher = Sha256::new();
-        lease_hasher.update(lease_nonce);
-        lease_hasher.update(pid.to_le_bytes());
-        lease_nonce.zeroize();
-        let launch_lease_sha256: [u8; 32] = lease_hasher.finalize().into();
         let child_input = child
             .stdin
             .take()
             .ok_or(HostControlError::InvalidExecutionPath)?;
-        let mut child_stderr = child
+        let child_stdout = child
+            .stdout
+            .take()
+            .ok_or(HostControlError::InvalidExecutionPath)?;
+        okx_host_launcher::logging::spawn_drain(child_stdout, stdout);
+        let child_stderr = child
             .stderr
             .take()
             .ok_or(HostControlError::InvalidExecutionPath)?;
         let (reply_tx, reply_rx) = mpsc::channel();
-        // Preserve the old append-only stderr diagnostic log. Only this
-        // parent receives the anonymous stderr pipe and routes typed replies.
-        let _stderr_reader = std::thread::spawn(move || {
-            let mut stderr_log = stderr;
-            let mut pending = Vec::<u8>::new();
-            let mut overflow = false;
-            let mut block = [0u8; 4096];
-            loop {
-                let count = match child_stderr.read(&mut block) {
-                    Ok(0) | Err(_) => break,
-                    Ok(n) => n,
-                };
-                if stderr_log.write_all(&block[..count]).is_err() {
-                    break;
-                }
-                for byte in &block[..count] {
-                    if *byte == b'\n' {
-                        if !overflow && pending.starts_with(NATIVE_CHILD_CONTROL_PREFIX.as_bytes())
-                        {
-                            let payload = &pending[NATIVE_CHILD_CONTROL_PREFIX.len()..];
-                            if let Ok(reply) = serde_json::from_slice::<NativeChildReply>(payload) {
-                                let _ = reply_tx.send(reply);
-                            }
-                        }
-                        pending.clear();
-                        overflow = false;
-                    } else if pending.len() < NATIVE_CHILD_CONTROL_MAX_BYTES {
-                        pending.push(*byte);
-                    } else {
-                        overflow = true;
-                    }
-                }
-            }
-        });
+        // The original stderr bytes feed typed child replies independently of
+        // the redacted rotating diagnostic sink; sink failures never stop drain.
+        let _stderr_reader =
+            std::thread::spawn(move || drain_native_stderr(child_stderr, stderr, reply_tx));
         self.native_child_pipe = Some(NativeChildPipe {
             input: child_input,
             replies: reply_rx,
@@ -1384,347 +903,68 @@ impl HostExecutor {
         self.agent_child = Some(child);
         self.agent_started_at = Some(Instant::now());
         self.agent_launch = Some(AgentLaunchEvidence {
-            profile,
             pid,
             stdout_offset,
             stderr_offset,
-            launch_lease_sha256,
+            stdout_health,
+            stderr_health,
         });
-        self.running_profile = Some(profile);
         self.next_restart_at = None;
         Ok(pid)
     }
 
     fn terminate_agent_owned(&mut self) -> HostControlResult<()> {
-        // Close the parent command pipe; never leave an orphaned ingress.
-        // Join the one-off diagnostic relay only after the Job-owned child
-        // has exited so the reader has reached pipe EOF.
-        let owned_pipe = self.native_child_pipe.take();
+        let mut pipe = self.native_child_pipe.take();
         let Some(mut child) = self.agent_child.take() else {
             self.agent_started_at = None;
             self.agent_launch = None;
             return Ok(());
         };
-
         if child.try_wait()?.is_none() {
-            child.kill()?;
-            child.wait()?;
+            let deadline = Instant::now() + Duration::from_secs(10);
+            if let Some(p) = pipe.as_mut() {
+                let request_id = format!(
+                    "{:x}",
+                    Sha256::digest(
+                        format!("shutdown:{}:{:?}", child.id(), Instant::now()).as_bytes()
+                    )
+                );
+                let request = NativeChildRequest {
+                    schema: NATIVE_CHILD_CONTROL_SCHEMA_V1.into(),
+                    request_id: request_id.clone(),
+                    operation: NativeChildOperation::Shutdown {
+                        drain_timeout_ms: 10000,
+                    },
+                };
+                if let Ok(mut bytes) = serde_json::to_vec(&request) {
+                    bytes.push(b'\n');
+                    let _ = p.input.write_all(&bytes);
+                    let _ = p.input.flush();
+                }
+            }
+            while Instant::now() < deadline && child.try_wait()?.is_none() {
+                if let Some(p) = pipe.as_ref() {
+                    while p.replies.try_recv().is_ok() {}
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            if child.try_wait()?.is_none() {
+                self.agent_job.terminate()?;
+                child.wait()?;
+            }
         }
-        if let Some(pipe) = owned_pipe {
-            // Closing this handle lets the one-off relay exit at pipe EOF.
-            // Do not join unboundedly: unknown inherited child handles must
-            // never stall controller recovery after a verified process exit.
-            drop(pipe);
+        drop(pipe);
+        if !self.agent_job.is_empty()? {
+            self.agent_job.terminate()?;
         }
         self.agent_started_at = None;
         self.agent_launch = None;
-        self.running_profile = None;
         Ok(())
-    }
-
-    /// Native drained read-only source is still a candidate, NOT a
-    /// CONTROL-authenticated one-use witness bound to exact PID/ReleaseSet.
-    #[allow(dead_code)]
-    fn request_native_drain(
-        &mut self,
-        expected_uid: &str,
-        account_id: Option<&str>,
-    ) -> HostControlResult<Value> {
-        if account_id.is_none()
-            && (!expected_uid.bytes().all(|b| b.is_ascii_hexdigit()) || expected_uid.len() != 64)
-        {
-            return Err(HostControlError::ProfileHandoffProofRequired);
-        }
-        if self.desired_store.is_pending()? {
-            let owned_pid = self
-                .agent_child
-                .as_ref()
-                .map(Child::id)
-                .ok_or(HostControlError::ProfileHandoffProofRequired)?;
-            if !self
-                .desired_store
-                .permits_owned_source_drain(self.desired_profile, owned_pid)?
-            {
-                return Err(HostControlError::ProfileTransitionPending);
-            }
-        }
-        let pipe = self
-            .native_child_pipe
-            .as_mut()
-            .ok_or(HostControlError::ProfileHandoffProofRequired)?;
-        let mut random = [0u8; 32];
-        getrandom::fill(&mut random).map_err(|e| HostControlError::Random(e.to_string()))?;
-        let request_id = random
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>();
-        let request = NativeChildRequest {
-            schema: NATIVE_CHILD_CONTROL_SCHEMA_V1.to_owned(),
-            request_id: request_id.clone(),
-            operation: NativeChildOperation::Drain,
-            expected_uid_fingerprint: expected_uid.to_owned(),
-            account_id: account_id.map(str::to_owned),
-        };
-        if !request.valid() {
-            return Err(HostControlError::ProfileHandoffProofRequired);
-        }
-        let bytes = serde_json::to_vec(&request)?;
-        if bytes.len() + 1 > NATIVE_CHILD_CONTROL_MAX_BYTES {
-            return Err(HostControlError::ProfileHandoffProofRequired);
-        }
-        pipe.input.write_all(&bytes)?;
-        pipe.input.write_all(b"\n")?;
-        pipe.input.flush()?;
-        // Parent must cover the 10s native account-identity receipt BEFORE
-        // the 15s mutation drain and 8s REST/WS/OCO source observation.
-        // Timeout still fails closed, never an implicit cancellation or POST retry.
-        let reply = pipe
-            .replies
-            .recv_timeout(Duration::from_secs(NATIVE_SELECT_REPLY_TIMEOUT_SECS))
-            .map_err(|_| HostControlError::ProfileHandoffProofRequired)?;
-        if !reply.valid_for(&request_id) || reply.disposition != "DRAINED_SOURCE_CANDIDATE" {
-            return Err(HostControlError::ProfileHandoffProofRequired);
-        }
-        let source = reply
-            .source_candidate
-            .as_ref()
-            .ok_or(HostControlError::ProfileHandoffProofRequired)?;
-        let ledger_sha = reply
-            .ledger_only
-            .as_ref()
-            .and_then(|value| value.get("source_ledger_manifest_sha256"))
-            .and_then(Value::as_str)
-            .unwrap_or("");
-        let ledger_format = reply
-            .ledger_only
-            .as_ref()
-            .and_then(|value| value.get("source_ledger_format"))
-            .and_then(Value::as_str);
-        // A historical v1 journal is never declared complete. Only a native
-        // source already persisted as strictly ReadOnly may leave it untouched.
-        if let Some(format) = ledger_format
-            && format != "okx.execution-ledger/v14"
-        {
-            let pid = self
-                .agent_child
-                .as_ref()
-                .map(Child::id)
-                .ok_or(HostControlError::ProfileHandoffProofRequired)?;
-            if format != "okx.execution-ledger/v1"
-                || !self
-                    .desired_store
-                    .permits_verified_read_only_source(self.desired_profile, pid)?
-            {
-                return Err(HostControlError::ProfileHandoffProofRequired);
-            }
-        }
-        if ledger_sha.is_empty() {
-            let pid = self
-                .agent_child
-                .as_ref()
-                .map(Child::id)
-                .ok_or(HostControlError::ProfileHandoffProofRequired)?;
-            if !source.ledger_manifest_sha256.is_empty()
-                || !self
-                    .desired_store
-                    .permits_verified_read_only_source(self.desired_profile, pid)?
-            {
-                return Err(HostControlError::ProfileHandoffProofRequired);
-            }
-        }
-        let now_ms = u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or_default();
-        let source_uid = if account_id.is_some() {
-            source.account_uid_fingerprint.as_str()
-        } else {
-            expected_uid
-        };
-        if !source.valid_for(source_uid, ledger_sha, now_ms)
-            || (account_id.is_some() && reply.selected_target_uid_fingerprint.is_none())
-        {
-            return Err(HostControlError::ProfileHandoffProofRequired);
-        }
-        Ok(json!({
-            "ledger": reply.ledger_only,
-            "source_candidate": reply.source_candidate,
-            "selected_target_uid_fingerprint": reply.selected_target_uid_fingerprint,
-            "authorizes_profile_switch": false
-        }))
-    }
-
-    /// Internal strict parent-bound source identity. This path does NOT mint
-    /// a remote switch authority. Only CONTROL knows the actual Job-owned PID,
-    /// per-launch random lease, tested ReleaseSet and native pipe handles.
-    #[allow(dead_code)]
-    fn bound_native_source_candidate(
-        &mut self,
-        expected_uid: &str,
-        destination: AgentProfile,
-        account_id: Option<&str>,
-    ) -> HostControlResult<(FrozenSourceWitness, BoundSourceIdentity, Option<String>)> {
-        if !self.agent_is_running()? {
-            return Err(HostControlError::ProfileHandoffProofRequired);
-        }
-        let launch = self
-            .agent_launch
-            .ok_or(HostControlError::ProfileHandoffProofRequired)?;
-        if self.running_profile != Some(launch.profile)
-            || self.desired_profile != launch.profile
-            || self.desired_agent != AgentDesired::Running
-            || destination == launch.profile
-        {
-            return Err(HostControlError::ProfileHandoffProofRequired);
-        }
-
-        // This one-shot pipe drains real executor POSTs; NEVER reuse a reply
-        // after a timeout or obtain it from GitHub/Cloudflare.
-        let reply = self.request_native_drain(expected_uid, account_id)?;
-        if !self.agent_is_running()?
-            || self.agent_child.as_ref().map(Child::id) != Some(launch.pid)
-            || self.agent_launch.is_none_or(|latest| {
-                latest.pid != launch.pid || latest.launch_lease_sha256 != launch.launch_lease_sha256
-            })
-        {
-            return Err(HostControlError::ProfileHandoffProofRequired);
-        }
-        let state = self.status()?;
-        if state["release_parity"]["state"] != "MATCHED"
-            || state["installed_agent"]["state"] != "VERIFIED"
-            || state["agent_owned_running"] != true
-            || state["agent_pid"] != launch.pid
-        {
-            return Err(HostControlError::ProfileHandoffProofRequired);
-        }
-        let prov = &state["installed_agent"]["provenance"];
-        let source_tree = prov["source_tree"]
-            .as_str()
-            .ok_or(HostControlError::ProfileHandoffProofRequired)?;
-        let agent_sha256 = prov["agent_sha256"]
-            .as_str()
-            .ok_or(HostControlError::ProfileHandoffProofRequired)?;
-        let controller_sha256 = std::env::current_exe()
-            .ok()
-            .and_then(|path| okx_host_launcher::sha256_file(&path).ok())
-            .ok_or(HostControlError::ProfileHandoffProofRequired)?;
-        let candidate: okx_protocol::NativeDrainedSourceCandidate =
-            serde_json::from_value(reply["source_candidate"].clone())
-                .map_err(|_| HostControlError::ProfileHandoffProofRequired)?;
-        // A missing native ledger is independently proven by the child and
-        // permitted only by the source's durable verified ReadOnly right.
-        let ledger_sha256 = reply["ledger"]["source_ledger_manifest_sha256"]
-            .as_str()
-            .unwrap_or("");
-        let now_ms = u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or_default();
-        let source_uid = candidate.account_uid_fingerprint.as_str();
-        if (account_id.is_none() && source_uid != expected_uid)
-            || !candidate.valid_for(source_uid, ledger_sha256, now_ms)
-        {
-            return Err(HostControlError::ProfileHandoffProofRequired);
-        }
-        let bound = BoundSourceIdentity {
-            source: launch.profile,
-            source_pid: launch.pid,
-            launch_lease_sha256: format!("{:x}", Sha256::digest(launch.launch_lease_sha256)),
-            account_uid_fingerprint: source_uid.to_owned(),
-            private_ws_generation: candidate.private_ws_generation,
-            ledger_manifest_sha256: ledger_sha256.to_owned(),
-            source_tree: source_tree.to_owned(),
-            agent_sha256: agent_sha256.to_owned(),
-            controller_sha256,
-        };
-        let frozen = FrozenSourceWitness {
-            sequence: now_ms,
-            destination,
-            source_observed_at_ms: candidate.snapshot_received_ms,
-            issued_at_ms: now_ms,
-            expires_at_ms: now_ms.saturating_add(60_000),
-            source: bound.source,
-            source_pid: bound.source_pid,
-            launch_lease_sha256: bound.launch_lease_sha256.clone(),
-            account_uid_fingerprint: bound.account_uid_fingerprint.clone(),
-            private_ws_generation: bound.private_ws_generation,
-            ledger_manifest_sha256: bound.ledger_manifest_sha256.clone(),
-            source_tree: bound.source_tree.clone(),
-            agent_sha256: bound.agent_sha256.clone(),
-            controller_sha256: bound.controller_sha256.clone(),
-        };
-        let selected_target_uid = reply["selected_target_uid_fingerprint"]
-            .as_str()
-            .map(str::to_owned);
-        if account_id.is_some() && selected_target_uid.is_none() {
-            return Err(HostControlError::ProfileHandoffProofRequired);
-        }
-        Ok((frozen, bound, selected_target_uid))
-    }
-
-    /// Only the same Job-owned target child can return this read-only
-    /// receipt; caller-provided JSON never certifies destination identity.
-    fn verify_native_read_only_target(
-        &mut self,
-        expected_uid: &str,
-    ) -> HostControlResult<okx_protocol::NativeReadOnlyTargetProof> {
-        if !self.agent_is_running()? {
-            return Err(HostControlError::ProfileHandoffProofRequired);
-        }
-        let pipe = self
-            .native_child_pipe
-            .as_mut()
-            .ok_or(HostControlError::ProfileHandoffProofRequired)?;
-        let mut entropy = [0u8; 32];
-        getrandom::fill(&mut entropy).map_err(|e| HostControlError::Random(e.to_string()))?;
-        let request_id = entropy
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect::<String>();
-        entropy.zeroize();
-        let req = NativeChildRequest {
-            schema: NATIVE_CHILD_CONTROL_SCHEMA_V1.to_owned(),
-            request_id: request_id.clone(),
-            operation: NativeChildOperation::VerifyReadOnly,
-            expected_uid_fingerprint: expected_uid.to_owned(),
-            account_id: None,
-        };
-        if !req.valid() {
-            return Err(HostControlError::ProfileHandoffProofRequired);
-        }
-        let bytes = serde_json::to_vec(&req)?;
-        if bytes.len() + 1 > NATIVE_CHILD_CONTROL_MAX_BYTES {
-            return Err(HostControlError::ProfileHandoffProofRequired);
-        }
-        pipe.input.write_all(&bytes)?;
-        pipe.input.write_all(b"\n")?;
-        pipe.input.flush()?;
-        let reply = pipe
-            .replies
-            .recv_timeout(Duration::from_secs(11))
-            .map_err(|_| HostControlError::ReadOnlyTargetProofDenied("NATIVE_REPLY_TIMEOUT"))?;
-        if !reply.valid_for(&request_id) {
-            return Err(HostControlError::ReadOnlyTargetProofDenied(
-                "INVALID_OR_UNBOUND_NATIVE_REPLY",
-            ));
-        }
-        if reply.disposition != "VERIFIED_READ_ONLY" {
-            return Err(HostControlError::ReadOnlyTargetProofDenied(
-                native_read_only_denial_code(reply.error.as_deref()),
-            ));
-        }
-        let proof = reply
-            .target_read_only
-            .ok_or(HostControlError::ReadOnlyTargetProofDenied(
-                "MISSING_TARGET_PROOF",
-            ))?;
-        let now = u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or_default();
-        if !proof.valid_for(expected_uid, now) {
-            return Err(HostControlError::ReadOnlyTargetProofDenied(
-                "INVALID_TARGET_UID_OR_RECEIPT",
-            ));
-        }
-        Ok(proof)
     }
 
     fn persist_desired(&mut self, state: AgentDesiredState) -> HostControlResult<()> {
         self.desired_store.save(state)?;
         self.desired_agent = state.agent;
-        self.desired_profile = state.profile;
         self.desired_error = None;
         Ok(())
     }
@@ -1805,7 +1045,6 @@ impl HostExecutor {
             self.agent_child = None;
             self.agent_started_at = None;
             self.agent_launch = None;
-            self.running_profile = None;
             if self.desired_agent == AgentDesired::Running {
                 self.schedule_restart();
             }
@@ -1833,15 +1072,32 @@ impl HostExecutor {
         command_name: &'static str,
     ) -> HostControlResult<()> {
         fs::create_dir_all(self.runtime_dir())?;
-        let stdout = File::create(self.runtime_dir().join(log_name))?;
-        let stderr = stdout.try_clone()?;
-
-        let status = hidden_command(program)
+        // Separate line collectors prevent stdout/stderr fragments from
+        // interleaving around a credential label before redaction.
+        let out_log =
+            okx_host_launcher::logging::RotatingLog::open(self.runtime_dir().join(log_name))?;
+        let err_log = okx_host_launcher::logging::RotatingLog::open(
+            self.runtime_dir().join(format!("{log_name}.stderr")),
+        )?;
+        let mut child = hidden_command(program)
             .args(args)
             .current_dir(&self.repo_root)
-            .stdout(Stdio::from(stdout))
-            .stderr(Stdio::from(stderr))
-            .status()?;
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or(HostControlError::InvalidExecutionPath)?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or(HostControlError::InvalidExecutionPath)?;
+        let out_thread = okx_host_launcher::logging::spawn_drain(stdout, out_log);
+        let err_thread = okx_host_launcher::logging::spawn_drain(stderr, err_log);
+        let status = child.wait()?;
+        let _ = out_thread.join();
+        let _ = err_thread.join();
 
         if status.success() {
             Ok(())
@@ -1859,7 +1115,7 @@ impl HostExecutor {
     }
 }
 
-const PRODUCTION_AGENT_ARGS: &[&str] = &[
+const ENGINE_AGENT_ARGS: &[&str] = &[
     "run",
     "--mailbox-issue",
     AGENT_MAILBOX_ISSUE,
@@ -1869,55 +1125,38 @@ const PRODUCTION_AGENT_ARGS: &[&str] = &[
     AGENT_CLOUDFLARE_RUNTIME_ID,
 ];
 
-/// The existing Production agent uses the SAME executor for trade authority,
-/// driven entirely by CONTROL's durable policy and checked at every POST.
-const PRODUCTION_TRADING_AGENT_ARGS: &[&str] = &[
-    "run",
-    "--production-trading",
-    "--mailbox-issue",
-    AGENT_MAILBOX_ISSUE,
-    "--cloudflare-ws-url",
-    AGENT_CLOUDFLARE_WS_URL,
-    "--cloudflare-runtime-id",
-    AGENT_CLOUDFLARE_RUNTIME_ID,
-];
-
-/// Same Demo engine and data root, but exchange mutation acceptance OFF.
-/// Never introduce a parallel Demo executor or a second strategy ledger.
-const DEMO_READ_ONLY_AGENT_ARGS: &[&str] = &[
-    "--root",
-    DEMO_RUNTIME_ROOT,
-    "--demo",
-    "run",
-    "--mailbox-issue",
-    DEMO_MAILBOX_ISSUE,
-    "--cloudflare-ws-url",
-    AGENT_CLOUDFLARE_WS_URL,
-    "--cloudflare-runtime-id",
-    AGENT_CLOUDFLARE_RUNTIME_ID,
-];
-
-const DEMO_ACCEPTANCE_AGENT_ARGS: &[&str] = &[
-    "--root",
-    DEMO_RUNTIME_ROOT,
-    "--demo",
-    "run",
-    "--mailbox-issue",
-    DEMO_MAILBOX_ISSUE,
-    "--demo-mutation-acceptance",
-    "--cloudflare-ws-url",
-    AGENT_CLOUDFLARE_WS_URL,
-    "--cloudflare-runtime-id",
-    AGENT_CLOUDFLARE_RUNTIME_ID,
-];
-
-fn agent_args_with_mode(profile: AgentProfile, read_only: bool) -> &'static [&'static str] {
-    match (profile, read_only) {
-        (AgentProfile::Production, true) => PRODUCTION_AGENT_ARGS,
-        (AgentProfile::Production, false) => PRODUCTION_TRADING_AGENT_ARGS,
-        (AgentProfile::DemoAcceptance, true) => DEMO_READ_ONLY_AGENT_ARGS,
-        (AgentProfile::DemoAcceptance, false) => DEMO_ACCEPTANCE_AGENT_ARGS,
+fn drain_native_stderr(
+    mut child_stderr: impl Read,
+    mut stderr_log: okx_host_launcher::logging::RotatingLog,
+    reply_tx: mpsc::Sender<NativeChildReply>,
+) {
+    let mut pending = Vec::<u8>::new();
+    let mut overflow = false;
+    let mut block = [0u8; 4096];
+    loop {
+        let count = match child_stderr.read(&mut block) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => n,
+        };
+        stderr_log.append(&block[..count]);
+        for byte in &block[..count] {
+            if *byte == b'\n' {
+                if !overflow && pending.starts_with(NATIVE_CHILD_CONTROL_PREFIX.as_bytes()) {
+                    let payload = &pending[NATIVE_CHILD_CONTROL_PREFIX.len()..];
+                    if let Ok(reply) = serde_json::from_slice::<NativeChildReply>(payload) {
+                        let _ = reply_tx.send(reply);
+                    }
+                }
+                pending.clear();
+                overflow = false;
+            } else if pending.len() < NATIVE_CHILD_CONTROL_MAX_BYTES {
+                pending.push(*byte);
+            } else {
+                overflow = true;
+            }
+        }
     }
+    stderr_log.finish();
 }
 
 fn read_log_tail(path: &Path) -> std::io::Result<(u64, String)> {
@@ -2102,12 +1341,13 @@ fn current_launch_summary(root: &Path, launch: &AgentLaunchEvidence) -> Value {
     let stdout = read_owned_launch_tail(&root.join("okx-agent.stdout.log"), launch.stdout_offset);
     let stderr = read_owned_launch_tail(&root.join("okx-agent.stderr.log"), launch.stderr_offset);
     let fully_observed = stdout.as_ref().is_some_and(|(_, complete)| *complete)
-        && stderr.as_ref().is_some_and(|(_, complete)| *complete);
+        && stderr.as_ref().is_some_and(|(_, complete)| *complete)
+        && launch.stdout_health.complete()
+        && launch.stderr_health.complete();
     let stdout_text = stdout.as_ref().map_or("", |(text, _)| text.as_str());
     let stderr_text = stderr.as_ref().map_or("", |(text, _)| text.as_str());
     json!({
         "pid": launch.pid,
-        "profile": launch.profile,
         "log_evidence": {
             "scope": "owned_launch_file_offsets",
             "current_process_scoped": stdout.is_some() && stderr.is_some(),
@@ -2130,12 +1370,10 @@ fn current_launch_summary(root: &Path, launch: &AgentLaunchEvidence) -> Value {
     })
 }
 
-fn runtime_log_summary(profile: AgentProfile, launch: Option<&AgentLaunchEvidence>) -> Value {
-    let root = runtime_dir(profile);
+fn runtime_log_summary(launch: Option<&AgentLaunchEvidence>) -> Value {
+    let root = PathBuf::from(RUNTIME_ROOT);
     let mut retained = runtime_log_summary_from_root(root.clone());
-    retained["current_process"] = launch
-        .filter(|value| value.profile == profile)
-        .map_or(Value::Null, |value| current_launch_summary(&root, value));
+    retained["current_process"] = launch.map_or(Value::Null, |v| current_launch_summary(&root, v));
     retained
 }
 
@@ -2149,11 +1387,10 @@ fn runtime_log_summary_from_root(root: PathBuf) -> Value {
 
     json!({
         "root": root,
-        // These retained per-profile files are append-only across agent restarts.
         // They are not scoped to the current PID/launch. Never treat a prior
         // fatal error or startup marker as proof of a current runtime failure.
         "log_evidence": {
-            "scope": "retained_profile_file_tail",
+            "scope":"retained_engine_file_tail",
             "current_process_scoped": false,
             "current_startup_attributed": false
         },
@@ -2170,33 +1407,6 @@ fn runtime_log_summary_from_root(root: PathBuf) -> Value {
         },
         "fatal_error": fatal_error_summary(stderr_text)
     })
-}
-
-fn native_read_only_denial_code(value: Option<&str>) -> &'static str {
-    match value {
-        Some("OBSERVER_UNAVAILABLE") => "OBSERVER_UNAVAILABLE",
-        Some("EXECUTOR_NOT_READ_ONLY") => "EXECUTOR_NOT_READ_ONLY",
-        Some("MUTATION_AUTHORITY_ENABLED") => "MUTATION_AUTHORITY_ENABLED",
-        Some("ACCOUNT_REST_UNAVAILABLE") => "ACCOUNT_REST_UNAVAILABLE",
-        Some("INVALID_ACCOUNT_RECEIPT") => "INVALID_ACCOUNT_RECEIPT",
-        Some("TARGET_UID_ACCESS_OR_RECEIPT_INVALID") => "TARGET_UID_ACCESS_OR_RECEIPT_INVALID",
-        Some("TARGET_VERIFY_TIMEOUT") => "TARGET_VERIFY_TIMEOUT",
-        _ => "UNRECOGNIZED_TARGET_DENIAL",
-    }
-}
-
-fn mailbox_issue(profile: AgentProfile) -> u64 {
-    match profile {
-        AgentProfile::Production => 10,
-        AgentProfile::DemoAcceptance => 234,
-    }
-}
-
-fn runtime_dir(profile: AgentProfile) -> PathBuf {
-    match profile {
-        AgentProfile::Production => PathBuf::from(RUNTIME_ROOT),
-        AgentProfile::DemoAcceptance => PathBuf::from(DEMO_RUNTIME_ROOT),
-    }
 }
 
 fn bounded_utf8(value: &str, max_bytes: usize) -> String {
@@ -2223,25 +1433,6 @@ fn command_available(command: &str) -> bool {
 /// Until the current agent can attest a fresh quiescent account+ledger state,
 /// a raw CONTROL operation cannot change the bound exchange environment.
 /// This is intentionally narrower than live trading admission.
-fn ensure_profile_unchanged(
-    committed: AgentProfile,
-    running: Option<AgentProfile>,
-    process_alive: bool,
-    requested: AgentProfile,
-) -> HostControlResult<()> {
-    if committed != requested
-        || running.is_some_and(|active| active != requested)
-        || (process_alive && running != Some(requested))
-    {
-        return Err(HostControlError::ProfileHandoffProofRequired);
-    }
-    Ok(())
-}
-
-/// One read-only provenance check, not a profile-switch authority.
-/// Versions can legitimately differ while serving the same profile, but a
-/// cross-profile transition must never infer a tested release pair from
-/// separately installed binaries. No runtime, ledger or network mutation.
 fn controller_agent_release_parity(
     agent: &Value,
     launcher: &Value,
@@ -2286,8 +1477,7 @@ fn controller_agent_release_parity(
         "state": if blockers.is_empty() { "MATCHED" } else { "BLOCKED" },
         "source_tree": if blockers.is_empty() { agent_tree } else { None },
         "blockers": blockers,
-        "handoff_admission": "DENIED_NO_CONTROL_BOUND_ONE_TIME_FENCE",
-        "same_profile_recovery_permitted": true
+        "process_recovery_permitted": true
     })
 }
 
@@ -2355,7 +1545,6 @@ fn direct_git_command(repo_root: &Path, args: &[&str]) -> std::process::Command 
 #[cfg(test)]
 mod tests {
     use super::*;
-
     #[test]
     fn git_commands_ignore_shell_proxy_and_global_git_configuration() {
         let command = direct_git_command(
@@ -2414,207 +1603,16 @@ mod tests {
                 .all(|remote| remote.starts_with("https://"))
         );
     }
-
-    #[test]
-    fn controller_agent_release_parity_detects_drift_without_authorizing_handoff() {
-        let hash = "c".repeat(64);
-        let tree = "a".repeat(40);
-        let agent = json!({
-            "state": "VERIFIED",
-            "provenance": {"source_tree": tree}
-        });
-        let launcher = json!({
-            "active": {"state": "READY", "value": {"active": {
-                "source_tree": tree, "controller_sha256": hash
-            }}},
-            "pending": {"state": "NONE"},
-            "entrypoint_is_launcher": true
-        });
-        let matched = controller_agent_release_parity(&agent, &launcher, Some(&hash));
-        assert_eq!(matched["state"], "MATCHED");
-        assert_eq!(
-            matched["handoff_admission"],
-            "DENIED_NO_CONTROL_BOUND_ONE_TIME_FENCE"
-        );
-        assert_eq!(matched["same_profile_recovery_permitted"], true);
-
-        let mut old_controller = launcher.clone();
-        old_controller["active"]["value"]["active"]["source_tree"] = json!("b".repeat(40));
-        let drift = controller_agent_release_parity(&agent, &old_controller, Some(&hash));
-        assert_eq!(drift["state"], "BLOCKED");
-        assert!(
-            drift["blockers"]
-                .as_array()
-                .unwrap()
-                .contains(&json!("CONTROLLER_AGENT_SOURCE_TREE_MISMATCH"))
-        );
-
-        let wrong_binary =
-            controller_agent_release_parity(&agent, &launcher, Some(&"d".repeat(64)));
-        assert_eq!(wrong_binary["state"], "BLOCKED");
-        assert!(
-            wrong_binary["blockers"]
-                .as_array()
-                .unwrap()
-                .contains(&json!("RUNNING_CONTROLLER_BINARY_MISMATCH"))
-        );
-
-        let mut pending = launcher.clone();
-        pending["pending"]["state"] = json!("PENDING");
-        assert_eq!(
-            controller_agent_release_parity(&agent, &pending, Some(&hash))["state"],
-            "BLOCKED"
-        );
-
-        let missing = controller_agent_release_parity(
-            &json!({"state": "UNKNOWN"}),
-            &json!({"active": {"state": "NONE"}}),
-            None,
-        );
-        assert_eq!(missing["state"], "BLOCKED");
-    }
-
-    #[test]
-    fn profile_handoff_requires_real_quiescence_not_a_control_request() {
-        use AgentProfile::{DemoAcceptance as Demo, Production as Prod};
-
-        assert!(ensure_profile_unchanged(Demo, Some(Demo), true, Demo).is_ok());
-        assert!(ensure_profile_unchanged(Demo, None, false, Demo).is_ok());
-        assert!(ensure_profile_unchanged(Prod, Some(Prod), true, Prod).is_ok());
-        for (committed, running, process_alive, requested) in [
-            (Demo, Some(Demo), true, Prod),
-            (Demo, None, false, Prod),
-            (Prod, Some(Prod), true, Demo),
-            (Prod, None, false, Demo),
-            // A stale persisted target can never stop the still-running source
-            // merely because reconcile_desired() sees a profile mismatch.
-            (Prod, Some(Demo), true, Prod),
-            (Demo, Some(Prod), true, Demo),
-            // An observed live process with untrusted/unknown profile identity
-            // is NOT equivalent to a stopped agent.
-            (Demo, None, true, Demo),
-            (Prod, None, true, Prod),
-        ] {
-            assert!(matches!(
-                ensure_profile_unchanged(committed, running, process_alive, requested),
-                Err(HostControlError::ProfileHandoffProofRequired)
-            ));
-        }
-    }
-
-    #[test]
-    fn raw_profile_switch_refuses_before_binary_or_desired_state_mutation() {
-        let mut host = HostExecutor::canonical().expect("controller");
-        host.desired_agent = AgentDesired::Running;
-        host.desired_profile = AgentProfile::DemoAcceptance;
-        assert!(matches!(
-            host.execute(HostControlOperation::RestoreProductionAgent),
-            Err(HostControlError::InvalidExecutionPath)
-        ));
-        assert_eq!(host.desired_profile, AgentProfile::DemoAcceptance);
-        assert_eq!(host.desired_agent, AgentDesired::Running);
-    }
-
-    #[test]
-    fn crash_pending_profile_transition_prevents_reconcile_and_manual_restart() {
-        use crate::desired::FrozenSourceWitness;
-        let path = std::env::temp_dir().join(format!(
-            "okx-control-pending-handoff-{}.json",
-            std::process::id(),
-        ));
-        let _ = fs::remove_file(&path);
-
-        let mut host = HostExecutor::canonical().expect("controller");
-        host.desired_store = DesiredStateStore::at(path.clone());
-        host.desired_store
-            .save(AgentDesiredState::demo_acceptance_running())
-            .expect("initial single owner");
-        host.desired_profile = AgentProfile::DemoAcceptance;
-        host.desired_agent = AgentDesired::Running;
-
-        let ticket = FrozenSourceWitness {
-            sequence: 1,
-            source: AgentProfile::DemoAcceptance,
-            destination: AgentProfile::Production,
-            source_pid: 321,
-            launch_lease_sha256: "a".repeat(64),
-            account_uid_fingerprint: "b".repeat(64),
-            private_ws_generation: 7,
-            ledger_manifest_sha256: "c".repeat(64),
-            source_tree: "d".repeat(40),
-            agent_sha256: "e".repeat(64),
-            controller_sha256: "f".repeat(64),
-            source_observed_at_ms: 10_000,
-            issued_at_ms: 10_500,
-            expires_at_ms: 40_500,
-        };
-        host.desired_store
-            .stage_frozen(ticket, 11_000)
-            .expect("atomic source fence");
-        let disposition = host.reconcile_desired().expect("bounded blocked readback");
-        assert_eq!(
-            disposition["disposition"],
-            "BLOCKED_UNFINALIZED_PROFILE_TRANSITION"
-        );
-        assert_eq!(host.desired_profile, AgentProfile::DemoAcceptance);
-        assert_eq!(host.desired_agent, AgentDesired::Running);
-        assert!(matches!(
-            host.execute(HostControlOperation::RestoreProductionAgent),
-            Err(HostControlError::ProfileTransitionPending)
-        ));
-        assert!(matches!(
-            host.execute(HostControlOperation::RestartAgent),
-            Err(HostControlError::ProfileTransitionPending)
-        ));
-        // All lateral entrypoints must remain fenced, not just RestartAgent.
-        for operation in [
-            HostControlOperation::StopAgent,
-            HostControlOperation::AcceptanceKillAgent,
-            HostControlOperation::HandoffControllerUpdate,
-            HostControlOperation::StageControllerUpdate {
-                run_id: 1,
-                artifact_id: 1,
-                expected_source_tree: "d".repeat(40),
-            },
-            HostControlOperation::HandoffToAutostart,
-            HostControlOperation::Sync,
-            HostControlOperation::InstallAutostart,
-            HostControlOperation::ProvisionCloudflareRuntimeToken,
-        ] {
-            assert!(matches!(
-                host.profile_transition_gate(&operation),
-                Err(HostControlError::ProfileTransitionPending)
-            ));
-        }
-        assert!(matches!(
-            host.install_verified_agent(b"should-not-be-written"),
-            Err(HostControlError::ProfileTransitionPending)
-        ));
-        // Read-only status remains available for diagnosis and repair.
-        for operation in [
-            HostControlOperation::Status,
-            HostControlOperation::TransportStatus,
-            HostControlOperation::ControllerUpdateStatus,
-            HostControlOperation::AgentIdentity,
-            HostControlOperation::AutostartStatus,
-        ] {
-            assert!(host.profile_transition_gate(&operation).is_ok());
-        }
-        let _ = fs::remove_file(&path);
-    }
-
     #[test]
     fn canonical_root_is_fixed() {
         let executor = HostExecutor::canonical().expect("executor");
         assert_eq!(executor.repo_root, PathBuf::from(r"C:\okx"));
     }
-
     #[test]
     fn remote_allowlist_is_narrow() {
         assert!(ALLOWED_REMOTES.contains(&"https://github.com/iamaman11/okx.git"));
         assert!(!ALLOWED_REMOTES.contains(&"https://github.com/other/okx.git"));
     }
-
     #[test]
     fn remote_local_build_is_not_a_valid_execution_path() {
         let mut executor = HostExecutor::canonical().expect("executor");
@@ -2623,35 +1621,10 @@ mod tests {
             .expect_err("remote local build must fail closed");
         assert!(matches!(error, HostControlError::InvalidExecutionPath));
     }
-
-    #[test]
-    fn cloudflare_transport_endpoint_is_production_okx_account_only() {
-        assert_eq!(
-            AGENT_CLOUDFLARE_WS_URL,
-            "wss://okx-cloudflare-mcp.okx-794.workers.dev/runtime"
-        );
-        assert!(!AGENT_CLOUDFLARE_WS_URL.contains("pvisakp"));
-    }
-
     #[test]
     fn restart_backoff_is_bounded() {
         assert_eq!(RESTART_BACKOFF_SECS, [1, 5, 15, 30, 60]);
     }
-
-    #[test]
-    fn production_agent_launch_uses_agent_owned_data_poll_default() {
-        let args = agent_args_with_mode(AgentProfile::Production, false);
-        assert!(!args.contains(&"--poll-seconds"));
-        assert!(args.contains(&"--cloudflare-ws-url"));
-        assert!(args.contains(&"--mailbox-issue"));
-        assert!(!args.contains(&"--demo"));
-        assert_eq!(mailbox_issue(AgentProfile::Production), 10);
-        assert_eq!(
-            runtime_dir(AgentProfile::Production),
-            PathBuf::from(RUNTIME_ROOT)
-        );
-    }
-
     #[test]
     fn runtime_log_summary_returns_only_structured_bounded_diagnostics() {
         let root =
@@ -2690,7 +1663,6 @@ mod tests {
 
         let _ = fs::remove_dir_all(root);
     }
-
     #[test]
     fn retained_log_error_cannot_be_misreported_as_current_runtime_failure() {
         let root = std::env::temp_dir().join(format!(
@@ -2713,7 +1685,7 @@ mod tests {
         let summary = runtime_log_summary_from_root(root.clone());
         assert_eq!(
             summary["log_evidence"]["scope"],
-            "retained_profile_file_tail"
+            "retained_engine_file_tail"
         );
         assert_eq!(summary["log_evidence"]["current_process_scoped"], false);
         assert_eq!(summary["log_evidence"]["current_startup_attributed"], false);
@@ -2724,7 +1696,6 @@ mod tests {
 
         let _ = fs::remove_dir_all(root);
     }
-
     #[test]
     fn current_launch_diagnostics_exclude_history_and_fail_closed_on_log_loss() {
         let root = std::env::temp_dir().join(format!(
@@ -2742,11 +1713,11 @@ mod tests {
         )
         .expect("old stderr");
         let launch = AgentLaunchEvidence {
-            profile: AgentProfile::DemoAcceptance,
             pid: 321,
             stdout_offset: fs::metadata(&stdout).expect("stdout metadata").len(),
             stderr_offset: fs::metadata(&stderr).expect("stderr metadata").len(),
-            launch_lease_sha256: [0xabu8; 32],
+            stdout_health: Default::default(),
+            stderr_health: Default::default(),
         };
         fs::OpenOptions::new()
             .append(true)
@@ -2794,7 +1765,6 @@ mod tests {
 
         let _ = fs::remove_dir_all(root);
     }
-
     #[test]
     fn fatal_error_summary_classifies_early_startup_variants_without_messages() {
         let cases = [
@@ -2839,7 +1809,6 @@ mod tests {
             assert!(!summary.to_string().contains("agent-key-1"));
         }
     }
-
     #[test]
     fn missing_required_field_diagnostic_exposes_only_allowlisted_schema_field() {
         let summary = fatal_error_summary(
@@ -2859,54 +1828,11 @@ mod tests {
         assert!(unknown["missing_field"].is_null());
         assert!(!unknown.to_string().contains("futureField"));
     }
-
-    #[test]
-    fn demo_acceptance_launch_isolated_from_production_transport_and_state() {
-        let args = agent_args_with_mode(AgentProfile::DemoAcceptance, false);
-        assert!(args.contains(&"--demo"));
-        assert!(args.contains(&"--demo-mutation-acceptance"));
-        let observer = agent_args_with_mode(AgentProfile::DemoAcceptance, true);
-        assert!(observer.contains(&"--demo"));
-        assert!(!observer.contains(&"--demo-mutation-acceptance"));
-        assert!(args.contains(&"--root"));
-        assert!(args.contains(&DEMO_RUNTIME_ROOT));
-        assert!(args.contains(&DEMO_MAILBOX_ISSUE));
-        assert!(args.contains(&"--cloudflare-ws-url"));
-        assert!(args.contains(&"--cloudflare-runtime-id"));
-        assert!(args.contains(&AGENT_CLOUDFLARE_WS_URL));
-        assert_eq!(mailbox_issue(AgentProfile::DemoAcceptance), 234);
-        assert_eq!(
-            runtime_dir(AgentProfile::DemoAcceptance),
-            PathBuf::from(DEMO_RUNTIME_ROOT)
-        );
-        assert_ne!(
-            runtime_dir(AgentProfile::DemoAcceptance),
-            runtime_dir(AgentProfile::Production)
-        );
-    }
-
-    #[test]
-    fn readonly_target_denial_is_typed_and_never_echoes_secrets() {
-        assert_eq!(
-            native_read_only_denial_code(Some("ACCOUNT_REST_UNAVAILABLE")),
-            "ACCOUNT_REST_UNAVAILABLE"
-        );
-        assert_eq!(
-            native_read_only_denial_code(Some("api-token=private")),
-            "UNRECOGNIZED_TARGET_DENIAL"
-        );
-        assert_eq!(
-            HostControlError::ReadOnlyTargetProofDenied("TARGET_VERIFY_TIMEOUT").code(),
-            "READ_ONLY_TARGET_PROOF_DENIED"
-        );
-    }
-
-    #[cfg(windows)]
     #[test]
     fn native_cutover_child_has_bounded_output_and_one_terminal_result() {
         let mut command = Command::new("cmd");
         command.arg("/C").arg("echo BOUNDED-CUTOVER-RECEIPT");
-        let bytes = bounded_storage_cutover_output(&mut command, Duration::from_secs(15))
+        let bytes = bounded_native_output(&mut command, Duration::from_secs(15))
             .expect("native completed once");
         assert_eq!(
             String::from_utf8(bytes).expect("UTF-8 receipt").trim(),
@@ -2919,11 +1845,10 @@ mod tests {
     fn timed_out_native_cutover_is_typed_unknown_not_replayed() {
         let mut command = Command::new("cmd");
         command.arg("/C").arg("ping -n 30 127.0.0.1 >nul");
-        let error = bounded_storage_cutover_output(&mut command, Duration::from_millis(30))
+        let error = bounded_native_output(&mut command, Duration::from_millis(30))
             .expect_err("the child must be terminated and its outcome uncertain");
-        assert_eq!(error.code(), "STORAGE_CUTOVER_OUTCOME_UNKNOWN");
+        assert_eq!(error.code(), "NATIVE_STORAGE_OUTCOME_UNKNOWN");
     }
-
     #[test]
     fn workspace_diagnostic_text_is_byte_bounded_and_utf8_safe() {
         let value = "é".repeat(400);
@@ -2931,10 +1856,42 @@ mod tests {
         assert!(bounded.len() <= WORKSPACE_STATUS_MAX_CHANGE_BYTES);
         assert!(std::str::from_utf8(bounded.as_bytes()).is_ok());
     }
-
     #[test]
     fn workspace_diagnostic_count_is_intentionally_small() {
         assert_eq!(WORKSPACE_STATUS_MAX_CHANGES, 16);
         assert_eq!(WORKSPACE_STATUS_MAX_CHANGE_BYTES, 512);
+    }
+    #[test]
+    fn rotating_redacted_stderr_preserves_child_shutdown_reply() {
+        let root = std::env::temp_dir().join(format!(
+            "okx-child-log-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("stderr.log");
+        let reply = NativeChildReply {
+            schema: NATIVE_CHILD_CONTROL_SCHEMA_V1.into(),
+            request_id: "shutdown_test_0001".into(),
+            outcome: "DRAINED".into(),
+        };
+        let input = format!(
+            "apiKey=NEVER_PERSIST_THIS\n{}{}\n",
+            NATIVE_CHILD_CONTROL_PREFIX,
+            serde_json::to_string(&reply).unwrap()
+        );
+        let (tx, rx) = mpsc::channel();
+        drain_native_stderr(
+            std::io::Cursor::new(input),
+            okx_host_launcher::logging::RotatingLog::open(&path).unwrap(),
+            tx,
+        );
+        assert!(rx.recv().unwrap().valid_for("shutdown_test_0001"));
+        let text = fs::read_to_string(path).unwrap();
+        assert!(!text.contains("NEVER_PERSIST_THIS"));
+        assert!(text.contains("redacted"));
     }
 }

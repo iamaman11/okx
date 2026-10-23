@@ -202,6 +202,36 @@ pub struct AccountHistoryApi {
 }
 
 impl AccountHistoryApi {
+    /// One immutable history window page for the native post-T0 cursor owner.
+    pub async fn fills_history_page(
+        &self,
+        instrument_type: &str,
+        begin: i64,
+        end: i64,
+        after: Option<&str>,
+    ) -> Result<Vec<FillHistory>, OkxError> {
+        if !matches!(instrument_type, "SPOT" | "SWAP" | "FUTURES" | "OPTION") {
+            return Err(OkxError::Config("invalid history instrument type".into()));
+        }
+        let mut params = history_window_params(begin, end, after)?;
+        params.push(("instType", instrument_type.into()));
+        self.client
+            .private_get("/api/v5/trade/fills-history", &params)
+            .await
+    }
+    pub async fn bills_history_page(
+        &self,
+        begin: i64,
+        end: i64,
+        after: Option<&str>,
+    ) -> Result<Vec<AccountBill>, OkxError> {
+        self.client
+            .private_get(
+                "/api/v5/account/bills-archive",
+                &history_window_params(begin, end, after)?,
+            )
+            .await
+    }
     pub fn new(client: OkxRestClient) -> Self {
         Self { client }
     }
@@ -355,6 +385,28 @@ impl AccountHistoryApi {
             complete: false,
         })
     }
+}
+fn history_window_params(
+    begin: i64,
+    end: i64,
+    after: Option<&str>,
+) -> Result<Vec<(&'static str, String)>, OkxError> {
+    if begin < 0
+        || end < begin
+        || after
+            .is_some_and(|s| s.is_empty() || s.len() > 64 || !s.bytes().all(|b| b.is_ascii_digit()))
+    {
+        return Err(OkxError::Config("invalid history window cursor".into()));
+    }
+    let mut params = vec![
+        ("begin", begin.to_string()),
+        ("end", end.to_string()),
+        ("limit", "100".into()),
+    ];
+    if let Some(after) = after {
+        params.push(("after", after.into()));
+    }
+    Ok(params)
 }
 
 fn merge_order_histories(

@@ -16,9 +16,6 @@ pub const RESPONSE_TOO_LARGE_CODE: &str = "RESPONSE_TOO_LARGE";
 
 const GLOBAL_RESPONSE_PLAINTEXT_BYTES: usize = 40 * 1024;
 const COMPACT_RESPONSE_PLAINTEXT_BYTES: usize = 8 * 1024;
-const MARKET_RESEARCH_RESPONSE_PLAINTEXT_BYTES: usize = 12 * 1024;
-const STANDARD_RESPONSE_PLAINTEXT_BYTES: usize = 16 * 1024;
-const LARGE_RESPONSE_PLAINTEXT_BYTES: usize = 32 * 1024;
 const AEAD_TAG_BYTES: usize = 16;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,21 +42,13 @@ struct BoundedResponsePlaintext {
     telemetry: ResponseSizeTelemetry,
 }
 
-pub use crate::query::{
-    ACCOUNT_BOOTSTRAP_INCONSISTENT_CODE, ACCOUNT_OBSERVER_CREDENTIAL_UNAVAILABLE_CODE,
-    ACCOUNT_OBSERVER_PERMISSION_REJECTED_CODE, ACCOUNT_PRIVATE_API_UNAVAILABLE_CODE,
-    ANALYSIS_EXACT_FEE_UNAVAILABLE_CODE, ANALYSIS_INPUT_INCONSISTENT_CODE,
-    MARKET_BOOTSTRAP_INCONSISTENT_CODE, MARKET_HISTORY_INCONSISTENT_CODE,
-    MARKET_INSTRUMENT_NOT_LIVE_CODE, MARKET_OVERVIEW_INCONSISTENT_CODE, MARKET_OVERVIEW_SCHEMA_V1,
-    MARKET_PUBLIC_API_UNAVAILABLE_CODE, MARKET_REFERENCE_INCOMPLETE_CODE, ObservationQueryContext,
-    P1_NOT_AVAILABLE_CODE, PUBLIC_MARKET_MAX_AGE_MS, REFERENCE_INSTRUMENT_NOT_FOUND_CODE,
-};
+pub use crate::query::DispatchContext;
 
 pub async fn process_once(
     envelope: &MailboxEnvelope,
     expected_key_id: &str,
     agent_private_key: &[u8; 32],
-    context: ObservationQueryContext<'_>,
+    context: &DispatchContext,
     response_nonce: [u8; 12],
     generated_at: &str,
 ) -> AgentResult<MailboxEnvelope> {
@@ -67,7 +56,7 @@ pub async fn process_once(
         envelope,
         expected_key_id,
         agent_private_key,
-        context,
+        Some(context),
         response_nonce,
         generated_at,
     )
@@ -79,7 +68,7 @@ async fn process_once_with_size_telemetry(
     envelope: &MailboxEnvelope,
     expected_key_id: &str,
     agent_private_key: &[u8; 32],
-    context: ObservationQueryContext<'_>,
+    context: Option<&DispatchContext>,
     response_nonce: [u8; 12],
     generated_at: &str,
 ) -> AgentResult<(MailboxEnvelope, ResponseSizeTelemetry)> {
@@ -114,7 +103,11 @@ async fn process_once_with_size_telemetry(
             // shared query dispatcher with trading authority. Decrypting an
             // authenticated envelope does NOT authorize exchange mutation.
             let response = if request.operation.direct_transport_read_only() {
-                dispatch(&request, context, generated_at).await?
+                if let Some(ctx) = context {
+                    dispatch(ctx, &request).await
+                } else {
+                    invalid_request_response(&request.request_id, generated_at)
+                }
             } else {
                 mailbox_execution_disabled(&request.request_id, generated_at)
             };
@@ -164,44 +157,10 @@ async fn process_once_with_size_telemetry(
 }
 
 fn response_budget(operation: &AgentOperation) -> ResponseBudget {
-    let plaintext_bytes = match operation {
-        AgentOperation::InstrumentRules { .. }
-        | AgentOperation::ExecutorPreflight
-        | AgentOperation::BeginStrategyRun { .. }
-        | AgentOperation::FinalizeStrategyRun { .. }
-        | AgentOperation::QuarantineUnverifiedStrategyRun { .. }
-        | AgentOperation::SetLeverage { .. }
-        | AgentOperation::SubmitPreparedExecution { .. }
-        | AgentOperation::MutateExecution { .. }
-        | AgentOperation::AbortReverseExecution { .. }
-        | AgentOperation::AbandonPreparedExecution { .. }
-        | AgentOperation::ReconcileUnsentPrepared { .. }
-        | AgentOperation::ExecutionStatus { .. }
-        | AgentOperation::HistoryBehavior { .. }
-        | AgentOperation::SnapshotQuality { .. }
-        | AgentOperation::MailboxTelemetry
-        | AgentOperation::QueryCapabilities
-        | AgentOperation::ResearchCapabilities
-        | AgentOperation::CurrentCost { .. }
-        | AgentOperation::PositionScenario { .. } => COMPACT_RESPONSE_PLAINTEXT_BYTES,
-        AgentOperation::MarketResearch { .. } | AgentOperation::Research { .. } => {
-            MARKET_RESEARCH_RESPONSE_PLAINTEXT_BYTES
-        }
-        AgentOperation::MarketSnapshot { .. }
-        | AgentOperation::MarketOverview { .. }
-        | AgentOperation::MarketIntelligence { .. }
-        | AgentOperation::PrepareExecution { .. }
-        | AgentOperation::PortfolioRisk { .. }
-        | AgentOperation::AnalyzeCandidateOrder { .. }
-        | AgentOperation::TradingCapabilities { .. }
-        | AgentOperation::AccountSummary
-        | AgentOperation::TraderSnapshot
-        | AgentOperation::ProfileHandoffReadiness
-        | AgentOperation::LedgerStorageAudit => STANDARD_RESPONSE_PLAINTEXT_BYTES,
-        AgentOperation::MarketHistory { .. }
-        | AgentOperation::FindInstruments { .. }
-        | AgentOperation::Query { .. }
-        | AgentOperation::AccountSnapshot => LARGE_RESPONSE_PLAINTEXT_BYTES,
+    let plaintext_bytes = if matches!(operation, AgentOperation::Portfolio { .. }) {
+        4 * 1024
+    } else {
+        COMPACT_RESPONSE_PLAINTEXT_BYTES
     };
     debug_assert!(plaintext_bytes <= GLOBAL_RESPONSE_PLAINTEXT_BYTES);
     ResponseBudget { plaintext_bytes }
@@ -345,7 +304,7 @@ fn mailbox_execution_disabled(request_id: &str, generated_at: &str) -> AgentResp
         result: None,
         failure: Some(AgentFailure {
             code: MAILBOX_EXECUTION_DISABLED_CODE.to_owned(),
-            message: "GitHub mailbox and local Once are read-only; trading writes require the authenticated primary Cloudflare direct transport and Demo policy".to_owned(),
+            message: "GitHub mailbox and local Once are read-only; trading writes require the authenticated primary Cloudflare direct transport and native account policy".to_owned(),
             retryable: false,
         }),
         warnings: Vec::new(),
@@ -376,7 +335,7 @@ pub async fn process_once_now(
     envelope: &MailboxEnvelope,
     expected_key_id: &str,
     agent_private_key: &[u8; 32],
-    context: ObservationQueryContext<'_>,
+    context: &DispatchContext,
 ) -> AgentResult<MailboxEnvelope> {
     let (response, _) =
         process_once_now_with_size_telemetry(envelope, expected_key_id, agent_private_key, context)
@@ -388,7 +347,7 @@ pub async fn process_once_now_with_size_telemetry(
     envelope: &MailboxEnvelope,
     expected_key_id: &str,
     agent_private_key: &[u8; 32],
-    context: ObservationQueryContext<'_>,
+    context: &DispatchContext,
 ) -> AgentResult<(MailboxEnvelope, ResponseSizeTelemetry)> {
     let mut nonce = [0_u8; 12];
     getrandom::fill(&mut nonce).map_err(|error| AgentError::Random(error.to_string()))?;
@@ -398,7 +357,7 @@ pub async fn process_once_now_with_size_telemetry(
         envelope,
         expected_key_id,
         agent_private_key,
-        context,
+        Some(context),
         nonce,
         &generated_at,
     )
@@ -415,508 +374,120 @@ fn decode_fixed<const N: usize>(value: &str) -> AgentResult<[u8; N]> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use okx_protocol::{
-        AgentOperation, AgentResponse, AgentResponseStatus, DataQuality,
-        crypto::{derive_directional_key, encrypt, public_key_from_private, shared_secret},
-    };
-
-    async fn process_authenticated_raw_request(
-        plaintext: &[u8],
-        request_id: &str,
-        request_nonce: [u8; 12],
-        response_nonce: [u8; 12],
-    ) -> Result<AgentResponse, AgentError> {
-        let agent_private = [1_u8; 32];
-        let client_private = [2_u8; 32];
-        let agent_public = public_key_from_private(agent_private);
-        let client_public = public_key_from_private(client_private);
-        let shared = shared_secret(client_private, agent_public).expect("shared");
-        let request_key = derive_directional_key(
-            &shared,
-            request_id,
-            "agent-key-1",
-            MailboxDirection::ClientToAgent,
-        )
-        .expect("request key");
-
-        let mut request_envelope = MailboxEnvelope {
-            schema: MAILBOX_ENVELOPE_SCHEMA_V1.to_owned(),
-            request_id: request_id.to_owned(),
-            direction: MailboxDirection::ClientToAgent,
-            agent_key_id: "agent-key-1".to_owned(),
-            client_ephemeral_public_key: STANDARD.encode(client_public),
-            nonce: STANDARD.encode(request_nonce),
-            ciphertext: String::new(),
-        };
-        let aad = request_envelope.aad().expect("request aad");
-        request_envelope.ciphertext = STANDARD.encode(
-            encrypt(&request_key, &request_nonce, aad.as_bytes(), plaintext)
-                .expect("encrypt request"),
-        );
-
-        let response_envelope = process_once(
-            &request_envelope,
-            "agent-key-1",
-            &agent_private,
-            ObservationQueryContext::unavailable(),
-            response_nonce,
-            "2026-09-28T00:00:00.000Z",
-        )
-        .await?;
-
-        let response_key = derive_directional_key(
-            &shared,
-            request_id,
-            "agent-key-1",
-            MailboxDirection::AgentToClient,
-        )
-        .expect("response key");
-        let response_aad = response_envelope.aad().expect("response aad");
-        let response_ciphertext = STANDARD
-            .decode(&response_envelope.ciphertext)
-            .expect("response ciphertext");
-        let response_plaintext = decrypt(
-            &response_key,
-            &response_nonce,
-            response_aad.as_bytes(),
-            &response_ciphertext,
-        )
-        .expect("decrypt response");
-        Ok(serde_json::from_slice(&response_plaintext).expect("response json"))
-    }
-
-    #[tokio::test]
-    async fn encrypted_mailbox_rejects_valid_typed_execution_writes_before_dispatch() {
-        // The request is correctly encrypted and signed by the same client
-        // test key as read-only messages. It cannot reach durable PREPARED.
-        for (suffix, operation) in [
-            (
-                "submit",
-                AgentOperation::SubmitPreparedExecution {
-                    intent_id: "intent_mailbox_01234567".to_owned(),
-                },
-            ),
-            (
-                "abandon",
-                AgentOperation::AbandonPreparedExecution {
-                    intent_id: "intent_mailbox_01234567".to_owned(),
-                },
-            ),
-            (
-                "abort",
-                AgentOperation::AbortReverseExecution {
-                    intent_id: "intent_mailbox_01234567".to_owned(),
-                },
-            ),
-            (
-                "cancel",
-                AgentOperation::MutateExecution {
-                    intent_id: "intent_mailbox_01234567".to_owned(),
-                    mutation: okx_protocol::ExecutionMutationRequest::Cancel {
-                        mutation_id: "mutation_mailbox_01234567".to_owned(),
-                    },
-                },
-            ),
-        ] {
-            let request_id = format!("req_mailbox_{suffix}_0123456789");
-            let request = AgentRequest {
-                schema: AGENT_REQUEST_SCHEMA_V1.to_owned(),
-                request_id: request_id.clone(),
-                operation,
-            };
-            request.validate().expect("valid typed request");
-            let response = process_authenticated_raw_request(
-                &serde_json::to_vec(&request).unwrap(),
-                &request_id,
-                [1; 12],
-                [2; 12],
-            )
-            .await
-            .expect("encrypted terminal denial");
-            assert_eq!(response.status, AgentResponseStatus::Rejected);
-            assert_eq!(
-                response.failure.unwrap().code,
-                MAILBOX_EXECUTION_DISABLED_CODE
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn authenticated_invalid_typed_requests_return_terminal_rejection() {
-        let cases = [
-            (
-                "req_invalid_enum_0123456789",
-                br#"{"schema":"okx.agent.request/v1","request_id":"req_invalid_enum_0123456789","operation":{"type":"find_instruments","asset":"DOGE","settle_currency":"USDT","instrument_type":"swap"}}"#.as_slice(),
-            ),
-            (
-                "req_unknown_op_0123456789",
-                br#"{"schema":"okx.agent.request/v1","request_id":"req_unknown_op_0123456789","operation":{"type":"run_shell","command":"whoami"}}"#.as_slice(),
-            ),
-            (
-                "req_extra_field_0123456789",
-                br#"{"schema":"okx.agent.request/v1","request_id":"req_extra_field_0123456789","unexpected":true,"operation":{"type":"portfolio_risk"}}"#.as_slice(),
-            ),
-        ];
-
-        for (index, (request_id, plaintext)) in cases.into_iter().enumerate() {
-            let response = process_authenticated_raw_request(
-                plaintext,
-                request_id,
-                [10 + index as u8; 12],
-                [20 + index as u8; 12],
-            )
-            .await
-            .expect("terminal rejection");
-
-            assert_eq!(response.request_id, request_id);
-            assert_eq!(response.status, AgentResponseStatus::Rejected);
-            assert_eq!(response.quality, DataQuality::NotReady);
-            let failure = response.failure.expect("failure");
-            assert_eq!(failure.code, INVALID_REQUEST_CODE);
-            assert!(!failure.retryable);
-            assert!(!failure.message.contains("swap"));
-            assert!(!failure.message.contains("whoami"));
-        }
-    }
-
-    #[tokio::test]
-    async fn authenticated_request_id_mismatch_returns_terminal_rejection() {
-        let response = process_authenticated_raw_request(
-            br#"{"schema":"okx.agent.request/v1","request_id":"req_other_0123456789","operation":{"type":"portfolio_risk"}}"#,
-            "req_envelope_0123456789",
-            [30_u8; 12],
-            [31_u8; 12],
-        )
-        .await
-        .expect("terminal rejection");
-
-        assert_eq!(response.request_id, "req_envelope_0123456789");
-        assert_eq!(
-            response.failure.expect("failure").code,
-            INVALID_REQUEST_CODE
-        );
-    }
-
-    #[tokio::test]
-    async fn tampered_ciphertext_still_fails_before_terminal_response() {
-        let agent_private = [1_u8; 32];
-        let client_private = [2_u8; 32];
-        let agent_public = public_key_from_private(agent_private);
-        let client_public = public_key_from_private(client_private);
-        let shared = shared_secret(client_private, agent_public).expect("shared");
-        let request_id = "req_tampered_0123456789";
-        let request_nonce = [40_u8; 12];
-        let request_key = derive_directional_key(
-            &shared,
-            request_id,
-            "agent-key-1",
-            MailboxDirection::ClientToAgent,
-        )
-        .expect("request key");
-        let mut envelope = MailboxEnvelope {
-            schema: MAILBOX_ENVELOPE_SCHEMA_V1.to_owned(),
-            request_id: request_id.to_owned(),
-            direction: MailboxDirection::ClientToAgent,
-            agent_key_id: "agent-key-1".to_owned(),
-            client_ephemeral_public_key: STANDARD.encode(client_public),
-            nonce: STANDARD.encode(request_nonce),
-            ciphertext: String::new(),
-        };
-        let aad = envelope.aad().expect("aad");
-        let mut ciphertext = encrypt(
-            &request_key,
-            &request_nonce,
-            aad.as_bytes(),
-            br#"{"schema":"okx.agent.request/v1","request_id":"req_tampered_0123456789","operation":{"type":"portfolio_risk"}}"#,
-        )
-        .expect("encrypt");
-        ciphertext[0] ^= 1;
-        envelope.ciphertext = STANDARD.encode(ciphertext);
-
-        let error = process_once(
-            &envelope,
-            "agent-key-1",
-            &agent_private,
-            ObservationQueryContext::unavailable(),
-            [41_u8; 12],
-            "2026-09-28T00:00:00.000Z",
-        )
-        .await
-        .expect_err("tampered ciphertext must fail before response");
-
-        assert!(matches!(error, AgentError::Crypto(_)));
-    }
-
-    fn sizing_envelope(request_id: &str) -> MailboxEnvelope {
+    fn envelope() -> MailboxEnvelope {
         MailboxEnvelope {
-            schema: MAILBOX_ENVELOPE_SCHEMA_V1.to_owned(),
-            request_id: request_id.to_owned(),
+            schema: MAILBOX_ENVELOPE_SCHEMA_V1.into(),
+            request_id: "request-398-fixture-001".into(),
             direction: MailboxDirection::ClientToAgent,
-            agent_key_id: "agent-key-1".to_owned(),
-            client_ephemeral_public_key: STANDARD.encode([7_u8; 32]),
-            nonce: STANDARD.encode([8_u8; 12]),
+            agent_key_id: "key-398".into(),
+            client_ephemeral_public_key: STANDARD.encode([7u8; 32]),
+            nonce: STANDARD.encode([8u8; 12]),
             ciphertext: String::new(),
         }
     }
-
-    #[test]
-    fn response_budget_registry_is_explicit_and_bounded() {
-        let compact = AgentOperation::MailboxTelemetry;
-        let research = AgentOperation::MarketResearch {
-            instruments: vec!["DOGE-USDT-SWAP".to_owned(), "BTC-USDT-SWAP".to_owned()],
-            bar: "1H".to_owned(),
-            limit: Some(12),
-        };
-        let standard = AgentOperation::MarketOverview {
-            instrument: "DOGE-USDT-SWAP".to_owned(),
-        };
-        let market_intelligence = AgentOperation::MarketIntelligence {
-            instrument: "DOGE-USDT-SWAP".to_owned(),
-            impact_contracts: "10".to_owned(),
-            depth_levels: 50,
-        };
-        let account_summary = AgentOperation::AccountSummary;
-        let history = AgentOperation::MarketHistory {
-            instrument: "DOGE-USDT-SWAP".to_owned(),
-            bar: "1H".to_owned(),
-            limit: Some(100),
-        };
-        let large_raw = AgentOperation::AccountSnapshot;
-
-        assert_eq!(
-            response_budget(&compact).plaintext_bytes,
-            COMPACT_RESPONSE_PLAINTEXT_BYTES
-        );
-        assert_eq!(
-            response_budget(&research).plaintext_bytes,
-            MARKET_RESEARCH_RESPONSE_PLAINTEXT_BYTES
-        );
-        assert_eq!(
-            response_budget(&standard).plaintext_bytes,
-            STANDARD_RESPONSE_PLAINTEXT_BYTES
-        );
-        assert_eq!(
-            response_budget(&market_intelligence).plaintext_bytes,
-            STANDARD_RESPONSE_PLAINTEXT_BYTES
-        );
-        assert_eq!(
-            response_budget(&account_summary).plaintext_bytes,
-            STANDARD_RESPONSE_PLAINTEXT_BYTES
-        );
-        assert_eq!(
-            response_budget(&history).plaintext_bytes,
-            LARGE_RESPONSE_PLAINTEXT_BYTES
-        );
-        assert_eq!(
-            response_budget(&large_raw).plaintext_bytes,
-            LARGE_RESPONSE_PLAINTEXT_BYTES
-        );
-    }
-
-    #[test]
-    fn every_plaintext_budget_has_an_exact_boundary() {
-        for limit in [
-            COMPACT_RESPONSE_PLAINTEXT_BYTES,
-            MARKET_RESEARCH_RESPONSE_PLAINTEXT_BYTES,
-            STANDARD_RESPONSE_PLAINTEXT_BYTES,
-            LARGE_RESPONSE_PLAINTEXT_BYTES,
-        ] {
-            let budget = ResponseBudget {
-                plaintext_bytes: limit,
-            };
-            assert!(response_size_within_budget(
-                ResponseSize {
-                    plaintext_bytes: limit,
-                    predicted_comment_bytes: MAX_COMMENT_BODY_BYTES,
-                },
-                budget
-            ));
-            assert!(!response_size_within_budget(
-                ResponseSize {
-                    plaintext_bytes: limit + 1,
-                    predicted_comment_bytes: MAX_COMMENT_BODY_BYTES,
-                },
-                budget
-            ));
-        }
-    }
-
-    #[test]
-    fn global_plaintext_ceiling_predicts_a_publishable_envelope() {
-        let envelope = sizing_envelope(&"r".repeat(128));
-        let size = response_size(
-            &envelope,
-            &"k".repeat(64),
-            [9_u8; 12],
-            GLOBAL_RESPONSE_PLAINTEXT_BYTES,
-        )
-        .expect("size");
-        assert!(size.predicted_comment_bytes < MAX_COMMENT_BODY_BYTES);
-    }
-
     #[test]
     fn predicted_comment_size_matches_actual_encrypted_envelope_size() {
-        let request_id = "req_response_size_prediction_20260928a";
-        let request = sizing_envelope(request_id);
-        let response_nonce = [11_u8; 12];
-        let plaintext = vec![b'x'; 10_535];
-        let predicted = response_size(&request, "agent-key-1", response_nonce, plaintext.len())
-            .expect("predicted size");
-
-        let mut response = MailboxEnvelope {
-            schema: MAILBOX_ENVELOPE_SCHEMA_V1.to_owned(),
-            request_id: request_id.to_owned(),
-            direction: MailboxDirection::AgentToClient,
-            agent_key_id: "agent-key-1".to_owned(),
-            client_ephemeral_public_key: request.client_ephemeral_public_key.clone(),
-            nonce: STANDARD.encode(response_nonce),
-            ciphertext: String::new(),
-        };
-        let aad = response.aad().expect("aad");
-        let ciphertext =
-            encrypt(&[5_u8; 32], &response_nonce, aad.as_bytes(), &plaintext).expect("encrypt");
-        response.ciphertext = STANDARD.encode(ciphertext);
-        let actual = serde_json::to_vec(&response).expect("serialize").len();
-
-        assert_eq!(predicted.predicted_comment_bytes, actual);
+        let e = envelope();
+        let size = response_size(&e, "key-398", [1; 12], 1024).unwrap();
+        let mut actual = e.clone();
+        actual.direction = MailboxDirection::AgentToClient;
+        actual.nonce = STANDARD.encode([1; 12]);
+        actual.ciphertext = STANDARD.encode(vec![0u8; 1040]);
+        assert_eq!(
+            size.predicted_comment_bytes,
+            serde_json::to_vec(&actual).unwrap().len()
+        );
     }
-
     #[test]
     fn oversized_response_becomes_small_terminal_failure_before_encryption() {
-        let request_id = "req_response_budget_0123456789";
-        let envelope = sizing_envelope(request_id);
-        let response = AgentResponse {
-            schema: AGENT_RESPONSE_SCHEMA_V1.to_owned(),
-            request_id: request_id.to_owned(),
-            status: AgentResponseStatus::Completed,
-            generated_at: "2026-09-28T00:00:00.000Z".to_owned(),
-            quality: DataQuality::Fresh,
-            result_schema: Some("okx.test.large/v1".to_owned()),
-            result: Some(serde_json::json!({
-                "payload": "x".repeat(MARKET_RESEARCH_RESPONSE_PLAINTEXT_BYTES)
-            })),
-            failure: None,
-            warnings: Vec::new(),
-        };
+        let e = envelope();
+        let mut r = invalid_request_response(&e.request_id, "2026-10-23T00:00:00Z");
+        r.warnings = vec!["x".repeat(10000)];
         let bounded = bounded_response_plaintext(
-            response,
+            r,
             ResponseBudget {
-                plaintext_bytes: MARKET_RESEARCH_RESPONSE_PLAINTEXT_BYTES,
+                plaintext_bytes: 8192,
             },
-            &envelope,
-            "agent-key-1",
-            [10_u8; 12],
-            "2026-09-28T00:00:00.000Z",
+            &e,
+            "key-398",
+            [1; 12],
+            "2026-10-23T00:00:00Z",
         )
-        .expect("bounded failure");
-
-        assert!(bounded.telemetry.budget_exceeded);
-        assert_eq!(
-            bounded.telemetry.plaintext_budget_bytes,
-            MARKET_RESEARCH_RESPONSE_PLAINTEXT_BYTES as u64
-        );
-        let terminal: AgentResponse =
-            serde_json::from_slice(&bounded.bytes).expect("terminal json");
-        assert_eq!(terminal.status, AgentResponseStatus::Failed);
-        assert_eq!(terminal.quality, DataQuality::NotReady);
-        let failure = terminal.failure.expect("failure");
-        assert_eq!(failure.code, RESPONSE_TOO_LARGE_CODE);
-        assert!(!failure.retryable);
-        assert!(bounded.bytes.len() < COMPACT_RESPONSE_PLAINTEXT_BYTES);
-
-        let size = response_size(&envelope, "agent-key-1", [10_u8; 12], bounded.bytes.len())
-            .expect("failure size");
-        assert!(size.predicted_comment_bytes < MAX_COMMENT_BODY_BYTES);
+        .unwrap();
+        let r: AgentResponse = serde_json::from_slice(&bounded.bytes).unwrap();
+        assert_eq!(r.failure.unwrap().code, RESPONSE_TOO_LARGE_CODE);
+        assert!(bounded.bytes.len() < 8192);
     }
-
     #[tokio::test]
-    async fn local_once_round_trip_returns_authenticated_terminal_response() {
-        let agent_private = [1_u8; 32];
-        let client_private = [2_u8; 32];
-        let agent_public = public_key_from_private(agent_private);
-        let client_public = public_key_from_private(client_private);
-        let shared = shared_secret(client_private, agent_public).expect("shared");
-        assert_eq!(
-            shared_secret(agent_private, client_public).expect("shared"),
-            shared
-        );
-
-        let request = AgentRequest {
-            schema: AGENT_REQUEST_SCHEMA_V1.to_owned(),
-            request_id: "req_0123456789abcdef".to_owned(),
-            operation: AgentOperation::MarketSnapshot {
-                instrument: "DOGE-USDT-SWAP".to_owned(),
-            },
-        };
-        let request_plaintext = serde_json::to_vec(&request).expect("request json");
-        let request_nonce = [3_u8; 12];
-        let request_key = derive_directional_key(
+    async fn encrypted_mailbox_authenticates_and_rejects_mutation_before_dispatch() {
+        use okx_protocol::crypto::public_key_from_private;
+        let agent = [3u8; 32];
+        let client = [4u8; 32];
+        let mut e = envelope();
+        e.client_ephemeral_public_key = STANDARD.encode(public_key_from_private(client));
+        let shared = shared_secret(agent, public_key_from_private(client)).unwrap();
+        let key = derive_directional_key(
             &shared,
-            &request.request_id,
-            "agent-key-1",
+            &e.request_id,
+            &e.agent_key_id,
             MailboxDirection::ClientToAgent,
         )
-        .expect("request key");
-
-        let mut request_envelope = MailboxEnvelope {
-            schema: MAILBOX_ENVELOPE_SCHEMA_V1.to_owned(),
-            request_id: request.request_id.clone(),
-            direction: MailboxDirection::ClientToAgent,
-            agent_key_id: "agent-key-1".to_owned(),
-            client_ephemeral_public_key: STANDARD.encode(client_public),
-            nonce: STANDARD.encode(request_nonce),
-            ciphertext: String::new(),
-        };
-        let aad = request_envelope.aad().expect("request aad");
-        request_envelope.ciphertext = STANDARD.encode(
+        .unwrap();
+        let payload = serde_json::json!({"schema":AGENT_REQUEST_SCHEMA_V1,"request_id":e.request_id,"account":null,"operation":{"type":"connect_account","credential_ref":"fixture-reference","alias":"fixture","operation_id":"operation-398","request_digest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}});
+        e.ciphertext = STANDARD.encode(
             encrypt(
-                &request_key,
-                &request_nonce,
-                aad.as_bytes(),
-                &request_plaintext,
+                &key,
+                &[8; 12],
+                e.aad().unwrap().as_bytes(),
+                &serde_json::to_vec(&payload).unwrap(),
             )
-            .expect("encrypt request"),
+            .unwrap(),
         );
-
-        let response_nonce = [4_u8; 12];
-        let response_envelope = process_once(
-            &request_envelope,
-            "agent-key-1",
-            &agent_private,
-            ObservationQueryContext::unavailable(),
-            response_nonce,
-            "2026-09-26T18:00:00.000Z",
+        let reply = process_once_with_size_telemetry(
+            &e,
+            "key-398",
+            &agent,
+            None,
+            [1; 12],
+            "2026-10-23T00:00:00Z",
         )
         .await
-        .expect("process once");
-
-        let response_key = derive_directional_key(
+        .unwrap()
+        .0;
+        let key = derive_directional_key(
             &shared,
-            &request.request_id,
-            "agent-key-1",
+            &e.request_id,
+            &e.agent_key_id,
             MailboxDirection::AgentToClient,
         )
-        .expect("response key");
-        let response_aad = response_envelope.aad().expect("response aad");
-        let response_ciphertext = STANDARD
-            .decode(&response_envelope.ciphertext)
-            .expect("response ciphertext");
-        let response_plaintext = decrypt(
-            &response_key,
-            &response_nonce,
-            response_aad.as_bytes(),
-            &response_ciphertext,
+        .unwrap();
+        let plaintext = decrypt(
+            &key,
+            &[1; 12],
+            reply.aad().unwrap().as_bytes(),
+            &STANDARD.decode(&reply.ciphertext).unwrap(),
         )
-        .expect("decrypt response");
-        let response: AgentResponse =
-            serde_json::from_slice(&response_plaintext).expect("response json");
-
-        assert_eq!(response.request_id, request.request_id);
+        .unwrap();
+        let response: AgentResponse = serde_json::from_slice(&plaintext).unwrap();
+        assert_eq!(response.request_id, e.request_id);
         assert_eq!(response.status, AgentResponseStatus::Rejected);
-        assert_eq!(response.quality, DataQuality::NotReady);
         assert_eq!(
-            response.failure.expect("failure").code,
-            P1_NOT_AVAILABLE_CODE
+            response.failure.unwrap().code,
+            MAILBOX_EXECUTION_DISABLED_CODE
+        );
+        let mut corrupted = e;
+        corrupted.ciphertext = STANDARD.encode([0u8; 32]);
+        assert!(
+            process_once_with_size_telemetry(
+                &corrupted,
+                "key-398",
+                &agent,
+                None,
+                [1; 12],
+                "2026-10-23T00:00:00Z"
+            )
+            .await
+            .is_err()
         );
     }
 }

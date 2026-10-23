@@ -355,93 +355,92 @@ async fn process_control_batch(
         // The privileged release/controller/launcher commands bypass
         // HostExecutor::execute, so fence them here under the SAME journal.
         // A refused command still yields one durable typed terminal result.
-        let (execution, transition) =
-            if let Err(error) = executor.profile_transition_gate(&operation) {
-                (Err(error), ProcessTransition::None)
-            } else {
-                match &operation {
-                    HostControlOperation::DeployAgent {
-                        run_id,
-                        artifact_id,
+        let (execution, transition) = if let Err(error) = executor.lifecycle_gate(&operation) {
+            (Err(error), ProcessTransition::None)
+        } else {
+            match &operation {
+                HostControlOperation::DeployAgent {
+                    run_id,
+                    artifact_id,
+                    expected_source_tree,
+                } => (
+                    deploy_agent(
+                        github,
+                        executor,
+                        *run_id,
+                        *artifact_id,
                         expected_source_tree,
-                    } => (
-                        deploy_agent(
-                            github,
-                            executor,
-                            *run_id,
-                            *artifact_id,
-                            expected_source_tree,
-                        )
-                        .await,
-                        ProcessTransition::None,
-                    ),
-                    HostControlOperation::InstallLauncherRoot {
-                        run_id,
-                        artifact_id,
+                    )
+                    .await,
+                    ProcessTransition::None,
+                ),
+                HostControlOperation::InstallLauncherRoot {
+                    run_id,
+                    artifact_id,
+                    expected_source_tree,
+                } => (
+                    install_launcher_root(
+                        github,
+                        executor,
+                        &request.request_id,
+                        *run_id,
+                        *artifact_id,
                         expected_source_tree,
-                    } => (
-                        install_launcher_root(
-                            github,
-                            executor,
-                            &request.request_id,
-                            *run_id,
-                            *artifact_id,
-                            expected_source_tree,
-                        )
-                        .await,
-                        ProcessTransition::RootMigration,
-                    ),
-                    HostControlOperation::UpgradeLauncherRoot {
-                        run_id,
-                        artifact_id,
+                    )
+                    .await,
+                    ProcessTransition::RootMigration,
+                ),
+                HostControlOperation::UpgradeLauncherRoot {
+                    run_id,
+                    artifact_id,
+                    expected_source_tree,
+                    expected_current_launcher_sha256,
+                } => (
+                    upgrade_launcher_root(
+                        github,
+                        executor,
+                        *run_id,
+                        *artifact_id,
                         expected_source_tree,
                         expected_current_launcher_sha256,
-                    } => (
-                        upgrade_launcher_root(
-                            github,
-                            executor,
-                            *run_id,
-                            *artifact_id,
-                            expected_source_tree,
-                            expected_current_launcher_sha256,
-                        )
-                        .await,
-                        ProcessTransition::None,
-                    ),
-                    HostControlOperation::StageControllerUpdate {
-                        run_id,
-                        artifact_id,
+                    )
+                    .await,
+                    ProcessTransition::None,
+                ),
+                HostControlOperation::StageControllerUpdate {
+                    run_id,
+                    artifact_id,
+                    expected_source_tree,
+                } => (
+                    stage_controller_update(
+                        github,
+                        executor,
+                        *run_id,
+                        *artifact_id,
                         expected_source_tree,
-                    } => (
-                        stage_controller_update(
-                            github,
-                            executor,
-                            *run_id,
-                            *artifact_id,
-                            expected_source_tree,
-                        )
-                        .await,
-                        ProcessTransition::None,
-                    ),
-                    HostControlOperation::HandoffControllerUpdate => (
-                        controller_update::prepare_handoff(&request.request_id),
-                        ProcessTransition::Handoff,
-                    ),
-                    HostControlOperation::HandoffToAutostart => {
-                        (autostart::run_now(), ProcessTransition::Handoff)
-                    }
-                    HostControlOperation::AcceptanceCrashController => (
-                        autostart::ensure_policy_valid().map(|()| {
-                            serde_json::json!({
-                                "autostart_policy_valid": true,
-                                "crash_after_terminal_ack": true
-                            })
-                        }),
-                        ProcessTransition::Crash,
-                    ),
-                    _ => (executor.execute(operation.clone()), ProcessTransition::None),
+                    )
+                    .await,
+                    ProcessTransition::None,
+                ),
+                HostControlOperation::HandoffControllerUpdate => (
+                    controller_update::prepare_handoff(&request.request_id),
+                    ProcessTransition::Handoff,
+                ),
+                HostControlOperation::HandoffToAutostart => {
+                    (autostart::run_now(), ProcessTransition::Handoff)
                 }
-            };
+                HostControlOperation::AcceptanceCrashController => (
+                    autostart::ensure_policy_valid().map(|()| {
+                        serde_json::json!({
+                            "autostart_policy_valid": true,
+                            "crash_after_terminal_ack": true
+                        })
+                    }),
+                    ProcessTransition::Crash,
+                ),
+                _ => (executor.execute(operation.clone()), ProcessTransition::None),
+            }
+        };
         let (status, details, failure) = match execution {
             Ok(details) => (HostControlStatus::Pass, Some(details), None),
             Err(error) => (

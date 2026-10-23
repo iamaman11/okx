@@ -1,9 +1,9 @@
 import type { OAuthHelpers } from "@cloudflare/workers-oauth-provider";
 
-export const FRAME_SCHEMA = "okx.direct-transport.frame/v1";
+export const FRAME_SCHEMA = "okx.direct-transport.frame/v2";
 export const MCP_PROTOCOL_VERSION = "2025-06-18";
-export const MCP_SERVER_VERSION = "0.7.1";
-export const TOOL_CONTRACT_VERSION = "okx.mcp.tools/2026-10-22.1";
+export const MCP_SERVER_VERSION = "0.8.0";
+export const TOOL_CONTRACT_VERSION = "okx.mcp.tools/2026-10-23.398";
 export const MAX_BODY_BYTES = 64 * 1024;
 export const MAX_INFLIGHT = 8;
 export const PONG_DEADLINE_MS = 2_000;
@@ -24,14 +24,8 @@ export interface Env {
   OAUTH_PROVIDER: OAuthHelpers;
 }
 
-export type RuntimeProfile = "production" | "demo_acceptance" | "unverified";
-
-/** An old agent has an unverified profile until its Hello is upgraded. */
-export function decodeRuntimeProfile(value: unknown): RuntimeProfile | null {
-  if (value === undefined) return "unverified";
-  if (value === "production" || value === "demo_acceptance") return value;
-  return null;
-}
+export type RuntimeProfile = "engine";
+export function decodeRuntimeProfile(value:unknown):RuntimeProfile|null{return value==="engine"?"engine":null;}
 
 export interface SocketAttachment {
   runtimeId: string;

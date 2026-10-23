@@ -125,6 +125,7 @@ mod tests {
             occupied: vec![RiskAccountOccupancy {
                 account_key: format!("okx:real:{uid}"),
                 occupied_usdt: "0".to_owned(),
+                cumulative_loss_usd: "0".into(),
             }],
             generated_at_ms: 1_000,
             source_digest: "c".repeat(64),
@@ -140,6 +141,7 @@ mod tests {
         RiskCommand {
             schema: RISK_COMMAND_SCHEMA_V1.to_owned(),
             command_id: "risk_reserve_0001".to_owned(),
+            installation_id: "installation-test".into(),
             action: RiskCommandAction::Reserve {
                 venue: "okx".to_owned(),
                 account_uid: "a".repeat(64),
@@ -149,6 +151,12 @@ mod tests {
                 instrument_id: "BTC-USDT-SWAP".to_owned(),
                 plan_sha256: "b".repeat(64),
                 requested_loss_usdt: "1".to_owned(),
+                requested_loss_usd: "1.001".into(),
+                usd_conversion: okx_protocol::risk_authority::UsdConversion {
+                    usd_per_usdt: "1.001".into(),
+                    source_digest: "f".repeat(64),
+                    observed_at_ms: 1000,
+                },
                 policy_revision: 1,
                 census: census(),
             },
@@ -169,6 +177,8 @@ mod tests {
                 None
             },
             reservation_state: None,
+            budget: None,
+            account_budget: None,
         }
     }
     fn post(held: &RiskResult) -> RiskCommand {
@@ -179,6 +189,7 @@ mod tests {
         RiskCommand {
             schema: RISK_COMMAND_SCHEMA_V1.to_owned(),
             command_id: "risk_post_000001".to_owned(),
+            installation_id: "installation-test".into(),
             action: RiskCommandAction::BeginPost {
                 reservation_key: held.reservation_key.clone().unwrap(),
                 plan_sha256: "b".repeat(64),

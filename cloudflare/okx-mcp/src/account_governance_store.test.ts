@@ -1,117 +1,99 @@
-import {governanceRequest,enrollObservedAccount,stopNewRealRisk,activateExistingOperatorGrant} from "./account_governance_store.js";
-import {defaultAccountPolicy} from "./account_policy.js";
+import {governanceRequest,enrollObservedAccount,setAccountPause,stopNewRealRisk,initializeGovernance,GOVERNANCE_STORAGE_KEY} from "./account_governance_store.js";
+import {FRAME_SCHEMA} from "./shared.js";
+import {initial,limits} from "./account_governance.test.js";
 function ok(v:boolean,label:string){if(!v)throw Error(label);}
 class Storage{
-  map=new Map<string,unknown>();
-  async get(key:string){return this.map.get(key);}
-  async put(key:string,value:unknown){this.map.set(key,value);}
-  private queue=Promise.resolve();
-  async transaction<T>(fn:(tx:Storage)=>Promise<T>):Promise<T>{
-    const preceding=this.queue;
-    let unlock!:()=>void;
-    this.queue=new Promise<void>(resolve=>{unlock=resolve;});
-    await preceding;
-    try{return await fn(this);}finally{unlock();}
-  }
+ map=new Map<string,any>(); reads:string[]=[];deletes:string[][]=[];
+ async get(key:string){this.reads.push(key);return structuredClone(this.map.get(key));}
+ async put(key:string,value:unknown){this.map.set(key,structuredClone(value));}
+ async delete(keys:string[]){this.deletes.push([...keys]);let n=0;for(const key of keys)if(this.map.delete(key))n++;return n;}
+ private queue=Promise.resolve();
+ async transaction<T>(fn:(tx:Storage)=>Promise<T>):Promise<T>{
+   const preceding=this.queue;let unlock!:()=>void;
+   this.queue=new Promise<void>(resolve=>{unlock=resolve;});await preceding;
+   const backup=structuredClone(this.map);
+   try{return await fn(this);}catch(e){this.map=backup;throw e;}finally{unlock();}
+ }
 }
 const s=new Storage();
-const first=await governanceRequest(s,"GET");
-ok(first.status===200&&first.body.revision===0&&first.body.trading_requested===false,"cold migration OFF");
-ok(first.body.effective_trading===false&&first.body.risk_book_sequence===0,"never advertise native GO");
-ok(first.body.available_for_new_risk_usdt===null&&first.body.complete_all_account_census===false,
- "empty RiskBook does not prove free portfolio budget");
-ok(first.body.available_risk_reason==="NATIVE_COMPLETE_ACCOUNT_CENSUS_UNPROVEN",
- "explicit native risk blocker");
-const update={expected_revision:0,trading_requested:false,max_total_modelled_loss_usdt:"2.75",accounts:[]};
-const changed=await governanceRequest(s,"POST",update);
-ok(changed.status===200&&changed.body.revision===1&&changed.body.max_total_modelled_loss_usdt==="2.75",
- "CAS update in same DO");
-ok((await governanceRequest(s,"POST",update)).status===409,"stale revision rejected");
-ok((await governanceRequest(s,"POST",{...update,expected_revision:1,trading_requested:true})).status===409,
- "UNVERIFIED grant cannot enable Real");
-ok((await governanceRequest(s,"POST",{...update,expected_revision:1,max_total_modelled_loss_usdt:"11"})).status===409,
- "operator cannot exceed grant");
-const noDual=await governanceRequest(s,"GET");
-ok(noDual.status===200&&noDual.body.revision===1,"durable readback");
-const concurrent=await Promise.all([
- governanceRequest(s,"POST",{...update,expected_revision:1,max_total_modelled_loss_usdt:"3"}),
- governanceRequest(s,"POST",{...update,expected_revision:1,max_total_modelled_loss_usdt:"4"})
-]);
-ok(concurrent.filter(row=>row.status===200).length===1
-  &&concurrent.filter(row=>row.status===409).length===1,
- "simultaneous configured-limit writes cannot both win a CAS revision");
-ok((await governanceRequest(s,"GET")).body.revision===2,"one durable winning revision");
-const legacy=new Storage();
-await legacy.put("account_policy_v1",{...defaultAccountPolicy(),
- revision:3,trading_requested:true,allowed_account_uids:["a".repeat(64)]});
-const migrated=await governanceRequest(legacy,"GET");
-ok(migrated.status===200&&migrated.body.revision===3&&migrated.body.trading_requested===false,
- "legacy enabled never migrates into LIVE grant");
-ok(Array.isArray(migrated.body.accounts)&&migrated.body.accounts.length===1
-  &&(migrated.body.accounts[0] as any).identity_verified===false,"no UID attestation invented");
-const corrupted=new Storage();
-await corrupted.put("account_policy_v1",{schema:"corrupt"});
-ok((await governanceRequest(corrupted,"GET")).status===503,"corrupt legacy fails closed");
-const badrisk=new Storage();
-await badrisk.put("risk_book_v1",{fake:true});
-ok((await governanceRequest(badrisk,"GET")).status===503,"corrupt risk owner fails closed");
-ok(await badrisk.get("account_governance_v2")===undefined,
-  "corrupt risk owner never partially writes a migrated governance policy");
-const badgovernance=new Storage();
-await badgovernance.put("account_governance_v2",{bad:true});
-ok((await governanceRequest(badgovernance,"GET")).status===503,"corrupt policy fails closed");
+ok((await governanceRequest(s,"GET")).status===503,"missing registered state never silently initialized");
+await s.put("account_policy_v1",{corrupt:true});await s.put("account_governance_v2",{corrupt:true});
+await s.put("risk_book_v1",{corrupt:true});s.reads=[];
+ok((await initializeGovernance(s,initial)).status===200,"explicit clean installation");
+ok((await governanceRequest(s,"GET")).body.complete_all_account_census==="not_evaluated","unmeasured_census_is_not_denied");
+ok(s.reads.every(k=>!k.includes("policy_v1")&&!k.includes("risk_book_v1")),"legacy_stop_claims_and_epochs_are_never_read");
+ok((await initializeGovernance(s,initial)).status===409,"installation cannot reset existing state");
+const observation={uid_fingerprint:"a".repeat(64),venue:"okx" as const,environment:"real" as const,label:"Primary",
+ alias:"primary",credential_ref:"ref_primary",enabled:true,limits,idempotency_key:"connect_primary_01"};
+const connected=await enrollObservedAccount(s,observation);
+ok(connected.status===200&&(connected.body.account as any).enabled,"connect saves access and limits together");
+ok((await enrollObservedAccount(s,observation)).body.status==="CONNECTED","same key returns original outcome");
+ok((await enrollObservedAccount(s,{...observation,label:"changed"})).status===409,"same_key_different_body_conflicts");
+const second=await enrollObservedAccount(s,{...observation,uid_fingerprint:"b".repeat(64),alias:"second",idempotency_key:"connect_second_01"});
+ok(second.status===200,"connect second");
+const status=(await governanceRequest(s,"GET")).body;
+ok((status.accounts as any[])[0].enabled&&!(status.accounts as any[])[0].explicit_pause,"enroll_b_does_not_disable_a");
+const restarted=new Storage();restarted.map=structuredClone(s.map);
+ok(((await governanceRequest(restarted,"GET")).body.accounts as any[])[0].enabled,"access_survives_restart");
+console.log("access_restart_and_account_registration PASS");
+const pause={account:"primary",expected_revision:status.revision,explicit_pause:true,idempotency_key:"pause_primary_001"};
+ok((await setAccountPause(s,pause)).status===200,"explicit pause saved");
+ok((await setAccountPause(s,pause)).status===200,"pause retry returns same revision");
+const paused=(await governanceRequest(s,"GET")).body;
+ok((paused.accounts as any[])[0].explicit_pause&&(paused.accounts as any[])[1].enabled,"pause scoped to account");
+ok((await setAccountPause(s,{...pause,expected_revision:paused.revision,explicit_pause:false,idempotency_key:"resume_primary_01"})).status===200,"one command resume");
+const before=(await governanceRequest(s,"GET")).body;
+const update={expected_revision:before.revision,max_total_modelled_loss_usdt:"4",accounts:before.accounts};
+const concurrent=await Promise.all([governanceRequest(s,"POST",{...update,idempotency_key:"limits_change_001"}),
+ governanceRequest(s,"POST",{...update,idempotency_key:"limits_change_002"})]);
+ok(concurrent.filter(r=>r.status===200).length===1&&concurrent.filter(r=>r.status===409).length===1,"concurrent CAS one winner");
+ok((await governanceRequest(s,"POST",update)).status===400,"all mutations require idempotency key");
+ok((await stopNewRealRisk(s,"stop_real_test_01")).status===200,"emergency stop persisted");
+const stopped=(await governanceRequest(s,"GET")).body;
+ok((stopped.accounts as any[]).every(a=>a.enabled&&a.explicit_pause),"STOP does not revoke access or remove cohort");
+const corrupt=new Storage();await corrupt.put(GOVERNANCE_STORAGE_KEY,{bad:true});
+ok((await governanceRequest(corrupt,"GET")).status===503,"corrupt state never reset");
 
-const fresh=new Storage();
-ok((await governanceRequest(fresh,"GET")).status===200,"initialize native registry");
-const observation={uid_fingerprint:"a".repeat(64),venue:"okx" as const,
- environment:"real" as const,label:"Primary OKX"};
-const enrolled=await enrollObservedAccount(fresh,observation);
-ok(enrolled.status===200&&enrolled.body.status==="REGISTERED_DISABLED",
- "fresh authenticated UID registers metadata into the same DO");
-const current=await governanceRequest(fresh,"GET");
-ok(current.status===200&&current.body.trading_requested===false
- &&Array.isArray(current.body.accounts)&&current.body.accounts.length===1
- &&(current.body.accounts[0] as any).enabled===false
- &&(current.body.accounts[0] as any).identity_verified===true,
- "registration is verified identity without automatically granting trading");
-ok((await enrollObservedAccount(fresh,observation)).body.status==="ALREADY_REGISTERED",
- "same authenticated UID is idempotent");
-const initialRevision=(current.body.revision as number);
-ok((await enrollObservedAccount(fresh,{...observation,uid_fingerprint:"b".repeat(64)})).status===200,
- "second account uses same catalog owner");
-ok((await governanceRequest(fresh,"GET")).body.revision===initialRevision+1,
- "central revision advances once per new registered account");
-ok((await enrollObservedAccount(fresh,{...observation,uid_fingerprint:"x".repeat(64)})).status===400,
- "caller cannot invent invalid UID fingerprints");
-ok((await governanceRequest(fresh,"GET")).body.trading_requested===false,
- "new account never converts old operator authority into GO");
+const malformed={...update,expected_revision:stopped.revision,accounts:[null],idempotency_key:"malformed_limits_01"};
+ok((await governanceRequest(s,"POST",malformed)).status===409,"malformed account rows fail without throwing");
+class FailingStorage extends Storage{
+ failReceipt=false;
+ override async put(key:string,value:unknown){if(this.failReceipt&&key.startsWith("access_operation:"))throw Error("disk full");return super.put(key,value);}
+}
+const atomic=new FailingStorage();await initializeGovernance(atomic,initial);atomic.failReceipt=true;
+let failed=false;try{await enrollObservedAccount(atomic,observation);}catch{failed=true;}
+ok(failed&&(await governanceRequest(atomic,"GET")).body.revision===0,"access and outcome rollback atomically");
+atomic.failReceipt=false;
+ok((await enrollObservedAccount(atomic,observation)).status===200,"failed commit is safely retried once");
 
-const authBefore=await governanceRequest(fresh,"GET");
-const grant=await activateExistingOperatorGrant(fresh,authBefore.body.revision as number,
- "sha256:"+"c".repeat(64));
-ok(grant.status===200&&grant.body.status==="AUTHORIZED_NOT_TRADING"
- &&grant.body.effective_trading===false,"operator grant is separate from LIVE enable");
-ok((await activateExistingOperatorGrant(fresh,authBefore.body.revision as number,
- "sha256:"+"d".repeat(64))).status===409,"stale duplicate grant denied");
-const verified=(await governanceRequest(fresh,"GET")).body;
-const accounts=(verified.accounts as any[]).map((a,i)=>({
- id:a.id,label:a.label,enabled:i===0,
- limits:i===0?{...a.limits,max_notional_usdt:"100",max_leverage:"3",
-   max_daily_realized_loss_usdt:"2",max_drawdown_ratio:"0.1",
-   allowed_instruments:["BTC-USDT-SWAP"]}:a.limits,
- strategies:[]
-}));
-const selected=await governanceRequest(fresh,"POST",{
- expected_revision:verified.revision,trading_requested:true,
- max_total_modelled_loss_usdt:"4",accounts
-});
-ok(selected.status===200&&selected.body.trading_requested===true,
- "central verified account may request trading only with active grant and complete limits");
-const stop=await stopNewRealRisk(fresh);
-ok(stop.status===200&&stop.body.status==="STOPPED"&&stop.body.effective_trading===false,
- "central STOP is immediate and durable");
-const afterStop=await governanceRequest(fresh,"GET");
-ok(afterStop.body.trading_requested===false&&afterStop.body.revision===selected.body.revision as number+1,
- "STOP advances policy revision and invalidates stale risk reservations");
-ok((await stopNewRealRisk(fresh)).body.revision===afterStop.body.revision,
- "repeated STOP does not create rev churn");
+const oldFinancialKeys=["risk_book_v1","account_governance_v2","account_policy_v1"];
+const lifecycle={operation_id:"clean_initialize_0001",release_sha256:"a".repeat(64),contract:FRAME_SCHEMA};
+function seedOld(storage:Storage){for(const key of oldFinancialKeys)storage.map.set(key,{fixture:"never read or import"});storage.map.set("oauth_fixture",{preserved:"oauth"});storage.map.set("session_fixture",{preserved:"session"});storage.map.set("generation",77);}
+function oldPresent(storage:Storage){return oldFinancialKeys.every(key=>storage.map.has(key));}
+function noOldReads(storage:Storage){return storage.reads.every(key=>!oldFinancialKeys.includes(key));}
+const implicit=new Storage();seedOld(implicit);
+ok((await initializeGovernance(implicit,initial)).status===200&&oldPresent(implicit)&&implicit.deletes.length===0,"no lifecycle never retires old keys");
+const clean=new Storage();seedOld(clean);
+const initialized=await initializeGovernance(clean,initial,lifecycle);
+ok(initialized.status===200&&initialized.body.retired_financial_keys_removed===3,"confirmed exact retirement count");
+ok(oldFinancialKeys.every(key=>!clean.map.has(key))&&JSON.stringify(clean.deletes)==JSON.stringify([oldFinancialKeys]),"only exact financial keys deleted");
+ok(clean.map.get("oauth_fixture").preserved==="oauth"&&clean.map.get("session_fixture").preserved==="session"&&clean.map.get("generation")===77,"unrelated OAuth and session data preserved");
+ok(clean.map.has("risk_meta_v2")&&clean.map.has(GOVERNANCE_STORAGE_KEY)&&clean.map.has("installation_release_v1"),"retirement and new state commit together");
+for(const key of oldFinancialKeys)clean.map.set(key,{fixture:"reintroduced after init"});
+const replay=await initializeGovernance(clean,initial,lifecycle);
+ok(JSON.stringify(replay)===JSON.stringify(initialized)&&clean.deletes.length===1&&oldPresent(clean),"exact replay returns original outcome without deleting again");
+ok((await initializeGovernance(clean,initial,{...lifecycle,release_sha256:"b".repeat(64)})).status===409&&clean.deletes.length===1&&oldPresent(clean),"conflicting replay never erases");
+ok((await initializeGovernance(clean,initial,{...lifecycle,operation_id:"different_initialize_0001"})).status===409&&clean.deletes.length===1,"already initialized state never retires again");
+const invalid=new Storage();seedOld(invalid);
+ok((await initializeGovernance(invalid,{...initial,revision:1},lifecycle)).status===400&&oldPresent(invalid)&&invalid.deletes.length===0,"invalid init never erases");
+for(const stateKey of ["risk_meta_v2","installation_release_v1"]){const existing=new Storage();seedOld(existing);existing.map.set(stateKey,{fixture:"existing new state"});ok((await initializeGovernance(existing,initial,lifecycle)).status===409&&oldPresent(existing)&&existing.deletes.length===0,"orphan new state cannot be reset");ok(noOldReads(existing),"orphan check reads no old values");}
+class DeleteFailure extends Storage{override async delete(keys:string[]):Promise<number>{this.deletes.push([...keys]);this.map.delete(keys[0]);throw Error("fixture delete failure");}}
+const deleteFailure=new DeleteFailure();seedOld(deleteFailure);let deleteFailed=false;
+try{await initializeGovernance(deleteFailure,initial,lifecycle);}catch{deleteFailed=true;}
+ok(deleteFailed&&oldPresent(deleteFailure)&&!deleteFailure.map.has("risk_meta_v2")&&!deleteFailure.map.has(GOVERNANCE_STORAGE_KEY),"partial delete failure rolls back atomically");
+class NewStateFailure extends Storage{override async put(key:string,value:unknown){if(key==="risk_meta_v2")throw Error("fixture write failure");return super.put(key,value);}}
+const writeFailure=new NewStateFailure();seedOld(writeFailure);let writeFailed=false;
+try{await initializeGovernance(writeFailure,initial,lifecycle);}catch{writeFailed=true;}
+ok(writeFailed&&oldPresent(writeFailure)&&!writeFailure.map.has("installation_operation:"+lifecycle.operation_id),"new state write failure restores retired keys and leaves no receipt");
+ok([implicit,clean,invalid,deleteFailure,writeFailure].every(noOldReads),"retirement never reads old values");
+console.log("clean_initialization_deletes_only_old_financial_keys PASS");

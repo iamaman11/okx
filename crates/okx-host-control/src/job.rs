@@ -69,6 +69,16 @@ impl AgentJob {
         }
     }
 
+    pub fn terminate(&self) -> HostControlResult<()> {
+        let ok =
+            unsafe { windows_sys::Win32::System::JobObjects::TerminateJobObject(self.handle, 1) };
+        if ok == 0 {
+            Err(std::io::Error::last_os_error().into())
+        } else {
+            Ok(())
+        }
+    }
+
     pub fn assign(&self, child: &mut Child) -> HostControlResult<()> {
         use std::os::windows::io::AsRawHandle;
         use windows_sys::Win32::System::JobObjects::AssignProcessToJobObject;
@@ -110,6 +120,9 @@ impl AgentJob {
         Err(HostControlError::UnsupportedPlatform)
     }
 
+    pub fn terminate(&self) -> HostControlResult<()> {
+        Err(HostControlError::UnsupportedPlatform)
+    }
     pub fn assign(&self, _child: &mut Child) -> HostControlResult<()> {
         Ok(())
     }

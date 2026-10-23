@@ -101,21 +101,6 @@ pub enum HostControlError {
     #[error("native account metadata catalog has reached its bounded capacity")]
     AccountCatalogFull,
 
-    #[error("switching the active trading environment requires an authenticated quiescence proof")]
-    ProfileHandoffProofRequired,
-
-    #[error("profile transition witness or durable journal has invalid provenance")]
-    ProfileTransitionInvalid,
-
-    #[error("ReadOnly target proof denied: {0}")]
-    ReadOnlyTargetProofDenied(&'static str),
-
-    #[error("an unfinalized profile transition prevents an implicit lifecycle operation")]
-    ProfileTransitionPending,
-
-    #[error("profile transition witness was stale, mismatched or already consumed")]
-    ProfileTransitionReplay,
-
     #[error("agent process could not be assigned to the controller job object: {0}")]
     JobAssignment(String),
 
@@ -156,9 +141,9 @@ pub enum HostControlError {
     ControlResponseBudgetInvariant,
 
     #[error(
-        "offline storage cutover outcome is uncertain; inspect the durable owner, never replay blindly"
+        "native storage operation outcome is uncertain; inspect the durable owner, never replay blindly"
     )]
-    StorageCutoverOutcomeUnknown,
+    NativeStorageOutcomeUnknown,
 
     #[error("secure random source failed: {0}")]
     Random(String),
@@ -195,11 +180,6 @@ impl HostControlError {
             Self::ArtifactHashMismatch => "ARTIFACT_HASH_MISMATCH",
             Self::InvalidExecutionPath => "INVALID_EXECUTION_PATH",
             Self::DesiredStateCorrupt => "DESIRED_STATE_CORRUPT",
-            Self::ProfileHandoffProofRequired => "PROFILE_HANDOFF_PROOF_REQUIRED",
-            Self::ProfileTransitionInvalid => "PROFILE_TRANSITION_INVALID",
-            Self::ReadOnlyTargetProofDenied(_) => "READ_ONLY_TARGET_PROOF_DENIED",
-            Self::ProfileTransitionPending => "PROFILE_TRANSITION_PENDING",
-            Self::ProfileTransitionReplay => "PROFILE_TRANSITION_REPLAY",
             Self::JobAssignment(_) => "JOB_ASSIGNMENT_FAILED",
             Self::ControllerAlreadyRunning => "CONTROLLER_ALREADY_RUNNING",
             Self::WindowsIdentityUnavailable => "WINDOWS_IDENTITY_UNAVAILABLE",
@@ -213,7 +193,7 @@ impl HostControlError {
             Self::LegacyBootstrapDisabled => "LEGACY_BOOTSTRAP_DISABLED",
             Self::AcceptanceActivationFailureInjected => "ACCEPTANCE_ACTIVATION_FAILURE_INJECTED",
             Self::ControlResponseBudgetInvariant => "CONTROL_RESPONSE_BUDGET_INVARIANT",
-            Self::StorageCutoverOutcomeUnknown => "STORAGE_CUTOVER_OUTCOME_UNKNOWN",
+            Self::NativeStorageOutcomeUnknown => "NATIVE_STORAGE_OUTCOME_UNKNOWN",
             Self::Random(_) => "RANDOM_SOURCE_FAILED",
         }
     }

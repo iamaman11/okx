@@ -1,0 +1,78 @@
+{
+  "issue": "https://github.com/iamaman11/okx/issues/398",
+  "scope": "W01 foundation and directly affected RuntimeSession cleanup; incomplete integration",
+  "baseline_commit": "1aacbc196db00b301e7eacb404d5db9b400c62e2",
+  "checks": [
+    {
+      "command": "cargo test --locked --workspace",
+      "result": "PASS",
+      "passed": 824,
+      "ignored": 1,
+      "environment": "Windows, NO_PROXY=127.0.0.1,localhost"
+    },
+    {
+      "command": "npm --prefix cloudflare/okx-mcp run check",
+      "result": "PASS",
+      "executed_test_files": 8
+    },
+    {
+      "command": "cargo fmt --all -- --check",
+      "result": "PASS"
+    },
+    {
+      "command": "python scripts/check_architecture.py",
+      "result": "PASS"
+    },
+    {
+      "command": "python scripts/check_ledger_sql.py",
+      "result": "PASS"
+    }
+  ],
+  "tools_list": {
+    "result": "PASS",
+    "tool_count": 16,
+    "serialized_result_utf8_bytes": 23074,
+    "measurement": "actual authenticated tools/list response fixture"
+  },
+  "release_acceptance": {
+    "CODE_PASSED": "NOT_RUN",
+    "INSTALLED_MATCHED": "NOT_RUN",
+    "ANALYTICS_READY": "NOT_RUN",
+    "PHYSICAL_MULTI_ACCOUNT": "NOT_RUN",
+    "REAL_CYCLE_ACCEPTED": "NOT_RUN"
+  },
+  "limitations": [
+    "accounts.connect has no native credential-reference route yet",
+    "full W01 action-aware close admission is pending W02/W05",
+    "W02-W10 are incomplete; this source must not be deployed",
+    "ignored million-history Linux workload was not run",
+    "no physical installation or exchange operation was performed"
+  ],
+  "code_sha256": {
+    "cloudflare/okx-mcp/scripts/test-tool-result.mjs": "4ca1ac321e297f9646eea383e6d2310e0a943d1aa50de99547635f28641fb0a4",
+    "cloudflare/okx-mcp/src/account_governance.test.ts": "66f9d5be899c608cba860d9ebb4aac346ead4098d7f53a22da334ea125374cda",
+    "cloudflare/okx-mcp/src/account_governance.ts": "200cdad18d598df6ad37566b5f49c5a1e3ae13dec4ab4671222c1d23f9d39d5c",
+    "cloudflare/okx-mcp/src/account_governance_store.test.ts": "23be6336385b0e05d129830a22592b621ee670539c0eb520d7c309dc662194cc",
+    "cloudflare/okx-mcp/src/account_governance_store.ts": "f2545c600e7166d0f974eeaf208460c1e9b3cde1478eb0507289aaabe2e36fd7",
+    "cloudflare/okx-mcp/src/execution_tools.test.ts": "5857a44498eded44eb42e418436b5faafbc2577fa355efb423aa8205f6bb1dd7",
+    "cloudflare/okx-mcp/src/mcp.test.ts": "63449e3183fc22676f09a026f8f9c55b7a536d1f0c89300d2748ab60f1a2aef6",
+    "cloudflare/okx-mcp/src/mcp.ts": "a5b989211265162311421fd5b4f97351a21078b42832065273bdf6440fc68448",
+    "cloudflare/okx-mcp/src/risk_authority.test.ts": "2e235f37cb40f4c9a6c20abb92a9fe46f27f35a89955c8e819c63c52ea731c7a",
+    "cloudflare/okx-mcp/src/risk_authority.ts": "04b0642532b42ac54d4e6612871a8b183d6367571fc7b6bcc56f0ea4d115b204",
+    "cloudflare/okx-mcp/src/risk_book.test.ts": "aae71ec819ad94df8f4f76c2dae7fa08ebe2d954e11d0f3e176f0f341226952f",
+    "cloudflare/okx-mcp/src/risk_book.ts": "acb185fe9b9275dcf980bde336ca05af4b5d441abf5ec3b27f0663abfddfa42f",
+    "cloudflare/okx-mcp/src/runtime_session.test.ts": "97cf3560469d926cf5665c3b3f6f07d02a296e1360c4b191a643a08afda0c7ca",
+    "cloudflare/okx-mcp/src/runtime_session.ts": "46bbd6dc45582c769af9045670527d80a0c1157f7586715fa8d943758d3292b4",
+    "cloudflare/okx-mcp/src/shared.ts": "1593f64c7416eb8e52878b69686caf5fab958feb980e87132d5ac4cef2e5caef",
+    "crates/okx-agent/src/cloudflare_transport.rs": "1298873dcb51e44a7191d7d124acb9e40c661ca67f0761b4a8cfc002942fde1d",
+    "crates/okx-agent/src/execution_runtime.rs": "570c197b084799465b166cb621413bad2eaf1a5ce4991c46ce1ed6ab7abfe980",
+    "crates/okx-agent/src/query.rs": "afc73ed3d80212e2565b5eb12c0cb95a652513ac34fef1b6ea8a5e29b959edbb",
+    "crates/okx-agent/src/query/execution.rs": "f450b439269439873a72478b8545096716c50d6faa702c86eb45b887ed6f6a3f",
+    "crates/okx-agent/src/risk_census.rs": "42edb028673f1f7319d9ff14337db8c8eca0cdb87eab7a0b4d25e54ab91ea0f4",
+    "crates/okx-protocol/src/account_governance.rs": "822508c672fde5c642eff90d32e60504c4351d2fb0d835fb310b5ad7a115cc22",
+    "crates/okx-protocol/src/accounts.rs": "c86979d1c7dcad534e0411984789cf99d6329c741fd833532cd7eb10cf7f7590",
+    "crates/okx-protocol/src/analytics.rs": "5652caa7aa02073a505c8d18e5f7adae5488d3b53c8b001336c78a20b0d6563b",
+    "crates/okx-protocol/src/lib.rs": "3f0ebe0ba8d98d80c2ae4c5ac06909c7e6f2497ed2d5782b4ed232747344041c",
+    "crates/okx-protocol/src/trading.rs": "f34acff70a90a680cb780b24f3b6815789eb4281643dff110d8cd0b8c3033d56"
+  }
+}

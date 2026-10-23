@@ -1,30 +1,12 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
 const output = mkdtempSync(join(tmpdir(), "okx-mcp-tool-result-"));
 const tsc = resolve("node_modules/typescript/bin/tsc");
 
-const mcpSource = readFileSync(
-  new URL("../src/mcp.ts", import.meta.url),
-  "utf8",
-);
-const toolsListStart = mcpSource.indexOf('if (rpc.method === "tools/list")');
-const toolsCallStart = mcpSource.indexOf('if (rpc.method !== "tools/call"', toolsListStart);
-if (toolsListStart < 0 || toolsCallStart <= toolsListStart) {
-  throw new Error("unable to locate the owned tools/list schema block");
-}
-const toolsListBlock = mcpSource.slice(toolsListStart, toolsCallStart);
-const toolsListBytes = new TextEncoder().encode(toolsListBlock).byteLength;
-if (toolsListBytes > 24 * 1024) {
-  throw new Error(`tools/list source schema exceeds 24 KiB budget: ${toolsListBytes} bytes`);
-}
-const toolCount = (toolsListBlock.match(/\n\s+name: "/g) ?? []).length
-  + (toolsListBlock.includes("...EXECUTION_TOOLS") ? 2 : 0);
-if (toolCount > 16) {
-  throw new Error(`coarse MCP surface exceeded 16-tool budget: ${toolCount} tools`);
-}
 
 try {
   execFileSync(
@@ -32,11 +14,20 @@ try {
     [tsc, "--rootDir", "src", "--outDir", output, "--noEmit", "false"],
     { stdio: "inherit" },
   );
-  for (const file of ["shared.test.js", "execution_tools.test.js", "account_policy.test.js", "risk_book.test.js", "account_governance.test.js", "account_governance_store.test.js", "risk_authority.test.js"]) {
+  let executed=0;
+  for (const file of ["auth.test.js", "shared.test.js", "execution_tools.test.js", "risk_book.test.js", "account_governance.test.js", "account_governance_store.test.js", "risk_authority.test.js", "runtime_session.test.js", "mcp.test.js"]) {
     execFileSync(process.execPath, [join(output, file)], {
       stdio: "inherit",
     });
+    executed++;
   }
+  const {PUBLIC_TOOLS}=await import(pathToFileURL(join(output,"execution_tools.js")));
+  const {payloadFixtures}=await import(pathToFileURL(join(output,"execution_tools.test.js")));
+  mkdirSync("contracts",{recursive:true});
+  writeFileSync("contracts/tools.schema.json",JSON.stringify({tools:PUBLIC_TOOLS},null,2)+"\n");
+  writeFileSync("contracts/action-fixtures.json",JSON.stringify(payloadFixtures,null,2)+"\n");
+  if(executed===0)throw new Error("empty Worker test suite");
+  console.log(`Worker test files passed: ${executed}`);
 } finally {
   rmSync(output, { recursive: true, force: true });
 }

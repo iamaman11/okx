@@ -1,0 +1,235 @@
+# Single native OKX agent: account profiles, CONTROL releases and Stage 5C-2 acceptance
+
+**ACTIVE ORDER (2026-10-17; canonical #160):** This document is the **subordinate Stage 5C design/acceptance contract**, not the active work item. [Canonical #160](https://github.com/iamaman11/okx/issues/160) controls execution order: **5B financial run → 5A final strategy risk acceptance → 5C read-only account handoff, operations and measured compact MCP → separately authorized Live gate**. The dated 'next/current 5C-2' sections below are preserved technical requirements/history; they may not interrupt unfinished 5B/5A or imply extra product stages. Only two existing Demo/Production profiles currently exist; extra named-account provisioning is deferred until a real additional account exists. Never confuse an exact ReleaseSet install with account-switch or trading acceptance.
+
+## Control ownership — ChatGPT remote operator, local read-only witness (2026-10-15)
+
+**Single authority for development and operation: ChatGPT through existing GitHub / encrypted Windows CONTROL / primary Cloudflare MCP.** ChatGPT chooses fixes, edits canonical Rust, commits/reviews, verifies CI, publishes exact immutable release sets and remotely operates the existing native lifecycle: install, upgrade/reinstall, controller A/B handoff, agent start/stop/restart, status, diagnosis, verified restore and profile selection when accepted. The Windows CONTROL/launcher remains the only lifecycle mutation owner; MCP remains the primary authenticated data plane and the sole admitted Demo execution ingress. No new service, scheduler, privileged shell, second installer, mutation transport or duplicate agent is permitted.
+
+**DIRECT_ONLY transport invariant — 2026-10-16.** The OKX application must use *direct connections* for GitHub CONTROL/Actions release delivery, Git provenance checks, OKX public/private REST, and existing Cloudflare/OKX WebSocket sessions. The operator's PowerShell `HTTP_PROXY`/`HTTPS_PROXY`, user/system proxy settings and inherited Git proxy configuration are never product configuration or a recovery dependency. Canonical Rust `reqwest` clients must disable automatic proxies; the sole native CONTROL owner must scrub per-command Git proxy settings without changing global/local workstation configuration. SSH Git origins are excluded from the canonical source proof to avoid implicit `ProxyCommand` paths. A failed direct transfer must fail closed with bounded diagnostics: **no proxy fallback, mirror, secondary installer, mutation transport or extra service**. Acceptance requires Windows direct-only signed Actions ZIP + origin/main Git proof under intentionally hostile ambient proxy settings, CI/tree/hash parity and one existing launcher-owned CONTROL/agent. Direct delivery was not yet physically accepted when this policy was adopted; a previous one-time proxied `once` terminated at Git provenance with no staged update.
+
+**The local assistant is exclusively a READ-ONLY evidence collector.** It may report current Windows PID/owner, executable path/version/hash, installed provenance, process and service status, redacted network/proxy environment **presence**, DNS/TLS/HTTP metadata, free disk, current events and logs. It shall **not** decide root causes or remedies, design/write/test/apply code or patches, commit, build, download or install artifacts, invoke deployment, switch profiles, start/stop/restart processes, change settings, tokens, DNS/proxy/firewall, mutate ledger/STOP, or submit exchange orders. Diagnostic observations are not installation or business approvals. The local witness cannot become a fallback operator when the remote control route fails.
+
+**Full remote lifecycle is an acceptance gate, not an assertion of existing access.** The current typed CONTROL protocol exposes `status`, `sync`, verified `deploy_agent`, controller stage/handoff/abort, launcher installation/upgrade, agent start/stop/restart, autostart/identity and diagnostics. However the exact DIRECT_ONLY ReleaseSet was successfully installed on 2026-10-16 through the native CONTROL owner, while safe source-fenced cross-account switching and independent recovery of a fully unavailable controller remain unproven. Current verdict: `WINDOWS_RELEASESET_ACCEPTED / STAGE5C-2_NOT_ACCEPTED`. Do not claim to run arbitrary local PowerShell from ChatGPT or silently instruct the user/local agent to execute an installer.
+
+**Closure requirement:** via approved existing remote owner chain alone, prove clean bootstrap, exact release install/reinstall/upgrade, matching A/B controller and launcher, single Job-owned agent, independent startup/status after reboot, reversible bounded recovery from interrupted download/partial install/controller crash, durable ledger/STOP preservation, coherent Demo/Production account isolation with single-use handoff, and primary MCP readback. Verify CI 6/6, exact tested=merged tree and installed binary hashes. If a physically unavailable controller cannot be recovered through the existing accepted launcher/CONTROL, record the precise `BLOCKED_REMOTE_CONTROL` gap and fix that owner natively; never invent a secondary installer or delegate remediation to the diagnostic witness. Production Live is separately disabled.
+
+## Stage 5C-2 next acceptance cursor — counterpart identity
+
+After physically accepting PR #345 (CI #1876, exact merged tree `4856c64386517f8c72aae791ee14a0e0650ff97d`), the one outstanding account-switch prerequisite is a freshly verified target UID. A native single-agent handoff readiness query now probes the existing Demo and Production ReadOnly observer credential slots via bounded authenticated REST. It returns only the distinct, fresh target UID fingerprint and source profile, never credentials and never a trading permit. The existing CONTROL `SelectReadOnlyAccount` still requires source and target UID and independently validates the destination PID/UID/WS/ReadOnly permission after one-use source drain. Missing/mismatched credentials fail closed *before* attempting any CONTROL mutation. Preserve production trading OFF, original ledger/STOP, and no second process, service, proxy, or MCP tool. Physical bidirectional account selection remains NOT_ACCEPTED until witnessed.
+
+## Stage 5C-2 next candidate — ReadOnly identity is not data readiness
+
+Keep source drain, fresh source REST/WS/OCO fence, PID/lease/release and
+ledger/STOP unchanged. A destination's strictly ReadOnly process may be
+committed after authenticated UID and disabled mutation authority are proven
+even if target WS or protective inventory is not ready. In that case data
+quality is DEGRADED; unknown OCO is null, never zero, and risk/admission stays
+denied. A later independent account observation must prove full data freshness.
+
+Native agent replies carry allowlisted fixed failure codes. CONTROL reports
+target process PID, phase, exact code and safe STOPPED/BLOCKED recovery
+without treating old retained logs as current process proof. Source and
+Production Live safety gates remain unchanged. CI alone does not close
+Stage 5C-2; physical two-way transition and recovery are required.
+
+## Stage 5C-2 safe return with retained Production legacy ledger
+
+Physical PR #347 acceptance confirmed Demo -> Production ReadOnly, exact UID,
+one Job-owned process and no Live trading. Production's separate v1 ledger has
+nine nonterminal historical intents; their economic status remains INCOMPLETE.
+Zero CURRENT exchange positions, orders and OCO were independently observed.
+
+For Production ReadOnly -> Demo ReadOnly, a historical-v1 exception is possible
+ONLY for a previously CONTROL-committed ReadOnly source (verified by desired.json
+under the exact source PID's pre-drain hold) and the same native agent running
+strictly ReadOnly with mutation authority disabled after drain. A full fresh,
+coherent and quiet REST/WS/OCO source and exact account UID/ledger digest remain
+mandatory. Only LEDGER_NOT_VERIFIED_V14 and NONTERMINAL_NATIVE_INTENT may be
+excluded from the outgoing nontrading safety proof. Other source blockers and
+wrong/corrupt/unknown native mutations are denied. The existing immutable v1
+ledger remains in place: no migration, zeroing, history relabel, trade permit,
+second process, alternate installer or new transport. Demo remains strictly
+ReadOnly after the return; original Demo v14 ledger/STOP unchanged.
+
+Physical bidirectional gate is pending exact CI 6/6, immutable Windows
+release and native CONTROL/read-only MCP evidence of the reverse transition.
+
+## Stage 5B-1 follow-on: bounded financial audit, NOT a new ledger
+
+Current immutable v14 run finalizations, archived proofs and unverified
+closures remain the only canonical historical financial source. The
+`okx.strategy-period-financial-audit/v1` projection in existing native
+`okx-execution` lists bounded, deduplicated ledger-local period proofs:
+`ARCHIVED_FINALIZATION`, `CURRENT_FINALIZATION` or
+`UNVERIFIED_SOURCE` (with no fabricated NAV, fees or realized PnL).
+It always explicitly marks `new_risk_authorized=false`. Exact archive
+proof checksums and source hashes are retained, but a validated historical
+finalization is not a new exchange read or current trading admission.
+Account-wide funding bills, unrelated bills and canceled intents outside
+the documented exchange lookback remain countable but UNALLOCATED; no
+unsupported time-based strategy or cross-cohort allocation is attempted.
+When records exceed the bounded view, total and `periods_truncated` make
+missing proof entries explicit. `account_summary(view=full)` includes
+this detailed native audit; the normal trader packet carries only its
+summary status/counts for context economy. Historical ledger/STOP remain
+immutable; no order, write, new transport/agent/daemon or proxy is needed.
+
+## Stage 5C: one compact read-only operator decision and measured transport
+
+The pre-existing `account_summary(view=trader)` (no new MCP tool or
+process) additionally returns `operator` with exact native
+`okx.operator-status/v1`: current exchange exposure/protection
+`OBSERVED_FLAT`, `EXPOSURE_OR_ORDERS_PRESENT`, or
+`UNKNOWN_OR_SOURCE_INCOMPLETE`; explicit financial audit status,
+a deterministic `next_safe_action`, and
+`trade_admission=NOT_AUTHORIZED_BY_OBSERVATION`. Partial WS/OCO,
+missing positions/orders or incoherent private snapshots never yield a
+false FLAT. Account identity UID is already in `account`. This agent
+cannot prove the installed release parity or Job/PID: it says
+`VERIFY_USING_NATIVE_CONTROL`, whose existing `status` owns that
+separate physical fact. Operators do not compute strategy numbers or
+risk permissions in ChatGPT; native Rust remains the only calculator.
+
+Eight sequential external MCP `view=trader` requests were measured
+on 2026-10-16 against live Demo ReadOnly: wall-clock p50 3641 ms,
+nearest-rank sample p95 3800 ms, min 3456/max 3800; JSON response
+envelopes 2495-2497 UTF-8 bytes, Rust native packet 2237-2239 bytes.
+Two full responses were 28208 bytes each; their two observed wall
+times were 3421/3972 ms (insufficient n for robust full-view p95).
+These measured figures are a **small sample**, not guaranteed SLA.
+The embedded source-read window is not end-to-end response latency.
+No measured exact ChatGPT token count or multi-hour reconnect p95 exists
+yet; do not equate bytes with tokens or claim a reconnect SLA.
+Acceptance performance targets, not guaranteed measurements: ordinary
+trader result under 4096 bytes and healthy p95 under five seconds on
+repeatable connected samples. Financial source was DEGRADED due
+bounded old history even though current private exposure is flat;
+the compact packet never re-labels it FRESH.
+
+## Stage 5C: GitHub Environment as sole credential source
+
+Named read-only account `account_id` deterministically maps to GitHub Environment `okx-<account_id>-global-observer`. The existing CONTROL catalog derives `observer_github_environment` for display; no second configurable source mapping or secret is stored. GitHub Environment holds `OKX_API_KEY`, `OKX_API_SECRET`, `OKX_API_PASSPHRASE`, plus variables `OKX_ACCOUNT_ID`, `OKX_REGION=global`, `OKX_DEMO=true|false`, `OKX_ACCESS_ROLE=observer`. The new `okx-named-account-readonly-attestation.yml` workflow (manual workflow_dispatch) validates strict account_id/UID syntax, binds the exact protected Environment and authenticates with OKX using its secrets, requires the expected UID fingerprint, ReadOnly and neither Trade nor Withdraw. Prints only a fixed PASS marker. Existing Succession acceptance and local Windows keyring remain unchanged.
+
+**This is independent GitHub-side credential identity proof, NOT Windows provisioning.** A PASS on GitHub cannot attest the locally installed key, cannot grant account selection or trading, and does not modify `identity=UNVERIFIED`, CONTROL lifecycle, v14 ledger or STOP. The following gate must use an accepted end-to-end encrypted delivery from the GitHub Environment into the existing Windows keyring and an independent native UID proof. Never send secrets through issue comments, MCP, logs or unencrypted artifacts.
+
+## Stage 5C: metadata-only catalog without additional control authority
+
+Named-account onboarding begins with one explicit nonsecret, bounded native
+CONTROL catalog `okx.account-catalog/v1` (maximum 32 entries), stored
+atomically under the existing `C:\\okx-control` configuration root.
+The one accepted GitHub CONTROL endpoint supports
+`account_catalog` (read-only) and `register_read_only_account`
+(metadata-only, exact `okx.account-catalog-entry/v1` account ID, display
+label (at most 48 UTF-8 bytes), Demo/Production environment and expected 64-hex UID fingerprint).
+All new entries are explicitly `UNVERIFIED`, `selectable=false` and
+`trading_authorized=false`: a supplied UID hash is merely an expectation,
+not a proven authenticated account. No API key, secret, passphrase, OCO or
+market data may appear in the catalog. Names cannot be paths, replace
+`production`/`demo_acceptance`, or collide with another UID. Exact
+duplicate registration is idempotent; conflicting identity fails closed.
+A corrupt catalog fails closed for registration, while status reports a
+safe typed diagnosis; it never stops or changes the running agent.
+
+This is actual remote **metadata management** for arbitrary future accounts,
+NOT functional named-account selection. Both legacy profiles, the sole
+`desired.json` lifecycle and PID/Job/ledger/STOP remain unchanged.
+The next independent gate is credential-keyring binding and authenticated
+read-only UID verification in the same Rust/CONTROL chain, then one
+bounded physical named-account switch. Do not suggest that a metadata
+entry is connected, or let registration grant Live.
+
+## Operator contract: one application, no Demo fork
+
+- Exactly **one installed `okx-agent.exe` binary** and **one Windows Job/CONTROL-owned running process** at any instant; `okx-host-control` and its launcher are existing lifecycle owners, not an alternate trading engine.
+- Exactly one `okx-execution::OrderExecutor` mutation authority, one durable ledger implementation, one observation/analysis/research source chain, one primary Cloudflare MCP transport. Demo is a test **account venue** for the same executor intended for Production, never a separate implementation, replica service, second transport or independent market-analysis pipeline.
+- Distinct `Demo` and `Production` roots, exchange credentials, authenticated UIDs, risk limits and financial journals are **required account-data isolation**. Do not merge or copy Demo fills/fees/NAV/STOP into Production; a separate directory is not a separate architecture.
+- The **single public market/reference/research feed always uses Production-public REST/WS**, regardless of the chosen private account venue. No Demo-public price or market feed as fallback. Account-specific private REST/WS remains bound to the chosen UID/environment.
+- UI presents two **independent dimensions**, not named agents: `account = Demo | Production` and `admission = ReadOnly | Trading`. Demo+Trading uses explicitly authorized test mutations through the same executor; Production+ReadOnly uses authenticated observations only. Production+Trading is **NOT IMPLEMENTED/NOT ACCEPTED** for live operation, must remain disabled until an independently authorized Live acceptance gate with approved strategy/mandate/credentials/risk. Switching the account never grants trade authority.
+- Operational commands are native and compact: `status`, `select_account(account, admission)` as one logical, fenced CONTROL action, `stop`, `start`, `diagnose`. Do not introduce a general shell RPC, second control backend, new Windows service, parallel Demo launcher, or new scheduled polling daemon. A proposed UI mockup is not an implemented control.
+
+## Owners and hard state boundaries
+
+`ChatGPT -> Cloudflare MCP (primary typed data/allowed Demo actions) -> one Windows agent/executor -> OKX`. GitHub encrypted CONTROL mailbox #12 is only the pre-existing authenticated lifecycle/deployment channel; GitHub DATA is read-only parity/diagnosis, not a fallback for denied trading requests.
+
+`okx-host-control` owns desired profile, process/PID/Job lease, artifact installation, controller A/B activation and single-flight handoff. `okx-agent` owns account UID, source generation/freshness, complete positions, ordinary and SWAP/FUTURES conditional/trigger/OCO order inventory, immutable managed intents, native exchange evidence and ledger hash/STOP. CONTROL **may consume** a narrowly scoped source attestation; CONTROL must not infer FLAT from a killed process, log tail, time gap, a read-only GitHub message or a missing historical order in a bounded API window.
+
+Ledger states such as `PREPARED`, `SUBMITTING`, `UNKNOWN`, unresolved durable orders, unverified source coverage and active exposure fail closed. The three historically unmatched managed intentions surfaced by merged #339 are **not** terminal by mere absence from the current OKX history window; no manual state rewrite, fictitious fill, lost-ACK POST replay, deletion or silent reset is allowed. Daily loss STOP remains durable even across binary upgrade/account toggle.
+
+## Current single-operator ReadOnly switch implementation (2026-10-16)
+
+**Source-level path in existing CONTROL:** `SelectReadOnlyAccount` accepts a target profile and *both exact known account UID fingerprints*. It does NOT enable live trade. The single existing executor drains its mutation ingress; the same Job-owned agent returns its fresh REST/WS/OCO/ledger source proof. CONTROL binds this to the actual owned PID, per-launch random lease, verified binary hash/source tree and controller ReleaseSet. It then commits `SOURCE_FROZEN -> CONSUMED` in the sole `desired.json`, terminates the old Job-owned PID, confirms the Windows Job is empty (including descendants) and records `SOURCE_EXITED`.
+
+The same installed agent binary then launches as the target **ReadOnly** profile. For Demo target, the temporary launch omits `--demo-mutation-acceptance`, preserving the same engine/root/ledger with mutation admission OFF. Through the same inherited native stdio link, the new agent independently attests strict OKX read-only observer credentials, execution mode ReadOnly (or no executor credentials at all), disabled mutation authority, fresh REST account UID, unchanged private-WS cursor and complete observed ordinary positions/orders/native-OCO inventory. The **outgoing mutation-owning source must be FLAT**; the **destination ReadOnly may already have independent positions or orders**, which must be faithfully reported, not silently declared absent and not treated as permission to trade. CONTROL verifies the response and live target PID/ReleaseSet before atomically committing target identity in `desired.json`. If the target cannot be proven and the owned Job is empty after termination, the transition returns to **STOPPED on source profile**; otherwise it remains BLOCKED and does not risk restarting another execution owner.
+
+**Crash gate before drain:** CONTROL first writes an optional `DRAIN_REQUESTED` hold to the SAME atomic `desired.json` before contacting the source. This prevents the controller from automatically rearming an account-authorized Demo agent if the original drain acknowledgement is lost or CONTROL crashes. No second file, service or engine exists. On a matching PID/source, the already-owned anonymous pipe may deliver exactly the pending drain response; a successfully authenticated source proof atomically replaces the hold with `SOURCE_FROZEN`. After an uncertain acknowledgement or crash the application remains fail-closed until an explicit, verified stopped recovery, never silently restarting risk.
+
+**Explicit recovery:** `RecoverReadOnlySelection` is allowed during a pending transition but only if the current CONTROL confirms no running owned agent and an empty Windows Job. It saves STOPPED on the original account and **never** resets durable strategy STOP or retries any uncertain exchange POST. No timer or background recovery daemon.
+
+**Acceptance still outstanding:** exact CI 6/6 for THIS changed tree, merge and accepted immutable Windows ReleaseSet, actual source/target local PID and UID snapshots, negative physical cases (missing credentials, old REST, active OCO, ACK loss, controller crash), physical Demo → Production ReadOnly → Demo. None of these operations has been executed on the installed machine by this draft. Production Live stays OFF; existing historical CANCELED accounting gaps remain INCOMPLETE. Do not label Stage 5C-2 PASS until the physical round trip and recovery evidence are recorded.
+
+## Current code boundary — typed source and crash-safe finalization (2026-10-16)
+
+The draft source proof is now typed as `okx.native-drained-source/v1`, not an arbitrary JSON verdict: source account UID fingerprint, exact authenticated REST **receipt** timestamp and bounded age, private-WS generation, zero ordinary positions/orders/native OCO, and exact on-disk ledger SHA-256 are all required and independently rechecked by CONTROL. The parent also binds the received proof to the **same actual Job-owned PID**, a per-launch random lease known only locally, the installed agent SHA/source tree and matching controller ReleaseSet; a dropped PID, stale receipt or mismatched release fails closed. Neither candidate nor lease is a trading token.
+
+The sole `desired.json` v3 transition can now persist `SOURCE_FROZEN -> CONSUMED -> SOURCE_EXITED`, then atomically either (a) commit a separately verified destination account **ReadOnly** identity with trade authority explicitly disabled, or (b) recover to **STOPPED on the original profile**, never Production by default. Duplicate consumption, reordered phases, wrong source PID/UID/WS/ledger/release, target UID, target process or stale destination evidence are rejected. Restart with any incomplete phase exposes `BLOCKED`, not automatic reassignment.
+
+**Still NOT IMPLEMENTED/NOT ACCEPTED:** the internal native CONTROL method is not wired to an operator mutation command; physical source Job exit, destination launch and independent target-identity readback are not yet orchestrated. The durable transitions are testable primitives, not permission to skip an actual OS/process proof. The Controller must not install or activate the draft until the complete round-trip and crash recovery are accepted. Production Live remains OFF; old canceled historical intents remain financially INCOMPLETE.
+
+## Accepted lifecycle simplification — 2026-10-16
+
+**One native lifecycle owner and ONE durable state file.** Replace the pre-merge separate `profile-transition.json` draft with an optional transition field in existing `C:\\okx-control\\desired.json` v3 (backward-readable v1/v2, atomically written through the existing native CONTROL store). Keep ordinary `RUNNING/STOPPED` desired state; show `SWITCHING` and `BLOCKED` only during an actual transition. No second journal, daemon, proxy or standalone "freeze engine". The original draft journal was never deployed, so no production file migration is needed. The same native control Job remains exclusive process owner.
+
+**One eventual typed operation:** `select_account(account, access=ReadOnly)` using the current encrypted CONTROL owner. Internally: after an independent fresh/live-source and exact-ledger check, the EXISTING single executor serializes a `DRAIN` that rejects new and completes in-flight mutations; CONTROL receives source-bound proof by a local parent-child channel (prefer the existing safe one if available, otherwise a Windows anonymous pipe with no listening port), atomically commits a one-time transitional state in `desired.json`, confirms exact source process termination, launches exactly one target process in ReadOnly, verifies UID/account/root/WS/release/ledger independently and finalizes the same state. Both directions follow the same contract. Recovery after crash or malformed state remains fail-closed: only read-only status and explicit safe recovery; never replay a POST or delete ledger/STOP. The `RUNNING/SWITCHING/BLOCKED` labels are operator projections, not a license to skip durable substep evidence.
+
+**Implementation boundary:** the durable owner is unified. An in-process `MutationIngress` RW lock now guards each mutating agent request from admission through exchange POST and final ledger result; the internal bounded `drain_mutation_ingress` takes its exclusive lock and disables order mutation before returning a native ledger assessment. Read-only `execution_status` and preflight remain available; a timeout does NOT cancel an order or authorize switch. A bounded single-shot local inherited stdin/stderr pipe now connects the exact Job-owned source agent and CONTROL for a transport-only drain acknowledgment; stderr is relayed to the same native diagnostic log, stdout remains unchanged. The native one-shot drain is followed by the SAME existing read-only ProfileHandoffReadiness REST/WS/OCO/UID source query as primary MCP, bounded to eight seconds. A compact DRAINED_SOURCE_CANDIDATE is returned only when the live current-source predicates and the unchanged native ledger manifest match. Missing current or archived evidence, a failed drain or a changed UID are BLOCKED, not a switch authority. The source candidate is not a CONTROL one-use PID/release/launch-lease witness, and switching remains prohibited. The local pipe cannot be invoked by a remote CONTROL command yet. Full fresh REST/WS/OCO source attestation, account-switch and recovery remain NOT_ACCEPTED. Stage 5C-2 and Production Live remain NOT_ACCEPTED.
+
+## Accepted operator decision — 2026-10-16: ReadOnly is not trading admission
+
+**Scope approved by operator:** the application remains ONE native trading/analytical engine and ONE CONTROL ownership chain, with no Demo fork, proxy/fallback or new daemon. Stage 5C-2 is implemented inside existing draft PR #345 and canonical issue #160, not another preparation stage.
+
+**Separate independent predicates, without relabeling historical evidence:**
+
+- **Current source safety for *ReadOnly* profile change:** fresh authenticated REST receipt; matching account UID, single Job-owned source PID/release identity and private WS generation; zero independently observed positions, ordinary orders and complete native conditional/OCO; complete current bounded inventories and a quiet source-event fence; no nonterminal/UNKNOWN native intents or pending protective/mutation lifecycle; verified ledger v14 manifest and exact current identities. Source is MUTATION-FROZEN inside the same executor **before** CONTROL can persist/consume one witness.
+- **Historical financial completeness:** exact archived fills/bills/fees/funding/TCA and independently verified historical order status remain a **separate financial-audit gate**. If old canceled order IDs have aged out, the read-only observer may classify them as a *terminal-identity exception* only when all managed entries are known terminal, each exception is exactly `CANCELED` with nonempty recorded numeric order ID, the exhaustive exception count matches an untruncated ledger list, and all current source-risk predicates independently PASS. Never upgrade these orders to `VERIFIED`, invent zero fills, modify financial results or clear durable STOP. Any `FILLED`/nonterminal/UNKNOWN/missing-order-ID/truncated exceptions remain blocking even for ReadOnly.
+- **ReadOnly handoff vs authorization:** `read_only_source_assessment.preconditions_pass=true` is ONLY an observation candidate. It never authorizes CONTROL, and cannot enable new-risk trading. CONTROL must independently verify an authenticated, bounded lifetime, full PID/lease/UID/WS/ledger/release-bound freeze proof; durably consume it once; prove prior Job/PID exit; launch one target ReadOnly agent; independently validate target UID, credential access rights, root, live private source and ledger. For any uncertain result STOP rather than replay, preserve original ledger/STOP and offer only read-only status/diagnostics until explicit safe recovery.
+- **Production Live gate:** separate and OFF. Trader `NO_GO` remains unaffected by a successful ReadOnly account selection; funding not attributable to strategy remains `INCOMPLETE`, not silently normalized.
+
+**Acceptance requires** finished native freeze/CONTROL state machine, negative/race tests for crash/replay/other UID/live OCO, CI 6/6 on exact tree, one accepted Windows release install, physical Demo -> Production ReadOnly -> Demo round trip, source/target identities and unmodified financial journals, and compact measured operator latency/payload diagnostics. Until then **Stage 5C-2 = NOT_ACCEPTED** and switching is denied.
+
+## Required one-time safe account switch (5C-2; NOT YET IMPLEMENTED)
+
+1. On original **single agent**, fence new risk/mutation admission. Produce one bounded source-authenticated **freeze attestation** containing original profile/UID, process instance + controller lease, private WS generation, timestamp/max age, complete venue positions + ordinary + all conditional/OCO scopes, immutable ledger and manifest SHA/checksum, STOP, full unresolved intent and historical coverage verdict, and the requested destination.
+2. All nonterminal, `UNKNOWN`, unproven historical, active protection or incompletely enumerated orders **block before the original owner stops**. Do not confuse current zero positions/orders with proved historical reconciliation.
+3. CONTROL atomically persists a crash-recoverable **single-use fence in existing desired.json v3** bound to the precise source agent PID/instance/UID/generation, target profile and verified installed controller/agent ReleaseSet; it consumes the attestation **exactly once** before changing persisted desired profile or spawning the destination. Stale, mismatched, replaced or replayed proof must fail.
+4. Stop the original owned process, verify its sole Job/PID exit, then launch **the same binary** with destination-specific root/credentials, preserving strong account-data isolation. Before declaring READY, independently verify destination environment, expected authenticated UID, read-only permissions, owned PID, Cloudflare generation, correct market source and ledger state. On uncertain startup/controller crash, never start a second owner or silently fall back to the other account; recover explicitly from durable transition state.
+5. The return Production ReadOnly -> Demo obeys identical fencing. Production Trading is never enabled by this handoff.
+
+**Negative/race tests:** original position, live OCO, pending ordinary/algo, prepared/submitting/unknown, three unmatched historical intents, stale/gapped WS, incomplete OKX pagination, wrong UID, malformed proof, changed source generation, agent exit, controller crash, duplicated operation, changed binary/release tree, failed destination boot; verify zero unsafe profile changes/POSTs. Exact CI/source-tree=merged-tree and native physical acceptance are required. Acceptance outcome must be PASS or explicit NOT_ACCEPTED/BLOCKED, not "ready" on tests only.
+
+## Verified operational cursor — 2026-10-16
+
+- **PR #344 is installed, not merely merged:** CI `38825672144` six-job PASS, exact artifact `12014969264`, tested/merged tree `2fd6326a72746fe802d2aa15289d5cce51377436`; verified launcher/controller/agent hashes from the same ReleaseSet; native handoff COMMITTED, current MCP PASS/FRESH and ledger v14 cold read + STOP preserved. [Physical proof in #160](https://github.com/iamaman11/okx/issues/160#issuecomment-6205325165).
+- **5C-2 ongoing boundary:** [draft PR #345](https://github.com/iamaman11/okx/pull/345) adds source/summary freshness separation and a durable CONTROL-owned one-time transition field in desired.json v3, plus a read-only source-only exception classification for exact legacy CANCELED order identities. There is **no authenticated agent mutation-freeze witness minting or operational CONTROL switch**; current handoff admission still DENIED. Three old canceled intents remain historically INCOMPLETE; two have exact zero-fill TCA, one has missing lineage. No financing proof is promoted and Production Live OFF.
+
+**Historical 2026-10-15 notes below were superseded by the accepted 2026-10-16 physical deployment; do not interpret them as current blockers.**
+
+- [PR #339](https://github.com/iamaman11/okx/pull/339) **MERGED**, source commit `850f30857495cdbd5cc2ff229d91fcb8efa4af75`, exact CI **6/6 PASS**, CI run `38769626317`, Windows ZIP artifact `11990618271`, tested/merged source-tree `8ed6da7da565e99ffa6290c6b40c001011489869`.
+- Merged code adds read-only CONTROL/controller↔agent exact release parity, explicit historical unmatched intent details and compact handoff diagnostics. This is **NOT** a freeze/consume handoff token; `handoff_admission` remains `DENIED_NO_CONTROL_BOUND_ONE_TIME_FENCE`.
+- The deployed Windows binary is **older** (installed agent tree `d1576b17e6f6a940218f1195225b73f22a72dc84`). Last independently accepted CONTROL preflight: `READY_RUNNING`, one owned PID `24064`, profile `demo_acceptance`, installed SHA matching provenance. Operator workstation checkout `C:\okx` is **dirty**; never forcibly reset it or build/install from that checkout.
+- Attempts to deploy the verified #339 release via existing CONTROL fail `GITHUB_ERROR`: `GitHub HTTP transport error: error decoding response body`. The same artifact is downloadable through an external GitHub connector, proving artifact existence, **not** proving CONTROL's exact failed HTTP stage. A prior failure was followed by an independent unchanged binary/profile check; do **not** infer that future failures are non-mutating without another status. No alternate ZIP sideload, second installer, out-of-band secret path or binary override is authorized.
+- Financial v14 `VALIDATED_COLD_READ` with five verified sealed archive bodies and persistent `STRATEGY_UTC_DAILY_GROSS_LOSS` STOP was observed through primary MCP. This is **not** proof of an account handoff, live permission, or fully reconciled three historical intents. Live exchange mutations = DISABLED.
+
+## Single next functional acceptance batch, without additional stages
+
+**A. Native GitHub release transport diagnosis and repair.** Identify whether the installed `okx-github::GitHubClient::workflow_run`, `workflow_artifact`, or ZIP read fails, with bounded structured diagnostics per phase (HTTP status, content type/encoding, length, received bytes, request id, JSON parse category, no credentials/tokens). Check actual GitHub workflow/metadata/artifact response shape and compression/redirect handling rather than guessing. Existing Rust client and CONTROL only. A test must reproduce the exact failure or document unknown root cause; add negative decode/EOF/redirect/size/hash tests. No recovery by using a second network transport or manually downloaded archive.
+
+**B. Verified one-ReleaseSet installation.** CI 6/6, exact source-tree equality, signed/provenance-protected artifact hashes, no mutable local build, one install through native CONTROL, and A/B CONTROL activation of matching controller from same ReleaseSet. Verify launcher/controller/agent parity, single PID/Job and intact financial journals. Correct installation bugs at the existing owner and accept the result only after physical Windows status and primary MCP readback.
+
+**C. Native single-use account handoff.** Implement the freeze/consume invariant above inside the existing executor/CONTROL. Full negative/race suite before any real switch. Never weaken the guard to resolve historical intents.
+
+**D. Physical bounded round trip (only after A–C).** Source-authenticated reconciled FLAT Demo -> Production **ReadOnly** -> Demo on the same sole binary/PID owner chain; verify separate UIDs/roots/credentials/ledgers, primary Cloudflare runtime, unchanged STOP/archive, no trade POSTs and crash recovery. If historical source evidence remains incomplete, report BLOCKED; do not relabel incomplete as safe.
+
+**E. Operator metrics.** One compact status/decision packet exposes environment, access rights, current UID fingerprint, release parity, source freshness, STOP, unresolved/UNKNOWN counts, next safe action, payload bytes and p50/p95 transport timings from actual samples. No second MCP tool or dashboard daemon. Stage 5C-2 = NOT_ACCEPTED until physical acceptance; source CI alone is insufficient.
+
+**Anti-loop:** one owner, one diagnostic root cause, one coherent functional correction and physical verification. Following two bounded identical failures, diagnose locally at the failing owner rather than resubmit opaque operations or introduce a fallback.

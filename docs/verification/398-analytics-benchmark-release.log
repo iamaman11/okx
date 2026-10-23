@@ -1,0 +1,13 @@
+   Compiling futures-util v0.3.34
+   Compiling tower v0.5.3
+   Compiling hyper-util v0.1.21
+   Compiling tower-http v0.6.11
+   Compiling hyper-rustls v0.27.10
+   Compiling reqwest v0.12.28
+   Compiling okx-api v0.1.0 (C:\Users\Bose\temp\okx-398\crates\okx-api)
+   Compiling okx-observation v0.1.0 (C:\Users\Bose\temp\okx-398\crates\okx-observation)
+   Compiling okx-analysis v0.1.0 (C:\Users\Bose\temp\okx-398\crates\okx-analysis)
+   Compiling okx-research v0.1.0 (C:\Users\Bose\temp\okx-398\crates\okx-research)
+    Finished `release` profile [optimized] target(s) in 55.67s
+     Running `target\release\examples\analytics_bench.exe`
+{"arch":"x86_64","build":"release","cpu":"Intel64 Family 6 Model 60 Stepping 3, GenuineIntel","ema_90d_15m":{"bars":8640,"max_ms":50.465500000000006,"measurements":30,"p50_ms":27.0703,"p95_ms":35.9249,"result_hash":"sha256:9d3b598bda65c6b3619ec5fc4eed7ef7bc4b126094d72cdb5d9331fe01251d08","summary_bytes":395,"warmups":5},"fixture_hash":"sha256:d3d20eaee154a27a8a031f7bd4b1d31d3a4b4d54d686d2593befdefb58a5893b","grid_100variants_100k":{"bars":100000,"bars_per_second":1410083.262878523,"incremental_peak_bytes":7901184,"peak_working_set_bytes":14622720,"result_hash":"sha256:0f72725d37b9ad7968cc225e8f9b3a8a1039a64c4c5bca22a57605c65c56352d","runtime_seconds":7.0917798,"variants":100},"logical_cpus":8,"platform":"windows"}
