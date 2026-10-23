@@ -235,7 +235,10 @@ pub enum AgentOperation {
         request: analytics::MarketRequest,
     },
     MarketCapabilities,
-    MarketMicrostructure { instrument: String, size_contracts: Option<String> },
+    MarketMicrostructure {
+        instrument: String,
+        size_contracts: Option<String>,
+    },
     Research {
         request: analytics::ResearchRequest,
     },
@@ -312,7 +315,16 @@ impl AgentOperation {
             }
             Self::Market { request } => request.valid(),
             Self::MarketCapabilities => true,
-            Self::MarketMicrostructure {instrument,size_contracts} => validate_instrument(instrument).is_ok() && size_contracts.as_ref().is_none_or(|v|v.parse::<f64>().is_ok_and(|n|n.is_finite()&&n>0.0&&n<=1_000_000.0)),
+            Self::MarketMicrostructure {
+                instrument,
+                size_contracts,
+            } => {
+                validate_instrument(instrument).is_ok()
+                    && size_contracts.as_ref().is_none_or(|v| {
+                        v.parse::<f64>()
+                            .is_ok_and(|n| n.is_finite() && n > 0.0 && n <= 1_000_000.0)
+                    })
+            }
             Self::Research { request } => request.valid(),
             Self::Trade { request } => request.valid(),
             Self::Strategies { request } => request.valid(),
