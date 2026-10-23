@@ -541,38 +541,11 @@
             "type": "object",
             "properties": {
               "action": {
-                "const": "start"
-              },
-              "account": {
                 "type": "string",
-                "minLength": 1,
-                "maxLength": 128
-              },
-              "idempotency_key": {
-                "type": "string",
-                "minLength": 8,
-                "maxLength": 128,
-                "pattern": "^[A-Za-z0-9_-]+$"
-              },
-              "instance_id": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": 64
-              }
-            },
-            "required": [
-              "action",
-              "account",
-              "idempotency_key",
-              "instance_id"
-            ],
-            "additionalProperties": false
-          },
-          {
-            "type": "object",
-            "properties": {
-              "action": {
-                "const": "stop"
+                "enum": [
+                  "start",
+                  "stop"
+                ]
               },
               "account": {
                 "type": "string",
