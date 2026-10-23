@@ -19,7 +19,7 @@ impl TradeService {
         supplied: Option<&CentralGovernanceSnapshot>,
         bound_hash: Option<String>,
     ) -> Result<Value, String> {
-        self.execute_inner(r, request, supplied, bound_hash, None, None, None)
+        self.execute_inner(r, request, supplied, bound_hash, None, None)
             .await
     }
     pub(super) async fn execute_for_definition(
@@ -37,8 +37,7 @@ impl TradeService {
             supplied,
             None,
             Some(version),
-            Some(decision_digest),
-            Some(claimed_decision_id),
+            Some((decision_digest, claimed_decision_id)),
         )
         .await
     }
@@ -49,8 +48,7 @@ impl TradeService {
         supplied: Option<&CentralGovernanceSnapshot>,
         bound_hash: Option<String>,
         expected_definition: Option<String>,
-        claimed_input_digest: Option<String>,
-        claimed_decision_id: Option<String>,
+        claimed_decision: Option<(String, String)>,
     ) -> Result<Value, String> {
         let TradeRequest::Execute {
             idempotency_key,
@@ -139,15 +137,14 @@ impl TradeService {
         let id = format!("intent_{}", &body_hash[..32]);
         let client_id = body_hash[..32].to_owned();
         let decision = Decision {
-            decision_id: if claimed_input_digest.is_some() {
-                claimed_decision_id.ok_or("STRATEGY_CLAIM_ID_MISSING")?
-            } else {
-                format!("decision_{}", &body_hash[..32])
-            },
+            decision_id: claimed_decision
+                .as_ref()
+                .map(|(_, id)| id.clone())
+                .unwrap_or_else(|| format!("decision_{}", &body_hash[..32])),
             instance_id: Some(strategy_instance.clone()),
             decision_at: now(),
-            input_digest: match claimed_input_digest {
-                Some(digest) => digest,
+            input_digest: match claimed_decision {
+                Some((digest, _)) => digest,
                 None => digest(&(body_hash.clone(), &plan))?,
             },
             policy_revision: state.state.revision as i64,
