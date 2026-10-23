@@ -326,7 +326,7 @@ pub struct RiskBudgetSnapshot {
 }
 impl RiskBudgetSnapshot {
     pub fn valid(&self) -> bool {
-        self.campaign_limit_usd == "20"
+        positive(&self.campaign_limit_usd)
             && [
                 &self.consumed_loss_usd,
                 &self.reserved_loss_usd,

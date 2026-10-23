@@ -12,4 +12,8 @@ if((await defaultHandler.fetch(req('Bearer fixture_secret'),env)).status!==200)t
 if((await defaultHandler.fetch(req('Bearer fixture_secret'),env)).status!==200)throw Error('lost init response exact retry');
 if((await defaultHandler.fetch(req('Bearer fixture_secret',{...body,release_sha256:'b'.repeat(64)}),env)).status!==409)throw Error('init same key changed body conflict');
 if(!storage.map.has('risk_meta_v2')||!storage.map.has('installation_release_v1'))throw Error('initialization not atomic');
+const lower=new Request('https://fixture/account-governance/campaign-limit',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({expected_revision:0,campaign_loss_limit_usd:'8',idempotency_key:'lower_campaign_01'})});
+if((await defaultHandler.fetch(lower,env)).status!==401)throw Error('campaign reduction must authenticate owner');
+const lowerAuthorized=new Request('https://fixture/account-governance/campaign-limit',{method:'POST',headers:{authorization:'Bearer fixture_secret','content-type':'application/json'},body:JSON.stringify({expected_revision:0,campaign_loss_limit_usd:'8',idempotency_key:'lower_campaign_01'})});
+if((await defaultHandler.fetch(lowerAuthorized,env)).status!==200)throw Error('owner lowers campaign without resetting installation');
 console.log('owner_install_init_auth_body_bound PASS');

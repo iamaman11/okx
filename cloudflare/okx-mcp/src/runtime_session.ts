@@ -1,5 +1,5 @@
 import { executionProfilePermitsOperation, isExecutionMutation } from "./execution_tools.js";
-import { initializeGovernance, setAccountLimits, governanceRequest, enrollObservedAccount, stopNewRealRisk, setAccountPause, GOVERNANCE_STORAGE_KEY } from "./account_governance_store.js";
+import { initializeGovernance, setAccountLimits, governanceRequest, lowerCampaignLimit, enrollObservedAccount, stopNewRealRisk, setAccountPause, GOVERNANCE_STORAGE_KEY } from "./account_governance_store.js";
 import {validGovernance,accessEnabled,validLimits} from "./account_governance.js";
 import { handleNativeRiskCommand } from "./risk_authority.js";
 import {
@@ -37,10 +37,14 @@ export class RuntimeSession {
 
     if(url.pathname==="/installation/initialize"&&request.method==="POST"){
       let raw:any;try{raw=await request.json();}catch{return Response.json({reason:"INVALID_INSTALLATION"},{status:400});}
-      if(raw?.contract!==FRAME_SCHEMA||typeof raw.release_sha256!=="string"||!/^[0-9a-f]{64}$/.test(raw.release_sha256)||typeof raw.operation_id!=="string"||!/^[A-Za-z0-9_-]{8,128}$/.test(raw.operation_id)||raw.configuration?.campaign_loss_limit_usd!=="20")return Response.json({reason:"INVALID_INSTALLATION"},{status:400});
+      if(raw?.contract!==FRAME_SCHEMA||typeof raw.release_sha256!=="string"||!/^[0-9a-f]{64}$/.test(raw.release_sha256)||typeof raw.operation_id!=="string"||!/^[A-Za-z0-9_-]{8,128}$/.test(raw.operation_id)||raw.configuration?.campaign_loss_limit_usd!=="10")return Response.json({reason:"INVALID_INSTALLATION"},{status:400});
       const result=await initializeGovernance(this.state.storage,raw.configuration,{operation_id:raw.operation_id,release_sha256:raw.release_sha256,contract:raw.contract});
       if(result.status===200)await this.publishPolicy();
       return Response.json(result.body,{status:result.status});
+    }
+    if(url.pathname==="/account-governance/campaign-limit"&&request.method==="POST"){
+      let raw:unknown;try{raw=await request.json();}catch{return Response.json({reason:"INVALID_REQUEST"},{status:400});}
+      const result=await lowerCampaignLimit(this.state.storage,raw);if(result.status===200)await this.publishPolicy();return Response.json(result.body,{status:result.status,headers:{"cache-control":"no-store"}});
     }
     if(url.pathname==="/account-governance/limits"&&request.method==="POST"){
       let raw:unknown;try{raw=await request.json();}catch{return Response.json({reason:"INVALID_REQUEST"},{status:400});}

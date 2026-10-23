@@ -1,6 +1,6 @@
 import {GOVERNANCE_STORAGE_KEY,validGovernance,validLimits,accessEnabled,
   reviseGovernance,type GovernanceUpdate,type Governance,type Account,type Limits} from "./account_governance.js";
-import {initializeRiskBook} from "./risk_book.js";
+import {initializeRiskBook,lowerRiskBookLimit,units} from "./risk_book.js";
 export {GOVERNANCE_STORAGE_KEY} from "./account_governance.js";
 
 type Reply={status:number;body:Record<string,unknown>};
@@ -86,6 +86,24 @@ export async function governanceRequest(storage:any,method:string,raw?:unknown):
     const revised=reviseGovernance(policy,raw as unknown as GovernanceUpdate);
     return revised?{status:200,body:{...result(revised),configuration:revised}}:fail(409,"ACCESS_REVISION_OR_LIMITS_REJECTED");
   });
+}
+/** Owner-only, body-bound, monotonic campaign reduction. It never resets risk. */
+export async function lowerCampaignLimit(storage:any,raw:unknown):Promise<Reply>{
+ if(!record(raw)||Object.keys(raw).sort().join(",")!=="campaign_loss_limit_usd,expected_revision,idempotency_key"||typeof raw.campaign_loss_limit_usd!=="string"||!Number.isSafeInteger(raw.expected_revision)||!operationKey(raw.idempotency_key))return fail(400,"INVALID_CAMPAIGN_LIMIT_REQUEST");
+ const requestedLimit=raw.campaign_loss_limit_usd as string;
+ const requested=units(requestedLimit);if(requested===null||requested<=0n)return fail(400,"INVALID_CAMPAIGN_LIMIT_REQUEST");
+ const hash=await digest(raw),receiptKey="campaign_limit_operation:"+raw.idempotency_key;
+ return storage.transaction(async(tx:any)=>{
+   const receipt=await tx.get(receiptKey);if(receipt!==undefined)return receipt.hash===hash?receipt.reply:fail(409,"IDEMPOTENCY_CONFLICT");
+   const previous:unknown=await tx.get(GOVERNANCE_STORAGE_KEY);
+   if(!validGovernance(previous))return fail(503,"INSTALLATION_ACCESS_MISSING_OR_CORRUPT");
+   if(previous.revision!==raw.expected_revision)return fail(409,"STALE_ACCESS_REVISION");
+   if(requested>=units(previous.campaign_loss_limit_usd)!)return fail(409,"CAMPAIGN_LIMIT_MUST_STRICTLY_DECREASE");
+   const next:Governance={...previous,revision:previous.revision+1,campaign_loss_limit_usd:requestedLimit};
+   if(!validGovernance(next)||!await lowerRiskBookLimit(tx,requestedLimit))return fail(409,"CAMPAIGN_LIMIT_BELOW_CONSUMED_OR_RESERVED_RISK");
+   const reply={status:200,body:{...result(next),campaign_limit_change:{previous_usd:previous.campaign_loss_limit_usd,current_usd:requestedLimit}}};
+   await tx.put(GOVERNANCE_STORAGE_KEY,next);await tx.put(receiptKey,{hash,reply});return reply;
+ });
 }
 /** Verified identity is supplied by authenticated native receipt, never public UID input.
  * The same connect persists the requested limits and access; other accounts are untouched.

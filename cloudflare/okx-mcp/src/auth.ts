@@ -123,7 +123,7 @@ export const defaultHandler = {
       });
     }
 
-    if(url.pathname==="/installation/initialize"&&request.method==="POST"){
+    if((url.pathname==="/installation/initialize"||url.pathname==="/account-governance/campaign-limit")&&request.method==="POST"){
       const supplied=request.headers.get("authorization");
       if(!supplied?.startsWith("Bearer ")||!sameHex(await sha256Hex(supplied.slice(7)),await sha256Hex(env.MCP_OWNER_SECRET)))return new Response("unauthorized",{status:401});
       const stub=await runtimeStub(env);return stub.fetch(request);
