@@ -101,19 +101,7 @@ impl AccountStore {
                 [format!("strategy-no-trade:{id}")],
                 |r| r.get(0),
             )?;
-            if has_intent || terminal {
-                return Ok(false);
-            }
-            // A planning defer left only a pending decision, not an external
-            // effect. Refresh its policy snapshot so a later central policy
-            // revision cannot strand this bar. Terminal/bound rows above are
-            // immutable and never rearmed.
-            tx.execute(
-                "UPDATE decisions SET policy_revision=?2 WHERE decision_id=?1",
-                params![id, policy_revision],
-            )?;
-            tx.commit()?;
-            return Ok(true);
+            return Ok(!has_intent && !terminal);
         }
         let enabled: bool = tx.query_row(
             "SELECT enabled FROM strategy_instances WHERE instance_id=?1",

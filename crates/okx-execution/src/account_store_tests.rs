@@ -1455,18 +1455,9 @@ fn strategy_crash_pending_decision_to_intent() {
     drop(s);
     let mut s = AccountStore::open_existing(p, &meta.account_key, &meta.installation_id).unwrap();
     assert!(
-        s.claim_strategy_decision("a", "bar-next", "inputs-next", 2, 8)
+        s.claim_strategy_decision("a", "bar-next", "inputs-next", 1, 8)
             .unwrap()
     );
-    let pending_revision: i64 = s
-        .connection
-        .query_row(
-            "SELECT policy_revision FROM decisions WHERE decision_id=?1",
-            [format!("strategy:a:{}:bar-next", version.version)],
-            |r| r.get(0),
-        )
-        .unwrap();
-    assert_eq!(pending_revision, 2);
     assert!(
         s.instances()
             .unwrap()
@@ -1500,7 +1491,7 @@ fn strategy_crash_pending_decision_to_intent() {
         instance_id: Some("a".into()),
         decision_at: 9,
         input_digest: "inputs-next".into(),
-        policy_revision: 2,
+        policy_revision: 1,
         code_version: "strategy-bar/v1".into(),
     };
     let intent = NewIntent {
@@ -1511,7 +1502,7 @@ fn strategy_crash_pending_decision_to_intent() {
         client_order_id: "f07-client".into(),
         deadline: 1000,
         plan_hash: "f07-plan".into(),
-        policy_revision: 2,
+        policy_revision: 1,
         risk_increase: true,
         instrument_id: "BTC".into(),
     };
