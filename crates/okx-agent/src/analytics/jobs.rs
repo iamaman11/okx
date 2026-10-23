@@ -445,6 +445,31 @@ mod tests {
         );
     }
     #[test]
+    fn new_catalog_starts_without_old_json() {
+        let p=path("strict");
+        let obsolete=p.with_extension("json");
+        std::fs::write(&obsolete, b"{malformed obsolete catalog").unwrap();
+        let jobs=Jobs::open(p.clone()).unwrap();
+        assert!(jobs.get("old").is_err());
+        jobs.enqueue("new-idempotency".into(),"new-id".into()).unwrap();
+        assert_eq!(jobs.get("new-id").unwrap().state, State::Queued);
+        assert!(obsolete.is_file()); // not loaded, migrated or silently deleted
+        let _=std::fs::remove_file(obsolete);
+    }
+    #[test]
+    fn expired_result_returns_expired_not_rerun() {
+        let p=path("expiry");
+        let jobs=Jobs::open(p.clone()).unwrap();
+        jobs.enqueue("key".into(),"hash".into()).unwrap();
+        jobs.update("hash",State::Completed,Some("immutable-result".into()),None).unwrap();
+        jobs.update("hash",State::Completed,None,Some("RESULT_EXPIRED_BY_7_DAY_RETENTION".into())).unwrap();
+        let (old,spawn,_) = jobs.enqueue("key".into(),"hash".into()).unwrap();
+        assert!(!spawn);
+        assert_eq!(old.error.as_deref(),Some("RESULT_EXPIRED_BY_7_DAY_RETENTION"));
+        assert_eq!(old.artifact,None);
+        assert_eq!(old.state,State::Completed);
+    }
+    #[test]
     fn job_status_reads_bounded_rows_at_100k_jobs() {
         let p = path("load");
         let s = Jobs::open(p).unwrap();

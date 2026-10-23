@@ -209,6 +209,9 @@ impl AnalyticsService {
         view: ResearchResultView,
     ) -> Result<Value, String> {
         let j = self.jobs.get(&job_id)?;
+        if j.error.as_deref() == Some("RESULT_EXPIRED_BY_7_DAY_RETENTION") {
+            return Err("RESULT_EXPIRED".into());
+        }
         let artifact = j.artifact.ok_or("RESULT_NOT_READY")?;
         let mut value: Value = self
             .artifacts
