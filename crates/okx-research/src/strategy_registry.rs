@@ -311,7 +311,13 @@ fn replay_with_hash(
     })
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GridCandidate {
+    pub parameters: EmaParameters,
+    pub train: Summary,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GridResult {
+    pub variants: Vec<GridCandidate>,
     pub selected: EmaParameters,
     pub split_index: usize,
     pub train: Summary,
@@ -333,6 +339,7 @@ pub fn grid(
     let dataset_hash = hash_chunks(bars, cancel)?;
     let split = bars.len() * 7 / 10;
     let mut best: Option<(EmaParameters, Summary)> = None;
+    let mut candidates = Vec::with_capacity(variants.len());
     for p in variants {
         if cancel() {
             return Err("CANCELLED".into());
@@ -340,6 +347,10 @@ pub fn grid(
         let mut s = spec.clone();
         s.parameters = *p;
         let r = replay_with_hash(bars, &s, p.slow, split, cancel, Some(&dataset_hash))?;
+        candidates.push(GridCandidate {
+            parameters: *p,
+            train: r.summary.clone(),
+        });
         if best.as_ref().is_none_or(|(_, b)| {
             r.summary.sharpe > b.sharpe
                 || (r.summary.sharpe == b.sharpe && r.summary.turnover < b.turnover)
@@ -352,6 +363,7 @@ pub fn grid(
     s.parameters = p;
     let test = replay_with_hash(bars, &s, split, bars.len(), cancel, Some(&dataset_hash))?;
     Ok(GridResult {
+        variants: candidates,
         selected: p,
         split_index: split,
         train,

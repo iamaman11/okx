@@ -134,7 +134,7 @@ impl AnalyticsService {
             return Err("MARKET_LIMIT:1..100 instruments,1..50 rows".into());
         }
         let plan = planner::AnalysisPlan::build(&request.fields, request.start_ms, request.end_ms)?;
-        let rows = self.market_rows(&request, cancel.clone()).await?;
+        let (rows, correlation_matrix) = self.market_rows(&request, cancel.clone()).await?;
         let store = self.artifacts.clone();
         self.cpu.run(cancel,move |cancel| {
         if cancel.load(Ordering::Acquire){return Err("CANCELLED".into())}
@@ -154,7 +154,7 @@ impl AnalyticsService {
                     .0,
             );
         }
-        let result_artifact=store.publish_evidence(&json!({"kind":"market_pages","row_pages":row_pages,"total_rows":total,"sources":plan.sources})).map_err(|e|e.to_string())?.0;
+        let result_artifact=store.publish_evidence(&json!({"kind":"market_pages","row_pages":row_pages,"total_rows":total,"sources":plan.sources,"correlation_matrix":correlation_matrix})).map_err(|e|e.to_string())?.0;
         let mut page = rows
             .into_iter()
             .skip(offset)
@@ -165,7 +165,7 @@ impl AnalyticsService {
         }
         let returned = page.len();
         Ok(
-            json!({"kind":"market","result_artifact":result_artifact,"rows":page,"returned_rows":returned,"total_rows":total,"next_cursor":if offset+returned<total{Some((offset+returned).to_string())}else{None},"sources":plan.sources}),
+            json!({"kind":"market","result_artifact":result_artifact,"rows":page,"returned_rows":returned,"total_rows":total,"next_cursor":if offset+returned<total{Some((offset+returned).to_string())}else{None},"sources":plan.sources,"correlation_matrix":correlation_matrix}),
         )
         }).await
     }
@@ -186,6 +186,7 @@ impl AnalyticsService {
                 job_id,
                 cursor,
                 limit,
+                view,
             } => {
                 if limit == 0 || limit > 50 {
                     return Err("RESULT_PAGE_LIMIT:1..50".into());
@@ -193,7 +194,7 @@ impl AnalyticsService {
                 let service = self.clone();
                 self.cpu
                     .run(Default::default(), move |_| {
-                        service.result_page(job_id, cursor, limit)
+                        service.result_page(job_id, cursor, limit, view)
                     })
                     .await
             }
@@ -205,6 +206,7 @@ impl AnalyticsService {
         job_id: String,
         cursor: Option<String>,
         limit: u16,
+        view: ResearchResultView,
     ) -> Result<Value, String> {
         let j = self.jobs.get(&job_id)?;
         let artifact = j.artifact.ok_or("RESULT_NOT_READY")?;
@@ -241,6 +243,91 @@ impl AnalyticsService {
             page_cursor = Some(parts[2].into());
             instrument_prefix = Some(format!("instrument:{index}:"));
         }
+        let metadata = json!({
+            "job_id":job_id,"artifact":artifact,
+            "summary":value.get("summary").or_else(||value.pointer("/test/summary")),
+            "grid":value.get("grid").map(|g| json!({
+                "selected":g.get("selected"),"train":g.get("train"),"split_index":g.get("split_index"),
+                "selection_warning":g.get("selection_warning")
+            })),
+            "dataset_hash":value.get("dataset_hash"),
+            "code_version":value.get("code_version"),
+            "result_hash":value.get("hash")
+        });
+        if matches!(view, ResearchResultView::Summary) && value.get("instruments").is_none() {
+            return Ok(
+                json!({"view":"summary","metadata":metadata,"rows":[],"total_rows":0,
+                "returned_rows":0,"next_cursor":null}),
+            );
+        }
+        if matches!(
+            view,
+            ResearchResultView::Variants | ResearchResultView::Equity
+        ) {
+            let offset = page_cursor
+                .as_deref()
+                .unwrap_or("0")
+                .parse::<usize>()
+                .map_err(|_| "INVALID_CURSOR")?;
+            let mut output = Vec::new();
+            let total;
+            if matches!(view, ResearchResultView::Variants) {
+                let variants = value
+                    .pointer("/grid/variants")
+                    .and_then(Value::as_array)
+                    .ok_or("VARIANTS_UNAVAILABLE")?;
+                total = variants.len();
+                output.extend(variants.iter().skip(offset).take(limit as usize).cloned());
+            } else {
+                let pages = value
+                    .get("equity_curve_pages")
+                    .and_then(Value::as_array)
+                    .ok_or("EQUITY_RESULT_UNAVAILABLE")?;
+                total = value
+                    .get("total_equity_points")
+                    .and_then(Value::as_u64)
+                    .ok_or("EQUITY_RESULT_UNAVAILABLE")? as usize;
+                let mut position = offset;
+                while output.len() < limit as usize && position < total {
+                    let id = pages
+                        .get(position / 4096)
+                        .and_then(Value::as_str)
+                        .ok_or("EQUITY_PAGE_MISSING")?;
+                    let points: Vec<Value> = self
+                        .artifacts
+                        .read_evidence_json(id)
+                        .map_err(|e| e.to_string())?;
+                    if position % 4096 >= points.len() {
+                        return Err("EQUITY_PAGE_MISSING".into());
+                    }
+                    let take = (limit as usize - output.len()).min(points.len() - position % 4096);
+                    output.extend(points.into_iter().skip(position % 4096).take(take));
+                    position += take;
+                }
+            }
+            while output.len() > 1
+                && serde_json::to_vec(&output)
+                    .map_err(|e| e.to_string())?
+                    .len()
+                    > 6500
+            {
+                output.pop();
+            }
+            let next = if offset + output.len() < total {
+                Some(format!(
+                    "{}{}",
+                    instrument_prefix.as_deref().unwrap_or(""),
+                    offset + output.len()
+                ))
+            } else {
+                None
+            };
+            return Ok(
+                json!({"view":if matches!(view,ResearchResultView::Equity){"equity"}else{"variants"},
+                "metadata":metadata,"rows":output,"returned_rows":output.len(),
+                "total_rows":total,"next_cursor":next}),
+            );
+        }
         let offset = page_cursor
             .as_deref()
             .unwrap_or("0")
@@ -275,7 +362,7 @@ impl AnalyticsService {
             page.pop();
         }
         Ok(
-            json!({"assumptions":value.pointer("/summary/assumptions").or_else(||value.pointer("/test/summary/assumptions")),"job_id":job_id,"artifact":artifact,"summary":value.get("summary").or_else(||value.pointer("/test/summary")),"rows":page,"returned_rows":page.len(),"total_rows":total,"next_cursor":if offset+page.len()<total{Some(format!("{}{}",instrument_prefix.as_deref().unwrap_or(""),offset+page.len()))}else{None}}),
+            json!({"view":"trades","metadata":metadata,"assumptions":value.pointer("/summary/assumptions").or_else(||value.pointer("/test/summary/assumptions")),"job_id":job_id,"artifact":artifact,"summary":value.get("summary").or_else(||value.pointer("/test/summary")),"rows":page,"returned_rows":page.len(),"total_rows":total,"next_cursor":if offset+page.len()<total{Some(format!("{}{}",instrument_prefix.as_deref().unwrap_or(""),offset+page.len()))}else{None}}),
         )
     }
     async fn submit(&self, request: ResearchRequest) -> Result<Value, String> {
@@ -431,6 +518,12 @@ impl AnalyticsService {
         {
             return Err("CANDLE_RANGE_INCOMPLETE".into());
         }
+        if bars
+            .windows(2)
+            .any(|pair| pair[1].time != pair[0].time.saturating_add(ms))
+        {
+            return Err("CANDLE_INTERIOR_GAP".into());
+        }
         if bars.len().saturating_mul(512) > 256 * 1024 * 1024 {
             return Err("RESEARCH_MEMORY_LIMIT".into());
         }
@@ -522,7 +615,7 @@ impl AnalyticsService {
                     let cancelled=||c.load(Ordering::Acquire);
                     let mut chunks=Vec::new();for chunk in bars.chunks(4096){if cancelled(){return Err("CANCELLED".into())}chunks.push(store.publish_evidence(&chunk).map_err(|e|e.to_string())?.0);}
                     let dataset=store.publish_evidence(&json!({"schema":"okx.research.dataset/398.1","instrument":instruments[0],"timeframe_ms":ms,"start_ms":start,"end_ms":end,"chunks":chunks})).map_err(|e|e.to_string())?.0;
-                    let(result,grid)=if is_grid{let g=replay::grid(&bars,&spec,&variants,&cancelled)?;(g.test,Some(json!({"selected":g.selected,"split_index":g.split_index,"train":g.train,"selection_warning":g.selection_warning})))}else{(replay::replay(&bars,&spec,first.slow,bars.len(),&cancelled)?,None)};
+                    let(result,grid)=if is_grid{let g=replay::grid(&bars,&spec,&variants,&cancelled)?;(g.test,Some(json!({"selected":g.selected,"split_index":g.split_index,"train":g.train,"variants":g.variants,"selection_warning":g.selection_warning})))}else{(replay::replay(&bars,&spec,first.slow,bars.len(),&cancelled)?,None)};
                     publish_replay(&store,&result,&dataset,grid,&cancelled)
                 }).await?;
         Ok::<_, String>(artifact)
@@ -550,7 +643,7 @@ fn publish_replay(
         }
         curve_pages.push(store.publish_evidence(&chunk).map_err(|e| e.to_string())?.0);
     }
-    let manifest = json!({"summary":result.summary,"dataset_hash":result.dataset_hash,"hash":result.hash,"code_version":result.code_version,"dataset_artifact":dataset,"grid":grid,"trade_pages":trade_pages,"equity_curve_pages":curve_pages,"total_trades":result.trades.len()});
+    let manifest = json!({"summary":result.summary,"dataset_hash":result.dataset_hash,"hash":result.hash,"code_version":result.code_version,"dataset_artifact":dataset,"grid":grid,"trade_pages":trade_pages,"equity_curve_pages":curve_pages,"total_equity_points":result.equity.len(),"total_trades":result.trades.len()});
     Ok(store
         .publish_evidence(&manifest)
         .map_err(|e| e.to_string())?
@@ -665,9 +758,98 @@ impl AnalyticsService {
     }
 }
 #[cfg(test)]
+mod tests {
+    use super::*;
+    #[tokio::test]
+    async fn grid_result_includes_selected_train_test_and_equity() {
+        let (root, service) = super::artifact_job_fixtures::service();
+        let dataset = service
+            .artifacts
+            .publish_evidence(&json!({"chunks":[]}))
+            .unwrap()
+            .0;
+        let summary = replay::Summary {
+            pnl: 1.0,
+            pnl_exact: "1".into(),
+            fees_exact: "0.1".into(),
+            funding_exact: "0".into(),
+            max_drawdown: 0.05,
+            sharpe: 1.2,
+            trades: 0,
+            turnover: 2.0,
+            fees: 0.1,
+            funding: 0.0,
+            benchmark: 0.0,
+            assumptions: vec!["COUNTERFACTUAL".into()],
+        };
+        let result = replay::ReplayResult {
+            dataset_hash: "dataset-398".into(),
+            code_version: "test".into(),
+            hash: "result-398".into(),
+            summary: summary.clone(),
+            equity: (0..100).map(|i| (i, 10000.0 + i as f64)).collect(),
+            trades: vec![],
+        };
+        let grid = json!({"selected":{"fast":3,"slow":8},"train":summary,
+            "split_index":70,"selection_warning":"Counterfactual only",
+            "variants":[{"parameters":{"fast":3,"slow":8},"train":summary}]});
+        let manifest =
+            publish_replay(&service.artifacts, &result, &dataset, Some(grid), &|| false).unwrap();
+        let id = "c".repeat(64);
+        service
+            .jobs
+            .enqueue("f05-proof".into(), id.clone())
+            .unwrap();
+        service
+            .jobs
+            .update(&id, jobs::State::Completed, Some(manifest), None)
+            .unwrap();
+        let get = |view, cursor: Option<String>| ResearchRequest::Result {
+            job_id: id.clone(),
+            cursor,
+            limit: 5,
+            view,
+        };
+        let summary_view = service
+            .research(get(ResearchResultView::Summary, None))
+            .await
+            .unwrap();
+        assert_eq!(summary_view["metadata"]["grid"]["selected"]["fast"], 3);
+        assert_eq!(summary_view["metadata"]["grid"]["train"]["pnl"], 1.0);
+        assert_eq!(summary_view["metadata"]["summary"]["pnl"], 1.0);
+        assert_eq!(summary_view["returned_rows"], 0);
+        let variants = service
+            .research(get(ResearchResultView::Variants, None))
+            .await
+            .unwrap();
+        assert_eq!(variants["total_rows"], 1);
+        assert_eq!(variants["rows"][0]["parameters"]["slow"], 8);
+        let first = service
+            .research(get(ResearchResultView::Equity, None))
+            .await
+            .unwrap();
+        assert_eq!(first["total_rows"], 100);
+        assert_eq!(first["returned_rows"], 5);
+        assert_eq!(first["next_cursor"], "5");
+        let next = service
+            .research(get(ResearchResultView::Equity, Some("5".into())))
+            .await
+            .unwrap();
+        assert_eq!(next["rows"][0][0], 5);
+        assert!(
+            service
+                .research(get(ResearchResultView::Equity, Some("invalid".into())))
+                .await
+                .is_err()
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(test)]
 mod artifact_job_fixtures {
     use super::*;
-    fn service() -> (PathBuf, AnalyticsService) {
+    pub(super) fn service() -> (PathBuf, AnalyticsService) {
         let root = std::env::temp_dir().join(format!(
             "okx-analytics-{}-{}",
             std::process::id(),
@@ -736,6 +918,7 @@ mod artifact_job_fixtures {
                 job_id: result["job_id"].as_str().unwrap().into(),
                 cursor: None,
                 limit: 1,
+                view: ResearchResultView::Trades,
             })
             .await
             .unwrap();
@@ -823,6 +1006,7 @@ mod artifact_job_fixtures {
                 job_id: id.clone(),
                 cursor: None,
                 limit: 50,
+                view: ResearchResultView::Trades,
             })
             .await
             .unwrap();
@@ -842,6 +1026,7 @@ mod artifact_job_fixtures {
                 job_id: id.clone(),
                 cursor: Some("instrument:0:0".into()),
                 limit: 1,
+                view: ResearchResultView::Trades,
             })
             .await
             .unwrap();
@@ -850,7 +1035,8 @@ mod artifact_job_fixtures {
             s.research(ResearchRequest::Result {
                 job_id: id,
                 cursor: Some("instrument:8:0".into()),
-                limit: 1
+                limit: 1,
+                view: ResearchResultView::Trades,
             })
             .await
             .is_err()
@@ -914,6 +1100,7 @@ mod artifact_job_fixtures {
                 job_id: id.clone(),
                 cursor: Some("47".into()),
                 limit: 5,
+                view: ResearchResultView::Trades,
             })
             .await
             .unwrap();
