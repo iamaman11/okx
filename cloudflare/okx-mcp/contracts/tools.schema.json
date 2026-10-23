@@ -1904,6 +1904,18 @@
                 ]
               }
             ]
+          },
+          {
+            "type": "object",
+            "properties": {
+              "action": {
+                "const": "runtime"
+              }
+            },
+            "required": [
+              "action"
+            ],
+            "additionalProperties": false
           }
         ]
       }

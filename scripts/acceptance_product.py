@@ -20,7 +20,57 @@ REQUIRED={
     "F07":{"trade_service::strategies::tests::decision_claim_creates_durable_intent_once"},
     "F08":{"trade_service::strategies::tests::strategy_risk_budget_not_notional","analytics::jobs::tests::job_status_reads_bounded_rows_at_100k_jobs"},
 }
-FINAL=["CODE_PASSED","INSTALLED_MATCHED","ANALYTICS_READY","PHYSICAL_MULTI_ACCOUNT","REAL_CYCLE_ACCEPTED"]
+
+# Required user workflows, not a count of public tools. Each capability is
+# PRESERVED only with its strict MCP action AND separate positive/negative
+# physical evidence. No legacy alias, stub output, or default retirement.
+CAPABILITY_ACTIONS={
+    "runtime_status":("diagnostics.runtime",),
+    "account_control":("accounts.list","accounts.status","accounts.connect","accounts.pause","accounts.resume","accounts.set_limits"),
+    "find_instruments":("market.instruments",),
+    "market_overview":("market.snapshot",),
+    "market_intelligence":("market.microstructure",),
+    "market_research":("market.compare",),
+    "query_capabilities":("market.capabilities",),
+    "query":("market.screen",),
+    "research_capabilities":("research.capabilities",),
+    "research":("research.backtest","research.grid","research.status","research.result","research.cancel","research.validate"),
+    "account_summary":("portfolio.summary","portfolio.history","diagnostics.explain"),
+    "execution_status":("trade.status","diagnostics.explain"),
+    "portfolio_risk":("portfolio.scenario",),
+    "trading_capabilities":("trade.capabilities",),
+    "executor_preflight":("trade.preflight",),
+    "execution_action":("trade.preview","trade.execute","trade.status","trade.cancel","trade.close"),
+}
+def capability_matrix(physical=None):
+    physical=physical or {}
+    schema=json.loads((ROOT/"cloudflare/okx-mcp/contracts/tools.schema.json").read_text(encoding="utf-8-sig"))
+    exposed={f"{tool['name']}.{action['properties']['action']['const']}"
+        for tool in schema["tools"] for action in tool["inputSchema"].get("oneOf",[])
+        if isinstance(action.get("properties",{}).get("action",{}).get("const"),str)}
+    claims=physical.get("capabilities",{})
+    rows=[]
+    for legacy,routes in CAPABILITY_ACTIONS.items():
+        claim=claims.get(legacy,{}) if isinstance(claims,dict) else {}
+        missing=[route for route in routes if route not in exposed]
+        pos=claim.get("positive_evidence",[])
+        neg=claim.get("negative_evidence",[])
+        def files_ok(paths):
+            return isinstance(paths,list) and bool(paths) and all(
+                isinstance(p,str) and (ROOT/p).is_file() for p in paths)
+        proven=(not missing and claim.get("result")=="PASS"
+            and isinstance(claim.get("code_owner"),str) and bool(claim["code_owner"])
+            and isinstance(claim.get("positive_assertion"),str) and bool(claim["positive_assertion"])
+            and isinstance(claim.get("negative_assertion"),str) and bool(claim["negative_assertion"])
+            and files_ok(pos) and files_ok(neg))
+        rows.append({"legacy_tool":legacy,"required_actions":list(routes),
+            "missing_actions":missing,"status":"PRESERVED" if proven else "GAP",
+            "reason":None if proven else ("ACTION_NOT_EXPOSED" if missing else "PHYSICAL_EVIDENCE_NOT_ACCEPTED"),
+            "code_owner":claim.get("code_owner"),"positive_assertion":claim.get("positive_assertion"),
+            "negative_assertion":claim.get("negative_assertion"),
+            "positive_evidence":pos,"negative_evidence":neg})
+    return rows
+FINAL=["CODE_PASSED","INSTALLED_MATCHED","CAPABILITY_PARITY","ANALYTICS_READY","PHYSICAL_MULTI_ACCOUNT","REAL_CYCLE_ACCEPTED"]
 STATES={"PASS","FAIL","BLOCKED","NOT_RUN"}
 def executed_tests(log):
     rust=[(m.group(1),m.group(2))for m in re.finditer(r"^test ([\w:]+) \.\.\. (ok|FAILED|ignored)\s*$",log,re.M)]
@@ -48,6 +98,14 @@ def validate(value):
         if failed:raise ValueError("mandatory test did not pass "+requirement+":"+failed[0])
     for key in FINAL:
         if value.get(key)not in STATES:raise ValueError("missing final field "+key)
+    rows=value.get("capabilities")
+    if not isinstance(rows,list) or len(rows)!=len(CAPABILITY_ACTIONS) or {
+        item.get("legacy_tool") for item in rows}!=set(CAPABILITY_ACTIONS):
+        raise ValueError("incomplete 16-to-7 capability coverage")
+    if value["CAPABILITY_PARITY"]=="PASS" and any(
+        item.get("status")!="PRESERVED" or item.get("missing_actions")
+        for item in rows):
+        raise ValueError("CAPABILITY_PARITY cannot pass with any unproven legacy workflow")
     if value["CODE_PASSED"]=="PASS"and(any(c["result"]!= "PASS"for c in cases)or any(c["exit_code"]!=0 for c in value["commands"])):raise ValueError("CODE_PASSED conflicts with unfinished checks")
     for key in FINAL[1:]:
         if value[key]=="PASS":
@@ -106,6 +164,9 @@ def build(args):
     value["mcp"].update(physical.get("mcp",{}))
     value["release_hashes"]=physical.get("release_hashes",{})
     value["physical_evidence_location"]=None  # final exact release tag is unknown before F09
+    value["capabilities"]=capability_matrix(physical)
+    value["CAPABILITY_PARITY"]="PASS" if all(
+        row["status"]=="PRESERVED" for row in value["capabilities"]) else "BLOCKED"
     for key in ["INSTALLED_MATCHED","PHYSICAL_MULTI_ACCOUNT","REAL_CYCLE_ACCEPTED"]:value[key]=physical.get(key,{}).get("result","NOT_RUN")
     validate(value);out.write_text(json.dumps(value,ensure_ascii=False,indent=2)+"\n",encoding="utf-8");print(out)
     return 0 if code_ok else 1
@@ -127,6 +188,12 @@ def self_test():
         def test_unrelated_preserves_test_does_not_prove_central_risk(self):
             name="market_data::tests::ticker_preserves_exchange_decimal_text_exactly"
             self.assertFalse(any(name in names for names in REQUIRED.values()))
+        def test_capability_parity_is_fail_closed(self):
+            rows=capability_matrix()
+            self.assertEqual(len(rows),16)
+            self.assertEqual(len({r["legacy_tool"] for r in rows}),16)
+            self.assertTrue(all(row["status"]=="GAP" for row in rows))
+            self.assertIn("market.microstructure",next(r for r in rows if r["legacy_tool"]=="market_intelligence")["missing_actions"])
         def test_worker_claims_require_complete_named_pass_line(self):
             self.assertEqual(executed_tests("risk_concurrent_accounts_campaign_limit PASS\n"),[("risk_concurrent_accounts_campaign_limit","ok")])
             self.assertEqual(executed_tests("risk_concurrent_accounts_campaign_limit FAIL\n"),[("risk_concurrent_accounts_campaign_limit","FAILED")])

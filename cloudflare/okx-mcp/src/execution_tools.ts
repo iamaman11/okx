@@ -28,7 +28,7 @@ export const ACTION_SCHEMAS:Record<string,Schema[]>={
  research:[action('backtest',{...research,parameters:ema},Object.keys(research).filter(k=>k!=='seed').concat('parameters')),action('grid',{...research,variants:array(ema,64)},Object.keys(research).filter(k=>k!=='seed').concat('variants')),action('status',{job_id:text()}),action('cancel',{job_id:text(),...mutation}),action('result',{job_id:text(),cursor:text(512),limit:integer(1,50),view:choice('summary','trades','equity','variants')},['job_id','limit'])],
  trade:[action('preview',{account,...trade},['account','operation','strategy_instance','instrument','side','sizing','order']),action('execute',{account,...mutation,...trade,expires_in_ms:integer(1,30000)},['account','idempotency_key','operation','strategy_instance','instrument','side','sizing','order','expires_in_ms']),action('status',{account,reference:text()}),action('cancel',{account,...mutation,reference:text()}),action('close',{account,...mutation,reference:text(),expires_in_ms:integer(1,30000)})],
  portfolio:['summary','history'].map(a=>action(a,{accounts:array(account),start_ms:integer(0),end_ms:integer(1),strategies:array(text()),currencies:array(text(16)),cursor:text(512),limit:integer(1,50)},['accounts','start_ms','end_ms','limit'])),
- diagnostics:[action('explain',{reference:text(),account},[])],
+ diagnostics:[action('explain',{reference:text(),account},[]),action('runtime')],
 };
 for(const schema of ACTION_SCHEMAS.trade){if(['preview','execute'].includes(schema.properties.action.const))schema.allOf=[{if:{properties:{operation:{enum:['open','add','replace']}}},then:{required:['protection']}}];}
 ACTION_SCHEMAS.diagnostics[0].allOf=[{anyOf:[{required:['account']},{required:['reference']}]}];

@@ -1233,6 +1233,23 @@
     ]
   },
   {
+    "tool": "diagnostics",
+    "action": "runtime",
+    "positive": {
+      "action": "runtime"
+    },
+    "negative": [
+      {
+        "action": "runtime",
+        "raw_rpc": "forbidden"
+      },
+      {},
+      {
+        "action": 12
+      }
+    ]
+  },
+  {
     "tool": "research",
     "action": "backtest_batch",
     "positive": {
