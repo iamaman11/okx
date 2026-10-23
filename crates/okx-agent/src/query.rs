@@ -99,6 +99,7 @@ async fn execute(
             serde_json::to_value(c).map_err(|_| "SERIALIZATION_FAILED".into())
         }
         AgentOperation::Market { request } => ctx.analytics.market(request.clone()).await,
+        AgentOperation::MarketCapabilities => Ok(ctx.analytics.market_capabilities()),
         AgentOperation::Research { request } => ctx.analytics.research(request.clone()).await,
         AgentOperation::Trade { request } => {
             ctx.trade

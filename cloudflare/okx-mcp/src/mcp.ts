@@ -190,6 +190,18 @@ export const mcpApi={async fetch(request:Request,env:Env,ctx:any):Promise<Respon
           quality:fresh?'fresh':'partial',
           warnings:fresh?[]:['RUNTIME_SESSION_NOT_FRESH']}));
       }
+ if(name==='market'&&args.action==='instruments'){
+   return jsonRpc(id,toolResult(await dispatchRuntime(env,{schema:'okx.agent.request/v1',request_id:requestId(),
+     operation:{type:'find_instruments',asset:args.asset,settle_currency:args.settle_currency??null,instrument_type:null}})));
+ }
+ if(name==='market'&&args.action==='snapshot'){
+   return jsonRpc(id,toolResult(await dispatchRuntime(env,{schema:'okx.agent.request/v1',request_id:requestId(),
+     operation:{type:'market_overview',instrument:args.instrument}})));
+ }
+ if(name==='market'&&args.action==='capabilities'){
+   return jsonRpc(id,toolResult(await dispatchRuntime(env,{schema:'okx.agent.request/v1',request_id:requestId(),
+     operation:{type:'market_capabilities'}})));
+ }
  const {account,...body}=args;
  const payload=name==='portfolio'?args:name==='diagnostics'?{reference:args.reference??null,account:args.account??null}:body;
  const operation={type:name,request:payload};

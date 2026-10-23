@@ -2,7 +2,7 @@
   "tools": [
     {
       "name": "accounts",
-      "description": "accounts actions. Mutations require body-bound idempotency. Responses contain bounded results and quality diagnostics.",
+      "description": "accounts: typed, bounded actions; explicit account and idempotency for writes.",
       "inputSchema": {
         "oneOf": [
           {
@@ -341,7 +341,7 @@
     },
     {
       "name": "strategies",
-      "description": "strategies actions. Mutations require body-bound idempotency. Responses contain bounded results and quality diagnostics.",
+      "description": "strategies: typed, bounded actions; explicit account and idempotency for writes.",
       "inputSchema": {
         "oneOf": [
           {
@@ -604,14 +604,18 @@
     },
     {
       "name": "market",
-      "description": "market actions. Mutations require body-bound idempotency. Responses contain bounded results and quality diagnostics.",
+      "description": "market: typed, bounded actions; explicit account and idempotency for writes.",
       "inputSchema": {
         "oneOf": [
           {
             "type": "object",
             "properties": {
               "action": {
-                "const": "screen"
+                "type": "string",
+                "enum": [
+                  "screen",
+                  "compare"
+                ]
               },
               "instruments": {
                 "type": "array",
@@ -773,161 +777,52 @@
             "type": "object",
             "properties": {
               "action": {
-                "const": "compare"
+                "const": "instruments"
               },
-              "instruments": {
-                "type": "array",
-                "items": {
-                  "type": "string",
-                  "minLength": 1,
-                  "maxLength": 64
-                },
-                "maxItems": 100,
-                "uniqueItems": true
-              },
-              "timeframe_ms": {
-                "type": "integer",
-                "minimum": 1000,
-                "maximum": 2678400000
-              },
-              "start_ms": {
-                "type": "integer",
-                "minimum": 1,
-                "maximum": 9007199254740991
-              },
-              "end_ms": {
-                "type": "integer",
-                "minimum": 1,
-                "maximum": 9007199254740991
-              },
-              "fields": {
-                "type": "array",
-                "items": {
-                  "type": "string",
-                  "minLength": 1,
-                  "maxLength": 64
-                },
-                "maxItems": 32,
-                "uniqueItems": true
-              },
-              "parameters": {
-                "type": "object",
-                "properties": {
-                  "ema_period": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": 1000
-                  },
-                  "atr_period": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": 1000
-                  },
-                  "rsi_period": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": 1000
-                  },
-                  "budget": {
-                    "type": "number",
-                    "minimum": 1e-9,
-                    "maximum": 9007199254740991
-                  },
-                  "price": {
-                    "type": "number",
-                    "minimum": 1e-9,
-                    "maximum": 9007199254740991
-                  },
-                  "stop_distance": {
-                    "type": "number",
-                    "minimum": 1e-9,
-                    "maximum": 0.999999999
-                  },
-                  "notional": {
-                    "type": "number",
-                    "minimum": 0,
-                    "maximum": 9007199254740991
-                  },
-                  "fee_bps": {
-                    "type": "number",
-                    "minimum": 0,
-                    "maximum": 10000
-                  },
-                  "slippage_bps": {
-                    "type": "number",
-                    "minimum": 0,
-                    "maximum": 10000
-                  }
-                },
-                "required": [],
-                "additionalProperties": false
-              },
-              "filters": {
-                "type": "array",
-                "items": {
-                  "type": "object",
-                  "properties": {
-                    "field": {
-                      "type": "string",
-                      "minLength": 1,
-                      "maxLength": 64
-                    },
-                    "min": {
-                      "type": "number",
-                      "minimum": -9007199254740991,
-                      "maximum": 9007199254740991
-                    },
-                    "max": {
-                      "type": "number",
-                      "minimum": -9007199254740991,
-                      "maximum": 9007199254740991
-                    }
-                  },
-                  "required": [
-                    "field"
-                  ],
-                  "additionalProperties": false
-                },
-                "maxItems": 16,
-                "uniqueItems": true
-              },
-              "sort": {
-                "type": "object",
-                "properties": {
-                  "field": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 64
-                  },
-                  "descending": {
-                    "type": "boolean"
-                  }
-                },
-                "required": [
-                  "field",
-                  "descending"
-                ],
-                "additionalProperties": false
-              },
-              "limit": {
-                "type": "integer",
-                "minimum": 1,
-                "maximum": 50
-              },
-              "cursor": {
+              "asset": {
                 "type": "string",
                 "minLength": 1,
-                "maxLength": 512
+                "maxLength": 16
+              },
+              "settle_currency": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 16
               }
             },
             "required": [
               "action",
-              "instruments",
-              "fields",
-              "timeframe_ms",
-              "start_ms",
-              "end_ms",
-              "limit"
+              "asset"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "action": {
+                "const": "snapshot"
+              },
+              "instrument": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64
+              }
+            },
+            "required": [
+              "action",
+              "instrument"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "action": {
+                "const": "capabilities"
+              }
+            },
+            "required": [
+              "action"
             ],
             "additionalProperties": false
           }
@@ -936,7 +831,7 @@
     },
     {
       "name": "research",
-      "description": "research actions. Mutations require body-bound idempotency. Responses contain bounded results and quality diagnostics.",
+      "description": "research: typed, bounded actions; explicit account and idempotency for writes.",
       "inputSchema": {
         "oneOf": [
           {
@@ -1277,13 +1172,126 @@
               "action"
             ],
             "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "action": {
+                "const": "validate"
+              },
+              "instruments": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 64
+                },
+                "maxItems": 8,
+                "uniqueItems": true,
+                "minItems": 1
+              },
+              "timeframe_ms": {
+                "type": "integer",
+                "minimum": 1000,
+                "maximum": 2678400000
+              },
+              "start_ms": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 9007199254740991
+              },
+              "end_ms": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 9007199254740991
+              },
+              "strategy_id": {
+                "type": "string",
+                "enum": [
+                  "ema_cross_v1"
+                ]
+              },
+              "costs": {
+                "type": "object",
+                "properties": {
+                  "maker_fee_bps": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 1000
+                  },
+                  "taker_fee_bps": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 1000
+                  },
+                  "slippage_bps": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 1000
+                  },
+                  "funding_mode": {
+                    "type": "string",
+                    "enum": [
+                      "observed",
+                      "zero_assumption"
+                    ]
+                  }
+                },
+                "required": [
+                  "maker_fee_bps",
+                  "taker_fee_bps",
+                  "slippage_bps",
+                  "funding_mode"
+                ],
+                "additionalProperties": false
+              },
+              "data_mode": {
+                "type": "string",
+                "enum": [
+                  "historical_observed",
+                  "counterfactual"
+                ]
+              },
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "fast": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 10000
+                  },
+                  "slow": {
+                    "type": "integer",
+                    "minimum": 2,
+                    "maximum": 10000
+                  }
+                },
+                "required": [
+                  "fast",
+                  "slow"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "action",
+              "instruments",
+              "timeframe_ms",
+              "start_ms",
+              "end_ms",
+              "strategy_id",
+              "costs",
+              "data_mode",
+              "parameters"
+            ],
+            "additionalProperties": false
           }
         ]
       }
     },
     {
       "name": "trade",
-      "description": "trade actions. Mutations require body-bound idempotency. Responses contain bounded results and quality diagnostics.",
+      "description": "trade: typed, bounded actions; explicit account and idempotency for writes.",
       "inputSchema": {
         "oneOf": [
           {
@@ -1730,13 +1738,49 @@
               "expires_in_ms"
             ],
             "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "action": {
+                "const": "capabilities"
+              },
+              "account": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              }
+            },
+            "required": [
+              "action",
+              "account"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "action": {
+                "const": "preflight"
+              },
+              "account": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              }
+            },
+            "required": [
+              "action",
+              "account"
+            ],
+            "additionalProperties": false
           }
         ]
       }
     },
     {
       "name": "portfolio",
-      "description": "portfolio actions. Mutations require body-bound idempotency. Responses contain bounded results and quality diagnostics.",
+      "description": "portfolio: typed, bounded actions; explicit account and idempotency for writes.",
       "inputSchema": {
         "oneOf": [
           {
@@ -1876,7 +1920,7 @@
     },
     {
       "name": "diagnostics",
-      "description": "diagnostics actions. Mutations require body-bound idempotency. Responses contain bounded results and quality diagnostics.",
+      "description": "diagnostics: typed, bounded actions; explicit account and idempotency for writes.",
       "inputSchema": {
         "oneOf": [
           {

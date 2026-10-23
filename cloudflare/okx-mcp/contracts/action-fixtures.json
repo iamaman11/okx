@@ -545,64 +545,6 @@
     ]
   },
   {
-    "tool": "market",
-    "action": "compare",
-    "positive": {
-      "action": "compare",
-      "instruments": [
-        "fixture"
-      ],
-      "timeframe_ms": 1000,
-      "start_ms": 1,
-      "end_ms": 100001,
-      "fields": [
-        "fixture"
-      ],
-      "limit": 1
-    },
-    "negative": [
-      {
-        "action": "compare",
-        "instruments": [
-          "fixture"
-        ],
-        "timeframe_ms": 1000,
-        "start_ms": 1,
-        "end_ms": 100001,
-        "fields": [
-          "fixture"
-        ],
-        "limit": 1,
-        "raw_rpc": "forbidden"
-      },
-      {
-        "instruments": [
-          "fixture"
-        ],
-        "timeframe_ms": 1000,
-        "start_ms": 1,
-        "end_ms": 100001,
-        "fields": [
-          "fixture"
-        ],
-        "limit": 1
-      },
-      {
-        "action": 12,
-        "instruments": [
-          "fixture"
-        ],
-        "timeframe_ms": 1000,
-        "start_ms": 1,
-        "end_ms": 100001,
-        "fields": [
-          "fixture"
-        ],
-        "limit": 1
-      }
-    ]
-  },
-  {
     "tool": "research",
     "action": "backtest",
     "positive": {
@@ -1475,6 +1417,201 @@
             "slow": 2
           }
         ]
+      }
+    ]
+  },
+  {
+    "tool": "market",
+    "action": "instruments",
+    "positive": {
+      "action": "instruments",
+      "asset": "fixture"
+    },
+    "negative": [
+      {
+        "action": "instruments",
+        "asset": "fixture",
+        "raw_rpc": "forbidden"
+      },
+      {
+        "asset": "fixture"
+      },
+      {
+        "action": 12,
+        "asset": "fixture"
+      }
+    ]
+  },
+  {
+    "tool": "market",
+    "action": "snapshot",
+    "positive": {
+      "action": "snapshot",
+      "instrument": "fixture"
+    },
+    "negative": [
+      {
+        "action": "snapshot",
+        "instrument": "fixture",
+        "raw_rpc": "forbidden"
+      },
+      {
+        "instrument": "fixture"
+      },
+      {
+        "action": 12,
+        "instrument": "fixture"
+      }
+    ]
+  },
+  {
+    "tool": "market",
+    "action": "capabilities",
+    "positive": {
+      "action": "capabilities"
+    },
+    "negative": [
+      {
+        "action": "capabilities",
+        "raw_rpc": "forbidden"
+      },
+      {},
+      {
+        "action": 12
+      }
+    ]
+  },
+  {
+    "tool": "research",
+    "action": "validate",
+    "positive": {
+      "action": "validate",
+      "instruments": [
+        "fixture"
+      ],
+      "timeframe_ms": 1000,
+      "start_ms": 1,
+      "end_ms": 100001,
+      "strategy_id": "ema_cross_v1",
+      "costs": {
+        "maker_fee_bps": 0,
+        "taker_fee_bps": 0,
+        "slippage_bps": 0,
+        "funding_mode": "observed"
+      },
+      "data_mode": "historical_observed",
+      "parameters": {
+        "fast": 1,
+        "slow": 2
+      }
+    },
+    "negative": [
+      {
+        "action": "validate",
+        "instruments": [
+          "fixture"
+        ],
+        "timeframe_ms": 1000,
+        "start_ms": 1,
+        "end_ms": 100001,
+        "strategy_id": "ema_cross_v1",
+        "costs": {
+          "maker_fee_bps": 0,
+          "taker_fee_bps": 0,
+          "slippage_bps": 0,
+          "funding_mode": "observed"
+        },
+        "data_mode": "historical_observed",
+        "parameters": {
+          "fast": 1,
+          "slow": 2
+        },
+        "raw_rpc": "forbidden"
+      },
+      {
+        "instruments": [
+          "fixture"
+        ],
+        "timeframe_ms": 1000,
+        "start_ms": 1,
+        "end_ms": 100001,
+        "strategy_id": "ema_cross_v1",
+        "costs": {
+          "maker_fee_bps": 0,
+          "taker_fee_bps": 0,
+          "slippage_bps": 0,
+          "funding_mode": "observed"
+        },
+        "data_mode": "historical_observed",
+        "parameters": {
+          "fast": 1,
+          "slow": 2
+        }
+      },
+      {
+        "action": 12,
+        "instruments": [
+          "fixture"
+        ],
+        "timeframe_ms": 1000,
+        "start_ms": 1,
+        "end_ms": 100001,
+        "strategy_id": "ema_cross_v1",
+        "costs": {
+          "maker_fee_bps": 0,
+          "taker_fee_bps": 0,
+          "slippage_bps": 0,
+          "funding_mode": "observed"
+        },
+        "data_mode": "historical_observed",
+        "parameters": {
+          "fast": 1,
+          "slow": 2
+        }
+      }
+    ]
+  },
+  {
+    "tool": "trade",
+    "action": "capabilities",
+    "positive": {
+      "action": "capabilities",
+      "account": "fixture"
+    },
+    "negative": [
+      {
+        "action": "capabilities",
+        "account": "fixture",
+        "raw_rpc": "forbidden"
+      },
+      {
+        "account": "fixture"
+      },
+      {
+        "action": 12,
+        "account": "fixture"
+      }
+    ]
+  },
+  {
+    "tool": "trade",
+    "action": "preflight",
+    "positive": {
+      "action": "preflight",
+      "account": "fixture"
+    },
+    "negative": [
+      {
+        "action": "preflight",
+        "account": "fixture",
+        "raw_rpc": "forbidden"
+      },
+      {
+        "account": "fixture"
+      },
+      {
+        "action": 12,
+        "account": "fixture"
       }
     ]
   }

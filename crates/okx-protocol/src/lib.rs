@@ -234,6 +234,7 @@ pub enum AgentOperation {
     Market {
         request: analytics::MarketRequest,
     },
+    MarketCapabilities,
     Research {
         request: analytics::ResearchRequest,
     },
@@ -309,6 +310,7 @@ impl AgentOperation {
                         .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
             }
             Self::Market { request } => request.valid(),
+            Self::MarketCapabilities => true,
             Self::Research { request } => request.valid(),
             Self::Trade { request } => request.valid(),
             Self::Strategies { request } => request.valid(),

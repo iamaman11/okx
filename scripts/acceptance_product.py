@@ -45,9 +45,12 @@ CAPABILITY_ACTIONS={
 def capability_matrix(physical=None):
     physical=physical or {}
     schema=json.loads((ROOT/"cloudflare/okx-mcp/contracts/tools.schema.json").read_text(encoding="utf-8-sig"))
-    exposed={f"{tool['name']}.{action['properties']['action']['const']}"
-        for tool in schema["tools"] for action in tool["inputSchema"].get("oneOf",[])
-        if isinstance(action.get("properties",{}).get("action",{}).get("const"),str)}
+    exposed=set()
+    for tool in schema["tools"]:
+        for variant in tool["inputSchema"].get("oneOf",[]):
+            selector=variant.get("properties",{}).get("action",{})
+            actions=[selector["const"]] if isinstance(selector.get("const"),str) else selector.get("enum",[])
+            exposed.update(f"{tool['name']}.{a}" for a in actions if isinstance(a,str))
     claims=physical.get("capabilities",{})
     rows=[]
     for legacy,routes in CAPABILITY_ACTIONS.items():

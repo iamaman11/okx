@@ -82,6 +82,16 @@ pub enum ResearchResultView {
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ResearchRequest {
     Capabilities {},
+    Validate {
+        instruments: Vec<String>,
+        timeframe_ms: u64,
+        start_ms: u64,
+        end_ms: u64,
+        strategy_id: String,
+        parameters: EmaParameters,
+        costs: ResearchCosts,
+        data_mode: ResearchDataMode,
+    },
     Backtest {
         idempotency_key: String,
         instruments: Vec<String>,
@@ -194,6 +204,13 @@ impl ResearchRequest {
     pub fn valid(&self) -> bool {
         match self {
             Self::Capabilities {} => true,
+            Self::Validate { instruments, timeframe_ms, start_ms, end_ms, strategy_id,
+                parameters, costs, data_mode } => Self::Backtest {
+                idempotency_key: "validation_only".into(), instruments: instruments.clone(),
+                timeframe_ms: *timeframe_ms, start_ms: *start_ms, end_ms: *end_ms,
+                strategy_id: strategy_id.clone(), parameters: parameters.clone(),
+                costs: costs.clone(), data_mode: *data_mode, seed: 0,
+            }.valid(),
             Self::Backtest {
                 idempotency_key,
                 instruments,
