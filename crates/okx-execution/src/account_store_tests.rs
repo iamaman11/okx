@@ -1458,12 +1458,15 @@ fn strategy_crash_pending_decision_to_intent() {
         s.claim_strategy_decision("a", "bar-next", "inputs-next", 2, 8)
             .unwrap()
     );
-    let pending_revision: i64 = s.connection.query_row(
-        "SELECT policy_revision FROM decisions WHERE decision_id=?1",
-        [format!("strategy:a:{}:bar-next",version.version)],
-        |r| r.get(0),
-    ).unwrap();
-    assert_eq!(pending_revision,2);
+    let pending_revision: i64 = s
+        .connection
+        .query_row(
+            "SELECT policy_revision FROM decisions WHERE decision_id=?1",
+            [format!("strategy:a:{}:bar-next", version.version)],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(pending_revision, 2);
     assert!(
         s.instances()
             .unwrap()
