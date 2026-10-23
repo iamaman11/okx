@@ -664,28 +664,36 @@ impl AnalyticsService {
             .iter()
             .filter_map(|j| j.artifact.clone())
             .collect::<std::collections::BTreeSet<_>>();
-        let mut protected = std::collections::BTreeSet::new();
-        for root in self.jobs.artifact_roots()? {
-            if !expired_roots.contains(&root) {
-                self.artifact_graph(&root, &mut protected)?;
-            }
-        }
+        // The candidates alone define a bounded garbage set. Scan current
+        // reference roots in small indexed pages; never materialize every job
+        // or every historical artifact in memory just to expire one result.
         let mut garbage = std::collections::BTreeSet::new();
         for root in &expired_roots {
             self.artifact_graph(root, &mut garbage)?;
         }
-        for id in garbage.difference(&protected) {
-            self.artifacts
-                .remove_evidence(id)
-                .map_err(|e| e.to_string())?;
+        let mut cursor: Option<String> = None;
+        loop {
+            let roots = self.jobs.artifact_roots_page(cursor.as_deref(), 64)?;
+            if roots.is_empty() { break; }
+            for root in &roots {
+                if !expired_roots.contains(root) {
+                    let mut shared = std::collections::BTreeSet::new();
+                    self.artifact_graph(root, &mut shared)?;
+                    garbage.retain(|id| !shared.contains(id));
+                }
+            }
+            cursor = roots.last().cloned();
+            if roots.len() < 64 || garbage.is_empty() { break; }
         }
+        // Mark jobs expired FIRST. Crashing before file deletion can leak
+        // collectable files, but never leave an accepted job referring to a
+        // deleted immutable result.
         for job in &expired {
-            self.jobs.update(
-                &job.id,
-                job.state.clone(),
-                None,
-                Some("RESULT_EXPIRED_BY_7_DAY_RETENTION".into()),
-            )?;
+            self.jobs.update(&job.id, job.state.clone(), None,
+                Some("RESULT_EXPIRED_BY_7_DAY_RETENTION".into()))?;
+        }
+        for id in &garbage {
+            self.artifacts.remove_evidence(id).map_err(|e| e.to_string())?;
         }
         Ok(expired.len())
     }

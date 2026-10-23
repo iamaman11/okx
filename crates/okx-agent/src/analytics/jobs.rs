@@ -98,6 +98,8 @@ impl Jobs {
                     ON research_jobs(created_ms,id) WHERE artifact IS NOT NULL AND pinned=0;
                  CREATE INDEX IF NOT EXISTS idx_research_jobs_active
                     ON research_jobs(state,id);
+                 CREATE INDEX IF NOT EXISTS idx_research_jobs_artifact
+                    ON research_jobs(artifact) WHERE artifact IS NOT NULL;
                  CREATE TABLE IF NOT EXISTS research_cancel_keys(
                     cancel_key TEXT PRIMARY KEY,
                     job_id TEXT NOT NULL REFERENCES research_jobs(id)
@@ -318,12 +320,21 @@ impl Jobs {
             .map(|id| Self::read(&db, id)?.ok_or("JOB_NOT_FOUND".into()))
             .collect()
     }
-    pub fn artifact_roots(&self) -> Result<Vec<String>, String> {
+    pub fn artifact_roots_page(
+        &self,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<String>, String> {
+        if limit == 0 || limit > 128 {
+            return Err("RESEARCH_ROOT_PAGE_LIMIT:1..128".into());
+        }
         let db = self.db.lock().map_err(|_| "CATALOG_LOCK_POISONED")?;
-        let mut stmt = db
-            .prepare("SELECT DISTINCT artifact FROM research_jobs WHERE artifact IS NOT NULL")
-            .map_err(|e| e.to_string())?;
-        stmt.query_map([], |row| row.get::<_, String>(0))
+        let mut stmt = db.prepare(
+            "SELECT DISTINCT artifact FROM research_jobs
+             WHERE artifact IS NOT NULL AND (?1 IS NULL OR artifact>?1)
+             ORDER BY artifact LIMIT ?2",
+        ).map_err(|e| e.to_string())?;
+        stmt.query_map(params![after, limit as i64], |row| row.get::<_, String>(0))
             .map_err(|e| e.to_string())?
             .collect::<rusqlite::Result<Vec<_>>>()
             .map_err(|e| e.to_string())
