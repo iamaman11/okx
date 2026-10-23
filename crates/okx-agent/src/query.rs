@@ -145,10 +145,10 @@ async fn execute(
                 resolved.universe = None;
             }
             let mut result = ctx.analytics.market(resolved).await?;
-            if let Some(page) = universe_page {
-                if let Some(fields) = result.as_object_mut() {
-                    fields.insert("universe_page".into(), page);
-                }
+            if let Some(page) = universe_page
+                && let Some(fields) = result.as_object_mut()
+            {
+                fields.insert("universe_page".into(), page);
             }
             Ok(result)
         }

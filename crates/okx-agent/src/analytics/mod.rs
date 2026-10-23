@@ -1010,6 +1010,7 @@ mod artifact_job_fixtures {
         let request = MarketRequest {
             action: MarketAction::Screen,
             instruments: vec!["BTC-USDT".into()],
+            universe: None,
             fields: vec!["returns".into()],
             timeframe_ms: 60000,
             start_ms: 0,

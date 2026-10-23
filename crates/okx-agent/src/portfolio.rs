@@ -493,8 +493,8 @@ pub fn scenario(r: &okx_protocol::trading::PortfolioScenarioRequest) -> Result<V
     for i in 0..size {
         for j in 0..=i {
             let mut value = correlation[i][j];
-            for k in 0..j {
-                value -= root[i][k] * root[j][k];
+            for (left, right) in root[i][..j].iter().zip(root[j][..j].iter()) {
+                value -= left * right;
             }
             if i == j {
                 if value < -1e-8 {
