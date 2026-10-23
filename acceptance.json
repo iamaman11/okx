@@ -1,14 +1,14 @@
 {
   "schema": "okx.acceptance/398.1",
-  "created_at": "2026-10-23T00:06:27.594834+00:00",
-  "source_tree": "348069f902cb64aeee0d1a4371cbaf7e58f10d1d",
-  "working_diff_sha256": "729270bcd722374d4b54f6bc568a12096cce933a1fa3d5562195758428ce4c42",
+  "created_at": "2026-10-23T00:22:50.543911+00:00",
+  "source_tree": "9e060cb4e5c357f0d417276354e7d3b6bb8a0588",
+  "working_diff_sha256": "b9afdbbbce4d8009ac5332e4216d2d654328ff26abf65eb1c61aea0c28696792",
   "release_hashes": {},
   "test_counts": {
-    "executed": 513,
-    "passed": 513,
+    "executed": 514,
+    "passed": 514,
     "failed": 0,
-    "rust_executed": 511,
+    "rust_executed": 512,
     "worker_named_executed": 2,
     "worker_test_files": 9
   },
@@ -97,14 +97,6 @@
   "tests": [
     {
       "requirement_id": "REGRESSION",
-      "test_name": "account_bootstrap::tests::configured_leverage_missing_or_duplicate_side_fails_closed",
-      "result": "PASS",
-      "evidence": [
-        "verification/rust-tests.log"
-      ]
-    },
-    {
-      "requirement_id": "REGRESSION",
       "test_name": "account_bootstrap::tests::exact_fee_schedule_fails_when_group_mapping_is_missing_or_ambiguous",
       "result": "PASS",
       "evidence": [
@@ -113,7 +105,15 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "account_bootstrap::tests::exact_fee_schedule_requires_one_typed_row_and_exchange_timestamp",
+      "test_name": "account_bootstrap::tests::configured_leverage_requires_exact_instrument_mode_and_position_side",
+      "result": "PASS",
+      "evidence": [
+        "verification/rust-tests.log"
+      ]
+    },
+    {
+      "requirement_id": "REGRESSION",
+      "test_name": "account_bootstrap::tests::configured_leverage_missing_or_duplicate_side_fails_closed",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -137,7 +137,7 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "account_bootstrap::tests::configured_leverage_requires_exact_instrument_mode_and_position_side",
+      "test_name": "account_bootstrap::tests::exact_fee_schedule_requires_one_typed_row_and_exchange_timestamp",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -153,14 +153,6 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "analytics::cache::tests::combined_fields_share_source_fetch",
-      "result": "PASS",
-      "evidence": [
-        "verification/rust-tests.log"
-      ]
-    },
-    {
-      "requirement_id": "REGRESSION",
       "test_name": "accounts::tests::duplicate_writer_lease_rejected_across_aliases",
       "result": "PASS",
       "evidence": [
@@ -168,24 +160,8 @@
       ]
     },
     {
-      "requirement_id": "CLEAN-01",
-      "test_name": "accounts::tests::initialize_without_any_legacy_files",
-      "result": "PASS",
-      "evidence": [
-        "verification/rust-tests.log"
-      ]
-    },
-    {
       "requirement_id": "REGRESSION",
-      "test_name": "accounts::tests::initialize_refuses_to_replace_installation",
-      "result": "PASS",
-      "evidence": [
-        "verification/rust-tests.log"
-      ]
-    },
-    {
-      "requirement_id": "CLEAN-01",
-      "test_name": "accounts::tests::legacy_stop_claims_and_epochs_are_never_read",
+      "test_name": "analytics::cache::tests::combined_fields_share_source_fetch",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -209,7 +185,23 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "analytics::market::tests::closed_candle_filter_preserves_quality",
+      "test_name": "accounts::tests::initialize_refuses_to_replace_installation",
+      "result": "PASS",
+      "evidence": [
+        "verification/rust-tests.log"
+      ]
+    },
+    {
+      "requirement_id": "CLEAN-01",
+      "test_name": "accounts::tests::initialize_without_any_legacy_files",
+      "result": "PASS",
+      "evidence": [
+        "verification/rust-tests.log"
+      ]
+    },
+    {
+      "requirement_id": "CLEAN-01",
+      "test_name": "accounts::tests::legacy_stop_claims_and_epochs_are_never_read",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -225,15 +217,7 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "analytics::artifact_job_fixtures::market_artifact_publication_and_cached_result_roundtrip",
-      "result": "PASS",
-      "evidence": [
-        "verification/rust-tests.log"
-      ]
-    },
-    {
-      "requirement_id": "OPS-01",
-      "test_name": "analytics::jobs::tests::restart_marks_job_interrupted",
+      "test_name": "analytics::market::tests::closed_candle_filter_preserves_quality",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -249,22 +233,6 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "analytics::planner::tests::arbitrary_operator_is_rejected",
-      "result": "PASS",
-      "evidence": [
-        "verification/rust-tests.log"
-      ]
-    },
-    {
-      "requirement_id": "REGRESSION",
-      "test_name": "analytics::planner::tests::plan_dependencies_exclude_unused_sources",
-      "result": "PASS",
-      "evidence": [
-        "verification/rust-tests.log"
-      ]
-    },
-    {
-      "requirement_id": "REGRESSION",
       "test_name": "analytics::market::tests::unused_missing_source_does_not_degrade",
       "result": "PASS",
       "evidence": [
@@ -273,23 +241,7 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "cloudflare_auth::tests::token_validation_is_bounded_and_whitespace_free",
-      "result": "PASS",
-      "evidence": [
-        "verification/rust-tests.log"
-      ]
-    },
-    {
-      "requirement_id": "REGRESSION",
-      "test_name": "analytics::artifact_job_fixtures::two_asset_batch_grid_has_independent_artifacts_and_cursors",
-      "result": "PASS",
-      "evidence": [
-        "verification/rust-tests.log"
-      ]
-    },
-    {
-      "requirement_id": "REGRESSION",
-      "test_name": "config::tests::admission_freshness_boundaries_reject_future_and_missing_receipts",
+      "test_name": "analytics::planner::tests::arbitrary_operator_is_rejected",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -305,7 +257,7 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "diagnostics::tests::common_failure_fields_and_no_secret_debug_dump",
+      "test_name": "analytics::planner::tests::plan_dependencies_exclude_unused_sources",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -313,7 +265,23 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "execution_preflight::tests::accepted_does_not_require_ip_binding",
+      "test_name": "cloudflare_auth::tests::token_validation_is_bounded_and_whitespace_free",
+      "result": "PASS",
+      "evidence": [
+        "verification/rust-tests.log"
+      ]
+    },
+    {
+      "requirement_id": "OPS-01",
+      "test_name": "analytics::jobs::tests::restart_marks_job_interrupted",
+      "result": "PASS",
+      "evidence": [
+        "verification/rust-tests.log"
+      ]
+    },
+    {
+      "requirement_id": "REGRESSION",
+      "test_name": "config::tests::admission_freshness_boundaries_reject_future_and_missing_receipts",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -329,6 +297,14 @@
     },
     {
       "requirement_id": "REGRESSION",
+      "test_name": "diagnostics::tests::common_failure_fields_and_no_secret_debug_dump",
+      "result": "PASS",
+      "evidence": [
+        "verification/rust-tests.log"
+      ]
+    },
+    {
+      "requirement_id": "REGRESSION",
       "test_name": "config::tests::explicit_config_contains_no_secret_material",
       "result": "PASS",
       "evidence": [
@@ -337,7 +313,15 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "execution_preflight::tests::account_or_mode_mismatch_fails_closed",
+      "test_name": "execution_preflight::tests::accepted_does_not_require_ip_binding",
+      "result": "PASS",
+      "evidence": [
+        "verification/rust-tests.log"
+      ]
+    },
+    {
+      "requirement_id": "REGRESSION",
+      "test_name": "analytics::artifact_job_fixtures::market_artifact_publication_and_cached_result_roundtrip",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -353,14 +337,6 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "execution_preflight::tests::demo_base_rate_limit_fallback_is_accepted_only_for_demo_preflight",
-      "result": "PASS",
-      "evidence": [
-        "verification/rust-tests.log"
-      ]
-    },
-    {
-      "requirement_id": "REGRESSION",
       "test_name": "execution_preflight::tests::demo_acceptance_preflight_requires_demo_and_preserves_production_rejection",
       "result": "PASS",
       "evidence": [
@@ -369,31 +345,7 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "execution_preflight::tests::missing_trade_permission_fails_closed_but_missing_ip_does_not",
-      "result": "PASS",
-      "evidence": [
-        "verification/rust-tests.log"
-      ]
-    },
-    {
-      "requirement_id": "REGRESSION",
-      "test_name": "execution_preflight::tests::mutation_preflight_rejects_rate_and_clock_mismatch_before_send",
-      "result": "PASS",
-      "evidence": [
-        "verification/rust-tests.log"
-      ]
-    },
-    {
-      "requirement_id": "REGRESSION",
-      "test_name": "github_auth::tests::token_validation_rejects_empty_or_whitespace",
-      "result": "PASS",
-      "evidence": [
-        "verification/rust-tests.log"
-      ]
-    },
-    {
-      "requirement_id": "REGRESSION",
-      "test_name": "execution_preflight::tests::withdraw_permission_fails_closed",
+      "test_name": "execution_preflight::tests::account_or_mode_mismatch_fails_closed",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -409,7 +361,31 @@
     },
     {
       "requirement_id": "REGRESSION",
+      "test_name": "execution_preflight::tests::missing_trade_permission_fails_closed_but_missing_ip_does_not",
+      "result": "PASS",
+      "evidence": [
+        "verification/rust-tests.log"
+      ]
+    },
+    {
+      "requirement_id": "REGRESSION",
+      "test_name": "execution_preflight::tests::demo_base_rate_limit_fallback_is_accepted_only_for_demo_preflight",
+      "result": "PASS",
+      "evidence": [
+        "verification/rust-tests.log"
+      ]
+    },
+    {
+      "requirement_id": "REGRESSION",
       "test_name": "execution_preflight::tests::demo_environment_is_not_accepted_for_production_preflight",
+      "result": "PASS",
+      "evidence": [
+        "verification/rust-tests.log"
+      ]
+    },
+    {
+      "requirement_id": "REGRESSION",
+      "test_name": "execution_preflight::tests::mutation_preflight_rejects_rate_and_clock_mismatch_before_send",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -449,7 +425,39 @@
     },
     {
       "requirement_id": "REGRESSION",
+      "test_name": "execution_preflight::tests::withdraw_permission_fails_closed",
+      "result": "PASS",
+      "evidence": [
+        "verification/rust-tests.log"
+      ]
+    },
+    {
+      "requirement_id": "REGRESSION",
+      "test_name": "github_auth::tests::token_validation_rejects_empty_or_whitespace",
+      "result": "PASS",
+      "evidence": [
+        "verification/rust-tests.log"
+      ]
+    },
+    {
+      "requirement_id": "REGRESSION",
       "test_name": "github_mailbox::tests::permanent_input_errors_are_skipped_without_retrying_batch",
+      "result": "PASS",
+      "evidence": [
+        "verification/rust-tests.log"
+      ]
+    },
+    {
+      "requirement_id": "REGRESSION",
+      "test_name": "github_mailbox::tests::published_identity_contains_public_material_only",
+      "result": "PASS",
+      "evidence": [
+        "verification/rust-tests.log"
+      ]
+    },
+    {
+      "requirement_id": "REGRESSION",
+      "test_name": "github_mailbox::tests::request_latency_is_non_negative_for_valid_timestamp",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -481,7 +489,7 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "github_mailbox::tests::request_latency_is_non_negative_for_valid_timestamp",
+      "test_name": "market_bootstrap::tests::unknown_funding_semantics_fail_before_market_bootstrap",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -489,15 +497,7 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "github_mailbox::tests::published_identity_contains_public_material_only",
-      "result": "PASS",
-      "evidence": [
-        "verification/rust-tests.log"
-      ]
-    },
-    {
-      "requirement_id": "REGRESSION",
-      "test_name": "market_bootstrap::tests::market_source_scope_is_bound_to_native_public_client_environment",
+      "test_name": "okx_credentials::tests::named_bundle_is_strict_and_environment_specific",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -513,7 +513,7 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "market_bootstrap::tests::unknown_funding_semantics_fail_before_market_bootstrap",
+      "test_name": "market_bootstrap::tests::market_source_scope_is_bound_to_native_public_client_environment",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -529,7 +529,7 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "okx_credentials::tests::named_bundle_is_strict_and_environment_specific",
+      "test_name": "analytics::artifact_job_fixtures::two_asset_batch_grid_has_independent_artifacts_and_cursors",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -553,14 +553,6 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "risk_bridge::tests::denied_reservation_never_sends_post",
-      "result": "PASS",
-      "evidence": [
-        "verification/rust-tests.log"
-      ]
-    },
-    {
-      "requirement_id": "REGRESSION",
       "test_name": "risk_bridge::tests::changed_plan_cannot_turn_held_into_post",
       "result": "PASS",
       "evidence": [
@@ -569,7 +561,7 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "risk_bridge::tests::reserve_time_census_cannot_enter_begin_post",
+      "test_name": "risk_bridge::tests::denied_reservation_never_sends_post",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -585,23 +577,7 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "risk_bridge::tests::later_envelope_timestamp_without_all_account_re_read_cannot_post",
-      "result": "PASS",
-      "evidence": [
-        "verification/rust-tests.log"
-      ]
-    },
-    {
-      "requirement_id": "REGRESSION",
       "test_name": "risk_bridge::tests::fresh_two_phase_receipt_fences_one_post",
-      "result": "PASS",
-      "evidence": [
-        "verification/rust-tests.log"
-      ]
-    },
-    {
-      "requirement_id": "REGRESSION",
-      "test_name": "source_capture::tests::source_window_retry_preserves_range_and_overlap",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -617,7 +593,23 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "source_capture::tests::unknown_currency_and_decimal_do_not_become_zero",
+      "test_name": "risk_bridge::tests::later_envelope_timestamp_without_all_account_re_read_cannot_post",
+      "result": "PASS",
+      "evidence": [
+        "verification/rust-tests.log"
+      ]
+    },
+    {
+      "requirement_id": "REGRESSION",
+      "test_name": "risk_bridge::tests::reserve_time_census_cannot_enter_begin_post",
+      "result": "PASS",
+      "evidence": [
+        "verification/rust-tests.log"
+      ]
+    },
+    {
+      "requirement_id": "REGRESSION",
+      "test_name": "source_capture::tests::source_window_retry_preserves_range_and_overlap",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -626,6 +618,14 @@
     {
       "requirement_id": "REGRESSION",
       "test_name": "storage_commands::tests::native_storage_requires_exclusive_stopped_engine",
+      "result": "PASS",
+      "evidence": [
+        "verification/rust-tests.log"
+      ]
+    },
+    {
+      "requirement_id": "REGRESSION",
+      "test_name": "source_capture::tests::unknown_currency_and_decimal_do_not_become_zero",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -656,6 +656,14 @@
       ]
     },
     {
+      "requirement_id": "REGRESSION",
+      "test_name": "trade_service::execute::tests::close_under_stop",
+      "result": "PASS",
+      "evidence": [
+        "verification/rust-tests.log"
+      ]
+    },
+    {
       "requirement_id": "EXEC-01",
       "test_name": "trade_service::execute::tests::duplicate_execute_one_post",
       "result": "PASS",
@@ -665,31 +673,7 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "portfolio::tests::cross_account_cursor_preserves_all_equal_timestamp_rows",
-      "result": "PASS",
-      "evidence": [
-        "verification/rust-tests.log"
-      ]
-    },
-    {
-      "requirement_id": "REGRESSION",
-      "test_name": "trade_service::execute::tests::close_under_stop",
-      "result": "PASS",
-      "evidence": [
-        "verification/rust-tests.log"
-      ]
-    },
-    {
-      "requirement_id": "REGRESSION",
-      "test_name": "trade_service::execute::tests::stale_generation_response_ignored",
-      "result": "PASS",
-      "evidence": [
-        "verification/rust-tests.log"
-      ]
-    },
-    {
-      "requirement_id": "EXEC-01",
-      "test_name": "trade_service::execute::tests::restart_posting_reconciles_without_resubmit",
+      "test_name": "trade_service::execute::tests::expired_command_never_executes_later",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -705,23 +689,7 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "trade_service::execute::tests::expired_command_never_executes_later",
-      "result": "PASS",
-      "evidence": [
-        "verification/rust-tests.log"
-      ]
-    },
-    {
-      "requirement_id": "REGRESSION",
-      "test_name": "trade_service::execute::tests::stop_after_reserve_before_post",
-      "result": "PASS",
-      "evidence": [
-        "verification/rust-tests.log"
-      ]
-    },
-    {
-      "requirement_id": "REGRESSION",
-      "test_name": "storage_commands::backup::tests::native_backup_restore_is_idempotent_and_reconciles_even_corrupt_current_db",
+      "test_name": "portfolio::tests::cross_account_cursor_preserves_all_equal_timestamp_rows",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -737,7 +705,7 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "trade_service::execute::tests::view_selection_does_not_reroute_intent",
+      "test_name": "storage_commands::backup::tests::restore_rejects_manifest_tampering_before_touching_live_db",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -745,7 +713,15 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "storage_commands::backup::tests::restore_rejects_manifest_tampering_before_touching_live_db",
+      "test_name": "trade_service::execute::tests::stale_generation_response_ignored",
+      "result": "PASS",
+      "evidence": [
+        "verification/rust-tests.log"
+      ]
+    },
+    {
+      "requirement_id": "REGRESSION",
+      "test_name": "trade_service::execute::tests::stop_after_reserve_before_post",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -760,16 +736,8 @@
       ]
     },
     {
-      "requirement_id": "REGRESSION",
-      "test_name": "trade_service::recovery::tests::fresh_generation_required",
-      "result": "PASS",
-      "evidence": [
-        "verification/rust-tests.log"
-      ]
-    },
-    {
-      "requirement_id": "MULTI-01",
-      "test_name": "trade_service::execute::tests::two_accounts_two_instances",
+      "requirement_id": "EXEC-01",
+      "test_name": "trade_service::execute::tests::restart_posting_reconciles_without_resubmit",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -785,7 +753,39 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "trade_service::recovery::tests::partial_source_never_clears",
+      "test_name": "trade_service::execute::tests::view_selection_does_not_reroute_intent",
+      "result": "PASS",
+      "evidence": [
+        "verification/rust-tests.log"
+      ]
+    },
+    {
+      "requirement_id": "REGRESSION",
+      "test_name": "storage_commands::backup::tests::native_backup_restore_is_idempotent_and_reconciles_even_corrupt_current_db",
+      "result": "PASS",
+      "evidence": [
+        "verification/rust-tests.log"
+      ]
+    },
+    {
+      "requirement_id": "MULTI-01",
+      "test_name": "trade_service::execute::tests::two_accounts_two_instances",
+      "result": "PASS",
+      "evidence": [
+        "verification/rust-tests.log"
+      ]
+    },
+    {
+      "requirement_id": "REGRESSION",
+      "test_name": "trade_service::recovery::tests::fresh_generation_required",
+      "result": "PASS",
+      "evidence": [
+        "verification/rust-tests.log"
+      ]
+    },
+    {
+      "requirement_id": "REGRESSION",
+      "test_name": "trade_service::recovery::tests::newer_local_loss_recovers_without_resetting_central",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -809,7 +809,7 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "trade_service::recovery::tests::unknown_central_never_clears",
+      "test_name": "trade_service::recovery::tests::partial_source_never_clears",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -817,7 +817,7 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "trade_service::recovery::tests::newer_local_loss_recovers_without_resetting_central",
+      "test_name": "trade_service::recovery::tests::unknown_central_never_clears",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -841,14 +841,6 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "candidate::tests::long_candidate_is_risk_sized_and_fee_aware",
-      "result": "PASS",
-      "evidence": [
-        "verification/rust-tests.log"
-      ]
-    },
-    {
-      "requirement_id": "REGRESSION",
       "test_name": "candidate::tests::candidate_never_exceeds_notional_or_loss_caps_after_lot_rounding",
       "result": "PASS",
       "evidence": [
@@ -857,7 +849,31 @@
     },
     {
       "requirement_id": "REGRESSION",
+      "test_name": "candidate::tests::long_candidate_is_risk_sized_and_fee_aware",
+      "result": "PASS",
+      "evidence": [
+        "verification/rust-tests.log"
+      ]
+    },
+    {
+      "requirement_id": "REGRESSION",
       "test_name": "candidate::tests::non_tick_aligned_stop_fails_closed",
+      "result": "PASS",
+      "evidence": [
+        "verification/rust-tests.log"
+      ]
+    },
+    {
+      "requirement_id": "REGRESSION",
+      "test_name": "candidate::tests::tiny_risk_budget_fails_instead_of_inventing_sub_minimum_size",
+      "result": "PASS",
+      "evidence": [
+        "verification/rust-tests.log"
+      ]
+    },
+    {
+      "requirement_id": "REGRESSION",
+      "test_name": "candidate::tests::target_rounding_never_understates_requested_rr",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -874,22 +890,6 @@
     {
       "requirement_id": "REGRESSION",
       "test_name": "candidate::tests::wrong_stop_side_fails_closed",
-      "result": "PASS",
-      "evidence": [
-        "verification/rust-tests.log"
-      ]
-    },
-    {
-      "requirement_id": "REGRESSION",
-      "test_name": "candidate::tests::target_rounding_never_understates_requested_rr",
-      "result": "PASS",
-      "evidence": [
-        "verification/rust-tests.log"
-      ]
-    },
-    {
-      "requirement_id": "REGRESSION",
-      "test_name": "candidate::tests::tiny_risk_budget_fails_instead_of_inventing_sub_minimum_size",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -1009,7 +1009,7 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "microstructure::tests::microstructure_computes_depth_basis_and_symmetric_sweeps",
+      "test_name": "microstructure::tests::insufficient_depth_is_evidence_not_an_analysis_failure",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -1017,7 +1017,7 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "microstructure::tests::insufficient_depth_is_evidence_not_an_analysis_failure",
+      "test_name": "microstructure::tests::microstructure_computes_depth_basis_and_symmetric_sweeps",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -1033,7 +1033,7 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "operators::dependency_fixtures::unused_numeric_columns_do_not_degrade_downside",
+      "test_name": "operators::downside_fixtures::downside_volatility_closed_returns_and_crypto_annualization",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -1041,7 +1041,7 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "operators::downside_fixtures::downside_volatility_closed_returns_and_crypto_annualization",
+      "test_name": "operators::dependency_fixtures::unused_numeric_columns_do_not_degrade_downside",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -1064,16 +1064,16 @@
       ]
     },
     {
-      "requirement_id": "REGRESSION",
-      "test_name": "operators::tests::ema_warmup_and_instances",
+      "requirement_id": "ANALYTICS-01",
+      "test_name": "operators::tests::correlation_timestamp_alignment",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
       ]
     },
     {
-      "requirement_id": "ANALYTICS-01",
-      "test_name": "operators::tests::correlation_timestamp_alignment",
+      "requirement_id": "REGRESSION",
+      "test_name": "operators::tests::ema_warmup_and_instances",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -1121,6 +1121,14 @@
     },
     {
       "requirement_id": "REGRESSION",
+      "test_name": "risk::tests::correlated_cluster_limit_uses_gross_not_net_exposure",
+      "result": "PASS",
+      "evidence": [
+        "verification/rust-tests.log"
+      ]
+    },
+    {
+      "requirement_id": "REGRESSION",
       "test_name": "risk::tests::candidate_risk_context_reuses_account_and_ledger_truth",
       "result": "PASS",
       "evidence": [
@@ -1137,7 +1145,7 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "risk::tests::correlated_cluster_limit_uses_gross_not_net_exposure",
+      "test_name": "risk::tests::hedge_mode_same_instrument_long_short_preserves_gross_and_offsets_net",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -1153,23 +1161,7 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "risk::tests::hedge_mode_same_instrument_long_short_preserves_gross_and_offsets_net",
-      "result": "PASS",
-      "evidence": [
-        "verification/rust-tests.log"
-      ]
-    },
-    {
-      "requirement_id": "REGRESSION",
       "test_name": "risk::tests::mandate_is_enforced_for_current_portfolio_and_declares_context_only_fields",
-      "result": "PASS",
-      "evidence": [
-        "verification/rust-tests.log"
-      ]
-    },
-    {
-      "requirement_id": "REGRESSION",
-      "test_name": "risk::tests::mismatched_side_quantity_duplicate_and_extra_oracle_lots_fail_closed",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -1185,15 +1177,7 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "risk::tests::missing_notional_for_non_zero_position_fails_closed",
-      "result": "PASS",
-      "evidence": [
-        "verification/rust-tests.log"
-      ]
-    },
-    {
-      "requirement_id": "REGRESSION",
-      "test_name": "risk::tests::missing_strategy_nav_does_not_latch_global_stop_without_true_breach",
+      "test_name": "risk::tests::mismatched_side_quantity_duplicate_and_extra_oracle_lots_fail_closed",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -1209,7 +1193,31 @@
     },
     {
       "requirement_id": "REGRESSION",
+      "test_name": "risk::tests::missing_strategy_nav_does_not_latch_global_stop_without_true_breach",
+      "result": "PASS",
+      "evidence": [
+        "verification/rust-tests.log"
+      ]
+    },
+    {
+      "requirement_id": "REGRESSION",
+      "test_name": "risk::tests::missing_notional_for_non_zero_position_fails_closed",
+      "result": "PASS",
+      "evidence": [
+        "verification/rust-tests.log"
+      ]
+    },
+    {
+      "requirement_id": "REGRESSION",
       "test_name": "risk::tests::net_mode_uses_position_sign_for_direction",
+      "result": "PASS",
+      "evidence": [
+        "verification/rust-tests.log"
+      ]
+    },
+    {
+      "requirement_id": "REGRESSION",
+      "test_name": "risk::tests::only_trusted_strategy_run_nav_can_admit_a_small_candidate",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -1233,31 +1241,7 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "risk::tests::only_trusted_strategy_run_nav_can_admit_a_small_candidate",
-      "result": "PASS",
-      "evidence": [
-        "verification/rust-tests.log"
-      ]
-    },
-    {
-      "requirement_id": "REGRESSION",
       "test_name": "risk::tests::unsupported_daily_realized_currency_rejects_instead_of_skipping_loss_policy",
-      "result": "PASS",
-      "evidence": [
-        "verification/rust-tests.log"
-      ]
-    },
-    {
-      "requirement_id": "REGRESSION",
-      "test_name": "risk::tests::unsupported_non_zero_position_type_fails_closed",
-      "result": "PASS",
-      "evidence": [
-        "verification/rust-tests.log"
-      ]
-    },
-    {
-      "requirement_id": "REGRESSION",
-      "test_name": "risk::tests::virtual_notional_oracle_requires_exact_per_position_and_gross_match",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -1273,7 +1257,7 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "risk::virtual_position_constraint_tests::futures_virtual_portfolio_initial_margin_is_exact_decimal_sum",
+      "test_name": "risk::tests::virtual_notional_oracle_requires_exact_per_position_and_gross_match",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -1281,7 +1265,15 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "risk::virtual_position_constraint_tests::futures_virtual_position_constraints_fail_closed_on_exchange_limits",
+      "test_name": "risk::tests::unsupported_non_zero_position_type_fails_closed",
+      "result": "PASS",
+      "evidence": [
+        "verification/rust-tests.log"
+      ]
+    },
+    {
+      "requirement_id": "REGRESSION",
+      "test_name": "risk::virtual_position_constraint_tests::futures_virtual_portfolio_initial_margin_is_exact_decimal_sum",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -1297,7 +1289,31 @@
     },
     {
       "requirement_id": "REGRESSION",
+      "test_name": "risk::virtual_position_constraint_tests::futures_virtual_position_constraints_fail_closed_on_exchange_limits",
+      "result": "PASS",
+      "evidence": [
+        "verification/rust-tests.log"
+      ]
+    },
+    {
+      "requirement_id": "REGRESSION",
       "test_name": "scenario::tests::historical_funding_cost_uses_position_direction",
+      "result": "PASS",
+      "evidence": [
+        "verification/rust-tests.log"
+      ]
+    },
+    {
+      "requirement_id": "REGRESSION",
+      "test_name": "scenario::tests::move_ratio_at_or_below_negative_one_fails_closed",
+      "result": "PASS",
+      "evidence": [
+        "verification/rust-tests.log"
+      ]
+    },
+    {
+      "requirement_id": "REGRESSION",
+      "test_name": "scenario::tests::history_behavior_uses_confirmed_candles_only",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -1313,7 +1329,7 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "scenario::tests::history_behavior_uses_confirmed_candles_only",
+      "test_name": "scenario::tests::invalid_ohlc_relationship_fails_closed",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -1337,22 +1353,6 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "scenario::tests::invalid_ohlc_relationship_fails_closed",
-      "result": "PASS",
-      "evidence": [
-        "verification/rust-tests.log"
-      ]
-    },
-    {
-      "requirement_id": "REGRESSION",
-      "test_name": "scenario::tests::move_ratio_at_or_below_negative_one_fails_closed",
-      "result": "PASS",
-      "evidence": [
-        "verification/rust-tests.log"
-      ]
-    },
-    {
-      "requirement_id": "REGRESSION",
       "test_name": "scenario::tests::signed_move_ratio_can_define_theoretical_scenario_price",
       "result": "PASS",
       "evidence": [
@@ -1361,7 +1361,7 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "scenario::tests::zero_starting_volume_has_explicit_undefined_change",
+      "test_name": "statistics::tests::covariance_is_symmetric_and_identical_series_have_unit_correlation",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -1369,7 +1369,7 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "statistics::tests::covariance_is_symmetric_and_identical_series_have_unit_correlation",
+      "test_name": "scenario::tests::zero_starting_volume_has_explicit_undefined_change",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -1393,14 +1393,6 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "statistics::tests::mismatched_series_fail_closed",
-      "result": "PASS",
-      "evidence": [
-        "verification/rust-tests.log"
-      ]
-    },
-    {
-      "requirement_id": "REGRESSION",
       "test_name": "statistics::tests::identical_series_have_unit_cross_correlation_and_parallel_scenario_is_signed",
       "result": "PASS",
       "evidence": [
@@ -1417,6 +1409,14 @@
     },
     {
       "requirement_id": "REGRESSION",
+      "test_name": "statistics::tests::mismatched_series_fail_closed",
+      "result": "PASS",
+      "evidence": [
+        "verification/rust-tests.log"
+      ]
+    },
+    {
+      "requirement_id": "REGRESSION",
       "test_name": "statistics::tests::zero_variance_has_no_correlation",
       "result": "PASS",
       "evidence": [
@@ -1425,15 +1425,7 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "strategy::tests::baseline_rejects_nonpositive_prices",
-      "result": "PASS",
-      "evidence": [
-        "verification/rust-tests.log"
-      ]
-    },
-    {
-      "requirement_id": "REGRESSION",
-      "test_name": "strategy::tests::close_momentum_is_deterministic_and_directional",
+      "test_name": "strategy::tests::no_trade_never_emits_a_position_decision",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -1457,7 +1449,15 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "strategy::tests::no_trade_never_emits_a_position_decision",
+      "test_name": "strategy::tests::baseline_rejects_nonpositive_prices",
+      "result": "PASS",
+      "evidence": [
+        "verification/rust-tests.log"
+      ]
+    },
+    {
+      "requirement_id": "REGRESSION",
+      "test_name": "strategy::tests::close_momentum_is_deterministic_and_directional",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -1521,7 +1521,7 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "tca::tests::tca_report_rejects_fills_above_requested_size",
+      "test_name": "tests::decimal_parser_rejects_non_decimal_text",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -1529,7 +1529,7 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "tests::decimal_parser_rejects_non_decimal_text",
+      "test_name": "tca::tests::tca_report_rejects_fills_above_requested_size",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -1617,7 +1617,15 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "account::tests::position_builder_snapshot_matches_documented_multi_currency_shape",
+      "test_name": "asset::tests::parses_funding_balance",
+      "result": "PASS",
+      "evidence": [
+        "verification/rust-tests.log"
+      ]
+    },
+    {
+      "requirement_id": "REGRESSION",
+      "test_name": "client::tests::request_query_encoding_is_deterministic",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -1633,14 +1641,6 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "asset::tests::parses_funding_balance",
-      "result": "PASS",
-      "evidence": [
-        "verification/rust-tests.log"
-      ]
-    },
-    {
-      "requirement_id": "REGRESSION",
       "test_name": "client::tests::throttle_code_from_http_429_body_preserves_okx_code",
       "result": "PASS",
       "evidence": [
@@ -1649,7 +1649,7 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "client::tests::request_query_encoding_is_deterministic",
+      "test_name": "account::tests::position_builder_snapshot_matches_documented_multi_currency_shape",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -1713,7 +1713,7 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "config::tests::websocket_urls_use_canonical_default_tls_port_for_every_environment",
+      "test_name": "config::tests::websocket_login_material_uses_okx_verify_path",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -1721,7 +1721,7 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "config::tests::websocket_login_material_uses_okx_verify_path",
+      "test_name": "config::tests::websocket_urls_use_canonical_default_tls_port_for_every_environment",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -1737,7 +1737,7 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "ledger::tests::order_filtered_fill_history_remains_one_bounded_page",
+      "test_name": "ledger::tests::conflicts_and_intra_source_duplicates_fail_closed",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -1745,7 +1745,7 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "ledger::tests::conflicts_and_intra_source_duplicates_fail_closed",
+      "test_name": "ledger::tests::order_filtered_fill_history_remains_one_bounded_page",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -1897,7 +1897,7 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "public_data::tests::public_instrument_preserves_exchange_decimal_text_exactly",
+      "test_name": "rate::tests::account_rate_limit_evidence_updates_dynamic_subaccount_capacity",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -1905,7 +1905,7 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "rate::tests::account_rate_limit_evidence_updates_dynamic_subaccount_capacity",
+      "test_name": "public_data::tests::public_instrument_preserves_exchange_decimal_text_exactly",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -1921,7 +1921,7 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "rate::tests::documented_bulk_tickers_budget_is_bounded",
+      "test_name": "rate::tests::documented_history_endpoint_budgets_are_not_exceeded",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -1929,7 +1929,7 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "rate::tests::documented_history_endpoint_budgets_are_not_exceeded",
+      "test_name": "rate::tests::documented_bulk_tickers_budget_is_bounded",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -2073,7 +2073,7 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "trade::tests::amend_requires_a_real_change",
+      "test_name": "trade::tests::algo_resize_wire_contract_requires_exact_one_algo_and_non_cancelling_positive_size",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -2081,7 +2081,7 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "trade::tests::algo_resize_wire_contract_requires_exact_one_algo_and_non_cancelling_positive_size",
+      "test_name": "trade::tests::amend_requires_a_real_change",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -2137,7 +2137,7 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "trade::tests::long_short_place_payload_is_exact_and_has_no_reduce_only_field",
+      "test_name": "trade::tests::one_exact_algo_cancel_wire_contract_is_an_array_and_not_a_bulk_request",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -2145,7 +2145,7 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "trade::tests::one_exact_algo_cancel_wire_contract_is_an_array_and_not_a_bulk_request",
+      "test_name": "trade::tests::long_short_place_payload_is_exact_and_has_no_reduce_only_field",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -2185,22 +2185,6 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "tests::bearer_credential_is_never_serialized",
-      "result": "PASS",
-      "evidence": [
-        "verification/rust-tests.log"
-      ]
-    },
-    {
-      "requirement_id": "REGRESSION",
-      "test_name": "tests::request_ids_are_typed_and_bounded",
-      "result": "PASS",
-      "evidence": [
-        "verification/rust-tests.log"
-      ]
-    },
-    {
-      "requirement_id": "REGRESSION",
       "test_name": "tests::identity_contract_is_pinned",
       "result": "PASS",
       "evidence": [
@@ -2210,6 +2194,22 @@
     {
       "requirement_id": "REGRESSION",
       "test_name": "tests::tool_surface_is_read_only_and_bounded",
+      "result": "PASS",
+      "evidence": [
+        "verification/rust-tests.log"
+      ]
+    },
+    {
+      "requirement_id": "REGRESSION",
+      "test_name": "tests::bearer_credential_is_never_serialized",
+      "result": "PASS",
+      "evidence": [
+        "verification/rust-tests.log"
+      ]
+    },
+    {
+      "requirement_id": "REGRESSION",
+      "test_name": "tests::request_ids_are_typed_and_bounded",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -2248,14 +2248,6 @@
       ]
     },
     {
-      "requirement_id": "REGRESSION",
-      "test_name": "account_store::tests::campaign_conversion_is_attested_deduplicated_and_profit_never_refills",
-      "result": "PASS",
-      "evidence": [
-        "verification/rust-tests.log"
-      ]
-    },
-    {
       "requirement_id": "OPS-01",
       "test_name": "account_store::tests::disk_full_before_post",
       "result": "PASS",
@@ -2265,7 +2257,7 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "account_store::tests::campaign_budget_survives_day_restart_and_profit",
+      "test_name": "account_store::tests::campaign_conversion_is_attested_deduplicated_and_profit_never_refills",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -2281,7 +2273,31 @@
     },
     {
       "requirement_id": "REGRESSION",
+      "test_name": "account_store::tests::campaign_budget_survives_day_restart_and_profit",
+      "result": "PASS",
+      "evidence": [
+        "verification/rust-tests.log"
+      ]
+    },
+    {
+      "requirement_id": "REGRESSION",
       "test_name": "account_store::tests::duplicate_cancel_never_posts_twice",
+      "result": "PASS",
+      "evidence": [
+        "verification/rust-tests.log"
+      ]
+    },
+    {
+      "requirement_id": "REGRESSION",
+      "test_name": "account_store::tests::crash_before_after_begin_post",
+      "result": "PASS",
+      "evidence": [
+        "verification/rust-tests.log"
+      ]
+    },
+    {
+      "requirement_id": "REGRESSION",
+      "test_name": "account_store::tests::expired_command_never_executes_later",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -2297,7 +2313,23 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "account_store::tests::crash_before_after_begin_post",
+      "test_name": "account_store::tests::external_fill_unattributed_not_zero_risk",
+      "result": "PASS",
+      "evidence": [
+        "verification/rust-tests.log"
+      ]
+    },
+    {
+      "requirement_id": "REGRESSION",
+      "test_name": "account_store::tests::duplicate_execute_one_post",
+      "result": "PASS",
+      "evidence": [
+        "verification/rust-tests.log"
+      ]
+    },
+    {
+      "requirement_id": "FIN-01",
+      "test_name": "account_store::tests::fee_fill_bill_counted_once",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -2321,47 +2353,7 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "account_store::tests::duplicate_execute_one_post",
-      "result": "PASS",
-      "evidence": [
-        "verification/rust-tests.log"
-      ]
-    },
-    {
-      "requirement_id": "REGRESSION",
-      "test_name": "account_store::tests::expired_command_never_executes_later",
-      "result": "PASS",
-      "evidence": [
-        "verification/rust-tests.log"
-      ]
-    },
-    {
-      "requirement_id": "REGRESSION",
-      "test_name": "account_store::tests::external_fill_unattributed_not_zero_risk",
-      "result": "PASS",
-      "evidence": [
-        "verification/rust-tests.log"
-      ]
-    },
-    {
-      "requirement_id": "FIN-01",
-      "test_name": "account_store::tests::fee_fill_bill_counted_once",
-      "result": "PASS",
-      "evidence": [
-        "verification/rust-tests.log"
-      ]
-    },
-    {
-      "requirement_id": "REGRESSION",
       "test_name": "account_store::tests::history_growth_does_not_expand_hot_read",
-      "result": "PASS",
-      "evidence": [
-        "verification/rust-tests.log"
-      ]
-    },
-    {
-      "requirement_id": "REGRESSION",
-      "test_name": "account_store::tests::funding_opposite_instances_conserves_account_and_keeps_residual_explicit",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -2377,7 +2369,7 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "account_store::tests::lost_response_after_post_returns_unknown",
+      "test_name": "account_store::tests::funding_opposite_instances_conserves_account_and_keeps_residual_explicit",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -2385,7 +2377,7 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "account_store::tests::missing_fx_stops_risk_and_does_not_commit_zero_loss_or_cursor",
+      "test_name": "account_store::tests::immutable_strategy_versions_bind_old_intent_and_cas_start_stop",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -2401,7 +2393,7 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "account_store::tests::immutable_strategy_versions_bind_old_intent_and_cas_start_stop",
+      "test_name": "account_store::tests::lost_response_after_post_returns_unknown",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -2433,7 +2425,7 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "account_store::tests::partial_fill_protection_tracks_size",
+      "test_name": "account_store::tests::missing_fx_stops_risk_and_does_not_commit_zero_loss_or_cursor",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -2442,6 +2434,14 @@
     {
       "requirement_id": "REGRESSION",
       "test_name": "account_store::tests::pending_fill_projection_is_exactly_once",
+      "result": "PASS",
+      "evidence": [
+        "verification/rust-tests.log"
+      ]
+    },
+    {
+      "requirement_id": "REGRESSION",
+      "test_name": "account_store::tests::partial_fill_protection_tracks_size",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -2473,7 +2473,7 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "account_store::tests::sql_deadline_handler_is_removed_after_operation_error",
+      "test_name": "account_store::tests::sql_money_overflow_rejected",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -2481,7 +2481,7 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "account_store::tests::recovery_history_age_is_separate_from_current_evidence_freshness",
+      "test_name": "account_store::tests::sql_deadline_handler_is_removed_after_operation_error",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -2504,8 +2504,24 @@
       ]
     },
     {
+      "requirement_id": "REGRESSION",
+      "test_name": "account_store::tests::recovery_history_age_is_separate_from_current_evidence_freshness",
+      "result": "PASS",
+      "evidence": [
+        "verification/rust-tests.log"
+      ]
+    },
+    {
       "requirement_id": "MULTI-01",
       "test_name": "finance::attribution::tests::two_instances_same_instrument_lot_attribution",
+      "result": "PASS",
+      "evidence": [
+        "verification/rust-tests.log"
+      ]
+    },
+    {
+      "requirement_id": "REGRESSION",
+      "test_name": "account_store::tests::sqlite_runtime_version_supported",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -2537,23 +2553,7 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "account_store::tests::sql_money_overflow_rejected",
-      "result": "PASS",
-      "evidence": [
-        "verification/rust-tests.log"
-      ]
-    },
-    {
-      "requirement_id": "REGRESSION",
       "test_name": "risk::admission::tests::ttl_boundaries_and_independent_source_generations",
-      "result": "PASS",
-      "evidence": [
-        "verification/rust-tests.log"
-      ]
-    },
-    {
-      "requirement_id": "REGRESSION",
-      "test_name": "account_store::tests::sqlite_runtime_version_supported",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -2569,7 +2569,7 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "account_store::tests::utc_daily_risk_rolls_without_replenishing_campaign_or_clearing_stop",
+      "test_name": "account_store::tests::storage_failure_after_post",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -2577,7 +2577,7 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "account_store::tests::storage_failure_after_post",
+      "test_name": "account_store::tests::utc_daily_risk_rolls_without_replenishing_campaign_or_clearing_stop",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -2625,7 +2625,7 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "tests::classifies_auth_permission_and_rate_limit_responses",
+      "test_name": "tests::comment_cursor_orders_by_creation_then_id",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -2633,7 +2633,7 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "tests::comment_cursor_orders_by_creation_then_id",
+      "test_name": "tests::classifies_auth_permission_and_rate_limit_responses",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -2673,15 +2673,7 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "tests::issue_number_zero_fails_closed",
-      "result": "PASS",
-      "evidence": [
-        "verification/rust-tests.log"
-      ]
-    },
-    {
-      "requirement_id": "REGRESSION",
-      "test_name": "tests::declared_body_over_limit_rejected_before_read",
+      "test_name": "tests::artifact_range_rejects_oversized_claim_before_body_read",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -2697,7 +2689,7 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "tests::artifact_range_rejects_oversized_claim_before_body_read",
+      "test_name": "tests::issue_number_zero_fails_closed",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -2729,6 +2721,14 @@
     },
     {
       "requirement_id": "REGRESSION",
+      "test_name": "tests::repository_identity_constants_are_pinned",
+      "result": "PASS",
+      "evidence": [
+        "verification/rust-tests.log"
+      ]
+    },
+    {
+      "requirement_id": "REGRESSION",
       "test_name": "tests::release_failure_evidence_never_contains_signed_redirect_query",
       "result": "PASS",
       "evidence": [
@@ -2737,7 +2737,15 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "tests::repository_identity_constants_are_pinned",
+      "test_name": "tests::declared_body_over_limit_rejected_before_read",
+      "result": "PASS",
+      "evidence": [
+        "verification/rust-tests.log"
+      ]
+    },
+    {
+      "requirement_id": "REGRESSION",
+      "test_name": "tests::artifact_range_reads_exact_contiguous_immutable_zip",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -2777,14 +2785,6 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "tests::artifact_range_reads_exact_contiguous_immutable_zip",
-      "result": "PASS",
-      "evidence": [
-        "verification/rust-tests.log"
-      ]
-    },
-    {
-      "requirement_id": "REGRESSION",
       "test_name": "tests::validator_only_arms_for_single_page_idle_representation",
       "result": "PASS",
       "evidence": [
@@ -2809,7 +2809,7 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "tests::cursor_store_round_trips_and_rejects_wrong_issue",
+      "test_name": "telemetry::tests::telemetry_rejects_wrong_issue_identity",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -2817,7 +2817,7 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "telemetry::tests::telemetry_rejects_wrong_issue_identity",
+      "test_name": "tests::cursor_store_round_trips_and_rejects_wrong_issue",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -2865,7 +2865,7 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "autostart::tests::scheduler_change_is_not_part_of_update_contract",
+      "test_name": "autostart::tests::canonical_task_keeps_one_fixed_entrypoint_forever",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -2873,7 +2873,7 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "autostart::tests::canonical_task_keeps_one_fixed_entrypoint_forever",
+      "test_name": "autostart::tests::scheduler_change_is_not_part_of_update_contract",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -2889,14 +2889,6 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "executor::tests::canonical_root_is_fixed",
-      "result": "PASS",
-      "evidence": [
-        "verification/rust-tests.log"
-      ]
-    },
-    {
-      "requirement_id": "REGRESSION",
       "test_name": "controller_update::tests::durable_ack_requires_owner_pass_and_exact_handoff_operation",
       "result": "PASS",
       "evidence": [
@@ -2905,7 +2897,7 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "executor::tests::git_commands_ignore_shell_proxy_and_global_git_configuration",
+      "test_name": "executor::tests::canonical_root_is_fixed",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -2921,15 +2913,7 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "executor::tests::fatal_error_summary_classifies_early_startup_variants_without_messages",
-      "result": "PASS",
-      "evidence": [
-        "verification/rust-tests.log"
-      ]
-    },
-    {
-      "requirement_id": "REGRESSION",
-      "test_name": "executor::tests::remote_allowlist_is_narrow",
+      "test_name": "executor::tests::git_commands_ignore_shell_proxy_and_global_git_configuration",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -2945,7 +2929,23 @@
     },
     {
       "requirement_id": "REGRESSION",
+      "test_name": "executor::tests::fatal_error_summary_classifies_early_startup_variants_without_messages",
+      "result": "PASS",
+      "evidence": [
+        "verification/rust-tests.log"
+      ]
+    },
+    {
+      "requirement_id": "REGRESSION",
       "test_name": "executor::tests::restart_backoff_is_bounded",
+      "result": "PASS",
+      "evidence": [
+        "verification/rust-tests.log"
+      ]
+    },
+    {
+      "requirement_id": "REGRESSION",
+      "test_name": "executor::tests::remote_allowlist_is_narrow",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -2977,7 +2977,7 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "executor::tests::retained_log_error_cannot_be_misreported_as_current_runtime_failure",
+      "test_name": "executor::tests::rotating_redacted_stderr_preserves_child_shutdown_reply",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -2993,7 +2993,7 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "executor::tests::rotating_redacted_stderr_preserves_child_shutdown_reply",
+      "test_name": "desired::tests::process_restart_preserves_desired_without_financial_flags",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -3001,7 +3001,7 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "provenance::tests::legacy_binary_without_record_is_unknown",
+      "test_name": "executor::tests::retained_log_error_cannot_be_misreported_as_current_runtime_failure",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -3010,14 +3010,6 @@
     {
       "requirement_id": "REGRESSION",
       "test_name": "root_migration::tests::durable_ack_requires_exact_install_root_operation",
-      "result": "PASS",
-      "evidence": [
-        "verification/rust-tests.log"
-      ]
-    },
-    {
-      "requirement_id": "REGRESSION",
-      "test_name": "desired::tests::process_restart_preserves_desired_without_financial_flags",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -3065,6 +3057,22 @@
     },
     {
       "requirement_id": "REGRESSION",
+      "test_name": "provenance::tests::legacy_binary_without_record_is_unknown",
+      "result": "PASS",
+      "evidence": [
+        "verification/rust-tests.log"
+      ]
+    },
+    {
+      "requirement_id": "REGRESSION",
+      "test_name": "executor::tests::current_launch_diagnostics_exclude_history_and_fail_closed_on_log_loss",
+      "result": "PASS",
+      "evidence": [
+        "verification/rust-tests.log"
+      ]
+    },
+    {
+      "requirement_id": "REGRESSION",
       "test_name": "runtime::tests::oversized_control_result_terminalizes_as_compact_failure",
       "result": "PASS",
       "evidence": [
@@ -3081,23 +3089,7 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "provenance::tests::status_contains_no_secret_material",
-      "result": "PASS",
-      "evidence": [
-        "verification/rust-tests.log"
-      ]
-    },
-    {
-      "requirement_id": "REGRESSION",
       "test_name": "runtime::tests::recovery_ledger_accepts_valid_terminal_larger_than_request_limit",
-      "result": "PASS",
-      "evidence": [
-        "verification/rust-tests.log"
-      ]
-    },
-    {
-      "requirement_id": "REGRESSION",
-      "test_name": "provenance::tests::changed_binary_is_mismatch",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -3113,7 +3105,7 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "executor::tests::current_launch_diagnostics_exclude_history_and_fail_closed_on_log_loss",
+      "test_name": "provenance::tests::changed_binary_is_mismatch",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -3121,7 +3113,7 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "executor::tests::native_cutover_child_has_bounded_output_and_one_terminal_result",
+      "test_name": "provenance::tests::status_contains_no_secret_material",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -3137,6 +3129,14 @@
     },
     {
       "requirement_id": "REGRESSION",
+      "test_name": "executor::tests::native_cutover_child_has_bounded_output_and_one_terminal_result",
+      "result": "PASS",
+      "evidence": [
+        "verification/rust-tests.log"
+      ]
+    },
+    {
+      "requirement_id": "REGRESSION",
       "test_name": "tests::activation_requires_distinct_exact_versions",
       "result": "PASS",
       "evidence": [
@@ -3145,7 +3145,31 @@
     },
     {
       "requirement_id": "REGRESSION",
+      "test_name": "logging::tests::credential_lines_and_unbounded_lines_never_leak",
+      "result": "PASS",
+      "evidence": [
+        "verification/rust-tests.log"
+      ]
+    },
+    {
+      "requirement_id": "REGRESSION",
+      "test_name": "logging::tests::default_cap_bounds_existing_oversized_log_before_archiving",
+      "result": "PASS",
+      "evidence": [
+        "verification/rust-tests.log"
+      ]
+    },
+    {
+      "requirement_id": "REGRESSION",
       "test_name": "tests::active_rejects_same_previous_and_active",
+      "result": "PASS",
+      "evidence": [
+        "verification/rust-tests.log"
+      ]
+    },
+    {
+      "requirement_id": "REGRESSION",
+      "test_name": "tests::launcher_dependency_boundary_has_no_product_or_transport_crates",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -3169,23 +3193,7 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "tests::launcher_dependency_boundary_has_no_product_or_transport_crates",
-      "result": "PASS",
-      "evidence": [
-        "verification/rust-tests.log"
-      ]
-    },
-    {
-      "requirement_id": "REGRESSION",
       "test_name": "tests::launcher_root_upgrade_is_hash_guarded_and_scheduler_free",
-      "result": "PASS",
-      "evidence": [
-        "verification/rust-tests.log"
-      ]
-    },
-    {
-      "requirement_id": "REGRESSION",
-      "test_name": "tests::recovery_matrix_activates_only_from_confirmed_previous",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -3201,7 +3209,23 @@
     },
     {
       "requirement_id": "REGRESSION",
+      "test_name": "logging::tests::venue_headers_and_bearer_queries_are_redacted",
+      "result": "PASS",
+      "evidence": [
+        "verification/rust-tests.log"
+      ]
+    },
+    {
+      "requirement_id": "REGRESSION",
       "test_name": "tests::recovery_matrix_never_activates_before_terminal_ack",
+      "result": "PASS",
+      "evidence": [
+        "verification/rust-tests.log"
+      ]
+    },
+    {
+      "requirement_id": "REGRESSION",
+      "test_name": "tests::recovery_matrix_activates_only_from_confirmed_previous",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -3217,30 +3241,6 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "tests::version_path_is_content_addressed_and_fixed",
-      "result": "PASS",
-      "evidence": [
-        "verification/rust-tests.log"
-      ]
-    },
-    {
-      "requirement_id": "REGRESSION",
-      "test_name": "logging::tests::default_cap_bounds_existing_oversized_log_before_archiving",
-      "result": "PASS",
-      "evidence": [
-        "verification/rust-tests.log"
-      ]
-    },
-    {
-      "requirement_id": "REGRESSION",
-      "test_name": "logging::tests::venue_headers_and_bearer_queries_are_redacted",
-      "result": "PASS",
-      "evidence": [
-        "verification/rust-tests.log"
-      ]
-    },
-    {
-      "requirement_id": "REGRESSION",
       "test_name": "tests::windows_background_launcher_has_no_console",
       "result": "PASS",
       "evidence": [
@@ -3249,7 +3249,7 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "logging::tests::credential_lines_and_unbounded_lines_never_leak",
+      "test_name": "tests::version_path_is_content_addressed_and_fixed",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -3273,6 +3273,14 @@
     },
     {
       "requirement_id": "REGRESSION",
+      "test_name": "stdio_capture::tests::controller_logs_survive_launcher_parent_exit",
+      "result": "PASS",
+      "evidence": [
+        "verification/rust-tests.log"
+      ]
+    },
+    {
+      "requirement_id": "REGRESSION",
       "test_name": "account::tests::duplicate_pending_order_id_fails_closed",
       "result": "PASS",
       "evidence": [
@@ -3289,7 +3297,7 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "account::tests::rest_update_timestamps_do_not_change_content_generation",
+      "test_name": "account::tests::terminal_order_delta_removes_rest_pending_order",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -3305,7 +3313,23 @@
     },
     {
       "requirement_id": "REGRESSION",
+      "test_name": "account::tests::private_last_inbound_time_does_not_change_content_generation",
+      "result": "PASS",
+      "evidence": [
+        "verification/rust-tests.log"
+      ]
+    },
+    {
+      "requirement_id": "REGRESSION",
       "test_name": "account::tests::private_generation_changes_content_generation",
+      "result": "PASS",
+      "evidence": [
+        "verification/rust-tests.log"
+      ]
+    },
+    {
+      "requirement_id": "REGRESSION",
+      "test_name": "account::tests::rest_update_timestamps_do_not_change_content_generation",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -3321,15 +3345,7 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "account::tests::private_last_inbound_time_does_not_change_content_generation",
-      "result": "PASS",
-      "evidence": [
-        "verification/rust-tests.log"
-      ]
-    },
-    {
-      "requirement_id": "REGRESSION",
-      "test_name": "account::tests::terminal_order_delta_removes_rest_pending_order",
+      "test_name": "account_ledger::tests::exact_execution_fill_history_preserves_bound_and_rejects_identity_drift",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -3345,15 +3361,7 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "account_ledger::tests::exact_execution_fill_history_preserves_bound_and_rejects_identity_drift",
-      "result": "PASS",
-      "evidence": [
-        "verification/rust-tests.log"
-      ]
-    },
-    {
-      "requirement_id": "REGRESSION",
-      "test_name": "account_ledger::tests::normalizes_account_ledger_without_double_counting_sources",
+      "test_name": "account_ledger::tests::incomplete_order_history_marks_fill_link_unresolved_instead_of_inventing_mismatch",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -3369,7 +3377,7 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "account_ledger::tests::incomplete_order_history_marks_fill_link_unresolved_instead_of_inventing_mismatch",
+      "test_name": "account_ledger::tests::normalizes_account_ledger_without_double_counting_sources",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -3393,7 +3401,7 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "fee::tests::actual_fee_change_changes_fee_generation",
+      "test_name": "capabilities::tests::rejects_wrong_leverage_scope",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -3409,7 +3417,7 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "capabilities::tests::rejects_wrong_leverage_scope",
+      "test_name": "fee::tests::exchange_timestamp_does_not_change_fee_generation",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -3417,7 +3425,7 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "fee::tests::exchange_timestamp_does_not_change_fee_generation",
+      "test_name": "fee::tests::actual_fee_change_changes_fee_generation",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -3433,7 +3441,7 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "history::tests::market_research_source_generation_is_content_addressed",
+      "test_name": "history::tests::empty_trade_and_funding_windows_are_explicit_evidence",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -3441,7 +3449,7 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "history::tests::empty_trade_and_funding_windows_are_explicit_evidence",
+      "test_name": "history::tests::market_research_source_generation_is_content_addressed",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -3457,30 +3465,6 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "history::tests::research_normalization_does_not_consult_current_reference_state",
-      "result": "PASS",
-      "evidence": [
-        "verification/rust-tests.log"
-      ]
-    },
-    {
-      "requirement_id": "REGRESSION",
-      "test_name": "history::tests::open_interest_history_is_chronological_and_content_addressed",
-      "result": "PASS",
-      "evidence": [
-        "verification/rust-tests.log"
-      ]
-    },
-    {
-      "requirement_id": "REGRESSION",
-      "test_name": "history::tests::history_preserves_unconfirmed_state_explicitly",
-      "result": "PASS",
-      "evidence": [
-        "verification/rust-tests.log"
-      ]
-    },
-    {
-      "requirement_id": "REGRESSION",
       "test_name": "history::tests::history_rejects_duplicate_timestamp",
       "result": "PASS",
       "evidence": [
@@ -3489,7 +3473,7 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "market::tests::index_mismatch_fails_closed",
+      "test_name": "history::tests::research_normalization_does_not_consult_current_reference_state",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -3505,7 +3489,7 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "market::tests::generation_is_content_based_not_receive_time_based",
+      "test_name": "market::tests::index_mismatch_fails_closed",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -3513,7 +3497,15 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "order_book::tests::linkage_gap_invalidates_book_immediately",
+      "test_name": "history::tests::history_preserves_unconfirmed_state_explicitly",
+      "result": "PASS",
+      "evidence": [
+        "verification/rust-tests.log"
+      ]
+    },
+    {
+      "requirement_id": "REGRESSION",
+      "test_name": "history::tests::open_interest_history_is_chronological_and_content_addressed",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -3529,7 +3521,7 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "market::tests::snapshot_quality_reports_m2_rest_only_readiness",
+      "test_name": "market::tests::snapshot_uses_reference_underlying_and_preserves_exact_values",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -3537,7 +3529,7 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "order_book::tests::reconnect_generation_requires_new_snapshot",
+      "test_name": "order_book::tests::linkage_gap_invalidates_book_immediately",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -3553,7 +3545,7 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "order_book::tests::same_sequence_keepalive_and_sequence_reset_are_valid_when_linked",
+      "test_name": "market::tests::snapshot_quality_reports_m2_rest_only_readiness",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -3561,7 +3553,7 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "market::tests::snapshot_uses_reference_underlying_and_preserves_exact_values",
+      "test_name": "market::tests::generation_is_content_based_not_receive_time_based",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -3570,6 +3562,38 @@
     {
       "requirement_id": "REGRESSION",
       "test_name": "order_book::tests::malformed_update_is_atomic_and_invalidates_book",
+      "result": "PASS",
+      "evidence": [
+        "verification/rust-tests.log"
+      ]
+    },
+    {
+      "requirement_id": "REGRESSION",
+      "test_name": "order_book::tests::reconnect_generation_requires_new_snapshot",
+      "result": "PASS",
+      "evidence": [
+        "verification/rust-tests.log"
+      ]
+    },
+    {
+      "requirement_id": "REGRESSION",
+      "test_name": "order_book::tests::same_sequence_keepalive_and_sequence_reset_are_valid_when_linked",
+      "result": "PASS",
+      "evidence": [
+        "verification/rust-tests.log"
+      ]
+    },
+    {
+      "requirement_id": "REGRESSION",
+      "test_name": "order_book::tests::snapshot_is_sorted_by_decimal_price_not_string_order",
+      "result": "PASS",
+      "evidence": [
+        "verification/rust-tests.log"
+      ]
+    },
+    {
+      "requirement_id": "REGRESSION",
+      "test_name": "order_book::tests::update_applies_replace_insert_and_zero_size_delete",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -3601,62 +3625,6 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "reference::tests::instrument_search_uses_normalized_asset_and_settlement_fields",
-      "result": "PASS",
-      "evidence": [
-        "verification/rust-tests.log"
-      ]
-    },
-    {
-      "requirement_id": "REGRESSION",
-      "test_name": "reference::tests::preopen_future_listing_without_instrument_id_is_excluded_from_snapshot",
-      "result": "PASS",
-      "evidence": [
-        "verification/rust-tests.log"
-      ]
-    },
-    {
-      "requirement_id": "REGRESSION",
-      "test_name": "reference::tests::preopen_future_listing_without_instrument_id_is_ignored_as_update",
-      "result": "PASS",
-      "evidence": [
-        "verification/rust-tests.log"
-      ]
-    },
-    {
-      "requirement_id": "REGRESSION",
-      "test_name": "order_book::tests::update_applies_replace_insert_and_zero_size_delete",
-      "result": "PASS",
-      "evidence": [
-        "verification/rust-tests.log"
-      ]
-    },
-    {
-      "requirement_id": "REGRESSION",
-      "test_name": "order_book::tests::snapshot_is_sorted_by_decimal_price_not_string_order",
-      "result": "PASS",
-      "evidence": [
-        "verification/rust-tests.log"
-      ]
-    },
-    {
-      "requirement_id": "REGRESSION",
-      "test_name": "reference::tests::missing_required_mechanics_fail_closed",
-      "result": "PASS",
-      "evidence": [
-        "verification/rust-tests.log"
-      ]
-    },
-    {
-      "requirement_id": "REGRESSION",
-      "test_name": "reference::tests::funding_semantics_are_reference_driven_and_fail_closed_for_unknown_rules",
-      "result": "PASS",
-      "evidence": [
-        "verification/rust-tests.log"
-      ]
-    },
-    {
-      "requirement_id": "REGRESSION",
       "test_name": "reference::tests::lookup_preserves_exact_exchange_mechanics",
       "result": "PASS",
       "evidence": [
@@ -3673,7 +3641,47 @@
     },
     {
       "requirement_id": "REGRESSION",
+      "test_name": "reference::tests::instrument_search_uses_normalized_asset_and_settlement_fields",
+      "result": "PASS",
+      "evidence": [
+        "verification/rust-tests.log"
+      ]
+    },
+    {
+      "requirement_id": "REGRESSION",
+      "test_name": "reference::tests::funding_semantics_are_reference_driven_and_fail_closed_for_unknown_rules",
+      "result": "PASS",
+      "evidence": [
+        "verification/rust-tests.log"
+      ]
+    },
+    {
+      "requirement_id": "REGRESSION",
+      "test_name": "reference::tests::missing_required_mechanics_fail_closed",
+      "result": "PASS",
+      "evidence": [
+        "verification/rust-tests.log"
+      ]
+    },
+    {
+      "requirement_id": "REGRESSION",
       "test_name": "reference::tests::preopen_instrument_with_incomplete_mechanics_is_excluded_from_snapshot",
+      "result": "PASS",
+      "evidence": [
+        "verification/rust-tests.log"
+      ]
+    },
+    {
+      "requirement_id": "REGRESSION",
+      "test_name": "reference::tests::preopen_future_listing_without_instrument_id_is_ignored_as_update",
+      "result": "PASS",
+      "evidence": [
+        "verification/rust-tests.log"
+      ]
+    },
+    {
+      "requirement_id": "REGRESSION",
+      "test_name": "reference::tests::preopen_future_listing_without_instrument_id_is_excluded_from_snapshot",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -3690,6 +3698,22 @@
     {
       "requirement_id": "REGRESSION",
       "test_name": "stream::tests::aged_required_dependency_is_stale",
+      "result": "PASS",
+      "evidence": [
+        "verification/rust-tests.log"
+      ]
+    },
+    {
+      "requirement_id": "REGRESSION",
+      "test_name": "reference::tests::ws_style_reference_updates_are_atomic_and_generation_is_content_based",
+      "result": "PASS",
+      "evidence": [
+        "verification/rust-tests.log"
+      ]
+    },
+    {
+      "requirement_id": "REGRESSION",
+      "test_name": "stream::tests::incomplete_ws_is_degraded_only_when_rest_fallback_exists",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -3721,23 +3745,7 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "stream::tests::incomplete_ws_is_degraded_only_when_rest_fallback_exists",
-      "result": "PASS",
-      "evidence": [
-        "verification/rust-tests.log"
-      ]
-    },
-    {
-      "requirement_id": "REGRESSION",
       "test_name": "stream::tests::reconnect_generation_revokes_fresh_until_rebuilt",
-      "result": "PASS",
-      "evidence": [
-        "verification/rust-tests.log"
-      ]
-    },
-    {
-      "requirement_id": "REGRESSION",
-      "test_name": "reference::tests::ws_style_reference_updates_are_atomic_and_generation_is_content_based",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -3801,14 +3809,6 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "crypto::tests::client_envelope_preflight_rejects_malformed_transport_encoding",
-      "result": "PASS",
-      "evidence": [
-        "verification/rust-tests.log"
-      ]
-    },
-    {
-      "requirement_id": "REGRESSION",
       "test_name": "crypto::tests::tampering_fails_authentication",
       "result": "PASS",
       "evidence": [
@@ -3817,7 +3817,15 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "product_contract_tests::removed_period_and_activation_operations_are_rejected",
+      "test_name": "crypto::tests::client_envelope_preflight_rejects_malformed_transport_encoding",
+      "result": "PASS",
+      "evidence": [
+        "verification/rust-tests.log"
+      ]
+    },
+    {
+      "requirement_id": "REGRESSION",
+      "test_name": "risk_authority::tests::denied_decision_cannot_count_as_post_authorization",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -3833,7 +3841,7 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "risk_authority::tests::denied_decision_cannot_count_as_post_authorization",
+      "test_name": "product_contract_tests::removed_period_and_activation_operations_are_rejected",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -3920,14 +3928,6 @@
       ]
     },
     {
-      "requirement_id": "REGRESSION",
-      "test_name": "strategy_registry::mechanics_fixtures::gap_through_stop_and_stop_before_take_profit",
-      "result": "PASS",
-      "evidence": [
-        "verification/rust-tests.log"
-      ]
-    },
-    {
       "requirement_id": "ANALYTICS-01",
       "test_name": "strategy_registry::tests::ema_cross_next_bar_no_lookahead",
       "result": "PASS",
@@ -3937,7 +3937,7 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "strategy_registry::tests::costs_change_net_return",
+      "test_name": "strategy_registry::mechanics_fixtures::gap_through_stop_and_stop_before_take_profit",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -3946,6 +3946,14 @@
     {
       "requirement_id": "REGRESSION",
       "test_name": "strategy_registry::tests::same_dataset_same_result_hash",
+      "result": "PASS",
+      "evidence": [
+        "verification/rust-tests.log"
+      ]
+    },
+    {
+      "requirement_id": "REGRESSION",
+      "test_name": "strategy_registry::tests::costs_change_net_return",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -3977,14 +3985,6 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "private::coordinator::tests::empty_private_events_never_trigger_financial_checkpoint",
-      "result": "PASS",
-      "evidence": [
-        "verification/rust-tests.log"
-      ]
-    },
-    {
-      "requirement_id": "REGRESSION",
       "test_name": "private::coordinator::tests::watch_events_coalesce_without_claiming_intermediate_financial_proof",
       "result": "PASS",
       "evidence": [
@@ -3994,6 +3994,22 @@
     {
       "requirement_id": "REGRESSION",
       "test_name": "private::state::tests::convergence_window_is_generation_bound",
+      "result": "PASS",
+      "evidence": [
+        "verification/rust-tests.log"
+      ]
+    },
+    {
+      "requirement_id": "REGRESSION",
+      "test_name": "private::state::tests::generation_reset_revokes_all_old_private_evidence",
+      "result": "PASS",
+      "evidence": [
+        "verification/rust-tests.log"
+      ]
+    },
+    {
+      "requirement_id": "REGRESSION",
+      "test_name": "private::coordinator::tests::empty_private_events_never_trigger_financial_checkpoint",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -4017,39 +4033,7 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "private::state::tests::generation_reset_revokes_all_old_private_evidence",
-      "result": "PASS",
-      "evidence": [
-        "verification/rust-tests.log"
-      ]
-    },
-    {
-      "requirement_id": "REGRESSION",
-      "test_name": "public::tests::connection_fingerprint_is_stable_and_does_not_expose_conn_id",
-      "result": "PASS",
-      "evidence": [
-        "verification/rust-tests.log"
-      ]
-    },
-    {
-      "requirement_id": "REGRESSION",
       "test_name": "private::state::tests::journal_gap_fails_closed",
-      "result": "PASS",
-      "evidence": [
-        "verification/rust-tests.log"
-      ]
-    },
-    {
-      "requirement_id": "REGRESSION",
-      "test_name": "public::tests::baseline_and_demand_subscriptions_are_reference_driven",
-      "result": "PASS",
-      "evidence": [
-        "verification/rust-tests.log"
-      ]
-    },
-    {
-      "requirement_id": "REGRESSION",
-      "test_name": "public::tests::demand_registration_is_local_idempotent_and_network_independent",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -4065,7 +4049,15 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "public::tests::ordinary_future_does_not_subscribe_funding_but_xperp_does",
+      "test_name": "public::tests::connection_fingerprint_is_stable_and_does_not_expose_conn_id",
+      "result": "PASS",
+      "evidence": [
+        "verification/rust-tests.log"
+      ]
+    },
+    {
+      "requirement_id": "REGRESSION",
+      "test_name": "public::tests::baseline_and_demand_subscriptions_are_reference_driven",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -4082,6 +4074,22 @@
     {
       "requirement_id": "REGRESSION",
       "test_name": "public::tests::standard_books_array_maps_price_size_and_order_count_only",
+      "result": "PASS",
+      "evidence": [
+        "verification/rust-tests.log"
+      ]
+    },
+    {
+      "requirement_id": "REGRESSION",
+      "test_name": "public::tests::demand_registration_is_local_idempotent_and_network_independent",
+      "result": "PASS",
+      "evidence": [
+        "verification/rust-tests.log"
+      ]
+    },
+    {
+      "requirement_id": "REGRESSION",
+      "test_name": "public::tests::ordinary_future_does_not_subscribe_funding_but_xperp_does",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -4113,7 +4121,7 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "private_protocol::tests::baseline_private_subscriptions_are_typed",
+      "test_name": "private_protocol::tests::unknown_private_channel_fails_closed",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -4129,7 +4137,15 @@
     },
     {
       "requirement_id": "REGRESSION",
-      "test_name": "private_protocol::tests::unknown_private_channel_fails_closed",
+      "test_name": "protocol::tests::application_pong_is_not_json",
+      "result": "PASS",
+      "evidence": [
+        "verification/rust-tests.log"
+      ]
+    },
+    {
+      "requirement_id": "REGRESSION",
+      "test_name": "private_protocol::tests::baseline_private_subscriptions_are_typed",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -4138,14 +4154,6 @@
     {
       "requirement_id": "REGRESSION",
       "test_name": "private_protocol::tests::parses_login_subscribe_data_and_upgrade_notice",
-      "result": "PASS",
-      "evidence": [
-        "verification/rust-tests.log"
-      ]
-    },
-    {
-      "requirement_id": "REGRESSION",
-      "test_name": "protocol::tests::application_pong_is_not_json",
       "result": "PASS",
       "evidence": [
         "verification/rust-tests.log"
@@ -4307,7 +4315,12 @@
       }
     }
   },
-  "physical": {},
+  "physical": {
+    "PHYSICAL_MULTI_ACCOUNT": {
+      "result": "BLOCKED",
+      "reason": "User confirmed no second Real account credential reference is available; physical multi-account exception explicitly allowed by issue #398."
+    }
+  },
   "CODE_PASSED": "PASS",
   "ANALYTICS_READY": "NOT_RUN",
   "sqlite": {
@@ -4323,12 +4336,11 @@
     "reason": "installed MCP observations are required",
     "tool_count": 7,
     "tools_list_utf8_bytes": 23245,
-    "public_action_count": 27,
+    "public_actions": 27,
     "positive_negative_payload_fixtures": 29
   },
   "physical_evidence_location": "https://github.com/iamaman11/okx/releases/latest/download/acceptance.json",
   "INSTALLED_MATCHED": "NOT_RUN",
-  "PHYSICAL_MULTI_ACCOUNT": "NOT_RUN",
-  "REAL_CYCLE_ACCEPTED": "NOT_RUN",
-  "provenance_note": "Preinstallation source checkpoint plus staged diff; final exact CI and installed hashes are recorded in the release asset. No installed or exchange PASS is inferred from CODE_PASSED."
+  "PHYSICAL_MULTI_ACCOUNT": "BLOCKED",
+  "REAL_CYCLE_ACCEPTED": "NOT_RUN"
 }

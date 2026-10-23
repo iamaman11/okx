@@ -1,4 +1,5 @@
 pub mod logging;
+pub mod stdio_capture;
 use std::{
     ffi::OsStr,
     fs::{self, File},
@@ -1000,28 +1001,18 @@ fn spawn_controller(
     activation_request_id: Option<&str>,
 ) -> LauncherResult<Child> {
     verify_version(version)?;
-    let stdout = logging::RotatingLog::open(Path::new(CONTROL_ROOT).join("controller.stdout.log"))?;
-    let stderr = logging::RotatingLog::open(Path::new(CONTROL_ROOT).join("controller.stderr.log"))?;
-
     let mut command = hidden_command(version.binary_path()?);
     command.arg("run");
     if let Some(request_id) = activation_request_id {
         command.arg("--activation-request-id").arg(request_id);
     }
-    let mut child = command
+    command
         .current_dir(CONTROL_ROOT)
         .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .spawn()
-        .map_err(|_| LauncherError::ControllerLaunch)?;
-    if let Some(pipe) = child.stdout.take() {
-        logging::spawn_drain(pipe, stdout);
-    }
-    if let Some(pipe) = child.stderr.take() {
-        logging::spawn_drain(pipe, stderr);
-    }
-    Ok(child)
+        .map_err(|_| LauncherError::ControllerLaunch)
 }
 
 fn hidden_command<S: AsRef<OsStr>>(program: S) -> Command {
