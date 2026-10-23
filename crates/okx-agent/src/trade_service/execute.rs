@@ -19,7 +19,7 @@ impl TradeService {
         supplied: Option<&CentralGovernanceSnapshot>,
         bound_hash: Option<String>,
     ) -> Result<Value, String> {
-        self.execute_inner(r, request, supplied, bound_hash, None, None)
+        self.execute_inner(r, request, supplied, bound_hash, None, None, None)
             .await
     }
     pub(super) async fn execute_for_definition(
@@ -29,6 +29,7 @@ impl TradeService {
         supplied: Option<&CentralGovernanceSnapshot>,
         version: String,
         decision_digest: String,
+        claimed_decision_id: String,
     ) -> Result<Value, String> {
         self.execute_inner(
             r,
@@ -37,6 +38,7 @@ impl TradeService {
             None,
             Some(version),
             Some(decision_digest),
+            Some(claimed_decision_id),
         )
         .await
     }
@@ -48,6 +50,7 @@ impl TradeService {
         bound_hash: Option<String>,
         expected_definition: Option<String>,
         claimed_input_digest: Option<String>,
+        claimed_decision_id: Option<String>,
     ) -> Result<Value, String> {
         let TradeRequest::Execute {
             idempotency_key,
@@ -137,14 +140,8 @@ impl TradeService {
         let client_id = body_hash[..32].to_owned();
         let decision = Decision {
             decision_id: if claimed_input_digest.is_some() {
-                format!(
-                    "strategy:{}:{}:{}",
-                    strategy_instance,
-                    expected_definition
-                        .as_deref()
-                        .ok_or("STRATEGY_DEFINITION_MISSING")?,
-                    idempotency_key,
-                )
+                claimed_decision_id
+                    .ok_or("STRATEGY_CLAIM_ID_MISSING")?
             } else {
                 format!("decision_{}", &body_hash[..32])
             },

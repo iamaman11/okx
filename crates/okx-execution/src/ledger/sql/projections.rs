@@ -65,6 +65,24 @@ impl AccountStore {
             cumulative_loss_usd: self.policy()?.4,
         })
     }
+    // The immutable decision table is the sole strategy claim journal. A retry
+    // after a policy revision must append another decision, never update one.
+    // The primary-key range is bounded by this exact strategy/version/bar.
+    fn latest_strategy_claim(
+        tx: &rusqlite::Transaction<'_>,
+        base: &str,
+    ) -> StoreResult<Option<(String, String, i64, i64)>> {
+        Ok(tx
+            .query_row(
+                "SELECT decision_id,input_digest,policy_revision,rowid FROM decisions
+                 WHERE decision_id=?1 OR
+                 (decision_id >= (?1 || ':retry:') AND decision_id < (?1 || ':retry;'))
+                 ORDER BY rowid DESC LIMIT 1",
+                [base],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .optional()?)
+    }
     pub fn claim_strategy_decision(
         &mut self,
         instance_id: &str,
@@ -73,36 +91,28 @@ impl AccountStore {
         policy_revision: i64,
         now: i64,
     ) -> StoreResult<bool> {
+        Ok(self
+            .claim_strategy_decision_with_id(
+                instance_id, decision_key, input_digest, policy_revision, now,
+            )?
+            .is_some())
+    }
+    pub fn claim_strategy_decision_with_id(
+        &mut self,
+        instance_id: &str,
+        decision_key: &str,
+        input_digest: &str,
+        policy_revision: i64,
+        now: i64,
+    ) -> StoreResult<Option<String>> {
+        if policy_revision < 1 {
+            return Err(StoreError::Invalid("STRATEGY_POLICY_REVISION_INVALID"));
+        }
         let version = self.strategy_definition(instance_id)?.version;
-        let id = format!("strategy:{instance_id}:{version}:{decision_key}");
+        let base = format!("strategy:{instance_id}:{version}:{decision_key}");
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let prior: Option<String> = tx
-            .query_row(
-                "SELECT input_digest FROM decisions WHERE decision_id=?1",
-                [&id],
-                |r| r.get(0),
-            )
-            .optional()?;
-        if let Some(prior) = prior {
-            if prior != input_digest {
-                return Err(StoreError::Invalid("STRATEGY_DECISION_INPUT_CONFLICT"));
-            }
-            // A pending decision is NOT a completed bar. If planning failed
-            // before the durable intent commit, resume the exact same key.
-            let has_intent: bool = tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM intents WHERE idempotency_key=?1)",
-                [decision_key],
-                |r| r.get(0),
-            )?;
-            let terminal: bool = tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM operation_receipts WHERE operation_id=?1)",
-                [format!("strategy-no-trade:{id}")],
-                |r| r.get(0),
-            )?;
-            return Ok(!has_intent && !terminal);
-        }
         let enabled: bool = tx.query_row(
             "SELECT enabled FROM strategy_instances WHERE instance_id=?1",
             [instance_id],
@@ -111,14 +121,55 @@ impl AccountStore {
         if !enabled {
             return Err(StoreError::Invalid("STRATEGY_STOPPED"));
         }
+        if let Some((prior_id, prior_digest, prior_revision, prior_row)) =
+            Self::latest_strategy_claim(&tx, &base)?
+        {
+            if prior_digest != input_digest {
+                return Err(StoreError::Invalid("STRATEGY_DECISION_INPUT_CONFLICT"));
+            }
+            // Idempotency is per bar, across every policy retry. Once any
+            // intent exists there is no second autonomous exchange POST.
+            let has_intent: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM intents WHERE idempotency_key=?1)",
+                [decision_key],
+                |r| r.get(0),
+            )?;
+            let terminal: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM operation_receipts WHERE operation_id=?1)",
+                [format!("strategy-no-trade:{prior_id}")],
+                |r| r.get(0),
+            )?;
+            if has_intent || terminal {
+                return Ok(None);
+            }
+            if prior_revision == policy_revision {
+                return Ok(Some(prior_id));
+            }
+            if policy_revision < prior_revision {
+                return Err(StoreError::Invalid("STRATEGY_POLICY_REVISION_REGRESSION"));
+            }
+            let successor = format!("{base}:retry:{prior_row}:policy:{policy_revision}");
+            tx.execute(
+                "INSERT INTO decisions VALUES(?1,?2,?3,?4,?5,'strategy-bar/policy-retry-v1')",
+                params![successor, instance_id, now, input_digest, policy_revision],
+            )?;
+            // Immutable predecessor -> successor lineage is committed together
+            // with the new decision; an interrupted claim cannot half-advance.
+            tx.execute(
+                "INSERT INTO operation_receipts(operation_id,kind,request_hash,result_ref,committed_at)
+                 VALUES(?1,'strategy_policy_retry',?2,?3,?4)",
+                params![format!("strategy-policy-retry:{prior_id}"), input_digest, successor, now],
+            )?;
+            tx.commit()?;
+            return Ok(Some(successor));
+        }
         tx.execute(
             "INSERT INTO decisions VALUES(?1,?2,?3,?4,?5,'strategy-bar/v1')",
-            params![id, instance_id, now, input_digest, policy_revision],
+            params![base, instance_id, now, input_digest, policy_revision],
         )?;
-        // Do not advance last_decision_key until an intent is prepared
-        // atomically, or the signal is durably recorded as no-trade.
+        // A pending bar is not terminal until its first intent or NO_TRADE.
         tx.commit()?;
-        Ok(true)
+        Ok(Some(base))
     }
     pub fn finish_strategy_no_trade(
         &mut self,
@@ -127,15 +178,12 @@ impl AccountStore {
         now: i64,
     ) -> StoreResult<()> {
         let version = self.strategy_definition(instance_id)?.version;
-        let id = format!("strategy:{instance_id}:{version}:{decision_key}");
+        let base = format!("strategy:{instance_id}:{version}:{decision_key}");
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let digest: String = tx.query_row(
-            "SELECT input_digest FROM decisions WHERE decision_id=?1 AND instance_id=?2",
-            params![id, instance_id],
-            |r| r.get(0),
-        )?;
+        let (id, digest, _, _) = Self::latest_strategy_claim(&tx, &base)?
+            .ok_or(StoreError::Invalid("STRATEGY_CLAIM_MISSING"))?;
         let has_intent: bool = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM intents WHERE idempotency_key=?1)",
             [decision_key],

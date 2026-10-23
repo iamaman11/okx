@@ -174,13 +174,13 @@ impl TradeService {
                             "STRATEGY_VERSION_CHANGED",
                         ));
                     }
-                    s.claim_strategy_decision(&id, &dk, &decision_digest, revision, now())
+                    s.claim_strategy_decision_with_id(&id, &dk, &decision_digest, revision, now())
                 })
                 .await
                 .map_err(err)?;
-            if !claimed {
+            let Some(claimed_decision_id) = claimed else {
                 continue;
-            }
+            };
             let desired = signal.unwrap_or(0);
             if desired == 0 {
                 let id = instance.instance_id.clone();
@@ -269,6 +269,7 @@ impl TradeService {
                     Some(&state),
                     instance.definition_version.clone(),
                     input_for_execute,
+                    claimed_decision_id,
                 )
                 .await?;
         }
