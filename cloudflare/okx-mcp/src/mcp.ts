@@ -12,6 +12,7 @@ function jobState(value:Record<string,unknown>):string|undefined {
  return state&&['queued','running','completed','failed','cancelled','partial','interrupted','expired'].includes(state)?state:undefined;
 }
 function partialQuality(value:unknown):boolean {
+ if(typeof value==='string')return ['partial','missing','stale','degraded','not_ready','unavailable'].includes(value.toLowerCase());
  // Inspect real result rows as well as the top-level quality. A bounded walk
  // prevents adversarially deep or oversized native JSON from blocking the Worker.
  const stack:[unknown,number][]=[[value,0]];let visited=0;
