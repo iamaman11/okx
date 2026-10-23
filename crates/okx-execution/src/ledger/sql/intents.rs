@@ -156,6 +156,25 @@ impl AccountStore {
                 intent.plan.strategy_definition_id, intent.plan.strategy_definition_version,intent.plan.strategy_parameters_digest
             ],
         )?;
+        // Link a preclaimed live strategy bar to this intent in the SAME
+        // SQL transaction. Crashes before commit leave the bar recoverable;
+        // crashes after commit find the exact idempotent prepared intent.
+        let claim_id = format!(
+            "strategy:{}:{}:{}",
+            intent.plan.strategy_instance,
+            intent.plan.strategy_definition_version,
+            intent.idempotency_key
+        );
+        let claimed: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM decisions WHERE decision_id=?1)",
+            [&claim_id], |r| r.get(0),
+        )?;
+        if claimed {
+            tx.execute(
+                "UPDATE strategy_instances SET last_decision_key=?2 WHERE instance_id=?1",
+                params![intent.plan.strategy_instance, intent.idempotency_key],
+            )?;
+        }
         tx.commit()?;
         self.intent(&intent.intent_id)?
             .ok_or(StoreError::Invalid("INTENT_MISSING"))
