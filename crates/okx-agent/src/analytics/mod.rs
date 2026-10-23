@@ -879,6 +879,7 @@ mod tests {
                 .await
                 .is_err()
         );
+        drop(service);
         std::fs::remove_dir_all(root).unwrap();
     }
 }
@@ -965,6 +966,7 @@ mod artifact_job_fixtures {
                 .unwrap()
                 .starts_with(std::env::temp_dir().canonicalize().unwrap())
         );
+        drop(s);
         std::fs::remove_dir_all(root).unwrap();
     }
     #[tokio::test]
@@ -1084,6 +1086,7 @@ mod artifact_job_fixtures {
                 .unwrap()
                 .starts_with(std::env::temp_dir().canonicalize().unwrap())
         );
+        drop(s);
         std::fs::remove_dir_all(root).unwrap();
     }
     #[tokio::test]
@@ -1171,6 +1174,8 @@ mod artifact_job_fixtures {
                 .unwrap()
                 .starts_with(std::env::temp_dir().canonicalize().unwrap())
         );
+        drop(reloaded);
+        drop(s);
         std::fs::remove_dir_all(root).unwrap();
     }
 }
