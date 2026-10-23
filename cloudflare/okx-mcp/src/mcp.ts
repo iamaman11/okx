@@ -89,7 +89,7 @@ export function projectNativeResponse(value:Json):Record<string,Json>{
  // Rejects carry null product data, never an entire AgentResponse nested inside
  // data. Completed research results preserve their bounded typed product fields.
  const data=native?(failure?null:rawResult??null):rawResult;
- const quality=(frame.quality??outer.quality??{state:'not_evaluated'}) as Json;
+ const quality=(status==='partial'?'partial':result?.quality??frame.quality??outer.quality??{state:'not_evaluated'}) as Json;
  const projected:Record<string,Json>={
    request_id:stringField(frame,'request_id')??stringField(outer,'request_id')??requestId(),
    status,as_of_ms:numericField(frame,'as_of_ms')??numericField(outer,'as_of_ms')??Date.now(),
