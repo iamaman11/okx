@@ -347,7 +347,10 @@ pub fn grid(
         let mut s = spec.clone();
         s.parameters = *p;
         let r = replay_with_hash(bars, &s, p.slow, split, cancel, Some(&dataset_hash))?;
-        candidates.push(GridCandidate { parameters: *p, train: r.summary.clone() });
+        candidates.push(GridCandidate {
+            parameters: *p,
+            train: r.summary.clone(),
+        });
         if best.as_ref().is_none_or(|(_, b)| {
             r.summary.sharpe > b.sharpe
                 || (r.summary.sharpe == b.sharpe && r.summary.turnover < b.turnover)
