@@ -11,22 +11,41 @@ REQUIRED={
     "MULTI-01":{"trade_service::execute::tests::two_accounts_two_instances","finance::attribution::tests::two_instances_same_instrument_lot_attribution"},
     "ANALYTICS-01":{"strategy_registry::tests::ema_cross_next_bar_no_lookahead","operators::tests::correlation_timestamp_alignment","strategy_registry::tests::test_partition_not_used_for_selection"},
     "OPS-01":{"analytics::jobs::tests::restart_marks_job_interrupted","analytics::executor::tests::cancel_releases_queue_capacity","account_store::tests::disk_full_before_post"},
+    "F01":{"account_governance_lower_campaign_limit_monotonic"},
+    "F02":{"trade_service::plan::tests::auto_fok_buy_rounds_inside_slippage","trade_service::plan::tests::auto_fok_sell_rounds_inside_slippage"},
+    "F03":{"mcp_nested_failure_preserves_reason_code","mcp_queued_job_remains_accepted"},
+    "F04":{"analytics::jobs::tests::transient_rate_defer_is_requeued_instead_of_cached_as_failed"},
+    "F05":{"analytics::tests::grid_result_includes_selected_train_test_and_equity"},
+    "F06":{"portfolio::tests::portfolio_before_t0_is_partial"},
+    "F07":{"trade_service::strategies::tests::decision_claim_creates_durable_intent_once"},
+    "F08":{"trade_service::strategies::tests::strategy_risk_budget_not_notional","analytics::jobs::tests::job_status_reads_bounded_rows_at_100k_jobs"},
 }
 FINAL=["CODE_PASSED","INSTALLED_MATCHED","ANALYTICS_READY","PHYSICAL_MULTI_ACCOUNT","REAL_CYCLE_ACCEPTED"]
 STATES={"PASS","FAIL","BLOCKED","NOT_RUN"}
 def executed_tests(log):
     rust=[(m.group(1),m.group(2))for m in re.finditer(r"^test ([\w:]+) \.\.\. (ok|FAILED|ignored)\s*$",log,re.M)]
-    worker=[(m.group(1),"ok")for m in re.finditer(r"^(risk_concurrent_accounts_campaign_limit|access_restart_and_account_registration|clean_initialization_deletes_only_old_financial_keys) PASS\s*$",log,re.M)]
+    worker=[(m.group(1),"ok" if m.group(2)=="PASS" else "FAILED")for m in re.finditer(r"^([a-z][a-z0-9_]*) (PASS|FAIL)\s*$",log,re.M)]
     return rust+worker
 def validate(value):
     if not value.get("test_counts",{}).get("executed",0):raise ValueError("zero executed tests are not acceptance evidence")
+    counts=value.get("test_counts",{})
+    parsed=counts.get("parsed_executed")
+    if parsed is not None and parsed!=counts.get("executed"):raise ValueError("test count does not match parsed logs")
+    if counts.get("failed",0):raise ValueError("failed executed test")
     cases=value.get("tests",[])
-    for requirement in REQUIRED:
-        if not any(t.get("requirement_id")==requirement for t in cases):raise ValueError("missing mandatory requirement "+requirement)
+    seen={}
     for case in cases:
         if not all(case.get(k)for k in ("requirement_id","test_name","result","evidence")):raise ValueError("incomplete test record")
         if case["result"]not in STATES:raise ValueError("invalid result")
+        key=(case["requirement_id"],case["test_name"])
+        if key in seen:raise ValueError("duplicate test record "+case["requirement_id"]+":"+case["test_name"])
+        seen[key]=case
         if case["result"]=="PASS"and not any((ROOT/p).is_file()for p in case["evidence"]):raise ValueError("PASS requires an existing executable evidence file")
+    for requirement,names in REQUIRED.items():
+        missing=[name for name in names if (requirement,name)not in seen]
+        if missing:raise ValueError("missing mandatory test "+requirement+":"+missing[0])
+        failed=[name for name in names if seen[(requirement,name)]["result"]!="PASS"]
+        if failed:raise ValueError("mandatory test did not pass "+requirement+":"+failed[0])
     for key in FINAL:
         if value.get(key)not in STATES:raise ValueError("missing final field "+key)
     if value["CODE_PASSED"]=="PASS"and(any(c["result"]!= "PASS"for c in cases)or any(c["exit_code"]!=0 for c in value["commands"])):raise ValueError("CODE_PASSED conflicts with unfinished checks")
@@ -58,8 +77,10 @@ def build(args):
                 if status!="ignored"and name in tokens:
                     mapped=True;tests.append({"requirement_id":requirement,"test_name":name,"result":"PASS"if status=="ok"else"FAIL","evidence":[path]})
             if status!="ignored"and not mapped:tests.append({"requirement_id":"REGRESSION","test_name":name,"result":"PASS"if status=="ok"else"FAIL","evidence":[path]})
-    for requirement in REQUIRED:
-        if not any(t["requirement_id"]==requirement for t in tests):tests.append({"requirement_id":requirement,"test_name":"required executable scenario not observed","result":"NOT_RUN","evidence":["acceptance runner: no matching executed test"]})
+    for requirement,names in REQUIRED.items():
+        observed={(t["requirement_id"],t["test_name"])for t in tests}
+        for name in names:
+            if (requirement,name)not in observed:tests.append({"requirement_id":requirement,"test_name":name,"result":"NOT_RUN","evidence":["acceptance runner: no matching executed test"]})
     perf_path=ROOT/args.performance;perf=json.loads(perf_path.read_text(encoding="utf-8-sig"))if perf_path.exists()else None
     if perf is not None:
         for _,log in logs:
@@ -74,7 +95,7 @@ def build(args):
     summaries=[tuple(map(int,m.groups()))for _,log in logs for m in re.finditer(r"test result: (?:ok|FAILED)\. (\d+) passed; (\d+) failed; (\d+) ignored;",log)]
     passed=sum(p for p,_,_ in summaries)+sum(1 for name,status in all_tests if "::"not in name and name in set().union(*REQUIRED.values()) and status=="ok");failed=sum(f for _,f,_ in summaries)
     head=subprocess.check_output(["git","rev-parse","HEAD^{tree}"],cwd=ROOT,text=True).strip();diff=subprocess.check_output(["git","diff","--binary","HEAD"],cwd=ROOT)
-    value={"schema":"okx.acceptance/398.1","created_at":datetime.datetime.now(datetime.timezone.utc).isoformat(),"source_tree":head,"working_diff_sha256":hashlib.sha256(diff).hexdigest(),"release_hashes":{},"test_counts":{"executed":passed+failed,"passed":passed,"failed":failed},"commands":commands,"tests":tests,"performance":{"result":"PASS"if perf_ok else"NOT_RUN","scope":"prepared native compute fixtures; physical MCP/network evidence is separate","evidence":args.performance,"measurements":perf},"physical":physical,"CODE_PASSED":"PASS"if code_ok else"FAIL","ANALYTICS_READY":physical.get("ANALYTICS_READY",{}).get("result","NOT_RUN") if perf_ok else "NOT_RUN"}
+    value={"schema":"okx.acceptance/398.1","created_at":datetime.datetime.now(datetime.timezone.utc).isoformat(),"source_tree":head,"working_diff_sha256":hashlib.sha256(diff).hexdigest(),"release_hashes":{},"test_counts":{"executed":passed+failed,"parsed_executed":passed+failed,"passed":passed,"failed":failed},"commands":commands,"tests":tests,"performance":{"result":"PASS"if perf_ok else"NOT_RUN","scope":"prepared native compute fixtures; physical MCP/network evidence is separate","evidence":args.performance,"measurements":perf},"physical":physical,"CODE_PASSED":"PASS"if code_ok else"FAIL","ANALYTICS_READY":physical.get("ANALYTICS_READY",{}).get("result","NOT_RUN") if perf_ok else "NOT_RUN"}
     sql_evidence=ROOT/"docs/verification/398-sql-million.json"
     if sql_evidence.exists():
         sql=json.loads(sql_evidence.read_text(encoding="utf-8-sig"));value["sqlite"]={"version":sql.get("sqlite_version"),"source_id":sql.get("sqlite_source_id"),"evidence":"docs/verification/398-sql-million.json","scope":"executed Linux bundled SQLite benchmark; installed binary checked separately"}
@@ -97,12 +118,18 @@ def self_test():
             with self.assertRaisesRegex(ValueError,"zero"):validate({"test_counts":{"executed":0}})
         def test_missing_requirement_rejected(self):
             with self.assertRaisesRegex(ValueError,"missing mandatory"):validate({"test_counts":{"executed":1},"tests":[]})
+        def test_duplicate_mandatory_record_rejected(self):
+            with self.assertRaisesRegex(ValueError,"duplicate"):
+                validate({"test_counts":{"executed":1},"tests":[{"requirement_id":"CLEAN-01","test_name":"x","result":"PASS","evidence":["scripts/acceptance_product.py"]},{"requirement_id":"CLEAN-01","test_name":"x","result":"PASS","evidence":["scripts/acceptance_product.py"]}]})
+        def test_count_log_mismatch_rejected(self):
+            with self.assertRaisesRegex(ValueError,"count"):
+                validate({"test_counts":{"executed":1,"parsed_executed":2},"tests":[]})
         def test_unrelated_preserves_test_does_not_prove_central_risk(self):
             name="market_data::tests::ticker_preserves_exchange_decimal_text_exactly"
             self.assertFalse(any(name in names for names in REQUIRED.values()))
         def test_worker_claims_require_complete_named_pass_line(self):
             self.assertEqual(executed_tests("risk_concurrent_accounts_campaign_limit PASS\n"),[("risk_concurrent_accounts_campaign_limit","ok")])
-            self.assertEqual(executed_tests("risk_concurrent_accounts_campaign_limit FAIL\n"),[])
+            self.assertEqual(executed_tests("risk_concurrent_accounts_campaign_limit FAIL\n"),[("risk_concurrent_accounts_campaign_limit","FAILED")])
             self.assertEqual(executed_tests("clean_initialization_deletes_only_old_financial_keys PASS\n"),[("clean_initialization_deletes_only_old_financial_keys","ok")])
     return 0 if unittest.TextTestRunner().run(unittest.defaultTestLoader.loadTestsFromTestCase(Tests)).wasSuccessful()else 1
 if __name__=="__main__":

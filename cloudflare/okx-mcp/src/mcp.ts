@@ -1,12 +1,47 @@
 import {PUBLIC_TOOLS,validTool} from './execution_tools.js';
 import {dispatchRuntime,type Env,isObject,type Json,jsonRpc,jsonRpcError,MAX_BODY_BYTES,MCP_PROTOCOL_VERSION,MCP_SERVER_VERSION,requestId,runtimeFetch,toolResult as baseToolResult,sha256Hex,transportFailure} from './shared.js';
+const NORMAL_RESULT_BYTES=12_288;
 function hasOnlyKeys(v:Record<string,unknown>,keys:string[]){return Object.keys(v).every(k=>keys.includes(k));}
 function canonical(v:unknown):string{if(Array.isArray(v))return '['+v.map(canonical).join(',')+']';if(isObject(v))return '{'+Object.keys(v).sort().map(k=>JSON.stringify(k)+':'+canonical(v[k])).join(',')+'}';return JSON.stringify(v);}
+function bytes(value:Json):number{return new TextEncoder().encode(JSON.stringify(value)).byteLength;}
+function stringField(value:Record<string,unknown>,field:string):string|undefined{return typeof value[field]==='string'?value[field]:undefined;}
+function numericField(value:Record<string,unknown>,field:string):number|undefined{return typeof value[field]==='number'&&Number.isFinite(value[field])?value[field]:undefined;}
+function warnings(...sources:Record<string,unknown>[]):string[]{return sources.flatMap(source=>Array.isArray(source.warnings)?source.warnings.filter((v):v is string=>typeof v==='string'):[]);}
+function partial(value:unknown):boolean{if(typeof value==='string')return ['partial','missing','stale','degraded'].includes(value.toLowerCase());return isObject(value)&&(partial(value.state)||partial(value.status));}
+function jobState(value:Record<string,unknown>):string|undefined{const state=stringField(value,'state')?.toLowerCase();return state&&['queued','running','completed','failed','cancelled','partial'].includes(state)?state:undefined;}
+function projectedStatus(outer:Record<string,unknown>,payload:Record<string,unknown>|undefined):string{
+ const outerStatus=stringField(outer,'status')?.toLowerCase(),nestedStatus=payload&&stringField(payload,'status')?.toLowerCase();
+ const reason=[stringField(outer,'reason_code'),stringField(outer,'reason'),payload&&stringField(payload,'reason_code'),payload&&stringField(payload,'reason')].filter((v):v is string=>!!v).join(' ');
+ if(reason.toUpperCase().includes('UNKNOWN')||nestedStatus==='unknown')return 'unknown';
+ if(outerStatus==='failed'||outerStatus==='rejected')return outerStatus;
+ if(nestedStatus==='failed'||nestedStatus==='rejected')return nestedStatus;
+ const state=payload&&jobState(payload);
+ if(state==='queued'||state==='running')return 'accepted';
+ if(state==='failed'||state==='cancelled')return 'failed';
+ if(nestedStatus==='accepted')return nestedStatus;
+ if(partial(payload?.quality)||partial(outer.quality)||state==='partial')return 'partial';
+ if(nestedStatus==='partial'||nestedStatus==='completed')return nestedStatus;
+ if(['configured','connected','observed','updated'].includes(nestedStatus??outerStatus??''))return 'completed';
+ return outerStatus==='completed'||!outerStatus?'completed':'failed';
+}
+/** Project a typed native envelope without turning nested uncertainty into success. */
+export function projectNativeResponse(value:Json):Record<string,Json>{
+ const outer=isObject(value)?value:{data:value},payload=isObject(outer.result)?outer.result:isObject(outer.data)?outer.data:undefined,failure=isObject(outer.failure)?outer.failure:undefined;
+ const status=projectedStatus(outer,payload),state=payload&&jobState(payload);
+ const reason=stringField(payload??{},'reason_code')??stringField(payload??{},'reason')??stringField(failure??{},'code')??stringField(outer,'reason_code')??stringField(outer,'reason');
+ const data=isObject(outer.result)?outer.result:('data' in outer?outer.data:failure?null:value);
+ const result:Record<string,Json>={request_id:stringField(outer,'request_id')??stringField(payload??{},'request_id')??requestId(),status,as_of_ms:numericField(payload??{},'as_of_ms')??numericField(outer,'as_of_ms')??Date.now(),data:data as Json,quality:(payload?.quality??outer.quality??{state:'not_evaluated'}) as Json,warnings:warnings(outer,payload??{})};
+ if(['failed','rejected','unknown'].includes(status)){result.reason_code=reason??(state==='cancelled'?'JOB_CANCELLED':'REQUEST_FAILED');result.scope=(payload?.scope??outer.scope??'request') as Json;result.retryable=status==='unknown'?false:!!(payload?.retryable??outer.retryable??failure?.retryable);result.next_action=(payload?.next_action??outer.next_action??(status==='unknown'?'inspect_exact_intent':'inspect_diagnostics')) as Json;}
+ const jobId=stringField(payload??{},'job_id')??stringField(outer,'job_id')??(state?stringField(payload??{},'id'):undefined);if(jobId)result.job_id=jobId;
+ const cursor=stringField(payload??{},'cursor')??stringField(outer,'cursor');if(cursor)result.cursor=cursor;
+ const artifact=stringField(payload??{},'artifact_id')??stringField(payload??{},'artifact')??stringField(outer,'artifact_id');if(artifact)result.artifact_id=artifact;
+ return result;
+}
 function toolResult(value:Json):Json{
- const outer=isObject(value)?value:{data:value};const v=isObject(outer.result)&&typeof outer.result.status==='string'?{...outer.result,request_id:outer.request_id}:outer;const raw=String(v.status??'completed').toLowerCase();
- const reason=String(v.reason_code??v.reason??'');
- const status=reason.includes('UNKNOWN')?'unknown':['completed','accepted','partial','rejected','unknown','failed'].includes(raw)?raw:['configured','connected','observed','updated'].includes(raw)?'completed':'failed';
- return baseToolResult({request_id:typeof v.request_id==='string'?v.request_id:requestId(),status,as_of_ms:typeof v.as_of_ms==='number'?v.as_of_ms:Date.now(),data:(v.result??v.data??value) as Json,quality:(v.quality??{state:'not_evaluated'}) as Json,warnings:(v.warnings??[]) as Json,...(['failed','rejected','unknown'].includes(status)?{reason_code:reason||'REQUEST_FAILED',scope:(v.scope??'request') as Json,retryable:status==='unknown'?false:!!v.retryable,next_action:(v.next_action??(status==='unknown'?'inspect_exact_intent':'inspect_diagnostics')) as Json}:{}),...(typeof v.job_id==='string'?{job_id:v.job_id}:{}),...(typeof v.cursor==='string'?{cursor:v.cursor}:{}),...(typeof v.artifact_id==='string'?{artifact_id:v.artifact_id}:{})});
+ const projected=projectNativeResponse(value);
+ if(bytes(projected)<=NORMAL_RESULT_BYTES)return baseToolResult(projected);
+ const status=projected.status==='unknown'?'unknown':'failed';
+ return baseToolResult({request_id:projected.request_id,status,as_of_ms:Date.now(),data:{response_bytes:bytes(projected),response_budget_bytes:NORMAL_RESULT_BYTES},quality:{state:'partial'},warnings:['RESPONSE_BUDGET_EXCEEDED'],reason_code:'RESPONSE_TOO_LARGE',scope:'response',retryable:false,next_action:status==='unknown'?'inspect_exact_intent':'inspect_diagnostics'});
 }
 export const mcpApi={async fetch(request:Request,env:Env,ctx:any):Promise<Response>{
  if(!ctx?.auth?.scope?.includes('mcp:use'))return new Response('insufficient scope',{status:403});

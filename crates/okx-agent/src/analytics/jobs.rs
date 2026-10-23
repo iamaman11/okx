@@ -17,6 +17,13 @@ pub enum State {
     Cancelled,
     Interrupted,
 }
+
+/// A rate/backpressure response means that the source did not produce a
+/// result.  It is a defer, rather than a terminal result for the request
+/// hash, so a later identical request must be allowed to run again.
+fn is_transient_rate_defer(error: Option<&str>) -> bool {
+    error.is_some_and(|value| value.starts_with("OKX rate/backpressure defer:"))
+}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Job {
     pub id: String,
@@ -86,7 +93,21 @@ impl Jobs {
         {
             return Err("IDEMPOTENCY_CONFLICT".into());
         }
-        if let Some(job) = items.get(&hash).cloned() {
+        if let Some(existing) = items.get_mut(&hash) {
+            if existing.state == State::Failed && is_transient_rate_defer(existing.error.as_deref())
+            {
+                existing.state = State::Queued;
+                existing.progress = 0;
+                existing.artifact = None;
+                existing.error = None;
+                let job = existing.clone();
+                drop(items);
+                let cancel = Arc::new(AtomicBool::new(false));
+                self.cancel.lock().unwrap().insert(hash, cancel.clone());
+                self.persist()?;
+                return Ok((job, true, cancel));
+            }
+            let job = existing.clone();
             drop(items);
             let cancel = self.cancel.lock().unwrap().entry(hash).or_default().clone();
             return Ok((job, false, cancel));
@@ -196,6 +217,45 @@ mod tests {
         s.update("fixture", State::Running, None, None).unwrap();
         let t = Jobs::open(p.clone()).unwrap();
         assert_eq!(t.get("fixture").unwrap().state, State::Interrupted);
+        std::fs::remove_file(p).unwrap();
+    }
+
+    #[test]
+    fn transient_rate_defer_is_requeued_instead_of_cached_as_failed() {
+        let p = std::env::temp_dir()
+            .join(format!("okx-catalog-retry-{}", std::process::id()))
+            .join("jobs.json");
+        let _ = std::fs::remove_file(&p);
+        let s = Jobs::open(p.clone()).unwrap();
+        s.enqueue("fixture-key".into(), "rate-defer".into())
+            .unwrap();
+        s.update(
+            "rate-defer",
+            State::Failed,
+            None,
+            Some("OKX rate/backpressure defer: fixture".into()),
+        )
+        .unwrap();
+
+        let (job, new, _) = s
+            .enqueue("fixture-key".into(), "rate-defer".into())
+            .unwrap();
+        assert!(new);
+        assert_eq!(job.state, State::Queued);
+        assert!(job.error.is_none());
+
+        s.update(
+            "rate-defer",
+            State::Failed,
+            None,
+            Some("SOURCE_INVALID".into()),
+        )
+        .unwrap();
+        assert!(
+            !s.enqueue("fixture-key".into(), "rate-defer".into())
+                .unwrap()
+                .1
+        );
         std::fs::remove_file(p).unwrap();
     }
 }

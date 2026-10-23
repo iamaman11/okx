@@ -118,6 +118,7 @@ pub async fn portfolio(
                         BTreeMap::new(),
                         health,
                         Vec::new(),
+                        s.meta().initialized_at,
                     ))
                 } else {
                     Ok((
@@ -125,15 +126,16 @@ pub async fn portfolio(
                         s.finance_totals_filtered(from, through, &instances, &currencies)?,
                         health,
                         s.nav_summary(from, through, &instances, &currencies)?,
+                        s.meta().initialized_at,
                     ))
                 }
             })
             .await
             .map_err(|e| e.to_string())?;
         for nav in page.3 {
-            navigation.push(json!({"kind":"nav","account":key,"window":nav}));
+            navigation.push(nav_projection(&key, nav, from, through, page.4));
         }
-        readiness.push(json!({"account":key,"financial_risk":page.2}));
+        readiness.push(json!({"account":key,"t0":page.4,"financial_risk":page.2}));
         for entry in page.0 {
             rows.push((entry.time,key.clone(),entry.entry_id.clone(),json!({"time":entry.time,"account":key,"component":entry.component,"amount":entry.amount.normalize().to_string(),"currency":entry.currency,"strategy_instance":entry.instance_id,"reference":entry.entry_id})));
         }
@@ -177,7 +179,7 @@ pub async fn portfolio(
         )
     } else {
         let mut all=totals.into_iter().map(|((currency,component),amount)|json!({"kind":"component","currency":currency,"component":component,"amount":amount.normalize().to_string()})).collect::<Vec<_>>();
-        all.extend(navigation);
+        all.extend(navigation.iter().cloned());
         if cursor.as_ref().is_some_and(|c| c.account != "summary") {
             return Err("INVALID_CURSOR".into());
         }
@@ -216,13 +218,84 @@ pub async fn portfolio(
         } else {
             None
         };
-        let complete = readiness
-            .iter()
-            .all(|r| r["financial_risk"]["nav_complete"] == true);
+        let complete = summary_is_complete(
+            &readiness,
+            &navigation,
+            central_budget.is_ok(),
+            next.is_none(),
+        );
         Ok(
-            json!({"rows":output,"next_cursor":next,"central_budget":central_budget.as_ref().ok(),"central_budget_error":central_budget.as_ref().err(),"account_count":readiness.len(),"quality":if complete{"complete"}else{"partial"},"diagnostics":readiness.into_iter().filter(|r|r["financial_risk"]["nav_complete"]!=true).take(4).collect::<Vec<_>>(),"as_of_ms":Utc::now().timestamp_millis()}),
+            json!({"rows":output,"next_cursor":next,"pagination_complete":next.is_none(),"central_budget":central_budget.as_ref().ok(),"central_budget_error":central_budget.as_ref().err(),"account_count":readiness.len(),"quality":if complete{"complete"}else{"partial"},"diagnostics":summary_diagnostics(readiness, &navigation, central_budget.as_ref().err()),"as_of_ms":Utc::now().timestamp_millis()}),
         )
     }
+}
+
+fn nav_projection(
+    account: &str,
+    nav: okx_execution::NavWindow,
+    from: i64,
+    through: i64,
+    t0: i64,
+) -> Value {
+    let coverage_reason = match nav.coverage.as_str() {
+        "COMPLETE" => Value::Null,
+        "UNAVAILABLE_BEFORE_T0" => json!("UNAVAILABLE_BEFORE_T0"),
+        "PARTIAL" => json!("NAV_SOURCE_INCOMPLETE"),
+        _ => json!("NAV_COVERAGE_INVALID"),
+    };
+    json!({
+        "kind":"nav",
+        "account":account,
+        "requested_range":{"start_ms":from,"end_ms":through},
+        "covered_range":{"start_ms":nav.opening_as_of,"end_ms":nav.current_as_of},
+        "t0":t0,
+        "coverage_reason":coverage_reason,
+        "as_of_ms":nav.current_as_of,
+        "window":nav
+    })
+}
+
+fn summary_is_complete(
+    readiness: &[Value],
+    navigation: &[Value],
+    central_budget_available: bool,
+    pagination_complete: bool,
+) -> bool {
+    !navigation.is_empty()
+        && central_budget_available
+        && pagination_complete
+        && readiness
+            .iter()
+            .all(|r| r["financial_risk"]["nav_complete"] == true)
+        && navigation
+            .iter()
+            .all(|row| row["window"]["coverage"] == "COMPLETE")
+}
+
+fn summary_diagnostics(
+    readiness: Vec<Value>,
+    navigation: &[Value],
+    central_budget_error: Option<&String>,
+) -> Vec<Value> {
+    let mut diagnostics = readiness
+        .into_iter()
+        .filter(|r| r["financial_risk"]["nav_complete"] != true)
+        .take(4)
+        .collect::<Vec<_>>();
+    diagnostics.extend(
+        navigation
+            .iter()
+            .filter(|row| row["window"]["coverage"] != "COMPLETE")
+            .take(4)
+            .map(|row| {
+                json!({"account":row["account"],"coverage_reason":row["coverage_reason"],"requested_range":row["requested_range"],"covered_range":row["covered_range"],"t0":row["t0"],"as_of_ms":row["as_of_ms"]})
+            }),
+    );
+    if central_budget_error.is_some() {
+        diagnostics.push(json!({"central_budget":"UNAVAILABLE"}));
+    }
+    diagnostics.truncate(4);
+    diagnostics
 }
 fn summary_key(value: &Value) -> String {
     if value["kind"] == "component" {
@@ -336,5 +409,27 @@ mod tests {
         assert_eq!(history_after("A", Some(&c), 1), (10, "\u{10ffff}".into()));
         assert_eq!(history_after("B", Some(&c), 1), (10, "b".into()));
         assert_eq!(history_after("C", Some(&c), 1), (10, String::new()));
+    }
+
+    #[test]
+    fn portfolio_before_t0_is_partial() {
+        let readiness = vec![json!({"financial_risk":{"nav_complete":true}})];
+        let navigation = vec![json!({
+            "kind":"nav",
+            "account":"A",
+            "window":{"coverage":"UNAVAILABLE_BEFORE_T0"}
+        })];
+        assert!(!summary_is_complete(&readiness, &navigation, true, true));
+    }
+
+    #[test]
+    fn summary_requires_complete_requested_window_and_fresh_account_nav() {
+        let readiness = vec![json!({"financial_risk":{"nav_complete":true}})];
+        let navigation = vec![json!({
+            "kind":"nav",
+            "account":"A",
+            "window":{"coverage":"COMPLETE"}
+        })];
+        assert!(summary_is_complete(&readiness, &navigation, true, true));
     }
 }
