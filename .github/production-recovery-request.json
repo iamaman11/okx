@@ -1,5 +1,5 @@
 {
   "schema": "okx.production-recovery.request/v1",
   "promote": true,
-  "purpose": "Issue #398 clean Engine matched ReleaseSet. Physical acceptance is recorded separately and is never inferred from release promotion."
+  "purpose": "Issue #398 physical acceptance correction: compare initial financial values independently of exchange update timestamps. Preserve installation, access and cumulative campaign budget."
 }

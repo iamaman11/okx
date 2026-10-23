@@ -1,1 +1,6 @@
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.84s
+    Checking okx-observation v0.1.0 (C:\Users\Bose\temp\okx-398\crates\okx-observation)
+    Checking okx-analysis v0.1.0 (C:\Users\Bose\temp\okx-398\crates\okx-analysis)
+    Checking okx-runtime v0.1.0 (C:\Users\Bose\temp\okx-398\crates\okx-runtime)
+    Checking okx-research v0.1.0 (C:\Users\Bose\temp\okx-398\crates\okx-research)
+    Checking okx-agent v0.1.0 (C:\Users\Bose\temp\okx-398\crates\okx-agent)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 21.92s

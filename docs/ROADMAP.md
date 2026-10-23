@@ -13,7 +13,7 @@ The canonical specification is [#398](https://github.com/iamaman11/okx/issues/39
 | W07 | Causal EMA/replay/grid and durable jobs | Installed multi-instrument research and two-instance checks |
 | W08 | Seven strict public tools, pagination, unified diagnostics and transport regression fixtures | Final wire and installed MCP verification |
 | W09 | Native Engine lifecycle, explicit clean initialization, backup/restore and obsolete host paths removed | Automatic addressed restore reconciliation implemented; matched installed ReleaseSet pending |
-| W10 | Final local code: 512 Rust tests + 3 named Worker scenarios passed (515 executed, zero failures); all 9 Worker files, strict Clippy and guards passed | Final exact CI, Windows installation and physical acceptance pending; prepared release analytics thresholds passed |
+| W10 | Integrated Rust/Worker suites, strict Clippy and guards passed; exact executed counts and evidence are in acceptance.json | Final exact CI, Windows installation and physical acceptance pending; prepared release analytics thresholds passed |
 
 This table records implementation, not release acceptance. Intermediate checkpoints remain undeployed. Unit tests do not establish physical multi-account routing or Real exchange cycles. Physical results must remain NOT_RUN or BLOCKED until evidenced.
 

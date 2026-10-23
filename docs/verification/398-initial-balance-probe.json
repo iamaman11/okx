@@ -1,0 +1,118 @@
+{
+  "read_only": true,
+  "scopes": [
+    {
+      "instType": "SWAP",
+      "ordType": "conditional",
+      "provider_code": "0",
+      "rows": 0
+    },
+    {
+      "instType": "SWAP",
+      "ordType": "oco",
+      "provider_code": "0",
+      "rows": 0
+    },
+    {
+      "instType": "SWAP",
+      "ordType": "trigger",
+      "provider_code": "0",
+      "rows": 0
+    },
+    {
+      "instType": "SWAP",
+      "ordType": "move_order_stop",
+      "provider_code": "0",
+      "rows": 0
+    },
+    {
+      "instType": "SWAP",
+      "ordType": "chase",
+      "provider_code": "0",
+      "rows": 0
+    },
+    {
+      "instType": "SWAP",
+      "ordType": "iceberg",
+      "provider_code": "0",
+      "rows": 0
+    },
+    {
+      "instType": "SWAP",
+      "ordType": "twap",
+      "provider_code": "0",
+      "rows": 0
+    },
+    {
+      "instType": "SWAP",
+      "ordType": "smart_iceberg",
+      "provider_code": "0",
+      "rows": 0
+    },
+    {
+      "instType": "FUTURES",
+      "ordType": "conditional",
+      "provider_code": "0",
+      "rows": 0
+    },
+    {
+      "instType": "FUTURES",
+      "ordType": "oco",
+      "provider_code": "0",
+      "rows": 0
+    },
+    {
+      "instType": "FUTURES",
+      "ordType": "trigger",
+      "provider_code": "0",
+      "rows": 0
+    },
+    {
+      "instType": "FUTURES",
+      "ordType": "move_order_stop",
+      "provider_code": "0",
+      "rows": 0
+    },
+    {
+      "instType": "FUTURES",
+      "ordType": "chase",
+      "provider_code": "0",
+      "rows": 0
+    },
+    {
+      "instType": "FUTURES",
+      "ordType": "iceberg",
+      "provider_code": "0",
+      "rows": 0
+    },
+    {
+      "instType": "FUTURES",
+      "ordType": "twap",
+      "provider_code": "0",
+      "rows": 0
+    },
+    {
+      "instType": "FUTURES",
+      "ordType": "smart_iceberg",
+      "provider_code": "0",
+      "rows": 0
+    }
+  ],
+  "balance_changed_field_names": [
+    "uTime"
+  ],
+  "balance_detail_changed_field_names": [],
+  "balance_currency_count_changed": false,
+  "balance_detail_counts": [
+    1,
+    1
+  ],
+  "schema": "okx.acceptance.initialization-probe/v1",
+  "evidence_recorded_at": "2026-10-23T00:53:15.117649+00:00",
+  "source_head_under_test": "ccbdd704766b3967c969bb1cbe9d6d50e52891b7",
+  "source_tree_under_test": "d138f119e3fb8f38467b409af070dd67fa334850",
+  "native_result": "NATIVE_STORAGE_OUTCOME_UNKNOWN; no account.sqlite created; no active native process; all initialization network operations before this point are reads",
+  "control_result": "https://github.com/iamaman11/okx/issues/12#issuecomment-6354682120",
+  "diagnosis": "Venue root balance uTime changed between bracketed snapshots; all financial detail fields were unchanged. PartialEq included this timestamp and exhausted INITIAL_SNAPSHOT_UNSTABLE retry window.",
+  "real_order_posts": 0
+}
