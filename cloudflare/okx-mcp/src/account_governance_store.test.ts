@@ -1,10 +1,12 @@
 import {governanceRequest,enrollObservedAccount,setAccountPause,stopNewRealRisk,initializeGovernance,GOVERNANCE_STORAGE_KEY} from "./account_governance_store.js";
+import {FRAME_SCHEMA} from "./shared.js";
 import {initial,limits} from "./account_governance.test.js";
 function ok(v:boolean,label:string){if(!v)throw Error(label);}
 class Storage{
- map=new Map<string,any>(); reads:string[]=[];
+ map=new Map<string,any>(); reads:string[]=[];deletes:string[][]=[];
  async get(key:string){this.reads.push(key);return structuredClone(this.map.get(key));}
  async put(key:string,value:unknown){this.map.set(key,structuredClone(value));}
+ async delete(keys:string[]){this.deletes.push([...keys]);let n=0;for(const key of keys)if(this.map.delete(key))n++;return n;}
  private queue=Promise.resolve();
  async transaction<T>(fn:(tx:Storage)=>Promise<T>):Promise<T>{
    const preceding=this.queue;let unlock!:()=>void;
@@ -63,3 +65,35 @@ let failed=false;try{await enrollObservedAccount(atomic,observation);}catch{fail
 ok(failed&&(await governanceRequest(atomic,"GET")).body.revision===0,"access and outcome rollback atomically");
 atomic.failReceipt=false;
 ok((await enrollObservedAccount(atomic,observation)).status===200,"failed commit is safely retried once");
+
+const oldFinancialKeys=["risk_book_v1","account_governance_v2","account_policy_v1"];
+const lifecycle={operation_id:"clean_initialize_0001",release_sha256:"a".repeat(64),contract:FRAME_SCHEMA};
+function seedOld(storage:Storage){for(const key of oldFinancialKeys)storage.map.set(key,{fixture:"never read or import"});storage.map.set("oauth_fixture",{preserved:"oauth"});storage.map.set("session_fixture",{preserved:"session"});storage.map.set("generation",77);}
+function oldPresent(storage:Storage){return oldFinancialKeys.every(key=>storage.map.has(key));}
+function noOldReads(storage:Storage){return storage.reads.every(key=>!oldFinancialKeys.includes(key));}
+const implicit=new Storage();seedOld(implicit);
+ok((await initializeGovernance(implicit,initial)).status===200&&oldPresent(implicit)&&implicit.deletes.length===0,"no lifecycle never retires old keys");
+const clean=new Storage();seedOld(clean);
+const initialized=await initializeGovernance(clean,initial,lifecycle);
+ok(initialized.status===200&&initialized.body.retired_financial_keys_removed===3,"confirmed exact retirement count");
+ok(oldFinancialKeys.every(key=>!clean.map.has(key))&&JSON.stringify(clean.deletes)==JSON.stringify([oldFinancialKeys]),"only exact financial keys deleted");
+ok(clean.map.get("oauth_fixture").preserved==="oauth"&&clean.map.get("session_fixture").preserved==="session"&&clean.map.get("generation")===77,"unrelated OAuth and session data preserved");
+ok(clean.map.has("risk_meta_v2")&&clean.map.has(GOVERNANCE_STORAGE_KEY)&&clean.map.has("installation_release_v1"),"retirement and new state commit together");
+for(const key of oldFinancialKeys)clean.map.set(key,{fixture:"reintroduced after init"});
+const replay=await initializeGovernance(clean,initial,lifecycle);
+ok(JSON.stringify(replay)===JSON.stringify(initialized)&&clean.deletes.length===1&&oldPresent(clean),"exact replay returns original outcome without deleting again");
+ok((await initializeGovernance(clean,initial,{...lifecycle,release_sha256:"b".repeat(64)})).status===409&&clean.deletes.length===1&&oldPresent(clean),"conflicting replay never erases");
+ok((await initializeGovernance(clean,initial,{...lifecycle,operation_id:"different_initialize_0001"})).status===409&&clean.deletes.length===1,"already initialized state never retires again");
+const invalid=new Storage();seedOld(invalid);
+ok((await initializeGovernance(invalid,{...initial,revision:1},lifecycle)).status===400&&oldPresent(invalid)&&invalid.deletes.length===0,"invalid init never erases");
+for(const stateKey of ["risk_meta_v2","installation_release_v1"]){const existing=new Storage();seedOld(existing);existing.map.set(stateKey,{fixture:"existing new state"});ok((await initializeGovernance(existing,initial,lifecycle)).status===409&&oldPresent(existing)&&existing.deletes.length===0,"orphan new state cannot be reset");ok(noOldReads(existing),"orphan check reads no old values");}
+class DeleteFailure extends Storage{override async delete(keys:string[]):Promise<number>{this.deletes.push([...keys]);this.map.delete(keys[0]);throw Error("fixture delete failure");}}
+const deleteFailure=new DeleteFailure();seedOld(deleteFailure);let deleteFailed=false;
+try{await initializeGovernance(deleteFailure,initial,lifecycle);}catch{deleteFailed=true;}
+ok(deleteFailed&&oldPresent(deleteFailure)&&!deleteFailure.map.has("risk_meta_v2")&&!deleteFailure.map.has(GOVERNANCE_STORAGE_KEY),"partial delete failure rolls back atomically");
+class NewStateFailure extends Storage{override async put(key:string,value:unknown){if(key==="risk_meta_v2")throw Error("fixture write failure");return super.put(key,value);}}
+const writeFailure=new NewStateFailure();seedOld(writeFailure);let writeFailed=false;
+try{await initializeGovernance(writeFailure,initial,lifecycle);}catch{writeFailed=true;}
+ok(writeFailed&&oldPresent(writeFailure)&&!writeFailure.map.has("installation_operation:"+lifecycle.operation_id),"new state write failure restores retired keys and leaves no receipt");
+ok([implicit,clean,invalid,deleteFailure,writeFailure].every(noOldReads),"retirement never reads old values");
+console.log("clean_initialization_deletes_only_old_financial_keys PASS");

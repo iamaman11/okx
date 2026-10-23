@@ -35,9 +35,19 @@ export async function initializeGovernance(storage:any,configuration:Governance,
     if(receipt!==undefined)return receipt.hash===bodyHash?receipt.reply:fail(409,"IDEMPOTENCY_CONFLICT");
     const previous:unknown=await tx.get(GOVERNANCE_STORAGE_KEY);
     if(previous!==undefined)return fail(409,"INSTALLATION_ALREADY_INITIALIZED");
+    if(await tx.get("risk_meta_v2")!==undefined||await tx.get("installation_release_v1")!==undefined)
+      return fail(409,"INSTALLATION_STORAGE_ALREADY_INITIALIZED");
+    // One-time retirement belongs to the authenticated clean-install lifecycle.
+    // Never inspect old values, convert them, or repeat deletion on receipt replay.
+    let retired:number|undefined;
+    if(lifecycle){
+      const removed=await tx.delete(["risk_book_v1","account_governance_v2","account_policy_v1"]);
+      if(!Number.isInteger(removed)||removed<0||removed>3)throw Error("RETIREMENT_DELETE_UNCONFIRMED");
+      retired=removed;
+    }
     await initializeRiskBook(tx,configuration.installation_id);
     await tx.put(GOVERNANCE_STORAGE_KEY,configuration);
-    const reply={status:200,body:result(configuration)};
+    const reply={status:200,body:{...result(configuration),...(retired===undefined?{}:{retired_financial_keys_removed:retired})}};
     if(receiptKey)await tx.put(receiptKey,{hash:bodyHash,reply});
     if(lifecycle)await tx.put("installation_release_v1",{release_sha256:lifecycle.release_sha256,contract:lifecycle.contract,installation_id:configuration.installation_id});
     return reply;

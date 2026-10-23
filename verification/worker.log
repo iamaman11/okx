@@ -3,8 +3,9 @@ npm notice run tsc --noEmit && node scripts/test-tool-result.mjs
 owner_install_init_auth_body_bound PASS
 strict_action_fixtures PASS 27 actions
 risk_concurrent_accounts_campaign_limit PASS
-million_history_hot_read PASS records=1000000 reads=6 elapsed_ms=0.675
+million_history_hot_read PASS records=1000000 reads=6 elapsed_ms=0.607
 access_restart_and_account_registration PASS
+clean_initialization_deletes_only_old_financial_keys PASS
 strict_action_fixtures PASS 27 actions
 tools_list_actual_serialized PASS 7 tools 23245 bytes
 strict_action_fixtures PASS 27 actions

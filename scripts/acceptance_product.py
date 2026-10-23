@@ -3,7 +3,7 @@
 import argparse,datetime,hashlib,json,pathlib,re,subprocess,sys
 ROOT=pathlib.Path(__file__).resolve().parents[1]
 REQUIRED={
-    "CLEAN-01":{"accounts::tests::initialize_without_any_legacy_files","accounts::tests::legacy_stop_claims_and_epochs_are_never_read","account_store::tests::corrupt_or_missing_db_never_reinitialized"},
+    "CLEAN-01":{"clean_initialization_deletes_only_old_financial_keys","accounts::tests::initialize_without_any_legacy_files","accounts::tests::legacy_stop_claims_and_epochs_are_never_read","account_store::tests::corrupt_or_missing_db_never_reinitialized"},
     "ACCESS-01":{"accounts::tests::access_survives_restart","access_restart_and_account_registration"},
     "EXEC-01":{"trade_service::execute::tests::duplicate_execute_one_post","trade_service::execute::tests::lost_response_after_post_returns_unknown","trade_service::execute::tests::restart_posting_reconciles_without_resubmit"},
     "RISK-01":{"risk_concurrent_accounts_campaign_limit"},
@@ -16,7 +16,7 @@ FINAL=["CODE_PASSED","INSTALLED_MATCHED","ANALYTICS_READY","PHYSICAL_MULTI_ACCOU
 STATES={"PASS","FAIL","BLOCKED","NOT_RUN"}
 def executed_tests(log):
     rust=[(m.group(1),m.group(2))for m in re.finditer(r"^test ([\w:]+) \.\.\. (ok|FAILED|ignored)\s*$",log,re.M)]
-    worker=[(m.group(1),"ok")for m in re.finditer(r"^(risk_concurrent_accounts_campaign_limit|access_restart_and_account_registration) PASS\s*$",log,re.M)]
+    worker=[(m.group(1),"ok")for m in re.finditer(r"^(risk_concurrent_accounts_campaign_limit|access_restart_and_account_registration|clean_initialization_deletes_only_old_financial_keys) PASS\s*$",log,re.M)]
     return rust+worker
 def validate(value):
     if not value.get("test_counts",{}).get("executed",0):raise ValueError("zero executed tests are not acceptance evidence")
@@ -103,6 +103,7 @@ def self_test():
         def test_worker_claims_require_complete_named_pass_line(self):
             self.assertEqual(executed_tests("risk_concurrent_accounts_campaign_limit PASS\n"),[("risk_concurrent_accounts_campaign_limit","ok")])
             self.assertEqual(executed_tests("risk_concurrent_accounts_campaign_limit FAIL\n"),[])
+            self.assertEqual(executed_tests("clean_initialization_deletes_only_old_financial_keys PASS\n"),[("clean_initialization_deletes_only_old_financial_keys","ok")])
     return 0 if unittest.TextTestRunner().run(unittest.defaultTestLoader.loadTestsFromTestCase(Tests)).wasSuccessful()else 1
 if __name__=="__main__":
     parser=argparse.ArgumentParser(description=__doc__);parser.add_argument("--run",action="store_true");parser.add_argument("--self-test",action="store_true");parser.add_argument("--code-log",action="append",default=[]);parser.add_argument("--performance",default="docs/acceptance/398/analytics-performance.json");parser.add_argument("--physical");parser.add_argument("--output",default="acceptance.json");args=parser.parse_args()
