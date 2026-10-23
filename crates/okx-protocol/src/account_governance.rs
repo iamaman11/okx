@@ -341,7 +341,7 @@ mod tests {
             revision: 0,
             installation_id: "installation_test".into(),
             campaign_id: format!("sha256:{}", "a".repeat(64)),
-            campaign_loss_limit_usd: "20".into(),
+            campaign_loss_limit_usd: "10".into(),
             max_total_modelled_loss_usdt: "5".into(),
             accounts: vec![],
         };

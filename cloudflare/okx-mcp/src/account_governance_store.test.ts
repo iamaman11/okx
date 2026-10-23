@@ -1,4 +1,4 @@
-import {governanceRequest,enrollObservedAccount,setAccountPause,stopNewRealRisk,initializeGovernance,GOVERNANCE_STORAGE_KEY} from "./account_governance_store.js";
+import {governanceRequest,lowerCampaignLimit,enrollObservedAccount,setAccountPause,stopNewRealRisk,initializeGovernance,GOVERNANCE_STORAGE_KEY} from "./account_governance_store.js";
 import {FRAME_SCHEMA} from "./shared.js";
 import {initial,limits} from "./account_governance.test.js";
 function ok(v:boolean,label:string){if(!v)throw Error(label);}
@@ -33,10 +33,15 @@ const second=await enrollObservedAccount(s,{...observation,uid_fingerprint:"b".r
 ok(second.status===200,"connect second");
 const status=(await governanceRequest(s,"GET")).body;
 ok((status.accounts as any[])[0].enabled&&!(status.accounts as any[])[0].explicit_pause,"enroll_b_does_not_disable_a");
+const revision=status.revision as number;
+const lowered=await lowerCampaignLimit(s,{expected_revision:revision,campaign_loss_limit_usd:"8",idempotency_key:"lower_campaign_01"});
+ok(lowered.status===200&&lowered.body.campaign_loss_limit_usd==="8","owner may only lower campaign ceiling");
+ok((await lowerCampaignLimit(s,{expected_revision:revision+1,campaign_loss_limit_usd:"10",idempotency_key:"raise_campaign_01"})).status===409,"campaign ceiling cannot increase");
+ok(JSON.stringify(await lowerCampaignLimit(s,{expected_revision:revision,campaign_loss_limit_usd:"8",idempotency_key:"lower_campaign_01"}))===JSON.stringify(lowered),"campaign lowering is body-bound idempotent");
 const restarted=new Storage();restarted.map=structuredClone(s.map);
 ok(((await governanceRequest(restarted,"GET")).body.accounts as any[])[0].enabled,"access_survives_restart");
 console.log("access_restart_and_account_registration PASS");
-const pause={account:"primary",expected_revision:status.revision,explicit_pause:true,idempotency_key:"pause_primary_001"};
+const pause={account:"primary",expected_revision:revision+1,explicit_pause:true,idempotency_key:"pause_primary_001"};
 ok((await setAccountPause(s,pause)).status===200,"explicit pause saved");
 ok((await setAccountPause(s,pause)).status===200,"pause retry returns same revision");
 const paused=(await governanceRequest(s,"GET")).body;

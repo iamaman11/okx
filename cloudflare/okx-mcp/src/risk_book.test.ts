@@ -34,7 +34,7 @@ function account(uid:string){
  };
 }
 const governance={
- schema:"okx.governance/v3",revision:1,installation_id:"installation_test",campaign_id:"sha256:"+d,campaign_loss_limit_usd:"20",
+ schema:"okx.governance/v3",revision:1,installation_id:"installation_test",campaign_id:"sha256:"+d,campaign_loss_limit_usd:"10",
  max_total_modelled_loss_usdt:"10",accounts:[account(a),account(b)]
 };
 await sa.put("account_access_v1",governance);await sa.put("generation",77);await initializeRiskBook(sa,"installation_test");

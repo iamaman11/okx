@@ -4,7 +4,7 @@
 
 One Rust Engine routes independent accounts and strategy instances. Persistent account access, addressed account SQL owners, one central RiskBook, seven compact MCP tools and shared causal Rust analytics form the current product. Installation starts clean from current verified identity and credential references. Old application financial history, grants, STOP and obligations are neither read nor imported. Ordinary restart retains new-format state and never initializes a replacement database.
 
-Delivery uses one integration PR, a matched CI ReleaseSet and one Windows/MCP acceptance program. Intermediate checkpoints are not deployed. The authorized Real campaign has a cumulative loss ceiling of USD20 including costs across accounts, strategies and restart; profits do not refill it. Fixture success and CI promotion do not establish physical acceptance.
+Delivery uses one integration PR, a matched CI ReleaseSet and one Windows/MCP acceptance program. Intermediate checkpoints are not deployed. The authorized Real campaign has a cumulative loss ceiling of USD10 including costs across accounts, strategies and restart; profits do not refill it. Fixture success and CI promotion do not establish physical acceptance.
 
 - [Current architecture](docs/ARCHITECTURE_CONTRACT_V1.md)
 - [Operator workflow](docs/chatgpt-operator-contract.md)
