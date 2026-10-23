@@ -1,20 +1,35 @@
+   Compiling okx-api v0.1.0 (C:\Users\Bose\temp\okx-398\crates\okx-api)
+   Compiling rusqlite v0.40.2
+   Compiling okx-protocol v0.1.0 (C:\Users\Bose\temp\okx-398\crates\okx-protocol)
+   Compiling okx-execution v0.1.0 (C:\Users\Bose\temp\okx-398\crates\okx-execution)
+   Compiling okx-observation v0.1.0 (C:\Users\Bose\temp\okx-398\crates\okx-observation)
+   Compiling okx-ws v0.1.0 (C:\Users\Bose\temp\okx-398\crates\okx-ws)
+   Compiling okx-analysis v0.1.0 (C:\Users\Bose\temp\okx-398\crates\okx-analysis)
+   Compiling okx-runtime v0.1.0 (C:\Users\Bose\temp\okx-398\crates\okx-runtime)
+   Compiling okx-research v0.1.0 (C:\Users\Bose\temp\okx-398\crates\okx-research)
+   Compiling okx-agent v0.1.0 (C:\Users\Bose\temp\okx-398\crates\okx-agent)
+    Finished `release` profile [optimized] target(s) in 3m 35s
+     Running unittests src\lib.rs (target\release\deps\okx_agent-0d51babc8ad91970.exe)
 
-running 13 tests
+running 16 tests
 test analytics::artifact_job_fixtures::immutable_result_pages_and_restart_catalog ... ok
+test analytics::artifact_job_fixtures::market_artifact_publication_and_cached_result_roundtrip ... ok
+test analytics::artifact_job_fixtures::two_asset_batch_grid_has_independent_artifacts_and_cursors ... ok
 test analytics::cache::tests::cache_key_includes_range_and_version ... ok
 test analytics::cache::tests::combined_fields_share_source_fetch ... ok
-test analytics::executor::heavy_fixtures::two_heavy_research_jobs_ingestion_stop_and_cancel_latency ... ANALYTICS_PERF_JSON:{"two_heavy_stop":{"build":"release","cancel_max_ms":11.7414,"cancel_p95_ms":10.084299999999999,"max_ms":13.7011,"measurements":30,"p50_ms":4.9061,"p95_ms":10.0713,"stage":"two actual causal grid jobs on blocking workers plus simulated typed ingestion; no exchange HTTP","warmups":5}}
+test analytics::executor::heavy_fixtures::two_heavy_research_jobs_ingestion_stop_and_cancel_latency ... ANALYTICS_PERF_JSON:{"two_heavy_stop":{"build":"release","cancel_max_ms":16.9845,"cancel_p95_ms":12.840900000000001,"max_ms":14.7407,"measurements":30,"p50_ms":6.124499999999999,"p95_ms":11.989700000000001,"stage":"two actual causal grid jobs on blocking workers plus simulated typed ingestion; no exchange HTTP","warmups":5}}
 ok
 test analytics::executor::tests::cancel_releases_queue_capacity ... ok
 test analytics::executor::tests::cpu_job_does_not_block_stop ... ok
 test analytics::jobs::tests::restart_marks_job_interrupted ... ok
-test analytics::market::performance_fixtures::prepared_screen_8x100_latency_and_response_budget ... ANALYTICS_PERF_JSON:{"screen_8x100":{"build":"release","max_ms":0.4128,"measurements":30,"p50_ms":0.20379999999999998,"p95_ms":0.40719999999999995,"stage":"native fixture compute/projection/serialization; HTTP and physical MCP separate","summary_bytes":3166,"warmups":5}}
+test analytics::market::performance_fixtures::prepared_screen_8x100_latency_and_response_budget ... ANALYTICS_PERF_JSON:{"screen_8x100":{"build":"release","max_ms":0.527,"measurements":30,"p50_ms":0.2713,"p95_ms":0.5033000000000001,"stage":"native fixture compute/projection/serialization; HTTP and physical MCP separate","summary_bytes":3166,"warmups":5}}
 ok
 test analytics::market::tests::closed_candle_filter_preserves_quality ... ok
 test analytics::market::tests::missing_requested_source_is_partial_not_zero ... ok
+test analytics::market::tests::new_downside_operator_uses_existing_market_plan_and_projection ... ok
 test analytics::market::tests::unused_missing_source_does_not_degrade ... ok
 test analytics::planner::tests::arbitrary_operator_is_rejected ... ok
 test analytics::planner::tests::plan_dependencies_exclude_unused_sources ... ok
 
-test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 62 filtered out; finished in 0.75s
+test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 76 filtered out; finished in 0.93s
 

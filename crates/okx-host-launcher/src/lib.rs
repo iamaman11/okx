@@ -1,6 +1,7 @@
+pub mod logging;
 use std::{
     ffi::OsStr,
-    fs::{self, File, OpenOptions},
+    fs::{self, File},
     io::{Read, Write},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
@@ -999,27 +1000,28 @@ fn spawn_controller(
     activation_request_id: Option<&str>,
 ) -> LauncherResult<Child> {
     verify_version(version)?;
-    let stdout = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(Path::new(CONTROL_ROOT).join("controller.stdout.log"))?;
-    let stderr = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(Path::new(CONTROL_ROOT).join("controller.stderr.log"))?;
+    let stdout = logging::RotatingLog::open(Path::new(CONTROL_ROOT).join("controller.stdout.log"))?;
+    let stderr = logging::RotatingLog::open(Path::new(CONTROL_ROOT).join("controller.stderr.log"))?;
 
     let mut command = hidden_command(version.binary_path()?);
     command.arg("run");
     if let Some(request_id) = activation_request_id {
         command.arg("--activation-request-id").arg(request_id);
     }
-    command
+    let mut child = command
         .current_dir(CONTROL_ROOT)
         .stdin(Stdio::null())
-        .stdout(Stdio::from(stdout))
-        .stderr(Stdio::from(stderr))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .spawn()
-        .map_err(|_| LauncherError::ControllerLaunch)
+        .map_err(|_| LauncherError::ControllerLaunch)?;
+    if let Some(pipe) = child.stdout.take() {
+        logging::spawn_drain(pipe, stdout);
+    }
+    if let Some(pipe) = child.stderr.take() {
+        logging::spawn_drain(pipe, stderr);
+    }
+    Ok(child)
 }
 
 fn hidden_command<S: AsRef<OsStr>>(program: S) -> Command {

@@ -1,25 +1,25 @@
 # OKX
 
-[#398](https://github.com/iamaman11/okx/issues/398) is the sole current implementation and acceptance plan. It supersedes #160 and the former staged Live gate. PR #397 is merged; its source tree is the baseline, not evidence that #398 is complete.
+[#398](https://github.com/iamaman11/okx/issues/398) is the sole implementation and acceptance specification. PR #397 is the merged baseline; previous staged Live gates are historical.
 
-The delivery is one integration PR with buildable W01–W10 commits, one matched ReleaseSet and one Windows/MCP acceptance campaign. Intermediate commits must not be deployed.
+One Rust Engine routes independent accounts and strategy instances. Persistent account access, addressed account SQL owners, one central RiskBook, seven compact MCP tools and shared causal Rust analytics form the current product. Installation starts clean from current verified identity and credential references. Old application financial history, grants, STOP and obligations are neither read nor imported. Ordinary restart retains new-format state and never initializes a replacement database.
 
-The target is one Rust Engine with independently routed accounts and strategy instances, persistent account access, one SQL owner per account, one central risk owner, compact MCP tools and causal Rust analytics. Installation starts clean from verified account identity, credential references and current exchange state. Old application financial history, grants, STOP and obligations are neither read nor imported. Ordinary restart must retain the new system's state and must never initialize a replacement database.
+Delivery uses one integration PR, a matched CI ReleaseSet and one Windows/MCP acceptance program. Intermediate checkpoints are not deployed. The authorized Real campaign has a cumulative loss ceiling of USD20 including costs across accounts, strategies and restart; profits do not refill it. Fixture success and CI promotion do not establish physical acceptance.
 
-The authorized physical campaign is Real, with total campaign loss including costs limited to USD 20. This is a cumulative loss budget; it is not a per-order notional limit. Physical execution follows W10 after the exact CI ReleaseSet is ready.
+- [Current architecture](docs/ARCHITECTURE_CONTRACT_V1.md)
+- [Operator workflow](docs/chatgpt-operator-contract.md)
+- [Defaults, transitions and install/backup/restore runbook](docs/PRODUCT_ACCEPTANCE.md)
+- [Published checkpoints and remaining acceptance](docs/ROADMAP.md)
+- [Preinstallation code acceptance](acceptance.json)
+- [Final manifest attached to the exact accepted release](https://github.com/iamaman11/okx/releases/latest/download/acceptance.json)
 
-Implementation status and verification evidence are recorded in [the current roadmap](docs/ROADMAP.md). Historical notes are retained in [the documentation archive](docs/history/README-before-398.md) and impose no additional activation or migration prerequisites.
+The tracked manifest precedes physical deployment. The release asset supplies the final installed/exchange observations and exact binary hashes; NOT_RUN/BLOCKED never means PASS. Prior documents are retained in [history](docs/history/README-before-398.md) without imposing activation or migration prerequisites.
 
-Workspace checks:
+Run complete local code acceptance from PowerShell:
 
 ```powershell
 $env:NO_PROXY = '127.0.0.1,localhost'
-cargo fmt --all -- --check
-cargo test --locked --workspace
-python scripts/check_architecture.py
-python scripts/check_ledger_sql.py
-npm --prefix cloudflare/okx-mcp ci
-npm --prefix cloudflare/okx-mcp run check
+python scripts/acceptance_product.py --run
 ```
 
-The full product-contract and physical-acceptance checks remain required by #398 before release acceptance.
+This runs format, architecture/SQL/product guards, locked Rust tests and Clippy, plus Worker checks. Exact CI and physical acceptance remain separate requirements.

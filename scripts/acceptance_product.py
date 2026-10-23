@@ -31,14 +31,14 @@ def validate(value):
         if value.get(key)not in STATES:raise ValueError("missing final field "+key)
     if value["CODE_PASSED"]=="PASS"and(any(c["result"]!= "PASS"for c in cases)or any(c["exit_code"]!=0 for c in value["commands"])):raise ValueError("CODE_PASSED conflicts with unfinished checks")
     for key in FINAL[1:]:
-        if value[key]=="PASS"and key!="ANALYTICS_READY":
+        if value[key]=="PASS":
             paths=value.get("physical",{}).get(key,{}).get("evidence",[])
             if not paths or not all((ROOT/p).is_file() for p in paths):raise ValueError(key+" requires existing physical evidence files")
     return value
 
 def command(cmd,cwd,output):
-    completed=subprocess.run(cmd,cwd=cwd,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,encoding="utf-8",errors="replace")
-    output.write_text(completed.stdout,encoding="utf-8")
+    with output.open("w",encoding="utf-8") as log:
+        completed=subprocess.run(cmd,cwd=cwd,stdout=log,stderr=subprocess.STDOUT)
     return {"command":cmd,"exit_code":completed.returncode,"evidence":str(output.relative_to(ROOT)).replace("\\","/")}
 def build(args):
     out=ROOT/args.output;out.parent.mkdir(parents=True,exist_ok=True);evidence=out.parent/"verification";evidence.mkdir(exist_ok=True)
@@ -79,7 +79,12 @@ def build(args):
     if sql_evidence.exists():
         sql=json.loads(sql_evidence.read_text(encoding="utf-8-sig"));value["sqlite"]={"version":sql.get("sqlite_version"),"source_id":sql.get("sqlite_source_id"),"evidence":"docs/verification/398-sql-million.json","scope":"executed Linux bundled SQLite benchmark; installed binary checked separately"}
     else:value["sqlite"]={"result":"NOT_RUN"}
-    value["mcp"]={"physical_network":"NOT_RUN","account_count":None,"instance_count":None,"reason":"installed MCP observations are required"}
+    worker_log=next((log for path,log in logs if path.endswith("worker.log")),"")
+    inventory=re.search(r"tools_list_actual_serialized PASS (\d+) tools (\d+) bytes",worker_log)
+    value["mcp"]={"physical_network":"NOT_RUN","account_count":None,"instance_count":None,"reason":"installed MCP observations are required","tool_count":int(inventory[1])if inventory else None,"tools_list_utf8_bytes":int(inventory[2])if inventory else None}
+    value["mcp"].update(physical.get("mcp",{}))
+    value["release_hashes"]=physical.get("release_hashes",{})
+    value["physical_evidence_location"]="https://github.com/iamaman11/okx/releases/latest/download/acceptance.json"
     for key in ["INSTALLED_MATCHED","PHYSICAL_MULTI_ACCOUNT","REAL_CYCLE_ACCEPTED"]:value[key]=physical.get(key,{}).get("result","NOT_RUN")
     validate(value);out.write_text(json.dumps(value,ensure_ascii=False,indent=2)+"\n",encoding="utf-8");print(out)
     return 0 if code_ok else 1

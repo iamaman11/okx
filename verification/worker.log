@@ -1,0 +1,11 @@
+npm notice run okx-cloudflare-mcp@0.2.0 check
+npm notice run tsc --noEmit && node scripts/test-tool-result.mjs
+owner_install_init_auth_body_bound PASS
+strict_action_fixtures PASS 27 actions
+risk_concurrent_accounts_campaign_limit PASS
+million_history_hot_read PASS records=1000000 reads=6 elapsed_ms=0.833
+access_restart_and_account_registration PASS
+strict_action_fixtures PASS 27 actions
+tools_list_actual_serialized PASS 7 tools 23245 bytes
+strict_action_fixtures PASS 27 actions
+Worker test files passed: 9

@@ -118,11 +118,13 @@ const ALLOWED_REMOTES: &[&str] = &[
     "https://github.com/iamaman11/okx.git",
 ];
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 struct AgentLaunchEvidence {
     pid: u32,
     stdout_offset: u64,
     stderr_offset: u64,
+    stdout_health: okx_host_launcher::logging::LogHealth,
+    stderr_health: okx_host_launcher::logging::LogHealth,
 }
 
 struct NativeChildPipe {
@@ -854,25 +856,23 @@ impl HostExecutor {
         let runtime_dir = PathBuf::from(RUNTIME_ROOT);
         fs::create_dir_all(&runtime_dir)?;
 
-        let stdout = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(runtime_dir.join("okx-agent.stdout.log"))?;
-        let stderr = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(runtime_dir.join("okx-agent.stderr.log"))?;
-
-        // Capture append-only log boundaries before launching the owned child.
-        let stdout_offset = stdout.metadata()?.len();
-        let stderr_offset = stderr.metadata()?.len();
+        let stdout = okx_host_launcher::logging::RotatingLog::open(
+            runtime_dir.join("okx-agent.stdout.log"),
+        )?;
+        let stderr = okx_host_launcher::logging::RotatingLog::open(
+            runtime_dir.join("okx-agent.stderr.log"),
+        )?;
+        let stdout_offset = stdout.offset();
+        let stderr_offset = stderr.offset();
+        let stdout_health = stdout.health();
+        let stderr_health = stderr.health();
         let args = ENGINE_AGENT_ARGS;
         let mut child = hidden_command(self.agent_binary())
             .args(args)
             .arg("--native-child-control-stdio")
             .current_dir(&self.repo_root)
             .stdin(Stdio::piped())
-            .stdout(Stdio::from(stdout))
+            .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()?;
 
@@ -882,45 +882,20 @@ impl HostExecutor {
             .stdin
             .take()
             .ok_or(HostControlError::InvalidExecutionPath)?;
-        let mut child_stderr = child
+        let child_stdout = child
+            .stdout
+            .take()
+            .ok_or(HostControlError::InvalidExecutionPath)?;
+        okx_host_launcher::logging::spawn_drain(child_stdout, stdout);
+        let child_stderr = child
             .stderr
             .take()
             .ok_or(HostControlError::InvalidExecutionPath)?;
         let (reply_tx, reply_rx) = mpsc::channel();
-        // Preserve the old append-only stderr diagnostic log. Only this
-        // parent receives the anonymous stderr pipe and routes typed replies.
-        let _stderr_reader = std::thread::spawn(move || {
-            let mut stderr_log = stderr;
-            let mut pending = Vec::<u8>::new();
-            let mut overflow = false;
-            let mut block = [0u8; 4096];
-            loop {
-                let count = match child_stderr.read(&mut block) {
-                    Ok(0) | Err(_) => break,
-                    Ok(n) => n,
-                };
-                if stderr_log.write_all(&block[..count]).is_err() {
-                    break;
-                }
-                for byte in &block[..count] {
-                    if *byte == b'\n' {
-                        if !overflow && pending.starts_with(NATIVE_CHILD_CONTROL_PREFIX.as_bytes())
-                        {
-                            let payload = &pending[NATIVE_CHILD_CONTROL_PREFIX.len()..];
-                            if let Ok(reply) = serde_json::from_slice::<NativeChildReply>(payload) {
-                                let _ = reply_tx.send(reply);
-                            }
-                        }
-                        pending.clear();
-                        overflow = false;
-                    } else if pending.len() < NATIVE_CHILD_CONTROL_MAX_BYTES {
-                        pending.push(*byte);
-                    } else {
-                        overflow = true;
-                    }
-                }
-            }
-        });
+        // The original stderr bytes feed typed child replies independently of
+        // the redacted rotating diagnostic sink; sink failures never stop drain.
+        let _stderr_reader =
+            std::thread::spawn(move || drain_native_stderr(child_stderr, stderr, reply_tx));
         self.native_child_pipe = Some(NativeChildPipe {
             input: child_input,
             replies: reply_rx,
@@ -931,6 +906,8 @@ impl HostExecutor {
             pid,
             stdout_offset,
             stderr_offset,
+            stdout_health,
+            stderr_health,
         });
         self.next_restart_at = None;
         Ok(pid)
@@ -1095,15 +1072,32 @@ impl HostExecutor {
         command_name: &'static str,
     ) -> HostControlResult<()> {
         fs::create_dir_all(self.runtime_dir())?;
-        let stdout = File::create(self.runtime_dir().join(log_name))?;
-        let stderr = stdout.try_clone()?;
-
-        let status = hidden_command(program)
+        // Separate line collectors prevent stdout/stderr fragments from
+        // interleaving around a credential label before redaction.
+        let out_log =
+            okx_host_launcher::logging::RotatingLog::open(self.runtime_dir().join(log_name))?;
+        let err_log = okx_host_launcher::logging::RotatingLog::open(
+            self.runtime_dir().join(format!("{log_name}.stderr")),
+        )?;
+        let mut child = hidden_command(program)
             .args(args)
             .current_dir(&self.repo_root)
-            .stdout(Stdio::from(stdout))
-            .stderr(Stdio::from(stderr))
-            .status()?;
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or(HostControlError::InvalidExecutionPath)?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or(HostControlError::InvalidExecutionPath)?;
+        let out_thread = okx_host_launcher::logging::spawn_drain(stdout, out_log);
+        let err_thread = okx_host_launcher::logging::spawn_drain(stderr, err_log);
+        let status = child.wait()?;
+        let _ = out_thread.join();
+        let _ = err_thread.join();
 
         if status.success() {
             Ok(())
@@ -1130,6 +1124,40 @@ const ENGINE_AGENT_ARGS: &[&str] = &[
     "--cloudflare-runtime-id",
     AGENT_CLOUDFLARE_RUNTIME_ID,
 ];
+
+fn drain_native_stderr(
+    mut child_stderr: impl Read,
+    mut stderr_log: okx_host_launcher::logging::RotatingLog,
+    reply_tx: mpsc::Sender<NativeChildReply>,
+) {
+    let mut pending = Vec::<u8>::new();
+    let mut overflow = false;
+    let mut block = [0u8; 4096];
+    loop {
+        let count = match child_stderr.read(&mut block) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => n,
+        };
+        stderr_log.append(&block[..count]);
+        for byte in &block[..count] {
+            if *byte == b'\n' {
+                if !overflow && pending.starts_with(NATIVE_CHILD_CONTROL_PREFIX.as_bytes()) {
+                    let payload = &pending[NATIVE_CHILD_CONTROL_PREFIX.len()..];
+                    if let Ok(reply) = serde_json::from_slice::<NativeChildReply>(payload) {
+                        let _ = reply_tx.send(reply);
+                    }
+                }
+                pending.clear();
+                overflow = false;
+            } else if pending.len() < NATIVE_CHILD_CONTROL_MAX_BYTES {
+                pending.push(*byte);
+            } else {
+                overflow = true;
+            }
+        }
+    }
+    stderr_log.finish();
+}
 
 fn read_log_tail(path: &Path) -> std::io::Result<(u64, String)> {
     let mut file = File::open(path)?;
@@ -1313,7 +1341,9 @@ fn current_launch_summary(root: &Path, launch: &AgentLaunchEvidence) -> Value {
     let stdout = read_owned_launch_tail(&root.join("okx-agent.stdout.log"), launch.stdout_offset);
     let stderr = read_owned_launch_tail(&root.join("okx-agent.stderr.log"), launch.stderr_offset);
     let fully_observed = stdout.as_ref().is_some_and(|(_, complete)| *complete)
-        && stderr.as_ref().is_some_and(|(_, complete)| *complete);
+        && stderr.as_ref().is_some_and(|(_, complete)| *complete)
+        && launch.stdout_health.complete()
+        && launch.stderr_health.complete();
     let stdout_text = stdout.as_ref().map_or("", |(text, _)| text.as_str());
     let stderr_text = stderr.as_ref().map_or("", |(text, _)| text.as_str());
     json!({
@@ -1686,6 +1716,8 @@ mod tests {
             pid: 321,
             stdout_offset: fs::metadata(&stdout).expect("stdout metadata").len(),
             stderr_offset: fs::metadata(&stderr).expect("stderr metadata").len(),
+            stdout_health: Default::default(),
+            stderr_health: Default::default(),
         };
         fs::OpenOptions::new()
             .append(true)
@@ -1828,5 +1860,38 @@ mod tests {
     fn workspace_diagnostic_count_is_intentionally_small() {
         assert_eq!(WORKSPACE_STATUS_MAX_CHANGES, 16);
         assert_eq!(WORKSPACE_STATUS_MAX_CHANGE_BYTES, 512);
+    }
+    #[test]
+    fn rotating_redacted_stderr_preserves_child_shutdown_reply() {
+        let root = std::env::temp_dir().join(format!(
+            "okx-child-log-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("stderr.log");
+        let reply = NativeChildReply {
+            schema: NATIVE_CHILD_CONTROL_SCHEMA_V1.into(),
+            request_id: "shutdown_test_0001".into(),
+            outcome: "DRAINED".into(),
+        };
+        let input = format!(
+            "apiKey=NEVER_PERSIST_THIS\n{}{}\n",
+            NATIVE_CHILD_CONTROL_PREFIX,
+            serde_json::to_string(&reply).unwrap()
+        );
+        let (tx, rx) = mpsc::channel();
+        drain_native_stderr(
+            std::io::Cursor::new(input),
+            okx_host_launcher::logging::RotatingLog::open(&path).unwrap(),
+            tx,
+        );
+        assert!(rx.recv().unwrap().valid_for("shutdown_test_0001"));
+        let text = fs::read_to_string(path).unwrap();
+        assert!(!text.contains("NEVER_PERSIST_THIS"));
+        assert!(text.contains("redacted"));
     }
 }
