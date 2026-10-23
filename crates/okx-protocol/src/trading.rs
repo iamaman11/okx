@@ -167,7 +167,7 @@ impl PortfolioScenarioRequest {
             if !name(&p.instrument)
                 || !decimal(&p.notional_usd)
                 || !decimal(&p.margin_usd)
-                || p.price_shock_bps.abs() > 10000
+                || !(-10000..=10000).contains(&p.price_shock_bps)
                 || p.volatility_bps > 10000
                 || p.liquidity_cost_bps > 10000
             {
