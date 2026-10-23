@@ -251,6 +251,7 @@ pub enum AgentOperation {
     Portfolio {
         request: trading::PortfolioRequest,
     },
+    PortfolioScenario { request: trading::PortfolioScenarioRequest },
     Diagnostics {
         request: trading::DiagnosticsRequest,
     },
@@ -329,6 +330,7 @@ impl AgentOperation {
             Self::Trade { request } => request.valid(),
             Self::Strategies { request } => request.valid(),
             Self::Portfolio { request } => request.valid(),
+            Self::PortfolioScenario { request } => request.valid(),
             Self::Diagnostics { request } => request.valid(),
             Self::FindInstruments {
                 asset,

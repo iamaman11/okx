@@ -1810,7 +1810,11 @@
             "type": "object",
             "properties": {
               "action": {
-                "const": "summary"
+                "type": "string",
+                "enum": [
+                  "summary",
+                  "history"
+                ]
               },
               "accounts": {
                 "type": "array",
@@ -1876,65 +1880,107 @@
             "type": "object",
             "properties": {
               "action": {
-                "const": "history"
+                "const": "scenario"
               },
-              "accounts": {
-                "type": "array",
-                "items": {
-                  "type": "string",
-                  "minLength": 1,
-                  "maxLength": 128
-                },
-                "maxItems": 32,
-                "uniqueItems": true
-              },
-              "start_ms": {
-                "type": "integer",
-                "minimum": 0,
-                "maximum": 9007199254740991
-              },
-              "end_ms": {
-                "type": "integer",
-                "minimum": 1,
-                "maximum": 9007199254740991
-              },
-              "strategies": {
-                "type": "array",
-                "items": {
-                  "type": "string",
-                  "minLength": 1,
-                  "maxLength": 128
-                },
-                "maxItems": 32,
-                "uniqueItems": true
-              },
-              "currencies": {
-                "type": "array",
-                "items": {
-                  "type": "string",
-                  "minLength": 1,
-                  "maxLength": 16
-                },
-                "maxItems": 32,
-                "uniqueItems": true
-              },
-              "cursor": {
+              "equity_usd": {
                 "type": "string",
-                "minLength": 1,
-                "maxLength": 512
+                "pattern": "^(?!0+(?:\\.0+)?$)(?:0|[1-9][0-9]{0,14})(?:\\.[0-9]{1,9})?$",
+                "maxLength": 32
               },
-              "limit": {
-                "type": "integer",
-                "minimum": 1,
-                "maximum": 50
+              "positions": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "instrument": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 64
+                    },
+                    "side": {
+                      "type": "string",
+                      "enum": [
+                        "long",
+                        "short"
+                      ]
+                    },
+                    "notional_usd": {
+                      "type": "string",
+                      "pattern": "^(?!0+(?:\\.0+)?$)(?:0|[1-9][0-9]{0,14})(?:\\.[0-9]{1,9})?$",
+                      "maxLength": 32
+                    },
+                    "margin_usd": {
+                      "type": "string",
+                      "pattern": "^(?!0+(?:\\.0+)?$)(?:0|[1-9][0-9]{0,14})(?:\\.[0-9]{1,9})?$",
+                      "maxLength": 32
+                    },
+                    "price_shock_bps": {
+                      "type": "integer",
+                      "minimum": -10000,
+                      "maximum": 10000
+                    },
+                    "volatility_bps": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 10000
+                    },
+                    "liquidity_cost_bps": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 10000
+                    }
+                  },
+                  "required": [
+                    "instrument",
+                    "side",
+                    "notional_usd",
+                    "margin_usd",
+                    "price_shock_bps",
+                    "volatility_bps",
+                    "liquidity_cost_bps"
+                  ],
+                  "additionalProperties": false
+                },
+                "maxItems": 8,
+                "uniqueItems": true
+              },
+              "correlations": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "left": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 7
+                    },
+                    "right": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 7
+                    },
+                    "rho": {
+                      "type": "number",
+                      "minimum": -1,
+                      "maximum": 1
+                    }
+                  },
+                  "required": [
+                    "left",
+                    "right",
+                    "rho"
+                  ],
+                  "additionalProperties": false
+                },
+                "maxItems": 28,
+                "uniqueItems": true
               }
             },
             "required": [
               "action",
-              "accounts",
-              "start_ms",
-              "end_ms",
-              "limit"
+              "equity_usd",
+              "positions",
+              "correlations"
             ],
             "additionalProperties": false
           }

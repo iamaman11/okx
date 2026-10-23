@@ -6,6 +6,9 @@ for(const [tool,schemas]of Object.entries(ACTION_SCHEMAS))for(const schema of sc
 const screen=payloadFixtures.find(x=>x.tool==='market'&&x.action==='screen')!.positive;
 fail(validTool('market',{...screen,action:'compare'}),'shared strict screen/compare schema');
 fail(!validTool('market',{...screen,action:'compare',raw_rpc:'forbidden'}),'compare rejects unknown fields');
+const summary=payloadFixtures.find(x=>x.tool==='portfolio'&&x.action==='summary')!.positive;
+fail(validTool('portfolio',{...summary,action:'history'}),'shared portfolio history schema');
+fail(!validTool('portfolio',{...summary,action:'history',raw_rpc:'forbidden'}),'strict history schema');
 const trade=payloadFixtures.find(x=>x.tool==='trade'&&x.action==='execute')!.positive;
 fail(!validTool('trade',{...trade,sizing:{contracts:'1',max_loss_usd:'5'}}),'sizing exactly one');
 fail(!validTool('trade',{...trade,expires_in_ms:30001}),'deadline bounded');

@@ -180,6 +180,7 @@ async fn execute(
                 .strategies(account.unwrap_or_default(), request, g)
                 .await
         }
+        AgentOperation::PortfolioScenario { request } => crate::portfolio::scenario(request),
         AgentOperation::Portfolio { request } => {
             crate::portfolio::portfolio(&ctx.accounts, request, &ctx.trade).await
         }

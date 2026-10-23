@@ -207,6 +207,10 @@ export const mcpApi={async fetch(request:Request,env:Env,ctx:any):Promise<Respon
    return jsonRpc(id,toolResult(await dispatchRuntime(env,{schema:'okx.agent.request/v1',request_id:requestId(),
      operation:{type:'market_capabilities'}})));
  }
+ if(name==='portfolio'&&args.action==='scenario'){
+   return jsonRpc(id,toolResult(await dispatchRuntime(env,{schema:'okx.agent.request/v1',request_id:requestId(),
+      operation:{type:'portfolio_scenario',request:args}})));
+ }
  const {account,...body}=args;
  const payload=name==='portfolio'?args:name==='diagnostics'?{reference:args.reference??null,account:args.account??null}:body;
  const operation={type:name,request:payload};
