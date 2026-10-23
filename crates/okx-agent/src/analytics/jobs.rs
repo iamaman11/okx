@@ -349,7 +349,9 @@ impl Jobs {
             |row| row.get::<_, i64>(0),
         )
         .map_err(|e| e.to_string())
-        .and_then(|count| u64::try_from(count).map_err(|_| "RESEARCH_REFERENCE_COUNT_INVALID".into()))
+        .and_then(|count| {
+            u64::try_from(count).map_err(|_| "RESEARCH_REFERENCE_COUNT_INVALID".into())
+        })
     }
     pub fn any_running(&self) -> Result<bool, String> {
         let db = self.db.lock().map_err(|_| "CATALOG_LOCK_POISONED")?;
