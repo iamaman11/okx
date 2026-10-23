@@ -9,6 +9,11 @@ fail(!validTool('market',{...screen,action:'compare',raw_rpc:'forbidden'}),'comp
 const summary=payloadFixtures.find(x=>x.tool==='portfolio'&&x.action==='summary')!.positive;
 fail(validTool('portfolio',{...summary,action:'history'}),'shared portfolio history schema');
 fail(!validTool('portfolio',{...summary,action:'history',raw_rpc:'forbidden'}),'strict history schema');
+const marketScreen=payloadFixtures.find(x=>x.tool==='market'&&x.action==='screen')!.positive;
+const {instruments:unused,...withoutList}=marketScreen;
+fail(validTool('market',{...withoutList,universe:{instrument_type:'SWAP'}}),'market universe is a strict schema');
+fail(!validTool('market',{...marketScreen,universe:{instrument_type:'SWAP'}}),'ambiguous universe rejected');
+fail(!validTool('market',{...withoutList,action:'compare',universe:{instrument_type:'SWAP'}}),'compare requires explicit instruments');
 const trade=payloadFixtures.find(x=>x.tool==='trade'&&x.action==='execute')!.positive;
 fail(!validTool('trade',{...trade,sizing:{contracts:'1',max_loss_usd:'5'}}),'sizing exactly one');
 fail(!validTool('trade',{...trade,expires_in_ms:30001}),'deadline bounded');

@@ -179,12 +179,13 @@ impl AnalyticsService {
     }
     pub fn market_capabilities(&self) -> Value {
         json!({"schema":"okx.market.capabilities/v1",
-            "actions":["screen","compare","instruments","snapshot","capabilities"],
+            "actions":["screen","compare","instruments","snapshot","microstructure","capabilities"],
             "timeframes_ms":[60000,180000,300000,900000,1800000,3600000,14400000,86400000],
             "limits":{"max_explicit_instruments":100,"max_page_rows":50,
                 "max_correlation_instruments":8,"max_candles_total":1000000},
-            "universe":{"mode":"explicit_instruments","whole_market_screen":false,
-                "reason_code":"WHOLE_MARKET_SCREEN_NOT_IMPLEMENTED"},
+            "universe":{"modes":["explicit_instruments","venue_reference_registry"],
+                "whole_market_paged":true,"globally_ranked":false,
+                "max_instruments_per_page":100},
             "quality":"partial"})
     }
     pub async fn research(&self, request: ResearchRequest) -> Result<Value, String> {

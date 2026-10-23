@@ -21,8 +21,10 @@ const research={...mutation,...range,instruments:{...array(text(64),8),minItems:
 const instance={instance_id:text(64)};
 const number=(minimum=0,maximum=Number.MAX_SAFE_INTEGER)=>({type:'number',minimum,maximum});
 const marketParameters=object({ema_period:integer(1,1000),atr_period:integer(1,1000),rsi_period:integer(1,1000),budget:number(0.000000001),price:number(0.000000001),stop_distance:number(0.000000001,0.999999999),notional:number(),fee_bps:number(0,10000),slippage_bps:number(0,10000)},[]);
-const screenCompare=action('screen',{...range,fields:array(text(64)),parameters:marketParameters,filters:array(object({field:text(64),min:number(-Number.MAX_SAFE_INTEGER),max:number(-Number.MAX_SAFE_INTEGER)},['field']),16),sort:object({field:text(64),descending:{type:'boolean'}}),limit:integer(1,50),cursor:text(512)},['instruments','fields','timeframe_ms','start_ms','end_ms','limit']);
+const universe=object({instrument_type:choice('SPOT','SWAP','FUTURES'),settle_currency:text(16),after_instrument:text(64),limit:integer(1,100)},['instrument_type']);
+const screenCompare=action('screen',{...range,universe,fields:array(text(64)),parameters:marketParameters,filters:array(object({field:text(64),min:number(-Number.MAX_SAFE_INTEGER),max:number(-Number.MAX_SAFE_INTEGER)},['field']),16),sort:object({field:text(64),descending:{type:'boolean'}}),limit:integer(1,50),cursor:text(512)},['fields','timeframe_ms','start_ms','end_ms','limit']);
 screenCompare.properties.action=choice('screen','compare');
+screenCompare.allOf=[{oneOf:[{required:['instruments']},{required:['universe']}]}];
 const portfolioHistory=action('summary',{accounts:array(account),start_ms:integer(0),end_ms:integer(1),strategies:array(text()),currencies:array(text(16)),cursor:text(512),limit:integer(1,50)},['accounts','start_ms','end_ms','limit']);portfolioHistory.properties.action=choice('summary','history');
 export const ACTION_SCHEMAS:Record<string,Schema[]>={
  accounts:[action('list'),action('status',{account}),action('connect',{...mutation,credential_ref:text(),alias:text(64),label:text(128),limits,enabled:{type:'boolean'}},['idempotency_key','credential_ref','alias','limits','enabled']),...['pause','resume'].map(a=>action(a,{account,...mutation,expected_revision:integer()})),action('set_limits',{account,...mutation,expected_revision:integer(),limits})],
@@ -35,7 +37,7 @@ export const ACTION_SCHEMAS:Record<string,Schema[]>={
 };
 for(const schema of ACTION_SCHEMAS.trade){if(['preview','execute'].includes(schema.properties.action.const))schema.allOf=[{if:{properties:{operation:{enum:['open','add','replace']}}},then:{required:['protection']}}];}
 ACTION_SCHEMAS.diagnostics[0].allOf=[{anyOf:[{required:['account']},{required:['reference']}]}];
-export const PUBLIC_TOOLS:Json[]=Object.entries(ACTION_SCHEMAS).map(([name,schemas])=>({name,description:`${name}: typed, bounded actions; explicit account and idempotency for writes.`,inputSchema:{oneOf:schemas}}));
+export const PUBLIC_TOOLS:Json[]=Object.entries(ACTION_SCHEMAS).map(([name,schemas])=>({name,description:`${name}: strict typed actions.`,inputSchema:{oneOf:schemas}}));
 export function matches(s:Schema,v:unknown):boolean {
  if(s.allOf&&!s.allOf.every((x:Schema)=>matches(x,v)))return false;
  if(s.if&&matches(s.if,v)&&s.then&&!matches(s.then,v))return false;
