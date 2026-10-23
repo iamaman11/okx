@@ -1548,7 +1548,8 @@ fn strategy_policy_retry_keeps_immutable_lineage_and_one_intent() {
     let definition = s.strategy_definition("a").unwrap();
     let base = format!("strategy:a:{}:bar-revision", definition.version);
     assert_eq!(
-        s.claim_strategy_decision_with_id("a", "bar-revision", "inputs", 1, 7).unwrap(),
+        s.claim_strategy_decision_with_id("a", "bar-revision", "inputs", 1, 7)
+            .unwrap(),
         Some(base.clone())
     );
     let p = s.path.clone();
@@ -1563,19 +1564,27 @@ fn strategy_policy_retry_keeps_immutable_lineage_and_one_intent() {
     assert_ne!(updated, base);
     assert!(updated.contains(":policy:2"));
     assert_eq!(
-        s.claim_strategy_decision_with_id("a", "bar-revision", "inputs", 2, 9).unwrap(),
+        s.claim_strategy_decision_with_id("a", "bar-revision", "inputs", 2, 9)
+            .unwrap(),
         Some(updated.clone())
     );
-    let old: (String, i64) = s.connection.query_row(
-        "SELECT input_digest,policy_revision FROM decisions WHERE decision_id=?1",
-        [&base],
-        |r| Ok((r.get(0)?, r.get(1)?)),
-    ).unwrap();
+    let old: (String, i64) = s
+        .connection
+        .query_row(
+            "SELECT input_digest,policy_revision FROM decisions WHERE decision_id=?1",
+            [&base],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
     assert_eq!(old, ("inputs".into(), 1));
-    assert!(s.connection.execute(
-        "UPDATE decisions SET policy_revision=2 WHERE decision_id=?1",
-        [&base],
-    ).is_err());
+    assert!(
+        s.connection
+            .execute(
+                "UPDATE decisions SET policy_revision=2 WHERE decision_id=?1",
+                [&base],
+            )
+            .is_err()
+    );
     let successor: String = s.connection.query_row(
         "SELECT result_ref FROM operation_receipts WHERE operation_id=?1 AND kind='strategy_policy_retry'",
         [format!("strategy-policy-retry:{base}")],
@@ -1627,28 +1636,48 @@ fn strategy_policy_retry_keeps_immutable_lineage_and_one_intent() {
         instrument_id: "BTC".into(),
     };
     s.prepare(&decision, &intent).unwrap();
-    let count: i64 = s.connection.query_row(
-        "SELECT count(*) FROM intents WHERE idempotency_key='bar-revision'",
-        [], |r| r.get(0),
-    ).unwrap();
+    let count: i64 = s
+        .connection
+        .query_row(
+            "SELECT count(*) FROM intents WHERE idempotency_key='bar-revision'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
     assert_eq!(count, 1);
-    assert!(!s.claim_strategy_decision("a", "bar-revision", "inputs", 4, 12).unwrap());
+    assert!(
+        !s.claim_strategy_decision("a", "bar-revision", "inputs", 4, 12)
+            .unwrap()
+    );
     assert_eq!(
-        s.connection.query_row(
-            "SELECT decision_id FROM intents WHERE idempotency_key='bar-revision'",
-            [], |r| r.get::<_,String>(0),
-        ).unwrap(),
+        s.connection
+            .query_row(
+                "SELECT decision_id FROM intents WHERE idempotency_key='bar-revision'",
+                [],
+                |r| r.get::<_, String>(0),
+            )
+            .unwrap(),
         final_id
     );
     // The SQL owner has prepared exactly one intent and no authorized POST.
-    assert!(s.connection.query_row(
-        "SELECT begin_post_at FROM intents WHERE idempotency_key='bar-revision'",
-        [], |r| r.get::<_,Option<i64>>(0),
-    ).unwrap().is_none());
-    let decisions: i64 = s.connection.query_row(
-        "SELECT count(*) FROM decisions WHERE decision_id=?1 OR
+    assert!(
+        s.connection
+            .query_row(
+                "SELECT begin_post_at FROM intents WHERE idempotency_key='bar-revision'",
+                [],
+                |r| r.get::<_, Option<i64>>(0),
+            )
+            .unwrap()
+            .is_none()
+    );
+    let decisions: i64 = s
+        .connection
+        .query_row(
+            "SELECT count(*) FROM decisions WHERE decision_id=?1 OR
          (decision_id >= (?1 || ':retry:') AND decision_id < (?1 || ':retry;'))",
-        [&base], |r| r.get(0),
-    ).unwrap();
+            [&base],
+            |r| r.get(0),
+        )
+        .unwrap();
     assert_eq!(decisions, 3);
 }

@@ -140,8 +140,7 @@ impl TradeService {
         let client_id = body_hash[..32].to_owned();
         let decision = Decision {
             decision_id: if claimed_input_digest.is_some() {
-                claimed_decision_id
-                    .ok_or("STRATEGY_CLAIM_ID_MISSING")?
+                claimed_decision_id.ok_or("STRATEGY_CLAIM_ID_MISSING")?
             } else {
                 format!("decision_{}", &body_hash[..32])
             },

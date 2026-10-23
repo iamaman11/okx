@@ -93,7 +93,11 @@ impl AccountStore {
     ) -> StoreResult<bool> {
         Ok(self
             .claim_strategy_decision_with_id(
-                instance_id, decision_key, input_digest, policy_revision, now,
+                instance_id,
+                decision_key,
+                input_digest,
+                policy_revision,
+                now,
             )?
             .is_some())
     }
