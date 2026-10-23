@@ -177,12 +177,39 @@ impl AnalyticsService {
         )
         }).await
     }
+    pub fn market_capabilities(&self) -> Value {
+        json!({"schema":"okx.market.capabilities/v1",
+            "actions":["screen","compare","instruments","snapshot","capabilities"],
+            "timeframes_ms":[60000,180000,300000,900000,1800000,3600000,14400000,86400000],
+            "limits":{"max_explicit_instruments":100,"max_page_rows":50,
+                "max_correlation_instruments":8,"max_candles_total":1000000},
+            "universe":{"mode":"explicit_instruments","whole_market_screen":false,
+                "reason_code":"WHOLE_MARKET_SCREEN_NOT_IMPLEMENTED"},
+            "quality":"partial"})
+    }
     pub async fn research(&self, request: ResearchRequest) -> Result<Value, String> {
         if !request.valid() {
             return Err("INVALID_RESEARCH_REQUEST".into());
         }
         match request {
             ResearchRequest::Capabilities {} => Ok(research_capabilities()),
+            ResearchRequest::Validate {
+                data_mode,
+                instruments,
+                timeframe_ms,
+                start_ms,
+                end_ms,
+                ..
+            } => {
+                let unsupported = matches!(data_mode, ResearchDataMode::HistoricalObserved);
+                Ok(json!({"schema":"okx.research.validation/v1",
+                    "status":if unsupported{"blocked"}else{"valid_request"},
+                    "reason_code":if unsupported{Some("HISTORICAL_RULES_AND_FEES_UNAVAILABLE")}else{None},
+                    "side_effects":"none","job_created":false,
+                    "source_coverage":"not_evaluated","quality":"partial",
+                    "instruments":instruments,"timeframe_ms":timeframe_ms,
+                    "start_ms":start_ms,"end_ms":end_ms}))
+            }
             ResearchRequest::Status { job_id } => {
                 serde_json::to_value(self.jobs.get_async(job_id).await?).map_err(|e| e.to_string())
             }

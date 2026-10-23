@@ -215,6 +215,73 @@ impl TradeService {
         }
         let r = self.resources(account).await?;
         match request {
+            TradeRequest::Capabilities {} => {
+                let access = self
+                    .diagnostic_access(&r.configuration.account_key.wire())
+                    .await;
+                Ok(
+                    json!({"schema":"okx.trade.capabilities/v1","account":r.configuration.account_key.wire(),
+                    "order_types":["limit","market","post_only","ioc","fok"],
+                    "operations":["open","add","reduce","close","replace"],
+                    "protection":["stop_price","stop_distance_bps"],
+                    "governance":access,"quality":"partial",
+                    "reason_code":"VENUE_MODE_AND_FEE_READINESS_NOT_PROVEN"}),
+                )
+            }
+            TradeRequest::Preflight {} => {
+                let access = self
+                    .diagnostic_access(&r.configuration.account_key.wire())
+                    .await;
+                let identity = r.source_identity_ready().await;
+                let snapshot = r.latest_snapshot.read().await.clone();
+                let fresh = snapshot
+                    .as_ref()
+                    .and_then(|s| chrono::DateTime::parse_from_rfc3339(&s.source_received_at).ok())
+                    .is_some_and(|t| {
+                        crate::config::evidence_fresh(
+                            t.timestamp_millis(),
+                            now(),
+                            crate::config::ACCOUNT_MAX_AGE_MS,
+                        )
+                    });
+                let (financial, stops) = r
+                    .execution
+                    .store
+                    .call(deadline(), |s| {
+                        Ok((s.financial_risk(now(), None)?, s.stops()?.len()))
+                    })
+                    .await
+                    .map_err(err)?;
+                let budget = self.risk_summary().await;
+                let mut blockers = Vec::new();
+                if access["state"] != "configured"
+                    || access["enabled"] != true
+                    || access["explicit_pause"] == true
+                {
+                    blockers.push("ACCOUNT_ACCESS_UNAVAILABLE");
+                }
+                if !identity || !fresh {
+                    blockers.push("WAITING_ACCOUNT_EVIDENCE");
+                }
+                if !financial.nav_complete {
+                    blockers.push("NAV_SOURCE_INCOMPLETE");
+                }
+                if stops > 0 {
+                    blockers.push("ACCOUNT_STOP");
+                }
+                if budget.is_err() {
+                    blockers.push("CENTRAL_BUDGET_UNAVAILABLE");
+                }
+                Ok(json!({"schema":"okx.trade.preflight/v1",
+                    "account":r.configuration.account_key.wire(),
+                    "state":if blockers.is_empty(){"not_evaluated"}else{"blocked"},
+                    "ready_for_new_risk":false,
+                    "reason_code":if blockers.is_empty(){"FULL_ADMISSION_REQUIRES_EXACT_TRADE_PLAN"}else{"READINESS_BLOCKERS"},
+                    "blockers":blockers,"account_source_fresh":fresh,
+                    "identity_verified":identity,"financial_risk":financial,
+                    "stops":stops,"central_budget":budget.ok(),
+                    "side_effects":"none","quality":"partial"}))
+            }
             TradeRequest::Status { reference } => self.status_intent(&r, reference).await,
             TradeRequest::Cancel {
                 idempotency_key,

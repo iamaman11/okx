@@ -99,6 +99,76 @@ async fn execute(
             serde_json::to_value(c).map_err(|_| "SERIALIZATION_FAILED".into())
         }
         AgentOperation::Market { request } => ctx.analytics.market(request.clone()).await,
+        AgentOperation::MarketCapabilities => Ok(ctx.analytics.market_capabilities()),
+        AgentOperation::MarketMicrostructure {
+            instrument,
+            size_contracts,
+        } => {
+            ctx.public_ws
+                .demand_instrument(instrument)
+                .await
+                .map_err(|_| "MARKET_CAPACITY")?;
+            // Fail closed on any stale or sequence-discontinuous order book: no REST fallback.
+            let snap = ctx
+                .public_ws
+                .fresh_snapshot(
+                    instrument,
+                    Utc::now().timestamp_millis().max(0) as u64,
+                    crate::config::QUOTE_MAX_AGE_MS,
+                    Utc::now().to_rfc3339(),
+                )
+                .await
+                .map_err(|_| "MICROSTRUCTURE_FRESH_BOOK_REQUIRED")?;
+            let asks = snap
+                .order_book
+                .asks
+                .iter()
+                .take(10)
+                .cloned()
+                .collect::<Vec<_>>();
+            let bids = snap
+                .order_book
+                .bids
+                .iter()
+                .take(10)
+                .cloned()
+                .collect::<Vec<_>>();
+            let best_ask = asks
+                .first()
+                .ok_or("BOOK_ASK_EMPTY")?
+                .price
+                .parse::<rust_decimal::Decimal>()
+                .map_err(|_| "BOOK_PRICE_INVALID")?;
+            let best_bid = bids
+                .first()
+                .ok_or("BOOK_BID_EMPTY")?
+                .price
+                .parse::<rust_decimal::Decimal>()
+                .map_err(|_| "BOOK_PRICE_INVALID")?;
+            if best_bid <= rust_decimal::Decimal::ZERO || best_ask <= best_bid {
+                return Err("BOOK_SPREAD_INVALID".into());
+            }
+            let spread = (best_ask - best_bid) * rust_decimal::Decimal::new(20_000, 0)
+                / (best_ask + best_bid);
+            let sweep=size_contracts.as_ref().map(|n|{
+                let qty=n.parse::<rust_decimal::Decimal>().map_err(|_|"SIZE_INVALID")?;
+                let buy=book_sweep_vwap(&asks,qty)?;
+                let sell=book_sweep_vwap(&bids,qty)?;
+                Ok::<_,String>(json!({"size_contracts":n,"buy_vwap":buy.normalize().to_string(),
+                    "sell_vwap":sell.normalize().to_string(),
+                    "buy_impact_bps":((buy-best_ask)*rust_decimal::Decimal::new(10_000,0)/best_ask).normalize().to_string(),
+                    "sell_impact_bps":((best_bid-sell)*rust_decimal::Decimal::new(10_000,0)/best_bid).normalize().to_string()}))
+            }).transpose()?;
+            Ok(json!({"schema":"okx.market.microstructure/v1",
+                "instrument":instrument,"quality":"complete",
+                "reference_generation":snap.market.reference_generation,
+                "generation":snap.generation,"book_sequence":snap.order_book.seq_id,
+                "book_exchange_timestamp_ms":snap.order_book.exchange_timestamp_ms,
+                "spread_bps":spread.normalize().to_string(),"asks":asks,"bids":bids,
+                "sweep":sweep,"mark_price":snap.market.mark_price,
+                "index_price":snap.market.index_price,
+                "funding":snap.market.funding,"open_interest":snap.market.open_interest}))
+        }
         AgentOperation::Research { request } => ctx.analytics.research(request.clone()).await,
         AgentOperation::Trade { request } => {
             ctx.trade
@@ -194,5 +264,64 @@ async fn execute(
         AgentOperation::MailboxTelemetry => Ok(
             json!({"contract":"okx.product/v1","installation_id":ctx.accounts.installation_id()}),
         ),
+    }
+}
+
+fn book_sweep_vwap(
+    levels: &[okx_observation::BookLevel],
+    requested: rust_decimal::Decimal,
+) -> Result<rust_decimal::Decimal, String> {
+    use rust_decimal::Decimal;
+    if requested <= Decimal::ZERO {
+        return Err("SIZE_INVALID".into());
+    }
+    let mut filled = Decimal::ZERO;
+    let mut cost = Decimal::ZERO;
+    for level in levels {
+        let price = level
+            .price
+            .parse::<Decimal>()
+            .map_err(|_| "BOOK_PRICE_INVALID")?;
+        let size = level
+            .size
+            .parse::<Decimal>()
+            .map_err(|_| "BOOK_SIZE_INVALID")?;
+        if price <= Decimal::ZERO || size < Decimal::ZERO {
+            return Err("BOOK_LEVEL_INVALID".into());
+        }
+        let take = (requested - filled).min(size);
+        filled = filled.checked_add(take).ok_or("BOOK_OVERFLOW")?;
+        cost = cost
+            .checked_add(price.checked_mul(take).ok_or("BOOK_OVERFLOW")?)
+            .ok_or("BOOK_OVERFLOW")?;
+        if filled >= requested {
+            return cost.checked_div(filled).ok_or("BOOK_OVERFLOW".into());
+        }
+    }
+    Err("INSUFFICIENT_BOOK_DEPTH".into())
+}
+#[cfg(test)]
+mod microstructure_test {
+    use super::*;
+    #[test]
+    fn bounded_book_sweep_rejects_insufficient_depth() {
+        let levels = vec![
+            okx_observation::BookLevel {
+                price: "100".into(),
+                size: "1".into(),
+                order_count: None,
+            },
+            okx_observation::BookLevel {
+                price: "102".into(),
+                size: "1".into(),
+                order_count: None,
+            },
+        ];
+        let qty = rust_decimal::Decimal::new(2, 0);
+        assert_eq!(
+            book_sweep_vwap(&levels, qty).unwrap(),
+            rust_decimal::Decimal::new(101, 0)
+        );
+        assert!(book_sweep_vwap(&levels, rust_decimal::Decimal::new(3, 0)).is_err());
     }
 }

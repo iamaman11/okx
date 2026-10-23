@@ -3,6 +3,8 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum TradeRequest {
+    Capabilities {},
+    Preflight {},
     Preview {
         operation: TradeOperation,
         strategy_instance: String,
@@ -215,6 +217,7 @@ impl OrderConstraints {
 impl TradeRequest {
     pub fn valid(&self) -> bool {
         match self {
+            Self::Capabilities {} | Self::Preflight {} => true,
             Self::Preview {
                 operation,
                 strategy_instance,

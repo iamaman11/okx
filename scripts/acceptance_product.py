@@ -45,9 +45,12 @@ CAPABILITY_ACTIONS={
 def capability_matrix(physical=None):
     physical=physical or {}
     schema=json.loads((ROOT/"cloudflare/okx-mcp/contracts/tools.schema.json").read_text(encoding="utf-8-sig"))
-    exposed={f"{tool['name']}.{action['properties']['action']['const']}"
-        for tool in schema["tools"] for action in tool["inputSchema"].get("oneOf",[])
-        if isinstance(action.get("properties",{}).get("action",{}).get("const"),str)}
+    exposed=set()
+    for tool in schema["tools"]:
+        for variant in tool["inputSchema"].get("oneOf",[]):
+            selector=variant.get("properties",{}).get("action",{})
+            actions=[selector["const"]] if isinstance(selector.get("const"),str) else selector.get("enum",[])
+            exposed.update(f"{tool['name']}.{a}" for a in actions if isinstance(a,str))
     claims=physical.get("capabilities",{})
     rows=[]
     for legacy,routes in CAPABILITY_ACTIONS.items():
@@ -55,14 +58,65 @@ def capability_matrix(physical=None):
         missing=[route for route in routes if route not in exposed]
         pos=claim.get("positive_evidence",[])
         neg=claim.get("negative_evidence",[])
-        def files_ok(paths):
-            return isinstance(paths,list) and bool(paths) and all(
-                isinstance(p,str) and (ROOT/p).is_file() for p in paths)
-        proven=(not missing and claim.get("result")=="PASS"
+        release=physical.get("release_hashes",{})
+        expected_tree=release.get("source_tree")
+        installed_tree=release.get("installed_agent_tree")
+        worker_tree=release.get("worker_tree")
+        # A green CI and a file's existence cannot certify an installed
+        # business scenario. Require exact release provenance and an observed
+        # native MCP request/response for *every* required action and polarity.
+        def checked_evidence(paths,polarity):
+            if not (isinstance(paths,list) and paths and
+                    all(isinstance(p,str) and p.startswith("docs/acceptance/398/")
+                        and p.endswith(".json") and ".." not in pathlib.PurePosixPath(p).parts
+                        and (ROOT/p).is_file() for p in paths)):
+                return False
+            observed=set()
+            for p in paths:
+                try: proof=json.loads((ROOT/p).read_text(encoding="utf-8-sig"))
+                except (OSError,ValueError):return False
+                route=proof.get("action")
+                request=proof.get("request")
+                response=proof.get("response")
+                if not (isinstance(request,dict) and isinstance(response,dict)
+                        and isinstance(request.get("arguments"),dict)):
+                    return False
+                if (proof.get("schema")!="okx.acceptance.capability-evidence/v1"
+                    or proof.get("legacy_tool")!=legacy
+                    or proof.get("polarity")!=polarity
+                    or proof.get("result")!="PASS"
+                    or route not in routes
+                    or route!=request.get("tool")+"."+str(request["arguments"].get("action"))
+                    or proof.get("source_tree")!=expected_tree
+                    or proof.get("installed_agent_tree")!=installed_tree
+                    or proof.get("worker_tree")!=worker_tree
+                    or not isinstance(proof.get("observed_at_utc"),str)
+                    or not proof.get("observed_at_utc")
+                    or proof.get("transport")!="live_mcp"):
+                    return False
+                envelope=response.get("structuredContent")
+                if not isinstance(envelope,dict):
+                    return False
+                if polarity=="positive":
+                    if envelope.get("status") not in ("completed","accepted","partial") or (
+                        envelope.get("data") is None):
+                        return False
+                else:
+                    reason=envelope.get("reason_code")
+                    if envelope.get("status") not in ("rejected","failed","unknown","partial") or (
+                        not isinstance(reason,str) or not reason):
+                        return False
+                observed.add(route)
+            return observed==set(routes)
+        provenance=(isinstance(expected_tree,str) and len(expected_tree)==40
+            and installed_tree==expected_tree and worker_tree==expected_tree
+            and physical.get("INSTALLED_MATCHED",{}).get("result")=="PASS"
+            and physical.get("mcp",{}).get("physical_network")=="PASS")
+        proven=(not missing and provenance and claim.get("result")=="PASS"
             and isinstance(claim.get("code_owner"),str) and bool(claim["code_owner"])
             and isinstance(claim.get("positive_assertion"),str) and bool(claim["positive_assertion"])
             and isinstance(claim.get("negative_assertion"),str) and bool(claim["negative_assertion"])
-            and files_ok(pos) and files_ok(neg))
+            and checked_evidence(pos,"positive") and checked_evidence(neg,"negative"))
         rows.append({"legacy_tool":legacy,"required_actions":list(routes),
             "missing_actions":missing,"status":"PRESERVED" if proven else "GAP",
             "reason":None if proven else ("ACTION_NOT_EXPOSED" if missing else "PHYSICAL_EVIDENCE_NOT_ACCEPTED"),
@@ -194,6 +248,17 @@ def self_test():
             self.assertEqual(len({r["legacy_tool"] for r in rows}),16)
             self.assertTrue(all(row["status"]=="GAP" for row in rows))
             self.assertIn("market.microstructure",next(r for r in rows if r["legacy_tool"]=="market_intelligence")["missing_actions"])
+        def test_capability_proof_requires_matching_installed_release(self):
+            physical={"INSTALLED_MATCHED":{"result":"PASS"},
+                "mcp":{"physical_network":"PASS"},
+                "release_hashes":{"source_tree":"a"*40,"installed_agent_tree":"b"*40,
+                                  "worker_tree":"a"*40},
+                "capabilities":{"runtime_status":{"result":"PASS","code_owner":"Worker",
+                    "positive_assertion":"PASS","negative_assertion":"PASS",
+                    "positive_evidence":["docs/acceptance/398/none.json"],
+                    "negative_evidence":["docs/acceptance/398/none.json"]}}}
+            rows=capability_matrix(physical)
+            self.assertEqual(next(r for r in rows if r["legacy_tool"]=="runtime_status")["status"],"GAP")
         def test_worker_claims_require_complete_named_pass_line(self):
             self.assertEqual(executed_tests("risk_concurrent_accounts_campaign_limit PASS\n"),[("risk_concurrent_accounts_campaign_limit","ok")])
             self.assertEqual(executed_tests("risk_concurrent_accounts_campaign_limit FAIL\n"),[("risk_concurrent_accounts_campaign_limit","FAILED")])
