@@ -1614,5 +1614,27 @@
         "account": "fixture"
       }
     ]
+  },
+  {
+    "tool": "market",
+    "action": "microstructure",
+    "positive": {
+      "action": "microstructure",
+      "instrument": "BTC-USDT-SWAP"
+    },
+    "negative": [
+      {
+        "action": "microstructure",
+        "instrument": "BTC-USDT-SWAP",
+        "raw_rpc": "no"
+      },
+      {
+        "instrument": "BTC-USDT-SWAP"
+      },
+      {
+        "action": 12,
+        "instrument": "BTC-USDT-SWAP"
+      }
+    ]
   }
 ]

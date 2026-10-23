@@ -198,6 +198,11 @@ export const mcpApi={async fetch(request:Request,env:Env,ctx:any):Promise<Respon
    return jsonRpc(id,toolResult(await dispatchRuntime(env,{schema:'okx.agent.request/v1',request_id:requestId(),
      operation:{type:'market_overview',instrument:args.instrument}})));
  }
+ if(name==='market'&&args.action==='microstructure'){
+   return jsonRpc(id,toolResult(await dispatchRuntime(env,{schema:'okx.agent.request/v1',request_id:requestId(),
+     operation:{type:'market_microstructure',instrument:args.instrument,
+       size_contracts:args.size_contracts??null}})));
+ }
  if(name==='market'&&args.action==='capabilities'){
    return jsonRpc(id,toolResult(await dispatchRuntime(env,{schema:'okx.agent.request/v1',request_id:requestId(),
      operation:{type:'market_capabilities'}})));
