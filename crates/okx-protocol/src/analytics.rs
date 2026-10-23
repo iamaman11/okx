@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 pub struct MarketRequest {
     pub action: MarketAction,
     pub instruments: Vec<String>,
+    #[serde(default)]
+    pub universe: Option<MarketUniverse>,
     pub fields: Vec<String>,
     pub timeframe_ms: u64,
     pub start_ms: u64,
@@ -19,6 +21,38 @@ pub struct MarketRequest {
     pub filters: Vec<MarketFilter>,
     #[serde(default)]
     pub sort: Option<MarketSort>,
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MarketUniverse {
+    pub instrument_type: String,
+    #[serde(default)]
+    pub settle_currency: Option<String>,
+    #[serde(default)]
+    pub after_instrument: Option<String>,
+    #[serde(default = "universe_page_limit")]
+    pub limit: u16,
+}
+fn universe_page_limit() -> u16 {
+    100
+}
+impl MarketUniverse {
+    pub fn valid(&self) -> bool {
+        matches!(self.instrument_type.as_str(), "SPOT" | "SWAP" | "FUTURES")
+            && (1..=100).contains(&self.limit)
+            && self.settle_currency.as_ref().is_none_or(|s| {
+                !s.is_empty()
+                    && s.len() <= 16
+                    && s.bytes()
+                        .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
+            })
+            && self.after_instrument.as_ref().is_none_or(|s| {
+                !s.is_empty()
+                    && s.len() <= 64
+                    && s.bytes()
+                        .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'-')
+            })
+    }
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -138,7 +172,10 @@ pub enum ResearchRequest {
 
 impl MarketRequest {
     pub fn valid(&self) -> bool {
-        !self.instruments.is_empty()
+        ((self.universe.is_none() && !self.instruments.is_empty())
+            || (matches!(self.action, MarketAction::Screen)
+                && self.instruments.is_empty()
+                && self.universe.as_ref().is_some_and(MarketUniverse::valid)))
             && self.instruments.len() <= 100
             && self
                 .instruments

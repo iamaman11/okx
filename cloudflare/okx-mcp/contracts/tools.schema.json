@@ -2,7 +2,7 @@
   "tools": [
     {
       "name": "accounts",
-      "description": "accounts: typed, bounded actions; explicit account and idempotency for writes.",
+      "description": "accounts actions",
       "inputSchema": {
         "oneOf": [
           {
@@ -341,7 +341,7 @@
     },
     {
       "name": "strategies",
-      "description": "strategies: typed, bounded actions; explicit account and idempotency for writes.",
+      "description": "strategies actions",
       "inputSchema": {
         "oneOf": [
           {
@@ -541,38 +541,11 @@
             "type": "object",
             "properties": {
               "action": {
-                "const": "start"
-              },
-              "account": {
                 "type": "string",
-                "minLength": 1,
-                "maxLength": 128
-              },
-              "idempotency_key": {
-                "type": "string",
-                "minLength": 8,
-                "maxLength": 128,
-                "pattern": "^[A-Za-z0-9_-]+$"
-              },
-              "instance_id": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": 64
-              }
-            },
-            "required": [
-              "action",
-              "account",
-              "idempotency_key",
-              "instance_id"
-            ],
-            "additionalProperties": false
-          },
-          {
-            "type": "object",
-            "properties": {
-              "action": {
-                "const": "stop"
+                "enum": [
+                  "start",
+                  "stop"
+                ]
               },
               "account": {
                 "type": "string",
@@ -604,7 +577,7 @@
     },
     {
       "name": "market",
-      "description": "market: typed, bounded actions; explicit account and idempotency for writes.",
+      "description": "market actions",
       "inputSchema": {
         "oneOf": [
           {
@@ -760,18 +733,79 @@
                 "type": "string",
                 "minLength": 1,
                 "maxLength": 512
+              },
+              "universe": {
+                "type": "object",
+                "properties": {
+                  "instrument_type": {
+                    "type": "string",
+                    "enum": [
+                      "SPOT",
+                      "SWAP",
+                      "FUTURES"
+                    ]
+                  },
+                  "settle_currency": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 16
+                  },
+                  "after_instrument": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64
+                  },
+                  "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 100
+                  }
+                },
+                "required": [
+                  "instrument_type"
+                ],
+                "additionalProperties": false
               }
             },
             "required": [
               "action",
-              "instruments",
               "fields",
               "timeframe_ms",
               "start_ms",
               "end_ms",
               "limit"
             ],
-            "additionalProperties": false
+            "additionalProperties": false,
+            "allOf": [
+              {
+                "oneOf": [
+                  {
+                    "required": [
+                      "instruments"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "universe"
+                    ]
+                  }
+                ]
+              },
+              {
+                "if": {
+                  "properties": {
+                    "action": {
+                      "const": "compare"
+                    }
+                  }
+                },
+                "then": {
+                  "required": [
+                    "instruments"
+                  ]
+                }
+              }
+            ]
           },
           {
             "type": "object",
@@ -854,7 +888,7 @@
     },
     {
       "name": "research",
-      "description": "research: typed, bounded actions; explicit account and idempotency for writes.",
+      "description": "research actions",
       "inputSchema": {
         "oneOf": [
           {
@@ -1314,7 +1348,7 @@
     },
     {
       "name": "trade",
-      "description": "trade: typed, bounded actions; explicit account and idempotency for writes.",
+      "description": "trade actions",
       "inputSchema": {
         "oneOf": [
           {
@@ -1803,14 +1837,18 @@
     },
     {
       "name": "portfolio",
-      "description": "portfolio: typed, bounded actions; explicit account and idempotency for writes.",
+      "description": "portfolio actions",
       "inputSchema": {
         "oneOf": [
           {
             "type": "object",
             "properties": {
               "action": {
-                "const": "summary"
+                "type": "string",
+                "enum": [
+                  "summary",
+                  "history"
+                ]
               },
               "accounts": {
                 "type": "array",
@@ -1876,65 +1914,107 @@
             "type": "object",
             "properties": {
               "action": {
-                "const": "history"
+                "const": "scenario"
               },
-              "accounts": {
-                "type": "array",
-                "items": {
-                  "type": "string",
-                  "minLength": 1,
-                  "maxLength": 128
-                },
-                "maxItems": 32,
-                "uniqueItems": true
-              },
-              "start_ms": {
-                "type": "integer",
-                "minimum": 0,
-                "maximum": 9007199254740991
-              },
-              "end_ms": {
-                "type": "integer",
-                "minimum": 1,
-                "maximum": 9007199254740991
-              },
-              "strategies": {
-                "type": "array",
-                "items": {
-                  "type": "string",
-                  "minLength": 1,
-                  "maxLength": 128
-                },
-                "maxItems": 32,
-                "uniqueItems": true
-              },
-              "currencies": {
-                "type": "array",
-                "items": {
-                  "type": "string",
-                  "minLength": 1,
-                  "maxLength": 16
-                },
-                "maxItems": 32,
-                "uniqueItems": true
-              },
-              "cursor": {
+              "equity_usd": {
                 "type": "string",
-                "minLength": 1,
-                "maxLength": 512
+                "pattern": "^(?!0+(?:\\.0+)?$)(?:0|[1-9][0-9]{0,14})(?:\\.[0-9]{1,9})?$",
+                "maxLength": 32
               },
-              "limit": {
-                "type": "integer",
-                "minimum": 1,
-                "maximum": 50
+              "positions": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "instrument": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 64
+                    },
+                    "side": {
+                      "type": "string",
+                      "enum": [
+                        "long",
+                        "short"
+                      ]
+                    },
+                    "notional_usd": {
+                      "type": "string",
+                      "pattern": "^(?!0+(?:\\.0+)?$)(?:0|[1-9][0-9]{0,14})(?:\\.[0-9]{1,9})?$",
+                      "maxLength": 32
+                    },
+                    "margin_usd": {
+                      "type": "string",
+                      "pattern": "^(?!0+(?:\\.0+)?$)(?:0|[1-9][0-9]{0,14})(?:\\.[0-9]{1,9})?$",
+                      "maxLength": 32
+                    },
+                    "price_shock_bps": {
+                      "type": "integer",
+                      "minimum": -10000,
+                      "maximum": 10000
+                    },
+                    "volatility_bps": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 10000
+                    },
+                    "liquidity_cost_bps": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 10000
+                    }
+                  },
+                  "required": [
+                    "instrument",
+                    "side",
+                    "notional_usd",
+                    "margin_usd",
+                    "price_shock_bps",
+                    "volatility_bps",
+                    "liquidity_cost_bps"
+                  ],
+                  "additionalProperties": false
+                },
+                "maxItems": 8,
+                "uniqueItems": true
+              },
+              "correlations": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "left": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 7
+                    },
+                    "right": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 7
+                    },
+                    "rho": {
+                      "type": "number",
+                      "minimum": -1,
+                      "maximum": 1
+                    }
+                  },
+                  "required": [
+                    "left",
+                    "right",
+                    "rho"
+                  ],
+                  "additionalProperties": false
+                },
+                "maxItems": 28,
+                "uniqueItems": true
               }
             },
             "required": [
               "action",
-              "accounts",
-              "start_ms",
-              "end_ms",
-              "limit"
+              "equity_usd",
+              "positions",
+              "correlations"
             ],
             "additionalProperties": false
           }
@@ -1943,7 +2023,7 @@
     },
     {
       "name": "diagnostics",
-      "description": "diagnostics: typed, bounded actions; explicit account and idempotency for writes.",
+      "description": "diagnostics actions",
       "inputSchema": {
         "oneOf": [
           {
