@@ -961,7 +961,8 @@ impl AnalyticsService {
         let start = end.saturating_sub((limit as u64).saturating_mul(timeframe_ms));
         let bars = tokio::time::timeout(
             std::time::Duration::from_secs(10),
-            self.sources.candles(instrument, timeframe_ms, start, end, false),
+            self.sources
+                .candles(instrument, timeframe_ms, start, end, false),
         )
         .await
         .map_err(|_| "LIVE_SOURCE_DEADLINE")??;
