@@ -187,8 +187,17 @@ export const mcpApi={async fetch(request:Request,env:Env,ctx:any):Promise<Respon
            typeof proof.source_tree==='string'&&typeof proof.agent_binary_sha256==='string'&&
            typeof proof.artifact_id==='number'&&typeof proof.control_receipt_url==='string')||
           (proof.verified===false&&typeof proof.reason_code==='string'));
-        const releaseAttestation=validProof?proof:
-          {verified:false,reason_code:'RELEASE_ATTESTATION_UNAVAILABLE',
+        // Whitelist typed JSON scalars; never expose an arbitrary DO object.
+        const p=isObject(proof)?proof:{};
+        const releaseAttestation=validProof?{
+          verified:p.verified===true,
+          reason_code:typeof p.reason_code==='string'?p.reason_code:null,
+          source_tree:typeof p.source_tree==='string'?p.source_tree:null,
+          agent_binary_sha256:typeof p.agent_binary_sha256==='string'?p.agent_binary_sha256:null,
+          artifact_id:typeof p.artifact_id==='number'&&Number.isSafeInteger(p.artifact_id)?p.artifact_id:null,
+          control_observed_at:typeof p.control_observed_at==='string'?p.control_observed_at:null,
+          control_receipt_url:typeof p.control_receipt_url==='string'?p.control_receipt_url:null,
+        }:{verified:false,reason_code:'RELEASE_ATTESTATION_UNAVAILABLE',
            source_tree:null,agent_binary_sha256:null,artifact_id:null};
         return jsonRpc(id,toolResult({status:fresh?'completed':'partial',
           data:{schema:'okx.runtime-status/v1',
