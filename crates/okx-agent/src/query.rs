@@ -172,10 +172,11 @@ async fn execute(
             // Fail closed on any stale or sequence-discontinuous order book: no REST fallback.
             let snap = ctx
                 .public_ws
-                .fresh_snapshot(
+                .risk_fresh_snapshot(
                     instrument,
                     Utc::now().timestamp_millis().max(0) as u64,
                     crate::config::QUOTE_MAX_AGE_MS,
+                    crate::config::DERIVATIVE_CONTEXT_MAX_AGE_MS,
                     Utc::now().to_rfc3339(),
                 )
                 .await
@@ -299,10 +300,11 @@ async fn execute(
                 .map_err(|_| "MARKET_CAPACITY")?;
             let snapshot = ctx
                 .public_ws
-                .fresh_snapshot(
+                .risk_fresh_snapshot(
                     instrument,
                     Utc::now().timestamp_millis() as u64,
                     crate::config::QUOTE_MAX_AGE_MS,
+                    crate::config::DERIVATIVE_CONTEXT_MAX_AGE_MS,
                     Utc::now().to_rfc3339(),
                 )
                 .await;
@@ -315,11 +317,11 @@ async fn execute(
                     // Expose bounded native WS quality without raw transport errors.
                     let ws_quality = match ctx
                         .public_ws
-                        .quality_snapshot(
+                        .risk_quality_snapshot(
                             instrument,
                             Utc::now().timestamp_millis().max(0) as u64,
                             crate::config::QUOTE_MAX_AGE_MS,
-                            true,
+                            crate::config::DERIVATIVE_CONTEXT_MAX_AGE_MS,
                         )
                         .await
                     {
