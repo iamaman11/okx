@@ -33,6 +33,7 @@ fail((await reason([]))==='CONTROL_RECEIPT_MISSING','no receipt does not become 
 fail((await reason([comment],{...live,agent_pid:3217}))==='LIVE_AGENT_IDENTITY_MISMATCH','different live PID rejected');
 fail((await reason([comment],{...live,agent_binary_sha256:'d'.repeat(64)}))==='AGENT_BINARY_HASH_MISMATCH','different native executable rejected');
 fail((await reason([comment],{...live,connection_generation:0}))==='LIVE_RELEASE_IDENTITY_UNAVAILABLE','stale generation rejected');
+fail((await reason([comment],{...live,connected_at_ms:now+1_000}))==='CONTROL_RECEIPT_PREDATES_SESSION','previous generation evidence rejected');
 fail((await reason([comment],{...live,session_fresh:false}))==='LIVE_RELEASE_IDENTITY_UNAVAILABLE','offline session rejected');
 fail((await reason([comment],live,'d'.repeat(40)))==='RELEASE_SOURCE_TREE_MISMATCH','different Worker git tree rejected');
 fail((await reason([{...comment,body:JSON.stringify({...receipt,observed_at:new Date(now-800_000).toISOString()})}]))==='CONTROL_RECEIPT_STALE','old native receipt rejected');
