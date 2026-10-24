@@ -91,6 +91,21 @@ const healthyRuntime=await mcpResponse('diagnostics',{action:'runtime'},
 if(healthyRuntime.status!=='completed'||healthyRuntime.data.schema!=='okx.runtime-status/v1'||
  healthyRuntime.data.transport.session_fresh!==true||healthyRuntime.data.transport.connection_generation!==73||
  typeof healthyRuntime.data.tool_contract!=='string')throw Error('runtime status must prove fresh session');
+const matchingRelease={verified:true,reason_code:null,source_tree:'a'.repeat(40),
+ agent_binary_sha256:'b'.repeat(64),artifact_id:12567853437,
+ control_receipt_url:'https://github.com/iamaman11/okx/issues/12#issuecomment-1234'};
+const attestedRuntime=await mcpResponse('diagnostics',{action:'runtime'},
+ {schema:'okx.direct-transport.status/v1',status:'PASS',runtime_id:'windows-primary',
+  runtime_profile:'engine',connected:true,session_fresh:true,connection_generation:73,
+  release_attestation:matchingRelease});
+if(attestedRuntime.data.release_attestation.verified!==true||
+ attestedRuntime.data.release_attestation.artifact_id!==12567853437)
+ throw Error('verified DO release proof lost by public diagnostic projection');
+if(healthyRuntime.data.release_attestation.verified!==false||
+ healthyRuntime.data.release_attestation.reason_code!=='RELEASE_ATTESTATION_UNAVAILABLE')
+ throw Error('missing DO receipt falsely promoted to verified');
+console.log('do_attestation_projection_requires_independent_proof PASS');
+
 const offlineRuntime=await mcpResponse('diagnostics',{action:'runtime'},
  {schema:'okx.direct-transport.status/v1',status:'OFFLINE',runtime_id:'windows-primary',
   connected:false,session_fresh:false});

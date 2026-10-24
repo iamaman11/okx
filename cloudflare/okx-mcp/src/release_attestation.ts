@@ -25,6 +25,31 @@ function field(x:JsonObject|null,k:string){return obj(x?.[k]);}
 function hex(x:unknown,n:number){return typeof x==='string'&&new RegExp('^[0-9a-f]{'+n+'}$').test(x);}
 function validPositive(x:unknown):x is number{return Number.isSafeInteger(x)&&Number(x)>0;}
 function failure(code:string):ReleaseAttestation{return {verified:false,reason_code:code,source_tree:null,agent_binary_sha256:null,artifact_id:null};}
+/** Proof is bound to a single authenticated, live WSS generation and exact release. */
+export function releaseSessionIdentity(observed:JsonObject, sourceTree:unknown):string|null{
+ if(!hex(sourceTree,40)||observed.schema!=='okx.direct-transport.status/v1'||
+    observed.status!=='PASS'||observed.connected!==true||observed.session_fresh!==true||
+    observed.runtime_id!=='windows-primary'||observed.runtime_profile!=='engine'||
+    !validPositive(observed.connection_generation)||!validPositive(observed.connected_at_ms)||
+    !validPositive(observed.agent_pid)||!hex(observed.agent_binary_sha256,64)||
+    typeof observed.installation_id!=='string'||observed.installation_id.length<8)
+    return null;
+ return JSON.stringify([sourceTree,observed.connection_generation,observed.connected_at_ms,
+   observed.agent_pid,observed.agent_binary_sha256,observed.installation_id]);
+}
+export function cachedSessionAttestation(stored:unknown,observed:JsonObject,sourceTree:unknown):ReleaseAttestation|null{
+ const record=obj(stored),proof=field(record,'proof');
+ const key=releaseSessionIdentity(observed,sourceTree);
+ if(!key||record?.schema!=='okx.runtime-session-attestation/v1'||
+    record.identity!==key||proof?.verified!==true||proof.reason_code!==null||
+    proof.source_tree!==sourceTree||proof.agent_binary_sha256!==observed.agent_binary_sha256||
+    !validPositive(proof.artifact_id)||
+    typeof proof.control_receipt_url!=='string'||
+    !proof.control_receipt_url.startsWith('https://github.com/iamaman11/okx/issues/12#issuecomment-')||
+    !Number.isFinite(Date.parse(String(proof.control_observed_at))))
+    return null;
+ return proof as unknown as ReleaseAttestation;
+}
 function validateReceipt(comment:JsonObject,observed:JsonObject,sourceTree:string,now:number):ReleaseAttestation{
  const user=field(comment,'user');
  if(user?.id!==OWNER_ID)return failure('CONTROL_RECEIPT_AUTHOR_MISMATCH');
@@ -83,15 +108,8 @@ export async function attestRuntimeRelease(
  now=Date.now(), get:typeof fetch=fetch,
 ):Promise<ReleaseAttestation>{
  if(!hex(sourceTree,40))return failure('WORKER_RELEASE_TREE_UNSET');
- if(observed.schema!=='okx.direct-transport.status/v1'||observed.status!=='PASS'||
-    observed.connected!==true||observed.session_fresh!==true||
-    observed.runtime_id!=='windows-primary'||observed.runtime_profile!=='engine'||
-    !validPositive(observed.connection_generation)||!validPositive(observed.connected_at_ms)||!validPositive(observed.agent_pid)||
-    !hex(observed.agent_binary_sha256,64)||
-    typeof observed.installation_id!=='string'||observed.installation_id.length<8)
-    return failure('LIVE_RELEASE_IDENTITY_UNAVAILABLE');
- const key=JSON.stringify([sourceTree,observed.connection_generation,observed.agent_pid,
-   observed.agent_binary_sha256,observed.installation_id]);
+ const key=releaseSessionIdentity(observed,sourceTree);
+ if(!key)return failure('LIVE_RELEASE_IDENTITY_UNAVAILABLE');
  if(get===fetch){
    const cached=cache.get(key);
    if(cached&&now>=cached.time&&now-cached.time<20_000)return cached.result;

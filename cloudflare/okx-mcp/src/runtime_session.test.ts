@@ -1,5 +1,6 @@
 import {RuntimeSession} from "./runtime_session.js";
 import {FRAME_SCHEMA} from "./shared.js";
+import {releaseSessionIdentity} from "./release_attestation.js";
 import {initial,account} from "./account_governance.test.js";
 function check(v:boolean,label:string){if(!v)throw Error(label);}
 const generation=4;
@@ -48,3 +49,38 @@ check((await fixture("request_send_failure")).status==="FAILED","synchronous req
 check((await fixture("duplicate")).status==="completed","duplicate request cannot clear original pending stages");
 
 check((await fixture("paused_complete")).status==="completed","pause_allows_native_verified_close_delivery");
+
+const attestationTree='a'.repeat(40),agentHash='b'.repeat(64),liveNow=Date.now();
+const provedSocket={...attachment,agentPid:5551,agentBinarySha256:agentHash,
+ installationId:'okx-clean-398-20261023',connectedAtMs:liveNow-10_000,lastPongAtMs:liveNow};
+const observed={schema:'okx.direct-transport.status/v1',status:'PASS',connected:true,session_fresh:true,
+ runtime_id:'windows-primary',runtime_profile:'engine',connection_generation:generation,
+ connected_at_ms:provedSocket.connectedAtMs,agent_pid:provedSocket.agentPid,
+ agent_binary_sha256:agentHash,installation_id:provedSocket.installationId};
+const proof={verified:true,reason_code:null,source_tree:attestationTree,
+ agent_binary_sha256:agentHash,artifact_id:12567853437,
+ control_observed_at:new Date(liveNow-5000).toISOString(),
+ control_receipt_url:'https://github.com/iamaman11/okx/issues/12#issuecomment-1234'};
+const verifiedState=new Map<string,unknown>([
+ ['release_session_attestation',{schema:'okx.runtime-session-attestation/v1',
+  identity:releaseSessionIdentity(observed,attestationTree),proof}],
+]);
+let liveProofSocket=true;
+const proofOwner=new RuntimeSession({
+ storage:{
+  get:async(key:string)=>verifiedState.get(key),
+  put:async(key:string,value:unknown)=>{verifiedState.set(key,value);},
+  delete:async(key:string)=>{verifiedState.delete(key);},
+ },
+ getWebSockets:()=>liveProofSocket?[{deserializeAttachment:()=>provedSocket}]:[],
+},{RELEASE_SOURCE_TREE:attestationTree} as any);
+const statusResponse=await proofOwner.fetch(new Request('https://runtime.internal/status?attest=1'));
+const statusProof:any=await statusResponse.json();
+check(statusProof.status==='PASS'&&statusProof.release_attestation?.verified===true&&
+ statusProof.release_attestation.artifact_id===12567853437,
+ 'Durable Object reuses independently accepted proof only on the same live session');
+liveProofSocket=false;
+const offlineStatus:any=await(await proofOwner.fetch(new Request('https://runtime.internal/status?attest=1'))).json();
+check(offlineStatus.status==='OFFLINE'&&offlineStatus.release_attestation.verified===false,
+ 'offline WSS must never inherit a previously persisted accepted proof');
+console.log('durable_object_live_generation_release_proof PASS');
