@@ -13,7 +13,7 @@ REQUIRED={
     "OPS-01":{"analytics::jobs::tests::restart_marks_job_interrupted","analytics::executor::tests::cancel_releases_queue_capacity","account_store::tests::disk_full_before_post"},
     "F01":{"account_governance_lower_campaign_limit_monotonic"},
     "F02":{"trade_service::plan::tests::auto_fok_buy_rounds_inside_slippage","trade_service::plan::tests::auto_fok_sell_rounds_inside_slippage"},
-    "F03":{"mcp_nested_failure_preserves_reason_code","mcp_queued_job_remains_accepted"},
+    "F03":{"mcp_nested_failure_preserves_reason_code","mcp_queued_job_remains_accepted","native_completed_business_envelope_once"},
     "F04":{"analytics::jobs::tests::transient_rate_defer_is_requeued_instead_of_cached_as_failed"},
     "F05":{"analytics::tests::grid_result_includes_selected_train_test_and_equity"},
     "F06":{"portfolio::tests::portfolio_before_t0_is_partial"},
