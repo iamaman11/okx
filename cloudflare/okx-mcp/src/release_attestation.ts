@@ -45,12 +45,12 @@ function validateReceipt(comment:JsonObject,observed:JsonObject,sourceTree:strin
      return failure('CONTROL_RECEIPT_INVALID');
  const at=Date.parse(String(receipt.observed_at));
  const created=Date.parse(String(comment.created_at));
- // An old, otherwise matching owner receipt cannot attest a replacement WSS process.
- if(!validPositive(observed.connected_at_ms)||!Number.isFinite(at)||at<Number(observed.connected_at_ms))
-    return failure('CONTROL_RECEIPT_PREDATES_SESSION');
  if(!Number.isFinite(at)||!Number.isFinite(created)||now-at< -10_000||now-created< -10_000||
     now-at>MAX_RECEIPT_AGE_MS||now-created>MAX_RECEIPT_AGE_MS)
     return failure('CONTROL_RECEIPT_STALE');
+ // An old, otherwise matching owner receipt cannot attest a replacement WSS process.
+ if(!validPositive(observed.connected_at_ms)||at<Number(observed.connected_at_ms))
+    return failure('CONTROL_RECEIPT_PREDATES_SESSION');
  if(installed.state!=='VERIFIED'||installed.reason!=='HASH_MATCH'||installed.binary_present!==true||
     details.agent_owned_running!==true||details.agent_desired!=='RUNNING'||
     parity.state!=='MATCHED'||!Array.isArray(parity.blockers)||parity.blockers.length!==0||
