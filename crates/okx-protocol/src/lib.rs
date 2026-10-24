@@ -473,7 +473,9 @@ impl DirectTransportFrame {
                 agent_binary_sha256,
             } => {
                 validate_direct_schema(schema)?;
-                if *agent_pid == 0 { return Err(ProtocolError::InvalidDirectTransportToken); }
+                if *agent_pid == 0 {
+                    return Err(ProtocolError::InvalidDirectTransportToken);
+                }
                 validate_sha256(agent_binary_sha256)?;
                 if !accounts::valid_installation(installation_id)
                     || contract != accounts::PRODUCT_CONTRACT
