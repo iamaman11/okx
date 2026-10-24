@@ -62,7 +62,7 @@ impl AnalyticsService {
             0
         };
         let hash =
-            okx_research::canonical_sha256(&("market/398.2", &request, &universe_page, bucket))
+            okx_research::canonical_sha256(&("market/398.3", &request, &universe_page, bucket))
                 .map_err(|e| e.to_string())?;
         let hash = hash.strip_prefix("sha256:").unwrap_or(&hash).to_owned();
         let (job, new, cancel) = self
