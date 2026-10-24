@@ -4,6 +4,11 @@ pub mod jobs;
 mod market;
 pub mod planner;
 pub mod sources;
+
+pub(crate) fn is_retryable_market_source_defer(error: &str) -> bool {
+    jobs::is_transient_rate_defer(Some(error))
+}
+
 use futures_util::{StreamExt, stream};
 use okx_protocol::analytics::*;
 use okx_research::{
