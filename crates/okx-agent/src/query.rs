@@ -45,6 +45,20 @@ fn incomplete(v: &Value) -> bool {
         _ => false,
     }
 }
+/// A live market overview must not leak unbounded order-book depth into the
+/// small public MCP envelope. Bounded book levels have their own microstructure action.
+fn compact_ws_overview(snapshot: okx_observation::LiveMarketSnapshot) -> Value {
+    json!({
+        "schema": "okx.market.overview/v1",
+        "source_mode": "websocket",
+        "quality": "complete",
+        "market": snapshot.market,
+        "generation": snapshot.generation,
+        "book_sequence": snapshot.order_book.seq_id,
+        "book_exchange_timestamp_ms": snapshot.order_book.exchange_timestamp_ms
+    })
+}
+
 pub fn response(id: &str, result: Result<Value, String>) -> AgentResponse {
     let quality = match &result {
         Ok(value) if incomplete(value) => DataQuality::Degraded,
@@ -309,9 +323,7 @@ async fn execute(
                 )
                 .await;
             match snapshot {
-                Ok(snapshot) => {
-                    serde_json::to_value(snapshot).map_err(|_| "SERIALIZATION_FAILED".into())
-                }
+                Ok(snapshot) => Ok(compact_ws_overview(snapshot)),
                 Err(_) => {
                     // A REST observation cannot certify a fresh WS book for trading.
                     // Expose bounded native WS quality without raw transport errors.
@@ -342,7 +354,7 @@ async fn execute(
                         .await
                         .map_err(|_| "MARKET_SOURCE_UNAVAILABLE")?;
                     Ok(
-                        json!({"market":snapshot,"source_mode":"rest","quality":"degraded","reason":"PUBLIC_WS_WARMING","public_ws_quality":ws_quality}),
+                        json!({"schema":"okx.market.overview/v1","market":snapshot,"source_mode":"rest","quality":"degraded","reason":"PUBLIC_WS_WARMING","public_ws_quality":ws_quality}),
                     )
                 }
             }
