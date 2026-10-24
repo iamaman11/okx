@@ -198,7 +198,8 @@ export const mcpApi={async fetch(request:Request,env:Env,ctx:any):Promise<Respon
           control_observed_at:typeof p.control_observed_at==='string'?p.control_observed_at:null,
           control_receipt_url:typeof p.control_receipt_url==='string'?p.control_receipt_url:null,
         }:{verified:false,reason_code:'RELEASE_ATTESTATION_UNAVAILABLE',
-           source_tree:null,agent_binary_sha256:null,artifact_id:null};
+           source_tree:null,agent_binary_sha256:null,artifact_id:null,
+           control_observed_at:null,control_receipt_url:null};
         return jsonRpc(id,toolResult({status:fresh?'completed':'partial',
           data:{schema:'okx.runtime-status/v1',
             worker_version:MCP_SERVER_VERSION,tool_contract:TOOL_CONTRACT_VERSION,
