@@ -61,6 +61,30 @@ def checked_capability_outcome(route, request, envelope, polarity):
         return False
     if envelope.get("quality") in ("NOT_READY","DEGRADED","partial","stale"):
         return False
+    # A generic completed envelope is insufficient proof of the live market
+    # snapshot: #416 fixed an unbounded full order-book projection.
+    if route=="market.snapshot":
+        market=data.get("market")
+        if not (data.get("schema")=="okx.market.overview/v1"
+                and data.get("source_mode")=="websocket"
+                and isinstance(market,dict)
+                and isinstance(market.get("ticker"),dict)
+                and isinstance(data.get("book_sequence"),int)
+                and data["book_sequence"]>0
+                and "order_book" not in data
+                and "order_book" not in market
+                and len(json.dumps(data,ensure_ascii=False).encode("utf-8"))<12288):
+            return False
+    if route=="market.microstructure":
+        bids,asks=data.get("bids"),data.get("asks")
+        if not (data.get("schema")=="okx.market.microstructure/v1"
+                and isinstance(data.get("book_sequence"),int) and data["book_sequence"]>0
+                and isinstance(bids,list) and 0<len(bids)<=10
+                and isinstance(asks,list) and 0<len(asks)<=10
+                and all(isinstance(level,dict) and level.get("price") and level.get("size")
+                        for level in bids+asks)
+                and data.get("quality")=="complete"):
+            return False
     if route=="market.screen":
         if not isinstance(data.get("rows"),list) or not isinstance(data.get("total_rows"),int):
             return False
@@ -304,6 +328,23 @@ def self_test():
                 "status":"rejected","reason_code":"REQUEST_FAILED","next_action":"inspect"},"negative"))
             self.assertFalse(checked_capability_outcome("market.screen",{"universe":{"instrument_type":"SWAP"}},{
                 "status":"completed","data":{"rows":[],"total_rows":0}},"positive"))
+        def test_live_market_positive_requires_bounded_typed_book(self):
+            overview={"status":"completed","quality":"complete","data":{
+                "schema":"okx.market.overview/v1","source_mode":"websocket",
+                "book_sequence":42,"market":{"ticker":{"last":"100"}}}}
+            self.assertTrue(checked_capability_outcome("market.snapshot",{},overview,"positive"))
+            overview["data"]["order_book"]=[{"price":"100","size":"1"}]*4000
+            self.assertFalse(checked_capability_outcome("market.snapshot",{},overview,"positive"))
+            del overview["data"]["order_book"]
+            overview["data"]["source_mode"]="rest"
+            self.assertFalse(checked_capability_outcome("market.snapshot",{},overview,"positive"))
+            book={"status":"completed","quality":"complete","data":{
+                "schema":"okx.market.microstructure/v1","book_sequence":42,
+                "quality":"complete","bids":[{"price":"100","size":"1"}],
+                "asks":[{"price":"101","size":"1"}]}}
+            self.assertTrue(checked_capability_outcome("market.microstructure",{},book,"positive"))
+            book["data"]["bids"]*=11
+            self.assertFalse(checked_capability_outcome("market.microstructure",{},book,"positive"))
         def test_scenario_has_read_only_semantics_not_exchange_margin_proof(self):
             scenario={"status":"completed","data":{
                 "schema":"okx.portfolio.scenario/v1","execution":"virtual_read_only",
