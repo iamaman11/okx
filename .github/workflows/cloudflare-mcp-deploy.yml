@@ -35,7 +35,7 @@ jobs:
       - name: Install locked package surface
         run: npm ci --ignore-scripts --no-audit --no-fund
 
-      - name: Typecheck
+      - name: Typecheck and release bindings regression
         run: npm run check
 
       - name: Deploy Worker
@@ -46,8 +46,10 @@ jobs:
           SOURCE_TREE="$(git rev-parse 'HEAD^{tree}')"
           [[ "$SOURCE_TREE" =~ ^[0-9a-f]{40}$ ]] || { echo "invalid tree"; exit 22; }
           echo "WORKER_DEPLOY_SOURCE_TREE=$SOURCE_TREE"
-          # Runtime metadata is bound to this same checkout, not operator-entered.
-          npx wrangler deploy --config wrangler.jsonc --var "RELEASE_SOURCE_TREE:$SOURCE_TREE"
+          # Build one complete, checked configuration. --var replaces config vars.
+          node scripts/release-config.mjs "$SOURCE_TREE" wrangler.release.jsonc
+          trap 'rm -f wrangler.release.jsonc' EXIT
+          npx wrangler deploy --config wrangler.release.jsonc
 
       - name: Health check
         shell: bash
