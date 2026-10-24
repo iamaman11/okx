@@ -1019,6 +1019,36 @@ mod product_contract_tests {
         }
     }
     #[test]
+    fn worker_universe_only_request_decodes_through_native_agent_envelope() {
+        let body = serde_json::json!({
+            "schema": AGENT_REQUEST_SCHEMA_V1,
+            "request_id": "a".repeat(64),
+            "operation": {
+                "type": "market",
+                "request": {
+                    "action": "screen",
+                    "universe": { "instrument_type": "SWAP", "limit": 50 },
+                    "fields": ["return_pct"],
+                    "timeframe_ms": 60000,
+                    "start_ms": 60000,
+                    "end_ms": 180000,
+                    "limit": 50
+                }
+            }
+        });
+        let decoded: AgentRequest = serde_json::from_value(body.clone()).unwrap();
+        assert!(decoded.validate().is_ok());
+        let AgentOperation::Market { request } = decoded.operation else {
+            panic!("wrong action")
+        };
+        assert!(request.instruments.is_empty());
+        assert!(request.universe.is_some());
+        let mut ambiguous = body;
+        ambiguous["operation"]["request"]["instruments"] = serde_json::json!(["BTC-USDT-SWAP"]);
+        let parsed: AgentRequest = serde_json::from_value(ambiguous).unwrap();
+        assert!(parsed.validate().is_err());
+    }
+    #[test]
     fn account_reference_is_preserved_in_transport() {
         let request = AgentRequest {
             schema: AGENT_REQUEST_SCHEMA_V1.into(),
