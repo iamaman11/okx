@@ -102,6 +102,17 @@ impl PrivateWsCoordinator {
         credentials: Credentials,
         rate_budget: RateBudget,
     ) -> (Self, PrivateWsHandle) {
+        Self::new_with_rate_budget_seed(environment, credentials, rate_budget, 0)
+    }
+
+    /// On account restart, seed the session counter from the last generation
+    /// committed in SQLite. A new authenticated connection increments it once.
+    pub fn new_with_rate_budget_seed(
+        environment: OkxEnvironment,
+        credentials: Credentials,
+        rate_budget: RateBudget,
+        generation_seed: u64,
+    ) -> (Self, PrivateWsHandle) {
         let state = Arc::new(RwLock::new(PrivateRuntimeState::new()));
         let (financial_source_signal, financial_source_receiver) = watch::channel(0);
         (
@@ -109,7 +120,7 @@ impl PrivateWsCoordinator {
                 environment,
                 credentials,
                 state: Arc::clone(&state),
-                generation: 0,
+                generation: generation_seed,
                 rate_budget,
                 financial_source_signal,
             },
