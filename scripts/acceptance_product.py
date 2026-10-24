@@ -90,12 +90,33 @@ def checked_capability_outcome(route, request, envelope, polarity):
             return False
         if "universe" in request:
             page=data.get("universe_page")
+            requested_global=request["universe"].get("rank_globally") is True
             if not (isinstance(page,dict)
-                and page.get("global_ranking") is False
+                and page.get("global_ranking") is requested_global
                 and isinstance(page.get("reference_generation"),str)
                 and bool(page["reference_generation"])
-                and isinstance(page.get("has_more"),bool)
-                and (not page["has_more"] or isinstance(page.get("next_after_instrument"),str))):
+                and isinstance(page.get("has_more"),bool)):
+                return False
+            if requested_global:
+                job_id=data.get("job_id")
+                cursor=data.get("next_cursor")
+                if not (page.get("scope")=="complete_venue_universe"
+                    and isinstance(page.get("universe_size"),int)
+                    and 0<page["universe_size"]<=512
+                    and data["total_rows"]==page["universe_size"]
+                    and isinstance(job_id,str) and re.fullmatch(r"[0-9a-f]{64}",job_id)
+                    and isinstance(data.get("result_artifact"),str)
+                    and re.fullmatch(r"sha256:[0-9a-f]{64}",data["result_artifact"])
+                    and isinstance(data.get("rank_request_fingerprint"),str)
+                    and re.fullmatch(r"sha256:[0-9a-f]{64}",data["rank_request_fingerprint"])
+                    and ((isinstance(cursor,str) and cursor.startswith(job_id+":"))
+                         if page["has_more"] else cursor is None)
+                    and len(data["rows"])<=request.get("limit",50)
+                    and all(isinstance(row,dict) and row.get("quality")=="complete"
+                            and row.get("gaps")==[] and isinstance(row.get("metrics"),dict)
+                            for row in data["rows"])):
+                    return False
+            elif page["has_more"] and not isinstance(page.get("next_after_instrument"),str):
                 return False
     elif route=="portfolio.scenario":
         if not (data.get("schema")=="okx.portfolio.scenario/v1"
@@ -353,6 +374,42 @@ def self_test():
             self.assertTrue(checked_capability_outcome("portfolio.scenario",{},scenario,"positive"))
             scenario["data"]["exchange_post"]=True
             self.assertFalse(checked_capability_outcome("portfolio.scenario",{},scenario,"positive"))
+        def test_global_rank_requires_verified_complete_immutable_artifact(self):
+            request={"action":"screen","limit":1,"universe":{"instrument_type":"SWAP","rank_globally":True}}
+            job="a"*64
+            proof={"status":"completed","quality":"FRESH","reason_code":None,"data":{
+                "rows":[{"instrument":"BTC-USDT-SWAP","quality":"complete","gaps":[],
+                         "metrics":{"returns":0.01}}],
+                "total_rows":2,"job_id":job,"result_artifact":"sha256:"+"b"*64,
+                "rank_request_fingerprint":"sha256:"+"c"*64,"next_cursor":job+":1",
+                "universe_page":{"global_ranking":True,"scope":"complete_venue_universe",
+                                 "universe_size":2,"reference_generation":"reference-1",
+                                 "has_more":True}}}
+            self.assertTrue(checked_capability_outcome("market.screen",request,proof,"positive"))
+            proof["data"]["universe_page"]["global_ranking"]=False
+            self.assertFalse(checked_capability_outcome("market.screen",request,proof,"positive"))
+            proof["data"]["universe_page"]["global_ranking"]=True
+            proof["data"]["rows"][0]["quality"]="partial"
+            self.assertFalse(checked_capability_outcome("market.screen",request,proof,"positive"))
+            proof["data"]["rows"][0]["quality"]="complete"
+            proof["data"]["result_artifact"]=None
+            self.assertFalse(checked_capability_outcome("market.screen",request,proof,"positive"))
+            proof["data"]["result_artifact"]="sha256:"+"b"*64
+            proof["data"]["next_cursor"]="wrong-job:1"
+            self.assertFalse(checked_capability_outcome("market.screen",request,proof,"positive"))
+            proof["data"]["next_cursor"]=None
+            proof["data"]["universe_page"]["has_more"]=False
+            self.assertTrue(checked_capability_outcome("market.screen",request,proof,"positive"))
+            proof["data"]["universe_page"]["universe_size"]=1
+            self.assertFalse(checked_capability_outcome("market.screen",request,proof,"positive"))
+        def test_ordinary_universe_page_remains_name_paged(self):
+            request={"action":"screen","limit":1,"universe":{"instrument_type":"SWAP"}}
+            proof={"status":"completed","quality":"FRESH","data":{"rows":[],"total_rows":0,
+                "universe_page":{"global_ranking":False,"reference_generation":"ref",
+                                 "has_more":True,"next_after_instrument":"BTC-USDT-SWAP"}}}
+            self.assertTrue(checked_capability_outcome("market.screen",request,proof,"positive"))
+            proof["data"]["universe_page"]["next_after_instrument"]=None
+            self.assertFalse(checked_capability_outcome("market.screen",request,proof,"positive"))
         def test_worker_claims_require_complete_named_pass_line(self):
             self.assertEqual(executed_tests("risk_concurrent_accounts_campaign_limit PASS\n"),[("risk_concurrent_accounts_campaign_limit","ok")])
             self.assertEqual(executed_tests("risk_concurrent_accounts_campaign_limit FAIL\n"),[("risk_concurrent_accounts_campaign_limit","FAILED")])
