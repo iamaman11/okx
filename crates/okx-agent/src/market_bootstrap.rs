@@ -135,7 +135,8 @@ impl MarketBootstrapper {
         before: Option<&str>,
         limit: u16,
     ) -> Result<ResearchCandleCapture, MarketBootstrapError> {
-        self.capture_research_candles(instrument_id, bar, after, before, limit, false).await
+        self.capture_research_candles(instrument_id, bar, after, before, limit, false)
+            .await
     }
 
     /// Opt-in public source queue for bounded global analytics, never order execution.
@@ -147,7 +148,8 @@ impl MarketBootstrapper {
         before: Option<&str>,
         limit: u16,
     ) -> Result<ResearchCandleCapture, MarketBootstrapError> {
-        self.capture_research_candles(instrument_id, bar, after, before, limit, true).await
+        self.capture_research_candles(instrument_id, bar, after, before, limit, true)
+            .await
     }
 
     async fn capture_research_candles(

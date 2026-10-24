@@ -115,7 +115,8 @@ impl OkxPublicClient {
     where
         T: DeserializeOwned,
     {
-        self.public_get_captured_with_admission(path, params, None).await
+        self.public_get_captured_with_admission(path, params, None)
+            .await
     }
 
     /// Only bounded analytics history scans opt into queued public admission.
@@ -128,9 +129,8 @@ impl OkxPublicClient {
     where
         T: DeserializeOwned,
     {
-        self.public_get_captured_with_admission(
-            path, params, Some(Duration::from_secs(15)),
-        ).await
+        self.public_get_captured_with_admission(path, params, Some(Duration::from_secs(15)))
+            .await
     }
 
     async fn public_get_captured_with_admission<T>(
@@ -144,7 +144,9 @@ impl OkxPublicClient {
     {
         let plan = self.rate_budget.public_rest_plan(path, params);
         if let Some(timeout) = queue_timeout {
-            self.rate_budget.admit_wait(&plan, timeout).await
+            self.rate_budget
+                .admit_wait(&plan, timeout)
+                .await
                 .map_err(|evidence| OkxError::RateLimited { evidence })?;
         } else {
             admit(&self.rate_budget, &plan)?;
@@ -170,7 +172,6 @@ impl OkxPublicClient {
             raw_body,
         })
     }
-
 }
 
 #[derive(Clone)]

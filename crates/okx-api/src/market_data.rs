@@ -548,8 +548,14 @@ impl MarketDataApi {
         limit: u16,
     ) -> Result<CapturedPublicRows<PublicCandle>, OkxError> {
         self.history_candles_page_captured_with_admission(
-            instrument_id, bar, after, before, limit, false,
-        ).await
+            instrument_id,
+            bar,
+            after,
+            before,
+            limit,
+            false,
+        )
+        .await
     }
 
     /// Uses the same central public IP window, waiting only before source reads.
@@ -562,8 +568,14 @@ impl MarketDataApi {
         limit: u16,
     ) -> Result<CapturedPublicRows<PublicCandle>, OkxError> {
         self.history_candles_page_captured_with_admission(
-            instrument_id, bar, after, before, limit, true,
-        ).await
+            instrument_id,
+            bar,
+            after,
+            before,
+            limit,
+            true,
+        )
+        .await
     }
 
     async fn history_candles_page_captured_with_admission(
@@ -590,12 +602,15 @@ impl MarketDataApi {
         params.push(("bar", bar.to_owned()));
         params.push(("limit", limit.to_string()));
         if queued {
-            self.client.public_get_captured_queued("/api/v5/market/history-candles", &params).await
+            self.client
+                .public_get_captured_queued("/api/v5/market/history-candles", &params)
+                .await
         } else {
-            self.client.public_get_captured("/api/v5/market/history-candles", &params).await
+            self.client
+                .public_get_captured("/api/v5/market/history-candles", &params)
+                .await
         }
     }
-
 }
 
 fn one<T>(mut rows: Vec<T>, label: &'static str) -> Result<T, OkxError> {

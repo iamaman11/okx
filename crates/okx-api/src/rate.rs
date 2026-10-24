@@ -617,7 +617,10 @@ mod tests {
         assert_eq!(deferred.domain.local_max_requests, 10);
         assert_eq!(deferred.domain.local_window_ms, 2_000);
         let started = Instant::now();
-        budget.admit_wait(&plan, Duration::from_secs(4)).await.unwrap();
+        budget
+            .admit_wait(&plan, Duration::from_secs(4))
+            .await
+            .unwrap();
         assert!(started.elapsed() >= Duration::from_millis(1_500));
     }
 

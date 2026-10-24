@@ -60,7 +60,8 @@ impl Sources {
                         self.bootstrap
                             .research_candles_page(symbol, bar, Some(&cursor), None, 100)
                             .await
-                    }.map_err(|e| e.to_string())?;
+                    }
+                    .map_err(|e| e.to_string())?;
                     if page.rows.is_empty() {
                         break;
                     }
