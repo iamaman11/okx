@@ -177,7 +177,10 @@ export class RuntimeSession {
     }
 
     if (frame.type === "hello") {
-      if (frame.runtime_id !== RUNTIME_NAME || typeof frame.connection_id !== "string") {
+      if (frame.runtime_id !== RUNTIME_NAME || typeof frame.connection_id !== "string"
+        || !Number.isSafeInteger(frame.agent_pid) || frame.agent_pid <= 0
+        || typeof frame.agent_binary_sha256 !== "string"
+        || !/^[0-9a-f]{64}$/.test(frame.agent_binary_sha256)) {
         ws.close(1008, "invalid hello");
         return;
       }
@@ -191,6 +194,9 @@ export class RuntimeSession {
         ws.close(1008,"installation or contract mismatch");return;
       }
       attachment.runtimeProfile = runtimeProfile;
+      attachment.installationId = frame.installation_id;
+      attachment.agentPid = frame.agent_pid;
+      attachment.agentBinarySha256 = frame.agent_binary_sha256;
       attachment.hello = true;
       ws.serializeAttachment(attachment);
       ws.send(JSON.stringify({
@@ -429,6 +435,10 @@ export class RuntimeSession {
       connected: true,
       session_fresh: fresh,
       connection_generation: active.attachment.generation,
+      connected_at_ms: active.attachment.connectedAtMs,
+      installation_id: active.attachment.installationId ?? null,
+      agent_pid: active.attachment.agentPid ?? null,
+      agent_binary_sha256: active.attachment.agentBinarySha256 ?? null,
     };
   }
 

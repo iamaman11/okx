@@ -39,7 +39,15 @@ jobs:
         run: npm run check
 
       - name: Deploy Worker
-        run: npx wrangler deploy --config wrangler.jsonc
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "${GITHUB_REF}" = "refs/heads/main" || { echo "must deploy exact main"; exit 21; }
+          SOURCE_TREE="$(git rev-parse 'HEAD^{tree}')"
+          [[ "$SOURCE_TREE" =~ ^[0-9a-f]{40}$ ]] || { echo "invalid tree"; exit 22; }
+          echo "WORKER_DEPLOY_SOURCE_TREE=$SOURCE_TREE"
+          # Runtime metadata is bound to this same checkout, not operator-entered.
+          npx wrangler deploy --config wrangler.jsonc --var "RELEASE_SOURCE_TREE:$SOURCE_TREE"
 
       - name: Health check
         shell: bash

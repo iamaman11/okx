@@ -15,7 +15,7 @@ try {
     { stdio: "inherit" },
   );
   let executed=0;
-  for (const file of ["auth.test.js", "shared.test.js", "execution_tools.test.js", "risk_book.test.js", "account_governance.test.js", "account_governance_store.test.js", "risk_authority.test.js", "runtime_session.test.js", "mcp.test.js"]) {
+  for (const file of ["auth.test.js", "shared.test.js", "execution_tools.test.js", "risk_book.test.js", "account_governance.test.js", "account_governance_store.test.js", "risk_authority.test.js", "runtime_session.test.js", "release_attestation.test.js", "mcp.test.js"]) {
     execFileSync(process.execPath, [join(output, file)], {
       stdio: "inherit",
     });

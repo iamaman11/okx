@@ -21,6 +21,8 @@ export interface Env {
   RUNTIME: any;
   MCP_OWNER_SECRET: string;
   RUNTIME_TOKEN_SHA256: string;
+  /** Immutable source tree of this exact Worker deployment, set only by deploy CI. */
+  RELEASE_SOURCE_TREE?: string;
   OAUTH_PROVIDER: OAuthHelpers;
 }
 
@@ -33,6 +35,9 @@ export interface SocketAttachment {
   sessionId: string;
   generation: number;
   hello: boolean;
+  installationId?: string;
+  agentPid?: number;
+  agentBinarySha256?: string;
   connectedAtMs: number;
   lastPongAtMs: number | null;
 }
