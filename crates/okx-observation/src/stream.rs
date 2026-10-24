@@ -752,6 +752,13 @@ mod tests {
         state.apply_mark_price(7, 80_000, mark()).unwrap();
         state.apply_index_ticker(7, 80_000, index()).unwrap();
         state.apply_book_snapshot(7, 80_000, book()).unwrap();
+        // Production policy: 2s price/book with 180s derivative context.
+        let current = state.risk_readiness(&reference, 81_000, 2_000, 180_000, true, true);
+        assert_eq!(current.quality, MarketReadiness::Fresh);
+        let old_price = state.risk_readiness(&reference, 82_001, 2_000, 180_000, true, true);
+        assert_eq!(old_price.quality, MarketReadiness::Stale);
+        assert!(old_price.reason.contains("ticker"));
+        assert!(old_price.reason.contains("budget_ms=2000"));
         let ready = state.risk_readiness(&reference, 90_000, 60_000, 180_000, true, true);
         assert_eq!(ready.quality, MarketReadiness::Fresh);
         assert_eq!(
