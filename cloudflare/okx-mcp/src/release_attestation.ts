@@ -100,10 +100,14 @@ export async function attestRuntimeRelease(
  try{
    const since=new Date(now-2*MAX_RECEIPT_AGE_MS).toISOString();
    const response=await get(GITHUB_COMMENTS+'?per_page=100&since='+encodeURIComponent(since),{
-     method:'GET',headers:{'Accept':'application/vnd.github+json','X-GitHub-Api-Version':'2022-11-28'},
+     method:'GET',headers:{'Accept':'application/vnd.github+json','X-GitHub-Api-Version':'2022-11-28','User-Agent':'okx-cloudflare-mcp-release-attestation'},
      signal:AbortSignal.timeout(4_000),
    });
-   if(!response.ok)return failure('CONTROL_RECEIPT_FETCH_FAILED');
+   if(!response.ok){
+     if(response.status===401||response.status===403)return failure('CONTROL_RECEIPT_GITHUB_DENIED');
+     if(response.status===429)return failure('CONTROL_RECEIPT_GITHUB_RATE_LIMITED');
+     return failure('CONTROL_RECEIPT_FETCH_FAILED');
+   }
    const comments:unknown=await response.json();
    if(!Array.isArray(comments)||comments.length>=MAX_COMMENTS)return failure('CONTROL_RECEIPT_PAGE_UNBOUNDED');
    const candidates=comments.map(obj).filter((comment):comment is JsonObject=>{
