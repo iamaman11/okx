@@ -122,8 +122,44 @@ export async function attestRuntimeRelease(
      signal:AbortSignal.timeout(4_000),
    });
    if(!response.ok){
-     if(response.status===401||response.status===403)return failure('CONTROL_RECEIPT_GITHUB_DENIED');
-     if(response.status===429)return failure('CONTROL_RECEIPT_GITHUB_RATE_LIMITED');
+     // Only bounded numeric HTTP metadata is logged. Never log headers such as
+     // Authorization, response bodies, receipt bodies, or user/account details.
+     const numericHeader=(name:string,maxDigits:number):number|null=>{
+       const raw=response.headers.get(name);
+       return raw!==null&&new RegExp('^[0-9]{1,'+maxDigits+'}
+   const comments:unknown=await response.json();
+   if(!Array.isArray(comments)||comments.length>=MAX_COMMENTS)return failure('CONTROL_RECEIPT_PAGE_UNBOUNDED');
+   const candidates=comments.map(obj).filter((comment):comment is JsonObject=>{
+     if(!comment||field(comment,'user')?.id!==OWNER_ID||typeof comment.body!=='string')return false;
+     try{
+       const receipt=obj(JSON.parse(comment.body));
+       return receipt?.schema==='okx.windows.control.result/v1'&&field(receipt,'operation')?.type==='status';
+     }catch{return false;}
+   });
+   const newest=candidates.sort((a,b)=>Number(b.id)-Number(a.id))[0];
+   result=newest?validateReceipt(newest,observed,sourceTree as string,now)
+     :failure('CONTROL_RECEIPT_MISSING');
+ }catch{result=failure('CONTROL_RECEIPT_FETCH_FAILED');}
+ if(get===fetch){
+   if(cache.size>32)cache.clear();
+   cache.set(key,{time:now,result});
+ }
+ return result;
+}
+).test(raw)?Number(raw):null;
+     };
+     const remaining=numericHeader('x-ratelimit-remaining',9);
+     const reset=numericHeader('x-ratelimit-reset',12);
+     const retryAfter=numericHeader('retry-after',6);
+     console.warn('CONTROL_RECEIPT_GITHUB_HTTP',JSON.stringify({
+       status:response.status,remaining,reset_epoch_seconds:reset,retry_after_seconds:retryAfter,
+     }));
+     // GitHub may use HTTP 403 for primary or secondary rate limits. Without
+     // explicit rate-limit evidence a 403 is UNKNOWN, not proof of permissions.
+     if(response.status===429||(response.status===403&&(remaining===0||retryAfter!==null)))
+       return failure('CONTROL_RECEIPT_GITHUB_RATE_LIMITED');
+     if(response.status===401)return failure('CONTROL_RECEIPT_GITHUB_UNAUTHORIZED');
+     if(response.status===403)return failure('CONTROL_RECEIPT_GITHUB_403_UNCLASSIFIED');
      return failure('CONTROL_RECEIPT_FETCH_FAILED');
    }
    const comments:unknown=await response.json();
