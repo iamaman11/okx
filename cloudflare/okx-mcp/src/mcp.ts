@@ -1,4 +1,5 @@
 import {PUBLIC_TOOLS,validTool} from './execution_tools.js';
+import {attestRuntimeRelease} from './release_attestation.js';
 import {dispatchRuntime,type Env,isObject,type Json,jsonRpc,jsonRpcError,MAX_BODY_BYTES,MCP_PROTOCOL_VERSION,MCP_SERVER_VERSION,TOOL_CONTRACT_VERSION,requestId,runtimeFetch,toolResult as baseToolResult,sha256Hex,transportFailure} from './shared.js';
 const NORMAL_RESULT_BYTES=12_288;
 function hasOnlyKeys(v:Record<string,unknown>,keys:string[]){return Object.keys(v).every(k=>keys.includes(k));}
@@ -179,6 +180,7 @@ export const mcpApi={async fetch(request:Request,env:Env,ctx:any):Promise<Respon
             next_action:'inspect_diagnostics'}));
         }
         const fresh=observed.status==='PASS'&&observed.connected===true&&observed.session_fresh===true;
+        const releaseAttestation=await attestRuntimeRelease(observed,env.RELEASE_SOURCE_TREE);
         return jsonRpc(id,toolResult({status:fresh?'completed':'partial',
           data:{schema:'okx.runtime-status/v1',
             worker_version:MCP_SERVER_VERSION,tool_contract:TOOL_CONTRACT_VERSION,
@@ -187,8 +189,7 @@ export const mcpApi={async fetch(request:Request,env:Env,ctx:any):Promise<Respon
               runtime_profile:stringField(observed,'runtime_profile')??null,
               connection_generation:numericField(observed,'connection_generation')??null},
             reason_code:fresh?null:'RUNTIME_SESSION_NOT_FRESH',
-            release_attestation:{verified:false,reason_code:'EXACT_CONTROL_RELEASE_RECEIPT_REQUIRED',
-              source_tree:null,agent_binary_sha256:null,artifact_id:null}},
+            release_attestation:releaseAttestation},
           quality:fresh?'fresh':'partial',
           warnings:fresh?[]:['RUNTIME_SESSION_NOT_FRESH']}));
       }
