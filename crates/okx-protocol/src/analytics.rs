@@ -362,16 +362,32 @@ mod batch_tests {
         assert!(parsed.valid());
         let mut both = request.clone();
         both["instruments"] = serde_json::json!(["BTC-USDT-SWAP"]);
-        assert!(!serde_json::from_value::<MarketRequest>(both).unwrap().valid());
+        assert!(
+            !serde_json::from_value::<MarketRequest>(both)
+                .unwrap()
+                .valid()
+        );
         let mut neither = request.clone();
         neither.as_object_mut().unwrap().remove("universe");
-        assert!(!serde_json::from_value::<MarketRequest>(neither).unwrap().valid());
+        assert!(
+            !serde_json::from_value::<MarketRequest>(neither)
+                .unwrap()
+                .valid()
+        );
         let mut compare = request.clone();
         compare["action"] = serde_json::json!("compare");
-        assert!(!serde_json::from_value::<MarketRequest>(compare).unwrap().valid());
+        assert!(
+            !serde_json::from_value::<MarketRequest>(compare)
+                .unwrap()
+                .valid()
+        );
         let mut wrong_generation = request;
         wrong_generation["universe"]["reference_generation"] = serde_json::json!(" ");
-        assert!(!serde_json::from_value::<MarketRequest>(wrong_generation).unwrap().valid());
+        assert!(
+            !serde_json::from_value::<MarketRequest>(wrong_generation)
+                .unwrap()
+                .valid()
+        );
     }
     #[test]
     fn research_capabilities_strict_read_only_wire() {
