@@ -885,9 +885,20 @@ mod tests {
         let (root, service) = super::artifact_job_fixtures::service();
         let capabilities = service.market_capabilities();
         let operators = capabilities["operators"].as_array().unwrap();
-        assert_eq!(operators.len(), okx_analysis::operators::SUPPORTED_OPERATORS.len());
-        assert!(operators.iter().any(|operator| operator["name"] == "returns" && operator["unit"] == "ratio"));
-        assert!(operators.iter().all(|operator| operator["inputs"].is_array()));
+        assert_eq!(
+            operators.len(),
+            okx_analysis::operators::SUPPORTED_OPERATORS.len()
+        );
+        assert!(
+            operators
+                .iter()
+                .any(|operator| operator["name"] == "returns" && operator["unit"] == "ratio")
+        );
+        assert!(
+            operators
+                .iter()
+                .all(|operator| operator["inputs"].is_array())
+        );
         drop(service);
         std::fs::remove_dir_all(root).unwrap();
     }
