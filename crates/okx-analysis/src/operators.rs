@@ -72,7 +72,6 @@ pub enum Operator {
     PositionSize,
     CostEstimate,
 }
-#[derive(Debug, Clone, Copy)]
 /// The enumerable public DSL contract. Adding a typed operator requires listing it here.
 pub const SUPPORTED_OPERATORS: &[Operator] = &[
     Operator::Returns,
@@ -92,6 +91,7 @@ pub const SUPPORTED_OPERATORS: &[Operator] = &[
     Operator::CostEstimate,
 ];
 
+#[derive(Debug, Clone, Copy)]
 pub struct OperatorInfo {
     pub operator: Operator,
     pub inputs: &'static [&'static str],
