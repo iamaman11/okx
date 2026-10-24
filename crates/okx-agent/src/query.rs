@@ -375,7 +375,7 @@ mod microstructure_test {
         assert_eq!(failure.code, "MARKET_SOURCE_RETRYABLE");
         assert!(failure.retryable);
         let fatal = response("market-fatal", Err("CANDLE_INTERIOR_GAP".into()));
-        assert_eq!(fatal.failure.unwrap().retryable, false);
+        assert!(!fatal.failure.unwrap().retryable);
     }
     #[test]
     fn bounded_book_sweep_rejects_insufficient_depth() {
