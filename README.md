@@ -4,7 +4,7 @@
 
 One Rust Engine routes independent AccountKey contexts, addressed SQLite WAL and a central governance/RiskBook. The public MCP has exactly seven typed tools: `accounts`, `strategies`, `market`, `research`, `trade`, `portfolio`, `diagnostics`. No Demo-only Agent, CONTROL profile handoff, v14 import or arbitrary shell/SQL/RPC route.
 
-**Verified 23 October 2026:** PR [#403](https://github.com/iamaman11/okx/pull/403) is merged, Agent/Controller/Launcher are installed with `release_parity=MATCHED`, and central/native SQL campaign policy is USD10, revision 2. F03, F05, F07, F08 and final F09 remain open. This is not a Real-trade authorization. The second Real UID is absent: `PHYSICAL_MULTI_ACCOUNT=BLOCKED`. Consult #398 for newer facts.
+**Last recorded physical proof, 24 October 2026:** [PR #416](https://github.com/iamaman11/okx/pull/416), exact [CI #40055850675](https://github.com/iamaman11/okx/actions/runs/40055850675) 6/6, native Windows artifact `12545318154` installed via CONTROL with Agent/Controller/Launcher `release_parity=MATCHED`. Live WebSocket snapshot, bounded market microstructure, read-only trade preview, fresh SQL sources and covered NAV windows have positive evidence. The USD10 central/native campaign ceiling revision 2 was preserved. **Independent Worker-side release attestation, full 16→7 business parity, concurrent strategy acceptance, two protected Real cycles and a second physical Real UID remain unaccepted.** Consult #398 for newer observations; no real trade authorization follows from this snapshot.
 
 - [Architecture and owners](docs/ARCHITECTURE_CONTRACT_V1.md)
 - [Operator rules](docs/chatgpt-operator-contract.md)
