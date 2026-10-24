@@ -6,6 +6,9 @@ pub const DEFAULT_AGENT_KEY_ID: &str = "agent-key-1";
 pub const AGENT_RUNTIME_SCHEMA_V1: &str = "okx.agent.runtime/v1";
 pub const AGENT_IDENTITY_SCHEMA_V1: &str = "okx.agent.identity/v1";
 pub const QUOTE_MAX_AGE_MS: u64 = 2_000;
+/// Bounded WS-only derivative context; never relaxes the 2s quote/book gate.
+/// Slow funding/OI updates may arrive much less often than price ticks.
+pub const DERIVATIVE_CONTEXT_MAX_AGE_MS: u64 = 180_000;
 pub const ACCOUNT_MAX_AGE_MS: i64 = 5_000;
 
 pub fn evidence_fresh(received: i64, now: i64, max_age_ms: i64) -> bool {
