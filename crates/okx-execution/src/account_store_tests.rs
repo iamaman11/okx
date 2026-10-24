@@ -40,6 +40,43 @@ async fn long_reader_is_interrupted_at_deadline_and_worker_recovers() {
     );
 }
 #[test]
+fn persisted_source_generation_survives_restart_without_losing_cursors() {
+    let mut s = store();
+    assert_eq!(s.source_generation_base().unwrap(), 0);
+    let cursor = |generation| IngestPage {
+        cursor: Some(SourceCursor {
+            source: "fills".into(),
+            stream_partition: "SWAP".into(),
+            cursor: String::new(),
+            watermark: 20,
+            generation,
+            coverage_gaps: String::new(),
+        }),
+        ..Default::default()
+    };
+    s.ingest_page(&cursor(5)).unwrap();
+    let path = s.path.clone();
+    let meta = s.meta.clone();
+    drop(s);
+    let mut recovered =
+        AccountStore::open_existing(path, &meta.account_key, &meta.installation_id).unwrap();
+    assert_eq!(recovered.source_generation_base().unwrap(), 5);
+    assert!(matches!(
+        recovered.ingest_page(&cursor(1)),
+        Err(StoreError::Invalid("SOURCE_CURSOR_REGRESSION"))
+    ));
+    recovered.ingest_page(&cursor(6)).unwrap();
+    assert_eq!(
+        recovered
+            .cursor("fills", "SWAP")
+            .unwrap()
+            .unwrap()
+            .generation,
+        6
+    );
+    assert_eq!(recovered.source_generation_base().unwrap(), 6);
+}
+#[test]
 fn missing_fx_stops_risk_and_does_not_commit_zero_loss_or_cursor() {
     let mut s = store();
     let fx = UsdConversionEvidence {
