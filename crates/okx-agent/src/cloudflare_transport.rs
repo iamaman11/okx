@@ -9,13 +9,13 @@ use okx_protocol::{
     DIRECT_TRANSPORT_FRAME_SCHEMA_V2 as SCHEMA, DIRECT_TRANSPORT_MAX_PAYLOAD_BYTES,
     DirectRuntimeProfile, DirectTransportFrame as F,
 };
+use sha2::{Digest, Sha256};
 use std::{
     collections::{HashMap, HashSet},
     io::Read,
     sync::Arc,
     time::Duration,
 };
-use sha2::{Digest, Sha256};
 use tokio::{
     sync::{mpsc, oneshot, watch},
     time::Instant,
@@ -71,12 +71,17 @@ impl CloudflareTransportConfig {
 /// to fresh, owner-authored native CONTROL evidence.
 fn current_binary_sha256() -> AgentResult<String> {
     let executable = std::env::current_exe().map_err(|_| transport("EXE_IDENTITY_UNAVAILABLE"))?;
-    let mut file = std::fs::File::open(executable).map_err(|_| transport("EXE_HASH_UNAVAILABLE"))?;
+    let mut file =
+        std::fs::File::open(executable).map_err(|_| transport("EXE_HASH_UNAVAILABLE"))?;
     let mut digest = Sha256::new();
     let mut chunk = [0u8; 64 * 1024];
     loop {
-        let count = file.read(&mut chunk).map_err(|_| transport("EXE_HASH_UNAVAILABLE"))?;
-        if count == 0 { break; }
+        let count = file
+            .read(&mut chunk)
+            .map_err(|_| transport("EXE_HASH_UNAVAILABLE"))?;
+        if count == 0 {
+            break;
+        }
         digest.update(&chunk[..count]);
     }
     Ok(format!("{:x}", digest.finalize()))
