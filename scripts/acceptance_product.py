@@ -54,6 +54,15 @@ def checked_capability_outcome(route, request, envelope, polarity):
             and envelope["reason_code"] not in ("", "REQUEST_FAILED")
             and isinstance(envelope.get("next_action"),str)
             and bool(envelope["next_action"]))
+    if status=="accepted" and route in ("research.backtest","research.grid"):
+        data=envelope.get("data")
+        job_id=envelope.get("job_id")
+        return (envelope.get("reason_code") is None
+            and isinstance(data,dict)
+            and isinstance(job_id,str) and re.fullmatch(r"[0-9a-f]{64}",job_id)
+            and data.get("id")==job_id
+            and data.get("state") in ("queued","running")
+            and data.get("error") is None)
     if status!="completed" or envelope.get("reason_code") is not None:
         return False
     data=envelope.get("data")
@@ -90,6 +99,7 @@ def checked_capability_outcome(route, request, envelope, polarity):
             return False
         if "universe" in request:
             page=data.get("universe_page")
+            if not isinstance(request["universe"],dict):return False
             requested_global=request["universe"].get("rank_globally") is True
             if not (isinstance(page,dict)
                 and page.get("global_ranking") is requested_global
@@ -410,6 +420,21 @@ def self_test():
             self.assertTrue(checked_capability_outcome("market.screen",request,proof,"positive"))
             proof["data"]["universe_page"]["next_after_instrument"]=None
             self.assertFalse(checked_capability_outcome("market.screen",request,proof,"positive"))
+        def test_research_async_positive_requires_durable_job_not_fake_completion(self):
+            job="e"*64
+            proof={"status":"accepted","quality":"FRESH","reason_code":None,
+                   "job_id":job,"data":{"id":job,"state":"queued","progress":0}}
+            for route in ("research.backtest","research.grid"):
+                self.assertTrue(checked_capability_outcome(route,{},proof,"positive"))
+            self.assertFalse(checked_capability_outcome("trade.execute",{},proof,"positive"))
+            proof["data"]["id"]="different-id"
+            self.assertFalse(checked_capability_outcome("research.backtest",{},proof,"positive"))
+            proof["data"]["id"]=job
+            proof["data"]["state"]="failed"
+            self.assertFalse(checked_capability_outcome("research.grid",{},proof,"positive"))
+            proof["data"]["state"]="running"
+            proof["reason_code"]="REQUEST_FAILED"
+            self.assertFalse(checked_capability_outcome("research.grid",{},proof,"positive"))
         def test_worker_claims_require_complete_named_pass_line(self):
             self.assertEqual(executed_tests("risk_concurrent_accounts_campaign_limit PASS\n"),[("risk_concurrent_accounts_campaign_limit","ok")])
             self.assertEqual(executed_tests("risk_concurrent_accounts_campaign_limit FAIL\n"),[("risk_concurrent_accounts_campaign_limit","FAILED")])
