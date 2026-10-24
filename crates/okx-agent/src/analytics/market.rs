@@ -129,8 +129,8 @@ impl AnalyticsService {
         if global_rank
             && need_candles
             && loaded.iter().any(|row| {
-                row.bars.as_ref().is_err_or(|bars| {
-                    !complete_rank_history(
+                !row.bars.as_ref().is_ok_and(|bars| {
+                    complete_rank_history(
                         bars,
                         request.start_ms,
                         request.end_ms,
