@@ -59,6 +59,15 @@ fn source_capture_reason(error: &AgentError) -> String {
         {
             code.clone()
         }
+        AgentError::Store(okx_execution::StoreError::Invalid(code))
+            if !code.is_empty()
+                && code.len() <= 96
+                && code.bytes().all(|b| {
+                    b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_'
+                }) =>
+        {
+            (*code).into()
+        }
         AgentError::Okx(_) => "EXCHANGE_SOURCE_UNAVAILABLE".into(),
         AgentError::Store(_) => "ACCOUNT_SOURCE_SQL_FAILURE".into(),
         _ => "SOURCE_CAPTURE_FAILED".into(),
@@ -548,6 +557,12 @@ impl AccountRuntimeRegistry {
                 |s| s.recover_posting(chrono::Utc::now().timestamp_millis()),
             )
             .await?;
+        let source_generation_seed = store
+            .call(
+                std::time::Instant::now() + std::time::Duration::from_secs(2),
+                |s| s.source_generation_base(),
+            )
+            .await?;
         let execution = Arc::new(ExecutionRuntime::new(
             store,
             credentials.environment,
@@ -555,10 +570,11 @@ impl AccountRuntimeRegistry {
             uid.clone(),
             self.rate_budget.clone(),
         )?);
-        let (coordinator, private_ws) = PrivateWsCoordinator::new_with_rate_budget(
+        let (coordinator, private_ws) = PrivateWsCoordinator::new_with_rate_budget_seed(
             credentials.environment,
             credentials.observer,
             self.rate_budget.clone(),
+            source_generation_seed,
         );
         let (shutdown, receiver) = watch::channel(false);
         let resources = Arc::new(AccountResources {
@@ -812,6 +828,12 @@ mod tests {
                 "API secret leaked: credential".into()
             )),
             "SOURCE_CAPTURE_FAILED"
+        );
+        assert_eq!(
+            source_capture_reason(&AgentError::Store(okx_execution::StoreError::Invalid(
+                "SOURCE_CURSOR_REGRESSION"
+            ))),
+            "SOURCE_CURSOR_REGRESSION"
         );
     }
     #[test]
