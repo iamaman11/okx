@@ -311,6 +311,28 @@ async fn execute(
                     serde_json::to_value(snapshot).map_err(|_| "SERIALIZATION_FAILED".into())
                 }
                 Err(_) => {
+                    // A REST observation cannot certify a fresh WS book for trading.
+                    // Expose bounded native WS quality without raw transport errors.
+                    let ws_quality = match ctx
+                        .public_ws
+                        .quality_snapshot(
+                            instrument,
+                            Utc::now().timestamp_millis().max(0) as u64,
+                            crate::config::QUOTE_MAX_AGE_MS,
+                            true,
+                        )
+                        .await
+                    {
+                        Ok(q) => json!({
+                            "connection_state": q.connection_state,
+                            "connection_generation": q.connection_generation,
+                            "acknowledged_subscriptions": q.acknowledged_subscriptions,
+                            "sequence_continuity_proven": q.sequence_continuity_proven,
+                            "reason": q.reason,
+                            "last_error_present": q.last_error.is_some()
+                        }),
+                        Err(_) => json!({"reason_code": "PUBLIC_WS_QUALITY_UNAVAILABLE"}),
+                    };
                     let refs = ctx.public_ws.reference_snapshot().await;
                     let snapshot = ctx
                         .market
@@ -318,7 +340,7 @@ async fn execute(
                         .await
                         .map_err(|_| "MARKET_SOURCE_UNAVAILABLE")?;
                     Ok(
-                        json!({"market":snapshot,"source_mode":"rest","quality":"degraded","reason":"PUBLIC_WS_WARMING"}),
+                        json!({"market":snapshot,"source_mode":"rest","quality":"degraded","reason":"PUBLIC_WS_WARMING","public_ws_quality":ws_quality}),
                     )
                 }
             }
