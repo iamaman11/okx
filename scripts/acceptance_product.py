@@ -42,6 +42,50 @@ CAPABILITY_ACTIONS={
     "executor_preflight":("trade.preflight",),
     "execution_action":("trade.preview","trade.execute","trade.status","trade.cancel","trade.close"),
 }
+
+def checked_capability_outcome(route, request, envelope, polarity):
+    """Check observed business values; self-declared PASS cannot substitute for them."""
+    if not isinstance(envelope,dict):
+        return False
+    status=envelope.get("status")
+    if polarity=="negative":
+        return (status in ("rejected","failed","unknown")
+            and isinstance(envelope.get("reason_code"),str)
+            and envelope["reason_code"] not in ("", "REQUEST_FAILED")
+            and isinstance(envelope.get("next_action"),str)
+            and bool(envelope["next_action"]))
+    if status!="completed" or envelope.get("reason_code") is not None:
+        return False
+    data=envelope.get("data")
+    if not isinstance(data,dict) or data.get("failure") is not None:
+        return False
+    if envelope.get("quality") in ("NOT_READY","DEGRADED","partial","stale"):
+        return False
+    if route=="market.screen":
+        if not isinstance(data.get("rows"),list) or not isinstance(data.get("total_rows"),int):
+            return False
+        if "universe" in request:
+            page=data.get("universe_page")
+            if not (isinstance(page,dict)
+                and page.get("global_ranking") is False
+                and isinstance(page.get("reference_generation"),str)
+                and bool(page["reference_generation"])
+                and isinstance(page.get("has_more"),bool)
+                and (not page["has_more"] or isinstance(page.get("next_after_instrument"),str))):
+                return False
+    elif route=="portfolio.scenario":
+        if not (data.get("schema")=="okx.portfolio.scenario/v1"
+                and data.get("exchange_post") is False
+                and data.get("execution")=="virtual_read_only"
+                and isinstance(data.get("net_stress_pnl_usd"),str)
+                and isinstance(data.get("venue_margin_verified"),bool)):
+            return False
+    elif route=="diagnostics.runtime":
+        attestation=data.get("release_attestation")
+        if not isinstance(attestation,dict) or attestation.get("verified") is not True:
+            return False
+    return True
+
 def capability_matrix(physical=None):
     physical=physical or {}
     schema=json.loads((ROOT/"cloudflare/okx-mcp/contracts/tools.schema.json").read_text(encoding="utf-8-sig"))
@@ -97,15 +141,8 @@ def capability_matrix(physical=None):
                 envelope=response.get("structuredContent")
                 if not isinstance(envelope,dict):
                     return False
-                if polarity=="positive":
-                    if envelope.get("status") not in ("completed","accepted","partial") or (
-                        envelope.get("data") is None):
-                        return False
-                else:
-                    reason=envelope.get("reason_code")
-                    if envelope.get("status") not in ("rejected","failed","unknown","partial") or (
-                        not isinstance(reason,str) or not reason):
-                        return False
+                if not checked_capability_outcome(route,request["arguments"],envelope,polarity):
+                    return False
                 observed.add(route)
             return observed==set(routes)
         provenance=(isinstance(expected_tree,str) and len(expected_tree)==40
@@ -259,6 +296,21 @@ def self_test():
                     "negative_evidence":["docs/acceptance/398/none.json"]}}}
             rows=capability_matrix(physical)
             self.assertEqual(next(r for r in rows if r["legacy_tool"]=="runtime_status")["status"],"GAP")
+        def test_partial_and_generic_errors_never_count_as_capability_proof(self):
+            self.assertFalse(checked_capability_outcome("market.snapshot",{},{
+                "status":"partial","data":{"market":{}}},"positive"))
+            self.assertFalse(checked_capability_outcome("research.status",{},{
+                "status":"rejected","reason_code":"REQUEST_FAILED","next_action":"inspect"},"negative"))
+            self.assertFalse(checked_capability_outcome("market.screen",{"universe":{"instrument_type":"SWAP"}},{
+                "status":"completed","data":{"rows":[],"total_rows":0}},"positive"))
+        def test_scenario_has_read_only_semantics_not_exchange_margin_proof(self):
+            scenario={"status":"completed","data":{
+                "schema":"okx.portfolio.scenario/v1","execution":"virtual_read_only",
+                "exchange_post":False,"venue_margin_verified":False,
+                "net_stress_pnl_usd":"-1"}}
+            self.assertTrue(checked_capability_outcome("portfolio.scenario",{},scenario,"positive"))
+            scenario["data"]["exchange_post"]=True
+            self.assertFalse(checked_capability_outcome("portfolio.scenario",{},scenario,"positive"))
         def test_worker_claims_require_complete_named_pass_line(self):
             self.assertEqual(executed_tests("risk_concurrent_accounts_campaign_limit PASS\n"),[("risk_concurrent_accounts_campaign_limit","ok")])
             self.assertEqual(executed_tests("risk_concurrent_accounts_campaign_limit FAIL\n"),[("risk_concurrent_accounts_campaign_limit","FAILED")])
