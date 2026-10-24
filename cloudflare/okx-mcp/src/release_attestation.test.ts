@@ -53,10 +53,20 @@ const headerProof:typeof fetch=(async(input,init)=>{
 }) as typeof fetch;
 fail((await attestRuntimeRelease(live,tree,now,headerProof)).verified===true,
  'GitHub User-Agent and independent receipt verified');
-fail((await attestRuntimeRelease(live,tree,now,response([],403))).reason_code==='CONTROL_RECEIPT_GITHUB_DENIED',
- 'GitHub permission/identity failure blocked');
+fail((await attestRuntimeRelease(live,tree,now,response([],401))).reason_code==='CONTROL_RECEIPT_GITHUB_UNAUTHORIZED',
+ 'HTTP 401 cannot be misreported as HTTP 403 or a rate limit');
+fail((await attestRuntimeRelease(live,tree,now,response([],403))).reason_code==='CONTROL_RECEIPT_GITHUB_403_UNCLASSIFIED',
+ 'HTTP 403 without rate-limit headers is not proof of permission denial');
+const rateResponse=(status:number,headers:Record<string,string>):typeof fetch=>
+ (async()=>Response.json([],{status,headers})) as typeof fetch;
+fail((await attestRuntimeRelease(live,tree,now,rateResponse(403,{'x-ratelimit-remaining':'0',
+ 'x-ratelimit-reset':'1792850360'}))).reason_code==='CONTROL_RECEIPT_GITHUB_RATE_LIMITED',
+ 'HTTP 403 with exhausted primary budget is a rate limit');
+fail((await attestRuntimeRelease(live,tree,now,rateResponse(403,{'x-ratelimit-remaining':'55',
+ 'retry-after':'60'}))).reason_code==='CONTROL_RECEIPT_GITHUB_RATE_LIMITED',
+ 'HTTP 403 with secondary retry-after is a rate limit');
 fail((await attestRuntimeRelease(live,tree,now,response([],429))).reason_code==='CONTROL_RECEIPT_GITHUB_RATE_LIMITED',
- 'GitHub rate-limit failure blocked');
+ 'HTTP 429 is a rate limit');
 fail((await reason(Array.from({length:100},()=>comment)))==='CONTROL_RECEIPT_PAGE_UNBOUNDED','unbounded issue window fails closed');
 const newer={...comment,id:1236,body:JSON.stringify({...receipt,details:{...receipt.details,agent_pid:999}})};
 fail((await reason([comment,newer]))==='LIVE_AGENT_IDENTITY_MISMATCH','never select older matching status over latest');
