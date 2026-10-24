@@ -12,6 +12,8 @@ fail(!validTool('portfolio',{...summary,action:'history',raw_rpc:'forbidden'}),'
 const marketScreen=payloadFixtures.find(x=>x.tool==='market'&&x.action==='screen')!.positive;
 const {instruments:unused,...withoutList}=marketScreen;
 fail(validTool('market',{...withoutList,universe:{instrument_type:'SWAP'}}),'market universe is a strict schema');
+fail(!validTool('market',{...withoutList,fields:[],universe:{instrument_type:'SWAP'}}),'empty market fields rejected before native dispatch');
+fail(!validTool('market',{...marketScreen,fields:[]}), 'explicit market screen requires at least one operator');
 fail(!validTool('market',{...marketScreen,universe:{instrument_type:'SWAP'}}),'ambiguous universe rejected');
 fail(!validTool('market',{...withoutList,action:'compare',universe:{instrument_type:'SWAP'}}),'compare requires explicit instruments');
 fail(validTool('market',{...withoutList,universe:{instrument_type:'SWAP',reference_generation:'generation-a',after_instrument:'BTC-USDT-SWAP'}}),'generation-fenced native market universe wire');
