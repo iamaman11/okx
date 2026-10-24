@@ -158,6 +158,33 @@ impl RateBudget {
         Self::default()
     }
 
+    /// Read-only analytics may wait for the SAME native rate-domain capacity.
+    /// No HTTP attempt is sent during the wait; exchange responses are never retried.
+    /// This is opt-in and does not change private/trading request admission.
+    pub async fn admit_wait(
+        &self,
+        plan: &RateRequestPlan,
+        max_wait: Duration,
+    ) -> Result<(), Box<RateThrottleEvidence>> {
+        let started = Instant::now();
+        loop {
+            match self.admit(plan) {
+                Ok(()) => return Ok(()),
+                Err(e) => {
+                    if e.source != RateThrottleSource::LocalBudget || e.request_sent {
+                        return Err(e);
+                    }
+                    let remaining = max_wait.saturating_sub(started.elapsed());
+                    let delay = Duration::from_millis(e.local_defer_ms);
+                    if delay.is_zero() || delay > remaining {
+                        return Err(e);
+                    }
+                    tokio::time::sleep(delay).await;
+                }
+            }
+        }
+    }
+
     pub fn public_rest_plan(&self, path: &str, params: &[(&str, String)]) -> RateRequestPlan {
         let (max_requests, window_ms, scope) = public_rest_policy(path, params);
         RateRequestPlan {
@@ -576,6 +603,26 @@ fn param<'a>(params: &'a [(&str, String)], key: &str) -> Option<&'a str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn queued_public_read_respects_same_budget_and_waits_without_sending() {
+        let budget = RateBudget::new();
+        let plan = budget.public_rest_plan("/api/v5/market/history-candles", &[]);
+        for _ in 0..10 {
+            budget.admit(&plan).expect("within documented venue budget");
+        }
+        let deferred = budget.admit_wait(&plan, Duration::ZERO).await.unwrap_err();
+        assert_eq!(deferred.source, RateThrottleSource::LocalBudget);
+        assert!(!deferred.request_sent);
+        assert_eq!(deferred.domain.local_max_requests, 10);
+        assert_eq!(deferred.domain.local_window_ms, 2_000);
+        let started = Instant::now();
+        budget
+            .admit_wait(&plan, Duration::from_secs(4))
+            .await
+            .unwrap();
+        assert!(started.elapsed() >= Duration::from_millis(1_500));
+    }
 
     #[test]
     fn rest_endpoints_are_bounded_in_distinct_named_domains() {

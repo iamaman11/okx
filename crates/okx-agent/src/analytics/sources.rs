@@ -28,6 +28,7 @@ impl Sources {
         ms: u64,
         start: u64,
         end: u64,
+        queued: bool,
     ) -> Result<Arc<Vec<Bar>>, String> {
         let bar = timeframe(ms)?;
         let now = chrono::Utc::now().timestamp_millis().max(0) as u64;
@@ -51,11 +52,16 @@ impl Sources {
                 let mut rows = std::collections::BTreeMap::new();
                 let mut cursor = end.to_string();
                 loop {
-                    let page = self
-                        .bootstrap
-                        .research_candles_page(symbol, bar, Some(&cursor), None, 100)
-                        .await
-                        .map_err(|e| e.to_string())?;
+                    let page = if queued {
+                        self.bootstrap
+                            .analytics_candles_page(symbol, bar, Some(&cursor), None, 100)
+                            .await
+                    } else {
+                        self.bootstrap
+                            .research_candles_page(symbol, bar, Some(&cursor), None, 100)
+                            .await
+                    }
+                    .map_err(|e| e.to_string())?;
                     if page.rows.is_empty() {
                         break;
                     }

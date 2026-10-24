@@ -115,8 +115,42 @@ impl OkxPublicClient {
     where
         T: DeserializeOwned,
     {
+        self.public_get_captured_with_admission(path, params, None)
+            .await
+    }
+
+    /// Only bounded analytics history scans opt into queued public admission.
+    /// Existing regular reads, all private reads and every trading action stay fail-fast.
+    pub(crate) async fn public_get_captured_queued<T>(
+        &self,
+        path: &str,
+        params: &[(&str, String)],
+    ) -> Result<CapturedPublicRows<T>, OkxError>
+    where
+        T: DeserializeOwned,
+    {
+        self.public_get_captured_with_admission(path, params, Some(Duration::from_secs(15)))
+            .await
+    }
+
+    async fn public_get_captured_with_admission<T>(
+        &self,
+        path: &str,
+        params: &[(&str, String)],
+        queue_timeout: Option<Duration>,
+    ) -> Result<CapturedPublicRows<T>, OkxError>
+    where
+        T: DeserializeOwned,
+    {
         let plan = self.rate_budget.public_rest_plan(path, params);
-        admit(&self.rate_budget, &plan)?;
+        if let Some(timeout) = queue_timeout {
+            self.rate_budget
+                .admit_wait(&plan, timeout)
+                .await
+                .map_err(|evidence| OkxError::RateLimited { evidence })?;
+        } else {
+            admit(&self.rate_budget, &plan)?;
+        }
 
         let request_path = request_path_with_query(path, params);
         let url = format!("{}{}", self.environment.rest_base_url(), request_path);
@@ -125,7 +159,6 @@ impl OkxPublicClient {
         if self.environment.demo {
             request = request.header("x-simulated-trading", "1");
         }
-
         let (envelope, raw_body) =
             decode_envelope_captured(request.send().await?, &self.rate_budget, &plan).await?;
         if envelope.code != "0" {

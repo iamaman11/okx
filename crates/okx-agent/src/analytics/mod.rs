@@ -321,7 +321,7 @@ impl AnalyticsService {
                 for symbol in instruments {
                     let result = self
                         .sources
-                        .candles(&symbol, timeframe_ms, start_ms, end_ms)
+                        .candles(&symbol, timeframe_ms, start_ms, end_ms, false)
                         .await;
                     match result {
                         Ok(bars) => {
@@ -705,7 +705,7 @@ impl AnalyticsService {
         if matches!(mode, ResearchDataMode::HistoricalObserved) {
             return Err("HISTORICAL_RULES_AND_FEES_UNAVAILABLE".into());
         }
-        let mut bars = tokio::select! {loaded=self.sources.candles(&instruments[0],ms,start,end)=>loaded?,_=executor::cancelled(cancel.clone())=>return Err("CANCELLED".into())};
+        let mut bars = tokio::select! {loaded=self.sources.candles(&instruments[0],ms,start,end,false)=>loaded?,_=executor::cancelled(cancel.clone())=>return Err("CANCELLED".into())};
         let expected_start = start.div_ceil(ms).saturating_mul(ms);
         let expected_end = end / ms * ms;
         if bars.first().is_none_or(|b| b.time > expected_start)
@@ -961,7 +961,8 @@ impl AnalyticsService {
         let start = end.saturating_sub((limit as u64).saturating_mul(timeframe_ms));
         let bars = tokio::time::timeout(
             std::time::Duration::from_secs(10),
-            self.sources.candles(instrument, timeframe_ms, start, end),
+            self.sources
+                .candles(instrument, timeframe_ms, start, end, false),
         )
         .await
         .map_err(|_| "LIVE_SOURCE_DEADLINE")??;
