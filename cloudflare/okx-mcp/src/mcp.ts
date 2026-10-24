@@ -1,5 +1,4 @@
 import {PUBLIC_TOOLS,validTool} from './execution_tools.js';
-import {attestRuntimeRelease} from './release_attestation.js';
 import {dispatchRuntime,type Env,isObject,type Json,jsonRpc,jsonRpcError,MAX_BODY_BYTES,MCP_PROTOCOL_VERSION,MCP_SERVER_VERSION,TOOL_CONTRACT_VERSION,requestId,runtimeFetch,toolResult as baseToolResult,sha256Hex,transportFailure} from './shared.js';
 const NORMAL_RESULT_BYTES=12_288;
 function hasOnlyKeys(v:Record<string,unknown>,keys:string[]){return Object.keys(v).every(k=>keys.includes(k));}
@@ -171,7 +170,7 @@ export const mcpApi={async fetch(request:Request,env:Env,ctx:any):Promise<Respon
       if(name==='diagnostics'&&args.action==='runtime'){
         // The Durable Object owns the authenticated transport session. Query
         // it directly; never synthesize readiness from a cached Agent reply.
-        const observed=await runtimeFetch(env,'/status?probe=1');
+        const observed=await runtimeFetch(env,'/status?probe=1&attest=1');
         if(!isObject(observed)||observed.schema!=='okx.direct-transport.status/v1'||
           typeof observed.connected!=='boolean'||typeof observed.session_fresh!=='boolean'||
           !['PASS','STALE','OFFLINE'].includes(String(observed.status))){
@@ -180,7 +179,27 @@ export const mcpApi={async fetch(request:Request,env:Env,ctx:any):Promise<Respon
             next_action:'inspect_diagnostics'}));
         }
         const fresh=observed.status==='PASS'&&observed.connected===true&&observed.session_fresh===true;
-        const releaseAttestation=await attestRuntimeRelease(observed,env.RELEASE_SOURCE_TREE);
+        // Independent CONTROL evidence is owned and bound to the live session by
+        // the existing Durable Object, not synthesized by a Worker reply.
+        const proof=observed.release_attestation;
+        const validProof=isObject(proof)&&(
+          (proof.verified===true&&proof.reason_code===null&&
+           typeof proof.source_tree==='string'&&typeof proof.agent_binary_sha256==='string'&&
+           typeof proof.artifact_id==='number'&&typeof proof.control_receipt_url==='string')||
+          (proof.verified===false&&typeof proof.reason_code==='string'));
+        // Whitelist typed JSON scalars; never expose an arbitrary DO object.
+        const p=isObject(proof)?proof:{};
+        const releaseAttestation=validProof?{
+          verified:p.verified===true,
+          reason_code:typeof p.reason_code==='string'?p.reason_code:null,
+          source_tree:typeof p.source_tree==='string'?p.source_tree:null,
+          agent_binary_sha256:typeof p.agent_binary_sha256==='string'?p.agent_binary_sha256:null,
+          artifact_id:typeof p.artifact_id==='number'&&Number.isSafeInteger(p.artifact_id)?p.artifact_id:null,
+          control_observed_at:typeof p.control_observed_at==='string'?p.control_observed_at:null,
+          control_receipt_url:typeof p.control_receipt_url==='string'?p.control_receipt_url:null,
+        }:{verified:false,reason_code:'RELEASE_ATTESTATION_UNAVAILABLE',
+           source_tree:null,agent_binary_sha256:null,artifact_id:null,
+           control_observed_at:null,control_receipt_url:null};
         return jsonRpc(id,toolResult({status:fresh?'completed':'partial',
           data:{schema:'okx.runtime-status/v1',
             worker_version:MCP_SERVER_VERSION,tool_contract:TOOL_CONTRACT_VERSION,

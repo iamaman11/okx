@@ -1,4 +1,4 @@
-import {attestRuntimeRelease} from './release_attestation.js';
+import {attestRuntimeRelease,releaseSessionIdentity,cachedSessionAttestation} from './release_attestation.js';
 const fail=(value:boolean,label:string)=>{if(!value)throw Error(label);};
 const tree='a'.repeat(40), hash='b'.repeat(64), now=1_792_850_000_000;
 const live={schema:'okx.direct-transport.status/v1',status:'PASS',connected:true,session_fresh:true,
@@ -60,4 +60,23 @@ fail((await attestRuntimeRelease(live,tree,now,response([],429))).reason_code===
 fail((await reason(Array.from({length:100},()=>comment)))==='CONTROL_RECEIPT_PAGE_UNBOUNDED','unbounded issue window fails closed');
 const newer={...comment,id:1236,body:JSON.stringify({...receipt,details:{...receipt.details,agent_pid:999}})};
 fail((await reason([comment,newer]))==='LIVE_AGENT_IDENTITY_MISMATCH','never select older matching status over latest');
+// Persisted owner receipt remains valid only for the unchanged authenticated
+// session. A new generation, PID, executable, installation or source tree cannot
+// inherit prior acceptance. No additional GitHub fetch is needed within a proven
+// live generation even when the original five-minute receipt becomes old.
+const sessionIdentity=releaseSessionIdentity(live,tree);
+fail(typeof sessionIdentity==='string','WSS identity must be canonical');
+const persisted={schema:'okx.runtime-session-attestation/v1',identity:sessionIdentity,proof:ok};
+fail(cachedSessionAttestation(persisted,live,tree)?.verified===true,'unchanged live session reuses owner proof');
+fail(cachedSessionAttestation(persisted,{...live,connection_generation:16},tree)===null,'new generation never inherits proof');
+fail(cachedSessionAttestation(persisted,{...live,connected_at_ms:now-9_000},tree)===null,'new connection timestamp never inherits proof');
+fail(cachedSessionAttestation(persisted,{...live,agent_pid:3217},tree)===null,'different PID never inherits proof');
+fail(cachedSessionAttestation(persisted,{...live,agent_binary_sha256:'d'.repeat(64)},tree)===null,'different executable never inherits proof');
+fail(cachedSessionAttestation(persisted,{...live,installation_id:'other-installed-engine'},tree)===null,'different installation never inherits proof');
+fail(cachedSessionAttestation(persisted,live,'c'.repeat(40))===null,'new release tree requires new owner receipt');
+fail(cachedSessionAttestation(persisted,{...live,session_fresh:false},tree)===null,'stale WSS cannot reuse proof');
+fail(cachedSessionAttestation({...persisted,proof:{...ok,verified:false}},live,tree)===null,'negative receipts cannot be cached as success');
+fail(cachedSessionAttestation({...persisted,proof:{...ok,artifact_id:0}},live,tree)===null,'malformed artifact cannot be accepted');
+console.log('generation_bound_release_attestation_positive_negative PASS');
+
 console.log('independent_release_attestation_positive_negative PASS');

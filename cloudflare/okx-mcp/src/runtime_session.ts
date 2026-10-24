@@ -2,6 +2,7 @@ import { executionProfilePermitsOperation, isExecutionMutation } from "./executi
 import { initializeGovernance, setAccountLimits, governanceRequest, lowerCampaignLimit, enrollObservedAccount, stopNewRealRisk, setAccountPause, GOVERNANCE_STORAGE_KEY } from "./account_governance_store.js";
 import {validGovernance,accessEnabled,validLimits} from "./account_governance.js";
 import { handleNativeRiskCommand } from "./risk_authority.js";
+import {attestRuntimeRelease,cachedSessionAttestation,releaseSessionIdentity,type ReleaseAttestation} from "./release_attestation.js";
 import {
   ACK_DEADLINE_MS,
   type Env,
@@ -26,6 +27,7 @@ export class RuntimeSession {
   private pending = new Map<string, Pending>();
   private inflight = 0;
   private activeRequests=new Set<string>();
+  private attesting:{identity:string,promise:Promise<ReleaseAttestation>}|null=null;
 
   constructor(state: any, env: Env) {
     this.state = state;
@@ -54,7 +56,9 @@ export class RuntimeSession {
       return this.acceptRuntime(request);
     }
     if (url.pathname === "/status") {
-      return Response.json(await this.status(url.searchParams.get("probe") === "1"));
+      const observed=await this.status(url.searchParams.get("probe") === "1");
+      if(url.searchParams.get("attest")!=="1")return Response.json(observed);
+      return Response.json({...observed,release_attestation:await this.attestedRelease(observed)});
     }
     if(url.pathname==="/account-governance/stop"&&request.method==="POST"){
       let raw:any;try{raw=await request.json();}catch{return Response.json({reason:"INVALID_STOP_REQUEST"},{status:400});}
@@ -142,6 +146,8 @@ export class RuntimeSession {
 
     const generation = Number(await this.state.storage.get("generation") ?? 0) + 1;
     await this.state.storage.put("generation", generation);
+    // A replacement connection invalidates the earlier native owner proof.
+    await this.state.storage.delete("release_session_attestation");
 
     const pair = new (globalThis as any).WebSocketPair();
     const client = pair[0] as WebSocket;
@@ -402,7 +408,38 @@ export class RuntimeSession {
     }
   }
 
-  private async status(probe: boolean): Promise<Json> {
+  private async attestedRelease(observed:Record<string,Json>):Promise<ReleaseAttestation>{
+    const identity=releaseSessionIdentity(observed,this.env.RELEASE_SOURCE_TREE);
+    if(!identity)return attestRuntimeRelease(observed,this.env.RELEASE_SOURCE_TREE);
+    const previous:unknown=await this.state.storage.get("release_session_attestation");
+    const accepted=cachedSessionAttestation(previous,observed,this.env.RELEASE_SOURCE_TREE);
+    if(accepted)return accepted;
+    if(this.attesting?.identity===identity)return this.attesting.promise;
+    // Fresh independent owner proof once per exact live WSS generation.
+    // Continued socket freshness and immutable identity keep that proof valid
+    // without burning GitHub rate limits on every monitoring request.
+    const promise=(async():Promise<ReleaseAttestation>=>{
+      const proof=await attestRuntimeRelease(observed,this.env.RELEASE_SOURCE_TREE);
+      if(!proof.verified)return proof;
+      const live=this.activeSocket()?.attachment;
+      if(!live||live.generation!==observed.connection_generation||
+         live.connectedAtMs!==observed.connected_at_ms||
+         live.agentPid!==observed.agent_pid||
+         live.agentBinarySha256!==observed.agent_binary_sha256||
+         live.installationId!==observed.installation_id)
+        return {verified:false,reason_code:"LIVE_RELEASE_IDENTITY_CHANGED",source_tree:null,
+          agent_binary_sha256:null,artifact_id:null};
+      await this.state.storage.put("release_session_attestation",{
+        schema:"okx.runtime-session-attestation/v1",identity,proof,
+      });
+      return proof;
+    })();
+    this.attesting={identity,promise};
+    try{return await promise;}
+    finally{if(this.attesting?.promise===promise)this.attesting=null;}
+  }
+
+  private async status(probe: boolean): Promise<Record<string,Json>> {
     const active = this.activeSocket();
     if (!active) {
       return {
