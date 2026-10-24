@@ -136,6 +136,23 @@ impl PublicWsHandle {
         )
     }
 
+    pub async fn risk_fresh_snapshot(
+        &self,
+        instrument_id: &str,
+        now_ms: u64,
+        price_max_age_ms: u64,
+        context_max_age_ms: u64,
+        source_received_at: impl Into<String>,
+    ) -> Result<LiveMarketSnapshot, PublicRuntimeError> {
+        self.state.read().await.risk_fresh_snapshot(
+            instrument_id,
+            now_ms,
+            price_max_age_ms,
+            context_max_age_ms,
+            source_received_at,
+        )
+    }
+
     pub async fn fresh_snapshot(
         &self,
         instrument_id: &str,
