@@ -121,8 +121,8 @@ async fn execute(
             serde_json::to_value(c).map_err(|_| "SERIALIZATION_FAILED".into())
         }
         AgentOperation::Market { request } => {
-            let mut resolved = request.clone();
             let mut universe_page = None;
+            let mut resolved_instruments = None;
             if let Some(universe) = &request.universe {
                 let reference = ctx.public_ws.reference_snapshot().await;
                 if universe
@@ -150,11 +150,23 @@ async fn execute(
                 names.sort_unstable();
                 names.dedup();
                 let universe_size = names.len();
-                if let Some(after) = &universe.after_instrument {
-                    names.retain(|name| name > after);
+                if universe.rank_globally && names.len() > 512 {
+                    return Err("GLOBAL_RANK_UNIVERSE_LIMIT:512".into());
                 }
-                let has_more = names.len() > usize::from(universe.limit);
-                names.truncate(usize::from(universe.limit));
+                if !universe.rank_globally {
+                    if let Some(after) = &universe.after_instrument {
+                        names.retain(|name| name > after);
+                    }
+                    names.truncate(usize::from(universe.limit).saturating_add(1));
+                }
+                let has_more = if universe.rank_globally {
+                    names.len() > usize::from(request.limit)
+                } else {
+                    names.len() > usize::from(universe.limit)
+                };
+                if !universe.rank_globally {
+                    names.truncate(usize::from(universe.limit));
+                }
                 if names.is_empty() {
                     return Err("UNIVERSE_PAGE_EMPTY".into());
                 }
@@ -163,16 +175,18 @@ async fn execute(
                     "source":"venue_reference_registry",
                     "reference_generation":reference.generation().as_str(),
                     "reference_received_at":reference.source_received_at(),
-                    "global_ranking":false,"scope":"bounded_market_page",
+                    "global_ranking":universe.rank_globally,
+                    "scope":if universe.rank_globally {"complete_venue_universe"} else {"bounded_market_page"},
                     "has_more":has_more,
-                    "next_after_instrument":if has_more {names.last().cloned()}else{None},
+                    "next_after_instrument":if has_more && !universe.rank_globally {names.last().cloned()}else{None},
                     "universe_size":universe_size,
-                    "page_count":names.len()
+                    "page_count":if universe.rank_globally {names.len().min(usize::from(request.limit))}else{names.len()}
                 }));
-                resolved.instruments = names;
-                resolved.universe = None;
+                resolved_instruments = Some(names);
             }
-            ctx.analytics.market(resolved, universe_page).await
+            ctx.analytics
+                .market(request.clone(), universe_page, resolved_instruments)
+                .await
         }
         AgentOperation::MarketCapabilities => Ok(ctx.analytics.market_capabilities()),
         AgentOperation::MarketMicrostructure {

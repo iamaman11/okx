@@ -738,6 +738,9 @@
                     "type": "string",
                     "minLength": 1,
                     "maxLength": 128
+                  },
+                  "rank_globally": {
+                    "type": "boolean"
                   }
                 },
                 "required": [

@@ -27,6 +27,7 @@ impl AnalyticsService {
         &self,
         request: &MarketRequest,
         cancel: Arc<std::sync::atomic::AtomicBool>,
+        global_rank: bool,
     ) -> Result<(Vec<Value>, Option<Value>), String> {
         let plan = planner::AnalysisPlan::build(&request.fields, request.start_ms, request.end_ms)?;
         let need_candles = plan.sources.contains("candles");
@@ -125,6 +126,21 @@ impl AnalyticsService {
             // No immutable partial artifact: Jobs::enqueue requeues this same request.
             return Err("OKX rate/backpressure defer: MARKET_SOURCE_RETRYABLE".into());
         }
+        if global_rank
+            && need_candles
+            && loaded.iter().any(|row| {
+                !row.bars.as_ref().is_ok_and(|bars| {
+                    complete_rank_history(
+                        bars,
+                        request.start_ms,
+                        request.end_ms,
+                        request.timeframe_ms,
+                    )
+                })
+            })
+        {
+            return Err("GLOBAL_RANK_CANDLE_COVERAGE_INCOMPLETE".into());
+        }
         let request = request.clone();
         self.cpu
             .run(cancel, move |cancel| {
@@ -152,6 +168,11 @@ impl AnalyticsService {
                     }
                     rows.push(compute_row(row, &request, peer.as_deref())?);
                 }
+                if global_rank {
+                    // Never drop deficient candidates via a metric filter and
+                    // pretend the surviving rows prove a full-venue ranking.
+                    sort_market_rows(&mut rows, request.sort.as_ref(), true)?;
+                }
                 for filter in &request.filters {
                     rows.retain(|row| {
                         row["metrics"][&filter.field].as_f64().is_some_and(|v| {
@@ -160,23 +181,62 @@ impl AnalyticsService {
                         })
                     });
                 }
-                if let Some(sort) = &request.sort {
-                    rows.sort_by(|a, b| {
-                        let order = a["metrics"][&sort.field]
-                            .as_f64()
-                            .partial_cmp(&b["metrics"][&sort.field].as_f64())
-                            .unwrap_or(std::cmp::Ordering::Equal);
-                        if sort.descending {
-                            order.reverse()
-                        } else {
-                            order
-                        }
-                    });
+                if !global_rank {
+                    sort_market_rows(&mut rows, request.sort.as_ref(), false)?;
                 }
                 Ok((rows, matrix))
             })
             .await
     }
+}
+/// Full-universe scores require identical *closed* time coverage for all candidates.
+fn complete_rank_history(bars: &[Bar], start: u64, end: u64, step: u64) -> bool {
+    step > 0
+        && end > start
+        && (end - start).is_multiple_of(step)
+        && bars.len() as u64 == (end - start) / step
+        && bars.first().is_some_and(|bar| bar.time == start)
+        && bars
+            .last()
+            .is_some_and(|bar| bar.time.checked_add(step) == Some(end))
+        && bars
+            .windows(2)
+            .all(|pair| pair[0].time.checked_add(step) == Some(pair[1].time))
+}
+/// Rank is globally valid only when every candidate has complete evidence.
+fn sort_market_rows(
+    rows: &mut [Value],
+    sort: Option<&MarketSort>,
+    global_rank: bool,
+) -> Result<(), String> {
+    if global_rank
+        && (sort.is_none()
+            || rows.iter().any(|row| {
+                row["quality"] != "complete"
+                    || sort.is_some_and(|s| {
+                        row["metrics"][&s.field]
+                            .as_f64()
+                            .is_none_or(|n| !n.is_finite())
+                    })
+            }))
+    {
+        return Err("GLOBAL_RANK_SOURCE_INCOMPLETE".into());
+    }
+    if let Some(sort) = sort {
+        rows.sort_by(|a, b| {
+            let order = a["metrics"][&sort.field]
+                .as_f64()
+                .partial_cmp(&b["metrics"][&sort.field].as_f64())
+                .unwrap_or(std::cmp::Ordering::Equal);
+            let primary = if sort.descending {
+                order.reverse()
+            } else {
+                order
+            };
+            primary.then_with(|| a["instrument"].as_str().cmp(&b["instrument"].as_str()))
+        });
+    }
+    Ok(())
 }
 fn compute_row(
     row: Loaded,
@@ -583,6 +643,58 @@ mod performance_fixtures {
         println!(
             "ANALYTICS_PERF_JSON:{}",
             json!({"screen_8x100":{"build":if cfg!(debug_assertions){"debug"}else{"release"},"stage":"native fixture compute/projection/serialization; HTTP and physical MCP separate","warmups":5,"measurements":30,"p50_ms":times[14],"p95_ms":times[28],"max_ms":times[29],"summary_bytes":bytes}})
+        );
+    }
+}
+
+#[cfg(test)]
+mod global_rank_tests {
+    use super::*;
+    #[test]
+    fn global_rank_rejects_first_last_and_interior_candle_gaps() {
+        let bar = |t| Bar {
+            time: t,
+            open: 1.0,
+            high: 1.0,
+            low: 1.0,
+            close: 1.0,
+            volume: 1.0,
+            funding_rate: None,
+        };
+        let full = vec![bar(0), bar(900_000), bar(1_800_000)];
+        assert!(complete_rank_history(&full, 0, 2_700_000, 900_000));
+        assert!(!complete_rank_history(&full[1..], 0, 2_700_000, 900_000));
+        assert!(!complete_rank_history(&full[..2], 0, 2_700_000, 900_000));
+        assert!(!complete_rank_history(
+            &[bar(0), bar(1_800_000)],
+            0,
+            2_700_000,
+            900_000
+        ));
+    }
+    #[test]
+    fn sorted_global_rank_has_stable_ties_and_no_page_local_shortcut() {
+        let mut rows = vec![
+            json!({"instrument":"AA","metrics":{"returns":0.05},"quality":"complete"}),
+            json!({"instrument":"ZZ","metrics":{"returns":0.09},"quality":"complete"}),
+            json!({"instrument":"BB","metrics":{"returns":0.09},"quality":"complete"}),
+            json!({"instrument":"CC","metrics":{"returns":-0.02},"quality":"complete"}),
+        ];
+        let sort = MarketSort {
+            field: "returns".into(),
+            descending: true,
+        };
+        sort_market_rows(&mut rows, Some(&sort), true).unwrap();
+        assert_eq!(
+            rows.iter()
+                .map(|r| r["instrument"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["BB", "ZZ", "AA", "CC"]
+        );
+        rows[3]["quality"] = json!("partial");
+        assert_eq!(
+            sort_market_rows(&mut rows, Some(&sort), true).unwrap_err(),
+            "GLOBAL_RANK_SOURCE_INCOMPLETE"
         );
     }
 }

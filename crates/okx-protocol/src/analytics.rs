@@ -27,6 +27,9 @@ pub struct MarketRequest {
 #[serde(deny_unknown_fields)]
 pub struct MarketUniverse {
     pub instrument_type: String,
+    /// Opt-in: sort all eligible venue instruments, never just a name page.
+    #[serde(default)]
+    pub rank_globally: bool,
     #[serde(default)]
     pub settle_currency: Option<String>,
     #[serde(default)]
@@ -49,6 +52,7 @@ impl MarketUniverse {
                     && s.bytes()
                         .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
             })
+            && (!self.rank_globally || self.after_instrument.is_none())
             && self.after_instrument.as_ref().is_none_or(|s| {
                 !s.is_empty()
                     && s.len() <= 64
@@ -183,6 +187,11 @@ impl MarketRequest {
                 && self.instruments.is_empty()
                 && self.universe.as_ref().is_some_and(MarketUniverse::valid)))
             && self.instruments.len() <= 100
+            && self.universe.as_ref().is_none_or(|u| {
+                !u.rank_globally
+                    || (self.sort.is_some()
+                        && !self.fields.iter().any(|f| f == "pearson_correlation"))
+            })
             && self
                 .instruments
                 .iter()
@@ -385,6 +394,40 @@ mod batch_tests {
         wrong_generation["universe"]["reference_generation"] = serde_json::json!(" ");
         assert!(
             !serde_json::from_value::<MarketRequest>(wrong_generation)
+                .unwrap()
+                .valid()
+        );
+    }
+
+    #[test]
+    fn global_rank_is_opt_in_and_rejects_name_cursor_without_score_sort() {
+        let mut value = serde_json::json!({
+            "action":"screen","fields":["returns"],"timeframe_ms":900000,
+            "start_ms":900000,"end_ms":1800000,"limit":10,
+            "universe":{"instrument_type":"SWAP","rank_globally":true}
+        });
+        let r: MarketRequest = serde_json::from_value(value.clone()).unwrap();
+        assert!(!r.valid());
+        value["sort"] = serde_json::json!({"field":"returns","descending":true});
+        assert!(
+            serde_json::from_value::<MarketRequest>(value.clone())
+                .unwrap()
+                .valid()
+        );
+        value["universe"]["after_instrument"] = serde_json::json!("BTC-USDT-SWAP");
+        assert!(
+            !serde_json::from_value::<MarketRequest>(value.clone())
+                .unwrap()
+                .valid()
+        );
+        value["universe"]
+            .as_object_mut()
+            .unwrap()
+            .remove("after_instrument");
+        value["fields"] = serde_json::json!(["pearson_correlation"]);
+        value["sort"]["field"] = serde_json::json!("pearson_correlation");
+        assert!(
+            !serde_json::from_value::<MarketRequest>(value)
                 .unwrap()
                 .valid()
         );
