@@ -86,7 +86,7 @@ export async function attestRuntimeRelease(
  if(observed.schema!=='okx.direct-transport.status/v1'||observed.status!=='PASS'||
     observed.connected!==true||observed.session_fresh!==true||
     observed.runtime_id!=='windows-primary'||observed.runtime_profile!=='engine'||
-    !validPositive(observed.connection_generation)||!validPositive(observed.agent_pid)||
+    !validPositive(observed.connection_generation)||!validPositive(observed.connected_at_ms)||!validPositive(observed.agent_pid)||
     !hex(observed.agent_binary_sha256,64)||
     typeof observed.installation_id!=='string'||observed.installation_id.length<8)
     return failure('LIVE_RELEASE_IDENTITY_UNAVAILABLE');
