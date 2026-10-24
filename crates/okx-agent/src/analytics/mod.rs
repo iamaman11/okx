@@ -42,7 +42,11 @@ impl AnalyticsService {
         service.apply_retention(chrono::Utc::now().timestamp_millis().max(0) as u64)?;
         Ok(service)
     }
-    pub async fn market(&self, request: MarketRequest) -> Result<Value, String> {
+    pub async fn market(
+        &self,
+        request: MarketRequest,
+        universe_page: Option<Value>,
+    ) -> Result<Value, String> {
         if !request.valid() {
             return Err("INVALID_MARKET_REQUEST".into());
         }
@@ -57,8 +61,9 @@ impl AnalyticsService {
         } else {
             0
         };
-        let hash = okx_research::canonical_sha256(&("market/398.1", &request, bucket))
-            .map_err(|e| e.to_string())?;
+        let hash =
+            okx_research::canonical_sha256(&("market/398.2", &request, &universe_page, bucket))
+                .map_err(|e| e.to_string())?;
         let hash = hash.strip_prefix("sha256:").unwrap_or(&hash).to_owned();
         let (job, new, cancel) = self
             .jobs
@@ -76,20 +81,17 @@ impl AnalyticsService {
                     })
                     .await;
             }
-            return Ok(json!(job));
+            return with_universe_page(json!(job), universe_page.as_ref());
         }
+        let queued_page = universe_page.clone();
         let this = self.clone();
         let mut task = tokio::spawn(async move {
             this.jobs
                 .update_async(hash.clone(), jobs::State::Running, None, None)
                 .await?;
             let mut outcome = this.market_execute(request, cancel.clone()).await;
-            if let Ok(value) = &mut outcome {
-                value
-                    .as_object_mut()
-                    .ok_or("INVALID_MARKET_RESULT")?
-                    .insert("job_id".into(), json!(hash));
-            }
+            outcome = outcome
+                .and_then(|value| market_result_with_context(value, &hash, universe_page.as_ref()));
             match &outcome {
                 Ok(value) => {
                     let store = this.artifacts.clone();
@@ -123,7 +125,7 @@ impl AnalyticsService {
         });
         match tokio::time::timeout(std::time::Duration::from_secs(2), &mut task).await {
             Ok(result) => result.map_err(|e| e.to_string())?,
-            Err(_) => Ok(json!(job)),
+            Err(_) => with_universe_page(json!(job), queued_page.as_ref()),
         }
     }
     async fn market_execute(
@@ -1021,9 +1023,9 @@ mod artifact_job_fixtures {
             filters: vec![],
             sort: None,
         };
-        let result = s.market(request.clone()).await.unwrap();
+        let result = s.market(request.clone(), None).await.unwrap();
         assert_eq!(result["returned_rows"], 1);
-        assert_eq!(s.market(request).await.unwrap(), result);
+        assert_eq!(s.market(request, None).await.unwrap(), result);
         let page = s
             .research(ResearchRequest::Result {
                 job_id: result["job_id"].as_str().unwrap().into(),
@@ -1249,6 +1251,67 @@ mod artifact_job_fixtures {
         );
         drop(reloaded);
         drop(s);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+fn with_universe_page(mut result: Value, page: Option<&Value>) -> Result<Value, String> {
+    if let Some(page) = page {
+        result
+            .as_object_mut()
+            .ok_or("INVALID_MARKET_RESULT")?
+            .insert("universe_page".into(), page.clone());
+    }
+    Ok(result)
+}
+
+fn market_result_with_context(
+    mut result: Value,
+    job_id: &str,
+    universe_page: Option<&Value>,
+) -> Result<Value, String> {
+    result
+        .as_object_mut()
+        .ok_or("INVALID_MARKET_RESULT")?
+        .insert("job_id".into(), json!(job_id));
+    with_universe_page(result, universe_page)
+}
+
+#[cfg(test)]
+mod universe_artifact_tests {
+    use super::*;
+    #[test]
+    fn market_universe_metadata_persisted_with_final_artifact_and_queue() {
+        let page = json!({
+            "reference_generation":"generation-a",
+            "next_after_instrument":"BTC-USDT-SWAP",
+            "has_more":true,
+            "global_ranking":false
+        });
+        let complete = market_result_with_context(
+            json!({"kind":"market","rows":[],"total_rows":0}),
+            "fixture-job",
+            Some(&page),
+        )
+        .unwrap();
+        assert_eq!(complete["universe_page"], page);
+        assert_eq!(complete["job_id"], "fixture-job");
+        let (root, service) = super::artifact_job_fixtures::service();
+        let artifact = service.artifacts.publish_evidence(&complete).unwrap().0;
+        let persisted: Value = service.artifacts.read_evidence_json(&artifact).unwrap();
+        assert_eq!(
+            persisted["universe_page"]["reference_generation"],
+            "generation-a"
+        );
+        assert_eq!(
+            persisted["universe_page"]["next_after_instrument"],
+            "BTC-USDT-SWAP"
+        );
+        assert_eq!(
+            with_universe_page(json!({"state":"queued"}), Some(&page)).unwrap()["universe_page"],
+            page
+        );
+        drop(service);
         std::fs::remove_dir_all(root).unwrap();
     }
 }

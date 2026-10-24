@@ -104,6 +104,9 @@ jobs:
           python3 scripts/check_product_contract.py --self-test
           python3 scripts/check_product_contract.py
 
+      - name: Verify fail-closed capability acceptance
+        run: python3 scripts/acceptance_product.py --self-test
+
 
   linux-rust:
     name: linux-rust

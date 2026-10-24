@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 #[serde(deny_unknown_fields)]
 pub struct MarketRequest {
     pub action: MarketAction,
+    #[serde(default)]
     pub instruments: Vec<String>,
     #[serde(default)]
     pub universe: Option<MarketUniverse>,
@@ -30,6 +31,8 @@ pub struct MarketUniverse {
     pub settle_currency: Option<String>,
     #[serde(default)]
     pub after_instrument: Option<String>,
+    #[serde(default)]
+    pub reference_generation: Option<String>,
     #[serde(default = "universe_page_limit")]
     pub limit: u16,
 }
@@ -51,6 +54,9 @@ impl MarketUniverse {
                     && s.len() <= 64
                     && s.bytes()
                         .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'-')
+            })
+            && self.reference_generation.as_ref().is_none_or(|s| {
+                !s.is_empty() && s.len() <= 128 && s.bytes().all(|b| b.is_ascii_graphic())
             })
     }
 }
@@ -343,6 +349,46 @@ fn valid_job(id: &str) -> bool {
 #[cfg(test)]
 mod batch_tests {
     use super::*;
+
+    #[test]
+    fn market_universe_only_wire_decodes_and_rejects_ambiguous_modes() {
+        let request = serde_json::json!({
+            "action":"screen", "universe":{"instrument_type":"SWAP","limit":50},
+            "fields":["return_pct"],"timeframe_ms":60000,
+            "start_ms":60000,"end_ms":180000,"limit":50
+        });
+        let parsed: MarketRequest = serde_json::from_value(request.clone()).unwrap();
+        assert!(parsed.instruments.is_empty());
+        assert!(parsed.valid());
+        let mut both = request.clone();
+        both["instruments"] = serde_json::json!(["BTC-USDT-SWAP"]);
+        assert!(
+            !serde_json::from_value::<MarketRequest>(both)
+                .unwrap()
+                .valid()
+        );
+        let mut neither = request.clone();
+        neither.as_object_mut().unwrap().remove("universe");
+        assert!(
+            !serde_json::from_value::<MarketRequest>(neither)
+                .unwrap()
+                .valid()
+        );
+        let mut compare = request.clone();
+        compare["action"] = serde_json::json!("compare");
+        assert!(
+            !serde_json::from_value::<MarketRequest>(compare)
+                .unwrap()
+                .valid()
+        );
+        let mut wrong_generation = request;
+        wrong_generation["universe"]["reference_generation"] = serde_json::json!(" ");
+        assert!(
+            !serde_json::from_value::<MarketRequest>(wrong_generation)
+                .unwrap()
+                .valid()
+        );
+    }
     #[test]
     fn research_capabilities_strict_read_only_wire() {
         let r: ResearchRequest = serde_json::from_str(r#"{"action":"capabilities"}"#).unwrap();

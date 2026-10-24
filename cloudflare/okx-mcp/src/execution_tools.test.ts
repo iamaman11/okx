@@ -14,6 +14,8 @@ const {instruments:unused,...withoutList}=marketScreen;
 fail(validTool('market',{...withoutList,universe:{instrument_type:'SWAP'}}),'market universe is a strict schema');
 fail(!validTool('market',{...marketScreen,universe:{instrument_type:'SWAP'}}),'ambiguous universe rejected');
 fail(!validTool('market',{...withoutList,action:'compare',universe:{instrument_type:'SWAP'}}),'compare requires explicit instruments');
+fail(validTool('market',{...withoutList,universe:{instrument_type:'SWAP',reference_generation:'generation-a',after_instrument:'BTC-USDT-SWAP'}}),'generation-fenced native market universe wire');
+fail(!validTool('market',{...withoutList,universe:{instrument_type:'SWAP',reference_generation:''}}),'empty generation rejected');
 const start=payloadFixtures.find(x=>x.tool==='strategies'&&x.action==='start')!.positive;
 fail(validTool('strategies',{...start,action:'stop'}),'strategy stop shares strict schema');
 fail(!validTool('strategies',{...start,action:'stop',raw_rpc:'forbidden'}),'strict stop rejects extra');
