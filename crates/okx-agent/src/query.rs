@@ -53,15 +53,23 @@ pub fn response(id: &str, result: Result<Value, String>) -> AgentResponse {
     };
     let (status, data, failure) = match result {
         Ok(v) => (AgentResponseStatus::Completed, Some(v), None),
-        Err(code) => (
-            AgentResponseStatus::Rejected,
-            None,
-            Some(AgentFailure {
-                message: code.clone(),
-                code,
-                retryable: false,
-            }),
-        ),
+        Err(code) => {
+            let retryable = crate::analytics::is_retryable_market_source_defer(&code);
+            let public_code = if retryable {
+                "MARKET_SOURCE_RETRYABLE".to_owned()
+            } else {
+                code
+            };
+            (
+                AgentResponseStatus::Rejected,
+                None,
+                Some(AgentFailure {
+                    message: public_code.clone(),
+                    code: public_code,
+                    retryable,
+                }),
+            )
+        },
     };
     AgentResponse {
         schema: AGENT_RESPONSE_SCHEMA_V1.into(),
@@ -357,6 +365,18 @@ fn book_sweep_vwap(
 #[cfg(test)]
 mod microstructure_test {
     use super::*;
+    #[test]
+    fn market_local_budget_failure_is_addressable_and_retryable() {
+        let r = response(
+            "market-defer",
+            Err("OKX rate/backpressure defer: MARKET_SOURCE_RETRYABLE".into()),
+        );
+        let failure = r.failure.unwrap();
+        assert_eq!(failure.code, "MARKET_SOURCE_RETRYABLE");
+        assert!(failure.retryable);
+        let fatal = response("market-fatal", Err("CANDLE_INTERIOR_GAP".into()));
+        assert_eq!(fatal.failure.unwrap().retryable, false);
+    }
     #[test]
     fn bounded_book_sweep_rejects_insufficient_depth() {
         let levels = vec![
