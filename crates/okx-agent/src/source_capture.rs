@@ -286,13 +286,15 @@ async fn capture_fills(
             },
         )
         .await
-        .map_err(|_| invalid(match partition {
-            "SPOT" => "SPOT_FILLS_SOURCE_UNAVAILABLE",
-            "SWAP" => "SWAP_FILLS_SOURCE_UNAVAILABLE",
-            "FUTURES" => "FUTURES_FILLS_SOURCE_UNAVAILABLE",
-            "OPTION" => "OPTION_FILLS_SOURCE_UNAVAILABLE",
-            _ => "FILL_HISTORY_SOURCE_UNAVAILABLE",
-        }))?;
+        .map_err(|_| {
+            invalid(match partition {
+                "SPOT" => "SPOT_FILLS_SOURCE_UNAVAILABLE",
+                "SWAP" => "SWAP_FILLS_SOURCE_UNAVAILABLE",
+                "FUTURES" => "FUTURES_FILLS_SOURCE_UNAVAILABLE",
+                "OPTION" => "OPTION_FILLS_SOURCE_UNAVAILABLE",
+                _ => "FILL_HISTORY_SOURCE_UNAVAILABLE",
+            })
+        })?;
     if ws.status().await.connection_generation != generation as u64 {
         return Err(invalid("SOURCE_GENERATION_CHANGED"));
     }
