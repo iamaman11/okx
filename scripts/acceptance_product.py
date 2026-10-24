@@ -17,8 +17,8 @@ REQUIRED={
     "F04":{"analytics::jobs::tests::transient_rate_defer_is_requeued_instead_of_cached_as_failed"},
     "F05":{"analytics::tests::grid_result_includes_selected_train_test_and_equity"},
     "F06":{"portfolio::tests::portfolio_before_t0_is_partial"},
-    "F07":{"trade_service::strategies::tests::decision_claim_creates_durable_intent_once"},
-    "F08":{"trade_service::strategies::tests::strategy_risk_budget_not_notional","analytics::jobs::tests::job_status_reads_bounded_rows_at_100k_jobs"},
+    "F07":{"account_store::tests::strategy_crash_pending_decision_to_intent","account_store::tests::strategy_policy_retry_keeps_immutable_lineage_and_one_intent"},
+    "F08":{"trade_service::strategies::budget_contract_tests::strategy_risk_budget_not_notional","analytics::jobs::tests::job_status_reads_bounded_rows_at_100k_jobs"},
 }
 
 # Required user workflows, not a count of public tools. Each capability is
@@ -42,6 +42,26 @@ CAPABILITY_ACTIONS={
     "executor_preflight":("trade.preflight",),
     "execution_action":("trade.preview","trade.execute","trade.status","trade.cancel","trade.close"),
 }
+
+# Only mock mutation scenarios may be evidenced through an actual fake venue.
+# This never promotes a fixture to physical Real trading acceptance.
+FAKE_VENUE_ACTIONS={
+    "accounts.connect","accounts.pause","accounts.resume","accounts.set_limits",
+    "strategies.create","strategies.update","strategies.start","strategies.stop",
+    "trade.execute","trade.cancel","trade.close",
+}
+def admissible_transport(route,proof,executed_tests):
+    transport=proof.get("transport")
+    if transport=="live_mcp":
+        return True
+    if transport!="fake_venue_fixture" or route not in FAKE_VENUE_ACTIONS:
+        return False
+    if proof.get("venue")!="fake" or type(proof.get("real_exchange_post_count")) is not int or proof["real_exchange_post_count"]!=0:
+        return False
+    native,worker=proof.get("native_test_name"),proof.get("worker_test_name")
+    return (isinstance(native,str) and isinstance(worker,str)
+        and native in executed_tests and worker in executed_tests
+        and "::" in native and "::" not in worker)
 
 def checked_capability_outcome(route, request, envelope, polarity):
     """Check observed business values; self-declared PASS cannot substitute for them."""
@@ -141,8 +161,9 @@ def checked_capability_outcome(route, request, envelope, polarity):
             return False
     return True
 
-def capability_matrix(physical=None):
+def capability_matrix(physical=None,executed_tests=None):
     physical=physical or {}
+    executed_tests=executed_tests or set()
     schema=json.loads((ROOT/"cloudflare/okx-mcp/contracts/tools.schema.json").read_text(encoding="utf-8-sig"))
     exposed=set()
     for tool in schema["tools"]:
@@ -191,7 +212,7 @@ def capability_matrix(physical=None):
                     or proof.get("worker_tree")!=worker_tree
                     or not isinstance(proof.get("observed_at_utc"),str)
                     or not proof.get("observed_at_utc")
-                    or proof.get("transport")!="live_mcp"):
+                    or not admissible_transport(route,proof,executed_tests)):
                     return False
                 envelope=response.get("structuredContent")
                 if not isinstance(envelope,dict):
@@ -310,7 +331,7 @@ def build(args):
     value["mcp"].update(physical.get("mcp",{}))
     value["release_hashes"]=physical.get("release_hashes",{})
     value["physical_evidence_location"]=None  # final exact release tag is unknown before F09
-    value["capabilities"]=capability_matrix(physical)
+    value["capabilities"]=capability_matrix(physical,{case["test_name"] for case in tests if case["result"]=="PASS"})
     value["CAPABILITY_PARITY"]="PASS" if all(
         row["status"]=="PRESERVED" for row in value["capabilities"]) else "BLOCKED"
     for key in ["INSTALLED_MATCHED","PHYSICAL_MULTI_ACCOUNT","REAL_CYCLE_ACCEPTED"]:value[key]=physical.get(key,{}).get("result","NOT_RUN")
@@ -334,6 +355,27 @@ def self_test():
         def test_unrelated_preserves_test_does_not_prove_central_risk(self):
             name="market_data::tests::ticker_preserves_exchange_decimal_text_exactly"
             self.assertFalse(any(name in names for names in REQUIRED.values()))
+
+        def test_fake_venue_fixture_requires_native_and_worker_proof(self):
+            case={"transport":"fake_venue_fixture","venue":"fake",
+                  "real_exchange_post_count":0,
+                  "native_test_name":"trade_service::execute::tests::duplicate_execute_one_post",
+                  "worker_test_name":"strict_action_fixtures"}
+            native,worker=case["native_test_name"],case["worker_test_name"]
+            self.assertFalse(admissible_transport("trade.execute",case,set()))
+            self.assertFalse(admissible_transport("trade.execute",case,{native}))
+            self.assertTrue(admissible_transport("trade.execute",case,{native,worker}))
+            self.assertFalse(admissible_transport("trade.preview",case,{native,worker}))
+            self.assertFalse(admissible_transport("market.snapshot",case,{native,worker}))
+            self.assertFalse(admissible_transport("trade.execute",{**case,"venue":"real"},{native,worker}))
+            self.assertFalse(admissible_transport("trade.execute",{**case,"real_exchange_post_count":1},{native,worker}))
+            self.assertFalse(admissible_transport("trade.execute",{**case,"real_exchange_post_count":False},{native,worker}))
+            self.assertTrue(admissible_transport("market.snapshot",{"transport":"live_mcp"},set()))
+        def test_f07_f08_required_names_are_explicitly_bound(self):
+            self.assertEqual(REQUIRED["F07"],{
+                "account_store::tests::strategy_crash_pending_decision_to_intent",
+                "account_store::tests::strategy_policy_retry_keeps_immutable_lineage_and_one_intent"})
+            self.assertIn("trade_service::strategies::budget_contract_tests::strategy_risk_budget_not_notional",REQUIRED["F08"])
         def test_capability_parity_is_fail_closed(self):
             rows=capability_matrix()
             self.assertEqual(len(rows),16)
