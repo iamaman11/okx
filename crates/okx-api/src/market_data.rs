@@ -547,12 +547,39 @@ impl MarketDataApi {
         before: Option<&str>,
         limit: u16,
     ) -> Result<CapturedPublicRows<PublicCandle>, OkxError> {
+        self.history_candles_page_captured_with_admission(
+            instrument_id, bar, after, before, limit, false,
+        ).await
+    }
+
+    /// Uses the same central public IP window, waiting only before source reads.
+    pub async fn history_candles_page_captured_queued(
+        &self,
+        instrument_id: &str,
+        bar: &str,
+        after: Option<&str>,
+        before: Option<&str>,
+        limit: u16,
+    ) -> Result<CapturedPublicRows<PublicCandle>, OkxError> {
+        self.history_candles_page_captured_with_admission(
+            instrument_id, bar, after, before, limit, true,
+        ).await
+    }
+
+    async fn history_candles_page_captured_with_admission(
+        &self,
+        instrument_id: &str,
+        bar: &str,
+        after: Option<&str>,
+        before: Option<&str>,
+        limit: u16,
+        queued: bool,
+    ) -> Result<CapturedPublicRows<PublicCandle>, OkxError> {
         if !(1..=100).contains(&limit) {
             return Err(OkxError::Response(
                 "history candle limit must be between 1 and 100".to_owned(),
             ));
         }
-
         let mut params = vec![("instId", instrument_id.to_owned())];
         if let Some(after) = after.filter(|value| !value.trim().is_empty()) {
             params.push(("after", after.to_owned()));
@@ -562,11 +589,13 @@ impl MarketDataApi {
         }
         params.push(("bar", bar.to_owned()));
         params.push(("limit", limit.to_string()));
-
-        self.client
-            .public_get_captured("/api/v5/market/history-candles", &params)
-            .await
+        if queued {
+            self.client.public_get_captured_queued("/api/v5/market/history-candles", &params).await
+        } else {
+            self.client.public_get_captured("/api/v5/market/history-candles", &params).await
+        }
     }
+
 }
 
 fn one<T>(mut rows: Vec<T>, label: &'static str) -> Result<T, OkxError> {

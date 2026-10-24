@@ -135,10 +135,39 @@ impl MarketBootstrapper {
         before: Option<&str>,
         limit: u16,
     ) -> Result<ResearchCandleCapture, MarketBootstrapError> {
-        let captured = self
-            .api
-            .history_candles_page_captured(instrument_id, bar, after, before, limit)
-            .await?;
+        self.capture_research_candles(instrument_id, bar, after, before, limit, false).await
+    }
+
+    /// Opt-in public source queue for bounded global analytics, never order execution.
+    pub async fn analytics_candles_page(
+        &self,
+        instrument_id: &str,
+        bar: &str,
+        after: Option<&str>,
+        before: Option<&str>,
+        limit: u16,
+    ) -> Result<ResearchCandleCapture, MarketBootstrapError> {
+        self.capture_research_candles(instrument_id, bar, after, before, limit, true).await
+    }
+
+    async fn capture_research_candles(
+        &self,
+        instrument_id: &str,
+        bar: &str,
+        after: Option<&str>,
+        before: Option<&str>,
+        limit: u16,
+        queued: bool,
+    ) -> Result<ResearchCandleCapture, MarketBootstrapError> {
+        let captured = if queued {
+            self.api
+                .history_candles_page_captured_queued(instrument_id, bar, after, before, limit)
+                .await?
+        } else {
+            self.api
+                .history_candles_page_captured(instrument_id, bar, after, before, limit)
+                .await?
+        };
         let acquired_at_ms = Utc::now().timestamp_millis().max(1).to_string();
         let rows = normalize_research_candles(captured.rows, limit as usize)?;
         Ok(ResearchCandleCapture {

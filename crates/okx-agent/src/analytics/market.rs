@@ -41,7 +41,7 @@ impl AnalyticsService {
             let (start, end, ms) = (request.start_ms, request.end_ms, request.timeframe_ms);
             async move {
                 let bars = if need_candles {
-                    sources.candles(&instrument, ms, start, end).await
+                    sources.candles(&instrument, ms, start, end, global_rank).await
                 } else {
                     Ok(Arc::new(Vec::new()))
                 };
