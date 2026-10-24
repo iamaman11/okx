@@ -69,7 +69,7 @@ pub fn response(id: &str, result: Result<Value, String>) -> AgentResponse {
                     retryable,
                 }),
             )
-        },
+        }
     };
     AgentResponse {
         schema: AGENT_RESPONSE_SCHEMA_V1.into(),
