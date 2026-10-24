@@ -67,6 +67,13 @@ impl AnalyticsService {
         }
         let mut hash_request = request.clone();
         let cursor = if global_rank { hash_request.cursor.take() } else { None };
+        // Unlike the time bucket, this request fingerprint is immutable
+        // across pages, but binds the exact typed query and reference generation.
+        let rank_fingerprint = if global_rank {
+            Some(okx_research::canonical_sha256(
+                &("market/398.global-v1", &hash_request, &universe_page))
+                .map_err(|e| e.to_string())?)
+        } else { None };
         let bucket = if request
             .fields
             .iter()
@@ -82,18 +89,29 @@ impl AnalyticsService {
             okx_research::canonical_sha256(&("market/398.4", &hash_request, &universe_page, bucket))
                 .map_err(|e| e.to_string())?;
         let hash = hash.strip_prefix("sha256:").unwrap_or(&hash).to_owned();
-        if global_rank && cursor.is_some() {
-            // Ranked pages are immutable artifact reads. They never re-fetch or
-            // re-rank a moving universe, even across process restarts.
-            let job = self.jobs.get_async(hash.clone()).await
+        if let (true, Some(cursor)) = (global_rank, cursor.as_deref()) {
+            // Cursor carries the original job ID; fast-changing market data
+            // must not trigger a fresh bucket or reorder later pages.
+            let (job_id, offset) = cursor.split_once(':')
+                .ok_or("GLOBAL_RANK_CURSOR_INVALID")?;
+            if job_id.len() != 64 || !job_id.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return Err("GLOBAL_RANK_CURSOR_INVALID".into());
+            }
+            let job = self.jobs.get_async(job_id.into()).await
                 .map_err(|_| "GLOBAL_RANK_CURSOR_NOT_FOUND")?;
             let artifact = job.artifact.ok_or("GLOBAL_RANK_NOT_READY")?;
             let store = self.artifacts.clone();
-            let offset = cursor.unwrap();
+            let offset = offset.to_owned();
+            let job_id = job_id.to_owned();
+            let expected_fingerprint = rank_fingerprint.ok_or("GLOBAL_RANK_REQUEST_INVALID")?;
             return self.cpu.run(Default::default(), move |_| {
                 let value: Value = store.read_evidence_json(&artifact)
                     .map_err(|e| e.to_string())?;
-                global_rank_page(&store, value, &offset)
+                if value["rank_request_fingerprint"] != expected_fingerprint
+                    || value["job_id"] != job_id {
+                    return Err("GLOBAL_RANK_CURSOR_REQUEST_MISMATCH".into());
+                }
+                global_rank_page(&store, value, &offset, &job_id)
             }).await;
         }
         let (job, new, cancel) = self
@@ -125,8 +143,12 @@ impl AnalyticsService {
                 Some(this.heavy.acquire().await.map_err(|_| "ANALYTICS_QUEUE_CLOSED")?)
             } else { None };
             let mut outcome = this.market_execute(compute_request, cancel.clone(), global_rank).await;
-            outcome = outcome
-                .and_then(|value| market_result_with_context(value, &hash, universe_page.as_ref()));
+            outcome = outcome.and_then(|mut value| {
+                if let Some(fingerprint) = &rank_fingerprint {
+                    value["rank_request_fingerprint"] = json!(fingerprint);
+                }
+                market_result_with_context(value, &hash, universe_page.as_ref())
+            });
             match &outcome {
                 Ok(value) => {
                     let store = this.artifacts.clone();
@@ -172,14 +194,16 @@ impl AnalyticsService {
         // The public request was validated before expanding the immutable
         // venue reference generation. No >100 explicit input is accepted.
         if request.instruments.is_empty()
-            || request.instruments.len() > if global_rank {512} else {100}
+            || request.instruments.len() > if global_rank { 512 } else { 100 }
             || request.limit == 0
             || request.limit > 50
         {
             return Err("MARKET_LIMIT:BOUNDED_INSTRUMENTS_AND_ROWS".into());
         }
         let plan = planner::AnalysisPlan::build(&request.fields, request.start_ms, request.end_ms)?;
-        let (rows, correlation_matrix) = self.market_rows(&request, cancel.clone(), global_rank).await?;
+        let (rows, correlation_matrix) = self
+            .market_rows(&request, cancel.clone(), global_rank)
+            .await?;
         let store = self.artifacts.clone();
         self.cpu.run(cancel,move |cancel| {
         if cancel.load(Ordering::Acquire){return Err("CANCELLED".into())}
@@ -1094,9 +1118,9 @@ mod artifact_job_fixtures {
             filters: vec![],
             sort: None,
         };
-        let result = s.market(request.clone(), None).await.unwrap();
+        let result = s.market(request.clone(), None, None).await.unwrap();
         assert_eq!(result["returned_rows"], 1);
-        assert_eq!(s.market(request, None).await.unwrap(), result);
+        assert_eq!(s.market(request, None, None).await.unwrap(), result);
         let page = s
             .research(ResearchRequest::Result {
                 job_id: result["job_id"].as_str().unwrap().into(),
@@ -1336,39 +1360,59 @@ fn with_universe_page(mut result: Value, page: Option<&Value>) -> Result<Value, 
     Ok(result)
 }
 
-
 /** Resolve rank-ordered pages from one immutable source generation and result. */
 fn global_rank_page(
     store: &ResearchArtifactStore,
     mut root: Value,
     cursor: &str,
+    job_id: &str,
 ) -> Result<Value, String> {
     let offset = cursor.parse::<usize>().map_err(|_| "INVALID_CURSOR")?;
     let total = root["total_rows"].as_u64().ok_or("INVALID_MARKET_RESULT")? as usize;
-    let previous = root["returned_rows"].as_u64().ok_or("INVALID_MARKET_RESULT")? as usize;
-    if offset == 0 || offset >= total || offset % previous.max(1) != 0 && previous == 0 {
+    if offset == 0 || offset >= total {
         return Err("GLOBAL_RANK_CURSOR_OUT_OF_RANGE".into());
     }
-    let root_id = root["result_artifact"].as_str().ok_or("MARKET_ARTIFACT_MISSING")?;
-    let manifest: Value = store.read_evidence_json(root_id).map_err(|e|e.to_string())?;
-    let chunks = manifest["row_pages"].as_array().ok_or("MARKET_ARTIFACT_INVALID")?;
-    let limit = root["page_limit"].as_u64().ok_or("MARKET_ARTIFACT_INVALID")? as usize;
-    if !(1..=50).contains(&limit) { return Err("MARKET_ARTIFACT_INVALID".into()); }
+    let root_id = root["result_artifact"]
+        .as_str()
+        .ok_or("MARKET_ARTIFACT_MISSING")?;
+    let manifest: Value = store
+        .read_evidence_json(root_id)
+        .map_err(|e| e.to_string())?;
+    let chunks = manifest["row_pages"]
+        .as_array()
+        .ok_or("MARKET_ARTIFACT_INVALID")?;
+    let limit = root["page_limit"]
+        .as_u64()
+        .ok_or("MARKET_ARTIFACT_INVALID")? as usize;
+    if !(1..=50).contains(&limit) {
+        return Err("MARKET_ARTIFACT_INVALID".into());
+    }
     let mut rows = Vec::new();
     for (idx, chunk) in chunks.iter().enumerate().skip(offset / 50) {
         let artifact = chunk.as_str().ok_or("MARKET_ARTIFACT_INVALID")?;
-        let values: Vec<Value> = store.read_evidence_json(artifact).map_err(|e|e.to_string())?;
+        let values: Vec<Value> = store
+            .read_evidence_json(artifact)
+            .map_err(|e| e.to_string())?;
         for (index, row) in values.into_iter().enumerate() {
-            if idx * 50 + index >= offset && rows.len() < limit { rows.push(row); }
+            if idx * 50 + index >= offset && rows.len() < limit {
+                rows.push(row);
+            }
         }
-        if rows.len() >= limit { break; }
+        if rows.len() >= limit {
+            break;
+        }
     }
-    while rows.len() > 1 && serde_json::to_vec(&rows).map_err(|_|"SERIALIZATION_FAILED")?.len()>6500 {
+    while rows.len() > 1
+        && serde_json::to_vec(&rows)
+            .map_err(|_| "SERIALIZATION_FAILED")?
+            .len()
+            > 6500
+    {
         rows.pop();
     }
     let count = rows.len();
     if count == 0 { return Err("MARKET_ARTIFACT_INVALID".into()); }
-    let next = (offset + count < total).then(|| (offset + count).to_string());
+    let next = (offset + count < total).then(|| format!("{job_id}:{}", offset + count));
     root["rows"] = json!(rows);
     root["returned_rows"] = json!(count);
     root["next_cursor"] = json!(next);
@@ -1388,6 +1432,9 @@ fn market_result_with_context(
     if universe_page.is_some_and(|v| v["global_ranking"] == true) {
         let count = result["returned_rows"].as_u64().unwrap_or(0);
         result["page_limit"] = json!(count);
+        if let Some(offset) = result["next_cursor"].as_str() {
+            result["next_cursor"] = json!(format!("{job_id}:{offset}"));
+        }
         let mut page = universe_page.cloned().ok_or("UNIVERSE_PAGE_MISSING")?;
         page["has_more"] = json!(result["next_cursor"].is_string());
         page["page_count"] = json!(count);
@@ -1404,18 +1451,18 @@ mod universe_artifact_tests {
     fn global_rank_cursor_uses_persisted_pages_without_refetch() {
         let (root, service) = super::artifact_job_fixtures::service();
         let scores = (0..57).map(|i|json!({"instrument":format!("A{i:03}"),"metrics":{"returns":57-i}})).collect::<Vec<_>>();
-        let first = service.artifacts.publish_evidence(&scores[..50]).unwrap().0;
-        let second = service.artifacts.publish_evidence(&scores[50..]).unwrap().0;
+        let first = service.artifacts.publish_evidence(&scores[..50].to_vec()).unwrap().0;
+        let second = service.artifacts.publish_evidence(&scores[50..].to_vec()).unwrap().0;
         let manifest = service.artifacts.publish_evidence(&json!({"row_pages":[first,second],"total_rows":57})).unwrap().0;
         let result = json!({"result_artifact":manifest,"total_rows":57,"returned_rows":12,
             "page_limit":12,"rows":scores[..12],"next_cursor":"12",
             "universe_page":{"global_ranking":true,"has_more":true,"page_count":12}});
-        let page = global_rank_page(&service.artifacts,result.clone(),"48").unwrap();
+        let page = global_rank_page(&service.artifacts,result.clone(),"48","f".repeat(64).as_str()).unwrap();
         assert_eq!(page["rows"][0]["instrument"],"A048");
         assert_eq!(page["returned_rows"],9);
         assert_eq!(page["next_cursor"],Value::Null);
         assert_eq!(page["universe_page"]["has_more"],false);
-        assert_eq!(global_rank_page(&service.artifacts,result,"57").unwrap_err(),
+        assert_eq!(global_rank_page(&service.artifacts,result,"57","f".repeat(64).as_str()).unwrap_err(),
             "GLOBAL_RANK_CURSOR_OUT_OF_RANGE");
         drop(service);
         std::fs::remove_dir_all(root).unwrap();

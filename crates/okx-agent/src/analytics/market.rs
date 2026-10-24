@@ -153,6 +153,11 @@ impl AnalyticsService {
                     }
                     rows.push(compute_row(row, &request, peer.as_deref())?);
                 }
+                if global_rank {
+                    // Never drop deficient candidates via a metric filter and
+                    // pretend the surviving rows prove a full-venue ranking.
+                    sort_market_rows(&mut rows, request.sort.as_ref(), true)?;
+                }
                 for filter in &request.filters {
                     rows.retain(|row| {
                         row["metrics"][&filter.field].as_f64().is_some_and(|v| {
@@ -161,7 +166,9 @@ impl AnalyticsService {
                         })
                     });
                 }
-                sort_market_rows(&mut rows, request.sort.as_ref(), global_rank)?;
+                if !global_rank {
+                    sort_market_rows(&mut rows, request.sort.as_ref(), false)?;
+                }
                 Ok((rows, matrix))
             })
             .await
@@ -173,11 +180,17 @@ fn sort_market_rows(
     sort: Option<&MarketSort>,
     global_rank: bool,
 ) -> Result<(), String> {
-    if global_rank && (sort.is_none() || rows.iter().any(|row| {
-        row["quality"] != "complete" || sort.is_some_and(|s| {
-            row["metrics"][&s.field].as_f64().is_none_or(|n| !n.is_finite())
-        })
-    })) {
+    if global_rank
+        && (sort.is_none()
+            || rows.iter().any(|row| {
+                row["quality"] != "complete"
+                    || sort.is_some_and(|s| {
+                        row["metrics"][&s.field]
+                            .as_f64()
+                            .is_none_or(|n| !n.is_finite())
+                    })
+            }))
+    {
         return Err("GLOBAL_RANK_SOURCE_INCOMPLETE".into());
     }
     if let Some(sort) = sort {
@@ -186,10 +199,12 @@ fn sort_market_rows(
                 .as_f64()
                 .partial_cmp(&b["metrics"][&sort.field].as_f64())
                 .unwrap_or(std::cmp::Ordering::Equal);
-            let primary = if sort.descending { order.reverse() } else { order };
-            primary.then_with(|| {
-                a["instrument"].as_str().cmp(&b["instrument"].as_str())
-            })
+            let primary = if sort.descending {
+                order.reverse()
+            } else {
+                order
+            };
+            primary.then_with(|| a["instrument"].as_str().cmp(&b["instrument"].as_str()))
         });
     }
     Ok(())
@@ -603,7 +618,6 @@ mod performance_fixtures {
     }
 }
 
-
 #[cfg(test)]
 mod global_rank_tests {
     use super::*;
@@ -615,12 +629,21 @@ mod global_rank_tests {
             json!({"instrument":"BB","metrics":{"returns":0.09},"quality":"complete"}),
             json!({"instrument":"CC","metrics":{"returns":-0.02},"quality":"complete"}),
         ];
-        let sort = MarketSort {field:"returns".into(),descending:true};
+        let sort = MarketSort {
+            field: "returns".into(),
+            descending: true,
+        };
         sort_market_rows(&mut rows, Some(&sort), true).unwrap();
-        assert_eq!(rows.iter().map(|r|r["instrument"].as_str().unwrap()).collect::<Vec<_>>(),
-            vec!["BB","ZZ","AA","CC"]);
-        rows[3]["quality"]=json!("partial");
-        assert_eq!(sort_market_rows(&mut rows,Some(&sort),true).unwrap_err(),
-            "GLOBAL_RANK_SOURCE_INCOMPLETE");
+        assert_eq!(
+            rows.iter()
+                .map(|r| r["instrument"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["BB", "ZZ", "AA", "CC"]
+        );
+        rows[3]["quality"] = json!("partial");
+        assert_eq!(
+            sort_market_rows(&mut rows, Some(&sort), true).unwrap_err(),
+            "GLOBAL_RANK_SOURCE_INCOMPLETE"
+        );
     }
 }
