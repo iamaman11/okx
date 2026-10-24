@@ -99,10 +99,11 @@ impl TradeService {
         let market = loop {
             match self
                 .public_ws
-                .fresh_snapshot(
+                .risk_fresh_snapshot(
                     instrument,
                     now() as u64,
                     crate::config::QUOTE_MAX_AGE_MS,
+                    crate::config::DERIVATIVE_CONTEXT_MAX_AGE_MS,
                     Utc::now().to_rfc3339(),
                 )
                 .await
@@ -343,10 +344,11 @@ impl TradeService {
         }
         let fresh = self
             .public_ws
-            .fresh_snapshot(
+            .risk_fresh_snapshot(
                 instrument,
                 now() as u64,
                 crate::config::QUOTE_MAX_AGE_MS,
+                crate::config::DERIVATIVE_CONTEXT_MAX_AGE_MS,
                 Utc::now().to_rfc3339(),
             )
             .await
