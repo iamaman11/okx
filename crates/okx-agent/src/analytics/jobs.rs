@@ -42,8 +42,8 @@ impl State {
         }
     }
 }
-fn is_transient_rate_defer(error: Option<&str>) -> bool {
-    error.is_some_and(|value| value.starts_with("OKX rate/backpressure defer:"))
+pub(super) fn is_transient_rate_defer(error: Option<&str>) -> bool {
+    error.is_some_and(|value| value.contains("OKX rate/backpressure defer:"))
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Job {
@@ -451,6 +451,13 @@ mod tests {
         s.update("fixture", State::Running, None, None).unwrap();
         let t = Jobs::open(p.clone()).unwrap();
         assert_eq!(t.get("fixture").unwrap().state, State::Interrupted);
+    }
+    #[test]
+    fn wrapped_source_throttle_is_retryable() {
+        assert!(is_transient_rate_defer(Some(
+            "public OKX market API error: OKX rate/backpressure defer: LocalBudget"
+        )));
+        assert!(!is_transient_rate_defer(Some("CANDLE_INTERIOR_GAP")));
     }
     #[test]
     fn transient_rate_defer_is_requeued_instead_of_cached_as_failed() {
