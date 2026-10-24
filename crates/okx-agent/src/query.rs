@@ -103,6 +103,13 @@ async fn execute(
             let mut universe_page = None;
             if let Some(universe) = &request.universe {
                 let reference = ctx.public_ws.reference_snapshot().await;
+                if universe
+                    .reference_generation
+                    .as_deref()
+                    .is_some_and(|expected| expected != reference.generation().as_str())
+                {
+                    return Err("UNIVERSE_REFERENCE_GENERATION_CHANGED".into());
+                }
                 let mut names = reference
                     .iter()
                     .filter(|spec| spec.state == "live")
@@ -116,15 +123,14 @@ async fn execute(
                             .as_ref()
                             .is_none_or(|settle| spec.settle_currency.as_ref() == Some(settle))
                     })
-                    .filter(|spec| {
-                        universe
-                            .after_instrument
-                            .as_ref()
-                            .is_none_or(|cursor| &spec.instrument_id > cursor)
-                    })
                     .map(|spec| spec.instrument_id.clone())
-                    .take(usize::from(universe.limit) + 1)
                     .collect::<Vec<_>>();
+                names.sort_unstable();
+                names.dedup();
+                let universe_size = names.len();
+                if let Some(after) = &universe.after_instrument {
+                    names.retain(|name| name > after);
+                }
                 let has_more = names.len() > usize::from(universe.limit);
                 names.truncate(usize::from(universe.limit));
                 if names.is_empty() {
@@ -138,19 +144,13 @@ async fn execute(
                     "global_ranking":false,"scope":"bounded_market_page",
                     "has_more":has_more,
                     "next_after_instrument":if has_more {names.last().cloned()}else{None},
-                    "universe_size":reference.len(),
+                    "universe_size":universe_size,
                     "page_count":names.len()
                 }));
                 resolved.instruments = names;
                 resolved.universe = None;
             }
-            let mut result = ctx.analytics.market(resolved).await?;
-            if let Some(page) = universe_page
-                && let Some(fields) = result.as_object_mut()
-            {
-                fields.insert("universe_page".into(), page);
-            }
-            Ok(result)
+            ctx.analytics.market(resolved, universe_page).await
         }
         AgentOperation::MarketCapabilities => Ok(ctx.analytics.market_capabilities()),
         AgentOperation::MarketMicrostructure {
