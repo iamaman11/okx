@@ -184,7 +184,9 @@ async fn execute(
                 }));
                 resolved_instruments = Some(names);
             }
-            ctx.analytics.market(request.clone(), universe_page, resolved_instruments).await
+            ctx.analytics
+                .market(request.clone(), universe_page, resolved_instruments)
+                .await
         }
         AgentOperation::MarketCapabilities => Ok(ctx.analytics.market_capabilities()),
         AgentOperation::MarketMicrostructure {

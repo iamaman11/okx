@@ -188,8 +188,9 @@ impl MarketRequest {
                 && self.universe.as_ref().is_some_and(MarketUniverse::valid)))
             && self.instruments.len() <= 100
             && self.universe.as_ref().is_none_or(|u| {
-                !u.rank_globally || (self.sort.is_some()
-                    && !self.fields.iter().any(|f| f == "pearson_correlation"))
+                !u.rank_globally
+                    || (self.sort.is_some()
+                        && !self.fields.iter().any(|f| f == "pearson_correlation"))
             })
             && self
                 .instruments
@@ -408,13 +409,28 @@ mod batch_tests {
         let r: MarketRequest = serde_json::from_value(value.clone()).unwrap();
         assert!(!r.valid());
         value["sort"] = serde_json::json!({"field":"returns","descending":true});
-        assert!(serde_json::from_value::<MarketRequest>(value.clone()).unwrap().valid());
+        assert!(
+            serde_json::from_value::<MarketRequest>(value.clone())
+                .unwrap()
+                .valid()
+        );
         value["universe"]["after_instrument"] = serde_json::json!("BTC-USDT-SWAP");
-        assert!(!serde_json::from_value::<MarketRequest>(value.clone()).unwrap().valid());
-        value["universe"].as_object_mut().unwrap().remove("after_instrument");
+        assert!(
+            !serde_json::from_value::<MarketRequest>(value.clone())
+                .unwrap()
+                .valid()
+        );
+        value["universe"]
+            .as_object_mut()
+            .unwrap()
+            .remove("after_instrument");
         value["fields"] = serde_json::json!(["pearson_correlation"]);
         value["sort"]["field"] = serde_json::json!("pearson_correlation");
-        assert!(!serde_json::from_value::<MarketRequest>(value).unwrap().valid());
+        assert!(
+            !serde_json::from_value::<MarketRequest>(value)
+                .unwrap()
+                .valid()
+        );
     }
     #[test]
     fn research_capabilities_strict_read_only_wire() {
