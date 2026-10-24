@@ -90,9 +90,8 @@ impl AnalyticsService {
                 .update_async(hash.clone(), jobs::State::Running, None, None)
                 .await?;
             let mut outcome = this.market_execute(request, cancel.clone()).await;
-            if let Ok(value) = &mut outcome {
-                *value = market_result_with_context(value.clone(), &hash, universe_page.as_ref())?;
-            }
+            outcome = outcome
+                .and_then(|value| market_result_with_context(value, &hash, universe_page.as_ref()));
             match &outcome {
                 Ok(value) => {
                     let store = this.artifacts.clone();
