@@ -62,9 +62,9 @@ fn source_capture_reason(error: &AgentError) -> String {
         AgentError::Store(okx_execution::StoreError::Invalid(code))
             if !code.is_empty()
                 && code.len() <= 96
-                && code.bytes().all(|b| {
-                    b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_'
-                }) =>
+                && code
+                    .bytes()
+                    .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_') =>
         {
             (*code).into()
         }
