@@ -69,6 +69,19 @@ function normalizedStatus(outer:Record<string,unknown>,frame:Record<string,unkno
     ['completed','configured','connected','observed','updated'].includes(outerStatus??''))return 'completed';
  return nativeStatus??outerStatus??'completed';
 }
+/** One legacy TradeService/Strategies completion shell inside the typed AgentResponse.
+ * Exact field and status validation prevents arbitrary business objects being unwrapped.
+ * The native AgentResponse remains the only status and identity owner.
+ */
+function completedBusinessEnvelope(value:unknown):Record<string,unknown>|undefined{
+ if(!isObject(value)||value.status!=='completed'||!('data' in value)||
+    typeof value.as_of_ms!=='number'||!Number.isSafeInteger(value.as_of_ms)||
+    !isObject(value.quality)||!Array.isArray(value.warnings)||
+    !value.warnings.every(w=>typeof w==='string')||
+    !Object.keys(value).every(k=>['status','as_of_ms','data','quality','warnings'].includes(k)))
+    return undefined;
+ return value;
+}
 /** Normalize exactly one native product response, not a nested JSON passthrough. */
 export function projectNativeResponse(value:Json):Record<string,Json>{
  const outer=isObject(value)?value:{data:value};
@@ -78,7 +91,12 @@ export function projectNativeResponse(value:Json):Record<string,Json>{
      data:null,quality:'NOT_READY',warnings:[],reason_code:'INVALID_NATIVE_ENVELOPE',scope:'transport',retryable:false,next_action:'inspect_diagnostics'};
  }
  const frame=native??outer;
- const rawResult=native?frame.result:('result' in frame?frame.result:'data' in frame?frame.data:frame);
+ const supplied=native?frame.result:('result' in frame?frame.result:'data' in frame?frame.data:frame);
+ // Rust TradeService can return a completed product inside AgentResponse.
+ // Project its business data once rather than sending duplicate envelopes.
+ const completedInner=native&&frame.status==='completed'&&!isObject(frame.failure)
+   ?completedBusinessEnvelope(supplied):undefined;
+ const rawResult=completedInner?completedInner.data:supplied;
  const result=isObject(rawResult)?rawResult:undefined;
  const failure=isObject(frame.failure)?frame.failure:undefined;
  const status=normalizedStatus(outer,frame,result);
@@ -89,11 +107,11 @@ export function projectNativeResponse(value:Json):Record<string,Json>{
  // Rejects carry null product data, never an entire AgentResponse nested inside
  // data. Completed research results preserve their bounded typed product fields.
  const data=native?(failure?null:rawResult??null):rawResult;
- const quality=(status==='partial'?'partial':result?.quality??frame.quality??outer.quality??{state:'not_evaluated'}) as Json;
+ const quality=(status==='partial'?'partial':result?.quality??completedInner?.quality??frame.quality??outer.quality??{state:'not_evaluated'}) as Json;
  const projected:Record<string,Json>={
    request_id:stringField(frame,'request_id')??stringField(outer,'request_id')??requestId(),
-   status,as_of_ms:numericField(frame,'as_of_ms')??numericField(outer,'as_of_ms')??Date.now(),
-   data:data as Json,quality,warnings:warnings(outer,...(frame===outer?[]:[frame]))
+   status,as_of_ms:numericField(completedInner??{},'as_of_ms')??numericField(frame,'as_of_ms')??numericField(outer,'as_of_ms')??Date.now(),
+   data:data as Json,quality,warnings:warnings(outer,...(frame===outer?[]:[frame]),...(completedInner?[completedInner]:[]))
  };
  if(['failed','rejected','unknown'].includes(status)){
    projected.reason_code=reason??(job==='cancelled'?'JOB_CANCELLED':'REQUEST_FAILED');

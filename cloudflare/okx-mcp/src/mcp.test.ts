@@ -20,6 +20,39 @@ console.log("mcp_nested_failure_preserves_reason_code PASS");
 const failedEnvelope:any=projectNativeResponse({schema:'okx.agent.response/v1',request_id:'req_native_failed',status:'failed',quality:'NOT_READY',warnings:[],failure:{code:'RESPONSE_TOO_LARGE',message:'native result bounded',retryable:false}});
 if(failedEnvelope.status!=='failed'||failedEnvelope.reason_code!=='RESPONSE_TOO_LARGE'||failedEnvelope.data!==null)throw Error('native envelope failure must keep exact failure code');
 
+// Rust TradeService and Strategies currently return a second, strictly bounded
+// completed shell. The public MCP must present only the typed product, with
+// native request identity, freshness and failure safety intact.
+const completedBusiness={status:'completed',as_of_ms:1780000000000,
+ data:{admission:'preview_only',plan:{risk_usd:'1'},quality:'complete'},
+ quality:{state:'not_evaluated'},warnings:['service_warning']};
+const once:any=projectNativeResponse({schema:'okx.agent.response/v1',request_id:'req_preview_once',
+ status:'completed',quality:'FRESH',warnings:['native_warning'],result:completedBusiness});
+if(once.status!=='completed'||once.request_id!=='req_preview_once'||
+ once.as_of_ms!==completedBusiness.as_of_ms||once.data.admission!=='preview_only'||
+ 'status' in once.data||'data' in once.data||once.quality!=='complete'||
+ once.warnings.join(',')!=='native_warning,service_warning')
+ throw Error('strict completed business result not projected once');
+const strategies:any=projectNativeResponse({schema:'okx.agent.response/v1',request_id:'req_strategies_once',
+ status:'completed',quality:'FRESH',warnings:[],
+ result:{status:'completed',as_of_ms:1780000000001,
+         data:{instances:[]},quality:{state:'not_evaluated'},warnings:[]}});
+if(strategies.status!=='completed'||!Array.isArray(strategies.data.instances)||
+ 'status' in strategies.data)throw Error('nested strategy list response');
+const fakeExtra:any=projectNativeResponse({schema:'okx.agent.response/v1',request_id:'req_extra',
+ status:'completed',quality:'FRESH',warnings:[],
+ result:{...completedBusiness,extra_untyped:'not_a_completed_shell'}});
+if(fakeExtra.data.extra_untyped!=='not_a_completed_shell'||
+ fakeExtra.data.data.admission!=='preview_only')
+ throw Error('untyped business result was unwrapped by shape');
+const stillUnknown:any=projectNativeResponse({schema:'okx.agent.response/v1',request_id:'req_trade_unknown',
+ status:'completed',quality:'FRESH',warnings:[],
+ result:{status:'unknown',reason_code:'EXCHANGE_POST_OUTCOME_UNKNOWN',intent_id:'intent_398'}});
+if(stillUnknown.status!=='unknown'||stillUnknown.reason_code!=='EXCHANGE_POST_OUTCOME_UNKNOWN'||
+ stillUnknown.retryable!==false||stillUnknown.data.intent_id!=='intent_398')
+ throw Error('UNKNOWN outcome erased by completed response projection');
+console.log('native_completed_business_envelope_once PASS');
+
 const queuedJob:any=projectNativeResponse({schema:'okx.agent.response/v1',request_id:'req_native_job',status:'completed',quality:'FRESH',warnings:[],result:{id:'job_398',state:'queued',progress:0}});
 if(queuedJob.status!=='accepted'||queuedJob.job_id!=='job_398'||queuedJob.data.state!=='queued')throw Error('queued job must remain accepted with an id');
 console.log("mcp_queued_job_remains_accepted PASS");
