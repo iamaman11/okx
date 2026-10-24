@@ -2,7 +2,7 @@ import {ACTION_SCHEMAS,PUBLIC_TOOLS,validTool,matches} from './execution_tools.j
 const fail=(v:boolean,n:string)=>{if(!v)throw Error(n);};
 function sample(s:any):any{if('const'in s)return s.const;if(s.enum)return s.enum[0];if(s.oneOf)return sample(s.oneOf[0]);if(s.anyOf)return sample(s.anyOf[0]);if(s.type==='object')return Object.fromEntries(Object.entries(s.properties).filter(([k])=>s.required.includes(k)).map(([k,x])=>[k,sample(x)]));if(s.type==='array')return [sample(s.items)];if(s.type==='string')return s.pattern?.includes('0-9]{1,9}')?'1':s.minLength===8?'command_0001':'fixture';if(s.type==='integer'||s.type==='number')return s.minimum??1;if(s.type==='boolean')return true;return null;}
 export const payloadFixtures:{tool:string;action:string;positive:any;negative:any[]}[]=[];
-for(const [tool,schemas]of Object.entries(ACTION_SCHEMAS))for(const schema of schemas){const good=sample(schema);if('start_ms'in good)good.end_ms=good.start_ms+100000;if(tool==='market'&&good.action==='screen')good.instruments=['BTC-USDT-SWAP'];if(tool==='portfolio'&&good.action==='scenario')good.correlations=[];if(tool==='trade'&&['execute','preview'].includes(good.action))good.protection={stop_distance_bps:50};if(tool==='diagnostics'&&good.action==='explain')good.reference='intent_fixture';if(good.order)good.order.type='fok';fail(validTool(tool,good),`positive ${tool}.${good.action}`);const badExtra={...good,raw_rpc:'forbidden'},badRequired={...good};delete badRequired.action;const badType={...good,action:12};for(const bad of [badExtra,badRequired,badType])fail(!validTool(tool,bad),`negative ${tool}.${good.action}`);payloadFixtures.push({tool,action:good.action,positive:good,negative:[badExtra,badRequired,badType]});}
+for(const [tool,schemas]of Object.entries(ACTION_SCHEMAS))for(const schema of schemas){const good=sample(schema);if('start_ms'in good)good.end_ms=good.start_ms+100000;if(tool==='market'&&good.action==='screen')good.instruments=['BTC-USDT-SWAP'];if(tool==='research'&&good.action==='backtest')good.parameters={fast:9,slow:21};if(tool==='portfolio'&&good.action==='scenario')good.correlations=[];if(tool==='trade'&&['execute','preview'].includes(good.action))good.protection={stop_distance_bps:50};if(tool==='diagnostics'&&good.action==='explain')good.reference='intent_fixture';if(good.order)good.order.type='fok';fail(validTool(tool,good),`positive ${tool}.${good.action}`);const badExtra={...good,raw_rpc:'forbidden'},badRequired={...good};delete badRequired.action;const badType={...good,action:12};for(const bad of [badExtra,badRequired,badType])fail(!validTool(tool,bad),`negative ${tool}.${good.action}`);payloadFixtures.push({tool,action:good.action,positive:good,negative:[badExtra,badRequired,badType]});}
 const screen=payloadFixtures.find(x=>x.tool==='market'&&x.action==='screen')!.positive;
 fail(validTool('market',{...screen,action:'compare'}),'shared strict screen/compare schema');
 fail(!validTool('market',{...screen,action:'compare',raw_rpc:'forbidden'}),'compare rejects unknown fields');
@@ -18,6 +18,18 @@ fail(!validTool('market',{...marketScreen,universe:{instrument_type:'SWAP'}}),'a
 fail(!validTool('market',{...withoutList,action:'compare',universe:{instrument_type:'SWAP'}}),'compare requires explicit instruments');
 fail(validTool('market',{...withoutList,universe:{instrument_type:'SWAP',reference_generation:'generation-a',after_instrument:'BTC-USDT-SWAP'}}),'generation-fenced native market universe wire');
 fail(!validTool('market',{...withoutList,universe:{instrument_type:'SWAP',reference_generation:''}}),'empty generation rejected');
+const pause=payloadFixtures.find(x=>x.tool==='accounts'&&x.action==='pause')!.positive;
+fail(validTool('accounts',{...pause,action:'resume'}),'resume shares strict typed account schema');
+fail(!validTool('accounts',{...pause,action:'resume',raw_rpc:'forbidden'}),'resume rejects raw RPC');
+const run=payloadFixtures.find(x=>x.tool==='research'&&x.action==='backtest')!.positive;
+const {parameters:unusedRunParams,...gridBase}=run;
+const gridPayload={...gridBase,action:'grid',variants:[{fast:9,slow:21}]};
+fail(validTool('research',gridPayload),'grid shares typed research-run schema');
+fail(!validTool('research',{...gridPayload,parameters:{fast:9,slow:21}}),'grid cannot also provide backtest parameters');
+fail(!validTool('research',{...run,variants:[{fast:9,slow:21}]}),'backtest cannot also provide grid variants');
+fail(!validTool('research',{...gridBase,action:'grid'}),'grid variants are mandatory');
+fail(!validTool('research',{...gridPayload,raw_rpc:'forbidden'}),'grid remains strictly typed');
+payloadFixtures.push({tool:'research',action:'grid',positive:gridPayload,negative:[{...gridPayload,raw_rpc:'forbidden'}]});
 const start=payloadFixtures.find(x=>x.tool==='strategies'&&x.action==='start')!.positive;
 fail(validTool('strategies',{...start,action:'stop'}),'strategy stop shares strict schema');
 fail(!validTool('strategies',{...start,action:'stop',raw_rpc:'forbidden'}),'strict stop rejects extra');
