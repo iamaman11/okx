@@ -2,7 +2,7 @@ import {attestRuntimeRelease} from './release_attestation.js';
 const fail=(value:boolean,label:string)=>{if(!value)throw Error(label);};
 const tree='a'.repeat(40), hash='b'.repeat(64), now=1_792_850_000_000;
 const live={schema:'okx.direct-transport.status/v1',status:'PASS',connected:true,session_fresh:true,
- runtime_id:'windows-primary',runtime_profile:'engine',connection_generation:15,
+ runtime_id:'windows-primary',runtime_profile:'engine',connection_generation:15,connected_at_ms:now-10_000,
  agent_pid:3216,agent_binary_sha256:hash,installation_id:'okx-clean-398-20261023'};
 const receipt={schema:'okx.windows.control.result/v1',request_id:'ctl_test_release_398',
  operation:{type:'status'},status:'PASS',observed_at:new Date(now-5_000).toISOString(),
