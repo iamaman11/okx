@@ -1,19 +1,18 @@
-# #398 progress: implementation versus physical acceptance
+# #398 progress — non-normative evidence index
 
-This is a **dated status ledger (23 October 2026)**, not a work plan. All tasks and tests are defined in [issue #398](https://github.com/iamaman11/okx/issues/398) and its [acceptance criteria](https://github.com/iamaman11/okx/issues/398#issuecomment-6373732525). Historical Stage 5 and W01–W10 directions are not executable.
+The only active requirements, status and acceptance gates are in [issue #398](https://github.com/iamaman11/okx/issues/398) and its [mandatory tests](https://github.com/iamaman11/okx/issues/398#issuecomment-6373732525). This page is a dated observation, **not a second plan**.
 
-| Area | Proven | Still pending |
-| --- | --- | --- |
-| F01 policy | PHYSICAL PASS after restart: central and native account SQL USD10/revision2, consumed/reserved=0 | Verify no reset after final deployment |
-| F02 execution price | PR #403 exact CI and tick/slippage regressions PASS | Final release read-only planning and safe admission acceptance |
-| F03 result semantics | **LIVE FAIL**: native `JOB_NOT_FOUND`/`ORDER_NOTIONAL_LIMIT` projected as `REQUEST_FAILED`; queued job projected completed | Fix DO-wrapped Worker projection and run live negatives |
-| F04 transient source | #403 regression committed | Concurrent source defer/retry/recovery physical test |
-| F05 analyst views | **LIVE FAIL**: grid selected/train/test/equity incomplete; no full log-return correlation matrix or interior gap guard | Complete user projections and input completeness |
-| F06 portfolio coverage | Before T0 physically shows partial as required | After-T0 financial reconciliation and aggregate quality |
-| F07 strategies | Instances and shared kernel exist | Crash-safe durable decision→intent; two-instance acceptance |
-| F08 units/jobs | SQLite finance and central reservations exist; research metadata still JSON | Risk-budget/notional split, indexed SQLite jobs |
-| F09 final acceptance | #403 Windows CONTROL Agent/Controller/Launcher `MATCHED`; [6/6 CI](https://github.com/iamaman11/okx/actions/runs/40010720157) | Final exact Windows+Worker release, comprehensive 7-tool/16-capability matrix, gated Real cycles |
+## Last verified native release (24 October 2026)
 
-Old sixteen-tool functionality is **not yet fully preserved**. Restore business use cases as typed actions inside the seven, not legacy endpoints. The second physical Real account does not exist: `PHYSICAL_MULTI_ACCOUNT=BLOCKED`, regardless of fixture coverage.
+- [PR #416](https://github.com/iamaman11/okx/pull/416) merged at main `a3ae33e1aff4ab75e713f708b73b0508903c1e24`. [CI #40055850675](https://github.com/iamaman11/okx/actions/runs/40055850675) finished 6/6 successful jobs.
+- Exact Windows artifact `12545318154` installed by CONTROL with Agent/Controller/Launcher parity MATCHED; original SQL installation retained. See [physical proof](https://github.com/iamaman11/okx/issues/398#issuecomment-6379064518).
+- Central and native account SQL campaign ceiling USD10/revision2; current account source and NAV freshness, WebSocket market overview/microstructure and read-only protected preview have positive physical evidence.
+- **Not accepted:** independent Worker-side release attestation (`verified=false`); full 16→7 positive/negative live business parity; concurrent strategy/load acceptance; two protected Real OPEN→CLOSE cycles. A second physical Real UID is unavailable. No trading POST is authorized merely by CI or this record.
 
-Evidence: [installed CONTROL](https://github.com/iamaman11/okx/issues/12#issuecomment-6373212927), [live MCP audit](https://github.com/iamaman11/okx/issues/398#issuecomment-6373565941). Real POST remains blocked on account evidence freshness and individual risk admission; code green is not physical PASS.
+## Primary references
+
+- [Current requirements/status #398](https://github.com/iamaman11/okx/issues/398)
+- [Product acceptance procedure](PRODUCT_ACCEPTANCE.md)
+- [Architecture owner contract](ARCHITECTURE_CONTRACT_V1.md)
+
+Later release evidence must be recorded under #398 first. This dated index may become stale; it never supersedes the issue.
