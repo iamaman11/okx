@@ -42,6 +42,21 @@ fail((await reason([{...comment,body:JSON.stringify({...receipt,details:{...rece
 fail((await reason([{...comment,body:JSON.stringify({...receipt,details:{...receipt.details,release_parity:{state:'MISMATCH',source_tree:tree,blockers:['broken']}}})}]))==='CONTROL_RELEASE_UNVERIFIED','mismatched CONTROL parity rejected');
 fail((await reason([comment],live,''))==='WORKER_RELEASE_TREE_UNSET','no Worker source receipt rejected');
 fail((await attestRuntimeRelease(live,tree,now,response([],503))).reason_code==='CONTROL_RECEIPT_FETCH_FAILED','GitHub outage fails closed');
+const headerProof:typeof fetch=(async(input,init)=>{
+ const headers=new Headers(init?.headers);
+ fail(headers.get('user-agent')==='okx-cloudflare-mcp-release-attestation','GitHub User-Agent required');
+ fail(headers.get('accept')==='application/vnd.github+json','GitHub Accept required');
+ fail(headers.get('x-github-api-version')==='2022-11-28','GitHub API version required');
+ fail(String(input).startsWith('https://api.github.com/repos/iamaman11/okx/issues/12/comments?'),
+   'only canonical CONTROL endpoint');
+ return Response.json([comment]);
+}) as typeof fetch;
+fail((await attestRuntimeRelease(live,tree,now,headerProof)).verified===true,
+ 'GitHub User-Agent and independent receipt verified');
+fail((await attestRuntimeRelease(live,tree,now,response([],403))).reason_code==='CONTROL_RECEIPT_GITHUB_DENIED',
+ 'GitHub permission/identity failure blocked');
+fail((await attestRuntimeRelease(live,tree,now,response([],429))).reason_code==='CONTROL_RECEIPT_GITHUB_RATE_LIMITED',
+ 'GitHub rate-limit failure blocked');
 fail((await reason(Array.from({length:100},()=>comment)))==='CONTROL_RECEIPT_PAGE_UNBOUNDED','unbounded issue window fails closed');
 const newer={...comment,id:1236,body:JSON.stringify({...receipt,details:{...receipt.details,agent_pid:999}})};
 fail((await reason([comment,newer]))==='LIVE_AGENT_IDENTITY_MISMATCH','never select older matching status over latest');
