@@ -4,6 +4,11 @@ pub mod jobs;
 mod market;
 pub mod planner;
 pub mod sources;
+
+pub(crate) fn is_retryable_market_source_defer(error: &str) -> bool {
+    jobs::is_transient_rate_defer(Some(error))
+}
+
 use futures_util::{StreamExt, stream};
 use okx_protocol::analytics::*;
 use okx_research::{
@@ -62,7 +67,7 @@ impl AnalyticsService {
             0
         };
         let hash =
-            okx_research::canonical_sha256(&("market/398.2", &request, &universe_page, bucket))
+            okx_research::canonical_sha256(&("market/398.3", &request, &universe_page, bucket))
                 .map_err(|e| e.to_string())?;
         let hash = hash.strip_prefix("sha256:").unwrap_or(&hash).to_owned();
         let (job, new, cancel) = self
@@ -180,9 +185,17 @@ impl AnalyticsService {
         }).await
     }
     pub fn market_capabilities(&self) -> Value {
+        let operators = okx_analysis::operators::SUPPORTED_OPERATORS
+            .iter()
+            .map(|&operator| {
+                let info = okx_analysis::operators::registry(operator);
+                json!({"name":operator,"unit":info.unit,"inputs":info.inputs})
+            })
+            .collect::<Vec<_>>();
         json!({"schema":"okx.market.capabilities/v1",
             "actions":["screen","compare","instruments","snapshot","microstructure","capabilities"],
             "timeframes_ms":[60000,180000,300000,900000,1800000,3600000,14400000,86400000],
+            "operators":operators,
             "limits":{"max_explicit_instruments":100,"max_page_rows":50,
                 "max_correlation_instruments":8,"max_candles_total":1000000},
             "universe":{"modes":["explicit_instruments","venue_reference_registry"],
@@ -336,7 +349,8 @@ impl AnalyticsService {
             "job_id":job_id,"artifact":artifact,
             "summary":value.get("summary").or_else(||value.pointer("/test/summary")),
             "grid":value.get("grid").map(|g| json!({
-                "selected":g.get("selected"),"train":g.get("train"),"split_index":g.get("split_index"),
+                "selected":g.get("selected"),"train":g.get("train"),
+                "test":value.get("summary"),"split_index":g.get("split_index"),
                 "selection_warning":g.get("selection_warning")
             })),
             "dataset_hash":value.get("dataset_hash"),
@@ -871,6 +885,28 @@ impl AnalyticsService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn market_capabilities_discloses_supported_operator_names_and_units() {
+        let (root, service) = super::artifact_job_fixtures::service();
+        let capabilities = service.market_capabilities();
+        let operators = capabilities["operators"].as_array().unwrap();
+        assert_eq!(
+            operators.len(),
+            okx_analysis::operators::SUPPORTED_OPERATORS.len()
+        );
+        assert!(
+            operators
+                .iter()
+                .any(|operator| operator["name"] == "returns" && operator["unit"] == "ratio")
+        );
+        assert!(
+            operators
+                .iter()
+                .all(|operator| operator["inputs"].is_array())
+        );
+        drop(service);
+        std::fs::remove_dir_all(root).unwrap();
+    }
     #[tokio::test]
     async fn grid_result_includes_selected_train_test_and_equity() {
         let (root, service) = super::artifact_job_fixtures::service();
@@ -927,6 +963,7 @@ mod tests {
             .unwrap();
         assert_eq!(summary_view["metadata"]["grid"]["selected"]["fast"], 3);
         assert_eq!(summary_view["metadata"]["grid"]["train"]["pnl"], 1.0);
+        assert_eq!(summary_view["metadata"]["grid"]["test"]["pnl"], 1.0);
         assert_eq!(summary_view["metadata"]["summary"]["pnl"], 1.0);
         assert_eq!(summary_view["returned_rows"], 0);
         let variants = service

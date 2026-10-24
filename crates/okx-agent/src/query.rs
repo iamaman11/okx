@@ -53,15 +53,23 @@ pub fn response(id: &str, result: Result<Value, String>) -> AgentResponse {
     };
     let (status, data, failure) = match result {
         Ok(v) => (AgentResponseStatus::Completed, Some(v), None),
-        Err(code) => (
-            AgentResponseStatus::Rejected,
-            None,
-            Some(AgentFailure {
-                message: code.clone(),
-                code,
-                retryable: false,
-            }),
-        ),
+        Err(code) => {
+            let retryable = crate::analytics::is_retryable_market_source_defer(&code);
+            let public_code = if retryable {
+                "MARKET_SOURCE_RETRYABLE".to_owned()
+            } else {
+                code
+            };
+            (
+                AgentResponseStatus::Rejected,
+                None,
+                Some(AgentFailure {
+                    message: public_code.clone(),
+                    code: public_code,
+                    retryable,
+                }),
+            )
+        }
     };
     AgentResponse {
         schema: AGENT_RESPONSE_SCHEMA_V1.into(),
@@ -303,6 +311,28 @@ async fn execute(
                     serde_json::to_value(snapshot).map_err(|_| "SERIALIZATION_FAILED".into())
                 }
                 Err(_) => {
+                    // A REST observation cannot certify a fresh WS book for trading.
+                    // Expose bounded native WS quality without raw transport errors.
+                    let ws_quality = match ctx
+                        .public_ws
+                        .quality_snapshot(
+                            instrument,
+                            Utc::now().timestamp_millis().max(0) as u64,
+                            crate::config::QUOTE_MAX_AGE_MS,
+                            true,
+                        )
+                        .await
+                    {
+                        Ok(q) => json!({
+                            "connection_state": q.connection_state,
+                            "connection_generation": q.connection_generation,
+                            "acknowledged_subscriptions": q.acknowledged_subscriptions,
+                            "sequence_continuity_proven": q.sequence_continuity_proven,
+                            "reason": q.reason,
+                            "last_error_present": q.last_error.is_some()
+                        }),
+                        Err(_) => json!({"reason_code": "PUBLIC_WS_QUALITY_UNAVAILABLE"}),
+                    };
                     let refs = ctx.public_ws.reference_snapshot().await;
                     let snapshot = ctx
                         .market
@@ -310,7 +340,7 @@ async fn execute(
                         .await
                         .map_err(|_| "MARKET_SOURCE_UNAVAILABLE")?;
                     Ok(
-                        json!({"market":snapshot,"source_mode":"rest","quality":"degraded","reason":"PUBLIC_WS_WARMING"}),
+                        json!({"market":snapshot,"source_mode":"rest","quality":"degraded","reason":"PUBLIC_WS_WARMING","public_ws_quality":ws_quality}),
                     )
                 }
             }
@@ -357,6 +387,18 @@ fn book_sweep_vwap(
 #[cfg(test)]
 mod microstructure_test {
     use super::*;
+    #[test]
+    fn market_local_budget_failure_is_addressable_and_retryable() {
+        let r = response(
+            "market-defer",
+            Err("OKX rate/backpressure defer: MARKET_SOURCE_RETRYABLE".into()),
+        );
+        let failure = r.failure.unwrap();
+        assert_eq!(failure.code, "MARKET_SOURCE_RETRYABLE");
+        assert!(failure.retryable);
+        let fatal = response("market-fatal", Err("CANDLE_INTERIOR_GAP".into()));
+        assert!(!fatal.failure.unwrap().retryable);
+    }
     #[test]
     fn bounded_book_sweep_rejects_insufficient_depth() {
         let levels = vec![

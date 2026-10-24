@@ -72,6 +72,25 @@ pub enum Operator {
     PositionSize,
     CostEstimate,
 }
+/// The enumerable public DSL contract. Adding a typed operator requires listing it here.
+pub const SUPPORTED_OPERATORS: &[Operator] = &[
+    Operator::Returns,
+    Operator::LogReturns,
+    Operator::RealizedVolatility,
+    Operator::DownsideVolatility,
+    Operator::MaxDrawdown,
+    Operator::PearsonCorrelation,
+    Operator::Ema,
+    Operator::Atr,
+    Operator::Rsi,
+    Operator::SpreadBps,
+    Operator::VolumeChange,
+    Operator::OiChange,
+    Operator::FundingSum,
+    Operator::PositionSize,
+    Operator::CostEstimate,
+];
+
 #[derive(Debug, Clone, Copy)]
 pub struct OperatorInfo {
     pub operator: Operator,

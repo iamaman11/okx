@@ -9,6 +9,19 @@ struct Loaded {
     oi: Option<Result<Vec<f64>, String>>,
     excluded: Option<usize>,
 }
+
+/// A public rate defer is transient source capacity, not durable analytical evidence.
+fn market_source_rate_deferred(loaded: &[Loaded]) -> bool {
+    let deferred =
+        |error: Option<&String>| jobs::is_transient_rate_defer(error.map(String::as_str));
+    loaded.iter().any(|row| {
+        deferred(row.bars.as_ref().err())
+            || deferred(row.ticker.as_ref().and_then(|value| value.as_ref().err()))
+            || deferred(row.funding.as_ref().and_then(|value| value.as_ref().err()))
+            || deferred(row.oi.as_ref().and_then(|value| value.as_ref().err()))
+    })
+}
+
 impl AnalyticsService {
     pub(super) async fn market_rows(
         &self,
@@ -108,6 +121,10 @@ impl AnalyticsService {
         .buffered(4)
         .collect::<Vec<_>>();
         let loaded = tokio::select! {data=loading=>data,_=super::executor::cancelled(cancel.clone())=>return Err("CANCELLED".into())};
+        if market_source_rate_deferred(&loaded) {
+            // No immutable partial artifact: Jobs::enqueue requeues this same request.
+            return Err("OKX rate/backpressure defer: MARKET_SOURCE_RETRYABLE".into());
+        }
         let request = request.clone();
         self.cpu
             .run(cancel, move |cancel| {
@@ -377,6 +394,18 @@ fn pairwise_matrix(loaded: &[Loaded], timeframe_ms: u64) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transient_market_source_defer_is_not_cacheable() {
+        let mut rate_limited = row();
+        rate_limited.bars =
+            Err("public OKX market API error: OKX rate/backpressure defer: LocalBudget".into());
+        assert!(market_source_rate_deferred(&[rate_limited]));
+        assert!(!market_source_rate_deferred(&[row()]));
+        let mut invalid = row();
+        invalid.bars = Err("CANDLE_INTERIOR_GAP".into());
+        assert!(!market_source_rate_deferred(&[invalid]));
+    }
     #[test]
     fn correlation_3x3_log_returns() {
         let mut series = Vec::new();
