@@ -27,6 +27,7 @@ impl AnalyticsService {
         &self,
         request: &MarketRequest,
         cancel: Arc<std::sync::atomic::AtomicBool>,
+        global_rank: bool,
     ) -> Result<(Vec<Value>, Option<Value>), String> {
         let plan = planner::AnalysisPlan::build(&request.fields, request.start_ms, request.end_ms)?;
         let need_candles = plan.sources.contains("candles");
@@ -160,23 +161,38 @@ impl AnalyticsService {
                         })
                     });
                 }
-                if let Some(sort) = &request.sort {
-                    rows.sort_by(|a, b| {
-                        let order = a["metrics"][&sort.field]
-                            .as_f64()
-                            .partial_cmp(&b["metrics"][&sort.field].as_f64())
-                            .unwrap_or(std::cmp::Ordering::Equal);
-                        if sort.descending {
-                            order.reverse()
-                        } else {
-                            order
-                        }
-                    });
-                }
+                sort_market_rows(&mut rows, request.sort.as_ref(), global_rank)?;
                 Ok((rows, matrix))
             })
             .await
     }
+}
+/// Rank is globally valid only when every candidate has complete evidence.
+fn sort_market_rows(
+    rows: &mut [Value],
+    sort: Option<&MarketSort>,
+    global_rank: bool,
+) -> Result<(), String> {
+    if global_rank && (sort.is_none() || rows.iter().any(|row| {
+        row["quality"] != "complete" || sort.is_some_and(|s| {
+            row["metrics"][&s.field].as_f64().is_none_or(|n| !n.is_finite())
+        })
+    })) {
+        return Err("GLOBAL_RANK_SOURCE_INCOMPLETE".into());
+    }
+    if let Some(sort) = sort {
+        rows.sort_by(|a, b| {
+            let order = a["metrics"][&sort.field]
+                .as_f64()
+                .partial_cmp(&b["metrics"][&sort.field].as_f64())
+                .unwrap_or(std::cmp::Ordering::Equal);
+            let primary = if sort.descending { order.reverse() } else { order };
+            primary.then_with(|| {
+                a["instrument"].as_str().cmp(&b["instrument"].as_str())
+            })
+        });
+    }
+    Ok(())
 }
 fn compute_row(
     row: Loaded,
@@ -584,5 +600,27 @@ mod performance_fixtures {
             "ANALYTICS_PERF_JSON:{}",
             json!({"screen_8x100":{"build":if cfg!(debug_assertions){"debug"}else{"release"},"stage":"native fixture compute/projection/serialization; HTTP and physical MCP separate","warmups":5,"measurements":30,"p50_ms":times[14],"p95_ms":times[28],"max_ms":times[29],"summary_bytes":bytes}})
         );
+    }
+}
+
+
+#[cfg(test)]
+mod global_rank_tests {
+    use super::*;
+    #[test]
+    fn sorted_global_rank_has_stable_ties_and_no_page_local_shortcut() {
+        let mut rows = vec![
+            json!({"instrument":"AA","metrics":{"returns":0.05},"quality":"complete"}),
+            json!({"instrument":"ZZ","metrics":{"returns":0.09},"quality":"complete"}),
+            json!({"instrument":"BB","metrics":{"returns":0.09},"quality":"complete"}),
+            json!({"instrument":"CC","metrics":{"returns":-0.02},"quality":"complete"}),
+        ];
+        let sort = MarketSort {field:"returns".into(),descending:true};
+        sort_market_rows(&mut rows, Some(&sort), true).unwrap();
+        assert_eq!(rows.iter().map(|r|r["instrument"].as_str().unwrap()).collect::<Vec<_>>(),
+            vec!["BB","ZZ","AA","CC"]);
+        rows[3]["quality"]=json!("partial");
+        assert_eq!(sort_market_rows(&mut rows,Some(&sort),true).unwrap_err(),
+            "GLOBAL_RANK_SOURCE_INCOMPLETE");
     }
 }

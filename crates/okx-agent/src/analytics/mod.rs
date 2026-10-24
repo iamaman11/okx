@@ -51,10 +51,22 @@ impl AnalyticsService {
         &self,
         request: MarketRequest,
         universe_page: Option<Value>,
+        resolved_instruments: Option<Vec<String>>,
     ) -> Result<Value, String> {
         if !request.valid() {
             return Err("INVALID_MARKET_REQUEST".into());
         }
+        let global_rank = request.universe.as_ref().is_some_and(|u| u.rank_globally);
+        if global_rank && resolved_instruments.is_none() {
+            return Err("GLOBAL_RANK_UNIVERSE_REQUIRED".into());
+        }
+        let mut compute_request = request.clone();
+        if let Some(names) = resolved_instruments {
+            compute_request.instruments = names;
+            compute_request.universe = None;
+        }
+        let mut hash_request = request.clone();
+        let cursor = if global_rank { hash_request.cursor.take() } else { None };
         let bucket = if request
             .fields
             .iter()
@@ -67,9 +79,23 @@ impl AnalyticsService {
             0
         };
         let hash =
-            okx_research::canonical_sha256(&("market/398.3", &request, &universe_page, bucket))
+            okx_research::canonical_sha256(&("market/398.4", &hash_request, &universe_page, bucket))
                 .map_err(|e| e.to_string())?;
         let hash = hash.strip_prefix("sha256:").unwrap_or(&hash).to_owned();
+        if global_rank && cursor.is_some() {
+            // Ranked pages are immutable artifact reads. They never re-fetch or
+            // re-rank a moving universe, even across process restarts.
+            let job = self.jobs.get_async(hash.clone()).await
+                .map_err(|_| "GLOBAL_RANK_CURSOR_NOT_FOUND")?;
+            let artifact = job.artifact.ok_or("GLOBAL_RANK_NOT_READY")?;
+            let store = self.artifacts.clone();
+            let offset = cursor.unwrap();
+            return self.cpu.run(Default::default(), move |_| {
+                let value: Value = store.read_evidence_json(&artifact)
+                    .map_err(|e| e.to_string())?;
+                global_rank_page(&store, value, &offset)
+            }).await;
+        }
         let (job, new, cancel) = self
             .jobs
             .enqueue_async(format!("market-{hash}"), hash.clone())
@@ -94,7 +120,11 @@ impl AnalyticsService {
             this.jobs
                 .update_async(hash.clone(), jobs::State::Running, None, None)
                 .await?;
-            let mut outcome = this.market_execute(request, cancel.clone()).await;
+            // Two global scans at most, using the existing analytics semaphore.
+            let _permit = if global_rank {
+                Some(this.heavy.acquire().await.map_err(|_| "ANALYTICS_QUEUE_CLOSED")?)
+            } else { None };
+            let mut outcome = this.market_execute(compute_request, cancel.clone(), global_rank).await;
             outcome = outcome
                 .and_then(|value| market_result_with_context(value, &hash, universe_page.as_ref()));
             match &outcome {
@@ -137,19 +167,19 @@ impl AnalyticsService {
         &self,
         request: MarketRequest,
         cancel: Arc<std::sync::atomic::AtomicBool>,
+        global_rank: bool,
     ) -> Result<Value, String> {
-        if !request.valid() {
-            return Err("INVALID_MARKET_REQUEST".into());
-        }
+        // The public request was validated before expanding the immutable
+        // venue reference generation. No >100 explicit input is accepted.
         if request.instruments.is_empty()
-            || request.instruments.len() > 100
+            || request.instruments.len() > if global_rank {512} else {100}
             || request.limit == 0
             || request.limit > 50
         {
-            return Err("MARKET_LIMIT:1..100 instruments,1..50 rows".into());
+            return Err("MARKET_LIMIT:BOUNDED_INSTRUMENTS_AND_ROWS".into());
         }
         let plan = planner::AnalysisPlan::build(&request.fields, request.start_ms, request.end_ms)?;
-        let (rows, correlation_matrix) = self.market_rows(&request, cancel.clone()).await?;
+        let (rows, correlation_matrix) = self.market_rows(&request, cancel.clone(), global_rank).await?;
         let store = self.artifacts.clone();
         self.cpu.run(cancel,move |cancel| {
         if cancel.load(Ordering::Acquire){return Err("CANCELLED".into())}
@@ -199,9 +229,13 @@ impl AnalyticsService {
             "limits":{"max_explicit_instruments":100,"max_page_rows":50,
                 "max_correlation_instruments":8,"max_candles_total":1000000},
             "universe":{"modes":["explicit_instruments","venue_reference_registry"],
-                "whole_market_paged":true,"globally_ranked":false,
+                "whole_market_paged":true,"globally_ranked":true,
+                "global_rank_requires_explicit_opt_in":true,
+                "global_rank_max_instruments":512,
+                "global_rank_source_budget_bars":1000000,
+                "global_rank_uses_immutable_artifact_cursor":true,
                 "max_instruments_per_page":100},
-            "quality":"partial"})
+            "quality":"complete"})
     }
     pub async fn research(&self, request: ResearchRequest) -> Result<Value, String> {
         if !request.valid() {
@@ -1302,6 +1336,46 @@ fn with_universe_page(mut result: Value, page: Option<&Value>) -> Result<Value, 
     Ok(result)
 }
 
+
+/** Resolve rank-ordered pages from one immutable source generation and result. */
+fn global_rank_page(
+    store: &ResearchArtifactStore,
+    mut root: Value,
+    cursor: &str,
+) -> Result<Value, String> {
+    let offset = cursor.parse::<usize>().map_err(|_| "INVALID_CURSOR")?;
+    let total = root["total_rows"].as_u64().ok_or("INVALID_MARKET_RESULT")? as usize;
+    let previous = root["returned_rows"].as_u64().ok_or("INVALID_MARKET_RESULT")? as usize;
+    if offset == 0 || offset >= total || offset % previous.max(1) != 0 && previous == 0 {
+        return Err("GLOBAL_RANK_CURSOR_OUT_OF_RANGE".into());
+    }
+    let root_id = root["result_artifact"].as_str().ok_or("MARKET_ARTIFACT_MISSING")?;
+    let manifest: Value = store.read_evidence_json(root_id).map_err(|e|e.to_string())?;
+    let chunks = manifest["row_pages"].as_array().ok_or("MARKET_ARTIFACT_INVALID")?;
+    let limit = root["page_limit"].as_u64().ok_or("MARKET_ARTIFACT_INVALID")? as usize;
+    if !(1..=50).contains(&limit) { return Err("MARKET_ARTIFACT_INVALID".into()); }
+    let mut rows = Vec::new();
+    for (idx, chunk) in chunks.iter().enumerate().skip(offset / 50) {
+        let artifact = chunk.as_str().ok_or("MARKET_ARTIFACT_INVALID")?;
+        let values: Vec<Value> = store.read_evidence_json(artifact).map_err(|e|e.to_string())?;
+        for (index, row) in values.into_iter().enumerate() {
+            if idx * 50 + index >= offset && rows.len() < limit { rows.push(row); }
+        }
+        if rows.len() >= limit { break; }
+    }
+    while rows.len() > 1 && serde_json::to_vec(&rows).map_err(|_|"SERIALIZATION_FAILED")?.len()>6500 {
+        rows.pop();
+    }
+    let count = rows.len();
+    if count == 0 { return Err("MARKET_ARTIFACT_INVALID".into()); }
+    let next = (offset + count < total).then(|| (offset + count).to_string());
+    root["rows"] = json!(rows);
+    root["returned_rows"] = json!(count);
+    root["next_cursor"] = json!(next);
+    root["universe_page"]["has_more"] = json!(next.is_some());
+    root["universe_page"]["page_count"] = json!(count);
+    Ok(root)
+}
 fn market_result_with_context(
     mut result: Value,
     job_id: &str,
@@ -1311,12 +1385,41 @@ fn market_result_with_context(
         .as_object_mut()
         .ok_or("INVALID_MARKET_RESULT")?
         .insert("job_id".into(), json!(job_id));
+    if universe_page.is_some_and(|v| v["global_ranking"] == true) {
+        let count = result["returned_rows"].as_u64().unwrap_or(0);
+        result["page_limit"] = json!(count);
+        let mut page = universe_page.cloned().ok_or("UNIVERSE_PAGE_MISSING")?;
+        page["has_more"] = json!(result["next_cursor"].is_string());
+        page["page_count"] = json!(count);
+        return with_universe_page(result, Some(&page));
+    }
     with_universe_page(result, universe_page)
 }
 
 #[cfg(test)]
 mod universe_artifact_tests {
     use super::*;
+
+    #[test]
+    fn global_rank_cursor_uses_persisted_pages_without_refetch() {
+        let (root, service) = super::artifact_job_fixtures::service();
+        let scores = (0..57).map(|i|json!({"instrument":format!("A{i:03}"),"metrics":{"returns":57-i}})).collect::<Vec<_>>();
+        let first = service.artifacts.publish_evidence(&scores[..50]).unwrap().0;
+        let second = service.artifacts.publish_evidence(&scores[50..]).unwrap().0;
+        let manifest = service.artifacts.publish_evidence(&json!({"row_pages":[first,second],"total_rows":57})).unwrap().0;
+        let result = json!({"result_artifact":manifest,"total_rows":57,"returned_rows":12,
+            "page_limit":12,"rows":scores[..12],"next_cursor":"12",
+            "universe_page":{"global_ranking":true,"has_more":true,"page_count":12}});
+        let page = global_rank_page(&service.artifacts,result.clone(),"48").unwrap();
+        assert_eq!(page["rows"][0]["instrument"],"A048");
+        assert_eq!(page["returned_rows"],9);
+        assert_eq!(page["next_cursor"],Value::Null);
+        assert_eq!(page["universe_page"]["has_more"],false);
+        assert_eq!(global_rank_page(&service.artifacts,result,"57").unwrap_err(),
+            "GLOBAL_RANK_CURSOR_OUT_OF_RANGE");
+        drop(service);
+        std::fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn market_universe_metadata_persisted_with_final_artifact_and_queue() {
         let page = json!({
