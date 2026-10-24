@@ -193,7 +193,7 @@ impl AnalyticsService {
 fn complete_rank_history(bars: &[Bar], start: u64, end: u64, step: u64) -> bool {
     step > 0
         && end > start
-        && (end - start) % step == 0
+        && (end - start).is_multiple_of(step)
         && bars.len() as u64 == (end - start) / step
         && bars.first().is_some_and(|bar| bar.time == start)
         && bars
