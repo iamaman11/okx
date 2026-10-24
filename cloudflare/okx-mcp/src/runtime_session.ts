@@ -435,6 +435,7 @@ export class RuntimeSession {
       connected: true,
       session_fresh: fresh,
       connection_generation: active.attachment.generation,
+      connected_at_ms: active.attachment.connectedAtMs,
       installation_id: active.attachment.installationId ?? null,
       agent_pid: active.attachment.agentPid ?? null,
       agent_binary_sha256: active.attachment.agentBinarySha256 ?? null,
