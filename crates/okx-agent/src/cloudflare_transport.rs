@@ -11,9 +11,11 @@ use okx_protocol::{
 };
 use std::{
     collections::{HashMap, HashSet},
+    io::Read,
     sync::Arc,
     time::Duration,
 };
+use sha2::{Digest, Sha256};
 use tokio::{
     sync::{mpsc, oneshot, watch},
     time::Instant,
@@ -64,6 +66,22 @@ impl CloudflareTransportConfig {
         &self.ws_url
     }
 }
+/// Re-hash the running executable on every authenticated session. This is a
+/// *claim*, never independent release authorization; Worker must compare it
+/// to fresh, owner-authored native CONTROL evidence.
+fn current_binary_sha256() -> AgentResult<String> {
+    let executable = std::env::current_exe().map_err(|_| transport("EXE_IDENTITY_UNAVAILABLE"))?;
+    let mut file = std::fs::File::open(executable).map_err(|_| transport("EXE_HASH_UNAVAILABLE"))?;
+    let mut digest = Sha256::new();
+    let mut chunk = [0u8; 64 * 1024];
+    loop {
+        let count = file.read(&mut chunk).map_err(|_| transport("EXE_HASH_UNAVAILABLE"))?;
+        if count == 0 { break; }
+        digest.update(&chunk[..count]);
+    }
+    Ok(format!("{:x}", digest.finalize()))
+}
+
 fn nonce() -> u128 {
     let mut bytes = [0u8; 16];
     getrandom::fill(&mut bytes).expect("system random unavailable");
@@ -152,6 +170,8 @@ async fn run_session(
             runtime_profile: DirectRuntimeProfile::Engine,
             installation_id: ctx.accounts.installation_id().into(),
             contract: okx_protocol::accounts::PRODUCT_CONTRACT.into(),
+            agent_pid: std::process::id(),
+            agent_binary_sha256: current_binary_sha256()?,
         },
     )
     .await?;
