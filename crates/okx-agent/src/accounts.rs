@@ -40,12 +40,38 @@ struct Installation {
     installation_id: String,
 }
 
+#[derive(Clone, Default, serde::Serialize)]
+pub struct SourceCaptureHealth {
+    pub last_attempt_ms: Option<i64>,
+    pub last_success_ms: Option<i64>,
+    pub last_failure_ms: Option<i64>,
+    pub reason_code: Option<String>,
+}
+
+fn source_capture_reason(error: &AgentError) -> String {
+    match error {
+        AgentError::FinancialCaptureTask(code)
+            if !code.is_empty()
+                && code.len() <= 96
+                && code
+                    .bytes()
+                    .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_') =>
+        {
+            code.clone()
+        }
+        AgentError::Okx(_) => "EXCHANGE_SOURCE_UNAVAILABLE".into(),
+        AgentError::Store(_) => "ACCOUNT_SOURCE_SQL_FAILURE".into(),
+        _ => "SOURCE_CAPTURE_FAILED".into(),
+    }
+}
+
 pub struct AccountResources {
     pub configuration: VerifiedAccountConfig,
     pub observer: AccountBootstrapper,
     pub private_ws: PrivateWsHandle,
     pub execution: Arc<ExecutionRuntime>,
     pub latest_snapshot: RwLock<Option<okx_observation::AccountSnapshot>>,
+    pub source_capture_health: RwLock<SourceCaptureHealth>,
     /// Bounded account-local mutation capacity. Never held by reads/analytics.
     pub mutation_capacity: Semaphore,
     source_shutdown: watch::Sender<bool>,
@@ -537,6 +563,7 @@ impl AccountRuntimeRegistry {
         let (shutdown, receiver) = watch::channel(false);
         let resources = Arc::new(AccountResources {
             latest_snapshot: RwLock::new(None),
+            source_capture_health: RwLock::new(SourceCaptureHealth::default()),
             configuration,
             observer,
             private_ws,
@@ -633,6 +660,22 @@ impl AccountResources {
             && self.verified_source_generation.load(Ordering::Acquire)
                 == status.connection_generation
     }
+
+    async fn record_source_failure(&self, reason_code: &str) {
+        let now = chrono::Utc::now().timestamp_millis();
+        let mut health = self.source_capture_health.write().await;
+        health.last_attempt_ms = Some(now);
+        health.last_failure_ms = Some(now);
+        health.reason_code = Some(reason_code.to_owned());
+    }
+
+    async fn record_source_success(&self) {
+        let now = chrono::Utc::now().timestamp_millis();
+        let mut health = self.source_capture_health.write().await;
+        health.last_attempt_ms = Some(now);
+        health.last_success_ms = Some(now);
+        health.reason_code = None;
+    }
 }
 
 fn start_sources(
@@ -654,20 +697,39 @@ fn start_sources(
             tokio::select! { _=shutdown.changed()=>break,_=interval.tick()=>{
              let Some(account)=weak.upgrade()else{break};
              let generation=account.private_ws.status().await.connection_generation;
-             if generation==0 {continue;}
+             if generation==0 {
+                 account.record_source_failure("PRIVATE_WS_NOT_READY").await;
+                 continue;
+             }
              if account.verified_source_generation.load(Ordering::Acquire)!=generation {
-                let Ok(snapshot)=account.observer.snapshot().await else{continue;};
+                let snapshot=match account.observer.snapshot().await {
+                    Ok(snapshot)=>snapshot,
+                    Err(_)=>{
+                        account.record_source_failure("ACCOUNT_SOURCE_UNAVAILABLE").await;
+                        continue;
+                    }
+                };
                 if snapshot.account_uid_fingerprint!=account.configuration.account_key.verified_uid
                     ||!account.execution.verified_uid_matches(&snapshot.account_uid_fingerprint).await.unwrap_or(false) {
+                    account.record_source_failure("ACCOUNT_IDENTITY_MISMATCH").await;
                     eprintln!("account source identity verification failed");continue;
                 }
-                if account.private_ws.status().await.connection_generation!=generation {continue;}
+                if account.private_ws.status().await.connection_generation!=generation {
+                    account.record_source_failure("PRIVATE_WS_GENERATION_CHANGED").await;
+                    continue;
+                }
                 *account.latest_snapshot.write().await=Some(snapshot);
                 account.verified_source_generation.store(generation,Ordering::Release);
              }
              match crate::runtime::capture_account_sources(&account.observer,&account.private_ws,&account.execution).await {
-                Ok(snapshot)=>*account.latest_snapshot.write().await=Some(snapshot),
-                Err(_)=>eprintln!("account financial source awaiting coherent readback"),
+                Ok(snapshot)=>{
+                    *account.latest_snapshot.write().await=Some(snapshot);
+                    account.record_source_success().await;
+                }
+                Err(error)=>{
+                    account.record_source_failure(&source_capture_reason(&error)).await;
+                    eprintln!("account financial source awaiting coherent readback");
+                }
              }
             }}
         }
@@ -736,6 +798,21 @@ mod tests {
         assert!(registry.failures().await.is_empty());
         assert!(!root.join("accounts").exists());
         std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn source_failure_codes_are_bounded_and_do_not_expose_raw_errors() {
+        assert_eq!(
+            source_capture_reason(&AgentError::FinancialCaptureTask(
+                "PRIVATE_SOURCE_NOT_READY".into()
+            )),
+            "PRIVATE_SOURCE_NOT_READY"
+        );
+        assert_eq!(
+            source_capture_reason(&AgentError::FinancialCaptureTask(
+                "API secret leaked: credential".into()
+            )),
+            "SOURCE_CAPTURE_FAILED"
+        );
     }
     #[test]
     fn duplicate_writer_lease_rejected_across_aliases() {

@@ -379,6 +379,16 @@ async fn account_diagnostics(
     let mut out = report(stage, reason, &key, blockers, retry, next);
     out["account"] = json!({"key":key,"alias":resources.configuration.alias});
     out["sources"] = json!({"identity_generation_verified":identity_ready,"account_as_of_ms":source_as_of,"account_fresh":fresh,"default_ttl_ms":5000});
+    let private = resources.private_ws.status().await;
+    out["private_ws"] = json!({
+        "connection_state": private.connection_state,
+        "connection_generation": private.connection_generation,
+        "logged_in": private.logged_in,
+        "subscriptions_complete": private.subscriptions_complete,
+        "last_inbound_ms": private.last_inbound_ms,
+        "last_error_present": private.last_error.is_some(),
+    });
+    out["source_capture"] = json!(resources.source_capture_health.read().await.clone());
     out["storage"] = facts;
     out["access"] = ctx.trade.diagnostic_access(&key).await;
     out["intent"]=intent.as_ref().map(|i|json!({"intent_id":i.intent_id,"client_order_id":i.client_order_id,"exchange_order_id":i.exchange_order_id,"state":i.state.as_str(),"instrument":i.instrument_id,"risk_increase":i.risk_increase,"policy_revision":i.policy_revision,"revision":i.revision,"deadline_ms":i.deadline,"incident":i.incident.as_ref().map(|e|safe_code(e,"INTENT_INCIDENT"))})).unwrap_or(Value::Null);
