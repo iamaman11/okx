@@ -284,7 +284,8 @@ def self_test():
             self.assertEqual(len(rows),16)
             self.assertEqual(len({r["legacy_tool"] for r in rows}),16)
             self.assertTrue(all(row["status"]=="GAP" for row in rows))
-            self.assertIn("market.microstructure",next(r for r in rows if r["legacy_tool"]=="market_intelligence")["missing_actions"])
+            self.assertEqual(next(r for r in rows if r["legacy_tool"]=="market_intelligence")["missing_actions"],[])
+            self.assertEqual(next(r for r in rows if r["legacy_tool"]=="market_intelligence")["status"],"GAP")
         def test_capability_proof_requires_matching_installed_release(self):
             physical={"INSTALLED_MATCHED":{"result":"PASS"},
                 "mcp":{"physical_network":"PASS"},
