@@ -1023,9 +1023,9 @@ mod artifact_job_fixtures {
             filters: vec![],
             sort: None,
         };
-        let result = s.market(request.clone()).await.unwrap();
+        let result = s.market(request.clone(), None).await.unwrap();
         assert_eq!(result["returned_rows"], 1);
-        assert_eq!(s.market(request).await.unwrap(), result);
+        assert_eq!(s.market(request, None).await.unwrap(), result);
         let page = s
             .research(ResearchRequest::Result {
                 job_id: result["job_id"].as_str().unwrap().into(),
@@ -1298,7 +1298,7 @@ mod universe_artifact_tests {
         assert_eq!(complete["job_id"], "fixture-job");
         let (root, service) = super::artifact_job_fixtures::service();
         let artifact = service.artifacts.publish_evidence(&complete).unwrap().0;
-        let persisted = service.artifacts.read_evidence_json(&artifact).unwrap();
+        let persisted: Value = service.artifacts.read_evidence_json(&artifact).unwrap();
         assert_eq!(
             persisted["universe_page"]["reference_generation"],
             "generation-a"
