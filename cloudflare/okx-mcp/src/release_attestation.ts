@@ -122,8 +122,22 @@ export async function attestRuntimeRelease(
      signal:AbortSignal.timeout(4_000),
    });
    if(!response.ok){
-     if(response.status===401||response.status===403)return failure('CONTROL_RECEIPT_GITHUB_DENIED');
-     if(response.status===429)return failure('CONTROL_RECEIPT_GITHUB_RATE_LIMITED');
+     // Bounded numeric HTTP metadata only, never receipt/response bodies or secrets.
+     const numericHeader=(name:string,maxDigits:number):number|null=>{
+       const raw=response.headers.get(name);
+       return raw!==null&&new RegExp('^[0-9]{1,'+maxDigits+'}$').test(raw)?Number(raw):null;
+     };
+     const remaining=numericHeader('x-ratelimit-remaining',9);
+     const reset=numericHeader('x-ratelimit-reset',12);
+     const retryAfter=numericHeader('retry-after',6);
+     console.warn('CONTROL_RECEIPT_GITHUB_HTTP',JSON.stringify({
+       status:response.status,remaining,reset_epoch_seconds:reset,retry_after_seconds:retryAfter,
+     }));
+     // GitHub HTTP 403 can also be primary/secondary rate limiting.
+     if(response.status===429||(response.status===403&&(remaining===0||retryAfter!==null)))
+       return failure('CONTROL_RECEIPT_GITHUB_RATE_LIMITED');
+     if(response.status===401)return failure('CONTROL_RECEIPT_GITHUB_UNAUTHORIZED');
+     if(response.status===403)return failure('CONTROL_RECEIPT_GITHUB_403_UNCLASSIFIED');
      return failure('CONTROL_RECEIPT_FETCH_FAILED');
    }
    const comments:unknown=await response.json();
