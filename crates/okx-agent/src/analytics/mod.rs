@@ -42,7 +42,11 @@ impl AnalyticsService {
         service.apply_retention(chrono::Utc::now().timestamp_millis().max(0) as u64)?;
         Ok(service)
     }
-    pub async fn market(&self, request: MarketRequest, universe_page: Option<Value>) -> Result<Value, String> {
+    pub async fn market(
+        &self,
+        request: MarketRequest,
+        universe_page: Option<Value>,
+    ) -> Result<Value, String> {
         if !request.valid() {
             return Err("INVALID_MARKET_REQUEST".into());
         }
@@ -57,8 +61,9 @@ impl AnalyticsService {
         } else {
             0
         };
-        let hash = okx_research::canonical_sha256(&("market/398.2", &request, &universe_page, bucket))
-            .map_err(|e| e.to_string())?;
+        let hash =
+            okx_research::canonical_sha256(&("market/398.2", &request, &universe_page, bucket))
+                .map_err(|e| e.to_string())?;
         let hash = hash.strip_prefix("sha256:").unwrap_or(&hash).to_owned();
         let (job, new, cancel) = self
             .jobs
@@ -1251,7 +1256,6 @@ mod artifact_job_fixtures {
     }
 }
 
-
 fn with_universe_page(mut result: Value, page: Option<&Value>) -> Result<Value, String> {
     if let Some(page) = page {
         result
@@ -1287,15 +1291,23 @@ mod universe_artifact_tests {
         });
         let complete = market_result_with_context(
             json!({"kind":"market","rows":[],"total_rows":0}),
-            "fixture-job", Some(&page),
-        ).unwrap();
+            "fixture-job",
+            Some(&page),
+        )
+        .unwrap();
         assert_eq!(complete["universe_page"], page);
         assert_eq!(complete["job_id"], "fixture-job");
         let (root, service) = super::artifact_job_fixtures::service();
         let artifact = service.artifacts.publish_evidence(&complete).unwrap().0;
         let persisted = service.artifacts.read_evidence_json(&artifact).unwrap();
-        assert_eq!(persisted["universe_page"]["reference_generation"], "generation-a");
-        assert_eq!(persisted["universe_page"]["next_after_instrument"], "BTC-USDT-SWAP");
+        assert_eq!(
+            persisted["universe_page"]["reference_generation"],
+            "generation-a"
+        );
+        assert_eq!(
+            persisted["universe_page"]["next_after_instrument"],
+            "BTC-USDT-SWAP"
+        );
         assert_eq!(
             with_universe_page(json!({"state":"queued"}), Some(&page)).unwrap()["universe_page"],
             page
