@@ -18,6 +18,18 @@ fail(!validTool('market',{...marketScreen,universe:{instrument_type:'SWAP'}}),'a
 fail(!validTool('market',{...withoutList,action:'compare',universe:{instrument_type:'SWAP'}}),'compare requires explicit instruments');
 fail(validTool('market',{...withoutList,universe:{instrument_type:'SWAP',reference_generation:'generation-a',after_instrument:'BTC-USDT-SWAP'}}),'generation-fenced native market universe wire');
 fail(!validTool('market',{...withoutList,universe:{instrument_type:'SWAP',reference_generation:''}}),'empty generation rejected');
+const pause=payloadFixtures.find(x=>x.tool==='accounts'&&x.action==='pause')!.positive;
+fail(validTool('accounts',{...pause,action:'resume'}),'resume shares strict typed account schema');
+fail(!validTool('accounts',{...pause,action:'resume',raw_rpc:'forbidden'}),'resume rejects raw RPC');
+const run=payloadFixtures.find(x=>x.tool==='research'&&x.action==='backtest')!.positive;
+const {parameters:unusedRunParams,...gridBase}=run;
+const gridPayload={...gridBase,action:'grid',variants:[{fast:9,slow:21}]};
+fail(validTool('research',gridPayload),'grid shares typed research-run schema');
+fail(!validTool('research',{...gridPayload,parameters:{fast:9,slow:21}}),'grid cannot also provide backtest parameters');
+fail(!validTool('research',{...run,variants:[{fast:9,slow:21}]}),'backtest cannot also provide grid variants');
+fail(!validTool('research',{...gridBase,action:'grid'}),'grid variants are mandatory');
+fail(!validTool('research',{...gridPayload,raw_rpc:'forbidden'}),'grid remains strictly typed');
+payloadFixtures.push({tool:'research',action:'grid',positive:gridPayload,negative:[{...gridPayload,raw_rpc:'forbidden'}]});
 const start=payloadFixtures.find(x=>x.tool==='strategies'&&x.action==='start')!.positive;
 fail(validTool('strategies',{...start,action:'stop'}),'strategy stop shares strict schema');
 fail(!validTool('strategies',{...start,action:'stop',raw_rpc:'forbidden'}),'strict stop rejects extra');
