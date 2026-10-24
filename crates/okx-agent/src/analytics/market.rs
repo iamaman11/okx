@@ -126,6 +126,21 @@ impl AnalyticsService {
             // No immutable partial artifact: Jobs::enqueue requeues this same request.
             return Err("OKX rate/backpressure defer: MARKET_SOURCE_RETRYABLE".into());
         }
+        if global_rank
+            && need_candles
+            && loaded.iter().any(|row| {
+                row.bars.as_ref().is_err_or(|bars| {
+                    !complete_rank_history(
+                        bars,
+                        request.start_ms,
+                        request.end_ms,
+                        request.timeframe_ms,
+                    )
+                })
+            })
+        {
+            return Err("GLOBAL_RANK_CANDLE_COVERAGE_INCOMPLETE".into());
+        }
         let request = request.clone();
         self.cpu
             .run(cancel, move |cancel| {
@@ -173,6 +188,20 @@ impl AnalyticsService {
             })
             .await
     }
+}
+/// Full-universe scores require identical *closed* time coverage for all candidates.
+fn complete_rank_history(bars: &[Bar], start: u64, end: u64, step: u64) -> bool {
+    step > 0
+        && end > start
+        && (end - start) % step == 0
+        && bars.len() as u64 == (end - start) / step
+        && bars.first().is_some_and(|bar| bar.time == start)
+        && bars
+            .last()
+            .is_some_and(|bar| bar.time.checked_add(step) == Some(end))
+        && bars
+            .windows(2)
+            .all(|pair| pair[0].time.checked_add(step) == Some(pair[1].time))
 }
 /// Rank is globally valid only when every candidate has complete evidence.
 fn sort_market_rows(
@@ -621,6 +650,28 @@ mod performance_fixtures {
 #[cfg(test)]
 mod global_rank_tests {
     use super::*;
+    #[test]
+    fn global_rank_rejects_first_last_and_interior_candle_gaps() {
+        let bar = |t| Bar {
+            time: t,
+            open: 1.0,
+            high: 1.0,
+            low: 1.0,
+            close: 1.0,
+            volume: 1.0,
+            funding_rate: None,
+        };
+        let full = vec![bar(0), bar(900_000), bar(1_800_000)];
+        assert!(complete_rank_history(&full, 0, 2_700_000, 900_000));
+        assert!(!complete_rank_history(&full[1..], 0, 2_700_000, 900_000));
+        assert!(!complete_rank_history(&full[..2], 0, 2_700_000, 900_000));
+        assert!(!complete_rank_history(
+            &[bar(0), bar(1_800_000)],
+            0,
+            2_700_000,
+            900_000
+        ));
+    }
     #[test]
     fn sorted_global_rank_has_stable_ties_and_no_page_local_shortcut() {
         let mut rows = vec![
