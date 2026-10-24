@@ -344,7 +344,8 @@ impl AnalyticsService {
             "job_id":job_id,"artifact":artifact,
             "summary":value.get("summary").or_else(||value.pointer("/test/summary")),
             "grid":value.get("grid").map(|g| json!({
-                "selected":g.get("selected"),"train":g.get("train"),"split_index":g.get("split_index"),
+                "selected":g.get("selected"),"train":g.get("train"),
+                "test":value.get("summary"),"split_index":g.get("split_index"),
                 "selection_warning":g.get("selection_warning")
             })),
             "dataset_hash":value.get("dataset_hash"),
@@ -879,6 +880,17 @@ impl AnalyticsService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn market_capabilities_discloses_supported_operator_names_and_units() {
+        let (root, service) = super::artifact_job_fixtures::service();
+        let capabilities = service.market_capabilities();
+        let operators = capabilities["operators"].as_array().unwrap();
+        assert_eq!(operators.len(), okx_analysis::operators::SUPPORTED_OPERATORS.len());
+        assert!(operators.iter().any(|operator| operator["name"] == "returns" && operator["unit"] == "ratio"));
+        assert!(operators.iter().all(|operator| operator["inputs"].is_array()));
+        drop(service);
+        std::fs::remove_dir_all(root).unwrap();
+    }
     #[tokio::test]
     async fn grid_result_includes_selected_train_test_and_equity() {
         let (root, service) = super::artifact_job_fixtures::service();
@@ -935,6 +947,7 @@ mod tests {
             .unwrap();
         assert_eq!(summary_view["metadata"]["grid"]["selected"]["fast"], 3);
         assert_eq!(summary_view["metadata"]["grid"]["train"]["pnl"], 1.0);
+        assert_eq!(summary_view["metadata"]["grid"]["test"]["pnl"], 1.0);
         assert_eq!(summary_view["metadata"]["summary"]["pnl"], 1.0);
         assert_eq!(summary_view["returned_rows"], 0);
         let variants = service
