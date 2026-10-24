@@ -180,9 +180,17 @@ impl AnalyticsService {
         }).await
     }
     pub fn market_capabilities(&self) -> Value {
+        let operators = okx_analysis::operators::SUPPORTED_OPERATORS
+            .iter()
+            .map(|&operator| {
+                let info = okx_analysis::operators::registry(operator);
+                json!({"name":operator,"unit":info.unit,"inputs":info.inputs})
+            })
+            .collect::<Vec<_>>();
         json!({"schema":"okx.market.capabilities/v1",
             "actions":["screen","compare","instruments","snapshot","microstructure","capabilities"],
             "timeframes_ms":[60000,180000,300000,900000,1800000,3600000,14400000,86400000],
+            "operators":operators,
             "limits":{"max_explicit_instruments":100,"max_page_rows":50,
                 "max_correlation_instruments":8,"max_candles_total":1000000},
             "universe":{"modes":["explicit_instruments","venue_reference_registry"],
