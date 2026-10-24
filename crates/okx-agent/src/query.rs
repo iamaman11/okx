@@ -45,6 +45,20 @@ fn incomplete(v: &Value) -> bool {
         _ => false,
     }
 }
+/// A live market overview must not leak unbounded order-book depth into the
+/// small public MCP envelope. Bounded book levels have their own microstructure action.
+fn compact_ws_overview(snapshot: okx_observation::LiveMarketSnapshot) -> Value {
+    json!({
+        "schema": "okx.market.overview/v1",
+        "source_mode": "websocket",
+        "quality": "complete",
+        "market": snapshot.market,
+        "generation": snapshot.generation,
+        "book_sequence": snapshot.order_book.seq_id,
+        "book_exchange_timestamp_ms": snapshot.order_book.exchange_timestamp_ms
+    })
+}
+
 pub fn response(id: &str, result: Result<Value, String>) -> AgentResponse {
     let quality = match &result {
         Ok(value) if incomplete(value) => DataQuality::Degraded,
@@ -309,9 +323,7 @@ async fn execute(
                 )
                 .await;
             match snapshot {
-                Ok(snapshot) => {
-                    serde_json::to_value(snapshot).map_err(|_| "SERIALIZATION_FAILED".into())
-                }
+                Ok(snapshot) => Ok(compact_ws_overview(snapshot)),
                 Err(_) => {
                     // A REST observation cannot certify a fresh WS book for trading.
                     // Expose bounded native WS quality without raw transport errors.
@@ -342,7 +354,7 @@ async fn execute(
                         .await
                         .map_err(|_| "MARKET_SOURCE_UNAVAILABLE")?;
                     Ok(
-                        json!({"market":snapshot,"source_mode":"rest","quality":"degraded","reason":"PUBLIC_WS_WARMING","public_ws_quality":ws_quality}),
+                        json!({"schema":"okx.market.overview/v1","market":snapshot,"source_mode":"rest","quality":"degraded","reason":"PUBLIC_WS_WARMING","public_ws_quality":ws_quality}),
                     )
                 }
             }
@@ -389,6 +401,73 @@ fn book_sweep_vwap(
 #[cfg(test)]
 mod microstructure_test {
     use super::*;
+
+    #[test]
+    fn healthy_ws_overview_omits_unbounded_depth_and_fits_mcp_envelope() {
+        let market = okx_observation::MarketSnapshot {
+            schema: "okx.market-snapshot/v1".into(),
+            instrument_id: "BTC-USDT-SWAP".into(),
+            instrument_type: okx_observation::InstrumentType::Swap,
+            underlying: "BTC-USDT".into(),
+            reference_generation: "reference".into(),
+            market_generation: "market".into(),
+            source_received_at: "2026-10-24T02:00:00Z".into(),
+            ticker: okx_observation::TickerState {
+                last: "100".into(),
+                last_size: "1".into(),
+                best_ask: "100.1".into(),
+                best_ask_size: "2".into(),
+                best_bid: "100".into(),
+                best_bid_size: "3".into(),
+                open_24h: None,
+                high_24h: None,
+                low_24h: None,
+                volume_currency_24h: None,
+                volume_24h: None,
+                exchange_timestamp_ms: "1000".into(),
+            },
+            mark_price: okx_observation::MarkPriceState {
+                price: "100".into(),
+                exchange_timestamp_ms: "1000".into(),
+            },
+            index_price: okx_observation::IndexPriceState {
+                index_id: "BTC-USDT".into(),
+                price: "100".into(),
+                exchange_timestamp_ms: "1000".into(),
+            },
+            funding: None,
+            open_interest: okx_observation::OpenInterestState {
+                contracts: "100".into(),
+                currency: None,
+                usd: None,
+                exchange_timestamp_ms: "1000".into(),
+            },
+        };
+        let depth = okx_observation::BookLevel {
+            price: "100".into(),
+            size: "1".into(),
+            order_count: None,
+        };
+        let snapshot = okx_observation::LiveMarketSnapshot {
+            generation: 7,
+            market,
+            order_book: okx_observation::OrderBookSnapshot {
+                generation: 7,
+                status: okx_observation::OrderBookStatus::Contiguous,
+                seq_id: Some(123),
+                exchange_timestamp_ms: Some("1000".into()),
+                asks: vec![depth.clone(); 2000],
+                bids: vec![depth; 2000],
+            },
+        };
+        let projected = compact_ws_overview(snapshot);
+        assert_eq!(projected["source_mode"], "websocket");
+        assert_eq!(projected["market"]["ticker"]["best_bid"], "100");
+        assert_eq!(projected["book_sequence"], 123);
+        assert!(projected.get("order_book").is_none());
+        assert!(serde_json::to_vec(&projected).unwrap().len() < 12_288);
+    }
+
     #[test]
     fn market_local_budget_failure_is_addressable_and_retryable() {
         let r = response(
