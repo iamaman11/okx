@@ -251,6 +251,32 @@ impl PublicRuntimeState {
         }
     }
 
+    /// Atomic WS-only new-risk read: fresh price/book, bounded funding/OI,
+    /// complete subscriptions and a single coherent generation.
+    pub fn risk_fresh_snapshot(
+        &self,
+        instrument_id: &str,
+        now_ms: u64,
+        price_max_age_ms: u64,
+        context_max_age_ms: u64,
+        source_received_at: impl Into<String>,
+    ) -> Result<LiveMarketSnapshot, PublicRuntimeError> {
+        let quality = self.risk_quality_snapshot(
+            instrument_id,
+            now_ms,
+            price_max_age_ms,
+            context_max_age_ms,
+        )?;
+        if quality.quality != MarketReadiness::Fresh {
+            return Err(PublicRuntimeError::MarketNotFresh(instrument_id.to_owned()));
+        }
+        self.markets
+            .get(instrument_id)
+            .ok_or_else(|| PublicRuntimeError::MarketStateNotInitialized(instrument_id.to_owned()))?
+            .publish(&self.reference, source_received_at)
+            .map_err(Into::into)
+    }
+
     pub fn fresh_snapshot(
         &self,
         instrument_id: &str,
