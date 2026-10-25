@@ -226,7 +226,7 @@ impl TradeService {
             };
             snapshot.valid()
                 && i64::try_from(snapshot.state.revision).ok() == Some(policy.0)
-                && policy.1 == !account.access_enabled()
+                && policy.1 != account.access_enabled()
                 && policy.2 == snapshot.state.campaign_id
                 && dec(&snapshot.state.campaign_loss_limit_usd).is_ok_and(|value| policy.3 == value)
         });
