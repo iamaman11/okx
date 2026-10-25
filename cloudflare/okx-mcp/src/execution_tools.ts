@@ -49,7 +49,43 @@ export const ACTION_SCHEMAS:Record<string,Schema[]>={
 };
 for(const schema of ACTION_SCHEMAS.trade){if(['preview','execute'].includes(schema.properties.action.const))schema.allOf=[{if:{properties:{operation:{enum:['open','add','replace']}}},then:{required:['protection']}}];}
 ACTION_SCHEMAS.diagnostics[0].allOf=[{anyOf:[{required:['account']},{required:['reference']}]}];
-export const PUBLIC_TOOLS:Json[]=Object.entries(ACTION_SCHEMAS).map(([name,schemas])=>({name,description:`${name} actions`,inputSchema:{oneOf:schemas}}));
+// The MCP tool is the permission/approval boundary. Do not mix preview
+// with real order submission under a single model-callable descriptor.
+const TOOL_NOTES:Record<string,{description:string;readOnlyHint:boolean;destructiveHint:boolean}>={
+ accounts:{description:'Read or modify connected accounts and limits.',readOnlyHint:false,destructiveHint:true},
+ strategies:{description:'Read or manage strategies; may start live trading.',readOnlyHint:false,destructiveHint:true},
+ market:{description:'Read OKX market data; no orders.',readOnlyHint:true,destructiveHint:false},
+ research:{description:'Run, inspect or cancel research jobs.',readOnlyHint:false,destructiveHint:true},
+ portfolio:{description:'Read portfolio and model scenarios.',readOnlyHint:true,destructiveHint:false},
+ diagnostics:{description:'Read runtime and order diagnostics.',readOnlyHint:true,destructiveHint:false},
+};
+const TRADE_NOTES:Record<string,{description:string;readOnlyHint:boolean;destructiveHint:boolean}>={
+ preview:{description:'Preview trade plan and risk; no order.',readOnlyHint:true,destructiveHint:false},
+ execute:{description:'Place a real order; financial loss is possible. Requires account authorization, limits and STOP.',readOnlyHint:false,destructiveHint:true},
+ status:{description:'Read exact trade status; no orders.',readOnlyHint:true,destructiveHint:false},
+ cancel:{description:'Cancel an order; changes exchange state.',readOnlyHint:false,destructiveHint:true},
+ close:{description:'Close a position by sending real trading instructions.',readOnlyHint:false,destructiveHint:true},
+ capabilities:{description:'Read trade permissions and capabilities.',readOnlyHint:true,destructiveHint:false},
+ preflight:{description:'Read trade readiness; no orders.',readOnlyHint:true,destructiveHint:false},
+};
+const annotation=(meta:{readOnlyHint:boolean;destructiveHint:boolean})=>({
+ readOnlyHint:meta.readOnlyHint,destructiveHint:meta.destructiveHint,openWorldHint:false
+});
+export const PUBLIC_TOOLS:Json[]=[
+ ...Object.entries(ACTION_SCHEMAS).filter(([name])=>name!=='trade')
+   .map(([name,schemas])=>({name,description:TOOL_NOTES[name].description,
+     inputSchema:{oneOf:schemas},annotations:annotation(TOOL_NOTES[name])})),
+ ...ACTION_SCHEMAS.trade.map(schema=>{
+   const scopedAction=String(schema.properties.action.const);
+   const {action:_action,...properties}=schema.properties;
+   // The explicit name already determines the action. Never let the model
+   // override it through a second caller-controlled action field.
+   const inputSchema={...schema,properties,
+     required:(schema.required as string[]).filter(k=>k!=='action')};
+   return {name:'trade.'+scopedAction,description:TRADE_NOTES[scopedAction].description,
+     inputSchema,annotations:annotation(TRADE_NOTES[scopedAction])};
+ })
+];
 export function matches(s:Schema,v:unknown):boolean {
  if(s.allOf&&!s.allOf.every((x:Schema)=>matches(x,v)))return false;
  if(s.if&&matches(s.if,v)&&s.then&&!matches(s.then,v))return false;
