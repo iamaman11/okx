@@ -1212,6 +1212,234 @@ mod tests {
             );
         }
     }
+    /// Test the actual Rust single-POST boundary, not an extra mock engine.
+    /// External source labels are synthetic and do not prove chat identity.
+    /// Risk receipts are fixtures: the independent RiskBook CAS tests remain separate.
+    #[tokio::test]
+    async fn three_sources_share_post_once_and_unknown_gate() {
+        let (store, human, _root) = reserved("three_sources", true, false, false).await;
+        let (chat, native) = store
+            .call(deadline(), |s| {
+                let native_instance = StrategyInstance {
+                    instance_id: "native_alpha".into(),
+                    definition_id: "ema_cross_v1".into(),
+                    definition_version: "1".into(),
+                    parameters: r#"{"parameters":{"fast":2,"slow":3},"instruments":["BTC-USDT-SWAP"],"timeframe_ms":60000}"#.into(),
+                    enabled: true,
+                    policy_revision: 1,
+                    budget: Decimal::from(2),
+                    last_decision_key: None,
+                };
+                s.mutate_instance(
+                    "three_source_create",
+                    "three_source_create_body",
+                    "create",
+                    &native_instance,
+                    None,
+                    now(),
+                )?;
+                let claim = s
+                    .claim_strategy_decision_with_id(
+                        "native_alpha",
+                        "bar_3sources",
+                        "native_inputs",
+                        1,
+                        now(),
+                    )?
+                    .ok_or(okx_execution::StoreError::Invalid("STRATEGY_CLAIM_MISSING"))?;
+                let prepare = |s: &mut okx_execution::AccountStore,
+                               source: &str,
+                               instance: &str,
+                               decision_id: String,
+                               inputs: &str|
+                 -> okx_execution::StoreResult<StoredIntent> {
+                    let definition = s.strategy_definition(instance)?;
+                    let intent_id = format!("three_sources_{source}");
+                    let decision = Decision {
+                        decision_id,
+                        instance_id: Some(instance.into()),
+                        decision_at: now(),
+                        input_digest: inputs.into(),
+                        policy_revision: 1,
+                        code_version: "three-sources-fixture".into(),
+                    };
+                    let new_intent = NewIntent {
+                        plan: IntentPlan {
+                            strategy_definition_id: definition.definition_id,
+                            strategy_definition_version: definition.version,
+                            strategy_parameters_digest: definition.parameters_digest,
+                            contract_value: Decimal::ONE,
+                            inverse: false,
+                            settlement_currency: "USDT".into(),
+                            position_side: "long".into(),
+                            private_source_generation: 1,
+                            operation: "open".into(),
+                            side: "buy".into(),
+                            quantity: Decimal::ONE,
+                            limit_price: Decimal::from(100),
+                            stop_price: Some(Decimal::from(90)),
+                            strategy_instance: instance.into(),
+                            planned_loss_usd: Decimal::ONE,
+                            source_generation: 1,
+                        },
+                        intent_id: intent_id.clone(),
+                        idempotency_key: format!("request_three_{source}"),
+                        request_hash: format!("request_body_three_{source}"),
+                        client_order_id: format!("client_three_{source}"),
+                        deadline: now() + 30_000,
+                        plan_hash: format!("plan_three_{source}"),
+                        policy_revision: 1,
+                        risk_increase: true,
+                        instrument_id: "BTC-USDT-SWAP".into(),
+                    };
+                    let saved = s.prepare(&decision, &new_intent)?;
+                    // Preserve the single SQL intent when the same command is replayed.
+                    assert_eq!(s.prepare(&decision, &new_intent)?.intent_id, intent_id);
+                    s.reserve(
+                        &CentralReceipt {
+                            reservation_key: format!("synthetic_reservation_{source}"),
+                            account_key: s.meta().account_key.clone(),
+                            installation_id: s.meta().installation_id.clone(),
+                            instance_id: Some(instance.into()),
+                            intent_id,
+                            plan_hash: new_intent.plan_hash,
+                            policy_revision: 1,
+                            receipt_hash: format!("synthetic_receipt_{source}"),
+                            requested_loss_usd: Decimal::ONE,
+                            conversion_digest: "synthetic_conversion".into(),
+                        },
+                        now(),
+                    )?;
+                    Ok(saved)
+                };
+                let chat = prepare(s, "chat", "manual", "external_chat".into(), "unverified_external")?;
+                let native = prepare(s, "native", "native_alpha", claim, "native_inputs")?;
+                Ok((chat, native))
+            })
+            .await
+            .unwrap();
+        let gateway = FixtureGateway {
+            posts: AtomicUsize::new(0),
+            lose: false,
+        };
+        // All three compete for the same AccountStoreHandle / durable POST fence.
+        let (first, second, third) = tokio::join!(
+            post_once(&store, &human, deadline(), || gateway.send()),
+            post_once(&store, &chat, deadline(), || gateway.send()),
+            post_once(&store, &native, deadline(), || gateway.send())
+        );
+        let intents = [human, chat, native];
+        let mut winner = None;
+        let mut blocked = Vec::new();
+        for (index, result) in [first, second, third].into_iter().enumerate() {
+            match result {
+                Ok(Some(1)) => {
+                    assert!(winner.replace(index).is_none(), "only one source may POST");
+                }
+                Err(reason) if reason.contains("ACCOUNT_UNKNOWN_EXPOSURE") => blocked.push(index),
+                other => panic!("unexpected POST admission result: {other:?}"),
+            }
+        }
+        assert_eq!(blocked.len(), 2);
+        assert_eq!(gateway.posts.load(Ordering::SeqCst), 1);
+        let winner = winner.expect("one admitted source");
+        let winner_id = intents[winner].intent_id.clone();
+        store
+            .call(deadline(), move |s| {
+                s.record_outcome(
+                    &winner_id,
+                    IntentState::Filled,
+                    Some("first_fixture_order"),
+                    "verified-fixture-venue-readback",
+                    now(),
+                )
+            })
+            .await
+            .unwrap();
+        assert!(
+            post_once(&store, &intents[winner], deadline(), || gateway.send())
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(gateway.posts.load(Ordering::SeqCst), 1);
+
+        let lost = FixtureGateway {
+            posts: AtomicUsize::new(0),
+            lose: true,
+        };
+        assert!(
+            post_once(&store, &intents[blocked[0]], deadline(), || lost.send())
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(lost.posts.load(Ordering::SeqCst), 1);
+        let unknown_id = intents[blocked[0]].intent_id.clone();
+        assert_eq!(
+            store
+                .call(deadline(), move |s| s.intent(&unknown_id))
+                .await
+                .unwrap()
+                .unwrap()
+                .state,
+            IntentState::Unknown
+        );
+        assert!(
+            post_once(&store, &intents[blocked[1]], deadline(), || gateway.send())
+                .await
+                .unwrap_err()
+                .contains("ACCOUNT_UNKNOWN_EXPOSURE")
+        );
+        assert_eq!(gateway.posts.load(Ordering::SeqCst), 1);
+        let resolved_id = intents[blocked[0]].intent_id.clone();
+        store
+            .call(deadline(), move |s| {
+                s.record_outcome(
+                    &resolved_id,
+                    IntentState::Filled,
+                    Some("resolved_fixture_order"),
+                    "verified-fixture-reconciliation",
+                    now(),
+                )
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            post_once(&store, &intents[blocked[1]], deadline(), || gateway.send())
+                .await
+                .unwrap(),
+            Some(1)
+        );
+        assert_eq!(gateway.posts.load(Ordering::SeqCst), 2);
+        let last_id = intents[blocked[1]].intent_id.clone();
+        store
+            .call(deadline(), move |s| {
+                s.record_outcome(
+                    &last_id,
+                    IntentState::Filled,
+                    Some("last_fixture_order"),
+                    "verified-fixture-venue-readback",
+                    now(),
+                )
+            })
+            .await
+            .unwrap();
+        for intent in &intents {
+            let id = intent.intent_id.clone();
+            let state = store
+                .call(deadline(), move |s| s.intent(&id))
+                .await
+                .unwrap();
+            assert_eq!(state.unwrap().state, IntentState::Filled);
+        }
+        // Two acknowledged fixture POSTs plus one lost-reply fixture POST.
+        assert_eq!(
+            gateway.posts.load(Ordering::SeqCst) + lost.posts.load(Ordering::SeqCst),
+            3
+        );
+    }
+
     #[tokio::test]
     async fn deadline_expires_after_commit_before_gateway_send() {
         let (store, intent, _root) = reserved("commit_deadline", true, false, false).await;
