@@ -1730,6 +1730,7 @@ mod tests {
         .expect("old stderr");
         let launch = AgentLaunchEvidence {
             pid: 321,
+            incarnation: "ctl_00000000000000000000000000000001".into(),
             stdout_offset: fs::metadata(&stdout).expect("stdout metadata").len(),
             stderr_offset: fs::metadata(&stderr).expect("stderr metadata").len(),
             stdout_health: Default::default(),
