@@ -213,10 +213,10 @@ pub fn promote_existing_once(root: &Path) -> io::Result<AccountCatalog> {
     let tmp = stage(root, &encode(&expected)?)?;
     let publish = fs::hard_link(&tmp, root.join(CATALOG_FILE));
     let _ = fs::remove_file(tmp);
-    if let Err(e) = publish {
-        if e.kind() != io::ErrorKind::AlreadyExists {
-            return Err(e);
-        }
+    if let Err(e) = publish
+        && e.kind() != io::ErrorKind::AlreadyExists
+    {
+        return Err(e);
     }
     let loaded = load(root)?;
     if loaded != expected {
