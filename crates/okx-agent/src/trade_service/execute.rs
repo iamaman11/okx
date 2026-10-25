@@ -104,6 +104,7 @@ impl TradeService {
                     order,
                     protection.as_ref(),
                     until,
+                    true,
                 )
                 .await
             {

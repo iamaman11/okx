@@ -38,6 +38,19 @@ pub(super) fn persist_definition(
     Ok(())
 }
 
+fn manual_instance(budget: Decimal) -> StrategyInstance {
+    StrategyInstance {
+        instance_id: "manual".into(),
+        definition_id: "manual".into(),
+        definition_version: "1".into(),
+        parameters: "{\"kind\":\"manual\"}".into(),
+        enabled: false,
+        policy_revision: 1,
+        budget,
+        last_decision_key: None,
+    }
+}
+
 impl AccountStore {
     pub fn instance(&self, id: &str) -> StoreResult<Option<StrategyInstance>> {
         let row=self.connection.query_row("SELECT instance_id,definition_id,definition_version,parameters,enabled,policy_revision,budget,last_decision_key FROM strategy_instances WHERE instance_id=?1",[id],|r|Ok((StrategyInstance{instance_id:r.get(0)?,definition_id:r.get(1)?,definition_version:r.get(2)?,parameters:r.get(3)?,enabled:r.get(4)?,policy_revision:r.get(5)?,budget:Decimal::ZERO,last_decision_key:r.get(7)?},r.get::<_,String>(6)?))).optional()?;
@@ -57,18 +70,17 @@ impl AccountStore {
     ) -> StoreResult<Option<StrategyDefinitionVersion>> {
         Ok(self.connection.query_row("SELECT parameters,parameters_digest,created_at FROM strategy_definition_versions WHERE definition_id=?1 AND version=?2",params![id,version],|r|Ok(StrategyDefinitionVersion{definition_id:id.into(),version:version.into(),parameters:r.get(0)?,parameters_digest:r.get(1)?,created_at:r.get(2)?})).optional()?)
     }
+    /// Construct exactly the same immutable definition without a SQL mutation.
+    pub fn manual_definition_preview(&self) -> StoreResult<StrategyDefinitionVersion> {
+        if self.instance("manual")?.is_some() {
+            self.strategy_definition("manual")
+        } else {
+            canonical_definition(&manual_instance(self.policy()?.3), 1, 0)
+        }
+    }
     pub fn ensure_manual_instance(&mut self, now: i64) -> StoreResult<StrategyDefinitionVersion> {
         if self.instance("manual")?.is_none() {
-            let instance = StrategyInstance {
-                instance_id: "manual".into(),
-                definition_id: "manual".into(),
-                definition_version: "1".into(),
-                parameters: "{\"kind\":\"manual\"}".into(),
-                enabled: false,
-                policy_revision: 1,
-                budget: self.policy()?.3,
-                last_decision_key: None,
-            };
+            let instance = manual_instance(self.policy()?.3);
             self.mutate_instance(
                 "native-manual-instance",
                 "native-manual-instance/v1",

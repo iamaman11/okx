@@ -12,7 +12,8 @@ impl TradeService {
             .call(deadline(), move |s| {
                 Ok(s.intent(&reference)?
                     .or(s.by_client_order_id(&reference)?)
-                    .or(s.by_exchange_order_id(&reference)?))
+                    .or(s.by_exchange_order_id(&reference)?)
+                    .or(s.by_idempotency(&reference)?))
             })
             .await
             .map_err(err)?
