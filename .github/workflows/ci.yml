@@ -141,6 +141,22 @@ jobs:
       - name: Measure two-account 100-parallel native SQL (not WSS)
         run: cargo test --locked -p okx-execution --lib two_account_100_parallel_sql_readonly_isolation -- --nocapture
 
+      - name: Verify actual Worker governance CAS history against native SQL owner
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Run in the same job/toolchain that already compiled native SQL.
+          # No new runner or production transport, no additional Rust rebuild.
+          pushd cloudflare/okx-mcp
+          npm ci --ignore-scripts --no-audit --no-fund
+          OKX_A2_TRACE=1 npm run check | tee "$RUNNER_TEMP/a2-worker-cas.log"
+          popd
+          test "$(grep -c '^A2_SQL_BRIDGE_TRACE_V1:' "$RUNNER_TEMP/a2-worker-cas.log")" -eq 1
+          sed -n 's/^A2_SQL_BRIDGE_TRACE_V1://p' "$RUNNER_TEMP/a2-worker-cas.log" > "$RUNNER_TEMP/a2-worker-governance.json"
+          test -s "$RUNNER_TEMP/a2-worker-governance.json"
+          OKX_A2_TRACE_PATH="$RUNNER_TEMP/a2-worker-governance.json" \
+            cargo test --locked -p okx-execution --lib central_worker_cas_trace_native_sql_readback_and_restart -- --ignored --nocapture
+
 
   cloudflare-mcp:
     name: cloudflare-mcp

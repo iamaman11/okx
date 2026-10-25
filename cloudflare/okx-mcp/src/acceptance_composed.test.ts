@@ -20,6 +20,21 @@ class Storage {
  }
 }
 const storage=new Storage();
+// This trace is emitted only during CI's native SQL bridge test. It records
+// actual Worker governance transactions, not mocked native acknowledgements.
+const nativePolicyTrace:{schema:string;source:string;events:Array<{
+ stage:string;governance:Record<string,unknown>}>}={
+ schema:'okx.a2.worker-sql-cas-trace/v1',
+ source:'mcpApi.fetch+account_governance_store.transaction',
+ events:[]
+};
+async function recordNativePolicy(stage:string):Promise<void>{
+ const snapshot=await governanceRequest(storage,'GET');
+ check(snapshot.status===200,'central CAS trace must come from committed storage');
+ const {status,access,readiness,last_admission,complete_all_account_census,
+  available_for_new_risk_usdt,...governance}=snapshot.body;
+ nativePolicyTrace.events.push({stage,governance:structuredClone(governance)});
+}
 check((await initializeGovernance(storage,initial)).status===200,'synthetic central installation');
 const ctx={auth:{scope:['mcp:use']}};
 let id=0,venuePostCount=0,transportCalls=0;
@@ -109,6 +124,7 @@ const connectArgs={action:'connect',alias:'fixture_a',label:'Fixture A',
 const first=await call('accounts',connectArgs);
 check(first.status==='completed'&&first.data.account.account_key===accountKey&&
  first.data.account.identity_verified===true,'connect must reach real central enrollment owner');
+await recordNativePolicy('connect');
 const repeated=await call('accounts',connectArgs);
 check(repeated.status==='completed'&&repeated.data.account.account_key===accountKey,'connect replay');
 const changed=await call('accounts',{...connectArgs,label:'Different'});
@@ -120,11 +136,13 @@ const pauseArgs={action:'pause',account:'fixture_a',expected_revision:1,
 let pause=await call('accounts',pauseArgs);
 check(pause.status==='completed'&&pause.data.revision===2&&pause.data.accounts[0].explicit_pause,
  'central pause and revision');
+await recordNativePolicy('pause');
 const pausedReplay=await call('accounts',pauseArgs);
 check(pausedReplay.data.revision===2,'pause replay same revision');
 const staleResume=await call('accounts',{...pauseArgs,action:'resume',idempotency_key:'fixture_resume_stale_001'});
 check(staleResume.status==='failed'&&staleResume.reason_code==='STALE_ACCESS_REVISION',
  'stale governance revision rejected');
+await recordNativePolicy('stale_resume_rejected');
 const plan={operation:'open',strategy_instance:'manual',instrument:'BTC-USDT-SWAP',
  side:'long',sizing:{contracts:'0.01'},order:{type:'limit',limit_price:'100',max_slippage_bps:25},
  protection:{stop_distance_bps:100}};
@@ -137,17 +155,21 @@ const resume=await call('accounts',{action:'resume',account:'fixture_a',expected
  idempotency_key:'fixture_resume_0001'});
 check(resume.status==='completed'&&resume.data.revision===3&&
  resume.data.accounts[0].explicit_pause===false,'central resume');
+await recordNativePolicy('resume');
 const revisedLimits={...limits,max_order_loss_usdt:'0.5'};
 const limitsArgs={action:'set_limits',account:'fixture_a',expected_revision:3,
  idempotency_key:'fixture_limits_0001',limits:revisedLimits};
 const revised=await call('accounts',limitsArgs);
 check(revised.status==='completed'&&revised.data.revision===4&&
  revised.data.accounts[0].limits.max_order_loss_usdt==='0.5','central limits CAS');
+await recordNativePolicy('set_limits');
 const staleLimit=await call('accounts',{...limitsArgs,idempotency_key:'fixture_limits_stale_001'});
 check(staleLimit.status==='failed'&&staleLimit.reason_code==='STALE_ACCESS_REVISION',
  'stale limits cannot overwrite');
+await recordNativePolicy('stale_limits_rejected');
 const replayLimit=await call('accounts',limitsArgs);
 check(replayLimit.data.revision===4,'limits identical replay');
+await recordNativePolicy('set_limits_replay');
 read=await call('accounts',{action:'status',account:'fixture_a'});
 check(read.data.account.policy_revision===4&&read.data.account.limits.max_order_loss_usdt==='0.5',
  'account status sees durable central owner');
@@ -185,4 +207,9 @@ check(final.revision===4&&final.accounts.length===1&&
  final.accounts[0].limits.max_order_loss_usdt==='0.5'&&
  final.accounts[0].explicit_pause===false,'persisted central owner was not overwritten');
 check(Number(venuePostCount)===2&&transportCalls>24,'no unexpected fixture posts');
+await recordNativePolicy('final');
+if((globalThis as any).process?.env?.OKX_A2_TRACE==='1'){
+ check(nativePolicyTrace.events.length===8,'the native SQL bridge requires all CAS transitions');
+ console.log('A2_SQL_BRIDGE_TRACE_V1:'+JSON.stringify(nativePolicyTrace));
+}
 console.log('mcp_central_owner_composed_fake_venue PASS central connect/pause/resume/limits CAS + protected trade lifecycle, two fixture posts, zero real exchange POST, no native SQL/WSS claim');
