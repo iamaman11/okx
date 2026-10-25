@@ -215,13 +215,7 @@ mod tests {
             connect_operation_id: "connect-operation".into(),
             configuration_digest: "b".repeat(64),
         };
-        write_new(
-            &root
-                .join("account-catalog")
-                .join(format!("{}.json", key_hash(&key))),
-            &serde_json::to_vec(&config).unwrap(),
-        )
-        .unwrap();
+        okx_protocol::account_catalog_proto::append(&root, &config).unwrap();
         let directory = account_root(&root, &key);
         fs::create_dir_all(&directory).unwrap();
         let opening = OpeningSnapshot {

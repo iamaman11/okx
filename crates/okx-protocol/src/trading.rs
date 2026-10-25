@@ -329,6 +329,65 @@ impl TradeRequest {
         }
     }
 }
+/// Strict typed v1 live strategy settings. JSON is only an API/SQL wire format.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StrategyParametersV1 {
+    #[serde(default = "default_fast")]
+    pub fast: usize,
+    #[serde(default = "default_slow")]
+    pub slow: usize,
+}
+fn default_fast() -> usize {
+    10
+}
+fn default_slow() -> usize {
+    20
+}
+impl StrategyParametersV1 {
+    pub fn valid(&self) -> bool {
+        self.fast >= 1 && self.fast < self.slow && self.slow <= 1000
+    }
+    pub fn parse(value: &serde_json::Value) -> Option<Self> {
+        let parsed: Self = serde_json::from_value(value.clone()).ok()?;
+        parsed.valid().then_some(parsed)
+    }
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StrategyConfigurationV1 {
+    pub parameters: StrategyParametersV1,
+    pub instruments: Vec<String>,
+    pub timeframe_ms: u64,
+}
+impl StrategyConfigurationV1 {
+    pub fn valid(&self) -> bool {
+        self.parameters.valid()
+            && !self.instruments.is_empty()
+            && self.instruments.len() <= 32
+            && self.instruments.iter().all(|v| name(v))
+            && self.timeframe_ms >= 1000
+    }
+}
+#[cfg(test)]
+mod typed_strategy_parameters_tests {
+    use super::*;
+    #[test]
+    fn live_parameters_v1_fail_closed_and_bound_default() {
+        let valid = serde_json::json!({"fast":20,"slow":50});
+        assert_eq!(StrategyParametersV1::parse(&valid).unwrap().fast, 20);
+        assert!(StrategyParametersV1::parse(&serde_json::json!({})).is_some());
+        for bad in [
+            serde_json::json!({"fast":51,"slow":50}),
+            serde_json::json!({"fast":0,"slow":50}),
+            serde_json::json!({"fast":1,"slow":1001}),
+            serde_json::json!({"fast":"20","slow":50}),
+            serde_json::json!({"fast":20,"slow":50,"unsafe_override":true}),
+        ] {
+            assert!(StrategyParametersV1::parse(&bad).is_none());
+        }
+    }
+}
 impl StrategyRequest {
     pub fn valid(&self) -> bool {
         match self {
@@ -355,8 +414,8 @@ impl StrategyRequest {
                 id(idempotency_key)
                     && name(instance_id)
                     && name(definition_id)
-                    && *version > 0
-                    && parameters.is_object()
+                    && *version == 1
+                    && StrategyParametersV1::parse(parameters).is_some()
                     && parameters.to_string().len() <= 4096
                     && !instruments.is_empty()
                     && instruments.len() <= 32
@@ -373,7 +432,7 @@ impl StrategyRequest {
             } => {
                 id(idempotency_key)
                     && name(instance_id)
-                    && parameters.is_object()
+                    && StrategyParametersV1::parse(parameters).is_some()
                     && parameters.to_string().len() <= 4096
                     && decimal(budget_usd)
             }

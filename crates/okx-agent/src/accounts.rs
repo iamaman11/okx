@@ -8,8 +8,9 @@ use crate::{
 };
 use okx_api::{AccountApi, OkxRestClient, RateBudget};
 use okx_execution::{AccountMeta, AccountStoreHandle, OpeningSnapshot};
-use okx_protocol::accounts::{
-    AccountCatalog, AccountKey, Environment, VerifiedAccountConfig, valid_reference,
+use okx_protocol::{
+    account_catalog_proto,
+    accounts::{AccountKey, Environment, VerifiedAccountConfig, valid_reference},
 };
 use okx_runtime::{PrivateWsCoordinator, PrivateWsHandle};
 use rust_decimal::Decimal;
@@ -17,7 +18,6 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
     fs::{self, File, OpenOptions},
-    io::Write,
     path::{Path, PathBuf},
     str::FromStr,
     sync::{
@@ -29,16 +29,6 @@ use tokio::{
     sync::{RwLock, Semaphore, watch},
     task::JoinHandle,
 };
-
-const CATALOG_DIR: &str = "account-catalog";
-const INSTALLATION_FILE: &str = "installation.json";
-
-#[derive(serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Installation {
-    schema: String,
-    installation_id: String,
-}
 
 #[derive(Clone, Default, serde::Serialize)]
 pub struct SourceCaptureHealth {
@@ -118,89 +108,40 @@ pub fn initialize_installation(root: &Path, installation_id: &str) -> AgentResul
     if !okx_protocol::accounts::valid_installation(installation_id) {
         return Err(invalid());
     }
-    fs::create_dir_all(root)?;
-    let bytes = serde_json::to_vec(&Installation {
-        schema: "okx.installation/v1".into(),
-        installation_id: installation_id.into(),
-    })?;
-    publish_new(&root.join(INSTALLATION_FILE), &bytes)?;
-    fs::create_dir_all(root.join(CATALOG_DIR))?;
-    Ok(())
-}
-
-/// Atomically publish without replacing another account/operation. The temp
-/// and target share one filesystem; no remove-then-rename gap on Windows.
-fn publish_new(path: &Path, bytes: &[u8]) -> AgentResult<()> {
-    let parent = path.parent().ok_or_else(invalid)?;
-    fs::create_dir_all(parent)?;
-    let mut nonce = [0u8; 16];
-    getrandom::fill(&mut nonce).map_err(|_| invalid())?;
-    let temp = parent.join(format!(
-        ".publish-{}-{:x}",
-        std::process::id(),
-        u128::from_le_bytes(nonce)
-    ));
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&temp)?;
-    let outcome = (|| -> std::io::Result<()> {
-        file.write_all(bytes)?;
-        file.sync_all()?;
-        fs::hard_link(&temp, path)?;
-        Ok(())
-    })();
-    drop(file);
-    let _ = fs::remove_file(&temp);
-    outcome?;
-    #[cfg(not(windows))]
-    {
-        std::fs::File::open(parent)?.sync_all()?;
-    }
+    account_catalog_proto::initialize(root, installation_id)?;
     Ok(())
 }
 
 impl AccountRuntimeRegistry {
     pub async fn open(root: &Path, rate_budget: RateBudget) -> AgentResult<Self> {
-        let installation: Installation =
-            serde_json::from_slice(&fs::read(root.join(INSTALLATION_FILE))?)?;
-        if installation.schema != "okx.installation/v1"
-            || !okx_protocol::accounts::valid_installation(&installation.installation_id)
-        {
-            return Err(invalid());
-        }
-        let mut configs = Vec::new();
-        for entry in fs::read_dir(root.join(CATALOG_DIR))? {
-            let entry = entry?;
-            if entry.path().extension().and_then(|e| e.to_str()) != Some("json") {
-                continue;
+        let catalog = account_catalog_proto::promote_existing_once(root, |catalog| {
+            for account in &catalog.accounts {
+                let path = root
+                    .join("accounts")
+                    .join(key_hash(&account.account_key))
+                    .join("account.sqlite");
+                let connection = rusqlite::Connection::open_with_flags(
+                    path,
+                    rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+                )
+                .map_err(|_| std::io::Error::other("ACCOUNT_SQL_IDENTITY_UNAVAILABLE"))?;
+                let (key, installation_id, version):(String,String,i64) = connection.query_row(
+                    "SELECT account_key,installation_id,schema_version FROM account_meta WHERE singleton=1",
+                    [],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
+                ).map_err(|_|std::io::Error::other("ACCOUNT_SQL_IDENTITY_UNAVAILABLE"))?;
+                if key != account.account_key.wire()
+                    || installation_id != catalog.installation_id
+                    || version != 2
+                {
+                    return Err(std::io::Error::other("ACCOUNT_SQL_IDENTITY_MISMATCH"));
+                }
             }
-            let bytes = fs::read(entry.path())?;
-            if bytes.len() > 8192 {
-                return Err(invalid());
-            }
-            let config: VerifiedAccountConfig = serde_json::from_slice(&bytes)?;
-            if entry.file_name().to_string_lossy()
-                != format!("{}.json", key_hash(&config.account_key))
-            {
-                return Err(invalid());
-            }
-            configs.push(config);
-            if configs.len() > 32 {
-                return Err(invalid());
-            }
-        }
-        let catalog = AccountCatalog {
-            schema: AccountCatalog::SCHEMA.into(),
-            installation_id: installation.installation_id.clone(),
-            accounts: configs.clone(),
-        };
-        if !catalog.valid() {
-            return Err(invalid());
-        }
+            Ok(())
+        })?;
+        let configs = catalog.accounts.clone();
         let registry = Self {
             root: root.into(),
-            installation_id: installation.installation_id,
+            installation_id: catalog.installation_id,
             routes: RwLock::new(BTreeMap::new()),
             configurations: RwLock::new(
                 configs
@@ -404,14 +345,7 @@ impl AccountRuntimeRegistry {
                 "ACCOUNT_ALREADY_CONNECTED".into(),
             ));
         }
-        let bytes = serde_json::to_vec(configuration)?;
-        publish_new(
-            &self
-                .root
-                .join(CATALOG_DIR)
-                .join(format!("{}.json", key_hash(&configuration.account_key))),
-            &bytes,
-        )?;
+        account_catalog_proto::append(&self.root, configuration)?;
         configs.insert(configuration.account_key.wire(), configuration.clone());
         self.routes
             .write()
@@ -851,8 +785,7 @@ mod tests {
         let root = root();
         initialize_installation(&root, "installation-first").unwrap();
         assert!(initialize_installation(&root, "installation-second").is_err());
-        let bytes = fs::read(root.join(INSTALLATION_FILE)).unwrap();
-        let value: Installation = serde_json::from_slice(&bytes).unwrap();
+        let value = account_catalog_proto::load(&root).unwrap();
         assert_eq!(value.installation_id, "installation-first");
         std::fs::remove_dir_all(root).unwrap();
     }

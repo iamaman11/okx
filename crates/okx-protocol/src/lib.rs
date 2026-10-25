@@ -1,3 +1,4 @@
+pub mod account_catalog_proto;
 pub mod account_governance;
 pub mod accounts;
 pub mod analytics;

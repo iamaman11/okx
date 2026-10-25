@@ -7,7 +7,10 @@ use crate::{
 };
 use okx_api::{OkxRestClient, RateBudget};
 use okx_execution::{AccountMeta, AccountStore, AccountStoreHandle, OpeningSnapshot};
-use okx_protocol::accounts::{AccountKey, Environment, VerifiedAccountConfig, valid_reference};
+use okx_protocol::{
+    account_catalog_proto,
+    accounts::{AccountKey, Environment, VerifiedAccountConfig, valid_reference},
+};
 use rust_decimal::Decimal;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -65,30 +68,17 @@ fn write_new(path: &Path, bytes: &[u8]) -> AgentResult<()> {
     Ok(())
 }
 fn installation(root: &Path) -> AgentResult<String> {
-    let v: Value = serde_json::from_slice(&fs::read(root.join("installation.json"))?)?;
-    if v["schema"] != "okx.installation/v1" {
-        return Err(error("INSTALLATION_INVALID"));
-    }
-    let id = v["installation_id"]
-        .as_str()
-        .ok_or_else(|| error("INSTALLATION_INVALID"))?;
-    if !valid_reference(id) {
-        return Err(error("INSTALLATION_INVALID"));
-    }
-    Ok(id.into())
+    Ok(account_catalog_proto::load(root)?.installation_id)
 }
 fn catalog(root: &Path, key: &AccountKey) -> AgentResult<VerifiedAccountConfig> {
     if !key.valid() {
         return Err(error("ACCOUNT_KEY_INVALID"));
     }
-    let c: VerifiedAccountConfig = serde_json::from_slice(&fs::read(
-        root.join("account-catalog")
-            .join(format!("{}.json", key_hash(key))),
-    )?)?;
-    if !c.valid() || c.account_key != *key {
-        return Err(error("ACCOUNT_CATALOG_INVALID"));
-    }
-    Ok(c)
+    account_catalog_proto::load(root)?
+        .accounts
+        .into_iter()
+        .find(|a| a.account_key == *key)
+        .ok_or_else(|| error("ACCOUNT_CATALOG_INVALID"))
 }
 fn parse_key(wire: &str) -> AgentResult<AccountKey> {
     let p = wire.split(':').collect::<Vec<_>>();
@@ -145,17 +135,16 @@ pub async fn initialize_installation(
         if old != expected {
             return Err(error("INITIALIZE_OPERATION_CONFLICT"));
         }
-        if root.join("installation.json").exists() {
+        if root.join(account_catalog_proto::CATALOG_FILE).exists() {
             if installation(root)? != installation_id {
                 return Err(error("INSTALLATION_MISMATCH"));
             }
-            fs::create_dir_all(root.join("account-catalog"))?;
         } else {
             crate::accounts::initialize_installation(root, installation_id)?;
         }
         return Ok(reply(installation_id, operation_id, None, json!({})));
     }
-    if root.join("installation.json").exists() {
+    if root.join(account_catalog_proto::CATALOG_FILE).exists() {
         return Err(error("INSTALLATION_ALREADY_EXISTS"));
     }
     write_new(&op_path, &serde_json::to_vec(&expected)?)?;
