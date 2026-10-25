@@ -1,6 +1,6 @@
 use chrono::{SecondsFormat, Utc};
 use okx_api::{
-    AccountApi, AccountHistoryApi, AccountPositionRiskSnapshot, AssetApi, FeeRate, InstrumentType,
+    AccountApi, AccountConfig, AccountHistoryApi, AccountPositionRiskSnapshot, AssetApi, FeeRate, InstrumentType,
     LeverageInfo, MarginMode, OkxError, OkxRestClient, PendingDerivativeAlgoRiskInventory,
     PendingProtectiveAlgoInventory, PositionBuilderRequest, PositionBuilderSnapshot, TradeApi,
 };
@@ -11,6 +11,8 @@ use okx_observation::{
     normalize_execution_fill_history,
 };
 use thiserror::Error;
+use std::{future::Future, sync::Arc, time::{Duration, Instant}};
+use tokio::sync::Mutex;
 
 #[derive(Debug, Error)]
 pub enum AccountBootstrapError {
@@ -91,9 +93,56 @@ pub enum FeeScheduleBootstrapError {
     Normalize(#[from] FeeScheduleError),
 }
 
+
+ // The observer credential belongs to one account; never share its configuration across UIDs.
+ // The 2s bound matches the narrow account/config rate-limit window, not risk-source freshness.
+ const OBSERVER_CONFIG_MAX_REUSE_AGE: Duration = Duration::from_secs(2);
+
+ struct ObservedConfig {
+     config: AccountConfig,
+     received_at: chrono::DateTime<Utc>,
+     sampled_at: Instant,
+ }
+
+ #[derive(Default)]
+ struct ObserverConfigCache {
+     current: Mutex<Option<ObservedConfig>>,
+ }
+
+ impl ObserverConfigCache {
+     /// Lock across the one authenticated read: concurrent callers share the same proof.
+     /// Failed refreshes discard expired proof; no stale success/fallback is possible.
+     async fn read<F, Fut>(
+         &self,
+         fetch: F,
+     ) -> Result<(AccountConfig, chrono::DateTime<Utc>), OkxError>
+     where
+         F: FnOnce() -> Fut,
+         Fut: Future<Output = Result<AccountConfig, OkxError>>,
+     {
+         let mut current = self.current.lock().await;
+         if let Some(proof) = current.as_ref()
+             && proof.sampled_at.elapsed() < OBSERVER_CONFIG_MAX_REUSE_AGE
+         {
+             return Ok((proof.config.clone(), proof.received_at));
+         }
+         *current = None;
+         let sampled_at = Instant::now();
+         let received_at = Utc::now();
+         let config = fetch().await?;
+         *current = Some(ObservedConfig {
+             config: config.clone(),
+             received_at,
+             sampled_at,
+         });
+         Ok((config, received_at))
+     }
+ }
+
 #[derive(Clone)]
 pub struct AccountBootstrapper {
     api: AccountApi,
+    config_cache: Arc<ObserverConfigCache>,
     history: AccountHistoryApi,
     asset: AssetApi,
     trade: TradeApi,
@@ -103,17 +152,22 @@ impl AccountBootstrapper {
     pub fn new(client: OkxRestClient) -> Self {
         Self {
             api: AccountApi::new(client.clone()),
+            config_cache: Arc::new(ObserverConfigCache::default()),
             history: AccountHistoryApi::new(client.clone()),
             asset: AssetApi::new(client.clone()),
             trade: TradeApi::new(client),
         }
     }
 
+    async fn observer_config(&self) -> Result<(AccountConfig, chrono::DateTime<Utc>), OkxError> {
+        self.config_cache.read(|| self.api.config()).await
+    }
+
     pub async fn fee_schedule(
         &self,
         rules: &InstrumentRulesSnapshot,
     ) -> Result<FeeScheduleSnapshot, FeeScheduleBootstrapError> {
-        let config = self.api.config().await?;
+        let (config, _) = self.observer_config().await?;
         strict_read_only_permissions(&config.perm)
             .map_err(|_| FeeScheduleBootstrapError::PermissionRejected)?;
         self.fee_schedule_authorized(rules).await
@@ -156,7 +210,7 @@ impl AccountBootstrapper {
         rules: &InstrumentRulesSnapshot,
         margin_mode: MarginMode,
     ) -> Result<TradingCapabilitiesSnapshot, TradingCapabilitiesBootstrapError> {
-        let config = self.api.config().await?;
+        let (config, _) = self.observer_config().await?;
         let permissions = strict_read_only_permissions(&config.perm)
             .map_err(|_| TradingCapabilitiesBootstrapError::PermissionRejected)?;
 
@@ -221,7 +275,7 @@ impl AccountBootstrapper {
         margin_mode: MarginMode,
         position_side: &str,
     ) -> Result<String, ConfiguredLeverageBootstrapError> {
-        let config = self.api.config().await?;
+        let (config, _) = self.observer_config().await?;
         strict_read_only_permissions(&config.perm)
             .map_err(|_| ConfiguredLeverageBootstrapError::PermissionRejected)?;
 
@@ -238,7 +292,7 @@ impl AccountBootstrapper {
         &self,
         request: &PositionBuilderRequest,
     ) -> Result<PositionBuilderSnapshot, AccountBootstrapError> {
-        let config = self.api.config().await?;
+        let (config, _) = self.observer_config().await?;
         strict_read_only_permissions(&config.perm)?;
         Ok(self.api.position_builder(request).await?)
     }
@@ -246,7 +300,7 @@ impl AccountBootstrapper {
     pub async fn account_position_risk_oracle(
         &self,
     ) -> Result<AccountPositionRiskSnapshot, AccountBootstrapError> {
-        let config = self.api.config().await?;
+        let (config, _) = self.observer_config().await?;
         strict_read_only_permissions(&config.perm)?;
         Ok(self.api.account_position_risk().await?)
     }
@@ -258,7 +312,7 @@ impl AccountBootstrapper {
         order_id: &str,
         client_order_id: &str,
     ) -> Result<ExecutionFillEvidence, AccountLedgerBootstrapError> {
-        let config = self.api.config().await?;
+        let (config, _) = self.observer_config().await?;
         strict_read_only_permissions(&config.perm)
             .map_err(|_| AccountLedgerBootstrapError::PermissionRejected)?;
         let history = self
@@ -277,7 +331,7 @@ impl AccountBootstrapper {
     pub async fn pending_protective_algos(
         &self,
     ) -> Result<PendingProtectiveAlgoInventory, AccountLedgerBootstrapError> {
-        let config = self.api.config().await?;
+        let (config, _) = self.observer_config().await?;
         strict_read_only_permissions(&config.perm)
             .map_err(|_| AccountLedgerBootstrapError::PermissionRejected)?;
         Ok(self.trade.pending_protective_algos().await?)
@@ -289,7 +343,7 @@ impl AccountBootstrapper {
     pub async fn pending_derivative_risk_algos(
         &self,
     ) -> Result<PendingDerivativeAlgoRiskInventory, AccountLedgerBootstrapError> {
-        let config = self.api.config().await?;
+        let (config, _) = self.observer_config().await?;
         strict_read_only_permissions(&config.perm)
             .map_err(|_| AccountLedgerBootstrapError::PermissionRejected)?;
         Ok(self.trade.pending_derivative_risk_algos().await?)
@@ -299,7 +353,7 @@ impl AccountBootstrapper {
         &self,
         snapshot: &AccountSnapshot,
     ) -> Result<AccountLedgerFacts, AccountLedgerBootstrapError> {
-        let config = self.api.config().await?;
+        let (config, config_received_at) = self.observer_config().await?;
         strict_read_only_permissions(&config.perm)
             .map_err(|_| AccountLedgerBootstrapError::PermissionRejected)?;
 
@@ -323,7 +377,7 @@ impl AccountBootstrapper {
             self.history.bills_history(),
         )?;
 
-        let source_received_at = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
+        let source_received_at = config_received_at.to_rfc3339_opts(SecondsFormat::Millis, true);
         Ok(AccountLedgerFacts::from_okx(
             source_received_at,
             snapshot,
@@ -346,10 +400,10 @@ impl AccountBootstrapper {
     }
 
     pub async fn snapshot(&self) -> Result<AccountSnapshot, AccountBootstrapError> {
-        let config = self.api.config().await?;
-        // Config completes first; every parallel response below is newer.
-        // Keep that oldest receipt so a slow batch cannot appear freshly read.
-        let source_received_at = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
+        let (config, config_received_at) = self.observer_config().await?;
+        // Use the original authenticated config observation time, not the cache-hit time.
+        // Balance/positions/orders are read afterward; no falsely fresh source receipt.
+        let source_received_at = config_received_at.to_rfc3339_opts(SecondsFormat::Millis, true);
         let permissions = strict_read_only_permissions(&config.perm)?;
 
         let (balance, positions, pending_orders) = tokio::try_join!(
@@ -675,4 +729,59 @@ mod tests {
             Err(AccountBootstrapError::PermissionRejected)
         ));
     }
+    #[tokio::test]
+    async fn observer_config_is_single_flight_per_account() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let cache = Arc::new(ObserverConfigCache::default());
+        let fetches = Arc::new(AtomicUsize::new(0));
+        let mut calls = Vec::new();
+        for _ in 0..16 {
+            let cache = cache.clone();
+            let fetches = fetches.clone();
+            calls.push(tokio::spawn(async move {
+                cache.read(|| async move {
+                    fetches.fetch_add(1, Ordering::SeqCst);
+                    tokio::task::yield_now().await;
+                    Ok::<_, OkxError>(serde_json::from_value::<AccountConfig>(
+                        serde_json::json!({"uid":"observer-1","perm":"read_only"}),
+                    ).unwrap())
+                }).await.expect("shared config")
+            }));
+        }
+        let mut timestamps = Vec::new();
+        for call in calls {
+            let (config, received_at) = call.await.expect("join");
+            assert_eq!(config.uid, "observer-1");
+            timestamps.push(received_at);
+        }
+        assert_eq!(fetches.load(Ordering::SeqCst), 1);
+        assert!(timestamps.iter().all(|t| *t == timestamps[0]));
+    }
+
+    #[tokio::test]
+    async fn observer_config_expiry_refreshes_and_denies_stale_fallback() {
+        let cache = ObserverConfigCache::default();
+        cache.read(|| async {
+            Ok::<_, OkxError>(serde_json::from_value::<AccountConfig>(
+                serde_json::json!({"uid":"observer-1","perm":"read_only"}),
+            ).unwrap())
+        }).await.expect("initial config");
+        // Expiry is deterministic; no wall-clock sleeps or loose timing assertions.
+        {
+            let mut current = cache.current.lock().await;
+            current.as_mut().expect("entry").sampled_at =
+                Instant::now() - Duration::from_secs(3);
+        }
+        assert!(cache.read(|| async {
+            Err::<AccountConfig, _>(OkxError::Config("authentication unavailable".into()))
+        }).await.is_err());
+        assert!(cache.current.lock().await.is_none());
+        let (changed, _) = cache.read(|| async {
+            Ok::<_, OkxError>(serde_json::from_value::<AccountConfig>(
+                serde_json::json!({"uid":"observer-1","perm":"trade"}),
+            ).unwrap())
+        }).await.expect("changed config");
+        assert!(strict_read_only_permissions(&changed.perm).is_err());
+    }
+
 }
