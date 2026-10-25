@@ -7,7 +7,13 @@ import re
 import sys
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 FORBIDDEN = re.compile(r'\b(?:DurableExecutionLedger|ExecutionLedgerStore|ExecutionRuntimeMode|ProductionTradingPolicy|BeginStrategyPeriod|FinalizeStrategyPeriod|PrepareExecution|SubmitExecution|RecoverReadOnlySelection|SelectAccount|StoredState|sealed_pre_v14)\b')
-TOOLS = {'accounts','strategies','market','research','trade','portfolio','diagnostics'}
+# A per-action trading interface makes read-only and consequential
+# financial operations independently inspectable by the MCP host.
+TRADE_ACTIONS = ('preview','execute','status','cancel','close','capabilities','preflight')
+CORE_TOOLS = {'accounts','strategies','market','research','portfolio','diagnostics'}
+TOOLS = CORE_TOOLS | {'trade.' + action for action in TRADE_ACTIONS}
+READ_TRADE = {'preview','status','capabilities','preflight'}
+WRITE_TRADE = {'execute','cancel','close'}
 def check_source(text):
     return sorted(set(FORBIDDEN.findall(text)))
 def check(root):
@@ -18,13 +24,33 @@ def check(root):
             for symbol in check_source(path.read_text(encoding='utf-8-sig')):errors.append(f'{path.relative_to(root)}: obsolete production API {symbol}')
     schema=json.loads((root/'cloudflare/okx-mcp/contracts/tools.schema.json').read_text(encoding='utf-8-sig'))
     tools=schema['tools']
-    if {t['name'] for t in tools}!=TOOLS or len(tools)!=7:errors.append('public tool set must contain exactly seven product tools')
-    if len(json.dumps({'jsonrpc':'2.0','id':1,'result':{'tools':tools}},ensure_ascii=False,separators=(',',':')).encode())>24576:errors.append('tools/list exceeds 24 KiB')
+    if {t['name'] for t in tools}!=TOOLS or len(tools)!=len(TOOLS):
+        errors.append('public tool set must expose six core tools and seven explicit trade operations')
+    if len(json.dumps({'jsonrpc':'2.0','id':1,'result':{'tools':tools}},ensure_ascii=False,separators=(',',':')).encode())>24576:
+        errors.append('tools/list exceeds 24 KiB')
     for tool in tools:
-        variants=tool['inputSchema'].get('oneOf',[])
-        if not variants:errors.append(f"{tool['name']}: missing strict action union")
+        name=tool['name']
+        ann=tool.get('annotations',{})
+        if any(type(ann.get(key)) is not bool for key in ('readOnlyHint','destructiveHint','openWorldHint')):
+            errors.append(f'{name}: explicit boolean risk annotations required')
+        if not tool.get('description') or len(tool['description'])>200:
+            errors.append(f'{name}: missing or overly long behavior description')
+        if name.startswith('trade.'):
+            action=name.split('.',1)[1]
+            if ('action' in tool['inputSchema'].get('properties',{}) or
+                'action' in tool['inputSchema'].get('required',[])):
+                errors.append(f'{name}: caller must not override tool identity with action')
+            if (ann.get('readOnlyHint')!=(action in READ_TRADE) or
+                ann.get('destructiveHint')!=(action in WRITE_TRADE) or
+                ann.get('openWorldHint') is not False):
+                errors.append(f'{name}: unsafe or misleading trading risk annotation')
+            variants=[tool['inputSchema']]
+        else:
+            variants=tool['inputSchema'].get('oneOf',[])
+            if not variants:errors.append(f'{name}: missing strict action union')
         for variant in variants:
-            if variant.get('additionalProperties') is not False:errors.append(f"{tool['name']}: action accepts unknown fields")
+            if variant.get('additionalProperties') is not False:
+                errors.append(f'{name}: action accepts unknown fields')
     # Generated MCP contract must reflect the live Rust strategy v1 and
     # all four read-only research result views (one source, no stale snapshot).
     catalog={t['name']:t for t in tools}
