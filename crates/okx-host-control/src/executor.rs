@@ -876,7 +876,10 @@ impl HostExecutor {
             .map_err(|error| HostControlError::Random(error.to_string()))?;
         let incarnation = format!(
             "ctl_{}",
-            incarnation_bytes.iter().map(|b| format!("{b:02x}")).collect::<String>()
+            incarnation_bytes
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>()
         );
         let mut child = hidden_command(self.agent_binary())
             .args(args)

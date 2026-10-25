@@ -480,7 +480,12 @@ impl DirectTransportFrame {
                     return Err(ProtocolError::InvalidDirectTransportToken);
                 }
                 validate_sha256(agent_binary_sha256)?;
-                if agent_incarnation.len() != 36 || !agent_incarnation.starts_with("ctl_") || !agent_incarnation[4..].bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()) {
+                if agent_incarnation.len() != 36
+                    || !agent_incarnation.starts_with("ctl_")
+                    || !agent_incarnation[4..]
+                        .bytes()
+                        .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+                {
                     return Err(ProtocolError::InvalidDirectTransportToken);
                 }
                 if !accounts::valid_installation(installation_id)
