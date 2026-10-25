@@ -1588,10 +1588,7 @@ fn central_worker_cas_trace_native_sql_readback_and_restart() {
         .expect("actual Worker acceptance run must publish OKX_A2_TRACE_PATH");
     let document: serde_json::Value =
         serde_json::from_slice(&std::fs::read(trace_path).unwrap()).unwrap();
-    assert_eq!(
-        document["schema"],
-        "okx.a2.worker-sql-cas-trace/v1"
-    );
+    assert_eq!(document["schema"], "okx.a2.worker-sql-cas-trace/v1");
     assert_eq!(
         document["source"],
         "mcpApi.fetch+account_governance_store.transaction"
@@ -1668,7 +1665,10 @@ fn central_worker_cas_trace_native_sql_readback_and_restart() {
         assert_eq!(saved.1, paused, "{stage} pause");
         assert_eq!(saved.2, campaign, "{stage} campaign");
         assert_eq!(saved.3, Decimal::from(10), "{stage} ceiling");
-        assert_eq!(first.account_summary().unwrap()["paused"].as_bool(), Some(paused));
+        assert_eq!(
+            first.account_summary().unwrap()["paused"].as_bool(),
+            Some(paused)
+        );
         assert_eq!(second.policy().unwrap().0, 1);
         assert_eq!(second.policy().unwrap().3, Decimal::from(20));
     }
