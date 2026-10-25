@@ -3,10 +3,11 @@ const fail=(value:boolean,label:string)=>{if(!value)throw Error(label);};
 const tree='a'.repeat(40), hash='b'.repeat(64), now=1_792_850_000_000;
 const live={schema:'okx.direct-transport.status/v1',status:'PASS',connected:true,session_fresh:true,
  runtime_id:'windows-primary',runtime_profile:'engine',connection_generation:15,connected_at_ms:now-10_000,
- agent_pid:3216,agent_binary_sha256:hash,installation_id:'okx-clean-398-20261023'};
+ agent_pid:3216,agent_binary_sha256:hash,agent_incarnation:'ctl_'+'1'.repeat(32),
+ installation_id:'okx-clean-398-20261023'};
 const receipt={schema:'okx.windows.control.result/v1',request_id:'ctl_test_release_398',
  operation:{type:'status'},status:'PASS',observed_at:new Date(now-5_000).toISOString(),
- details:{agent_pid:3216,agent_desired:'RUNNING',agent_owned_running:true,
+ details:{agent_pid:3216,agent_incarnation:live.agent_incarnation,agent_desired:'RUNNING',agent_owned_running:true,
  account_catalog:{installation_id:live.installation_id},
  release_parity:{state:'MATCHED',source_tree:tree,blockers:[]},
  controller_update:{active:{value:{active:{source_tree:tree}}}},
@@ -31,6 +32,7 @@ const spoof={...comment,id:1235,user:{id:999}};
 fail((await reason([spoof]))==='CONTROL_RECEIPT_MISSING','no arbitrary GH user evidence');
 fail((await reason([]))==='CONTROL_RECEIPT_MISSING','no receipt does not become verified');
 fail((await reason([comment],{...live,agent_pid:3217}))==='LIVE_AGENT_IDENTITY_MISMATCH','different live PID rejected');
+fail((await reason([comment],{...live,agent_incarnation:'ctl_'+'2'.repeat(32)}))==='CONTROL_RELEASE_UNVERIFIED','different CONTROL child rejected');
 fail((await reason([comment],{...live,agent_binary_sha256:'d'.repeat(64)}))==='AGENT_BINARY_HASH_MISMATCH','different native executable rejected');
 fail((await reason([comment],{...live,connection_generation:0}))==='LIVE_RELEASE_IDENTITY_UNAVAILABLE','stale generation rejected');
 fail((await reason([comment],{...live,connected_at_ms:now+1_000}))==='CONTROL_RECEIPT_PREDATES_SESSION','previous generation evidence rejected');
@@ -78,8 +80,9 @@ const sessionIdentity=releaseSessionIdentity(live,tree);
 fail(typeof sessionIdentity==='string','WSS identity must be canonical');
 const persisted={schema:'okx.runtime-session-attestation/v1',identity:sessionIdentity,proof:ok};
 fail(cachedSessionAttestation(persisted,live,tree)?.verified===true,'unchanged live session reuses owner proof');
-fail(cachedSessionAttestation(persisted,{...live,connection_generation:16},tree)===null,'new generation never inherits proof');
-fail(cachedSessionAttestation(persisted,{...live,connected_at_ms:now-9_000},tree)===null,'new connection timestamp never inherits proof');
+fail(cachedSessionAttestation(persisted,{...live,connection_generation:16},tree)?.verified===true,'same CONTROL child can reconnect without GitHub');
+fail(cachedSessionAttestation(persisted,{...live,connected_at_ms:now-9_000},tree)?.verified===true,'new WSS for same child can reuse proof');
+fail(cachedSessionAttestation(persisted,{...live,agent_incarnation:'ctl_'+'2'.repeat(32)},tree)===null,'new CONTROL child cannot inherit accepted proof even with reused PID');
 fail(cachedSessionAttestation(persisted,{...live,agent_pid:3217},tree)===null,'different PID never inherits proof');
 fail(cachedSessionAttestation(persisted,{...live,agent_binary_sha256:'d'.repeat(64)},tree)===null,'different executable never inherits proof');
 fail(cachedSessionAttestation(persisted,{...live,installation_id:'other-installed-engine'},tree)===null,'different installation never inherits proof');

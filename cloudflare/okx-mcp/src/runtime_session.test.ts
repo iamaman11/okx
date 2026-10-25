@@ -52,11 +52,13 @@ check((await fixture("paused_complete")).status==="completed","pause_allows_nati
 
 const attestationTree='a'.repeat(40),agentHash='b'.repeat(64),liveNow=Date.now();
 const provedSocket={...attachment,agentPid:5551,agentBinarySha256:agentHash,
+ agentIncarnation:'ctl_'+'1'.repeat(32),
  installationId:'okx-clean-398-20261023',connectedAtMs:liveNow-10_000,lastPongAtMs:liveNow};
 const observed={schema:'okx.direct-transport.status/v1',status:'PASS',connected:true,session_fresh:true,
  runtime_id:'windows-primary',runtime_profile:'engine',connection_generation:generation,
  connected_at_ms:provedSocket.connectedAtMs,agent_pid:provedSocket.agentPid,
- agent_binary_sha256:agentHash,installation_id:provedSocket.installationId};
+ agent_binary_sha256:agentHash,agent_incarnation:provedSocket.agentIncarnation,
+ installation_id:provedSocket.installationId};
 const proof={verified:true,reason_code:null,source_tree:attestationTree,
  agent_binary_sha256:agentHash,artifact_id:12567853437,
  control_observed_at:new Date(liveNow-5000).toISOString(),
@@ -78,7 +80,14 @@ const statusResponse=await proofOwner.fetch(new Request('https://runtime.interna
 const statusProof:any=await statusResponse.json();
 check(statusProof.status==='PASS'&&statusProof.release_attestation?.verified===true&&
  statusProof.release_attestation.artifact_id===12567853437,
- 'Durable Object reuses independently accepted proof only on the same live session');
+ 'Durable Object reuses independently accepted proof for same CONTROL child');
+provedSocket.generation=5;
+provedSocket.connectedAtMs=liveNow-5000;
+const reconnected:any=await(await proofOwner.fetch(new Request('https://runtime.internal/status?attest=1'))).json();
+check(reconnected.release_attestation?.verified===true,
+ 'normal reconnect preserves validated owner proof without new GitHub GET');
+provedSocket.generation=generation;
+provedSocket.connectedAtMs=observed.connected_at_ms;
 liveProofSocket=false;
 const offlineStatus:any=await(await proofOwner.fetch(new Request('https://runtime.internal/status?attest=1'))).json();
 check(offlineStatus.status==='OFFLINE'&&offlineStatus.release_attestation.verified===false,

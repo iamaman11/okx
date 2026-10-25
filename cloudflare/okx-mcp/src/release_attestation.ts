@@ -32,9 +32,10 @@ export function releaseSessionIdentity(observed:JsonObject, sourceTree:unknown):
     observed.runtime_id!=='windows-primary'||observed.runtime_profile!=='engine'||
     !validPositive(observed.connection_generation)||!validPositive(observed.connected_at_ms)||
     !validPositive(observed.agent_pid)||!hex(observed.agent_binary_sha256,64)||
+    typeof observed.agent_incarnation!=='string'||!/^ctl_[0-9a-f]{32}$/.test(observed.agent_incarnation)||
     typeof observed.installation_id!=='string'||observed.installation_id.length<8)
     return null;
- return JSON.stringify([sourceTree,observed.connection_generation,observed.connected_at_ms,
+ return JSON.stringify([sourceTree,observed.agent_incarnation,
    observed.agent_pid,observed.agent_binary_sha256,observed.installation_id]);
 }
 export function cachedSessionAttestation(stored:unknown,observed:JsonObject,sourceTree:unknown):ReleaseAttestation|null{
@@ -78,6 +79,7 @@ function validateReceipt(comment:JsonObject,observed:JsonObject,sourceTree:strin
     return failure('CONTROL_RECEIPT_PREDATES_SESSION');
  if(installed.state!=='VERIFIED'||installed.reason!=='HASH_MATCH'||installed.binary_present!==true||
     details.agent_owned_running!==true||details.agent_desired!=='RUNNING'||
+    details.agent_incarnation!==observed.agent_incarnation||
     parity.state!=='MATCHED'||!Array.isArray(parity.blockers)||parity.blockers.length!==0||
     provenance.schema!=='okx.host-control.installed-agent/v1'||
     provenance.repository_id!==REPOSITORY_ID||

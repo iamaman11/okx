@@ -42,6 +42,7 @@ export interface SocketAttachment {
   installationId?: string;
   agentPid?: number;
   agentBinarySha256?: string;
+  agentIncarnation?: string;
   connectedAtMs: number;
   lastPongAtMs: number | null;
 }
