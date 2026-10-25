@@ -6,6 +6,10 @@ export const MCP_SERVER_VERSION = "0.8.0";
 export const TOOL_CONTRACT_VERSION = "okx.mcp.tools/2026-10-23.398";
 export const MAX_BODY_BYTES = 64 * 1024;
 export const MAX_INFLIGHT = 8;
+// Bounded admission: read-only requests wait, while mutation/status stays free.
+export const MAX_READ_INFLIGHT = MAX_INFLIGHT - 1;
+export const MAX_READ_WAITERS = 100;
+export const READ_QUEUE_WAIT_MS = 15_000;
 export const PONG_DEADLINE_MS = 2_000;
 export const ACK_DEADLINE_MS = 2_000;
 export const RESPONSE_DEADLINE_MS = 20_000;

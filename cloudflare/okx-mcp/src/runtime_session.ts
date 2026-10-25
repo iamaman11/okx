@@ -10,6 +10,9 @@ import {
   type Json,
   MAX_BODY_BYTES,
   MAX_INFLIGHT,
+  MAX_READ_INFLIGHT,
+  MAX_READ_WAITERS,
+  READ_QUEUE_WAIT_MS,
   type Pending,
   PONG_DEADLINE_MS,
   RESPONSE_DEADLINE_MS,
@@ -26,6 +29,14 @@ export class RuntimeSession {
   private env: Env;
   private pending = new Map<string, Pending>();
   private inflight = 0;
+  private readonlyInflight = 0;
+  // All ordinary work, including costly research mutations, shares seven slots.
+  private normalInflight = 0;
+  // Transient bounded queue, not durable financial/business storage.
+  private readonlyWaiters: Array<{
+    resolve: (admitted: boolean) => void;
+    timer: ReturnType<typeof setTimeout>;
+  }> = [];
   private activeRequests=new Set<string>();
   private attesting:{identity:string,promise:Promise<ReleaseAttestation>}|null=null;
 
@@ -315,8 +326,37 @@ export class RuntimeSession {
     return nonce;
   }
 
+  private grantWaitingReads():void {
+    // A reserved WSS slot is never consumed by ordinary read-only work.
+    while(this.readonlyWaiters.length && this.normalInflight<MAX_READ_INFLIGHT &&
+          this.inflight<MAX_INFLIGHT){
+      const next=this.readonlyWaiters.shift()!;
+      clearTimeout(next.timer);
+      this.readonlyInflight++;
+      this.normalInflight++;
+      this.inflight++;
+      next.resolve(true);
+    }
+  }
+
+  private admitReadOnly():Promise<boolean>{
+    if(this.readonlyWaiters.length===0 && this.normalInflight<MAX_READ_INFLIGHT &&
+       this.inflight<MAX_INFLIGHT){
+      this.readonlyInflight++;this.normalInflight++;this.inflight++;
+      return Promise.resolve(true);
+    }
+    if(this.readonlyWaiters.length>=MAX_READ_WAITERS)return Promise.resolve(false);
+    return new Promise<boolean>(resolve=>{
+      const waiter={resolve,timer:null as unknown as ReturnType<typeof setTimeout>};
+      waiter.timer=setTimeout(()=>{
+        const index=this.readonlyWaiters.indexOf(waiter);
+        if(index>=0){this.readonlyWaiters.splice(index,1);resolve(false);}
+      },READ_QUEUE_WAIT_MS);
+      this.readonlyWaiters.push(waiter);
+    });
+  }
+
   private async dispatch(request: any): Promise<Json> {
-    if (this.inflight >= MAX_INFLIGHT) return transportFailure("TRANSPORT_BUSY");
     if (!request || request.schema !== "okx.agent.request/v1" || typeof request.request_id !== "string") {
       return transportFailure("INVALID_REQUEST", false);
     }
@@ -334,9 +374,34 @@ export class RuntimeSession {
 
     if(this.activeRequests.has(request.request_id))
       return transportFailure("REQUEST_ALREADY_IN_FLIGHT",false);
+    // Keep protective trading commands and exact-intent status above both
+    // read-only traffic AND ordinary research/strategy/new-risk mutations.
+    // Ordinary mutations NEVER wait: BUSY is returned before native delivery.
+    const type=request.operation?.type;
+    const action=request.operation?.request?.action;
+    const protective=(type==="trade" && (["status","cancel","close"].includes(String(action)) ||
+      (action==="execute"&&["reduce","close"].includes(String(request.operation?.request?.operation))))) ||
+      (type==="strategies"&&action==="stop");
+    const queuedRead=!protective&&!isExecutionMutation(type,action);
     this.activeRequests.add(request.request_id);
-    this.inflight += 1;
+    let admitted=false;
     try {
+      if(queuedRead){
+        admitted=await this.admitReadOnly();
+        if(!admitted)return transportFailure("TRANSPORT_BUSY");
+      }else if(protective){
+        if(this.inflight>=MAX_INFLIGHT)return transportFailure("TRANSPORT_BUSY");
+        this.inflight++;admitted=true;
+      }else{
+        if(this.normalInflight>=MAX_READ_INFLIGHT||this.inflight>=MAX_INFLIGHT)
+          return transportFailure("TRANSPORT_BUSY");
+        this.normalInflight++;this.inflight++;admitted=true;
+      }
+      // A waiting reader must never cross a native session generation.
+      const current=this.activeSocket();
+      if(!current||current.attachment.generation!==active.attachment.generation||
+         current.attachment.sessionId!==active.attachment.sessionId)
+        return transportFailure("RUNTIME_OFFLINE");
       const deliveryChallenge = await this.proveFresh(active);
 
       // Production writes and exact-intent terminal status both need the
@@ -401,7 +466,12 @@ export class RuntimeSession {
       }
       return transportFailure(error instanceof Error ? error.message : "TRANSPORT_FAILURE");
     } finally {
-      this.inflight -= 1;
+      if(admitted){
+        this.inflight--;
+        if(!protective)this.normalInflight--;
+        if(queuedRead)this.readonlyInflight--;
+        this.grantWaitingReads();
+      }
       this.activeRequests.delete(request.request_id);
       this.clearPending(`ack:${request.request_id}`,active.attachment.generation);
       this.clearPending(`response:${request.request_id}`,active.attachment.generation);
@@ -448,6 +518,11 @@ export class RuntimeSession {
         runtime_id: RUNTIME_NAME,
         connected: false,
         session_fresh: false,
+        inflight: this.inflight,
+        readonly_inflight: this.readonlyInflight,
+        normal_inflight: this.normalInflight,
+        readonly_queue_depth: this.readonlyWaiters.length,
+        readonly_queue_capacity: MAX_READ_WAITERS,
       };
     }
 
@@ -472,6 +547,11 @@ export class RuntimeSession {
       connected: true,
       session_fresh: fresh,
       connection_generation: active.attachment.generation,
+      inflight: this.inflight,
+      readonly_inflight: this.readonlyInflight,
+      normal_inflight: this.normalInflight,
+      readonly_queue_depth: this.readonlyWaiters.length,
+      readonly_queue_capacity: MAX_READ_WAITERS,
       connected_at_ms: active.attachment.connectedAtMs,
       installation_id: active.attachment.installationId ?? null,
       agent_pid: active.attachment.agentPid ?? null,
