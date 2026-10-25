@@ -1360,7 +1360,7 @@ async fn two_account_100_parallel_sql_readonly_isolation() {
     let mut max_bytes = 0;
     for task in tasks {
         let (index, key, bytes, latency) = task.await.unwrap();
-        assert_eq!(key, if index % 2 == 0 { &a_key } else { &b_key });
+        assert_eq!(key.as_str(), if index % 2 == 0 { a_key.as_str() } else { b_key.as_str() });
         assert!(bytes <= 12_288);
         max_bytes = max_bytes.max(bytes);
         latencies.push(latency);
