@@ -227,6 +227,7 @@ export const mcpApi={async fetch(request:Request,env:Env,ctx:any):Promise<Respon
               connection_generation:numericField(observed,'connection_generation')??null,
               inflight:numericField(observed,'inflight')??null,
               readonly_inflight:numericField(observed,'readonly_inflight')??null,
+              normal_inflight:numericField(observed,'normal_inflight')??null,
               readonly_queue_depth:numericField(observed,'readonly_queue_depth')??null,
               readonly_queue_capacity:numericField(observed,'readonly_queue_capacity')??null},
             reason_code:fresh?null:'RUNTIME_SESSION_NOT_FRESH',

@@ -130,3 +130,26 @@ check(sentReads-beforeSent===succeeded.length &&
 console.log('runtime_session_queue_overflow_fail_closed PASS '+JSON.stringify({
  requested:burst.length,completed:succeeded.length,busy:busy.length,
  delivered_to_fixture:sentReads-beforeSent,real_exchange_posts:0}));
+
+
+// Research starts are not protective exchange exits. They must never take
+// the reserved native delivery slot, even though they mutate job state.
+delayMs=120;
+const beforeResearch=sentReads;
+const researchBurst=Array.from({length:8},(_,i)=>rpc('research_pressure_'+i,
+ {type:'research',request:{action:'backtest'}}));
+await waitActive(MAX_READ_INFLIGHT);
+const researchStatus:any=await(await session.fetch(new Request('https://fixture/status'))).json();
+check(researchStatus.normal_inflight===MAX_READ_INFLIGHT &&
+ researchStatus.readonly_inflight===0,'research must count towards normal slot budget');
+const protectedExit=await rpc('protective_exit_during_research',{type:'trade',
+ request:{action:'close',reference:'intent_fixture',idempotency_key:'close_during_research_398',
+ expires_in_ms:30000}},account.id);
+check(protectedExit.status==='completed','protective trade close must bypass seven heavy jobs');
+const observedResearch=await Promise.all(researchBurst);
+check(observedResearch.filter((x:any)=>x.status==='completed').length===7&&
+ observedResearch.filter((x:any)=>x.reason==='TRANSPORT_BUSY').length===1,
+ 'research overflow must not consume protective slot');
+check(sentReads-beforeResearch===7 && session.inflight===0 && session.normalInflight===0,
+ 'heavy research did not drain and release all normal capacity');
+console.log('runtime_session_research_cannot_starve_protective_close PASS seven heavy jobs + one protected WSS close, overflow refused before send');

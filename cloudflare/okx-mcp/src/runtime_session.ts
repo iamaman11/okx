@@ -30,6 +30,8 @@ export class RuntimeSession {
   private pending = new Map<string, Pending>();
   private inflight = 0;
   private readonlyInflight = 0;
+  // All ordinary work, including costly research mutations, shares seven slots.
+  private normalInflight = 0;
   // Transient bounded queue, not durable financial/business storage.
   private readonlyWaiters: Array<{
     resolve: (admitted: boolean) => void;
@@ -326,20 +328,21 @@ export class RuntimeSession {
 
   private grantWaitingReads():void {
     // A reserved WSS slot is never consumed by ordinary read-only work.
-    while(this.readonlyWaiters.length && this.readonlyInflight<MAX_READ_INFLIGHT &&
+    while(this.readonlyWaiters.length && this.normalInflight<MAX_READ_INFLIGHT &&
           this.inflight<MAX_INFLIGHT){
       const next=this.readonlyWaiters.shift()!;
       clearTimeout(next.timer);
       this.readonlyInflight++;
+      this.normalInflight++;
       this.inflight++;
       next.resolve(true);
     }
   }
 
   private admitReadOnly():Promise<boolean>{
-    if(this.readonlyWaiters.length===0 && this.readonlyInflight<MAX_READ_INFLIGHT &&
+    if(this.readonlyWaiters.length===0 && this.normalInflight<MAX_READ_INFLIGHT &&
        this.inflight<MAX_INFLIGHT){
-      this.readonlyInflight++;this.inflight++;
+      this.readonlyInflight++;this.normalInflight++;this.inflight++;
       return Promise.resolve(true);
     }
     if(this.readonlyWaiters.length>=MAX_READ_WAITERS)return Promise.resolve(false);
@@ -371,20 +374,28 @@ export class RuntimeSession {
 
     if(this.activeRequests.has(request.request_id))
       return transportFailure("REQUEST_ALREADY_IN_FLIGHT",false);
-    // Trade mutation or exact-intent terminal status bypasses ordinary reads.
-    // A rejected queued read has never reached the native owner.
+    // Keep protective trading commands and exact-intent status above both
+    // read-only traffic AND ordinary research/strategy/new-risk mutations.
+    // Ordinary mutations NEVER wait: BUSY is returned before native delivery.
+    const type=request.operation?.type;
     const action=request.operation?.request?.action;
-    const privileged=isExecutionMutation(request.operation?.type,action)||
-      (request.operation?.type==="trade"&&action==="status");
+    const protective=(type==="trade" && (["status","cancel","close"].includes(String(action)) ||
+      (action==="execute"&&["reduce","close"].includes(String(request.operation?.request?.operation))))) ||
+      (type==="strategies"&&action==="stop");
+    const queuedRead=!protective&&!isExecutionMutation(type,action);
     this.activeRequests.add(request.request_id);
     let admitted=false;
     try {
-      if(privileged){
+      if(queuedRead){
+        admitted=await this.admitReadOnly();
+        if(!admitted)return transportFailure("TRANSPORT_BUSY");
+      }else if(protective){
         if(this.inflight>=MAX_INFLIGHT)return transportFailure("TRANSPORT_BUSY");
         this.inflight++;admitted=true;
       }else{
-        admitted=await this.admitReadOnly();
-        if(!admitted)return transportFailure("TRANSPORT_BUSY");
+        if(this.normalInflight>=MAX_READ_INFLIGHT||this.inflight>=MAX_INFLIGHT)
+          return transportFailure("TRANSPORT_BUSY");
+        this.normalInflight++;this.inflight++;admitted=true;
       }
       // A waiting reader must never cross a native session generation.
       const current=this.activeSocket();
@@ -457,7 +468,8 @@ export class RuntimeSession {
     } finally {
       if(admitted){
         this.inflight--;
-        if(!privileged)this.readonlyInflight--;
+        if(!protective)this.normalInflight--;
+        if(queuedRead)this.readonlyInflight--;
         this.grantWaitingReads();
       }
       this.activeRequests.delete(request.request_id);
@@ -508,6 +520,7 @@ export class RuntimeSession {
         session_fresh: false,
         inflight: this.inflight,
         readonly_inflight: this.readonlyInflight,
+        normal_inflight: this.normalInflight,
         readonly_queue_depth: this.readonlyWaiters.length,
         readonly_queue_capacity: MAX_READ_WAITERS,
       };
@@ -536,6 +549,7 @@ export class RuntimeSession {
       connection_generation: active.attachment.generation,
       inflight: this.inflight,
       readonly_inflight: this.readonlyInflight,
+      normal_inflight: this.normalInflight,
       readonly_queue_depth: this.readonlyWaiters.length,
       readonly_queue_capacity: MAX_READ_WAITERS,
       connected_at_ms: active.attachment.connectedAtMs,
