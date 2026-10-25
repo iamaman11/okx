@@ -1,16 +1,34 @@
 import {mcpApi,projectNativeResponse} from './mcp.js';
 import {payloadFixtures} from './execution_tools.test.js';
 const ctx={auth:{scope:['mcp:use']}};
+// Model-visible trading operations are separately named and have no caller
+// action selector. The legacy test fixtures continue to describe native calls.
+const publicArgs=(name:string,args:any)=>{
+ if(name!=='trade')return {name,arguments:args};
+ const {action,...input}=args;
+ return {name:'trade.'+action,arguments:input};
+};
 const call=(method:string,params?:unknown)=>mcpApi.fetch(new Request('https://fixture/mcp',{method:'POST',body:JSON.stringify({jsonrpc:'2.0',id:1,method,params})}),{} as any,ctx);
 const response=await call('tools/list'),body:any=await response.json();
 const bytes=new TextEncoder().encode(JSON.stringify(body)).byteLength;
-if(body.result.tools.length!==7||bytes>24576)throw Error(`tools budget ${bytes}`);
-for(const fixture of payloadFixtures){const r:any=await(await call('tools/call',{name:fixture.tool,arguments:fixture.negative[0]})).json();if(r.error?.code!==-32602)throw Error('negative dispatched');}
-console.log(`tools_list_actual_serialized PASS 7 tools ${bytes} bytes`);
+
+for(const action of ['preview','execute','status','cancel','close','capabilities','preflight']){
+ const tool=body.result.tools.find((t:any)=>t.name==='trade.'+action);
+ if(!tool||!tool.inputSchema||'action' in tool.inputSchema.properties||
+   !tool.annotations||tool.annotations.openWorldHint!==false||
+   tool.annotations.readOnlyHint!==['preview','status','capabilities','preflight'].includes(action)||
+   tool.annotations.destructiveHint!==['execute','cancel','close'].includes(action))
+  throw Error('truthful trade metadata missing '+action);
+}
+if(body.result.tools.some((t:any)=>t.name==='trade'))throw Error('generic trade must not remain model-callable');
+
+if(body.result.tools.length!==13||bytes>24576)throw Error(`tools budget ${bytes}`);
+for(const fixture of payloadFixtures){const r:any=await(await call('tools/call',publicArgs(fixture.tool,fixture.negative[0]))).json();if(r.error?.code!==-32602)throw Error('negative dispatched');}
+console.log(`tools_list_actual_serialized PASS 13 tools ${bytes} bytes`);
 
 const fixture=payloadFixtures.find(x=>x.tool==='trade'&&x.action==='execute')!;
 const env:any={RUNTIME:{idFromName:()=>0,get:()=>({fetch:async()=>Response.json({status:'FAILED',reason:'MUTATION_OUTCOME_UNKNOWN_RECONCILE_EXACT_INTENT',retryable:false})})}};
-const unknown:any=await(await mcpApi.fetch(new Request('https://fixture/mcp',{method:'POST',body:JSON.stringify({id:2,method:'tools/call',params:{name:'trade',arguments:fixture.positive}})}),env,ctx)).json();
+const unknown:any=await(await mcpApi.fetch(new Request('https://fixture/mcp',{method:'POST',body:JSON.stringify({id:2,method:'tools/call',params:publicArgs('trade',fixture.positive)})}),env,ctx)).json();
 if(unknown.result.structuredContent.status!=='unknown'||unknown.result.structuredContent.retryable!==false||!unknown.result.structuredContent.request_id||!unknown.result.structuredContent.as_of_ms)throw Error('unknown outcome common shell');
 
 const nestedUnknown:any=projectNativeResponse({schema:'okx.agent.response/v1',request_id:'req_native_unknown',status:'completed',quality:'FRESH',warnings:['native_warning'],result:{status:'UNKNOWN',reason_code:'POSTING_UNKNOWN',intent_id:'intent_398'}});
@@ -70,7 +88,7 @@ const nativeResponse=(response:unknown):any=>({RUNTIME:{idFromName:()=>0,get:()=
 const mcpResponse=async(tool:string,args:unknown,response:unknown):Promise<any>=>{
  const env=nativeResponse(response);
  const reply:any=await(await mcpApi.fetch(new Request('https://fixture/mcp',{method:'POST',
-  body:JSON.stringify({jsonrpc:'2.0',id:99,method:'tools/call',params:{name:tool,arguments:args}})}),env,ctx)).json();
+  body:JSON.stringify({jsonrpc:'2.0',id:99,method:'tools/call',params:publicArgs(tool,args)})}),env,ctx)).json();
  if(reply.error)throw Error(JSON.stringify(reply.error));
  return reply.result.structuredContent;
 };
@@ -130,7 +148,7 @@ for(const [tool,action] of fakeMutationActions){
   };
   const fake:any={RUNTIME:{idFromName:()=>0,get:()=>({fetch:fakeHandler})}};
   const rpc:any=await(await mcpApi.fetch(new Request('https://fixture/mcp',{method:'POST',
-   body:JSON.stringify({jsonrpc:'2.0',id:902,method:'tools/call',params:{name:tool,arguments:args}})}),fake,ctx)).json();
+   body:JSON.stringify({jsonrpc:'2.0',id:902,method:'tools/call',params:publicArgs(tool,args)})}),fake,ctx)).json();
   if(rpc.error||!rpc.result?.structuredContent)throw Error('mutation schema/dispatch failed '+tool+'.'+action+':'+JSON.stringify(rpc.error));
   const envelope=rpc.result.structuredContent;
   if(negative){
