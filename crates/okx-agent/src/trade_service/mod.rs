@@ -210,6 +210,43 @@ impl TradeService {
             .map_err(err)?;
         Ok((state, account))
     }
+    /// A preview observes an already-applied governance revision; only the
+    /// policy delivery and execution owners may write policy to account SQL.
+    async fn preview_authority(
+        &self,
+        r: &AccountResources,
+        supplied: Option<&CentralGovernanceSnapshot>,
+    ) -> Result<(CentralGovernanceSnapshot, AccountControl), String> {
+        let state = self
+            .governance
+            .read()
+            .await
+            .clone()
+            .ok_or("AUTHORITY_UNAVAILABLE")?;
+        if supplied.is_some_and(|proof| !proof.valid() || proof.state != state.state) {
+            return Err("PREVIEW_AUTHORITY_NOT_APPLIED".into());
+        }
+        let account = state
+            .state
+            .accounts
+            .iter()
+            .find(|a| a.account_key == r.configuration.account_key.wire())
+            .cloned()
+            .ok_or("ACCOUNT_ACCESS_MISSING")?;
+        let policy = r
+            .execution
+            .store
+            .call(deadline(), |store| store.policy())
+            .await
+            .map_err(err)?;
+        if Self::sql_policy_receipt(&policy, Some(&state), &r.configuration.account_key.wire())
+            ["matches_governance"]
+            != true
+        {
+            return Err("NATIVE_SQL_POLICY_NOT_APPLIED".into());
+        }
+        Ok((state, account))
+    }
     fn sql_policy_receipt(
         policy: &(i64, bool, String, Decimal, Decimal),
         governance: Option<&CentralGovernanceSnapshot>,
@@ -294,6 +331,27 @@ impl TradeService {
                 };
                 let policy_applied = sql_receipt["matches_governance"] == true;
                 drop(governance);
+                // Query the actual Executor key, not the Observer-only account snapshot.
+                // Never return key material, passphrase, or exchange UID.
+                let executor = match r.execution.account.config().await {
+                    Ok(config) => {
+                        let permissions = config.perm.split(',')
+                            .map(str::trim).filter(|p| !p.is_empty()).collect::<Vec<_>>();
+                        let read = permissions.contains(&"read_only");
+                        let trade = permissions.contains(&"trade");
+                        let withdraw = permissions.contains(&"withdraw");
+                        let uid_match = okx_api::account_uid_fingerprint(&config.uid)
+                            == r.configuration.account_key.verified_uid;
+                        json!({"state":if permissions.len()==2 && read && trade && !withdraw && uid_match
+                                  {"verified"}else{"blocked"},
+                               "source":"executor_okx_account_config","as_of_ms":now(),
+                               "read":read,"trade":trade,"withdraw":withdraw,
+                               "uid_match":uid_match})
+                    }
+                    Err(_) => json!({"state":"unavailable","source":"executor_okx_account_config",
+                                     "reason_code":"EXECUTOR_CONFIG_UNAVAILABLE"}),
+                };
+                let executor_verified = executor["state"] == "verified";
                 Ok(
                     json!({"schema":"okx.trade.capabilities/v1","account":r.configuration.account_key.wire(),
                     "order_types":["limit","market","post_only","ioc","fok"],
@@ -302,12 +360,19 @@ impl TradeService {
                     "account_level":snapshot.as_ref().map(|s|s.account_level.as_str()),
                     "position_mode":snapshot.as_ref().map(|s|s.position_mode.as_str()),
                     "api_key_permissions":snapshot.as_ref().map(|s|&s.api_key_permissions),
+                    "observer":{"source":"observer_account_snapshot",
+                                "permissions":snapshot.as_ref().map(|s|&s.api_key_permissions),
+                                "source_received_at":snapshot.as_ref().map(|s|s.source_received_at.as_str())},
+                    "executor":executor,
                     "account_source_received_at":snapshot.as_ref().map(|s|s.source_received_at.as_str()),
                     "account_source_fresh":fresh,"governance":access,
                     "native_sql_policy":sql_receipt,
-                    "quality":if fresh&&policy_applied{"complete"}else{"partial"},
+                    "quality":if fresh&&policy_applied&&executor_verified{"complete"}else{"partial"},
+                    "admission_state":"not_evaluated",
                     "ready_for_post":false,
-                    "reason_code":if !policy_applied {"NATIVE_SQL_POLICY_NOT_APPLIED"} else {"VENUE_PER_INSTRUMENT_ADMISSION_REQUIRES_TRADE_PLAN"}}),
+                    "reason_code":if !policy_applied {"NATIVE_SQL_POLICY_NOT_APPLIED"}
+                      else if !executor_verified {"EXECUTOR_PERMISSION_NOT_VERIFIED"}
+                      else {"VENUE_PER_INSTRUMENT_ADMISSION_REQUIRES_TRADE_PLAN"}}),
                 )
             }
             TradeRequest::Preflight {} => {
@@ -386,7 +451,7 @@ impl TradeService {
                 order,
                 protection,
             } => {
-                let (a, c) = self.authority(&r, governance).await?;
+                let (a, c) = self.preview_authority(&r, governance).await?;
                 let plan = self
                     .plan(
                         &r,
@@ -399,10 +464,26 @@ impl TradeService {
                         order,
                         protection.as_ref(),
                         Instant::now() + Duration::from_secs(10),
+                        false,
                     )
                     .await?;
+                // This is a fresh exchange-side census, not a reservation or
+                // authorization to POST. Any gap is reported, never guessed flat.
+                let census = if r.configuration.account_key.environment
+                    == okx_protocol::accounts::Environment::Real
+                {
+                    match self.census(&a).await {
+                        Ok(proof) => json!({"state":"verified","source":"native_risk_census",
+                                            "generated_at_ms":proof.generated_at_ms,
+                                            "complete":proof.complete}),
+                        Err(reason) => json!({"state":"blocked","reason_code":reason}),
+                    }
+                } else {
+                    json!({"state":"not_evaluated"})
+                };
                 Ok(completed(
-                    json!({"plan":plan,"access":c.access_enabled(),"policy_revision":a.state.revision,"admission":"preview_only"}),
+                    json!({"plan":plan,"access":c.access_enabled(),"policy_revision":a.state.revision,
+                           "admission":"preview_only","side_effects":"none","census":census}),
                 ))
             }
             TradeRequest::Execute {

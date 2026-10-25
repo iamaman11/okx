@@ -2144,3 +2144,27 @@ fn strategy_policy_retry_keeps_immutable_lineage_and_one_intent() {
         .unwrap();
     assert_eq!(decisions, 3);
 }
+
+#[test]
+fn manual_preview_never_creates_instance_or_changes_sql() {
+    let mut s = store();
+    let changes = |s: &AccountStore| -> i64 {
+        s.connection.query_row("SELECT total_changes()", [], |r| r.get(0)).unwrap()
+    };
+    let before = changes(&s);
+    let policy = s.policy().unwrap();
+    let stops = s.stops().unwrap();
+    assert!(s.instance("manual").unwrap().is_none());
+    let planned = s.manual_definition_preview().unwrap();
+    assert_eq!(changes(&s), before);
+    assert_eq!(s.policy().unwrap(), policy);
+    assert_eq!(s.stops().unwrap(), stops);
+    assert!(s.instance("manual").unwrap().is_none());
+    let created = s.ensure_manual_instance(1234).unwrap();
+    assert_eq!(planned.version, created.version);
+    assert_eq!(planned.parameters_digest, created.parameters_digest);
+    let after = changes(&s);
+    let again = s.manual_definition_preview().unwrap();
+    assert_eq!(again.version, created.version);
+    assert_eq!(changes(&s), after);
+}

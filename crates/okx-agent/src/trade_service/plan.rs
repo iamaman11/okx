@@ -81,6 +81,7 @@ impl TradeService {
         order: &OrderConstraints,
         protection: Option<&Protection>,
         until: Instant,
+        record_risk_state: bool,
     ) -> Result<IntentPlan, String> {
         let increase = matches!(
             operation,
@@ -317,7 +318,7 @@ impl TradeService {
             Decimal::ZERO
         };
         if increase {
-            self.financial_admission(r, c, instance, &snap, loss)
+            self.financial_admission(r, c, instance, &snap, loss, record_risk_state)
                 .await?;
         }
         if increase && qty * per_contract > dec(&c.limits.max_order_loss_usdt)? {
@@ -370,7 +371,11 @@ impl TradeService {
             .store
             .call(until, move |s| {
                 if binding_id == "manual" {
-                    s.ensure_manual_instance(now())
+                    if record_risk_state {
+                        s.ensure_manual_instance(now())
+                    } else {
+                        s.manual_definition_preview()
+                    }
                 } else {
                     s.strategy_definition(&binding_id)
                 }
@@ -403,6 +408,7 @@ impl TradeService {
         instance: &str,
         snapshot: &okx_observation::AccountSnapshot,
         candidate: Decimal,
+        record_risk_state: bool,
     ) -> Result<(), String> {
         let rate = dec(&Self::usd_conversion(snapshot)?.usd_per_usdt)?;
         let daily = dec(control
@@ -434,21 +440,29 @@ impl TradeService {
                         "FINANCIAL_SOURCE_INCOMPLETE_OR_STALE",
                     ));
                 }
-                for (id, _, reason, _) in s.stops()? {
-                    if reason == "DAILY_LOSS_LIMIT" && !id.ends_with(&utc_day) {
-                        s.resolve_stop(&id, "fresh_UTC_window_rollover")?;
+                // A preview may inspect historical stops, but must not resolve
+                // even a stale latch: that is a write owned by admission.
+                if record_risk_state {
+                    for (id, _, reason, _) in s.stops()? {
+                        if reason == "DAILY_LOSS_LIMIT" && !id.ends_with(&utc_day) {
+                            s.resolve_stop(&id, "fresh_UTC_window_rollover")?;
+                        }
                     }
                 }
                 if risk.daily_loss_usd >= daily {
                     let id = format!("daily:{utc_day}");
-                    s.latch_stop(&id, "account", "DAILY_LOSS_LIMIT", now())?;
+                    if record_risk_state {
+                        s.latch_stop(&id, "account", "DAILY_LOSS_LIMIT", now())?;
+                    }
                     return Ok(Some("DAILY_LOSS_LIMIT"));
                 }
                 if risk.daily_loss_usd + candidate > daily {
                     return Ok(Some("DAILY_LOSS_HEADROOM_INSUFFICIENT"));
                 }
                 if risk.drawdown_ratio >= drawdown {
-                    s.latch_stop("drawdown", "account", "DRAWDOWN_LIMIT", now())?;
+                    if record_risk_state {
+                        s.latch_stop("drawdown", "account", "DRAWDOWN_LIMIT", now())?;
+                    }
                     return Ok(Some("DRAWDOWN_LIMIT"));
                 }
                 if s.instances()?.iter().any(|i| i.instance_id == instance) {
@@ -459,12 +473,14 @@ impl TradeService {
                         ));
                     }
                     if own.daily_loss_usd >= daily || own.drawdown_ratio >= drawdown {
-                        s.latch_stop(
-                            &format!("instance:{instance}:risk"),
-                            &instance,
-                            "INSTANCE_LOSS_LIMIT",
-                            now(),
-                        )?;
+                        if record_risk_state {
+                            s.latch_stop(
+                                &format!("instance:{instance}:risk"),
+                                &instance,
+                                "INSTANCE_LOSS_LIMIT",
+                                now(),
+                            )?;
+                        }
                         return Ok(Some("INSTANCE_LOSS_LIMIT"));
                     }
                 }
