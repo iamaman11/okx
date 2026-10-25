@@ -50,6 +50,41 @@ FAKE_VENUE_ACTIONS={
     "strategies.create","strategies.update","strategies.start","strategies.stop",
     "trade.execute","trade.cancel","trade.close",
 }
+# Schema-only negative proofs are allowed exclusively for no-argument read-only
+# actions. Every other route must still demonstrate a native business refusal.
+SCHEMA_ONLY_NEGATIVE_ACTIONS=frozenset({
+    "diagnostics.runtime","accounts.list","market.capabilities","research.capabilities",
+})
+def checked_schema_negative(route,arguments,response,proof,executed_tests,tool_contract):
+    """Require observed pre-dispatch schema error, exact strict contract, and Worker CI."""
+    if (route not in SCHEMA_ONLY_NEGATIVE_ACTIONS
+        or proof.get("rejection_stage")!="tool_schema"
+        or proof.get("transport")!="live_mcp"
+        or proof.get("worker_test_name")!="strict_action_fixtures"
+        or "strict_action_fixtures" not in executed_tests):
+        return False
+    tool_name,action=route.split(".",1)
+    if arguments!={"action":action,"raw_rpc":"forbidden"}:
+        return False
+    if not isinstance(response,dict) or set(response)!={"tool_error"}:
+        return False  # In particular, no fabricated native structuredContent.
+    variants=next((tool["inputSchema"].get("oneOf",[]) for tool in tool_contract["tools"]
+                   if tool.get("name")==tool_name),[])
+    selected=[variant for variant in variants
+              if variant.get("properties",{}).get("action",{}).get("const")==action]
+    if (len(selected)!=1 or set(selected[0].get("properties",{}))!={"action"}
+        or selected[0].get("required")!=["action"]
+        or selected[0].get("additionalProperties") is not False):
+        return False
+    error=response["tool_error"]
+    return (isinstance(error,str)
+        and len(error)<=65536
+        and "not valid under any of the given schemas" in error
+        and "Failed validating 'oneOf' in schema:" in error
+        and "'additionalProperties': False" in error
+        and "On instance:" in error
+        and repr(arguments) in error)
+
 def admissible_transport(route,proof,executed_tests):
     transport=proof.get("transport")
     if transport=="live_mcp":
@@ -214,6 +249,12 @@ def capability_matrix(physical=None,executed_tests=None):
                     or not proof.get("observed_at_utc")
                     or not admissible_transport(route,proof,executed_tests)):
                     return False
+                if polarity=="negative" and proof.get("rejection_stage")=="tool_schema":
+                    if not checked_schema_negative(
+                        route,request["arguments"],response,proof,executed_tests,schema):
+                        return False
+                    observed.add(route)
+                    continue
                 envelope=response.get("structuredContent")
                 if not isinstance(envelope,dict):
                     return False
@@ -371,6 +412,57 @@ def self_test():
             self.assertFalse(admissible_transport("trade.execute",{**case,"real_exchange_post_count":1},{native,worker}))
             self.assertFalse(admissible_transport("trade.execute",{**case,"real_exchange_post_count":False},{native,worker}))
             self.assertTrue(admissible_transport("market.snapshot",{"transport":"live_mcp"},set()))
+        def test_schema_only_negative_requires_strict_contract_and_observed_tool_error(self):
+            contract=json.loads((ROOT/"cloudflare/okx-mcp/contracts/tools.schema.json").read_text(encoding="utf-8-sig"))
+            proof={"transport":"live_mcp","rejection_stage":"tool_schema",
+                   "worker_test_name":"strict_action_fixtures"}
+            for route in SCHEMA_ONLY_NEGATIVE_ACTIONS:
+                action=route.split(".",1)[1]
+                arguments={"action":action,"raw_rpc":"forbidden"}
+                error=(repr(arguments)+" is not valid under any of the given schemas\\n"
+                       "Failed validating 'oneOf' in schema:\\n"
+                       " {'additionalProperties': False}\\n"
+                       "On instance:\\n"+repr(arguments))
+                response={"tool_error":error}
+                self.assertTrue(checked_schema_negative(
+                    route,arguments,response,proof,{"strict_action_fixtures"},contract),route)
+                self.assertFalse(checked_schema_negative(
+                    route,arguments,response,proof,set(),contract))
+                self.assertFalse(checked_schema_negative(
+                    route,arguments,response,{**proof,"transport":"fake_venue_fixture"},
+                    {"strict_action_fixtures"},contract))
+                self.assertFalse(checked_schema_negative(
+                    route,arguments,{"structuredContent":{"status":"rejected",
+                    "reason_code":"SYNTHETIC"}},proof,{"strict_action_fixtures"},contract))
+                self.assertFalse(checked_schema_negative(
+                    route,arguments,{"tool_error":"invalid request"},
+                    proof,{"strict_action_fixtures"},contract))
+                self.assertFalse(checked_schema_negative(
+                    route,{"action":action},response,proof,{"strict_action_fixtures"},contract))
+            self.assertFalse(checked_schema_negative(
+                "trade.execute",{"action":"execute","raw_rpc":"forbidden"},
+                {"tool_error":"not valid under any of the given schemas"},
+                proof,{"strict_action_fixtures"},contract))
+            self.assertFalse(checked_schema_negative(
+                "accounts.status",{"action":"status","raw_rpc":"forbidden"},
+                {"tool_error":"not valid under any of the given schemas"},
+                proof,{"strict_action_fixtures"},contract))
+        def test_schema_negative_rejects_relaxed_contract_and_spoofed_result(self):
+            contract=json.loads((ROOT/"cloudflare/okx-mcp/contracts/tools.schema.json").read_text(encoding="utf-8-sig"))
+            contract=json.loads(json.dumps(contract))
+            for tool in contract["tools"]:
+                if tool["name"]=="diagnostics":
+                    for variant in tool["inputSchema"]["oneOf"]:
+                        if variant.get("properties",{}).get("action",{}).get("const")=="runtime":
+                            variant["additionalProperties"]=True
+            args={"action":"runtime","raw_rpc":"forbidden"}
+            proof={"transport":"live_mcp","rejection_stage":"tool_schema",
+                   "worker_test_name":"strict_action_fixtures"}
+            response={"tool_error":repr(args)+" is not valid under any of the given schemas\\n"
+                       "Failed validating 'oneOf' in schema:\\n"
+                       " {'additionalProperties': False}\\nOn instance:\\n"+repr(args)}
+            self.assertFalse(checked_schema_negative(
+                "diagnostics.runtime",args,response,proof,{"strict_action_fixtures"},contract))
         def test_f07_f08_required_names_are_explicitly_bound(self):
             self.assertEqual(REQUIRED["F07"],{
                 "account_store::tests::strategy_crash_pending_decision_to_intent",
