@@ -2,7 +2,7 @@
   "tools": [
     {
       "name": "accounts",
-      "description": "Read or modify connected accounts and limits.",
+      "description": "Manage accounts and limits.",
       "inputSchema": {
         "oneOf": [
           {
@@ -319,7 +319,7 @@
     },
     {
       "name": "strategies",
-      "description": "Read or manage strategies; may start live trading.",
+      "description": "Manage strategies; may trade.",
       "inputSchema": {
         "oneOf": [
           {
@@ -560,7 +560,7 @@
     },
     {
       "name": "market",
-      "description": "Read OKX market data; no orders.",
+      "description": "Read OKX market data.",
       "inputSchema": {
         "oneOf": [
           {
@@ -885,7 +885,7 @@
     },
     {
       "name": "research",
-      "description": "Run, inspect or cancel research jobs.",
+      "description": "Manage research jobs.",
       "inputSchema": {
         "oneOf": [
           {
@@ -1301,7 +1301,7 @@
     },
     {
       "name": "portfolio",
-      "description": "Read portfolio and model scenarios.",
+      "description": "Read portfolio scenarios.",
       "inputSchema": {
         "oneOf": [
           {
@@ -1492,7 +1492,7 @@
     },
     {
       "name": "diagnostics",
-      "description": "Read runtime and order diagnostics.",
+      "description": "Read runtime diagnostics.",
       "inputSchema": {
         "oneOf": [
           {
@@ -1555,7 +1555,7 @@
     },
     {
       "name": "trade.preview",
-      "description": "Preview trade plan and risk; no order.",
+      "description": "Preview a trade; no order.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -1730,7 +1730,7 @@
     },
     {
       "name": "trade.execute",
-      "description": "Place a real order; financial loss is possible. Requires account authorization, limits and STOP.",
+      "description": "Submit a real order; financial loss possible. Requires approval, account limits and STOP.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -1918,7 +1918,7 @@
     },
     {
       "name": "trade.status",
-      "description": "Read exact trade status; no orders.",
+      "description": "Read trade status.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -1947,7 +1947,7 @@
     },
     {
       "name": "trade.cancel",
-      "description": "Cancel an order; changes exchange state.",
+      "description": "Cancel an exchange order.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -1983,7 +1983,7 @@
     },
     {
       "name": "trade.close",
-      "description": "Close a position by sending real trading instructions.",
+      "description": "Close a position by real exchange order.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -2025,7 +2025,7 @@
     },
     {
       "name": "trade.capabilities",
-      "description": "Read trade permissions and capabilities.",
+      "description": "Read trade permissions.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -2048,7 +2048,7 @@
     },
     {
       "name": "trade.preflight",
-      "description": "Read trade readiness; no orders.",
+      "description": "Check readiness; no order.",
       "inputSchema": {
         "type": "object",
         "properties": {
