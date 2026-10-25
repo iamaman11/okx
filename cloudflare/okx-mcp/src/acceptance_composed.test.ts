@@ -6,6 +6,8 @@ import {FRAME_SCHEMA} from './shared.js';
 import {governanceRequest,initializeGovernance,enrollObservedAccount,setAccountPause,setAccountLimits} from './account_governance_store.js';
 import {initial,limits} from './account_governance.test.js';
 import type {Governance} from './account_governance.js';
+import {handleNativeRiskCommand} from './risk_authority.js';
+import {readRiskBook} from './risk_book.js';
 
 function check(ok:unknown,message:string):asserts ok{if(!ok)throw Error(message);}
 class Storage {
@@ -93,7 +95,7 @@ const handler=async(url:string,init?:RequestInit)=>{
  if(op?.type==='connect_account'){
   return Response.json({status:'completed',result:{alias:op.alias,credential_ref:op.credential_ref,
    connect_operation_id:op.operation_id,configuration_digest:op.request_digest,
-   account_key:{venue:'okx',environment:'demo',verified_uid:verifiedUid}}});
+   account_key:{venue:'okx',environment:op.credential_ref==='credential_fixture_real'?'real':'demo',verified_uid:verifiedUid}}});
  }
  const req=op?.request;
  if(op?.type!=='trade'||!req)return Response.json(rejected('FAKE_OPERATION_UNSUPPORTED'));
@@ -111,6 +113,60 @@ const handler=async(url:string,init?:RequestInit)=>{
   return Response.json(rejected('ACCOUNT_NEW_RISK_PAUSED'));
  }
  if(req.action==='execute'){
+  // Explicit synthetic Real branch: MCP routes to the fixture Agent, which
+  // requests actual central Worker RiskBook RESERVE and BEGIN_POST decisions.
+  // The invented native census/session here is TEST ONLY, never an MCP input.
+  if(row.environment==='real'){
+   const hash=JSON.stringify(req),key=String(req.idempotency_key);
+   if(bodyHash.has(key)&&bodyHash.get(key)!==hash)
+    return Response.json(rejected('IDEMPOTENCY_CONFLICT'));
+   const existing=intentByKey.get(key);
+   if(existing)return Response.json(success({intent:intents.get(existing)}));
+   const at=1792890000000;
+   const intentId='intent_real_'+(intents.size+1);
+   const planHash=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',
+     new TextEncoder().encode(JSON.stringify({account:row.account_key,request:req}))))).
+     map(b=>b.toString(16).padStart(2,'0')).join('');
+   const census={complete:true,source_digest:'c'.repeat(64),
+     content_digest:'b'.repeat(64),generated_at_ms:at-1,source_read_floor_ms:at-1,
+     account_keys:[row.account_key],occupied:[{account_key:row.account_key,
+       occupied_usdt:'0',cumulative_loss_usd:'0'}],
+     native_account_evidence_complete:true,native_order_evidence_complete:true,
+     native_ledger_evidence_complete:true};
+   const nativeSession={connection_generation:generation,runtime_profile:'engine',hello:true};
+   const reserve=await handleNativeRiskCommand(storage,nativeSession,{
+     schema:'okx.risk-command/v1',command_id:'reserve_fixture_'+(++id),
+     installation_id:initial.installation_id,
+     action:{action:'RESERVE',venue:'okx',account_uid:row.uid_fingerprint,
+       run_id:'run_fixture_real_001',intent_id:intentId,
+       strategy_id:String(req.strategy_instance),instrument_id:String(req.instrument),
+       plan_sha256:planHash,requested_loss_usdt:'0.5',requested_loss_usd:'0.5',
+       usd_conversion:{usd_per_usdt:'1',source_digest:census.source_digest,observed_at_ms:at},
+       policy_revision:governance.revision,census}
+   },at);
+   if(reserve.status!=='HELD'||!reserve.reservation_key||
+      reserve.risk_book_sequence===null)
+    return Response.json(rejected(reserve.reason??'CENTRAL_RESERVE_DENIED'));
+   const fresh={...census,source_digest:'d'.repeat(64),
+     generated_at_ms:at+1,source_read_floor_ms:at+1};
+   const fence=await handleNativeRiskCommand(storage,nativeSession,{
+     schema:'okx.risk-command/v1',command_id:'post_fixture_'+(++id),
+     installation_id:initial.installation_id,
+     action:{action:'BEGIN_POST',reservation_key:reserve.reservation_key,
+       plan_sha256:planHash,policy_revision:governance.revision,
+       expected_risk_book_sequence:reserve.risk_book_sequence,
+       source_proof_sha256:'e'.repeat(64),census:fresh}
+   },at+2);
+   if(fence.status!=='POST_AUTHORIZED')
+    return Response.json(rejected(fence.reason??'CENTRAL_POST_FENCE_DENIED'));
+   const intent={intent_id:intentId,state:'FILLED',plan:{instrument:req.instrument,
+     operation:req.operation,protection:req.protection,stop_price:'99',
+     planned_loss_usd:'0.5'},protected:true};
+   // The fixture venue can POST only AFTER central risk says POST_AUTHORIZED.
+   venuePostCount++;
+   intents.set(intentId,intent);bodyHash.set(key,hash);intentByKey.set(key,intentId);
+   return Response.json(success({intent}));
+  }
   const hash=JSON.stringify(req),key=req.idempotency_key;
   if(bodyHash.has(key)&&bodyHash.get(key)!==hash)return Response.json(rejected('IDEMPOTENCY_CONFLICT'));
   const prior=intentByKey.get(key);
@@ -247,3 +303,49 @@ if((globalThis as any).process?.env?.OKX_A2_TRACE==='1'){
  console.log('A2_SQL_BRIDGE_TRACE_V1:'+JSON.stringify(nativePolicyTrace));
 }
 console.log('mcp_central_owner_composed_fake_venue PASS central connect/pause/resume/limits CAS + protected trade lifecycle, two fixture posts, zero real exchange POST, no native SQL/WSS claim');
+
+
+// A second account in the SAME composed MCP fixture exercises the true Worker
+// transaction code on the way to a fake venue. This intentionally follows the
+// A2 policy trace: it must not alter its exact committed CAS evidence.
+const realConnect=await call('accounts',{action:'connect',alias:'fixture_real',
+ label:'Fixture Real',credential_ref:'credential_fixture_real',enabled:true,limits,
+ idempotency_key:'fixture_connect_real_0001'});
+check(realConnect.status==='completed'&&realConnect.data.account.account_key===
+ 'okx:real:'+verifiedUid,'real account identity arrived via same MCP connect path');
+// Simulates the authenticated fixture socket's own generation, not an
+// externally asserted MCP parameter or a production WSS attestation.
+await storage.put('generation',generation);
+const beforeReal=venuePostCount;
+const realPreview=await call('trade',{action:'preview',account:'fixture_real',...plan});
+check(realPreview.status==='completed'&&realPreview.data.admission==='preview_only'&&
+ venuePostCount===beforeReal,'real preview never reserves or posts');
+const realArgs={...executeArgs,account:'fixture_real',
+ idempotency_key:'fixture_real_execute_0001'};
+const realOrder=await call('trade',realArgs);
+check(realOrder.status==='completed'&&realOrder.data.intent.protected&&
+ venuePostCount===beforeReal+1,'MCP route→fake native→actual RiskBook→fake venue');
+const reservedRisk=await readRiskBook(storage);
+check(reservedRisk?.occupied_usd==='0.5'&&reservedRisk?.occupied_usdt==='0.5',
+ 'fake FILLED is NOT a real terminal ledger proof: central risk remains occupied');
+const replayedReal=await call('trade',realArgs);
+check(replayedReal.data.intent.intent_id===realOrder.data.intent.intent_id&&
+ venuePostCount===beforeReal+1,'replayed MCP command never duplicates risk or venue POST');
+const realChanged=await call('trade',{...realArgs,operation:'replace'});
+check(realChanged.status==='rejected'&&realChanged.reason_code==='IDEMPOTENCY_CONFLICT'&&
+ venuePostCount===beforeReal+1,'changed body fails before new risk or venue POST');
+const realStatus=await call('trade',{action:'status',account:'fixture_real',
+ reference:realOrder.data.intent.intent_id});
+check(realStatus.data.intent.state==='FILLED'&&realStatus.data.intent.protected,
+ 'fake venue status is visible through same MCP routing');
+const latest=(await governanceRequest(storage,'GET')).body as Governance;
+const pausedReal=await call('accounts',{action:'pause',account:'fixture_real',
+ expected_revision:latest.revision,idempotency_key:'fixture_real_pause_0001'});
+check(pausedReal.status==='completed'&&pausedReal.data.accounts.find(
+ (a:any)=>a.id==='fixture_real')?.explicit_pause===true,'central pause through MCP');
+const blockedReal=await call('trade',{...realArgs,idempotency_key:'fixture_real_blocked_0001'});
+check(blockedReal.status==='rejected'&&blockedReal.reason_code==='ACCOUNT_NEW_RISK_PAUSED'&&
+ venuePostCount===beforeReal+1,'pause denies additional real risk before fixture POST');
+check((await readRiskBook(storage))?.occupied_usd==='0.5',
+ 'pause cannot silently release a POSTED reservation without terminal native proof');
+console.log('mcp_riskbook_fake_venue_composed PASS real MCP route, central RESERVE/BEGIN_POST, fixture venue once, replay, pause, held risk; zero real exchange POST, no physical native SQL claim');
