@@ -96,6 +96,70 @@ if(nativeReadCount!==100||maxInFlightRead<2||hundred.length!==100||
  throw Error('100 concurrent Worker read-only fixture requests lost or incorrectly projected');
 console.log('worker_100_concurrent_readonly_fixture PASS 100 native fixture reads zero real POST');
 
+// Eleven real Worker MCP routes through an in-memory DO with NO exchange access.
+// Success and business refusal: route fidelity, identity, retries, bounded shell.
+const fakeMutationActions:[string,string][]=[
+ ['accounts','connect'],['accounts','pause'],['accounts','resume'],['accounts','set_limits'],
+ ['strategies','create'],['strategies','update'],['strategies','start'],['strategies','stop'],
+ ['trade','execute'],['trade','cancel'],['trade','close'],
+];
+for(const [tool,action] of fakeMutationActions){
+ const fixture=payloadFixtures.find(x=>x.tool===tool&&x.action===action)
+  ?? (action==='resume'||action==='stop'
+    ?payloadFixtures.find(x=>x.tool===tool&&x.action===(action==='resume'?'pause':'start'))
+    :undefined);
+ if(!fixture)throw Error('missing mutation fixture '+tool+'.'+action);
+ const args={...fixture.positive,action};
+ for(const negative of [false,true]){
+  const visits:{path:string;request:any}[]=[];
+  const fakeHandler=async(url:string,init?:RequestInit)=>{
+   const path=new URL(url).pathname;
+   const request=init?.body?JSON.parse(String(init.body)):null;
+   visits.push({path,request});
+   if(negative)return Response.json({status:'failed',reason_code:'FAKE_VENUE_REJECTED',retryable:false});
+   if(path==='/dispatch'&&request?.operation?.type==='connect_account'){
+    const op=request.operation;
+    return Response.json({status:'completed',result:{alias:op.alias,credential_ref:op.credential_ref,
+     connect_operation_id:op.operation_id,configuration_digest:op.request_digest,
+     account_key:{venue:'okx',environment:'demo',verified_uid:'a'.repeat(64)}}});
+   }
+   if(path==='/dispatch')return Response.json({schema:'okx.agent.response/v1',
+    request_id:'fake_mutation_native',status:'completed',quality:'FRESH',warnings:[],
+    result:{schema:'okx.fake-venue.fixture/v1',venue:'fake',exchange_post_count:0}});
+   return Response.json({status:'completed',data:{venue:'fake',exchange_post_count:0}});
+  };
+  const fake:any={RUNTIME:{idFromName:()=>0,get:()=>({fetch:fakeHandler})}};
+  const rpc:any=await(await mcpApi.fetch(new Request('https://fixture/mcp',{method:'POST',
+   body:JSON.stringify({jsonrpc:'2.0',id:902,method:'tools/call',params:{name:tool,arguments:args}})}),fake,ctx)).json();
+  if(rpc.error||!rpc.result?.structuredContent)throw Error('mutation schema/dispatch failed '+tool+'.'+action+':'+JSON.stringify(rpc.error));
+  const envelope=rpc.result.structuredContent;
+  if(negative){
+   if(envelope.status!=='failed'||envelope.reason_code!=='FAKE_VENUE_REJECTED'||visits.length!==1)
+    throw Error('fake venue business refusal not preserved '+tool+'.'+action);
+  }else if(envelope.status!=='completed')throw Error('fake venue success not projected '+tool+'.'+action);
+  const first=visits[0];
+  const expectedPath=tool==='accounts'&&['pause','resume','set_limits'].includes(action)
+    ?(action==='set_limits'?'/account-governance/limits':'/account-governance/pause'):'/dispatch';
+  if(!first||first.path!==expectedPath)throw Error('wrong owner '+tool+'.'+action);
+  if(expectedPath==='/dispatch'){
+   const expectedType=tool==='accounts'?'connect_account':tool;
+   if(first.request?.operation?.type!==expectedType)throw Error('mutation operation lost '+tool+'.'+action);
+   if(tool!=='accounts'&&(first.request.operation.request?.action!==action||first.request.account!==args.account))
+    throw Error('mutation action/account lost '+tool+'.'+action);
+  }else if(expectedPath==='/account-governance/pause'){
+   if(first.request?.explicit_pause!==(action==='pause')||first.request?.account!==args.account)
+    throw Error('pause/resume action/account lost');
+  }else if(first.request?.action!==action||first.request?.account!==args.account)
+    throw Error('set_limits action/account lost');
+  if(tool==='accounts'&&action==='connect'&&!negative){
+   if(visits.length!==2||visits[1].path!=='/account-governance/enroll'||
+     visits[1].request?.alias!==args.alias||visits[1].request?.credential_ref!==args.credential_ref)
+    throw Error('connect did not prove central enrollment binding');
+  }else if(visits.length!==1)throw Error('mutation dispatched repeatedly '+tool+'.'+action);
+ }
+}
+console.log('mcp_fake_venue_mutation_routes PASS 11 actions positive/negative 0 real exchange POST');
+
 const rawFailure=(code:string)=>({schema:'okx.agent.response/v1',request_id:'native_fail_398',
  status:'rejected',generated_at:'2026-10-23T00:00:00Z',quality:'NOT_READY',result_schema:'okx.product/v1',
  result:null,failure:{code,message:code,retryable:false},warnings:[]});
