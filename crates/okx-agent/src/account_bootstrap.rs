@@ -1,8 +1,9 @@
 use chrono::{SecondsFormat, Utc};
 use okx_api::{
-    AccountApi, AccountConfig, AccountHistoryApi, AccountPositionRiskSnapshot, AssetApi, FeeRate, InstrumentType,
-    LeverageInfo, MarginMode, OkxError, OkxRestClient, PendingDerivativeAlgoRiskInventory,
-    PendingProtectiveAlgoInventory, PositionBuilderRequest, PositionBuilderSnapshot, TradeApi,
+    AccountApi, AccountConfig, AccountHistoryApi, AccountPositionRiskSnapshot, AssetApi, FeeRate,
+    InstrumentType, LeverageInfo, MarginMode, OkxError, OkxRestClient,
+    PendingDerivativeAlgoRiskInventory, PendingProtectiveAlgoInventory, PositionBuilderRequest,
+    PositionBuilderSnapshot, TradeApi,
 };
 use okx_observation::{
     AccountError, AccountLedgerError, AccountLedgerFacts, AccountSnapshot, ExecutionFillEvidence,
@@ -10,8 +11,12 @@ use okx_observation::{
     TradingCapabilitiesError, TradingCapabilitiesInput, TradingCapabilitiesSnapshot,
     normalize_execution_fill_history,
 };
+use std::{
+    future::Future,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 use thiserror::Error;
-use std::{future::Future, sync::Arc, time::{Duration, Instant}};
 use tokio::sync::Mutex;
 
 #[derive(Debug, Error)]
@@ -93,51 +98,50 @@ pub enum FeeScheduleBootstrapError {
     Normalize(#[from] FeeScheduleError),
 }
 
+// The observer credential belongs to one account; never share its configuration across UIDs.
+// The 2s bound matches the narrow account/config rate-limit window, not risk-source freshness.
+const OBSERVER_CONFIG_MAX_REUSE_AGE: Duration = Duration::from_secs(2);
 
- // The observer credential belongs to one account; never share its configuration across UIDs.
- // The 2s bound matches the narrow account/config rate-limit window, not risk-source freshness.
- const OBSERVER_CONFIG_MAX_REUSE_AGE: Duration = Duration::from_secs(2);
+struct ObservedConfig {
+    config: AccountConfig,
+    received_at: chrono::DateTime<Utc>,
+    sampled_at: Instant,
+}
 
- struct ObservedConfig {
-     config: AccountConfig,
-     received_at: chrono::DateTime<Utc>,
-     sampled_at: Instant,
- }
+#[derive(Default)]
+struct ObserverConfigCache {
+    current: Mutex<Option<ObservedConfig>>,
+}
 
- #[derive(Default)]
- struct ObserverConfigCache {
-     current: Mutex<Option<ObservedConfig>>,
- }
-
- impl ObserverConfigCache {
-     /// Lock across the one authenticated read: concurrent callers share the same proof.
-     /// Failed refreshes discard expired proof; no stale success/fallback is possible.
-     async fn read<F, Fut>(
-         &self,
-         fetch: F,
-     ) -> Result<(AccountConfig, chrono::DateTime<Utc>), OkxError>
-     where
-         F: FnOnce() -> Fut,
-         Fut: Future<Output = Result<AccountConfig, OkxError>>,
-     {
-         let mut current = self.current.lock().await;
-         if let Some(proof) = current.as_ref()
-             && proof.sampled_at.elapsed() < OBSERVER_CONFIG_MAX_REUSE_AGE
-         {
-             return Ok((proof.config.clone(), proof.received_at));
-         }
-         *current = None;
-         let sampled_at = Instant::now();
-         let received_at = Utc::now();
-         let config = fetch().await?;
-         *current = Some(ObservedConfig {
-             config: config.clone(),
-             received_at,
-             sampled_at,
-         });
-         Ok((config, received_at))
-     }
- }
+impl ObserverConfigCache {
+    /// Lock across the one authenticated read: concurrent callers share the same proof.
+    /// Failed refreshes discard expired proof; no stale success/fallback is possible.
+    async fn read<F, Fut>(
+        &self,
+        fetch: F,
+    ) -> Result<(AccountConfig, chrono::DateTime<Utc>), OkxError>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<AccountConfig, OkxError>>,
+    {
+        let mut current = self.current.lock().await;
+        if let Some(proof) = current.as_ref()
+            && proof.sampled_at.elapsed() < OBSERVER_CONFIG_MAX_REUSE_AGE
+        {
+            return Ok((proof.config.clone(), proof.received_at));
+        }
+        *current = None;
+        let sampled_at = Instant::now();
+        let received_at = Utc::now();
+        let config = fetch().await?;
+        *current = Some(ObservedConfig {
+            config: config.clone(),
+            received_at,
+            sampled_at,
+        });
+        Ok((config, received_at))
+    }
+}
 
 #[derive(Clone)]
 pub struct AccountBootstrapper {
@@ -739,13 +743,19 @@ mod tests {
             let cache = cache.clone();
             let fetches = fetches.clone();
             calls.push(tokio::spawn(async move {
-                cache.read(|| async move {
-                    fetches.fetch_add(1, Ordering::SeqCst);
-                    tokio::task::yield_now().await;
-                    Ok::<_, OkxError>(serde_json::from_value::<AccountConfig>(
-                        serde_json::json!({"uid":"observer-1","perm":"read_only"}),
-                    ).unwrap())
-                }).await.expect("shared config")
+                cache
+                    .read(|| async move {
+                        fetches.fetch_add(1, Ordering::SeqCst);
+                        tokio::task::yield_now().await;
+                        Ok::<_, OkxError>(
+                            serde_json::from_value::<AccountConfig>(
+                                serde_json::json!({"uid":"observer-1","perm":"read_only"}),
+                            )
+                            .unwrap(),
+                        )
+                    })
+                    .await
+                    .expect("shared config")
             }));
         }
         let mut timestamps = Vec::new();
@@ -761,27 +771,42 @@ mod tests {
     #[tokio::test]
     async fn observer_config_expiry_refreshes_and_denies_stale_fallback() {
         let cache = ObserverConfigCache::default();
-        cache.read(|| async {
-            Ok::<_, OkxError>(serde_json::from_value::<AccountConfig>(
-                serde_json::json!({"uid":"observer-1","perm":"read_only"}),
-            ).unwrap())
-        }).await.expect("initial config");
+        cache
+            .read(|| async {
+                Ok::<_, OkxError>(
+                    serde_json::from_value::<AccountConfig>(
+                        serde_json::json!({"uid":"observer-1","perm":"read_only"}),
+                    )
+                    .unwrap(),
+                )
+            })
+            .await
+            .expect("initial config");
         // Expiry is deterministic; no wall-clock sleeps or loose timing assertions.
         {
             let mut current = cache.current.lock().await;
-            current.as_mut().expect("entry").sampled_at =
-                Instant::now() - Duration::from_secs(3);
+            current.as_mut().expect("entry").sampled_at = Instant::now() - Duration::from_secs(3);
         }
-        assert!(cache.read(|| async {
-            Err::<AccountConfig, _>(OkxError::Config("authentication unavailable".into()))
-        }).await.is_err());
+        assert!(
+            cache
+                .read(|| async {
+                    Err::<AccountConfig, _>(OkxError::Config("authentication unavailable".into()))
+                })
+                .await
+                .is_err()
+        );
         assert!(cache.current.lock().await.is_none());
-        let (changed, _) = cache.read(|| async {
-            Ok::<_, OkxError>(serde_json::from_value::<AccountConfig>(
-                serde_json::json!({"uid":"observer-1","perm":"trade"}),
-            ).unwrap())
-        }).await.expect("changed config");
+        let (changed, _) = cache
+            .read(|| async {
+                Ok::<_, OkxError>(
+                    serde_json::from_value::<AccountConfig>(
+                        serde_json::json!({"uid":"observer-1","perm":"trade"}),
+                    )
+                    .unwrap(),
+                )
+            })
+            .await
+            .expect("changed config");
         assert!(strict_read_only_permissions(&changed.perm).is_err());
     }
-
 }
