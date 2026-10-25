@@ -1516,7 +1516,27 @@ fn central_policy_revisions_persist_in_sql_and_isolate_accounts() {
     // Synthetic central-owner CAS outcomes are applied to two independent
     // account-local SQLite writers. No live governance is changed.
     let mut first = store();
-    let second = store();
+    let second_meta = AccountMeta {
+        account_key: "okx:demo:fixture-account-b".into(),
+        installation_id: "fixture-installation-b".into(),
+        initialize_operation_id: "fixture-connect-b".into(),
+        ..first.meta.clone()
+    };
+    let opening = OpeningSnapshot {
+        opening_equity_usd: Decimal::from(100),
+        source_ref: second_meta.opening_source.clone(),
+        observed_at: 1,
+        positions: 0,
+        orders: 0,
+        conditional_orders: 0,
+        liabilities: Decimal::ZERO,
+        balances: vec![("USDT".into(), Decimal::from(100))],
+    };
+    let mut second = AccountStore::initialize_flat(path(), second_meta, &opening).unwrap();
+    second
+        .apply_authority_policy(1, false, "campaign-20", Decimal::from(20))
+        .unwrap();
+    assert_ne!(first.meta.account_key, second.meta.account_key);
     assert_eq!(first.policy().unwrap().0, 1);
     assert_eq!(second.policy().unwrap().0, 1);
 
