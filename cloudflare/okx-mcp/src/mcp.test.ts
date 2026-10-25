@@ -74,6 +74,28 @@ const mcpResponse=async(tool:string,args:unknown,response:unknown):Promise<any>=
  if(reply.error)throw Error(JSON.stringify(reply.error));
  return reply.result.structuredContent;
 };
+// Exercise the real Worker MCP projection/dispatch for 100 independent read-only
+// requests. The Durable Object is a deterministic fixture, not a physical network SLA.
+let inFlightRead=0,maxInFlightRead=0,nativeReadCount=0;
+const readOnlyEnv:any={RUNTIME:{idFromName:()=>0,get:()=>({fetch:async()=>{
+ nativeReadCount++;inFlightRead++;maxInFlightRead=Math.max(maxInFlightRead,inFlightRead);
+ await Promise.resolve();inFlightRead--;
+ return Response.json({schema:'okx.agent.response/v1',request_id:'fake_readonly_native',
+   status:'completed',quality:'FRESH',warnings:[],
+   result:{schema:'okx.research.capabilities/v1',strategy_ids:['ema_cross_v1']}});
+}})}};
+const hundred=await Promise.all(Array.from({length:100},async(_,i)=>{
+ const res=await mcpApi.fetch(new Request('https://fixture/mcp',{method:'POST',body:JSON.stringify({
+   jsonrpc:'2.0',id:i+100,method:'tools/call',params:{name:'research',arguments:{action:'capabilities'}}
+ })}),readOnlyEnv,ctx);
+ return res.json() as Promise<any>;
+}));
+if(nativeReadCount!==100||maxInFlightRead<2||hundred.length!==100||
+ hundred.some((x:any,i:number)=>x.id!==i+100||x.result?.structuredContent?.status!=='completed'||
+ x.result?.structuredContent?.data?.schema!=='okx.research.capabilities/v1'||x.error))
+ throw Error('100 concurrent Worker read-only fixture requests lost or incorrectly projected');
+console.log('worker_100_concurrent_readonly_fixture PASS 100 native fixture reads zero real POST');
+
 const rawFailure=(code:string)=>({schema:'okx.agent.response/v1',request_id:'native_fail_398',
  status:'rejected',generated_at:'2026-10-23T00:00:00Z',quality:'NOT_READY',result_schema:'okx.product/v1',
  result:null,failure:{code,message:code,retryable:false},warnings:[]});

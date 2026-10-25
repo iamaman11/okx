@@ -25,6 +25,27 @@ def check(root):
         if not variants:errors.append(f"{tool['name']}: missing strict action union")
         for variant in variants:
             if variant.get('additionalProperties') is not False:errors.append(f"{tool['name']}: action accepts unknown fields")
+    # Generated MCP contract must reflect the live Rust strategy v1 and
+    # all four read-only research result views (one source, no stale snapshot).
+    catalog={t['name']:t for t in tools}
+    def variant(tool,action):
+        return next((v for v in catalog[tool]['inputSchema']['oneOf']
+                     if v.get('properties',{}).get('action',{}).get('const')==action),None)
+    view=variant('research','result')
+    if (view is None or view['properties'].get('view',{}).get('enum')!=
+        ['summary','trades','equity','variants']):
+        errors.append('research.result is missing one or more supported result views')
+    for action in ('create','update'):
+        rule=variant('strategies',action)
+        if rule is None:
+            errors.append('strategies.'+action+' missing')
+            continue
+        params=rule['properties'].get('parameters',{}).get('properties',{})
+        if (params.get('fast',{}).get('maximum')!=999 or
+            params.get('slow',{}).get('maximum')!=1000):
+            errors.append('strategies.'+action+' does not match Rust StrategyParametersV1 bounds')
+        if action=='create' and rule['properties'].get('version',{}).get('maximum')!=1:
+            errors.append('strategies.create must reject unsupported version > 1')
     return errors
 if __name__=='__main__':
     parser=argparse.ArgumentParser();parser.add_argument('--self-test',action='store_true');args=parser.parse_args()

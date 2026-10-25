@@ -30,6 +30,20 @@ fail(!validTool('research',{...run,variants:[{fast:9,slow:21}]}),'backtest canno
 fail(!validTool('research',{...gridBase,action:'grid'}),'grid variants are mandatory');
 fail(!validTool('research',{...gridPayload,raw_rpc:'forbidden'}),'grid remains strictly typed');
 payloadFixtures.push({tool:'research',action:'grid',positive:gridPayload,negative:[{...gridPayload,raw_rpc:'forbidden'}]});
+// Public acceptance must not promise unsupported live strategy versions/bounds.
+const liveCreate=payloadFixtures.find(x=>x.tool==='strategies'&&x.action==='create')!.positive;
+const liveUpdate=payloadFixtures.find(x=>x.tool==='strategies'&&x.action==='update')!.positive;
+for(const [action,valid]of [['create',liveCreate],['update',liveUpdate]] as const){
+ fail(validTool('strategies',valid),`valid strategy ${action} accepted`);
+ fail(!validTool('strategies',{...valid,parameters:{fast:1,slow:1001}}),`strategy ${action} slow upper bound`);
+ fail(!validTool('strategies',{...valid,parameters:{fast:1000,slow:1000}}),`strategy ${action} fast upper bound`);
+}
+fail(!validTool('strategies',{...liveCreate,version:2}),'only live strategy definition v1 supported');
+const researchResult=payloadFixtures.find(x=>x.tool==='research'&&x.action==='result')!.positive;
+for(const view of ['summary','trades','equity','variants'])
+ fail(validTool('research',{...researchResult,view}),`research result view ${view} accepted`);
+fail(!validTool('research',{...researchResult,view:'unsupported'}),'research view strictly enumerated');
+console.log('live_strategy_v1_and_research_views PASS');
 const start=payloadFixtures.find(x=>x.tool==='strategies'&&x.action==='start')!.positive;
 fail(validTool('strategies',{...start,action:'stop'}),'strategy stop shares strict schema');
 fail(!validTool('strategies',{...start,action:'stop',raw_rpc:'forbidden'}),'strict stop rejects extra');

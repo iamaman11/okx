@@ -389,7 +389,7 @@
               "version": {
                 "type": "integer",
                 "minimum": 1,
-                "maximum": 9007199254740991
+                "maximum": 1
               },
               "parameters": {
                 "type": "object",
@@ -397,12 +397,12 @@
                   "fast": {
                     "type": "integer",
                     "minimum": 1,
-                    "maximum": 10000
+                    "maximum": 999
                   },
                   "slow": {
                     "type": "integer",
                     "minimum": 2,
-                    "maximum": 10000
+                    "maximum": 1000
                   }
                 },
                 "required": [
@@ -479,12 +479,12 @@
                   "fast": {
                     "type": "integer",
                     "minimum": 1,
-                    "maximum": 10000
+                    "maximum": 999
                   },
                   "slow": {
                     "type": "integer",
                     "minimum": 2,
-                    "maximum": 10000
+                    "maximum": 1000
                   }
                 },
                 "required": [
@@ -587,6 +587,46 @@
                 "type": "integer",
                 "minimum": 1,
                 "maximum": 9007199254740991
+              },
+              "universe": {
+                "type": "object",
+                "properties": {
+                  "instrument_type": {
+                    "type": "string",
+                    "enum": [
+                      "SPOT",
+                      "SWAP",
+                      "FUTURES"
+                    ]
+                  },
+                  "settle_currency": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 16
+                  },
+                  "after_instrument": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64
+                  },
+                  "reference_generation": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128
+                  },
+                  "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 100
+                  },
+                  "rank_globally": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "instrument_type"
+                ],
+                "additionalProperties": false
               },
               "fields": {
                 "type": "array",
@@ -707,46 +747,6 @@
                 "type": "string",
                 "minLength": 1,
                 "maxLength": 512
-              },
-              "universe": {
-                "type": "object",
-                "properties": {
-                  "instrument_type": {
-                    "type": "string",
-                    "enum": [
-                      "SPOT",
-                      "SWAP",
-                      "FUTURES"
-                    ]
-                  },
-                  "settle_currency": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 16
-                  },
-                  "after_instrument": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 64
-                  },
-                  "limit": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": 100
-                  },
-                  "reference_generation": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 128
-                  },
-                  "rank_globally": {
-                    "type": "boolean"
-                  }
-                },
-                "required": [
-                  "instrument_type"
-                ],
-                "additionalProperties": false
               }
             },
             "required": [
@@ -1133,6 +1133,15 @@
                 "type": "integer",
                 "minimum": 1,
                 "maximum": 50
+              },
+              "view": {
+                "type": "string",
+                "enum": [
+                  "summary",
+                  "trades",
+                  "equity",
+                  "variants"
+                ]
               }
             },
             "required": [
@@ -1192,6 +1201,26 @@
                   "ema_cross_v1"
                 ]
               },
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "fast": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 10000
+                  },
+                  "slow": {
+                    "type": "integer",
+                    "minimum": 2,
+                    "maximum": 10000
+                  }
+                },
+                "required": [
+                  "fast",
+                  "slow"
+                ],
+                "additionalProperties": false
+              },
               "costs": {
                 "type": "object",
                 "properties": {
@@ -1229,29 +1258,9 @@
               "data_mode": {
                 "type": "string",
                 "enum": [
-                  "historical_observed",
-                  "counterfactual"
+                  "counterfactual",
+                  "historical_observed"
                 ]
-              },
-              "parameters": {
-                "type": "object",
-                "properties": {
-                  "fast": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": 10000
-                  },
-                  "slow": {
-                    "type": "integer",
-                    "minimum": 2,
-                    "maximum": 10000
-                  }
-                },
-                "required": [
-                  "fast",
-                  "slow"
-                ],
-                "additionalProperties": false
               }
             },
             "required": [
@@ -1261,9 +1270,9 @@
               "start_ms",
               "end_ms",
               "strategy_id",
+              "parameters",
               "costs",
-              "data_mode",
-              "parameters"
+              "data_mode"
             ],
             "additionalProperties": false
           }
