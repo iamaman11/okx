@@ -1,6 +1,5 @@
 import {RuntimeSession} from "./runtime_session.js";
 import {FRAME_SCHEMA} from "./shared.js";
-import {releaseSessionIdentity} from "./release_attestation.js";
 import {initial,account} from "./account_governance.test.js";
 function check(v:boolean,label:string){if(!v)throw Error(label);}
 const generation=4;
@@ -50,46 +49,27 @@ check((await fixture("duplicate")).status==="completed","duplicate request canno
 
 check((await fixture("paused_complete")).status==="completed","pause_allows_native_verified_close_delivery");
 
-const attestationTree='a'.repeat(40),agentHash='b'.repeat(64),liveNow=Date.now();
-const provedSocket={...attachment,agentPid:5551,agentBinarySha256:agentHash,
- agentIncarnation:'ctl_'+'1'.repeat(32),
- installationId:'okx-clean-398-20261023',connectedAtMs:liveNow-10_000,lastPongAtMs:liveNow};
-const observed={schema:'okx.direct-transport.status/v1',status:'PASS',connected:true,session_fresh:true,
- runtime_id:'windows-primary',runtime_profile:'engine',connection_generation:generation,
- connected_at_ms:provedSocket.connectedAtMs,agent_pid:provedSocket.agentPid,
- agent_binary_sha256:agentHash,agent_incarnation:provedSocket.agentIncarnation,
- installation_id:provedSocket.installationId};
-const proof={verified:true,reason_code:null,source_tree:attestationTree,
- agent_binary_sha256:agentHash,artifact_id:12567853437,
- control_observed_at:new Date(liveNow-5000).toISOString(),
- control_receipt_url:'https://github.com/iamaman11/okx/issues/12#issuecomment-1234'};
-const verifiedState=new Map<string,unknown>([
- ['release_session_attestation',{schema:'okx.runtime-session-attestation/v1',
-  identity:releaseSessionIdentity(observed,attestationTree),proof}],
-]);
-let liveProofSocket=true;
-const proofOwner=new RuntimeSession({
- storage:{
-  get:async(key:string)=>verifiedState.get(key),
-  put:async(key:string,value:unknown)=>{verifiedState.set(key,value);},
-  delete:async(key:string)=>{verifiedState.delete(key);},
- },
- getWebSockets:()=>liveProofSocket?[{deserializeAttachment:()=>provedSocket}]:[],
-},{RELEASE_SOURCE_TREE:attestationTree} as any);
-const statusResponse=await proofOwner.fetch(new Request('https://runtime.internal/status?attest=1'));
-const statusProof:any=await statusResponse.json();
-check(statusProof.status==='PASS'&&statusProof.release_attestation?.verified===true&&
- statusProof.release_attestation.artifact_id===12567853437,
- 'Durable Object reuses independently accepted proof for same CONTROL child');
-provedSocket.generation=5;
-provedSocket.connectedAtMs=liveNow-5000;
-const reconnected:any=await(await proofOwner.fetch(new Request('https://runtime.internal/status?attest=1'))).json();
-check(reconnected.release_attestation?.verified===true,
- 'normal reconnect preserves validated owner proof without new GitHub GET');
-provedSocket.generation=generation;
-provedSocket.connectedAtMs=observed.connected_at_ms;
-liveProofSocket=false;
-const offlineStatus:any=await(await proofOwner.fetch(new Request('https://runtime.internal/status?attest=1'))).json();
-check(offlineStatus.status==='OFFLINE'&&offlineStatus.release_attestation.verified===false,
- 'offline WSS must never inherit a previously persisted accepted proof');
-console.log('durable_object_live_generation_release_proof PASS');
+// Windows CONTROL is the sole owner of native binary installation evidence.
+// Runtime status reports authenticated liveness, not independent file proof.
+const now=Date.now();
+let online=true;
+const socket:any={...attachment,agentPid:5551,agentBinarySha256:'b'.repeat(64),
+ agentIncarnation:'ctl_'+'1'.repeat(32),installationId:'okx-clean-398-20261023',
+ connectedAtMs:now-10000,lastPongAtMs:now};
+const owner=new RuntimeSession({
+ storage:{get:async()=>null},
+ getWebSockets:()=>online?[{deserializeAttachment:()=>socket}]:[],
+},{} as any);
+const ready:any=await(await owner.fetch(new Request('https://runtime.internal/status'))).json();
+check(ready.status==='PASS'&&ready.agent_pid===5551&&ready.agent_incarnation===socket.agentIncarnation,
+ 'transport returns Agent-reported identity without claiming CONTROL proof');
+socket.generation=5;
+socket.connectedAtMs=now-5000;
+const reconnected:any=await(await owner.fetch(new Request('https://runtime.internal/status'))).json();
+check(reconnected.status==='PASS'&&reconnected.connection_generation===5,
+ 'same child WSS reconnect has no GitHub REST dependency');
+online=false;
+const offline:any=await(await owner.fetch(new Request('https://runtime.internal/status'))).json();
+check(offline.status==='OFFLINE'&&offline.connected===false,
+ 'offline transport stays offline independently of native installation');
+console.log('runtime_native_owner_and_wss_separation PASS');
