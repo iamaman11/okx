@@ -2,7 +2,7 @@
   "tools": [
     {
       "name": "accounts",
-      "description": "accounts actions",
+      "description": "Read or modify connected accounts and limits.",
       "inputSchema": {
         "oneOf": [
           {
@@ -310,11 +310,16 @@
             "additionalProperties": false
           }
         ]
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "openWorldHint": false
       }
     },
     {
       "name": "strategies",
-      "description": "strategies actions",
+      "description": "Read or manage strategies; may start live trading.",
       "inputSchema": {
         "oneOf": [
           {
@@ -546,11 +551,16 @@
             "additionalProperties": false
           }
         ]
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "openWorldHint": false
       }
     },
     {
       "name": "market",
-      "description": "market actions",
+      "description": "Read OKX market data; no orders.",
       "inputSchema": {
         "oneOf": [
           {
@@ -866,11 +876,16 @@
             "additionalProperties": false
           }
         ]
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "openWorldHint": false
       }
     },
     {
       "name": "research",
-      "description": "research actions",
+      "description": "Run, inspect or cancel research jobs.",
       "inputSchema": {
         "oneOf": [
           {
@@ -1277,500 +1292,16 @@
             "additionalProperties": false
           }
         ]
-      }
-    },
-    {
-      "name": "trade",
-      "description": "trade actions",
-      "inputSchema": {
-        "oneOf": [
-          {
-            "type": "object",
-            "properties": {
-              "action": {
-                "const": "preview"
-              },
-              "account": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": 128
-              },
-              "operation": {
-                "type": "string",
-                "enum": [
-                  "open",
-                  "add",
-                  "reduce",
-                  "close",
-                  "replace"
-                ]
-              },
-              "strategy_instance": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": 64
-              },
-              "instrument": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": 64
-              },
-              "side": {
-                "type": "string",
-                "enum": [
-                  "long",
-                  "short"
-                ]
-              },
-              "sizing": {
-                "oneOf": [
-                  {
-                    "type": "object",
-                    "properties": {
-                      "contracts": {
-                        "type": "string",
-                        "pattern": "^(?!0+(?:\\.0+)?$)(?:0|[1-9][0-9]{0,14})(?:\\.[0-9]{1,9})?$",
-                        "maxLength": 32
-                      }
-                    },
-                    "required": [
-                      "contracts"
-                    ],
-                    "additionalProperties": false
-                  },
-                  {
-                    "type": "object",
-                    "properties": {
-                      "max_loss_usd": {
-                        "type": "string",
-                        "pattern": "^(?!0+(?:\\.0+)?$)(?:0|[1-9][0-9]{0,14})(?:\\.[0-9]{1,9})?$",
-                        "maxLength": 32
-                      }
-                    },
-                    "required": [
-                      "max_loss_usd"
-                    ],
-                    "additionalProperties": false
-                  }
-                ]
-              },
-              "order": {
-                "type": "object",
-                "properties": {
-                  "type": {
-                    "type": "string",
-                    "enum": [
-                      "limit",
-                      "market",
-                      "post_only",
-                      "ioc",
-                      "fok"
-                    ]
-                  },
-                  "limit_price": {
-                    "type": "string",
-                    "pattern": "^(?!0+(?:\\.0+)?$)(?:0|[1-9][0-9]{0,14})(?:\\.[0-9]{1,9})?$",
-                    "maxLength": 32
-                  },
-                  "reference": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 128
-                  },
-                  "max_slippage_bps": {
-                    "type": "integer",
-                    "minimum": 0,
-                    "maximum": 10000
-                  }
-                },
-                "required": [
-                  "type",
-                  "max_slippage_bps"
-                ],
-                "additionalProperties": false
-              },
-              "protection": {
-                "oneOf": [
-                  {
-                    "type": "object",
-                    "properties": {
-                      "stop_price": {
-                        "type": "string",
-                        "pattern": "^(?!0+(?:\\.0+)?$)(?:0|[1-9][0-9]{0,14})(?:\\.[0-9]{1,9})?$",
-                        "maxLength": 32
-                      }
-                    },
-                    "required": [
-                      "stop_price"
-                    ],
-                    "additionalProperties": false
-                  },
-                  {
-                    "type": "object",
-                    "properties": {
-                      "stop_distance_bps": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "maximum": 10000
-                      }
-                    },
-                    "required": [
-                      "stop_distance_bps"
-                    ],
-                    "additionalProperties": false
-                  }
-                ]
-              }
-            },
-            "required": [
-              "action",
-              "account",
-              "operation",
-              "strategy_instance",
-              "instrument",
-              "side",
-              "sizing",
-              "order"
-            ],
-            "additionalProperties": false,
-            "allOf": [
-              {
-                "if": {
-                  "properties": {
-                    "operation": {
-                      "enum": [
-                        "open",
-                        "add",
-                        "replace"
-                      ]
-                    }
-                  }
-                },
-                "then": {
-                  "required": [
-                    "protection"
-                  ]
-                }
-              }
-            ]
-          },
-          {
-            "type": "object",
-            "properties": {
-              "action": {
-                "const": "execute"
-              },
-              "account": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": 128
-              },
-              "idempotency_key": {
-                "type": "string",
-                "minLength": 8,
-                "maxLength": 128,
-                "pattern": "^[A-Za-z0-9_-]+$"
-              },
-              "operation": {
-                "type": "string",
-                "enum": [
-                  "open",
-                  "add",
-                  "reduce",
-                  "close",
-                  "replace"
-                ]
-              },
-              "strategy_instance": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": 64
-              },
-              "instrument": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": 64
-              },
-              "side": {
-                "type": "string",
-                "enum": [
-                  "long",
-                  "short"
-                ]
-              },
-              "sizing": {
-                "oneOf": [
-                  {
-                    "type": "object",
-                    "properties": {
-                      "contracts": {
-                        "type": "string",
-                        "pattern": "^(?!0+(?:\\.0+)?$)(?:0|[1-9][0-9]{0,14})(?:\\.[0-9]{1,9})?$",
-                        "maxLength": 32
-                      }
-                    },
-                    "required": [
-                      "contracts"
-                    ],
-                    "additionalProperties": false
-                  },
-                  {
-                    "type": "object",
-                    "properties": {
-                      "max_loss_usd": {
-                        "type": "string",
-                        "pattern": "^(?!0+(?:\\.0+)?$)(?:0|[1-9][0-9]{0,14})(?:\\.[0-9]{1,9})?$",
-                        "maxLength": 32
-                      }
-                    },
-                    "required": [
-                      "max_loss_usd"
-                    ],
-                    "additionalProperties": false
-                  }
-                ]
-              },
-              "order": {
-                "type": "object",
-                "properties": {
-                  "type": {
-                    "type": "string",
-                    "enum": [
-                      "limit",
-                      "market",
-                      "post_only",
-                      "ioc",
-                      "fok"
-                    ]
-                  },
-                  "limit_price": {
-                    "type": "string",
-                    "pattern": "^(?!0+(?:\\.0+)?$)(?:0|[1-9][0-9]{0,14})(?:\\.[0-9]{1,9})?$",
-                    "maxLength": 32
-                  },
-                  "reference": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 128
-                  },
-                  "max_slippage_bps": {
-                    "type": "integer",
-                    "minimum": 0,
-                    "maximum": 10000
-                  }
-                },
-                "required": [
-                  "type",
-                  "max_slippage_bps"
-                ],
-                "additionalProperties": false
-              },
-              "protection": {
-                "oneOf": [
-                  {
-                    "type": "object",
-                    "properties": {
-                      "stop_price": {
-                        "type": "string",
-                        "pattern": "^(?!0+(?:\\.0+)?$)(?:0|[1-9][0-9]{0,14})(?:\\.[0-9]{1,9})?$",
-                        "maxLength": 32
-                      }
-                    },
-                    "required": [
-                      "stop_price"
-                    ],
-                    "additionalProperties": false
-                  },
-                  {
-                    "type": "object",
-                    "properties": {
-                      "stop_distance_bps": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "maximum": 10000
-                      }
-                    },
-                    "required": [
-                      "stop_distance_bps"
-                    ],
-                    "additionalProperties": false
-                  }
-                ]
-              },
-              "expires_in_ms": {
-                "type": "integer",
-                "minimum": 1,
-                "maximum": 30000
-              }
-            },
-            "required": [
-              "action",
-              "account",
-              "idempotency_key",
-              "operation",
-              "strategy_instance",
-              "instrument",
-              "side",
-              "sizing",
-              "order",
-              "expires_in_ms"
-            ],
-            "additionalProperties": false,
-            "allOf": [
-              {
-                "if": {
-                  "properties": {
-                    "operation": {
-                      "enum": [
-                        "open",
-                        "add",
-                        "replace"
-                      ]
-                    }
-                  }
-                },
-                "then": {
-                  "required": [
-                    "protection"
-                  ]
-                }
-              }
-            ]
-          },
-          {
-            "type": "object",
-            "properties": {
-              "action": {
-                "const": "status"
-              },
-              "account": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": 128
-              },
-              "reference": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": 128
-              }
-            },
-            "required": [
-              "action",
-              "account",
-              "reference"
-            ],
-            "additionalProperties": false
-          },
-          {
-            "type": "object",
-            "properties": {
-              "action": {
-                "const": "cancel"
-              },
-              "account": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": 128
-              },
-              "idempotency_key": {
-                "type": "string",
-                "minLength": 8,
-                "maxLength": 128,
-                "pattern": "^[A-Za-z0-9_-]+$"
-              },
-              "reference": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": 128
-              }
-            },
-            "required": [
-              "action",
-              "account",
-              "idempotency_key",
-              "reference"
-            ],
-            "additionalProperties": false
-          },
-          {
-            "type": "object",
-            "properties": {
-              "action": {
-                "const": "close"
-              },
-              "account": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": 128
-              },
-              "idempotency_key": {
-                "type": "string",
-                "minLength": 8,
-                "maxLength": 128,
-                "pattern": "^[A-Za-z0-9_-]+$"
-              },
-              "reference": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": 128
-              },
-              "expires_in_ms": {
-                "type": "integer",
-                "minimum": 1,
-                "maximum": 30000
-              }
-            },
-            "required": [
-              "action",
-              "account",
-              "idempotency_key",
-              "reference",
-              "expires_in_ms"
-            ],
-            "additionalProperties": false
-          },
-          {
-            "type": "object",
-            "properties": {
-              "action": {
-                "const": "capabilities"
-              },
-              "account": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": 128
-              }
-            },
-            "required": [
-              "action",
-              "account"
-            ],
-            "additionalProperties": false
-          },
-          {
-            "type": "object",
-            "properties": {
-              "action": {
-                "const": "preflight"
-              },
-              "account": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": 128
-              }
-            },
-            "required": [
-              "action",
-              "account"
-            ],
-            "additionalProperties": false
-          }
-        ]
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "openWorldHint": false
       }
     },
     {
       "name": "portfolio",
-      "description": "portfolio actions",
+      "description": "Read portfolio and model scenarios.",
       "inputSchema": {
         "oneOf": [
           {
@@ -1952,11 +1483,16 @@
             "additionalProperties": false
           }
         ]
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "openWorldHint": false
       }
     },
     {
       "name": "diagnostics",
-      "description": "diagnostics actions",
+      "description": "Read runtime and order diagnostics.",
       "inputSchema": {
         "oneOf": [
           {
@@ -2010,6 +1546,527 @@
             "additionalProperties": false
           }
         ]
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "trade.preview",
+      "description": "Preview trade plan and risk; no order.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "account": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "operation": {
+            "type": "string",
+            "enum": [
+              "open",
+              "add",
+              "reduce",
+              "close",
+              "replace"
+            ]
+          },
+          "strategy_instance": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "instrument": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "side": {
+            "type": "string",
+            "enum": [
+              "long",
+              "short"
+            ]
+          },
+          "sizing": {
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "contracts": {
+                    "type": "string",
+                    "pattern": "^(?!0+(?:\\.0+)?$)(?:0|[1-9][0-9]{0,14})(?:\\.[0-9]{1,9})?$",
+                    "maxLength": 32
+                  }
+                },
+                "required": [
+                  "contracts"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "max_loss_usd": {
+                    "type": "string",
+                    "pattern": "^(?!0+(?:\\.0+)?$)(?:0|[1-9][0-9]{0,14})(?:\\.[0-9]{1,9})?$",
+                    "maxLength": 32
+                  }
+                },
+                "required": [
+                  "max_loss_usd"
+                ],
+                "additionalProperties": false
+              }
+            ]
+          },
+          "order": {
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "limit",
+                  "market",
+                  "post_only",
+                  "ioc",
+                  "fok"
+                ]
+              },
+              "limit_price": {
+                "type": "string",
+                "pattern": "^(?!0+(?:\\.0+)?$)(?:0|[1-9][0-9]{0,14})(?:\\.[0-9]{1,9})?$",
+                "maxLength": 32
+              },
+              "reference": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "max_slippage_bps": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 10000
+              }
+            },
+            "required": [
+              "type",
+              "max_slippage_bps"
+            ],
+            "additionalProperties": false
+          },
+          "protection": {
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "stop_price": {
+                    "type": "string",
+                    "pattern": "^(?!0+(?:\\.0+)?$)(?:0|[1-9][0-9]{0,14})(?:\\.[0-9]{1,9})?$",
+                    "maxLength": 32
+                  }
+                },
+                "required": [
+                  "stop_price"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "stop_distance_bps": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 10000
+                  }
+                },
+                "required": [
+                  "stop_distance_bps"
+                ],
+                "additionalProperties": false
+              }
+            ]
+          }
+        },
+        "required": [
+          "account",
+          "operation",
+          "strategy_instance",
+          "instrument",
+          "side",
+          "sizing",
+          "order"
+        ],
+        "additionalProperties": false,
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "operation": {
+                  "enum": [
+                    "open",
+                    "add",
+                    "replace"
+                  ]
+                }
+              }
+            },
+            "then": {
+              "required": [
+                "protection"
+              ]
+            }
+          }
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "trade.execute",
+      "description": "Place a real order; financial loss is possible. Requires account authorization, limits and STOP.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "account": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "idempotency_key": {
+            "type": "string",
+            "minLength": 8,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9_-]+$"
+          },
+          "operation": {
+            "type": "string",
+            "enum": [
+              "open",
+              "add",
+              "reduce",
+              "close",
+              "replace"
+            ]
+          },
+          "strategy_instance": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "instrument": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "side": {
+            "type": "string",
+            "enum": [
+              "long",
+              "short"
+            ]
+          },
+          "sizing": {
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "contracts": {
+                    "type": "string",
+                    "pattern": "^(?!0+(?:\\.0+)?$)(?:0|[1-9][0-9]{0,14})(?:\\.[0-9]{1,9})?$",
+                    "maxLength": 32
+                  }
+                },
+                "required": [
+                  "contracts"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "max_loss_usd": {
+                    "type": "string",
+                    "pattern": "^(?!0+(?:\\.0+)?$)(?:0|[1-9][0-9]{0,14})(?:\\.[0-9]{1,9})?$",
+                    "maxLength": 32
+                  }
+                },
+                "required": [
+                  "max_loss_usd"
+                ],
+                "additionalProperties": false
+              }
+            ]
+          },
+          "order": {
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "limit",
+                  "market",
+                  "post_only",
+                  "ioc",
+                  "fok"
+                ]
+              },
+              "limit_price": {
+                "type": "string",
+                "pattern": "^(?!0+(?:\\.0+)?$)(?:0|[1-9][0-9]{0,14})(?:\\.[0-9]{1,9})?$",
+                "maxLength": 32
+              },
+              "reference": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "max_slippage_bps": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 10000
+              }
+            },
+            "required": [
+              "type",
+              "max_slippage_bps"
+            ],
+            "additionalProperties": false
+          },
+          "protection": {
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "stop_price": {
+                    "type": "string",
+                    "pattern": "^(?!0+(?:\\.0+)?$)(?:0|[1-9][0-9]{0,14})(?:\\.[0-9]{1,9})?$",
+                    "maxLength": 32
+                  }
+                },
+                "required": [
+                  "stop_price"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "stop_distance_bps": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 10000
+                  }
+                },
+                "required": [
+                  "stop_distance_bps"
+                ],
+                "additionalProperties": false
+              }
+            ]
+          },
+          "expires_in_ms": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 30000
+          }
+        },
+        "required": [
+          "account",
+          "idempotency_key",
+          "operation",
+          "strategy_instance",
+          "instrument",
+          "side",
+          "sizing",
+          "order",
+          "expires_in_ms"
+        ],
+        "additionalProperties": false,
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "operation": {
+                  "enum": [
+                    "open",
+                    "add",
+                    "replace"
+                  ]
+                }
+              }
+            },
+            "then": {
+              "required": [
+                "protection"
+              ]
+            }
+          }
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "trade.status",
+      "description": "Read exact trade status; no orders.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "account": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "reference": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          }
+        },
+        "required": [
+          "account",
+          "reference"
+        ],
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "trade.cancel",
+      "description": "Cancel an order; changes exchange state.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "account": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "idempotency_key": {
+            "type": "string",
+            "minLength": 8,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9_-]+$"
+          },
+          "reference": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          }
+        },
+        "required": [
+          "account",
+          "idempotency_key",
+          "reference"
+        ],
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "trade.close",
+      "description": "Close a position by sending real trading instructions.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "account": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "idempotency_key": {
+            "type": "string",
+            "minLength": 8,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9_-]+$"
+          },
+          "reference": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "expires_in_ms": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 30000
+          }
+        },
+        "required": [
+          "account",
+          "idempotency_key",
+          "reference",
+          "expires_in_ms"
+        ],
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "trade.capabilities",
+      "description": "Read trade permissions and capabilities.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "account": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          }
+        },
+        "required": [
+          "account"
+        ],
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "trade.preflight",
+      "description": "Read trade readiness; no orders.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "account": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          }
+        },
+        "required": [
+          "account"
+        ],
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "openWorldHint": false
       }
     }
   ]
