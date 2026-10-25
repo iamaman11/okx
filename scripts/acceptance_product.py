@@ -50,6 +50,18 @@ FAKE_VENUE_ACTIONS={
     "strategies.create","strategies.update","strategies.start","strategies.stop",
     "trade.execute","trade.cancel","trade.close",
 }
+# Per-action Rust business owner; no green unrelated test may certify a route.
+# Unmapped fake mutations remain blocked until an actual native test exists.
+FAKE_NATIVE_OWNERS={
+    "strategies.update":frozenset({"account_store::tests::immutable_strategy_versions_bind_old_intent_and_cas_start_stop"}),
+    "strategies.start":frozenset({"account_store::tests::immutable_strategy_versions_bind_old_intent_and_cas_start_stop"}),
+    "strategies.stop":frozenset({"account_store::tests::immutable_strategy_versions_bind_old_intent_and_cas_start_stop"}),
+    "trade.execute":frozenset({"trade_service::execute::tests::duplicate_execute_one_post",
+                                  "trade_service::execute::tests::lost_response_after_post_returns_unknown"}),
+    "trade.cancel":frozenset({"account_store::tests::duplicate_cancel_never_posts_twice"}),
+    "trade.close":frozenset({"trade_service::execute::tests::close_under_stop"}),
+}
+FAKE_WORKER_ROUTE_TEST="mcp_fake_venue_mutation_routes"
 # Schema-only negative proofs are allowed exclusively for no-argument read-only
 # actions. Every other route must still demonstrate a native business refusal.
 SCHEMA_ONLY_NEGATIVE_ACTIONS=frozenset({
@@ -95,8 +107,9 @@ def admissible_transport(route,proof,executed_tests):
         return False
     native,worker=proof.get("native_test_name"),proof.get("worker_test_name")
     return (isinstance(native,str) and isinstance(worker,str)
-        and native in executed_tests and worker in executed_tests
-        and "::" in native and "::" not in worker)
+        and native in FAKE_NATIVE_OWNERS.get(route,())
+        and worker==FAKE_WORKER_ROUTE_TEST
+        and native in executed_tests and worker in executed_tests)
 
 def checked_capability_outcome(route, request, envelope, polarity):
     """Check observed business values; self-declared PASS cannot substitute for them."""
@@ -401,13 +414,19 @@ def self_test():
             case={"transport":"fake_venue_fixture","venue":"fake",
                   "real_exchange_post_count":0,
                   "native_test_name":"trade_service::execute::tests::duplicate_execute_one_post",
-                  "worker_test_name":"strict_action_fixtures"}
+                  "worker_test_name":FAKE_WORKER_ROUTE_TEST}
             native,worker=case["native_test_name"],case["worker_test_name"]
             self.assertFalse(admissible_transport("trade.execute",case,set()))
             self.assertFalse(admissible_transport("trade.execute",case,{native}))
             self.assertTrue(admissible_transport("trade.execute",case,{native,worker}))
             self.assertFalse(admissible_transport("trade.preview",case,{native,worker}))
             self.assertFalse(admissible_transport("market.snapshot",case,{native,worker}))
+            self.assertFalse(admissible_transport("accounts.connect",case,{native,worker}))
+            self.assertFalse(admissible_transport("accounts.pause",case,{native,worker}))
+            self.assertFalse(admissible_transport("strategies.create",case,{native,worker}))
+            self.assertFalse(admissible_transport("trade.cancel",case,{native,worker}))
+            self.assertFalse(admissible_transport("trade.execute",{
+                **case,"worker_test_name":"strict_action_fixtures"},{native,worker}))
             self.assertFalse(admissible_transport("trade.execute",{**case,"venue":"real"},{native,worker}))
             self.assertFalse(admissible_transport("trade.execute",{**case,"real_exchange_post_count":1},{native,worker}))
             self.assertFalse(admissible_transport("trade.execute",{**case,"real_exchange_post_count":False},{native,worker}))
