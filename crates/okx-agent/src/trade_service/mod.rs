@@ -98,8 +98,11 @@ impl TradeService {
         }) {
             return Err("POLICY_REVISION_CONFLICT".into());
         }
-        *latest = Some(snapshot.clone());
-        drop(latest);
+        // Publish the new in-process authority only after all connected SQL
+        // account owners have durably applied it. On failure, retain the old
+        // authority; stale SQL revisions reject attempts to reuse it.
+        // Holding the write guard also prevents readers from observing a
+        // partially applied multi-account policy.
 
         // A policy frame is the authoritative update.  Persist the campaign
         // ceiling for every currently connected account before returning the
@@ -122,6 +125,7 @@ impl TradeService {
                 .await
                 .map_err(err)?;
         }
+        *latest = Some(snapshot.clone());
         Ok(())
     }
     pub async fn diagnostic_access(&self, key: &str) -> Value {
@@ -136,7 +140,9 @@ impl TradeService {
             .find(|a| a.account_key == key || a.id == key)
         {
             Some(a) => {
-                json!({"state":"configured","enabled":a.enabled,"explicit_pause":a.explicit_pause,"policy_revision":a.policy_revision,"revision":snapshot.state.revision,"limits":a.limits,"issued_at_ms":snapshot.issued_at_ms})
+                json!({"state":"configured","enabled":a.enabled,"explicit_pause":a.explicit_pause,"policy_revision":a.policy_revision,"revision":snapshot.state.revision,
+                    "limits":a.limits,"issued_at_ms":snapshot.issued_at_ms,
+                    "session_generation":snapshot.session_generation})
             }
             None => json!({"state":"not_evaluated","reason_code":"ACCOUNT_ACCESS_MISSING"}),
         }
@@ -204,6 +210,38 @@ impl TradeService {
             .map_err(err)?;
         Ok((state, account))
     }
+    fn sql_policy_receipt(
+        policy: &(i64, bool, String, Decimal, Decimal),
+        governance: Option<&CentralGovernanceSnapshot>,
+        account_key: &str,
+    ) -> Value {
+        let matched = governance.is_some_and(|snapshot| {
+            let Some(account) = snapshot
+                .state
+                .accounts
+                .iter()
+                .find(|account| account.account_key == account_key)
+            else {
+                return false;
+            };
+            snapshot.valid()
+                && i64::try_from(snapshot.state.revision).ok() == Some(policy.0)
+                && policy.1 != account.access_enabled()
+                && policy.2 == snapshot.state.campaign_id
+                && dec(&snapshot.state.campaign_loss_limit_usd).is_ok_and(|value| policy.3 == value)
+        });
+        json!({
+            "schema":"okx.native-policy-sql-receipt/v1",
+            "source":"account_sql",
+            "revision":policy.0,
+            "paused":policy.1,
+            "campaign_id":policy.2,
+            "campaign_limit_usd":exact(policy.3),
+            "matches_governance":matched,
+            "state":if matched {"applied"} else {"mismatch"},
+        })
+    }
+
     pub async fn trade(
         &self,
         account: &str,
@@ -230,6 +268,32 @@ impl TradeService {
                             crate::config::ACCOUNT_MAX_AGE_MS,
                         )
                     });
+                // A live capabilities readback is independently sourced from
+                // the native account-local SQLite owner. It proves the current
+                // governance revision was physically applied; the cached Worker
+                // snapshot alone is insufficient evidence.
+                let sql = r
+                    .execution
+                    .store
+                    .call(deadline(), |store| store.policy())
+                    .await;
+                let governance = self.governance.read().await;
+                let sql_receipt = match sql {
+                    Ok(policy) => Self::sql_policy_receipt(
+                        &policy,
+                        governance.as_ref(),
+                        &r.configuration.account_key.wire(),
+                    ),
+                    Err(_) => json!({
+                        "schema":"okx.native-policy-sql-receipt/v1",
+                        "source":"account_sql",
+                        "state":"unavailable",
+                        "reason_code":"NATIVE_SQL_POLICY_UNAVAILABLE",
+                        "matches_governance":false
+                    }),
+                };
+                let policy_applied = sql_receipt["matches_governance"] == true;
+                drop(governance);
                 Ok(
                     json!({"schema":"okx.trade.capabilities/v1","account":r.configuration.account_key.wire(),
                     "order_types":["limit","market","post_only","ioc","fok"],
@@ -240,9 +304,10 @@ impl TradeService {
                     "api_key_permissions":snapshot.as_ref().map(|s|&s.api_key_permissions),
                     "account_source_received_at":snapshot.as_ref().map(|s|s.source_received_at.as_str()),
                     "account_source_fresh":fresh,"governance":access,
-                    "quality":if fresh{"complete"}else{"partial"},
+                    "native_sql_policy":sql_receipt,
+                    "quality":if fresh&&policy_applied{"complete"}else{"partial"},
                     "ready_for_post":false,
-                    "reason_code":"VENUE_PER_INSTRUMENT_ADMISSION_REQUIRES_TRADE_PLAN"}),
+                    "reason_code":if !policy_applied {"NATIVE_SQL_POLICY_NOT_APPLIED"} else {"VENUE_PER_INSTRUMENT_ADMISSION_REQUIRES_TRADE_PLAN"}}),
                 )
             }
             TradeRequest::Preflight {} => {
@@ -346,5 +411,98 @@ impl TradeService {
             } => self.replace(&r, request, governance).await,
             TradeRequest::Execute { .. } => self.execute(&r, request, governance).await,
         }
+    }
+}
+
+#[cfg(test)]
+mod governance_sql_proof_tests {
+    use super::*;
+    use okx_protocol::account_governance::CentralGovernanceSnapshot;
+
+    fn fixture() -> CentralGovernanceSnapshot {
+        serde_json::from_value(json!({
+            "state":{
+                "schema":"okx.governance/v3","revision":2,
+                "installation_id":"installation_test",
+                "campaign_id":format!("sha256:{}", "a".repeat(64)),
+                "campaign_loss_limit_usd":"10",
+                "max_total_modelled_loss_usdt":"5",
+                "accounts":[{
+                    "id":"primary","label":"Primary","venue":"okx",
+                    "environment":"real","uid_fingerprint":"b".repeat(64),
+                    "identity_verified":true,"enabled":true,"explicit_pause":false,
+                    "policy_revision":1,
+                    "account_key":format!("okx:real:{}", "b".repeat(64)),
+                    "limits":{
+                        "max_modelled_loss_usdt":"5","max_order_loss_usdt":"2",
+                        "max_notional_usdt":"100","max_leverage":"20",
+                        "max_daily_realized_loss_usdt":"8","max_drawdown_ratio":"0.2",
+                        "allowed_instruments":["BTC-USDT-SWAP"]
+                    },"strategies":[]
+                }]
+            },
+            "issued_at_ms":1792910000000_u64,"session_generation":673_u64
+        }))
+        .unwrap()
+    }
+    #[test]
+    fn physical_policy_sql_receipt_matches_account_revision_and_fails_closed() {
+        let governance = fixture();
+        assert!(governance.valid());
+        let key = format!("okx:real:{}", "b".repeat(64));
+        let original = (
+            2_i64,
+            false,
+            format!("sha256:{}", "a".repeat(64)),
+            Decimal::from(10),
+            Decimal::ZERO,
+        );
+        let receipt = TradeService::sql_policy_receipt(&original, Some(&governance), &key);
+        assert_eq!(receipt["state"], "applied");
+        assert_eq!(receipt["revision"], 2);
+        assert_eq!(receipt["matches_governance"], true);
+        for failed in [
+            (
+                1_i64,
+                false,
+                original.2.clone(),
+                Decimal::from(10),
+                Decimal::ZERO,
+            ),
+            (
+                2_i64,
+                true,
+                original.2.clone(),
+                Decimal::from(10),
+                Decimal::ZERO,
+            ),
+            (
+                2_i64,
+                false,
+                original.2.clone(),
+                Decimal::from(20),
+                Decimal::ZERO,
+            ),
+            (
+                2_i64,
+                false,
+                "sha256:wrong".into(),
+                Decimal::from(10),
+                Decimal::ZERO,
+            ),
+        ] {
+            assert_eq!(
+                TradeService::sql_policy_receipt(&failed, Some(&governance), &key)["matches_governance"],
+                false
+            );
+        }
+        assert_eq!(
+            TradeService::sql_policy_receipt(&original, Some(&governance), "wrong")["matches_governance"],
+            false
+        );
+        assert_eq!(
+            TradeService::sql_policy_receipt(&original, None, &key)["matches_governance"],
+            false
+        );
     }
 }
