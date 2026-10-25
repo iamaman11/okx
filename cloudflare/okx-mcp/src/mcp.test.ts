@@ -112,7 +112,7 @@ for(const [tool,action] of fakeMutationActions){
  const args={...fixture.positive,action};
  for(const negative of [false,true]){
   const visits:{path:string;request:any}[]=[];
-  const fake:any={RUNTIME:{idFromName:()=>0,get:()=>({fetch:async(url:string,init?:RequestInit)=>{
+  const fakeHandler=async(url:string,init?:RequestInit)=>{
    const path=new URL(url).pathname;
    const request=init?.body?JSON.parse(String(init.body)):null;
    visits.push({path,request});
@@ -127,7 +127,8 @@ for(const [tool,action] of fakeMutationActions){
     request_id:'fake_mutation_native',status:'completed',quality:'FRESH',warnings:[],
     result:{schema:'okx.fake-venue.fixture/v1',venue:'fake',exchange_post_count:0}});
    return Response.json({status:'completed',data:{venue:'fake',exchange_post_count:0}});
-  }})}}};
+  };
+  const fake:any={RUNTIME:{idFromName:()=>0,get:()=>({fetch:fakeHandler})}};
   const rpc:any=await(await mcpApi.fetch(new Request('https://fixture/mcp',{method:'POST',
    body:JSON.stringify({jsonrpc:'2.0',id:902,method:'tools/call',params:{name:tool,arguments:args}})}),fake,ctx)).json();
   if(rpc.error||!rpc.result?.structuredContent)throw Error('mutation schema/dispatch failed '+tool+'.'+action+':'+JSON.stringify(rpc.error));

@@ -1342,11 +1342,7 @@ async fn two_account_100_parallel_sql_readonly_isolation() {
     let start = std::time::Instant::now();
     let mut tasks = Vec::new();
     for index in 0..100 {
-        let handle = if index % 2 == 0 {
-            a.clone()
-        } else {
-            b.clone()
-        };
+        let handle = if index % 2 == 0 { a.clone() } else { b.clone() };
         tasks.push(tokio::spawn(async move {
             let issued = std::time::Instant::now();
             let (key, size) = handle
