@@ -103,7 +103,7 @@ impl TradeService {
         // authority; stale SQL revisions reject attempts to reuse it.
         // Holding the write guard also prevents readers from observing a
         // partially applied multi-account policy.
-        
+
         // A policy frame is the authoritative update.  Persist the campaign
         // ceiling for every currently connected account before returning the
         // frame acknowledgement, so a restart or read-only diagnostic cannot
@@ -228,8 +228,7 @@ impl TradeService {
                 && i64::try_from(snapshot.state.revision).ok() == Some(policy.0)
                 && policy.1 == !account.access_enabled()
                 && policy.2 == snapshot.state.campaign_id
-                && dec(&snapshot.state.campaign_loss_limit_usd)
-                    .is_ok_and(|value| policy.3 == value)
+                && dec(&snapshot.state.campaign_loss_limit_usd).is_ok_and(|value| policy.3 == value)
         });
         json!({
             "schema":"okx.native-policy-sql-receipt/v1",
@@ -415,7 +414,6 @@ impl TradeService {
     }
 }
 
-
 #[cfg(test)]
 mod governance_sql_proof_tests {
     use super::*;
@@ -444,7 +442,8 @@ mod governance_sql_proof_tests {
                 }]
             },
             "issued_at_ms":1792910000000_u64,"session_generation":673_u64
-        })).unwrap()
+        }))
+        .unwrap()
     }
     #[test]
     fn physical_policy_sql_receipt_matches_account_revision_and_fails_closed() {
@@ -452,30 +451,57 @@ mod governance_sql_proof_tests {
         assert!(governance.valid());
         let key = format!("okx:real:{}", "b".repeat(64));
         let original = (
-            2_i64,false,format!("sha256:{}", "a".repeat(64)),
-            Decimal::from(10),Decimal::ZERO
+            2_i64,
+            false,
+            format!("sha256:{}", "a".repeat(64)),
+            Decimal::from(10),
+            Decimal::ZERO,
         );
-        let receipt = TradeService::sql_policy_receipt(&original,Some(&governance),&key);
-        assert_eq!(receipt["state"],"applied");
-        assert_eq!(receipt["revision"],2);
-        assert_eq!(receipt["matches_governance"],true);
+        let receipt = TradeService::sql_policy_receipt(&original, Some(&governance), &key);
+        assert_eq!(receipt["state"], "applied");
+        assert_eq!(receipt["revision"], 2);
+        assert_eq!(receipt["matches_governance"], true);
         for failed in [
-            (1_i64,false,original.2.clone(),Decimal::from(10),Decimal::ZERO),
-            (2_i64,true,original.2.clone(),Decimal::from(10),Decimal::ZERO),
-            (2_i64,false,original.2.clone(),Decimal::from(20),Decimal::ZERO),
-            (2_i64,false,"sha256:wrong".into(),Decimal::from(10),Decimal::ZERO),
+            (
+                1_i64,
+                false,
+                original.2.clone(),
+                Decimal::from(10),
+                Decimal::ZERO,
+            ),
+            (
+                2_i64,
+                true,
+                original.2.clone(),
+                Decimal::from(10),
+                Decimal::ZERO,
+            ),
+            (
+                2_i64,
+                false,
+                original.2.clone(),
+                Decimal::from(20),
+                Decimal::ZERO,
+            ),
+            (
+                2_i64,
+                false,
+                "sha256:wrong".into(),
+                Decimal::from(10),
+                Decimal::ZERO,
+            ),
         ] {
             assert_eq!(
-                TradeService::sql_policy_receipt(&failed,Some(&governance),&key)["matches_governance"],
+                TradeService::sql_policy_receipt(&failed, Some(&governance), &key)["matches_governance"],
                 false
             );
         }
         assert_eq!(
-            TradeService::sql_policy_receipt(&original,Some(&governance),"wrong")["matches_governance"],
+            TradeService::sql_policy_receipt(&original, Some(&governance), "wrong")["matches_governance"],
             false
         );
         assert_eq!(
-            TradeService::sql_policy_receipt(&original,None,&key)["matches_governance"],
+            TradeService::sql_policy_receipt(&original, None, &key)["matches_governance"],
             false
         );
     }
