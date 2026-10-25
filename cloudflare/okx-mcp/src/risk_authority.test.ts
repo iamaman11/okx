@@ -54,3 +54,97 @@ s.map.delete("risk_account_v2:"+other);
 check((await handleNativeRiskCommand(s,session,{schema:"okx.risk-command/v1",command_id:"recovery_12346",installation_id:initial.installation_id,action:{action:"ACCOUNT_SUMMARY",account_key:other}},now)).reason==="RISK_ACCOUNT_AGGREGATE_MISSING","missing addressed aggregate is never zero");
 s.map.delete("risk_meta_v2");
 check((await handleNativeRiskCommand(s,session,{schema:"okx.risk-command/v1",command_id:"summary_12346",installation_id:initial.installation_id,action:{action:"SUMMARY"}},now)).reason==="RISK_BOOK_MISSING_OR_CORRUPT","missing central state is never zero budget");
+
+
+// Three independently labelled decisions use the actual central owner and
+// its transactional RiskBook. These are synthetic native-session inputs:
+// a ChatGPT label is NOT a trusted actor identity or platform permission.
+// Native SQLite + post_once are independently covered by the Rust fixtures.
+{
+ const t=new Store(),sameUid=account.uid_fingerprint;
+ const sourceDigest="d".repeat(64),freshDigest="e".repeat(64),proof="f".repeat(64);
+ const governance={...initial,revision:1,max_total_modelled_loss_usdt:"3",accounts:[{
+   ...account,limits:{...account.limits,max_modelled_loss_usdt:"3",max_order_loss_usdt:"1"},
+   strategies:[{id:"native_alpha",enabled:true,allocated_capital_usdt:"1",
+     max_modelled_loss_usdt:"1",max_daily_realized_loss_usdt:"2",
+     max_drawdown_ratio:"0.1"}]
+ }]};
+ await t.put("generation",session.connection_generation);
+ await t.put("account_access_v1",governance);
+ await initializeRiskBook(t,initial.installation_id);
+ const census={complete:true,source_digest:sourceDigest,content_digest:hash,
+   generated_at_ms:now,source_read_floor_ms:now,
+   account_keys:[account.account_key],
+   occupied:[{account_key:account.account_key,occupied_usdt:"0",cumulative_loss_usd:"0"}],
+   native_account_evidence_complete:true,native_order_evidence_complete:true,
+   native_ledger_evidence_complete:true};
+ const reserve=(origin:string,strategy:string,plan:string)=>({
+   schema:"okx.risk-command/v1",command_id:"reserve_"+origin+"_0001",
+   installation_id:initial.installation_id,
+   action:{action:"RESERVE",venue:"okx",account_uid:sameUid,
+     run_id:"run_three_sources_001",intent_id:"intent_"+origin+"_0001",
+     strategy_id:strategy,instrument_id:"BTC-USDT-SWAP",
+     plan_sha256:plan,requested_loss_usdt:"1",requested_loss_usd:"1",
+     usd_conversion:{usd_per_usdt:"1",source_digest:sourceDigest,observed_at_ms:now},
+     policy_revision:1,census}
+ });
+ const externalHuman=reserve("human","manual","a".repeat(64));
+ const externalChat=reserve("chat","manual","b".repeat(64));
+ const autonomous=reserve("native","native_alpha","c".repeat(64));
+ const admitted=await Promise.all([externalHuman,externalChat,autonomous]
+   .map(command=>handleNativeRiskCommand(t,session,command,now)));
+ check(admitted.every(r=>r.status==="HELD"&&!!r.reservation_key),
+   "all three source labels must use the same central RiskBook transaction owner");
+ check(new Set(admitted.map(r=>r.reservation_key)).size===3,
+   "three different intents require three independent central reservations");
+ const summary=await handleNativeRiskCommand(t,session,{
+   schema:"okx.risk-command/v1",command_id:"summary_three_001",
+   installation_id:initial.installation_id,action:{action:"SUMMARY"}},now);
+ check(summary.status==="OBSERVED"&&summary.budget?.reserved_loss_usd==="3"&&
+   summary.budget?.remaining_loss_usd==="7",
+   "three distinct sources consume the same campaign, not three separate budgets");
+ const replay=await handleNativeRiskCommand(t,session,externalHuman,now);
+ check(replay.status==="HELD"&&replay.reservation_key===admitted[0].reservation_key,
+   "identical external retry returns the same central reservation");
+ check((await handleNativeRiskCommand(t,session,{
+   ...externalChat,action:{...externalChat.action,plan_sha256:proof}},now))
+   .reason==="IDEMPOTENCY_CONFLICT",
+   "changed ChatGPT-labelled request cannot reuse its central intent identity");
+ const fourth=await handleNativeRiskCommand(t,session,reserve("fourth","manual",proof),now);
+ check(fourth.status==="DENIED"&&fourth.reason==="INSUFFICIENT_AGGREGATE_OR_ACCOUNT_RISK",
+   "fourth competing order must not bypass the single-account aggregate limit");
+ const fresh={...census,source_digest:freshDigest,
+   source_read_floor_ms:now+1,generated_at_ms:now+1};
+ const post=(origin:string,index:number,plan:string,sequence:number)=>({
+   schema:"okx.risk-command/v1",command_id:"post_"+origin+"_00001",
+   installation_id:initial.installation_id,
+   action:{action:"BEGIN_POST",reservation_key:admitted[index].reservation_key,
+     plan_sha256:plan,policy_revision:1,expected_risk_book_sequence:sequence,
+     source_proof_sha256:proof,census:fresh}
+ });
+ const first=await handleNativeRiskCommand(t,session,post("human",0,"a".repeat(64),3),now+2);
+ check(first.status==="POST_AUTHORIZED"&&first.risk_book_sequence===4,
+   "fresh verified all-account census permits one exact central post fence");
+ check((await handleNativeRiskCommand(t,session,
+   post("human_retry",0,"a".repeat(64),4),now+3)).status==="DENIED",
+   "central RiskBook must never authorize the same POST twice");
+ const revocation={...governance,revision:2,accounts:[
+   {...governance.accounts[0],policy_revision:2,explicit_pause:true}]};
+ await t.put("account_access_v1",revocation);
+ const revoked=await handleNativeRiskCommand(t,session,
+   post("chat",1,"b".repeat(64),4),now+4);
+ check(revoked.status==="DENIED"&&
+   revoked.reason==="CENTRAL_REVOCATION_OR_POLICY_CHANGE",
+   "an existing HELD reservation grants no POST after central policy revocation");
+ const inspect=await handleNativeRiskCommand(t,session,{
+   schema:"okx.risk-command/v1",command_id:"inspect_chat_0001",
+   installation_id:initial.installation_id,
+   action:{action:"INSPECT",reservation_key:admitted[1].reservation_key,
+     plan_sha256:"b".repeat(64)}},now+5);
+ check(inspect.status==="OBSERVED"&&inspect.reservation_state==="HELD",
+   "revocation preserves exposure for reconciliation; it never silently releases it");
+ check((await handleNativeRiskCommand(t,session,
+   reserve("after_pause","native_alpha",proof),now+5)).status==="DENIED",
+   "revoked account cannot admit more risk under stale policy");
+ console.log("three_source_central_riskbook_cas PASS 3 HELD / 1 exact POST / revoked POST denied / no venue POST");
+}
