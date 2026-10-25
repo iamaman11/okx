@@ -377,6 +377,7 @@ pub enum DirectTransportFrame {
         runtime_profile: DirectRuntimeProfile,
         agent_pid: u32,
         agent_binary_sha256: String,
+        agent_incarnation: String,
     },
     HelloAck {
         schema: String,
@@ -472,12 +473,21 @@ impl DirectTransportFrame {
                 runtime_profile: _,
                 agent_pid,
                 agent_binary_sha256,
+                agent_incarnation,
             } => {
                 validate_direct_schema(schema)?;
                 if *agent_pid == 0 {
                     return Err(ProtocolError::InvalidDirectTransportToken);
                 }
                 validate_sha256(agent_binary_sha256)?;
+                if agent_incarnation.len() != 36
+                    || !agent_incarnation.starts_with("ctl_")
+                    || !agent_incarnation[4..]
+                        .bytes()
+                        .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+                {
+                    return Err(ProtocolError::InvalidDirectTransportToken);
+                }
                 if !accounts::valid_installation(installation_id)
                     || contract != accounts::PRODUCT_CONTRACT
                 {

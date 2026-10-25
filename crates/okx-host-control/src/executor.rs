@@ -121,6 +121,7 @@ const ALLOWED_REMOTES: &[&str] = &[
 #[derive(Clone, Debug)]
 struct AgentLaunchEvidence {
     pid: u32,
+    incarnation: String,
     stdout_offset: u64,
     stderr_offset: u64,
     stdout_health: okx_host_launcher::logging::LogHealth,
@@ -382,6 +383,7 @@ impl HostExecutor {
             "agent_binary_present": agent_binary.is_file(),
             "agent_owned_running": running,
             "agent_pid": if running { self.agent_child.as_ref().map(Child::id) } else { None },
+            "agent_incarnation": if running { self.agent_launch.as_ref().map(|e| e.incarnation.as_str()) } else { None },
             "agent_desired": self.desired_agent,
             "desired_state_path": self.desired_store.path(),
             "desired_state_error": self.desired_error.clone(),
@@ -867,9 +869,22 @@ impl HostExecutor {
         let stdout_health = stdout.health();
         let stderr_health = stderr.health();
         let args = ENGINE_AGENT_ARGS;
+        // Native CONTROL owns one random identity per child; WSS reconnects
+        // do not change it, while a new child necessarily gets a new value.
+        let mut incarnation_bytes = [0u8; 16];
+        getrandom::fill(&mut incarnation_bytes)
+            .map_err(|error| HostControlError::Random(error.to_string()))?;
+        let incarnation = format!(
+            "ctl_{}",
+            incarnation_bytes
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>()
+        );
         let mut child = hidden_command(self.agent_binary())
             .args(args)
             .arg("--native-child-control-stdio")
+            .env("OKX_CONTROL_AGENT_INCAR", &incarnation)
             .current_dir(&self.repo_root)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -904,6 +919,7 @@ impl HostExecutor {
         self.agent_started_at = Some(Instant::now());
         self.agent_launch = Some(AgentLaunchEvidence {
             pid,
+            incarnation,
             stdout_offset,
             stderr_offset,
             stdout_health,
@@ -1714,6 +1730,7 @@ mod tests {
         .expect("old stderr");
         let launch = AgentLaunchEvidence {
             pid: 321,
+            incarnation: "ctl_00000000000000000000000000000001".into(),
             stdout_offset: fs::metadata(&stdout).expect("stdout metadata").len(),
             stderr_offset: fs::metadata(&stderr).expect("stderr metadata").len(),
             stdout_health: Default::default(),

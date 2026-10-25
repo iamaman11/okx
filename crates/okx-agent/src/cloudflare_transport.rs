@@ -177,6 +177,8 @@ async fn run_session(
             contract: okx_protocol::accounts::PRODUCT_CONTRACT.into(),
             agent_pid: std::process::id(),
             agent_binary_sha256: current_binary_sha256()?,
+            agent_incarnation: std::env::var("OKX_CONTROL_AGENT_INCAR")
+                .map_err(|_| transport("CONTROL_INCARNATION_UNAVAILABLE"))?,
         },
     )
     .await?;

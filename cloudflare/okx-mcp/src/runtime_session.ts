@@ -157,8 +157,8 @@ export class RuntimeSession {
 
     const generation = Number(await this.state.storage.get("generation") ?? 0) + 1;
     await this.state.storage.put("generation", generation);
-    // A replacement connection invalidates the earlier native owner proof.
-    await this.state.storage.delete("release_session_attestation");
+    // A new connection is not a new Windows process. Persisted independent
+    // CONTROL proof remains process-bound and is rejected on changed identity.
 
     const pair = new (globalThis as any).WebSocketPair();
     const client = pair[0] as WebSocket;
@@ -197,7 +197,9 @@ export class RuntimeSession {
       if (frame.runtime_id !== RUNTIME_NAME || typeof frame.connection_id !== "string"
         || !Number.isSafeInteger(frame.agent_pid) || frame.agent_pid <= 0
         || typeof frame.agent_binary_sha256 !== "string"
-        || !/^[0-9a-f]{64}$/.test(frame.agent_binary_sha256)) {
+        || !/^[0-9a-f]{64}$/.test(frame.agent_binary_sha256)
+        || typeof frame.agent_incarnation !== "string"
+        || !/^ctl_[0-9a-f]{32}$/.test(frame.agent_incarnation)) {
         ws.close(1008, "invalid hello");
         return;
       }
@@ -214,6 +216,7 @@ export class RuntimeSession {
       attachment.installationId = frame.installation_id;
       attachment.agentPid = frame.agent_pid;
       attachment.agentBinarySha256 = frame.agent_binary_sha256;
+      attachment.agentIncarnation = frame.agent_incarnation;
       attachment.hello = true;
       ws.serializeAttachment(attachment);
       ws.send(JSON.stringify({
@@ -485,7 +488,7 @@ export class RuntimeSession {
     const accepted=cachedSessionAttestation(previous,observed,this.env.RELEASE_SOURCE_TREE);
     if(accepted)return accepted;
     if(this.attesting?.identity===identity)return this.attesting.promise;
-    // Fresh independent owner proof once per exact live WSS generation.
+    // Fresh independent owner proof once per CONTROL-owned process incarnation.
     // Continued socket freshness and immutable identity keep that proof valid
     // without burning GitHub rate limits on every monitoring request.
     const promise=(async():Promise<ReleaseAttestation>=>{
@@ -496,6 +499,7 @@ export class RuntimeSession {
          live.connectedAtMs!==observed.connected_at_ms||
          live.agentPid!==observed.agent_pid||
          live.agentBinarySha256!==observed.agent_binary_sha256||
+         live.agentIncarnation!==observed.agent_incarnation||
          live.installationId!==observed.installation_id)
         return {verified:false,reason_code:"LIVE_RELEASE_IDENTITY_CHANGED",source_tree:null,
           agent_binary_sha256:null,artifact_id:null};
@@ -556,6 +560,7 @@ export class RuntimeSession {
       installation_id: active.attachment.installationId ?? null,
       agent_pid: active.attachment.agentPid ?? null,
       agent_binary_sha256: active.attachment.agentBinarySha256 ?? null,
+      agent_incarnation: active.attachment.agentIncarnation ?? null,
     };
   }
 
