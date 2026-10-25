@@ -13,7 +13,7 @@ const policyStore=new Map<string,any>([['account_access_v1',{...initial,revision
 const storage={
  async get(key:string){return structuredClone(policyStore.get(key));},
  async put(key:string,value:unknown){policyStore.set(key,structuredClone(value));},
- async transaction<T>(fn:(tx:typeof storage)=>Promise<T>):Promise<T>{
+ async transaction<T>(fn:(tx:Record<string,any>)=>Promise<T>):Promise<T>{
   const backup=structuredClone(policyStore);
   try{return await fn(this);}catch(error){policyStore.clear();for(const [k,v] of backup)policyStore.set(k,v);throw error;}
  }
