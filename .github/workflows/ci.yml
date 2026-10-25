@@ -138,6 +138,9 @@ jobs:
         timeout-minutes: 30
         run: cargo test --locked -p okx-execution --lib sqlite_million_history_bounded_rss -- --ignored --nocapture
 
+      - name: Measure two-account 100-parallel native SQL (not WSS)
+        run: cargo test --locked -p okx-execution --lib two_account_100_parallel_sql_readonly_isolation -- --nocapture
+
 
   cloudflare-mcp:
     name: cloudflare-mcp
