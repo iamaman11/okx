@@ -53,6 +53,7 @@ FAKE_VENUE_ACTIONS={
 # Per-action Rust business owner; no green unrelated test may certify a route.
 # Unmapped fake mutations remain blocked until an actual native test exists.
 FAKE_NATIVE_OWNERS={
+    "strategies.create":frozenset({"account_store::tests::strategy_create_sql_persists_receipt_replay_and_rejects_conflicts"}),
     "strategies.update":frozenset({"account_store::tests::immutable_strategy_versions_bind_old_intent_and_cas_start_stop"}),
     "strategies.start":frozenset({"account_store::tests::immutable_strategy_versions_bind_old_intent_and_cas_start_stop"}),
     "strategies.stop":frozenset({"account_store::tests::immutable_strategy_versions_bind_old_intent_and_cas_start_stop"}),
