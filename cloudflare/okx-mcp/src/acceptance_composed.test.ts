@@ -132,7 +132,7 @@ const blocked=await call('trade',{action:'execute',account:'fixture_a',
  idempotency_key:'fake_blocked_001',expires_in_ms:30000,...plan});
 check(blocked.status==='rejected'&&blocked.reason_code==='ACCOUNT_NEW_RISK_PAUSED',
  'paused fake venue blocks new risk without post');
-check(venuePostCount===0,'no fake post during paused state');
+check(Number(venuePostCount)===0,'no fake post during paused state');
 const resume=await call('accounts',{action:'resume',account:'fixture_a',expected_revision:2,
  idempotency_key:'fixture_resume_0001'});
 check(resume.status==='completed'&&resume.data.revision===3&&
@@ -161,7 +161,7 @@ const executed=await call('trade',executeArgs);
 const ref=executed.data?.intent?.intent_id;
 check(executed.status==='completed'&&typeof ref==='string'&&executed.data.intent.protected,
  'protected fake venue execute');
-check((await call('trade',executeArgs)).data.intent.intent_id===ref&&venuePostCount===1,
+check((await call('trade',executeArgs)).data.intent.intent_id===ref&&Number(venuePostCount)===1,
  'exact replay never duplicates fixture POST');
 const conflicting=await call('trade',{...executeArgs,operation:'replace'});
 check(conflicting.status==='rejected'&&conflicting.reason_code==='IDEMPOTENCY_CONFLICT',
@@ -169,7 +169,7 @@ check(conflicting.status==='rejected'&&conflicting.reason_code==='IDEMPOTENCY_CO
 const status=await call('trade',{action:'status',account:'fixture_a',reference:ref});
 check(status.data.intent.protected&&status.data.intent.state==='FILLED','fake status/protection');
 const replace=await call('trade',{...executeArgs,operation:'replace',idempotency_key:'fake_replace_0001'});
-check(replace.status==='completed'&&replace.data.intent.plan.operation==='replace'&&venuePostCount===2,
+check(replace.status==='completed'&&replace.data.intent.plan.operation==='replace'&&Number(venuePostCount)===2,
  'replace is a separate protected fake venue intent');
 const cancel=await call('trade',{action:'cancel',account:'fixture_a',
  reference:replace.data.intent.intent_id,idempotency_key:'fake_cancel_0001'});
@@ -184,5 +184,5 @@ const final=(await governanceRequest(storage,'GET')).body as Governance&{status:
 check(final.revision===4&&final.accounts.length===1&&
  final.accounts[0].limits.max_order_loss_usdt==='0.5'&&
  final.accounts[0].explicit_pause===false,'persisted central owner was not overwritten');
-check(venuePostCount===2&&transportCalls>24,'no unexpected fixture posts');
+check(Number(venuePostCount)===2&&transportCalls>24,'no unexpected fixture posts');
 console.log('mcp_central_owner_composed_fake_venue PASS central connect/pause/resume/limits CAS + protected trade lifecycle, two fixture posts, zero real exchange POST, no native SQL/WSS claim');
