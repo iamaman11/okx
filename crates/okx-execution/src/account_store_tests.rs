@@ -2172,3 +2172,146 @@ fn manual_preview_never_creates_instance_or_changes_sql() {
     assert_eq!(again.version, created.version);
     assert_eq!(changes(&s), before);
 }
+/// One real SQL owner and three concurrent decision submissions. "chatgpt" is
+/// only a synthetic *unverified external* label: this test does NOT assert
+/// authenticated chat approval or a live MCP/venue execution.
+#[tokio::test]
+async fn three_decision_sources_share_sql_owner_and_fail_closed() {
+    let mut seeded = store();
+    owned_fill(&mut seeded, "autonomous", "autonomous-seed", 100, "long", 3);
+    let strategy_decision = seeded
+        .claim_strategy_decision_with_id("autonomous", "bar-10", "market-inputs", 1, 7)
+        .unwrap()
+        .unwrap();
+    let path = seeded.path.clone();
+    let meta = seeded.meta.clone();
+    drop(seeded);
+    let sql = crate::AccountStoreHandle::open_existing(
+        path,
+        meta.account_key.clone(),
+        meta.installation_id.clone(),
+    )
+    .await
+    .unwrap();
+
+    let mut pending = Vec::new();
+    for (origin, instance, claim) in [
+        ("human", "manual", None),
+        ("chatgpt", "manual", None),
+        ("autonomous", "autonomous", Some(strategy_decision.as_str())),
+    ] {
+        let sql = sql.clone();
+        let origin = origin.to_owned();
+        let instance = instance.to_owned();
+        let claim = claim.map(str::to_owned);
+        pending.push(tokio::spawn(async move {
+            sql.call(
+                std::time::Instant::now() + Duration::from_secs(5),
+                move |s| {
+                    let definition = s.strategy_definition(&instance)?;
+                    let id = format!("three_sources_{origin}");
+                    let decision = Decision {
+                        decision_id: claim.unwrap_or_else(|| format!("external_{origin}")),
+                        instance_id: Some(instance.clone()),
+                        decision_at: 9,
+                        input_digest: if origin == "autonomous" {
+                            "market-inputs".into()
+                        } else {
+                            "unverified-external-request".into()
+                        },
+                        policy_revision: 1,
+                        code_version: "three-sources-fixture".into(),
+                    };
+                    let request = NewIntent {
+                        plan: IntentPlan {
+                            strategy_definition_id: definition.definition_id,
+                            strategy_definition_version: definition.version,
+                            strategy_parameters_digest: definition.parameters_digest,
+                            contract_value: Decimal::ONE,
+                            inverse: false,
+                            settlement_currency: "USDT".into(),
+                            position_side: "long".into(),
+                            private_source_generation: 1,
+                            operation: "open".into(),
+                            side: "buy".into(),
+                            quantity: Decimal::ONE,
+                            limit_price: Decimal::from(100),
+                            stop_price: Some(Decimal::from(90)),
+                            strategy_instance: instance.clone(),
+                            planned_loss_usd: Decimal::ONE,
+                            source_generation: 1,
+                        },
+                        intent_id: id.clone(),
+                        idempotency_key: format!("idempotency_{origin}"),
+                        request_hash: format!("hash_{origin}"),
+                        client_order_id: format!("client_{origin}"),
+                        deadline: 1000,
+                        plan_hash: format!("plan_{origin}"),
+                        policy_revision: 1,
+                        risk_increase: true,
+                        instrument_id: "BTC-USDT-SWAP".into(),
+                    };
+                    assert_eq!(s.prepare(&decision, &request)?.intent_id, id);
+                    // Same request cannot produce a second SQL intent.
+                    assert_eq!(s.prepare(&decision, &request)?.intent_id, id);
+                    s.reserve(
+                        &CentralReceipt {
+                            reservation_key: format!("synthetic_risk_{origin}"),
+                            account_key: s.meta.account_key.clone(),
+                            installation_id: s.meta.installation_id.clone(),
+                            instance_id: Some(instance),
+                            intent_id: id.clone(),
+                            plan_hash: request.plan_hash,
+                            policy_revision: 1,
+                            receipt_hash: format!("synthetic_receipt_{origin}"),
+                            requested_loss_usd: Decimal::ONE,
+                            conversion_digest: "synthetic-fx".into(),
+                        },
+                        11,
+                    )?;
+                    assert_eq!(s.intent(&id)?.unwrap().state, IntentState::Reserved);
+                    Ok(id)
+                },
+            )
+            .await
+        }));
+    }
+    let mut ids = Vec::new();
+    for task in pending {
+        ids.push(task.await.unwrap().unwrap());
+    }
+    assert_eq!(ids.len(), 3);
+    let sql_view = sql.clone();
+    sql_view
+        .call(
+            std::time::Instant::now() + Duration::from_secs(5),
+            move |s| {
+                let count: i64 = s.connection.query_row(
+                    "SELECT count(*) FROM intents WHERE intent_id LIKE 'three_sources_%'",
+                    [],
+                    |r| r.get(0),
+                )?;
+                assert_eq!(count, 3);
+                // One central revision applies to every source, regardless
+                // of synthetic external labels or internal strategy claims.
+                s.apply_authority_policy(2, true, "campaign-20", Decimal::from(20))?;
+                for id in &ids {
+                    assert!(matches!(
+                        s.begin_post(id, 1, 20),
+                        Err(StoreError::Invalid("POLICY_CHANGED"))
+                    ));
+                    let stored = s.intent(id)?.unwrap();
+                    assert_eq!(stored.state, IntentState::Reserved);
+                    let began: Option<i64> = s.connection.query_row(
+                        "SELECT begin_post_at FROM intents WHERE intent_id=?1",
+                        [id],
+                        |r| r.get(0),
+                    )?;
+                    assert!(began.is_none(), "no source may cross the POST fence");
+                }
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
+}
