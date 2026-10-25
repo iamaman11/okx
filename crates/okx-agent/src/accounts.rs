@@ -15,7 +15,6 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
     fs::{self, File, OpenOptions},
-    io::Write,
     path::{Path, PathBuf},
     str::FromStr,
     sync::{
@@ -108,38 +107,6 @@ pub fn initialize_installation(root: &Path, installation_id: &str) -> AgentResul
         return Err(invalid());
     }
     account_catalog_proto::initialize(root,installation_id)?;
-    Ok(())
-}
-
-/// Atomically publish without replacing another account/operation. The temp
-/// and target share one filesystem; no remove-then-rename gap on Windows.
-fn publish_new(path: &Path, bytes: &[u8]) -> AgentResult<()> {
-    let parent = path.parent().ok_or_else(invalid)?;
-    fs::create_dir_all(parent)?;
-    let mut nonce = [0u8; 16];
-    getrandom::fill(&mut nonce).map_err(|_| invalid())?;
-    let temp = parent.join(format!(
-        ".publish-{}-{:x}",
-        std::process::id(),
-        u128::from_le_bytes(nonce)
-    ));
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&temp)?;
-    let outcome = (|| -> std::io::Result<()> {
-        file.write_all(bytes)?;
-        file.sync_all()?;
-        fs::hard_link(&temp, path)?;
-        Ok(())
-    })();
-    drop(file);
-    let _ = fs::remove_file(&temp);
-    outcome?;
-    #[cfg(not(windows))]
-    {
-        std::fs::File::open(parent)?.sync_all()?;
-    }
     Ok(())
 }
 

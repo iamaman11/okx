@@ -360,6 +360,23 @@ impl StrategyConfigurationV1 {
             &&self.instruments.iter().all(|v|name(v))&&self.timeframe_ms>=1000
     }
 }
+#[cfg(test)]
+mod typed_strategy_parameters_tests {
+    use super::*;
+    #[test]
+    fn live_parameters_v1_fail_closed_and_bound_default(){
+        let valid=serde_json::json!({"fast":20,"slow":50});
+        assert_eq!(StrategyParametersV1::parse(&valid).unwrap().fast,20);
+        assert!(StrategyParametersV1::parse(&serde_json::json!({})).is_some());
+        for bad in [
+            serde_json::json!({"fast":51,"slow":50}),
+            serde_json::json!({"fast":0,"slow":50}),
+            serde_json::json!({"fast":1,"slow":1001}),
+            serde_json::json!({"fast":"20","slow":50}),
+            serde_json::json!({"fast":20,"slow":50,"unsafe_override":true}),
+        ]{assert!(StrategyParametersV1::parse(&bad).is_none());}
+    }
+}
 impl StrategyRequest {
     pub fn valid(&self) -> bool {
         match self {

@@ -6,3 +6,6 @@
 *.key
 
 **/node_modules/
+
+# A5 executable evidence is generated, never a committed physical certificate.
+/acceptance.json
