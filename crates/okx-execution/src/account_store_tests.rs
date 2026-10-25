@@ -1393,6 +1393,167 @@ async fn two_account_100_parallel_sql_readonly_isolation() {
 }
 
 #[test]
+fn strategy_create_sql_persists_receipt_replay_and_rejects_conflicts() {
+    // Real native SQL business transition, not a fake Durable Object response.
+    let mut s = store();
+    let proposed = StrategyInstance {
+        instance_id: "ema_398".into(),
+        definition_id: "ema_cross_v1".into(),
+        definition_version: "1".into(),
+        parameters: serde_json::json!({
+            "parameters": {"fast": 10, "slow": 30},
+            "instruments": ["BTC-USDT-SWAP"],
+            "timeframe_ms": 60000
+        })
+        .to_string(),
+        enabled: false,
+        policy_revision: 1,
+        budget: Decimal::from(3),
+        last_decision_key: None,
+    };
+    assert!(s.instance("ema_398").unwrap().is_none());
+
+    let accepted = s
+        .mutate_instance(
+            "strategy-create-398",
+            "body-create-398",
+            "create",
+            &proposed,
+            None,
+            100,
+        )
+        .unwrap();
+    let persisted = s.instance("ema_398").unwrap().unwrap();
+    assert_eq!(persisted.definition_id, "ema_cross_v1");
+    assert!(persisted.definition_version.starts_with("1-"));
+    assert!(!persisted.enabled);
+    assert_eq!(persisted.policy_revision, 1);
+    assert_eq!(persisted.budget, Decimal::from(3));
+    let result: StrategyInstance = serde_json::from_str(&accepted.result_ref).unwrap();
+    assert_eq!(result.instance_id, persisted.instance_id);
+    assert_eq!(result.definition_version, persisted.definition_version);
+    assert_eq!(result.parameters, persisted.parameters);
+    let definition = s.strategy_definition("ema_398").unwrap();
+    assert_eq!(definition.parameters, persisted.parameters);
+    assert_eq!(definition.version, persisted.definition_version);
+    assert_eq!(s.strategy_status("ema_398", 101).unwrap()["instance"]["enabled"], false);
+    let allocation_count: i64 = s
+        .connection
+        .query_row(
+            "SELECT COUNT(*) FROM allocations WHERE instance_id='ema_398'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(allocation_count, 1);
+
+    let path = s.path.clone();
+    let meta = s.meta.clone();
+    drop(s);
+    let mut recovered =
+        AccountStore::open_existing(path, &meta.account_key, &meta.installation_id).unwrap();
+    let replay = recovered
+        .mutate_instance(
+            "strategy-create-398",
+            "body-create-398",
+            "create",
+            &proposed,
+            None,
+            102,
+        )
+        .unwrap();
+    assert_eq!(replay.result_ref, accepted.result_ref);
+    assert!(matches!(
+        recovered.mutate_instance(
+            "strategy-create-398",
+            "changed-body-398",
+            "create",
+            &proposed,
+            None,
+            103
+        ),
+        Err(StoreError::Invalid("IDEMPOTENCY_CONFLICT"))
+    ));
+    assert!(matches!(
+        recovered.mutate_instance(
+            "strategy-create-other-key-398",
+            "body-create-398",
+            "create",
+            &proposed,
+            None,
+            104
+        ),
+        Err(StoreError::Invalid("INSTANCE_ALREADY_EXISTS"))
+    ));
+    let saved = recovered.instance("ema_398").unwrap().unwrap();
+    assert_eq!(saved.policy_revision, 1);
+    assert_eq!(saved.budget, Decimal::from(3));
+    let count: i64 = recovered
+        .connection
+        .query_row(
+            "SELECT COUNT(*) FROM operation_receipts WHERE kind='STRATEGY_create' AND result_ref LIKE '%ema_398%'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, 1);
+    let allocations: i64 = recovered
+        .connection
+        .query_row(
+            "SELECT COUNT(*) FROM allocations WHERE instance_id='ema_398'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(allocations, 1);
+}
+
+#[test]
+fn central_policy_revisions_persist_in_sql_and_isolate_accounts() {
+    // Synthetic central-owner CAS outcomes are applied to two independent
+    // account-local SQLite writers. No live governance is changed.
+    let mut first = store();
+    let second = store();
+    assert_eq!(first.policy().unwrap().0, 1);
+    assert_eq!(second.policy().unwrap().0, 1);
+
+    first
+        .apply_authority_policy(2, true, "campaign-20", Decimal::from(20))
+        .unwrap();
+    assert_eq!(first.policy().unwrap().0, 2);
+    assert!(first.policy().unwrap().1);
+    assert_eq!(first.account_summary().unwrap()["paused"], true);
+    assert!(matches!(
+        first.apply_authority_policy(2, false, "campaign-20", Decimal::from(20)),
+        Err(StoreError::Invalid("POLICY_REVISION_CONFLICT"))
+    ));
+    assert!(matches!(
+        first.apply_authority_policy(1, false, "campaign-20", Decimal::from(20)),
+        Err(StoreError::Invalid("POLICY_REVISION_CONFLICT"))
+    ));
+    first
+        .apply_authority_policy(3, false, "campaign-20", Decimal::from(10))
+        .unwrap();
+    let policy = first.policy().unwrap();
+    assert_eq!(policy.0, 3);
+    assert!(!policy.1);
+    assert_eq!(policy.3, Decimal::from(10));
+    assert_eq!(first.account_summary().unwrap()["campaign"]["limit_usd"], "10");
+    assert_eq!(second.policy().unwrap().0, 1);
+    assert_eq!(second.policy().unwrap().3, Decimal::from(20));
+
+    let path = first.path.clone();
+    let meta = first.meta.clone();
+    drop(first);
+    let recovered =
+        AccountStore::open_existing(path, &meta.account_key, &meta.installation_id).unwrap();
+    assert_eq!(recovered.policy().unwrap().0, 3);
+    assert!(!recovered.policy().unwrap().1);
+    assert_eq!(recovered.policy().unwrap().3, Decimal::from(10));
+    assert_eq!(second.policy().unwrap().0, 1);
+}
+
+#[test]
 fn immutable_strategy_versions_bind_old_intent_and_cas_start_stop() {
     let mut s = store();
     let old = intent(&mut s);
