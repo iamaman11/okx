@@ -2153,6 +2153,12 @@ fn manual_preview_never_creates_instance_or_changes_sql() {
             .query_row("SELECT total_changes()", [], |r| r.get(0))
             .unwrap()
     };
+    // The normal store fixture already seeds manual; emulate a fresh
+    // account before first manual planning without changing production SQL.
+    assert!(s.instance("manual").unwrap().is_some());
+    s.connection
+        .execute("DELETE FROM strategy_instances WHERE instance_id='manual'", [])
+        .unwrap();
     let before = changes(&s);
     let policy = s.policy().unwrap();
     let stops = s.stops().unwrap();
