@@ -114,7 +114,29 @@ pub fn initialize_installation(root: &Path, installation_id: &str) -> AgentResul
 
 impl AccountRuntimeRegistry {
     pub async fn open(root: &Path, rate_budget: RateBudget) -> AgentResult<Self> {
-        let catalog = account_catalog_proto::promote_existing_once(root)?;
+        let catalog = account_catalog_proto::promote_existing_once(root, |catalog| {
+            for account in &catalog.accounts {
+                let path = root
+                    .join("accounts")
+                    .join(key_hash(&account.account_key))
+                    .join("account.sqlite");
+                let connection = rusqlite::Connection::open_with_flags(
+                    path,
+                    rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+                ).map_err(|_| std::io::Error::other("ACCOUNT_SQL_IDENTITY_UNAVAILABLE"))?;
+                let (key, installation_id, version):(String,String,i64) = connection.query_row(
+                    "SELECT account_key,installation_id,schema_version FROM account_meta WHERE singleton=1",
+                    [],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
+                ).map_err(|_|std::io::Error::other("ACCOUNT_SQL_IDENTITY_UNAVAILABLE"))?;
+                if key != account.account_key.wire()
+                    || installation_id != catalog.installation_id
+                    || version != 2
+                {
+                    return Err(std::io::Error::other("ACCOUNT_SQL_IDENTITY_MISMATCH"));
+                }
+            }
+            Ok(())
+        })?;
         let configs = catalog.accounts.clone();
         let registry = Self {
             root: root.into(),

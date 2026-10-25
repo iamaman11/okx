@@ -165,7 +165,10 @@ struct LegacyInstallation {
 }
 /// One-time identity cutover under the Engine lock. Never used if Protobuf
 /// exists (including a corrupt one). No finance DB, campaigns or SQL is reset.
-pub fn promote_existing_once(root: &Path) -> io::Result<AccountCatalog> {
+pub fn promote_existing_once(
+    root: &Path,
+    verify_account_sql: impl FnOnce(&AccountCatalog) -> io::Result<()>,
+) -> io::Result<AccountCatalog> {
     if root.join(CATALOG_FILE).exists() {
         return load(root);
     }
@@ -210,6 +213,9 @@ pub fn promote_existing_once(root: &Path) -> io::Result<AccountCatalog> {
         installation_id: installation.installation_id,
         accounts,
     };
+    // Validate each account's actual SQL identity before publishing one
+    // canonical catalog; a matching filename alone is insufficient.
+    verify_account_sql(&expected)?;
     let tmp = stage(root, &encode(&expected)?)?;
     let publish = fs::hard_link(&tmp, root.join(CATALOG_FILE));
     let _ = fs::remove_file(tmp);
@@ -274,7 +280,7 @@ mod tests {
         assert_eq!(load(&root).unwrap(), c);
         assert!(append(&root, &c.accounts[0]).is_err());
         fs::write(root.join(CATALOG_FILE), b"corrupted").unwrap();
-        assert!(promote_existing_once(&root).is_err());
+        assert!(promote_existing_once(&root, |_| Ok(())).is_err());
         fs::remove_dir_all(root).unwrap();
     }
 }
