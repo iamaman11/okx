@@ -1120,9 +1120,11 @@ mod product_contract_tests {
             let raw = &event["frame"];
             assert_eq!(raw["type"], "policy_snapshot");
             assert_eq!(raw["schema"], DIRECT_TRANSPORT_FRAME_SCHEMA_V2);
-            assert_eq!(raw["snapshot"]["state"]["revision"].as_u64(), Some(revision));
-            let frame: DirectTransportFrame =
-                serde_json::from_value(raw.clone()).unwrap();
+            assert_eq!(
+                raw["snapshot"]["state"]["revision"].as_u64(),
+                Some(revision)
+            );
+            let frame: DirectTransportFrame = serde_json::from_value(raw.clone()).unwrap();
             frame.validate_incoming_envelope().unwrap();
 
             let mut wrong_generation = raw.clone();
