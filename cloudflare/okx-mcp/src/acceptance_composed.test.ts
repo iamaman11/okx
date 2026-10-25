@@ -53,8 +53,8 @@ async function recordNativePolicy(stage:string):Promise<void>{
   available_for_new_risk_usdt,...governance}=snapshot.body;
  const frame=policyFrames.at(-1);
  check(frame&&frame.type==='policy_snapshot','native bridge requires outbound DO WSS policy');
- const snapshot=frame.snapshot as Record<string,unknown>;
- check(JSON.stringify(snapshot.state)===JSON.stringify(governance),
+ const outgoing=frame.snapshot as Record<string,unknown>;
+ check(JSON.stringify(outgoing.state)===JSON.stringify(governance),
   'outbound DO frame must reflect committed central owner state');
  nativePolicyTrace.events.push({
   stage,governance:structuredClone(governance),frame:structuredClone(frame),
