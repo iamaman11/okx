@@ -162,6 +162,9 @@ jobs:
 
       - name: Typecheck
         run: npm run check
+      - name: Reject drift in generated MCP public contracts
+        working-directory: cloudflare/okx-mcp
+        run: git diff --exit-code -- contracts/tools.schema.json contracts/action-fixtures.json
 
 
 

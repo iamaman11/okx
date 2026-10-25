@@ -389,7 +389,7 @@
               "version": {
                 "type": "integer",
                 "minimum": 1,
-                "maximum": 9007199254740991
+                "maximum": 1
               },
               "parameters": {
                 "type": "object",
@@ -397,12 +397,12 @@
                   "fast": {
                     "type": "integer",
                     "minimum": 1,
-                    "maximum": 10000
+                    "maximum": 999
                   },
                   "slow": {
                     "type": "integer",
                     "minimum": 2,
-                    "maximum": 10000
+                    "maximum": 1000
                   }
                 },
                 "required": [
@@ -479,12 +479,12 @@
                   "fast": {
                     "type": "integer",
                     "minimum": 1,
-                    "maximum": 10000
+                    "maximum": 999
                   },
                   "slow": {
                     "type": "integer",
                     "minimum": 2,
-                    "maximum": 10000
+                    "maximum": 1000
                   }
                 },
                 "required": [
@@ -1133,6 +1133,15 @@
                 "type": "integer",
                 "minimum": 1,
                 "maximum": 50
+              },
+              "view": {
+                "type": "string",
+                "enum": [
+                  "summary",
+                  "trades",
+                  "equity",
+                  "variants"
+                ]
               }
             },
             "required": [
