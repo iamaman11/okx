@@ -270,6 +270,47 @@ mod tests {
         assert!(encode(&dup).is_err());
     }
     #[test]
+    fn one_time_cutover_is_verified_atomic_and_retains_sql() {
+        let root = std::env::temp_dir().join(format!("okx-catalog-cutover-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let catalog = sample();
+        let config = &catalog.accounts[0];
+        let key_hash = format!("{:x}", Sha256::digest(config.account_key.wire().as_bytes()));
+        let account_dir = root.join("accounts").join(&key_hash);
+        let old_dir = root.join("account-catalog");
+        fs::create_dir_all(&account_dir).unwrap();
+        fs::create_dir_all(&old_dir).unwrap();
+        let db = account_dir.join("account.sqlite");
+        fs::write(&db, b"SQL-SENTINEL-NOT-REWRITTEN").unwrap();
+        fs::write(
+            root.join("installation.json"),
+            r#"{"schema":"okx.installation/v1","installation_id":"installation-test"}"#,
+        ).unwrap();
+        fs::write(
+            old_dir.join(format!("{key_hash}.json")),
+            serde_json::to_vec(config).unwrap(),
+        ).unwrap();
+        // A failed SQL-identity validation cannot publish new canonical state.
+        assert!(promote_existing_once(&root, |_| Err(invalid())).is_err());
+        assert!(!root.join(CATALOG_FILE).exists());
+        assert!(root.join("installation.json").exists());
+        let promoted = promote_existing_once(&root, |c| {
+            assert_eq!(c, &catalog);
+            Ok(())
+        }).unwrap();
+        assert_eq!(promoted, catalog);
+        assert_eq!(load(&root).unwrap(), catalog);
+        assert_eq!(fs::read(db).unwrap(), b"SQL-SENTINEL-NOT-REWRITTEN");
+        assert!(!root.join("installation.json").exists());
+        assert!(!old_dir.exists());
+        // Canonical protobuf must win; no second legacy read or conversion.
+        assert_eq!(
+            promote_existing_once(&root, |_| Err(invalid())).unwrap(),
+            catalog
+        );
+        fs::remove_dir_all(&root).unwrap();
+    }
+    #[test]
     fn catalog_publication_preserves_identity_and_fails_closed() {
         let root = std::env::temp_dir().join(format!("okx-catalog-proto-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
