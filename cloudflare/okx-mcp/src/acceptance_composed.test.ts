@@ -194,9 +194,12 @@ const handler=async(url:string,init?:RequestInit)=>{
 };
 const env:any={RUNTIME:{idFromName:()=>0,get:()=>({fetch:handler})}};
 async function call(tool:string,args:Record<string,unknown>){
+ const {action,...fields}=args;
+ const name=tool==='trade'?'trade.'+action:tool;
+ const publicArgs=tool==='trade'?fields:args;
  const rpc:any=await(await mcpApi.fetch(new Request('https://fixture/mcp',{method:'POST',
   body:JSON.stringify({jsonrpc:'2.0',id:++id,method:'tools/call',
-   params:{name:tool,arguments:args}})}),env,ctx)).json();
+   params:{name,arguments:publicArgs}})}),env,ctx)).json();
  check(!rpc.error,tool+'.'+args.action+' rejected at schema '+JSON.stringify(rpc.error));
  const response=rpc.result?.structuredContent;
  check(response&&typeof response.status==='string','missing MCP typed response');

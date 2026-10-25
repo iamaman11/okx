@@ -145,7 +145,14 @@ export const mcpApi={async fetch(request:Request,env:Env,ctx:any):Promise<Respon
  if (rpc.method === "tools/list") {return jsonRpc(id,{tools:PUBLIC_TOOLS});}
  if (rpc.method !== "tools/call" || !isObject(rpc.params))return jsonRpcError(id,-32601,'method not found');
  const name=rpc.params.name,args=rpc.params.arguments;
- if(typeof name!=='string'||!validTool(name,args)||!isObject(args))return jsonRpcError(id,-32602,'invalid tool action payload');
+ // Validate the actual public descriptor first. Retired generic "trade"
+ // is not a hidden mutation route; trade.execute remains explicitly high-risk.
+ const published=typeof name==='string'&&PUBLIC_TOOLS.some(tool=>(tool as any).name===name);
+ const scopedAction=typeof name==='string'&&name.startsWith('trade.')?name.slice(6):null;
+ const nativeName=scopedAction===null?name:'trade';
+ const nativeArgs=scopedAction===null?args:{...args,action:scopedAction};
+ if(!published||!isObject(args)||(scopedAction!==null&&'action' in args)||
+    !validTool(nativeName,nativeArgs))return jsonRpcError(id,-32602,'invalid tool action payload');
  try{
       if (name === "accounts") {
         if((args.action==="list"||args.action==="status")&&hasOnlyKeys(args,["action","account"])){
@@ -242,9 +249,9 @@ export const mcpApi={async fetch(request:Request,env:Env,ctx:any):Promise<Respon
    return jsonRpc(id,toolResult(await dispatchRuntime(env,{schema:'okx.agent.request/v1',request_id:requestId(),
       operation:{type:'portfolio_scenario',request:scenario}})));
  }
- const {account,...body}=args;
- const payload=name==='portfolio'?args:name==='diagnostics'?{reference:args.reference??null,account:args.account??null}:body;
- const operation={type:name,request:payload};
+ const {account,...body}=nativeArgs;
+ const payload=nativeName==='portfolio'?nativeArgs:nativeName==='diagnostics'?{reference:nativeArgs.reference??null,account:nativeArgs.account??null}:body;
+ const operation={type:nativeName,request:payload};
  return jsonRpc(id,toolResult(await dispatchRuntime(env,{schema:'okx.agent.request/v1',request_id:requestId(),...(typeof account==='string'?{account}:{}),operation})));
  }catch(error){return jsonRpc(id,toolResult(transportFailure(error instanceof Error?error.message:'transport failure')));}
 }};

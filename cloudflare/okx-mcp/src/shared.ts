@@ -3,7 +3,7 @@ import type { OAuthHelpers } from "@cloudflare/workers-oauth-provider";
 export const FRAME_SCHEMA = "okx.direct-transport.frame/v2";
 export const MCP_PROTOCOL_VERSION = "2025-06-18";
 export const MCP_SERVER_VERSION = "0.8.0";
-export const TOOL_CONTRACT_VERSION = "okx.mcp.tools/2026-10-23.398";
+export const TOOL_CONTRACT_VERSION = "okx.mcp.tools/2026-10-26.398";
 export const MAX_BODY_BYTES = 64 * 1024;
 export const MAX_INFLIGHT = 8;
 // Bounded admission: read-only requests wait, while mutation/status stays free.
