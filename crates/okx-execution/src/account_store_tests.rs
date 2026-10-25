@@ -1297,6 +1297,98 @@ async fn writer_queue_backpressure_and_account_isolation() {
     assert!(rejected > 0);
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_account_100_parallel_sql_readonly_isolation() {
+    // Two distinct account keys and actor-owned databases. No exchange transport.
+    let first = store();
+    let second_meta = AccountMeta {
+        account_key: "okx:demo:fixture-account-b".into(),
+        installation_id: "fixture-installation-b".into(),
+        initialize_operation_id: "fixture-connect-b".into(),
+        ..first.meta.clone()
+    };
+    let opening = OpeningSnapshot {
+        opening_equity_usd: Decimal::from(100),
+        source_ref: second_meta.opening_source.clone(),
+        observed_at: 1,
+        positions: 0,
+        orders: 0,
+        conditional_orders: 0,
+        liabilities: Decimal::ZERO,
+        balances: vec![("USDT".into(), Decimal::from(100))],
+    };
+    let second = AccountStore::initialize_flat(path(), second_meta, &opening).unwrap();
+    let a_key = first.meta.account_key.clone();
+    let b_key = second.meta.account_key.clone();
+    assert_ne!(a_key, b_key);
+    let (a_path, a_meta) = (first.path.clone(), first.meta.clone());
+    let (b_path, b_meta) = (second.path.clone(), second.meta.clone());
+    drop(first);
+    drop(second);
+    let a = crate::AccountStoreHandle::open_existing(
+        a_path,
+        a_meta.account_key,
+        a_meta.installation_id,
+    )
+    .await
+    .unwrap();
+    let b = crate::AccountStoreHandle::open_existing(
+        b_path,
+        b_meta.account_key,
+        b_meta.installation_id,
+    )
+    .await
+    .unwrap();
+    let start = std::time::Instant::now();
+    let mut tasks = Vec::new();
+    for index in 0..100 {
+        let handle = if index % 2 == 0 {
+            a.clone()
+        } else {
+            b.clone()
+        };
+        tasks.push(tokio::spawn(async move {
+            let issued = std::time::Instant::now();
+            let (key, size) = handle
+                .call(std::time::Instant::now() + Duration::from_secs(15), |s| {
+                    let summary = s.account_summary()?;
+                    let bytes = serde_json::to_vec(&summary).unwrap().len();
+                    Ok((s.meta.account_key.clone(), bytes))
+                })
+                .await
+                .unwrap();
+            (index, key, size, issued.elapsed().as_micros() as u64)
+        }));
+    }
+    let mut latencies = Vec::new();
+    let mut max_bytes = 0;
+    for task in tasks {
+        let (index, key, bytes, latency) = task.await.unwrap();
+        assert_eq!(key, if index % 2 == 0 { &a_key } else { &b_key });
+        assert!(bytes <= 12_288);
+        max_bytes = max_bytes.max(bytes);
+        latencies.push(latency);
+    }
+    latencies.sort_unstable();
+    println!(
+        "NATIVE_SQL_100_PARALLEL_JSON:{}",
+        serde_json::json!({
+            "type": "native_sql_actors_not_network",
+            "os": std::env::consts::OS,
+            "accounts": 2,
+            "distinct_account_keys": true,
+            "operations": 100,
+            "real_exchange_posts": 0,
+            "p50_us": latencies[49],
+            "p95_us": latencies[94],
+            "max_us": latencies[99],
+            "elapsed_ms": start.elapsed().as_millis(),
+            "response_bytes_max": max_bytes,
+            "network_p95_measured": false
+        })
+    );
+}
+
 #[test]
 fn immutable_strategy_versions_bind_old_intent_and_cas_start_stop() {
     let mut s = store();
