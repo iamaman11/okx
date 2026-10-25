@@ -1436,7 +1436,10 @@ fn strategy_create_sql_persists_receipt_replay_and_rejects_conflicts() {
     let definition = s.strategy_definition("ema_398").unwrap();
     assert_eq!(definition.parameters, persisted.parameters);
     assert_eq!(definition.version, persisted.definition_version);
-    assert_eq!(s.strategy_status("ema_398", 101).unwrap()["instance"]["enabled"], false);
+    assert_eq!(
+        s.strategy_status("ema_398", 101).unwrap()["instance"]["enabled"],
+        false
+    );
     let allocation_count: i64 = s
         .connection
         .query_row(
@@ -1538,7 +1541,10 @@ fn central_policy_revisions_persist_in_sql_and_isolate_accounts() {
     assert_eq!(policy.0, 3);
     assert!(!policy.1);
     assert_eq!(policy.3, Decimal::from(10));
-    assert_eq!(first.account_summary().unwrap()["campaign"]["limit_usd"], "10");
+    assert_eq!(
+        first.account_summary().unwrap()["campaign"]["limit_usd"],
+        "10"
+    );
     assert_eq!(second.policy().unwrap().0, 1);
     assert_eq!(second.policy().unwrap().3, Decimal::from(20));
 
