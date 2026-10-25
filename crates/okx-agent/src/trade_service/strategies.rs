@@ -1,5 +1,5 @@
 use super::*;
-use okx_protocol::trading::{StrategyConfigurationV1,StrategyParametersV1};
+use okx_protocol::trading::{StrategyConfigurationV1, StrategyParametersV1};
 impl TradeService {
     pub async fn strategies(
         &self,
@@ -38,38 +38,180 @@ impl TradeService {
         let campaign_limit_usd = state.state.campaign_loss_limit_usd.clone();
         let request_hash = digest(&(r.configuration.account_key.wire(), request))?;
         let body = request.clone();
-        let result=r.execution.store.call(deadline(),move|s|{
- let operation=match &body {StrategyRequest::Create{idempotency_key,..}|StrategyRequest::Update{idempotency_key,..}|StrategyRequest::Start{idempotency_key,..}|StrategyRequest::Stop{idempotency_key,..}=>idempotency_key,_=>return Err(okx_execution::StoreError::Invalid("STRATEGY_MUTATION_REQUIRED"))};
- if let Some(old)=s.operation(operation)? {if old.request_hash!=request_hash {return Err(okx_execution::StoreError::Invalid("IDEMPOTENCY_CONFLICT"));}return serde_json::from_str::<StrategyInstance>(&old.result_ref).map_err(|_|okx_execution::StoreError::Invalid("STRATEGY_RECEIPT_CORRUPT"));}
- let instances=s.instances()?;
- let (operation,action,instance,expected)=match &body{
- StrategyRequest::Create{idempotency_key,instance_id,definition_id,version,parameters,instruments,timeframe_ms,budget_usd}=>{
- if !matches!(definition_id.as_str(),"ema_cross_v1"|"no_trade"|"close_momentum"|"two_bar_momentum"){return Err(okx_execution::StoreError::Invalid("STRATEGY_DEFINITION_UNSUPPORTED"));}
- let config=StrategyConfigurationV1{parameters:StrategyParametersV1::parse(parameters)
-    .ok_or(okx_execution::StoreError::Invalid("STRATEGY_PARAMETERS_INVALID"))?,
-    instruments:instruments.clone(),timeframe_ms:*timeframe_ms};
- if !config.valid()||*version!=1{return Err(okx_execution::StoreError::Invalid("STRATEGY_CONFIGURATION_INVALID"));}
- let parameters=serde_json::to_string(&config)
-    .map_err(|_|okx_execution::StoreError::Invalid("STRATEGY_CONFIGURATION_INVALID"))?;
- let instance=StrategyInstance{instance_id:instance_id.clone(),definition_id:definition_id.clone(),definition_version:version.to_string(),parameters,enabled:false,policy_revision:1,budget:Decimal::from_str(budget_usd).map_err(|_|okx_execution::StoreError::Invalid("INVALID_BUDGET"))?,last_decision_key:None};
- (idempotency_key.clone(),"create",instance,None)
- },
- StrategyRequest::Update{idempotency_key,instance_id,expected_revision,parameters,budget_usd}=>{let mut i=instances.iter().find(|i|&i.instance_id==instance_id).cloned().ok_or(okx_execution::StoreError::Invalid("STRATEGY_INSTANCE_NOT_FOUND"))?;let mut config:StrategyConfigurationV1=serde_json::from_str(&i.parameters).map_err(|_|okx_execution::StoreError::Invalid("STRATEGY_CONFIGURATION_CORRUPT"))?;
- config.parameters=StrategyParametersV1::parse(parameters)
-    .ok_or(okx_execution::StoreError::Invalid("STRATEGY_PARAMETERS_INVALID"))?;
- if !config.valid(){return Err(okx_execution::StoreError::Invalid("STRATEGY_CONFIGURATION_INVALID"));}
- i.parameters=serde_json::to_string(&config).map_err(|_|okx_execution::StoreError::Invalid("STRATEGY_CONFIGURATION_INVALID"))?;i.budget=Decimal::from_str(budget_usd).map_err(|_|okx_execution::StoreError::Invalid("INVALID_BUDGET"))?;i.policy_revision=(*expected_revision as i64)+1;(idempotency_key.clone(),"update",i,Some(*expected_revision as i64))},
- StrategyRequest::Start{idempotency_key,instance_id}|StrategyRequest::Stop{idempotency_key,instance_id}=>{let mut i=instances.iter().find(|i|&i.instance_id==instance_id).cloned().ok_or(okx_execution::StoreError::Invalid("STRATEGY_INSTANCE_NOT_FOUND"))?;let expected=i.policy_revision;i.policy_revision+=1;i.enabled=matches!(&body,StrategyRequest::Start{..});(idempotency_key.clone(),if i.enabled{"start"}else{"stop"},i,Some(expected))},_=>return Err(okx_execution::StoreError::Invalid("STRATEGY_MUTATION_REQUIRED"))
- };
- if action=="start"&&!control.access_enabled(){return Err(okx_execution::StoreError::Invalid("ACCOUNT_NEW_RISK_PAUSED"));}
- // Strategy budget is a per-decision maximum modeled loss in USD, NOT a
- // notional allocation and NOT a central reservation. Only actual plans
- // reserve aggregate campaign capacity through RiskBook CAS.
- let ceiling=Decimal::from_str(&campaign_limit_usd).map_err(|_|okx_execution::StoreError::Invalid("INVALID_CAMPAIGN_BUDGET"))?;
- validate_strategy_risk_budget_usd(instance.budget,ceiling)?;
- let receipt=s.mutate_instance(&operation,&request_hash,action,&instance,expected,now())?;
- serde_json::from_str::<StrategyInstance>(&receipt.result_ref).map_err(|_|okx_execution::StoreError::Invalid("STRATEGY_RECEIPT_CORRUPT"))
- }).await.map_err(err)?;
+        let result = r
+            .execution
+            .store
+            .call(deadline(), move |s| {
+                let operation = match &body {
+                    StrategyRequest::Create {
+                        idempotency_key, ..
+                    }
+                    | StrategyRequest::Update {
+                        idempotency_key, ..
+                    }
+                    | StrategyRequest::Start {
+                        idempotency_key, ..
+                    }
+                    | StrategyRequest::Stop {
+                        idempotency_key, ..
+                    } => idempotency_key,
+                    _ => {
+                        return Err(okx_execution::StoreError::Invalid(
+                            "STRATEGY_MUTATION_REQUIRED",
+                        ));
+                    }
+                };
+                if let Some(old) = s.operation(operation)? {
+                    if old.request_hash != request_hash {
+                        return Err(okx_execution::StoreError::Invalid("IDEMPOTENCY_CONFLICT"));
+                    }
+                    return serde_json::from_str::<StrategyInstance>(&old.result_ref).map_err(
+                        |_| okx_execution::StoreError::Invalid("STRATEGY_RECEIPT_CORRUPT"),
+                    );
+                }
+                let instances = s.instances()?;
+                let (operation, action, instance, expected) = match &body {
+                    StrategyRequest::Create {
+                        idempotency_key,
+                        instance_id,
+                        definition_id,
+                        version,
+                        parameters,
+                        instruments,
+                        timeframe_ms,
+                        budget_usd,
+                    } => {
+                        if !matches!(
+                            definition_id.as_str(),
+                            "ema_cross_v1" | "no_trade" | "close_momentum" | "two_bar_momentum"
+                        ) {
+                            return Err(okx_execution::StoreError::Invalid(
+                                "STRATEGY_DEFINITION_UNSUPPORTED",
+                            ));
+                        }
+                        let config = StrategyConfigurationV1 {
+                            parameters: StrategyParametersV1::parse(parameters).ok_or(
+                                okx_execution::StoreError::Invalid("STRATEGY_PARAMETERS_INVALID"),
+                            )?,
+                            instruments: instruments.clone(),
+                            timeframe_ms: *timeframe_ms,
+                        };
+                        if !config.valid() || *version != 1 {
+                            return Err(okx_execution::StoreError::Invalid(
+                                "STRATEGY_CONFIGURATION_INVALID",
+                            ));
+                        }
+                        let parameters = serde_json::to_string(&config).map_err(|_| {
+                            okx_execution::StoreError::Invalid("STRATEGY_CONFIGURATION_INVALID")
+                        })?;
+                        let instance = StrategyInstance {
+                            instance_id: instance_id.clone(),
+                            definition_id: definition_id.clone(),
+                            definition_version: version.to_string(),
+                            parameters,
+                            enabled: false,
+                            policy_revision: 1,
+                            budget: Decimal::from_str(budget_usd).map_err(|_| {
+                                okx_execution::StoreError::Invalid("INVALID_BUDGET")
+                            })?,
+                            last_decision_key: None,
+                        };
+                        (idempotency_key.clone(), "create", instance, None)
+                    }
+                    StrategyRequest::Update {
+                        idempotency_key,
+                        instance_id,
+                        expected_revision,
+                        parameters,
+                        budget_usd,
+                    } => {
+                        let mut i = instances
+                            .iter()
+                            .find(|i| &i.instance_id == instance_id)
+                            .cloned()
+                            .ok_or(okx_execution::StoreError::Invalid(
+                                "STRATEGY_INSTANCE_NOT_FOUND",
+                            ))?;
+                        let mut config: StrategyConfigurationV1 =
+                            serde_json::from_str(&i.parameters).map_err(|_| {
+                                okx_execution::StoreError::Invalid("STRATEGY_CONFIGURATION_CORRUPT")
+                            })?;
+                        config.parameters = StrategyParametersV1::parse(parameters).ok_or(
+                            okx_execution::StoreError::Invalid("STRATEGY_PARAMETERS_INVALID"),
+                        )?;
+                        if !config.valid() {
+                            return Err(okx_execution::StoreError::Invalid(
+                                "STRATEGY_CONFIGURATION_INVALID",
+                            ));
+                        }
+                        i.parameters = serde_json::to_string(&config).map_err(|_| {
+                            okx_execution::StoreError::Invalid("STRATEGY_CONFIGURATION_INVALID")
+                        })?;
+                        i.budget = Decimal::from_str(budget_usd)
+                            .map_err(|_| okx_execution::StoreError::Invalid("INVALID_BUDGET"))?;
+                        i.policy_revision = (*expected_revision as i64) + 1;
+                        (
+                            idempotency_key.clone(),
+                            "update",
+                            i,
+                            Some(*expected_revision as i64),
+                        )
+                    }
+                    StrategyRequest::Start {
+                        idempotency_key,
+                        instance_id,
+                    }
+                    | StrategyRequest::Stop {
+                        idempotency_key,
+                        instance_id,
+                    } => {
+                        let mut i = instances
+                            .iter()
+                            .find(|i| &i.instance_id == instance_id)
+                            .cloned()
+                            .ok_or(okx_execution::StoreError::Invalid(
+                                "STRATEGY_INSTANCE_NOT_FOUND",
+                            ))?;
+                        let expected = i.policy_revision;
+                        i.policy_revision += 1;
+                        i.enabled = matches!(&body, StrategyRequest::Start { .. });
+                        (
+                            idempotency_key.clone(),
+                            if i.enabled { "start" } else { "stop" },
+                            i,
+                            Some(expected),
+                        )
+                    }
+                    _ => {
+                        return Err(okx_execution::StoreError::Invalid(
+                            "STRATEGY_MUTATION_REQUIRED",
+                        ));
+                    }
+                };
+                if action == "start" && !control.access_enabled() {
+                    return Err(okx_execution::StoreError::Invalid(
+                        "ACCOUNT_NEW_RISK_PAUSED",
+                    ));
+                }
+                // Strategy budget is a per-decision maximum modeled loss in USD, NOT a
+                // notional allocation and NOT a central reservation. Only actual plans
+                // reserve aggregate campaign capacity through RiskBook CAS.
+                let ceiling = Decimal::from_str(&campaign_limit_usd)
+                    .map_err(|_| okx_execution::StoreError::Invalid("INVALID_CAMPAIGN_BUDGET"))?;
+                validate_strategy_risk_budget_usd(instance.budget, ceiling)?;
+                let receipt = s.mutate_instance(
+                    &operation,
+                    &request_hash,
+                    action,
+                    &instance,
+                    expected,
+                    now(),
+                )?;
+                serde_json::from_str::<StrategyInstance>(&receipt.result_ref)
+                    .map_err(|_| okx_execution::StoreError::Invalid("STRATEGY_RECEIPT_CORRUPT"))
+            })
+            .await
+            .map_err(err)?;
         Ok(completed(json!({"instance":result})))
     }
     pub async fn run(&self, mut shutdown: tokio::sync::watch::Receiver<bool>) {
@@ -129,11 +271,13 @@ impl TradeService {
             .await
             .clone()
             .ok_or("ANALYTICS_SOURCE_NOT_READY")?;
-        let config:StrategyConfigurationV1=serde_json::from_str(&instance.parameters)
-            .map_err(|_|"STRATEGY_CONFIGURATION_CORRUPT")?;
-        if !config.valid(){return Err("STRATEGY_CONFIGURATION_INVALID".into());}
-        let (fast,slow)=(config.parameters.fast,config.parameters.slow);
-        let timeframe=config.timeframe_ms;
+        let config: StrategyConfigurationV1 = serde_json::from_str(&instance.parameters)
+            .map_err(|_| "STRATEGY_CONFIGURATION_CORRUPT")?;
+        if !config.valid() {
+            return Err("STRATEGY_CONFIGURATION_INVALID".into());
+        }
+        let (fast, slow) = (config.parameters.fast, config.parameters.slow);
+        let timeframe = config.timeframe_ms;
         for instrument in &config.instruments {
             let bars = analytics
                 .load_closed_closes(instrument, timeframe, (slow * 4).clamp(100, 10000))

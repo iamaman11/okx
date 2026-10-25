@@ -7,7 +7,10 @@ use crate::{
 };
 use okx_api::{OkxRestClient, RateBudget};
 use okx_execution::{AccountMeta, AccountStore, AccountStoreHandle, OpeningSnapshot};
-use okx_protocol::{account_catalog_proto,accounts::{AccountKey, Environment, VerifiedAccountConfig, valid_reference}};
+use okx_protocol::{
+    account_catalog_proto,
+    accounts::{AccountKey, Environment, VerifiedAccountConfig, valid_reference},
+};
 use rust_decimal::Decimal;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -68,9 +71,14 @@ fn installation(root: &Path) -> AgentResult<String> {
     Ok(account_catalog_proto::load(root)?.installation_id)
 }
 fn catalog(root: &Path, key: &AccountKey) -> AgentResult<VerifiedAccountConfig> {
-    if !key.valid(){return Err(error("ACCOUNT_KEY_INVALID"));}
-    account_catalog_proto::load(root)?.accounts.into_iter()
-        .find(|a|a.account_key==*key).ok_or_else(||error("ACCOUNT_CATALOG_INVALID"))
+    if !key.valid() {
+        return Err(error("ACCOUNT_KEY_INVALID"));
+    }
+    account_catalog_proto::load(root)?
+        .accounts
+        .into_iter()
+        .find(|a| a.account_key == *key)
+        .ok_or_else(|| error("ACCOUNT_CATALOG_INVALID"))
 }
 fn parse_key(wire: &str) -> AgentResult<AccountKey> {
     let p = wire.split(':').collect::<Vec<_>>();
@@ -131,7 +139,6 @@ pub async fn initialize_installation(
             if installation(root)? != installation_id {
                 return Err(error("INSTALLATION_MISMATCH"));
             }
-            
         } else {
             crate::accounts::initialize_installation(root, installation_id)?;
         }

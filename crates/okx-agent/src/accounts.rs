@@ -8,7 +8,10 @@ use crate::{
 };
 use okx_api::{AccountApi, OkxRestClient, RateBudget};
 use okx_execution::{AccountMeta, AccountStoreHandle, OpeningSnapshot};
-use okx_protocol::{account_catalog_proto, accounts::{AccountKey, Environment, VerifiedAccountConfig, valid_reference}};
+use okx_protocol::{
+    account_catalog_proto,
+    accounts::{AccountKey, Environment, VerifiedAccountConfig, valid_reference},
+};
 use okx_runtime::{PrivateWsCoordinator, PrivateWsHandle};
 use rust_decimal::Decimal;
 use sha2::{Digest, Sha256};
@@ -26,7 +29,6 @@ use tokio::{
     sync::{RwLock, Semaphore, watch},
     task::JoinHandle,
 };
-
 
 #[derive(Clone, Default, serde::Serialize)]
 pub struct SourceCaptureHealth {
@@ -106,7 +108,7 @@ pub fn initialize_installation(root: &Path, installation_id: &str) -> AgentResul
     if !okx_protocol::accounts::valid_installation(installation_id) {
         return Err(invalid());
     }
-    account_catalog_proto::initialize(root,installation_id)?;
+    account_catalog_proto::initialize(root, installation_id)?;
     Ok(())
 }
 
@@ -320,7 +322,7 @@ impl AccountRuntimeRegistry {
                 "ACCOUNT_ALREADY_CONNECTED".into(),
             ));
         }
-        account_catalog_proto::append(&self.root,configuration)?;
+        account_catalog_proto::append(&self.root, configuration)?;
         configs.insert(configuration.account_key.wire(), configuration.clone());
         self.routes
             .write()

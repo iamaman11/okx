@@ -1,6 +1,9 @@
 //! Read-only view of the Engine's sole verified account catalog. CONTROL never edits aliases or credentials.
 use crate::{HostControlError, HostControlResult};
-use okx_protocol::{account_catalog_proto,accounts::{AccountCatalog, VerifiedAccountConfig}};
+use okx_protocol::{
+    account_catalog_proto,
+    accounts::{AccountCatalog, VerifiedAccountConfig},
+};
 use serde_json::{Value, json};
 use std::path::PathBuf;
 pub struct AccountCatalogStore {

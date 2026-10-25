@@ -1,9 +1,9 @@
+pub mod account_catalog_proto;
 pub mod account_governance;
 pub mod accounts;
 pub mod analytics;
 pub mod crypto;
 pub mod host_state_proto;
-pub mod account_catalog_proto;
 pub mod risk_authority;
 pub mod trading;
 
