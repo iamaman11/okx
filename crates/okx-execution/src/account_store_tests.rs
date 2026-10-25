@@ -2149,7 +2149,9 @@ fn strategy_policy_retry_keeps_immutable_lineage_and_one_intent() {
 fn manual_preview_never_creates_instance_or_changes_sql() {
     let mut s = store();
     let changes = |s: &AccountStore| -> i64 {
-        s.connection.query_row("SELECT total_changes()", [], |r| r.get(0)).unwrap()
+        s.connection
+            .query_row("SELECT total_changes()", [], |r| r.get(0))
+            .unwrap()
     };
     let before = changes(&s);
     let policy = s.policy().unwrap();

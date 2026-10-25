@@ -239,8 +239,7 @@ impl TradeService {
             .call(deadline(), |store| store.policy())
             .await
             .map_err(err)?;
-        if Self::sql_policy_receipt(&policy, Some(&state), &r.configuration.account_key.wire())
-            ["matches_governance"]
+        if Self::sql_policy_receipt(&policy, Some(&state), &r.configuration.account_key.wire())["matches_governance"]
             != true
         {
             return Err("NATIVE_SQL_POLICY_NOT_APPLIED".into());
@@ -335,8 +334,12 @@ impl TradeService {
                 // Never return key material, passphrase, or exchange UID.
                 let executor = match r.execution.account.config().await {
                     Ok(config) => {
-                        let permissions = config.perm.split(',')
-                            .map(str::trim).filter(|p| !p.is_empty()).collect::<Vec<_>>();
+                        let permissions = config
+                            .perm
+                            .split(',')
+                            .map(str::trim)
+                            .filter(|p| !p.is_empty())
+                            .collect::<Vec<_>>();
                         let read = permissions.contains(&"read_only");
                         let trade = permissions.contains(&"trade");
                         let withdraw = permissions.contains(&"withdraw");
