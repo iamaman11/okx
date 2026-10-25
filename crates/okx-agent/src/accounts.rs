@@ -123,7 +123,8 @@ impl AccountRuntimeRegistry {
                 let connection = rusqlite::Connection::open_with_flags(
                     path,
                     rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-                ).map_err(|_| std::io::Error::other("ACCOUNT_SQL_IDENTITY_UNAVAILABLE"))?;
+                )
+                .map_err(|_| std::io::Error::other("ACCOUNT_SQL_IDENTITY_UNAVAILABLE"))?;
                 let (key, installation_id, version):(String,String,i64) = connection.query_row(
                     "SELECT account_key,installation_id,schema_version FROM account_meta WHERE singleton=1",
                     [],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?)),

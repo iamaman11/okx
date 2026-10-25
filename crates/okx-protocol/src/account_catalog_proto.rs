@@ -285,11 +285,13 @@ mod tests {
         fs::write(
             root.join("installation.json"),
             r#"{"schema":"okx.installation/v1","installation_id":"installation-test"}"#,
-        ).unwrap();
+        )
+        .unwrap();
         fs::write(
             old_dir.join(format!("{key_hash}.json")),
             serde_json::to_vec(config).unwrap(),
-        ).unwrap();
+        )
+        .unwrap();
         // A failed SQL-identity validation cannot publish new canonical state.
         assert!(promote_existing_once(&root, |_| Err(invalid())).is_err());
         assert!(!root.join(CATALOG_FILE).exists());
@@ -297,7 +299,8 @@ mod tests {
         let promoted = promote_existing_once(&root, |c| {
             assert_eq!(c, &catalog);
             Ok(())
-        }).unwrap();
+        })
+        .unwrap();
         assert_eq!(promoted, catalog);
         assert_eq!(load(&root).unwrap(), catalog);
         assert_eq!(fs::read(db).unwrap(), b"SQL-SENTINEL-NOT-REWRITTEN");
