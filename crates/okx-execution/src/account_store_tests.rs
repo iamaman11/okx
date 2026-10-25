@@ -2157,7 +2157,10 @@ fn manual_preview_never_creates_instance_or_changes_sql() {
     // account before first manual planning without changing production SQL.
     assert!(s.instance("manual").unwrap().is_some());
     s.connection
-        .execute("DELETE FROM strategy_instances WHERE instance_id='manual'", [])
+        .execute(
+            "DELETE FROM strategy_instances WHERE instance_id='manual'",
+            [],
+        )
         .unwrap();
     let before = changes(&s);
     let policy = s.policy().unwrap();
