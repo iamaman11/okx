@@ -1356,34 +1356,41 @@ mod tests {
             })
             .await
             .unwrap();
-        assert!(post_once(&store, &intents[winner], deadline(), || gateway.send())
-            .await
-            .unwrap()
-            .is_none());
+        assert!(
+            post_once(&store, &intents[winner], deadline(), || gateway.send())
+                .await
+                .unwrap()
+                .is_none()
+        );
         assert_eq!(gateway.posts.load(Ordering::SeqCst), 1);
 
         let lost = FixtureGateway {
             posts: AtomicUsize::new(0),
             lose: true,
         };
-        assert!(post_once(&store, &intents[blocked[0]], deadline(), || lost.send())
-            .await
-            .unwrap()
-            .is_none());
+        assert!(
+            post_once(&store, &intents[blocked[0]], deadline(), || lost.send())
+                .await
+                .unwrap()
+                .is_none()
+        );
         assert_eq!(lost.posts.load(Ordering::SeqCst), 1);
         let unknown_id = intents[blocked[0]].intent_id.clone();
         assert_eq!(
-            store.call(deadline(), move |s| s.intent(&unknown_id))
+            store
+                .call(deadline(), move |s| s.intent(&unknown_id))
                 .await
                 .unwrap()
                 .unwrap()
                 .state,
             IntentState::Unknown
         );
-        assert!(post_once(&store, &intents[blocked[1]], deadline(), || gateway.send())
-            .await
-            .unwrap_err()
-            .contains("ACCOUNT_UNKNOWN_EXPOSURE"));
+        assert!(
+            post_once(&store, &intents[blocked[1]], deadline(), || gateway.send())
+                .await
+                .unwrap_err()
+                .contains("ACCOUNT_UNKNOWN_EXPOSURE")
+        );
         assert_eq!(gateway.posts.load(Ordering::SeqCst), 1);
         let resolved_id = intents[blocked[0]].intent_id.clone();
         store
@@ -1420,7 +1427,10 @@ mod tests {
             .unwrap();
         for intent in &intents {
             let id = intent.intent_id.clone();
-            let state = store.call(deadline(), move |s| s.intent(&id)).await.unwrap();
+            let state = store
+                .call(deadline(), move |s| s.intent(&id))
+                .await
+                .unwrap();
             assert_eq!(state.unwrap().state, IntentState::Filled);
         }
         // Two acknowledged fixture POSTs plus one lost-reply fixture POST.
