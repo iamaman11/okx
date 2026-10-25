@@ -1606,7 +1606,10 @@ fn central_worker_cas_trace_native_sql_readback_and_restart() {
     ];
     assert_eq!(events.len(), stages.len());
     assert_eq!(
-        events.iter().map(|v| v["frame_count"].as_u64().unwrap()).collect::<Vec<_>>(),
+        events
+            .iter()
+            .map(|v| v["frame_count"].as_u64().unwrap())
+            .collect::<Vec<_>>(),
         vec![1, 3, 4, 5, 6, 6, 7, 7],
         "stale governance CAS must emit no WSS frame"
     );
@@ -1650,7 +1653,11 @@ fn central_worker_cas_trace_native_sql_readback_and_restart() {
         assert_eq!(frame["session_id"], "session_test_012345");
         assert_eq!(frame["connection_generation"], 4);
         assert_eq!(frame["snapshot"]["session_generation"], 4);
-        assert!(frame["snapshot"]["issued_at_ms"].as_u64().is_some_and(|v| v > 0));
+        assert!(
+            frame["snapshot"]["issued_at_ms"]
+                .as_u64()
+                .is_some_and(|v| v > 0)
+        );
         let state = &frame["snapshot"]["state"];
         assert_eq!(*state, event["governance"]);
         assert_eq!(state["schema"], "okx.governance/v3");
