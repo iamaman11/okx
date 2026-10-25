@@ -1,6 +1,8 @@
 // #398 A2/A3: real Worker routing + actual central governance transaction owner,
 // with a stateful fake Agent/venue. Never classify this as live WSS/native SQL.
 import {mcpApi} from './mcp.js';
+import {RuntimeSession} from './runtime_session.js';
+import {FRAME_SCHEMA} from './shared.js';
 import {governanceRequest,initializeGovernance,enrollObservedAccount,setAccountPause,setAccountLimits} from './account_governance_store.js';
 import {initial,limits} from './account_governance.test.js';
 import type {Governance} from './account_governance.js';
@@ -23,17 +25,41 @@ const storage=new Storage();
 // This trace is emitted only during CI's native SQL bridge test. It records
 // actual Worker governance transactions, not mocked native acknowledgements.
 const nativePolicyTrace:{schema:string;source:string;events:Array<{
- stage:string;governance:Record<string,unknown>}>}={
+ stage:string;governance:Record<string,unknown>;frame:Record<string,unknown>;frame_count:number}>}={
  schema:'okx.a2.worker-sql-cas-trace/v1',
  source:'mcpApi.fetch+account_governance_store.transaction',
  events:[]
 };
+const policyFrames:Array<Record<string,unknown>>=[];
+const generation=4;
+const policySocket={
+ deserializeAttachment:()=>({runtimeId:'windows-primary',runtimeProfile:'engine',
+  sessionId:'session_test_012345',generation,hello:true,
+  connectedAtMs:Date.now()-1000,lastPongAtMs:Date.now()}),
+ send:(raw:string)=>{
+  const frame=JSON.parse(raw);
+  check(frame.type==='policy_snapshot'&&frame.schema===FRAME_SCHEMA,
+   'native policy fixture must observe only genuine RuntimeSession policy frames');
+  policyFrames.push(structuredClone(frame));
+ },
+ close:()=>{throw Error('no policy-frame send failures expected')}
+};
+const runtimeOwner=new RuntimeSession(
+ {storage,getWebSockets:()=>[policySocket]},{} as any);
 async function recordNativePolicy(stage:string):Promise<void>{
  const snapshot=await governanceRequest(storage,'GET');
  check(snapshot.status===200,'central CAS trace must come from committed storage');
  const {status,access,readiness,last_admission,complete_all_account_census,
   available_for_new_risk_usdt,...governance}=snapshot.body;
- nativePolicyTrace.events.push({stage,governance:structuredClone(governance)});
+ const frame=policyFrames.at(-1);
+ check(frame&&frame.type==='policy_snapshot','native bridge requires outbound DO WSS policy');
+ const outgoing=frame.snapshot as Record<string,unknown>;
+ check(JSON.stringify(outgoing.state)===JSON.stringify(governance),
+  'outbound DO frame must reflect committed central owner state');
+ nativePolicyTrace.events.push({
+  stage,governance:structuredClone(governance),frame:structuredClone(frame),
+  frame_count:policyFrames.length
+ });
 }
 check((await initializeGovernance(storage,initial)).status===200,'synthetic central installation');
 const ctx={auth:{scope:['mcp:use']}};
@@ -53,11 +79,15 @@ const handler=async(url:string,init?:RequestInit)=>{
  transportCalls++;
  const path=new URL(url).pathname;
  const raw=init?.body?JSON.parse(String(init.body)):null;
- const reply=async(out:{status:number;body:Record<string,unknown>})=>Response.json(out.body);
- if(path==='/account-governance')return reply(await governanceRequest(storage,'GET'));
- if(path==='/account-governance/enroll')return reply(await enrollObservedAccount(storage,raw));
- if(path==='/account-governance/pause')return reply(await setAccountPause(storage,raw));
- if(path==='/account-governance/limits')return reply(await setAccountLimits(storage,raw));
+ // Route through the actual Durable Object owner (including publishPolicy),
+ // never call governanceStore mutation methods directly from this fixture.
+ if(['/account-governance','/account-governance/enroll',
+     '/account-governance/pause','/account-governance/limits'].includes(path))
+  return runtimeOwner.fetch(new Request(url,{
+   method:init?.method??'GET',
+   headers:{'content-type':'application/json'},
+   ...(init?.body?{body:String(init.body)}:{})
+  }));
  check(path==='/dispatch','unexpected transport endpoint');
  const op=raw?.operation;
  if(op?.type==='connect_account'){
@@ -210,6 +240,10 @@ check(Number(venuePostCount)===2&&transportCalls>24,'no unexpected fixture posts
 await recordNativePolicy('final');
 if((globalThis as any).process?.env?.OKX_A2_TRACE==='1'){
  check(nativePolicyTrace.events.length===8,'the native SQL bridge requires all CAS transitions');
+ check(policyFrames.length===7,'only successful CAS/replay may emit native WSS policies');
+ check(JSON.stringify(nativePolicyTrace.events.map(e=>e.frame_count))===
+       JSON.stringify([1,3,4,5,6,6,7,7]),
+       'stale CAS must not send policy and successful replay is idempotent');
  console.log('A2_SQL_BRIDGE_TRACE_V1:'+JSON.stringify(nativePolicyTrace));
 }
 console.log('mcp_central_owner_composed_fake_venue PASS central connect/pause/resume/limits CAS + protected trade lifecycle, two fixture posts, zero real exchange POST, no native SQL/WSS claim');

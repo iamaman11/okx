@@ -155,6 +155,8 @@ jobs:
           sed -n 's/^A2_SQL_BRIDGE_TRACE_V1://p' "$RUNNER_TEMP/a2-worker-cas.log" > "$RUNNER_TEMP/a2-worker-governance.json"
           test -s "$RUNNER_TEMP/a2-worker-governance.json"
           OKX_A2_TRACE_PATH="$RUNNER_TEMP/a2-worker-governance.json" \
+            cargo test --locked -p okx-protocol --lib worker_do_policy_frames_decode_and_fail_closed_in_native_protocol -- --ignored --nocapture
+          OKX_A2_TRACE_PATH="$RUNNER_TEMP/a2-worker-governance.json" \
             cargo test --locked -p okx-execution --lib central_worker_cas_trace_native_sql_readback_and_restart -- --ignored --nocapture
 
 

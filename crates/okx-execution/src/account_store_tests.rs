@@ -1605,6 +1605,14 @@ fn central_worker_cas_trace_native_sql_readback_and_restart() {
         ("final", 4, false, "0.5"),
     ];
     assert_eq!(events.len(), stages.len());
+    assert_eq!(
+        events
+            .iter()
+            .map(|v| v["frame_count"].as_u64().unwrap())
+            .collect::<Vec<_>>(),
+        vec![1, 3, 4, 5, 6, 6, 7, 7],
+        "stale governance CAS must emit no WSS frame"
+    );
     let account_key = "okx:demo:".to_string() + &"a".repeat(64);
     let meta = AccountMeta {
         initialize_operation_id: "fixture-worker-connect".into(),
@@ -1636,7 +1644,22 @@ fn central_worker_cas_trace_native_sql_readback_and_restart() {
         .unwrap();
     for (event, (stage, revision, paused, per_order)) in events.iter().zip(stages) {
         assert_eq!(event["stage"].as_str(), Some(stage));
-        let state = &event["governance"];
+        // Use the exact outgoing Durable Object policy_snapshot, not a
+        // copied central readback. The Rust protocol crate validates the same
+        // frame independently before the native SQL owner reads its state.
+        let frame = &event["frame"];
+        assert_eq!(frame["type"], "policy_snapshot");
+        assert_eq!(frame["schema"], "okx.direct-transport.frame/v2");
+        assert_eq!(frame["session_id"], "session_test_012345");
+        assert_eq!(frame["connection_generation"], 4);
+        assert_eq!(frame["snapshot"]["session_generation"], 4);
+        assert!(
+            frame["snapshot"]["issued_at_ms"]
+                .as_u64()
+                .is_some_and(|v| v > 0)
+        );
+        let state = &frame["snapshot"]["state"];
+        assert_eq!(*state, event["governance"]);
         assert_eq!(state["schema"], "okx.governance/v3");
         assert_eq!(state["installation_id"], meta.installation_id);
         assert_eq!(state["revision"].as_i64(), Some(revision));
@@ -1696,7 +1719,7 @@ fn central_worker_cas_trace_native_sql_readback_and_restart() {
     assert!(!recovered.policy().unwrap().1);
     assert_eq!(second.policy().unwrap().0, 1);
     println!(
-        "a2_worker_cas_to_native_sql PASS 8 actual Worker states; central ownership, replay, stale rejection, native SQL restart/isolation, 0 real exchange POST; not physical WSS"
+        "a2_actual_do_policy_frame_to_native_sql PASS 8 committed stages and 7 WSS policy frames; central ownership, replay, stale rejection, native SQL restart/isolation, 0 real exchange POST; not physical WSS"
     );
 }
 
