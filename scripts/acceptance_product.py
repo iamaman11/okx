@@ -100,7 +100,9 @@ def checked_schema_negative(route,arguments,response,proof,executed_tests,tool_c
 def admissible_transport(route,proof,executed_tests):
     transport=proof.get("transport")
     if transport=="live_mcp":
-        return True
+        # Real live mutation POST is never acceptance evidence. Even a genuine
+        # read-only account is not permission to exercise a live mutation.
+        return route not in FAKE_VENUE_ACTIONS
     if transport!="fake_venue_fixture" or route not in FAKE_VENUE_ACTIONS:
         return False
     if proof.get("venue")!="fake" or type(proof.get("real_exchange_post_count")) is not int or proof["real_exchange_post_count"]!=0:
@@ -110,6 +112,62 @@ def admissible_transport(route,proof,executed_tests):
         and native in FAKE_NATIVE_OWNERS.get(route,())
         and worker==FAKE_WORKER_ROUTE_TEST
         and native in executed_tests and worker in executed_tests)
+
+def mutation_business_result(route,request,data):
+    """A fake venue success must prove route-specific business state, not only
+    the presence of an MCP completed wrapper. Never certify a simulated POST
+    as a physical Real trade or a central risk reservation."""
+    if not isinstance(data,dict):
+        return False
+    if route=="accounts.connect":
+        account=data.get("account")
+        config=data.get("configuration")
+        return (data.get("status")=="CONNECTED"
+            and isinstance(account,dict) and account.get("id")==request.get("alias")
+            and account.get("identity_verified") is True
+            and account.get("enabled") is request.get("enabled")
+            and account.get("venue")=="okx"
+            and account.get("environment") in ("real","demo")
+            and isinstance(account.get("account_key"),str)
+            and account["account_key"].startswith("okx:"+account["environment"]+":")
+            and isinstance(config,dict) and isinstance(config.get("accounts"),list)
+            and any(isinstance(row,dict) and row==account for row in config["accounts"]))
+    if route in ("accounts.pause","accounts.resume","accounts.set_limits"):
+        config=data.get("configuration")
+        if not isinstance(config,dict) or not isinstance(config.get("revision"),int) or not isinstance(config.get("accounts"),list):
+            return False
+        target=next((row for row in config["accounts"] if isinstance(row,dict)
+                     and request.get("account") in (row.get("id"),row.get("account_key"))),None)
+        if target is None or data.get("status")!="CONFIGURED":
+            return False
+        if route=="accounts.pause":
+            return target.get("explicit_pause") is True
+        if route=="accounts.resume":
+            return target.get("explicit_pause") is False
+        return isinstance(request.get("limits"),dict) and target.get("limits")==request["limits"]
+    if route.startswith("strategies."):
+        instance=data.get("instance")
+        if not isinstance(instance,dict) or instance.get("instance_id")!=request.get("instance_id") or not isinstance(instance.get("policy_revision"),int):
+            return False
+        if route=="strategies.create":
+            return (instance.get("definition_id")==request.get("definition_id")
+                and instance.get("enabled") is False and instance["policy_revision"]==1)
+        if route=="strategies.start":
+            return instance.get("enabled") is True
+        if route=="strategies.stop":
+            return instance.get("enabled") is False
+        return route=="strategies.update" and isinstance(instance.get("parameters"),str)
+    if route in ("trade.execute","trade.cancel","trade.close"):
+        intent=data.get("intent")
+        # Native responses after verified readback expose the persisted intent;
+        # only an acknowledged/filled or cancelled identity is positive.
+        if not isinstance(intent,dict) or not isinstance(intent.get("intent_id"),str) or not intent["intent_id"]:
+            return False
+        state=intent.get("state")
+        if route=="trade.cancel":
+            return state=="CANCELLED"
+        return state in ("ACKNOWLEDGED","PARTIALLY_FILLED","FILLED") and isinstance(intent.get("plan"),dict)
+    return False
 
 def checked_capability_outcome(route, request, envelope, polarity):
     """Check observed business values; self-declared PASS cannot substitute for them."""
@@ -138,6 +196,8 @@ def checked_capability_outcome(route, request, envelope, polarity):
         return False
     if envelope.get("quality") in ("NOT_READY","DEGRADED","partial","stale"):
         return False
+    if route in FAKE_VENUE_ACTIONS:
+        return mutation_business_result(route,request,data)
     # A generic completed envelope is insufficient proof of the live market
     # snapshot: #416 fixed an unbounded full order-book projection.
     if route=="market.snapshot":
@@ -431,6 +491,80 @@ def self_test():
             self.assertFalse(admissible_transport("trade.execute",{**case,"real_exchange_post_count":1},{native,worker}))
             self.assertFalse(admissible_transport("trade.execute",{**case,"real_exchange_post_count":False},{native,worker}))
             self.assertTrue(admissible_transport("market.snapshot",{"transport":"live_mcp"},set()))
+            for route in FAKE_VENUE_ACTIONS:
+                self.assertFalse(admissible_transport(route,{"transport":"live_mcp"},set()),route)
+            self.assertFalse(admissible_transport("trade.execute",{
+                **case,"real_exchange_post_count":0,"native_test_name":"unrelated::test"},
+                {"unrelated::test",worker}))
+
+        def test_mutation_positive_must_prove_specific_business_state(self):
+            # Former validator incorrectly treated any completed+data={} or
+            # generic fake DO route receipt as full business execution.
+            for route in FAKE_VENUE_ACTIONS:
+                for data in ({},{"venue":"fake","exchange_post_count":0},
+                             {"schema":"okx.fake-venue.fixture/v1","venue":"fake",
+                              "exchange_post_count":0}):
+                    self.assertFalse(checked_capability_outcome(route,{},{
+                        "status":"completed","quality":"FRESH","reason_code":None,
+                        "data":data},"positive"),route)
+            account={"id":"fixture_a","identity_verified":True,"enabled":True,
+                     "venue":"okx","environment":"demo",
+                     "account_key":"okx:demo:"+"a"*64}
+            self.assertTrue(checked_capability_outcome("accounts.connect",{
+                "alias":"fixture_a","enabled":True},{
+                "status":"completed","data":{"status":"CONNECTED","account":account,
+                  "configuration":{"accounts":[account]}}},"positive"))
+            for action,paused in (("pause",True),("resume",False)):
+                state={"id":"fixture_a","account_key":account["account_key"],
+                       "explicit_pause":paused}
+                self.assertTrue(checked_capability_outcome("accounts."+action,
+                    {"account":"fixture_a"},{"status":"completed",
+                    "data":{"status":"CONFIGURED","configuration":{
+                    "revision":2,"accounts":[state]}}},"positive"))
+                state["explicit_pause"]=not paused
+                self.assertFalse(checked_capability_outcome("accounts."+action,
+                    {"account":"fixture_a"},{"status":"completed",
+                    "data":{"status":"CONFIGURED","configuration":{
+                    "revision":2,"accounts":[state]}}},"positive"))
+            limits={"max_notional_usdt":"20"}
+            state={"id":"fixture_a","limits":limits}
+            self.assertTrue(checked_capability_outcome("accounts.set_limits",
+                {"account":"fixture_a","limits":limits},{"status":"completed",
+                "data":{"status":"CONFIGURED","configuration":{
+                "revision":3,"accounts":[state]}}},"positive"))
+            self.assertFalse(checked_capability_outcome("accounts.set_limits",
+                {"account":"other","limits":limits},{"status":"completed",
+                "data":{"status":"CONFIGURED","configuration":{
+                "revision":3,"accounts":[state]}}},"positive"))
+            for action,enabled in (("create",False),("start",True),("stop",False)):
+                instance={"instance_id":"ema_fixture","definition_id":"ema_cross_v1",
+                          "policy_revision":1,"enabled":enabled}
+                self.assertTrue(checked_capability_outcome("strategies."+action,
+                    {"instance_id":"ema_fixture","definition_id":"ema_cross_v1"},
+                    {"status":"completed","data":{"instance":instance}},"positive"))
+                self.assertFalse(checked_capability_outcome("strategies."+action,
+                    {"instance_id":"other","definition_id":"ema_cross_v1"},
+                    {"status":"completed","data":{"instance":instance}},"positive"))
+            intent={"intent_id":"fake-intent-1","state":"FILLED","plan":{"operation":"open"}}
+            self.assertTrue(checked_capability_outcome("trade.execute",{},
+                {"status":"completed","data":{"intent":intent}},"positive"))
+            self.assertTrue(checked_capability_outcome("trade.close",{},
+                {"status":"completed","data":{"intent":intent}},"positive"))
+            self.assertFalse(checked_capability_outcome("trade.cancel",{},
+                {"status":"completed","data":{"intent":intent}},"positive"))
+            intent["state"]="CANCELLED"
+            self.assertTrue(checked_capability_outcome("trade.cancel",{},
+                {"status":"completed","data":{"intent":intent}},"positive"))
+
+        def test_mutation_negative_never_accepts_unknown_or_generic_failure(self):
+            self.assertFalse(checked_capability_outcome("trade.execute",{},
+                {"status":"failed","reason_code":"REQUEST_FAILED",
+                "next_action":"trade.status"},"negative"))
+            self.assertFalse(checked_capability_outcome("strategies.create",{},
+                {"status":"rejected","reason_code":"INVALID_STRATEGY_REQUEST"},"negative"))
+            self.assertTrue(checked_capability_outcome("strategies.create",{},
+                {"status":"rejected","reason_code":"INVALID_STRATEGY_REQUEST",
+                "next_action":"inspect_diagnostics"},"negative"))
         def test_schema_only_negative_requires_strict_contract_and_observed_tool_error(self):
             contract=json.loads((ROOT/"cloudflare/okx-mcp/contracts/tools.schema.json").read_text(encoding="utf-8-sig"))
             proof={"transport":"live_mcp","rejection_stage":"tool_schema",
