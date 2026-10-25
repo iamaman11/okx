@@ -1091,4 +1091,59 @@ mod product_contract_tests {
         };
         assert!(invalid.validate().is_err());
     }
+
+    /// Validates exact policy_snapshot frames emitted by the real Durable
+    /// Object CAS route, before the native SQL account owner reads them.
+    /// Not a physical WebSocket delivery or exchange approval.
+    #[test]
+    #[ignore = "requires OKX_A2_TRACE_PATH from composed Worker acceptance"]
+    fn worker_do_policy_frames_decode_and_fail_closed_in_native_protocol() {
+        let path = std::env::var("OKX_A2_TRACE_PATH")
+            .expect("run actual Worker composition before this protocol check");
+        let trace: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        assert_eq!(trace["schema"], "okx.a2.worker-sql-cas-trace/v1");
+        let events = trace["events"].as_array().unwrap();
+        assert_eq!(events.len(), 8);
+        let expected = [
+            ("connect", 1_u64),
+            ("pause", 2),
+            ("stale_resume_rejected", 2),
+            ("resume", 3),
+            ("set_limits", 4),
+            ("stale_limits_rejected", 4),
+            ("set_limits_replay", 4),
+            ("final", 4),
+        ];
+        for (event, (stage, revision)) in events.iter().zip(expected) {
+            assert_eq!(event["stage"].as_str(), Some(stage));
+            let raw = &event["frame"];
+            assert_eq!(raw["type"], "policy_snapshot");
+            assert_eq!(raw["schema"], DIRECT_TRANSPORT_FRAME_SCHEMA_V2);
+            assert_eq!(raw["snapshot"]["state"]["revision"].as_u64(), Some(revision));
+            let frame: DirectTransportFrame =
+                serde_json::from_value(raw.clone()).unwrap();
+            frame.validate_incoming_envelope().unwrap();
+
+            let mut wrong_generation = raw.clone();
+            wrong_generation["connection_generation"] = serde_json::json!(5);
+            let wrong_frame: DirectTransportFrame =
+                serde_json::from_value(wrong_generation).unwrap();
+            assert!(wrong_frame.validate_incoming_envelope().is_err());
+
+            let mut wrong_account_key = raw.clone();
+            wrong_account_key["snapshot"]["state"]["accounts"][0]["account_key"] =
+                serde_json::json!(format!("okx:demo:{}", "b".repeat(64)));
+            let wrong_frame: DirectTransportFrame =
+                serde_json::from_value(wrong_account_key).unwrap();
+            assert!(wrong_frame.validate_incoming_envelope().is_err());
+
+            let mut unknown = raw.clone();
+            unknown["snapshot"]["unexpected_policy_owner"] = serde_json::json!(true);
+            assert!(serde_json::from_value::<DirectTransportFrame>(unknown).is_err());
+        }
+        println!(
+            "a2_native_typed_policy_wss PASS 8 actual DO frames, generation and UID binding negatives; no physical network claim"
+        );
+    }
 }
