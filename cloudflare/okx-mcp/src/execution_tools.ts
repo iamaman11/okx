@@ -52,21 +52,21 @@ ACTION_SCHEMAS.diagnostics[0].allOf=[{anyOf:[{required:['account']},{required:['
 // The MCP tool is the permission/approval boundary. Do not mix preview
 // with real order submission under a single model-callable descriptor.
 const TOOL_NOTES:Record<string,{description:string;readOnlyHint:boolean;destructiveHint:boolean}>={
- accounts:{description:'Read or modify connected accounts and limits.',readOnlyHint:false,destructiveHint:true},
- strategies:{description:'Read or manage strategies; may start live trading.',readOnlyHint:false,destructiveHint:true},
- market:{description:'Read OKX market data; no orders.',readOnlyHint:true,destructiveHint:false},
- research:{description:'Run, inspect or cancel research jobs.',readOnlyHint:false,destructiveHint:true},
- portfolio:{description:'Read portfolio and model scenarios.',readOnlyHint:true,destructiveHint:false},
- diagnostics:{description:'Read runtime and order diagnostics.',readOnlyHint:true,destructiveHint:false},
+ accounts:{description:'Manage accounts and limits.',readOnlyHint:false,destructiveHint:true},
+ strategies:{description:'Manage strategies; may trade.',readOnlyHint:false,destructiveHint:true},
+ market:{description:'Read OKX market data.',readOnlyHint:true,destructiveHint:false},
+ research:{description:'Manage research jobs.',readOnlyHint:false,destructiveHint:true},
+ portfolio:{description:'Read portfolio scenarios.',readOnlyHint:true,destructiveHint:false},
+ diagnostics:{description:'Read runtime diagnostics.',readOnlyHint:true,destructiveHint:false},
 };
 const TRADE_NOTES:Record<string,{description:string;readOnlyHint:boolean;destructiveHint:boolean}>={
- preview:{description:'Preview trade plan and risk; no order.',readOnlyHint:true,destructiveHint:false},
- execute:{description:'Place a real order; financial loss is possible. Requires account authorization, limits and STOP.',readOnlyHint:false,destructiveHint:true},
- status:{description:'Read exact trade status; no orders.',readOnlyHint:true,destructiveHint:false},
- cancel:{description:'Cancel an order; changes exchange state.',readOnlyHint:false,destructiveHint:true},
- close:{description:'Close a position by sending real trading instructions.',readOnlyHint:false,destructiveHint:true},
- capabilities:{description:'Read trade permissions and capabilities.',readOnlyHint:true,destructiveHint:false},
- preflight:{description:'Read trade readiness; no orders.',readOnlyHint:true,destructiveHint:false},
+ preview:{description:'Preview a trade; no order.',readOnlyHint:true,destructiveHint:false},
+ execute:{description:'Submit a real order; financial loss possible. Requires approval, account limits and STOP.',readOnlyHint:false,destructiveHint:true},
+ status:{description:'Read trade status.',readOnlyHint:true,destructiveHint:false},
+ cancel:{description:'Cancel an exchange order.',readOnlyHint:false,destructiveHint:true},
+ close:{description:'Close a position by real exchange order.',readOnlyHint:false,destructiveHint:true},
+ capabilities:{description:'Read trade permissions.',readOnlyHint:true,destructiveHint:false},
+ preflight:{description:'Check readiness; no order.',readOnlyHint:true,destructiveHint:false},
 };
 const annotation=(meta:{readOnlyHint:boolean;destructiveHint:boolean})=>({
  readOnlyHint:meta.readOnlyHint,destructiveHint:meta.destructiveHint,openWorldHint:false
