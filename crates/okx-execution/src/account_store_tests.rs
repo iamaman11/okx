@@ -1297,7 +1297,7 @@ async fn writer_queue_backpressure_and_account_isolation() {
     assert!(rejected > 0);
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::test]
 async fn two_account_100_parallel_sql_readonly_isolation() {
     // Two distinct account keys and actor-owned databases. No exchange transport.
     let first = store();
