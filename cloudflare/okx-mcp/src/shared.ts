@@ -30,6 +30,13 @@ export interface Env {
   OAUTH_PROVIDER: OAuthHelpers;
 }
 
+// A deployment label, not independent attestation of Windows binaries.
+// The deploy workflow sets this from its exact Git source tree.
+export function workerReleaseSourceTree(env: Env): string | null {
+  const tree = env.RELEASE_SOURCE_TREE;
+  return typeof tree === "string" && /^[0-9a-f]{40}$/.test(tree) ? tree : null;
+}
+
 export type RuntimeProfile = "engine";
 export function decodeRuntimeProfile(value:unknown):RuntimeProfile|null{return value==="engine"?"engine":null;}
 
