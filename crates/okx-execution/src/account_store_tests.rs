@@ -28,13 +28,25 @@ fn f1_prepared_before_reserve_is_recovered_once_without_central_release() {
     let pending = recovered.reconcilable_intents(16).unwrap();
     assert_eq!(pending.len(), 1, "expired pre-reserve must not be orphaned");
     assert_eq!(pending[0].state, IntentState::Prepared);
-    recovered.reject_unsent("intent", "COMMAND_EXPIRED", 5).unwrap();
+    recovered
+        .reject_unsent("intent", "COMMAND_EXPIRED", 5)
+        .unwrap();
     assert!(recovered.unsent_before_reserve("intent").unwrap());
-    assert!(recovered.unsent_release_receipt("intent").unwrap().is_none());
+    assert!(
+        recovered
+            .unsent_release_receipt("intent")
+            .unwrap()
+            .is_none()
+    );
     assert!(recovered.reconcilable_intents(16).unwrap().is_empty());
     assert!(!recovered.begin_post("intent", 1, 6).unwrap());
     assert_eq!(
-        recovered.intent("intent").unwrap().unwrap().incident.as_deref(),
+        recovered
+            .intent("intent")
+            .unwrap()
+            .unwrap()
+            .incident
+            .as_deref(),
         Some("COMMAND_EXPIRED")
     );
 }
@@ -54,7 +66,9 @@ fn f3_crash_after_native_reserve_before_post_claim_releases_no_send() {
         restored.intent("intent").unwrap().unwrap().state,
         IntentState::Reserved
     );
-    restored.reject_unsent("intent", "COMMAND_EXPIRED", 5).unwrap();
+    restored
+        .reject_unsent("intent", "COMMAND_EXPIRED", 5)
+        .unwrap();
     let proof = restored.unsent_release_receipt("intent").unwrap().unwrap();
     assert_eq!(proof.reservation_key, "central-key");
     assert_eq!(proof.reason, "COMMAND_EXPIRED");
@@ -83,7 +97,10 @@ fn f8_central_release_local_ack_replay_keeps_first_receipt() {
     recovered
         .acknowledge_central_release("central-key", "central-released")
         .unwrap();
-    let receipt = recovered.operation("central-release:central-key").unwrap().unwrap();
+    let receipt = recovered
+        .operation("central-release:central-key")
+        .unwrap()
+        .unwrap();
     assert_eq!(receipt.result_ref, "central-released");
     assert_eq!(recovered.reconcilable_intents(16).unwrap().len(), 0);
     assert!(!recovered.begin_post("intent", 1, 6).unwrap());

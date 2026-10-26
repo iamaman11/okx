@@ -108,8 +108,10 @@ impl AccountStore {
                     WHERE a.operation_id='risk-reserve:'||i.intent_id)
                ) GROUP BY intent_id ORDER BY MIN(priority),intent_id LIMIT ?1"
             )?;
-            q.query_map(params![limit.min(1000) as i64, wall_time_ms()], |r| r.get::<_, String>(0))?
-                .collect::<Result<Vec<_>, _>>()?
+            q.query_map(params![limit.min(1000) as i64, wall_time_ms()], |r| {
+                r.get::<_, String>(0)
+            })?
+            .collect::<Result<Vec<_>, _>>()?
         };
         ids.iter()
             .map(|id| {
