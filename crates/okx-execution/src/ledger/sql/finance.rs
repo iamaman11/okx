@@ -445,7 +445,7 @@ impl AccountStore {
         through: i64,
         instances: &[String],
         currencies: &[String],
-    ) -> StoreResult<std::collections::BTreeMap<(Option<String>, String, String), Decimal>> {
+    ) -> StoreResult<FinanceAttribution> {
         let (filter, mut args) = finance_filter(instances, currencies, 2)?;
         let mut values = vec![from.into(), through.into()];
         values.append(&mut args);

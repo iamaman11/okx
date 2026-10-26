@@ -253,7 +253,7 @@ pub async fn portfolio(
     }
 }
 
-type AccountFinance = BTreeMap<(Option<String>, String, String), Decimal>;
+type AccountFinance = okx_execution::FinanceAttribution;
 type EnvironmentTotals = BTreeMap<(String, String, String), Decimal>;
 type AccountDetails = BTreeMap<(String, String, Option<String>, String, String), Decimal>;
 
