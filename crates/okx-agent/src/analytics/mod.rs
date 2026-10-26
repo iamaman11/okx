@@ -31,7 +31,8 @@ fn read_verified_result<T: DeserializeOwned>(
         .read_evidence_json(artifact)
         .map_err(|error| match error {
             okx_research::ResearchError::ArtifactIdentityMismatch
-            | okx_research::ResearchError::InvalidArtifactId => "ARTIFACT_CORRUPT".into(),
+            | okx_research::ResearchError::InvalidArtifactId
+            | okx_research::ResearchError::Serialization(_) => "ARTIFACT_CORRUPT".into(),
             okx_research::ResearchError::Io(ref source)
                 if source.kind() == std::io::ErrorKind::NotFound =>
             {
@@ -40,6 +41,64 @@ fn read_verified_result<T: DeserializeOwned>(
             other => other.to_string(),
         })
 }
+/// Traverse all immutable pages, checking SHA and exact count without
+/// materializing the complete result. Row export uses the paged result view.
+fn verify_export_pages(
+    store: &ResearchArtifactStore,
+    manifest: &Value,
+    refs_key: &str,
+    count_key: &str,
+    capacity: usize,
+) -> Result<Option<Value>, String> {
+    let Some(ids) = manifest.get(refs_key) else { return Ok(None); };
+    let pages = ids.as_array().ok_or("EXPORT_MANIFEST_INVALID")?;
+    let declared = manifest.get(count_key).and_then(Value::as_u64)
+        .ok_or("EXPORT_MANIFEST_INVALID")?;
+    if pages.len() as u64 > declared.div_ceil(capacity as u64) {
+        return Err("EXPORT_ROW_COUNT_MISMATCH".into());
+    }
+    let mut count = 0u64;
+    for (index, reference) in pages.iter().enumerate() {
+        let id = reference.as_str().ok_or("EXPORT_MANIFEST_INVALID")?;
+        let rows: Vec<Value> = read_verified_result(store, id)?;
+        if rows.is_empty() || rows.len() > capacity
+            || (index + 1 < pages.len() && rows.len() != capacity)
+        {
+            return Err("EXPORT_PAGE_SIZE_INVALID".into());
+        }
+        count = count.checked_add(rows.len() as u64).ok_or("EXPORT_ROW_COUNT_MISMATCH")?;
+        if count > declared {
+            return Err("EXPORT_ROW_COUNT_MISMATCH".into());
+        }
+    }
+    if count != declared {
+        return Err("EXPORT_ROW_COUNT_MISMATCH".into());
+    }
+    Ok(Some(json!({
+        "rows":count,
+        "pages":pages.len(),
+        "page_refs_sha256":okx_research::canonical_sha256(ids).map_err(|e| e.to_string())?
+    })))
+}
+
+fn verify_export_manifest(
+    store: &ResearchArtifactStore,
+    manifest: &Value,
+) -> Result<Value, String> {
+    let trades = verify_export_pages(store, manifest, "trade_pages", "total_trades", 50)?;
+    let rows = verify_export_pages(store, manifest, "row_pages", "total_rows", 50)?;
+    let equity = verify_export_pages(store, manifest, "equity_curve_pages", "total_equity_points", 4096)?;
+    if trades.is_none() && rows.is_none() {
+        return Err("EXPORT_MANIFEST_INVALID".into());
+    }
+    Ok(json!({
+        "quality":"complete",
+        "counts_verified":true,
+        "checksums_verified":true,
+        "trades":trades,"rows":rows,"equity":equity
+    }))
+}
+
 #[derive(Clone)]
 pub struct AnalyticsService {
     sources: sources::Sources,
@@ -502,6 +561,20 @@ impl AnalyticsService {
             signed.matches(&job_id, &artifact, &leaf_artifact, view)?;
         }
         let offset = signed.as_ref().map_or(0, |s| s.offset);
+        if matches!(view, ResearchResultView::Export) {
+            if signed.is_some() {
+                return Err("INVALID_CURSOR".into());
+            }
+            return Ok(json!({
+                "view":"export","schema":"okx.research.export/448.1",
+                "job_id":job_id,"result_id":artifact,"leaf_id":leaf_artifact,
+                "integrity":verify_export_manifest(&self.artifacts, &value)?,
+                "dataset_hash":value.get("dataset_hash"),
+                "result_hash":value.get("hash"),
+                "code_version":value.get("code_version"),
+                "read_data_via":["trades","equity"],"side_effects":"none"
+            }));
+        }
         let metadata = json!({
             "job_id":job_id,"artifact":artifact,
             "summary":value.get("summary").or_else(||value.pointer("/test/summary")),
@@ -1946,7 +2019,7 @@ fn research_capabilities() -> Value {
         "timeframes_ms":[60000,180000,300000,900000,1800000,3600000,14400000,86400000],
         "limits":{"max_instruments":8,"max_bars_total":1000000,"max_grid_variants":64,
             "max_result_page_rows":50,"max_heavy_concurrent_jobs":2},
-        "result_views":["summary","trades","variants","equity"],
+        "result_views":["summary","trades","variants","equity","export"],
         "oos":{"grid_train_test_split":true,"selected_variant_from_train_only":true},
         "source_evidence":{"closed_candles_only":true,"no_forward_fill":true}
     })
