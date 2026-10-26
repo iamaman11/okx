@@ -1146,7 +1146,8 @@
                   "summary",
                   "trades",
                   "equity",
-                  "variants"
+                  "variants",
+                  "export"
                 ]
               }
             },

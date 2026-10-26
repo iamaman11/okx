@@ -129,6 +129,7 @@ pub enum ResearchResultView {
     Summary,
     Variants,
     Equity,
+    Export,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
