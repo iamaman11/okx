@@ -532,6 +532,108 @@ mod tests {
         assert!(b.summary.fees > 0.0);
     }
     #[test]
+    fn c14_four_bar_oracle_executes_only_on_next_open() {
+        let opens = [100.0, 100.0, 101.0, 102.0];
+        let closes = [100.0, 101.0, 102.0, 100.0];
+        let bars = (0..4)
+            .map(|i| Bar {
+                time: i as u64 * 60_000,
+                open: opens[i],
+                high: opens[i].max(closes[i]) + 1.0,
+                low: opens[i].min(closes[i]) - 1.0,
+                close: closes[i],
+                volume: 1.0,
+                funding_rate: None,
+            })
+            .collect::<Vec<_>>();
+        let mut s = spec();
+        s.strategy_id = "close_momentum".into();
+        s.mechanics = Mechanics::Spot;
+        s.timeframe_ms = 60_000;
+        s.costs.observed_funding = false;
+        let first = replay(&bars, &s, 1, 4, &|| false).unwrap();
+        assert_eq!(first.trades.len(), 1);
+        assert_eq!(first.trades[0].time, bars[2].time);
+        assert_eq!(first.trades[0].price, 101.0);
+        assert_eq!(first.trades[0].quantity, 1.0);
+        assert_eq!(first.trades[0].side, 1);
+        assert_eq!(first.summary.pnl_exact, "-1");
+        assert_eq!(first.summary.fees_exact, "0");
+        assert_eq!(first.equity.last().unwrap().1, 9999.0);
+        // The exit signal at bar 3 cannot execute without a subsequent open.
+        let mut future = bars.clone();
+        future[3].close = 90.0;
+        future[3].low = 89.0;
+        let later = replay(&future, &s, 1, 4, &|| false).unwrap();
+        assert_eq!(later.trades.len(), 1);
+        assert_eq!(later.trades[0].time, first.trades[0].time);
+        assert_eq!(later.trades[0].price, first.trades[0].price);
+        assert_eq!(later.trades[0].quantity, first.trades[0].quantity);
+        future[3] = bars[3].clone();
+        future.push(Bar {
+            time: 4 * 60_000,
+            open: 99.0,
+            high: 101.0,
+            low: 97.0,
+            close: 98.0,
+            volume: 1.0,
+            funding_rate: None,
+        });
+        let extended = replay(&future, &s, 1, 5, &|| false).unwrap();
+        assert_eq!(extended.trades.len(), 2);
+        assert_eq!(extended.trades[1].time, future[4].time);
+        assert_eq!(extended.trades[1].price, future[4].open);
+        assert_eq!(extended.trades[1].side, -1);
+    }
+
+    #[test]
+    fn c15_identical_seed_and_inputs_repeat_exact_financial_hashes() {
+        let b = bars();
+        let s = spec();
+        let a = replay(&b, &s, 3, 100, &|| false).unwrap();
+        let other = std::thread::spawn(move || replay(&b, &s, 3, 100, &|| false).unwrap())
+            .join()
+            .unwrap();
+        assert_eq!(a.hash, other.hash);
+        assert_eq!(a.dataset_hash, other.dataset_hash);
+        assert_eq!(a.summary.pnl_exact, other.summary.pnl_exact);
+        assert_eq!(a.summary.fees_exact, other.summary.fees_exact);
+        assert_eq!(a.summary.funding_exact, other.summary.funding_exact);
+        assert_eq!(a.trades.len(), other.trades.len());
+        assert_eq!(a.equity, other.equity);
+    }
+
+    #[test]
+    fn c14_train_artifacts_ignore_holdout_and_ties_do_not_depend_on_order() {
+        let mut s = spec();
+        s.strategy_id = "no_trade".into();
+        let variants = [
+            EmaParameters { fast: 3, slow: 8 },
+            EmaParameters { fast: 2, slow: 3 },
+        ];
+        let input = bars();
+        let first = grid(&input, &s, &variants, &|| false).unwrap();
+        let mut changed = input;
+        for bar in &mut changed[70..] {
+            bar.close += 10.0;
+        }
+        let changed_result = grid(&changed, &s, &variants, &|| false).unwrap();
+        assert_eq!(first.split_index, 70);
+        assert_eq!(first.train_dataset_hash, changed_result.train_dataset_hash);
+        assert_eq!(first.selected, changed_result.selected);
+        assert_eq!(first.variants.len(), changed_result.variants.len());
+        for (left, right) in first.variants.iter().zip(&changed_result.variants) {
+            assert_eq!(left.train_result_hash, right.train_result_hash);
+            assert_eq!(left.train.pnl_exact, right.train.pnl_exact);
+        }
+        assert_ne!(first.test.dataset_hash, changed_result.test.dataset_hash);
+        assert_eq!(first.selected, EmaParameters { fast: 2, slow: 3 });
+        let reversed = [variants[1], variants[0]];
+        let inverted = grid(&changed, &s, &reversed, &|| false).unwrap();
+        assert_eq!(first.selected, inverted.selected);
+    }
+
+    #[test]
     fn test_partition_not_used_for_selection() {
         let b = bars();
         let v = [
