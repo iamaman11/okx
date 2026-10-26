@@ -460,6 +460,28 @@ mod tests {
         ))
     }
     #[test]
+    fn c16_two_active_and_thirty_two_queued_bound_admission() {
+        let jobs = Jobs::open(path("c16-capacity")).unwrap();
+        for i in 0..34 {
+            let id = format!("c16-job-{i}");
+            let (job, new, _) = jobs.enqueue(format!("idem-{i}"), id.clone()).unwrap();
+            assert!(new);
+            assert_eq!(job.id, id);
+            if i < 2 {
+                jobs.update(&id, State::Running, None, None).unwrap();
+            }
+        }
+        assert_eq!(
+            jobs.enqueue("overflow".into(), "c16-overflow".into()).unwrap_err(),
+            "RESOURCE_BUSY:RESEARCH_QUEUE_FULL"
+        );
+        // Repeating an accepted idempotent request does not take another slot.
+        assert!(!jobs.enqueue("idem-0".into(), "c16-job-0".into()).unwrap().1);
+        jobs.cancel("c16-job-2", "cancel-c16-slot").unwrap();
+        assert!(jobs.enqueue("overflow".into(), "c16-overflow".into()).unwrap().1);
+    }
+
+    #[test]
     fn restart_marks_job_interrupted() {
         let p = path("restart");
         let s = Jobs::open(p.clone()).unwrap();
