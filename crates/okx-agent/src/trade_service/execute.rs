@@ -302,7 +302,15 @@ impl TradeService {
                 return Err("COMMAND_EXPIRED".into());
             }
             match self
-                .fence_inspect_retry(&state, &held, &prepared, until, held_received, &conversion, r)
+                .fence_inspect_retry(
+                    &state,
+                    &held,
+                    &prepared,
+                    until,
+                    held_received,
+                    &conversion,
+                    r,
+                )
                 .await
             {
                 Ok(v) => central = Some(v),
