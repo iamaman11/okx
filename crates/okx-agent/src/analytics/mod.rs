@@ -100,7 +100,7 @@ impl AnalyticsService {
             0
         };
         let hash = okx_research::canonical_sha256(&(
-            "market/398.4",
+            "market/448.1",
             &hash_request,
             &universe_page,
             bucket,
@@ -1171,6 +1171,77 @@ mod artifact_job_fixtures {
         drop(s);
         std::fs::remove_dir_all(root).unwrap();
     }
+    #[tokio::test(flavor = "current_thread")]
+    async fn ordinary_market_cursors_resume_one_job_and_reject_other_queries() {
+        let (root, service) = service();
+        let instruments = ["BTC-USDT", "ETH-USDT", "SOL-USDT"];
+        for instrument in instruments {
+            let bars = (0..100)
+                .map(|i| replay::Bar {
+                    time: i * 60000,
+                    open: 100.0 + i as f64,
+                    high: 102.0 + i as f64,
+                    low: 99.0 + i as f64,
+                    close: 101.0 + i as f64,
+                    volume: 1.0,
+                    funding_rate: None,
+                })
+                .collect::<Vec<_>>();
+            service
+                .sources
+                .cache
+                .load(
+                    cache::SourceKey {
+                        source: "candles".into(),
+                        instrument: instrument.into(),
+                        timeframe_ms: 60000,
+                        start_ms: 0,
+                        end_ms: 6000000,
+                        closed_only: true,
+                        schema: 1,
+                    },
+                    || async { Ok(bars) },
+                )
+                .await
+                .unwrap();
+        }
+        let mut query = MarketRequest {
+            action: MarketAction::Screen,
+            instruments: instruments.iter().map(|s| (*s).into()).collect(),
+            universe: None,
+            fields: vec!["returns".into()],
+            timeframe_ms: 60000,
+            start_ms: 0,
+            end_ms: 6000000,
+            limit: 1,
+            cursor: None,
+            parameters: Default::default(),
+            filters: vec![],
+            sort: None,
+        };
+        let first = service.market(query.clone(), None, None).await.unwrap();
+        assert_eq!(first["rows"][0]["instrument"], instruments[0]);
+        let job = first["job_id"].as_str().unwrap().to_owned();
+        assert_eq!(first["next_cursor"], format!("{job}:1"));
+        query.cursor = first["next_cursor"].as_str().map(str::to_owned);
+        let second = service.market(query.clone(), None, None).await.unwrap();
+        assert_eq!(second["rows"][0]["instrument"], instruments[1]);
+        assert_eq!(second["job_id"], job);
+        assert_eq!(second["next_cursor"], format!("{job}:2"));
+        query.cursor = second["next_cursor"].as_str().map(str::to_owned);
+        let third = service.market(query.clone(), None, None).await.unwrap();
+        assert_eq!(third["rows"][0]["instrument"], instruments[2]);
+        assert!(third["next_cursor"].is_null());
+        assert_eq!(service.jobs.snapshot().len(), 1);
+        query.fields = vec!["realized_volatility".into()];
+        assert_eq!(
+            service.market(query, None, None).await.unwrap_err(),
+            "MARKET_CURSOR_REQUEST_MISMATCH"
+        );
+        drop(service);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[tokio::test]
     async fn two_asset_batch_grid_has_independent_artifacts_and_cursors() {
         let (root, s) = service();
