@@ -83,6 +83,34 @@ export interface NativeSessionRiskProof {
   native_ledger_evidence_complete:boolean;
 }
 
+/** Evidence produced by the same authenticated native process after HELD.
+ * Worker verifies the reserve window using its own clock, never native wall time.
+ */
+export interface CausalPostProof {
+  reserve_anchor:string;
+  native_incarnation:string;
+  elapsed_to_proof_ms:number;
+  account_reads:{
+    account_key:string;private_generation:number;source_read_id:string;
+    content_digest:string;started_after_held_ms:number;completed_after_held_ms:number;
+  }[];
+}
+function validPostProof(proof:CausalPostProof,census:CompleteRiskCensus,key:string):boolean {
+  return !!proof&&proof.reserve_anchor===key&&key.length<=512&&
+    /^[0-9a-f]{32}$/.test(proof.native_incarnation)&&
+    Number.isSafeInteger(proof.elapsed_to_proof_ms)&&
+    proof.elapsed_to_proof_ms>=0&&proof.elapsed_to_proof_ms<=5000&&
+    Array.isArray(proof.account_reads)&&proof.account_reads.length===census.account_keys.length&&
+    proof.account_reads.every((read,i)=>read.account_key===census.account_keys[i]&&
+      Number.isSafeInteger(read.private_generation)&&read.private_generation>0&&
+      HEX.test(read.source_read_id)&&HEX.test(read.content_digest)&&
+      Number.isSafeInteger(read.started_after_held_ms)&&
+      Number.isSafeInteger(read.completed_after_held_ms)&&
+      read.started_after_held_ms>=0&&
+      read.started_after_held_ms<=read.completed_after_held_ms&&
+      read.completed_after_held_ms<=proof.elapsed_to_proof_ms);
+}
+
 export type RiskDecision =
   | { status: "HELD"; entry: RiskEntry; book_sequence: number; occupied_global_usdt: string }
   | { status: "DENIED"; reason: string };
@@ -173,13 +201,16 @@ async function applyCensusLoss(tx:any,meta:RiskMeta,census:CompleteRiskCensus):P
  meta.source_as_of_ms=census.source_read_floor_ms;
  if(added>0n){meta.consumed_loss_usd=amount(units(meta.consumed_loss_usd)!+added);meta.sequence++;for(const[k,v]of updates)await tx.put(k,v);await tx.put(KEY,meta);}else{await tx.put(KEY,meta);}return true;
 }
-function censusRisk(census: CompleteRiskCensus, policy: RiskPolicy, now: number): Map<string,bigint> | null {
+function censusRisk(census: CompleteRiskCensus, policy: RiskPolicy, now: number,
+  postHeldCausal=false): Map<string,bigint> | null {
   if (census.complete !== true || !HEX.test(census.source_digest)
     || !HEX.test(census.content_digest)
     || !Number.isSafeInteger(census.source_read_floor_ms)
     || census.source_read_floor_ms <= 0
     || census.source_read_floor_ms > census.generated_at_ms
-    || census.generated_at_ms > now || now - census.generated_at_ms > MAX_CENSUS_AGE_MS
+    || (!postHeldCausal &&
+      (census.generated_at_ms > now || now - census.generated_at_ms > MAX_CENSUS_AGE_MS))
+    || (postHeldCausal && census.generated_at_ms-census.source_read_floor_ms>MAX_CENSUS_AGE_MS)
     || !Number.isSafeInteger(now) || !Number.isSafeInteger(census.generated_at_ms)) return null;
   const required = Object.keys(policy.account_limits_usdt).sort();
   if (!Array.isArray(census.account_keys)
@@ -398,6 +429,7 @@ export async function beginRiskPost(
   native:{
     connection_generation:number;expected_book_sequence:number;
     census:CompleteRiskCensus;source_proof:NativeSessionRiskProof;now_ms:number;
+    causal_proof:CausalPostProof;
   }|null,
 ):Promise<{status:"POST_AUTHORIZED"|"DENIED";reason?:string;book_sequence?:number;existing_modelled_loss_usdt?:string}>{
   if(!native||!HEX.test(plan_hash)||!HEX.test(proof_digest)||
@@ -409,7 +441,8 @@ export async function beginRiskPost(
     !native.source_proof.native_account_evidence_complete||
     !native.source_proof.native_order_evidence_complete||
     !native.source_proof.native_ledger_evidence_complete||
-    !Number.isSafeInteger(native.now_ms)||native.now_ms<=0)
+    !Number.isSafeInteger(native.now_ms)||native.now_ms<=0||
+    !validPostProof(native.causal_proof,native.census,key))
     return {status:"DENIED",reason:"INVALID_NATIVE_POST_FENCE"};
   return storage.transaction(async(tx:any)=>{
     const generation:unknown=await tx.get("generation");
@@ -423,7 +456,7 @@ export async function beginRiskPost(
       return {status:"DENIED" as const,reason:"CENTRAL_OPERATOR_GRANT_INACTIVE"};
     // A fresh native inventory is mandatory AGAIN immediately before POST.
     // Positions, unmanaged orders and another account can change after RESERVE.
-    const occupied=censusRisk(native.census,authority,native.now_ms);
+    const occupied=censusRisk(native.census,authority,native.now_ms,true);
     if(occupied===null)
       return {status:"DENIED" as const,reason:"POST_CENSUS_UNPROVEN_OR_STALE"};
     const stored=await tx.get(KEY);
@@ -432,18 +465,16 @@ export async function beginRiskPost(
     if(stored.sequence!==native.expected_book_sequence)return {status:"DENIED" as const,reason:"STALE_RISK_BOOK_SEQUENCE"};
     const entry:RiskEntry|undefined=await tx.get(entryKey(key));
     if(!entry||!validEntry(entry)||entry.plan_hash!==plan_hash||entry.state!=="HELD"||entry.policy_revision!==policy_revision)return {status:"DENIED" as const,reason:"INTENT_NOT_HELD_EXACTLY_ONCE"};
-    if(native.now_ms-entry.usd_conversion.observed_at_ms>5000)return {status:"DENIED" as const,reason:"USD_CONVERSION_STALE"};
-    // Reusing a recently sampled RESERVE census is not a new source read.
-    if(native.census.generated_at_ms<=entry.created_at_ms ||
-       native.census.source_read_floor_ms<=entry.created_at_ms)
-      return {status:"DENIED" as const,reason:"POST_CENSUS_NOT_AFTER_RESERVE"};
-    // Every registered Real UID must have been read again. Identical
-    // exchange content is valid; advancing only a command clock is not.
-    if (!entry.reserve_source_digest ||
-        !entry.reserve_source_read_floor_ms ||
-        native.census.source_read_floor_ms <= entry.reserve_source_read_floor_ms ||
-        native.census.source_digest===entry.reserve_source_digest)
-      return {status:"DENIED" as const,reason:"POST_CENSUS_SOURCE_REUSED_OR_UNKNOWN"};
+    // The anchor lives in Worker storage and uses Worker time only; the
+    // authenticated native evidence uses elapsed ticks since HELD instead.
+    if(native.now_ms<entry.created_at_ms||
+       native.now_ms-entry.created_at_ms>5000)
+      return {status:"DENIED" as const,reason:"POST_EVIDENCE_WINDOW_EXPIRED"};
+    if(!entry.reserve_source_digest||!entry.reserve_source_read_floor_ms)
+      return {status:"DENIED" as const,reason:"RESERVE_SOURCE_NOT_RECORDED"};
+    // Identical exchange content from independently completed reads is valid.
+    // Native source read IDs, coverage and relative ordering are checked
+    // against the full registered cohort by validPostProof above.
     const account=governance.accounts.find(a=>
       a.venue===entry.venue&&a.environment==="real"&&a.uid_fingerprint===entry.uid
       &&accessEnabled(a));
