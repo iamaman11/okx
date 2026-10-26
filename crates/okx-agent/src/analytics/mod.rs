@@ -595,7 +595,7 @@ impl AnalyticsService {
         )
     }
     async fn submit(&self, request: ResearchRequest) -> Result<Value, String> {
-        let hash = okx_research::canonical_sha256(&("analytics-v1", &request))
+        let hash = okx_research::canonical_sha256(&("analytics/448.1", &request))
             .map_err(|e| e.to_string())?;
         let hash = hash.strip_prefix("sha256:").unwrap_or(&hash).to_owned();
         let key = match &request {
@@ -849,7 +849,7 @@ impl AnalyticsService {
                     let cancelled=||c.load(Ordering::Acquire);
                     let mut chunks=Vec::new();for chunk in bars.chunks(4096){if cancelled(){return Err("CANCELLED".into())}chunks.push(store.publish_evidence(&chunk).map_err(|e|e.to_string())?.0);}
                     let dataset=store.publish_evidence(&json!({"schema":"okx.research.dataset/398.1","instrument":instruments[0],"timeframe_ms":ms,"start_ms":start,"end_ms":end,"chunks":chunks})).map_err(|e|e.to_string())?.0;
-                    let(result,grid)=if is_grid{let g=replay::grid(&bars,&spec,&variants,&cancelled)?;(g.test,Some(json!({"selected":g.selected,"split_index":g.split_index,"train_dataset_hash":g.train_dataset_hash,"train_range":{"start_ms":bars.first().map(|b|b.time),"end_ms":bars[g.split_index].time},"test_range":{"start_ms":bars[g.split_index].time,"end_ms":end},"train":g.train,"variants":g.variants,"selection_warning":g.selection_warning})))}else{(replay::replay(&bars,&spec,first.slow,bars.len(),&cancelled)?,None)};
+                    let(result,grid)=if is_grid{let g=replay::grid(&bars,&spec,&variants,&cancelled)?;(g.test,Some(json!({"selected":g.selected,"split_index":g.split_index,"train_dataset_hash":g.train_dataset_hash,"train_range":{"start_ms":bars[g.train_score_start_index].time,"end_ms":bars[g.split_index].time},"warmup_bars":g.train_score_start_index,"test_range":{"start_ms":bars[g.split_index].time,"end_ms":end},"train":g.train,"variants":g.variants,"selection_warning":g.selection_warning})))}else{(replay::replay(&bars,&spec,first.slow,bars.len(),&cancelled)?,None)};
                     publish_replay(&store,&result,&dataset,grid,&cancelled)
                 }).await?;
         Ok::<_, String>(artifact)

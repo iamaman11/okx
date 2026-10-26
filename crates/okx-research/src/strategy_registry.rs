@@ -3,7 +3,7 @@ use okx_analysis::operators::{EmaParameters, StrategyKernel};
 use rust_decimal::{Decimal, prelude::ToPrimitive};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-pub const CAUSAL_REPLAY_VERSION: &str = "okx-causal-replay/398.2";
+pub const CAUSAL_REPLAY_VERSION: &str = "okx-causal-replay/448.1";
 use std::str::FromStr;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Bar {
@@ -331,6 +331,7 @@ pub struct GridResult {
     pub variants: Vec<GridCandidate>,
     pub selected: EmaParameters,
     pub split_index: usize,
+    pub train_score_start_index: usize,
     pub train_dataset_hash: String,
     pub train: Summary,
     pub test: ReplayResult,
@@ -349,7 +350,14 @@ pub fn grid(
         return Err("LIMIT_BARS:1000000".into());
     }
     let split = bars.len() * 7 / 10;
-    if variants.iter().any(|p| p.slow >= split) {
+    // All candidate scores use the same reporting window. Different EMA
+    // warmups are loaded before it, never counted as reporting returns.
+    let train_score_start = variants
+        .iter()
+        .map(|p| p.slow)
+        .max()
+        .ok_or("EMPTY_GRID")?;
+    if train_score_start >= split {
         return Err("INSUFFICIENT_TRAIN_BARS".into());
     }
     // Never feed holdout observations into training identities or scores.
@@ -363,7 +371,14 @@ pub fn grid(
         }
         let mut s = spec.clone();
         s.parameters = *p;
-        let r = replay_with_hash(bars, &s, p.slow, split, cancel, Some(&train_dataset_hash))?;
+        let r = replay_with_hash(
+            bars,
+            &s,
+            train_score_start,
+            split,
+            cancel,
+            Some(&train_dataset_hash),
+        )?;
         candidates.push(GridCandidate {
             parameters: *p,
             train: r.summary.clone(),
@@ -388,6 +403,7 @@ pub fn grid(
         variants: candidates,
         selected: p,
         split_index: split,
+        train_score_start_index: train_score_start,
         train_dataset_hash,
         train,
         test,
