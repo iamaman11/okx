@@ -641,7 +641,10 @@ mod tests {
         let changed_result = grid(&changed, &s, &variants, &|| false).unwrap();
         assert_eq!(first.split_index, 70);
         assert_eq!(first.train_score_start_index, 8);
-        assert_eq!(first.train_score_start_index, changed_result.train_score_start_index);
+        assert_eq!(
+            first.train_score_start_index,
+            changed_result.train_score_start_index
+        );
         assert_eq!(first.train_dataset_hash, changed_result.train_dataset_hash);
         assert_eq!(first.selected, changed_result.selected);
         assert_eq!(first.variants.len(), changed_result.variants.len());
