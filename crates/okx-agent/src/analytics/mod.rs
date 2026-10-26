@@ -21,6 +21,23 @@ use std::{
     path::PathBuf,
     sync::{Arc, atomic::Ordering},
 };
+use serde::de::DeserializeOwned;
+
+fn read_verified_result<T: DeserializeOwned>(
+    store: &ResearchArtifactStore,
+    artifact: &str,
+) -> Result<T, String> {
+    store.read_evidence_json(artifact).map_err(|error| match error {
+        okx_research::ResearchError::ArtifactIdentityMismatch
+        | okx_research::ResearchError::InvalidArtifactId => "ARTIFACT_CORRUPT".into(),
+        okx_research::ResearchError::Io(ref source)
+            if source.kind() == std::io::ErrorKind::NotFound =>
+        {
+            "ARTIFACT_CORRUPT".into()
+        }
+        other => other.to_string(),
+    })
+}
 #[derive(Clone)]
 pub struct AnalyticsService {
     sources: sources::Sources,
@@ -437,39 +454,45 @@ impl AnalyticsService {
             return Err("RESULT_EXPIRED".into());
         }
         let artifact = j.artifact.ok_or("RESULT_NOT_READY")?;
-        let mut value: Value = self
-            .artifacts
-            .read_evidence_json(&artifact)
-            .map_err(|e| e.to_string())?;
-        if let Some(id) = value.get("result_artifact").and_then(Value::as_str) {
-            value = self
-                .artifacts
-                .read_evidence_json(id)
-                .map_err(|e| e.to_string())?;
+        if j.state != jobs::State::Completed {
+            return Err("RESULT_NOT_READY".into());
         }
-        let mut page_cursor = cursor.clone();
-        let mut instrument_prefix = None;
-        if let Some(raw) = cursor.as_deref().filter(|c| c.starts_with("instrument:")) {
-            let parts = raw.split(':').collect::<Vec<_>>();
-            if parts.len() != 3 {
-                return Err("INVALID_CURSOR".into());
+        let signing_key = self.jobs.cursor_signing_key()?;
+        let signed = cursor.as_deref().filter(|s| s.starts_with("r1."))
+            .map(|s| cursor::Cursor::decode(s, &signing_key)).transpose()?;
+        // Explicit instrument:INDEX:0 is only a first-page selector for a
+        // batch. Continuation always requires an authenticated page token.
+        let selector = match cursor.as_deref() {
+            Some(value) if value.starts_with("r1.") => None,
+            Some(value) if value.starts_with("instrument:") => {
+                let parts = value.split(':').collect::<Vec<_>>();
+                if parts.len() != 3 || parts[2] != "0" {
+                    return Err("INVALID_CURSOR".into());
+                }
+                Some(parts[1].parse::<u64>().map_err(|_| "INVALID_CURSOR")?)
             }
-            let index = parts[1].parse::<u64>().map_err(|_| "INVALID_CURSOR")?;
-            let row = value
-                .get("instruments")
-                .and_then(Value::as_array)
+            Some(_) => return Err("INVALID_CURSOR".into()),
+            None => None,
+        };
+        let mut leaf_artifact = artifact.clone();
+        let mut value: Value = read_verified_result(&self.artifacts, &artifact)?;
+        if let Some(id) = value.get("result_artifact").and_then(Value::as_str) {
+            leaf_artifact = id.to_owned();
+            value = read_verified_result(&self.artifacts, id)?;
+        }
+        let instrument_index = signed.as_ref().and_then(|s| s.instrument).or(selector);
+        if let Some(index) = instrument_index {
+            let row = value.get("instruments").and_then(Value::as_array)
                 .and_then(|rows| rows.iter().find(|r| r["index"].as_u64() == Some(index)))
                 .ok_or("INVALID_CURSOR")?;
-            let id = row["artifact"]
-                .as_str()
-                .ok_or("INSTRUMENT_RESULT_UNAVAILABLE")?;
-            value = self
-                .artifacts
-                .read_evidence_json(id)
-                .map_err(|e| e.to_string())?;
-            page_cursor = Some(parts[2].into());
-            instrument_prefix = Some(format!("instrument:{index}:"));
+            let id = row["artifact"].as_str().ok_or("INSTRUMENT_RESULT_UNAVAILABLE")?;
+            leaf_artifact = id.to_owned();
+            value = read_verified_result(&self.artifacts, id)?;
         }
+        if let Some(signed) = &signed {
+            signed.matches(&job_id, &artifact, &leaf_artifact, view)?;
+        }
+        let offset = signed.as_ref().map_or(0, |s| s.offset);
         let metadata = json!({
             "job_id":job_id,"artifact":artifact,
             "summary":value.get("summary").or_else(||value.pointer("/test/summary")),
@@ -486,6 +509,9 @@ impl AnalyticsService {
             "result_hash":value.get("hash")
         });
         if matches!(view, ResearchResultView::Summary) && value.get("instruments").is_none() {
+            if cursor.is_some() {
+                return Err("INVALID_CURSOR".into());
+            }
             return Ok(
                 json!({"view":"summary","metadata":metadata,"rows":[],"total_rows":0,
                 "returned_rows":0,"next_cursor":null}),
@@ -495,11 +521,6 @@ impl AnalyticsService {
             view,
             ResearchResultView::Variants | ResearchResultView::Equity
         ) {
-            let offset = page_cursor
-                .as_deref()
-                .unwrap_or("0")
-                .parse::<usize>()
-                .map_err(|_| "INVALID_CURSOR")?;
             let mut output = Vec::new();
             let total;
             if matches!(view, ResearchResultView::Variants) {
@@ -524,10 +545,7 @@ impl AnalyticsService {
                         .get(position / 4096)
                         .and_then(Value::as_str)
                         .ok_or("EQUITY_PAGE_MISSING")?;
-                    let points: Vec<Value> = self
-                        .artifacts
-                        .read_evidence_json(id)
-                        .map_err(|e| e.to_string())?;
+                    let points: Vec<Value> = read_verified_result(&self.artifacts, id)?;
                     if position % 4096 >= points.len() {
                         return Err("EQUITY_PAGE_MISSING".into());
                     }
@@ -547,12 +565,16 @@ impl AnalyticsService {
             {
                 output.pop();
             }
+            if output.len() == 1
+                && serde_json::to_vec(&output).map_err(|e| e.to_string())?.len() > 6500
+            {
+                return Err("RESULT_ROW_TOO_LARGE".into());
+            }
             let next = if offset + output.len() < total {
-                Some(format!(
-                    "{}{}",
-                    instrument_prefix.as_deref().unwrap_or(""),
-                    offset + output.len()
-                ))
+                Some(cursor::Cursor::new(
+                    &job_id, &artifact, &leaf_artifact, view,
+                    offset + output.len(), instrument_index,
+                ).encode(&signing_key)?)
             } else {
                 None
             };
@@ -562,11 +584,6 @@ impl AnalyticsService {
                 "total_rows":total,"next_cursor":next}),
             );
         }
-        let offset = page_cursor
-            .as_deref()
-            .unwrap_or("0")
-            .parse::<usize>()
-            .map_err(|_| "INVALID_CURSOR")?;
         let pages = value
             .get("trade_pages")
             .or_else(|| value.get("row_pages"))
@@ -587,10 +604,7 @@ impl AnalyticsService {
                 .get(position / 50)
                 .and_then(Value::as_str)
                 .ok_or("RESULT_PAGE_MISSING")?;
-            let rows: Vec<Value> = self
-                .artifacts
-                .read_evidence_json(id)
-                .map_err(|e| e.to_string())?;
+            let rows: Vec<Value> = read_verified_result(&self.artifacts, id)?;
             if rows.len() <= position % 50 {
                 // A missing, empty or prematurely short page must never
                 // spin at the same cursor or pretend the result is complete.
@@ -603,9 +617,23 @@ impl AnalyticsService {
         while page.len() > 1 && serde_json::to_vec(&page).map_err(|e| e.to_string())?.len() > 6500 {
             page.pop();
         }
-        Ok(
-            json!({"view":"trades","metadata":metadata,"assumptions":value.pointer("/summary/assumptions").or_else(||value.pointer("/test/summary/assumptions")),"job_id":job_id,"artifact":artifact,"summary":value.get("summary").or_else(||value.pointer("/test/summary")),"rows":page,"returned_rows":page.len(),"total_rows":total,"next_cursor":if offset+page.len()<total{Some(format!("{}{}",instrument_prefix.as_deref().unwrap_or(""),offset+page.len()))}else{None}}),
-        )
+        if page.len() == 1 && serde_json::to_vec(&page).map_err(|e| e.to_string())?.len() > 6500 {
+            return Err("RESULT_ROW_TOO_LARGE".into());
+        }
+        let next = if offset + page.len() < total {
+            Some(cursor::Cursor::new(
+                &job_id, &artifact, &leaf_artifact, view,
+                offset + page.len(), instrument_index,
+            ).encode(&signing_key)?)
+        } else {
+            None
+        };
+        Ok(json!({
+            "view":"trades","metadata":metadata,
+            "assumptions":value.pointer("/summary/assumptions").or_else(||value.pointer("/test/summary/assumptions")),
+            "job_id":job_id,"artifact":artifact,"summary":value.get("summary").or_else(||value.pointer("/test/summary")),
+            "rows":page,"returned_rows":page.len(),"total_rows":total,"next_cursor":next
+        }))
     }
     async fn submit(&self, request: ResearchRequest) -> Result<Value, String> {
         let hash = okx_research::canonical_sha256(&("analytics/448.1", &request))
