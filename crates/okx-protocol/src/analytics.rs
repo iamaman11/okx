@@ -490,6 +490,34 @@ mod batch_tests {
         );
     }
     #[test]
+    fn k9_grid_variants_match_canonical_sixty_four_limit() {
+        let parameters = EmaParameters { fast: 2, slow: 4 };
+        let variants = (0..64).map(|_| parameters.clone()).collect();
+        let mut request = ResearchRequest::Grid {
+            idempotency_key: "k9-grid".into(),
+            instruments: vec!["BTC-USDT".into()],
+            timeframe_ms: 60000,
+            start_ms: 0,
+            end_ms: 60000 * 100,
+            strategy_id: "ema_cross_v1".into(),
+            variants,
+            costs: ResearchCosts {
+                maker_fee_bps: 0.0,
+                taker_fee_bps: 0.0,
+                slippage_bps: 0.0,
+                funding_mode: FundingMode::ZeroAssumption,
+            },
+            data_mode: ResearchDataMode::Counterfactual,
+            seed: 448,
+        };
+        assert!(request.valid());
+        if let ResearchRequest::Grid { variants, .. } = &mut request {
+            variants.push(parameters);
+        }
+        assert!(!request.valid());
+    }
+
+    #[test]
     fn research_batch_wire_roundtrip_and_total_bar_budget() {
         let request = ResearchRequest::Backtest {
             idempotency_key: "batch".into(),

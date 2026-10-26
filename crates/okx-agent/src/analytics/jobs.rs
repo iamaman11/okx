@@ -508,6 +508,26 @@ mod tests {
         ))
     }
     #[test]
+    fn k9_sql_busy_admission_is_bounded_and_does_not_commit() {
+        let file = path("k9-busy-100ms");
+        let jobs = Jobs::open(file.clone()).unwrap();
+        let blocker = Connection::open(file).unwrap();
+        blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let began = std::time::Instant::now();
+        let blocked = jobs.enqueue("idempotent".into(), "new-job".into());
+        let elapsed = began.elapsed();
+        assert_eq!(blocked.unwrap_err(), "RESEARCH_SQL_BUSY");
+        assert!(elapsed < std::time::Duration::from_millis(500), "elapsed: {elapsed:?}");
+        blocker.execute_batch("ROLLBACK").unwrap();
+        assert!(jobs.get("new-job").is_err());
+        let (accepted, fresh, _) = jobs
+            .enqueue("idempotent".into(), "new-job".into())
+            .unwrap();
+        assert!(fresh);
+        assert_eq!(accepted.state, State::Queued);
+    }
+
+    #[test]
     fn c16_two_active_and_thirty_two_queued_bound_admission() {
         let jobs = Jobs::open(path("c16-capacity")).unwrap();
         for i in 0..34 {
