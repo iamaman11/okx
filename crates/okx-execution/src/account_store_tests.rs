@@ -20,20 +20,24 @@ fn f2_lost_reserve_receipt_recovers_after_restart_without_second_reserve() {
     assert_eq!(proof.reservation_key, key);
     assert_eq!(proof.reason, "RESERVE_REPLY_LOST");
     assert_eq!(s.reconcilable_intents(16).unwrap().len(), 1);
-    s.acknowledge_central_release(key, "worker-released").unwrap();
+    s.acknowledge_central_release(key, "worker-released")
+        .unwrap();
     assert_eq!(s.reconcilable_intents(16).unwrap().len(), 0);
     // Both proof and first cause survive a lost local release ACK.
     let proof = s.unsent_release_receipt("intent").unwrap().unwrap();
     assert_eq!(proof.reason, "RESERVE_REPLY_LOST");
-    s.acknowledge_central_release(key, "worker-released").unwrap();
+    s.acknowledge_central_release(key, "worker-released")
+        .unwrap();
     assert!(s.begin_post("intent", 1, 6).unwrap() == false);
 }
 #[test]
 fn f2_explicit_worker_reserve_denial_has_no_orphan_risk_and_no_post() {
     let mut s = store();
     intent(&mut s);
-    s.mark_reserve_attempt("intent", "risk_reserve_not_granted", 3).unwrap();
-    s.reject_denied_reserve("intent", "ORDER_OR_STRATEGY_RISK_LIMIT", 5).unwrap();
+    s.mark_reserve_attempt("intent", "risk_reserve_not_granted", 3)
+        .unwrap();
+    s.reject_denied_reserve("intent", "ORDER_OR_STRATEGY_RISK_LIMIT", 5)
+        .unwrap();
     assert!(s.declined_reserve("intent").unwrap());
     assert!(s.unsent_release_receipt("intent").unwrap().is_none());
     assert!(s.reconcilable_intents(16).unwrap().is_empty());
@@ -46,10 +50,16 @@ fn f2_explicit_worker_reserve_denial_has_no_orphan_risk_and_no_post() {
 fn f2_durable_marker_conflicts_and_never_becomes_post_claim() {
     let mut s = store();
     intent(&mut s);
-    s.mark_reserve_attempt("intent", "original-reserve-key", 3).unwrap();
-    s.mark_reserve_attempt("intent", "original-reserve-key", 4).unwrap();
-    assert!(s.mark_reserve_attempt("intent", "different-key", 5).is_err());
-    s.reject_unsent("intent", "RESERVE_LOCAL_COMMIT_UNCONFIRMED", 6).unwrap();
+    s.mark_reserve_attempt("intent", "original-reserve-key", 3)
+        .unwrap();
+    s.mark_reserve_attempt("intent", "original-reserve-key", 4)
+        .unwrap();
+    assert!(
+        s.mark_reserve_attempt("intent", "different-key", 5)
+            .is_err()
+    );
+    s.reject_unsent("intent", "RESERVE_LOCAL_COMMIT_UNCONFIRMED", 6)
+        .unwrap();
     let evidence = s.unsent_release_receipt("intent").unwrap().unwrap();
     assert_eq!(evidence.reservation_key, "original-reserve-key");
     assert_eq!(evidence.reason, "RESERVE_LOCAL_COMMIT_UNCONFIRMED");
