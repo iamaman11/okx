@@ -56,6 +56,25 @@ impl TradeService {
                 "central_release":{"state":"not_required","proof":"RESERVE_DENIED"}
             })));
         }
+        // F1: no risk command was ever attempted. The SQL terminal receipt
+        // and absent reserve marker jointly prove no-send / no central risk;
+        // skip unrelated venue and financial I/O.
+        let id = i.intent_id.clone();
+        if r.execution
+            .store
+            .call(deadline(), move |s| s.unsent_before_reserve(&id))
+            .await
+            .map_err(err)?
+        {
+            return Ok(completed(json!({
+                "intent":i,
+                "send_state":"NOT_STARTED",
+                "rejection_origin":"LOCAL",
+                "primary_reason":i.incident,
+                "finance_state":"NOT_APPLICABLE",
+                "central_release":{"state":"not_required","proof":"PRE_RESERVE_SQL"}
+            })));
+        }
         // A durable SQL REJECTED_UNSENT can release its central reservation
         // independently of exchange history/fees. Other rejected intents
         // still require the full authoritative reconciliation below.
