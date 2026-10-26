@@ -576,17 +576,19 @@ impl TradeService {
             Err(_) => "RESERVE_OUTCOME_UNKNOWN_NO_POST".into(),
         };
         match observed {
-            Ok(reply) if reply.status == RiskDecisionStatus::Observed
-                && reply.reservation_state == Some(RiskReservationState::Held)
-                && !central_denied =>
+            Ok(reply)
+                if reply.status == RiskDecisionStatus::Observed
+                    && reply.reservation_state == Some(RiskReservationState::Held)
+                    && !central_denied =>
             {
                 // One original reservation is known; never replay stale
                 // reserve-time source as a second grant.
                 Ok(reply)
             }
-            Ok(reply) if central_denied
-                && reply.status == RiskDecisionStatus::Denied
-                && reply.reason.as_deref() == Some("RISK_RESERVATION_NOT_FOUND") =>
+            Ok(reply)
+                if central_denied
+                    && reply.status == RiskDecisionStatus::Denied
+                    && reply.reason.as_deref() == Some("RISK_RESERVATION_NOT_FOUND") =>
             {
                 Err((reason, true))
             }

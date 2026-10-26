@@ -117,7 +117,11 @@ impl AccountStore {
     }
 
     fn reject_unsent_inner(
-        &mut self, id: &str, reason: &str, now: i64, proven_not_reserved: bool
+        &mut self,
+        id: &str,
+        reason: &str,
+        now: i64,
+        proven_not_reserved: bool,
     ) -> StoreResult<bool> {
         if reason.is_empty() {
             return Err(StoreError::Invalid("UNSENT_REASON_REQUIRED"));
@@ -149,13 +153,17 @@ impl AccountStore {
             )?;
         }
         if proven_not_reserved {
-            let original: Option<(String,String)> = tx.query_row(
-                "SELECT kind,request_hash FROM operation_receipts WHERE operation_id=?1",
-                [format!("terminal:{id}")],
-                |r| Ok((r.get(0)?,r.get(1)?)),
-            ).optional()?;
-            if original.as_ref().is_none_or(|(kind,request)|
-                kind!="REJECTED_UNSENT" || request!=&hash) {
+            let original: Option<(String, String)> = tx
+                .query_row(
+                    "SELECT kind,request_hash FROM operation_receipts WHERE operation_id=?1",
+                    [format!("terminal:{id}")],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()?;
+            if original
+                .as_ref()
+                .is_none_or(|(kind, request)| kind != "REJECTED_UNSENT" || request != &hash)
+            {
                 return Err(StoreError::Invalid("UNSENT_TERMINAL_RECEIPT_MISSING"));
             }
             let operation = format!("risk-reserve:{id}");
