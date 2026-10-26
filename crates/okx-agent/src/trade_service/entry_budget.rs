@@ -50,7 +50,6 @@ pub(super) fn quote(
     })
 }
 
-
 /// The Real account policy owns the required ceiling. A command may only tighten it.
 /// No cap is inferred from the independent campaign LOSS limit or USDT notional.
 pub(super) fn enforced_entry_ceiling(
