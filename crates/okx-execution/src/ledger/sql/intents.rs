@@ -61,11 +61,33 @@ impl AccountStore {
         )?)
     }
 
+    /// F1: the prepare transaction committed, but no central RESERVE was
+    /// attempted. A matching terminal SQL receipt proves no native POST.
+    pub fn unsent_before_reserve(&self, id: &str) -> StoreResult<bool> {
+        self.connection
+            .query_row(
+                "SELECT EXISTS(
+                   SELECT 1 FROM intents i
+                   JOIN operation_receipts t ON t.operation_id='terminal:'||i.intent_id
+                   WHERE i.intent_id=?1 AND i.state='REJECTED'
+                     AND i.begin_post_at IS NULL AND i.exchange_order_id IS NULL
+                     AND t.kind='REJECTED_UNSENT'
+                     AND t.request_hash=i.request_hash AND t.result_ref=i.incident
+                     AND NOT EXISTS(SELECT 1 FROM risk_receipts r
+                       WHERE r.intent_id=i.intent_id)
+                     AND NOT EXISTS(SELECT 1 FROM operation_receipts a
+                       WHERE a.operation_id='risk-reserve:'||i.intent_id))",
+                [id],
+                |r| r.get(0),
+            )
+            .map_err(StoreError::from)
+    }
+
     pub fn reconcilable_intents(&self, limit: usize) -> StoreResult<Vec<StoredIntent>> {
         let ids = {
             let mut q=self.connection.prepare(
               "SELECT intent_id FROM (
-                SELECT intent_id,CASE WHEN state='UNSENT_PENDING_CENTRAL' THEN 0 ELSE 2 END AS priority
+                SELECT intent_id,CASE WHEN state='UNSENT_PENDING_CENTRAL' THEN 0 ELSE 3 END AS priority
                 FROM risk_receipts
                 WHERE state IN('HELD','POSTED','UNKNOWN','OPEN','TERMINAL_PENDING_CENTRAL','UNSENT_PENDING_CENTRAL')
                 UNION ALL
@@ -77,9 +99,16 @@ impl AccountStore {
                   AND NOT EXISTS(SELECT 1 FROM operation_receipts ack
                     WHERE ack.operation_id='central-release:'||o.result_ref
                       AND ack.kind='CENTRAL_RELEASE')
+                UNION ALL
+                SELECT i.intent_id,2 AS priority FROM intents i
+                WHERE i.state='PREPARED' AND i.deadline<=?2
+                  AND NOT EXISTS(SELECT 1 FROM risk_receipts r
+                    WHERE r.intent_id=i.intent_id)
+                  AND NOT EXISTS(SELECT 1 FROM operation_receipts a
+                    WHERE a.operation_id='risk-reserve:'||i.intent_id)
                ) GROUP BY intent_id ORDER BY MIN(priority),intent_id LIMIT ?1"
             )?;
-            q.query_map([limit.min(1000) as i64], |r| r.get::<_, String>(0))?
+            q.query_map(params![limit.min(1000) as i64, wall_time_ms()], |r| r.get::<_, String>(0))?
                 .collect::<Result<Vec<_>, _>>()?
         };
         ids.iter()
