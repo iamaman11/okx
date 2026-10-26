@@ -243,18 +243,29 @@ impl TradeService {
             let key = self.risk_reservation_key(r, &prepared);
             let intent_id = prepared.intent_id.clone();
             let reserve_key = key.clone();
-            r.execution.store.call(until, move |s| {
-                s.mark_reserve_attempt(&intent_id, &reserve_key, now())
-            }).await.map_err(err)?;
-            let held = match self.reserve_inspect_retry(&state, reserve, &prepared, r).await {
+            r.execution
+                .store
+                .call(until, move |s| {
+                    s.mark_reserve_attempt(&intent_id, &reserve_key, now())
+                })
+                .await
+                .map_err(err)?;
+            let held = match self
+                .reserve_inspect_retry(&state, reserve, &prepared, r)
+                .await
+            {
                 Ok(held) => held,
                 Err((reason, authoritative_denial)) => {
                     let id = prepared.intent_id.clone();
                     if authoritative_denial {
                         let owner_reason = reason.clone();
-                        r.execution.store.call(deadline(), move |s| {
-                            s.reject_denied_reserve(&id, &owner_reason, now())
-                        }).await.map_err(err)?;
+                        r.execution
+                            .store
+                            .call(deadline(), move |s| {
+                                s.reject_denied_reserve(&id, &owner_reason, now())
+                            })
+                            .await
+                            .map_err(err)?;
                         return Ok(completed(json!({
                             "intent_id":prepared.intent_id,
                             "state":"REJECTED","rejection_origin":"CENTRAL",
@@ -262,7 +273,8 @@ impl TradeService {
                             "risk_release_state":"NOT_RESERVED"
                         })));
                     }
-                    return match reject_prepost_denial(&r.execution.store, &prepared, &reason).await {
+                    return match reject_prepost_denial(&r.execution.store, &prepared, &reason).await
+                    {
                         Ok(mut result) => {
                             match self.release_unsent(r, &prepared).await {
                                 Ok(()) => result["data"]["risk_release_state"] = json!("RELEASED"),
@@ -541,8 +553,9 @@ impl TradeService {
     ) -> Result<RiskResult, (String, bool)> {
         match self.risk.request(command.clone()).await {
             Ok(v) if v.status == RiskDecisionStatus::Held => Ok(v),
-            Ok(v) if v.status == RiskDecisionStatus::Denied =>
-                Err((v.reason.unwrap_or("RESERVE_DENIED".into()), true)),
+            Ok(v) if v.status == RiskDecisionStatus::Denied => {
+                Err((v.reason.unwrap_or("RESERVE_DENIED".into()), true))
+            }
             Ok(_) => Err(("RESERVE_UNEXPECTED_STATE_NO_POST".into(), false)),
             Err(_) => {
                 let key = self.risk_reservation_key(r, intent);
@@ -554,8 +567,11 @@ impl TradeService {
                         plan_sha256: intent.plan_hash.clone(),
                     },
                 );
-                let observed = self.risk.request(inspect)
-                    .await.map_err(|e| (e.to_owned(), false))?;
+                let observed = self
+                    .risk
+                    .request(inspect)
+                    .await
+                    .map_err(|e| (e.to_owned(), false))?;
                 if observed.status != RiskDecisionStatus::Observed
                     || observed.reservation_state != Some(RiskReservationState::Held)
                 {

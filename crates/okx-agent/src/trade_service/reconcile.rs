@@ -44,8 +44,12 @@ impl TradeService {
             }
         }
         let id = i.intent_id.clone();
-        if r.execution.store.call(deadline(), move |s| s.declined_reserve(&id))
-            .await.map_err(err)? {
+        if r.execution
+            .store
+            .call(deadline(), move |s| s.declined_reserve(&id))
+            .await
+            .map_err(err)?
+        {
             return Ok(completed(json!({
                 "intent":i,"send_state":"NOT_STARTED",
                 "rejection_origin":"CENTRAL","primary_reason":i.incident,

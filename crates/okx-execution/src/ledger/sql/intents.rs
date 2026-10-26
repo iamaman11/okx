@@ -6,26 +6,34 @@ impl AccountStore {
         if key.is_empty() || key.len() > 512 {
             return Err(StoreError::Invalid("INVALID_RESERVE_IDENTITY"));
         }
-        let tx = self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let (state, hash, begin): (String, String, Option<i64>) = tx.query_row(
             "SELECT state,request_hash,begin_post_at FROM intents WHERE intent_id=?1",
-            [id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )?;
         if state != "PREPARED" || begin.is_some() {
             return Err(StoreError::Invalid("INVALID_RESERVE_ATTEMPT_STATE"));
         }
         let name = format!("risk-reserve:{id}");
-        let previous: Option<(String,String,String)> = tx.query_row(
-            "SELECT kind,request_hash,result_ref FROM operation_receipts WHERE operation_id=?1",
-            [&name],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))
-        ).optional()?;
-        if let Some((kind,prior_hash,prior_key)) = previous {
+        let previous: Option<(String, String, String)> = tx
+            .query_row(
+                "SELECT kind,request_hash,result_ref FROM operation_receipts WHERE operation_id=?1",
+                [&name],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?;
+        if let Some((kind, prior_hash, prior_key)) = previous {
             if kind != "RISK_RESERVE_ATTEMPT" || prior_hash != hash || prior_key != key {
                 return Err(StoreError::Invalid("RESERVE_ATTEMPT_IDEMPOTENCY_CONFLICT"));
             }
         } else {
-            tx.execute("INSERT INTO operation_receipts VALUES(?1,'RISK_RESERVE_ATTEMPT',?2,?3,?4)",
-                params![name,hash,key,now])?;
+            tx.execute(
+                "INSERT INTO operation_receipts VALUES(?1,'RISK_RESERVE_ATTEMPT',?2,?3,?4)",
+                params![name, hash, key, now],
+            )?;
         }
         tx.commit()?;
         Ok(())
@@ -34,11 +42,12 @@ impl AccountStore {
     /// Explicit, authenticated Worker DENIED is proof no reservation was
     /// minted; record the first local reason and stop polling this address.
     pub fn reject_denied_reserve(&mut self, id: &str, reason: &str, now: i64) -> StoreResult<()> {
-        self.reject_unsent(id,reason,now)?;
+        self.reject_unsent(id, reason, now)?;
         let operation = format!("risk-reserve:{id}");
         let changed = self.connection.execute(
             "UPDATE operation_receipts SET kind='RISK_RESERVE_DENIED'
-             WHERE operation_id=?1 AND kind='RISK_RESERVE_ATTEMPT'", [&operation]
+             WHERE operation_id=?1 AND kind='RISK_RESERVE_ATTEMPT'",
+            [&operation],
         )?;
         if changed != 1 {
             return Err(StoreError::Invalid("RESERVE_ATTEMPT_MARKER_MISSING"));
@@ -56,7 +65,8 @@ impl AccountStore {
                  AND o.kind='RISK_RESERVE_DENIED'
                  AND o.request_hash=i.request_hash
                  AND t.kind='REJECTED_UNSENT' AND t.request_hash=i.request_hash)",
-            [id],|r|r.get(0)
+            [id],
+            |r| r.get(0),
         )?)
     }
 
@@ -100,7 +110,8 @@ impl AccountStore {
              UNION ALL SELECT request_hash FROM operation_receipts
                WHERE kind='RISK_RESERVE_ATTEMPT' AND result_ref=?1
              LIMIT 1",
-            [key], |r| r.get(0),
+            [key],
+            |r| r.get(0),
         )?;
         tx.execute(
             "UPDATE risk_receipts SET state='RELEASED' WHERE reservation_key=?1",
@@ -163,7 +174,7 @@ impl AccountStore {
                         (r.reservation_key IS NULL AND a.result_ref IS NOT NULL))
                    AND o.kind='REJECTED_UNSENT'
                    AND o.request_hash=i.request_hash AND o.result_ref=i.incident",
-                params![id,self.meta.account_key],
+                params![id, self.meta.account_key],
                 |r| {
                     Ok(UnsentSqlReceipt {
                         reservation_key: r.get(0)?,
