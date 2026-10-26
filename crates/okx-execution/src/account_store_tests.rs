@@ -755,9 +755,15 @@ fn pending_fill_projection_is_exactly_once() {
         fee: Decimal::new(-1, 2),
         currency: "USDT".into(),
     };
+    // The bill and fill are two provenance links for ONE economic fee;
+    // unlike unrelated fees, an identical canonical economic event must
+    // never be charged twice on replay after a pending projection.
+    let mut source_fee = fee("source-fee", "bill-source");
+    source_fee.economic_event_key = "fill:BTC:t:o".into();
+    source_fee.amount = Decimal::new(-1, 2);
     s.ingest_page(&IngestPage {
         fills: vec![f],
-        finance: vec![fee("source-fee", "bill-source")],
+        finance: vec![source_fee],
         ..Default::default()
     })
     .unwrap();
@@ -765,6 +771,22 @@ fn pending_fill_projection_is_exactly_once() {
     assert_eq!(s.project_pending_fills(100).unwrap(), 0);
     assert_eq!(s.active_lots("BTC").unwrap().len(), 1);
     assert_eq!(s.finance_history(1, 10, 0, "", 10).unwrap().len(), 1);
+    assert_eq!(
+        s.finance_totals(1, 10, None)
+            .unwrap()
+            .get(&("USDT".into(), "FEE".into()))
+            .copied(),
+        Some(Decimal::new(-1, 2))
+    );
+    let linked: i64 = s
+        .connection
+        .query_row(
+            "SELECT count(*) FROM finance_source_links WHERE entry_id='source-fee'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(linked, 2, "bill + fill proof, one economic fee");
 }
 #[test]
 fn backup_blocks_risk_until_exchange_and_central_reconcile() {
