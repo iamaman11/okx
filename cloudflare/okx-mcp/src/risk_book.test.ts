@@ -51,10 +51,20 @@ check((await reserve({...request,loss_usd:"5"})).status==="DENIED","USD exact co
 const missing=new Storage();await missing.put("generation",77);await missing.put("account_access_v1",governance);
 check((await reserve(request,missing)).status==="DENIED","worker_storage_missing_is_not_zero_budget");
 check((await transitionRisk(sa,held.entry.key,p,"RELEASED",d,{connection_generation:77,expected_book_sequence:1})).status==="DENIED","no unknown/held release without exact terminal proof");
-const later={...census,source_digest:p,source_read_floor_ms:now+1,generated_at_ms:now+1};
-const begun=await beginRiskPost(sa,held.entry.key,p,1,d,{connection_generation:77,expected_book_sequence:1,census:later,source_proof:{...native,source_digest:p},now_ms:now+2});
-check(begun.status==="POST_AUTHORIZED","single durable POST fence");
-check((await beginRiskPost(sa,held.entry.key,p,1,d,{connection_generation:77,expected_book_sequence:2,census:later,source_proof:{...native,source_digest:p},now_ms:now+3})).status==="DENIED","no duplicate POST fence");
+// The content is identical on fresh reads; the native monotonic proof, not
+// a changed market digest or cross-host epoch, establishes causality.
+const later={...census,source_read_floor_ms:now-60000,generated_at_ms:now-60000};
+const causal_proof={reserve_anchor:held.entry.key,
+  native_incarnation:"1".repeat(32),elapsed_to_proof_ms:40,
+  account_reads:census.account_keys.map(account_key=>({account_key,private_generation:5,
+    source_read_id:"a".repeat(64),content_digest:"b".repeat(64),
+    started_after_held_ms:2,completed_after_held_ms:20}))};
+const invalid=await beginRiskPost(sa,held.entry.key,p,1,d,{connection_generation:77,expected_book_sequence:1,census:later,source_proof:native,causal_proof:{...causal_proof,account_reads:[...causal_proof.account_reads].reverse()},now_ms:now+2});
+check(invalid.status==="DENIED"&&invalid.reason==="INVALID_NATIVE_POST_FENCE","wrong order of cohort readings cannot authorize POST");
+const begun=await beginRiskPost(sa,held.entry.key,p,1,d,{connection_generation:77,expected_book_sequence:1,census:later,source_proof:native,causal_proof,now_ms:now+2});
+check(begun.status==="POST_AUTHORIZED","same-content fresh causal proof with -60s host skew");
+
+check((await beginRiskPost(sa,held.entry.key,p,1,d,{connection_generation:77,expected_book_sequence:2,census:later,source_proof:native,causal_proof,now_ms:now+3})).status==="DENIED","no duplicate POST fence");
 check((await inspectRisk(sa,held.entry.key))?.entry.state==="POSTED","addressed readback");
 const terminalCensus={...census,occupied:census.occupied.map(v=>({...v,cumulative_loss_usd:v.account_key===accountKey(request)?"2":"0"})),source_digest:a,generated_at_ms:now+4,source_read_floor_ms:now+4};
 check((await transitionRisk(sa,held.entry.key,p,"RELEASED",d,{connection_generation:77,expected_book_sequence:2,terminal:{census:terminalCensus,source_proof:{...native,source_digest:a},ledger:{account_uid:a,run_id:base.run_id,intent_id:request.intent_id,state:"FILLED",record_digest:p,cumulative_loss_usd:"2",remaining_exposure_usdt:"0"},now_ms:now+5}})).status==="UPDATED","terminal exact release consumes cumulative losses");
