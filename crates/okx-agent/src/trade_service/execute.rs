@@ -744,24 +744,26 @@ impl TradeService {
                     occupied_usdt: "0".into(),
                     cumulative_loss_usd: exact(financial.1),
                 };
-                let read = started.map(|started_after_held_ms| {
-                    let completed_after_held_ms =
-                        held_received.expect("start time implies HELD clock").elapsed().as_millis() as u64;
-                    PostAccountReadProof {
-                        account_key: c.account_key.clone(),
-                        private_generation: generation,
-                        source_read_id: digest(&(
-                            &c.account_key,
-                            generation,
-                            &data,
+                let read = started
+                    .map(|started_after_held_ms| {
+                        let clock = held_received.ok_or("POST_PROOF_CLOCK_MISSING")?;
+                        let completed_after_held_ms = clock.elapsed().as_millis() as u64;
+                        Ok::<_, String>(PostAccountReadProof {
+                            account_key: c.account_key.clone(),
+                            private_generation: generation,
+                            source_read_id: digest(&(
+                                &c.account_key,
+                                generation,
+                                &data,
+                                started_after_held_ms,
+                                completed_after_held_ms,
+                            ))?,
+                            content_digest: data.clone(),
                             started_after_held_ms,
                             completed_after_held_ms,
-                        ))?,
-                        content_digest: data.clone(),
-                        started_after_held_ms,
-                        completed_after_held_ms,
-                    }
-                }).transpose()?;
+                        })
+                    })
+                    .transpose()?;
                 Ok::<_, String>((c.account_key, occupancy, data, read))
             })
             .buffer_unordered(8)
