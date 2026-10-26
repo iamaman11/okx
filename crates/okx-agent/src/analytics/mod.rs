@@ -1418,16 +1418,34 @@ mod artifact_job_fixtures {
     #[test]
     fn c17_empty_or_short_manifest_page_fails_without_unbounded_scan() {
         let (root, service) = super::artifact_job_fixtures::service();
-        let page_id = service.artifacts.publish_evidence(&Vec::<Value>::new()).unwrap().0;
-        let manifest = service.artifacts.publish_evidence(&json!({
-            "trade_pages":[page_id],"total_trades":2
-        })).unwrap().0;
+        let page_id = service
+            .artifacts
+            .publish_evidence(&Vec::<Value>::new())
+            .unwrap()
+            .0;
+        let manifest = service
+            .artifacts
+            .publish_evidence(&json!({
+                "trade_pages":[page_id],"total_trades":2
+            }))
+            .unwrap()
+            .0;
         let id = "d".repeat(64);
-        service.jobs.enqueue("c17-empty".into(), id.clone()).unwrap();
-        service.jobs.update(&id, jobs::State::Completed, Some(manifest), None).unwrap();
-        let err = service.result_page(id.clone(), None, 5, ResearchResultView::Trades).unwrap_err();
+        service
+            .jobs
+            .enqueue("c17-empty".into(), id.clone())
+            .unwrap();
+        service
+            .jobs
+            .update(&id, jobs::State::Completed, Some(manifest), None)
+            .unwrap();
+        let err = service
+            .result_page(id.clone(), None, 5, ResearchResultView::Trades)
+            .unwrap_err();
         assert_eq!(err, "RESULT_PAGE_TRUNCATED");
-        let err = service.result_page(id, Some("2".into()), 5, ResearchResultView::Trades).unwrap_err();
+        let err = service
+            .result_page(id, Some("2".into()), 5, ResearchResultView::Trades)
+            .unwrap_err();
         assert_eq!(err, "RESULT_CURSOR_OUT_OF_RANGE");
         drop(service);
         std::fs::remove_dir_all(root).unwrap();

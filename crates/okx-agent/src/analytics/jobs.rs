@@ -176,9 +176,11 @@ impl Jobs {
         let existing = Self::read(&tx, &hash)?;
         // One SQL transaction owns the bounded research/market admission.
         // Duplicate idempotent submissions do not consume new queue slots.
-        if existing.is_none() || existing.as_ref().is_some_and(|j| {
-            j.state == State::Failed && is_transient_rate_defer(j.error.as_deref())
-        }) {
+        if existing.is_none()
+            || existing.as_ref().is_some_and(|j| {
+                j.state == State::Failed && is_transient_rate_defer(j.error.as_deref())
+            })
+        {
             let admitted: i64 = tx
                 .query_row(
                     "SELECT COUNT(*) FROM research_jobs WHERE state IN ('queued','running')",
@@ -472,13 +474,18 @@ mod tests {
             }
         }
         assert_eq!(
-            jobs.enqueue("overflow".into(), "c16-overflow".into()).unwrap_err(),
+            jobs.enqueue("overflow".into(), "c16-overflow".into())
+                .unwrap_err(),
             "RESOURCE_BUSY:RESEARCH_QUEUE_FULL"
         );
         // Repeating an accepted idempotent request does not take another slot.
         assert!(!jobs.enqueue("idem-0".into(), "c16-job-0".into()).unwrap().1);
         jobs.cancel("c16-job-2", "cancel-c16-slot").unwrap();
-        assert!(jobs.enqueue("overflow".into(), "c16-overflow".into()).unwrap().1);
+        assert!(
+            jobs.enqueue("overflow".into(), "c16-overflow".into())
+                .unwrap()
+                .1
+        );
     }
 
     #[test]

@@ -13,9 +13,7 @@ fn cpu_worker_budget(logical_cores: usize) -> usize {
 }
 impl Default for CpuExecutor {
     fn default() -> Self {
-        let n = cpu_worker_budget(
-            std::thread::available_parallelism().map_or(1, |n| n.get()),
-        );
+        let n = cpu_worker_budget(std::thread::available_parallelism().map_or(1, |n| n.get()));
         Self {
             cpu: Arc::new(Semaphore::new(n)),
             queue: Arc::new(Semaphore::new(32)),
