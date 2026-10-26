@@ -1,6 +1,6 @@
 import {validGovernance,projectRiskPolicy,accessEnabled,GOVERNANCE_STORAGE_KEY} from "./account_governance.js";
 import {amount,units,beginRiskPost,readRiskBook,inspectRisk,reserveRisk,transitionRisk,
-  type CompleteRiskCensus,type NativeSessionRiskProof,type RiskReservation,
+  type CompleteRiskCensus,type NativeSessionRiskProof,type CausalPostProof,type RiskReservation,
   type TerminalRiskReleaseProof} from "./risk_book.js";
 
 const COMMAND_SCHEMA="okx.risk-command/v1";
@@ -142,7 +142,8 @@ export async function handleNativeRiskCommand(
   if(a.action==="BEGIN_POST"){
     if(typeof a.reservation_key!=="string"||typeof a.plan_sha256!=="string"
       ||!Number.isSafeInteger(a.policy_revision)||!Number.isSafeInteger(a.expected_risk_book_sequence)
-      ||typeof a.source_proof_sha256!=="string")
+      ||typeof a.source_proof_sha256!=="string"
+      ||!isObject(a.causal_proof))
       return deny(id,"INVALID_POST_FENCE");
     const proof=nativeEvidence(a.census,session.connection_generation);
     if(!proof||!isObject(a.census)||!Array.isArray(a.census.account_keys)||
@@ -160,7 +161,7 @@ export async function handleNativeRiskCommand(
       a.policy_revision as number,a.source_proof_sha256,
       {connection_generation:session.connection_generation,
        expected_book_sequence:a.expected_risk_book_sequence as number,
-       census,source_proof:proof,now_ms});
+       census,source_proof:proof,now_ms,causal_proof:a.causal_proof as unknown as CausalPostProof});
     return result.status==="POST_AUTHORIZED"
       ?{schema:RESULT_SCHEMA,command_id:id,status:"POST_AUTHORIZED",reason:null,
         reservation_key:a.reservation_key,risk_book_sequence:result.book_sequence!,
