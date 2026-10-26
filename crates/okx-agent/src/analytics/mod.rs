@@ -1634,24 +1634,39 @@ mod artifact_job_fixtures {
     #[test]
     fn c17_retention_keeps_shared_pinned_result_and_expires_only_unpinned_job() {
         let (root, service) = super::artifact_job_fixtures::service();
-        let page = service.artifacts.publish_evidence(&vec![json!({"row":1})]).unwrap().0;
-        let manifest = service.artifacts.publish_evidence(&json!({
-            "trade_pages":[page.clone()],"total_trades":1
-        })).unwrap().0;
+        let page = service
+            .artifacts
+            .publish_evidence(&vec![json!({"row":1})])
+            .unwrap()
+            .0;
+        let manifest = service
+            .artifacts
+            .publish_evidence(&json!({
+                "trade_pages":[page.clone()],"total_trades":1
+            }))
+            .unwrap()
+            .0;
         let first = "8".repeat(64);
         let second = "7".repeat(64);
         for (key, id) in [("shared-first", &first), ("shared-second", &second)] {
             service.jobs.enqueue(key.into(), id.clone()).unwrap();
-            service.jobs.update(id, jobs::State::Completed, Some(manifest.clone()), None).unwrap();
+            service
+                .jobs
+                .update(id, jobs::State::Completed, Some(manifest.clone()), None)
+                .unwrap();
         }
         service.pin_job(&second, true).unwrap();
         let future = chrono::Utc::now().timestamp_millis().max(0) as u64 + 8 * 86_400_000;
         assert_eq!(service.apply_retention(future).unwrap(), 1);
         assert_eq!(
-            service.result_page(first, None, 1, ResearchResultView::Trades).unwrap_err(),
+            service
+                .result_page(first, None, 1, ResearchResultView::Trades)
+                .unwrap_err(),
             "RESULT_EXPIRED"
         );
-        let still_live = service.result_page(second.clone(), None, 1, ResearchResultView::Trades).unwrap();
+        let still_live = service
+            .result_page(second.clone(), None, 1, ResearchResultView::Trades)
+            .unwrap();
         assert_eq!(still_live["rows"][0]["row"], 1);
         assert!(service.artifacts.read_evidence(&page).is_ok());
         service.pin_job(&second, false).unwrap();
