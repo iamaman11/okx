@@ -243,6 +243,7 @@ impl TradeService {
             let held = self
                 .reserve_inspect_retry(&state, reserve, &prepared, r)
                 .await?;
+            let held_received = Instant::now();
             let receipt = self.local_receipt(r, &prepared, &held, usd, &conversion)?;
             r.execution
                 .store
@@ -253,7 +254,7 @@ impl TradeService {
                 return Err("COMMAND_EXPIRED".into());
             }
             match self
-                .fence_inspect_retry(&state, &held, &prepared, until)
+                .fence_inspect_retry(&state, &held, &prepared, until, held_received)
                 .await
             {
                 Ok(v) => central = Some(v),
@@ -521,6 +522,7 @@ impl TradeService {
         held: &RiskResult,
         intent: &StoredIntent,
         until: Instant,
+        held_received: Instant,
     ) -> Result<RiskResult, String> {
         let key = held
             .reservation_key
@@ -533,7 +535,9 @@ impl TradeService {
             if Instant::now() >= until {
                 return Err("COMMAND_EXPIRED".into());
             }
-            let census = self.census(state).await?;
+            let (census, causal_proof) = self
+                .census_after_held(state, held_received, &key)
+                .await?;
             let command = self.risk_command(
                 state,
                 format!("fence_{}", intent.client_order_id),
@@ -544,6 +548,7 @@ impl TradeService {
                     expected_risk_book_sequence: sequence,
                     source_proof_sha256: digest(&census)?,
                     census,
+                    causal_proof,
                 },
             );
             match self.risk.request(command).await {
@@ -579,12 +584,40 @@ impl TradeService {
         &self,
         state: &CentralGovernanceSnapshot,
     ) -> Result<NativeRiskCensus, String> {
+        self.census_with_reads(state, None).await.map(|v| v.0)
+    }
+
+    async fn census_after_held(
+        &self,
+        state: &CentralGovernanceSnapshot,
+        held_received: Instant,
+        reservation: &str,
+    ) -> Result<(NativeRiskCensus, CausalPostProof), String> {
+        let (census, account_reads) = self.census_with_reads(state, Some(held_received)).await?;
+        let proof = CausalPostProof {
+            reserve_anchor: reservation.to_owned(),
+            native_incarnation: native_process_incarnation()?.to_owned(),
+            elapsed_to_proof_ms: held_received.elapsed().as_millis() as u64,
+            account_reads,
+        };
+        if !proof.valid(&census) {
+            return Err("POST_CAUSAL_READ_PROOF_INVALID".into());
+        }
+        Ok((census, proof))
+    }
+
+    async fn census_with_reads(
+        &self,
+        state: &CentralGovernanceSnapshot,
+        held_received: Option<Instant>,
+    ) -> Result<(NativeRiskCensus, Vec<PostAccountReadProof>), String> {
         if !self.accounts.failures().await.is_empty() {
             return Err("ACCOUNT_COHORT_UNAVAILABLE".into());
         }
         let mut keys = Vec::new();
         let mut occupied = Vec::new();
         let mut evidence = Vec::new();
+        let mut post_reads = Vec::new();
         let floor = now();
         use futures_util::{StreamExt, TryStreamExt, stream};
         let cohort = state
@@ -596,6 +629,8 @@ impl TradeService {
             .collect::<Vec<_>>();
         let pages = stream::iter(cohort)
             .map(|c| async move {
+                // The timer starts before fetching any account/private/venue facts.
+                let started = held_received.map(|tick| tick.elapsed().as_millis() as u64);
                 let r = self.resources(&c.account_key).await?;
                 if !r.source_identity_ready().await {
                     return Err("COHORT_SOURCE_GENERATION_UNVERIFIED".into());
@@ -709,16 +744,38 @@ impl TradeService {
                     occupied_usdt: "0".into(),
                     cumulative_loss_usd: exact(financial.1),
                 };
-                Ok::<_, String>((c.account_key, occupancy, data))
+                let read = started.map(|started_after_held_ms| {
+                    let completed_after_held_ms =
+                        held_received.expect("start time implies HELD clock").elapsed().as_millis() as u64;
+                    PostAccountReadProof {
+                        account_key: c.account_key.clone(),
+                        private_generation: generation,
+                        source_read_id: digest(&(
+                            &c.account_key,
+                            generation,
+                            &data,
+                            started_after_held_ms,
+                            completed_after_held_ms,
+                        ))?,
+                        content_digest: data.clone(),
+                        started_after_held_ms,
+                        completed_after_held_ms,
+                    }
+                }).transpose()?;
+                Ok::<_, String>((c.account_key, occupancy, data, read))
             })
             .buffer_unordered(8)
             .try_collect::<Vec<_>>()
             .await?;
-        for (key, row, proof) in pages {
+        for (key, row, proof, read) in pages {
             keys.push(key);
             occupied.push(row);
             evidence.push(proof);
+            if let Some(read) = read {
+                post_reads.push(read);
+            }
         }
+        post_reads.sort_by(|a, b| a.account_key.cmp(&b.account_key));
 
         keys.sort();
         occupied.sort_by(|a, b| a.account_key.cmp(&b.account_key));
@@ -727,7 +784,7 @@ impl TradeService {
             return Err("COHORT_EVIDENCE_STALE".into());
         }
         let content = digest(&evidence)?;
-        Ok(NativeRiskCensus {
+        Ok((NativeRiskCensus {
             account_keys: keys,
             occupied,
             generated_at_ms: generated as u64,
@@ -738,8 +795,20 @@ impl TradeService {
             native_account_evidence_complete: true,
             native_order_evidence_complete: true,
             native_ledger_evidence_complete: true,
-        })
+        }, post_reads))
     }
+}
+fn native_process_incarnation() -> Result<&'static str, String> {
+    static INSTANCE: std::sync::OnceLock<Result<String, String>> = std::sync::OnceLock::new();
+    INSTANCE
+        .get_or_init(|| {
+            let mut bytes = [0u8; 16];
+            getrandom::fill(&mut bytes).map_err(err)?;
+            Ok(bytes.iter().map(|b| format!("{b:02x}")).collect::<String>())
+        })
+        .as_ref()
+        .map(String::as_str)
+        .map_err(Clone::clone)
 }
 pub(super) async fn prepare_on_owner<T, F>(
     store: &AccountStoreHandle,
