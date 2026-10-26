@@ -243,7 +243,14 @@ fn run_fixed_batch(
         let complete = std::thread::scope(|scope| {
             let spawned = group
                 .iter()
-                .map(|bars| scope.spawn(move || grid(bars, replay_spec, variants, &|| false).unwrap().test.hash))
+                .map(|bars| {
+                    scope.spawn(move || {
+                        grid(bars, replay_spec, variants, &|| false)
+                            .unwrap()
+                            .test
+                            .hash
+                    })
+                })
                 .collect::<Vec<_>>();
             spawned
                 .into_iter()
