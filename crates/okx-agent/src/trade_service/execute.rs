@@ -552,10 +552,10 @@ impl TradeService {
         r: &AccountResources,
     ) -> Result<RiskResult, (String, bool)> {
         let first = self.risk.request(command).await;
-        if let Ok(held) = &first {
-            if held.status == RiskDecisionStatus::Held {
-                return Ok(held.clone());
-            }
+        if let Ok(held) = &first
+            && held.status == RiskDecisionStatus::Held
+        {
+            return Ok(held.clone());
         }
         // DENIED is not itself proof of no existing reservation: a replayed
         // identity may have HELD capacity in Worker already. INSPECT the exact
