@@ -744,9 +744,7 @@ impl TradeService {
                     && c.account_key == selected
                 {
                     let fresh_rate = Self::usd_conversion(&snapshot)?.usd_per_usdt;
-                    if dec(&fresh_rate)? != dec(original_rate)? {
-                        return Err("POST_FX_SOURCE_CHANGED_REQUIRES_NEW_RESERVE".into());
-                    }
+                    verify_post_held_fx(original_rate, &fresh_rate)?;
                 }
                 let algos = r
                     .observer
@@ -914,6 +912,20 @@ impl TradeService {
         ))
     }
 }
+/// Compare exact 9-decimal USD/USDT conversion values on native fresh
+/// post-HELD snapshot; content equality is allowed only after a new read.
+fn verify_post_held_fx(reserved: &str, observed: &str) -> Result<(), String> {
+    let before = dec(reserved)?;
+    let after = dec(observed)?;
+    if before <= Decimal::ZERO || after <= Decimal::ZERO {
+        return Err("POST_FX_SOURCE_INVALID".into());
+    }
+    if before != after {
+        return Err("POST_FX_SOURCE_CHANGED_REQUIRES_NEW_RESERVE".into());
+    }
+    Ok(())
+}
+
 fn native_process_incarnation() -> Result<&'static str, String> {
     static INSTANCE: std::sync::OnceLock<Result<String, String>> = std::sync::OnceLock::new();
     INSTANCE
@@ -1074,6 +1086,20 @@ where
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn k4_post_held_fx_same_rate_or_changed_rate() {
+        assert!(verify_post_held_fx("0.999000000", "0.999").is_ok());
+        assert_eq!(
+            verify_post_held_fx("0.999", "0.998").unwrap_err(),
+            "POST_FX_SOURCE_CHANGED_REQUIRES_NEW_RESERVE"
+        );
+        assert_eq!(
+            verify_post_held_fx("0", "1").unwrap_err(),
+            "POST_FX_SOURCE_INVALID"
+        );
+        assert!(verify_post_held_fx("1", "invalid").is_err());
+    }
     struct FixtureGateway {
         posts: AtomicUsize,
         lose: bool,
