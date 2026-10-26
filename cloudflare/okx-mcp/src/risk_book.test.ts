@@ -137,7 +137,8 @@ check((await releaseUnsentRisk(neverArrived,lateKey,p,0,77,
   "wrong native account cannot abort another risk identity");
 check((await releaseUnsentRisk(neverArrived,lateKey,p,0,77,lateProof)).status==="UPDATED",
   "SQL no-send fences an absent reservation with initial sequence zero");
-check((await reserveRisk(neverArrived,policy,census,lateRequest,native)).reason==="RESERVE_FENCED_NO_SEND",
+const lateAttempt=await reserveRisk(neverArrived,policy,census,lateRequest,native);
+check(lateAttempt.status==="DENIED"&&lateAttempt.reason==="RESERVE_FENCED_NO_SEND",
   "a delayed exchange-independent RESERVE never mints risk after the no-send fence");
 const absentBook=await readRiskBook(neverArrived);
 check(absentBook?.occupied_usdt==="0"&&absentBook?.consumed_loss_usd==="0"&&
