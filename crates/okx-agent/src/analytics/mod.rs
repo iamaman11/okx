@@ -1547,6 +1547,52 @@ mod artifact_job_fixtures {
         std::fs::remove_dir_all(root).unwrap();
     }
     #[test]
+    fn c17_verified_export_reads_all_page_checksums_and_exact_rows() {
+        let (root, service) = super::artifact_job_fixtures::service();
+        let first = (0..50).map(|i| json!({"row":i})).collect::<Vec<_>>();
+        let second = vec![json!({"row":50})];
+        let (page_a, path_a) = service.artifacts.publish_evidence(&first).unwrap();
+        let page_b = service.artifacts.publish_evidence(&second).unwrap().0;
+        let equity = service.artifacts.publish_evidence(&vec![(1, 100.0),(2, 101.0)]).unwrap().0;
+        let manifest = service.artifacts.publish_evidence(&json!({
+            "trade_pages":[page_a,page_b],"total_trades":51,
+            "equity_curve_pages":[equity],"total_equity_points":2,
+            "dataset_hash":"fixture-dataset","code_version":"fixture"
+        })).unwrap().0;
+        let job = "9".repeat(64);
+        service.jobs.enqueue("c17-export".into(), job.clone()).unwrap();
+        service.jobs.update(&job, jobs::State::Completed, Some(manifest), None).unwrap();
+        let receipt = service.result_page(job.clone(), None, 20, ResearchResultView::Export).unwrap();
+        assert_eq!(receipt["integrity"]["quality"], "complete");
+        assert_eq!(receipt["integrity"]["trades"]["rows"], 51);
+        assert_eq!(receipt["integrity"]["trades"]["pages"], 2);
+        assert_eq!(receipt["integrity"]["equity"]["rows"], 2);
+        assert_eq!(receipt["dataset_hash"], "fixture-dataset");
+        let data = service.result_page(job.clone(), None, 50, ResearchResultView::Trades).unwrap();
+        assert_eq!(data["rows"].as_array().unwrap().len(), 50);
+        std::fs::write(path_a, b"tampered-page").unwrap();
+        assert_eq!(
+            service.result_page(job, None, 20, ResearchResultView::Export).unwrap_err(),
+            "ARTIFACT_CORRUPT"
+        );
+        drop(service);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn c17_export_does_not_claim_complete_on_count_mismatch() {
+        let (root, service) = super::artifact_job_fixtures::service();
+        let page = service.artifacts.publish_evidence(&vec![json!({"row":1})]).unwrap().0;
+        let manifest = json!({"trade_pages":[page],"total_trades":2});
+        assert_eq!(
+            verify_export_manifest(&service.artifacts, &manifest).unwrap_err(),
+            "EXPORT_ROW_COUNT_MISMATCH"
+        );
+        drop(service);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn c17_cursor_survives_catalog_restart_and_is_not_transferable() {
         let (root, service) = super::artifact_job_fixtures::service();
         let page = service
