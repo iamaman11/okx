@@ -535,6 +535,9 @@ impl AnalyticsService {
                     position += take;
                 }
             }
+            if cursor.is_some() && offset >= total {
+                return Err("RESULT_CURSOR_OUT_OF_RANGE".into());
+            }
             while output.len() > 1
                 && serde_json::to_vec(&output)
                     .map_err(|e| e.to_string())?
@@ -573,6 +576,9 @@ impl AnalyticsService {
             .or_else(|| value.get("total_rows"))
             .and_then(Value::as_u64)
             .unwrap_or(0) as usize;
+        if cursor.is_some() && offset >= total {
+            return Err("RESULT_CURSOR_OUT_OF_RANGE".into());
+        }
         let mut page = Vec::new();
         let mut position = offset;
         while page.len() < limit as usize && position < total {
@@ -584,6 +590,11 @@ impl AnalyticsService {
                 .artifacts
                 .read_evidence_json(id)
                 .map_err(|e| e.to_string())?;
+            if rows.len() <= position % 50 {
+                // A missing, empty or prematurely short page must never
+                // spin at the same cursor or pretend the result is complete.
+                return Err("RESULT_PAGE_TRUNCATED".into());
+            }
             let take = (limit as usize - page.len()).min(rows.len() - position % 50);
             page.extend(rows.into_iter().skip(position % 50).take(take));
             position += take;
@@ -1400,6 +1411,24 @@ mod artifact_job_fixtures {
         drop(s);
         std::fs::remove_dir_all(root).unwrap();
     }
+    #[test]
+    fn c17_empty_or_short_manifest_page_fails_without_unbounded_scan() {
+        let (root, service) = super::artifact_job_fixtures::service();
+        let page_id = service.artifacts.publish_evidence(&Vec::<Value>::new()).unwrap().0;
+        let manifest = service.artifacts.publish_evidence(&json!({
+            "trade_pages":[page_id],"total_trades":2
+        })).unwrap().0;
+        let id = "d".repeat(64);
+        service.jobs.enqueue("c17-empty".into(), id.clone()).unwrap();
+        service.jobs.update(&id, jobs::State::Completed, Some(manifest), None).unwrap();
+        let err = service.result_page(id.clone(), None, 5, ResearchResultView::Trades).unwrap_err();
+        assert_eq!(err, "RESULT_PAGE_TRUNCATED");
+        let err = service.result_page(id, Some("2".into()), 5, ResearchResultView::Trades).unwrap_err();
+        assert_eq!(err, "RESULT_CURSOR_OUT_OF_RANGE");
+        drop(service);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[tokio::test]
     async fn immutable_result_pages_and_restart_catalog() {
         let (root, s) = service();
