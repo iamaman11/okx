@@ -2845,3 +2845,179 @@ async fn three_decision_sources_share_sql_owner_and_fail_closed() {
         .await
         .unwrap();
 }
+
+// K6 V-02: one SQLite owner observes two partial entry fills, a full exit,
+// fill/bill echoes and funding, including a reopen. No synthetic PnL owner.
+#[test]
+fn k6_v02_sqlite_partial_fills_close_fees_funding_and_replay() {
+    let mut s = store();
+    let definition = s.ensure_manual_instance(1).unwrap();
+    let q = Decimal::new(9, 2);
+    for (name, operation, side, risk_increase) in [
+        ("v02-open", "open", "buy", true),
+        ("v02-close", "close", "sell", false),
+    ] {
+        let decision = Decision {
+            decision_id: format!("decision:{name}"),
+            instance_id: Some("manual".into()),
+            decision_at: 2,
+            input_digest: format!("input:{name}"),
+            policy_revision: 1,
+            code_version: "fixture-v02".into(),
+        };
+        let request = NewIntent {
+            plan: IntentPlan {
+                strategy_definition_id: definition.definition_id.clone(),
+                strategy_definition_version: definition.version.clone(),
+                strategy_parameters_digest: definition.parameters_digest.clone(),
+                operation: operation.into(),
+                side: side.into(),
+                position_side: "long".into(),
+                quantity: q,
+                limit_price: Decimal::from(if risk_increase { 101 } else { 102 }),
+                stop_price: if risk_increase { Some(Decimal::from(95)) } else { None },
+                strategy_instance: "manual".into(),
+                planned_loss_usd: if risk_increase { Decimal::ONE } else { Decimal::ZERO },
+                source_generation: 1,
+                private_source_generation: 1,
+                contract_value: Decimal::ONE,
+                inverse: false,
+                settlement_currency: "USDT".into(),
+            },
+            intent_id: name.into(),
+            idempotency_key: name.into(),
+            request_hash: format!("hash:{name}"),
+            client_order_id: format!("client:{name}"),
+            deadline: 100,
+            plan_hash: format!("plan:{name}"),
+            policy_revision: 1,
+            risk_increase,
+            instrument_id: "BTC-USDT-SWAP".into(),
+        };
+        s.prepare(&decision, &request).unwrap();
+    }
+    let open_a = Fill {
+        fill_id: "v02-fill-a".into(),
+        instrument_id: "BTC-USDT-SWAP".into(),
+        trade_id: "v02-trade-a".into(),
+        exchange_order_id: "v02-order-open".into(),
+        intent_id: Some("v02-open".into()),
+        time: 3,
+        qty: Decimal::new(4, 2),
+        price: Decimal::from(100),
+        fee: Decimal::new(-4, 3),
+        currency: "USDT".into(),
+        side: "buy".into(),
+    };
+    let open_b = Fill {
+        fill_id: "v02-fill-b".into(),
+        trade_id: "v02-trade-b".into(),
+        time: 4,
+        qty: Decimal::new(5, 2),
+        price: Decimal::from(101),
+        fee: Decimal::new(-505, 5),
+        ..open_a.clone()
+    };
+    let exit = Fill {
+        fill_id: "v02-fill-exit".into(),
+        trade_id: "v02-trade-exit".into(),
+        exchange_order_id: "v02-order-close".into(),
+        intent_id: Some("v02-close".into()),
+        time: 6,
+        qty: q,
+        price: Decimal::from(102),
+        fee: Decimal::new(-918, 5),
+        side: "sell".into(),
+        ..open_a.clone()
+    };
+    for fill in [&open_a, &open_b] {
+        s.ingest_attributed_fill(
+            fill.clone(),
+            FillEffect::Open { side: "long".into() },
+            None,
+        )
+        .unwrap();
+    }
+    assert_eq!(
+        s.active_lots("BTC-USDT-SWAP")
+            .unwrap()
+            .iter()
+            .map(|v| v.remaining_qty)
+            .sum::<Decimal>(),
+        q,
+    );
+    // The bill and fill point at the same economic event: exactly one cost.
+    let bill = FinanceEntry {
+        entry_id: "v02-bill-a".into(),
+        economic_event_key: "fill:BTC-USDT-SWAP:v02-trade-a:v02-order-open".into(),
+        component: "FEE".into(),
+        allocation_leg: "account".into(),
+        amount: Decimal::new(-4, 3),
+        currency: "USDT".into(),
+        instance_id: Some("manual".into()),
+        source_ref: "bill:v02-bill-a".into(),
+        time: 3,
+        reverses_entry_id: None,
+    };
+    let funding = FinanceEntry {
+        entry_id: "v02-funding".into(),
+        economic_event_key: "funding:v02".into(),
+        component: "FUNDING".into(),
+        allocation_leg: "account".into(),
+        amount: Decimal::new(-2, 3),
+        currency: "USDT".into(),
+        instance_id: Some("manual".into()),
+        source_ref: "exchange:funding:v02".into(),
+        time: 5,
+        reverses_entry_id: None,
+    };
+    s.ingest_page(&IngestPage {
+        finance: vec![bill.clone(), funding.clone()],
+        ..Default::default()
+    })
+    .unwrap();
+    s.ingest_attributed_fill(exit.clone(), FillEffect::Reduce, None)
+        .unwrap();
+    let path = s.path.clone();
+    let account = s.meta.clone();
+    drop(s);
+    let mut s = AccountStore::open_existing(path, &account.account_key, &account.installation_id)
+        .unwrap();
+    for fill in [&open_a, &open_b] {
+        s.ingest_attributed_fill(
+            fill.clone(),
+            FillEffect::Open { side: "long".into() },
+            None,
+        )
+        .unwrap();
+    }
+    s.ingest_attributed_fill(exit, FillEffect::Reduce, None)
+        .unwrap();
+    s.ingest_page(&IngestPage {
+        finance: vec![bill, funding],
+        ..Default::default()
+    })
+    .unwrap();
+    assert!(
+        s.active_lots("BTC-USDT-SWAP").unwrap().is_empty(),
+        "V-02 must finish FLAT, never duplicate a reduced lot"
+    );
+    let account = s.finance_totals(1, 10, None).unwrap();
+    let manual = s.finance_totals(1, 10, Some("manual")).unwrap();
+    for (component, expected) in [
+        ("REALIZED_PNL", Decimal::new(13, 2)),
+        ("FEE", Decimal::new(-1823, 5)),
+        ("FUNDING", Decimal::new(-2, 3)),
+    ] {
+        let key = ("USDT".to_owned(), component.to_owned());
+        assert_eq!(account.get(&key), Some(&expected), "account {component}");
+        assert_eq!(manual.get(&key), Some(&expected), "manual {component}");
+    }
+    let net = account
+        .iter()
+        .filter(|((ccy, component), _)| ccy == "USDT" && ["REALIZED_PNL", "FEE", "FUNDING"].contains(&component.as_str()))
+        .map(|(_, amount)| *amount)
+        .sum::<Decimal>();
+    assert_eq!(net, Decimal::new(109770, 6));
+    s.integrity_check().unwrap();
+}
