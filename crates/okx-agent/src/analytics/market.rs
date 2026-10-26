@@ -262,6 +262,12 @@ fn compute_row(
         .is_none_or(|coverage| !coverage.complete);
     if !bars.is_empty() && incomplete_candles {
         gaps.push("CANDLE_RANGE_INCOMPLETE_OR_GAPPED".into());
+        // Preserve the precise public reason alongside the new typed evidence.
+        if bars.windows(2).any(|pair| {
+            pair[0].time.checked_add(request.timeframe_ms) != Some(pair[1].time)
+        }) {
+            gaps.push("CANDLE_INTERIOR_GAP".into());
+        }
     }
     let mut metrics = serde_json::Map::new();
     let mut units = serde_json::Map::new();
