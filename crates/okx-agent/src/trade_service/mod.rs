@@ -18,11 +18,12 @@ use rust_decimal::{Decimal, RoundingStrategy};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
+    collections::HashMap,
     str::FromStr,
     sync::Arc,
     time::{Duration, Instant},
 };
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 mod execute;
 mod plan;
 mod reconcile;
@@ -34,6 +35,116 @@ pub struct TradeService {
     risk: NativeRiskClient,
     governance: RwLock<Option<CentralGovernanceSnapshot>>,
     analytics: RwLock<Option<crate::analytics::AnalyticsService>>,
+    /// Non-authoritative polling schedule only; SQLite and RiskBook retain
+    /// all decision, reservation, order, and financial state.
+    recovery_schedule: Mutex<RecoverySchedule>,
+}
+
+#[derive(Default)]
+struct RecoverySchedule {
+    pages: HashMap<String, usize>,
+    attempts: HashMap<(String, String), RecoveryAttempt>,
+}
+struct RecoveryAttempt {
+    count: u8,
+    due: Instant,
+    incident_emitted: bool,
+}
+const RECOVERY_DELAYS_SECONDS: [u64; 6] = [1, 2, 4, 8, 16, 30];
+const RECOVERY_BATCH: usize = 100;
+impl RecoverySchedule {
+    fn page(&self, account: &str) -> usize {
+        *self.pages.get(account).unwrap_or(&0)
+    }
+
+    fn advance_page(&mut self, account: &str, offset: usize, len: usize) {
+        self.pages.insert(
+            account.to_owned(),
+            if len == RECOVERY_BATCH && offset < 100_000 - RECOVERY_BATCH {
+                offset + RECOVERY_BATCH
+            } else {
+                0
+            },
+        );
+    }
+
+    fn due(&mut self, account: &str, intent: &str, clock: Instant) -> bool {
+        let key = (account.to_owned(), intent.to_owned());
+        // Scheduling metadata is bounded; a pruned entry only causes an
+        // earlier safe readback, never another risk grant or venue POST.
+        if self.attempts.len() >= 16_384 && !self.attempts.contains_key(&key) {
+            self.attempts.retain(|_, value| value.due > clock);
+            if self.attempts.len() >= 16_384 {
+                self.attempts.clear();
+            }
+        }
+        let attempt = self.attempts.entry(key).or_insert(RecoveryAttempt {
+            count: 0,
+            due: clock,
+            incident_emitted: false,
+        });
+        if clock < attempt.due {
+            return false;
+        }
+        let seconds = RECOVERY_DELAYS_SECONDS[usize::from(attempt.count.min(5))];
+        // Stable bounded jitter distributes same-second account recovery
+        // across workers without requiring a new RNG or a persistence layer.
+        let key_digest = Sha256::digest(format!("{account}:{intent}").as_bytes());
+        let jitter_ms = u64::from(key_digest[0]) % 251;
+        attempt.due = clock + Duration::from_millis(seconds * 1_000 + jitter_ms);
+        attempt.count = attempt.count.saturating_add(1);
+        true
+    }
+
+    fn finish(&mut self, account: &str, intent: &str) {
+        self.attempts.remove(&(account.to_owned(), intent.to_owned()));
+    }
+
+    fn overdue_incident(
+        &mut self,
+        account: &str,
+        intent: &str,
+        deadline_ms: i64,
+        now_ms: i64,
+    ) -> bool {
+        if now_ms.saturating_sub(deadline_ms) < 30_000 {
+            return false;
+        }
+        let Some(attempt) = self.attempts.get_mut(&(account.to_owned(), intent.to_owned()))
+        else {
+            return false;
+        };
+        if attempt.incident_emitted {
+            return false;
+        }
+        attempt.incident_emitted = true;
+        true
+    }
+}
+#[cfg(test)]
+mod recovery_schedule_tests {
+    use super::*;
+    #[test]
+    fn bounded_exponential_backoff_and_one_incident() {
+        let mut r = RecoverySchedule::default();
+        let start = Instant::now();
+        assert!(r.due("account", "intent", start));
+        assert!(!r.due("account", "intent", start));
+        let mut tick = start;
+        for seconds in RECOVERY_DELAYS_SECONDS {
+            tick += Duration::from_millis(seconds * 1_000 + 251);
+            assert!(r.due("account", "intent", tick));
+        }
+        assert!(!r.overdue_incident("account", "intent", 50_000, 79_999));
+        assert!(r.overdue_incident("account", "intent", 50_000, 80_000));
+        assert!(!r.overdue_incident("account", "intent", 50_000, 90_000));
+        r.advance_page("account", 0, RECOVERY_BATCH);
+        assert_eq!(r.page("account"), RECOVERY_BATCH);
+        r.advance_page("account", RECOVERY_BATCH, 3);
+        assert_eq!(r.page("account"), 0);
+        r.finish("account", "intent");
+        assert!(r.due("account", "intent", tick));
+    }
 }
 fn now() -> i64 {
     Utc::now().timestamp_millis()
@@ -74,6 +185,7 @@ impl TradeService {
             risk,
             governance: RwLock::new(None),
             analytics: RwLock::new(None),
+            recovery_schedule: Mutex::new(RecoverySchedule::default()),
         }
     }
     pub async fn set_analytics(&self, analytics: crate::analytics::AnalyticsService) {
