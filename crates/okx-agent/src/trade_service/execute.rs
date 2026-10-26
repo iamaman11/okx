@@ -3,6 +3,12 @@ use okx_api::{
     ApiOrderSide, ApiOrderType, ApiPositionSide, ApiTradeMode, ApiTriggerPriceType,
     AttachedAlgoOrderRequest, PlaceOrderRequest,
 };
+/// Immutable provenance for checking the fresh post-HELD FX rate against the
+/// exact native account that owns the central reservation.
+struct PostFxFence<'a> {
+    owner: &'a AccountResources,
+    conversion: &'a UsdConversion,
+}
 impl TradeService {
     pub(super) async fn execute(
         &self,
@@ -308,8 +314,10 @@ impl TradeService {
                     &prepared,
                     until,
                     held_received,
-                    &conversion,
-                    r,
+                    PostFxFence {
+                        owner: r,
+                        conversion: &conversion,
+                    },
                 )
                 .await
             {
@@ -610,8 +618,7 @@ impl TradeService {
         intent: &StoredIntent,
         until: Instant,
         held_received: Instant,
-        reserved_conversion: &UsdConversion,
-        owner: &AccountResources,
+        fx: PostFxFence<'_>,
     ) -> Result<RiskResult, String> {
         let key = held
             .reservation_key
@@ -629,8 +636,8 @@ impl TradeService {
                     state,
                     held_received,
                     &key,
-                    &owner.configuration.account_key.wire(),
-                    &reserved_conversion.usd_per_usdt,
+                    &fx.owner.configuration.account_key.wire(),
+                    &fx.conversion.usd_per_usdt,
                 )
                 .await?;
             let command = self.risk_command(
