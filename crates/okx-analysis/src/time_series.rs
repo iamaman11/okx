@@ -140,7 +140,7 @@ mod tests {
         );
         assert_eq!(
             ClosedRange::normalize(
-                range.start_ms + 1,
+                range.start_ms - 1,
                 range.end_ms + range.timeframe_ms - 1,
                 range.timeframe_ms
             )
