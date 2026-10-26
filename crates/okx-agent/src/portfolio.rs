@@ -145,16 +145,7 @@ pub async fn portfolio(
         for entry in page.0 {
             rows.push((entry.time,key.clone(),entry.entry_id.clone(),json!({"time":entry.time,"account":key,"component":entry.component,"amount":entry.amount.normalize().to_string(),"currency":entry.currency,"strategy_instance":entry.instance_id,"reference":entry.entry_id})));
         }
-        for ((instance, currency, component), amount) in page.1 {
-            let sum = totals
-                .entry((environment.to_owned(), currency.clone(), component.clone()))
-                .or_default();
-            *sum = sum.checked_add(amount).ok_or("MONEY_OVERFLOW")?;
-            attribution.insert(
-                (key.clone(), environment.to_owned(), instance, currency, component),
-                amount,
-            );
-        }
+        accumulate_finance(&key, environment, page.1, &mut totals, &mut attribution)?;
     }
     if request.action == PortfolioAction::History {
         rows.sort_by(|a, b| (&a.0, &a.1, &a.2).cmp(&(&b.0, &b.1, &b.2)));
@@ -255,6 +246,32 @@ pub async fn portfolio(
             json!({"rows":output,"next_cursor":next,"pagination_complete":next.is_none(),"central_budget":central_budget.as_ref().ok(),"central_budget_error":central_budget.as_ref().err(),"account_count":readiness.len(),"quality":if complete{"complete"}else{"partial"},"diagnostics":summary_diagnostics(readiness, &navigation, central_budget.as_ref().err()),"as_of_ms":Utc::now().timestamp_millis()}),
         )
     }
+}
+
+type AccountFinance = BTreeMap<(Option<String>, String, String), Decimal>;
+type EnvironmentTotals = BTreeMap<(String, String, String), Decimal>;
+type AccountDetails = BTreeMap<(String, String, Option<String>, String, String), Decimal>;
+
+/// A detail is a partition of account economic facts, not an additional
+/// amount to add to the environment rollup or to NAV.
+fn accumulate_finance(
+    account: &str,
+    environment: &str,
+    scoped: AccountFinance,
+    totals: &mut EnvironmentTotals,
+    details: &mut AccountDetails,
+) -> Result<(), String> {
+    for ((instance, currency, component), amount) in scoped {
+        let sum = totals
+            .entry((environment.to_owned(), currency.clone(), component.clone()))
+            .or_default();
+        *sum = sum.checked_add(amount).ok_or("MONEY_OVERFLOW")?;
+        details.insert(
+            (account.to_owned(), environment.to_owned(), instance, currency, component),
+            amount,
+        );
+    }
+    Ok(())
 }
 
 fn nav_projection(
@@ -399,6 +416,120 @@ mod tests {
         store.ingest_page(&page).unwrap();
         store
     }
+    fn fixture_scoped_finance(
+        account: &mut AccountStore,
+        amounts: [i64; 3],
+    ) -> AccountFinance {
+        use okx_execution::StrategyInstance;
+        for id in ["momentum", "mean_reversion"] {
+            account
+                .mutate_instance(
+                    &format!("create-{id}"),
+                    "definition-fixture",
+                    "create",
+                    &StrategyInstance {
+                        instance_id: id.into(),
+                        definition_id: id.into(),
+                        definition_version: "1".into(),
+                        parameters: "{}".into(),
+                        enabled: false,
+                        policy_revision: 1,
+                        budget: Decimal::from(10),
+                        last_decision_key: None,
+                    },
+                    None,
+                    2,
+                )
+                .unwrap();
+        }
+        let mut page = IngestPage::default();
+        for (n, (instance, amount)) in [
+            (Some("momentum"), amounts[0]),
+            (Some("mean_reversion"), amounts[1]),
+            (None, amounts[2]),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            page.finance.push(FinanceEntry {
+                entry_id: format!("fact-{n}"),
+                economic_event_key: format!("economic-{n}"),
+                component: "REALIZED_PNL".into(),
+                allocation_leg: instance.unwrap_or("unattributed").into(),
+                amount: Decimal::from(amount),
+                currency: "USD".into(),
+                instance_id: instance.map(str::to_owned),
+                source_ref: "verified-exchange-fixture".into(),
+                time: 12,
+                reverses_entry_id: None,
+            });
+        }
+        account.ingest_page(&page).unwrap();
+        // Replayed venue evidence is idempotent, not a second financial leg.
+        account.ingest_page(&page).unwrap();
+        account
+            .finance_attribution_filtered(12, 12, &[], &["USD".into()])
+            .unwrap()
+    }
+
+    #[test]
+    fn two_accounts_two_strategies_conserve_real_demo_and_unattributed_money() {
+        let mut real = store("okx:real:uid-a");
+        let mut demo = store("okx:demo:uid-b");
+        let mut totals = EnvironmentTotals::new();
+        let mut details = AccountDetails::new();
+        accumulate_finance(
+            "okx:real:uid-a",
+            "real",
+            fixture_scoped_finance(&mut real, [10, 5, -2]),
+            &mut totals,
+            &mut details,
+        )
+        .unwrap();
+        accumulate_finance(
+            "okx:demo:uid-b",
+            "demo",
+            fixture_scoped_finance(&mut demo, [7, -1, 4]),
+            &mut totals,
+            &mut details,
+        )
+        .unwrap();
+        assert_eq!(totals.len(), 2);
+        assert_eq!(
+            totals[&("real".into(), "USD".into(), "REALIZED_PNL".into())],
+            Decimal::from(13)
+        );
+        assert_eq!(
+            totals[&("demo".into(), "USD".into(), "REALIZED_PNL".into())],
+            Decimal::from(10)
+        );
+        assert_eq!(details.len(), 6);
+        for (env, expected) in [("real", Decimal::from(13)), ("demo", Decimal::from(10))] {
+            let detail_sum: Decimal = details
+                .iter()
+                .filter(|((_, e, _, _, _), _)| e == env)
+                .map(|(_, amount)| amount)
+                .copied()
+                .sum();
+            assert_eq!(detail_sum, expected);
+        }
+        assert_eq!(
+            details[&(
+                "okx:real:uid-a".into(),
+                "real".into(),
+                None,
+                "USD".into(),
+                "REALIZED_PNL".into(),
+            )],
+            Decimal::from(-2)
+        );
+        // Risk budgets are not financial facts or additional capital.
+        assert_eq!(real.instance("momentum").unwrap().unwrap().budget, Decimal::from(10));
+        assert_eq!(demo.instance("momentum").unwrap().unwrap().budget, Decimal::from(10));
+        assert_eq!(real.finance_totals_filtered(12, 12, &[], &[]).unwrap()[&("USD".into(), "REALIZED_PNL".into())], Decimal::from(13));
+        assert_eq!(demo.finance_totals_filtered(12, 12, &[], &[]).unwrap()[&("USD".into(), "REALIZED_PNL".into())], Decimal::from(10));
+    }
+
     #[test]
     fn cross_account_cursor_preserves_all_equal_timestamp_rows() {
         let accounts = vec![("A", store("A")), ("B", store("B")), ("C", store("C"))];
