@@ -1051,6 +1051,120 @@ fn source_page_and_cursor_atomic() {
     .unwrap();
     assert_eq!(s.cursor("fills", "BTC").unwrap().unwrap().watermark, 10);
 }
+/// Real child-process termination, not an in-process Error or orderly
+/// SQLite close. The Rust test binary is reused as the child; no new binary,
+/// runner, service, or venue dependency.
+#[test]
+fn k5_child_hard_exit_at_native_claim() {
+    let Ok(path) = std::env::var("OKX_K5_CHILD_SQL_PATH") else {
+        return;
+    };
+    let phase = std::env::var("OKX_K5_CHILD_PHASE").expect("child phase");
+    let account = std::env::var("OKX_K5_CHILD_ACCOUNT").expect("account identity");
+    let installation = std::env::var("OKX_K5_CHILD_INSTALL").expect("installation identity");
+    let mut store = AccountStore::open_existing(path, &account, &installation).unwrap();
+    match phase.as_str() {
+        "F1" | "F3" => {}
+        "F5" | "F6" => {
+            assert!(store.begin_post("intent", 1, 4).unwrap());
+            if phase == "F6" {
+                // This durable marker stands in for exactly one venue
+                // place_order with its stable client order identity.
+                // The process is then killed before any venue ACK arrives.
+                let venue_path = std::env::var("OKX_K5_CHILD_VENUE_LOG").unwrap();
+                let mut f = std::fs::OpenOptions::new()
+                    .create_new(true)
+                    .write(true)
+                    .open(venue_path)
+                    .unwrap();
+                use std::io::Write;
+                writeln!(f, "stableclient").unwrap();
+                f.sync_all().unwrap();
+            }
+        }
+        _ => panic!("unknown native kill phase"),
+    }
+    // std::process::exit bypasses Rust destructors and AccountStore::drop.
+    // The only persisted mutation is the SQLite WAL FULL commit (plus F6
+    // fake-venue sentinel), just as when the Windows agent process dies.
+    std::process::exit(86);
+}
+
+#[test]
+fn k5_real_child_process_exit_f1_f3_f5_f6_never_reposts() {
+    // Same Rust binary and exact mounted test DB across the process boundary.
+    // The child is deliberately not allowed to connect to OKX or RiskBook.
+    for phase in ["F1", "F3", "F5", "F6"] {
+        let mut store = store();
+        let original = intent(&mut store);
+        if phase != "F1" {
+            reserve(&mut store);
+        }
+        let path = store.path.clone();
+        let meta = store.meta.clone();
+        let venue_log = path.with_extension(format!("{phase}.venue-marker"));
+        drop(store);
+
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--nocapture")
+            .arg("k5_child_hard_exit_at_native_claim")
+            .env("OKX_K5_CHILD_SQL_PATH", &path)
+            .env("OKX_K5_CHILD_PHASE", phase)
+            .env("OKX_K5_CHILD_ACCOUNT", &meta.account_key)
+            .env("OKX_K5_CHILD_INSTALL", &meta.installation_id)
+            .env("OKX_K5_CHILD_VENUE_LOG", &venue_log)
+            .status()
+            .expect("spawn child test executable");
+        assert_eq!(child.code(), Some(86), "{phase}: must terminate without SQLite drop");
+        let mut recovered =
+            AccountStore::open_existing(&path, &meta.account_key, &meta.installation_id).unwrap();
+        let saved = recovered.intent("intent").unwrap().unwrap();
+        assert_eq!(saved.client_order_id, original.client_order_id);
+        if matches!(phase, "F5" | "F6") {
+            assert_eq!(saved.state, IntentState::Posting);
+            assert_eq!(recovered.recover_posting(5).unwrap(), 1);
+            assert_eq!(
+                recovered.intent("intent").unwrap().unwrap().state,
+                IntentState::Unknown
+            );
+            assert!(!recovered.begin_post("intent", 1, 6).unwrap());
+            assert_eq!(recovered.recover_posting(7).unwrap(), 0);
+        } else {
+            assert_eq!(
+                saved.state,
+                if phase == "F1" {
+                    IntentState::Prepared
+                } else {
+                    IntentState::Reserved
+                }
+            );
+            assert!(recovered.reject_unsent("intent", "COMMAND_EXPIRED", 5).unwrap());
+            assert_eq!(
+                recovered.intent("intent").unwrap().unwrap().state,
+                IntentState::Rejected
+            );
+            assert!(!recovered.begin_post("intent", 1, 6).unwrap());
+        }
+        if phase == "F6" {
+            assert_eq!(
+                std::fs::read_to_string(&venue_log).unwrap().trim(),
+                saved.client_order_id
+            );
+            // Recovery never calls the mock POST closure or adds a second
+            // log record; the unacknowledged send remains MAY_HAVE_SENT.
+            assert_eq!(
+                std::fs::read_to_string(&venue_log)
+                    .unwrap()
+                    .lines()
+                    .count(),
+                1
+            );
+        } else {
+            assert!(!venue_log.exists(), "{phase}: 0 venue POST expected");
+        }
+    }
+}
+
 #[test]
 fn crash_before_after_begin_post() {
     let mut s = store();
