@@ -2875,9 +2875,17 @@ fn k6_v02_sqlite_partial_fills_close_fees_funding_and_replay() {
                 position_side: "long".into(),
                 quantity: q,
                 limit_price: Decimal::from(if risk_increase { 101 } else { 102 }),
-                stop_price: if risk_increase { Some(Decimal::from(95)) } else { None },
+                stop_price: if risk_increase {
+                    Some(Decimal::from(95))
+                } else {
+                    None
+                },
                 strategy_instance: "manual".into(),
-                planned_loss_usd: if risk_increase { Decimal::ONE } else { Decimal::ZERO },
+                planned_loss_usd: if risk_increase {
+                    Decimal::ONE
+                } else {
+                    Decimal::ZERO
+                },
                 source_generation: 1,
                 private_source_generation: 1,
                 contract_value: Decimal::ONE,
@@ -2933,7 +2941,9 @@ fn k6_v02_sqlite_partial_fills_close_fees_funding_and_replay() {
     for fill in [&open_a, &open_b] {
         s.ingest_attributed_fill(
             fill.clone(),
-            FillEffect::Open { side: "long".into() },
+            FillEffect::Open {
+                side: "long".into(),
+            },
             None,
         )
         .unwrap();
@@ -2981,12 +2991,14 @@ fn k6_v02_sqlite_partial_fills_close_fees_funding_and_replay() {
     let path = s.path.clone();
     let account = s.meta.clone();
     drop(s);
-    let mut s = AccountStore::open_existing(path, &account.account_key, &account.installation_id)
-        .unwrap();
+    let mut s =
+        AccountStore::open_existing(path, &account.account_key, &account.installation_id).unwrap();
     for fill in [&open_a, &open_b] {
         s.ingest_attributed_fill(
             fill.clone(),
-            FillEffect::Open { side: "long".into() },
+            FillEffect::Open {
+                side: "long".into(),
+            },
             None,
         )
         .unwrap();
@@ -3015,7 +3027,9 @@ fn k6_v02_sqlite_partial_fills_close_fees_funding_and_replay() {
     }
     let net = account
         .iter()
-        .filter(|((ccy, component), _)| ccy == "USDT" && ["REALIZED_PNL", "FEE", "FUNDING"].contains(&component.as_str()))
+        .filter(|((ccy, component), _)| {
+            ccy == "USDT" && ["REALIZED_PNL", "FEE", "FUNDING"].contains(&component.as_str())
+        })
         .map(|(_, amount)| *amount)
         .sum::<Decimal>();
     assert_eq!(net, Decimal::new(109770, 6));
