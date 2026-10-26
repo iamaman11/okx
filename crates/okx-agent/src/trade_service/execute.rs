@@ -257,7 +257,18 @@ impl TradeService {
                 .await
             {
                 Ok(v) => central = Some(v),
-                Err(reason) => return Ok(uncertain(&id, &reason)),
+                Err(reason) => {
+                    // BEGIN_POST failed before any native post claim or venue call.
+                    // Preserve the central first cause in SQL, not a fabricated
+                    // MAY_HAVE_SENT outcome. A failed local commit stays uncertain.
+                    return match reject_prepost_denial(&r.execution.store, &prepared, &reason).await {
+                        Ok(result) => Ok(result),
+                        Err(_) => Ok(uncertain(
+                            &id,
+                            "PREPOST_LOCAL_COMMIT_UNCONFIRMED_NO_RESUBMIT",
+                        )),
+                    };
+                }
             }
         } else {
             // Demo and native-confirmed reductions use the same durable marker; no Real global capacity is minted.
@@ -762,6 +773,39 @@ fn validate_generation(expected: i64, observed: i64) -> Result<(), String> {
     }
 }
 /// The one durable send boundary, shared by real and fixture gateways.
+/// A central fence denial before the SQL POST claim proves the venue was
+/// never called. Keep the first reason and the reservation pending for
+/// central release; do not confuse this with a lost exchange POST response.
+async fn reject_prepost_denial(
+    store: &AccountStoreHandle,
+    intent: &StoredIntent,
+    reason: &str,
+) -> Result<Value, String> {
+    let id = intent.intent_id.clone();
+    let original = reason.to_owned();
+    store
+        .call(deadline(), move |s| s.reject_unsent(&id, &original, now()))
+        .await
+        .map_err(err)?;
+    let id = intent.intent_id.clone();
+    let saved = store
+        .call(deadline(), move |s| s.intent(&id))
+        .await
+        .map_err(err)?
+        .ok_or("PREPOST_INTENT_READBACK_MISSING")?;
+    if saved.state != IntentState::Rejected {
+        return Err("PREPOST_INTENT_REJECTION_UNCONFIRMED".into());
+    }
+    Ok(completed(json!({
+        "intent_id":saved.intent_id,
+        "state":"REJECTED",
+        "rejection_origin":"LOCAL",
+        "send_state":"NOT_STARTED",
+        "primary_reason":saved.incident.as_deref().unwrap_or(reason),
+        "risk_release_state":"PENDING",
+        "next_action":"trade.status"
+    })))
+}
 pub(super) async fn post_once<T, F, Fut>(
     store: &AccountStoreHandle,
     intent: &StoredIntent,
@@ -965,6 +1009,49 @@ mod tests {
             .await
             .unwrap();
         (store, saved, root)
+    }
+    #[tokio::test]
+    async fn prepost_fence_denial_is_durable_no_send_not_unknown() {
+        let (store, intent, _root) = reserved("prepost_fence_denial", true, false, false).await;
+        let result = reject_prepost_denial(&store, &intent, "POST_CENSUS_NOT_AFTER_RESERVE")
+            .await
+            .unwrap();
+        assert_eq!(result["data"]["state"], "REJECTED");
+        assert_eq!(result["data"]["send_state"], "NOT_STARTED");
+        assert_eq!(result["data"]["risk_release_state"], "PENDING");
+        assert_eq!(
+            result["data"]["primary_reason"],
+            "POST_CENSUS_NOT_AFTER_RESERVE"
+        );
+        let saved = store
+            .call(deadline(), |s| s.intent("intent_fixture"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(saved.state, IntentState::Rejected);
+        assert_eq!(
+            saved.incident.as_deref(),
+            Some("POST_CENSUS_NOT_AFTER_RESERVE")
+        );
+        // Re-observation must not erase the original denial or mint a POST.
+        let replay = reject_prepost_denial(&store, &intent, "COMMAND_EXPIRED")
+            .await
+            .unwrap();
+        assert_eq!(
+            replay["data"]["primary_reason"],
+            "POST_CENSUS_NOT_AFTER_RESERVE"
+        );
+        let gateway = FixtureGateway {
+            posts: AtomicUsize::new(0),
+            lose: false,
+        };
+        assert_eq!(
+            post_once(&store, &intent, deadline(), || gateway.send())
+                .await
+                .unwrap(),
+            None
+        );
+        assert_eq!(gateway.posts.load(Ordering::SeqCst), 0);
     }
     #[tokio::test]
     async fn duplicate_execute_one_post() {
