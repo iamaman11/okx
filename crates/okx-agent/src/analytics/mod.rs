@@ -1150,9 +1150,9 @@ mod tests {
             .unwrap();
         assert_eq!(first["total_rows"], 100);
         assert_eq!(first["returned_rows"], 5);
-        assert_eq!(first["next_cursor"], "5");
+        assert!(first["next_cursor"].as_str().unwrap().starts_with("r1."));
         let next = service
-            .research(get(ResearchResultView::Equity, Some("5".into())))
+            .research(get(ResearchResultView::Equity, first["next_cursor"].as_str().map(str::to_owned)))
             .await
             .unwrap();
         assert_eq!(next["rows"][0][0], 5);
@@ -1445,6 +1445,39 @@ mod artifact_job_fixtures {
         std::fs::remove_dir_all(root).unwrap();
     }
     #[test]
+    fn c17_cursor_survives_catalog_restart_and_is_not_transferable() {
+        let (root, service) = super::artifact_job_fixtures::service();
+        let page = service.artifacts.publish_evidence(&vec![json!({"row":1}),json!({"row":2})]).unwrap().0;
+        let manifest = service.artifacts.publish_evidence(&json!({
+            "trade_pages":[page],"total_trades":2
+        })).unwrap().0;
+        let id = "e".repeat(64);
+        service.jobs.enqueue("c17-signed".into(), id.clone()).unwrap();
+        service.jobs.update(&id, jobs::State::Completed, Some(manifest.clone()), None).unwrap();
+        let first = service.result_page(id.clone(), None, 1, ResearchResultView::Trades).unwrap();
+        let token = first["next_cursor"].as_str().unwrap().to_owned();
+        assert!(token.starts_with("r1."));
+        let decoded = cursor::Cursor::decode(&token,&service.jobs.cursor_signing_key().unwrap()).unwrap();
+        assert_eq!(decoded.offset, 1);
+        assert_eq!(service.result_page(id.clone(), Some(token.clone()), 1, ResearchResultView::Equity).unwrap_err(),"CURSOR_MISMATCH");
+        let other = "f".repeat(64);
+        service.jobs.enqueue("c17-other".into(), other.clone()).unwrap();
+        service.jobs.update(&other,jobs::State::Completed,Some(manifest),None).unwrap();
+        assert_eq!(service.result_page(other,Some(token.clone()),1,ResearchResultView::Trades).unwrap_err(),"CURSOR_MISMATCH");
+        let mut forged=token.clone().into_bytes();
+        let last=forged.len()-1;
+        forged[last]=if forged[last]==b'A'{b'B'}else{b'A'};
+        assert_eq!(service.result_page(id.clone(),Some(String::from_utf8(forged).unwrap()),1,ResearchResultView::Trades).unwrap_err(),"INVALID_CURSOR");
+        let restarted = jobs::Jobs::open(root.join("research-catalog.sqlite")).unwrap();
+        assert_eq!(restarted.cursor_signing_key().unwrap(),service.jobs.cursor_signing_key().unwrap());
+        let second = service.result_page(id,Some(token),1,ResearchResultView::Trades).unwrap();
+        assert_eq!(second["rows"][0]["row"],2);
+        drop(restarted);
+        drop(service);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn c17_empty_or_short_manifest_page_fails_without_unbounded_scan() {
         let (root, service) = super::artifact_job_fixtures::service();
         let page_id = service
@@ -1472,8 +1505,11 @@ mod artifact_job_fixtures {
             .result_page(id.clone(), None, 5, ResearchResultView::Trades)
             .unwrap_err();
         assert_eq!(err, "RESULT_PAGE_TRUNCATED");
+        let token = cursor::Cursor::new(
+            &id, &manifest, &manifest, ResearchResultView::Trades, 2, None,
+        ).encode(&service.jobs.cursor_signing_key().unwrap()).unwrap();
         let err = service
-            .result_page(id, Some("2".into()), 5, ResearchResultView::Trades)
+            .result_page(id, Some(token), 5, ResearchResultView::Trades)
             .unwrap_err();
         assert_eq!(err, "RESULT_CURSOR_OUT_OF_RANGE");
         drop(service);
@@ -1529,7 +1565,9 @@ mod artifact_job_fixtures {
         let page = s
             .research(ResearchRequest::Result {
                 job_id: id.clone(),
-                cursor: Some("47".into()),
+                cursor: Some(cursor::Cursor::new(
+                    &id, &artifact, &artifact, ResearchResultView::Trades, 47, None
+                ).encode(&s.jobs.cursor_signing_key().unwrap()).unwrap()),
                 limit: 5,
                 view: ResearchResultView::Trades,
             })
@@ -1538,7 +1576,7 @@ mod artifact_job_fixtures {
         assert_eq!(page["returned_rows"], 5);
         assert_eq!(page["total_rows"], 120);
         assert_eq!(page["rows"][0]["time"], 47);
-        assert_eq!(page["next_cursor"], "52");
+        assert!(page["next_cursor"].as_str().unwrap().starts_with("r1."));
         let reloaded = jobs::Jobs::open(root.join("research-catalog.sqlite")).unwrap();
         assert_eq!(reloaded.get(&id).unwrap().state, jobs::State::Completed);
         assert!(
