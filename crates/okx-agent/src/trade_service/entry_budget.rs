@@ -100,22 +100,20 @@ pub(super) fn size_order(
     } else {
         (quantity / lot).floor() * lot
     };
-    if increase {
-        if let Some(cap) = entry_ceiling_usd {
-            if cap <= Decimal::ZERO {
-                return Err("ENTRY_BUDGET_INVALID".into());
-            }
-            let divisor = ct
-                .checked_mul(price)
-                .and_then(|v| v.checked_mul(Decimal::ONE + fee_rate))
-                .and_then(|v| v.checked_mul(fx))
-                .ok_or("MONEY_OVERFLOW")?;
-            let cap_qty = (cap / divisor / lot).floor() * lot;
-            if matches!(sizing, Sizing::Contracts { .. }) && qty > cap_qty {
-                return Err("ENTRY_BUDGET_EXCEEDED".into());
-            }
-            qty = qty.min(cap_qty);
+    if let Some(cap) = entry_ceiling_usd.filter(|_| increase) {
+        if cap <= Decimal::ZERO {
+            return Err("ENTRY_BUDGET_INVALID".into());
         }
+        let divisor = ct
+            .checked_mul(price)
+            .and_then(|v| v.checked_mul(Decimal::ONE + fee_rate))
+            .and_then(|v| v.checked_mul(fx))
+            .ok_or("MONEY_OVERFLOW")?;
+        let cap_qty = (cap / divisor / lot).floor() * lot;
+        if matches!(sizing, Sizing::Contracts { .. }) && qty > cap_qty {
+            return Err("ENTRY_BUDGET_EXCEEDED".into());
+        }
+        qty = qty.min(cap_qty);
     }
     if qty < minimum || qty <= Decimal::ZERO {
         return Err(
