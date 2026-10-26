@@ -10,8 +10,8 @@ const object=(properties:Schema,required=Object.keys(properties)):Schema=>({type
 const action=(name:string,props:Schema={},required=Object.keys(props)):Schema=>object({action:{const:name},...props},['action',...required]);
 const account=text();const mutation={idempotency_key:token};
 const limits=object({max_modelled_loss_usdt:money,max_order_loss_usdt:money,max_notional_usdt:{anyOf:[money,{type:'null'}]},max_leverage:{anyOf:[money,{type:'null'}]},max_daily_realized_loss_usdt:{anyOf:[money,{type:'null'}]},max_drawdown_ratio:{anyOf:[{type:'string',pattern:'^(?:0(?:\\.[0-9]{1,9})?|1(?:\\.0{1,9})?)$',maxLength:11},{type:'null'}]},allowed_instruments:array(text(64))});
-const sizing={oneOf:[object({contracts:money}),object({max_loss_usd:money})]};
-const constraints=object({type:choice('limit','market','post_only','ioc','fok'),limit_price:money,reference:text(),max_slippage_bps:integer(0,10000)},['type','max_slippage_bps']);
+const sizing={oneOf:[object({contracts:money}),object({max_loss_usd:money}),object({entry_budget_usd:money})]};
+const constraints=object({type:choice('limit','market','post_only','ioc','fok'),limit_price:money,reference:text(),max_entry_usd:money,max_slippage_bps:integer(0,10000)},['type','max_slippage_bps']);
 const protection={oneOf:[object({stop_price:money}),object({stop_distance_bps:integer(1,10000)})]};
 const trade={operation:choice('open','add','reduce','close','replace'),strategy_instance:text(64),instrument:text(64),side:choice('long','short'),sizing,order:constraints,protection};
 const ema=object({fast:integer(1,10000),slow:integer(2,10000)});

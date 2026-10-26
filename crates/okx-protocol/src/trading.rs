@@ -44,6 +44,7 @@ pub enum TradeRequest {
 pub enum Sizing {
     Contracts { contracts: String },
     MaxLossUsd { max_loss_usd: String },
+    EntryBudgetUsd { entry_budget_usd: String },
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -52,6 +53,9 @@ pub struct OrderConstraints {
     pub order_type: String,
     pub limit_price: Option<String>,
     pub reference: Option<String>,
+    /// Optional independent fee-inclusive USD entry ceiling, NOT the modelled loss budget.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_entry_usd: Option<String>,
     pub max_slippage_bps: u32,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -251,6 +255,7 @@ impl Sizing {
         match self {
             Self::Contracts { contracts } => decimal(contracts),
             Self::MaxLossUsd { max_loss_usd } => decimal(max_loss_usd),
+            Self::EntryBudgetUsd { entry_budget_usd } => decimal(entry_budget_usd),
         }
     }
 }
@@ -268,6 +273,7 @@ impl OrderConstraints {
             self.order_type.as_str(),
             "limit" | "market" | "fok" | "ioc" | "post_only"
         ) && self.reference.as_ref().is_none_or(|v| name(v))
+            && self.max_entry_usd.as_ref().is_none_or(|v| decimal(v))
             && self.max_slippage_bps <= 10000
             && self.limit_price.as_ref().is_none_or(|v| decimal(v))
             && (!matches!(self.order_type.as_str(), "limit" | "post_only")

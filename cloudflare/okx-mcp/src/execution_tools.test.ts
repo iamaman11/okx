@@ -49,6 +49,10 @@ fail(validTool('strategies',{...start,action:'stop'}),'strategy stop shares stri
 fail(!validTool('strategies',{...start,action:'stop',raw_rpc:'forbidden'}),'strict stop rejects extra');
 const trade=payloadFixtures.find(x=>x.tool==='trade'&&x.action==='execute')!.positive;
 fail(!validTool('trade',{...trade,sizing:{contracts:'1',max_loss_usd:'5'}}),'sizing exactly one');
+fail(validTool('trade',{...trade,sizing:{entry_budget_usd:'10'},order:{...trade.order,max_entry_usd:'10'}}),'fee-inclusive entry-budget wire');
+fail(!validTool('trade',{...trade,order:{...trade.order,max_entry_usd:'0'}}),'reject zero entry cap');
+fail(!validTool('trade',{...trade,order:{...trade.order,max_entry_usd:'10e0'}}),'reject exponent entry cap');
+fail(!validTool('trade',{...trade,sizing:{contracts:'1',entry_budget_usd:'10'}}),'reject mixed quantity and money basis');
 fail(!validTool('trade',{...trade,expires_in_ms:30001}),'deadline bounded');
 fail(!validTool('trade',{...trade,protection:undefined}),'increase needs protection');
 fail(!matches({type:'object',properties:{x:{type:'integer'}},required:['x'],additionalProperties:false},{x:1,y:2}),'strict nested');

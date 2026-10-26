@@ -223,29 +223,28 @@ impl TradeService {
         let per_contract = ct
             * ((price - stop.unwrap_or(price)).abs()
                 + price * (fee_rate * Decimal::from(2) + slip + Decimal::new(1, 3)));
-        let quantity = match sizing {
-            Sizing::Contracts { contracts } => dec(contracts)?,
-            Sizing::MaxLossUsd { max_loss_usd } => {
-                if !increase || per_contract <= Decimal::ZERO {
-                    return Err("LOSS_SIZING_REQUIRES_PROTECTED_INCREASE".into());
-                }
-                let conversion = Self::usd_conversion(&snap)?;
-                dec(max_loss_usd)? / dec(&conversion.usd_per_usdt)? / per_contract
-            }
+        let fx = if increase {
+            let conversion = Self::usd_conversion(&snap)?;
+            dec(&conversion.usd_per_usdt)?
+        } else {
+            Decimal::ONE
         };
-        let qty = (quantity / lot).floor() * lot;
-        if qty < minimum || qty <= Decimal::ZERO {
-            return Err("MINIMUM_SIZE_EXCEEDS_BUDGET".into());
-        }
+        let entry_ceiling = if increase {
+            order.max_entry_usd.as_deref().map(dec).transpose()?
+        } else {
+            None
+        };
+        let budgeted = entry_budget::size_order(
+            sizing, increase, lot, minimum, ct, price, per_contract, fx, fee_rate,
+            entry_ceiling,
+        )?;
+        let qty = budgeted.quantity;
         if let Some(v) = &rules.instrument.max_limit_size
             && qty > dec(v)?
         {
             return Err("ORDER_SIZE_VENUE_LIMIT".into());
         }
-        let notional = qty
-            .checked_mul(ct)
-            .and_then(|v| v.checked_mul(price))
-            .ok_or("MONEY_OVERFLOW")?;
+        let notional = budgeted.notional_usdt;
         if increase {
             if let Some(v) = &c.limits.max_notional_usdt
                 && notional > dec(v)?
@@ -312,7 +311,7 @@ impl TradeService {
             }
         }
         let loss = if increase {
-            (qty * per_contract * dec(&Self::usd_conversion(&snap)?.usd_per_usdt)?)
+            (qty * per_contract * fx)
                 .round_dp_with_strategy(9, RoundingStrategy::ToPositiveInfinity)
         } else {
             Decimal::ZERO
