@@ -28,7 +28,7 @@ fn f2_lost_reserve_receipt_recovers_after_restart_without_second_reserve() {
     assert_eq!(proof.reason, "RESERVE_REPLY_LOST");
     s.acknowledge_central_release(key, "worker-released")
         .unwrap();
-    assert!(s.begin_post("intent", 1, 6).unwrap() == false);
+    assert!(!s.begin_post("intent", 1, 6).unwrap());
 }
 #[test]
 fn f2_explicit_worker_reserve_denial_has_no_orphan_risk_and_no_post() {
