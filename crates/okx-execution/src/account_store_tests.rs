@@ -2,6 +2,94 @@ use super::*;
 use std::sync::atomic::{AtomicU64, Ordering};
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 #[test]
+fn f0_crash_before_prepare_commit_is_retriable_once() {
+    let mut s = store();
+    assert!(s.reconcilable_intents(16).unwrap().is_empty());
+    let path = s.path.clone();
+    let meta = s.meta.clone();
+    drop(s);
+    let mut recovered =
+        AccountStore::open_existing(path, &meta.account_key, &meta.installation_id).unwrap();
+    assert!(recovered.reconcilable_intents(16).unwrap().is_empty());
+    let first = intent(&mut recovered);
+    assert_eq!(first.state, IntentState::Prepared);
+    assert_eq!(recovered.active_intents(16).unwrap().len(), 1);
+}
+
+#[test]
+fn f1_prepared_before_reserve_is_recovered_once_without_central_release() {
+    let mut s = store();
+    intent(&mut s);
+    let path = s.path.clone();
+    let meta = s.meta.clone();
+    drop(s);
+    let mut recovered =
+        AccountStore::open_existing(path, &meta.account_key, &meta.installation_id).unwrap();
+    let pending = recovered.reconcilable_intents(16).unwrap();
+    assert_eq!(pending.len(), 1, "expired pre-reserve must not be orphaned");
+    assert_eq!(pending[0].state, IntentState::Prepared);
+    recovered.reject_unsent("intent", "COMMAND_EXPIRED", 5).unwrap();
+    assert!(recovered.unsent_before_reserve("intent").unwrap());
+    assert!(recovered.unsent_release_receipt("intent").unwrap().is_none());
+    assert!(recovered.reconcilable_intents(16).unwrap().is_empty());
+    assert!(!recovered.begin_post("intent", 1, 6).unwrap());
+    assert_eq!(
+        recovered.intent("intent").unwrap().unwrap().incident.as_deref(),
+        Some("COMMAND_EXPIRED")
+    );
+}
+
+#[test]
+fn f3_crash_after_native_reserve_before_post_claim_releases_no_send() {
+    let mut s = store();
+    intent(&mut s);
+    reserve(&mut s);
+    let path = s.path.clone();
+    let meta = s.meta.clone();
+    drop(s);
+    let mut restored =
+        AccountStore::open_existing(path, &meta.account_key, &meta.installation_id).unwrap();
+    assert_eq!(restored.reconcilable_intents(16).unwrap().len(), 1);
+    assert_eq!(
+        restored.intent("intent").unwrap().unwrap().state,
+        IntentState::Reserved
+    );
+    restored.reject_unsent("intent", "COMMAND_EXPIRED", 5).unwrap();
+    let proof = restored.unsent_release_receipt("intent").unwrap().unwrap();
+    assert_eq!(proof.reservation_key, "central-key");
+    assert_eq!(proof.reason, "COMMAND_EXPIRED");
+    assert!(!restored.begin_post("intent", 1, 6).unwrap());
+    restored
+        .acknowledge_central_release("central-key", "worker-release-proof")
+        .unwrap();
+    assert!(restored.reconcilable_intents(16).unwrap().is_empty());
+}
+
+#[test]
+fn f8_central_release_local_ack_replay_keeps_first_receipt() {
+    let mut s = store();
+    intent(&mut s);
+    reserve(&mut s);
+    s.reject_unsent("intent", "CENTRAL_POST_DENIED", 5).unwrap();
+    let path = s.path.clone();
+    let meta = s.meta.clone();
+    drop(s);
+    let mut recovered =
+        AccountStore::open_existing(path, &meta.account_key, &meta.installation_id).unwrap();
+    assert_eq!(recovered.reconcilable_intents(16).unwrap().len(), 1);
+    recovered
+        .acknowledge_central_release("central-key", "central-released")
+        .unwrap();
+    recovered
+        .acknowledge_central_release("central-key", "central-released")
+        .unwrap();
+    let receipt = recovered.operation("central-release:central-key").unwrap().unwrap();
+    assert_eq!(receipt.result_ref, "central-released");
+    assert_eq!(recovered.reconcilable_intents(16).unwrap().len(), 0);
+    assert!(!recovered.begin_post("intent", 1, 6).unwrap());
+}
+
+#[test]
 fn f2_lost_reserve_receipt_recovers_after_restart_without_second_reserve() {
     let mut s = store();
     intent(&mut s);
