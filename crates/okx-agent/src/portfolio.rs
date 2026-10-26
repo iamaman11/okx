@@ -19,6 +19,8 @@ struct Cursor {
     time: i64,
     account: String,
     id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    snapshot: Option<String>,
 }
 fn history_after(key: &str, cursor: Option<&Cursor>, from: i64) -> (i64, String) {
     match cursor {
@@ -33,6 +35,27 @@ fn hash(v: &impl Serialize) -> Result<String, String> {
         "{:x}",
         Sha256::digest(serde_json::to_vec(v).map_err(|e| e.to_string())?)
     ))
+}
+/// Page cursors must refer to an unchanged logical summary; a fresh SQL/venue
+/// point or newly reachable account invalidates the prior snapshot, not skips rows.
+fn summary_snapshot(
+    query: &str,
+    rows: &[Value],
+    readiness: &[Value],
+    central_budget_available: bool,
+) -> Result<String, String> {
+    let sources = readiness
+        .iter()
+        .map(|r| (&r["account"], &r["account_requested"], &r["reason"]))
+        .collect::<Vec<_>>();
+    hash(&(query, rows, sources, central_budget_available))
+}
+
+fn require_summary_snapshot(cursor: Option<&Cursor>, snapshot: &str) -> Result<(), String> {
+    if cursor.is_some_and(|c| c.snapshot.as_deref() != Some(snapshot)) {
+        return Err("CURSOR_SNAPSHOT_CHANGED".into());
+    }
+    Ok(())
 }
 pub async fn portfolio(
     accounts: &Arc<AccountRuntimeRegistry>,
@@ -194,6 +217,9 @@ pub async fn portfolio(
         for (time, account, id, value) in rows {
             let size = serde_json::to_vec(&value).map_err(|e| e.to_string())?.len();
             if bytes + size > 7000 {
+                if output.is_empty() {
+                    return Err("HISTORY_ROW_TOO_LARGE".into());
+                }
                 truncated = true;
                 break;
             }
@@ -203,6 +229,7 @@ pub async fn portfolio(
                 time,
                 account,
                 id,
+                snapshot: None,
             });
             output.push(value);
         }
@@ -235,9 +262,11 @@ pub async fn portfolio(
             },
         ));
         all.extend(navigation.iter().cloned());
+        let snapshot = summary_snapshot(&query, &all, &readiness, central_budget.is_ok())?;
         if cursor.as_ref().is_some_and(|c| c.account != "summary") {
             return Err("INVALID_CURSOR".into());
         }
+        require_summary_snapshot(cursor.as_ref(), &snapshot)?;
         let last_id = cursor.as_ref().map(|c| c.id.as_str()).unwrap_or("");
         let mut ordered = all
             .into_iter()
@@ -252,6 +281,9 @@ pub async fn portfolio(
         for (key, value) in ordered.into_iter().take(usize::from(request.limit).min(50)) {
             let size = serde_json::to_vec(&value).map_err(|e| e.to_string())?.len();
             if bytes + size > 5500 {
+                if output.is_empty() {
+                    return Err("SUMMARY_ROW_TOO_LARGE".into());
+                }
                 break;
             }
             bytes += size;
@@ -265,6 +297,7 @@ pub async fn portfolio(
                     time: from,
                     account: "summary".into(),
                     id,
+                    snapshot: Some(snapshot.clone()),
                 })
                 .map(|v| URL_SAFE_NO_PAD.encode(v))
             })
@@ -614,6 +647,7 @@ mod tests {
                 time: last.0,
                 account: last.1.clone(),
                 id: last.2.clone(),
+                snapshot: None,
             });
             all.extend(rows);
         }
@@ -633,10 +667,114 @@ mod tests {
             time: 10,
             account: "B".into(),
             id: "b".into(),
+            snapshot: None,
         };
         assert_eq!(history_after("A", Some(&c), 1), (10, "\u{10ffff}".into()));
         assert_eq!(history_after("B", Some(&c), 1), (10, "b".into()));
         assert_eq!(history_after("C", Some(&c), 1), (10, String::new()));
+    }
+
+    #[test]
+    fn four_accounts_preserve_strategy_and_unattributed_finance_isolation() {
+        let specs = [
+            ("okx:real:a", "real", [10, 5, -2], 13),
+            ("okx:real:b", "real", [4, 2, -1], 5),
+            ("okx:demo:c", "demo", [7, -1, 4], 10),
+            ("okx:demo:d", "demo", [-4, 3, 2], 1),
+        ];
+        let mut totals = EnvironmentTotals::new();
+        let mut details = AccountDetails::new();
+        let mut stores = Vec::new();
+        for (account, environment, components, expected) in specs {
+            let mut s = store(account);
+            let facts = fixture_scoped_finance(&mut s, components);
+            assert_eq!(facts.values().copied().sum::<Decimal>(), Decimal::from(expected));
+            accumulate_finance(account, environment, facts, &mut totals, &mut details).unwrap();
+            stores.push(s);
+        }
+        assert_eq!(stores.len(), 4);
+        assert_eq!(details.len(), 12);
+        assert_eq!(
+            totals[&("real".into(), "USD".into(), "REALIZED_PNL".into())],
+            Decimal::from(18)
+        );
+        assert_eq!(
+            totals[&("demo".into(), "USD".into(), "REALIZED_PNL".into())],
+            Decimal::from(11)
+        );
+        for (environment, expected) in [("real", Decimal::from(18)), ("demo", Decimal::from(11))] {
+            let sum = details
+                .iter()
+                .filter(|((_, env, _, _, _), _)| env == environment)
+                .map(|(_, value)| *value)
+                .sum::<Decimal>();
+            assert_eq!(sum, expected);
+        }
+        let before = stores[1].finance_attribution_filtered(12, 12, &[], &[]).unwrap();
+        // A new fact in account A must not alter account B or Demo financial truth.
+        stores[0]
+            .ingest_page(&IngestPage {
+                finance: vec![FinanceEntry {
+                    entry_id: "extra".into(),
+                    economic_event_key: "extra".into(),
+                    component: "REALIZED_PNL".into(),
+                    allocation_leg: "unattributed".into(),
+                    amount: Decimal::from(-3),
+                    currency: "USD".into(),
+                    instance_id: None,
+                    source_ref: "verified-exchange-fixture".into(),
+                    time: 13,
+                    reverses_entry_id: None,
+                }],
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(
+            stores[1].finance_attribution_filtered(12, 12, &[], &[]).unwrap(),
+            before
+        );
+        assert_eq!(
+            stores[2].finance_totals_filtered(12, 13, &[], &[]).unwrap()
+                [&("USD".into(), "REALIZED_PNL".into())],
+            Decimal::from(10)
+        );
+        assert_eq!(
+            stores[0].finance_totals_filtered(12, 13, &[], &[]).unwrap()
+                [&("USD".into(), "REALIZED_PNL".into())],
+            Decimal::from(10)
+        );
+    }
+
+    #[test]
+    fn summary_cursor_rejects_changed_finance_or_account_availability() {
+        let base = vec![json!({"kind":"component","amount":"13"})];
+        let available = vec![json!({"account":"okx:real:a","financial_risk":{"nav_complete":true}})];
+        let snapshot = summary_snapshot("request", &base, &available, true).unwrap();
+        let cursor = Cursor {
+            query: "request".into(),
+            time: 1,
+            account: "summary".into(),
+            id: "component|real|USD|REALIZED_PNL".into(),
+            snapshot: Some(snapshot.clone()),
+        };
+        require_summary_snapshot(Some(&cursor), &snapshot).unwrap();
+        let changed = vec![json!({"kind":"component","amount":"15"})];
+        let updated = summary_snapshot("request", &changed, &available, true).unwrap();
+        assert_eq!(
+            require_summary_snapshot(Some(&cursor), &updated),
+            Err("CURSOR_SNAPSHOT_CHANGED".into())
+        );
+        let missing = vec![json!({"account_requested":"a","reason":"ACCOUNT_UNAVAILABLE"})];
+        let unavailable = summary_snapshot("request", &base, &missing, true).unwrap();
+        assert_eq!(
+            require_summary_snapshot(Some(&cursor), &unavailable),
+            Err("CURSOR_SNAPSHOT_CHANGED".into())
+        );
+        let old_token = Cursor { snapshot: None, ..cursor };
+        assert_eq!(
+            require_summary_snapshot(Some(&old_token), &snapshot),
+            Err("CURSOR_SNAPSHOT_CHANGED".into())
+        );
     }
 
     #[test]
