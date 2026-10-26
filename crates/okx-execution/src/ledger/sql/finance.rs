@@ -13,7 +13,7 @@ impl AccountStore {
         let scopes = {
             let mut q = self
                 .connection
-                .prepare("SELECT scope_id,currency FROM nav_scopes ORDER BY scope_id,currency")?;
+                .prepare("SELECT scope_id,currency FROM nav_scopes UNION SELECT 'strategy:' || instance_id, 'USD' FROM strategy_instances ORDER BY scope_id,currency")?;
             q.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
                 .filter_map(|v| match v {
                     Ok((scope, currency))
@@ -39,8 +39,12 @@ impl AccountStore {
                 row.map(|(e, f, t, c)| Ok((decimal(e)?, decimal(f)?, t, c)))
                     .transpose()
             };
-            let opening = endpoint(from)?;
-            let current = endpoint(through)?;
+            // A risk allocation is not capital. Until a separate, verified strategy
+            // capital source exists, legacy strategy NAV points must not be treated
+            // as equity, flows or returns (even if they say COMPLETE).
+            let capital_known = !scope.starts_with("strategy:");
+            let opening = if capital_known { endpoint(from)? } else { None };
+            let current = if capital_known { endpoint(through)? } else { None };
             let flows = opening
                 .as_ref()
                 .zip(current.as_ref())
@@ -76,7 +80,7 @@ impl AccountStore {
                 current_as_of: current.as_ref().map(|v| v.2),
                 coverage: if from < self.meta.initialized_at {
                     "UNAVAILABLE_BEFORE_T0"
-                } else if complete {
+                } else if complete && capital_known {
                     "COMPLETE"
                 } else {
                     "PARTIAL"
@@ -101,107 +105,6 @@ impl AccountStore {
         v.map(decimal)
             .transpose()
             .map(|v| v.unwrap_or(Decimal::ZERO))
-    }
-    pub fn record_instance_nav(
-        &mut self,
-        marks: &[VenueMark],
-        fx: &UsdConversionEvidence,
-        now: i64,
-    ) -> StoreResult<()> {
-        let mut page = IngestPage::default();
-        for instance in self.instances()? {
-            let mut pnl = Decimal::ZERO;
-            let mut complete = true;
-            {
-                let mut q=self.connection.prepare("SELECT currency,component,amount FROM instance_finance_totals WHERE instance_id=?1 AND component IN('REALIZED_PNL','FEE','FUNDING')")?;
-                let mut rows = q.query([&instance.instance_id])?;
-                while let Some(r) = rows.next()? {
-                    let currency: String = r.get(0)?;
-                    let amount = decimal(r.get(2)?)?;
-                    let rate = if currency == "USD" {
-                        Some(Decimal::ONE)
-                    } else {
-                        fx.usd_per_currency.get(&currency).copied()
-                    };
-                    if let Some(rate) = rate {
-                        pnl = pnl
-                            .checked_add(
-                                amount
-                                    .checked_mul(rate)
-                                    .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))?,
-                            )
-                            .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))?;
-                    } else {
-                        complete = false;
-                    }
-                }
-            }
-            {
-                let mut q=self.connection.prepare("SELECT l.instrument_id,l.side,l.remaining_qty,l.cost,p.contract_value,p.inverse,p.settlement_currency FROM position_lots l JOIN intent_plans p USING(intent_id) WHERE l.instance_id=?1 AND l.remaining_qty<>'0'")?;
-                let mut rows = q.query([&instance.instance_id])?;
-                while let Some(r) = rows.next()? {
-                    let instrument: String = r.get(0)?;
-                    let side: String = r.get(1)?;
-                    let q = decimal(r.get(2)?)?;
-                    let entry = decimal(r.get(3)?)?;
-                    let cv = decimal(r.get(4)?)?;
-                    let inverse: bool = r.get(5)?;
-                    let ccy: String = r.get(6)?;
-                    let Some(mark) = marks.iter().find(|m| m.instrument_id == instrument) else {
-                        complete = false;
-                        continue;
-                    };
-                    let rate = if ccy == "USD" {
-                        Some(Decimal::ONE)
-                    } else {
-                        fx.usd_per_currency.get(&ccy).copied()
-                    };
-                    let Some(rate) = rate else {
-                        complete = false;
-                        continue;
-                    };
-                    let upl = crate::finance::position_pnl(
-                        q,
-                        entry,
-                        mark.price,
-                        cv,
-                        inverse,
-                        if side == "long" {
-                            Decimal::ONE
-                        } else {
-                            -Decimal::ONE
-                        },
-                    )?;
-                    pnl = pnl
-                        .checked_add(
-                            upl.checked_mul(rate)
-                                .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))?,
-                        )
-                        .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))?;
-                }
-            }
-            let first:Option<String>=self.connection.query_row("SELECT delta FROM allocations WHERE instance_id=?1 AND currency='USD' ORDER BY time,event_id LIMIT 1",[&instance.instance_id],|r|r.get(0)).optional()?;
-            let opening = first.map(decimal).transpose()?.unwrap_or(instance.budget);
-            let flows = instance
-                .budget
-                .checked_sub(opening)
-                .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))?;
-            page.nav.push(NavPoint {
-                scope_id: format!("strategy:{}", instance.instance_id),
-                time: now,
-                source_version: fx.source_digest.clone(),
-                equity: instance
-                    .budget
-                    .checked_add(pnl)
-                    .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))?,
-                pnl,
-                flows,
-                currency: "USD".into(),
-                coverage: if complete { "COMPLETE" } else { "PARTIAL" }.into(),
-                mark_source: fx.source_digest.clone(),
-            });
-        }
-        self.ingest_page(&page)
     }
     pub fn financial_risk(&self, now: i64, instance: Option<&str>) -> StoreResult<FinancialRisk> {
         let scope = instance
@@ -229,7 +132,7 @@ impl AccountStore {
             (
                 dd,
                 time,
-                coverage == "COMPLETE" && now >= time && now - time <= 5000,
+                coverage == "COMPLETE" && instance.is_none() && now >= time && now - time <= 5000,
             )
         } else {
             (Decimal::ZERO, 0, false)

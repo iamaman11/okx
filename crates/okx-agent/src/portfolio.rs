@@ -90,10 +90,14 @@ pub async fn portfolio(
         return Err("CURSOR_QUERY_MISMATCH".into());
     }
     let mut rows = Vec::new();
-    let mut totals: BTreeMap<(String, String), Decimal> = BTreeMap::new();
+    let mut totals: BTreeMap<(String, String, String), Decimal> = BTreeMap::new();
     let mut readiness = Vec::new();
     let mut navigation = Vec::new();
     for (key, r) in resolved {
+        let environment = match r.configuration.account_key.environment {
+            okx_protocol::accounts::Environment::Real => "real",
+            okx_protocol::accounts::Environment::Demo => "demo",
+        };
         let instances = request.strategies.clone().unwrap_or_default();
         let currencies = request.currencies.clone().unwrap_or_default();
         let history = request.action == PortfolioAction::History;
@@ -140,7 +144,7 @@ pub async fn portfolio(
             rows.push((entry.time,key.clone(),entry.entry_id.clone(),json!({"time":entry.time,"account":key,"component":entry.component,"amount":entry.amount.normalize().to_string(),"currency":entry.currency,"strategy_instance":entry.instance_id,"reference":entry.entry_id})));
         }
         for (k, amount) in page.1 {
-            let sum = totals.entry(k).or_default();
+            let sum = totals.entry((environment.to_owned(), k.0, k.1)).or_default();
             *sum = sum.checked_add(amount).ok_or("MONEY_OVERFLOW")?;
         }
     }
@@ -178,7 +182,7 @@ pub async fn portfolio(
             json!({"rows":output,"next_cursor":next,"central_budget":central_budget.as_ref().ok(),"central_budget_error":central_budget.as_ref().err(),"as_of_ms":Utc::now().timestamp_millis()}),
         )
     } else {
-        let mut all=totals.into_iter().map(|((currency,component),amount)|json!({"kind":"component","currency":currency,"component":component,"amount":amount.normalize().to_string()})).collect::<Vec<_>>();
+        let mut all=totals.into_iter().map(|((environment,currency,component),amount)|json!({"kind":"component","environment":environment,"currency":currency,"component":component,"amount":amount.normalize().to_string()})).collect::<Vec<_>>();
         all.extend(navigation.iter().cloned());
         if cursor.as_ref().is_some_and(|c| c.account != "summary") {
             return Err("INVALID_CURSOR".into());
@@ -240,6 +244,7 @@ fn nav_projection(
     let coverage_reason = match nav.coverage.as_str() {
         "COMPLETE" => Value::Null,
         "UNAVAILABLE_BEFORE_T0" => json!("UNAVAILABLE_BEFORE_T0"),
+        "PARTIAL" if nav.scope_id.starts_with("strategy:") => json!("STRATEGY_CAPITAL_PROVENANCE_MISSING"),
         "PARTIAL" => json!("NAV_SOURCE_INCOMPLETE"),
         _ => json!("NAV_COVERAGE_INVALID"),
     };
@@ -300,7 +305,8 @@ fn summary_diagnostics(
 fn summary_key(value: &Value) -> String {
     if value["kind"] == "component" {
         format!(
-            "component|{}|{}",
+            "component|{}|{}|{}",
+            value["environment"].as_str().unwrap_or_default(),
             value["currency"].as_str().unwrap_or_default(),
             value["component"].as_str().unwrap_or_default()
         )
@@ -411,6 +417,31 @@ mod tests {
         assert_eq!(history_after("C", Some(&c), 1), (10, String::new()));
     }
 
+    #[test]
+    fn real_and_demo_components_have_distinct_summary_keys() {
+        let real = json!({"kind":"component","environment":"real","currency":"USD","component":"FEE"});
+        let demo = json!({"kind":"component","environment":"demo","currency":"USD","component":"FEE"});
+        assert_ne!(summary_key(&real), summary_key(&demo));
+    }
+
+    #[test]
+    fn unknown_strategy_capital_is_an_explicit_partial_reason() {
+        let nav = okx_execution::NavWindow {
+            scope_id: "strategy:manual".into(),
+            currency: "USD".into(),
+            opening_equity: None,
+            current_equity: None,
+            flows: None,
+            pnl: None,
+            opening_as_of: None,
+            current_as_of: None,
+            coverage: "PARTIAL".into(),
+        };
+        let row = nav_projection("okx:real:verified", nav, 1, 10, 1);
+        assert_eq!(row["coverage_reason"], "STRATEGY_CAPITAL_PROVENANCE_MISSING");
+        assert!(row["window"]["opening_equity"].is_null());
+        assert!(row["window"]["pnl"].is_null());
+    }
     #[test]
     fn portfolio_before_t0_is_partial() {
         let readiness = vec![json!({"financial_risk":{"nav_complete":true}})];
