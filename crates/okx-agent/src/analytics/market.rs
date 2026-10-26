@@ -263,9 +263,10 @@ fn compute_row(
     if !bars.is_empty() && incomplete_candles {
         gaps.push("CANDLE_RANGE_INCOMPLETE_OR_GAPPED".into());
         // Preserve the precise public reason alongside the new typed evidence.
-        if bars.windows(2).any(|pair| {
-            pair[0].time.checked_add(request.timeframe_ms) != Some(pair[1].time)
-        }) {
+        if bars
+            .windows(2)
+            .any(|pair| pair[0].time.checked_add(request.timeframe_ms) != Some(pair[1].time))
+        {
             gaps.push("CANDLE_INTERIOR_GAP".into());
         }
     }
