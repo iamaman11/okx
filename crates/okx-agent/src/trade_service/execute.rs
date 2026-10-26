@@ -713,7 +713,11 @@ impl TradeService {
                     return Err("COHORT_SOURCE_GENERATION_UNVERIFIED".into());
                 }
                 let generation = r.private_ws.status().await.connection_generation;
-                let snapshot = r.observer.snapshot().await.map_err(err)?;
+                let snapshot = if held_received.is_some() {
+                    r.observer.snapshot_after_held().await.map_err(err)?
+                } else {
+                    r.observer.snapshot().await.map_err(err)?
+                };
                 let algos = r
                     .observer
                     .pending_derivative_risk_algos()
