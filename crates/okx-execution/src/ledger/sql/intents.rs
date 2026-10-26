@@ -39,20 +39,11 @@ impl AccountStore {
         Ok(())
     }
 
-    /// Explicit, authenticated Worker DENIED is proof no reservation was
-    /// minted; record the first local reason and stop polling this address.
+    /// An explicit central DENIED plus an authenticated address-specific
+    /// NOT_FOUND readback proves this attempt minted no reservation. Both
+    /// the original reason and its no-risk marker commit atomically.
     pub fn reject_denied_reserve(&mut self, id: &str, reason: &str, now: i64) -> StoreResult<()> {
-        self.reject_unsent(id, reason, now)?;
-        let operation = format!("risk-reserve:{id}");
-        let changed = self.connection.execute(
-            "UPDATE operation_receipts SET kind='RISK_RESERVE_DENIED'
-             WHERE operation_id=?1 AND kind='RISK_RESERVE_ATTEMPT'",
-            [&operation],
-        )?;
-        if changed != 1 {
-            return Err(StoreError::Invalid("RESERVE_ATTEMPT_MARKER_MISSING"));
-        }
-        Ok(())
+        self.reject_unsent_inner(id, reason, now, true).map(|_| ())
     }
 
     pub fn declined_reserve(&self, id: &str) -> StoreResult<bool> {
@@ -122,6 +113,12 @@ impl AccountStore {
         Ok(())
     }
     pub fn reject_unsent(&mut self, id: &str, reason: &str, now: i64) -> StoreResult<bool> {
+        self.reject_unsent_inner(id, reason, now, false)
+    }
+
+    fn reject_unsent_inner(
+        &mut self, id: &str, reason: &str, now: i64, proven_not_reserved: bool
+    ) -> StoreResult<bool> {
         if reason.is_empty() {
             return Err(StoreError::Invalid("UNSENT_REASON_REQUIRED"));
         }
@@ -136,23 +133,44 @@ impl AccountStore {
         if begin.is_some() {
             return Err(StoreError::Invalid("POST_OUTCOME_REQUIRES_RECONCILIATION"));
         }
-        if state == "REJECTED" {
-            return Ok(false);
+        let first = state != "REJECTED";
+        if first {
+            if !matches!(state.as_str(), "PREPARED" | "RESERVED") {
+                return Err(StoreError::Invalid("INVALID_INTENT_TRANSITION"));
+            }
+            tx.execute("UPDATE intents SET state='REJECTED',incident=?2,updated_at=?3,revision=revision+1 WHERE intent_id=?1",params![id,reason,now])?;
+            tx.execute(
+                "UPDATE risk_receipts SET state='UNSENT_PENDING_CENTRAL' WHERE intent_id=?1",
+                [id],
+            )?;
+            tx.execute(
+                "INSERT INTO operation_receipts VALUES(?1,'REJECTED_UNSENT',?2,?3,?4)",
+                params![format!("terminal:{id}"), hash, reason, now],
+            )?;
         }
-        if !matches!(state.as_str(), "PREPARED" | "RESERVED") {
-            return Err(StoreError::Invalid("INVALID_INTENT_TRANSITION"));
+        if proven_not_reserved {
+            let original: Option<(String,String)> = tx.query_row(
+                "SELECT kind,request_hash FROM operation_receipts WHERE operation_id=?1",
+                [format!("terminal:{id}")],
+                |r| Ok((r.get(0)?,r.get(1)?)),
+            ).optional()?;
+            if original.as_ref().is_none_or(|(kind,request)|
+                kind!="REJECTED_UNSENT" || request!=&hash) {
+                return Err(StoreError::Invalid("UNSENT_TERMINAL_RECEIPT_MISSING"));
+            }
+            let operation = format!("risk-reserve:{id}");
+            let changed = tx.execute(
+                "UPDATE operation_receipts SET kind='RISK_RESERVE_DENIED'
+                 WHERE operation_id=?1
+                   AND kind IN('RISK_RESERVE_ATTEMPT','RISK_RESERVE_DENIED')",
+                [&operation],
+            )?;
+            if changed != 1 {
+                return Err(StoreError::Invalid("RESERVE_ATTEMPT_MARKER_MISSING"));
+            }
         }
-        tx.execute("UPDATE intents SET state='REJECTED',incident=?2,updated_at=?3,revision=revision+1 WHERE intent_id=?1",params![id,reason,now])?;
-        tx.execute(
-            "UPDATE risk_receipts SET state='UNSENT_PENDING_CENTRAL' WHERE intent_id=?1",
-            [id],
-        )?;
-        tx.execute(
-            "INSERT INTO operation_receipts VALUES(?1,'REJECTED_UNSENT',?2,?3,?4)",
-            params![format!("terminal:{id}"), hash, reason, now],
-        )?;
         tx.commit()?;
-        Ok(true)
+        Ok(first)
     }
     /// A no-send release requires the existing durable rejection receipt,
     /// matching the original request, with no committed post claim.
