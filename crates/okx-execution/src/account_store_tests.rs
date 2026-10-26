@@ -2,6 +2,60 @@ use super::*;
 use std::sync::atomic::{AtomicU64, Ordering};
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 #[test]
+fn f2_lost_reserve_receipt_recovers_after_restart_without_second_reserve() {
+    let mut s = store();
+    intent(&mut s);
+    let key = "3:okx4:real64:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa14:continuous_engine6:intent";
+    s.mark_reserve_attempt("intent", key, 3).unwrap();
+    // Before a remote reply there is no local CentralReceipt to scan.
+    assert!(s.central_receipt("intent").unwrap().is_none());
+    assert_eq!(s.reconcilable_intents(16).unwrap().len(), 1);
+    let p = s.path.clone();
+    let meta = s.meta.clone();
+    drop(s);
+    let mut s = AccountStore::open_existing(p, &meta.account_key, &meta.installation_id).unwrap();
+    assert_eq!(s.reconcilable_intents(16).unwrap()[0].intent_id, "intent");
+    s.reject_unsent("intent", "RESERVE_REPLY_LOST", 5).unwrap();
+    let proof = s.unsent_release_receipt("intent").unwrap().unwrap();
+    assert_eq!(proof.reservation_key, key);
+    assert_eq!(proof.reason, "RESERVE_REPLY_LOST");
+    assert_eq!(s.reconcilable_intents(16).unwrap().len(), 1);
+    s.acknowledge_central_release(key, "worker-released").unwrap();
+    assert_eq!(s.reconcilable_intents(16).unwrap().len(), 0);
+    // Both proof and first cause survive a lost local release ACK.
+    let proof = s.unsent_release_receipt("intent").unwrap().unwrap();
+    assert_eq!(proof.reason, "RESERVE_REPLY_LOST");
+    s.acknowledge_central_release(key, "worker-released").unwrap();
+    assert!(s.begin_post("intent", 1, 6).unwrap() == false);
+}
+#[test]
+fn f2_explicit_worker_reserve_denial_has_no_orphan_risk_and_no_post() {
+    let mut s = store();
+    intent(&mut s);
+    s.mark_reserve_attempt("intent", "risk_reserve_not_granted", 3).unwrap();
+    s.reject_denied_reserve("intent", "ORDER_OR_STRATEGY_RISK_LIMIT", 5).unwrap();
+    assert!(s.declined_reserve("intent").unwrap());
+    assert!(s.unsent_release_receipt("intent").unwrap().is_none());
+    assert!(s.reconcilable_intents(16).unwrap().is_empty());
+    assert_eq!(
+        s.intent("intent").unwrap().unwrap().incident.as_deref(),
+        Some("ORDER_OR_STRATEGY_RISK_LIMIT")
+    );
+}
+#[test]
+fn f2_durable_marker_conflicts_and_never_becomes_post_claim() {
+    let mut s = store();
+    intent(&mut s);
+    s.mark_reserve_attempt("intent", "original-reserve-key", 3).unwrap();
+    s.mark_reserve_attempt("intent", "original-reserve-key", 4).unwrap();
+    assert!(s.mark_reserve_attempt("intent", "different-key", 5).is_err());
+    s.reject_unsent("intent", "RESERVE_LOCAL_COMMIT_UNCONFIRMED", 6).unwrap();
+    let evidence = s.unsent_release_receipt("intent").unwrap().unwrap();
+    assert_eq!(evidence.reservation_key, "original-reserve-key");
+    assert_eq!(evidence.reason, "RESERVE_LOCAL_COMMIT_UNCONFIRMED");
+    assert!(!s.begin_post("intent", 1, 7).unwrap());
+}
+#[test]
 fn sql_deadline_handler_is_removed_after_operation_error() {
     let mut s = store();
     let result: StoreResult<()> =
