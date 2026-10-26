@@ -121,6 +121,35 @@ check((await beginRiskPost(postUnsent,postRes.entry.key,p,1,d,{
  connection_generation:77,expected_book_sequence:3,census:f4read,source_proof:native,
  causal_proof:f4proof,now_ms:now+3})).status==="DENIED","old post fence cannot resurrect tombstone");
 console.log("risk_f4_unsent_after_central_post PASS");
+// F2: a lost RESERVE never arrived, but its native SQL attempt did. The
+// Worker fences the exact address so that a delayed RESERVE cannot mint risk.
+const neverArrived=new Storage();
+await neverArrived.put("account_access_v1",governance);
+await neverArrived.put("generation",77);
+await initializeRiskBook(neverArrived,"installation_test");
+const lateIntent="intent_f2_late_001";
+const lateRequest={...request,intent_id:lateIntent};
+const lateKey=[base.venue,"real",a,base.run_id,lateIntent]
+  .map(v=>v.length+":"+v).join("");
+const lateProof={...receipt,reservation_key:lateKey,intent_id:lateIntent};
+check((await releaseUnsentRisk(neverArrived,lateKey,p,0,77,
+  {...lateProof,account_key:"okx:real:"+b})).status==="DENIED",
+  "wrong native account cannot abort another risk identity");
+check((await releaseUnsentRisk(neverArrived,lateKey,p,0,77,lateProof)).status==="UPDATED",
+  "SQL no-send fences an absent reservation with initial sequence zero");
+check((await reserveRisk(neverArrived,policy,census,lateRequest,native)).reason==="RESERVE_FENCED_NO_SEND",
+  "a delayed exchange-independent RESERVE never mints risk after the no-send fence");
+const absentBook=await readRiskBook(neverArrived);
+check(absentBook?.occupied_usdt==="0"&&absentBook?.consumed_loss_usd==="0"&&
+  absentBook?.sequence===1,"negative fence only advances book CAS, never consumes risk");
+check((await releaseUnsentRisk(neverArrived,lateKey,p,1,77,lateProof)).status==="UPDATED",
+  "repeated no-send fence is idempotent under new CAS sequence");
+check((await readRiskBook(neverArrived))?.sequence===1,
+  "idempotent absent release does not advance central book");
+check((await releaseUnsentRisk(neverArrived,lateKey,p,1,77,
+  {...lateProof,record_digest:d})).status==="DENIED",
+  "conflicting terminal proof cannot replace an immutable absence fence");
+console.log("risk_f2_absent_reserve_fence PASS");
 
 census.occupied[0].cumulative_loss_usd="17";
 // One million terminal records must not be enumerated or decoded on the hot path.
