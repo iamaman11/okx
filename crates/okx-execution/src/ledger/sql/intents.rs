@@ -78,7 +78,7 @@ impl AccountStore {
                  JOIN operation_receipts o ON o.operation_id='terminal:'||i.intent_id
                  WHERE i.intent_id=?1 AND i.state='REJECTED'
                    AND i.begin_post_at IS NULL AND i.exchange_order_id IS NULL
-                   AND r.state='UNSENT_PENDING_CENTRAL'
+                   AND r.state IN('UNSENT_PENDING_CENTRAL','RELEASED')
                    AND o.kind='REJECTED_UNSENT'
                    AND o.request_hash=i.request_hash AND o.result_ref=i.incident",
                 [id],

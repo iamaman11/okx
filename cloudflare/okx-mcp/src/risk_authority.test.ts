@@ -157,8 +157,8 @@ check((await handleNativeRiskCommand(s,session,{schema:"okx.risk-command/v1",com
    installation_id:initial.installation_id,
    action:{action:"INSPECT",reservation_key:admitted[1].reservation_key,
      plan_sha256:"b".repeat(64)}},now+5);
- check(inspect.status==="OBSERVED"&&inspect.reservation_state==="HELD",
-   "revocation preserves exposure for reconciliation; it never silently releases it");
+ check(inspect.status==="OBSERVED"&&inspect.reservation_state==="RELEASED",
+   "durable no-send proof releases capacity after revocation; no automatic release otherwise");
  check((await handleNativeRiskCommand(t,session,
    reserve("after_pause","native_alpha",proof),now+5)).status==="DENIED",
    "revoked account cannot admit more risk under stale policy");
