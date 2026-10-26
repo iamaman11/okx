@@ -581,6 +581,7 @@ impl AnalyticsService {
             return Ok(json!({
                 "view":"export","schema":"okx.research.export/448.1",
                 "job_id":job_id,"result_id":artifact,"leaf_id":leaf_artifact,
+                "expires_at_ms":j.expires_at_ms,
                 "integrity":verify_export_manifest(&self.artifacts, &value)?,
                 "dataset_hash":value.get("dataset_hash"),
                 "result_hash":value.get("hash"),
@@ -590,6 +591,7 @@ impl AnalyticsService {
         }
         let metadata = json!({
             "job_id":job_id,"artifact":artifact,
+            "expires_at_ms":j.expires_at_ms,
             "summary":value.get("summary").or_else(||value.pointer("/test/summary")),
             "grid":value.get("grid").map(|g| json!({
                 "selected":g.get("selected"),"train":g.get("train"),
@@ -1625,6 +1627,37 @@ mod artifact_job_fixtures {
             verify_export_manifest(&service.artifacts, &manifest).unwrap_err(),
             "EXPORT_ROW_COUNT_MISMATCH"
         );
+        drop(service);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn c17_retention_keeps_shared_pinned_result_and_expires_only_unpinned_job() {
+        let (root, service) = super::artifact_job_fixtures::service();
+        let page = service.artifacts.publish_evidence(&vec![json!({"row":1})]).unwrap().0;
+        let manifest = service.artifacts.publish_evidence(&json!({
+            "trade_pages":[page.clone()],"total_trades":1
+        })).unwrap().0;
+        let first = "8".repeat(64);
+        let second = "7".repeat(64);
+        for (key, id) in [("shared-first", &first), ("shared-second", &second)] {
+            service.jobs.enqueue(key.into(), id.clone()).unwrap();
+            service.jobs.update(id, jobs::State::Completed, Some(manifest.clone()), None).unwrap();
+        }
+        service.pin_job(&second, true).unwrap();
+        let future = chrono::Utc::now().timestamp_millis().max(0) as u64 + 8 * 86_400_000;
+        assert_eq!(service.apply_retention(future).unwrap(), 1);
+        assert_eq!(
+            service.result_page(first, None, 1, ResearchResultView::Trades).unwrap_err(),
+            "RESULT_EXPIRED"
+        );
+        let still_live = service.result_page(second.clone(), None, 1, ResearchResultView::Trades).unwrap();
+        assert_eq!(still_live["rows"][0]["row"], 1);
+        assert!(service.artifacts.read_evidence(&page).is_ok());
+        service.pin_job(&second, false).unwrap();
+        assert_eq!(service.apply_retention(future).unwrap(), 1);
+        assert!(service.artifacts.read_evidence(&page).is_err());
+        assert!(service.artifacts.read_evidence(&manifest).is_err());
         drop(service);
         std::fs::remove_dir_all(root).unwrap();
     }

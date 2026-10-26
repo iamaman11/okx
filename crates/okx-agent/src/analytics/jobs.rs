@@ -656,7 +656,7 @@ mod tests {
         assert_eq!(cancelled.artifact.as_deref(), Some("partial-artifact"));
         // General late async writes cannot mutate a cancelled job.
         catalog
-            .update("cancelled-job", State::Completed, None, None)
+            .update("cancelled-job", State::Completed, Some("late-result".into()), None)
             .unwrap();
         assert_eq!(
             catalog.get("cancelled-job").unwrap().state,
