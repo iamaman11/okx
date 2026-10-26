@@ -382,11 +382,23 @@ mod batch_tests {
         });
         let legacy: ResearchRequest = serde_json::from_value(request.clone()).unwrap();
         assert!(legacy.valid());
-        assert!(matches!(legacy, ResearchRequest::Validate { range_mode: RangeMode::Strict, .. }));
+        assert!(matches!(
+            legacy,
+            ResearchRequest::Validate {
+                range_mode: RangeMode::Strict,
+                ..
+            }
+        ));
         request["range_mode"] = serde_json::json!("normalize");
         let normalized: ResearchRequest = serde_json::from_value(request.clone()).unwrap();
         assert!(normalized.valid());
-        assert!(matches!(normalized, ResearchRequest::Validate { range_mode: RangeMode::Normalize, .. }));
+        assert!(matches!(
+            normalized,
+            ResearchRequest::Validate {
+                range_mode: RangeMode::Normalize,
+                ..
+            }
+        ));
         request["range_mode"] = serde_json::json!("silent_truncation");
         assert!(serde_json::from_value::<ResearchRequest>(request).is_err());
     }
