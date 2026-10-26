@@ -604,19 +604,28 @@ mod tests {
 
     #[test]
     fn c15_identical_seed_and_inputs_repeat_exact_financial_hashes() {
-        let b = bars();
-        let s = spec();
-        let a = replay(&b, &s, 3, 100, &|| false).unwrap();
-        let other = std::thread::spawn(move || replay(&b, &s, 3, 100, &|| false).unwrap())
-            .join()
-            .unwrap();
-        assert_eq!(a.hash, other.hash);
-        assert_eq!(a.dataset_hash, other.dataset_hash);
-        assert_eq!(a.summary.pnl_exact, other.summary.pnl_exact);
-        assert_eq!(a.summary.fees_exact, other.summary.fees_exact);
-        assert_eq!(a.summary.funding_exact, other.summary.funding_exact);
-        assert_eq!(a.trades.len(), other.trades.len());
-        assert_eq!(a.equity, other.equity);
+        let input = bars();
+        let parameters = spec();
+        let baseline = replay(&input, &parameters, 3, 100, &|| false).unwrap();
+        for workers in [1, 2, 4, 8] {
+            let tasks = (0..workers)
+                .map(|_| {
+                    let input = input.clone();
+                    let spec = parameters.clone();
+                    std::thread::spawn(move || replay(&input, &spec, 3, 100, &|| false).unwrap())
+                })
+                .collect::<Vec<_>>();
+            for task in tasks {
+                let result = task.join().unwrap();
+                assert_eq!(baseline.hash, result.hash);
+                assert_eq!(baseline.dataset_hash, result.dataset_hash);
+                assert_eq!(baseline.summary.pnl_exact, result.summary.pnl_exact);
+                assert_eq!(baseline.summary.fees_exact, result.summary.fees_exact);
+                assert_eq!(baseline.summary.funding_exact, result.summary.funding_exact);
+                assert_eq!(baseline.trades.len(), result.trades.len());
+                assert_eq!(baseline.equity, result.equity);
+            }
+        }
     }
 
     #[test]
@@ -635,6 +644,8 @@ mod tests {
         }
         let changed_result = grid(&changed, &s, &variants, &|| false).unwrap();
         assert_eq!(first.split_index, 70);
+        assert_eq!(first.train_score_start_index, 8);
+        assert_eq!(first.train_score_start_index, changed_result.train_score_start_index);
         assert_eq!(first.train_dataset_hash, changed_result.train_dataset_hash);
         assert_eq!(first.selected, changed_result.selected);
         assert_eq!(first.variants.len(), changed_result.variants.len());
