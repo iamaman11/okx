@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 #[test]
 fn f0_crash_before_prepare_commit_is_retriable_once() {
-    let mut s = store();
+    let s = store();
     assert!(s.reconcilable_intents(16).unwrap().is_empty());
     let path = s.path.clone();
     let meta = s.meta.clone();
