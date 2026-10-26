@@ -174,6 +174,34 @@ export async function lowerRiskBookLimit(tx:any,limit:string):Promise<boolean>{
  await tx.put(KEY,{...meta,campaign_limit_usd:limit,sequence:meta.sequence+1});return true;
 }
 const entryKey=(key:string)=>"risk_entry_v2:"+key;
+const noReserveKey=(key:string)=>"risk_no_reserve_v1:"+key;
+/** Permanent negative fence in the existing Worker RiskBook, never occupancy. */
+interface NoReserveFence {
+  account_key:string;intent_id:string;plan_hash:string;
+  record_digest:string;policy_revision:number;
+}
+function validNoReserveAddress(key:string,account:string,intent:string):boolean {
+  const pieces=account.split(":");
+  if(pieces.length!==3||pieces[0]!=="okx"||pieces[1]!=="real"||!HEX.test(pieces[2])||
+    !TOKEN.test(intent))return false;
+  const prefix=pieces.map(v=>v.length+":"+v).join("");
+  const suffix=intent.length+":"+intent;
+  if(!key.startsWith(prefix)||!key.endsWith(suffix))return false;
+  const run=key.slice(prefix.length,key.length-suffix.length);
+  const m=/^([1-9][0-9]{0,2}):(.+)$/.exec(run);
+  return !!m&&m[2].length===Number(m[1])&&TOKEN.test(m[2]);
+}
+export async function inspectNoReserveFence(storage:any,key:string,plan:string):
+  Promise<{sequence:number;policy_revision:number}|null>{
+  return storage.transaction(async(tx:any)=>{
+    const meta=await tx.get(KEY),f:NoReserveFence|undefined=await tx.get(noReserveKey(key));
+    return validMeta(meta)&&f&&f.plan_hash===plan&&HEX.test(f.record_digest)&&
+      validNoReserveAddress(key,f.account_key,f.intent_id)&&
+      Number.isSafeInteger(f.policy_revision)&&f.policy_revision>0
+      ?{sequence:meta.sequence,policy_revision:f.policy_revision}:null;
+  });
+}
+
 const strategyKey=(entry:Pick<RiskEntry,"venue"|"environment"|"uid"|"strategy_id">)=>accountKey(entry)+":"+entry.strategy_id;
 export async function inspectRisk(storage:any,key:string):Promise<{meta:RiskMeta;entry:RiskEntry}|null>{
  return storage.transaction(async(tx:any)=>{const meta=await tx.get(KEY),entry=await tx.get(entryKey(key));return validMeta(meta)&&entry&&validEntry(entry)?{meta,entry}:null;});
@@ -297,8 +325,12 @@ export async function reserveRisk(
       return {status:"DENIED",reason:"STALE_RUNTIME_GENERATION"};
     const meta:unknown=await tx.get(KEY);
     if(!validMeta(meta)||meta.installation_id!==governance.installation_id)return {status:"DENIED",reason:"RISK_BOOK_MISSING_OR_CORRUPT"};
+    const key=riskKey(input);
+    // A late RESERVE after a durable native no-send release cannot mint risk.
+    if(await tx.get(noReserveKey(key))!==undefined)
+      return {status:"DENIED",reason:"RESERVE_FENCED_NO_SEND"};
     if(!await applyCensusLoss(tx,meta,census))return {status:"DENIED",reason:"CUMULATIVE_LOSS_SOURCE_REGRESSION"};
-    const key=riskKey(input),prior:RiskEntry|undefined=await tx.get(entryKey(key));
+    const prior:RiskEntry|undefined=await tx.get(entryKey(key));
     if(prior){
       if(!validEntry(prior)||prior.plan_hash!==input.plan_hash||prior.loss_usdt!==input.loss_usdt||prior.loss_usd!==input.loss_usd||JSON.stringify(prior.usd_conversion)!==JSON.stringify(input.usd_conversion)||prior.policy_revision!==input.policy_revision||prior.strategy_id!==input.strategy_id||prior.instrument_id!==input.instrument_id)return {status:"DENIED",reason:"IDEMPOTENCY_CONFLICT"};
       return prior.state==="HELD"?{status:"HELD",entry:prior,book_sequence:meta.sequence,occupied_global_usdt:meta.occupied_usdt}:{status:"DENIED",reason:"INTENT_ALREADY_POSTED_OR_RESOLVED"};
@@ -370,10 +402,11 @@ export async function releaseUnsentRisk(
 ):Promise<{status:"UPDATED"|"DENIED";reason?:string}> {
   if(!proof||!HEX.test(plan_hash)||!HEX.test(proof.request_hash)||
     !HEX.test(proof.record_digest)||!TOKEN.test(proof.intent_id)||
+    !validNoReserveAddress(key,proof.account_key,proof.intent_id)||
     proof.reservation_key!==key||proof.plan_hash!==plan_hash||
     !/^okx:real:[0-9a-f]{64}$/.test(proof.account_key)||
     typeof proof.reason!=="string"||proof.reason.length<1||proof.reason.length>128||
-    !Number.isSafeInteger(expected_sequence)||expected_sequence<1||
+    !Number.isSafeInteger(expected_sequence)||expected_sequence<0||
     !Number.isSafeInteger(generation)||generation<1)
     return {status:"DENIED",reason:"INVALID_UNSENT_SQL_PROOF"};
   return storage.transaction(async(tx:any)=>{
@@ -382,7 +415,24 @@ export async function releaseUnsentRisk(
     if(await tx.get("generation")!==generation||meta.sequence!==expected_sequence)
       return {status:"DENIED" as const,reason:"STALE_SESSION_OR_BOOK_SEQUENCE"};
     const entry:RiskEntry|undefined=await tx.get(entryKey(key));
-    if(!entry||!validEntry(entry)||entry.plan_hash!==plan_hash||
+    if(!entry){
+      const previous:NoReserveFence|undefined=await tx.get(noReserveKey(key));
+      if(previous){
+        return previous.account_key===proof.account_key&&previous.intent_id===proof.intent_id&&
+          previous.plan_hash===plan_hash&&previous.record_digest===proof.record_digest
+          ?{status:"UPDATED" as const}
+          :{status:"DENIED" as const,reason:"NO_RESERVE_FENCE_CONFLICT"};
+      }
+      const governance:unknown=await tx.get(GOVERNANCE_STORAGE_KEY);
+      if(!validGovernance(governance))return {status:"DENIED" as const,reason:"GOVERNANCE_UNAVAILABLE"};
+      await tx.put(noReserveKey(key),{
+        account_key:proof.account_key,intent_id:proof.intent_id,plan_hash,
+        record_digest:proof.record_digest,policy_revision:governance.revision
+      } satisfies NoReserveFence);
+      await tx.put(KEY,{...meta,sequence:meta.sequence+1});
+      return {status:"UPDATED" as const};
+    }
+    if(!validEntry(entry)||entry.plan_hash!==plan_hash||
       !["HELD","POSTED"].includes(entry.state)||
       accountKey(entry)!==proof.account_key||entry.intent_id!==proof.intent_id)
       return {status:"DENIED" as const,reason:"UNSENT_RELEASE_IDENTITY_OR_STATE_MISMATCH"};
