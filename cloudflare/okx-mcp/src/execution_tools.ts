@@ -2,7 +2,7 @@ import {isObject,type Json} from './shared.js';
 type Schema=Record<string,any>;
 const text=(max=128):Schema=>({type:'string',minLength:1,maxLength:max});
 const token={...text(),minLength:8,pattern:'^[A-Za-z0-9_-]+$'};
-const money={type:'string',pattern:'^(?!0+(\\.0+)?$)(0|[1-9]\\d{0,14})(\\.\\d{1,9})?
+const money={type:'string',pattern:'^(?!0+(\\.0+)?$)(0|[1-9]\\d{0,14})(\\.\\d{1,9})?$',maxLength:32};
 const integer=(min=0,max=Number.MAX_SAFE_INTEGER):Schema=>({type:'integer',minimum:min,maximum:max});
 const choice=(...values:string[]):Schema=>({type:'string',enum:values});
 const array=(items:Schema,max=32):Schema=>({type:'array',items,maxItems:max,uniqueItems:true});
