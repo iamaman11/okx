@@ -168,10 +168,11 @@ fn k9_fixed_profile() {
         "{:x}",
         Sha256::digest(std::fs::read("Cargo.lock").expect("run from repository root"))
     );
+    let logical_cpus = std::thread::available_parallelism().map_or(1, |n| n.get());
     let mut reference_hash = None;
     let mut readings = Vec::new();
     let peak_before = peak_memory();
-    for workers in [1usize, 4, 8] {
+    for workers in [1usize, 4, 8].into_iter().filter(|workers| *workers <= logical_cpus) {
         for _ in 0..WARMUPS {
             let observed = run_fixed_batch(&source, &mechanics, &variants, workers);
             if let Some(expected) = &reference_hash {
@@ -201,10 +202,10 @@ fn k9_fixed_profile() {
             "peak_working_set_bytes":peak_memory(),
         }));
     }
-    let logical_cpus = std::thread::available_parallelism().map_or(1, |n| n.get());
     let hash = okx_research::canonical_sha256(&reference_hash).unwrap();
     let one_p50 = readings[0]["p50_ms"].as_f64().unwrap();
-    let four_p50 = readings[1]["p50_ms"].as_f64().unwrap();
+    let four_p50 = readings.iter().find(|r| r["workers"] == 4)
+        .and_then(|r| r["p50_ms"].as_f64());
     println!(
         "K9_REFERENCE_PROFILE_JSON:{}",
         serde_json::json!({
@@ -222,7 +223,10 @@ fn k9_fixed_profile() {
             "instruments":INSTRUMENTS,
             "variants":VARIANT_COUNT,
             "worker_profiles":readings,
-            "median_speedup_4_vs_1":one_p50 / four_p50,
+            "median_speedup_4_vs_1":four_p50.map(|p50| one_p50 / p50),
+            "physical_memory_bytes":physical_memory_bytes(),
+            "worker_profiles_not_run": [1usize,4,8].into_iter()
+                .filter(|workers| *workers > logical_cpus).collect::<Vec<_>>(),
             "memory_peak_bytes":peak_memory(),
             "memory_incremental_peak_bytes":peak_memory().saturating_sub(peak_before),
             "reference_cpu_eligible":logical_cpus >= 8,
@@ -261,4 +265,44 @@ fn run_fixed_batch(
     }
     assert_eq!(result_hashes.len(), sources.len());
     result_hashes
+}
+
+#[cfg(windows)]
+fn physical_memory_bytes() -> Option<u64> {
+    #[repr(C)]
+    struct MemoryStatus {
+        size: u32,
+        load: u32,
+        total_phys: u64,
+        available_phys: u64,
+        total_page_file: u64,
+        available_page_file: u64,
+        total_virtual: u64,
+        available_virtual: u64,
+        available_extended_virtual: u64,
+    }
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GlobalMemoryStatusEx(buffer: *mut MemoryStatus) -> i32;
+    }
+    let mut memory = MemoryStatus {
+        size: std::mem::size_of::<MemoryStatus>() as u32,
+        load: 0,
+        total_phys: 0,
+        available_phys: 0,
+        total_page_file: 0,
+        available_page_file: 0,
+        total_virtual: 0,
+        available_virtual: 0,
+        available_extended_virtual: 0,
+    };
+    if unsafe { GlobalMemoryStatusEx(&mut memory) } == 0 {
+        None
+    } else {
+        Some(memory.total_phys)
+    }
+}
+#[cfg(not(windows))]
+fn physical_memory_bytes() -> Option<u64> {
+    None
 }

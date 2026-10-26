@@ -128,6 +128,15 @@ struct AgentLaunchEvidence {
     stderr_health: okx_host_launcher::logging::LogHealth,
 }
 
+struct K9BenchmarkRun {
+    child: Child,
+    source_tree: String,
+    output_path: PathBuf,
+    error_path: PathBuf,
+    started_at: Instant,
+    _job: AgentJob,
+}
+
 struct NativeChildPipe {
     input: ChildStdin,
     replies: Receiver<NativeChildReply>,
@@ -135,6 +144,7 @@ struct NativeChildPipe {
 
 pub struct HostExecutor {
     native_child_pipe: Option<NativeChildPipe>,
+    k9_benchmark: Option<K9BenchmarkRun>,
     repo_root: PathBuf,
     agent_child: Option<Child>,
     agent_started_at: Option<Instant>,
@@ -158,6 +168,7 @@ impl HostExecutor {
 
         Ok(Self {
             native_child_pipe: None,
+            k9_benchmark: None,
             repo_root: PathBuf::from(CANONICAL_ROOT),
             agent_child: None,
             agent_started_at: None,
@@ -192,6 +203,10 @@ impl HostExecutor {
             HostControlOperation::ControllerUpdateStatus => Ok(controller_update::status_value()),
             HostControlOperation::WorkspaceStatus => self.workspace_status(),
             HostControlOperation::TestWorkspace => self.test_workspace(),
+            HostControlOperation::K9BenchmarkStart { expected_source_tree } => {
+                self.k9_benchmark_start(&expected_source_tree)
+            }
+            HostControlOperation::K9BenchmarkStatus => self.k9_benchmark_status(),
             HostControlOperation::InitAgentIdentity => self.init_agent_identity(),
             HostControlOperation::AgentIdentity => self.agent_identity(),
             HostControlOperation::BootstrapAgentGithubToken => self.bootstrap_agent_github_token(),
@@ -254,6 +269,7 @@ impl HostExecutor {
                 | HostControlOperation::ControllerUpdateStatus
                 | HostControlOperation::AgentIdentity
                 | HostControlOperation::AutostartStatus
+                | HostControlOperation::K9BenchmarkStatus
                 | HostControlOperation::StopAgent
         ) {
             return Ok(());
@@ -469,6 +485,109 @@ impl HostExecutor {
         Ok(json!({
             "head": self.git(&["rev-parse", "HEAD"])?,
             "workspace_tests": "PASS"
+        }))
+    }
+
+
+    /// Benchmark the already-reviewed local replay on THIS Windows host.
+    /// Uses an isolated exact origin/main worktree: never requires a clean
+    /// or stopped production Agent, and never loads exchange credentials.
+    fn k9_benchmark_start(&mut self, expected_source_tree: &str) -> HostControlResult<Value> {
+        if let Some(previous) = self.k9_benchmark.as_mut() {
+            if previous.child.try_wait()?.is_none() {
+                return Ok(json!({
+                    "state": "RUNNING",
+                    "source_tree": previous.source_tree,
+                    "elapsed_ms": previous.started_at.elapsed().as_millis()
+                }));
+            }
+            // Previous evidence remains on disk; only one active CPU job.
+            self.k9_benchmark.take();
+        }
+
+        // GitHub is the source of truth. Dirty local C:\\okx files remain untouched.
+        let actual_tree = self.fetch_origin_main_tree()?;
+        if actual_tree != expected_source_tree {
+            return Ok(json!({
+                "state": "REJECTED_SOURCE_TREE_MISMATCH",
+                "expected": expected_source_tree,
+                "actual": actual_tree
+            }));
+        }
+        let commit = self.git(&["rev-parse", "origin/main"])?;
+        let mut nonce = [0u8; 12];
+        getrandom::fill(&mut nonce).map_err(|e| HostControlError::Random(e.to_string()))?;
+        let run_id = nonce.iter().map(|b| format!("{b:02x}")).collect::<String>();
+        let evidence_root = PathBuf::from(RUNTIME_ROOT).join("k9-evidence");
+        fs::create_dir_all(&evidence_root)?;
+        let worktree = evidence_root.join(format!("source-{run_id}"));
+        let output = evidence_root.join(format!("result-{run_id}.jsonl"));
+        let errors = evidence_root.join(format!("error-{run_id}.log"));
+        let worktree_arg = worktree.to_string_lossy().into_owned();
+
+        // Native git worktree gives a detached, reproducible checkout even if
+        // the operator has uncommitted local changes in C:\\okx.
+        self.git(&["worktree", "add", "--detach", &worktree_arg, &commit])?;
+        let job = AgentJob::new()?;
+        let mut child = hidden_command("cargo")
+            .args([
+                "run", "--locked", "--release", "-p", "okx-research",
+                "--example", "analytics_bench", "--", "--k9-fixed",
+            ])
+            .env("CARGO_BUILD_JOBS", "2")
+            .current_dir(&worktree)
+            .stdout(Stdio::from(File::create(&output)?))
+            .stderr(Stdio::from(File::create(&errors)?))
+            .spawn()?;
+        job.assign(&mut child)?;
+        let pid = child.id();
+        self.k9_benchmark = Some(K9BenchmarkRun {
+            child,
+            source_tree: actual_tree.clone(),
+            output_path: output,
+            error_path: errors,
+            started_at: Instant::now(),
+            _job: job,
+        });
+        Ok(json!({
+            "state": "STARTED",
+            "pid": pid,
+            "source_tree": actual_tree,
+            "run_id": run_id,
+            "bench": "1m_bars_8_instruments_64_variants_5_warmups_30_samples",
+            "exchange_io": false,
+            "agent_interrupted": false
+        }))
+    }
+
+    fn k9_benchmark_status(&mut self) -> HostControlResult<Value> {
+        let Some(run) = self.k9_benchmark.as_mut() else {
+            return Ok(json!({"state": "NOT_STARTED_OR_CONTROL_RESTARTED"}));
+        };
+        let outcome = run.child.try_wait()?;
+        let Some(code) = outcome else {
+            return Ok(json!({
+                "state": "RUNNING",
+                "source_tree": run.source_tree,
+                "pid": run.child.id(),
+                "elapsed_ms": run.started_at.elapsed().as_millis()
+            }));
+        };
+        let stdout = fs::read_to_string(&run.output_path)?;
+        let evidence = stdout.lines().find_map(|line| {
+            line.strip_prefix("K9_REFERENCE_PROFILE_JSON:")
+                .and_then(|json_text| serde_json::from_str::<Value>(json_text).ok())
+        });
+        let stderr = fs::read_to_string(&run.error_path).unwrap_or_default();
+        Ok(json!({
+            "state": if code.success() && evidence.is_some() { "COMPLETED" } else { "FAILED" },
+            "source_tree": run.source_tree,
+            "exit_code": code.code(),
+            "elapsed_ms": run.started_at.elapsed().as_millis(),
+            "evidence": evidence,
+            "stderr_tail": if code.success() { None } else {
+                Some(bounded_utf8(&stderr, 1000))
+            }
         }))
     }
 
