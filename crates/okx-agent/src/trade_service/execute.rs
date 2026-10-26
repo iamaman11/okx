@@ -261,7 +261,8 @@ impl TradeService {
                     // BEGIN_POST failed before any native post claim or venue call.
                     // Preserve the central first cause in SQL, not a fabricated
                     // MAY_HAVE_SENT outcome. A failed local commit stays uncertain.
-                    return match reject_prepost_denial(&r.execution.store, &prepared, &reason).await {
+                    return match reject_prepost_denial(&r.execution.store, &prepared, &reason).await
+                    {
                         Ok(result) => Ok(result),
                         Err(_) => Ok(uncertain(
                             &id,
