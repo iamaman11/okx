@@ -115,3 +115,53 @@ impl QueryPlan{
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn fixture() -> (Vec<String>, ClosedRange, Vec<Operator>) {
+        (
+            vec!["BTC-USDT-SWAP".into()],
+            ClosedRange::strict(0, 20 * 3_600_000, 3_600_000).unwrap(),
+            vec![Operator::Returns, Operator::SpreadBps],
+        )
+    }
+    #[test]
+    fn k7_compiled_plan_has_typed_sources_units_and_deterministic_provenance() {
+        let (universe, range, ops) = fixture();
+        let plan = QueryPlan::compile(
+            universe, range, ops, BTreeMap::new(), Vec::new(),
+            Some(Rank { operator: Operator::Returns, descending: true }),
+        ).unwrap();
+        assert_eq!(plan.sources, vec![Source::Candles, Source::Ticker]);
+        assert_eq!(plan.operators[0].output_unit, Unit::Ratio);
+        assert_eq!(plan.operators[1].output_unit, Unit::Bps);
+        assert!(plan.operators.iter().all(|o| o.deterministic));
+        assert_eq!(plan.range.expected_bars, 20);
+        let serialized = serde_json::to_string(&plan).unwrap();
+        assert_eq!(serde_json::from_str::<QueryPlan>(&serialized).unwrap(), plan);
+    }
+    #[test]
+    fn k7_invalid_operator_bounds_or_parameter_fail_closed() {
+        let (universe, range, ops) = fixture();
+        let params = BTreeMap::from([("unrecognized_parameter".to_string(), 1.0)]);
+        assert_eq!(
+            QueryPlan::compile(universe.clone(), range, ops.clone(), params, Vec::new(), None)
+                .unwrap_err(),
+            "parameters.unrecognized_parameter:INVALID"
+        );
+        let filters = vec![Filter { operator: Operator::Rsi, min: None, max: Some(40.0) }];
+        assert_eq!(
+            QueryPlan::compile(universe.clone(), range, ops.clone(), BTreeMap::new(), filters, None)
+                .unwrap_err(),
+            "filters[0].operator:NOT_PROJECTED"
+        );
+        assert_eq!(
+            QueryPlan::compile(
+                universe, range, ops, BTreeMap::new(), Vec::new(),
+                Some(Rank { operator: Operator::Atr, descending: false }),
+            ).unwrap_err(),
+            "ranking.operator:NOT_PROJECTED"
+        );
+    }
+}

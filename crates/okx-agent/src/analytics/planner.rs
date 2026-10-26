@@ -74,6 +74,23 @@ mod tests {
         assert!(!p.sources.contains("open_interest"));
     }
     #[test]
+    fn market_plan_rejects_unknown_operator_before_any_source_read() {
+        let mut request: MarketRequest = serde_json::from_value(serde_json::json!({
+            "action":"screen","instruments":["BTC-USDT-SWAP"],
+            "fields":["returns","spread_bps"],"timeframe_ms":3600000,
+            "start_ms":3600000,"end_ms":72000000,"limit":10
+        })).unwrap();
+        let plan = AnalysisPlan::compile_market(&request).unwrap();
+        assert_eq!(plan.result_projection.len(), 2);
+        assert_eq!(plan.sources.len(), 2);
+        request.fields = vec!["unknown_indicator".into()];
+        assert_eq!(
+            AnalysisPlan::compile_market(&request).unwrap_err(),
+            "operators:UNKNOWN_FIELD:unknown_indicator"
+        );
+    }
+
+    #[test]
     fn arbitrary_operator_is_rejected() {
         assert!(AnalysisPlan::build(&["execute_shell".into()], 0, 100).is_err());
     }
