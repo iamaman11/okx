@@ -233,6 +233,27 @@ jobs:
       - name: Test native Windows crates
         run: cargo test --locked -p okx-agent -p okx-host-control -p okx-host-launcher -p okx-execution
 
+      - name: K9 native two-heavy cancellation latency evidence
+        shell: pwsh
+        run: |
+          cargo test --locked -p okx-agent --lib two_heavy_research_jobs_ingestion_stop_and_cancel_latency -- --nocapture | Tee-Object -FilePath "$env:RUNNER_TEMP\k9-two-heavy.txt"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $log = Get-Content -Raw -LiteralPath "$env:RUNNER_TEMP\k9-two-heavy.txt"
+          $line = [regex]::Match($log, 'ANALYTICS_PERF_JSON:(\{[^\r\n]+\})')
+          if (-not $line.Success) { throw "K9_PERF_RECEIPT_MISSING" }
+          $evidence = $line.Groups[1].Value | ConvertFrom-Json
+          if ($evidence.two_heavy_stop.measurements -ne 30) { throw "K9_PERF_SAMPLE_COUNT_INVALID" }
+          if ($evidence.two_heavy_stop.os -ne "windows") { throw "K9_PERF_NOT_WINDOWS" }
+          $line.Groups[1].Value | Set-Content -LiteralPath "$env:RUNNER_TEMP\k9-native-evidence.json" -Encoding utf8NoBOM
+
+      - name: Upload K9 native latency evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: k9-native-two-heavy-${{ github.sha }}
+          path: ${{ runner.temp }}\k9-native-evidence.json
+          if-no-files-found: error
+          retention-days: 14
+
       - name: Build deployable Windows binaries
         if: github.event_name == 'pull_request'
         shell: pwsh

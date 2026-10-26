@@ -2165,7 +2165,7 @@ fn research_capabilities() -> Value {
         "unavailable_data_modes":[{"mode":"historical_observed",
             "reason_code":"HISTORICAL_RULES_AND_FEES_UNAVAILABLE"}],
         "timeframes_ms":[60000,180000,300000,900000,1800000,3600000,14400000,86400000],
-        "limits":{"max_instruments":8,"max_bars_total":1000000,"max_grid_variants":64,
+        "limits":{"max_instruments":8,"max_bars_total":1000000,"max_grid_variants":64,"research_memory_total_mib":budget::MEMORY_TOTAL_MIB,"memory_admission":"conservative_pre_source_shared",
             "max_result_page_rows":50,"max_heavy_concurrent_jobs":2},
         "result_views":["summary","trades","variants","equity","export"],
         "oos":{"grid_train_test_split":true,"selected_variant_from_train_only":true},
