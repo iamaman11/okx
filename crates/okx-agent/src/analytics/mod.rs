@@ -114,21 +114,29 @@ impl AnalyticsService {
             if job_id.len() != 64 || !job_id.bytes().all(|b| b.is_ascii_hexdigit()) {
                 return Err("MARKET_CURSOR_INVALID".into());
             }
-            let job = self.jobs.get_async(job_id.into()).await
+            let job = self
+                .jobs
+                .get_async(job_id.into())
+                .await
                 .map_err(|_| "MARKET_CURSOR_NOT_FOUND")?;
             let artifact = job.artifact.ok_or("MARKET_CURSOR_NOT_READY")?;
             let store = self.artifacts.clone();
             let offset = offset.to_owned();
             let job_id = job_id.to_owned();
-            return self.cpu.run(Default::default(), move |_| {
-                let value: Value = store.read_evidence_json(&artifact)
-                    .map_err(|e| e.to_string())?;
-                if value["market_request_fingerprint"] != request_fingerprint
-                    || value["job_id"] != job_id {
-                    return Err("MARKET_CURSOR_REQUEST_MISMATCH".into());
-                }
-                global_rank_page(&store, value, &offset, &job_id)
-            }).await;
+            return self
+                .cpu
+                .run(Default::default(), move |_| {
+                    let value: Value = store
+                        .read_evidence_json(&artifact)
+                        .map_err(|e| e.to_string())?;
+                    if value["market_request_fingerprint"] != request_fingerprint
+                        || value["job_id"] != job_id
+                    {
+                        return Err("MARKET_CURSOR_REQUEST_MISMATCH".into());
+                    }
+                    global_rank_page(&store, value, &offset, &job_id)
+                })
+                .await;
         }
         let (job, new, cancel) = self
             .jobs
@@ -1527,21 +1535,26 @@ mod universe_artifact_tests {
     #[test]
     fn ordinary_market_cursor_reads_exact_persisted_pages() {
         let (root, service) = super::artifact_job_fixtures::service();
-        let scores = (0..105).map(|i| json!({"instrument":format!("I{i:03}")}))
+        let scores = (0..105)
+            .map(|i| json!({"instrument":format!("I{i:03}")}))
             .collect::<Vec<_>>();
         let mut pages = Vec::new();
         for chunk in scores.chunks(50) {
             pages.push(service.artifacts.publish_evidence(&chunk).unwrap().0);
         }
-        let manifest = service.artifacts
-            .publish_evidence(&json!({"row_pages":pages,"total_rows":105})).unwrap().0;
+        let manifest = service
+            .artifacts
+            .publish_evidence(&json!({"row_pages":pages,"total_rows":105}))
+            .unwrap()
+            .0;
         let job = "a".repeat(64);
         let first = market_result_with_context(
             json!({"kind":"market","result_artifact":manifest,"rows":scores[..13],
                 "total_rows":105,"returned_rows":13,"next_cursor":"13"}),
             &job,
             None,
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(first["next_cursor"], format!("{job}:13"));
         assert_eq!(first["page_limit"], 13);
         let next = global_rank_page(&service.artifacts, first, "49", &job).unwrap();
