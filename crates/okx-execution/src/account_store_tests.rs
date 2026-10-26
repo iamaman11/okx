@@ -1064,7 +1064,7 @@ fn k5_child_hard_exit_at_native_claim() {
     let installation = std::env::var("OKX_K5_CHILD_INSTALL").expect("installation identity");
     let mut store = AccountStore::open_existing(path, &account, &installation).unwrap();
     match phase.as_str() {
-        "F1" | "F3" => {}
+        "F0" | "F1" | "F2" | "F3" | "F4" | "F8" => {}
         "F5" | "F6" => {
             assert!(store.begin_post("intent", 1, 4).unwrap());
             if phase == "F6" {
@@ -1094,14 +1094,28 @@ fn k5_child_hard_exit_at_native_claim() {
 }
 
 #[test]
-fn k5_real_child_process_exit_f1_f3_f5_f6_never_reposts() {
+fn k5_real_os_kill_f0_f1_f2_f3_f4_f5_f6_f8_never_reposts() {
     // Same Rust binary and exact mounted test DB across the process boundary.
     // The child is deliberately not allowed to connect to OKX or RiskBook.
-    for phase in ["F1", "F3", "F5", "F6"] {
+    for phase in ["F0", "F1", "F2", "F3", "F4", "F5", "F6", "F8"] {
         let mut store = store();
-        let original = intent(&mut store);
-        if phase != "F1" {
+        let original = if phase == "F0" {
+            None
+        } else {
+            Some(intent(&mut store))
+        };
+        if matches!(phase, "F3" | "F4" | "F5" | "F6" | "F8") {
             reserve(&mut store);
+        }
+        if phase == "F2" {
+            store
+                .mark_reserve_attempt("intent", "f2-original-central-reserve-key", 3)
+                .unwrap();
+        }
+        if phase == "F8" {
+            store
+                .reject_unsent("intent", "CENTRAL_POST_DENIED", 5)
+                .unwrap();
         }
         let path = store.path.clone();
         let meta = store.meta.clone();
@@ -1144,8 +1158,20 @@ fn k5_real_child_process_exit_f1_f3_f5_f6_never_reposts() {
         );
         let mut recovered =
             AccountStore::open_existing(&path, &meta.account_key, &meta.installation_id).unwrap();
+        recovered.integrity_check().unwrap();
+        if phase == "F0" {
+            assert!(recovered.intent("intent").unwrap().is_none());
+            let first = intent(&mut recovered);
+            assert_eq!(intent(&mut recovered).intent_id, first.intent_id);
+            assert_eq!(recovered.active_intents(16).unwrap().len(), 1);
+            assert!(!venue_log.exists());
+            continue;
+        }
         let saved = recovered.intent("intent").unwrap().unwrap();
-        assert_eq!(saved.client_order_id, original.client_order_id);
+        assert_eq!(
+            saved.client_order_id,
+            original.as_ref().unwrap().client_order_id
+        );
         if matches!(phase, "F5" | "F6") {
             assert_eq!(saved.state, IntentState::Posting);
             assert_eq!(recovered.recover_posting(5).unwrap(), 1);
@@ -1155,20 +1181,57 @@ fn k5_real_child_process_exit_f1_f3_f5_f6_never_reposts() {
             );
             assert!(!recovered.begin_post("intent", 1, 6).unwrap());
             assert_eq!(recovered.recover_posting(7).unwrap(), 0);
+        } else if phase == "F8" {
+            assert_eq!(saved.state, IntentState::Rejected);
+            assert_eq!(recovered.reconcilable_intents(16).unwrap().len(), 1);
+            recovered
+                .acknowledge_central_release("central-key", "worker-proof")
+                .unwrap();
+            recovered
+                .acknowledge_central_release("central-key", "worker-proof")
+                .unwrap();
+            assert!(recovered.reconcilable_intents(16).unwrap().is_empty());
+            assert!(!recovered.begin_post("intent", 1, 6).unwrap());
         } else {
             assert_eq!(
                 saved.state,
-                if phase == "F1" {
+                if matches!(phase, "F1" | "F2") {
                     IntentState::Prepared
                 } else {
                     IntentState::Reserved
                 }
             );
+            if phase == "F2" {
+                assert!(
+                    recovered
+                        .operation("risk-reserve:intent")
+                        .unwrap()
+                        .is_some()
+                );
+                assert!(recovered.central_receipt("intent").unwrap().is_none());
+            }
             assert!(
                 recovered
                     .reject_unsent("intent", "COMMAND_EXPIRED", 5)
                     .unwrap()
             );
+            if phase == "F2" {
+                let proof = recovered.unsent_release_receipt("intent").unwrap().unwrap();
+                assert_eq!(proof.reservation_key, "f2-original-central-reserve-key");
+                recovered
+                    .acknowledge_central_release(&proof.reservation_key, "worker-fenced")
+                    .unwrap();
+            } else if phase != "F1" {
+                // F4: Worker may have accepted BEGIN_POST, but no local
+                // SQL POST claim was ever committed. The same durable SQL
+                // rejection witness can release central POSTED, proven in
+                // the separate Worker CAS tests.
+                let proof = recovered.unsent_release_receipt("intent").unwrap().unwrap();
+                assert_eq!(proof.reservation_key, "central-key");
+                recovered
+                    .acknowledge_central_release("central-key", "worker-released")
+                    .unwrap();
+            }
             assert_eq!(
                 recovered.intent("intent").unwrap().unwrap().state,
                 IntentState::Rejected
