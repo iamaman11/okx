@@ -2,6 +2,46 @@ use super::*;
 use std::sync::atomic::{AtomicU64, Ordering};
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 #[test]
+fn k5_recovery_pages_over_100_intents_are_disjoint_and_bounded() {
+    let mut s = store();
+    let first = intent(&mut s);
+    for n in 1..=129 {
+        let d = Decision {
+            decision_id: format!("decision_{n:04}"),
+            instance_id: None,
+            decision_at: 2,
+            input_digest: "inputs".into(),
+            policy_revision: 1,
+            code_version: "test".into(),
+        };
+        let i = NewIntent {
+            plan: first.plan.clone(),
+            intent_id: format!("intent_{n:04}"),
+            idempotency_key: format!("request_{n:04}"),
+            request_hash: format!("body_{n:04}"),
+            client_order_id: format!("client_{n:04}"),
+            deadline: 100,
+            plan_hash: first.plan_hash.clone(),
+            policy_revision: 1,
+            risk_increase: true,
+            instrument_id: "BTC-USDT-SWAP".into(),
+        };
+        s.prepare(&d, &i).unwrap();
+    }
+    let first_page = s.reconcilable_intents_page(100, 0).unwrap();
+    let next_page = s.reconcilable_intents_page(100, 100).unwrap();
+    assert_eq!(first_page.len(), 100);
+    assert_eq!(next_page.len(), 30);
+    let ids = first_page
+        .iter()
+        .chain(next_page.iter())
+        .map(|i| i.intent_id.clone())
+        .collect::<std::collections::HashSet<_>>();
+    assert_eq!(ids.len(), 130);
+    assert!(s.reconcilable_intents_page(100, 200).unwrap().is_empty());
+    assert!(s.reconcilable_intents_page(0, 0).unwrap().is_empty());
+}
+#[test]
 fn f0_crash_before_prepare_commit_is_retriable_once() {
     let s = store();
     assert!(s.reconcilable_intents(16).unwrap().is_empty());
