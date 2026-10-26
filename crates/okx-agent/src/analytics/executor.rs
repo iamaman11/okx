@@ -212,13 +212,15 @@ mod heavy_fixtures {
             }
             assert!(ingestion.await.unwrap() > 0);
         }
+        let stop_samples_ms = stop_times.clone();
+        let cancel_samples_ms = cancel_times.clone();
         stop_times.sort_by(f64::total_cmp);
         cancel_times.sort_by(f64::total_cmp);
         assert!(stop_times[28] <= 100.0);
         assert!(cancel_times[29] <= 1000.0);
         println!(
             "ANALYTICS_PERF_JSON:{}",
-            serde_json::json!({"two_heavy_stop":{"build":if cfg!(debug_assertions){"debug"}else{"release"},"warmups":5,"measurements":30,"p50_ms":stop_times[14],"p95_ms":stop_times[28],"max_ms":stop_times[29],"cancel_p95_ms":cancel_times[28],"cancel_max_ms":cancel_times[29],"stage":"two actual causal grid jobs on blocking workers plus simulated typed ingestion; no exchange HTTP"}})
+            serde_json::json!({"two_heavy_stop":{"build":if cfg!(debug_assertions){"debug"}else{"release"},"os":std::env::consts::OS,"logical_cpus":std::thread::available_parallelism().map_or(1,|x|x.get()),"warmups":5,"measurements":30,"p50_ms":stop_times[14],"p95_ms":stop_times[28],"max_ms":stop_times[29],"cancel_p95_ms":cancel_times[28],"cancel_max_ms":cancel_times[29],"stop_samples_ms":stop_samples_ms,"cancel_samples_ms":cancel_samples_ms,"stage":"two actual causal grid jobs on blocking workers plus simulated typed ingestion; no exchange HTTP"}})
         );
     }
 }

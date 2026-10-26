@@ -40,6 +40,10 @@ fn spec() -> ReplaySpec {
     }
 }
 fn main() {
+    if std::env::args().any(|arg| arg == "--k9-fixed") {
+        k9_fixed_profile();
+        return;
+    }
     let bars = dataset(8640, 900000);
     let spec = spec();
     for _ in 0..5 {
@@ -125,4 +129,136 @@ fn peak_memory() -> usize {
 #[cfg(not(windows))]
 fn peak_memory() -> usize {
     0
+}
+
+/// K9 reference profile, never reaches the exchange. Deliberately opt-in:
+/// cargo run --release -p okx-research --example analytics_bench -- --k9-fixed
+/// 5 warmups and 30 recorded runs for each requested 1/4/8 CPU profile.
+/// Emit raw samples: gate reviewers must NOT extrapolate from a quick smoke.
+fn k9_fixed_profile() {
+    use sha2::{Digest, Sha256};
+    const INSTRUMENTS: usize = 8;
+    const BARS_EACH: usize = 125_000;
+    const VARIANT_COUNT: usize = 64;
+    const WARMUPS: usize = 5;
+    const MEASURED: usize = 30;
+    let source = (0..INSTRUMENTS)
+        .map(|instrument| {
+            let mut bars = dataset(BARS_EACH, 60_000);
+            for bar in &mut bars {
+                let delta = instrument as f64 / 10.0;
+                bar.open += delta;
+                bar.high += delta;
+                bar.low += delta;
+                bar.close += delta;
+            }
+            bars
+        })
+        .collect::<Vec<_>>();
+    let variants = (0..VARIANT_COUNT)
+        .map(|i| EmaParameters {
+            fast: 2 + i % 16,
+            slow: 40 + i,
+        })
+        .collect::<Vec<_>>();
+    let mut mechanics = spec();
+    mechanics.timeframe_ms = 60_000;
+    let bars_hash = okx_research::canonical_sha256(&source).unwrap();
+    let lockfile_sha256 = format!(
+        "{:x}",
+        Sha256::digest(std::fs::read("Cargo.lock").expect("run from repository root"))
+    );
+    let mut reference_hash = None;
+    let mut readings = Vec::new();
+    let peak_before = peak_memory();
+    for workers in [1usize, 4, 8] {
+        for _ in 0..WARMUPS {
+            let observed = run_fixed_batch(&source, &mechanics, &variants, workers);
+            if let Some(expected) = &reference_hash {
+                assert_eq!(&observed, expected, "profile results must be identical");
+            } else {
+                reference_hash = Some(observed);
+            }
+        }
+        let mut raw_ms = Vec::with_capacity(MEASURED);
+        for _ in 0..MEASURED {
+            let began = std::time::Instant::now();
+            let observed = run_fixed_batch(&source, &mechanics, &variants, workers);
+            let ms = began.elapsed().as_secs_f64() * 1000.0;
+            assert_eq!(Some(&observed), reference_hash.as_ref());
+            raw_ms.push(ms);
+        }
+        let mut sorted = raw_ms.clone();
+        sorted.sort_by(f64::total_cmp);
+        readings.push(serde_json::json!({
+            "workers":workers,
+            "warmups":WARMUPS,
+            "measurements":MEASURED,
+            "p50_ms":sorted[14],
+            "p95_ms":sorted[28],
+            "max_ms":sorted[29],
+            "raw_ms":raw_ms,
+            "peak_working_set_bytes":peak_memory(),
+        }));
+    }
+    let logical_cpus = std::thread::available_parallelism().map_or(1, |n| n.get());
+    let hash = okx_research::canonical_sha256(&reference_hash).unwrap();
+    let one_p50 = readings[0]["p50_ms"].as_f64().unwrap();
+    let four_p50 = readings[1]["p50_ms"].as_f64().unwrap();
+    println!(
+        "K9_REFERENCE_PROFILE_JSON:{}",
+        serde_json::json!({
+            "schema":"okx.k9.reference-benchmark/v1",
+            "os":std::env::consts::OS,
+            "arch":std::env::consts::ARCH,
+            "logical_cpus":logical_cpus,
+            "processor":std::env::var("PROCESSOR_IDENTIFIER").unwrap_or_default(),
+            "source":"fixed_local_in_memory_no_http",
+            "build":"release",
+            "lockfile_sha256":lockfile_sha256,
+            "fixture_hash":bars_hash,
+            "result_hash":hash,
+            "bars_total":INSTRUMENTS * BARS_EACH,
+            "instruments":INSTRUMENTS,
+            "variants":VARIANT_COUNT,
+            "worker_profiles":readings,
+            "median_speedup_4_vs_1":one_p50 / four_p50,
+            "memory_peak_bytes":peak_memory(),
+            "memory_incremental_peak_bytes":peak_memory().saturating_sub(peak_before),
+            "reference_cpu_eligible":logical_cpus >= 8,
+            "acceptance_scope":"pure_replay_kernel_only; real runtime queued/source/memory/RSS/transport not measured",
+            "slo_status":"NOT_FULL_K9_ACCEPTANCE",
+        })
+    );
+}
+
+fn run_fixed_batch(
+    sources: &[Vec<Bar>],
+    replay_spec: &ReplaySpec,
+    variants: &[EmaParameters],
+    workers: usize,
+) -> Vec<String> {
+    let mut result_hashes = Vec::new();
+    for group in sources.chunks(workers) {
+        let complete = std::thread::scope(|scope| {
+            let spawned = group
+                .iter()
+                .map(|bars| {
+                    scope.spawn(move || {
+                        grid(bars, replay_spec, variants, &|| false)
+                            .unwrap()
+                            .test
+                            .hash
+                    })
+                })
+                .collect::<Vec<_>>();
+            spawned
+                .into_iter()
+                .map(|worker| worker.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+        result_hashes.extend(complete);
+    }
+    assert_eq!(result_hashes.len(), sources.len());
+    result_hashes
 }

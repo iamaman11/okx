@@ -1,3 +1,4 @@
+mod budget;
 pub mod cache;
 mod cursor;
 pub mod executor;
@@ -119,6 +120,7 @@ pub struct AnalyticsService {
     jobs: jobs::Jobs,
     artifacts: ResearchArtifactStore,
     heavy: Arc<tokio::sync::Semaphore>,
+    research_memory: Arc<tokio::sync::Semaphore>,
 }
 impl AnalyticsService {
     pub fn new(
@@ -135,6 +137,9 @@ impl AnalyticsService {
             jobs: jobs::Jobs::open(root.join("research-catalog.sqlite"))?,
             artifacts: ResearchArtifactStore::at(root),
             heavy: Arc::new(tokio::sync::Semaphore::new(2)),
+            research_memory: Arc::new(tokio::sync::Semaphore::new(
+                budget::MEMORY_TOTAL_MIB as usize,
+            )),
         };
         service.apply_retention(chrono::Utc::now().timestamp_millis().max(0) as u64)?;
         Ok(service)
@@ -750,6 +755,9 @@ impl AnalyticsService {
         }))
     }
     async fn submit(&self, request: ResearchRequest) -> Result<Value, String> {
+        // Estimate the complete batch before SQL admission or fetching candles.
+        // Large requests are rejected before any allocation or source I/O.
+        let memory_mib = budget::estimated_mib(&request)?;
         let hash = okx_research::canonical_sha256(&("analytics/448.1", &request))
             .map_err(|e| e.to_string())?;
         let hash = hash.strip_prefix("sha256:").unwrap_or(&hash).to_owned();
@@ -775,6 +783,15 @@ impl AnalyticsService {
                 let _heavy = tokio::select! {
                     result = this.heavy.clone().acquire_owned() =>
                         result.map_err(|_| "ANALYTICS_QUEUE_CLOSED")?,
+                    _ = executor::cancelled(cancel.clone()) =>
+                        return Err("CANCELLED".into()),
+                };
+                // Hold the entire batch reservation through artifact publish
+                // and terminal state transition. Multiple heavy jobs share one
+                // global 4 GiB estimate; wait cancellably, never oversubscribe.
+                let _memory = tokio::select! {
+                    permit = this.research_memory.clone().acquire_many_owned(memory_mib) =>
+                        permit.map_err(|_| "RESEARCH_MEMORY_POOL_CLOSED")?,
                     _ = executor::cancelled(cancel.clone()) =>
                         return Err("CANCELLED".into()),
                 };
@@ -2148,7 +2165,7 @@ fn research_capabilities() -> Value {
         "unavailable_data_modes":[{"mode":"historical_observed",
             "reason_code":"HISTORICAL_RULES_AND_FEES_UNAVAILABLE"}],
         "timeframes_ms":[60000,180000,300000,900000,1800000,3600000,14400000,86400000],
-        "limits":{"max_instruments":8,"max_bars_total":1000000,"max_grid_variants":64,
+        "limits":{"max_instruments":8,"max_bars_total":1000000,"max_grid_variants":64,"research_memory_total_mib":budget::MEMORY_TOTAL_MIB,"memory_admission":"conservative_pre_source_shared",
             "max_result_page_rows":50,"max_heavy_concurrent_jobs":2},
         "result_views":["summary","trades","variants","equity","export"],
         "oos":{"grid_train_test_split":true,"selected_variant_from_train_only":true},
