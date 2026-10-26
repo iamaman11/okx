@@ -302,7 +302,9 @@ impl TradeService {
                 ))
                 .await
                 .map_err(str::to_owned)?;
-            if observed.status != RiskDecisionStatus::Observed {
+            let absent = observed.status == RiskDecisionStatus::Denied
+                && observed.reason.as_deref() == Some("RISK_RESERVATION_NOT_FOUND");
+            if observed.status != RiskDecisionStatus::Observed && !absent {
                 return Err(observed
                     .reason
                     .unwrap_or("CENTRAL_INSPECTION_FAILED".into()));
@@ -319,10 +321,12 @@ impl TradeService {
                     .map_err(err)?;
                 return Ok(());
             }
-            if !matches!(
-                observed.reservation_state,
-                Some(RiskReservationState::Held | RiskReservationState::Posted)
-            ) {
+            if !absent
+                && !matches!(
+                    observed.reservation_state,
+                    Some(RiskReservationState::Held | RiskReservationState::Posted)
+                )
+            {
                 return Err("UNSENT_CENTRAL_STATE_UNRESOLVED".into());
             }
             let native_proof = UnsentRiskReleaseProof {
