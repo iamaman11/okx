@@ -120,7 +120,12 @@ check((await handleNativeRiskCommand(s,session,{schema:"okx.risk-command/v1",com
    installation_id:initial.installation_id,
    action:{action:"BEGIN_POST",reservation_key:admitted[index].reservation_key,
      plan_sha256:plan,policy_revision:1,expected_risk_book_sequence:sequence,
-     source_proof_sha256:proof,census:fresh}
+     source_proof_sha256:proof,census:fresh,
+     causal_proof:{reserve_anchor:admitted[index].reservation_key,
+       native_incarnation:"a".repeat(32),elapsed_to_proof_ms:30,
+       account_reads:[{account_key:account.account_key,private_generation:7,
+         source_read_id:"b".repeat(64),content_digest:hash,
+         started_after_held_ms:5,completed_after_held_ms:20}]}}
  });
  const first=await handleNativeRiskCommand(t,session,post("human",0,"a".repeat(64),3),now+2);
  check(first.status==="POST_AUTHORIZED"&&first.risk_book_sequence===4,
