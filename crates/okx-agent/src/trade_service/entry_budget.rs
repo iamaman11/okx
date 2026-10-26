@@ -205,7 +205,10 @@ mod tests {
             enforced_entry_ceiling(true, true, Some(d("8")), Some(d("10"))).unwrap(),
             Some(d("8"))
         );
-        assert_eq!(enforced_entry_ceiling(false, true, None, None).unwrap(), None);
+        assert_eq!(
+            enforced_entry_ceiling(false, true, None, None).unwrap(),
+            None
+        );
         assert_eq!(
             enforced_entry_ceiling(true, false, None, Some(d("10"))).unwrap(),
             Some(d("10"))
