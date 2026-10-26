@@ -517,12 +517,13 @@ mod tests {
         let blocked = jobs.enqueue("idempotent".into(), "new-job".into());
         let elapsed = began.elapsed();
         assert_eq!(blocked.unwrap_err(), "RESEARCH_SQL_BUSY");
-        assert!(elapsed < std::time::Duration::from_millis(500), "elapsed: {elapsed:?}");
+        assert!(
+            elapsed < std::time::Duration::from_millis(500),
+            "elapsed: {elapsed:?}"
+        );
         blocker.execute_batch("ROLLBACK").unwrap();
         assert!(jobs.get("new-job").is_err());
-        let (accepted, fresh, _) = jobs
-            .enqueue("idempotent".into(), "new-job".into())
-            .unwrap();
+        let (accepted, fresh, _) = jobs.enqueue("idempotent".into(), "new-job".into()).unwrap();
         assert!(fresh);
         assert_eq!(accepted.state, State::Queued);
     }
