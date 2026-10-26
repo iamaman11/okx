@@ -114,6 +114,16 @@ pub struct StoredIntent {
     pub exchange_order_id: Option<String>,
     pub incident: Option<String>,
 }
+/// Exact durable SQL witness that no local POST claim was ever committed.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct UnsentSqlReceipt {
+    pub reservation_key: String,
+    pub account_key: String,
+    pub intent_id: String,
+    pub plan_hash: String,
+    pub request_hash: String,
+    pub reason: String,
+}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CentralReceipt {
     pub reservation_key: String,

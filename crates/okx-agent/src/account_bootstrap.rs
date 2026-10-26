@@ -114,6 +114,29 @@ struct ObserverConfigCache {
 }
 
 impl ObserverConfigCache {
+    /// K4: force a new authenticated config read after the central HELD
+    /// response; never satisfy post-HELD causality from the 2s cache.
+    async fn read_fresh<F, Fut>(
+        &self,
+        fetch: F,
+    ) -> Result<(AccountConfig, chrono::DateTime<Utc>), OkxError>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<AccountConfig, OkxError>>,
+    {
+        let mut current = self.current.lock().await;
+        *current = None;
+        let sampled_at = Instant::now();
+        let config = fetch().await?;
+        let received_at = Utc::now();
+        *current = Some(ObservedConfig {
+            config: config.clone(),
+            received_at,
+            sampled_at,
+        });
+        Ok((config, received_at))
+    }
+
     /// Lock across the one authenticated read: concurrent callers share the same proof.
     /// Failed refreshes discard expired proof; no stale success/fallback is possible.
     async fn read<F, Fut>(
@@ -165,6 +188,12 @@ impl AccountBootstrapper {
 
     async fn observer_config(&self) -> Result<(AccountConfig, chrono::DateTime<Utc>), OkxError> {
         self.config_cache.read(|| self.api.config()).await
+    }
+
+    async fn fresh_observer_config(
+        &self,
+    ) -> Result<(AccountConfig, chrono::DateTime<Utc>), OkxError> {
+        self.config_cache.read_fresh(|| self.api.config()).await
     }
 
     pub async fn fee_schedule(
@@ -405,7 +434,22 @@ impl AccountBootstrapper {
 
     pub async fn snapshot(&self) -> Result<AccountSnapshot, AccountBootstrapError> {
         let (config, config_received_at) = self.observer_config().await?;
-        // Use the original authenticated config observation time, not the cache-hit time.
+        self.snapshot_from_config(config, config_received_at).await
+    }
+
+    /// Used only after HELD: a fresh OKX config call, followed by fresh
+    /// balance/positions/orders; any failure blocks BEGIN_POST.
+    pub async fn snapshot_after_held(&self) -> Result<AccountSnapshot, AccountBootstrapError> {
+        let (config, config_received_at) = self.fresh_observer_config().await?;
+        self.snapshot_from_config(config, config_received_at).await
+    }
+
+    async fn snapshot_from_config(
+        &self,
+        config: AccountConfig,
+        config_received_at: chrono::DateTime<Utc>,
+    ) -> Result<AccountSnapshot, AccountBootstrapError> {
+        // Use the authenticated config observation time, not a cache-hit time.
         // Balance/positions/orders are read afterward; no falsely fresh source receipt.
         let source_received_at = config_received_at.to_rfc3339_opts(SecondsFormat::Millis, true);
         let permissions = strict_read_only_permissions(&config.perm)?;
@@ -766,6 +810,53 @@ mod tests {
         }
         assert_eq!(fetches.load(Ordering::SeqCst), 1);
         assert!(timestamps.iter().all(|t| *t == timestamps[0]));
+    }
+
+    #[tokio::test]
+    async fn k4_after_held_bypasses_config_cache_and_never_falls_back() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let cache = ObserverConfigCache::default();
+        let calls = AtomicUsize::new(0);
+        let (first, _) = cache
+            .read(|| async {
+                calls.fetch_add(1, Ordering::SeqCst);
+                serde_json::from_value::<AccountConfig>(
+                    serde_json::json!({"uid":"uid-1","perm":"read_only"}),
+                )
+                .map_err(|e| OkxError::Config(e.to_string()))
+            })
+            .await
+            .unwrap();
+        assert_eq!(first.perm, "read_only");
+        let (cached, _) = cache
+            .read(|| async { panic!("ordinary config must reuse cache") })
+            .await
+            .unwrap();
+        assert_eq!(cached.uid, "uid-1");
+        let (after_held, _) = cache
+            .read_fresh(|| async {
+                calls.fetch_add(1, Ordering::SeqCst);
+                serde_json::from_value::<AccountConfig>(
+                    serde_json::json!({"uid":"uid-1","perm":"trade"}),
+                )
+                .map_err(|e| OkxError::Config(e.to_string()))
+            })
+            .await
+            .unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert!(strict_read_only_permissions(&after_held.perm).is_err());
+        assert!(
+            cache
+                .read_fresh(|| async {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    Err::<AccountConfig, _>(OkxError::Config("venue unavailable".into()))
+                })
+                .await
+                .is_err(),
+            "failed post-HELD read must not reuse successful pre-HELD snapshot"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        assert!(cache.current.lock().await.is_none());
     }
 
     #[tokio::test]

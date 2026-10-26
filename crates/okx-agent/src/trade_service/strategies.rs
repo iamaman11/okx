@@ -231,20 +231,93 @@ impl TradeService {
                 };
                 let _ = self.reconcile_restored(&r).await;
                 let reconcile = async {
-                    if let Ok(intents) = r
+                    let account = config.account_key.wire();
+                    let mut offset = self.recovery_schedule.lock().await.page(&account);
+                    let mut result = r
                         .execution
                         .store
-                        .call(deadline(), |s| s.reconcilable_intents(16))
-                        .await
-                    {
-                        stream::iter(intents)
-                            .for_each_concurrent(2, |intent| {
-                                let r = &r;
-                                async move {
-                                    let _ = self.status_intent(r, &intent.intent_id).await;
-                                }
+                        .call(deadline(), move |s| {
+                            s.reconcilable_intents_page(RECOVERY_BATCH, offset)
+                        })
+                        .await;
+                    if result.as_ref().is_ok_and(Vec::is_empty) && offset != 0 {
+                        // The candidate set shrank after successful recovery.
+                        // Wrap rather than starving fresh lower-index entries.
+                        offset = 0;
+                        result = r
+                            .execution
+                            .store
+                            .call(deadline(), move |s| {
+                                s.reconcilable_intents_page(RECOVERY_BATCH, 0)
                             })
                             .await;
+                    }
+                    match result {
+                        Ok(intents) => {
+                            self.recovery_schedule
+                                .lock()
+                                .await
+                                .advance_page(&account, offset, intents.len());
+                            stream::iter(intents)
+                                .for_each_concurrent(2, |intent| {
+                                    let r = &r;
+                                    let account = account.clone();
+                                    async move {
+                                        let scheduled = self
+                                            .recovery_schedule
+                                            .lock()
+                                            .await
+                                            .due(&account, &intent.intent_id, Instant::now());
+                                        if !scheduled {
+                                            return;
+                                        }
+                                        let result = self.status_intent(r, &intent.intent_id).await;
+                                        let settled = result.as_ref().is_ok_and(|value| {
+                                            value["data"]["central_release"]["state"] == "verified"
+                                                || value["data"]["central_release"]["state"]
+                                                    == "not_required"
+                                        });
+                                        let incident = {
+                                            let mut schedule = self.recovery_schedule.lock().await;
+                                            if settled {
+                                                schedule.finish(&account, &intent.intent_id);
+                                                false
+                                            } else {
+                                                schedule.overdue_incident(
+                                                    &account,
+                                                    &intent.intent_id,
+                                                    intent.deadline,
+                                                    now(),
+                                                )
+                                            }
+                                        };
+                                        if incident {
+                                            let reason = match &result {
+                                                Ok(value) => value["reason_code"]
+                                                    .as_str()
+                                                    .or_else(|| {
+                                                        value["data"]["central_release"]
+                                                            ["reason_code"]
+                                                            .as_str()
+                                                    })
+                                                    .unwrap_or("RECONCILIATION_NOT_TERMINAL"),
+                                                Err(_) => "RECONCILIATION_READBACK_FAILED",
+                                            };
+                                            eprintln!(
+                                                "OKX_RECOVERY_INCIDENT_V1 account={} intent={} reason={} state=UNRESOLVED_OVER_30S",
+                                                account, intent.intent_id, reason
+                                            );
+                                        }
+                                    }
+                                })
+                                .await;
+                        }
+                        Err(_) => {
+                            eprintln!(
+                                "OKX_RECOVERY_SCAN_ERROR_V1 account={} state=SQL_READ_FAILED",
+                                account
+                            );
+                        }
                     }
                 };
                 let decisions = async {

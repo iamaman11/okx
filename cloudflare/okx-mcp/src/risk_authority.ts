@@ -1,7 +1,7 @@
 import {validGovernance,projectRiskPolicy,accessEnabled,GOVERNANCE_STORAGE_KEY} from "./account_governance.js";
 import {amount,units,beginRiskPost,readRiskBook,inspectRisk,reserveRisk,transitionRisk,
-  type CompleteRiskCensus,type NativeSessionRiskProof,type RiskReservation,
-  type TerminalRiskReleaseProof} from "./risk_book.js";
+  type CompleteRiskCensus,type NativeSessionRiskProof,type CausalPostProof,type RiskReservation,
+  type TerminalRiskReleaseProof,type UnsentRiskReleaseProof,releaseUnsentRisk,inspectNoReserveFence} from "./risk_book.js";
 
 const COMMAND_SCHEMA="okx.risk-command/v1";
 const RESULT_SCHEMA="okx.risk-result/v1";
@@ -95,7 +95,20 @@ export async function handleNativeRiskCommand(
       return deny(id,"STALE_NATIVE_INSPECTION_SESSION");
     const observed=await inspectRisk(storage,a.reservation_key);
     const book=observed?.meta,found=observed?.entry;
-    if(!found||found.plan_hash!==a.plan_sha256||!book)return deny(id,"RISK_RESERVATION_NOT_FOUND");
+    if(!found||found.plan_hash!==a.plan_sha256||!book){
+      const fenced=await inspectNoReserveFence(storage,a.reservation_key,a.plan_sha256);
+      if(fenced)return {schema:RESULT_SCHEMA,command_id:id,status:"OBSERVED",reason:null,
+        reservation_key:a.reservation_key,risk_book_sequence:fenced.sequence,
+        policy_revision:fenced.policy_revision,existing_modelled_loss_usdt:null,
+        reservation_state:"RELEASED"};
+      const meta=await readRiskBook(storage);
+      const governance:unknown=await storage.get(GOVERNANCE_STORAGE_KEY);
+      if(!meta||!validGovernance(governance))return deny(id,"RISK_BOOK_OR_GOVERNANCE_UNAVAILABLE");
+      return {schema:RESULT_SCHEMA,command_id:id,status:"DENIED",
+        reason:"RISK_RESERVATION_NOT_FOUND",reservation_key:null,
+        risk_book_sequence:meta.sequence,policy_revision:governance.revision,
+        existing_modelled_loss_usdt:null,reservation_state:null};
+    }
     return {schema:RESULT_SCHEMA,command_id:id,status:"OBSERVED",reason:null,
       reservation_key:found.key,risk_book_sequence:book.sequence,
       policy_revision:found.policy_revision,existing_modelled_loss_usdt:null,
@@ -142,7 +155,8 @@ export async function handleNativeRiskCommand(
   if(a.action==="BEGIN_POST"){
     if(typeof a.reservation_key!=="string"||typeof a.plan_sha256!=="string"
       ||!Number.isSafeInteger(a.policy_revision)||!Number.isSafeInteger(a.expected_risk_book_sequence)
-      ||typeof a.source_proof_sha256!=="string")
+      ||typeof a.source_proof_sha256!=="string"
+      ||!isObject(a.causal_proof))
       return deny(id,"INVALID_POST_FENCE");
     const proof=nativeEvidence(a.census,session.connection_generation);
     if(!proof||!isObject(a.census)||!Array.isArray(a.census.account_keys)||
@@ -160,13 +174,37 @@ export async function handleNativeRiskCommand(
       a.policy_revision as number,a.source_proof_sha256,
       {connection_generation:session.connection_generation,
        expected_book_sequence:a.expected_risk_book_sequence as number,
-       census,source_proof:proof,now_ms});
+       census,source_proof:proof,now_ms,causal_proof:a.causal_proof as unknown as CausalPostProof});
     return result.status==="POST_AUTHORIZED"
       ?{schema:RESULT_SCHEMA,command_id:id,status:"POST_AUTHORIZED",reason:null,
         reservation_key:a.reservation_key,risk_book_sequence:result.book_sequence!,
         policy_revision:a.policy_revision as number,
         existing_modelled_loss_usdt:result.existing_modelled_loss_usdt!,reservation_state:null}
       :deny(id,result.reason??"POST_FENCE_DENIED");
+  }
+  if(a.action==="RELEASE_UNSENT"){
+    if(typeof a.reservation_key!=="string"||typeof a.plan_sha256!=="string"||
+       !Number.isSafeInteger(a.expected_risk_book_sequence)||!isObject(a.proof))
+      return deny(id,"INVALID_UNSENT_RELEASE_COMMAND");
+    const proof=a.proof;
+    if(typeof proof.reservation_key!=="string"||typeof proof.account_key!=="string"||
+       typeof proof.intent_id!=="string"||typeof proof.plan_hash!=="string"||
+       typeof proof.request_hash!=="string"||typeof proof.reason!=="string"||
+       typeof proof.record_digest!=="string")
+      return deny(id,"INVALID_UNSENT_SQL_PROOF");
+    const result=await releaseUnsentRisk(storage,a.reservation_key,a.plan_sha256,
+      a.expected_risk_book_sequence as number,session.connection_generation,
+      proof as unknown as UnsentRiskReleaseProof);
+    if(result.status!=="UPDATED")return deny(id,result.reason??"UNSENT_RELEASE_DENIED");
+    const observed=await inspectRisk(storage,a.reservation_key);
+    const fenced=observed?null:await inspectNoReserveFence(storage,a.reservation_key,a.plan_sha256);
+    return observed||fenced
+      ?{schema:RESULT_SCHEMA,command_id:id,status:"UPDATED",reason:null,
+        reservation_key:a.reservation_key,
+        risk_book_sequence:observed?.meta.sequence??fenced!.sequence,
+        policy_revision:observed?.entry.policy_revision??fenced!.policy_revision,
+        existing_modelled_loss_usdt:null,reservation_state:null}
+      :deny(id,"RISK_BOOK_READBACK_FAILED");
   }
   if(a.action==="RESOLVE"){
     if(typeof a.reservation_key!=="string"||typeof a.plan_sha256!=="string"

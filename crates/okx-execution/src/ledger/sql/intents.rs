@@ -1,10 +1,135 @@
 use super::super::*;
 impl AccountStore {
+    /// Durable address of a central reservation attempt, committed before
+    /// any WSS RESERVE. A crash or lost ACK cannot orphan the Worker grant.
+    pub fn mark_reserve_attempt(&mut self, id: &str, key: &str, now: i64) -> StoreResult<()> {
+        if key.is_empty() || key.len() > 512 {
+            return Err(StoreError::Invalid("INVALID_RESERVE_IDENTITY"));
+        }
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let (state, hash, begin): (String, String, Option<i64>) = tx.query_row(
+            "SELECT state,request_hash,begin_post_at FROM intents WHERE intent_id=?1",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )?;
+        if state != "PREPARED" || begin.is_some() {
+            return Err(StoreError::Invalid("INVALID_RESERVE_ATTEMPT_STATE"));
+        }
+        let name = format!("risk-reserve:{id}");
+        let previous: Option<(String, String, String)> = tx
+            .query_row(
+                "SELECT kind,request_hash,result_ref FROM operation_receipts WHERE operation_id=?1",
+                [&name],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?;
+        if let Some((kind, prior_hash, prior_key)) = previous {
+            if kind != "RISK_RESERVE_ATTEMPT" || prior_hash != hash || prior_key != key {
+                return Err(StoreError::Invalid("RESERVE_ATTEMPT_IDEMPOTENCY_CONFLICT"));
+            }
+        } else {
+            tx.execute(
+                "INSERT INTO operation_receipts VALUES(?1,'RISK_RESERVE_ATTEMPT',?2,?3,?4)",
+                params![name, hash, key, now],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// An explicit central DENIED plus an authenticated address-specific
+    /// NOT_FOUND readback proves this attempt minted no reservation. Both
+    /// the original reason and its no-risk marker commit atomically.
+    pub fn reject_denied_reserve(&mut self, id: &str, reason: &str, now: i64) -> StoreResult<()> {
+        self.reject_unsent_inner(id, reason, now, true).map(|_| ())
+    }
+
+    pub fn declined_reserve(&self, id: &str) -> StoreResult<bool> {
+        Ok(self.connection.query_row(
+            "SELECT EXISTS(
+               SELECT 1 FROM intents i
+               JOIN operation_receipts o ON o.operation_id='risk-reserve:'||i.intent_id
+               JOIN operation_receipts t ON t.operation_id='terminal:'||i.intent_id
+               WHERE i.intent_id=?1 AND i.state='REJECTED' AND i.begin_post_at IS NULL
+                 AND o.kind='RISK_RESERVE_DENIED'
+                 AND o.request_hash=i.request_hash
+                 AND t.kind='REJECTED_UNSENT' AND t.request_hash=i.request_hash)",
+            [id],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// F1: the prepare transaction committed, but no central RESERVE was
+    /// attempted. A matching terminal SQL receipt proves no native POST.
+    pub fn unsent_before_reserve(&self, id: &str) -> StoreResult<bool> {
+        self.connection
+            .query_row(
+                "SELECT EXISTS(
+                   SELECT 1 FROM intents i
+                   JOIN operation_receipts t ON t.operation_id='terminal:'||i.intent_id
+                   WHERE i.intent_id=?1 AND i.state='REJECTED'
+                     AND i.begin_post_at IS NULL AND i.exchange_order_id IS NULL
+                     AND t.kind='REJECTED_UNSENT'
+                     AND t.request_hash=i.request_hash AND t.result_ref=i.incident
+                     AND NOT EXISTS(SELECT 1 FROM risk_receipts r
+                       WHERE r.intent_id=i.intent_id)
+                     AND NOT EXISTS(SELECT 1 FROM operation_receipts a
+                       WHERE a.operation_id='risk-reserve:'||i.intent_id))",
+                [id],
+                |r| r.get(0),
+            )
+            .map_err(StoreError::from)
+    }
+
     pub fn reconcilable_intents(&self, limit: usize) -> StoreResult<Vec<StoredIntent>> {
+        self.reconcilable_intents_page(limit, 0)
+    }
+
+    /// Bounded, addressable paging prevents a failed early intent from starving
+    /// later account intents. Offset is a scheduling cursor, not a second owner.
+    pub fn reconcilable_intents_page(
+        &self,
+        limit: usize,
+        offset: usize,
+    ) -> StoreResult<Vec<StoredIntent>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
         let ids = {
-            let mut q=self.connection.prepare("SELECT intent_id FROM risk_receipts WHERE state IN('HELD','POSTED','UNKNOWN','OPEN','TERMINAL_PENDING_CENTRAL','UNSENT_PENDING_CENTRAL') ORDER BY state,intent_id LIMIT ?1")?;
-            q.query_map([limit.min(1000) as i64], |r| r.get::<_, String>(0))?
-                .collect::<Result<Vec<_>, _>>()?
+            let mut q=self.connection.prepare(
+              "SELECT intent_id FROM (
+                SELECT intent_id,CASE WHEN state='UNSENT_PENDING_CENTRAL' THEN 0 ELSE 3 END AS priority
+                FROM risk_receipts
+                WHERE state IN('HELD','POSTED','UNKNOWN','OPEN','TERMINAL_PENDING_CENTRAL','UNSENT_PENDING_CENTRAL')
+                UNION ALL
+                SELECT i.intent_id,1 AS priority FROM intents i
+                JOIN operation_receipts o ON o.operation_id='risk-reserve:'||i.intent_id
+                WHERE o.kind='RISK_RESERVE_ATTEMPT' AND o.request_hash=i.request_hash
+                  AND i.state IN('PREPARED','REJECTED')
+                  AND NOT EXISTS(SELECT 1 FROM risk_receipts r WHERE r.intent_id=i.intent_id)
+                  AND NOT EXISTS(SELECT 1 FROM operation_receipts ack
+                    WHERE ack.operation_id='central-release:'||o.result_ref
+                      AND ack.kind='CENTRAL_RELEASE')
+                UNION ALL
+                SELECT i.intent_id,2 AS priority FROM intents i
+                WHERE i.state='PREPARED' AND i.deadline<=?2
+                  AND NOT EXISTS(SELECT 1 FROM risk_receipts r
+                    WHERE r.intent_id=i.intent_id)
+                  AND NOT EXISTS(SELECT 1 FROM operation_receipts a
+                    WHERE a.operation_id='risk-reserve:'||i.intent_id)
+               ) GROUP BY intent_id ORDER BY MIN(priority),intent_id LIMIT ?1 OFFSET ?3"
+            )?;
+            q.query_map(
+                params![
+                    limit.min(100) as i64,
+                    wall_time_ms(),
+                    offset.min(100_000) as i64
+                ],
+                |r| r.get::<_, String>(0),
+            )?
+            .collect::<Result<Vec<_>, _>>()?
         };
         ids.iter()
             .map(|id| {
@@ -21,7 +146,10 @@ impl AccountStore {
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let hash: String = tx.query_row(
-            "SELECT receipt_hash FROM risk_receipts WHERE reservation_key=?1",
+            "SELECT receipt_hash FROM risk_receipts WHERE reservation_key=?1
+             UNION ALL SELECT request_hash FROM operation_receipts
+               WHERE kind='RISK_RESERVE_ATTEMPT' AND result_ref=?1
+             LIMIT 1",
             [key],
             |r| r.get(0),
         )?;
@@ -34,6 +162,16 @@ impl AccountStore {
         Ok(())
     }
     pub fn reject_unsent(&mut self, id: &str, reason: &str, now: i64) -> StoreResult<bool> {
+        self.reject_unsent_inner(id, reason, now, false)
+    }
+
+    fn reject_unsent_inner(
+        &mut self,
+        id: &str,
+        reason: &str,
+        now: i64,
+        proven_not_reserved: bool,
+    ) -> StoreResult<bool> {
         if reason.is_empty() {
             return Err(StoreError::Invalid("UNSENT_REASON_REQUIRED"));
         }
@@ -48,23 +186,83 @@ impl AccountStore {
         if begin.is_some() {
             return Err(StoreError::Invalid("POST_OUTCOME_REQUIRES_RECONCILIATION"));
         }
-        if state == "REJECTED" {
-            return Ok(false);
+        let first = state != "REJECTED";
+        if first {
+            if !matches!(state.as_str(), "PREPARED" | "RESERVED") {
+                return Err(StoreError::Invalid("INVALID_INTENT_TRANSITION"));
+            }
+            tx.execute("UPDATE intents SET state='REJECTED',incident=?2,updated_at=?3,revision=revision+1 WHERE intent_id=?1",params![id,reason,now])?;
+            tx.execute(
+                "UPDATE risk_receipts SET state='UNSENT_PENDING_CENTRAL' WHERE intent_id=?1",
+                [id],
+            )?;
+            tx.execute(
+                "INSERT INTO operation_receipts VALUES(?1,'REJECTED_UNSENT',?2,?3,?4)",
+                params![format!("terminal:{id}"), hash, reason, now],
+            )?;
         }
-        if !matches!(state.as_str(), "PREPARED" | "RESERVED") {
-            return Err(StoreError::Invalid("INVALID_INTENT_TRANSITION"));
+        if proven_not_reserved {
+            let original: Option<(String, String)> = tx
+                .query_row(
+                    "SELECT kind,request_hash FROM operation_receipts WHERE operation_id=?1",
+                    [format!("terminal:{id}")],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()?;
+            if original
+                .as_ref()
+                .is_none_or(|(kind, request)| kind != "REJECTED_UNSENT" || request != &hash)
+            {
+                return Err(StoreError::Invalid("UNSENT_TERMINAL_RECEIPT_MISSING"));
+            }
+            let operation = format!("risk-reserve:{id}");
+            let changed = tx.execute(
+                "UPDATE operation_receipts SET kind='RISK_RESERVE_DENIED'
+                 WHERE operation_id=?1
+                   AND kind IN('RISK_RESERVE_ATTEMPT','RISK_RESERVE_DENIED')",
+                [&operation],
+            )?;
+            if changed != 1 {
+                return Err(StoreError::Invalid("RESERVE_ATTEMPT_MARKER_MISSING"));
+            }
         }
-        tx.execute("UPDATE intents SET state='REJECTED',incident=?2,updated_at=?3,revision=revision+1 WHERE intent_id=?1",params![id,reason,now])?;
-        tx.execute(
-            "UPDATE risk_receipts SET state='UNSENT_PENDING_CENTRAL' WHERE intent_id=?1",
-            [id],
-        )?;
-        tx.execute(
-            "INSERT INTO operation_receipts VALUES(?1,'REJECTED_UNSENT',?2,?3,?4)",
-            params![format!("terminal:{id}"), hash, reason, now],
-        )?;
         tx.commit()?;
-        Ok(true)
+        Ok(first)
+    }
+    /// A no-send release requires the existing durable rejection receipt,
+    /// matching the original request, with no committed post claim.
+    /// A gateway timeout or venue rejection can never produce this witness.
+    pub fn unsent_release_receipt(&self, id: &str) -> StoreResult<Option<UnsentSqlReceipt>> {
+        self.connection
+            .query_row(
+                "SELECT COALESCE(r.reservation_key,a.result_ref),
+                        COALESCE(r.account_key,?2),
+                        i.intent_id,i.plan_hash,i.request_hash,i.incident
+                 FROM intents i
+                 LEFT JOIN risk_receipts r ON r.intent_id=i.intent_id
+                 LEFT JOIN operation_receipts a ON a.operation_id='risk-reserve:'||i.intent_id
+                    AND a.kind='RISK_RESERVE_ATTEMPT' AND a.request_hash=i.request_hash
+                 JOIN operation_receipts o ON o.operation_id='terminal:'||i.intent_id
+                 WHERE i.intent_id=?1 AND i.state='REJECTED'
+                   AND i.begin_post_at IS NULL AND i.exchange_order_id IS NULL
+                   AND (r.state IN('UNSENT_PENDING_CENTRAL','RELEASED') OR
+                        (r.reservation_key IS NULL AND a.result_ref IS NOT NULL))
+                   AND o.kind='REJECTED_UNSENT'
+                   AND o.request_hash=i.request_hash AND o.result_ref=i.incident",
+                params![id, self.meta.account_key],
+                |r| {
+                    Ok(UnsentSqlReceipt {
+                        reservation_key: r.get(0)?,
+                        account_key: r.get(1)?,
+                        intent_id: r.get(2)?,
+                        plan_hash: r.get(3)?,
+                        request_hash: r.get(4)?,
+                        reason: r.get(5)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(StoreError::from)
     }
     pub fn central_receipt(&self, id: &str) -> StoreResult<Option<CentralReceipt>> {
         let row=self.connection.query_row("SELECT reservation_key,account_key,installation_id,instance_id,plan_hash,policy_revision,receipt_hash,requested_loss_usd,conversion_digest FROM risk_receipts WHERE intent_id=?1",[id],|r|Ok((CentralReceipt{reservation_key:r.get(0)?,account_key:r.get(1)?,installation_id:r.get(2)?,instance_id:r.get(3)?,intent_id:id.into(),plan_hash:r.get(4)?,policy_revision:r.get(5)?,receipt_hash:r.get(6)?,requested_loss_usd:Decimal::ZERO,conversion_digest:r.get(8)?},r.get::<_,String>(7)?))).optional()?;

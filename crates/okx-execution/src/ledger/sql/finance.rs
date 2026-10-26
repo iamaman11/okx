@@ -659,7 +659,10 @@ impl AccountStore {
             cursor,
             ..Default::default()
         };
-        if !existing && fill.fee != Decimal::ZERO {
+        // F7: a raw fill may have committed with fill_projection_pending
+        // before its fee/position projection. Rebuild the fee on replay;
+        // the canonical economic-event uniqueness prevents double charge.
+        if fill.fee != Decimal::ZERO {
             page.finance.push(FinanceEntry {
                 entry_id: format!("{key}:fee"),
                 economic_event_key: key.clone(),

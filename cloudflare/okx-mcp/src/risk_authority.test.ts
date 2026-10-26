@@ -120,7 +120,12 @@ check((await handleNativeRiskCommand(s,session,{schema:"okx.risk-command/v1",com
    installation_id:initial.installation_id,
    action:{action:"BEGIN_POST",reservation_key:admitted[index].reservation_key,
      plan_sha256:plan,policy_revision:1,expected_risk_book_sequence:sequence,
-     source_proof_sha256:proof,census:fresh}
+     source_proof_sha256:proof,census:fresh,
+     causal_proof:{reserve_anchor:admitted[index].reservation_key,
+       native_incarnation:"a".repeat(32),elapsed_to_proof_ms:30,
+       account_reads:[{account_key:account.account_key,private_generation:7,
+         source_read_id:"b".repeat(64),content_digest:hash,
+         started_after_held_ms:5,completed_after_held_ms:20}]}}
  });
  const first=await handleNativeRiskCommand(t,session,post("human",0,"a".repeat(64),3),now+2);
  check(first.status==="POST_AUTHORIZED"&&first.risk_book_sequence===4,
@@ -136,15 +141,58 @@ check((await handleNativeRiskCommand(s,session,{schema:"okx.risk-command/v1",com
  check(revoked.status==="DENIED"&&
    revoked.reason==="CENTRAL_REVOCATION_OR_POLICY_CHANGE",
    "an existing HELD reservation grants no POST after central policy revocation");
+ const unsent=await handleNativeRiskCommand(t,session,{
+   schema:"okx.risk-command/v1",command_id:"unsent_chat_00001",
+   installation_id:initial.installation_id,
+   action:{action:"RELEASE_UNSENT",reservation_key:admitted[1].reservation_key,
+     plan_sha256:"b".repeat(64),expected_risk_book_sequence:4,
+     proof:{reservation_key:admitted[1].reservation_key,
+       account_key:account.account_key,intent_id:"intent_chat_0001",
+       plan_hash:"b".repeat(64),request_hash:"e".repeat(64),
+       reason:"POLICY_CHANGED",record_digest:"f".repeat(64)}}
+ },now+4);
+ check(unsent.status==="UPDATED","native signed no-send frees held reserve despite governance pause");
  const inspect=await handleNativeRiskCommand(t,session,{
    schema:"okx.risk-command/v1",command_id:"inspect_chat_0001",
    installation_id:initial.installation_id,
    action:{action:"INSPECT",reservation_key:admitted[1].reservation_key,
      plan_sha256:"b".repeat(64)}},now+5);
- check(inspect.status==="OBSERVED"&&inspect.reservation_state==="HELD",
-   "revocation preserves exposure for reconciliation; it never silently releases it");
+ check(inspect.status==="OBSERVED"&&inspect.reservation_state==="RELEASED",
+   "durable no-send proof releases capacity after revocation; no automatic release otherwise");
  check((await handleNativeRiskCommand(t,session,
    reserve("after_pause","native_alpha",proof),now+5)).status==="DENIED",
    "revoked account cannot admit more risk under stale policy");
+ // The authenticated WSS handler must expose the empty book CAS and
+ // a read-backable RELEASED fence, never an invented HELD reservation.
+ const absentStore=new Store(),lateCommand=reserve("late","manual",hash);
+ await absentStore.put("generation",session.connection_generation);
+ await absentStore.put("account_access_v1",governance);
+ await initializeRiskBook(absentStore,initial.installation_id);
+ const lateKey=[lateCommand.action.venue,"real",sameUid,lateCommand.action.run_id,
+   lateCommand.action.intent_id].map(v=>v.length+":"+v).join("");
+ const inspectLate={schema:"okx.risk-command/v1",command_id:"inspect_absent_0001",
+   installation_id:initial.installation_id,
+   action:{action:"INSPECT",reservation_key:lateKey,plan_sha256:hash}};
+ const before=await handleNativeRiskCommand(absentStore,session,inspectLate,now+1);
+ check(before.status==="DENIED"&&before.reason==="RISK_RESERVATION_NOT_FOUND"&&
+   before.risk_book_sequence===0,"F2 empty central book returns exact CAS zero");
+ const abort=await handleNativeRiskCommand(absentStore,session,{
+   schema:"okx.risk-command/v1",command_id:"abort_absent_0001",
+   installation_id:initial.installation_id,
+   action:{action:"RELEASE_UNSENT",reservation_key:lateKey,plan_sha256:hash,
+     expected_risk_book_sequence:0,
+     proof:{reservation_key:lateKey,account_key:account.account_key,
+       intent_id:lateCommand.action.intent_id,plan_hash:hash,
+       request_hash:"e".repeat(64),reason:"RESERVE_REPLY_LOST",
+       record_digest:"f".repeat(64)}}},now+2);
+ check(abort.status==="UPDATED"&&abort.risk_book_sequence===1,
+   "F2 no-send fence accepts exact signed native proof at sequence zero");
+ const seen=await handleNativeRiskCommand(absentStore,session,inspectLate,now+3);
+ check(seen.status==="OBSERVED"&&seen.reservation_state==="RELEASED",
+   "F2 lost negative-fence ACK is repeatably inspectable");
+ const delayed=await handleNativeRiskCommand(absentStore,session,lateCommand,now+4);
+ check(delayed.status==="DENIED"&&delayed.reason==="RESERVE_FENCED_NO_SEND",
+   "late RESERVE can no longer mint risk");
+ console.log("risk_f2_never_arrived_handler PASS");
  console.log("three_source_central_riskbook_cas PASS 3 HELD / 1 exact POST / revoked POST denied / no venue POST");
 }

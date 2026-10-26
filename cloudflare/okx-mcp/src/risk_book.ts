@@ -83,6 +83,34 @@ export interface NativeSessionRiskProof {
   native_ledger_evidence_complete:boolean;
 }
 
+/** Evidence produced by the same authenticated native process after HELD.
+ * Worker verifies the reserve window using its own clock, never native wall time.
+ */
+export interface CausalPostProof {
+  reserve_anchor:string;
+  native_incarnation:string;
+  elapsed_to_proof_ms:number;
+  account_reads:{
+    account_key:string;private_generation:number;source_read_id:string;
+    content_digest:string;started_after_held_ms:number;completed_after_held_ms:number;
+  }[];
+}
+function validPostProof(proof:CausalPostProof,census:CompleteRiskCensus,key:string):boolean {
+  return !!proof&&proof.reserve_anchor===key&&key.length<=512&&
+    /^[0-9a-f]{32}$/.test(proof.native_incarnation)&&
+    Number.isSafeInteger(proof.elapsed_to_proof_ms)&&
+    proof.elapsed_to_proof_ms>=0&&proof.elapsed_to_proof_ms<=5000&&
+    Array.isArray(proof.account_reads)&&proof.account_reads.length===census.account_keys.length&&
+    proof.account_reads.every((read,i)=>read.account_key===census.account_keys[i]&&
+      Number.isSafeInteger(read.private_generation)&&read.private_generation>0&&
+      HEX.test(read.source_read_id)&&HEX.test(read.content_digest)&&
+      Number.isSafeInteger(read.started_after_held_ms)&&
+      Number.isSafeInteger(read.completed_after_held_ms)&&
+      read.started_after_held_ms>=0&&
+      read.started_after_held_ms<=read.completed_after_held_ms&&
+      read.completed_after_held_ms<=proof.elapsed_to_proof_ms);
+}
+
 export type RiskDecision =
   | { status: "HELD"; entry: RiskEntry; book_sequence: number; occupied_global_usdt: string }
   | { status: "DENIED"; reason: string };
@@ -146,6 +174,34 @@ export async function lowerRiskBookLimit(tx:any,limit:string):Promise<boolean>{
  await tx.put(KEY,{...meta,campaign_limit_usd:limit,sequence:meta.sequence+1});return true;
 }
 const entryKey=(key:string)=>"risk_entry_v2:"+key;
+const noReserveKey=(key:string)=>"risk_no_reserve_v1:"+key;
+/** Permanent negative fence in the existing Worker RiskBook, never occupancy. */
+interface NoReserveFence {
+  account_key:string;intent_id:string;plan_hash:string;
+  record_digest:string;policy_revision:number;
+}
+function validNoReserveAddress(key:string,account:string,intent:string):boolean {
+  const pieces=account.split(":");
+  if(pieces.length!==3||pieces[0]!=="okx"||pieces[1]!=="real"||!HEX.test(pieces[2])||
+    !TOKEN.test(intent))return false;
+  const prefix=pieces.map(v=>v.length+":"+v).join("");
+  const suffix=intent.length+":"+intent;
+  if(!key.startsWith(prefix)||!key.endsWith(suffix))return false;
+  const run=key.slice(prefix.length,key.length-suffix.length);
+  const m=/^([1-9][0-9]{0,2}):(.+)$/.exec(run);
+  return !!m&&m[2].length===Number(m[1])&&TOKEN.test(m[2]);
+}
+export async function inspectNoReserveFence(storage:any,key:string,plan:string):
+  Promise<{sequence:number;policy_revision:number}|null>{
+  return storage.transaction(async(tx:any)=>{
+    const meta=await tx.get(KEY),f:NoReserveFence|undefined=await tx.get(noReserveKey(key));
+    return validMeta(meta)&&f&&f.plan_hash===plan&&HEX.test(f.record_digest)&&
+      validNoReserveAddress(key,f.account_key,f.intent_id)&&
+      Number.isSafeInteger(f.policy_revision)&&f.policy_revision>0
+      ?{sequence:meta.sequence,policy_revision:f.policy_revision}:null;
+  });
+}
+
 const strategyKey=(entry:Pick<RiskEntry,"venue"|"environment"|"uid"|"strategy_id">)=>accountKey(entry)+":"+entry.strategy_id;
 export async function inspectRisk(storage:any,key:string):Promise<{meta:RiskMeta;entry:RiskEntry}|null>{
  return storage.transaction(async(tx:any)=>{const meta=await tx.get(KEY),entry=await tx.get(entryKey(key));return validMeta(meta)&&entry&&validEntry(entry)?{meta,entry}:null;});
@@ -173,13 +229,16 @@ async function applyCensusLoss(tx:any,meta:RiskMeta,census:CompleteRiskCensus):P
  meta.source_as_of_ms=census.source_read_floor_ms;
  if(added>0n){meta.consumed_loss_usd=amount(units(meta.consumed_loss_usd)!+added);meta.sequence++;for(const[k,v]of updates)await tx.put(k,v);await tx.put(KEY,meta);}else{await tx.put(KEY,meta);}return true;
 }
-function censusRisk(census: CompleteRiskCensus, policy: RiskPolicy, now: number): Map<string,bigint> | null {
+function censusRisk(census: CompleteRiskCensus, policy: RiskPolicy, now: number,
+  postHeldCausal=false): Map<string,bigint> | null {
   if (census.complete !== true || !HEX.test(census.source_digest)
     || !HEX.test(census.content_digest)
     || !Number.isSafeInteger(census.source_read_floor_ms)
     || census.source_read_floor_ms <= 0
     || census.source_read_floor_ms > census.generated_at_ms
-    || census.generated_at_ms > now || now - census.generated_at_ms > MAX_CENSUS_AGE_MS
+    || (!postHeldCausal &&
+      (census.generated_at_ms > now || now - census.generated_at_ms > MAX_CENSUS_AGE_MS))
+    || (postHeldCausal && census.generated_at_ms-census.source_read_floor_ms>MAX_CENSUS_AGE_MS)
     || !Number.isSafeInteger(now) || !Number.isSafeInteger(census.generated_at_ms)) return null;
   const required = Object.keys(policy.account_limits_usdt).sort();
   if (!Array.isArray(census.account_keys)
@@ -266,8 +325,12 @@ export async function reserveRisk(
       return {status:"DENIED",reason:"STALE_RUNTIME_GENERATION"};
     const meta:unknown=await tx.get(KEY);
     if(!validMeta(meta)||meta.installation_id!==governance.installation_id)return {status:"DENIED",reason:"RISK_BOOK_MISSING_OR_CORRUPT"};
+    const key=riskKey(input);
+    // A late RESERVE after a durable native no-send release cannot mint risk.
+    if(await tx.get(noReserveKey(key))!==undefined)
+      return {status:"DENIED",reason:"RESERVE_FENCED_NO_SEND"};
     if(!await applyCensusLoss(tx,meta,census))return {status:"DENIED",reason:"CUMULATIVE_LOSS_SOURCE_REGRESSION"};
-    const key=riskKey(input),prior:RiskEntry|undefined=await tx.get(entryKey(key));
+    const prior:RiskEntry|undefined=await tx.get(entryKey(key));
     if(prior){
       if(!validEntry(prior)||prior.plan_hash!==input.plan_hash||prior.loss_usdt!==input.loss_usdt||prior.loss_usd!==input.loss_usd||JSON.stringify(prior.usd_conversion)!==JSON.stringify(input.usd_conversion)||prior.policy_revision!==input.policy_revision||prior.strategy_id!==input.strategy_id||prior.instrument_id!==input.instrument_id)return {status:"DENIED",reason:"IDEMPOTENCY_CONFLICT"};
       return prior.state==="HELD"?{status:"HELD",entry:prior,book_sequence:meta.sequence,occupied_global_usdt:meta.occupied_usdt}:{status:"DENIED",reason:"INTENT_ALREADY_POSTED_OR_RESOLVED"};
@@ -324,6 +387,62 @@ export interface TerminalRiskLedgerProof {
 export interface TerminalRiskReleaseProof {
   census:CompleteRiskCensus;source_proof:NativeSessionRiskProof;
   ledger:TerminalRiskLedgerProof;now_ms:number;
+}
+
+/// A no-send release is strictly narrower than an exchange-terminal release:
+/// it can only follow the authenticated account owner's durable SQL rejection
+/// with no native post claim. No venue facts or speculative credits are used.
+export interface UnsentRiskReleaseProof {
+  reservation_key:string;account_key:string;intent_id:string;plan_hash:string;
+  request_hash:string;reason:string;record_digest:string;
+}
+export async function releaseUnsentRisk(
+  storage:any,key:string,plan_hash:string,expected_sequence:number,
+  generation:number,proof:UnsentRiskReleaseProof
+):Promise<{status:"UPDATED"|"DENIED";reason?:string}> {
+  if(!proof||!HEX.test(plan_hash)||!HEX.test(proof.request_hash)||
+    !HEX.test(proof.record_digest)||!TOKEN.test(proof.intent_id)||
+    !validNoReserveAddress(key,proof.account_key,proof.intent_id)||
+    proof.reservation_key!==key||proof.plan_hash!==plan_hash||
+    !/^okx:real:[0-9a-f]{64}$/.test(proof.account_key)||
+    typeof proof.reason!=="string"||proof.reason.length<1||proof.reason.length>128||
+    !Number.isSafeInteger(expected_sequence)||expected_sequence<0||
+    !Number.isSafeInteger(generation)||generation<1)
+    return {status:"DENIED",reason:"INVALID_UNSENT_SQL_PROOF"};
+  return storage.transaction(async(tx:any)=>{
+    const meta=await tx.get(KEY);
+    if(!validMeta(meta))return {status:"DENIED" as const,reason:"RISK_BOOK_MISSING_OR_CORRUPT"};
+    if(await tx.get("generation")!==generation||meta.sequence!==expected_sequence)
+      return {status:"DENIED" as const,reason:"STALE_SESSION_OR_BOOK_SEQUENCE"};
+    const entry:RiskEntry|undefined=await tx.get(entryKey(key));
+    if(!entry){
+      const previous:NoReserveFence|undefined=await tx.get(noReserveKey(key));
+      if(previous){
+        return previous.account_key===proof.account_key&&previous.intent_id===proof.intent_id&&
+          previous.plan_hash===plan_hash&&previous.record_digest===proof.record_digest
+          ?{status:"UPDATED" as const}
+          :{status:"DENIED" as const,reason:"NO_RESERVE_FENCE_CONFLICT"};
+      }
+      const governance:unknown=await tx.get(GOVERNANCE_STORAGE_KEY);
+      if(!validGovernance(governance))return {status:"DENIED" as const,reason:"GOVERNANCE_UNAVAILABLE"};
+      await tx.put(noReserveKey(key),{
+        account_key:proof.account_key,intent_id:proof.intent_id,plan_hash,
+        record_digest:proof.record_digest,policy_revision:governance.revision
+      } satisfies NoReserveFence);
+      await tx.put(KEY,{...meta,sequence:meta.sequence+1});
+      return {status:"UPDATED" as const};
+    }
+    if(!validEntry(entry)||entry.plan_hash!==plan_hash||
+      !["HELD","POSTED"].includes(entry.state)||
+      accountKey(entry)!==proof.account_key||entry.intent_id!==proof.intent_id)
+      return {status:"DENIED" as const,reason:"UNSENT_RELEASE_IDENTITY_OR_STATE_MISMATCH"};
+    // Even if central BEGIN_POST committed but its reply was lost, a native
+    // SQL rejection CAS prevents this intention from ever reaching venue.
+    // Only the native writer, already authenticated by WS generation, may
+    // supply this proof. A replayed release is blocked by the tombstone.
+    await saveEntry(tx,meta,{...entry,state:"RELEASED",transition_proof:proof.record_digest},-units(entry.loss_usdt)!);
+    return {status:"UPDATED" as const};
+  });
 }
 
 export async function transitionRisk(
@@ -398,6 +517,7 @@ export async function beginRiskPost(
   native:{
     connection_generation:number;expected_book_sequence:number;
     census:CompleteRiskCensus;source_proof:NativeSessionRiskProof;now_ms:number;
+    causal_proof:CausalPostProof;
   }|null,
 ):Promise<{status:"POST_AUTHORIZED"|"DENIED";reason?:string;book_sequence?:number;existing_modelled_loss_usdt?:string}>{
   if(!native||!HEX.test(plan_hash)||!HEX.test(proof_digest)||
@@ -409,7 +529,8 @@ export async function beginRiskPost(
     !native.source_proof.native_account_evidence_complete||
     !native.source_proof.native_order_evidence_complete||
     !native.source_proof.native_ledger_evidence_complete||
-    !Number.isSafeInteger(native.now_ms)||native.now_ms<=0)
+    !Number.isSafeInteger(native.now_ms)||native.now_ms<=0||
+    !validPostProof(native.causal_proof,native.census,key))
     return {status:"DENIED",reason:"INVALID_NATIVE_POST_FENCE"};
   return storage.transaction(async(tx:any)=>{
     const generation:unknown=await tx.get("generation");
@@ -423,7 +544,7 @@ export async function beginRiskPost(
       return {status:"DENIED" as const,reason:"CENTRAL_OPERATOR_GRANT_INACTIVE"};
     // A fresh native inventory is mandatory AGAIN immediately before POST.
     // Positions, unmanaged orders and another account can change after RESERVE.
-    const occupied=censusRisk(native.census,authority,native.now_ms);
+    const occupied=censusRisk(native.census,authority,native.now_ms,true);
     if(occupied===null)
       return {status:"DENIED" as const,reason:"POST_CENSUS_UNPROVEN_OR_STALE"};
     const stored=await tx.get(KEY);
@@ -432,18 +553,16 @@ export async function beginRiskPost(
     if(stored.sequence!==native.expected_book_sequence)return {status:"DENIED" as const,reason:"STALE_RISK_BOOK_SEQUENCE"};
     const entry:RiskEntry|undefined=await tx.get(entryKey(key));
     if(!entry||!validEntry(entry)||entry.plan_hash!==plan_hash||entry.state!=="HELD"||entry.policy_revision!==policy_revision)return {status:"DENIED" as const,reason:"INTENT_NOT_HELD_EXACTLY_ONCE"};
-    if(native.now_ms-entry.usd_conversion.observed_at_ms>5000)return {status:"DENIED" as const,reason:"USD_CONVERSION_STALE"};
-    // Reusing a recently sampled RESERVE census is not a new source read.
-    if(native.census.generated_at_ms<=entry.created_at_ms ||
-       native.census.source_read_floor_ms<=entry.created_at_ms)
-      return {status:"DENIED" as const,reason:"POST_CENSUS_NOT_AFTER_RESERVE"};
-    // Every registered Real UID must have been read again. Identical
-    // exchange content is valid; advancing only a command clock is not.
-    if (!entry.reserve_source_digest ||
-        !entry.reserve_source_read_floor_ms ||
-        native.census.source_read_floor_ms <= entry.reserve_source_read_floor_ms ||
-        native.census.source_digest===entry.reserve_source_digest)
-      return {status:"DENIED" as const,reason:"POST_CENSUS_SOURCE_REUSED_OR_UNKNOWN"};
+    // The anchor lives in Worker storage and uses Worker time only; the
+    // authenticated native evidence uses elapsed ticks since HELD instead.
+    if(native.now_ms<entry.created_at_ms||
+       native.now_ms-entry.created_at_ms>5000)
+      return {status:"DENIED" as const,reason:"POST_EVIDENCE_WINDOW_EXPIRED"};
+    if(!entry.reserve_source_digest||!entry.reserve_source_read_floor_ms)
+      return {status:"DENIED" as const,reason:"RESERVE_SOURCE_NOT_RECORDED"};
+    // Identical exchange content from independently completed reads is valid.
+    // Native source read IDs, coverage and relative ordering are checked
+    // against the full registered cohort by validPostProof above.
     const account=governance.accounts.find(a=>
       a.venue===entry.venue&&a.environment==="real"&&a.uid_fingerprint===entry.uid
       &&accessEnabled(a));

@@ -2,6 +2,215 @@ use super::*;
 use std::sync::atomic::{AtomicU64, Ordering};
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 #[test]
+fn k5_recovery_pages_over_100_intents_are_disjoint_and_bounded() {
+    let mut s = store();
+    let first = intent(&mut s);
+    for n in 1..=129 {
+        let d = Decision {
+            decision_id: format!("decision_{n:04}"),
+            instance_id: None,
+            decision_at: 2,
+            input_digest: "inputs".into(),
+            policy_revision: 1,
+            code_version: "test".into(),
+        };
+        let i = NewIntent {
+            plan: first.plan.clone(),
+            intent_id: format!("intent_{n:04}"),
+            idempotency_key: format!("request_{n:04}"),
+            request_hash: format!("body_{n:04}"),
+            client_order_id: format!("client_{n:04}"),
+            deadline: 100,
+            plan_hash: first.plan_hash.clone(),
+            policy_revision: 1,
+            risk_increase: true,
+            instrument_id: "BTC-USDT-SWAP".into(),
+        };
+        s.prepare(&d, &i).unwrap();
+    }
+    let first_page = s.reconcilable_intents_page(100, 0).unwrap();
+    let next_page = s.reconcilable_intents_page(100, 100).unwrap();
+    assert_eq!(first_page.len(), 100);
+    assert_eq!(next_page.len(), 30);
+    let ids = first_page
+        .iter()
+        .chain(next_page.iter())
+        .map(|i| i.intent_id.clone())
+        .collect::<std::collections::HashSet<_>>();
+    assert_eq!(ids.len(), 130);
+    assert!(s.reconcilable_intents_page(100, 200).unwrap().is_empty());
+    assert!(s.reconcilable_intents_page(0, 0).unwrap().is_empty());
+}
+#[test]
+fn f0_crash_before_prepare_commit_is_retriable_once() {
+    let s = store();
+    assert!(s.reconcilable_intents(16).unwrap().is_empty());
+    let path = s.path.clone();
+    let meta = s.meta.clone();
+    drop(s);
+    let mut recovered =
+        AccountStore::open_existing(path, &meta.account_key, &meta.installation_id).unwrap();
+    assert!(recovered.reconcilable_intents(16).unwrap().is_empty());
+    let first = intent(&mut recovered);
+    assert_eq!(first.state, IntentState::Prepared);
+    assert_eq!(recovered.active_intents(16).unwrap().len(), 1);
+}
+
+#[test]
+fn f1_prepared_before_reserve_is_recovered_once_without_central_release() {
+    let mut s = store();
+    intent(&mut s);
+    let path = s.path.clone();
+    let meta = s.meta.clone();
+    drop(s);
+    let mut recovered =
+        AccountStore::open_existing(path, &meta.account_key, &meta.installation_id).unwrap();
+    let pending = recovered.reconcilable_intents(16).unwrap();
+    assert_eq!(pending.len(), 1, "expired pre-reserve must not be orphaned");
+    assert_eq!(pending[0].state, IntentState::Prepared);
+    recovered
+        .reject_unsent("intent", "COMMAND_EXPIRED", 5)
+        .unwrap();
+    assert!(recovered.unsent_before_reserve("intent").unwrap());
+    assert!(
+        recovered
+            .unsent_release_receipt("intent")
+            .unwrap()
+            .is_none()
+    );
+    assert!(recovered.reconcilable_intents(16).unwrap().is_empty());
+    assert!(!recovered.begin_post("intent", 1, 6).unwrap());
+    assert_eq!(
+        recovered
+            .intent("intent")
+            .unwrap()
+            .unwrap()
+            .incident
+            .as_deref(),
+        Some("COMMAND_EXPIRED")
+    );
+}
+
+#[test]
+fn f3_crash_after_native_reserve_before_post_claim_releases_no_send() {
+    let mut s = store();
+    intent(&mut s);
+    reserve(&mut s);
+    let path = s.path.clone();
+    let meta = s.meta.clone();
+    drop(s);
+    let mut restored =
+        AccountStore::open_existing(path, &meta.account_key, &meta.installation_id).unwrap();
+    assert_eq!(restored.reconcilable_intents(16).unwrap().len(), 1);
+    assert_eq!(
+        restored.intent("intent").unwrap().unwrap().state,
+        IntentState::Reserved
+    );
+    restored
+        .reject_unsent("intent", "COMMAND_EXPIRED", 5)
+        .unwrap();
+    let proof = restored.unsent_release_receipt("intent").unwrap().unwrap();
+    assert_eq!(proof.reservation_key, "central-key");
+    assert_eq!(proof.reason, "COMMAND_EXPIRED");
+    assert!(!restored.begin_post("intent", 1, 6).unwrap());
+    restored
+        .acknowledge_central_release("central-key", "worker-release-proof")
+        .unwrap();
+    assert!(restored.reconcilable_intents(16).unwrap().is_empty());
+}
+
+#[test]
+fn f8_central_release_local_ack_replay_keeps_first_receipt() {
+    let mut s = store();
+    intent(&mut s);
+    reserve(&mut s);
+    s.reject_unsent("intent", "CENTRAL_POST_DENIED", 5).unwrap();
+    let path = s.path.clone();
+    let meta = s.meta.clone();
+    drop(s);
+    let mut recovered =
+        AccountStore::open_existing(path, &meta.account_key, &meta.installation_id).unwrap();
+    assert_eq!(recovered.reconcilable_intents(16).unwrap().len(), 1);
+    recovered
+        .acknowledge_central_release("central-key", "central-released")
+        .unwrap();
+    recovered
+        .acknowledge_central_release("central-key", "central-released")
+        .unwrap();
+    let receipt = recovered
+        .operation("central-release:central-key")
+        .unwrap()
+        .unwrap();
+    assert_eq!(receipt.result_ref, "central-released");
+    assert_eq!(recovered.reconcilable_intents(16).unwrap().len(), 0);
+    assert!(!recovered.begin_post("intent", 1, 6).unwrap());
+}
+
+#[test]
+fn f2_lost_reserve_receipt_recovers_after_restart_without_second_reserve() {
+    let mut s = store();
+    intent(&mut s);
+    let key = "3:okx4:real64:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa14:continuous_engine6:intent";
+    s.mark_reserve_attempt("intent", key, 3).unwrap();
+    // Before a remote reply there is no local CentralReceipt to scan.
+    assert!(s.central_receipt("intent").unwrap().is_none());
+    assert_eq!(s.reconcilable_intents(16).unwrap().len(), 1);
+    let p = s.path.clone();
+    let meta = s.meta.clone();
+    drop(s);
+    let mut s = AccountStore::open_existing(p, &meta.account_key, &meta.installation_id).unwrap();
+    assert_eq!(s.reconcilable_intents(16).unwrap()[0].intent_id, "intent");
+    s.reject_unsent("intent", "RESERVE_REPLY_LOST", 5).unwrap();
+    let proof = s.unsent_release_receipt("intent").unwrap().unwrap();
+    assert_eq!(proof.reservation_key, key);
+    assert_eq!(proof.reason, "RESERVE_REPLY_LOST");
+    assert_eq!(s.reconcilable_intents(16).unwrap().len(), 1);
+    s.acknowledge_central_release(key, "worker-released")
+        .unwrap();
+    assert_eq!(s.reconcilable_intents(16).unwrap().len(), 0);
+    // Both proof and first cause survive a lost local release ACK.
+    let proof = s.unsent_release_receipt("intent").unwrap().unwrap();
+    assert_eq!(proof.reason, "RESERVE_REPLY_LOST");
+    s.acknowledge_central_release(key, "worker-released")
+        .unwrap();
+    assert!(!s.begin_post("intent", 1, 6).unwrap());
+}
+#[test]
+fn f2_explicit_worker_reserve_denial_has_no_orphan_risk_and_no_post() {
+    let mut s = store();
+    intent(&mut s);
+    s.mark_reserve_attempt("intent", "risk_reserve_not_granted", 3)
+        .unwrap();
+    s.reject_denied_reserve("intent", "ORDER_OR_STRATEGY_RISK_LIMIT", 5)
+        .unwrap();
+    assert!(s.declined_reserve("intent").unwrap());
+    assert!(s.unsent_release_receipt("intent").unwrap().is_none());
+    assert!(s.reconcilable_intents(16).unwrap().is_empty());
+    assert_eq!(
+        s.intent("intent").unwrap().unwrap().incident.as_deref(),
+        Some("ORDER_OR_STRATEGY_RISK_LIMIT")
+    );
+}
+#[test]
+fn f2_durable_marker_conflicts_and_never_becomes_post_claim() {
+    let mut s = store();
+    intent(&mut s);
+    s.mark_reserve_attempt("intent", "original-reserve-key", 3)
+        .unwrap();
+    s.mark_reserve_attempt("intent", "original-reserve-key", 4)
+        .unwrap();
+    assert!(
+        s.mark_reserve_attempt("intent", "different-key", 5)
+            .is_err()
+    );
+    s.reject_unsent("intent", "RESERVE_LOCAL_COMMIT_UNCONFIRMED", 6)
+        .unwrap();
+    let evidence = s.unsent_release_receipt("intent").unwrap().unwrap();
+    assert_eq!(evidence.reservation_key, "original-reserve-key");
+    assert_eq!(evidence.reason, "RESERVE_LOCAL_COMMIT_UNCONFIRMED");
+    assert!(!s.begin_post("intent", 1, 7).unwrap());
+}
+#[test]
 fn sql_deadline_handler_is_removed_after_operation_error() {
     let mut s = store();
     let result: StoreResult<()> =
@@ -546,9 +755,15 @@ fn pending_fill_projection_is_exactly_once() {
         fee: Decimal::new(-1, 2),
         currency: "USDT".into(),
     };
+    // The bill and fill are two provenance links for ONE economic fee;
+    // unlike unrelated fees, an identical canonical economic event must
+    // never be charged twice on replay after a pending projection.
+    let mut source_fee = fee("source-fee", "bill-source");
+    source_fee.economic_event_key = "fill:BTC:t:o".into();
+    source_fee.amount = Decimal::new(-1, 2);
     s.ingest_page(&IngestPage {
         fills: vec![f],
-        finance: vec![fee("source-fee", "bill-source")],
+        finance: vec![source_fee],
         ..Default::default()
     })
     .unwrap();
@@ -556,6 +771,22 @@ fn pending_fill_projection_is_exactly_once() {
     assert_eq!(s.project_pending_fills(100).unwrap(), 0);
     assert_eq!(s.active_lots("BTC").unwrap().len(), 1);
     assert_eq!(s.finance_history(1, 10, 0, "", 10).unwrap().len(), 1);
+    assert_eq!(
+        s.finance_totals(1, 10, None)
+            .unwrap()
+            .get(&("USDT".into(), "FEE".into()))
+            .copied(),
+        Some(Decimal::new(-1, 2))
+    );
+    let linked: i64 = s
+        .connection
+        .query_row(
+            "SELECT count(*) FROM finance_source_links WHERE entry_id='source-fee'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(linked, 2, "bill + fill proof, one economic fee");
 }
 #[test]
 fn backup_blocks_risk_until_exchange_and_central_reconcile() {
@@ -842,6 +1073,305 @@ fn source_page_and_cursor_atomic() {
     .unwrap();
     assert_eq!(s.cursor("fills", "BTC").unwrap().unwrap().watermark, 10);
 }
+/// Real child-process termination, not an in-process Error or orderly
+/// SQLite close. The Rust test binary is reused as the child; no new binary,
+/// runner, service, or venue dependency.
+fn k5_f7_fixture_fill() -> Fill {
+    Fill {
+        side: "buy".into(),
+        fill_id: "fill-f7".into(),
+        instrument_id: "BTC-USDT-SWAP".into(),
+        trade_id: "trade-f7".into(),
+        exchange_order_id: "order-f7".into(),
+        intent_id: Some("intent".into()),
+        time: 4,
+        qty: Decimal::ONE,
+        price: Decimal::from(100),
+        fee: Decimal::new(-10, 2),
+        currency: "USDT".into(),
+    }
+}
+
+#[test]
+fn k5_child_hard_exit_at_native_claim() {
+    let Ok(path) = std::env::var("OKX_K5_CHILD_SQL_PATH") else {
+        return;
+    };
+    let phase = std::env::var("OKX_K5_CHILD_PHASE").expect("child phase");
+    let account = std::env::var("OKX_K5_CHILD_ACCOUNT").expect("account identity");
+    let installation = std::env::var("OKX_K5_CHILD_INSTALL").expect("installation identity");
+    let mut store = AccountStore::open_existing(path, &account, &installation).unwrap();
+    match phase.as_str() {
+        "F0" | "F1" | "F2" | "F3" | "F4" | "F8" => {}
+        "F7" => {
+            let fill = k5_f7_fixture_fill();
+            let tx = store
+                .connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .unwrap();
+            tx.execute(
+                "INSERT INTO fills VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+                params![
+                    fill.fill_id,
+                    fill.instrument_id,
+                    fill.trade_id,
+                    fill.exchange_order_id,
+                    fill.intent_id,
+                    fill.time,
+                    exact(fill.qty),
+                    exact(fill.price),
+                    exact(fill.fee),
+                    fill.currency,
+                    fill.side
+                ],
+            )
+            .unwrap();
+            tx.execute(
+                "INSERT INTO fill_projection_pending VALUES(?1,?2)",
+                params!["fill-f7", "buy"],
+            )
+            .unwrap();
+            tx.commit().unwrap();
+        }
+        "F5" | "F6" => {
+            assert!(store.begin_post("intent", 1, 4).unwrap());
+            if phase == "F6" {
+                // This durable marker stands in for exactly one venue
+                // place_order with its stable client order identity.
+                // The process is then killed before any venue ACK arrives.
+                let venue_path = std::env::var("OKX_K5_CHILD_VENUE_LOG").unwrap();
+                let mut f = std::fs::OpenOptions::new()
+                    .create_new(true)
+                    .write(true)
+                    .open(venue_path)
+                    .unwrap();
+                use std::io::Write;
+                writeln!(f, "stableclient").unwrap();
+                f.sync_all().unwrap();
+            }
+        }
+        _ => panic!("unknown native kill phase"),
+    }
+    // Publish marker after the SQLite FULL WAL commit with the connection
+    // still live. Parent must kill this process at the exact boundary.
+    let ready = std::env::var("OKX_K5_CHILD_READY").unwrap();
+    std::fs::write(ready, phase).unwrap();
+    loop {
+        std::thread::park();
+    }
+}
+
+#[test]
+fn k5_real_os_kill_f0_through_f8_never_reposts_or_duplicates_finance() {
+    // Same Rust binary and exact mounted test DB across the process boundary.
+    // The child is deliberately not allowed to connect to OKX or RiskBook.
+    for phase in ["F0", "F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8"] {
+        let mut store = store();
+        let original = if phase == "F0" {
+            None
+        } else {
+            Some(intent(&mut store))
+        };
+        if matches!(phase, "F3" | "F4" | "F5" | "F6" | "F8") {
+            reserve(&mut store);
+        }
+        if phase == "F2" {
+            store
+                .mark_reserve_attempt("intent", "f2-original-central-reserve-key", 3)
+                .unwrap();
+        }
+        if phase == "F8" {
+            store
+                .reject_unsent("intent", "CENTRAL_POST_DENIED", 5)
+                .unwrap();
+        }
+        let path = store.path.clone();
+        let meta = store.meta.clone();
+        let venue_log = path.with_extension(format!("{phase}.venue-marker"));
+        let ready = path.with_extension(format!("{phase}.ready"));
+        drop(store);
+
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--nocapture")
+            .arg("k5_child_hard_exit_at_native_claim")
+            .env("OKX_K5_CHILD_SQL_PATH", &path)
+            .env("OKX_K5_CHILD_PHASE", phase)
+            .env("OKX_K5_CHILD_ACCOUNT", &meta.account_key)
+            .env("OKX_K5_CHILD_INSTALL", &meta.installation_id)
+            .env("OKX_K5_CHILD_VENUE_LOG", &venue_log)
+            .env("OKX_K5_CHILD_READY", &ready)
+            .spawn()
+            .expect("spawn child test executable");
+        let mut witnessed = false;
+        for _ in 0..200 {
+            if ready.exists() {
+                witnessed = true;
+                break;
+            }
+            if let Some(status) = child.try_wait().unwrap() {
+                panic!("{phase}: helper stopped before the SQL claim boundary: {status}");
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(
+            witnessed,
+            "{phase}: child never reported durable SQL boundary"
+        );
+        assert_eq!(std::fs::read_to_string(&ready).unwrap(), phase);
+        child.kill().expect("OS kill at durable SQL boundary");
+        let status = child.wait().expect("reap killed native process");
+        assert!(
+            !status.success(),
+            "{phase}: child must be killed, not finish normally"
+        );
+        let mut recovered =
+            AccountStore::open_existing(&path, &meta.account_key, &meta.installation_id).unwrap();
+        recovered.integrity_check().unwrap();
+        if phase == "F0" {
+            assert!(recovered.intent("intent").unwrap().is_none());
+            let first = intent(&mut recovered);
+            assert_eq!(intent(&mut recovered).intent_id, first.intent_id);
+            assert_eq!(recovered.active_intents(16).unwrap().len(), 1);
+            assert!(!venue_log.exists());
+            continue;
+        }
+        let saved = recovered.intent("intent").unwrap().unwrap();
+        assert_eq!(
+            saved.client_order_id,
+            original.as_ref().unwrap().client_order_id
+        );
+        if phase == "F7" {
+            let pending_before: i64 = recovered
+                .connection
+                .query_row(
+                    "SELECT count(*) FROM fill_projection_pending WHERE fill_id='fill-f7'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(
+                pending_before, 1,
+                "raw fact+pending persisted across OS kill"
+            );
+            assert!(recovered.active_lots("BTC-USDT-SWAP").unwrap().is_empty());
+            for _ in 0..2 {
+                recovered
+                    .ingest_attributed_fill(
+                        k5_f7_fixture_fill(),
+                        FillEffect::Open {
+                            side: "long".into(),
+                        },
+                        None,
+                    )
+                    .unwrap();
+            }
+            let pending_after: i64 = recovered
+                .connection
+                .query_row(
+                    "SELECT count(*) FROM fill_projection_pending WHERE fill_id='fill-f7'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(pending_after, 0, "native projection complete");
+            let lots = recovered.active_lots("BTC-USDT-SWAP").unwrap();
+            assert_eq!(lots.len(), 1, "replay never doubles the position");
+            assert_eq!(lots[0].remaining_qty, Decimal::ONE);
+            assert_eq!(
+                recovered
+                    .finance_totals(1, 10, None)
+                    .unwrap()
+                    .get(&("USDT".into(), "FEE".into()))
+                    .copied(),
+                Some(Decimal::new(-10, 2)),
+                "fee recovered once even when raw fill was committed before crash"
+            );
+            assert!(!venue_log.exists(), "reconciliation must never resend F7");
+            continue;
+        }
+        if matches!(phase, "F5" | "F6") {
+            assert_eq!(saved.state, IntentState::Posting);
+            assert_eq!(recovered.recover_posting(5).unwrap(), 1);
+            assert_eq!(
+                recovered.intent("intent").unwrap().unwrap().state,
+                IntentState::Unknown
+            );
+            assert!(!recovered.begin_post("intent", 1, 6).unwrap());
+            assert_eq!(recovered.recover_posting(7).unwrap(), 0);
+        } else if phase == "F8" {
+            assert_eq!(saved.state, IntentState::Rejected);
+            assert_eq!(recovered.reconcilable_intents(16).unwrap().len(), 1);
+            recovered
+                .acknowledge_central_release("central-key", "worker-proof")
+                .unwrap();
+            recovered
+                .acknowledge_central_release("central-key", "worker-proof")
+                .unwrap();
+            assert!(recovered.reconcilable_intents(16).unwrap().is_empty());
+            assert!(!recovered.begin_post("intent", 1, 6).unwrap());
+        } else {
+            assert_eq!(
+                saved.state,
+                if matches!(phase, "F1" | "F2") {
+                    IntentState::Prepared
+                } else {
+                    IntentState::Reserved
+                }
+            );
+            if phase == "F2" {
+                assert!(
+                    recovered
+                        .operation("risk-reserve:intent")
+                        .unwrap()
+                        .is_some()
+                );
+                assert!(recovered.central_receipt("intent").unwrap().is_none());
+            }
+            assert!(
+                recovered
+                    .reject_unsent("intent", "COMMAND_EXPIRED", 5)
+                    .unwrap()
+            );
+            if phase == "F2" {
+                let proof = recovered.unsent_release_receipt("intent").unwrap().unwrap();
+                assert_eq!(proof.reservation_key, "f2-original-central-reserve-key");
+                recovered
+                    .acknowledge_central_release(&proof.reservation_key, "worker-fenced")
+                    .unwrap();
+            } else if phase != "F1" {
+                // F4: Worker may have accepted BEGIN_POST, but no local
+                // SQL POST claim was ever committed. The same durable SQL
+                // rejection witness can release central POSTED, proven in
+                // the separate Worker CAS tests.
+                let proof = recovered.unsent_release_receipt("intent").unwrap().unwrap();
+                assert_eq!(proof.reservation_key, "central-key");
+                recovered
+                    .acknowledge_central_release("central-key", "worker-released")
+                    .unwrap();
+            }
+            assert_eq!(
+                recovered.intent("intent").unwrap().unwrap().state,
+                IntentState::Rejected
+            );
+            assert!(!recovered.begin_post("intent", 1, 6).unwrap());
+        }
+        if phase == "F6" {
+            assert_eq!(
+                std::fs::read_to_string(&venue_log).unwrap().trim(),
+                saved.client_order_id
+            );
+            // Recovery never calls the mock POST closure or adds a second
+            // log record; the unacknowledged send remains MAY_HAVE_SENT.
+            assert_eq!(
+                std::fs::read_to_string(&venue_log).unwrap().lines().count(),
+                1
+            );
+        } else {
+            assert!(!venue_log.exists(), "{phase}: 0 venue POST expected");
+        }
+    }
+}
+
 #[test]
 fn crash_before_after_begin_post() {
     let mut s = store();

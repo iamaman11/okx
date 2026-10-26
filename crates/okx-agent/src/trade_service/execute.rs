@@ -3,6 +3,12 @@ use okx_api::{
     ApiOrderSide, ApiOrderType, ApiPositionSide, ApiTradeMode, ApiTriggerPriceType,
     AttachedAlgoOrderRequest, PlaceOrderRequest,
 };
+/// Immutable provenance for checking the fresh post-HELD FX rate against the
+/// exact native account that owns the central reservation.
+struct PostFxFence<'a> {
+    owner: &'a AccountResources,
+    conversion: &'a UsdConversion,
+}
 impl TradeService {
     pub(super) async fn execute(
         &self,
@@ -240,9 +246,58 @@ impl TradeService {
                     census,
                 },
             );
-            let held = self
+            let key = self.risk_reservation_key(r, &prepared);
+            let intent_id = prepared.intent_id.clone();
+            let reserve_key = key.clone();
+            r.execution
+                .store
+                .call(until, move |s| {
+                    s.mark_reserve_attempt(&intent_id, &reserve_key, now())
+                })
+                .await
+                .map_err(err)?;
+            let held = match self
                 .reserve_inspect_retry(&state, reserve, &prepared, r)
-                .await?;
+                .await
+            {
+                Ok(held) => held,
+                Err((reason, authoritative_denial)) => {
+                    let id = prepared.intent_id.clone();
+                    if authoritative_denial {
+                        let owner_reason = reason.clone();
+                        r.execution
+                            .store
+                            .call(deadline(), move |s| {
+                                s.reject_denied_reserve(&id, &owner_reason, now())
+                            })
+                            .await
+                            .map_err(err)?;
+                        return Ok(completed(json!({
+                            "intent_id":prepared.intent_id,
+                            "state":"REJECTED","rejection_origin":"CENTRAL",
+                            "send_state":"NOT_STARTED","primary_reason":reason,
+                            "risk_release_state":"NOT_RESERVED"
+                        })));
+                    }
+                    return match reject_prepost_denial(&r.execution.store, &prepared, &reason).await
+                    {
+                        Ok(mut result) => {
+                            match self.release_unsent(r, &prepared).await {
+                                Ok(()) => result["data"]["risk_release_state"] = json!("RELEASED"),
+                                Err(release) => {
+                                    result["data"]["risk_release_error"] = json!(release);
+                                }
+                            }
+                            Ok(result)
+                        }
+                        Err(_) => Ok(uncertain(
+                            &prepared.intent_id,
+                            "RESERVE_LOCAL_COMMIT_UNCONFIRMED_NO_RESUBMIT",
+                        )),
+                    };
+                }
+            };
+            let held_received = Instant::now();
             let receipt = self.local_receipt(r, &prepared, &held, usd, &conversion)?;
             r.execution
                 .store
@@ -253,11 +308,41 @@ impl TradeService {
                 return Err("COMMAND_EXPIRED".into());
             }
             match self
-                .fence_inspect_retry(&state, &held, &prepared, until)
+                .fence_inspect_retry(
+                    &state,
+                    &held,
+                    &prepared,
+                    until,
+                    held_received,
+                    PostFxFence {
+                        owner: r,
+                        conversion: &conversion,
+                    },
+                )
                 .await
             {
                 Ok(v) => central = Some(v),
-                Err(reason) => return Ok(uncertain(&id, &reason)),
+                Err(reason) => {
+                    // BEGIN_POST failed before any native post claim or venue call.
+                    // Preserve the central first cause in SQL, not a fabricated
+                    // MAY_HAVE_SENT outcome. A failed local commit stays uncertain.
+                    return match reject_prepost_denial(&r.execution.store, &prepared, &reason).await
+                    {
+                        Ok(mut result) => {
+                            match self.release_unsent(r, &prepared).await {
+                                Ok(()) => result["data"]["risk_release_state"] = json!("RELEASED"),
+                                Err(release) => {
+                                    result["data"]["risk_release_error"] = json!(release);
+                                }
+                            }
+                            Ok(result)
+                        }
+                        Err(_) => Ok(uncertain(
+                            &id,
+                            "PREPOST_LOCAL_COMMIT_UNCONFIRMED_NO_RESUBMIT",
+                        )),
+                    };
+                }
             }
         } else {
             // Demo and native-confirmed reductions use the same durable marker; no Real global capacity is minted.
@@ -462,45 +547,68 @@ impl TradeService {
             conversion_digest: digest(conversion)?,
         })
     }
+    fn risk_reservation_key(&self, r: &AccountResources, intent: &StoredIntent) -> String {
+        [
+            "okx",
+            "real",
+            r.configuration.account_key.verified_uid.as_str(),
+            "continuous_engine",
+            intent.intent_id.as_str(),
+        ]
+        .iter()
+        .map(|x| format!("{}:{}", x.len(), x))
+        .collect::<String>()
+    }
+
     async fn reserve_inspect_retry(
         &self,
         state: &CentralGovernanceSnapshot,
         command: RiskCommand,
         intent: &StoredIntent,
         r: &AccountResources,
-    ) -> Result<RiskResult, String> {
-        match self.risk.request(command.clone()).await {
-            Ok(v) if v.status == RiskDecisionStatus::Held => Ok(v),
-            Ok(v) => Err(v.reason.unwrap_or("RESERVE_DENIED".into())),
-            Err(_) => {
-                let key = [
-                    "okx",
-                    "real",
-                    r.configuration.account_key.verified_uid.as_str(),
-                    "continuous_engine",
-                    intent.intent_id.as_str(),
-                ]
-                .iter()
-                .map(|x| format!("{}:{}", x.len(), x))
-                .collect::<String>();
-                let inspect = self.risk_command(
-                    state,
-                    format!("inspect_{}", &intent.plan_hash[..32]),
-                    RiskCommandAction::Inspect {
-                        reservation_key: key,
-                        plan_sha256: intent.plan_hash.clone(),
-                    },
-                );
-                let observed = self.risk.request(inspect).await.map_err(str::to_owned)?;
-                if observed.status != RiskDecisionStatus::Observed
-                    || observed.reservation_state != Some(RiskReservationState::Held)
-                {
-                    return Err("RESERVE_OUTCOME_UNKNOWN_NO_POST".into());
-                }
-                // Inspection confirms the one original reservation. A stale reserve-time
-                // source is never replayed as a second grant after its transport timeout.
-                Ok(observed)
+    ) -> Result<RiskResult, (String, bool)> {
+        let first = self.risk.request(command).await;
+        if let Ok(held) = &first
+            && held.status == RiskDecisionStatus::Held
+        {
+            return Ok(held.clone());
+        }
+        // DENIED is not itself proof of no existing reservation: a replayed
+        // identity may have HELD capacity in Worker already. INSPECT the exact
+        // address before settling the SQL no-reservation marker.
+        let inspect = self.risk_command(
+            state,
+            format!("inspect_{}", &intent.plan_hash[..32]),
+            RiskCommandAction::Inspect {
+                reservation_key: self.risk_reservation_key(r, intent),
+                plan_sha256: intent.plan_hash.clone(),
+            },
+        );
+        let observed = self.risk.request(inspect).await;
+        let central_denied = matches!(&first,
+            Ok(v) if v.status == RiskDecisionStatus::Denied);
+        let reason = match &first {
+            Ok(v) => v.reason.clone().unwrap_or("RESERVE_DENIED".into()),
+            Err(_) => "RESERVE_OUTCOME_UNKNOWN_NO_POST".into(),
+        };
+        match observed {
+            Ok(reply)
+                if reply.status == RiskDecisionStatus::Observed
+                    && reply.reservation_state == Some(RiskReservationState::Held)
+                    && !central_denied =>
+            {
+                // One original reservation is known; never replay stale
+                // reserve-time source as a second grant.
+                Ok(reply)
             }
+            Ok(reply)
+                if central_denied
+                    && reply.status == RiskDecisionStatus::Denied
+                    && reply.reason.as_deref() == Some("RISK_RESERVATION_NOT_FOUND") =>
+            {
+                Err((reason, true))
+            }
+            _ => Err((reason, false)),
         }
     }
     async fn fence_inspect_retry(
@@ -509,6 +617,8 @@ impl TradeService {
         held: &RiskResult,
         intent: &StoredIntent,
         until: Instant,
+        held_received: Instant,
+        fx: PostFxFence<'_>,
     ) -> Result<RiskResult, String> {
         let key = held
             .reservation_key
@@ -521,7 +631,15 @@ impl TradeService {
             if Instant::now() >= until {
                 return Err("COMMAND_EXPIRED".into());
             }
-            let census = self.census(state).await?;
+            let (census, causal_proof) = self
+                .census_after_held(
+                    state,
+                    held_received,
+                    &key,
+                    &fx.owner.configuration.account_key.wire(),
+                    &fx.conversion.usd_per_usdt,
+                )
+                .await?;
             let command = self.risk_command(
                 state,
                 format!("fence_{}", intent.client_order_id),
@@ -532,6 +650,7 @@ impl TradeService {
                     expected_risk_book_sequence: sequence,
                     source_proof_sha256: digest(&census)?,
                     census,
+                    causal_proof,
                 },
             );
             match self.risk.request(command).await {
@@ -567,12 +686,49 @@ impl TradeService {
         &self,
         state: &CentralGovernanceSnapshot,
     ) -> Result<NativeRiskCensus, String> {
+        self.census_with_reads(state, None, None).await.map(|v| v.0)
+    }
+
+    async fn census_after_held(
+        &self,
+        state: &CentralGovernanceSnapshot,
+        held_received: Instant,
+        reservation: &str,
+        selected_account: &str,
+        reserved_usd_per_usdt: &str,
+    ) -> Result<(NativeRiskCensus, CausalPostProof), String> {
+        let (census, account_reads) = self
+            .census_with_reads(
+                state,
+                Some(held_received),
+                Some((selected_account, reserved_usd_per_usdt)),
+            )
+            .await?;
+        let proof = CausalPostProof {
+            reserve_anchor: reservation.to_owned(),
+            native_incarnation: native_process_incarnation()?.to_owned(),
+            elapsed_to_proof_ms: held_received.elapsed().as_millis() as u64,
+            account_reads,
+        };
+        if !proof.valid(&census) {
+            return Err("POST_CAUSAL_READ_PROOF_INVALID".into());
+        }
+        Ok((census, proof))
+    }
+
+    async fn census_with_reads(
+        &self,
+        state: &CentralGovernanceSnapshot,
+        held_received: Option<Instant>,
+        fx_rate_check: Option<(&str, &str)>,
+    ) -> Result<(NativeRiskCensus, Vec<PostAccountReadProof>), String> {
         if !self.accounts.failures().await.is_empty() {
             return Err("ACCOUNT_COHORT_UNAVAILABLE".into());
         }
         let mut keys = Vec::new();
         let mut occupied = Vec::new();
         let mut evidence = Vec::new();
+        let mut post_reads = Vec::new();
         let floor = now();
         use futures_util::{StreamExt, TryStreamExt, stream};
         let cohort = state
@@ -584,12 +740,27 @@ impl TradeService {
             .collect::<Vec<_>>();
         let pages = stream::iter(cohort)
             .map(|c| async move {
+                // The timer starts before fetching any account/private/venue facts.
+                let started = held_received.map(|tick| tick.elapsed().as_millis() as u64);
                 let r = self.resources(&c.account_key).await?;
                 if !r.source_identity_ready().await {
                     return Err("COHORT_SOURCE_GENERATION_UNVERIFIED".into());
                 }
                 let generation = r.private_ws.status().await.connection_generation;
-                let snapshot = r.observer.snapshot().await.map_err(err)?;
+                let snapshot = if held_received.is_some() {
+                    r.observer.snapshot_after_held().await.map_err(err)?
+                } else {
+                    r.observer.snapshot().await.map_err(err)?
+                };
+                // The selected account's fresh USD/USDT conversion must
+                // still cover the identical reserved USD exposure. A rate
+                // change cannot silently reuse a smaller prior risk grant.
+                if let Some((selected, original_rate)) = fx_rate_check
+                    && c.account_key == selected
+                {
+                    let fresh_rate = Self::usd_conversion(&snapshot)?.usd_per_usdt;
+                    verify_post_held_fx(original_rate, &fresh_rate)?;
+                }
                 let algos = r
                     .observer
                     .pending_derivative_risk_algos()
@@ -697,16 +868,40 @@ impl TradeService {
                     occupied_usdt: "0".into(),
                     cumulative_loss_usd: exact(financial.1),
                 };
-                Ok::<_, String>((c.account_key, occupancy, data))
+                let read = started
+                    .map(|started_after_held_ms| {
+                        let clock = held_received.ok_or("POST_PROOF_CLOCK_MISSING")?;
+                        let completed_after_held_ms = clock.elapsed().as_millis() as u64;
+                        Ok::<_, String>(PostAccountReadProof {
+                            account_key: c.account_key.clone(),
+                            private_generation: generation,
+                            source_read_id: digest(&(
+                                &c.account_key,
+                                generation,
+                                &data,
+                                started_after_held_ms,
+                                completed_after_held_ms,
+                            ))?,
+                            content_digest: data.clone(),
+                            started_after_held_ms,
+                            completed_after_held_ms,
+                        })
+                    })
+                    .transpose()?;
+                Ok::<_, String>((c.account_key, occupancy, data, read))
             })
             .buffer_unordered(8)
             .try_collect::<Vec<_>>()
             .await?;
-        for (key, row, proof) in pages {
+        for (key, row, proof, read) in pages {
             keys.push(key);
             occupied.push(row);
             evidence.push(proof);
+            if let Some(read) = read {
+                post_reads.push(read);
+            }
         }
+        post_reads.sort_by(|a, b| a.account_key.cmp(&b.account_key));
 
         keys.sort();
         occupied.sort_by(|a, b| a.account_key.cmp(&b.account_key));
@@ -715,19 +910,48 @@ impl TradeService {
             return Err("COHORT_EVIDENCE_STALE".into());
         }
         let content = digest(&evidence)?;
-        Ok(NativeRiskCensus {
-            account_keys: keys,
-            occupied,
-            generated_at_ms: generated as u64,
-            source_digest: digest(&(content.clone(), floor, generated))?,
-            content_digest: content,
-            source_read_floor_ms: floor as u64,
-            complete: true,
-            native_account_evidence_complete: true,
-            native_order_evidence_complete: true,
-            native_ledger_evidence_complete: true,
-        })
+        Ok((
+            NativeRiskCensus {
+                account_keys: keys,
+                occupied,
+                generated_at_ms: generated as u64,
+                source_digest: digest(&(content.clone(), floor, generated))?,
+                content_digest: content,
+                source_read_floor_ms: floor as u64,
+                complete: true,
+                native_account_evidence_complete: true,
+                native_order_evidence_complete: true,
+                native_ledger_evidence_complete: true,
+            },
+            post_reads,
+        ))
     }
+}
+/// Compare exact 9-decimal USD/USDT conversion values on native fresh
+/// post-HELD snapshot; content equality is allowed only after a new read.
+fn verify_post_held_fx(reserved: &str, observed: &str) -> Result<(), String> {
+    let before = dec(reserved)?;
+    let after = dec(observed)?;
+    if before <= Decimal::ZERO || after <= Decimal::ZERO {
+        return Err("POST_FX_SOURCE_INVALID".into());
+    }
+    if before != after {
+        return Err("POST_FX_SOURCE_CHANGED_REQUIRES_NEW_RESERVE".into());
+    }
+    Ok(())
+}
+
+fn native_process_incarnation() -> Result<&'static str, String> {
+    static INSTANCE: std::sync::OnceLock<Result<String, String>> = std::sync::OnceLock::new();
+    INSTANCE
+        .get_or_init(|| {
+            let mut bytes = [0u8; 16];
+            getrandom::fill(&mut bytes).map_err(err)?;
+            Ok(bytes.iter().map(|b| format!("{b:02x}")).collect::<String>())
+        })
+        .as_ref()
+        .map(String::as_str)
+        .map_err(Clone::clone)
 }
 pub(super) async fn prepare_on_owner<T, F>(
     store: &AccountStoreHandle,
@@ -762,6 +986,39 @@ fn validate_generation(expected: i64, observed: i64) -> Result<(), String> {
     }
 }
 /// The one durable send boundary, shared by real and fixture gateways.
+/// A central fence denial before the SQL POST claim proves the venue was
+/// never called. Keep the first reason and the reservation pending for
+/// central release; do not confuse this with a lost exchange POST response.
+async fn reject_prepost_denial(
+    store: &AccountStoreHandle,
+    intent: &StoredIntent,
+    reason: &str,
+) -> Result<Value, String> {
+    let id = intent.intent_id.clone();
+    let original = reason.to_owned();
+    store
+        .call(deadline(), move |s| s.reject_unsent(&id, &original, now()))
+        .await
+        .map_err(err)?;
+    let id = intent.intent_id.clone();
+    let saved = store
+        .call(deadline(), move |s| s.intent(&id))
+        .await
+        .map_err(err)?
+        .ok_or("PREPOST_INTENT_READBACK_MISSING")?;
+    if saved.state != IntentState::Rejected {
+        return Err("PREPOST_INTENT_REJECTION_UNCONFIRMED".into());
+    }
+    Ok(completed(json!({
+        "intent_id":saved.intent_id,
+        "state":"REJECTED",
+        "rejection_origin":"LOCAL",
+        "send_state":"NOT_STARTED",
+        "primary_reason":saved.incident.as_deref().unwrap_or(reason),
+        "risk_release_state":"PENDING",
+        "next_action":"trade.status"
+    })))
+}
 pub(super) async fn post_once<T, F, Fut>(
     store: &AccountStoreHandle,
     intent: &StoredIntent,
@@ -844,6 +1101,20 @@ where
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn k4_post_held_fx_same_rate_or_changed_rate() {
+        assert!(verify_post_held_fx("0.999000000", "0.999").is_ok());
+        assert_eq!(
+            verify_post_held_fx("0.999", "0.998").unwrap_err(),
+            "POST_FX_SOURCE_CHANGED_REQUIRES_NEW_RESERVE"
+        );
+        assert_eq!(
+            verify_post_held_fx("0", "1").unwrap_err(),
+            "POST_FX_SOURCE_INVALID"
+        );
+        assert!(verify_post_held_fx("1", "invalid").is_err());
+    }
     struct FixtureGateway {
         posts: AtomicUsize,
         lose: bool,
@@ -967,6 +1238,56 @@ mod tests {
         (store, saved, root)
     }
     #[tokio::test]
+    async fn prepost_fence_denial_is_durable_no_send_not_unknown() {
+        let (store, intent, _root) = reserved("prepost_fence_denial", true, false, false).await;
+        let result = reject_prepost_denial(&store, &intent, "POST_CENSUS_NOT_AFTER_RESERVE")
+            .await
+            .unwrap();
+        assert_eq!(result["data"]["state"], "REJECTED");
+        assert_eq!(result["data"]["send_state"], "NOT_STARTED");
+        assert_eq!(result["data"]["risk_release_state"], "PENDING");
+        assert_eq!(
+            result["data"]["primary_reason"],
+            "POST_CENSUS_NOT_AFTER_RESERVE"
+        );
+        let saved = store
+            .call(deadline(), |s| s.intent("intent_fixture"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(saved.state, IntentState::Rejected);
+        assert_eq!(
+            saved.incident.as_deref(),
+            Some("POST_CENSUS_NOT_AFTER_RESERVE")
+        );
+        // Re-observation must not erase the original denial or mint a POST.
+        let sql_proof = store
+            .call(deadline(), |s| s.unsent_release_receipt("intent_fixture"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(sql_proof.reason, "POST_CENSUS_NOT_AFTER_RESERVE");
+        assert_eq!(sql_proof.intent_id, "intent_fixture");
+        let replay = reject_prepost_denial(&store, &intent, "COMMAND_EXPIRED")
+            .await
+            .unwrap();
+        assert_eq!(
+            replay["data"]["primary_reason"],
+            "POST_CENSUS_NOT_AFTER_RESERVE"
+        );
+        let gateway = FixtureGateway {
+            posts: AtomicUsize::new(0),
+            lose: false,
+        };
+        assert_eq!(
+            post_once(&store, &intent, deadline(), || gateway.send())
+                .await
+                .unwrap(),
+            None
+        );
+        assert_eq!(gateway.posts.load(Ordering::SeqCst), 0);
+    }
+    #[tokio::test]
     async fn duplicate_execute_one_post() {
         let (store, intent, _root) = reserved("duplicate", true, false, false).await;
         let gateway = FixtureGateway {
@@ -1026,6 +1347,14 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(saved.state, IntentState::Unknown);
+        assert!(
+            store
+                .call(deadline(), |s| s.unsent_release_receipt("intent_fixture"))
+                .await
+                .unwrap()
+                .is_none(),
+            "a possible POST must never acquire an SQL no-send release witness"
+        );
         assert_eq!(
             post_once(&store, &intent, deadline(), || gateway.send())
                 .await

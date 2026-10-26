@@ -43,6 +43,69 @@ impl TradeService {
                 ));
             }
         }
+        let id = i.intent_id.clone();
+        if r.execution
+            .store
+            .call(deadline(), move |s| s.declined_reserve(&id))
+            .await
+            .map_err(err)?
+        {
+            return Ok(completed(json!({
+                "intent":i,"send_state":"NOT_STARTED",
+                "rejection_origin":"CENTRAL","primary_reason":i.incident,
+                "central_release":{"state":"not_required","proof":"RESERVE_DENIED"}
+            })));
+        }
+        // F1: no risk command was ever attempted. The SQL terminal receipt
+        // and absent reserve marker jointly prove no-send / no central risk;
+        // skip unrelated venue and financial I/O.
+        let id = i.intent_id.clone();
+        if r.execution
+            .store
+            .call(deadline(), move |s| s.unsent_before_reserve(&id))
+            .await
+            .map_err(err)?
+        {
+            return Ok(completed(json!({
+                "intent":i,
+                "send_state":"NOT_STARTED",
+                "rejection_origin":"LOCAL",
+                "primary_reason":i.incident,
+                "finance_state":"NOT_APPLICABLE",
+                "central_release":{"state":"not_required","proof":"PRE_RESERVE_SQL"}
+            })));
+        }
+        // A durable SQL REJECTED_UNSENT can release its central reservation
+        // independently of exchange history/fees. Other rejected intents
+        // still require the full authoritative reconciliation below.
+        let id = i.intent_id.clone();
+        let no_send = r
+            .execution
+            .store
+            .call(deadline(), move |s| s.unsent_release_receipt(&id))
+            .await
+            .map_err(err)?
+            .is_some();
+        if no_send {
+            // A completed native SQL REJECTED_UNSENT receipt is proof that
+            // this intent never touched venue. It needs neither a fills
+            // backfill nor an account-wide finance snapshot for release.
+            let central_release = match self.release_unsent(r, &i).await {
+                Ok(()) => json!({"state":"verified","proof":"SQL_NO_SEND"}),
+                Err(reason) => json!({
+                    "state":"pending","reason_code":reason,
+                    "scope":"intent","next_action":"trade.status"
+                }),
+            };
+            return Ok(completed(json!({
+                "intent":i,
+                "send_state":"NOT_STARTED",
+                "rejection_origin":"LOCAL",
+                "primary_reason":i.incident,
+                "finance_state":"NOT_APPLICABLE",
+                "central_release":central_release
+            })));
+        }
         let order = if matches!(i.state, IntentState::Rejected) && i.exchange_order_id.is_none() {
             None
         } else {
@@ -197,6 +260,118 @@ impl TradeService {
             result["warnings"] = json!(["FINANCIAL_BACKFILL_PENDING"]);
         }
         Ok(result)
+    }
+    /// Retryable in the existing 1-second maintenance loop. INSPECT resolves
+    /// lost central ACKs; a missing/rejected SQL witness never releases budget.
+    pub(super) async fn release_unsent(
+        &self,
+        r: &AccountResources,
+        i: &StoredIntent,
+    ) -> Result<(), String> {
+        if r.configuration.account_key.environment != okx_protocol::accounts::Environment::Real {
+            return Ok(());
+        }
+        let id = i.intent_id.clone();
+        let proof = r
+            .execution
+            .store
+            .call(deadline(), move |s| s.unsent_release_receipt(&id))
+            .await
+            .map_err(err)?
+            .ok_or("DURABLE_UNSENT_SQL_PROOF_MISSING")?;
+        let state = self
+            .governance
+            .read()
+            .await
+            .clone()
+            .ok_or("AUTHORITY_UNAVAILABLE")?;
+        let reservation = proof.reservation_key.clone();
+        if reservation.starts_with("local:") {
+            return Ok(());
+        }
+        for _ in 0..4 {
+            let observed = self
+                .risk
+                .request(self.risk_command(
+                    &state,
+                    format!("inspect_{}", i.client_order_id),
+                    RiskCommandAction::Inspect {
+                        reservation_key: reservation.clone(),
+                        plan_sha256: proof.plan_hash.clone(),
+                    },
+                ))
+                .await
+                .map_err(str::to_owned)?;
+            let absent = observed.status == RiskDecisionStatus::Denied
+                && observed.reason.as_deref() == Some("RISK_RESERVATION_NOT_FOUND");
+            if observed.status != RiskDecisionStatus::Observed && !absent {
+                return Err(observed
+                    .reason
+                    .unwrap_or("CENTRAL_INSPECTION_FAILED".into()));
+            }
+            if observed.reservation_state == Some(RiskReservationState::Released) {
+                let evidence = digest(&observed)?;
+                let reservation = reservation.clone();
+                r.execution
+                    .store
+                    .call(deadline(), move |s| {
+                        s.acknowledge_central_release(&reservation, &evidence)
+                    })
+                    .await
+                    .map_err(err)?;
+                return Ok(());
+            }
+            if !absent
+                && !matches!(
+                    observed.reservation_state,
+                    Some(RiskReservationState::Held | RiskReservationState::Posted)
+                )
+            {
+                return Err("UNSENT_CENTRAL_STATE_UNRESOLVED".into());
+            }
+            let native_proof = UnsentRiskReleaseProof {
+                reservation_key: proof.reservation_key.clone(),
+                account_key: proof.account_key.clone(),
+                intent_id: proof.intent_id.clone(),
+                plan_hash: proof.plan_hash.clone(),
+                request_hash: proof.request_hash.clone(),
+                reason: proof.reason.clone(),
+                record_digest: digest(&proof)?,
+            };
+            let result = self
+                .risk
+                .request(self.risk_command(
+                    &state,
+                    format!("release_{}", i.client_order_id),
+                    RiskCommandAction::ReleaseUnsent {
+                        reservation_key: reservation.clone(),
+                        plan_sha256: proof.plan_hash.clone(),
+                        expected_risk_book_sequence:
+                            observed.risk_book_sequence.ok_or("RISK_SEQUENCE_MISSING")?,
+                        proof: native_proof,
+                    },
+                ))
+                .await
+                .map_err(str::to_owned)?;
+            if result.status == RiskDecisionStatus::Updated {
+                let evidence = digest(&result)?;
+                let reservation = reservation.clone();
+                r.execution
+                    .store
+                    .call(deadline(), move |s| {
+                        s.acknowledge_central_release(&reservation, &evidence)
+                    })
+                    .await
+                    .map_err(err)?;
+                return Ok(());
+            }
+            if result.reason.as_deref() != Some("STALE_SESSION_OR_BOOK_SEQUENCE") {
+                return Err(result
+                    .reason
+                    .unwrap_or("CENTRAL_UNSENT_RELEASE_DENIED".into()));
+            }
+        }
+        Err("CENTRAL_UNSENT_RELEASE_CAS_BUSY".into())
     }
     async fn release_terminal(
         &self,

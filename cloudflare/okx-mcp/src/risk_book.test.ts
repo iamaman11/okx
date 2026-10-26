@@ -1,4 +1,4 @@
-import {accountKey,amount,units,readRiskBook,initializeRiskBook,inspectRisk,reserveRisk,transitionRisk,beginRiskPost} from "./risk_book.js";
+import {accountKey,amount,units,readRiskBook,initializeRiskBook,inspectRisk,reserveRisk,transitionRisk,beginRiskPost,releaseUnsentRisk} from "./risk_book.js";
 function check(value: boolean, label:string) { if(!value) throw Error(label); }
 class Storage {
   map=new Map<string,unknown>();
@@ -51,10 +51,20 @@ check((await reserve({...request,loss_usd:"5"})).status==="DENIED","USD exact co
 const missing=new Storage();await missing.put("generation",77);await missing.put("account_access_v1",governance);
 check((await reserve(request,missing)).status==="DENIED","worker_storage_missing_is_not_zero_budget");
 check((await transitionRisk(sa,held.entry.key,p,"RELEASED",d,{connection_generation:77,expected_book_sequence:1})).status==="DENIED","no unknown/held release without exact terminal proof");
-const later={...census,source_digest:p,source_read_floor_ms:now+1,generated_at_ms:now+1};
-const begun=await beginRiskPost(sa,held.entry.key,p,1,d,{connection_generation:77,expected_book_sequence:1,census:later,source_proof:{...native,source_digest:p},now_ms:now+2});
-check(begun.status==="POST_AUTHORIZED","single durable POST fence");
-check((await beginRiskPost(sa,held.entry.key,p,1,d,{connection_generation:77,expected_book_sequence:2,census:later,source_proof:{...native,source_digest:p},now_ms:now+3})).status==="DENIED","no duplicate POST fence");
+// The content is identical on fresh reads; the native monotonic proof, not
+// a changed market digest or cross-host epoch, establishes causality.
+const later={...census,source_read_floor_ms:now-60000,generated_at_ms:now-60000};
+const causal_proof={reserve_anchor:held.entry.key,
+  native_incarnation:"1".repeat(32),elapsed_to_proof_ms:40,
+  account_reads:census.account_keys.map(account_key=>({account_key,private_generation:5,
+    source_read_id:"a".repeat(64),content_digest:"b".repeat(64),
+    started_after_held_ms:2,completed_after_held_ms:20}))};
+const invalid=await beginRiskPost(sa,held.entry.key,p,1,d,{connection_generation:77,expected_book_sequence:1,census:later,source_proof:native,causal_proof:{...causal_proof,account_reads:[...causal_proof.account_reads].reverse()},now_ms:now+2});
+check(invalid.status==="DENIED"&&invalid.reason==="INVALID_NATIVE_POST_FENCE","wrong order of cohort readings cannot authorize POST");
+const begun=await beginRiskPost(sa,held.entry.key,p,1,d,{connection_generation:77,expected_book_sequence:1,census:later,source_proof:native,causal_proof,now_ms:now+2});
+check(begun.status==="POST_AUTHORIZED","same-content fresh causal proof with -60s host skew");
+
+check((await beginRiskPost(sa,held.entry.key,p,1,d,{connection_generation:77,expected_book_sequence:2,census:later,source_proof:native,causal_proof,now_ms:now+3})).status==="DENIED","no duplicate POST fence");
 check((await inspectRisk(sa,held.entry.key))?.entry.state==="POSTED","addressed readback");
 const terminalCensus={...census,occupied:census.occupied.map(v=>({...v,cumulative_loss_usd:v.account_key===accountKey(request)?"2":"0"})),source_digest:a,generated_at_ms:now+4,source_read_floor_ms:now+4};
 check((await transitionRisk(sa,held.entry.key,p,"RELEASED",d,{connection_generation:77,expected_book_sequence:2,terminal:{census:terminalCensus,source_proof:{...native,source_digest:a},ledger:{account_uid:a,run_id:base.run_id,intent_id:request.intent_id,state:"FILLED",record_digest:p,cumulative_loss_usd:"2",remaining_exposure_usdt:"0"},now_ms:now+5}})).status==="UPDATED","terminal exact release consumes cumulative losses");
@@ -64,6 +74,112 @@ const campaign=await reserveRisk(sa,policy,reported,{...request,intent_id:"new_i
 check(campaign.status==="DENIED"&&campaign.reason==="CAMPAIGN_LOSS_BUDGET_EXHAUSTED","fresh losses charged before reserve even when admission denied");
 check((await readRiskBook(sa))?.consumed_loss_usd==="17","campaign losses remain charged without releasing any new reservation");
 console.log("risk_concurrent_accounts_campaign_limit PASS");
+// A fresh reservation can be released only by the exact current native SQL
+// writer's durable no-post receipt. No venue, fills or finance source needed.
+const unsent=new Storage();
+await unsent.put("account_access_v1",governance);
+await unsent.put("generation",77);
+await initializeRiskBook(unsent,"installation_test");
+const rescue=await reserveRisk(unsent,policy,census,{...request,intent_id:"intent_unsent_001"},native);
+if(rescue.status!=="HELD")throw Error("unsent reserve");
+const receipt={reservation_key:rescue.entry.key,account_key:accountKey(request),
+  intent_id:"intent_unsent_001",plan_hash:p,request_hash:"e".repeat(64),
+  reason:"POST_CENSUS_UNPROVEN",record_digest:"f".repeat(64)};
+check((await releaseUnsentRisk(unsent,rescue.entry.key,p,1,76,receipt)).status==="DENIED",
+  "stale authenticated generation cannot release");
+check((await releaseUnsentRisk(unsent,rescue.entry.key,p,1,77,
+  {...receipt,plan_hash:d})).status==="DENIED","wrong plan cannot release");
+check((await releaseUnsentRisk(unsent,rescue.entry.key,p,1,77,receipt)).status==="UPDATED",
+  "exact no-send SQL proof releases HELD");
+check((await releaseUnsentRisk(unsent,rescue.entry.key,p,2,77,receipt)).status==="DENIED",
+  "central release tombstone prevents repeated budget mutation");
+check((await readRiskBook(unsent))?.occupied_usd==="0" &&
+ (await readRiskBook(unsent))?.consumed_loss_usd==="0",
+ "release only reserved capacity and never credits realized losses");
+console.log("risk_unsent_cas_release PASS");
+// F4: central BEGIN_POST may have committed before the native SQL claim.
+// A durable native REJECTED_UNSENT transaction still gates place_order.
+const postUnsent=new Storage();
+await postUnsent.put("account_access_v1",governance);
+await postUnsent.put("generation",77);
+await initializeRiskBook(postUnsent,"installation_test");
+const postRes=await reserveRisk(postUnsent,policy,census,{...request,intent_id:"intent_f4_unsent"},native);
+if(postRes.status!=="HELD")throw Error("F4 reserve");
+const f4read={...census,generated_at_ms:now+1,source_read_floor_ms:now+1};
+const f4proof={reserve_anchor:postRes.entry.key,native_incarnation:"a".repeat(32),
+  elapsed_to_proof_ms:22,account_reads:census.account_keys.map(account_key=>({
+    account_key,private_generation:77,source_read_id:"e".repeat(64),
+    content_digest:d,started_after_held_ms:2,completed_after_held_ms:14}))};
+const f4=await beginRiskPost(postUnsent,postRes.entry.key,p,1,d,{
+  connection_generation:77,expected_book_sequence:1,census:f4read,
+  source_proof:native,causal_proof:f4proof,now_ms:now+2});
+check(f4.status==="POST_AUTHORIZED","F4 central post authorized");
+const f4receipt={...receipt,reservation_key:postRes.entry.key,intent_id:"intent_f4_unsent"};
+check((await releaseUnsentRisk(postUnsent,postRes.entry.key,p,2,77,f4receipt)).status==="UPDATED",
+ "F4 central POSTED + native never-claimed release is safe");
+check((await beginRiskPost(postUnsent,postRes.entry.key,p,1,d,{
+ connection_generation:77,expected_book_sequence:3,census:f4read,source_proof:native,
+ causal_proof:f4proof,now_ms:now+3})).status==="DENIED","old post fence cannot resurrect tombstone");
+console.log("risk_f4_unsent_after_central_post PASS");
+// F2: a lost RESERVE never arrived, but its native SQL attempt did. The
+// Worker fences the exact address so that a delayed RESERVE cannot mint risk.
+const neverArrived=new Storage();
+await neverArrived.put("account_access_v1",governance);
+await neverArrived.put("generation",77);
+await initializeRiskBook(neverArrived,"installation_test");
+const lateIntent="intent_f2_late_001";
+const lateRequest={...request,intent_id:lateIntent};
+const lateKey=[base.venue,"real",a,base.run_id,lateIntent]
+  .map(v=>v.length+":"+v).join("");
+const lateProof={...receipt,reservation_key:lateKey,intent_id:lateIntent};
+check((await releaseUnsentRisk(neverArrived,lateKey,p,0,77,
+  {...lateProof,account_key:"okx:real:"+b})).status==="DENIED",
+  "wrong native account cannot abort another risk identity");
+check((await releaseUnsentRisk(neverArrived,lateKey,p,0,77,lateProof)).status==="UPDATED",
+  "SQL no-send fences an absent reservation with initial sequence zero");
+const lateAttempt=await reserveRisk(neverArrived,policy,census,lateRequest,native);
+check(lateAttempt.status==="DENIED"&&lateAttempt.reason==="RESERVE_FENCED_NO_SEND",
+  "a delayed exchange-independent RESERVE never mints risk after the no-send fence");
+const absentBook=await readRiskBook(neverArrived);
+check(absentBook?.occupied_usdt==="0"&&absentBook?.consumed_loss_usd==="0"&&
+  absentBook?.sequence===1,"negative fence only advances book CAS, never consumes risk");
+check((await releaseUnsentRisk(neverArrived,lateKey,p,1,77,lateProof)).status==="UPDATED",
+  "repeated no-send fence is idempotent under new CAS sequence");
+check((await readRiskBook(neverArrived))?.sequence===1,
+  "idempotent absent release does not advance central book");
+check((await releaseUnsentRisk(neverArrived,lateKey,p,1,77,
+  {...lateProof,record_digest:d})).status==="DENIED",
+  "conflicting terminal proof cannot replace an immutable absence fence");
+// F2 concurrent delivery in both serializations: whichever Worker transaction
+// wins, retry the exact same SQL no-send proof and never mint/re-mint risk.
+for(const abortFirst of [true,false]){
+  const racing=new Storage();
+  await racing.put("account_access_v1",governance);
+  await racing.put("generation",77);
+  await initializeRiskBook(racing,"installation_test");
+  const id=abortFirst?"intent_f2_abort_first":"intent_f2_reserve_first";
+  const requestRace={...request,intent_id:id};
+  const key=[base.venue,"real",a,base.run_id,id].map(v=>v.length+":"+v).join("");
+  const sqlProof={...receipt,reservation_key:key,intent_id:id};
+  const release=()=>releaseUnsentRisk(racing,key,p,0,77,sqlProof);
+  const reserve=()=>reserveRisk(racing,policy,census,requestRace,native);
+  const first=abortFirst?await Promise.all([release(),reserve()]):await Promise.all([reserve(),release()]);
+  const returnedRelease=abortFirst?first[0]:first[1];
+  if(returnedRelease.status==="DENIED"){
+    const current=await readRiskBook(racing);
+    check(!!current,"racing Worker book present");
+    check((await releaseUnsentRisk(racing,key,p,current!.sequence,77,sqlProof)).status==="UPDATED",
+      "stale CAS retries same durable no-send proof after competing RESERVE");
+  }
+  const final=await readRiskBook(racing);
+  check(final?.occupied_usdt==="0"&&final?.consumed_loss_usd==="0",
+    "no-send race returns all unspent risk without crediting consumed loss");
+  const late=await reserveRisk(racing,policy,census,requestRace,native);
+  check(late.status==="DENIED","no second grant after no-send race");
+}
+console.log("risk_f2_concurrent_abort_reserve PASS");
+console.log("risk_f2_absent_reserve_fence PASS");
+
 census.occupied[0].cumulative_loss_usd="17";
 // One million terminal records must not be enumerated or decoded on the hot path.
 for(let i=0;i<1_000_000;i++)sa.map.set("risk_entry_v2:tombstone_"+i,{state:"RELEASED",key:i});

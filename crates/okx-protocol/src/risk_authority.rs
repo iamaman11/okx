@@ -123,6 +123,80 @@ impl NativeRiskCensus {
             })
     }
 }
+/// A native observation performed after the authenticated HELD response.
+/// Ticks are relative to the receipt on one process incarnation, never epoch time.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PostAccountReadProof {
+    pub account_key: String,
+    pub private_generation: u64,
+    pub source_read_id: String,
+    pub content_digest: String,
+    pub started_after_held_ms: u64,
+    pub completed_after_held_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CausalPostProof {
+    /// Exact central reservation identity, whose creation time only Worker knows.
+    pub reserve_anchor: String,
+    pub native_incarnation: String,
+    pub elapsed_to_proof_ms: u64,
+    pub account_reads: Vec<PostAccountReadProof>,
+}
+impl CausalPostProof {
+    pub fn valid(&self, census: &NativeRiskCensus) -> bool {
+        !self.reserve_anchor.is_empty()
+            && self.reserve_anchor.len() <= 512
+            && self.native_incarnation.len() == 32
+            && self
+                .native_incarnation
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            && self.elapsed_to_proof_ms <= 5_000
+            && self.account_reads.len() == census.account_keys.len()
+            && self
+                .account_reads
+                .iter()
+                .zip(&census.account_keys)
+                .all(|(read, account)| {
+                    &read.account_key == account
+                        && read.private_generation > 0
+                        && hash(&read.source_read_id)
+                        && hash(&read.content_digest)
+                        && read.started_after_held_ms <= read.completed_after_held_ms
+                        && read.completed_after_held_ms <= self.elapsed_to_proof_ms
+                })
+    }
+}
+/// Current authenticated SQL writer attests durable REJECTED_UNSENT
+/// and the absence of any native POST claim for this exact intention.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UnsentRiskReleaseProof {
+    pub reservation_key: String,
+    pub account_key: String,
+    pub intent_id: String,
+    pub plan_hash: String,
+    pub request_hash: String,
+    pub reason: String,
+    pub record_digest: String,
+}
+impl UnsentRiskReleaseProof {
+    pub fn valid(&self) -> bool {
+        self.reservation_key.len() <= 512
+            && !self.reservation_key.is_empty()
+            && self.account_key.starts_with("okx:real:")
+            && self.account_key.len() == 73
+            && hash(&self.account_key[9..])
+            && token(&self.intent_id)
+            && hash(&self.plan_hash)
+            && hash(&self.request_hash)
+            && (1..=128).contains(&self.reason.len())
+            && hash(&self.record_digest)
+    }
+}
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum RiskResolution {
@@ -168,6 +242,12 @@ pub enum RiskCommandAction {
         policy_revision: u64,
         census: NativeRiskCensus,
     },
+    ReleaseUnsent {
+        reservation_key: String,
+        plan_sha256: String,
+        expected_risk_book_sequence: u64,
+        proof: UnsentRiskReleaseProof,
+    },
     BeginPost {
         reservation_key: String,
         plan_sha256: String,
@@ -175,6 +255,7 @@ pub enum RiskCommandAction {
         expected_risk_book_sequence: u64,
         source_proof_sha256: String,
         census: NativeRiskCensus,
+        causal_proof: CausalPostProof,
     },
     Resolve {
         reservation_key: String,
@@ -250,6 +331,17 @@ impl RiskCommand {
                     && *policy_revision > 0
                     && census.valid()
             }
+            RiskCommandAction::ReleaseUnsent {
+                reservation_key,
+                plan_sha256,
+                expected_risk_book_sequence: _,
+                proof,
+            } => {
+                hash(plan_sha256)
+                    && proof.valid()
+                    && proof.reservation_key == *reservation_key
+                    && proof.plan_hash == *plan_sha256
+            }
             RiskCommandAction::BeginPost {
                 reservation_key,
                 plan_sha256,
@@ -257,6 +349,7 @@ impl RiskCommand {
                 expected_risk_book_sequence,
                 source_proof_sha256,
                 census,
+                causal_proof,
             } => {
                 !reservation_key.is_empty()
                     && reservation_key.len() <= 512
@@ -265,6 +358,8 @@ impl RiskCommand {
                     && *expected_risk_book_sequence > 0
                     && hash(source_proof_sha256)
                     && census.valid()
+                    && causal_proof.valid(census)
+                    && causal_proof.reserve_anchor == *reservation_key
             }
             RiskCommandAction::Resolve {
                 reservation_key,
