@@ -688,7 +688,10 @@ mod tests {
         for (account, environment, components, expected) in specs {
             let mut s = store(account);
             let facts = fixture_scoped_finance(&mut s, components);
-            assert_eq!(facts.values().copied().sum::<Decimal>(), Decimal::from(expected));
+            assert_eq!(
+                facts.values().copied().sum::<Decimal>(),
+                Decimal::from(expected)
+            );
             accumulate_finance(account, environment, facts, &mut totals, &mut details).unwrap();
             stores.push(s);
         }
@@ -710,7 +713,9 @@ mod tests {
                 .sum::<Decimal>();
             assert_eq!(sum, expected);
         }
-        let before = stores[1].finance_attribution_filtered(12, 12, &[], &[]).unwrap();
+        let before = stores[1]
+            .finance_attribution_filtered(12, 12, &[], &[])
+            .unwrap();
         // A new fact in account A must not alter account B or Demo financial truth.
         stores[0]
             .ingest_page(&IngestPage {
@@ -730,7 +735,9 @@ mod tests {
             })
             .unwrap();
         assert_eq!(
-            stores[1].finance_attribution_filtered(12, 12, &[], &[]).unwrap(),
+            stores[1]
+                .finance_attribution_filtered(12, 12, &[], &[])
+                .unwrap(),
             before
         );
         assert_eq!(
@@ -748,7 +755,8 @@ mod tests {
     #[test]
     fn summary_cursor_rejects_changed_finance_or_account_availability() {
         let base = vec![json!({"kind":"component","amount":"13"})];
-        let available = vec![json!({"account":"okx:real:a","financial_risk":{"nav_complete":true}})];
+        let available =
+            vec![json!({"account":"okx:real:a","financial_risk":{"nav_complete":true}})];
         let snapshot = summary_snapshot("request", &base, &available, true).unwrap();
         let cursor = Cursor {
             query: "request".into(),
@@ -770,7 +778,10 @@ mod tests {
             require_summary_snapshot(Some(&cursor), &unavailable),
             Err("CURSOR_SNAPSHOT_CHANGED".into())
         );
-        let old_token = Cursor { snapshot: None, ..cursor };
+        let old_token = Cursor {
+            snapshot: None,
+            ..cursor
+        };
         assert_eq!(
             require_summary_snapshot(Some(&old_token), &snapshot),
             Err("CURSOR_SNAPSHOT_CHANGED".into())
