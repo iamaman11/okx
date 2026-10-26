@@ -1131,11 +1131,17 @@ fn k5_real_child_process_exit_f1_f3_f5_f6_never_reposts() {
             }
             std::thread::sleep(Duration::from_millis(50));
         }
-        assert!(witnessed, "{phase}: child never reported durable SQL boundary");
+        assert!(
+            witnessed,
+            "{phase}: child never reported durable SQL boundary"
+        );
         assert_eq!(std::fs::read_to_string(&ready).unwrap(), phase);
         child.kill().expect("OS kill at durable SQL boundary");
         let status = child.wait().expect("reap killed native process");
-        assert!(!status.success(), "{phase}: child must be killed, not finish normally");
+        assert!(
+            !status.success(),
+            "{phase}: child must be killed, not finish normally"
+        );
         let mut recovered =
             AccountStore::open_existing(&path, &meta.account_key, &meta.installation_id).unwrap();
         let saved = recovered.intent("intent").unwrap().unwrap();
@@ -1158,7 +1164,11 @@ fn k5_real_child_process_exit_f1_f3_f5_f6_never_reposts() {
                     IntentState::Reserved
                 }
             );
-            assert!(recovered.reject_unsent("intent", "COMMAND_EXPIRED", 5).unwrap());
+            assert!(
+                recovered
+                    .reject_unsent("intent", "COMMAND_EXPIRED", 5)
+                    .unwrap()
+            );
             assert_eq!(
                 recovered.intent("intent").unwrap().unwrap().state,
                 IntentState::Rejected
@@ -1173,10 +1183,7 @@ fn k5_real_child_process_exit_f1_f3_f5_f6_never_reposts() {
             // Recovery never calls the mock POST closure or adds a second
             // log record; the unacknowledged send remains MAY_HAVE_SENT.
             assert_eq!(
-                std::fs::read_to_string(&venue_log)
-                    .unwrap()
-                    .lines()
-                    .count(),
+                std::fs::read_to_string(&venue_log).unwrap().lines().count(),
                 1
             );
         } else {
