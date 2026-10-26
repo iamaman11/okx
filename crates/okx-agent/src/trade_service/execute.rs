@@ -535,9 +535,7 @@ impl TradeService {
             if Instant::now() >= until {
                 return Err("COMMAND_EXPIRED".into());
             }
-            let (census, causal_proof) = self
-                .census_after_held(state, held_received, &key)
-                .await?;
+            let (census, causal_proof) = self.census_after_held(state, held_received, &key).await?;
             let command = self.risk_command(
                 state,
                 format!("fence_{}", intent.client_order_id),
@@ -786,18 +784,21 @@ impl TradeService {
             return Err("COHORT_EVIDENCE_STALE".into());
         }
         let content = digest(&evidence)?;
-        Ok((NativeRiskCensus {
-            account_keys: keys,
-            occupied,
-            generated_at_ms: generated as u64,
-            source_digest: digest(&(content.clone(), floor, generated))?,
-            content_digest: content,
-            source_read_floor_ms: floor as u64,
-            complete: true,
-            native_account_evidence_complete: true,
-            native_order_evidence_complete: true,
-            native_ledger_evidence_complete: true,
-        }, post_reads))
+        Ok((
+            NativeRiskCensus {
+                account_keys: keys,
+                occupied,
+                generated_at_ms: generated as u64,
+                source_digest: digest(&(content.clone(), floor, generated))?,
+                content_digest: content,
+                source_read_floor_ms: floor as u64,
+                complete: true,
+                native_account_evidence_complete: true,
+                native_order_evidence_complete: true,
+                native_ledger_evidence_complete: true,
+            },
+            post_reads,
+        ))
     }
 }
 fn native_process_incarnation() -> Result<&'static str, String> {
