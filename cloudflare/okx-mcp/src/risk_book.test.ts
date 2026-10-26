@@ -150,6 +150,34 @@ check((await readRiskBook(neverArrived))?.sequence===1,
 check((await releaseUnsentRisk(neverArrived,lateKey,p,1,77,
   {...lateProof,record_digest:d})).status==="DENIED",
   "conflicting terminal proof cannot replace an immutable absence fence");
+// F2 concurrent delivery in both serializations: whichever Worker transaction
+// wins, retry the exact same SQL no-send proof and never mint/re-mint risk.
+for(const abortFirst of [true,false]){
+  const racing=new Storage();
+  await racing.put("account_access_v1",governance);
+  await racing.put("generation",77);
+  await initializeRiskBook(racing,"installation_test");
+  const id=abortFirst?"intent_f2_abort_first":"intent_f2_reserve_first";
+  const requestRace={...request,intent_id:id};
+  const key=[base.venue,"real",a,base.run_id,id].map(v=>v.length+":"+v).join("");
+  const sqlProof={...receipt,reservation_key:key,intent_id:id};
+  const release=()=>releaseUnsentRisk(racing,key,p,0,77,sqlProof);
+  const reserve=()=>reserveRisk(racing,policy,census,requestRace,native);
+  const first=abortFirst?await Promise.all([release(),reserve()]):await Promise.all([reserve(),release()]);
+  const returnedRelease=abortFirst?first[0]:first[1];
+  if(returnedRelease.status==="DENIED"){
+    const current=await readRiskBook(racing);
+    check(!!current,"racing Worker book present");
+    check((await releaseUnsentRisk(racing,key,p,current!.sequence,77,sqlProof)).status==="UPDATED",
+      "stale CAS retries same durable no-send proof after competing RESERVE");
+  }
+  const final=await readRiskBook(racing);
+  check(final?.occupied_usdt==="0"&&final?.consumed_loss_usd==="0",
+    "no-send race returns all unspent risk without crediting consumed loss");
+  const late=await reserveRisk(racing,policy,census,requestRace,native);
+  check(late.status==="DENIED","no second grant after no-send race");
+}
+console.log("risk_f2_concurrent_abort_reserve PASS");
 console.log("risk_f2_absent_reserve_fence PASS");
 
 census.occupied[0].cumulative_loss_usd="17";
