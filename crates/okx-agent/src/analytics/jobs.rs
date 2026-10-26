@@ -548,10 +548,12 @@ mod tests {
             .unwrap()
             .0;
         if phase == "running" {
-            jobs.update(&id, State::Running, Some(artifact), None).unwrap();
+            jobs.update(&id, State::Running, Some(artifact), None)
+                .unwrap();
         } else if phase == "completed" {
             jobs.update(&id, State::Running, None, None).unwrap();
-            jobs.update(&id, State::Completed, Some(artifact), None).unwrap();
+            jobs.update(&id, State::Completed, Some(artifact), None)
+                .unwrap();
         }
         let ready = PathBuf::from(&file).with_extension(format!("{phase}.ready"));
         std::fs::write(ready, b"committed").unwrap();
@@ -562,7 +564,10 @@ mod tests {
 
     #[test]
     fn c17_actual_child_os_kill_recovers_wal_and_blocks_false_success() {
-        use std::{process::{Command, Stdio},time::{Duration, Instant}};
+        use std::{
+            process::{Command, Stdio},
+            time::{Duration, Instant},
+        };
         let file = path("c17-physical-kill");
         let exe = std::env::current_exe().unwrap();
         let phases = ["queued", "running", "completed"];
@@ -583,7 +588,10 @@ mod tests {
                 .unwrap();
             let deadline = Instant::now() + Duration::from_secs(8);
             while !ready.exists() && Instant::now() < deadline {
-                assert!(child.try_wait().unwrap().is_none(), "child exited before evidence commit");
+                assert!(
+                    child.try_wait().unwrap().is_none(),
+                    "child exited before evidence commit"
+                );
                 std::thread::sleep(Duration::from_millis(10));
             }
             if !ready.exists() {
@@ -601,34 +609,38 @@ mod tests {
             if phase == "completed" {
                 assert_eq!(job.state, State::Completed);
                 let proof = job.artifact.clone().unwrap();
-                let store = okx_research::ResearchArtifactStore::at(
-                    file.with_extension("evidence-root"),
-                );
+                let store =
+                    okx_research::ResearchArtifactStore::at(file.with_extension("evidence-root"));
                 let readback: serde_json::Value = store.read_evidence_json(&proof).unwrap();
                 assert_eq!(readback["phase"], "completed");
                 assert_eq!(
-                    restarted.update(&id, State::Completed, Some("forged".into()), None)
+                    restarted
+                        .update(&id, State::Completed, Some("forged".into()), None)
                         .unwrap_err(),
                     "RESEARCH_TERMINAL_IMMUTABLE"
                 );
             } else {
                 assert_eq!(job.state, State::Interrupted);
                 assert_eq!(
-                    restarted.update(&id, State::Completed, Some("forged".into()), None)
+                    restarted
+                        .update(&id, State::Completed, Some("forged".into()), None)
                         .unwrap_err(),
                     "RESEARCH_TERMINAL_IMMUTABLE"
                 );
             }
             std::fs::remove_file(ready).unwrap();
         }
-        println!("C17_OS_KILL_JSON:{}", serde_json::json!({
-            "runner_os":std::env::consts::OS,
-            "test_binary":exe.file_name().and_then(|name|name.to_str()).unwrap_or("unknown"),
-            "phases":phases,
-            "kill_mode":"OS process kill + WAL reopen, no graceful shutdown",
-            "assertions":"completed remains immutable; queued/running interrupted; SHA artifact readback",
-            "trading_effects":"none"
-        }));
+        println!(
+            "C17_OS_KILL_JSON:{}",
+            serde_json::json!({
+                "runner_os":std::env::consts::OS,
+                "test_binary":exe.file_name().and_then(|name|name.to_str()).unwrap_or("unknown"),
+                "phases":phases,
+                "kill_mode":"OS process kill + WAL reopen, no graceful shutdown",
+                "assertions":"completed remains immutable; queued/running interrupted; SHA artifact readback",
+                "trading_effects":"none"
+            })
+        );
     }
 
     #[test]
