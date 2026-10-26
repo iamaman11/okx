@@ -1090,10 +1090,17 @@ fn k5_child_hard_exit_at_native_claim() {
             tx.execute(
                 "INSERT INTO fills VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
                 params![
-                    fill.fill_id, fill.instrument_id, fill.trade_id,
-                    fill.exchange_order_id, fill.intent_id, fill.time,
-                    exact(fill.qty), exact(fill.price), exact(fill.fee),
-                    fill.currency, fill.side
+                    fill.fill_id,
+                    fill.instrument_id,
+                    fill.trade_id,
+                    fill.exchange_order_id,
+                    fill.intent_id,
+                    fill.time,
+                    exact(fill.qty),
+                    exact(fill.price),
+                    exact(fill.fee),
+                    fill.currency,
+                    fill.side
                 ],
             )
             .unwrap();
@@ -1220,13 +1227,18 @@ fn k5_real_os_kill_f0_through_f8_never_reposts_or_duplicates_finance() {
                     |r| r.get(0),
                 )
                 .unwrap();
-            assert_eq!(pending_before, 1, "raw fact+pending persisted across OS kill");
+            assert_eq!(
+                pending_before, 1,
+                "raw fact+pending persisted across OS kill"
+            );
             assert!(recovered.active_lots("BTC-USDT-SWAP").unwrap().is_empty());
             for _ in 0..2 {
                 recovered
                     .ingest_attributed_fill(
                         k5_f7_fixture_fill(),
-                        FillEffect::Open { side: "long".into() },
+                        FillEffect::Open {
+                            side: "long".into(),
+                        },
                         None,
                     )
                     .unwrap();
