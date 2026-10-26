@@ -1,4 +1,5 @@
 mod candidate;
+pub mod query_plan;
 mod derivatives;
 mod history_features;
 mod market_query;
