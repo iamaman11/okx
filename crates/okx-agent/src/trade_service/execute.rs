@@ -1115,8 +1115,11 @@ mod tests {
             Some("POST_CENSUS_NOT_AFTER_RESERVE")
         );
         // Re-observation must not erase the original denial or mint a POST.
-        let sql_proof = store.call(deadline(), |s| s.unsent_release_receipt("intent_fixture"))
-            .await.unwrap().unwrap();
+        let sql_proof = store
+            .call(deadline(), |s| s.unsent_release_receipt("intent_fixture"))
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(sql_proof.reason, "POST_CENSUS_NOT_AFTER_RESERVE");
         assert_eq!(sql_proof.intent_id, "intent_fixture");
         let replay = reject_prepost_denial(&store, &intent, "COMMAND_EXPIRED")

@@ -47,15 +47,21 @@ impl TradeService {
         // independently of exchange history/fees. Other rejected intents
         // still require the full authoritative reconciliation below.
         let id = i.intent_id.clone();
-        let no_send = r.execution.store
+        let no_send = r
+            .execution
+            .store
             .call(deadline(), move |s| s.unsent_release_receipt(&id))
-            .await.map_err(err)?.is_some();
+            .await
+            .map_err(err)?
+            .is_some();
         let unsent_release = if no_send {
             Some(self.release_unsent(r, &i).await)
         } else {
             None
         };
-        let order = if no_send || (matches!(i.state, IntentState::Rejected) && i.exchange_order_id.is_none()) {
+        let order = if no_send
+            || (matches!(i.state, IntentState::Rejected) && i.exchange_order_id.is_none())
+        {
             None
         } else {
             match r
@@ -175,7 +181,9 @@ impl TradeService {
         let central_release = if let Some(resolution) = unsent_release {
             match resolution {
                 Ok(()) => json!({"state":"verified","proof":"SQL_NO_SEND"}),
-                Err(reason) => json!({"state":"pending","reason_code":reason,"scope":"intent","next_action":"trade.status"}),
+                Err(reason) => {
+                    json!({"state":"pending","reason_code":reason,"scope":"intent","next_action":"trade.status"})
+                }
             }
         } else if i.state.terminal() && financial {
             match self.release_terminal(r, &i, order.as_ref()).await {
@@ -226,37 +234,57 @@ impl TradeService {
             return Ok(());
         }
         let id = i.intent_id.clone();
-        let proof = r.execution.store
+        let proof = r
+            .execution
+            .store
             .call(deadline(), move |s| s.unsent_release_receipt(&id))
-            .await.map_err(err)?
+            .await
+            .map_err(err)?
             .ok_or("DURABLE_UNSENT_SQL_PROOF_MISSING")?;
-        let state = self.governance.read().await.clone()
+        let state = self
+            .governance
+            .read()
+            .await
+            .clone()
             .ok_or("AUTHORITY_UNAVAILABLE")?;
         let reservation = proof.reservation_key.clone();
         if reservation.starts_with("local:") {
             return Ok(());
         }
         for _ in 0..4 {
-            let observed = self.risk.request(self.risk_command(
-                &state, format!("inspect_{}", i.client_order_id),
-                RiskCommandAction::Inspect {
-                    reservation_key: reservation.clone(),
-                    plan_sha256: proof.plan_hash.clone(),
-                },
-            )).await.map_err(str::to_owned)?;
+            let observed = self
+                .risk
+                .request(self.risk_command(
+                    &state,
+                    format!("inspect_{}", i.client_order_id),
+                    RiskCommandAction::Inspect {
+                        reservation_key: reservation.clone(),
+                        plan_sha256: proof.plan_hash.clone(),
+                    },
+                ))
+                .await
+                .map_err(str::to_owned)?;
             if observed.status != RiskDecisionStatus::Observed {
-                return Err(observed.reason.unwrap_or("CENTRAL_INSPECTION_FAILED".into()));
+                return Err(observed
+                    .reason
+                    .unwrap_or("CENTRAL_INSPECTION_FAILED".into()));
             }
             if observed.reservation_state == Some(RiskReservationState::Released) {
                 let evidence = digest(&observed)?;
                 let reservation = reservation.clone();
-                r.execution.store.call(deadline(), move |s| {
-                    s.acknowledge_central_release(&reservation, &evidence)
-                }).await.map_err(err)?;
+                r.execution
+                    .store
+                    .call(deadline(), move |s| {
+                        s.acknowledge_central_release(&reservation, &evidence)
+                    })
+                    .await
+                    .map_err(err)?;
                 return Ok(());
             }
-            if !matches!(observed.reservation_state,
-                Some(RiskReservationState::Held | RiskReservationState::Posted)) {
+            if !matches!(
+                observed.reservation_state,
+                Some(RiskReservationState::Held | RiskReservationState::Posted)
+            ) {
                 return Err("UNSENT_CENTRAL_STATE_UNRESOLVED".into());
             }
             let native_proof = UnsentRiskReleaseProof {
@@ -268,26 +296,37 @@ impl TradeService {
                 reason: proof.reason.clone(),
                 record_digest: digest(&proof)?,
             };
-            let result = self.risk.request(self.risk_command(
-                &state, format!("release_{}", i.client_order_id),
-                RiskCommandAction::ReleaseUnsent {
-                    reservation_key: reservation.clone(),
-                    plan_sha256: proof.plan_hash.clone(),
-                    expected_risk_book_sequence: observed.risk_book_sequence
-                        .ok_or("RISK_SEQUENCE_MISSING")?,
-                    proof: native_proof,
-                },
-            )).await.map_err(str::to_owned)?;
+            let result = self
+                .risk
+                .request(self.risk_command(
+                    &state,
+                    format!("release_{}", i.client_order_id),
+                    RiskCommandAction::ReleaseUnsent {
+                        reservation_key: reservation.clone(),
+                        plan_sha256: proof.plan_hash.clone(),
+                        expected_risk_book_sequence:
+                            observed.risk_book_sequence.ok_or("RISK_SEQUENCE_MISSING")?,
+                        proof: native_proof,
+                    },
+                ))
+                .await
+                .map_err(str::to_owned)?;
             if result.status == RiskDecisionStatus::Updated {
                 let evidence = digest(&result)?;
                 let reservation = reservation.clone();
-                r.execution.store.call(deadline(), move |s| {
-                    s.acknowledge_central_release(&reservation, &evidence)
-                }).await.map_err(err)?;
+                r.execution
+                    .store
+                    .call(deadline(), move |s| {
+                        s.acknowledge_central_release(&reservation, &evidence)
+                    })
+                    .await
+                    .map_err(err)?;
                 return Ok(());
             }
             if result.reason.as_deref() != Some("STALE_SESSION_OR_BOOK_SEQUENCE") {
-                return Err(result.reason.unwrap_or("CENTRAL_UNSENT_RELEASE_DENIED".into()));
+                return Err(result
+                    .reason
+                    .unwrap_or("CENTRAL_UNSENT_RELEASE_DENIED".into()));
             }
         }
         Err("CENTRAL_UNSENT_RELEASE_CAS_BUSY".into())
