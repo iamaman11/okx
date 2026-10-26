@@ -63,8 +63,7 @@ impl AnalyticsService {
             request.timeframe_ms,
         )
         .map_err(str::to_owned)?;
-        let closed_end = chrono::Utc::now().timestamp_millis().max(0) as u64
-            / request.timeframe_ms
+        let closed_end = chrono::Utc::now().timestamp_millis().max(0) as u64 / request.timeframe_ms
             * request.timeframe_ms;
         if window.end_ms > closed_end {
             return Err("RANGE_NOT_CLOSED".into());
@@ -329,16 +328,16 @@ impl AnalyticsService {
                 }
                 // Validate the canonical window before any venue I/O.
                 let validation_range = match range_mode {
-                    RangeMode::Strict => {
-                        okx_analysis::time_series::ClosedRange::strict(
-                            start_ms, end_ms, timeframe_ms,
-                        )
-                    }
-                    RangeMode::Normalize => {
-                        okx_analysis::time_series::ClosedRange::normalize(
-                            start_ms, end_ms, timeframe_ms,
-                        )
-                    }
+                    RangeMode::Strict => okx_analysis::time_series::ClosedRange::strict(
+                        start_ms,
+                        end_ms,
+                        timeframe_ms,
+                    ),
+                    RangeMode::Normalize => okx_analysis::time_series::ClosedRange::normalize(
+                        start_ms,
+                        end_ms,
+                        timeframe_ms,
+                    ),
                 }
                 .map_err(str::to_owned)?;
                 let last_closed = chrono::Utc::now().timestamp_millis().max(0) as u64

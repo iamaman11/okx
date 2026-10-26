@@ -371,6 +371,27 @@ mod batch_tests {
     use super::*;
 
     #[test]
+    fn c13_research_validate_range_mode_is_typed_and_backward_compatible() {
+        let mut request = serde_json::json!({
+            "action":"validate","instruments":["BTC-USDT-SWAP"],
+            "timeframe_ms":3600000,"start_ms":3600001,"end_ms":14400001,
+            "strategy_id":"ema_cross_v1","parameters":{"fast":2,"slow":4},
+            "costs":{"maker_fee_bps":1,"taker_fee_bps":2,"slippage_bps":2,
+                "funding_mode":"zero_assumption"},
+            "data_mode":"counterfactual"
+        });
+        let legacy: ResearchRequest = serde_json::from_value(request.clone()).unwrap();
+        assert!(legacy.valid());
+        assert!(matches!(legacy, ResearchRequest::Validate { range_mode: RangeMode::Strict, .. }));
+        request["range_mode"] = serde_json::json!("normalize");
+        let normalized: ResearchRequest = serde_json::from_value(request.clone()).unwrap();
+        assert!(normalized.valid());
+        assert!(matches!(normalized, ResearchRequest::Validate { range_mode: RangeMode::Normalize, .. }));
+        request["range_mode"] = serde_json::json!("silent_truncation");
+        assert!(serde_json::from_value::<ResearchRequest>(request).is_err());
+    }
+
+    #[test]
     fn market_universe_only_wire_decodes_and_rejects_ambiguous_modes() {
         let request = serde_json::json!({
             "action":"screen", "universe":{"instrument_type":"SWAP","limit":50},
