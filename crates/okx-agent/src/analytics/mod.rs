@@ -313,7 +313,20 @@ impl AnalyticsService {
                         "side_effects":"none","job_created":false,"quality":"partial"}),
                     );
                 }
-                if (end_ms - start_ms) / timeframe_ms > 2000 {
+                // Validate the canonical window before any venue I/O.
+                let validation_range = okx_analysis::time_series::ClosedRange::strict(
+                    start_ms,
+                    end_ms,
+                    timeframe_ms,
+                )
+                .map_err(str::to_owned)?;
+                let last_closed = chrono::Utc::now().timestamp_millis().max(0) as u64
+                    / timeframe_ms
+                    * timeframe_ms;
+                if validation_range.end_ms > last_closed {
+                    return Err("RANGE_NOT_CLOSED".into());
+                }
+                if validation_range.expected_bars > 2000 {
                     return Err("VALIDATION_RANGE_LIMIT:2000_CANDLES_PER_INSTRUMENT".into());
                 }
                 let mut rows = Vec::new();
@@ -325,18 +338,14 @@ impl AnalyticsService {
                         .await;
                     match result {
                         Ok(bars) => {
-                            let range = okx_analysis::time_series::ClosedRange::strict(
-                                start_ms, end_ms, timeframe_ms,
-                            )
-                            .map_err(str::to_owned)?;
-                            let evidence = range.coverage(bars.iter().map(|bar| bar.time));
+                            let evidence = validation_range.coverage(bars.iter().map(|bar| bar.time));
                             if !evidence.complete {
                                 complete = false;
                             }
                             rows.push(json!({"instrument":symbol,"source":"confirmed_closed_candles",
                                 "first_candle_ms":bars.first().map(|b|b.time),
                                 "last_candle_ms":bars.last().map(|b|b.time),
-                                "observed_bars":bars.len(),"expected_bars":range.expected_bars,
+                                "observed_bars":bars.len(),"expected_bars":validation_range.expected_bars,
                                 "coverage":if evidence.complete{"complete"}else{"partial"},
                                 "reason_code":if evidence.complete{None}else{Some("CANDLE_RANGE_INCOMPLETE_OR_GAPPED")},
                                 "time_evidence":evidence}));

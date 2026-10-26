@@ -134,7 +134,8 @@ mod tests {
         assert_eq!(range.expected_bars, 168);
         assert_eq!(range.end_ms % range.timeframe_ms, 0);
         assert_eq!(
-            range.coverage((0..168).map(|i| range.start_ms + i * range.timeframe_ms))
+            range
+                .coverage((0..168).map(|i| range.start_ms + i * range.timeframe_ms))
                 .complete,
             true
         );
@@ -171,9 +172,21 @@ mod tests {
 
     #[test]
     fn strict_and_normalize_fail_closed_on_invalid_boundaries() {
-        assert_eq!(ClosedRange::strict(1, 3_600_000, 3_600_000), Err("RANGE_NOT_ALIGNED"));
-        assert_eq!(ClosedRange::normalize(1, 3_600_000, 3_600_000), Err("EMPTY_RANGE"));
-        assert_eq!(ClosedRange::relative_closed(100, 3_600_000, 168), Err("RANGE_UNAVAILABLE"));
-        assert_eq!(ClosedRange::normalize(u64::MAX, u64::MAX, 60_000), Err("RANGE_OVERFLOW"));
+        assert_eq!(
+            ClosedRange::strict(1, 3_600_000, 3_600_000),
+            Err("RANGE_NOT_ALIGNED")
+        );
+        assert_eq!(
+            ClosedRange::normalize(1, 3_600_000, 3_600_000),
+            Err("EMPTY_RANGE")
+        );
+        assert_eq!(
+            ClosedRange::relative_closed(100, 3_600_000, 168),
+            Err("RANGE_UNAVAILABLE")
+        );
+        assert_eq!(
+            ClosedRange::normalize(u64::MAX, u64::MAX, 60_000),
+            Err("RANGE_OVERFLOW")
+        );
     }
 }
