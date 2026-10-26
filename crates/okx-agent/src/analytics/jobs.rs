@@ -528,6 +528,109 @@ mod tests {
         );
     }
 
+    /// Runs only when selected by the parent OS-kill acceptance test.
+    /// The child genuinely holds an open SQLite WAL connection until killed.
+    #[test]
+    #[ignore]
+    fn c17_os_kill_child_process() {
+        let Ok(file) = std::env::var("OKX_C17_CHILD_SQLITE") else {
+            return;
+        };
+        let phase = std::env::var("OKX_C17_CHILD_PHASE").unwrap();
+        let jobs = Jobs::open(PathBuf::from(&file)).unwrap();
+        let id = format!("os-kill-{phase}");
+        jobs.enqueue(id.clone(), id.clone()).unwrap();
+        let evidence = okx_research::ResearchArtifactStore::at(
+            PathBuf::from(&file).with_extension("evidence-root"),
+        );
+        let artifact = evidence
+            .publish_evidence(&serde_json::json!({"phase":phase,"quality":"verified"}))
+            .unwrap()
+            .0;
+        if phase == "running" {
+            jobs.update(&id, State::Running, Some(artifact), None).unwrap();
+        } else if phase == "completed" {
+            jobs.update(&id, State::Running, None, None).unwrap();
+            jobs.update(&id, State::Completed, Some(artifact), None).unwrap();
+        }
+        let ready = PathBuf::from(&file).with_extension(format!("{phase}.ready"));
+        std::fs::write(ready, b"committed").unwrap();
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(1));
+        }
+    }
+
+    #[test]
+    fn c17_actual_child_os_kill_recovers_wal_and_blocks_false_success() {
+        use std::{process::{Command, Stdio},time::{Duration, Instant}};
+        let file = path("c17-physical-kill");
+        let exe = std::env::current_exe().unwrap();
+        let phases = ["queued", "running", "completed"];
+        for phase in phases {
+            let ready = file.with_extension(format!("{phase}.ready"));
+            let mut child = Command::new(&exe)
+                .args([
+                    "--ignored",
+                    "--exact",
+                    "analytics::jobs::tests::c17_os_kill_child_process",
+                    "--nocapture",
+                ])
+                .env("OKX_C17_CHILD_SQLITE", file.as_os_str())
+                .env("OKX_C17_CHILD_PHASE", phase)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap();
+            let deadline = Instant::now() + Duration::from_secs(8);
+            while !ready.exists() && Instant::now() < deadline {
+                assert!(child.try_wait().unwrap().is_none(), "child exited before evidence commit");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            if !ready.exists() {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("OS-KILL_SETUP_TIMEOUT: {phase}");
+            }
+            // Real OS process termination (TerminateProcess on Windows,
+            // SIGKILL on Linux); no cooperative runtime shutdown.
+            child.kill().unwrap();
+            child.wait().unwrap();
+            let restarted = Jobs::open(file.clone()).unwrap();
+            let id = format!("os-kill-{phase}");
+            let job = restarted.get(&id).unwrap();
+            if phase == "completed" {
+                assert_eq!(job.state, State::Completed);
+                let proof = job.artifact.clone().unwrap();
+                let store = okx_research::ResearchArtifactStore::at(
+                    file.with_extension("evidence-root"),
+                );
+                let readback: serde_json::Value = store.read_evidence_json(&proof).unwrap();
+                assert_eq!(readback["phase"], "completed");
+                assert_eq!(
+                    restarted.update(&id, State::Completed, Some("forged".into()), None)
+                        .unwrap_err(),
+                    "RESEARCH_TERMINAL_IMMUTABLE"
+                );
+            } else {
+                assert_eq!(job.state, State::Interrupted);
+                assert_eq!(
+                    restarted.update(&id, State::Completed, Some("forged".into()), None)
+                        .unwrap_err(),
+                    "RESEARCH_TERMINAL_IMMUTABLE"
+                );
+            }
+            std::fs::remove_file(ready).unwrap();
+        }
+        println!("C17_OS_KILL_JSON:{}", serde_json::json!({
+            "runner_os":std::env::consts::OS,
+            "test_binary":exe.file_name().and_then(|name|name.to_str()).unwrap_or("unknown"),
+            "phases":phases,
+            "kill_mode":"OS process kill + WAL reopen, no graceful shutdown",
+            "assertions":"completed remains immutable; queued/running interrupted; SHA artifact readback",
+            "trading_effects":"none"
+        }));
+    }
+
     #[test]
     fn c17_terminal_manifest_survives_restart_and_rejects_late_overwrite() {
         let file = path("c17-terminal");
