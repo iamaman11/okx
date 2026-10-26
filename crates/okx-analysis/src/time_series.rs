@@ -16,7 +16,7 @@ impl ClosedRange {
         if timeframe_ms == 0 {
             return Err("INVALID_TIMEFRAME");
         }
-        if start_ms % timeframe_ms != 0 || end_ms % timeframe_ms != 0 {
+        if !start_ms.is_multiple_of(timeframe_ms) || !end_ms.is_multiple_of(timeframe_ms) {
             return Err("RANGE_NOT_ALIGNED");
         }
         if end_ms <= start_ms {
@@ -75,7 +75,7 @@ impl ClosedRange {
         for time in times {
             if time < self.start_ms
                 || time >= self.end_ms
-                || (time - self.start_ms) % self.timeframe_ms != 0
+                || !(time - self.start_ms).is_multiple_of(self.timeframe_ms)
             {
                 unexpected += 1;
             } else if !observed.insert(time) {
@@ -133,11 +133,10 @@ mod tests {
         assert_eq!(range.end_ms, 1792972800000);
         assert_eq!(range.expected_bars, 168);
         assert_eq!(range.end_ms % range.timeframe_ms, 0);
-        assert_eq!(
+        assert!(
             range
                 .coverage((0..168).map(|i| range.start_ms + i * range.timeframe_ms))
-                .complete,
-            true
+                .complete
         );
         assert_eq!(
             ClosedRange::normalize(
