@@ -8,6 +8,7 @@ mod scenario;
 mod statistics;
 mod strategy;
 mod tca;
+pub mod time_series;
 mod validation;
 
 pub use candidate::{

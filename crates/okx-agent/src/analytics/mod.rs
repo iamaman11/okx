@@ -325,27 +325,21 @@ impl AnalyticsService {
                         .await;
                     match result {
                         Ok(bars) => {
-                            let expected = (end_ms - start_ms) / timeframe_ms;
-                            let aligned =
-                                start_ms % timeframe_ms == 0 && end_ms % timeframe_ms == 0;
-                            let coverage = aligned
-                                && bars.len() as u64 == expected
-                                && bars.first().is_some_and(|b| b.time == start_ms)
-                                && bars
-                                    .last()
-                                    .is_some_and(|b| b.time.saturating_add(timeframe_ms) == end_ms)
-                                && bars.windows(2).all(|pair| {
-                                    pair[1].time == pair[0].time.saturating_add(timeframe_ms)
-                                });
-                            if !coverage {
+                            let range = okx_analysis::time_series::ClosedRange::strict(
+                                start_ms, end_ms, timeframe_ms,
+                            )
+                            .map_err(str::to_owned)?;
+                            let evidence = range.coverage(bars.iter().map(|bar| bar.time));
+                            if !evidence.complete {
                                 complete = false;
                             }
                             rows.push(json!({"instrument":symbol,"source":"confirmed_closed_candles",
                                 "first_candle_ms":bars.first().map(|b|b.time),
                                 "last_candle_ms":bars.last().map(|b|b.time),
-                                "observed_bars":bars.len(),"expected_bars":expected,
-                                "coverage":if coverage{"complete"}else{"partial"},
-                                "reason_code":if coverage{None}else{Some("CANDLE_RANGE_INCOMPLETE_OR_GAPPED")}}));
+                                "observed_bars":bars.len(),"expected_bars":range.expected_bars,
+                                "coverage":if evidence.complete{"complete"}else{"partial"},
+                                "reason_code":if evidence.complete{None}else{Some("CANDLE_RANGE_INCOMPLETE_OR_GAPPED")},
+                                "time_evidence":evidence}));
                         }
                         Err(e) => {
                             complete = false;
