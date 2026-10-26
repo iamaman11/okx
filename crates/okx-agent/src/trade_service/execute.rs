@@ -302,7 +302,7 @@ impl TradeService {
                 return Err("COMMAND_EXPIRED".into());
             }
             match self
-                .fence_inspect_retry(&state, &held, &prepared, until, held_received)
+                .fence_inspect_retry(&state, &held, &prepared, until, held_received, &conversion, r)
                 .await
             {
                 Ok(v) => central = Some(v),
@@ -602,6 +602,8 @@ impl TradeService {
         intent: &StoredIntent,
         until: Instant,
         held_received: Instant,
+        reserved_conversion: &UsdConversion,
+        owner: &AccountResources,
     ) -> Result<RiskResult, String> {
         let key = held
             .reservation_key
@@ -614,7 +616,15 @@ impl TradeService {
             if Instant::now() >= until {
                 return Err("COMMAND_EXPIRED".into());
             }
-            let (census, causal_proof) = self.census_after_held(state, held_received, &key).await?;
+            let (census, causal_proof) = self
+                .census_after_held(
+                    state,
+                    held_received,
+                    &key,
+                    &owner.configuration.account_key.wire(),
+                    &reserved_conversion.usd_per_usdt,
+                )
+                .await?;
             let command = self.risk_command(
                 state,
                 format!("fence_{}", intent.client_order_id),
@@ -661,7 +671,7 @@ impl TradeService {
         &self,
         state: &CentralGovernanceSnapshot,
     ) -> Result<NativeRiskCensus, String> {
-        self.census_with_reads(state, None).await.map(|v| v.0)
+        self.census_with_reads(state, None, None).await.map(|v| v.0)
     }
 
     async fn census_after_held(
@@ -669,8 +679,16 @@ impl TradeService {
         state: &CentralGovernanceSnapshot,
         held_received: Instant,
         reservation: &str,
+        selected_account: &str,
+        reserved_usd_per_usdt: &str,
     ) -> Result<(NativeRiskCensus, CausalPostProof), String> {
-        let (census, account_reads) = self.census_with_reads(state, Some(held_received)).await?;
+        let (census, account_reads) = self
+            .census_with_reads(
+                state,
+                Some(held_received),
+                Some((selected_account, reserved_usd_per_usdt)),
+            )
+            .await?;
         let proof = CausalPostProof {
             reserve_anchor: reservation.to_owned(),
             native_incarnation: native_process_incarnation()?.to_owned(),
@@ -687,6 +705,7 @@ impl TradeService {
         &self,
         state: &CentralGovernanceSnapshot,
         held_received: Option<Instant>,
+        fx_rate_check: Option<(&str, &str)>,
     ) -> Result<(NativeRiskCensus, Vec<PostAccountReadProof>), String> {
         if !self.accounts.failures().await.is_empty() {
             return Err("ACCOUNT_COHORT_UNAVAILABLE".into());
@@ -718,6 +737,17 @@ impl TradeService {
                 } else {
                     r.observer.snapshot().await.map_err(err)?
                 };
+                // The selected account's fresh USD/USDT conversion must
+                // still cover the identical reserved USD exposure. A rate
+                // change cannot silently reuse a smaller prior risk grant.
+                if let Some((selected, original_rate)) = fx_rate_check
+                    && c.account_key == selected
+                {
+                    let fresh_rate = Self::usd_conversion(&snapshot)?.usd_per_usdt;
+                    if dec(&fresh_rate)? != dec(original_rate)? {
+                        return Err("POST_FX_SOURCE_CHANGED_REQUIRES_NEW_RESERVE".into());
+                    }
+                }
                 let algos = r
                     .observer
                     .pending_derivative_risk_algos()
