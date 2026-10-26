@@ -16,27 +16,29 @@ use okx_research::{
     ResearchArtifactStore,
     strategy_registry::{self as replay, Costs, Mechanics, ReplaySpec},
 };
+use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use std::{
     path::PathBuf,
     sync::{Arc, atomic::Ordering},
 };
-use serde::de::DeserializeOwned;
 
 fn read_verified_result<T: DeserializeOwned>(
     store: &ResearchArtifactStore,
     artifact: &str,
 ) -> Result<T, String> {
-    store.read_evidence_json(artifact).map_err(|error| match error {
-        okx_research::ResearchError::ArtifactIdentityMismatch
-        | okx_research::ResearchError::InvalidArtifactId => "ARTIFACT_CORRUPT".into(),
-        okx_research::ResearchError::Io(ref source)
-            if source.kind() == std::io::ErrorKind::NotFound =>
-        {
-            "ARTIFACT_CORRUPT".into()
-        }
-        other => other.to_string(),
-    })
+    store
+        .read_evidence_json(artifact)
+        .map_err(|error| match error {
+            okx_research::ResearchError::ArtifactIdentityMismatch
+            | okx_research::ResearchError::InvalidArtifactId => "ARTIFACT_CORRUPT".into(),
+            okx_research::ResearchError::Io(ref source)
+                if source.kind() == std::io::ErrorKind::NotFound =>
+            {
+                "ARTIFACT_CORRUPT".into()
+            }
+            other => other.to_string(),
+        })
 }
 #[derive(Clone)]
 pub struct AnalyticsService {
@@ -458,8 +460,11 @@ impl AnalyticsService {
             return Err("RESULT_NOT_READY".into());
         }
         let signing_key = self.jobs.cursor_signing_key()?;
-        let signed = cursor.as_deref().filter(|s| s.starts_with("r1."))
-            .map(|s| cursor::Cursor::decode(s, &signing_key)).transpose()?;
+        let signed = cursor
+            .as_deref()
+            .filter(|s| s.starts_with("r1."))
+            .map(|s| cursor::Cursor::decode(s, &signing_key))
+            .transpose()?;
         // Explicit instrument:INDEX:0 is only a first-page selector for a
         // batch. Continuation always requires an authenticated page token.
         let selector = match cursor.as_deref() {
@@ -482,10 +487,14 @@ impl AnalyticsService {
         }
         let instrument_index = signed.as_ref().and_then(|s| s.instrument).or(selector);
         if let Some(index) = instrument_index {
-            let row = value.get("instruments").and_then(Value::as_array)
+            let row = value
+                .get("instruments")
+                .and_then(Value::as_array)
                 .and_then(|rows| rows.iter().find(|r| r["index"].as_u64() == Some(index)))
                 .ok_or("INVALID_CURSOR")?;
-            let id = row["artifact"].as_str().ok_or("INSTRUMENT_RESULT_UNAVAILABLE")?;
+            let id = row["artifact"]
+                .as_str()
+                .ok_or("INSTRUMENT_RESULT_UNAVAILABLE")?;
             leaf_artifact = id.to_owned();
             value = read_verified_result(&self.artifacts, id)?;
         }
@@ -566,15 +575,25 @@ impl AnalyticsService {
                 output.pop();
             }
             if output.len() == 1
-                && serde_json::to_vec(&output).map_err(|e| e.to_string())?.len() > 6500
+                && serde_json::to_vec(&output)
+                    .map_err(|e| e.to_string())?
+                    .len()
+                    > 6500
             {
                 return Err("RESULT_ROW_TOO_LARGE".into());
             }
             let next = if offset + output.len() < total {
-                Some(cursor::Cursor::new(
-                    &job_id, &artifact, &leaf_artifact, view,
-                    offset + output.len(), instrument_index,
-                ).encode(&signing_key)?)
+                Some(
+                    cursor::Cursor::new(
+                        &job_id,
+                        &artifact,
+                        &leaf_artifact,
+                        view,
+                        offset + output.len(),
+                        instrument_index,
+                    )
+                    .encode(&signing_key)?,
+                )
             } else {
                 None
             };
@@ -621,10 +640,17 @@ impl AnalyticsService {
             return Err("RESULT_ROW_TOO_LARGE".into());
         }
         let next = if offset + page.len() < total {
-            Some(cursor::Cursor::new(
-                &job_id, &artifact, &leaf_artifact, view,
-                offset + page.len(), instrument_index,
-            ).encode(&signing_key)?)
+            Some(
+                cursor::Cursor::new(
+                    &job_id,
+                    &artifact,
+                    &leaf_artifact,
+                    view,
+                    offset + page.len(),
+                    instrument_index,
+                )
+                .encode(&signing_key)?,
+            )
         } else {
             None
         };
@@ -1152,7 +1178,10 @@ mod tests {
         assert_eq!(first["returned_rows"], 5);
         assert!(first["next_cursor"].as_str().unwrap().starts_with("r1."));
         let next = service
-            .research(get(ResearchResultView::Equity, first["next_cursor"].as_str().map(str::to_owned)))
+            .research(get(
+                ResearchResultView::Equity,
+                first["next_cursor"].as_str().map(str::to_owned),
+            ))
             .await
             .unwrap();
         assert_eq!(next["rows"][0][0], 5);
@@ -1447,31 +1476,84 @@ mod artifact_job_fixtures {
     #[test]
     fn c17_cursor_survives_catalog_restart_and_is_not_transferable() {
         let (root, service) = super::artifact_job_fixtures::service();
-        let page = service.artifacts.publish_evidence(&vec![json!({"row":1}),json!({"row":2})]).unwrap().0;
-        let manifest = service.artifacts.publish_evidence(&json!({
-            "trade_pages":[page],"total_trades":2
-        })).unwrap().0;
+        let page = service
+            .artifacts
+            .publish_evidence(&vec![json!({"row":1}), json!({"row":2})])
+            .unwrap()
+            .0;
+        let manifest = service
+            .artifacts
+            .publish_evidence(&json!({
+                "trade_pages":[page],"total_trades":2
+            }))
+            .unwrap()
+            .0;
         let id = "e".repeat(64);
-        service.jobs.enqueue("c17-signed".into(), id.clone()).unwrap();
-        service.jobs.update(&id, jobs::State::Completed, Some(manifest.clone()), None).unwrap();
-        let first = service.result_page(id.clone(), None, 1, ResearchResultView::Trades).unwrap();
+        service
+            .jobs
+            .enqueue("c17-signed".into(), id.clone())
+            .unwrap();
+        service
+            .jobs
+            .update(&id, jobs::State::Completed, Some(manifest.clone()), None)
+            .unwrap();
+        let first = service
+            .result_page(id.clone(), None, 1, ResearchResultView::Trades)
+            .unwrap();
         let token = first["next_cursor"].as_str().unwrap().to_owned();
         assert!(token.starts_with("r1."));
-        let decoded = cursor::Cursor::decode(&token,&service.jobs.cursor_signing_key().unwrap()).unwrap();
+        let decoded =
+            cursor::Cursor::decode(&token, &service.jobs.cursor_signing_key().unwrap()).unwrap();
         assert_eq!(decoded.offset, 1);
-        assert_eq!(service.result_page(id.clone(), Some(token.clone()), 1, ResearchResultView::Equity).unwrap_err(),"CURSOR_MISMATCH");
+        assert_eq!(
+            service
+                .result_page(
+                    id.clone(),
+                    Some(token.clone()),
+                    1,
+                    ResearchResultView::Equity
+                )
+                .unwrap_err(),
+            "CURSOR_MISMATCH"
+        );
         let other = "f".repeat(64);
-        service.jobs.enqueue("c17-other".into(), other.clone()).unwrap();
-        service.jobs.update(&other,jobs::State::Completed,Some(manifest),None).unwrap();
-        assert_eq!(service.result_page(other,Some(token.clone()),1,ResearchResultView::Trades).unwrap_err(),"CURSOR_MISMATCH");
-        let mut forged=token.clone().into_bytes();
-        let last=forged.len()-1;
-        forged[last]=if forged[last]==b'A'{b'B'}else{b'A'};
-        assert_eq!(service.result_page(id.clone(),Some(String::from_utf8(forged).unwrap()),1,ResearchResultView::Trades).unwrap_err(),"INVALID_CURSOR");
+        service
+            .jobs
+            .enqueue("c17-other".into(), other.clone())
+            .unwrap();
+        service
+            .jobs
+            .update(&other, jobs::State::Completed, Some(manifest), None)
+            .unwrap();
+        assert_eq!(
+            service
+                .result_page(other, Some(token.clone()), 1, ResearchResultView::Trades)
+                .unwrap_err(),
+            "CURSOR_MISMATCH"
+        );
+        let mut forged = token.clone().into_bytes();
+        let last = forged.len() - 1;
+        forged[last] = if forged[last] == b'A' { b'B' } else { b'A' };
+        assert_eq!(
+            service
+                .result_page(
+                    id.clone(),
+                    Some(String::from_utf8(forged).unwrap()),
+                    1,
+                    ResearchResultView::Trades
+                )
+                .unwrap_err(),
+            "INVALID_CURSOR"
+        );
         let restarted = jobs::Jobs::open(root.join("research-catalog.sqlite")).unwrap();
-        assert_eq!(restarted.cursor_signing_key().unwrap(),service.jobs.cursor_signing_key().unwrap());
-        let second = service.result_page(id,Some(token),1,ResearchResultView::Trades).unwrap();
-        assert_eq!(second["rows"][0]["row"],2);
+        assert_eq!(
+            restarted.cursor_signing_key().unwrap(),
+            service.jobs.cursor_signing_key().unwrap()
+        );
+        let second = service
+            .result_page(id, Some(token), 1, ResearchResultView::Trades)
+            .unwrap();
+        assert_eq!(second["rows"][0]["row"], 2);
         drop(restarted);
         drop(service);
         std::fs::remove_dir_all(root).unwrap();
@@ -1506,8 +1588,15 @@ mod artifact_job_fixtures {
             .unwrap_err();
         assert_eq!(err, "RESULT_PAGE_TRUNCATED");
         let token = cursor::Cursor::new(
-            &id, &manifest, &manifest, ResearchResultView::Trades, 2, None,
-        ).encode(&service.jobs.cursor_signing_key().unwrap()).unwrap();
+            &id,
+            &manifest,
+            &manifest,
+            ResearchResultView::Trades,
+            2,
+            None,
+        )
+        .encode(&service.jobs.cursor_signing_key().unwrap())
+        .unwrap();
         let err = service
             .result_page(id, Some(token), 5, ResearchResultView::Trades)
             .unwrap_err();
@@ -1565,9 +1654,18 @@ mod artifact_job_fixtures {
         let page = s
             .research(ResearchRequest::Result {
                 job_id: id.clone(),
-                cursor: Some(cursor::Cursor::new(
-                    &id, &artifact, &artifact, ResearchResultView::Trades, 47, None
-                ).encode(&s.jobs.cursor_signing_key().unwrap()).unwrap()),
+                cursor: Some(
+                    cursor::Cursor::new(
+                        &id,
+                        &artifact,
+                        &artifact,
+                        ResearchResultView::Trades,
+                        47,
+                        None,
+                    )
+                    .encode(&s.jobs.cursor_signing_key().unwrap())
+                    .unwrap(),
+                ),
                 limit: 5,
                 view: ResearchResultView::Trades,
             })

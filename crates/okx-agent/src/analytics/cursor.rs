@@ -72,8 +72,12 @@ impl Cursor {
         if parts.len() != 3 || parts[0] != "r1" {
             return Err("INVALID_CURSOR".into());
         }
-        let payload = URL_SAFE_NO_PAD.decode(parts[1]).map_err(|_| "INVALID_CURSOR")?;
-        let provided = URL_SAFE_NO_PAD.decode(parts[2]).map_err(|_| "INVALID_CURSOR")?;
+        let payload = URL_SAFE_NO_PAD
+            .decode(parts[1])
+            .map_err(|_| "INVALID_CURSOR")?;
+        let provided = URL_SAFE_NO_PAD
+            .decode(parts[2])
+            .map_err(|_| "INVALID_CURSOR")?;
         let expected = mac(key, &payload)?;
         if provided.len() != expected.len() {
             return Err("INVALID_CURSOR".into());
@@ -115,12 +119,19 @@ mod tests {
         let text = cursor.encode(&key).unwrap();
         let parsed = Cursor::decode(&text, &key).unwrap();
         assert_eq!(parsed.offset, 50);
-        parsed.matches("job", "root", "leaf", ResearchResultView::Trades).unwrap();
+        parsed
+            .matches("job", "root", "leaf", ResearchResultView::Trades)
+            .unwrap();
         assert_eq!(
-            parsed.matches("job", "root", "leaf", ResearchResultView::Equity).unwrap_err(),
+            parsed
+                .matches("job", "root", "leaf", ResearchResultView::Equity)
+                .unwrap_err(),
             "CURSOR_MISMATCH"
         );
-        assert_eq!(Cursor::decode(&text, &[18u8; 32]).unwrap_err(), "INVALID_CURSOR");
+        assert_eq!(
+            Cursor::decode(&text, &[18u8; 32]).unwrap_err(),
+            "INVALID_CURSOR"
+        );
         let mut forged = text.into_bytes();
         let last = forged.len() - 1;
         forged[last] = if forged[last] == b'A' { b'B' } else { b'A' };
