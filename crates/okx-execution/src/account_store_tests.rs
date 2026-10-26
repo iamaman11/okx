@@ -1054,6 +1054,22 @@ fn source_page_and_cursor_atomic() {
 /// Real child-process termination, not an in-process Error or orderly
 /// SQLite close. The Rust test binary is reused as the child; no new binary,
 /// runner, service, or venue dependency.
+fn k5_f7_fixture_fill() -> Fill {
+    Fill {
+        side: "buy".into(),
+        fill_id: "fill-f7".into(),
+        instrument_id: "BTC-USDT-SWAP".into(),
+        trade_id: "trade-f7".into(),
+        exchange_order_id: "order-f7".into(),
+        intent_id: Some("intent".into()),
+        time: 4,
+        qty: Decimal::ONE,
+        price: Decimal::from(100),
+        fee: Decimal::new(-10, 2),
+        currency: "USDT".into(),
+    }
+}
+
 #[test]
 fn k5_child_hard_exit_at_native_claim() {
     let Ok(path) = std::env::var("OKX_K5_CHILD_SQL_PATH") else {
@@ -1065,6 +1081,29 @@ fn k5_child_hard_exit_at_native_claim() {
     let mut store = AccountStore::open_existing(path, &account, &installation).unwrap();
     match phase.as_str() {
         "F0" | "F1" | "F2" | "F3" | "F4" | "F8" => {}
+        "F7" => {
+            let fill = k5_f7_fixture_fill();
+            let tx = store
+                .connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .unwrap();
+            tx.execute(
+                "INSERT INTO fills VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+                params![
+                    fill.fill_id, fill.instrument_id, fill.trade_id,
+                    fill.exchange_order_id, fill.intent_id, fill.time,
+                    exact(fill.qty), exact(fill.price), exact(fill.fee),
+                    fill.currency, fill.side
+                ],
+            )
+            .unwrap();
+            tx.execute(
+                "INSERT INTO fill_projection_pending VALUES(?1,?2)",
+                params!["fill-f7", "buy"],
+            )
+            .unwrap();
+            tx.commit().unwrap();
+        }
         "F5" | "F6" => {
             assert!(store.begin_post("intent", 1, 4).unwrap());
             if phase == "F6" {
@@ -1094,10 +1133,10 @@ fn k5_child_hard_exit_at_native_claim() {
 }
 
 #[test]
-fn k5_real_os_kill_f0_f1_f2_f3_f4_f5_f6_f8_never_reposts() {
+fn k5_real_os_kill_f0_through_f8_never_reposts_or_duplicates_finance() {
     // Same Rust binary and exact mounted test DB across the process boundary.
     // The child is deliberately not allowed to connect to OKX or RiskBook.
-    for phase in ["F0", "F1", "F2", "F3", "F4", "F5", "F6", "F8"] {
+    for phase in ["F0", "F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8"] {
         let mut store = store();
         let original = if phase == "F0" {
             None
@@ -1172,6 +1211,50 @@ fn k5_real_os_kill_f0_f1_f2_f3_f4_f5_f6_f8_never_reposts() {
             saved.client_order_id,
             original.as_ref().unwrap().client_order_id
         );
+        if phase == "F7" {
+            let pending_before: i64 = recovered
+                .connection
+                .query_row(
+                    "SELECT count(*) FROM fill_projection_pending WHERE fill_id='fill-f7'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(pending_before, 1, "raw fact+pending persisted across OS kill");
+            assert!(recovered.active_lots("BTC-USDT-SWAP").unwrap().is_empty());
+            for _ in 0..2 {
+                recovered
+                    .ingest_attributed_fill(
+                        k5_f7_fixture_fill(),
+                        FillEffect::Open { side: "long".into() },
+                        None,
+                    )
+                    .unwrap();
+            }
+            let pending_after: i64 = recovered
+                .connection
+                .query_row(
+                    "SELECT count(*) FROM fill_projection_pending WHERE fill_id='fill-f7'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(pending_after, 0, "native projection complete");
+            let lots = recovered.active_lots("BTC-USDT-SWAP").unwrap();
+            assert_eq!(lots.len(), 1, "replay never doubles the position");
+            assert_eq!(lots[0].remaining_qty, Decimal::ONE);
+            assert_eq!(
+                recovered
+                    .finance_totals(1, 10, None)
+                    .unwrap()
+                    .get(&("USDT".into(), "FEE".into()))
+                    .copied(),
+                Some(Decimal::new(-10, 2)),
+                "fee recovered once even when raw fill was committed before crash"
+            );
+            assert!(!venue_log.exists(), "reconciliation must never resend F7");
+            continue;
+        }
         if matches!(phase, "F5" | "F6") {
             assert_eq!(saved.state, IntentState::Posting);
             assert_eq!(recovered.recover_posting(5).unwrap(), 1);
