@@ -43,12 +43,19 @@ pub async fn portfolio(
     let from = i64::try_from(request.start_ms).map_err(|_| "RANGE_OVERFLOW")?;
     let through = i64::try_from(request.end_ms).map_err(|_| "RANGE_OVERFLOW")?;
     let mut keys = BTreeSet::new();
+    let mut missing = BTreeSet::new();
     let mut resolved = Vec::new();
     for account in &request.accounts {
-        let r = accounts
-            .resolve(account)
-            .await
-            .ok_or("ACCOUNT_UNAVAILABLE")?;
+        let Some(r) = accounts.resolve(account).await else {
+            if request.action == PortfolioAction::History {
+                // History must never advance a cursor past an unread account.
+                return Err("ACCOUNT_UNAVAILABLE".into());
+            }
+            if !missing.insert(account.clone()) {
+                return Err("DUPLICATE_ACCOUNT".into());
+            }
+            continue;
+        };
         let key = r.configuration.account_key.wire();
         if !keys.insert(key.clone()) {
             return Err("DUPLICATE_ACCOUNT".into());
@@ -58,6 +65,7 @@ pub async fn portfolio(
     resolved.sort_by(|a, b| a.0.cmp(&b.0));
     let query = hash(&(
         keys,
+        &missing,
         from,
         through,
         &request.strategies,
@@ -94,7 +102,17 @@ pub async fn portfolio(
     let mut attribution: BTreeMap<(String, String, Option<String>, String, String), Decimal> =
         BTreeMap::new();
     let mut account_names = BTreeMap::new();
-    let mut readiness = Vec::new();
+    let mut readiness = missing
+        .into_iter()
+        .map(|requested| {
+            json!({
+                "account_requested":requested,
+                "quality":"unavailable",
+                "reason":"ACCOUNT_UNAVAILABLE",
+                "financial_risk":null
+            })
+        })
+        .collect::<Vec<_>>();
     let mut navigation = Vec::new();
     for (key, r) in resolved {
         let environment = match r.configuration.account_key.environment {
@@ -139,8 +157,22 @@ pub async fn portfolio(
                     ))
                 }
             })
-            .await
-            .map_err(|e| e.to_string())?;
+            .await;
+        let page = match page {
+            Ok(page) => page,
+            Err(err) if !history => {
+                readiness.push(json!({
+                    "account":key,
+                    "account_name":alias,
+                    "quality":"unavailable",
+                    "reason":"ACCOUNT_SQL_READ_FAILED",
+                    "error":err.to_string(),
+                    "financial_risk":null
+                }));
+                continue;
+            }
+            Err(err) => return Err(err.to_string()),
+        };
         for nav in page.3 {
             navigation.push(nav_projection(&key, &alias, nav, from, through, page.4));
         }
@@ -646,6 +678,24 @@ mod tests {
             "window":{"coverage":"UNAVAILABLE_BEFORE_T0"}
         })];
         assert!(!summary_is_complete(&readiness, &navigation, true, true));
+    }
+
+    #[test]
+    fn unavailable_account_cannot_be_misreported_as_zero_or_complete() {
+        let readiness = vec![
+            json!({"account":"okx:real:healthy","financial_risk":{"nav_complete":true}}),
+            json!({"account_requested":"offline","quality":"unavailable","reason":"ACCOUNT_UNAVAILABLE","financial_risk":null}),
+        ];
+        let navigation = vec![json!({
+            "kind":"nav",
+            "account":"okx:real:healthy",
+            "window":{"coverage":"COMPLETE"}
+        })];
+        assert!(!summary_is_complete(&readiness, &navigation, true, true));
+        let diagnostics = summary_diagnostics(readiness, &navigation, None);
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0]["reason"], "ACCOUNT_UNAVAILABLE");
+        assert!(diagnostics[0]["financial_risk"].is_null());
     }
 
     #[test]
