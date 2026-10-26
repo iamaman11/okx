@@ -8,12 +8,14 @@ pub struct CpuExecutor {
     cpu: Arc<Semaphore>,
     queue: Arc<Semaphore>,
 }
+fn cpu_worker_budget(logical_cores: usize) -> usize {
+    logical_cores.saturating_sub(2).max(1)
+}
 impl Default for CpuExecutor {
     fn default() -> Self {
-        let n = std::thread::available_parallelism()
-            .map_or(1, |n| n.get())
-            .saturating_sub(1)
-            .clamp(1, 4);
+        let n = cpu_worker_budget(
+            std::thread::available_parallelism().map_or(1, |n| n.get()),
+        );
         Self {
             cpu: Arc::new(Semaphore::new(n)),
             queue: Arc::new(Semaphore::new(32)),
@@ -78,6 +80,13 @@ mod tests {
         })
         .await
         .unwrap();
+    }
+    #[test]
+    fn k9_worker_budget_reserves_two_cores_without_four_core_ceiling() {
+        assert_eq!(cpu_worker_budget(1), 1);
+        assert_eq!(cpu_worker_budget(2), 1);
+        assert_eq!(cpu_worker_budget(8), 6);
+        assert_eq!(cpu_worker_budget(16), 14);
     }
     #[tokio::test]
     async fn cancel_releases_queue_capacity() {

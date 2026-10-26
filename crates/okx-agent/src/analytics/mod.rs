@@ -626,11 +626,15 @@ impl AnalyticsService {
         let this = self.clone();
         tokio::spawn(async move {
             let outcome = async {
-                let _heavy = this
-                    .heavy
-                    .clone()
-                    .try_acquire_owned()
-                    .map_err(|_| "HEAVY_JOBS_LIMIT:2")?;
+                // Bounded SQL admission happens at submit. Accepted queued
+                // jobs wait for an existing heavy permit instead of becoming
+                // FAILED because two other research jobs are in progress.
+                let _heavy = tokio::select! {
+                    result = this.heavy.clone().acquire_owned() =>
+                        result.map_err(|_| "ANALYTICS_QUEUE_CLOSED")?,
+                    _ = executor::cancelled(cancel.clone()) =>
+                        return Err("CANCELLED".into()),
+                };
                 this.jobs.update_async(hash.clone(), jobs::State::Running, None, None).await?;
                 let instruments = match &request { ResearchRequest::Backtest{instruments,..}|ResearchRequest::Grid{instruments,..}=>instruments.clone(),_=>unreachable!() };
                 if instruments.len()==1 { return this.execute_one(request,cancel.clone()).await; }

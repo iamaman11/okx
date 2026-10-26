@@ -174,6 +174,22 @@ impl Jobs {
             return Err("IDEMPOTENCY_CONFLICT".into());
         }
         let existing = Self::read(&tx, &hash)?;
+        // One SQL transaction owns the bounded research/market admission.
+        // Duplicate idempotent submissions do not consume new queue slots.
+        if existing.is_none() || existing.as_ref().is_some_and(|j| {
+            j.state == State::Failed && is_transient_rate_defer(j.error.as_deref())
+        }) {
+            let admitted: i64 = tx
+                .query_row(
+                    "SELECT COUNT(*) FROM research_jobs WHERE state IN ('queued','running')",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(|e| e.to_string())?;
+            if admitted >= 34 {
+                return Err("RESOURCE_BUSY:RESEARCH_QUEUE_FULL".into());
+            }
+        }
         let is_new = if let Some(job) = &existing {
             if job.state == State::Failed && is_transient_rate_defer(job.error.as_deref()) {
                 tx.execute(
