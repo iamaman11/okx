@@ -95,10 +95,18 @@ fn replay_with_hash(
     if bars.len() > 1_000_000 {
         return Err("LIMIT_BARS:1000000".into());
     }
+    // Warm-up belongs to the strategy kernel, not to unrelated EMA
+    // parameters that are also carried by a generic replay specification.
+    let required_warmup = match spec.strategy_id.as_str() {
+        "close_momentum" => 1,
+        "two_bar_momentum" => 2,
+        "no_trade" => 0,
+        _ => spec.parameters.slow,
+    };
     if spec.timeframe_ms == 0
         || score_end > bars.len()
         || score_start >= score_end
-        || score_start < spec.parameters.slow
+        || score_start < required_warmup
     {
         return Err("INVALID_SCORE_RANGE_OR_WARMUP".into());
     }
@@ -314,12 +322,16 @@ fn replay_with_hash(
 pub struct GridCandidate {
     pub parameters: EmaParameters,
     pub train: Summary,
+    /// Stable train-only replay evidence; changes to the holdout cannot
+    /// modify this hash or the candidate's selection score.
+    pub train_result_hash: String,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GridResult {
     pub variants: Vec<GridCandidate>,
     pub selected: EmaParameters,
     pub split_index: usize,
+    pub train_dataset_hash: String,
     pub train: Summary,
     pub test: ReplayResult,
     pub selection_warning: String,
@@ -336,8 +348,13 @@ pub fn grid(
     if bars.len() > 1_000_000 {
         return Err("LIMIT_BARS:1000000".into());
     }
-    let dataset_hash = hash_chunks(bars, cancel)?;
     let split = bars.len() * 7 / 10;
+    if variants.iter().any(|p| p.slow >= split) {
+        return Err("INSUFFICIENT_TRAIN_BARS".into());
+    }
+    // Never feed holdout observations into training identities or scores.
+    let train_dataset_hash = hash_chunks(&bars[..split], cancel)?;
+    let dataset_hash = hash_chunks(bars, cancel)?;
     let mut best: Option<(EmaParameters, Summary)> = None;
     let mut candidates = Vec::with_capacity(variants.len());
     for p in variants {
@@ -346,14 +363,19 @@ pub fn grid(
         }
         let mut s = spec.clone();
         s.parameters = *p;
-        let r = replay_with_hash(bars, &s, p.slow, split, cancel, Some(&dataset_hash))?;
+        let r = replay_with_hash(bars, &s, p.slow, split, cancel, Some(&train_dataset_hash))?;
         candidates.push(GridCandidate {
             parameters: *p,
             train: r.summary.clone(),
+            train_result_hash: r.hash.clone(),
         });
-        if best.as_ref().is_none_or(|(_, b)| {
+        // Stable tie-break independent of the user's variant iteration order.
+        if best.as_ref().is_none_or(|(prior, b)| {
             r.summary.sharpe > b.sharpe
-                || (r.summary.sharpe == b.sharpe && r.summary.turnover < b.turnover)
+                || (r.summary.sharpe == b.sharpe
+                    && (r.summary.turnover < b.turnover
+                        || (r.summary.turnover == b.turnover
+                            && (p.fast, p.slow) < (prior.fast, prior.slow))))
         }) {
             best = Some((*p, r.summary));
         }
@@ -366,6 +388,7 @@ pub fn grid(
         variants: candidates,
         selected: p,
         split_index: split,
+        train_dataset_hash,
         train,
         test,
         selection_warning:
