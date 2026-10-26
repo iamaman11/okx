@@ -123,6 +123,53 @@ impl NativeRiskCensus {
             })
     }
 }
+/// A native observation performed after the authenticated HELD response.
+/// Ticks are relative to the receipt on one process incarnation, never epoch time.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PostAccountReadProof {
+    pub account_key: String,
+    pub private_generation: u64,
+    pub source_read_id: String,
+    pub content_digest: String,
+    pub started_after_held_ms: u64,
+    pub completed_after_held_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CausalPostProof {
+    /// Exact central reservation identity, whose creation time only Worker knows.
+    pub reserve_anchor: String,
+    pub native_incarnation: String,
+    pub elapsed_to_proof_ms: u64,
+    pub account_reads: Vec<PostAccountReadProof>,
+}
+impl CausalPostProof {
+    pub fn valid(&self, census: &NativeRiskCensus) -> bool {
+        !self.reserve_anchor.is_empty()
+            && self.reserve_anchor.len() <= 512
+            && self.native_incarnation.len() == 32
+            && self
+                .native_incarnation
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            && self.elapsed_to_proof_ms <= 5_000
+            && self.account_reads.len() == census.account_keys.len()
+            && self
+                .account_reads
+                .iter()
+                .zip(&census.account_keys)
+                .all(|(read, account)| {
+                    &read.account_key == account
+                        && read.private_generation > 0
+                        && hash(&read.source_read_id)
+                        && hash(&read.content_digest)
+                        && read.started_after_held_ms <= read.completed_after_held_ms
+                        && read.completed_after_held_ms <= self.elapsed_to_proof_ms
+                })
+    }
+}
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum RiskResolution {
@@ -175,6 +222,7 @@ pub enum RiskCommandAction {
         expected_risk_book_sequence: u64,
         source_proof_sha256: String,
         census: NativeRiskCensus,
+        causal_proof: CausalPostProof,
     },
     Resolve {
         reservation_key: String,
@@ -257,6 +305,7 @@ impl RiskCommand {
                 expected_risk_book_sequence,
                 source_proof_sha256,
                 census,
+                causal_proof,
             } => {
                 !reservation_key.is_empty()
                     && reservation_key.len() <= 512
@@ -265,6 +314,8 @@ impl RiskCommand {
                     && *expected_risk_book_sequence > 0
                     && hash(source_proof_sha256)
                     && census.valid()
+                    && causal_proof.valid(census)
+                    && causal_proof.reserve_anchor == *reservation_key
             }
             RiskCommandAction::Resolve {
                 reservation_key,
