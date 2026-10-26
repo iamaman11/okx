@@ -81,7 +81,7 @@ impl Cursor {
         let difference = provided
             .iter()
             .zip(expected)
-            .fold(0u8, |diff, (left, right)| diff | left ^ right);
+            .fold(0u8, |diff, (left, right)| diff | (*left ^ right));
         if difference != 0 {
             return Err("INVALID_CURSOR".into());
         }

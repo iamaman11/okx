@@ -1499,7 +1499,7 @@ mod artifact_job_fixtures {
             .unwrap();
         service
             .jobs
-            .update(&id, jobs::State::Completed, Some(manifest), None)
+            .update(&id, jobs::State::Completed, Some(manifest.clone()), None)
             .unwrap();
         let err = service
             .result_page(id.clone(), None, 5, ResearchResultView::Trades)
@@ -1560,7 +1560,7 @@ mod artifact_job_fixtures {
             .enqueue("fixture-request".into(), id.clone())
             .unwrap();
         s.jobs
-            .update(&id, jobs::State::Completed, Some(artifact), None)
+            .update(&id, jobs::State::Completed, Some(artifact.clone()), None)
             .unwrap();
         let page = s
             .research(ResearchRequest::Result {
