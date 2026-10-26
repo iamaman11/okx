@@ -38,7 +38,7 @@ impl AnalysisPlan {
             .sort
             .as_ref()
             .map(|s| {
-                Ok(Rank {
+                Ok::<Rank, String>(Rank {
                     operator: parse(&s.field)?,
                     descending: s.descending,
                 })
