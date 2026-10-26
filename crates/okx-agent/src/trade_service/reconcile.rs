@@ -948,6 +948,7 @@ impl TradeService {
                 order_type: "ioc".into(),
                 limit_price: None,
                 reference: None,
+                max_entry_usd: None,
                 max_slippage_bps: 10,
             },
             protection: None,

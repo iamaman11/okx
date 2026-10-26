@@ -69,6 +69,10 @@ pub struct AccountLimits {
     pub max_modelled_loss_usdt: String,
     pub max_order_loss_usdt: String,
     pub max_notional_usdt: Option<String>,
+    /// Fee-inclusive USD entry ceiling for risk increase, independent of loss and USDT notional.
+    /// Older policy snapshots omit this and native Real risk admission fails closed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_entry_usd: Option<String>,
     pub max_leverage: Option<String>,
     pub max_daily_realized_loss_usdt: Option<String>,
     pub max_drawdown_ratio: Option<String>,
@@ -85,6 +89,7 @@ impl AccountLimits {
         };
         account >= order
             && optional_positive(&self.max_notional_usdt)
+            && optional_positive(&self.max_entry_usd)
             && optional_positive(&self.max_leverage)
             && optional_positive(&self.max_daily_realized_loss_usdt)
             && ratio(&self.max_drawdown_ratio)

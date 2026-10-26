@@ -477,6 +477,7 @@ impl TradeService {
                     order_type: "fok".into(),
                     limit_price: None,
                     reference: None,
+                    max_entry_usd: None,
                     max_slippage_bps: 5,
                 },
                 protection: Some(Protection::Distance {
