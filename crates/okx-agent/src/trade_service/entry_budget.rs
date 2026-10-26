@@ -194,11 +194,23 @@ mod tests {
             enforced_entry_ceiling(true, true, None, Some(d("10"))).unwrap_err(),
             "ACCOUNT_ENTRY_CAP_UNCONFIGURED"
         );
-        assert_eq!(enforced_entry_ceiling(true, true, Some(d("10")), None).unwrap(), Some(d("10")));
-        assert_eq!(enforced_entry_ceiling(true, true, Some(d("10")), Some(d("8"))).unwrap(), Some(d("8")));
-        assert_eq!(enforced_entry_ceiling(true, true, Some(d("8")), Some(d("10"))).unwrap(), Some(d("8")));
+        assert_eq!(
+            enforced_entry_ceiling(true, true, Some(d("10")), None).unwrap(),
+            Some(d("10"))
+        );
+        assert_eq!(
+            enforced_entry_ceiling(true, true, Some(d("10")), Some(d("8"))).unwrap(),
+            Some(d("8"))
+        );
+        assert_eq!(
+            enforced_entry_ceiling(true, true, Some(d("8")), Some(d("10"))).unwrap(),
+            Some(d("8"))
+        );
         assert_eq!(enforced_entry_ceiling(false, true, None, None).unwrap(), None);
-        assert_eq!(enforced_entry_ceiling(true, false, None, Some(d("10"))).unwrap(), Some(d("10")));
+        assert_eq!(
+            enforced_entry_ceiling(true, false, None, Some(d("10"))).unwrap(),
+            Some(d("10"))
+        );
     }
     #[test]
     fn k6_v01_fee_inclusive_max_entry_and_minimum() {

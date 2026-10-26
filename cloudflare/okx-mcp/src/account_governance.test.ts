@@ -20,6 +20,10 @@ yes(Object.keys(projectRiskPolicy(paused)!.account_limits_usdt).length===1,"disa
 const change={expected_revision:1,max_total_modelled_loss_usdt:"4",accounts:[{...account,limits:{...limits,max_modelled_loss_usdt:"4"}}]};
 const revised=reviseGovernance(policy,change);
 yes(revised!==null&&revised.revision===2&&revised.accounts[0].policy_revision===2,"policy CAS is atomic");
+const capChange={...change,accounts:[{...account,limits:{...limits,max_modelled_loss_usdt:"4",max_entry_usd:"10"}}]};
+const capped=reviseGovernance(policy,capChange);
+yes(capped!==null&&capped.accounts[0].limits.max_entry_usd==="10"&&capped.revision===2,"account entry cap applies through existing revision CAS");
+yes(reviseGovernance(capped!,capChange)===null,"entry cap cannot be changed by stale policy revision");
 yes(reviseGovernance(revised!,change)===null,"stale limits do not overwrite policy");
 yes(reviseGovernance(policy,{...change,accounts:[]})===null,"cannot remove exposure through configuration");
 yes(reviseGovernance(policy,{...change,accounts:[{...account,limits:{...limits,max_order_loss_usdt:"6"}}]})===null,"per order bounds");
