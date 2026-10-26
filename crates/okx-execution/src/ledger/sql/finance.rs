@@ -437,6 +437,17 @@ impl AccountStore {
         })
         .collect()
     }
+    /// Cheap monotonic revision for the append-only, immutable finance log.
+    /// Includes late event-time arrivals. MAX(rowid) uses the table btree,
+    /// avoiding a full historical scan on every history page.
+    pub fn finance_revision(&self) -> StoreResult<i64> {
+        Ok(self.connection.query_row(
+            "SELECT COALESCE(MAX(rowid),0) FROM finance_entries",
+            [],
+            |r| r.get(0),
+        )?)
+    }
+
     /// Exact per-instance economic facts from the canonical account ledger.
     /// None means the account's unattributed leg, not a second copy of money.
     pub fn finance_attribution_filtered(

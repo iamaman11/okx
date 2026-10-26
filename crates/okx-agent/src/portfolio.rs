@@ -51,7 +51,7 @@ fn summary_snapshot(
     hash(&(query, rows, sources, central_budget_available))
 }
 
-fn require_summary_snapshot(cursor: Option<&Cursor>, snapshot: &str) -> Result<(), String> {
+fn require_cursor_snapshot(cursor: Option<&Cursor>, snapshot: &str) -> Result<(), String> {
     if cursor.is_some_and(|c| c.snapshot.as_deref() != Some(snapshot)) {
         return Err("CURSOR_SNAPSHOT_CHANGED".into());
     }
@@ -125,6 +125,7 @@ pub async fn portfolio(
     let mut attribution: BTreeMap<(String, String, Option<String>, String, String), Decimal> =
         BTreeMap::new();
     let mut account_names = BTreeMap::new();
+    let mut finance_revisions = BTreeMap::new();
     let mut readiness = missing
         .into_iter()
         .map(|requested| {
@@ -169,6 +170,7 @@ pub async fn portfolio(
                         health,
                         Vec::new(),
                         s.meta().initialized_at,
+                        s.finance_revision()?,
                     ))
                 } else {
                     Ok((
@@ -177,6 +179,7 @@ pub async fn portfolio(
                         health,
                         s.nav_summary(from, through, &instances, &currencies)?,
                         s.meta().initialized_at,
+                        s.finance_revision()?,
                     ))
                 }
             })
@@ -196,6 +199,7 @@ pub async fn portfolio(
             }
             Err(err) => return Err(err.to_string()),
         };
+        finance_revisions.insert(key.clone(), page.5);
         for nav in page.3 {
             navigation.push(nav_projection(&key, &alias, nav, from, through, page.4));
         }
@@ -207,6 +211,8 @@ pub async fn portfolio(
         accumulate_finance(&key, environment, page.1, &mut totals, &mut attribution)?;
     }
     if request.action == PortfolioAction::History {
+        let history_snapshot = hash(&(query.as_str(), &finance_revisions))?;
+        require_cursor_snapshot(cursor.as_ref(), &history_snapshot)?;
         rows.sort_by(|a, b| (&a.0, &a.1, &a.2).cmp(&(&b.0, &b.1, &b.2)));
         let more = rows.len() > usize::from(request.limit).min(50);
         rows.truncate(usize::from(request.limit).min(50));
@@ -229,7 +235,7 @@ pub async fn portfolio(
                 time,
                 account,
                 id,
-                snapshot: None,
+                snapshot: Some(history_snapshot.clone()),
             });
             output.push(value);
         }
@@ -266,7 +272,7 @@ pub async fn portfolio(
         if cursor.as_ref().is_some_and(|c| c.account != "summary") {
             return Err("INVALID_CURSOR".into());
         }
-        require_summary_snapshot(cursor.as_ref(), &snapshot)?;
+        require_cursor_snapshot(cursor.as_ref(), &snapshot)?;
         let last_id = cursor.as_ref().map(|c| c.id.as_str()).unwrap_or("");
         let mut ordered = all
             .into_iter()
@@ -765,17 +771,17 @@ mod tests {
             id: "component|real|USD|REALIZED_PNL".into(),
             snapshot: Some(snapshot.clone()),
         };
-        require_summary_snapshot(Some(&cursor), &snapshot).unwrap();
+        require_cursor_snapshot(Some(&cursor), &snapshot).unwrap();
         let changed = vec![json!({"kind":"component","amount":"15"})];
         let updated = summary_snapshot("request", &changed, &available, true).unwrap();
         assert_eq!(
-            require_summary_snapshot(Some(&cursor), &updated),
+            require_cursor_snapshot(Some(&cursor), &updated),
             Err("CURSOR_SNAPSHOT_CHANGED".into())
         );
         let missing = vec![json!({"account_requested":"a","reason":"ACCOUNT_UNAVAILABLE"})];
         let unavailable = summary_snapshot("request", &base, &missing, true).unwrap();
         assert_eq!(
-            require_summary_snapshot(Some(&cursor), &unavailable),
+            require_cursor_snapshot(Some(&cursor), &unavailable),
             Err("CURSOR_SNAPSHOT_CHANGED".into())
         );
         let old_token = Cursor {
@@ -783,9 +789,53 @@ mod tests {
             ..cursor
         };
         assert_eq!(
-            require_summary_snapshot(Some(&old_token), &snapshot),
+            require_cursor_snapshot(Some(&old_token), &snapshot),
             Err("CURSOR_SNAPSHOT_CHANGED".into())
         );
+    }
+
+    #[test]
+    fn late_backfilled_finance_invalidates_history_cursor_without_full_scan() {
+        let mut a = store("okx:real:a");
+        let b = store("okx:real:b");
+        let mut revisions = BTreeMap::from([
+            ("okx:real:a".to_owned(), a.finance_revision().unwrap()),
+            ("okx:real:b".to_owned(), b.finance_revision().unwrap()),
+        ]);
+        let original = hash(&("request", &revisions)).unwrap();
+        let cursor = Cursor {
+            query: "request".into(),
+            time: 10,
+            account: "okx:real:a".into(),
+            id: "b".into(),
+            snapshot: Some(original.clone()),
+        };
+        require_cursor_snapshot(Some(&cursor), &original).unwrap();
+        let mut page = IngestPage::default();
+        page.finance.push(FinanceEntry {
+            entry_id: "late-arrival".into(),
+            economic_event_key: "late-arrival".into(),
+            component: "FEE".into(),
+            allocation_leg: "account".into(),
+            amount: -Decimal::ONE,
+            currency: "USD".into(),
+            instance_id: None,
+            source_ref: "venue-backfill".into(),
+            time: 9,
+            reverses_entry_id: None,
+        });
+        a.ingest_page(&page).unwrap();
+        revisions.insert("okx:real:a".into(), a.finance_revision().unwrap());
+        let updated = hash(&("request", &revisions)).unwrap();
+        assert_eq!(
+            require_cursor_snapshot(Some(&cursor), &updated),
+            Err("CURSOR_SNAPSHOT_CHANGED".into())
+        );
+        // Replaying the same immutable economic fact is not a new revision.
+        let before_replay = a.finance_revision().unwrap();
+        a.ingest_page(&page).unwrap();
+        assert_eq!(a.finance_revision().unwrap(), before_replay);
+        assert_eq!(b.finance_revision().unwrap(), revisions["okx:real:b"]);
     }
 
     #[test]
