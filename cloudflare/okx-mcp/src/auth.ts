@@ -5,6 +5,7 @@ import {
   sameHex,
   sha256Hex,
   TOOL_CONTRACT_VERSION,
+  workerReleaseSourceTree,
 } from "./shared.js";
 
 const AUTH_CSRF_TTL_MS = 5 * 60 * 1000;
@@ -120,6 +121,7 @@ export const defaultHandler = {
         status: "ok",
         service: "okx-cloudflare-mcp",
         tool_contract_version: TOOL_CONTRACT_VERSION,
+        release_source_tree: workerReleaseSourceTree(env),
       });
     }
 

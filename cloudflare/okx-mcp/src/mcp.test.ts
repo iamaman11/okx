@@ -85,8 +85,8 @@ const budgetResult=budget.result.structuredContent;
 if(budgetResult.status!=='failed'||budgetResult.reason_code!=='RESPONSE_TOO_LARGE'||budgetResult.data.response_budget_bytes!==12_288||budgetResult.data.response_bytes<=12_288)throw Error('oversized native result must terminalize as bounded MCP failure');
 
 const nativeResponse=(response:unknown):any=>({RUNTIME:{idFromName:()=>0,get:()=>({fetch:async()=>Response.json(response)})}});
-const mcpResponse=async(tool:string,args:unknown,response:unknown):Promise<any>=>{
- const env=nativeResponse(response);
+const mcpResponse=async(tool:string,args:unknown,response:unknown,releaseTree?:string):Promise<any>=>{
+ const env={...nativeResponse(response),RELEASE_SOURCE_TREE:releaseTree};
  const reply:any=await(await mcpApi.fetch(new Request('https://fixture/mcp',{method:'POST',
   body:JSON.stringify({jsonrpc:'2.0',id:99,method:'tools/call',params:publicArgs(tool,args)})}),env,ctx)).json();
  if(reply.error)throw Error(JSON.stringify(reply.error));
@@ -224,10 +224,11 @@ if(invalidNative.status!=='failed'||invalidNative.reason_code!=='INVALID_NATIVE_
 
 const healthyRuntime=await mcpResponse('diagnostics',{action:'runtime'},
  {schema:'okx.direct-transport.status/v1',status:'PASS',runtime_id:'windows-primary',
-  runtime_profile:'engine',connected:true,session_fresh:true,connection_generation:73});
+  runtime_profile:'engine',connected:true,session_fresh:true,connection_generation:73},'b'.repeat(40));
 if(healthyRuntime.status!=='completed'||healthyRuntime.data.schema!=='okx.runtime-status/v1'||
  healthyRuntime.data.transport.session_fresh!==true||healthyRuntime.data.transport.connection_generation!==73||
- typeof healthyRuntime.data.tool_contract!=='string')throw Error('runtime status must prove fresh session');
+ typeof healthyRuntime.data.tool_contract!=='string'||healthyRuntime.data.release_source_tree!=='b'.repeat(40))
+ throw Error('runtime must expose exact deployment source tree without claiming installed Windows proof');
 if(healthyRuntime.data.installation_verification.owner!=='WINDOWS_CONTROL'||
  healthyRuntime.data.installation_verification.worker_independent_proof!=='NOT_PERFORMED'||
  'release_attestation' in healthyRuntime.data)
@@ -237,7 +238,8 @@ const offlineRuntime=await mcpResponse('diagnostics',{action:'runtime'},
  {schema:'okx.direct-transport.status/v1',status:'OFFLINE',runtime_id:'windows-primary',
   connected:false,session_fresh:false});
 if(offlineRuntime.status!=='partial'||offlineRuntime.data.reason_code!=='RUNTIME_SESSION_NOT_FRESH'||
- offlineRuntime.data.transport.connected!==false)throw Error('offline session promoted to fresh');
+ offlineRuntime.data.transport.connected!==false||offlineRuntime.data.release_source_tree!==null)
+ throw Error('offline session promoted to fresh or invented deployment source tree');
 const corruptRuntime=await mcpResponse('diagnostics',{action:'runtime'},{status:'PASS'});
 if(corruptRuntime.status!=='failed'||corruptRuntime.reason_code!=='INVALID_RUNTIME_STATUS')
  throw Error('malformed runtime observation accepted');

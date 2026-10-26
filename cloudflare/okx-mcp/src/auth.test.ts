@@ -5,6 +5,14 @@ import {FRAME_SCHEMA} from './shared.js';
 class Storage{map=new Map();async get(k:string){return structuredClone(this.map.get(k));}async put(k:string,v:any){this.map.set(k,structuredClone(v));}async delete(keys:string[]){let n=0;for(const key of keys)if(this.map.delete(key))n++;return n;}async transaction(fn:any){const backup=structuredClone(this.map);try{return await fn(this);}catch(e){this.map=backup;throw e;}}}
 const storage=new Storage(),owner=new RuntimeSession({storage},{} as any);
 let calls=0;const env:any={MCP_OWNER_SECRET:'fixture_secret',RUNTIME:{idFromName:()=>0,get:()=>({fetch:(r:Request)=>{calls++;return owner.fetch(r);}})}};
+const releaseHealth:any=await(await defaultHandler.fetch(new Request('https://fixture/health'),
+ {...env,RELEASE_SOURCE_TREE:'a'.repeat(40)})).json();
+if(releaseHealth.status!=='ok'||releaseHealth.release_source_tree!=='a'.repeat(40))
+ throw Error('health must expose the exact Worker deploy source tree');
+const unboundHealth:any=await(await defaultHandler.fetch(new Request('https://fixture/health'),
+ {...env,RELEASE_SOURCE_TREE:'not-a-git-tree'})).json();
+if(unboundHealth.release_source_tree!==null)throw Error('health must not invent Worker provenance');
+console.log('health_worker_release_tree_readback PASS');
 const body={configuration:initial,operation_id:'initialize_0001',contract:FRAME_SCHEMA,release_sha256:'a'.repeat(64)};
 const req=(auth?:string,payload=body)=>new Request('https://fixture/installation/initialize',{method:'POST',headers:auth?{authorization:auth}:{},body:JSON.stringify(payload)});
 if((await defaultHandler.fetch(req(),env)).status!==401||calls!==0)throw Error('initialize must authenticate owner');
