@@ -50,9 +50,13 @@ fn verify_export_pages(
     count_key: &str,
     capacity: usize,
 ) -> Result<Option<Value>, String> {
-    let Some(ids) = manifest.get(refs_key) else { return Ok(None); };
+    let Some(ids) = manifest.get(refs_key) else {
+        return Ok(None);
+    };
     let pages = ids.as_array().ok_or("EXPORT_MANIFEST_INVALID")?;
-    let declared = manifest.get(count_key).and_then(Value::as_u64)
+    let declared = manifest
+        .get(count_key)
+        .and_then(Value::as_u64)
         .ok_or("EXPORT_MANIFEST_INVALID")?;
     if pages.len() as u64 > declared.div_ceil(capacity as u64) {
         return Err("EXPORT_ROW_COUNT_MISMATCH".into());
@@ -61,12 +65,15 @@ fn verify_export_pages(
     for (index, reference) in pages.iter().enumerate() {
         let id = reference.as_str().ok_or("EXPORT_MANIFEST_INVALID")?;
         let rows: Vec<Value> = read_verified_result(store, id)?;
-        if rows.is_empty() || rows.len() > capacity
+        if rows.is_empty()
+            || rows.len() > capacity
             || (index + 1 < pages.len() && rows.len() != capacity)
         {
             return Err("EXPORT_PAGE_SIZE_INVALID".into());
         }
-        count = count.checked_add(rows.len() as u64).ok_or("EXPORT_ROW_COUNT_MISMATCH")?;
+        count = count
+            .checked_add(rows.len() as u64)
+            .ok_or("EXPORT_ROW_COUNT_MISMATCH")?;
         if count > declared {
             return Err("EXPORT_ROW_COUNT_MISMATCH".into());
         }
@@ -87,7 +94,13 @@ fn verify_export_manifest(
 ) -> Result<Value, String> {
     let trades = verify_export_pages(store, manifest, "trade_pages", "total_trades", 50)?;
     let rows = verify_export_pages(store, manifest, "row_pages", "total_rows", 50)?;
-    let equity = verify_export_pages(store, manifest, "equity_curve_pages", "total_equity_points", 4096)?;
+    let equity = verify_export_pages(
+        store,
+        manifest,
+        "equity_curve_pages",
+        "total_equity_points",
+        4096,
+    )?;
     if trades.is_none() && rows.is_none() {
         return Err("EXPORT_MANIFEST_INVALID".into());
     }
@@ -1553,26 +1566,46 @@ mod artifact_job_fixtures {
         let second = vec![json!({"row":50})];
         let (page_a, path_a) = service.artifacts.publish_evidence(&first).unwrap();
         let page_b = service.artifacts.publish_evidence(&second).unwrap().0;
-        let equity = service.artifacts.publish_evidence(&vec![(1, 100.0),(2, 101.0)]).unwrap().0;
-        let manifest = service.artifacts.publish_evidence(&json!({
-            "trade_pages":[page_a,page_b],"total_trades":51,
-            "equity_curve_pages":[equity],"total_equity_points":2,
-            "dataset_hash":"fixture-dataset","code_version":"fixture"
-        })).unwrap().0;
+        let equity = service
+            .artifacts
+            .publish_evidence(&vec![(1, 100.0), (2, 101.0)])
+            .unwrap()
+            .0;
+        let manifest = service
+            .artifacts
+            .publish_evidence(&json!({
+                "trade_pages":[page_a,page_b],"total_trades":51,
+                "equity_curve_pages":[equity],"total_equity_points":2,
+                "dataset_hash":"fixture-dataset","code_version":"fixture"
+            }))
+            .unwrap()
+            .0;
         let job = "9".repeat(64);
-        service.jobs.enqueue("c17-export".into(), job.clone()).unwrap();
-        service.jobs.update(&job, jobs::State::Completed, Some(manifest), None).unwrap();
-        let receipt = service.result_page(job.clone(), None, 20, ResearchResultView::Export).unwrap();
+        service
+            .jobs
+            .enqueue("c17-export".into(), job.clone())
+            .unwrap();
+        service
+            .jobs
+            .update(&job, jobs::State::Completed, Some(manifest), None)
+            .unwrap();
+        let receipt = service
+            .result_page(job.clone(), None, 20, ResearchResultView::Export)
+            .unwrap();
         assert_eq!(receipt["integrity"]["quality"], "complete");
         assert_eq!(receipt["integrity"]["trades"]["rows"], 51);
         assert_eq!(receipt["integrity"]["trades"]["pages"], 2);
         assert_eq!(receipt["integrity"]["equity"]["rows"], 2);
         assert_eq!(receipt["dataset_hash"], "fixture-dataset");
-        let data = service.result_page(job.clone(), None, 50, ResearchResultView::Trades).unwrap();
+        let data = service
+            .result_page(job.clone(), None, 50, ResearchResultView::Trades)
+            .unwrap();
         assert_eq!(data["rows"].as_array().unwrap().len(), 50);
         std::fs::write(path_a, b"tampered-page").unwrap();
         assert_eq!(
-            service.result_page(job, None, 20, ResearchResultView::Export).unwrap_err(),
+            service
+                .result_page(job, None, 20, ResearchResultView::Export)
+                .unwrap_err(),
             "ARTIFACT_CORRUPT"
         );
         drop(service);
@@ -1582,7 +1615,11 @@ mod artifact_job_fixtures {
     #[test]
     fn c17_export_does_not_claim_complete_on_count_mismatch() {
         let (root, service) = super::artifact_job_fixtures::service();
-        let page = service.artifacts.publish_evidence(&vec![json!({"row":1})]).unwrap().0;
+        let page = service
+            .artifacts
+            .publish_evidence(&vec![json!({"row":1})])
+            .unwrap()
+            .0;
         let manifest = json!({"trade_pages":[page],"total_trades":2});
         assert_eq!(
             verify_export_manifest(&service.artifacts, &manifest).unwrap_err(),
