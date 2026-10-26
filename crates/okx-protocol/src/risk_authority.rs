@@ -334,11 +334,10 @@ impl RiskCommand {
             RiskCommandAction::ReleaseUnsent {
                 reservation_key,
                 plan_sha256,
-                expected_risk_book_sequence,
+                expected_risk_book_sequence: _,
                 proof,
             } => {
-                *expected_risk_book_sequence > 0
-                    && hash(plan_sha256)
+                hash(plan_sha256)
                     && proof.valid()
                     && proof.reservation_key == *reservation_key
                     && proof.plan_hash == *plan_sha256
