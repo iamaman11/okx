@@ -104,6 +104,13 @@ impl Jobs {
                     cancel_key TEXT PRIMARY KEY,
                     job_id TEXT NOT NULL REFERENCES research_jobs(id)
                  ) STRICT;
+                 CREATE TABLE IF NOT EXISTS research_cursor_signing (
+                    name TEXT PRIMARY KEY,
+                    key BLOB NOT NULL CHECK(length(key)=32)
+                 ) STRICT;
+                 INSERT INTO research_cursor_signing(name,key)
+                    VALUES('research-result-v1',randomblob(32))
+                    ON CONFLICT(name) DO NOTHING;
                  UPDATE research_jobs
                     SET state='interrupted',error='process restarted before completion'
                     WHERE state IN('queued','running');",
@@ -226,6 +233,18 @@ impl Jobs {
         };
         Ok((job, is_new, token))
     }
+    /// Persisted per-catalog cursor authenticator. Distinct installations
+    /// cannot replay each other's page selectors. Never exported or logged.
+    pub fn cursor_signing_key(&self) -> Result<Vec<u8>, String> {
+        let db = self.db.lock().map_err(|_| "CATALOG_LOCK_POISONED")?;
+        db.query_row(
+            "SELECT key FROM research_cursor_signing WHERE name='research-result-v1'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|e| e.to_string())
+    }
+
     pub fn get(&self, id: &str) -> Result<Job, String> {
         let db = self.db.lock().map_err(|_| "CATALOG_LOCK_POISONED")?;
         Self::read(&db, id)?.ok_or("JOB_NOT_FOUND".into())
