@@ -54,14 +54,27 @@ impl TradeService {
             .await
             .map_err(err)?
             .is_some();
-        let unsent_release = if no_send {
-            Some(self.release_unsent(r, &i).await)
-        } else {
-            None
-        };
-        let order = if no_send
-            || (matches!(i.state, IntentState::Rejected) && i.exchange_order_id.is_none())
-        {
+        if no_send {
+            // A completed native SQL REJECTED_UNSENT receipt is proof that
+            // this intent never touched venue. It needs neither a fills
+            // backfill nor an account-wide finance snapshot for release.
+            let central_release = match self.release_unsent(r, &i).await {
+                Ok(()) => json!({"state":"verified","proof":"SQL_NO_SEND"}),
+                Err(reason) => json!({
+                    "state":"pending","reason_code":reason,
+                    "scope":"intent","next_action":"trade.status"
+                }),
+            };
+            return Ok(completed(json!({
+                "intent":i,
+                "send_state":"NOT_STARTED",
+                "rejection_origin":"LOCAL",
+                "primary_reason":i.incident,
+                "finance_state":"NOT_APPLICABLE",
+                "central_release":central_release
+            })));
+        }
+        let order = if matches!(i.state, IntentState::Rejected) && i.exchange_order_id.is_none() {
             None
         } else {
             match r
@@ -178,14 +191,7 @@ impl TradeService {
         } else {
             None
         };
-        let central_release = if let Some(resolution) = unsent_release {
-            match resolution {
-                Ok(()) => json!({"state":"verified","proof":"SQL_NO_SEND"}),
-                Err(reason) => {
-                    json!({"state":"pending","reason_code":reason,"scope":"intent","next_action":"trade.status"})
-                }
-            }
-        } else if i.state.terminal() && financial {
+        let central_release = if i.state.terminal() && financial {
             match self.release_terminal(r, &i, order.as_ref()).await {
                 Ok(()) => json!({"state":"verified"}),
                 Err(reason) => {
