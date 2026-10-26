@@ -29,8 +29,8 @@ impl AnalyticsService {
         cancel: Arc<std::sync::atomic::AtomicBool>,
         global_rank: bool,
     ) -> Result<(Vec<Value>, Option<Value>), String> {
-        let plan = planner::AnalysisPlan::build(&request.fields, request.start_ms, request.end_ms)?;
-        let need_candles = plan.sources.contains("candles");
+        let plan = planner::AnalysisPlan::compile_market(request)?;
+        let need_candles = plan.sources.contains(&okx_analysis::query_plan::Source::Candles);
         let count = (request.end_ms - request.start_ms) / request.timeframe_ms;
         if need_candles && count.saturating_mul(request.instruments.len() as u64) > 1_000_000 {
             return Err("LIMIT_TOTAL_BARS:1000000".into());

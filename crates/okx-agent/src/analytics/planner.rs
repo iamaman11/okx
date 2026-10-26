@@ -1,4 +1,6 @@
 use okx_analysis::operators::{Operator, registry};
+use okx_analysis::query_plan::{Filter, QueryPlan, Rank};
+use okx_protocol::analytics::MarketRequest;
 use std::collections::BTreeSet;
 #[derive(Debug, Clone)]
 pub struct AnalysisPlan {
@@ -9,6 +11,29 @@ pub struct AnalysisPlan {
     pub projection: Vec<String>,
 }
 impl AnalysisPlan {
+    /// Compiles every executable market request to the pure typed operator
+    /// plan before source allocation or the first venue request.
+    pub fn compile_market(request: &MarketRequest) -> Result<QueryPlan, String> {
+        let parse = |name: &str| {
+            serde_json::from_value::<Operator>(serde_json::Value::String(name.into()))
+                .map_err(|_| format!("operators:UNKNOWN_FIELD:{name}"))
+        };
+        let operators = request.fields.iter().map(|f| parse(f)).collect::<Result<Vec<_>,_>>()?;
+        let filters = request.filters.iter().map(|f| Ok(Filter {
+            operator: parse(&f.field)?,
+            min: f.min,
+            max: f.max,
+        })).collect::<Result<Vec<_>,String>>()?;
+        let ranking = request.sort.as_ref().map(|s| Ok(Rank {
+            operator: parse(&s.field)?,
+            descending: s.descending,
+        })).transpose()?;
+        let range = okx_analysis::time_series::ClosedRange::strict(
+            request.start_ms,request.end_ms,request.timeframe_ms
+        ).map_err(|e|format!("range:{e}"))?;
+        QueryPlan::compile(request.instruments.clone(),range,operators,
+            request.parameters.clone(),filters,ranking)
+    }
     pub fn build(fields: &[String], start: u64, end: u64) -> Result<Self, String> {
         if start >= end {
             return Err("INVALID_RANGE".into());

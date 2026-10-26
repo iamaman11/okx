@@ -56,13 +56,9 @@ impl AnalyticsService {
         if !request.valid() {
             return Err("INVALID_MARKET_REQUEST".into());
         }
-        // Explicit screen windows are strict and closed before network I/O.
-        let window = okx_analysis::time_series::ClosedRange::strict(
-            request.start_ms,
-            request.end_ms,
-            request.timeframe_ms,
-        )
-        .map_err(str::to_owned)?;
+        // K7 source, type and range validation precedes every venue read.
+        let query_plan = planner::AnalysisPlan::compile_market(&request)?;
+        let window = query_plan.range;
         let closed_end = chrono::Utc::now().timestamp_millis().max(0) as u64 / request.timeframe_ms
             * request.timeframe_ms;
         if window.end_ms > closed_end {
@@ -112,7 +108,7 @@ impl AnalyticsService {
             0
         };
         let hash = okx_research::canonical_sha256(&(
-            "market/448.1",
+            "market/448.2",
             &hash_request,
             &universe_page,
             bucket,
@@ -189,6 +185,8 @@ impl AnalyticsService {
                 .market_execute(compute_request, cancel.clone(), global_rank)
                 .await;
             outcome = outcome.and_then(|mut value| {
+                value["query_plan"] = serde_json::to_value(&query_plan)
+                    .map_err(|e| e.to_string())?;
                 if let Some(fingerprint) = &rank_fingerprint {
                     value["rank_request_fingerprint"] = json!(fingerprint);
                 }
