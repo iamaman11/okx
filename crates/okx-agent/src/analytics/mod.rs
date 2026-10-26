@@ -56,6 +56,19 @@ impl AnalyticsService {
         if !request.valid() {
             return Err("INVALID_MARKET_REQUEST".into());
         }
+        // Explicit screen windows are strict and closed before network I/O.
+        let window = okx_analysis::time_series::ClosedRange::strict(
+            request.start_ms,
+            request.end_ms,
+            request.timeframe_ms,
+        )
+        .map_err(str::to_owned)?;
+        let closed_end = chrono::Utc::now().timestamp_millis().max(0) as u64
+            / request.timeframe_ms
+            * request.timeframe_ms;
+        if window.end_ms > closed_end {
+            return Err("RANGE_NOT_CLOSED".into());
+        }
         let global_rank = request.universe.as_ref().is_some_and(|u| u.rank_globally);
         if global_rank && resolved_instruments.is_none() {
             return Err("GLOBAL_RANK_UNIVERSE_REQUIRED".into());
@@ -304,6 +317,7 @@ impl AnalyticsService {
                 timeframe_ms,
                 start_ms,
                 end_ms,
+                range_mode,
                 ..
             } => {
                 if matches!(data_mode, ResearchDataMode::HistoricalObserved) {
@@ -314,11 +328,18 @@ impl AnalyticsService {
                     );
                 }
                 // Validate the canonical window before any venue I/O.
-                let validation_range = okx_analysis::time_series::ClosedRange::strict(
-                    start_ms,
-                    end_ms,
-                    timeframe_ms,
-                )
+                let validation_range = match range_mode {
+                    RangeMode::Strict => {
+                        okx_analysis::time_series::ClosedRange::strict(
+                            start_ms, end_ms, timeframe_ms,
+                        )
+                    }
+                    RangeMode::Normalize => {
+                        okx_analysis::time_series::ClosedRange::normalize(
+                            start_ms, end_ms, timeframe_ms,
+                        )
+                    }
+                }
                 .map_err(str::to_owned)?;
                 let last_closed = chrono::Utc::now().timestamp_millis().max(0) as u64
                     / timeframe_ms
@@ -334,11 +355,18 @@ impl AnalyticsService {
                 for symbol in instruments {
                     let result = self
                         .sources
-                        .candles(&symbol, timeframe_ms, start_ms, end_ms, false)
+                        .candles(
+                            &symbol,
+                            timeframe_ms,
+                            validation_range.start_ms,
+                            validation_range.end_ms,
+                            false,
+                        )
                         .await;
                     match result {
                         Ok(bars) => {
-                            let evidence = validation_range.coverage(bars.iter().map(|bar| bar.time));
+                            let evidence =
+                                validation_range.coverage(bars.iter().map(|bar| bar.time));
                             if !evidence.complete {
                                 complete = false;
                             }
@@ -362,7 +390,14 @@ impl AnalyticsService {
                     "quality":if complete{"complete"}else{"partial"},
                     "data_mode":"counterfactual","historical_rules_and_fees":"not_observed",
                     "source_coverage":rows,"timeframe_ms":timeframe_ms,
-                    "start_ms":start_ms,"end_ms":end_ms,"side_effects":"none",
+                    "start_ms":validation_range.start_ms,
+                    "end_ms":validation_range.end_ms,
+                    "requested_range":{"start_ms":start_ms,"end_ms":end_ms},
+                    "range_mode":range_mode,
+                    "range_adjusted":start_ms != validation_range.start_ms
+                        || end_ms != validation_range.end_ms,
+                    "expected_bars":validation_range.expected_bars,
+                    "side_effects":"none",
                     "job_created":false}))
             }
             ResearchRequest::Status { job_id } => {

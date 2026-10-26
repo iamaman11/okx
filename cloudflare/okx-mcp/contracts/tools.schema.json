@@ -1201,6 +1201,13 @@
                 "minimum": 1,
                 "maximum": 9007199254740991
               },
+              "range_mode": {
+                "type": "string",
+                "enum": [
+                  "strict",
+                  "normalize"
+                ]
+              },
               "strategy_id": {
                 "type": "string",
                 "enum": [

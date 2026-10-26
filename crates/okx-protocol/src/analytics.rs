@@ -1,5 +1,13 @@
 //! Public compact analytics contract. No transport or financial logic.
 use serde::{Deserialize, Serialize};
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RangeMode {
+    #[default]
+    Strict,
+    Normalize,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MarketRequest {
@@ -131,6 +139,8 @@ pub enum ResearchRequest {
         timeframe_ms: u64,
         start_ms: u64,
         end_ms: u64,
+        #[serde(default)]
+        range_mode: RangeMode,
         strategy_id: String,
         parameters: EmaParameters,
         costs: ResearchCosts,
@@ -265,6 +275,7 @@ impl ResearchRequest {
                 parameters,
                 costs,
                 data_mode,
+                ..
             } => Self::Backtest {
                 idempotency_key: "validation_only".into(),
                 instruments: instruments.clone(),
