@@ -551,36 +551,46 @@ impl TradeService {
         intent: &StoredIntent,
         r: &AccountResources,
     ) -> Result<RiskResult, (String, bool)> {
-        match self.risk.request(command.clone()).await {
-            Ok(v) if v.status == RiskDecisionStatus::Held => Ok(v),
-            Ok(v) if v.status == RiskDecisionStatus::Denied => {
-                Err((v.reason.unwrap_or("RESERVE_DENIED".into()), true))
+        let first = self.risk.request(command).await;
+        if let Ok(held) = &first {
+            if held.status == RiskDecisionStatus::Held {
+                return Ok(held.clone());
             }
-            Ok(_) => Err(("RESERVE_UNEXPECTED_STATE_NO_POST".into(), false)),
-            Err(_) => {
-                let key = self.risk_reservation_key(r, intent);
-                let inspect = self.risk_command(
-                    state,
-                    format!("inspect_{}", &intent.plan_hash[..32]),
-                    RiskCommandAction::Inspect {
-                        reservation_key: key,
-                        plan_sha256: intent.plan_hash.clone(),
-                    },
-                );
-                let observed = self
-                    .risk
-                    .request(inspect)
-                    .await
-                    .map_err(|e| (e.to_owned(), false))?;
-                if observed.status != RiskDecisionStatus::Observed
-                    || observed.reservation_state != Some(RiskReservationState::Held)
-                {
-                    return Err(("RESERVE_OUTCOME_UNKNOWN_NO_POST".into(), false));
-                }
-                // Inspection confirms the one original reservation. A stale reserve-time
-                // source is never replayed as a second grant after its transport timeout.
-                Ok(observed)
+        }
+        // DENIED is not itself proof of no existing reservation: a replayed
+        // identity may have HELD capacity in Worker already. INSPECT the exact
+        // address before settling the SQL no-reservation marker.
+        let inspect = self.risk_command(
+            state,
+            format!("inspect_{}", &intent.plan_hash[..32]),
+            RiskCommandAction::Inspect {
+                reservation_key: self.risk_reservation_key(r, intent),
+                plan_sha256: intent.plan_hash.clone(),
+            },
+        );
+        let observed = self.risk.request(inspect).await;
+        let central_denied = matches!(&first,
+            Ok(v) if v.status == RiskDecisionStatus::Denied);
+        let reason = match &first {
+            Ok(v) => v.reason.clone().unwrap_or("RESERVE_DENIED".into()),
+            Err(_) => "RESERVE_OUTCOME_UNKNOWN_NO_POST".into(),
+        };
+        match observed {
+            Ok(reply) if reply.status == RiskDecisionStatus::Observed
+                && reply.reservation_state == Some(RiskReservationState::Held)
+                && !central_denied =>
+            {
+                // One original reservation is known; never replay stale
+                // reserve-time source as a second grant.
+                Ok(reply)
             }
+            Ok(reply) if central_denied
+                && reply.status == RiskDecisionStatus::Denied
+                && reply.reason.as_deref() == Some("RISK_RESERVATION_NOT_FOUND") =>
+            {
+                Err((reason, true))
+            }
+            _ => Err((reason, false)),
         }
     }
     async fn fence_inspect_retry(
