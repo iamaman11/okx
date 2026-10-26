@@ -235,7 +235,15 @@ impl TradeService {
             None
         };
         let budgeted = entry_budget::size_order(
-            sizing, increase, lot, minimum, ct, price, per_contract, fx, fee_rate,
+            sizing,
+            increase,
+            lot,
+            minimum,
+            ct,
+            price,
+            per_contract,
+            fx,
+            fee_rate,
             entry_ceiling,
         )?;
         let qty = budgeted.quantity;

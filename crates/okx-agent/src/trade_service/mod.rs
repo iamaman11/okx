@@ -590,18 +590,34 @@ impl TradeService {
                     .await?;
                 // Preview uses the same price-bounded, fee-inclusive cost model as
                 // native admission; do not silently suppress missing fee evidence.
-                let costs = if matches!(operation, TradeOperation::Open | TradeOperation::Add | TradeOperation::Replace) {
-                    let rules = self.public_ws.instrument_rules(instrument).await
+                let costs = if matches!(
+                    operation,
+                    TradeOperation::Open | TradeOperation::Add | TradeOperation::Replace
+                ) {
+                    let rules = self
+                        .public_ws
+                        .instrument_rules(instrument)
+                        .await
                         .ok_or("INSTRUMENT_RULES_UNAVAILABLE")?;
                     let fees = r.observer.fee_schedule(&rules).await.map_err(err)?;
-                    if !fees.exact_for_instrument || fees.reference_generation != rules.reference_generation {
+                    if !fees.exact_for_instrument
+                        || fees.reference_generation != rules.reference_generation
+                    {
                         return Err("FEE_SOURCE_GENERATION_MISMATCH".into());
                     }
-                    let fee_rate = dec(&fees.taker_rate)?.abs().max(dec(&fees.maker_rate)?.abs());
+                    let fee_rate = dec(&fees.taker_rate)?
+                        .abs()
+                        .max(dec(&fees.maker_rate)?.abs());
                     let source = r.observer.snapshot().await.map_err(err)?;
                     let conversion = Self::usd_conversion(&source)?;
                     let fx = dec(&conversion.usd_per_usdt)?;
-                    let entry = entry_budget::quote(plan.quantity, plan.contract_value, plan.limit_price, fee_rate, fx)?;
+                    let entry = entry_budget::quote(
+                        plan.quantity,
+                        plan.contract_value,
+                        plan.limit_price,
+                        fee_rate,
+                        fx,
+                    )?;
                     json!({"price_bound_usdt":exact(plan.limit_price),
                            "notional_usdt":exact(entry.notional_usdt),
                            "entry_fee_usdt":exact(entry.fee_usdt),
@@ -614,7 +630,9 @@ impl TradeService {
                            "entry_cap_usd":order.max_entry_usd,
                            "price_enforcement":"VENUE_LIMIT_OR_IOC_FOK",
                            "other_costs":"UNAVAILABLE_NOT_INCLUDED"})
-                } else {json!(null)};
+                } else {
+                    json!(null)
+                };
                 // This is a fresh exchange-side census, not a reservation or
                 // authorization to POST. Any gap is reported, never guessed flat.
                 let census = if r.configuration.account_key.environment
