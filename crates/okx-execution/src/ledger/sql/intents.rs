@@ -84,6 +84,19 @@ impl AccountStore {
     }
 
     pub fn reconcilable_intents(&self, limit: usize) -> StoreResult<Vec<StoredIntent>> {
+        self.reconcilable_intents_page(limit, 0)
+    }
+
+    /// Bounded, addressable paging prevents a failed early intent from starving
+    /// later account intents. Offset is a scheduling cursor, not a second owner.
+    pub fn reconcilable_intents_page(
+        &self,
+        limit: usize,
+        offset: usize,
+    ) -> StoreResult<Vec<StoredIntent>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
         let ids = {
             let mut q=self.connection.prepare(
               "SELECT intent_id FROM (
@@ -106,9 +119,9 @@ impl AccountStore {
                     WHERE r.intent_id=i.intent_id)
                   AND NOT EXISTS(SELECT 1 FROM operation_receipts a
                     WHERE a.operation_id='risk-reserve:'||i.intent_id)
-               ) GROUP BY intent_id ORDER BY MIN(priority),intent_id LIMIT ?1"
+               ) GROUP BY intent_id ORDER BY MIN(priority),intent_id LIMIT ?1 OFFSET ?3"
             )?;
-            q.query_map(params![limit.min(1000) as i64, wall_time_ms()], |r| {
+            q.query_map(params![limit.min(100) as i64, wall_time_ms(), offset.min(100_000) as i64], |r| {
                 r.get::<_, String>(0)
             })?
             .collect::<Result<Vec<_>, _>>()?
