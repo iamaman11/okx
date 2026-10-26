@@ -162,5 +162,37 @@ check((await handleNativeRiskCommand(s,session,{schema:"okx.risk-command/v1",com
  check((await handleNativeRiskCommand(t,session,
    reserve("after_pause","native_alpha",proof),now+5)).status==="DENIED",
    "revoked account cannot admit more risk under stale policy");
+ // The authenticated WSS handler must expose the empty book CAS and
+ // a read-backable RELEASED fence, never an invented HELD reservation.
+ const absentStore=new Store(),lateCommand=reserve("late","manual",hash);
+ await absentStore.put("generation",session.connection_generation);
+ await absentStore.put("account_access_v1",governance);
+ await initializeRiskBook(absentStore,initial.installation_id);
+ const lateKey=[lateCommand.action.venue,"real",sameUid,lateCommand.action.run_id,
+   lateCommand.action.intent_id].map(v=>v.length+":"+v).join("");
+ const inspectLate={schema:"okx.risk-command/v1",command_id:"inspect_absent_0001",
+   installation_id:initial.installation_id,
+   action:{action:"INSPECT",reservation_key:lateKey,plan_sha256:hash}};
+ const before=await handleNativeRiskCommand(absentStore,session,inspectLate,now+1);
+ check(before.status==="DENIED"&&before.reason==="RISK_RESERVATION_NOT_FOUND"&&
+   before.risk_book_sequence===0,"F2 empty central book returns exact CAS zero");
+ const abort=await handleNativeRiskCommand(absentStore,session,{
+   schema:"okx.risk-command/v1",command_id:"abort_absent_0001",
+   installation_id:initial.installation_id,
+   action:{action:"RELEASE_UNSENT",reservation_key:lateKey,plan_sha256:hash,
+     expected_risk_book_sequence:0,
+     proof:{reservation_key:lateKey,account_key:account.account_key,
+       intent_id:lateCommand.action.intent_id,plan_hash:hash,
+       request_hash:"e".repeat(64),reason:"RESERVE_REPLY_LOST",
+       record_digest:"f".repeat(64)}}},now+2);
+ check(abort.status==="UPDATED"&&abort.risk_book_sequence===1,
+   "F2 no-send fence accepts exact signed native proof at sequence zero");
+ const seen=await handleNativeRiskCommand(absentStore,session,inspectLate,now+3);
+ check(seen.status==="OBSERVED"&&seen.reservation_state==="RELEASED",
+   "F2 lost negative-fence ACK is repeatably inspectable");
+ const delayed=await handleNativeRiskCommand(absentStore,session,lateCommand,now+4);
+ check(delayed.status==="DENIED"&&delayed.reason==="RESERVE_FENCED_NO_SEND",
+   "late RESERVE can no longer mint risk");
+ console.log("risk_f2_never_arrived_handler PASS");
  console.log("three_source_central_riskbook_cas PASS 3 HELD / 1 exact POST / revoked POST denied / no venue POST");
 }
