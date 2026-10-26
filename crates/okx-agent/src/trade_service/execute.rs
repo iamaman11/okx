@@ -240,9 +240,45 @@ impl TradeService {
                     census,
                 },
             );
-            let held = self
-                .reserve_inspect_retry(&state, reserve, &prepared, r)
-                .await?;
+            let key = self.risk_reservation_key(r, &prepared);
+            let intent_id = prepared.intent_id.clone();
+            let reserve_key = key.clone();
+            r.execution.store.call(until, move |s| {
+                s.mark_reserve_attempt(&intent_id, &reserve_key, now())
+            }).await.map_err(err)?;
+            let held = match self.reserve_inspect_retry(&state, reserve, &prepared, r).await {
+                Ok(held) => held,
+                Err((reason, authoritative_denial)) => {
+                    let id = prepared.intent_id.clone();
+                    if authoritative_denial {
+                        let owner_reason = reason.clone();
+                        r.execution.store.call(deadline(), move |s| {
+                            s.reject_denied_reserve(&id, &owner_reason, now())
+                        }).await.map_err(err)?;
+                        return Ok(completed(json!({
+                            "intent_id":prepared.intent_id,
+                            "state":"REJECTED","rejection_origin":"CENTRAL",
+                            "send_state":"NOT_STARTED","primary_reason":reason,
+                            "risk_release_state":"NOT_RESERVED"
+                        })));
+                    }
+                    return match reject_prepost_denial(&r.execution.store, &prepared, &reason).await {
+                        Ok(mut result) => {
+                            match self.release_unsent(r, &prepared).await {
+                                Ok(()) => result["data"]["risk_release_state"] = json!("RELEASED"),
+                                Err(release) => {
+                                    result["data"]["risk_release_error"] = json!(release);
+                                }
+                            }
+                            Ok(result)
+                        }
+                        Err(_) => Ok(uncertain(
+                            &prepared.intent_id,
+                            "RESERVE_LOCAL_COMMIT_UNCONFIRMED_NO_RESUBMIT",
+                        )),
+                    };
+                }
+            };
             let held_received = Instant::now();
             let receipt = self.local_receipt(r, &prepared, &held, usd, &conversion)?;
             r.execution
@@ -483,27 +519,33 @@ impl TradeService {
             conversion_digest: digest(conversion)?,
         })
     }
+    fn risk_reservation_key(&self, r: &AccountResources, intent: &StoredIntent) -> String {
+        [
+            "okx",
+            "real",
+            r.configuration.account_key.verified_uid.as_str(),
+            "continuous_engine",
+            intent.intent_id.as_str(),
+        ]
+        .iter()
+        .map(|x| format!("{}:{}", x.len(), x))
+        .collect::<String>()
+    }
+
     async fn reserve_inspect_retry(
         &self,
         state: &CentralGovernanceSnapshot,
         command: RiskCommand,
         intent: &StoredIntent,
         r: &AccountResources,
-    ) -> Result<RiskResult, String> {
+    ) -> Result<RiskResult, (String, bool)> {
         match self.risk.request(command.clone()).await {
             Ok(v) if v.status == RiskDecisionStatus::Held => Ok(v),
-            Ok(v) => Err(v.reason.unwrap_or("RESERVE_DENIED".into())),
+            Ok(v) if v.status == RiskDecisionStatus::Denied =>
+                Err((v.reason.unwrap_or("RESERVE_DENIED".into()), true)),
+            Ok(_) => Err(("RESERVE_UNEXPECTED_STATE_NO_POST".into(), false)),
             Err(_) => {
-                let key = [
-                    "okx",
-                    "real",
-                    r.configuration.account_key.verified_uid.as_str(),
-                    "continuous_engine",
-                    intent.intent_id.as_str(),
-                ]
-                .iter()
-                .map(|x| format!("{}:{}", x.len(), x))
-                .collect::<String>();
+                let key = self.risk_reservation_key(r, intent);
                 let inspect = self.risk_command(
                     state,
                     format!("inspect_{}", &intent.plan_hash[..32]),
@@ -512,11 +554,12 @@ impl TradeService {
                         plan_sha256: intent.plan_hash.clone(),
                     },
                 );
-                let observed = self.risk.request(inspect).await.map_err(str::to_owned)?;
+                let observed = self.risk.request(inspect)
+                    .await.map_err(|e| (e.to_owned(), false))?;
                 if observed.status != RiskDecisionStatus::Observed
                     || observed.reservation_state != Some(RiskReservationState::Held)
                 {
-                    return Err("RESERVE_OUTCOME_UNKNOWN_NO_POST".into());
+                    return Err(("RESERVE_OUTCOME_UNKNOWN_NO_POST".into(), false));
                 }
                 // Inspection confirms the one original reservation. A stale reserve-time
                 // source is never replayed as a second grant after its transport timeout.
