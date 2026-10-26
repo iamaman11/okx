@@ -58,6 +58,9 @@ pub struct Job {
     pub error: Option<String>,
     pub created_ms: u64,
     pub pinned: bool,
+    /// Terminal artifact expiry; pinned results have no deadline.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at_ms: Option<u64>,
 }
 
 /// The SQLite connection is the sole metadata owner. The in-memory map contains
@@ -125,17 +128,30 @@ impl Jobs {
         let state: String = row.get(3)?;
         let progress: i64 = row.get(4)?;
         let created_ms: i64 = row.get(7)?;
+        let created_ms = u64::try_from(created_ms).map_err(|_| rusqlite::Error::InvalidQuery)?;
+        let state = State::parse(&state)?;
+        let pinned = row.get::<_, i64>(8)? != 0;
+        let artifact: Option<String> = row.get(5)?;
+        let expires_at_ms = if artifact.is_some()
+            && !pinned
+            && !matches!(state, State::Queued | State::Running)
+        {
+            Some(created_ms.saturating_add(7 * 86_400_000))
+        } else {
+            None
+        };
         Ok(Job {
             id: row.get(0)?,
             request_hash: row.get(1)?,
             idempotency_key: row.get(2)?,
             cancel_keys: BTreeSet::new(),
-            state: State::parse(&state)?,
+            state,
             progress: u8::try_from(progress).map_err(|_| rusqlite::Error::InvalidQuery)?,
-            artifact: row.get(5)?,
+            artifact,
             error: row.get(6)?,
-            created_ms: u64::try_from(created_ms).map_err(|_| rusqlite::Error::InvalidQuery)?,
-            pinned: row.get::<_, i64>(8)? != 0,
+            created_ms,
+            pinned,
+            expires_at_ms,
         })
     }
     fn read(connection: &Connection, id: &str) -> Result<Option<Job>, String> {
@@ -256,18 +272,25 @@ impl Jobs {
         artifact: Option<String>,
         error: Option<String>,
     ) -> Result<(), String> {
+        if state == State::Completed && artifact.is_none() {
+            return Err("RESEARCH_COMPLETED_RESULT_REQUIRED".into());
+        }
         let db = self.db.lock().map_err(|_| "CATALOG_LOCK_POISONED")?;
         let updated = db
             .execute(
                 "UPDATE research_jobs SET state=?2,
                     progress=CASE WHEN ?2='completed' THEN 100 WHEN ?2='running' THEN 10 ELSE progress END,
                     artifact=?3,error=?4
-                 WHERE id=?1 AND state!='cancelled'",
+                 WHERE id=?1 AND state IN ('queued','running')",
                 params![id, state.wire(), artifact, error],
             )
             .map_err(|e| e.to_string())?;
-        if updated == 0 && Self::read(&db, id)?.is_none() {
-            return Err("JOB_NOT_FOUND".into());
+        if updated == 0 {
+            match Self::read(&db, id)?.ok_or("JOB_NOT_FOUND")?.state {
+                // A cancelled job cannot be resurrected by late compute.
+                State::Cancelled => return Ok(()),
+                _ => return Err("RESEARCH_TERMINAL_IMMUTABLE".into()),
+            }
         }
         drop(db);
         if !matches!(state, State::Queued | State::Running) {
@@ -508,6 +531,52 @@ mod tests {
     }
 
     #[test]
+    fn c17_terminal_manifest_survives_restart_and_rejects_late_overwrite() {
+        let file = path("c17-terminal");
+        let original = Jobs::open(file.clone()).unwrap();
+        original.enqueue("c17-idem".into(), "c17-id".into()).unwrap();
+        original.update("c17-id", State::Running, None, None).unwrap();
+        original.update("c17-id", State::Completed, Some("sha256:verified".into()), None).unwrap();
+        let saved = original.get("c17-id").unwrap();
+        assert_eq!(saved.expires_at_ms, Some(saved.created_ms + 7 * 86_400_000));
+        assert_eq!(
+            original.update("c17-id", State::Running, None, None).unwrap_err(),
+            "RESEARCH_TERMINAL_IMMUTABLE"
+        );
+        assert_eq!(
+            original.update("c17-id", State::Completed, Some("other-result".into()), None).unwrap_err(),
+            "RESEARCH_TERMINAL_IMMUTABLE"
+        );
+        let restarted = Jobs::open(file).unwrap();
+        assert_eq!(restarted.get("c17-id").unwrap().state, State::Completed);
+        assert_eq!(restarted.get("c17-id").unwrap().artifact, saved.artifact);
+        assert!(!restarted.enqueue("c17-idem".into(), "c17-id".into()).unwrap().1);
+        restarted.pin("c17-id", true).unwrap();
+        assert!(restarted.get("c17-id").unwrap().expires_at_ms.is_none());
+        restarted.pin("c17-id", false).unwrap();
+        assert_eq!(restarted.get("c17-id").unwrap().expires_at_ms, saved.expires_at_ms);
+        assert!(restarted.update("c17-id", State::Completed, None, None).is_err());
+    }
+
+    #[test]
+    fn c17_restart_interrupts_incomplete_without_resurrecting_it() {
+        let file = path("c17-crash");
+        let before = Jobs::open(file.clone()).unwrap();
+        before.enqueue("c17-queued".into(), "queued".into()).unwrap();
+        before.enqueue("c17-running".into(), "running".into()).unwrap();
+        before.update("running", State::Running, Some("partial-artifact".into()), None).unwrap();
+        let after = Jobs::open(file).unwrap();
+        assert_eq!(after.get("queued").unwrap().state, State::Interrupted);
+        assert_eq!(after.get("running").unwrap().state, State::Interrupted);
+        assert_eq!(after.get("running").unwrap().artifact.as_deref(), Some("partial-artifact"));
+        assert_eq!(
+            after.update("running", State::Completed, Some("false-success".into()), None).unwrap_err(),
+            "RESEARCH_TERMINAL_IMMUTABLE"
+        );
+        assert!(!after.enqueue("c17-running".into(), "running".into()).unwrap().1);
+    }
+
+    #[test]
     fn restart_marks_job_interrupted() {
         let p = path("restart");
         let s = Jobs::open(p.clone()).unwrap();
@@ -622,13 +691,7 @@ mod tests {
             None,
         )
         .unwrap();
-        jobs.update(
-            "hash",
-            State::Completed,
-            None,
-            Some("RESULT_EXPIRED_BY_7_DAY_RETENTION".into()),
-        )
-        .unwrap();
+        jobs.expire_terminal_artifact("hash", "immutable-result").unwrap();
         let (old, spawn, _) = jobs.enqueue("key".into(), "hash".into()).unwrap();
         assert!(!spawn);
         assert_eq!(
