@@ -552,7 +552,7 @@
     },
     {
       "name": "market",
-      "description": "Read OKX market data.",
+      "description": "Read market data.",
       "inputSchema": {
         "oneOf": [
           {
@@ -876,7 +876,7 @@
     },
     {
       "name": "research",
-      "description": "Manage research jobs.",
+      "description": "Manage research.",
       "inputSchema": {
         "oneOf": [
           {
@@ -1300,7 +1300,7 @@
     },
     {
       "name": "portfolio",
-      "description": "Read portfolio scenarios.",
+      "description": "Portfolio scenarios.",
       "inputSchema": {
         "oneOf": [
           {
@@ -1488,7 +1488,7 @@
     },
     {
       "name": "diagnostics",
-      "description": "Read runtime diagnostics.",
+      "description": "Runtime diagnostics.",
       "inputSchema": {
         "oneOf": [
           {

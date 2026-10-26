@@ -55,10 +55,10 @@ ACTION_SCHEMAS.diagnostics[0].allOf=[{anyOf:[{required:['account']},{required:['
 const TOOL_NOTES:Record<string,{description:string;readOnlyHint:boolean;destructiveHint:boolean}>={
  accounts:{description:'Manage accounts and limits.',readOnlyHint:false,destructiveHint:true},
  strategies:{description:'Manage strategies; may trade.',readOnlyHint:false,destructiveHint:true},
- market:{description:'Read OKX market data.',readOnlyHint:true,destructiveHint:false},
- research:{description:'Manage research jobs.',readOnlyHint:false,destructiveHint:true},
- portfolio:{description:'Read portfolio scenarios.',readOnlyHint:true,destructiveHint:false},
- diagnostics:{description:'Read runtime diagnostics.',readOnlyHint:true,destructiveHint:false},
+ market:{description:'Read market data.',readOnlyHint:true,destructiveHint:false},
+ research:{description:'Manage research.',readOnlyHint:false,destructiveHint:true},
+ portfolio:{description:'Portfolio scenarios.',readOnlyHint:true,destructiveHint:false},
+ diagnostics:{description:'Runtime diagnostics.',readOnlyHint:true,destructiveHint:false},
 };
 const TRADE_NOTES:Record<string,{description:string;readOnlyHint:boolean;destructiveHint:boolean}>={
  preview:{description:'Preview a trade; no order.',readOnlyHint:true,destructiveHint:false},
