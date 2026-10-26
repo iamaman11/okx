@@ -1,5 +1,5 @@
-pub mod cache;
 mod budget;
+pub mod cache;
 mod cursor;
 pub mod executor;
 pub mod jobs;
@@ -137,7 +137,9 @@ impl AnalyticsService {
             jobs: jobs::Jobs::open(root.join("research-catalog.sqlite"))?,
             artifacts: ResearchArtifactStore::at(root),
             heavy: Arc::new(tokio::sync::Semaphore::new(2)),
-            research_memory: Arc::new(tokio::sync::Semaphore::new(budget::MEMORY_TOTAL_MIB as usize)),
+            research_memory: Arc::new(tokio::sync::Semaphore::new(
+                budget::MEMORY_TOTAL_MIB as usize,
+            )),
         };
         service.apply_retention(chrono::Utc::now().timestamp_millis().max(0) as u64)?;
         Ok(service)

@@ -34,12 +34,17 @@ pub fn estimated_mib(request: &ResearchRequest) -> Result<u32, String> {
         ),
         _ => return Err("RESOURCE_BUDGET_NOT_RESEARCH_JOB".into()),
     };
-    if instruments == 0 || instruments > 8 || timeframe_ms == 0 || end_ms <= start_ms
-        || variant_count == 0 || variant_count > 64
+    if instruments == 0
+        || instruments > 8
+        || timeframe_ms == 0
+        || end_ms <= start_ms
+        || variant_count == 0
+        || variant_count > 64
     {
         return Err("LIMIT_EXCEEDED:RESEARCH_REQUEST".into());
     }
-    let bars = (end_ms - start_ms).div_ceil(timeframe_ms)
+    let bars = (end_ms - start_ms)
+        .div_ceil(timeframe_ms)
         .checked_mul(instruments as u64)
         .ok_or("LIMIT_EXCEEDED:RESEARCH_BARS")?;
     if bars > 1_000_000 {
@@ -48,9 +53,9 @@ pub fn estimated_mib(request: &ResearchRequest) -> Result<u32, String> {
     let bytes = bars
         .checked_mul(ESTIMATED_BYTES_PER_BAR)
         .and_then(|n| n.checked_add(instruments as u64 * ESTIMATED_BYTES_PER_INSTRUMENT))
-        .and_then(|n| n.checked_add(
-            instruments as u64 * variant_count as u64 * ESTIMATED_BYTES_PER_VARIANT
-        ))
+        .and_then(|n| {
+            n.checked_add(instruments as u64 * variant_count as u64 * ESTIMATED_BYTES_PER_VARIANT)
+        })
         .ok_or("LIMIT_EXCEEDED:RESEARCH_MEMORY")?;
     let mib = bytes.div_ceil(MIB).max(1);
     if mib > MEMORY_TOTAL_MIB as u64 {
@@ -71,10 +76,12 @@ mod tests {
             start_ms: 60_000,
             end_ms: 60_000 * (bars + 1),
             strategy_id: "ema_cross_v1".into(),
-            variants: (0..variants).map(|i| EmaParameters {
-                fast: 2 + i,
-                slow: 90 + i,
-            }).collect(),
+            variants: (0..variants)
+                .map(|i| EmaParameters {
+                    fast: 2 + i,
+                    slow: 90 + i,
+                })
+                .collect(),
             costs: ResearchCosts {
                 maker_fee_bps: 0.0,
                 taker_fee_bps: 5.0,
@@ -97,9 +104,15 @@ mod tests {
     #[test]
     fn k9_rejects_oversized_input_without_allocating_source_bars() {
         let request = job(8, 125_001, 64);
-        assert_eq!(estimated_mib(&request).unwrap_err(), "LIMIT_EXCEEDED:RESEARCH_BARS");
+        assert_eq!(
+            estimated_mib(&request).unwrap_err(),
+            "LIMIT_EXCEEDED:RESEARCH_BARS"
+        );
         let request = job(8, 125_000, 65);
-        assert_eq!(estimated_mib(&request).unwrap_err(), "LIMIT_EXCEEDED:RESEARCH_REQUEST");
+        assert_eq!(
+            estimated_mib(&request).unwrap_err(),
+            "LIMIT_EXCEEDED:RESEARCH_REQUEST"
+        );
     }
     #[tokio::test]
     async fn k9_shared_four_gib_memory_permits_not_released_until_task_exits() {
