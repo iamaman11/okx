@@ -18,21 +18,46 @@ impl AnalysisPlan {
             serde_json::from_value::<Operator>(serde_json::Value::String(name.into()))
                 .map_err(|_| format!("operators:UNKNOWN_FIELD:{name}"))
         };
-        let operators = request.fields.iter().map(|f| parse(f)).collect::<Result<Vec<_>,_>>()?;
-        let filters = request.filters.iter().map(|f| Ok(Filter {
-            operator: parse(&f.field)?,
-            min: f.min,
-            max: f.max,
-        })).collect::<Result<Vec<_>,String>>()?;
-        let ranking = request.sort.as_ref().map(|s| Ok(Rank {
-            operator: parse(&s.field)?,
-            descending: s.descending,
-        })).transpose()?;
+        let operators = request
+            .fields
+            .iter()
+            .map(|f| parse(f))
+            .collect::<Result<Vec<_>, _>>()?;
+        let filters = request
+            .filters
+            .iter()
+            .map(|f| {
+                Ok(Filter {
+                    operator: parse(&f.field)?,
+                    min: f.min,
+                    max: f.max,
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        let ranking = request
+            .sort
+            .as_ref()
+            .map(|s| {
+                Ok(Rank {
+                    operator: parse(&s.field)?,
+                    descending: s.descending,
+                })
+            })
+            .transpose()?;
         let range = okx_analysis::time_series::ClosedRange::strict(
-            request.start_ms,request.end_ms,request.timeframe_ms
-        ).map_err(|e|format!("range:{e}"))?;
-        QueryPlan::compile(request.instruments.clone(),range,operators,
-            request.parameters.clone(),filters,ranking)
+            request.start_ms,
+            request.end_ms,
+            request.timeframe_ms,
+        )
+        .map_err(|e| format!("range:{e}"))?;
+        QueryPlan::compile(
+            request.instruments.clone(),
+            range,
+            operators,
+            request.parameters.clone(),
+            filters,
+            ranking,
+        )
     }
     pub fn build(fields: &[String], start: u64, end: u64) -> Result<Self, String> {
         if start >= end {
@@ -79,7 +104,8 @@ mod tests {
             "action":"screen","instruments":["BTC-USDT-SWAP"],
             "fields":["returns","spread_bps"],"timeframe_ms":3600000,
             "start_ms":3600000,"end_ms":72000000,"limit":10
-        })).unwrap();
+        }))
+        .unwrap();
         let plan = AnalysisPlan::compile_market(&request).unwrap();
         assert_eq!(plan.result_projection.len(), 2);
         assert_eq!(plan.sources.len(), 2);

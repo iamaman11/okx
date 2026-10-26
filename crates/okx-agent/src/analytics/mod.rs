@@ -185,8 +185,8 @@ impl AnalyticsService {
                 .market_execute(compute_request, cancel.clone(), global_rank)
                 .await;
             outcome = outcome.and_then(|mut value| {
-                value["query_plan"] = serde_json::to_value(&query_plan)
-                    .map_err(|e| e.to_string())?;
+                value["query_plan"] =
+                    serde_json::to_value(&query_plan).map_err(|e| e.to_string())?;
                 if let Some(fingerprint) = &rank_fingerprint {
                     value["rank_request_fingerprint"] = json!(fingerprint);
                 }
