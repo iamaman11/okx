@@ -97,7 +97,8 @@ impl RecoverySchedule {
     }
 
     fn finish(&mut self, account: &str, intent: &str) {
-        self.attempts.remove(&(account.to_owned(), intent.to_owned()));
+        self.attempts
+            .remove(&(account.to_owned(), intent.to_owned()));
     }
 
     fn overdue_incident(
@@ -110,7 +111,9 @@ impl RecoverySchedule {
         if now_ms.saturating_sub(deadline_ms) < 30_000 {
             return false;
         }
-        let Some(attempt) = self.attempts.get_mut(&(account.to_owned(), intent.to_owned()))
+        let Some(attempt) = self
+            .attempts
+            .get_mut(&(account.to_owned(), intent.to_owned()))
         else {
             return false;
         };
