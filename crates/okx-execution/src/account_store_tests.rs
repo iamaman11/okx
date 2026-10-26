@@ -1084,10 +1084,13 @@ fn k5_child_hard_exit_at_native_claim() {
         }
         _ => panic!("unknown native kill phase"),
     }
-    // std::process::exit bypasses Rust destructors and AccountStore::drop.
-    // The only persisted mutation is the SQLite WAL FULL commit (plus F6
-    // fake-venue sentinel), just as when the Windows agent process dies.
-    std::process::exit(86);
+    // Publish marker after the SQLite FULL WAL commit with the connection
+    // still live. Parent must kill this process at the exact boundary.
+    let ready = std::env::var("OKX_K5_CHILD_READY").unwrap();
+    std::fs::write(ready, phase).unwrap();
+    loop {
+        std::thread::park();
+    }
 }
 
 #[test]
@@ -1103,9 +1106,10 @@ fn k5_real_child_process_exit_f1_f3_f5_f6_never_reposts() {
         let path = store.path.clone();
         let meta = store.meta.clone();
         let venue_log = path.with_extension(format!("{phase}.venue-marker"));
+        let ready = path.with_extension(format!("{phase}.ready"));
         drop(store);
 
-        let child = std::process::Command::new(std::env::current_exe().unwrap())
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
             .arg("--nocapture")
             .arg("k5_child_hard_exit_at_native_claim")
             .env("OKX_K5_CHILD_SQL_PATH", &path)
@@ -1113,9 +1117,25 @@ fn k5_real_child_process_exit_f1_f3_f5_f6_never_reposts() {
             .env("OKX_K5_CHILD_ACCOUNT", &meta.account_key)
             .env("OKX_K5_CHILD_INSTALL", &meta.installation_id)
             .env("OKX_K5_CHILD_VENUE_LOG", &venue_log)
-            .status()
+            .env("OKX_K5_CHILD_READY", &ready)
+            .spawn()
             .expect("spawn child test executable");
-        assert_eq!(child.code(), Some(86), "{phase}: must terminate without SQLite drop");
+        let mut witnessed = false;
+        for _ in 0..200 {
+            if ready.exists() {
+                witnessed = true;
+                break;
+            }
+            if let Some(status) = child.try_wait().unwrap() {
+                panic!("{phase}: helper stopped before the SQL claim boundary: {status}");
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(witnessed, "{phase}: child never reported durable SQL boundary");
+        assert_eq!(std::fs::read_to_string(&ready).unwrap(), phase);
+        child.kill().expect("OS kill at durable SQL boundary");
+        let status = child.wait().expect("reap killed native process");
+        assert!(!status.success(), "{phase}: child must be killed, not finish normally");
         let mut recovered =
             AccountStore::open_existing(&path, &meta.account_key, &meta.installation_id).unwrap();
         let saved = recovered.intent("intent").unwrap().unwrap();
