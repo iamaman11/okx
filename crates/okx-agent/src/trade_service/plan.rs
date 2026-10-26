@@ -229,11 +229,12 @@ impl TradeService {
         } else {
             Decimal::ONE
         };
-        let entry_ceiling = if increase {
-            order.max_entry_usd.as_deref().map(dec).transpose()?
-        } else {
-            None
-        };
+        let entry_ceiling = entry_budget::enforced_entry_ceiling(
+            increase,
+            c.environment == okx_protocol::account_governance::AccountEnvironment::Real,
+            c.limits.max_entry_usd.as_deref().map(dec).transpose()?,
+            order.max_entry_usd.as_deref().map(dec).transpose()?,
+        )?;
         let budgeted = entry_budget::size_order(
             sizing,
             increase,

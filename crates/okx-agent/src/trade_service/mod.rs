@@ -627,7 +627,13 @@ impl TradeService {
                            "fee_rate":exact(fee_rate),
                            "fee_currency":"USDT",
                            "fee_rounding":"CEIL_0.000001",
-                           "entry_cap_usd":order.max_entry_usd,
+                           "entry_cap_usd":entry_budget::enforced_entry_ceiling(
+                               true,
+                               c.environment == okx_protocol::account_governance::AccountEnvironment::Real,
+                               c.limits.max_entry_usd.as_deref().map(dec).transpose()?,
+                               order.max_entry_usd.as_deref().map(dec).transpose()?,
+                           )?.map(exact),
+                           "account_entry_cap_usd":c.limits.max_entry_usd,
                            "price_enforcement":"VENUE_LIMIT_OR_IOC_FOK",
                            "other_costs":"UNAVAILABLE_NOT_INCLUDED"})
                 } else {

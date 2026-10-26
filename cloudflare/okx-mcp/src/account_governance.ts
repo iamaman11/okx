@@ -11,6 +11,8 @@ export type Limits = {
   max_modelled_loss_usdt:string;
   max_order_loss_usdt:string;
   max_notional_usdt:string|null;
+  /** Optional on old saved policy; Real entry admission refuses absent cap. */
+  max_entry_usd?:string|null;
   max_leverage:string|null;
   max_daily_realized_loss_usdt:string|null;
   max_drawdown_ratio:string|null;
@@ -72,10 +74,12 @@ export function validLimits(value:unknown):value is Limits{
   const x=value as Record<string,unknown>;
   const fields=["max_modelled_loss_usdt","max_order_loss_usdt","max_notional_usdt",
     "max_leverage","max_daily_realized_loss_usdt","max_drawdown_ratio","allowed_instruments"];
+  if("max_entry_usd" in x)fields.push("max_entry_usd");
   if(Object.keys(x).sort().join("|")!==fields.sort().join("|"))return false;
   return positive(x.max_modelled_loss_usdt)&&positive(x.max_order_loss_usdt)
     &&units(x.max_order_loss_usdt)!<=units(x.max_modelled_loss_usdt)!
-    &&optionalPositive(x.max_notional_usdt)&&optionalPositive(x.max_leverage)
+    &&optionalPositive(x.max_notional_usdt)&&(!("max_entry_usd" in x)||optionalPositive(x.max_entry_usd))
+    &&optionalPositive(x.max_leverage)
     &&optionalPositive(x.max_daily_realized_loss_usdt)
     &&(x.max_drawdown_ratio===null||ratio(x.max_drawdown_ratio))
     &&Array.isArray(x.allowed_instruments)&&x.allowed_instruments.length<=32

@@ -50,6 +50,32 @@ pub(super) fn quote(
     })
 }
 
+
+/// The Real account policy owns the required ceiling. A command may only tighten it.
+/// No cap is inferred from the independent campaign LOSS limit or USDT notional.
+pub(super) fn enforced_entry_ceiling(
+    increase: bool,
+    real: bool,
+    account_cap: Option<Decimal>,
+    request_cap: Option<Decimal>,
+) -> Result<Option<Decimal>, String> {
+    if !increase {
+        return Ok(None);
+    }
+    if real && account_cap.is_none() {
+        return Err("ACCOUNT_ENTRY_CAP_UNCONFIGURED".into());
+    }
+    if account_cap.is_some_and(|cap| cap <= Decimal::ZERO)
+        || request_cap.is_some_and(|cap| cap <= Decimal::ZERO)
+    {
+        return Err("ENTRY_BUDGET_INVALID".into());
+    }
+    Ok(match (account_cap, request_cap) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (Some(a), None) | (None, Some(a)) => Some(a),
+        (None, None) => None,
+    })
+}
 #[allow(clippy::too_many_arguments)] // One bounded, pure pricing calculation; no owner or IO.
 pub(super) fn size_order(
     sizing: &Sizing,
@@ -161,6 +187,18 @@ mod tests {
     use super::*;
     fn d(s: &str) -> Decimal {
         dec(s).unwrap()
+    }
+    #[test]
+    fn policy_ceiling_is_mandatory_for_real_and_always_stricter() {
+        assert_eq!(
+            enforced_entry_ceiling(true, true, None, Some(d("10"))).unwrap_err(),
+            "ACCOUNT_ENTRY_CAP_UNCONFIGURED"
+        );
+        assert_eq!(enforced_entry_ceiling(true, true, Some(d("10")), None).unwrap(), Some(d("10")));
+        assert_eq!(enforced_entry_ceiling(true, true, Some(d("10")), Some(d("8"))).unwrap(), Some(d("8")));
+        assert_eq!(enforced_entry_ceiling(true, true, Some(d("8")), Some(d("10"))).unwrap(), Some(d("8")));
+        assert_eq!(enforced_entry_ceiling(false, true, None, None).unwrap(), None);
+        assert_eq!(enforced_entry_ceiling(true, false, None, Some(d("10"))).unwrap(), Some(d("10")));
     }
     #[test]
     fn k6_v01_fee_inclusive_max_entry_and_minimum() {

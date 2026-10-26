@@ -10,6 +10,7 @@ const object=(properties:Schema,required=Object.keys(properties)):Schema=>({type
 const action=(name:string,props:Schema={},required=Object.keys(props)):Schema=>object({action:{const:name},...props},['action',...required]);
 const account=text();const mutation={idempotency_key:token};
 const limits=object({max_modelled_loss_usdt:money,max_order_loss_usdt:money,max_notional_usdt:{anyOf:[money,{type:'null'}]},max_leverage:{anyOf:[money,{type:'null'}]},max_daily_realized_loss_usdt:{anyOf:[money,{type:'null'}]},max_drawdown_ratio:{anyOf:[{type:'string',pattern:'^(?:0(?:\\.[0-9]{1,9})?|1(?:\\.0{1,9})?)$',maxLength:11},{type:'null'}]},allowed_instruments:array(text(64))});
+const limitsWithEntry=object({...limits.properties,max_entry_usd:money},limits.required);
 const sizing={oneOf:[object({contracts:money}),object({max_loss_usd:money}),object({entry_budget_usd:money})]};
 const constraints=object({type:choice('limit','market','post_only','ioc','fok'),limit_price:money,reference:text(),max_entry_usd:money,max_slippage_bps:integer(0,10000)},['type','max_slippage_bps']);
 const protection={oneOf:[object({stop_price:money}),object({stop_distance_bps:integer(1,10000)})]};
@@ -39,7 +40,7 @@ researchRun.allOf=[{oneOf:[{required:['parameters']},{required:['variants']}]},
  {if:{properties:{action:{const:'backtest'}}},then:{required:['parameters']}},
  {if:{properties:{action:{const:'grid'}}},then:{required:['variants']}}];
 export const ACTION_SCHEMAS:Record<string,Schema[]>={
- accounts:[action('list'),action('status',{account}),action('connect',{...mutation,credential_ref:text(),alias:text(64),label:text(128),limits,enabled:{type:'boolean'}},['idempotency_key','credential_ref','alias','limits','enabled']),pauseResume,action('set_limits',{account,...mutation,expected_revision:integer(),limits})],
+ accounts:[action('list'),action('status',{account}),action('connect',{...mutation,credential_ref:text(),alias:text(64),label:text(128),limits,enabled:{type:'boolean'}},['idempotency_key','credential_ref','alias','limits','enabled']),pauseResume,action('set_limits',{account,...mutation,expected_revision:integer(),limits:limitsWithEntry})],
  strategies:[action('list',{account}),action('status',{account,...instance}),action('create',{account,...mutation,...instance,definition_id:text(64),version:integer(1,1),parameters:liveStrategyParams,instruments:array(text(64)),timeframe_ms:integer(1000),budget_usd:money}),action('update',{account,...mutation,...instance,expected_revision:integer(),parameters:liveStrategyParams,budget_usd:money}),startStop],
  market:[screenCompare,action('instruments',{asset:text(16),settle_currency:text(16)},['asset']),action('snapshot',{instrument:text(64)}),action('microstructure',{instrument:text(64),size_contracts:money},['instrument']),action('capabilities')],
  research:[researchRun,action('status',{job_id:text()}),action('cancel',{job_id:text(),...mutation}),action('result',{job_id:text(),cursor:text(512),limit:integer(1,50),view:choice('summary','trades','equity','variants')},['job_id','limit']),action('capabilities'),action('validate',{...range,instruments:{...array(text(64),8),minItems:1},strategy_id:choice('ema_cross_v1'),parameters:ema,costs,data_mode:choice('counterfactual','historical_observed')},['instruments','timeframe_ms','start_ms','end_ms','strategy_id','parameters','costs','data_mode'])],

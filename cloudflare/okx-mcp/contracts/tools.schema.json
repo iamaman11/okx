@@ -276,6 +276,10 @@
                     },
                     "maxItems": 32,
                     "uniqueItems": true
+                  },
+                  "max_entry_usd": {
+                    "type": "string",
+                    "pattern": "^(?!0+(\\.0+)?$)(0|[1-9]\\d{0,14})(\\.\\d{1,9})?$"
                   }
                 },
                 "required": [

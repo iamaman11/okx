@@ -8,6 +8,9 @@ export const account:Account={id:"primary",label:"Primary",venue:"okx",environme
  identity_verified:true,enabled:true,explicit_pause:false,policy_revision:1,account_key:"okx:real:"+"a".repeat(64),limits,strategies:[]};
 const policy:Governance={...initial,revision:1,accounts:[account]};
 yes(validGovernance(initial)&&validGovernance(policy),"clean account policy validates");
+yes(validGovernance({...policy,accounts:[{...account,limits:{...limits,max_entry_usd:"10"}}]}),"configurable real USD entry cap");
+yes(!validGovernance({...policy,accounts:[{...account,limits:{...limits,max_entry_usd:"0"}}]}),"zero entry cap is invalid");
+yes(!validGovernance({...policy,accounts:[{...account,limits:{...limits,max_entry_usd:"10",unauthorized:true}}]}),"entry cap does not weaken strict fields");
 yes(!validGovernance({...policy,trading_requested:true}),"old grant fields are not decoded");
 yes(!validGovernance({...policy,accounts:[{...account,account_key:"okx:real:"+"b".repeat(64)}]}),"identity and key cannot disagree");
 yes(projectRiskPolicy(policy)?.enabled===true,"saved access enables authority, never native POST");
