@@ -1,4 +1,5 @@
 pub mod cache;
+mod budget;
 mod cursor;
 pub mod executor;
 pub mod jobs;
@@ -119,6 +120,7 @@ pub struct AnalyticsService {
     jobs: jobs::Jobs,
     artifacts: ResearchArtifactStore,
     heavy: Arc<tokio::sync::Semaphore>,
+    research_memory: Arc<tokio::sync::Semaphore>,
 }
 impl AnalyticsService {
     pub fn new(
@@ -135,6 +137,7 @@ impl AnalyticsService {
             jobs: jobs::Jobs::open(root.join("research-catalog.sqlite"))?,
             artifacts: ResearchArtifactStore::at(root),
             heavy: Arc::new(tokio::sync::Semaphore::new(2)),
+            research_memory: Arc::new(tokio::sync::Semaphore::new(budget::MEMORY_TOTAL_MIB as usize)),
         };
         service.apply_retention(chrono::Utc::now().timestamp_millis().max(0) as u64)?;
         Ok(service)
@@ -750,6 +753,9 @@ impl AnalyticsService {
         }))
     }
     async fn submit(&self, request: ResearchRequest) -> Result<Value, String> {
+        // Estimate the complete batch before SQL admission or fetching candles.
+        // Large requests are rejected before any allocation or source I/O.
+        let memory_mib = budget::estimated_mib(&request)?;
         let hash = okx_research::canonical_sha256(&("analytics/448.1", &request))
             .map_err(|e| e.to_string())?;
         let hash = hash.strip_prefix("sha256:").unwrap_or(&hash).to_owned();
@@ -775,6 +781,15 @@ impl AnalyticsService {
                 let _heavy = tokio::select! {
                     result = this.heavy.clone().acquire_owned() =>
                         result.map_err(|_| "ANALYTICS_QUEUE_CLOSED")?,
+                    _ = executor::cancelled(cancel.clone()) =>
+                        return Err("CANCELLED".into()),
+                };
+                // Hold the entire batch reservation through artifact publish
+                // and terminal state transition. Multiple heavy jobs share one
+                // global 4 GiB estimate; wait cancellably, never oversubscribe.
+                let _memory = tokio::select! {
+                    permit = this.research_memory.clone().acquire_many_owned(memory_mib) =>
+                        permit.map_err(|_| "RESEARCH_MEMORY_POOL_CLOSED")?,
                     _ = executor::cancelled(cancel.clone()) =>
                         return Err("CANCELLED".into()),
                 };
