@@ -264,7 +264,15 @@ impl TradeService {
                     // MAY_HAVE_SENT outcome. A failed local commit stays uncertain.
                     return match reject_prepost_denial(&r.execution.store, &prepared, &reason).await
                     {
-                        Ok(result) => Ok(result),
+                        Ok(mut result) => {
+                            match self.release_unsent(r, &prepared).await {
+                                Ok(()) => result["data"]["risk_release_state"] = json!("RELEASED"),
+                                Err(release) => {
+                                    result["data"]["risk_release_error"] = json!(release);
+                                }
+                            }
+                            Ok(result)
+                        }
                         Err(_) => Ok(uncertain(
                             &id,
                             "PREPOST_LOCAL_COMMIT_UNCONFIRMED_NO_RESUBMIT",
@@ -1107,6 +1115,10 @@ mod tests {
             Some("POST_CENSUS_NOT_AFTER_RESERVE")
         );
         // Re-observation must not erase the original denial or mint a POST.
+        let sql_proof = store.call(deadline(), |s| s.unsent_release_receipt("intent_fixture"))
+            .await.unwrap().unwrap();
+        assert_eq!(sql_proof.reason, "POST_CENSUS_NOT_AFTER_RESERVE");
+        assert_eq!(sql_proof.intent_id, "intent_fixture");
         let replay = reject_prepost_denial(&store, &intent, "COMMAND_EXPIRED")
             .await
             .unwrap();

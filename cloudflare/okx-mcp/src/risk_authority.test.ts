@@ -141,6 +141,17 @@ check((await handleNativeRiskCommand(s,session,{schema:"okx.risk-command/v1",com
  check(revoked.status==="DENIED"&&
    revoked.reason==="CENTRAL_REVOCATION_OR_POLICY_CHANGE",
    "an existing HELD reservation grants no POST after central policy revocation");
+ const unsent=await handleNativeRiskCommand(t,session,{
+   schema:"okx.risk-command/v1",command_id:"unsent_chat_00001",
+   installation_id:initial.installation_id,
+   action:{action:"RELEASE_UNSENT",reservation_key:admitted[1].reservation_key,
+     plan_sha256:"b".repeat(64),expected_risk_book_sequence:4,
+     proof:{reservation_key:admitted[1].reservation_key,
+       account_key:account.account_key,intent_id:"intent_chat_0001",
+       plan_hash:"b".repeat(64),request_hash:"e".repeat(64),
+       reason:"POLICY_CHANGED",record_digest:"f".repeat(64)}}
+ },now+4);
+ check(unsent.status==="UPDATED","native signed no-send frees held reserve despite governance pause");
  const inspect=await handleNativeRiskCommand(t,session,{
    schema:"okx.risk-command/v1",command_id:"inspect_chat_0001",
    installation_id:initial.installation_id,

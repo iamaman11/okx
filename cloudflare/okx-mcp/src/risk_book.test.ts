@@ -1,4 +1,4 @@
-import {accountKey,amount,units,readRiskBook,initializeRiskBook,inspectRisk,reserveRisk,transitionRisk,beginRiskPost} from "./risk_book.js";
+import {accountKey,amount,units,readRiskBook,initializeRiskBook,inspectRisk,reserveRisk,transitionRisk,beginRiskPost,releaseUnsentRisk} from "./risk_book.js";
 function check(value: boolean, label:string) { if(!value) throw Error(label); }
 class Storage {
   map=new Map<string,unknown>();
@@ -74,6 +74,29 @@ const campaign=await reserveRisk(sa,policy,reported,{...request,intent_id:"new_i
 check(campaign.status==="DENIED"&&campaign.reason==="CAMPAIGN_LOSS_BUDGET_EXHAUSTED","fresh losses charged before reserve even when admission denied");
 check((await readRiskBook(sa))?.consumed_loss_usd==="17","campaign losses remain charged without releasing any new reservation");
 console.log("risk_concurrent_accounts_campaign_limit PASS");
+// A fresh reservation can be released only by the exact current native SQL
+// writer's durable no-post receipt. No venue, fills or finance source needed.
+const unsent=new Storage();
+await unsent.put("account_access_v1",governance);
+await unsent.put("generation",77);
+await initializeRiskBook(unsent,"installation_test");
+const rescue=await reserveRisk(unsent,policy,census,{...request,intent_id:"intent_unsent_001"},native);
+if(rescue.status!=="HELD")throw Error("unsent reserve");
+const receipt={reservation_key:rescue.entry.key,account_key:accountKey(request),
+  intent_id:"intent_unsent_001",plan_hash:p,request_hash:"e".repeat(64),
+  reason:"POST_CENSUS_UNPROVEN",record_digest:"f".repeat(64)};
+check((await releaseUnsentRisk(unsent,rescue.entry.key,p,1,76,receipt)).status==="DENIED",
+  "stale authenticated generation cannot release");
+check((await releaseUnsentRisk(unsent,rescue.entry.key,p,1,77,
+  {...receipt,plan_hash:d})).status==="DENIED","wrong plan cannot release");
+check((await releaseUnsentRisk(unsent,rescue.entry.key,p,1,77,receipt)).status==="UPDATED",
+  "exact no-send SQL proof releases HELD");
+check((await releaseUnsentRisk(unsent,rescue.entry.key,p,2,77,receipt)).status==="DENIED",
+  "central release tombstone prevents repeated budget mutation");
+check((await readRiskBook(unsent))?.occupied_usd==="0" &&
+ (await readRiskBook(unsent))?.consumed_loss_usd==="0",
+ "release only reserved capacity and never credits realized losses");
+console.log("risk_unsent_cas_release PASS");
 census.occupied[0].cumulative_loss_usd="17";
 // One million terminal records must not be enumerated or decoded on the hot path.
 for(let i=0;i<1_000_000;i++)sa.map.set("risk_entry_v2:tombstone_"+i,{state:"RELEASED",key:i});

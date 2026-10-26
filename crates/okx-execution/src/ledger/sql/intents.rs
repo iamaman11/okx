@@ -66,6 +66,36 @@ impl AccountStore {
         tx.commit()?;
         Ok(true)
     }
+    /// A no-send release requires the existing durable rejection receipt,
+    /// matching the original request, with no committed post claim.
+    /// A gateway timeout or venue rejection can never produce this witness.
+    pub fn unsent_release_receipt(&self, id: &str) -> StoreResult<Option<UnsentSqlReceipt>> {
+        self.connection
+            .query_row(
+                "SELECT r.reservation_key,r.account_key,i.intent_id,i.plan_hash,i.request_hash,i.incident
+                 FROM intents i
+                 JOIN risk_receipts r ON r.intent_id=i.intent_id
+                 JOIN operation_receipts o ON o.operation_id='terminal:'||i.intent_id
+                 WHERE i.intent_id=?1 AND i.state='REJECTED'
+                   AND i.begin_post_at IS NULL AND i.exchange_order_id IS NULL
+                   AND r.state='UNSENT_PENDING_CENTRAL'
+                   AND o.kind='REJECTED_UNSENT'
+                   AND o.request_hash=i.request_hash AND o.result_ref=i.incident",
+                [id],
+                |r| {
+                    Ok(UnsentSqlReceipt {
+                        reservation_key: r.get(0)?,
+                        account_key: r.get(1)?,
+                        intent_id: r.get(2)?,
+                        plan_hash: r.get(3)?,
+                        request_hash: r.get(4)?,
+                        reason: r.get(5)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(StoreError::from)
+    }
     pub fn central_receipt(&self, id: &str) -> StoreResult<Option<CentralReceipt>> {
         let row=self.connection.query_row("SELECT reservation_key,account_key,installation_id,instance_id,plan_hash,policy_revision,receipt_hash,requested_loss_usd,conversion_digest FROM risk_receipts WHERE intent_id=?1",[id],|r|Ok((CentralReceipt{reservation_key:r.get(0)?,account_key:r.get(1)?,installation_id:r.get(2)?,instance_id:r.get(3)?,intent_id:id.into(),plan_hash:r.get(4)?,policy_revision:r.get(5)?,receipt_hash:r.get(6)?,requested_loss_usd:Decimal::ZERO,conversion_digest:r.get(8)?},r.get::<_,String>(7)?))).optional()?;
         row.map(|(mut receipt, amount)| {

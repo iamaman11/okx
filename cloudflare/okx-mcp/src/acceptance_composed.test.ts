@@ -155,12 +155,7 @@ const handler=async(url:string,init?:RequestInit)=>{
      action:{action:'BEGIN_POST',reservation_key:reserve.reservation_key,
        plan_sha256:planHash,policy_revision:governance.revision,
        expected_risk_book_sequence:reserve.risk_book_sequence,
-       source_proof_sha256:'e'.repeat(64),census:fresh,
-       causal_proof:{reserve_anchor:reserve.reservation_key,
-         native_incarnation:'a'.repeat(32),elapsed_to_proof_ms:35,
-         account_reads:[{account_key:row.account_key,private_generation:5,
-           source_read_id:'f'.repeat(64),content_digest:'b'.repeat(64),
-           started_after_held_ms:3,completed_after_held_ms:22}]}}
+       source_proof_sha256:'e'.repeat(64),census:fresh}
    },at+2);
    if(fence.status!=='POST_AUTHORIZED')
     return Response.json(rejected(fence.reason??'CENTRAL_POST_FENCE_DENIED'));

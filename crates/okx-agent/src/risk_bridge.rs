@@ -196,19 +196,6 @@ mod tests {
                 policy_revision: 1,
                 expected_risk_book_sequence: held.risk_book_sequence.unwrap(),
                 source_proof_sha256: "d".repeat(64),
-                causal_proof: okx_protocol::risk_authority::CausalPostProof {
-                    reserve_anchor: held.reservation_key.clone().unwrap(),
-                    native_incarnation: "a".repeat(32),
-                    elapsed_to_proof_ms: 25,
-                    account_reads: vec![okx_protocol::risk_authority::PostAccountReadProof {
-                        account_key: format!("okx:real:{}", "a".repeat(64)),
-                        private_generation: 1,
-                        source_read_id: "b".repeat(64),
-                        content_digest: "f".repeat(64),
-                        started_after_held_ms: 2,
-                        completed_after_held_ms: 15,
-                    }],
-                },
                 census: fresh,
             },
         }

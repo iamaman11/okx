@@ -170,6 +170,33 @@ impl CausalPostProof {
                 })
     }
 }
+/// Current authenticated SQL writer attests durable REJECTED_UNSENT
+/// and the absence of any native POST claim for this exact intention.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UnsentRiskReleaseProof {
+    pub reservation_key: String,
+    pub account_key: String,
+    pub intent_id: String,
+    pub plan_hash: String,
+    pub request_hash: String,
+    pub reason: String,
+    pub record_digest: String,
+}
+impl UnsentRiskReleaseProof {
+    pub fn valid(&self) -> bool {
+        self.reservation_key.len() <= 512
+            && !self.reservation_key.is_empty()
+            && self.account_key.starts_with("okx:real:")
+            && self.account_key.len() == 73
+            && hash(&self.account_key[9..])
+            && token(&self.intent_id)
+            && hash(&self.plan_hash)
+            && hash(&self.request_hash)
+            && (1..=128).contains(&self.reason.len())
+            && hash(&self.record_digest)
+    }
+}
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum RiskResolution {
@@ -214,6 +241,12 @@ pub enum RiskCommandAction {
         usd_conversion: UsdConversion,
         policy_revision: u64,
         census: NativeRiskCensus,
+    },
+    ReleaseUnsent {
+        reservation_key: String,
+        plan_sha256: String,
+        expected_risk_book_sequence: u64,
+        proof: UnsentRiskReleaseProof,
     },
     BeginPost {
         reservation_key: String,
@@ -297,6 +330,18 @@ impl RiskCommand {
                     && usd_conversion.valid()
                     && *policy_revision > 0
                     && census.valid()
+            }
+            RiskCommandAction::ReleaseUnsent {
+                reservation_key,
+                plan_sha256,
+                expected_risk_book_sequence,
+                proof,
+            } => {
+                *expected_risk_book_sequence > 0
+                    && hash(plan_sha256)
+                    && proof.valid()
+                    && proof.reservation_key == *reservation_key
+                    && proof.plan_hash == *plan_sha256
             }
             RiskCommandAction::BeginPost {
                 reservation_key,

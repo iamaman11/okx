@@ -357,6 +357,44 @@ export interface TerminalRiskReleaseProof {
   ledger:TerminalRiskLedgerProof;now_ms:number;
 }
 
+/// A no-send release is strictly narrower than an exchange-terminal release:
+/// it can only follow the authenticated account owner's durable SQL rejection
+/// with no native post claim. No venue facts or speculative credits are used.
+export interface UnsentRiskReleaseProof {
+  reservation_key:string;account_key:string;intent_id:string;plan_hash:string;
+  request_hash:string;reason:string;record_digest:string;
+}
+export async function releaseUnsentRisk(
+  storage:any,key:string,plan_hash:string,expected_sequence:number,
+  generation:number,proof:UnsentRiskReleaseProof
+):Promise<{status:"UPDATED"|"DENIED";reason?:string}> {
+  if(!proof||!HEX.test(plan_hash)||!HEX.test(proof.request_hash)||
+    !HEX.test(proof.record_digest)||!TOKEN.test(proof.intent_id)||
+    proof.reservation_key!==key||proof.plan_hash!==plan_hash||
+    !/^okx:real:[0-9a-f]{64}$/.test(proof.account_key)||
+    typeof proof.reason!=="string"||proof.reason.length<1||proof.reason.length>128||
+    !Number.isSafeInteger(expected_sequence)||expected_sequence<1||
+    !Number.isSafeInteger(generation)||generation<1)
+    return {status:"DENIED",reason:"INVALID_UNSENT_SQL_PROOF"};
+  return storage.transaction(async(tx:any)=>{
+    const meta=await tx.get(KEY);
+    if(!validMeta(meta))return {status:"DENIED" as const,reason:"RISK_BOOK_MISSING_OR_CORRUPT"};
+    if(await tx.get("generation")!==generation||meta.sequence!==expected_sequence)
+      return {status:"DENIED" as const,reason:"STALE_SESSION_OR_BOOK_SEQUENCE"};
+    const entry:RiskEntry|undefined=await tx.get(entryKey(key));
+    if(!entry||!validEntry(entry)||entry.plan_hash!==plan_hash||
+      !["HELD","POSTED"].includes(entry.state)||
+      accountKey(entry)!==proof.account_key||entry.intent_id!==proof.intent_id)
+      return {status:"DENIED" as const,reason:"UNSENT_RELEASE_IDENTITY_OR_STATE_MISMATCH"};
+    // Even if central BEGIN_POST committed but its reply was lost, a native
+    // SQL rejection CAS prevents this intention from ever reaching venue.
+    // Only the native writer, already authenticated by WS generation, may
+    // supply this proof. A replayed release is blocked by the tombstone.
+    await saveEntry(tx,meta,{...entry,state:"RELEASED",transition_proof:proof.record_digest},-units(entry.loss_usdt)!);
+    return {status:"UPDATED" as const};
+  });
+}
+
 export async function transitionRisk(
   storage: any,
   key: string,

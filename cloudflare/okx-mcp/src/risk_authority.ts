@@ -1,7 +1,7 @@
 import {validGovernance,projectRiskPolicy,accessEnabled,GOVERNANCE_STORAGE_KEY} from "./account_governance.js";
 import {amount,units,beginRiskPost,readRiskBook,inspectRisk,reserveRisk,transitionRisk,
   type CompleteRiskCensus,type NativeSessionRiskProof,type CausalPostProof,type RiskReservation,
-  type TerminalRiskReleaseProof} from "./risk_book.js";
+  type TerminalRiskReleaseProof,type UnsentRiskReleaseProof,releaseUnsentRisk} from "./risk_book.js";
 
 const COMMAND_SCHEMA="okx.risk-command/v1";
 const RESULT_SCHEMA="okx.risk-result/v1";
@@ -168,6 +168,28 @@ export async function handleNativeRiskCommand(
         policy_revision:a.policy_revision as number,
         existing_modelled_loss_usdt:result.existing_modelled_loss_usdt!,reservation_state:null}
       :deny(id,result.reason??"POST_FENCE_DENIED");
+  }
+  if(a.action==="RELEASE_UNSENT"){
+    if(typeof a.reservation_key!=="string"||typeof a.plan_sha256!=="string"||
+       !Number.isSafeInteger(a.expected_risk_book_sequence)||!isObject(a.proof))
+      return deny(id,"INVALID_UNSENT_RELEASE_COMMAND");
+    const proof=a.proof;
+    if(typeof proof.reservation_key!=="string"||typeof proof.account_key!=="string"||
+       typeof proof.intent_id!=="string"||typeof proof.plan_hash!=="string"||
+       typeof proof.request_hash!=="string"||typeof proof.reason!=="string"||
+       typeof proof.record_digest!=="string")
+      return deny(id,"INVALID_UNSENT_SQL_PROOF");
+    const result=await releaseUnsentRisk(storage,a.reservation_key,a.plan_sha256,
+      a.expected_risk_book_sequence as number,session.connection_generation,
+      proof as unknown as UnsentRiskReleaseProof);
+    if(result.status!=="UPDATED")return deny(id,result.reason??"UNSENT_RELEASE_DENIED");
+    const observed=await inspectRisk(storage,a.reservation_key);
+    return observed
+      ?{schema:RESULT_SCHEMA,command_id:id,status:"UPDATED",reason:null,
+        reservation_key:observed.entry.key,risk_book_sequence:observed.meta.sequence,
+        policy_revision:observed.entry.policy_revision,existing_modelled_loss_usdt:null,
+        reservation_state:null}
+      :deny(id,"RISK_BOOK_READBACK_FAILED");
   }
   if(a.action==="RESOLVE"){
     if(typeof a.reservation_key!=="string"||typeof a.plan_sha256!=="string"
