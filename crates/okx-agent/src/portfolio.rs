@@ -93,6 +93,7 @@ pub async fn portfolio(
     let mut totals: BTreeMap<(String, String, String), Decimal> = BTreeMap::new();
     let mut attribution: BTreeMap<(String, String, Option<String>, String, String), Decimal> =
         BTreeMap::new();
+    let mut account_names = BTreeMap::new();
     let mut readiness = Vec::new();
     let mut navigation = Vec::new();
     for (key, r) in resolved {
@@ -100,6 +101,8 @@ pub async fn portfolio(
             okx_protocol::accounts::Environment::Real => "real",
             okx_protocol::accounts::Environment::Demo => "demo",
         };
+        let alias = r.configuration.alias.clone();
+        account_names.insert(key.clone(), alias.clone());
         let instances = request.strategies.clone().unwrap_or_default();
         let currencies = request.currencies.clone().unwrap_or_default();
         let history = request.action == PortfolioAction::History;
@@ -139,11 +142,11 @@ pub async fn portfolio(
             .await
             .map_err(|e| e.to_string())?;
         for nav in page.3 {
-            navigation.push(nav_projection(&key, nav, from, through, page.4));
+            navigation.push(nav_projection(&key, &alias, nav, from, through, page.4));
         }
-        readiness.push(json!({"account":key,"t0":page.4,"financial_risk":page.2}));
+        readiness.push(json!({"account":key,"account_name":alias,"t0":page.4,"financial_risk":page.2}));
         for entry in page.0 {
-            rows.push((entry.time,key.clone(),entry.entry_id.clone(),json!({"time":entry.time,"account":key,"component":entry.component,"amount":entry.amount.normalize().to_string(),"currency":entry.currency,"strategy_instance":entry.instance_id,"reference":entry.entry_id})));
+            rows.push((entry.time,key.clone(),entry.entry_id.clone(),json!({"time":entry.time,"account":key,"account_name":alias,"component":entry.component,"amount":entry.amount.normalize().to_string(),"currency":entry.currency,"strategy_instance":entry.instance_id,"reference":entry.entry_id})));
         }
         accumulate_finance(&key, environment, page.1, &mut totals, &mut attribution)?;
     }
@@ -186,6 +189,7 @@ pub async fn portfolio(
             |((account, environment, instance, currency, component), amount)| {
                 json!({
                     "kind":"account_component",
+                    "account_name":account_names.get(&account).map(String::as_str),
                     "account":account,
                     "environment":environment,
                     "strategy_instance":instance,
@@ -267,7 +271,13 @@ fn accumulate_finance(
             .or_default();
         *sum = sum.checked_add(amount).ok_or("MONEY_OVERFLOW")?;
         details.insert(
-            (account.to_owned(), environment.to_owned(), instance, currency, component),
+            (
+                account.to_owned(),
+                environment.to_owned(),
+                instance,
+                currency,
+                component,
+            ),
             amount,
         );
     }
@@ -276,6 +286,7 @@ fn accumulate_finance(
 
 fn nav_projection(
     account: &str,
+    account_name: &str,
     nav: okx_execution::NavWindow,
     from: i64,
     through: i64,
@@ -293,6 +304,8 @@ fn nav_projection(
     json!({
         "kind":"nav",
         "account":account,
+        "account_name":account_name,
+        "pnl_interpretation":"equity_change_less_external_flows_includes_valuation_fx_not_necessarily_realized_trade_pnl",
         "requested_range":{"start_ms":from,"end_ms":through},
         "covered_range":{"start_ms":nav.opening_as_of,"end_ms":nav.current_as_of},
         "t0":t0,
@@ -416,10 +429,7 @@ mod tests {
         store.ingest_page(&page).unwrap();
         store
     }
-    fn fixture_scoped_finance(
-        account: &mut AccountStore,
-        amounts: [i64; 3],
-    ) -> AccountFinance {
+    fn fixture_scoped_finance(account: &mut AccountStore, amounts: [i64; 3]) -> AccountFinance {
         use okx_execution::StrategyInstance;
         for id in ["momentum", "mean_reversion"] {
             account
@@ -524,10 +534,24 @@ mod tests {
             Decimal::from(-2)
         );
         // Risk budgets are not financial facts or additional capital.
-        assert_eq!(real.instance("momentum").unwrap().unwrap().budget, Decimal::from(10));
-        assert_eq!(demo.instance("momentum").unwrap().unwrap().budget, Decimal::from(10));
-        assert_eq!(real.finance_totals_filtered(12, 12, &[], &[]).unwrap()[&("USD".into(), "REALIZED_PNL".into())], Decimal::from(13));
-        assert_eq!(demo.finance_totals_filtered(12, 12, &[], &[]).unwrap()[&("USD".into(), "REALIZED_PNL".into())], Decimal::from(10));
+        assert_eq!(
+            real.instance("momentum").unwrap().unwrap().budget,
+            Decimal::from(10)
+        );
+        assert_eq!(
+            demo.instance("momentum").unwrap().unwrap().budget,
+            Decimal::from(10)
+        );
+        assert_eq!(
+            real.finance_totals_filtered(12, 12, &[], &[]).unwrap()
+                [&("USD".into(), "REALIZED_PNL".into())],
+            Decimal::from(13)
+        );
+        assert_eq!(
+            demo.finance_totals_filtered(12, 12, &[], &[]).unwrap()
+                [&("USD".into(), "REALIZED_PNL".into())],
+            Decimal::from(10)
+        );
     }
 
     #[test]
@@ -604,7 +628,7 @@ mod tests {
             current_as_of: None,
             coverage: "PARTIAL".into(),
         };
-        let row = nav_projection("okx:real:verified", nav, 1, 10, 1);
+        let row = nav_projection("okx:real:verified", "Acceptance", nav, 1, 10, 1);
         assert_eq!(
             row["coverage_reason"],
             "STRATEGY_CAPITAL_PROVENANCE_MISSING"
