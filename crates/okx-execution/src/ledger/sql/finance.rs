@@ -44,7 +44,11 @@ impl AccountStore {
             // as equity, flows or returns (even if they say COMPLETE).
             let capital_known = !scope.starts_with("strategy:");
             let opening = if capital_known { endpoint(from)? } else { None };
-            let current = if capital_known { endpoint(through)? } else { None };
+            let current = if capital_known {
+                endpoint(through)?
+            } else {
+                None
+            };
             let flows = opening
                 .as_ref()
                 .zip(current.as_ref())

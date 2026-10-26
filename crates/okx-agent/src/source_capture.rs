@@ -6,7 +6,7 @@ use crate::{
 use okx_api::{AccountBill, FillHistory};
 use okx_execution::{
     Bill, CashFlow, Fill, FinanceEntry, FundingEvent, IngestPage, NavPoint, SourceCursor,
-    StoreError, StoreResult, UsdConversionEvidence,
+    StoreError, StoreResult, UsdConversionEvidence, VenueMark,
 };
 use okx_runtime::PrivateWsHandle;
 use rust_decimal::Decimal;
@@ -163,6 +163,21 @@ pub async fn capture_account_sources(
     let complete = spot && swap && futures && options && bills;
     let balances = snapshot.balance.details.clone();
     let usd_equity = d(&snapshot.balance.total_equity_usd)?;
+    // Validate all supplied marks even though no unproven strategy capital
+    // is projected as NAV. Bad venue marks must not silently pass capture.
+    let _marks = snapshot
+        .positions
+        .iter()
+        .filter_map(|p| {
+            p.mark_price.as_ref().map(|mark| {
+                Ok(VenueMark {
+                    instrument_id: p.instrument_id.clone(),
+                    price: d(mark)?,
+                    source_ref: snapshot.source_received_at.clone(),
+                })
+            })
+        })
+        .collect::<StoreResult<Vec<_>>>()?;
     let source = snapshot.source_received_at.clone();
     let version = format!("{generation}:{}", snapshot.account_generation);
     execution

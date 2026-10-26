@@ -144,7 +144,9 @@ pub async fn portfolio(
             rows.push((entry.time,key.clone(),entry.entry_id.clone(),json!({"time":entry.time,"account":key,"component":entry.component,"amount":entry.amount.normalize().to_string(),"currency":entry.currency,"strategy_instance":entry.instance_id,"reference":entry.entry_id})));
         }
         for (k, amount) in page.1 {
-            let sum = totals.entry((environment.to_owned(), k.0, k.1)).or_default();
+            let sum = totals
+                .entry((environment.to_owned(), k.0, k.1))
+                .or_default();
             *sum = sum.checked_add(amount).ok_or("MONEY_OVERFLOW")?;
         }
     }
@@ -244,7 +246,9 @@ fn nav_projection(
     let coverage_reason = match nav.coverage.as_str() {
         "COMPLETE" => Value::Null,
         "UNAVAILABLE_BEFORE_T0" => json!("UNAVAILABLE_BEFORE_T0"),
-        "PARTIAL" if nav.scope_id.starts_with("strategy:") => json!("STRATEGY_CAPITAL_PROVENANCE_MISSING"),
+        "PARTIAL" if nav.scope_id.starts_with("strategy:") => {
+            json!("STRATEGY_CAPITAL_PROVENANCE_MISSING")
+        }
         "PARTIAL" => json!("NAV_SOURCE_INCOMPLETE"),
         _ => json!("NAV_COVERAGE_INVALID"),
     };
@@ -419,8 +423,10 @@ mod tests {
 
     #[test]
     fn real_and_demo_components_have_distinct_summary_keys() {
-        let real = json!({"kind":"component","environment":"real","currency":"USD","component":"FEE"});
-        let demo = json!({"kind":"component","environment":"demo","currency":"USD","component":"FEE"});
+        let real =
+            json!({"kind":"component","environment":"real","currency":"USD","component":"FEE"});
+        let demo =
+            json!({"kind":"component","environment":"demo","currency":"USD","component":"FEE"});
         assert_ne!(summary_key(&real), summary_key(&demo));
     }
 
@@ -438,7 +444,10 @@ mod tests {
             coverage: "PARTIAL".into(),
         };
         let row = nav_projection("okx:real:verified", nav, 1, 10, 1);
-        assert_eq!(row["coverage_reason"], "STRATEGY_CAPITAL_PROVENANCE_MISSING");
+        assert_eq!(
+            row["coverage_reason"],
+            "STRATEGY_CAPITAL_PROVENANCE_MISSING"
+        );
         assert!(row["window"]["opening_equity"].is_null());
         assert!(row["window"]["pnl"].is_null());
     }
