@@ -352,11 +352,7 @@ pub fn grid(
     let split = bars.len() * 7 / 10;
     // All candidate scores use the same reporting window. Different EMA
     // warmups are loaded before it, never counted as reporting returns.
-    let train_score_start = variants
-        .iter()
-        .map(|p| p.slow)
-        .max()
-        .ok_or("EMPTY_GRID")?;
+    let train_score_start = variants.iter().map(|p| p.slow).max().ok_or("EMPTY_GRID")?;
     if train_score_start >= split {
         return Err("INSUFFICIENT_TRAIN_BARS".into());
     }
