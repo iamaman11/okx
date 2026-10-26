@@ -21,6 +21,8 @@ pub enum StoreError {
     Invalid(&'static str),
 }
 pub type StoreResult<T> = Result<T, StoreError>;
+/// Exact economic-event partition by strategy owner (None = unattributed), currency and component.
+pub type FinanceAttribution = std::collections::BTreeMap<(Option<String>, String, String), Decimal>;
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AccountMeta {
     pub initialize_operation_id: String,

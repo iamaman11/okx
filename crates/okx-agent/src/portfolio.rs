@@ -19,6 +19,8 @@ struct Cursor {
     time: i64,
     account: String,
     id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    snapshot: Option<String>,
 }
 fn history_after(key: &str, cursor: Option<&Cursor>, from: i64) -> (i64, String) {
     match cursor {
@@ -34,6 +36,27 @@ fn hash(v: &impl Serialize) -> Result<String, String> {
         Sha256::digest(serde_json::to_vec(v).map_err(|e| e.to_string())?)
     ))
 }
+/// Page cursors must refer to an unchanged logical summary; a fresh SQL/venue
+/// point or newly reachable account invalidates the prior snapshot, not skips rows.
+fn summary_snapshot(
+    query: &str,
+    rows: &[Value],
+    readiness: &[Value],
+    central_budget_available: bool,
+) -> Result<String, String> {
+    let sources = readiness
+        .iter()
+        .map(|r| (&r["account"], &r["account_requested"], &r["reason"]))
+        .collect::<Vec<_>>();
+    hash(&(query, rows, sources, central_budget_available))
+}
+
+fn require_cursor_snapshot(cursor: Option<&Cursor>, snapshot: &str) -> Result<(), String> {
+    if cursor.is_some_and(|c| c.snapshot.as_deref() != Some(snapshot)) {
+        return Err("CURSOR_SNAPSHOT_CHANGED".into());
+    }
+    Ok(())
+}
 pub async fn portfolio(
     accounts: &Arc<AccountRuntimeRegistry>,
     request: &PortfolioRequest,
@@ -43,12 +66,19 @@ pub async fn portfolio(
     let from = i64::try_from(request.start_ms).map_err(|_| "RANGE_OVERFLOW")?;
     let through = i64::try_from(request.end_ms).map_err(|_| "RANGE_OVERFLOW")?;
     let mut keys = BTreeSet::new();
+    let mut missing = BTreeSet::new();
     let mut resolved = Vec::new();
     for account in &request.accounts {
-        let r = accounts
-            .resolve(account)
-            .await
-            .ok_or("ACCOUNT_UNAVAILABLE")?;
+        let Some(r) = accounts.resolve(account).await else {
+            if request.action == PortfolioAction::History {
+                // History must never advance a cursor past an unread account.
+                return Err("ACCOUNT_UNAVAILABLE".into());
+            }
+            if !missing.insert(account.clone()) {
+                return Err("DUPLICATE_ACCOUNT".into());
+            }
+            continue;
+        };
         let key = r.configuration.account_key.wire();
         if !keys.insert(key.clone()) {
             return Err("DUPLICATE_ACCOUNT".into());
@@ -58,6 +88,7 @@ pub async fn portfolio(
     resolved.sort_by(|a, b| a.0.cmp(&b.0));
     let query = hash(&(
         keys,
+        &missing,
         from,
         through,
         &request.strategies,
@@ -90,10 +121,30 @@ pub async fn portfolio(
         return Err("CURSOR_QUERY_MISMATCH".into());
     }
     let mut rows = Vec::new();
-    let mut totals: BTreeMap<(String, String), Decimal> = BTreeMap::new();
-    let mut readiness = Vec::new();
+    let mut totals: BTreeMap<(String, String, String), Decimal> = BTreeMap::new();
+    let mut attribution: BTreeMap<(String, String, Option<String>, String, String), Decimal> =
+        BTreeMap::new();
+    let mut account_names = BTreeMap::new();
+    let mut finance_revisions = BTreeMap::new();
+    let mut readiness = missing
+        .into_iter()
+        .map(|requested| {
+            json!({
+                "account_requested":requested,
+                "quality":"unavailable",
+                "reason":"ACCOUNT_UNAVAILABLE",
+                "financial_risk":null
+            })
+        })
+        .collect::<Vec<_>>();
     let mut navigation = Vec::new();
     for (key, r) in resolved {
+        let environment = match r.configuration.account_key.environment {
+            okx_protocol::accounts::Environment::Real => "real",
+            okx_protocol::accounts::Environment::Demo => "demo",
+        };
+        let alias = r.configuration.alias.clone();
+        account_names.insert(key.clone(), alias.clone());
         let instances = request.strategies.clone().unwrap_or_default();
         let currencies = request.currencies.clone().unwrap_or_default();
         let history = request.action == PortfolioAction::History;
@@ -119,32 +170,49 @@ pub async fn portfolio(
                         health,
                         Vec::new(),
                         s.meta().initialized_at,
+                        s.finance_revision()?,
                     ))
                 } else {
                     Ok((
                         Vec::new(),
-                        s.finance_totals_filtered(from, through, &instances, &currencies)?,
+                        s.finance_attribution_filtered(from, through, &instances, &currencies)?,
                         health,
                         s.nav_summary(from, through, &instances, &currencies)?,
                         s.meta().initialized_at,
+                        s.finance_revision()?,
                     ))
                 }
             })
-            .await
-            .map_err(|e| e.to_string())?;
+            .await;
+        let page = match page {
+            Ok(page) => page,
+            Err(err) if !history => {
+                readiness.push(json!({
+                    "account":key,
+                    "account_name":alias,
+                    "quality":"unavailable",
+                    "reason":"ACCOUNT_SQL_READ_FAILED",
+                    "error":err.to_string(),
+                    "financial_risk":null
+                }));
+                continue;
+            }
+            Err(err) => return Err(err.to_string()),
+        };
+        finance_revisions.insert(key.clone(), page.5);
         for nav in page.3 {
-            navigation.push(nav_projection(&key, nav, from, through, page.4));
+            navigation.push(nav_projection(&key, &alias, nav, from, through, page.4));
         }
-        readiness.push(json!({"account":key,"t0":page.4,"financial_risk":page.2}));
+        readiness
+            .push(json!({"account":key,"account_name":alias,"t0":page.4,"financial_risk":page.2}));
         for entry in page.0 {
-            rows.push((entry.time,key.clone(),entry.entry_id.clone(),json!({"time":entry.time,"account":key,"component":entry.component,"amount":entry.amount.normalize().to_string(),"currency":entry.currency,"strategy_instance":entry.instance_id,"reference":entry.entry_id})));
+            rows.push((entry.time,key.clone(),entry.entry_id.clone(),json!({"time":entry.time,"account":key,"account_name":alias,"component":entry.component,"amount":entry.amount.normalize().to_string(),"currency":entry.currency,"strategy_instance":entry.instance_id,"reference":entry.entry_id})));
         }
-        for (k, amount) in page.1 {
-            let sum = totals.entry(k).or_default();
-            *sum = sum.checked_add(amount).ok_or("MONEY_OVERFLOW")?;
-        }
+        accumulate_finance(&key, environment, page.1, &mut totals, &mut attribution)?;
     }
     if request.action == PortfolioAction::History {
+        let history_snapshot = hash(&(query.as_str(), &finance_revisions))?;
+        require_cursor_snapshot(cursor.as_ref(), &history_snapshot)?;
         rows.sort_by(|a, b| (&a.0, &a.1, &a.2).cmp(&(&b.0, &b.1, &b.2)));
         let more = rows.len() > usize::from(request.limit).min(50);
         rows.truncate(usize::from(request.limit).min(50));
@@ -155,6 +223,9 @@ pub async fn portfolio(
         for (time, account, id, value) in rows {
             let size = serde_json::to_vec(&value).map_err(|e| e.to_string())?.len();
             if bytes + size > 7000 {
+                if output.is_empty() {
+                    return Err("HISTORY_ROW_TOO_LARGE".into());
+                }
                 truncated = true;
                 break;
             }
@@ -164,6 +235,7 @@ pub async fn portfolio(
                 time,
                 account,
                 id,
+                snapshot: Some(history_snapshot.clone()),
             });
             output.push(value);
         }
@@ -178,11 +250,29 @@ pub async fn portfolio(
             json!({"rows":output,"next_cursor":next,"central_budget":central_budget.as_ref().ok(),"central_budget_error":central_budget.as_ref().err(),"as_of_ms":Utc::now().timestamp_millis()}),
         )
     } else {
-        let mut all=totals.into_iter().map(|((currency,component),amount)|json!({"kind":"component","currency":currency,"component":component,"amount":amount.normalize().to_string()})).collect::<Vec<_>>();
+        let mut all=totals.into_iter().map(|((environment,currency,component),amount)|json!({"kind":"component","environment":environment,"currency":currency,"component":component,"amount":amount.normalize().to_string()})).collect::<Vec<_>>();
+        all.extend(attribution.into_iter().map(
+            |((account, environment, instance, currency, component), amount)| {
+                json!({
+                    "kind":"account_component",
+                    "account_name":account_names.get(&account).map(String::as_str),
+                    "account":account,
+                    "environment":environment,
+                    "strategy_instance":instance,
+                    "currency":currency,
+                    "component":component,
+                    "amount":amount.normalize().to_string(),
+                    "view":"detail_of_environment_component",
+                    "additive_with_rollup":false
+                })
+            },
+        ));
         all.extend(navigation.iter().cloned());
+        let snapshot = summary_snapshot(&query, &all, &readiness, central_budget.is_ok())?;
         if cursor.as_ref().is_some_and(|c| c.account != "summary") {
             return Err("INVALID_CURSOR".into());
         }
+        require_cursor_snapshot(cursor.as_ref(), &snapshot)?;
         let last_id = cursor.as_ref().map(|c| c.id.as_str()).unwrap_or("");
         let mut ordered = all
             .into_iter()
@@ -197,6 +287,9 @@ pub async fn portfolio(
         for (key, value) in ordered.into_iter().take(usize::from(request.limit).min(50)) {
             let size = serde_json::to_vec(&value).map_err(|e| e.to_string())?.len();
             if bytes + size > 5500 {
+                if output.is_empty() {
+                    return Err("SUMMARY_ROW_TOO_LARGE".into());
+                }
                 break;
             }
             bytes += size;
@@ -210,6 +303,7 @@ pub async fn portfolio(
                     time: from,
                     account: "summary".into(),
                     id,
+                    snapshot: Some(snapshot.clone()),
                 })
                 .map(|v| URL_SAFE_NO_PAD.encode(v))
             })
@@ -230,8 +324,41 @@ pub async fn portfolio(
     }
 }
 
+type AccountFinance = okx_execution::FinanceAttribution;
+type EnvironmentTotals = BTreeMap<(String, String, String), Decimal>;
+type AccountDetails = BTreeMap<(String, String, Option<String>, String, String), Decimal>;
+
+/// A detail is a partition of account economic facts, not an additional
+/// amount to add to the environment rollup or to NAV.
+fn accumulate_finance(
+    account: &str,
+    environment: &str,
+    scoped: AccountFinance,
+    totals: &mut EnvironmentTotals,
+    details: &mut AccountDetails,
+) -> Result<(), String> {
+    for ((instance, currency, component), amount) in scoped {
+        let sum = totals
+            .entry((environment.to_owned(), currency.clone(), component.clone()))
+            .or_default();
+        *sum = sum.checked_add(amount).ok_or("MONEY_OVERFLOW")?;
+        details.insert(
+            (
+                account.to_owned(),
+                environment.to_owned(),
+                instance,
+                currency,
+                component,
+            ),
+            amount,
+        );
+    }
+    Ok(())
+}
+
 fn nav_projection(
     account: &str,
+    account_name: &str,
     nav: okx_execution::NavWindow,
     from: i64,
     through: i64,
@@ -240,12 +367,17 @@ fn nav_projection(
     let coverage_reason = match nav.coverage.as_str() {
         "COMPLETE" => Value::Null,
         "UNAVAILABLE_BEFORE_T0" => json!("UNAVAILABLE_BEFORE_T0"),
+        "PARTIAL" if nav.scope_id.starts_with("strategy:") => {
+            json!("STRATEGY_CAPITAL_PROVENANCE_MISSING")
+        }
         "PARTIAL" => json!("NAV_SOURCE_INCOMPLETE"),
         _ => json!("NAV_COVERAGE_INVALID"),
     };
     json!({
         "kind":"nav",
         "account":account,
+        "account_name":account_name,
+        "pnl_interpretation":"equity_change_less_external_flows_includes_valuation_fx_not_necessarily_realized_trade_pnl",
         "requested_range":{"start_ms":from,"end_ms":through},
         "covered_range":{"start_ms":nav.opening_as_of,"end_ms":nav.current_as_of},
         "t0":t0,
@@ -300,7 +432,17 @@ fn summary_diagnostics(
 fn summary_key(value: &Value) -> String {
     if value["kind"] == "component" {
         format!(
-            "component|{}|{}",
+            "component|{}|{}|{}",
+            value["environment"].as_str().unwrap_or_default(),
+            value["currency"].as_str().unwrap_or_default(),
+            value["component"].as_str().unwrap_or_default()
+        )
+    } else if value["kind"] == "account_component" {
+        format!(
+            "account_component|{}|{}|{}|{}|{}",
+            value["account"].as_str().unwrap_or_default(),
+            value["environment"].as_str().unwrap_or_default(),
+            value["strategy_instance"].as_str().unwrap_or(""),
             value["currency"].as_str().unwrap_or_default(),
             value["component"].as_str().unwrap_or_default()
         )
@@ -359,6 +501,131 @@ mod tests {
         store.ingest_page(&page).unwrap();
         store
     }
+    fn fixture_scoped_finance(account: &mut AccountStore, amounts: [i64; 3]) -> AccountFinance {
+        use okx_execution::StrategyInstance;
+        for id in ["momentum", "mean_reversion"] {
+            account
+                .mutate_instance(
+                    &format!("create-{id}"),
+                    "definition-fixture",
+                    "create",
+                    &StrategyInstance {
+                        instance_id: id.into(),
+                        definition_id: id.into(),
+                        definition_version: "1".into(),
+                        parameters: "{}".into(),
+                        enabled: false,
+                        policy_revision: 1,
+                        budget: Decimal::from(10),
+                        last_decision_key: None,
+                    },
+                    None,
+                    2,
+                )
+                .unwrap();
+        }
+        let mut page = IngestPage::default();
+        for (n, (instance, amount)) in [
+            (Some("momentum"), amounts[0]),
+            (Some("mean_reversion"), amounts[1]),
+            (None, amounts[2]),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            page.finance.push(FinanceEntry {
+                entry_id: format!("fact-{n}"),
+                economic_event_key: format!("economic-{n}"),
+                component: "REALIZED_PNL".into(),
+                allocation_leg: instance.unwrap_or("unattributed").into(),
+                amount: Decimal::from(amount),
+                currency: "USD".into(),
+                instance_id: instance.map(str::to_owned),
+                source_ref: "verified-exchange-fixture".into(),
+                time: 12,
+                reverses_entry_id: None,
+            });
+        }
+        account.ingest_page(&page).unwrap();
+        // Replayed venue evidence is idempotent, not a second financial leg.
+        account.ingest_page(&page).unwrap();
+        account
+            .finance_attribution_filtered(12, 12, &[], &["USD".into()])
+            .unwrap()
+    }
+
+    #[test]
+    fn two_accounts_two_strategies_conserve_real_demo_and_unattributed_money() {
+        let mut real = store("okx:real:uid-a");
+        let mut demo = store("okx:demo:uid-b");
+        let mut totals = EnvironmentTotals::new();
+        let mut details = AccountDetails::new();
+        accumulate_finance(
+            "okx:real:uid-a",
+            "real",
+            fixture_scoped_finance(&mut real, [10, 5, -2]),
+            &mut totals,
+            &mut details,
+        )
+        .unwrap();
+        accumulate_finance(
+            "okx:demo:uid-b",
+            "demo",
+            fixture_scoped_finance(&mut demo, [7, -1, 4]),
+            &mut totals,
+            &mut details,
+        )
+        .unwrap();
+        assert_eq!(totals.len(), 2);
+        assert_eq!(
+            totals[&("real".into(), "USD".into(), "REALIZED_PNL".into())],
+            Decimal::from(13)
+        );
+        assert_eq!(
+            totals[&("demo".into(), "USD".into(), "REALIZED_PNL".into())],
+            Decimal::from(10)
+        );
+        assert_eq!(details.len(), 6);
+        for (env, expected) in [("real", Decimal::from(13)), ("demo", Decimal::from(10))] {
+            let detail_sum: Decimal = details
+                .iter()
+                .filter(|((_, e, _, _, _), _)| e == env)
+                .map(|(_, amount)| amount)
+                .copied()
+                .sum();
+            assert_eq!(detail_sum, expected);
+        }
+        assert_eq!(
+            details[&(
+                "okx:real:uid-a".into(),
+                "real".into(),
+                None,
+                "USD".into(),
+                "REALIZED_PNL".into(),
+            )],
+            Decimal::from(-2)
+        );
+        // Risk budgets are not financial facts or additional capital.
+        assert_eq!(
+            real.instance("momentum").unwrap().unwrap().budget,
+            Decimal::from(10)
+        );
+        assert_eq!(
+            demo.instance("momentum").unwrap().unwrap().budget,
+            Decimal::from(10)
+        );
+        assert_eq!(
+            real.finance_totals_filtered(12, 12, &[], &[]).unwrap()
+                [&("USD".into(), "REALIZED_PNL".into())],
+            Decimal::from(13)
+        );
+        assert_eq!(
+            demo.finance_totals_filtered(12, 12, &[], &[]).unwrap()
+                [&("USD".into(), "REALIZED_PNL".into())],
+            Decimal::from(10)
+        );
+    }
+
     #[test]
     fn cross_account_cursor_preserves_all_equal_timestamp_rows() {
         let accounts = vec![("A", store("A")), ("B", store("B")), ("C", store("C"))];
@@ -386,6 +653,7 @@ mod tests {
                 time: last.0,
                 account: last.1.clone(),
                 id: last.2.clone(),
+                snapshot: None,
             });
             all.extend(rows);
         }
@@ -405,12 +673,201 @@ mod tests {
             time: 10,
             account: "B".into(),
             id: "b".into(),
+            snapshot: None,
         };
         assert_eq!(history_after("A", Some(&c), 1), (10, "\u{10ffff}".into()));
         assert_eq!(history_after("B", Some(&c), 1), (10, "b".into()));
         assert_eq!(history_after("C", Some(&c), 1), (10, String::new()));
     }
 
+    #[test]
+    fn four_accounts_preserve_strategy_and_unattributed_finance_isolation() {
+        let specs = [
+            ("okx:real:a", "real", [10, 5, -2], 13),
+            ("okx:real:b", "real", [4, 2, -1], 5),
+            ("okx:demo:c", "demo", [7, -1, 4], 10),
+            ("okx:demo:d", "demo", [-4, 3, 2], 1),
+        ];
+        let mut totals = EnvironmentTotals::new();
+        let mut details = AccountDetails::new();
+        let mut stores = Vec::new();
+        for (account, environment, components, expected) in specs {
+            let mut s = store(account);
+            let facts = fixture_scoped_finance(&mut s, components);
+            assert_eq!(
+                facts.values().copied().sum::<Decimal>(),
+                Decimal::from(expected)
+            );
+            accumulate_finance(account, environment, facts, &mut totals, &mut details).unwrap();
+            stores.push(s);
+        }
+        assert_eq!(stores.len(), 4);
+        assert_eq!(details.len(), 12);
+        assert_eq!(
+            totals[&("real".into(), "USD".into(), "REALIZED_PNL".into())],
+            Decimal::from(18)
+        );
+        assert_eq!(
+            totals[&("demo".into(), "USD".into(), "REALIZED_PNL".into())],
+            Decimal::from(11)
+        );
+        for (environment, expected) in [("real", Decimal::from(18)), ("demo", Decimal::from(11))] {
+            let sum = details
+                .iter()
+                .filter(|((_, env, _, _, _), _)| env == environment)
+                .map(|(_, value)| *value)
+                .sum::<Decimal>();
+            assert_eq!(sum, expected);
+        }
+        let before = stores[1]
+            .finance_attribution_filtered(12, 12, &[], &[])
+            .unwrap();
+        // A new fact in account A must not alter account B or Demo financial truth.
+        stores[0]
+            .ingest_page(&IngestPage {
+                finance: vec![FinanceEntry {
+                    entry_id: "extra".into(),
+                    economic_event_key: "extra".into(),
+                    component: "REALIZED_PNL".into(),
+                    allocation_leg: "unattributed".into(),
+                    amount: Decimal::from(-3),
+                    currency: "USD".into(),
+                    instance_id: None,
+                    source_ref: "verified-exchange-fixture".into(),
+                    time: 13,
+                    reverses_entry_id: None,
+                }],
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(
+            stores[1]
+                .finance_attribution_filtered(12, 12, &[], &[])
+                .unwrap(),
+            before
+        );
+        assert_eq!(
+            stores[2].finance_totals_filtered(12, 13, &[], &[]).unwrap()
+                [&("USD".into(), "REALIZED_PNL".into())],
+            Decimal::from(10)
+        );
+        assert_eq!(
+            stores[0].finance_totals_filtered(12, 13, &[], &[]).unwrap()
+                [&("USD".into(), "REALIZED_PNL".into())],
+            Decimal::from(10)
+        );
+    }
+
+    #[test]
+    fn summary_cursor_rejects_changed_finance_or_account_availability() {
+        let base = vec![json!({"kind":"component","amount":"13"})];
+        let available =
+            vec![json!({"account":"okx:real:a","financial_risk":{"nav_complete":true}})];
+        let snapshot = summary_snapshot("request", &base, &available, true).unwrap();
+        let cursor = Cursor {
+            query: "request".into(),
+            time: 1,
+            account: "summary".into(),
+            id: "component|real|USD|REALIZED_PNL".into(),
+            snapshot: Some(snapshot.clone()),
+        };
+        require_cursor_snapshot(Some(&cursor), &snapshot).unwrap();
+        let changed = vec![json!({"kind":"component","amount":"15"})];
+        let updated = summary_snapshot("request", &changed, &available, true).unwrap();
+        assert_eq!(
+            require_cursor_snapshot(Some(&cursor), &updated),
+            Err("CURSOR_SNAPSHOT_CHANGED".into())
+        );
+        let missing = vec![json!({"account_requested":"a","reason":"ACCOUNT_UNAVAILABLE"})];
+        let unavailable = summary_snapshot("request", &base, &missing, true).unwrap();
+        assert_eq!(
+            require_cursor_snapshot(Some(&cursor), &unavailable),
+            Err("CURSOR_SNAPSHOT_CHANGED".into())
+        );
+        let old_token = Cursor {
+            snapshot: None,
+            ..cursor
+        };
+        assert_eq!(
+            require_cursor_snapshot(Some(&old_token), &snapshot),
+            Err("CURSOR_SNAPSHOT_CHANGED".into())
+        );
+    }
+
+    #[test]
+    fn late_backfilled_finance_invalidates_history_cursor_without_full_scan() {
+        let mut a = store("okx:real:a");
+        let b = store("okx:real:b");
+        let mut revisions = BTreeMap::from([
+            ("okx:real:a".to_owned(), a.finance_revision().unwrap()),
+            ("okx:real:b".to_owned(), b.finance_revision().unwrap()),
+        ]);
+        let original = hash(&("request", &revisions)).unwrap();
+        let cursor = Cursor {
+            query: "request".into(),
+            time: 10,
+            account: "okx:real:a".into(),
+            id: "b".into(),
+            snapshot: Some(original.clone()),
+        };
+        require_cursor_snapshot(Some(&cursor), &original).unwrap();
+        let mut page = IngestPage::default();
+        page.finance.push(FinanceEntry {
+            entry_id: "late-arrival".into(),
+            economic_event_key: "late-arrival".into(),
+            component: "FEE".into(),
+            allocation_leg: "account".into(),
+            amount: -Decimal::ONE,
+            currency: "USD".into(),
+            instance_id: None,
+            source_ref: "venue-backfill".into(),
+            time: 9,
+            reverses_entry_id: None,
+        });
+        a.ingest_page(&page).unwrap();
+        revisions.insert("okx:real:a".into(), a.finance_revision().unwrap());
+        let updated = hash(&("request", &revisions)).unwrap();
+        assert_eq!(
+            require_cursor_snapshot(Some(&cursor), &updated),
+            Err("CURSOR_SNAPSHOT_CHANGED".into())
+        );
+        // Replaying the same immutable economic fact is not a new revision.
+        let before_replay = a.finance_revision().unwrap();
+        a.ingest_page(&page).unwrap();
+        assert_eq!(a.finance_revision().unwrap(), before_replay);
+        assert_eq!(b.finance_revision().unwrap(), revisions["okx:real:b"]);
+    }
+
+    #[test]
+    fn real_and_demo_components_have_distinct_summary_keys() {
+        let real =
+            json!({"kind":"component","environment":"real","currency":"USD","component":"FEE"});
+        let demo =
+            json!({"kind":"component","environment":"demo","currency":"USD","component":"FEE"});
+        assert_ne!(summary_key(&real), summary_key(&demo));
+    }
+
+    #[test]
+    fn unknown_strategy_capital_is_an_explicit_partial_reason() {
+        let nav = okx_execution::NavWindow {
+            scope_id: "strategy:manual".into(),
+            currency: "USD".into(),
+            opening_equity: None,
+            current_equity: None,
+            flows: None,
+            pnl: None,
+            opening_as_of: None,
+            current_as_of: None,
+            coverage: "PARTIAL".into(),
+        };
+        let row = nav_projection("okx:real:verified", "Acceptance", nav, 1, 10, 1);
+        assert_eq!(
+            row["coverage_reason"],
+            "STRATEGY_CAPITAL_PROVENANCE_MISSING"
+        );
+        assert!(row["window"]["opening_equity"].is_null());
+        assert!(row["window"]["pnl"].is_null());
+    }
     #[test]
     fn portfolio_before_t0_is_partial() {
         let readiness = vec![json!({"financial_risk":{"nav_complete":true}})];
@@ -420,6 +877,24 @@ mod tests {
             "window":{"coverage":"UNAVAILABLE_BEFORE_T0"}
         })];
         assert!(!summary_is_complete(&readiness, &navigation, true, true));
+    }
+
+    #[test]
+    fn unavailable_account_cannot_be_misreported_as_zero_or_complete() {
+        let readiness = vec![
+            json!({"account":"okx:real:healthy","financial_risk":{"nav_complete":true}}),
+            json!({"account_requested":"offline","quality":"unavailable","reason":"ACCOUNT_UNAVAILABLE","financial_risk":null}),
+        ];
+        let navigation = vec![json!({
+            "kind":"nav",
+            "account":"okx:real:healthy",
+            "window":{"coverage":"COMPLETE"}
+        })];
+        assert!(!summary_is_complete(&readiness, &navigation, true, true));
+        let diagnostics = summary_diagnostics(readiness, &navigation, None);
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0]["reason"], "ACCOUNT_UNAVAILABLE");
+        assert!(diagnostics[0]["financial_risk"].is_null());
     }
 
     #[test]

@@ -3,7 +3,7 @@ use okx_analysis::operators::{EmaParameters, StrategyKernel};
 use rust_decimal::{Decimal, prelude::ToPrimitive};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-pub const CAUSAL_REPLAY_VERSION: &str = "okx-causal-replay/398.2";
+pub const CAUSAL_REPLAY_VERSION: &str = "okx-causal-replay/448.1";
 use std::str::FromStr;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Bar {
@@ -95,10 +95,18 @@ fn replay_with_hash(
     if bars.len() > 1_000_000 {
         return Err("LIMIT_BARS:1000000".into());
     }
+    // Warm-up belongs to the strategy kernel, not to unrelated EMA
+    // parameters that are also carried by a generic replay specification.
+    let required_warmup = match spec.strategy_id.as_str() {
+        "close_momentum" => 1,
+        "two_bar_momentum" => 2,
+        "no_trade" => 0,
+        _ => spec.parameters.slow,
+    };
     if spec.timeframe_ms == 0
         || score_end > bars.len()
         || score_start >= score_end
-        || score_start < spec.parameters.slow
+        || score_start < required_warmup
     {
         return Err("INVALID_SCORE_RANGE_OR_WARMUP".into());
     }
@@ -314,12 +322,17 @@ fn replay_with_hash(
 pub struct GridCandidate {
     pub parameters: EmaParameters,
     pub train: Summary,
+    /// Stable train-only replay evidence; changes to the holdout cannot
+    /// modify this hash or the candidate's selection score.
+    pub train_result_hash: String,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GridResult {
     pub variants: Vec<GridCandidate>,
     pub selected: EmaParameters,
     pub split_index: usize,
+    pub train_score_start_index: usize,
+    pub train_dataset_hash: String,
     pub train: Summary,
     pub test: ReplayResult,
     pub selection_warning: String,
@@ -336,8 +349,16 @@ pub fn grid(
     if bars.len() > 1_000_000 {
         return Err("LIMIT_BARS:1000000".into());
     }
-    let dataset_hash = hash_chunks(bars, cancel)?;
     let split = bars.len() * 7 / 10;
+    // All candidate scores use the same reporting window. Different EMA
+    // warmups are loaded before it, never counted as reporting returns.
+    let train_score_start = variants.iter().map(|p| p.slow).max().ok_or("EMPTY_GRID")?;
+    if train_score_start >= split {
+        return Err("INSUFFICIENT_TRAIN_BARS".into());
+    }
+    // Never feed holdout observations into training identities or scores.
+    let train_dataset_hash = hash_chunks(&bars[..split], cancel)?;
+    let dataset_hash = hash_chunks(bars, cancel)?;
     let mut best: Option<(EmaParameters, Summary)> = None;
     let mut candidates = Vec::with_capacity(variants.len());
     for p in variants {
@@ -346,14 +367,26 @@ pub fn grid(
         }
         let mut s = spec.clone();
         s.parameters = *p;
-        let r = replay_with_hash(bars, &s, p.slow, split, cancel, Some(&dataset_hash))?;
+        let r = replay_with_hash(
+            bars,
+            &s,
+            train_score_start,
+            split,
+            cancel,
+            Some(&train_dataset_hash),
+        )?;
         candidates.push(GridCandidate {
             parameters: *p,
             train: r.summary.clone(),
+            train_result_hash: r.hash.clone(),
         });
-        if best.as_ref().is_none_or(|(_, b)| {
+        // Stable tie-break independent of the user's variant iteration order.
+        if best.as_ref().is_none_or(|(prior, b)| {
             r.summary.sharpe > b.sharpe
-                || (r.summary.sharpe == b.sharpe && r.summary.turnover < b.turnover)
+                || (r.summary.sharpe == b.sharpe
+                    && (r.summary.turnover < b.turnover
+                        || (r.summary.turnover == b.turnover
+                            && (p.fast, p.slow) < (prior.fast, prior.slow))))
         }) {
             best = Some((*p, r.summary));
         }
@@ -366,6 +399,8 @@ pub fn grid(
         variants: candidates,
         selected: p,
         split_index: split,
+        train_score_start_index: train_score_start,
+        train_dataset_hash,
         train,
         test,
         selection_warning:
@@ -508,6 +543,122 @@ mod tests {
         assert!(b.summary.pnl < a.summary.pnl);
         assert!(b.summary.fees > 0.0);
     }
+    #[test]
+    fn c14_four_bar_oracle_executes_only_on_next_open() {
+        let opens = [100.0, 100.0, 101.0, 102.0];
+        let closes = [100.0, 101.0, 102.0, 100.0];
+        let bars = (0..4)
+            .map(|i| Bar {
+                time: i as u64 * 60_000,
+                open: opens[i],
+                high: opens[i].max(closes[i]) + 1.0,
+                low: opens[i].min(closes[i]) - 1.0,
+                close: closes[i],
+                volume: 1.0,
+                funding_rate: None,
+            })
+            .collect::<Vec<_>>();
+        let mut s = spec();
+        s.strategy_id = "close_momentum".into();
+        s.mechanics = Mechanics::Spot;
+        s.timeframe_ms = 60_000;
+        s.costs.observed_funding = false;
+        let first = replay(&bars, &s, 1, 4, &|| false).unwrap();
+        assert_eq!(first.trades.len(), 1);
+        assert_eq!(first.trades[0].time, bars[2].time);
+        assert_eq!(first.trades[0].price, 101.0);
+        assert_eq!(first.trades[0].quantity, 1.0);
+        assert_eq!(first.trades[0].side, 1);
+        assert_eq!(first.summary.pnl_exact, "-1");
+        assert_eq!(first.summary.fees_exact, "0");
+        assert_eq!(first.equity.last().unwrap().1, 9999.0);
+        // The exit signal at bar 3 cannot execute without a subsequent open.
+        let mut future = bars.clone();
+        future[3].close = 90.0;
+        future[3].low = 89.0;
+        let later = replay(&future, &s, 1, 4, &|| false).unwrap();
+        assert_eq!(later.trades.len(), 1);
+        assert_eq!(later.trades[0].time, first.trades[0].time);
+        assert_eq!(later.trades[0].price, first.trades[0].price);
+        assert_eq!(later.trades[0].quantity, first.trades[0].quantity);
+        future[3] = bars[3].clone();
+        future.push(Bar {
+            time: 4 * 60_000,
+            open: 99.0,
+            high: 101.0,
+            low: 97.0,
+            close: 98.0,
+            volume: 1.0,
+            funding_rate: None,
+        });
+        let extended = replay(&future, &s, 1, 5, &|| false).unwrap();
+        assert_eq!(extended.trades.len(), 2);
+        assert_eq!(extended.trades[1].time, future[4].time);
+        assert_eq!(extended.trades[1].price, future[4].open);
+        assert_eq!(extended.trades[1].side, -1);
+    }
+
+    #[test]
+    fn c15_identical_seed_and_inputs_repeat_exact_financial_hashes() {
+        let input = bars();
+        let parameters = spec();
+        let baseline = replay(&input, &parameters, 3, 100, &|| false).unwrap();
+        for workers in [1, 2, 4, 8] {
+            let tasks = (0..workers)
+                .map(|_| {
+                    let input = input.clone();
+                    let spec = parameters.clone();
+                    std::thread::spawn(move || replay(&input, &spec, 3, 100, &|| false).unwrap())
+                })
+                .collect::<Vec<_>>();
+            for task in tasks {
+                let result = task.join().unwrap();
+                assert_eq!(baseline.hash, result.hash);
+                assert_eq!(baseline.dataset_hash, result.dataset_hash);
+                assert_eq!(baseline.summary.pnl_exact, result.summary.pnl_exact);
+                assert_eq!(baseline.summary.fees_exact, result.summary.fees_exact);
+                assert_eq!(baseline.summary.funding_exact, result.summary.funding_exact);
+                assert_eq!(baseline.trades.len(), result.trades.len());
+                assert_eq!(baseline.equity, result.equity);
+            }
+        }
+    }
+
+    #[test]
+    fn c14_train_artifacts_ignore_holdout_and_ties_do_not_depend_on_order() {
+        let mut s = spec();
+        s.strategy_id = "no_trade".into();
+        let variants = [
+            EmaParameters { fast: 3, slow: 8 },
+            EmaParameters { fast: 2, slow: 3 },
+        ];
+        let input = bars();
+        let first = grid(&input, &s, &variants, &|| false).unwrap();
+        let mut changed = input;
+        for bar in &mut changed[70..] {
+            bar.close += 10.0;
+        }
+        let changed_result = grid(&changed, &s, &variants, &|| false).unwrap();
+        assert_eq!(first.split_index, 70);
+        assert_eq!(first.train_score_start_index, 8);
+        assert_eq!(
+            first.train_score_start_index,
+            changed_result.train_score_start_index
+        );
+        assert_eq!(first.train_dataset_hash, changed_result.train_dataset_hash);
+        assert_eq!(first.selected, changed_result.selected);
+        assert_eq!(first.variants.len(), changed_result.variants.len());
+        for (left, right) in first.variants.iter().zip(&changed_result.variants) {
+            assert_eq!(left.train_result_hash, right.train_result_hash);
+            assert_eq!(left.train.pnl_exact, right.train.pnl_exact);
+        }
+        assert_ne!(first.test.dataset_hash, changed_result.test.dataset_hash);
+        assert_eq!(first.selected, EmaParameters { fast: 2, slow: 3 });
+        let reversed = [variants[1], variants[0]];
+        let inverted = grid(&changed, &s, &reversed, &|| false).unwrap();
+        assert_eq!(first.selected, inverted.selected);
+    }
+
     #[test]
     fn test_partition_not_used_for_selection() {
         let b = bars();

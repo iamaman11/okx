@@ -1,5 +1,13 @@
 //! Public compact analytics contract. No transport or financial logic.
 use serde::{Deserialize, Serialize};
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RangeMode {
+    #[default]
+    Strict,
+    Normalize,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MarketRequest {
@@ -121,6 +129,7 @@ pub enum ResearchResultView {
     Summary,
     Variants,
     Equity,
+    Export,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
@@ -131,6 +140,8 @@ pub enum ResearchRequest {
         timeframe_ms: u64,
         start_ms: u64,
         end_ms: u64,
+        #[serde(default)]
+        range_mode: RangeMode,
         strategy_id: String,
         parameters: EmaParameters,
         costs: ResearchCosts,
@@ -265,6 +276,7 @@ impl ResearchRequest {
                 parameters,
                 costs,
                 data_mode,
+                ..
             } => Self::Backtest {
                 idempotency_key: "validation_only".into(),
                 instruments: instruments.clone(),
@@ -338,7 +350,7 @@ impl ResearchRequest {
                         "ema_cross_v1" | "no_trade" | "close_momentum" | "two_bar_momentum"
                     )
                     && !variants.is_empty()
-                    && variants.len() <= 100
+                    && variants.len() <= 64
                     && variants.iter().all(EmaParameters::valid)
                     && costs.valid()
             }
@@ -358,6 +370,39 @@ fn valid_job(id: &str) -> bool {
 #[cfg(test)]
 mod batch_tests {
     use super::*;
+
+    #[test]
+    fn c13_research_validate_range_mode_is_typed_and_backward_compatible() {
+        let mut request = serde_json::json!({
+            "action":"validate","instruments":["BTC-USDT-SWAP"],
+            "timeframe_ms":3600000,"start_ms":3600001,"end_ms":14400001,
+            "strategy_id":"ema_cross_v1","parameters":{"fast":2,"slow":4},
+            "costs":{"maker_fee_bps":1,"taker_fee_bps":2,"slippage_bps":2,
+                "funding_mode":"zero_assumption"},
+            "data_mode":"counterfactual"
+        });
+        let legacy: ResearchRequest = serde_json::from_value(request.clone()).unwrap();
+        assert!(legacy.valid());
+        assert!(matches!(
+            legacy,
+            ResearchRequest::Validate {
+                range_mode: RangeMode::Strict,
+                ..
+            }
+        ));
+        request["range_mode"] = serde_json::json!("normalize");
+        let normalized: ResearchRequest = serde_json::from_value(request.clone()).unwrap();
+        assert!(normalized.valid());
+        assert!(matches!(
+            normalized,
+            ResearchRequest::Validate {
+                range_mode: RangeMode::Normalize,
+                ..
+            }
+        ));
+        request["range_mode"] = serde_json::json!("silent_truncation");
+        assert!(serde_json::from_value::<ResearchRequest>(request).is_err());
+    }
 
     #[test]
     fn market_universe_only_wire_decodes_and_rejects_ambiguous_modes() {
@@ -444,6 +489,34 @@ mod batch_tests {
             .is_err()
         );
     }
+    #[test]
+    fn k9_grid_variants_match_canonical_sixty_four_limit() {
+        let parameters = EmaParameters { fast: 2, slow: 4 };
+        let variants = (0..64).map(|_| parameters.clone()).collect();
+        let mut request = ResearchRequest::Grid {
+            idempotency_key: "k9-grid".into(),
+            instruments: vec!["BTC-USDT".into()],
+            timeframe_ms: 60000,
+            start_ms: 0,
+            end_ms: 60000 * 100,
+            strategy_id: "ema_cross_v1".into(),
+            variants,
+            costs: ResearchCosts {
+                maker_fee_bps: 0.0,
+                taker_fee_bps: 0.0,
+                slippage_bps: 0.0,
+                funding_mode: FundingMode::ZeroAssumption,
+            },
+            data_mode: ResearchDataMode::Counterfactual,
+            seed: 448,
+        };
+        assert!(request.valid());
+        if let ResearchRequest::Grid { variants, .. } = &mut request {
+            variants.push(parameters);
+        }
+        assert!(!request.valid());
+    }
+
     #[test]
     fn research_batch_wire_roundtrip_and_total_bar_budget() {
         let request = ResearchRequest::Backtest {

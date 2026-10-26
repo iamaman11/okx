@@ -538,56 +538,41 @@ fn owned_fill(s: &mut AccountStore, instance: &str, id: &str, price: i64, side: 
     .unwrap();
 }
 #[test]
-fn instance_nav_uses_each_lot_cost_and_contract_value() {
+fn unverified_strategy_budget_is_never_strategy_nav() {
     let mut s = store();
+    s.ensure_manual_instance(2).unwrap();
     owned_fill(&mut s, "a", "a-order", 100, "long", 3);
     owned_fill(&mut s, "b", "b-order", 200, "long", 4);
-    let fx = UsdConversionEvidence {
-        observed_at: 5,
-        source_digest: "usd-mark".into(),
-        usd_per_currency: std::collections::BTreeMap::from([("USDT".into(), Decimal::ONE)]),
-    };
-    s.record_instance_nav(
-        &[VenueMark {
-            instrument_id: "BTC".into(),
-            price: Decimal::from(300),
-            source_ref: "mark".into(),
+    // Even a legacy projection incorrectly labelled COMPLETE cannot establish
+    // strategy capital or become an equity/profit figure in portfolio views.
+    s.ingest_page(&IngestPage {
+        nav: vec![NavPoint {
+            scope_id: "strategy:a".into(),
+            time: 5,
+            source_version: "legacy-budget-is-not-capital".into(),
+            equity: Decimal::from(12),
+            pnl: Decimal::from(2),
+            flows: Decimal::ZERO,
+            currency: "USD".into(),
+            coverage: "COMPLETE".into(),
+            mark_source: "legacy".into(),
         }],
-        &fx,
-        5,
-    )
+        ..Default::default()
+    })
     .unwrap();
-    let a: String = s
-        .connection
-        .query_row(
-            "SELECT equity FROM nav_points WHERE scope_id='strategy:a' AND time=5",
-            [],
-            |r| r.get(0),
-        )
-        .unwrap();
-    let b: String = s
-        .connection
-        .query_row(
-            "SELECT equity FROM nav_points WHERE scope_id='strategy:b' AND time=5",
-            [],
-            |r| r.get(0),
-        )
-        .unwrap();
-    assert_eq!(a, "12");
-    assert_eq!(b, "11");
-    s.record_instance_nav(
-        &[VenueMark {
-            instrument_id: "BTC".into(),
-            price: Decimal::from(100),
-            source_ref: "mark".into(),
-        }],
-        &fx,
-        6,
-    )
-    .unwrap();
-    let risk = s.financial_risk(6, Some("b")).unwrap();
-    assert!(risk.nav_complete);
-    assert!(risk.drawdown_ratio > Decimal::ZERO);
+
+    let windows = s.nav_summary(2, 6, &[], &["USD".into()]).unwrap();
+    for id in ["manual", "a", "b"] {
+        let scope = format!("strategy:{id}");
+        let nav = windows.iter().find(|n| n.scope_id == scope).unwrap();
+        assert_eq!(nav.coverage, "PARTIAL");
+        assert_eq!(nav.opening_equity, None);
+        assert_eq!(nav.current_equity, None);
+        assert_eq!(nav.flows, None);
+        assert_eq!(nav.pnl, None);
+        assert!(!s.financial_risk(5, Some(id)).unwrap().nav_complete);
+    }
+    assert!(s.financial_risk(5, None).unwrap().nav_complete);
 }
 #[test]
 fn funding_at_event_respects_opposite_instances_and_later_fills() {

@@ -1,4 +1,5 @@
 pub mod cache;
+mod cursor;
 pub mod executor;
 pub mod jobs;
 mod market;
@@ -15,11 +16,102 @@ use okx_research::{
     ResearchArtifactStore,
     strategy_registry::{self as replay, Costs, Mechanics, ReplaySpec},
 };
+use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use std::{
     path::PathBuf,
     sync::{Arc, atomic::Ordering},
 };
+
+fn read_verified_result<T: DeserializeOwned>(
+    store: &ResearchArtifactStore,
+    artifact: &str,
+) -> Result<T, String> {
+    store
+        .read_evidence_json(artifact)
+        .map_err(|error| match error {
+            okx_research::ResearchError::ArtifactIdentityMismatch
+            | okx_research::ResearchError::InvalidArtifactId
+            | okx_research::ResearchError::Serialization(_) => "ARTIFACT_CORRUPT".into(),
+            okx_research::ResearchError::Io(ref source)
+                if source.kind() == std::io::ErrorKind::NotFound =>
+            {
+                "ARTIFACT_CORRUPT".into()
+            }
+            other => other.to_string(),
+        })
+}
+/// Traverse all immutable pages, checking SHA and exact count without
+/// materializing the complete result. Row export uses the paged result view.
+fn verify_export_pages(
+    store: &ResearchArtifactStore,
+    manifest: &Value,
+    refs_key: &str,
+    count_key: &str,
+    capacity: usize,
+) -> Result<Option<Value>, String> {
+    let Some(ids) = manifest.get(refs_key) else {
+        return Ok(None);
+    };
+    let pages = ids.as_array().ok_or("EXPORT_MANIFEST_INVALID")?;
+    let declared = manifest
+        .get(count_key)
+        .and_then(Value::as_u64)
+        .ok_or("EXPORT_MANIFEST_INVALID")?;
+    if pages.len() as u64 > declared.div_ceil(capacity as u64) {
+        return Err("EXPORT_ROW_COUNT_MISMATCH".into());
+    }
+    let mut count = 0u64;
+    for (index, reference) in pages.iter().enumerate() {
+        let id = reference.as_str().ok_or("EXPORT_MANIFEST_INVALID")?;
+        let rows: Vec<Value> = read_verified_result(store, id)?;
+        if rows.is_empty()
+            || rows.len() > capacity
+            || (index + 1 < pages.len() && rows.len() != capacity)
+        {
+            return Err("EXPORT_PAGE_SIZE_INVALID".into());
+        }
+        count = count
+            .checked_add(rows.len() as u64)
+            .ok_or("EXPORT_ROW_COUNT_MISMATCH")?;
+        if count > declared {
+            return Err("EXPORT_ROW_COUNT_MISMATCH".into());
+        }
+    }
+    if count != declared {
+        return Err("EXPORT_ROW_COUNT_MISMATCH".into());
+    }
+    Ok(Some(json!({
+        "rows":count,
+        "pages":pages.len(),
+        "page_refs_sha256":okx_research::canonical_sha256(ids).map_err(|e| e.to_string())?
+    })))
+}
+
+fn verify_export_manifest(
+    store: &ResearchArtifactStore,
+    manifest: &Value,
+) -> Result<Value, String> {
+    let trades = verify_export_pages(store, manifest, "trade_pages", "total_trades", 50)?;
+    let rows = verify_export_pages(store, manifest, "row_pages", "total_rows", 50)?;
+    let equity = verify_export_pages(
+        store,
+        manifest,
+        "equity_curve_pages",
+        "total_equity_points",
+        4096,
+    )?;
+    if trades.is_none() && rows.is_none() {
+        return Err("EXPORT_MANIFEST_INVALID".into());
+    }
+    Ok(json!({
+        "quality":"complete",
+        "counts_verified":true,
+        "checksums_verified":true,
+        "trades":trades,"rows":rows,"equity":equity
+    }))
+}
+
 #[derive(Clone)]
 pub struct AnalyticsService {
     sources: sources::Sources,
@@ -56,6 +148,14 @@ impl AnalyticsService {
         if !request.valid() {
             return Err("INVALID_MARKET_REQUEST".into());
         }
+        // K7 source, type and range validation precedes every venue read.
+        let query_plan = planner::AnalysisPlan::compile_market(&request)?;
+        let window = query_plan.range;
+        let closed_end = chrono::Utc::now().timestamp_millis().max(0) as u64 / request.timeframe_ms
+            * request.timeframe_ms;
+        if window.end_ms > closed_end {
+            return Err("RANGE_NOT_CLOSED".into());
+        }
         let global_rank = request.universe.as_ref().is_some_and(|u| u.rank_globally);
         if global_rank && resolved_instruments.is_none() {
             return Err("GLOBAL_RANK_UNIVERSE_REQUIRED".into());
@@ -66,11 +166,8 @@ impl AnalyticsService {
             compute_request.universe = None;
         }
         let mut hash_request = request.clone();
-        let cursor = if global_rank {
-            hash_request.cursor.take()
-        } else {
-            None
-        };
+        // A page selector is not a separate computation.
+        let cursor = hash_request.cursor.take();
         // Unlike the time bucket, this request fingerprint is immutable
         // across pages, but binds the exact typed query and reference generation.
         let rank_fingerprint = if global_rank {
@@ -85,6 +182,12 @@ impl AnalyticsService {
         } else {
             None
         };
+        let request_fingerprint = okx_research::canonical_sha256(&(
+            "market/448.cursor-v1",
+            &hash_request,
+            &universe_page,
+        ))
+        .map_err(|e| e.to_string())?;
         let bucket = if request
             .fields
             .iter()
@@ -97,40 +200,39 @@ impl AnalyticsService {
             0
         };
         let hash = okx_research::canonical_sha256(&(
-            "market/398.4",
+            "market/448.2",
             &hash_request,
             &universe_page,
             bucket,
         ))
         .map_err(|e| e.to_string())?;
         let hash = hash.strip_prefix("sha256:").unwrap_or(&hash).to_owned();
-        if let (true, Some(cursor)) = (global_rank, cursor.as_deref()) {
-            // Cursor carries the original job ID; fast-changing market data
-            // must not trigger a fresh bucket or reorder later pages.
-            let (job_id, offset) = cursor.split_once(':').ok_or("GLOBAL_RANK_CURSOR_INVALID")?;
+        if let Some(cursor) = cursor.as_deref() {
+            // Reuse the original completed immutable artifact even if the
+            // live source bucket has advanced since the preceding page.
+            let (job_id, offset) = cursor.split_once(':').ok_or("MARKET_CURSOR_INVALID")?;
             if job_id.len() != 64 || !job_id.bytes().all(|b| b.is_ascii_hexdigit()) {
-                return Err("GLOBAL_RANK_CURSOR_INVALID".into());
+                return Err("MARKET_CURSOR_INVALID".into());
             }
             let job = self
                 .jobs
                 .get_async(job_id.into())
                 .await
-                .map_err(|_| "GLOBAL_RANK_CURSOR_NOT_FOUND")?;
-            let artifact = job.artifact.ok_or("GLOBAL_RANK_NOT_READY")?;
+                .map_err(|_| "MARKET_CURSOR_NOT_FOUND")?;
+            let artifact = job.artifact.ok_or("MARKET_CURSOR_NOT_READY")?;
             let store = self.artifacts.clone();
             let offset = offset.to_owned();
             let job_id = job_id.to_owned();
-            let expected_fingerprint = rank_fingerprint.ok_or("GLOBAL_RANK_REQUEST_INVALID")?;
             return self
                 .cpu
                 .run(Default::default(), move |_| {
                     let value: Value = store
                         .read_evidence_json(&artifact)
                         .map_err(|e| e.to_string())?;
-                    if value["rank_request_fingerprint"] != expected_fingerprint
+                    if value["market_request_fingerprint"] != request_fingerprint
                         || value["job_id"] != job_id
                     {
-                        return Err("GLOBAL_RANK_CURSOR_REQUEST_MISMATCH".into());
+                        return Err("MARKET_CURSOR_REQUEST_MISMATCH".into());
                     }
                     global_rank_page(&store, value, &offset, &job_id)
                 })
@@ -175,9 +277,12 @@ impl AnalyticsService {
                 .market_execute(compute_request, cancel.clone(), global_rank)
                 .await;
             outcome = outcome.and_then(|mut value| {
+                value["query_plan"] =
+                    serde_json::to_value(&query_plan).map_err(|e| e.to_string())?;
                 if let Some(fingerprint) = &rank_fingerprint {
                     value["rank_request_fingerprint"] = json!(fingerprint);
                 }
+                value["market_request_fingerprint"] = json!(request_fingerprint);
                 market_result_with_context(value, &hash, universe_page.as_ref())
             });
             match &outcome {
@@ -238,12 +343,9 @@ impl AnalyticsService {
         let store = self.artifacts.clone();
         self.cpu.run(cancel,move |cancel| {
         if cancel.load(Ordering::Acquire){return Err("CANCELLED".into())}
-        let offset = request
-            .cursor
-            .as_deref()
-            .unwrap_or("0")
-            .parse::<usize>()
-            .map_err(|_| "INVALID_CURSOR")?;
+        // Only the first page computes; subsequent pages read exact stored
+        // pages rather than reading new venue data or accepting bare offsets.
+        let offset = 0usize;
         let total = rows.len();
         let mut row_pages = Vec::new();
         for chunk in rows.chunks(50) {
@@ -304,6 +406,7 @@ impl AnalyticsService {
                 timeframe_ms,
                 start_ms,
                 end_ms,
+                range_mode,
                 ..
             } => {
                 if matches!(data_mode, ResearchDataMode::HistoricalObserved) {
@@ -313,7 +416,27 @@ impl AnalyticsService {
                         "side_effects":"none","job_created":false,"quality":"partial"}),
                     );
                 }
-                if (end_ms - start_ms) / timeframe_ms > 2000 {
+                // Validate the canonical window before any venue I/O.
+                let validation_range = match range_mode {
+                    RangeMode::Strict => okx_analysis::time_series::ClosedRange::strict(
+                        start_ms,
+                        end_ms,
+                        timeframe_ms,
+                    ),
+                    RangeMode::Normalize => okx_analysis::time_series::ClosedRange::normalize(
+                        start_ms,
+                        end_ms,
+                        timeframe_ms,
+                    ),
+                }
+                .map_err(str::to_owned)?;
+                let last_closed = chrono::Utc::now().timestamp_millis().max(0) as u64
+                    / timeframe_ms
+                    * timeframe_ms;
+                if validation_range.end_ms > last_closed {
+                    return Err("RANGE_NOT_CLOSED".into());
+                }
+                if validation_range.expected_bars > 2000 {
                     return Err("VALIDATION_RANGE_LIMIT:2000_CANDLES_PER_INSTRUMENT".into());
                 }
                 let mut rows = Vec::new();
@@ -321,31 +444,28 @@ impl AnalyticsService {
                 for symbol in instruments {
                     let result = self
                         .sources
-                        .candles(&symbol, timeframe_ms, start_ms, end_ms, false)
+                        .candles(
+                            &symbol,
+                            timeframe_ms,
+                            validation_range.start_ms,
+                            validation_range.end_ms,
+                            false,
+                        )
                         .await;
                     match result {
                         Ok(bars) => {
-                            let expected = (end_ms - start_ms) / timeframe_ms;
-                            let aligned =
-                                start_ms % timeframe_ms == 0 && end_ms % timeframe_ms == 0;
-                            let coverage = aligned
-                                && bars.len() as u64 == expected
-                                && bars.first().is_some_and(|b| b.time == start_ms)
-                                && bars
-                                    .last()
-                                    .is_some_and(|b| b.time.saturating_add(timeframe_ms) == end_ms)
-                                && bars.windows(2).all(|pair| {
-                                    pair[1].time == pair[0].time.saturating_add(timeframe_ms)
-                                });
-                            if !coverage {
+                            let evidence =
+                                validation_range.coverage(bars.iter().map(|bar| bar.time));
+                            if !evidence.complete {
                                 complete = false;
                             }
                             rows.push(json!({"instrument":symbol,"source":"confirmed_closed_candles",
                                 "first_candle_ms":bars.first().map(|b|b.time),
                                 "last_candle_ms":bars.last().map(|b|b.time),
-                                "observed_bars":bars.len(),"expected_bars":expected,
-                                "coverage":if coverage{"complete"}else{"partial"},
-                                "reason_code":if coverage{None}else{Some("CANDLE_RANGE_INCOMPLETE_OR_GAPPED")}}));
+                                "observed_bars":bars.len(),"expected_bars":validation_range.expected_bars,
+                                "coverage":if evidence.complete{"complete"}else{"partial"},
+                                "reason_code":if evidence.complete{None}else{Some("CANDLE_RANGE_INCOMPLETE_OR_GAPPED")},
+                                "time_evidence":evidence}));
                         }
                         Err(e) => {
                             complete = false;
@@ -359,7 +479,14 @@ impl AnalyticsService {
                     "quality":if complete{"complete"}else{"partial"},
                     "data_mode":"counterfactual","historical_rules_and_fees":"not_observed",
                     "source_coverage":rows,"timeframe_ms":timeframe_ms,
-                    "start_ms":start_ms,"end_ms":end_ms,"side_effects":"none",
+                    "start_ms":validation_range.start_ms,
+                    "end_ms":validation_range.end_ms,
+                    "requested_range":{"start_ms":start_ms,"end_ms":end_ms},
+                    "range_mode":range_mode,
+                    "range_adjusted":start_ms != validation_range.start_ms
+                        || end_ms != validation_range.end_ms,
+                    "expected_bars":validation_range.expected_bars,
+                    "side_effects":"none",
                     "job_created":false}))
             }
             ResearchRequest::Status { job_id } => {
@@ -401,24 +528,37 @@ impl AnalyticsService {
             return Err("RESULT_EXPIRED".into());
         }
         let artifact = j.artifact.ok_or("RESULT_NOT_READY")?;
-        let mut value: Value = self
-            .artifacts
-            .read_evidence_json(&artifact)
-            .map_err(|e| e.to_string())?;
-        if let Some(id) = value.get("result_artifact").and_then(Value::as_str) {
-            value = self
-                .artifacts
-                .read_evidence_json(id)
-                .map_err(|e| e.to_string())?;
+        if j.state != jobs::State::Completed {
+            return Err("RESULT_NOT_READY".into());
         }
-        let mut page_cursor = cursor.clone();
-        let mut instrument_prefix = None;
-        if let Some(raw) = cursor.as_deref().filter(|c| c.starts_with("instrument:")) {
-            let parts = raw.split(':').collect::<Vec<_>>();
-            if parts.len() != 3 {
-                return Err("INVALID_CURSOR".into());
+        let signing_key = self.jobs.cursor_signing_key()?;
+        let signed = cursor
+            .as_deref()
+            .filter(|s| s.starts_with("r1."))
+            .map(|s| cursor::Cursor::decode(s, &signing_key))
+            .transpose()?;
+        // Explicit instrument:INDEX:0 is only a first-page selector for a
+        // batch. Continuation always requires an authenticated page token.
+        let selector = match cursor.as_deref() {
+            Some(value) if value.starts_with("r1.") => None,
+            Some(value) if value.starts_with("instrument:") => {
+                let parts = value.split(':').collect::<Vec<_>>();
+                if parts.len() != 3 || parts[2] != "0" {
+                    return Err("INVALID_CURSOR".into());
+                }
+                Some(parts[1].parse::<u64>().map_err(|_| "INVALID_CURSOR")?)
             }
-            let index = parts[1].parse::<u64>().map_err(|_| "INVALID_CURSOR")?;
+            Some(_) => return Err("INVALID_CURSOR".into()),
+            None => None,
+        };
+        let mut leaf_artifact = artifact.clone();
+        let mut value: Value = read_verified_result(&self.artifacts, &artifact)?;
+        if let Some(id) = value.get("result_artifact").and_then(Value::as_str) {
+            leaf_artifact = id.to_owned();
+            value = read_verified_result(&self.artifacts, id)?;
+        }
+        let instrument_index = signed.as_ref().and_then(|s| s.instrument).or(selector);
+        if let Some(index) = instrument_index {
             let row = value
                 .get("instruments")
                 .and_then(Value::as_array)
@@ -427,19 +567,38 @@ impl AnalyticsService {
             let id = row["artifact"]
                 .as_str()
                 .ok_or("INSTRUMENT_RESULT_UNAVAILABLE")?;
-            value = self
-                .artifacts
-                .read_evidence_json(id)
-                .map_err(|e| e.to_string())?;
-            page_cursor = Some(parts[2].into());
-            instrument_prefix = Some(format!("instrument:{index}:"));
+            leaf_artifact = id.to_owned();
+            value = read_verified_result(&self.artifacts, id)?;
+        }
+        if let Some(signed) = &signed {
+            signed.matches(&job_id, &artifact, &leaf_artifact, view)?;
+        }
+        let offset = signed.as_ref().map_or(0, |s| s.offset);
+        if matches!(view, ResearchResultView::Export) {
+            if signed.is_some() {
+                return Err("INVALID_CURSOR".into());
+            }
+            return Ok(json!({
+                "view":"export","schema":"okx.research.export/448.1",
+                "job_id":job_id,"result_id":artifact,"leaf_id":leaf_artifact,
+                "expires_at_ms":j.expires_at_ms,
+                "integrity":verify_export_manifest(&self.artifacts, &value)?,
+                "dataset_hash":value.get("dataset_hash"),
+                "result_hash":value.get("hash"),
+                "code_version":value.get("code_version"),
+                "read_data_via":["trades","equity"],"side_effects":"none"
+            }));
         }
         let metadata = json!({
             "job_id":job_id,"artifact":artifact,
+            "expires_at_ms":j.expires_at_ms,
             "summary":value.get("summary").or_else(||value.pointer("/test/summary")),
             "grid":value.get("grid").map(|g| json!({
                 "selected":g.get("selected"),"train":g.get("train"),
                 "test":value.get("summary"),"split_index":g.get("split_index"),
+                "train_dataset_hash":g.get("train_dataset_hash"),"train_range":g.get("train_range"),
+                "test_range":g.get("test_range"),"warmup_bars":g.get("warmup_bars"),
+                "seed":g.get("seed"),"strategy_id":g.get("strategy_id"),
                 "selection_warning":g.get("selection_warning")
             })),
             "dataset_hash":value.get("dataset_hash"),
@@ -447,6 +606,9 @@ impl AnalyticsService {
             "result_hash":value.get("hash")
         });
         if matches!(view, ResearchResultView::Summary) && value.get("instruments").is_none() {
+            if cursor.is_some() {
+                return Err("INVALID_CURSOR".into());
+            }
             return Ok(
                 json!({"view":"summary","metadata":metadata,"rows":[],"total_rows":0,
                 "returned_rows":0,"next_cursor":null}),
@@ -456,11 +618,6 @@ impl AnalyticsService {
             view,
             ResearchResultView::Variants | ResearchResultView::Equity
         ) {
-            let offset = page_cursor
-                .as_deref()
-                .unwrap_or("0")
-                .parse::<usize>()
-                .map_err(|_| "INVALID_CURSOR")?;
             let mut output = Vec::new();
             let total;
             if matches!(view, ResearchResultView::Variants) {
@@ -485,10 +642,7 @@ impl AnalyticsService {
                         .get(position / 4096)
                         .and_then(Value::as_str)
                         .ok_or("EQUITY_PAGE_MISSING")?;
-                    let points: Vec<Value> = self
-                        .artifacts
-                        .read_evidence_json(id)
-                        .map_err(|e| e.to_string())?;
+                    let points: Vec<Value> = read_verified_result(&self.artifacts, id)?;
                     if position % 4096 >= points.len() {
                         return Err("EQUITY_PAGE_MISSING".into());
                     }
@@ -496,6 +650,9 @@ impl AnalyticsService {
                     output.extend(points.into_iter().skip(position % 4096).take(take));
                     position += take;
                 }
+            }
+            if cursor.is_some() && offset >= total {
+                return Err("RESULT_CURSOR_OUT_OF_RANGE".into());
             }
             while output.len() > 1
                 && serde_json::to_vec(&output)
@@ -505,12 +662,26 @@ impl AnalyticsService {
             {
                 output.pop();
             }
+            if output.len() == 1
+                && serde_json::to_vec(&output)
+                    .map_err(|e| e.to_string())?
+                    .len()
+                    > 6500
+            {
+                return Err("RESULT_ROW_TOO_LARGE".into());
+            }
             let next = if offset + output.len() < total {
-                Some(format!(
-                    "{}{}",
-                    instrument_prefix.as_deref().unwrap_or(""),
-                    offset + output.len()
-                ))
+                Some(
+                    cursor::Cursor::new(
+                        &job_id,
+                        &artifact,
+                        &leaf_artifact,
+                        view,
+                        offset + output.len(),
+                        instrument_index,
+                    )
+                    .encode(&signing_key)?,
+                )
             } else {
                 None
             };
@@ -520,11 +691,6 @@ impl AnalyticsService {
                 "total_rows":total,"next_cursor":next}),
             );
         }
-        let offset = page_cursor
-            .as_deref()
-            .unwrap_or("0")
-            .parse::<usize>()
-            .map_err(|_| "INVALID_CURSOR")?;
         let pages = value
             .get("trade_pages")
             .or_else(|| value.get("row_pages"))
@@ -535,6 +701,9 @@ impl AnalyticsService {
             .or_else(|| value.get("total_rows"))
             .and_then(Value::as_u64)
             .unwrap_or(0) as usize;
+        if cursor.is_some() && offset >= total {
+            return Err("RESULT_CURSOR_OUT_OF_RANGE".into());
+        }
         let mut page = Vec::new();
         let mut position = offset;
         while page.len() < limit as usize && position < total {
@@ -542,10 +711,12 @@ impl AnalyticsService {
                 .get(position / 50)
                 .and_then(Value::as_str)
                 .ok_or("RESULT_PAGE_MISSING")?;
-            let rows: Vec<Value> = self
-                .artifacts
-                .read_evidence_json(id)
-                .map_err(|e| e.to_string())?;
+            let rows: Vec<Value> = read_verified_result(&self.artifacts, id)?;
+            if rows.len() <= position % 50 {
+                // A missing, empty or prematurely short page must never
+                // spin at the same cursor or pretend the result is complete.
+                return Err("RESULT_PAGE_TRUNCATED".into());
+            }
             let take = (limit as usize - page.len()).min(rows.len() - position % 50);
             page.extend(rows.into_iter().skip(position % 50).take(take));
             position += take;
@@ -553,12 +724,33 @@ impl AnalyticsService {
         while page.len() > 1 && serde_json::to_vec(&page).map_err(|e| e.to_string())?.len() > 6500 {
             page.pop();
         }
-        Ok(
-            json!({"view":"trades","metadata":metadata,"assumptions":value.pointer("/summary/assumptions").or_else(||value.pointer("/test/summary/assumptions")),"job_id":job_id,"artifact":artifact,"summary":value.get("summary").or_else(||value.pointer("/test/summary")),"rows":page,"returned_rows":page.len(),"total_rows":total,"next_cursor":if offset+page.len()<total{Some(format!("{}{}",instrument_prefix.as_deref().unwrap_or(""),offset+page.len()))}else{None}}),
-        )
+        if page.len() == 1 && serde_json::to_vec(&page).map_err(|e| e.to_string())?.len() > 6500 {
+            return Err("RESULT_ROW_TOO_LARGE".into());
+        }
+        let next = if offset + page.len() < total {
+            Some(
+                cursor::Cursor::new(
+                    &job_id,
+                    &artifact,
+                    &leaf_artifact,
+                    view,
+                    offset + page.len(),
+                    instrument_index,
+                )
+                .encode(&signing_key)?,
+            )
+        } else {
+            None
+        };
+        Ok(json!({
+            "view":"trades","metadata":metadata,
+            "assumptions":value.pointer("/summary/assumptions").or_else(||value.pointer("/test/summary/assumptions")),
+            "job_id":job_id,"artifact":artifact,"summary":value.get("summary").or_else(||value.pointer("/test/summary")),
+            "rows":page,"returned_rows":page.len(),"total_rows":total,"next_cursor":next
+        }))
     }
     async fn submit(&self, request: ResearchRequest) -> Result<Value, String> {
-        let hash = okx_research::canonical_sha256(&("analytics-v1", &request))
+        let hash = okx_research::canonical_sha256(&("analytics/448.1", &request))
             .map_err(|e| e.to_string())?;
         let hash = hash.strip_prefix("sha256:").unwrap_or(&hash).to_owned();
         let key = match &request {
@@ -577,11 +769,15 @@ impl AnalyticsService {
         let this = self.clone();
         tokio::spawn(async move {
             let outcome = async {
-                let _heavy = this
-                    .heavy
-                    .clone()
-                    .try_acquire_owned()
-                    .map_err(|_| "HEAVY_JOBS_LIMIT:2")?;
+                // Bounded SQL admission happens at submit. Accepted queued
+                // jobs wait for an existing heavy permit instead of becoming
+                // FAILED because two other research jobs are in progress.
+                let _heavy = tokio::select! {
+                    result = this.heavy.clone().acquire_owned() =>
+                        result.map_err(|_| "ANALYTICS_QUEUE_CLOSED")?,
+                    _ = executor::cancelled(cancel.clone()) =>
+                        return Err("CANCELLED".into()),
+                };
                 this.jobs.update_async(hash.clone(), jobs::State::Running, None, None).await?;
                 let instruments = match &request { ResearchRequest::Backtest{instruments,..}|ResearchRequest::Grid{instruments,..}=>instruments.clone(),_=>unreachable!() };
                 if instruments.len()==1 { return this.execute_one(request,cancel.clone()).await; }
@@ -812,7 +1008,7 @@ impl AnalyticsService {
                     let cancelled=||c.load(Ordering::Acquire);
                     let mut chunks=Vec::new();for chunk in bars.chunks(4096){if cancelled(){return Err("CANCELLED".into())}chunks.push(store.publish_evidence(&chunk).map_err(|e|e.to_string())?.0);}
                     let dataset=store.publish_evidence(&json!({"schema":"okx.research.dataset/398.1","instrument":instruments[0],"timeframe_ms":ms,"start_ms":start,"end_ms":end,"chunks":chunks})).map_err(|e|e.to_string())?.0;
-                    let(result,grid)=if is_grid{let g=replay::grid(&bars,&spec,&variants,&cancelled)?;(g.test,Some(json!({"selected":g.selected,"split_index":g.split_index,"train":g.train,"variants":g.variants,"selection_warning":g.selection_warning})))}else{(replay::replay(&bars,&spec,first.slow,bars.len(),&cancelled)?,None)};
+                    let(result,grid)=if is_grid{let g=replay::grid(&bars,&spec,&variants,&cancelled)?;(g.test,Some(json!({"selected":g.selected,"split_index":g.split_index,"train_dataset_hash":g.train_dataset_hash,"train_range":{"start_ms":bars[g.train_score_start_index].time,"end_ms":bars[g.split_index].time},"warmup_bars":g.train_score_start_index,"seed":spec.seed,"strategy_id":spec.strategy_id,"test_range":{"start_ms":bars[g.split_index].time,"end_ms":end},"train":g.train,"variants":g.variants,"selection_warning":g.selection_warning})))}else{(replay::replay(&bars,&spec,first.slow,bars.len(),&cancelled)?,None)};
                     publish_replay(&store,&result,&dataset,grid,&cancelled)
                 }).await?;
         Ok::<_, String>(artifact)
@@ -1068,9 +1264,12 @@ mod tests {
             .unwrap();
         assert_eq!(first["total_rows"], 100);
         assert_eq!(first["returned_rows"], 5);
-        assert_eq!(first["next_cursor"], "5");
+        assert!(first["next_cursor"].as_str().unwrap().starts_with("r1."));
         let next = service
-            .research(get(ResearchResultView::Equity, Some("5".into())))
+            .research(get(
+                ResearchResultView::Equity,
+                first["next_cursor"].as_str().map(str::to_owned),
+            ))
             .await
             .unwrap();
         assert_eq!(next["rows"][0][0], 5);
@@ -1171,6 +1370,77 @@ mod artifact_job_fixtures {
         drop(s);
         std::fs::remove_dir_all(root).unwrap();
     }
+    #[tokio::test(flavor = "current_thread")]
+    async fn ordinary_market_cursors_resume_one_job_and_reject_other_queries() {
+        let (root, service) = service();
+        let instruments = ["BTC-USDT", "ETH-USDT", "SOL-USDT"];
+        for instrument in instruments {
+            let bars = (0..100)
+                .map(|i| replay::Bar {
+                    time: i * 60000,
+                    open: 100.0 + i as f64,
+                    high: 102.0 + i as f64,
+                    low: 99.0 + i as f64,
+                    close: 101.0 + i as f64,
+                    volume: 1.0,
+                    funding_rate: None,
+                })
+                .collect::<Vec<_>>();
+            service
+                .sources
+                .cache
+                .load(
+                    cache::SourceKey {
+                        source: "candles".into(),
+                        instrument: instrument.into(),
+                        timeframe_ms: 60000,
+                        start_ms: 0,
+                        end_ms: 6000000,
+                        closed_only: true,
+                        schema: 1,
+                    },
+                    || async { Ok(bars) },
+                )
+                .await
+                .unwrap();
+        }
+        let mut query = MarketRequest {
+            action: MarketAction::Screen,
+            instruments: instruments.iter().map(|s| (*s).into()).collect(),
+            universe: None,
+            fields: vec!["returns".into()],
+            timeframe_ms: 60000,
+            start_ms: 0,
+            end_ms: 6000000,
+            limit: 1,
+            cursor: None,
+            parameters: Default::default(),
+            filters: vec![],
+            sort: None,
+        };
+        let first = service.market(query.clone(), None, None).await.unwrap();
+        assert_eq!(first["rows"][0]["instrument"], instruments[0]);
+        let job = first["job_id"].as_str().unwrap().to_owned();
+        assert_eq!(first["next_cursor"], format!("{job}:1"));
+        query.cursor = first["next_cursor"].as_str().map(str::to_owned);
+        let second = service.market(query.clone(), None, None).await.unwrap();
+        assert_eq!(second["rows"][0]["instrument"], instruments[1]);
+        assert_eq!(second["job_id"], job);
+        assert_eq!(second["next_cursor"], format!("{job}:2"));
+        query.cursor = second["next_cursor"].as_str().map(str::to_owned);
+        let third = service.market(query.clone(), None, None).await.unwrap();
+        assert_eq!(third["rows"][0]["instrument"], instruments[2]);
+        assert!(third["next_cursor"].is_null());
+        assert_eq!(service.jobs.snapshot().len(), 1);
+        query.fields = vec!["realized_volatility".into()];
+        assert_eq!(
+            service.market(query, None, None).await.unwrap_err(),
+            "MARKET_CURSOR_REQUEST_MISMATCH"
+        );
+        drop(service);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[tokio::test]
     async fn two_asset_batch_grid_has_independent_artifacts_and_cursors() {
         let (root, s) = service();
@@ -1291,6 +1561,254 @@ mod artifact_job_fixtures {
         drop(s);
         std::fs::remove_dir_all(root).unwrap();
     }
+    #[test]
+    fn c17_verified_export_reads_all_page_checksums_and_exact_rows() {
+        let (root, service) = super::artifact_job_fixtures::service();
+        let first = (0..50).map(|i| json!({"row":i})).collect::<Vec<_>>();
+        let second = vec![json!({"row":50})];
+        let (page_a, path_a) = service.artifacts.publish_evidence(&first).unwrap();
+        let page_b = service.artifacts.publish_evidence(&second).unwrap().0;
+        let equity = service
+            .artifacts
+            .publish_evidence(&vec![(1, 100.0), (2, 101.0)])
+            .unwrap()
+            .0;
+        let manifest = service
+            .artifacts
+            .publish_evidence(&json!({
+                "trade_pages":[page_a,page_b],"total_trades":51,
+                "equity_curve_pages":[equity],"total_equity_points":2,
+                "dataset_hash":"fixture-dataset","code_version":"fixture"
+            }))
+            .unwrap()
+            .0;
+        let job = "9".repeat(64);
+        service
+            .jobs
+            .enqueue("c17-export".into(), job.clone())
+            .unwrap();
+        service
+            .jobs
+            .update(&job, jobs::State::Completed, Some(manifest), None)
+            .unwrap();
+        let receipt = service
+            .result_page(job.clone(), None, 20, ResearchResultView::Export)
+            .unwrap();
+        assert_eq!(receipt["integrity"]["quality"], "complete");
+        assert_eq!(receipt["integrity"]["trades"]["rows"], 51);
+        assert_eq!(receipt["integrity"]["trades"]["pages"], 2);
+        assert_eq!(receipt["integrity"]["equity"]["rows"], 2);
+        assert_eq!(receipt["dataset_hash"], "fixture-dataset");
+        let data = service
+            .result_page(job.clone(), None, 50, ResearchResultView::Trades)
+            .unwrap();
+        assert_eq!(data["rows"].as_array().unwrap().len(), 50);
+        std::fs::write(path_a, b"tampered-page").unwrap();
+        assert_eq!(
+            service
+                .result_page(job, None, 20, ResearchResultView::Export)
+                .unwrap_err(),
+            "ARTIFACT_CORRUPT"
+        );
+        drop(service);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn c17_export_does_not_claim_complete_on_count_mismatch() {
+        let (root, service) = super::artifact_job_fixtures::service();
+        let page = service
+            .artifacts
+            .publish_evidence(&vec![json!({"row":1})])
+            .unwrap()
+            .0;
+        let manifest = json!({"trade_pages":[page],"total_trades":2});
+        assert_eq!(
+            verify_export_manifest(&service.artifacts, &manifest).unwrap_err(),
+            "EXPORT_ROW_COUNT_MISMATCH"
+        );
+        drop(service);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn c17_retention_keeps_shared_pinned_result_and_expires_only_unpinned_job() {
+        let (root, service) = super::artifact_job_fixtures::service();
+        let page = service
+            .artifacts
+            .publish_evidence(&vec![json!({"row":1})])
+            .unwrap()
+            .0;
+        let manifest = service
+            .artifacts
+            .publish_evidence(&json!({
+                "trade_pages":[page.clone()],"total_trades":1
+            }))
+            .unwrap()
+            .0;
+        let first = "8".repeat(64);
+        let second = "7".repeat(64);
+        for (key, id) in [("shared-first", &first), ("shared-second", &second)] {
+            service.jobs.enqueue(key.into(), id.clone()).unwrap();
+            service
+                .jobs
+                .update(id, jobs::State::Completed, Some(manifest.clone()), None)
+                .unwrap();
+        }
+        service.pin_job(&second, true).unwrap();
+        let future = chrono::Utc::now().timestamp_millis().max(0) as u64 + 8 * 86_400_000;
+        assert_eq!(service.apply_retention(future).unwrap(), 1);
+        assert_eq!(
+            service
+                .result_page(first, None, 1, ResearchResultView::Trades)
+                .unwrap_err(),
+            "RESULT_EXPIRED"
+        );
+        let still_live = service
+            .result_page(second.clone(), None, 1, ResearchResultView::Trades)
+            .unwrap();
+        assert_eq!(still_live["rows"][0]["row"], 1);
+        assert!(service.artifacts.read_evidence(&page).is_ok());
+        service.pin_job(&second, false).unwrap();
+        assert_eq!(service.apply_retention(future).unwrap(), 1);
+        assert!(service.artifacts.read_evidence(&page).is_err());
+        assert!(service.artifacts.read_evidence(&manifest).is_err());
+        drop(service);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn c17_cursor_survives_catalog_restart_and_is_not_transferable() {
+        let (root, service) = super::artifact_job_fixtures::service();
+        let page = service
+            .artifacts
+            .publish_evidence(&vec![json!({"row":1}), json!({"row":2})])
+            .unwrap()
+            .0;
+        let manifest = service
+            .artifacts
+            .publish_evidence(&json!({
+                "trade_pages":[page],"total_trades":2
+            }))
+            .unwrap()
+            .0;
+        let id = "e".repeat(64);
+        service
+            .jobs
+            .enqueue("c17-signed".into(), id.clone())
+            .unwrap();
+        service
+            .jobs
+            .update(&id, jobs::State::Completed, Some(manifest.clone()), None)
+            .unwrap();
+        let first = service
+            .result_page(id.clone(), None, 1, ResearchResultView::Trades)
+            .unwrap();
+        let token = first["next_cursor"].as_str().unwrap().to_owned();
+        assert!(token.starts_with("r1."));
+        let decoded =
+            cursor::Cursor::decode(&token, &service.jobs.cursor_signing_key().unwrap()).unwrap();
+        assert_eq!(decoded.offset, 1);
+        assert_eq!(
+            service
+                .result_page(
+                    id.clone(),
+                    Some(token.clone()),
+                    1,
+                    ResearchResultView::Equity
+                )
+                .unwrap_err(),
+            "CURSOR_MISMATCH"
+        );
+        let other = "f".repeat(64);
+        service
+            .jobs
+            .enqueue("c17-other".into(), other.clone())
+            .unwrap();
+        service
+            .jobs
+            .update(&other, jobs::State::Completed, Some(manifest), None)
+            .unwrap();
+        assert_eq!(
+            service
+                .result_page(other, Some(token.clone()), 1, ResearchResultView::Trades)
+                .unwrap_err(),
+            "CURSOR_MISMATCH"
+        );
+        let mut forged = token.clone().into_bytes();
+        let last = forged.len() - 1;
+        forged[last] = if forged[last] == b'A' { b'B' } else { b'A' };
+        assert_eq!(
+            service
+                .result_page(
+                    id.clone(),
+                    Some(String::from_utf8(forged).unwrap()),
+                    1,
+                    ResearchResultView::Trades
+                )
+                .unwrap_err(),
+            "INVALID_CURSOR"
+        );
+        let restarted = jobs::Jobs::open(root.join("research-catalog.sqlite")).unwrap();
+        assert_eq!(
+            restarted.cursor_signing_key().unwrap(),
+            service.jobs.cursor_signing_key().unwrap()
+        );
+        let second = service
+            .result_page(id, Some(token), 1, ResearchResultView::Trades)
+            .unwrap();
+        assert_eq!(second["rows"][0]["row"], 2);
+        drop(restarted);
+        drop(service);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn c17_empty_or_short_manifest_page_fails_without_unbounded_scan() {
+        let (root, service) = super::artifact_job_fixtures::service();
+        let page_id = service
+            .artifacts
+            .publish_evidence(&Vec::<Value>::new())
+            .unwrap()
+            .0;
+        let manifest = service
+            .artifacts
+            .publish_evidence(&json!({
+                "trade_pages":[page_id],"total_trades":2
+            }))
+            .unwrap()
+            .0;
+        let id = "d".repeat(64);
+        service
+            .jobs
+            .enqueue("c17-empty".into(), id.clone())
+            .unwrap();
+        service
+            .jobs
+            .update(&id, jobs::State::Completed, Some(manifest.clone()), None)
+            .unwrap();
+        let err = service
+            .result_page(id.clone(), None, 5, ResearchResultView::Trades)
+            .unwrap_err();
+        assert_eq!(err, "RESULT_PAGE_TRUNCATED");
+        let token = cursor::Cursor::new(
+            &id,
+            &manifest,
+            &manifest,
+            ResearchResultView::Trades,
+            2,
+            None,
+        )
+        .encode(&service.jobs.cursor_signing_key().unwrap())
+        .unwrap();
+        let err = service
+            .result_page(id, Some(token), 5, ResearchResultView::Trades)
+            .unwrap_err();
+        assert_eq!(err, "RESULT_CURSOR_OUT_OF_RANGE");
+        drop(service);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[tokio::test]
     async fn immutable_result_pages_and_restart_catalog() {
         let (root, s) = service();
@@ -1335,12 +1853,23 @@ mod artifact_job_fixtures {
             .enqueue("fixture-request".into(), id.clone())
             .unwrap();
         s.jobs
-            .update(&id, jobs::State::Completed, Some(artifact), None)
+            .update(&id, jobs::State::Completed, Some(artifact.clone()), None)
             .unwrap();
         let page = s
             .research(ResearchRequest::Result {
                 job_id: id.clone(),
-                cursor: Some("47".into()),
+                cursor: Some(
+                    cursor::Cursor::new(
+                        &id,
+                        &artifact,
+                        &artifact,
+                        ResearchResultView::Trades,
+                        47,
+                        None,
+                    )
+                    .encode(&s.jobs.cursor_signing_key().unwrap())
+                    .unwrap(),
+                ),
                 limit: 5,
                 view: ResearchResultView::Trades,
             })
@@ -1349,7 +1878,7 @@ mod artifact_job_fixtures {
         assert_eq!(page["returned_rows"], 5);
         assert_eq!(page["total_rows"], 120);
         assert_eq!(page["rows"][0]["time"], 47);
-        assert_eq!(page["next_cursor"], "52");
+        assert!(page["next_cursor"].as_str().unwrap().starts_with("r1."));
         let reloaded = jobs::Jobs::open(root.join("research-catalog.sqlite")).unwrap();
         assert_eq!(reloaded.get(&id).unwrap().state, jobs::State::Completed);
         assert!(
@@ -1402,7 +1931,12 @@ fn global_rank_page(
     let offset = cursor.parse::<usize>().map_err(|_| "INVALID_CURSOR")?;
     let total = root["total_rows"].as_u64().ok_or("INVALID_MARKET_RESULT")? as usize;
     if offset == 0 || offset >= total {
-        return Err("GLOBAL_RANK_CURSOR_OUT_OF_RANGE".into());
+        return Err(if root["universe_page"]["global_ranking"] == true {
+            "GLOBAL_RANK_CURSOR_OUT_OF_RANGE"
+        } else {
+            "MARKET_CURSOR_OUT_OF_RANGE"
+        }
+        .into());
     }
     let root_id = root["result_artifact"]
         .as_str()
@@ -1450,8 +1984,10 @@ fn global_rank_page(
     root["rows"] = json!(rows);
     root["returned_rows"] = json!(count);
     root["next_cursor"] = json!(next);
-    root["universe_page"]["has_more"] = json!(next.is_some());
-    root["universe_page"]["page_count"] = json!(count);
+    if root["universe_page"].is_object() {
+        root["universe_page"]["has_more"] = json!(next.is_some());
+        root["universe_page"]["page_count"] = json!(count);
+    }
     Ok(root)
 }
 fn market_result_with_context(
@@ -1463,12 +1999,13 @@ fn market_result_with_context(
         .as_object_mut()
         .ok_or("INVALID_MARKET_RESULT")?
         .insert("job_id".into(), json!(job_id));
+    // All market cursors refer to persisted job ID + next row offset.
+    let count = result["returned_rows"].as_u64().unwrap_or(0);
+    result["page_limit"] = json!(count);
+    if let Some(offset) = result["next_cursor"].as_str() {
+        result["next_cursor"] = json!(format!("{job_id}:{offset}"));
+    }
     if universe_page.is_some_and(|v| v["global_ranking"] == true) {
-        let count = result["returned_rows"].as_u64().unwrap_or(0);
-        result["page_limit"] = json!(count);
-        if let Some(offset) = result["next_cursor"].as_str() {
-            result["next_cursor"] = json!(format!("{job_id}:{offset}"));
-        }
         let mut page = universe_page.cloned().ok_or("UNIVERSE_PAGE_MISSING")?;
         page["has_more"] = json!(result["next_cursor"].is_string());
         page["page_count"] = json!(count);
@@ -1525,6 +2062,45 @@ mod universe_artifact_tests {
         std::fs::remove_dir_all(root).unwrap();
     }
     #[test]
+    fn ordinary_market_cursor_reads_exact_persisted_pages() {
+        let (root, service) = super::artifact_job_fixtures::service();
+        let scores = (0..105)
+            .map(|i| json!({"instrument":format!("I{i:03}")}))
+            .collect::<Vec<_>>();
+        let mut pages = Vec::new();
+        for chunk in scores.chunks(50) {
+            pages.push(service.artifacts.publish_evidence(&chunk).unwrap().0);
+        }
+        let manifest = service
+            .artifacts
+            .publish_evidence(&json!({"row_pages":pages,"total_rows":105}))
+            .unwrap()
+            .0;
+        let job = "a".repeat(64);
+        let first = market_result_with_context(
+            json!({"kind":"market","result_artifact":manifest,"rows":scores[..13],
+                "total_rows":105,"returned_rows":13,"next_cursor":"13"}),
+            &job,
+            None,
+        )
+        .unwrap();
+        assert_eq!(first["next_cursor"], format!("{job}:13"));
+        assert_eq!(first["page_limit"], 13);
+        let next = global_rank_page(&service.artifacts, first, "49", &job).unwrap();
+        assert_eq!(next["rows"][0]["instrument"], "I049");
+        assert_eq!(next["rows"][1]["instrument"], "I050");
+        assert_eq!(next["returned_rows"], 13);
+        assert_eq!(next["next_cursor"], format!("{job}:62"));
+        assert!(next["universe_page"].is_null());
+        assert_eq!(
+            global_rank_page(&service.artifacts, next, "105", &job).unwrap_err(),
+            "MARKET_CURSOR_OUT_OF_RANGE"
+        );
+        drop(service);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn market_universe_metadata_persisted_with_final_artifact_and_queue() {
         let page = json!({
             "reference_generation":"generation-a",
@@ -1574,7 +2150,7 @@ fn research_capabilities() -> Value {
         "timeframes_ms":[60000,180000,300000,900000,1800000,3600000,14400000,86400000],
         "limits":{"max_instruments":8,"max_bars_total":1000000,"max_grid_variants":64,
             "max_result_page_rows":50,"max_heavy_concurrent_jobs":2},
-        "result_views":["summary","trades","variants","equity"],
+        "result_views":["summary","trades","variants","equity","export"],
         "oos":{"grid_train_test_split":true,"selected_variant_from_train_only":true},
         "source_evidence":{"closed_candles_only":true,"no_forward_fill":true}
     })

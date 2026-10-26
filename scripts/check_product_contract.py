@@ -52,14 +52,14 @@ def check(root):
             if variant.get('additionalProperties') is not False:
                 errors.append(f'{name}: action accepts unknown fields')
     # Generated MCP contract must reflect the live Rust strategy v1 and
-    # all four read-only research result views (one source, no stale snapshot).
+    # all five read-only research result views (one source, no stale snapshot).
     catalog={t['name']:t for t in tools}
     def variant(tool,action):
         return next((v for v in catalog[tool]['inputSchema']['oneOf']
                      if v.get('properties',{}).get('action',{}).get('const')==action),None)
     view=variant('research','result')
     if (view is None or view['properties'].get('view',{}).get('enum')!=
-        ['summary','trades','equity','variants']):
+        ['summary','trades','equity','variants','export']):
         errors.append('research.result is missing one or more supported result views')
     for action in ('create','update'):
         rule=variant('strategies',action)

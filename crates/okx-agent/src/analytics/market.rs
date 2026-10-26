@@ -29,8 +29,10 @@ impl AnalyticsService {
         cancel: Arc<std::sync::atomic::AtomicBool>,
         global_rank: bool,
     ) -> Result<(Vec<Value>, Option<Value>), String> {
-        let plan = planner::AnalysisPlan::build(&request.fields, request.start_ms, request.end_ms)?;
-        let need_candles = plan.sources.contains("candles");
+        let plan = planner::AnalysisPlan::compile_market(request)?;
+        let need_candles = plan
+            .sources
+            .contains(&okx_analysis::query_plan::Source::Candles);
         let count = (request.end_ms - request.start_ms) / request.timeframe_ms;
         if need_candles && count.saturating_mul(request.instruments.len() as u64) > 1_000_000 {
             return Err("LIMIT_TOTAL_BARS:1000000".into());
@@ -193,17 +195,8 @@ impl AnalyticsService {
 }
 /// Full-universe scores require identical *closed* time coverage for all candidates.
 fn complete_rank_history(bars: &[Bar], start: u64, end: u64, step: u64) -> bool {
-    step > 0
-        && end > start
-        && (end - start).is_multiple_of(step)
-        && bars.len() as u64 == (end - start) / step
-        && bars.first().is_some_and(|bar| bar.time == start)
-        && bars
-            .last()
-            .is_some_and(|bar| bar.time.checked_add(step) == Some(end))
-        && bars
-            .windows(2)
-            .all(|pair| pair[0].time.checked_add(step) == Some(pair[1].time))
+    okx_analysis::time_series::ClosedRange::strict(start, end, step)
+        .is_ok_and(|window| window.coverage(bars.iter().map(|bar| bar.time)).complete)
 }
 /// Rank is globally valid only when every candidate has complete evidence.
 fn sort_market_rows(
@@ -259,22 +252,25 @@ fn compute_row(
     let high = bars.iter().map(|b| b.high).collect::<Vec<_>>();
     let low = bars.iter().map(|b| b.low).collect::<Vec<_>>();
     let volume = bars.iter().map(|b| b.volume).collect::<Vec<_>>();
-    let interior_gap = bars
-        .windows(2)
-        .any(|pair| pair[1].time != pair[0].time.saturating_add(request.timeframe_ms));
-    if interior_gap {
-        gaps.push("CANDLE_INTERIOR_GAP".into());
-    }
-    if !bars.is_empty()
-        && (bars.first().unwrap().time > request.start_ms.saturating_add(request.timeframe_ms)
-            || bars
-                .last()
-                .unwrap()
-                .time
-                .saturating_add(request.timeframe_ms)
-                < request.end_ms)
-    {
-        gaps.push("CANDLE_RANGE_INCOMPLETE".into());
+    let candle_coverage = okx_analysis::time_series::ClosedRange::strict(
+        request.start_ms,
+        request.end_ms,
+        request.timeframe_ms,
+    )
+    .ok()
+    .map(|range| range.coverage(bars.iter().map(|bar| bar.time)));
+    let incomplete_candles = candle_coverage
+        .as_ref()
+        .is_none_or(|coverage| !coverage.complete);
+    if !bars.is_empty() && incomplete_candles {
+        gaps.push("CANDLE_RANGE_INCOMPLETE_OR_GAPPED".into());
+        // Preserve the precise public reason alongside the new typed evidence.
+        if bars
+            .windows(2)
+            .any(|pair| pair[0].time.checked_add(request.timeframe_ms) != Some(pair[1].time))
+        {
+            gaps.push("CANDLE_INTERIOR_GAP".into());
+        }
     }
     let mut metrics = serde_json::Map::new();
     let mut units = serde_json::Map::new();
@@ -356,7 +352,7 @@ fn compute_row(
                 )?
             }
         };
-        let value = if interior_gap
+        let value = if incomplete_candles
             && !matches!(
                 op,
                 Operator::SpreadBps
@@ -376,7 +372,7 @@ fn compute_row(
         units.insert(field.clone(), json!(registry(op).unit));
     }
     Ok(
-        json!({"instrument":row.instrument,"metrics":metrics,"units":units,"parameters":{"ema_period":request.parameters.get("ema_period").unwrap_or(&14.0),"atr_period":request.parameters.get("atr_period").unwrap_or(&14.0),"rsi_period":request.parameters.get("rsi_period").unwrap_or(&14.0)},"source_start_ms":bars.first().map(|b|b.time),"source_end_ms":bars.last().map(|b|b.time),"unclosed_candles_excluded":row.excluded,"quality":if gaps.is_empty(){"complete"}else{"partial"},"gaps":gaps}),
+        json!({"instrument":row.instrument,"metrics":metrics,"units":units,"parameters":{"ema_period":request.parameters.get("ema_period").unwrap_or(&14.0),"atr_period":request.parameters.get("atr_period").unwrap_or(&14.0),"rsi_period":request.parameters.get("rsi_period").unwrap_or(&14.0)},"source_start_ms":bars.first().map(|b|b.time),"source_end_ms":bars.last().map(|b|b.time),"unclosed_candles_excluded":row.excluded,"candle_coverage":candle_coverage,"quality":if gaps.is_empty(){"complete"}else{"partial"},"gaps":gaps}),
     )
 }
 

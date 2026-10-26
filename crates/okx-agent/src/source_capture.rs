@@ -163,7 +163,9 @@ pub async fn capture_account_sources(
     let complete = spot && swap && futures && options && bills;
     let balances = snapshot.balance.details.clone();
     let usd_equity = d(&snapshot.balance.total_equity_usd)?;
-    let marks = snapshot
+    // Validate all supplied marks even though no unproven strategy capital
+    // is projected as NAV. Bad venue marks must not silently pass capture.
+    let _marks = snapshot
         .positions
         .iter()
         .filter_map(|p| {
@@ -246,9 +248,6 @@ pub async fn capture_account_sources(
                 },
             });
             s.ingest_page(&page)?;
-            if complete {
-                s.record_instance_nav(&marks, &fx, now)?;
-            }
             Ok(())
         })
         .await?;

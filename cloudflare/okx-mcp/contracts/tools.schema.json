@@ -552,7 +552,7 @@
     },
     {
       "name": "market",
-      "description": "Read OKX market data.",
+      "description": "Read market data.",
       "inputSchema": {
         "oneOf": [
           {
@@ -876,7 +876,7 @@
     },
     {
       "name": "research",
-      "description": "Manage research jobs.",
+      "description": "Manage research.",
       "inputSchema": {
         "oneOf": [
           {
@@ -1146,7 +1146,8 @@
                   "summary",
                   "trades",
                   "equity",
-                  "variants"
+                  "variants",
+                  "export"
                 ]
               }
             },
@@ -1200,6 +1201,13 @@
                 "type": "integer",
                 "minimum": 1,
                 "maximum": 9007199254740991
+              },
+              "range_mode": {
+                "type": "string",
+                "enum": [
+                  "strict",
+                  "normalize"
+                ]
               },
               "strategy_id": {
                 "type": "string",
@@ -1292,7 +1300,7 @@
     },
     {
       "name": "portfolio",
-      "description": "Read portfolio scenarios.",
+      "description": "Portfolio scenarios.",
       "inputSchema": {
         "oneOf": [
           {
@@ -1480,7 +1488,7 @@
     },
     {
       "name": "diagnostics",
-      "description": "Read runtime diagnostics.",
+      "description": "Runtime diagnostics.",
       "inputSchema": {
         "oneOf": [
           {

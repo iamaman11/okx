@@ -3,11 +3,13 @@ mod derivatives;
 mod history_features;
 mod market_query;
 mod microstructure;
+pub mod query_plan;
 mod risk;
 mod scenario;
 mod statistics;
 mod strategy;
 mod tca;
+pub mod time_series;
 mod validation;
 
 pub use candidate::{
