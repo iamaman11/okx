@@ -144,7 +144,7 @@ mod heavy_fixtures {
             stop_fraction: None,
             take_profit_fraction: None,
         };
-        let variants = (0..100)
+        let variants = (0..64)
             .map(|i| EmaParameters {
                 fast: i + 1,
                 slow: i + 101,

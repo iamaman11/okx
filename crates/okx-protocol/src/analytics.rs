@@ -350,7 +350,7 @@ impl ResearchRequest {
                         "ema_cross_v1" | "no_trade" | "close_momentum" | "two_bar_momentum"
                     )
                     && !variants.is_empty()
-                    && variants.len() <= 100
+                    && variants.len() <= 64
                     && variants.iter().all(EmaParameters::valid)
                     && costs.valid()
             }

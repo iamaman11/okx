@@ -85,7 +85,7 @@ impl Jobs {
             .execute_batch(
                 "PRAGMA journal_mode=WAL;
                  PRAGMA foreign_keys=ON;
-                 PRAGMA busy_timeout=5000;
+                 PRAGMA busy_timeout=100;
                  CREATE TABLE IF NOT EXISTS research_jobs(
                     id TEXT PRIMARY KEY,
                     request_hash TEXT NOT NULL,
@@ -182,7 +182,13 @@ impl Jobs {
         let mut db = self.db.lock().map_err(|_| "CATALOG_LOCK_POISONED")?;
         let tx = db
             .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| {
+                if e.sqlite_error_code() == Some(rusqlite::ErrorCode::DatabaseBusy) {
+                    "RESEARCH_SQL_BUSY".into()
+                } else {
+                    e.to_string()
+                }
+            })?;
         let owner: Option<String> = tx
             .query_row(
                 "SELECT id FROM research_jobs WHERE idempotency_key=?1",
