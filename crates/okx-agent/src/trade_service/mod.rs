@@ -51,7 +51,9 @@ struct RecoveryAttempt {
     incident_emitted: bool,
 }
 const RECOVERY_DELAYS_SECONDS: [u64; 6] = [1, 2, 4, 8, 16, 30];
-const RECOVERY_BATCH: usize = 100;
+// One maintenance turn reads at most 16 native intents per account.
+// The SQL API itself supports bounded pages up to 100, without full scans.
+const RECOVERY_BATCH: usize = 16;
 impl RecoverySchedule {
     fn page(&self, account: &str) -> usize {
         *self.pages.get(account).unwrap_or(&0)
