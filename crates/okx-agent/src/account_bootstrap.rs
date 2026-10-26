@@ -813,6 +813,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn k4_after_held_bypasses_config_cache_and_never_falls_back() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let cache = ObserverConfigCache::default();
+        let calls = AtomicUsize::new(0);
+        let (first, _) = cache
+            .read(|| async {
+                calls.fetch_add(1, Ordering::SeqCst);
+                serde_json::from_value::<AccountConfig>(
+                    serde_json::json!({"uid":"uid-1","perm":"read_only"}),
+                )
+                .map_err(|e| OkxError::Config(e.to_string()))
+            })
+            .await
+            .unwrap();
+        assert_eq!(first.perm, "read_only");
+        let (cached, _) = cache
+            .read(|| async { panic!("ordinary config must reuse cache") })
+            .await
+            .unwrap();
+        assert_eq!(cached.uid, "uid-1");
+        let (after_held, _) = cache
+            .read_fresh(|| async {
+                calls.fetch_add(1, Ordering::SeqCst);
+                serde_json::from_value::<AccountConfig>(
+                    serde_json::json!({"uid":"uid-1","perm":"trade"}),
+                )
+                .map_err(|e| OkxError::Config(e.to_string()))
+            })
+            .await
+            .unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert!(strict_read_only_permissions(&after_held.perm).is_err());
+        assert!(
+            cache
+                .read_fresh(|| async {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    Err::<AccountConfig, _>(OkxError::Config("venue unavailable".into()))
+                })
+                .await
+                .is_err(),
+            "failed post-HELD read must not reuse successful pre-HELD snapshot"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        assert!(cache.current.lock().await.is_none());
+    }
+
+    #[tokio::test]
     async fn observer_config_expiry_refreshes_and_denies_stale_fallback() {
         let cache = ObserverConfigCache::default();
         cache
