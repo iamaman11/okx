@@ -144,7 +144,8 @@ pub async fn portfolio(
         for nav in page.3 {
             navigation.push(nav_projection(&key, &alias, nav, from, through, page.4));
         }
-        readiness.push(json!({"account":key,"account_name":alias,"t0":page.4,"financial_risk":page.2}));
+        readiness
+            .push(json!({"account":key,"account_name":alias,"t0":page.4,"financial_risk":page.2}));
         for entry in page.0 {
             rows.push((entry.time,key.clone(),entry.entry_id.clone(),json!({"time":entry.time,"account":key,"account_name":alias,"component":entry.component,"amount":entry.amount.normalize().to_string(),"currency":entry.currency,"strategy_instance":entry.instance_id,"reference":entry.entry_id})));
         }
