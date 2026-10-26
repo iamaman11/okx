@@ -437,6 +437,44 @@ impl AccountStore {
         })
         .collect()
     }
+    /// Exact per-instance economic facts from the canonical account ledger.
+    /// None means the account's unattributed leg, not a second copy of money.
+    pub fn finance_attribution_filtered(
+        &self,
+        from: i64,
+        through: i64,
+        instances: &[String],
+        currencies: &[String],
+    ) -> StoreResult<std::collections::BTreeMap<(Option<String>, String, String), Decimal>> {
+        let (filter, mut args) = finance_filter(instances, currencies, 2)?;
+        let mut values = vec![from.into(), through.into()];
+        values.append(&mut args);
+        let query = format!(
+            "SELECT instance_id,currency,component,amount FROM finance_entries WHERE time>=?1 AND time<=?2{filter} ORDER BY time,entry_id"
+        );
+        let mut s = self.connection.prepare(&query)?;
+        let mut rows = s.query(rusqlite::params_from_iter(values))?;
+        let mut totals = std::collections::BTreeMap::new();
+        while let Some(row) = rows.next()? {
+            let key = (
+                row.get::<_, Option<String>>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            );
+            let amount = decimal(row.get(3)?)?;
+            let old = *totals.get(&key).unwrap_or(&Decimal::ZERO);
+            totals.insert(
+                key,
+                old.checked_add(amount)
+                    .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))?,
+            );
+            if totals.len() > 4096 {
+                return Err(StoreError::Invalid("FINANCE_ATTRIBUTION_GROUP_LIMIT"));
+            }
+        }
+        Ok(totals)
+    }
+
     pub fn finance_totals_filtered(
         &self,
         from: i64,

@@ -91,6 +91,8 @@ pub async fn portfolio(
     }
     let mut rows = Vec::new();
     let mut totals: BTreeMap<(String, String, String), Decimal> = BTreeMap::new();
+    let mut attribution: BTreeMap<(String, String, Option<String>, String, String), Decimal> =
+        BTreeMap::new();
     let mut readiness = Vec::new();
     let mut navigation = Vec::new();
     for (key, r) in resolved {
@@ -127,7 +129,7 @@ pub async fn portfolio(
                 } else {
                     Ok((
                         Vec::new(),
-                        s.finance_totals_filtered(from, through, &instances, &currencies)?,
+                        s.finance_attribution_filtered(from, through, &instances, &currencies)?,
                         health,
                         s.nav_summary(from, through, &instances, &currencies)?,
                         s.meta().initialized_at,
@@ -143,11 +145,15 @@ pub async fn portfolio(
         for entry in page.0 {
             rows.push((entry.time,key.clone(),entry.entry_id.clone(),json!({"time":entry.time,"account":key,"component":entry.component,"amount":entry.amount.normalize().to_string(),"currency":entry.currency,"strategy_instance":entry.instance_id,"reference":entry.entry_id})));
         }
-        for (k, amount) in page.1 {
+        for ((instance, currency, component), amount) in page.1 {
             let sum = totals
-                .entry((environment.to_owned(), k.0, k.1))
+                .entry((environment.to_owned(), currency.clone(), component.clone()))
                 .or_default();
             *sum = sum.checked_add(amount).ok_or("MONEY_OVERFLOW")?;
+            attribution.insert(
+                (key.clone(), environment.to_owned(), instance, currency, component),
+                amount,
+            );
         }
     }
     if request.action == PortfolioAction::History {
@@ -185,6 +191,21 @@ pub async fn portfolio(
         )
     } else {
         let mut all=totals.into_iter().map(|((environment,currency,component),amount)|json!({"kind":"component","environment":environment,"currency":currency,"component":component,"amount":amount.normalize().to_string()})).collect::<Vec<_>>();
+        all.extend(attribution.into_iter().map(
+            |((account, environment, instance, currency, component), amount)| {
+                json!({
+                    "kind":"account_component",
+                    "account":account,
+                    "environment":environment,
+                    "strategy_instance":instance,
+                    "currency":currency,
+                    "component":component,
+                    "amount":amount.normalize().to_string(),
+                    "view":"detail_of_environment_component",
+                    "additive_with_rollup":false
+                })
+            },
+        ));
         all.extend(navigation.iter().cloned());
         if cursor.as_ref().is_some_and(|c| c.account != "summary") {
             return Err("INVALID_CURSOR".into());
@@ -311,6 +332,15 @@ fn summary_key(value: &Value) -> String {
         format!(
             "component|{}|{}|{}",
             value["environment"].as_str().unwrap_or_default(),
+            value["currency"].as_str().unwrap_or_default(),
+            value["component"].as_str().unwrap_or_default()
+        )
+    } else if value["kind"] == "account_component" {
+        format!(
+            "account_component|{}|{}|{}|{}|{}",
+            value["account"].as_str().unwrap_or_default(),
+            value["environment"].as_str().unwrap_or_default(),
+            value["strategy_instance"].as_str().unwrap_or(""),
             value["currency"].as_str().unwrap_or_default(),
             value["component"].as_str().unwrap_or_default()
         )
