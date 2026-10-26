@@ -1201,6 +1201,11 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(saved.state, IntentState::Unknown);
+        assert!(
+            store.call(deadline(), |s| s.unsent_release_receipt("intent_fixture"))
+                .await.unwrap().is_none(),
+            "a possible POST must never acquire an SQL no-send release witness"
+        );
         assert_eq!(
             post_once(&store, &intent, deadline(), || gateway.send())
                 .await

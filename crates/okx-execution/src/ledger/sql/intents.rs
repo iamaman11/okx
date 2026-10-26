@@ -2,7 +2,7 @@ use super::super::*;
 impl AccountStore {
     pub fn reconcilable_intents(&self, limit: usize) -> StoreResult<Vec<StoredIntent>> {
         let ids = {
-            let mut q=self.connection.prepare("SELECT intent_id FROM risk_receipts WHERE state IN('HELD','POSTED','UNKNOWN','OPEN','TERMINAL_PENDING_CENTRAL','UNSENT_PENDING_CENTRAL') ORDER BY state,intent_id LIMIT ?1")?;
+            let mut q=self.connection.prepare("SELECT intent_id FROM risk_receipts WHERE state IN('HELD','POSTED','UNKNOWN','OPEN','TERMINAL_PENDING_CENTRAL','UNSENT_PENDING_CENTRAL') ORDER BY CASE WHEN state='UNSENT_PENDING_CENTRAL' THEN 0 ELSE 1 END,state,intent_id LIMIT ?1")?;
             q.query_map([limit.min(1000) as i64], |r| r.get::<_, String>(0))?
                 .collect::<Result<Vec<_>, _>>()?
         };

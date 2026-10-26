@@ -97,6 +97,31 @@ check((await readRiskBook(unsent))?.occupied_usd==="0" &&
  (await readRiskBook(unsent))?.consumed_loss_usd==="0",
  "release only reserved capacity and never credits realized losses");
 console.log("risk_unsent_cas_release PASS");
+// F4: central BEGIN_POST may have committed before the native SQL claim.
+// A durable native REJECTED_UNSENT transaction still gates place_order.
+const postUnsent=new Storage();
+await postUnsent.put("account_access_v1",governance);
+await postUnsent.put("generation",77);
+await initializeRiskBook(postUnsent,"installation_test");
+const postRes=await reserveRisk(postUnsent,policy,census,{...request,intent_id:"intent_f4_unsent"},native);
+if(postRes.status!=="HELD")throw Error("F4 reserve");
+const f4read={...census,generated_at_ms:now+1,source_read_floor_ms:now+1};
+const f4proof={reserve_anchor:postRes.entry.key,native_incarnation:"a".repeat(32),
+  elapsed_to_proof_ms:22,account_reads:census.account_keys.map(account_key=>({
+    account_key,private_generation:77,source_read_id:"e".repeat(64),
+    content_digest:d,started_after_held_ms:2,completed_after_held_ms:14}))};
+const f4=await beginRiskPost(postUnsent,postRes.entry.key,p,1,d,{
+  connection_generation:77,expected_book_sequence:1,census:f4read,
+  source_proof:native,causal_proof:f4proof,now_ms:now+2});
+check(f4.status==="POST_AUTHORIZED","F4 central post authorized");
+const f4receipt={...receipt,reservation_key:postRes.entry.key,intent_id:"intent_f4_unsent"};
+check((await releaseUnsentRisk(postUnsent,postRes.entry.key,p,2,77,f4receipt)).status==="UPDATED",
+ "F4 central POSTED + native never-claimed release is safe");
+check((await beginRiskPost(postUnsent,postRes.entry.key,p,1,d,{
+ connection_generation:77,expected_book_sequence:3,census:f4read,source_proof:native,
+ causal_proof:f4proof,now_ms:now+3})).status==="DENIED","old post fence cannot resurrect tombstone");
+console.log("risk_f4_unsent_after_central_post PASS");
+
 census.occupied[0].cumulative_loss_usd="17";
 // One million terminal records must not be enumerated or decoded on the hot path.
 for(let i=0;i<1_000_000;i++)sa.map.set("risk_entry_v2:tombstone_"+i,{state:"RELEASED",key:i});
