@@ -588,6 +588,25 @@ impl TradeService {
                         false,
                     )
                     .await?;
+                // Read-only preview may project costs even when the strategy's
+                // financial capital provenance is missing. Actual execution
+                // still requires complete instance NAV in plan(record_risk_state=true).
+                let binding = strategy_instance.clone();
+                let instance_nav_complete = r
+                    .execution
+                    .store
+                    .call(deadline(), move |store| {
+                        if store.instances()?.iter().any(|i| i.instance_id == binding) {
+                            Ok(Some(
+                                store.financial_risk(now(), Some(&binding))?.nav_complete,
+                            ))
+                        } else {
+                            Ok(None)
+                        }
+                    })
+                    .await
+                    .map_err(err)?;
+                let instance_nav_blocked = instance_nav_complete == Some(false);
                 // Preview uses the same price-bounded, fee-inclusive cost model as
                 // native admission; do not silently suppress missing fee evidence.
                 let costs = if matches!(
@@ -655,7 +674,13 @@ impl TradeService {
                 };
                 Ok(completed(
                     json!({"plan":plan,"entry_costs":costs,"access":c.access_enabled(),"policy_revision":a.state.revision,
-                           "admission":"preview_only","side_effects":"none","census":census}),
+                    "admission":"preview_only","side_effects":"none","census":census,
+                    "financial_admission":{
+                        "state":if instance_nav_blocked {"blocked"} else {"not_evaluated"},
+                        "reason_code":if instance_nav_blocked {Some("INSTANCE_NAV_INCOMPLETE")} else {None},
+                        "ready_for_post":false,
+                        "instance_nav_complete":instance_nav_complete
+                    }}),
                 ))
             }
             TradeRequest::Execute {
