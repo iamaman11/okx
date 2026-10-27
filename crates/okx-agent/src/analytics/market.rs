@@ -23,6 +23,261 @@ fn market_source_rate_deferred(loaded: &[Loaded]) -> bool {
 }
 
 impl AnalyticsService {
+    pub async fn market(
+        &self,
+        request: MarketRequest,
+        universe_page: Option<Value>,
+        resolved_instruments: Option<Vec<String>>,
+    ) -> Result<Value, String> {
+        if !request.valid() {
+            return Err("INVALID_MARKET_REQUEST".into());
+        }
+        // K7 source, type and range validation precedes every venue read.
+        let query_plan = planner::AnalysisPlan::compile_market(&request)?;
+        let window = query_plan.range;
+        let closed_end = chrono::Utc::now().timestamp_millis().max(0) as u64 / request.timeframe_ms
+            * request.timeframe_ms;
+        if window.end_ms > closed_end {
+            return Err("RANGE_NOT_CLOSED".into());
+        }
+        let global_rank = request.universe.as_ref().is_some_and(|u| u.rank_globally);
+        if global_rank && resolved_instruments.is_none() {
+            return Err("GLOBAL_RANK_UNIVERSE_REQUIRED".into());
+        }
+        let mut compute_request = request.clone();
+        if let Some(names) = resolved_instruments {
+            compute_request.instruments = names;
+            compute_request.universe = None;
+        }
+        let mut hash_request = request.clone();
+        // A page selector is not a separate computation.
+        let cursor = hash_request.cursor.take();
+        // Unlike the time bucket, this request fingerprint is immutable
+        // across pages, but binds the exact typed query and reference generation.
+        let rank_fingerprint = if global_rank {
+            Some(
+                okx_research::canonical_sha256(&(
+                    "market/398.global-v1",
+                    &hash_request,
+                    &universe_page,
+                ))
+                .map_err(|e| e.to_string())?,
+            )
+        } else {
+            None
+        };
+        let request_fingerprint = okx_research::canonical_sha256(&(
+            "market/448.cursor-v1",
+            &hash_request,
+            &universe_page,
+        ))
+        .map_err(|e| e.to_string())?;
+        let bucket = if request
+            .fields
+            .iter()
+            .any(|f| matches!(f.as_str(), "spread_bps" | "oi_change"))
+        {
+            chrono::Utc::now().timestamp_millis() / 1000
+        } else if request.end_ms > chrono::Utc::now().timestamp_millis().max(0) as u64 {
+            chrono::Utc::now().timestamp_millis() / request.timeframe_ms as i64
+        } else {
+            0
+        };
+        let hash = okx_research::canonical_sha256(&(
+            "market/448.2",
+            &hash_request,
+            &universe_page,
+            bucket,
+        ))
+        .map_err(|e| e.to_string())?;
+        let hash = hash.strip_prefix("sha256:").unwrap_or(&hash).to_owned();
+        if let Some(cursor) = cursor.as_deref() {
+            // Reuse the original completed immutable artifact even if the
+            // live source bucket has advanced since the preceding page.
+            let (job_id, offset) = cursor.split_once(':').ok_or("MARKET_CURSOR_INVALID")?;
+            if job_id.len() != 64 || !job_id.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return Err("MARKET_CURSOR_INVALID".into());
+            }
+            let job = self
+                .jobs
+                .get_async(job_id.into())
+                .await
+                .map_err(|_| "MARKET_CURSOR_NOT_FOUND")?;
+            let artifact = job.artifact.ok_or("MARKET_CURSOR_NOT_READY")?;
+            let store = self.artifacts.clone();
+            let offset = offset.to_owned();
+            let job_id = job_id.to_owned();
+            return self
+                .cpu
+                .run(Default::default(), move |_| {
+                    let value: Value = store
+                        .read_evidence_json(&artifact)
+                        .map_err(|e| e.to_string())?;
+                    if value["market_request_fingerprint"] != request_fingerprint
+                        || value["job_id"] != job_id
+                    {
+                        return Err("MARKET_CURSOR_REQUEST_MISMATCH".into());
+                    }
+                    global_rank_page(&store, value, &offset, &job_id)
+                })
+                .await;
+        }
+        let (job, new, cancel) = self
+            .jobs
+            .enqueue_async(format!("market-{hash}"), hash.clone())
+            .await?;
+        if !new {
+            if let Some(artifact) = job.artifact {
+                let store = self.artifacts.clone();
+                return self
+                    .cpu
+                    .run(Default::default(), move |_| {
+                        store
+                            .read_evidence_json(&artifact)
+                            .map_err(|e| e.to_string())
+                    })
+                    .await;
+            }
+            return with_universe_page(json!(job), universe_page.as_ref());
+        }
+        let queued_page = universe_page.clone();
+        let this = self.clone();
+        let mut task = tokio::spawn(async move {
+            this.jobs
+                .update_async(hash.clone(), jobs::State::Running, None, None)
+                .await?;
+            // Two global scans at most, using the existing analytics semaphore.
+            let _permit = if global_rank {
+                Some(
+                    this.heavy
+                        .acquire()
+                        .await
+                        .map_err(|_| "ANALYTICS_QUEUE_CLOSED")?,
+                )
+            } else {
+                None
+            };
+            let mut outcome = this
+                .market_execute(compute_request, cancel.clone(), global_rank)
+                .await;
+            outcome = outcome.and_then(|mut value| {
+                value["query_plan"] =
+                    serde_json::to_value(&query_plan).map_err(|e| e.to_string())?;
+                if let Some(fingerprint) = &rank_fingerprint {
+                    value["rank_request_fingerprint"] = json!(fingerprint);
+                }
+                value["market_request_fingerprint"] = json!(request_fingerprint);
+                market_result_with_context(value, &hash, universe_page.as_ref())
+            });
+            match &outcome {
+                Ok(value) => {
+                    let store = this.artifacts.clone();
+                    let value = value.clone();
+                    let artifact = this
+                        .cpu
+                        .run(cancel.clone(), move |_| {
+                            Ok(store.publish_evidence(&value).map_err(|e| e.to_string())?.0)
+                        })
+                        .await?;
+                    this.jobs
+                        .update_async(hash.clone(), jobs::State::Completed, Some(artifact), None)
+                        .await?;
+                }
+                Err(e) => {
+                    this.jobs
+                        .update_async(
+                            hash.clone(),
+                            if cancel.load(Ordering::Acquire) {
+                                jobs::State::Cancelled
+                            } else {
+                                jobs::State::Failed
+                            },
+                            None,
+                            Some(e.clone()),
+                        )
+                        .await?;
+                }
+            }
+            outcome
+        });
+        match tokio::time::timeout(std::time::Duration::from_secs(2), &mut task).await {
+            Ok(result) => result.map_err(|e| e.to_string())?,
+            Err(_) => with_universe_page(json!(job), queued_page.as_ref()),
+        }
+    }
+    async fn market_execute(
+        &self,
+        request: MarketRequest,
+        cancel: Arc<std::sync::atomic::AtomicBool>,
+        global_rank: bool,
+    ) -> Result<Value, String> {
+        // The public request was validated before expanding the immutable
+        // venue reference generation. No >100 explicit input is accepted.
+        if request.instruments.is_empty()
+            || request.instruments.len() > if global_rank { 512 } else { 100 }
+            || request.limit == 0
+            || request.limit > 50
+        {
+            return Err("MARKET_LIMIT:BOUNDED_INSTRUMENTS_AND_ROWS".into());
+        }
+        let plan = planner::AnalysisPlan::build(&request.fields, request.start_ms, request.end_ms)?;
+        let (rows, correlation_matrix) = self
+            .market_rows(&request, cancel.clone(), global_rank)
+            .await?;
+        let store = self.artifacts.clone();
+        self.cpu.run(cancel,move |cancel| {
+        if cancel.load(Ordering::Acquire){return Err("CANCELLED".into())}
+        // Only the first page computes; subsequent pages read exact stored
+        // pages rather than reading new venue data or accepting bare offsets.
+        let offset = 0usize;
+        let total = rows.len();
+        let mut row_pages = Vec::new();
+        for chunk in rows.chunks(50) {
+            row_pages.push(
+                store
+                    .publish_evidence(&chunk)
+                    .map_err(|e| e.to_string())?
+                    .0,
+            );
+        }
+        let result_artifact=store.publish_evidence(&json!({"kind":"market_pages","row_pages":row_pages,"total_rows":total,"sources":plan.sources,"correlation_matrix":correlation_matrix})).map_err(|e|e.to_string())?.0;
+        let mut page = rows
+            .into_iter()
+            .skip(offset)
+            .take(request.limit as usize)
+            .collect::<Vec<_>>();
+        while page.len() > 1 && serde_json::to_vec(&page).map_err(|e| e.to_string())?.len() > 6500 {
+            page.pop();
+        }
+        let returned = page.len();
+        Ok(
+            json!({"kind":"market","result_artifact":result_artifact,"rows":page,"returned_rows":returned,"total_rows":total,"next_cursor":if offset+returned<total{Some((offset+returned).to_string())}else{None},"sources":plan.sources,"correlation_matrix":correlation_matrix}),
+        )
+        }).await
+    }
+    pub fn market_capabilities(&self) -> Value {
+        let operators = okx_analysis::operators::SUPPORTED_OPERATORS
+            .iter()
+            .map(|&operator| {
+                let info = okx_analysis::operators::registry(operator);
+                json!({"name":operator,"unit":info.unit,"inputs":info.inputs})
+            })
+            .collect::<Vec<_>>();
+        json!({"schema":"okx.market.capabilities/v1",
+            "actions":["screen","compare","instruments","snapshot","microstructure","capabilities"],
+            "timeframes_ms":[60000,180000,300000,900000,1800000,3600000,14400000,86400000],
+            "operators":operators,
+            "limits":{"max_explicit_instruments":100,"max_page_rows":50,
+                "max_correlation_instruments":8,"max_candles_total":1000000},
+            "universe":{"modes":["explicit_instruments","venue_reference_registry"],
+                "whole_market_paged":true,"globally_ranked":true,
+                "global_rank_requires_explicit_opt_in":true,
+                "global_rank_max_instruments":512,
+                "global_rank_source_budget_bars":1000000,
+                "global_rank_uses_immutable_artifact_cursor":true,
+                "max_instruments_per_page":100},
+            "quality":"complete"})
+    }
     pub(super) async fn market_rows(
         &self,
         request: &MarketRequest,
