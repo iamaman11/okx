@@ -21,22 +21,46 @@ impl AccountStore {
         if account_nav < Decimal::ZERO {
             return Err(StoreError::Invalid("ACCOUNT_NAV_NEGATIVE"));
         }
-        let mut query=self.connection.prepare(
-            "SELECT instance_id,amount FROM instance_finance_totals WHERE currency='USD' AND component='INTERNAL_CAPITAL_USD' ORDER BY instance_id"
+        // instance_finance_totals is a CURRENT projection, not an as-of
+        // balance. A later allocation must never appear as historical money.
+        // Use the fast projection at the latest point; only historical reads
+        // replay the already-immutable, source-backed assignment legs.
+        let latest_assignment: Option<i64> = self.connection.query_row(
+            "SELECT MAX(time) FROM finance_entries WHERE component='INTERNAL_CAPITAL_USD'",
+            [],
+            |r| r.get(0),
         )?;
-        let mut rows = query.query([])?;
+        let historical = latest_assignment.is_some_and(|last| now < last);
+        let sql = if historical {
+            "SELECT instance_id,amount FROM finance_entries
+             WHERE component='INTERNAL_CAPITAL_USD' AND currency='USD'
+               AND instance_id IS NOT NULL AND time<=?1
+             ORDER BY time,entry_id"
+        } else {
+            "SELECT instance_id,amount FROM instance_finance_totals
+             WHERE currency='USD' AND component='INTERNAL_CAPITAL_USD'
+               AND ?1>=0 ORDER BY instance_id"
+        };
+        let mut query = self.connection.prepare(sql)?;
+        let mut rows = query.query([now])?;
         let mut principals = std::collections::BTreeMap::new();
         let mut assigned = Decimal::ZERO;
         while let Some(row) = rows.next()? {
             let id: String = row.get(0)?;
             let amount = decimal(row.get(1)?)?;
-            if id == "manual" || amount < Decimal::ZERO {
+            let next = principals
+                .get(&id)
+                .copied()
+                .unwrap_or(Decimal::ZERO)
+                .checked_add(amount)
+                .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))?;
+            if id == "manual" || next < Decimal::ZERO {
                 return Err(StoreError::Invalid("INTERNAL_CAPITAL_CORRUPT"));
             }
+            principals.insert(id, next);
             assigned = assigned
                 .checked_add(amount)
                 .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))?;
-            principals.insert(id, amount);
             if principals.len() > 64 {
                 return Err(StoreError::Invalid("CAPITAL_SCOPE_LIMIT"));
             }
@@ -519,6 +543,17 @@ impl AccountStore {
                 return Err(StoreError::Invalid("IDEMPOTENCY_CONFLICT"));
             }
             return Ok(old);
+        }
+        // Current principal totals are a projection of this ordered series.
+        // Backdated new assignments would corrupt that projection and
+        // retroactively change NAV; reject them instead of silently rewriting
+        // prior allocations. Exact idempotent retries still return above.
+        let latest_assignment:Option<i64>=self.connection.query_row(
+            "SELECT MAX(time) FROM finance_entries WHERE component='INTERNAL_CAPITAL_USD'",
+            [],|r|r.get(0)
+        )?;
+        if latest_assignment.is_some_and(|last| request.time<last) {
+            return Err(StoreError::Invalid("CAPITAL_ASSIGNMENT_OUT_OF_ORDER"));
         }
         let state = self.capital_state(request.time)?;
         if request.nav_source_ref != state.nav_source_ref {
