@@ -690,8 +690,9 @@ impl AccountStore {
             // ignored. A new financial event invalidates a prior revision.
             let manual = scope == "strategy:manual";
             let strategy = scope.starts_with("strategy:") && !manual;
-            let endpoint =
-                |time: i64, source_revision: &str| -> StoreResult<Option<(Decimal, Decimal, i64, String)>> {
+            let endpoint = |time: i64,
+                            source_revision: &str|
+             -> StoreResult<Option<(Decimal, Decimal, i64, String)>> {
                 let row: Option<(String, String, i64, String)> = if strategy {
                     self.connection.query_row(
                         "SELECT n.equity,n.flows,n.time,n.coverage FROM nav_points n
