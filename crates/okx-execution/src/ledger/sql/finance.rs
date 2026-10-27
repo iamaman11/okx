@@ -122,6 +122,33 @@ impl AccountStore {
         if pending != 0 {
             return Err(StoreError::Invalid("STRATEGY_NAV_PROJECTION_PENDING"));
         }
+        // A modeled economic component can be counted as strategy profit
+        // only if its immutable originating fill or bill exists in this
+        // account's ledger. Arbitrary finance ingestion is NOT source proof.
+        let mut sources=self.connection.prepare(
+            "SELECT instance_id,component,source_ref FROM finance_entries WHERE time>=?1 AND time<=?2 AND instance_id IS NOT NULL ORDER BY time,entry_id"
+        )?;
+        let mut source_rows=sources.query(params![self.meta.initialized_at,evidence.as_of])?;
+        while let Some(r)=source_rows.next()? {
+            let instance:String=r.get(0)?;
+            if instance=="manual" {continue}
+            let component:String=r.get(1)?;
+            if !matches!(component.as_str(),"FEE"|"FUNDING"|"REALIZED_PNL"|"LIQUIDATION_COST") {
+                if component=="INTERNAL_CAPITAL_USD" || component=="CAMPAIGN_LOSS_USD" {continue}
+                return Err(StoreError::Invalid("STRATEGY_NAV_COMPONENT_UNKNOWN"));
+            }
+            let proof:String=r.get(2)?;
+            let found=if let Some(id)=proof.strip_prefix("fill:") {
+                self.connection.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM fills WHERE fill_id=?1)",[id],|row|row.get::<_,bool>(0)
+                )?
+            } else if let Some(id)=proof.strip_prefix("bill:") {
+                self.connection.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM bills WHERE bill_id=?1)",[id],|row|row.get::<_,bool>(0)
+                )?
+            } else {false};
+            if !found {return Err(StoreError::Invalid("STRATEGY_NAV_ECONOMIC_SOURCE_UNVERIFIED"))}
+        }
         let fx = &evidence.conversion.usd_per_currency;
         let convert = |currency: &str, value: Decimal| -> StoreResult<Decimal> {
             let rate = if currency == "USD" {

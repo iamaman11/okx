@@ -3547,6 +3547,20 @@ fn p02_valuation_requires_converged_sources_even_with_valid_principal() {
         s.reconcile_strategy_valuation(&witness),
         Err(StoreError::Invalid("STRATEGY_NAV_ACCOUNT_SOURCE_MISMATCH"))
     ));
+    let mut witness=p02_valuation_witness(&s,4,"account-witness");
+    s.ingest_page(&IngestPage {
+        finance:vec![FinanceEntry{
+            entry_id:"forged-fee".into(),economic_event_key:"fake-fee".into(),
+            component:"FEE".into(),allocation_leg:"account".into(),
+            amount:Decimal::from(-1),currency:"USD".into(),instance_id:Some("alpha".into()),
+            source_ref:"unverified:fee".into(),time:4,reverses_entry_id:None,
+        }],
+        ..Default::default()
+    }).unwrap();
+    assert!(matches!(
+        s.reconcile_strategy_valuation(&witness),
+        Err(StoreError::Invalid("STRATEGY_NAV_ECONOMIC_SOURCE_UNVERIFIED"))
+    ));
 }
 #[test]
 fn p02_valuation_rejects_missing_mark_and_uses_contract_mechanics() {
