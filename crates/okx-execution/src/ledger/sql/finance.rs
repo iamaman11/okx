@@ -63,7 +63,12 @@ impl AccountStore {
             strategy_principal_usd: principals,
             nav_source_as_of: nav_time,
             nav_source_ref: source,
-            coverage: if under_collateralized { "PARTIAL" } else { "COMPLETE" }.into(),
+            coverage: if under_collateralized {
+                "PARTIAL"
+            } else {
+                "COMPLETE"
+            }
+            .into(),
             reason_code: if under_collateralized {
                 Some("ACCOUNT_CAPITAL_OVERASSIGNED".into())
             } else {
@@ -112,7 +117,8 @@ impl AccountStore {
             .checked_add(request.delta_usd)
             .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))?;
         if next < Decimal::ZERO
-            || (request.delta_usd > Decimal::ZERO && request.delta_usd > state.unattributed_residual_usd)
+            || (request.delta_usd > Decimal::ZERO
+                && request.delta_usd > state.unattributed_residual_usd)
         {
             return Err(StoreError::Invalid("CAPITAL_ASSIGNMENT_EXCEEDS_AVAILABLE"));
         }

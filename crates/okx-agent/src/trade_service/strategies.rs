@@ -79,7 +79,7 @@ impl TradeService {
                             return Err(okx_execution::StoreError::Invalid("IDEMPOTENCY_CONFLICT"));
                         }
                         let capital = s.capital_state(observed_at).ok();
-                        let coverage=capital.as_ref().map_or("PARTIAL",|v|v.coverage.as_str());
+                        let coverage = capital.as_ref().map_or("PARTIAL", |v| v.coverage.as_str());
                         return Ok(
                             json!({"receipt":prior,"capital":capital,"capital_coverage":coverage}),
                         );
@@ -99,7 +99,7 @@ impl TradeService {
                     };
                     let receipt = s.commit_authorized_capital_assignment(&authorized)?;
                     let capital = s.capital_state(observed_at)?;
-                    let coverage=capital.coverage.clone();
+                    let coverage = capital.coverage.clone();
                     Ok(json!({"receipt":receipt,"capital":capital,"capital_coverage":coverage}))
                 })
                 .await

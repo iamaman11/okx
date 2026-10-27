@@ -3335,8 +3335,9 @@ fn p02_capital_is_isolated_per_account_and_identity_bound() {
     );
     let db = b.path.clone();
     drop(b);
-    let mut b = AccountStore::open_existing(db, &second_meta.account_key, &second_meta.installation_id)
-        .unwrap();
+    let mut b =
+        AccountStore::open_existing(db, &second_meta.account_key, &second_meta.installation_id)
+            .unwrap();
     assert_eq!(b.capital_state(4).unwrap().assigned_usd, Decimal::from(15));
     assert!(matches!(
         b.commit_authorized_capital_assignment(&input),
@@ -3346,52 +3347,79 @@ fn p02_capital_is_isolated_per_account_and_identity_bound() {
 
 #[test]
 fn p02_account_loss_can_be_repaired_by_releasing_internal_capital() {
-    let mut s=store();
-    owned_fill(&mut s,"loss-strategy","loss-a",100,"long",3);
-    let first=AuthorizedCapitalAssignment{
-        account_key:s.meta().account_key.clone(),
-        installation_id:s.meta().installation_id.clone(),
-        nav_source_ref:s.meta().opening_source.clone(),
-        operation_id:"p02-initial-capital".into(),request_hash:"initial-hash".into(),
-        instance_id:"loss-strategy".into(),delta_usd:Decimal::from(70),
-        authority_revision:1,authority_receipt:"governance:rev1".into(),time:4,
+    let mut s = store();
+    owned_fill(&mut s, "loss-strategy", "loss-a", 100, "long", 3);
+    let first = AuthorizedCapitalAssignment {
+        account_key: s.meta().account_key.clone(),
+        installation_id: s.meta().installation_id.clone(),
+        nav_source_ref: s.meta().opening_source.clone(),
+        operation_id: "p02-initial-capital".into(),
+        request_hash: "initial-hash".into(),
+        instance_id: "loss-strategy".into(),
+        delta_usd: Decimal::from(70),
+        authority_revision: 1,
+        authority_receipt: "governance:rev1".into(),
+        time: 4,
     };
     s.commit_authorized_capital_assignment(&first).unwrap();
-    s.ingest_page(&IngestPage{
-        nav:vec![NavPoint {
-            scope_id:"account".into(),time:5,source_version:"venue-update".into(),
-            equity:Decimal::from(60),pnl:Decimal::from(-40),flows:Decimal::ZERO,
-            currency:"USD".into(),coverage:"COMPLETE".into(),mark_source:"venue:loss".into()
-        }],..Default::default()
-    }).unwrap();
-    let before=s.capital_state(5).unwrap();
-    assert_eq!(before.assigned_usd,Decimal::from(70));
-    assert_eq!(before.unattributed_residual_usd,Decimal::from(-10));
-    assert_eq!(before.coverage,"PARTIAL");
-    assert_eq!(before.reason_code.as_deref(),Some("ACCOUNT_CAPITAL_OVERASSIGNED"));
-    let mut adjustment=AuthorizedCapitalAssignment {
-        account_key:first.account_key.clone(),
-        installation_id:first.installation_id.clone(),
-        nav_source_ref:"venue:loss".into(),
-        operation_id:"p02-denied-increase".into(),
-        request_hash:"increase-hash".into(),
-        instance_id:"loss-strategy".into(),
-        delta_usd:Decimal::ONE,
-        authority_revision:1,
-        authority_receipt:"governance:rev1".into(),
-        time:5,
+    s.ingest_page(&IngestPage {
+        nav: vec![NavPoint {
+            scope_id: "account".into(),
+            time: 5,
+            source_version: "venue-update".into(),
+            equity: Decimal::from(60),
+            pnl: Decimal::from(-40),
+            flows: Decimal::ZERO,
+            currency: "USD".into(),
+            coverage: "COMPLETE".into(),
+            mark_source: "venue:loss".into(),
+        }],
+        ..Default::default()
+    })
+    .unwrap();
+    let before = s.capital_state(5).unwrap();
+    assert_eq!(before.assigned_usd, Decimal::from(70));
+    assert_eq!(before.unattributed_residual_usd, Decimal::from(-10));
+    assert_eq!(before.coverage, "PARTIAL");
+    assert_eq!(
+        before.reason_code.as_deref(),
+        Some("ACCOUNT_CAPITAL_OVERASSIGNED")
+    );
+    let mut adjustment = AuthorizedCapitalAssignment {
+        account_key: first.account_key.clone(),
+        installation_id: first.installation_id.clone(),
+        nav_source_ref: "venue:loss".into(),
+        operation_id: "p02-denied-increase".into(),
+        request_hash: "increase-hash".into(),
+        instance_id: "loss-strategy".into(),
+        delta_usd: Decimal::ONE,
+        authority_revision: 1,
+        authority_receipt: "governance:rev1".into(),
+        time: 5,
     };
-    assert!(matches!(s.commit_authorized_capital_assignment(&adjustment),
-        Err(StoreError::Invalid("CAPITAL_ASSIGNMENT_EXCEEDS_AVAILABLE"))));
-    adjustment.operation_id="p02-repair".into();
-    adjustment.request_hash="release-hash".into();
-    adjustment.delta_usd=Decimal::from(-15);
+    assert!(matches!(
+        s.commit_authorized_capital_assignment(&adjustment),
+        Err(StoreError::Invalid("CAPITAL_ASSIGNMENT_EXCEEDS_AVAILABLE"))
+    ));
+    adjustment.operation_id = "p02-repair".into();
+    adjustment.request_hash = "release-hash".into();
+    adjustment.delta_usd = Decimal::from(-15);
     s.commit_authorized_capital_assignment(&adjustment).unwrap();
-    let after=s.capital_state(5).unwrap();
-    assert_eq!(after.assigned_usd,Decimal::from(55));
-    assert_eq!(after.unattributed_residual_usd,Decimal::from(5));
-    assert_eq!(after.coverage,"COMPLETE");
-    assert_eq!(after.account_nav_usd,after.assigned_usd+after.unattributed_residual_usd);
-    assert_eq!(s.usd_component_total("INTERNAL_CAPITAL_USD").unwrap(),Decimal::ZERO);
-    assert!(!s.financial_risk(5,Some("loss-strategy")).unwrap().nav_complete);
+    let after = s.capital_state(5).unwrap();
+    assert_eq!(after.assigned_usd, Decimal::from(55));
+    assert_eq!(after.unattributed_residual_usd, Decimal::from(5));
+    assert_eq!(after.coverage, "COMPLETE");
+    assert_eq!(
+        after.account_nav_usd,
+        after.assigned_usd + after.unattributed_residual_usd
+    );
+    assert_eq!(
+        s.usd_component_total("INTERNAL_CAPITAL_USD").unwrap(),
+        Decimal::ZERO
+    );
+    assert!(
+        !s.financial_risk(5, Some("loss-strategy"))
+            .unwrap()
+            .nav_complete
+    );
 }
