@@ -1,20 +1,75 @@
-# OKX — clean Engine
+# OKX — one Engine, one installed Windows runtime
 
-**[Issue #398](https://github.com/iamaman11/okx/issues/398) is the sole active requirements and acceptance source.** Its [acceptance and testing checklist](https://github.com/iamaman11/okx/issues/398#issuecomment-6373732525) is mandatory. Older Stage 5 and W01–W10 plans are historical, not prerequisites.
+**Normative specification:** [#448](https://github.com/iamaman11/okx/issues/448) (P0 → P1 → P2; M/T/A; K1–K12; C01–C20).
+**Single implementation cursor:** [#449](https://github.com/iamaman11/okx/issues/449).
+Issue #398 records historical **read-only** acceptance; it is not a competing roadmap or proof of Real execution.
 
-One Rust Engine routes independent AccountKey contexts, addressed SQLite WAL and a central governance/RiskBook. The public MCP has exactly seven typed tools: `accounts`, `strategies`, `market`, `research`, `trade`, `portfolio`, `diagnostics`. No Demo-only Agent, CONTROL profile handoff, v14 import or arbitrary shell/SQL/RPC route.
+The product has one installed **`okx-agent` Engine** on `windows-primary` for accounts,
+trading, research and finance. Cloudflare Worker provides the authenticated MCP/WSS
+gateway and central account risk authority; native Windows CONTROL only owns
+install/restart/diagnostics. GitHub CI builds signed, version-addressed release
+artifacts. No separate Demo Agent, research benchmark executable, second financial
+ledger, alternate transport or bypass for real orders.
 
-**Last recorded physical proof, 24 October 2026:** [PR #416](https://github.com/iamaman11/okx/pull/416), exact [CI #40055850675](https://github.com/iamaman11/okx/actions/runs/40055850675) 6/6, native Windows artifact `12545318154` installed via CONTROL with Agent/Controller/Launcher `release_parity=MATCHED`. Live WebSocket snapshot, bounded market microstructure, read-only trade preview, fresh SQL sources and covered NAV windows have positive evidence. The USD10 central/native campaign ceiling revision 2 was preserved. **Independent Worker-side release attestation, full 16→7 business parity, concurrent strategy acceptance, two protected Real cycles and a second physical Real UID remain unaccepted.** Consult #398 for newer observations; no real trade authorization follows from this snapshot.
+## Modules and responsibility
 
-- [Architecture and owners](docs/ARCHITECTURE_CONTRACT_V1.md)
-- [Operator rules](docs/chatgpt-operator-contract.md)
-- [Operational acceptance and CONTROL](docs/PRODUCT_ACCEPTANCE.md)
-- [Observed requirement status](docs/ROADMAP.md) — not another plan
-- [Historical non-normative evidence](docs/history/README-before-398.md)
+| Module | Owns | Does not own |
+| --- | --- | --- |
+| `crates/okx-agent` | One runtime and request orchestration | A second venue execution state machine |
+| `crates/okx-agent/src/analytics/market.rs` | Market use case, source reads and market computations | Trading decisions and account SQL |
+| `crates/okx-agent/src/analytics/result.rs` | Verified immutable result reads, page cursors and export integrity | Research CPU execution or SQL mutations |
+| `crates/okx-agent/src/analytics/{jobs,executor,budget,benchmark}.rs` | SQLite research jobs, shared CPU/memory admission, in-Agent K9 diagnostics | A separate benchmark service |
+| `crates/okx-research` / `crates/okx-analysis` | Replay, research artifacts and analytics formulas | Transport permissions or exchange orders |
+| `crates/okx-execution` | Account-owned order facts, fills and SQLite finance | Worker risk authority or display totals |
+| `cloudflare/okx-mcp` | Public MCP schema, routing and central risk authority | A second native trading engine |
+| `crates/okx-host-control` | Verified GitHub artifact install, lifecycle and Windows diagnostics | Research/strategy calculation or venue execution |
+
+**Market:** `market` MCP → Worker/WSS → Agent `AnalyticsService.market`
+→ K7 planner → `analytics/market.rs` → bounded result and immutable artifact.
+
+**Research:** `research.validate/grid/backtest/benchmark` MCP → Agent
+`AnalyticsService` → shared SQLite jobs and CPU/memory admission →
+replay → `analytics/result.rs` summary/detail/export. The K9 fixed fixture
+runs inside this same Engine; CI microbenchmarks are not physical acceptance.
+
+**Trading:** an authorized `trade` MCP action → Worker risk authority →
+the single Agent trade service / account SQLite → exchange API; reconcile
+the venue outcome before changing financial state. External restrictions
+are reported, never hidden behind strategy or read-only actions.
+
+## Build, tests, and diagnosis
+
+From the repository root on an installed Rust/PowerShell development machine:
 
 ```powershell
-python scripts/acceptance_product.py --self-test
-python scripts/acceptance_product.py --run
+cargo fmt --all -- --check
+python scripts/check_architecture.py --self-test
+python scripts/check_architecture.py
+python scripts/check_product_contract.py
+cargo clippy --locked -p okx-agent -p okx-host-control -p okx-host-launcher -p okx-execution --all-targets -- -D warnings
+cargo test --locked -p okx-agent -p okx-host-control -p okx-host-launcher -p okx-execution
 ```
 
-The checked-in [acceptance.json](acceptance.json) is **preinstallation code evidence**, not installed product proof. Final acceptance must cite the **specific immutable release tag and asset SHA256**, never a mutable latest-release URL. Do not reinitialize current SQL or reset the campaign while fixing F01–F09.
+On Linux the same canonical CI also checks portable crates and the Worker
+contract; see `[.github/workflows/ci.yml](.github/workflows/ci.yml)`.
+No production credentials are needed for the local fixture/unit tests.
+Run public read-only diagnostics with the authenticated `diagnostics` MCP tool
+or the existing typed `status` request to Windows CONTROL issue #12; follow
+the returned request ID and source reason, not a manual SQL inspection.
+
+**Known architectural gap, NOT_ACCEPTED:** the current architecture guard
+checks direct local-crate dependencies, not transitive purity. In particular
+`okx-analysis → okx-observation → okx-api` still couples analytics to API
+types. #448 K10/C20 explicitly requires closing this gap and exercising
+extension paths; a passing CI architecture job does not yet prove that target.
+
+**Release evidence:** `main` merge and CI PASS are code proof only.
+Physical acceptance additionally requires the *same* installed Agent/Worker
+Git tree, native CONTROL binary SHA, MCP/WSS readback and scenario evidence
+in #449. Do not initialize the account SQL ledger or reset campaign limits
+to resolve a deployment mismatch. K9 workload and Real venue lifecycle are
+NOT_ACCEPTED until their independent physical receipts exist.
+
+[Architecture](docs/ARCHITECTURE_CONTRACT_V1.md) ·
+[Operations and lifecycle](docs/PRODUCT_ACCEPTANCE.md) ·
+[ChatGPT operator rules](docs/chatgpt-operator-contract.md)
