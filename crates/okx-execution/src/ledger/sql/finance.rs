@@ -7,55 +7,61 @@ impl AccountStore {
             "SELECT equity,time,coverage FROM nav_points WHERE scope_id='account' AND currency='USD' AND time<=?1 ORDER BY time DESC,source_version DESC LIMIT 1",
             [now],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))
         ).optional()?.ok_or(StoreError::Invalid("ACCOUNT_NAV_SOURCE_MISSING"))?;
-        let recovering:i64=self.connection.query_row(
+        let recovering: i64 = self.connection.query_row(
             "SELECT requires_reconcile FROM storage_recovery WHERE singleton=1",
-            [],|r|r.get(0)
+            [],
+            |r| r.get(0),
         )?;
-        if coverage!="COMPLETE" || now<nav_time || now-nav_time>5000 || recovering!=0 {
-            return Err(StoreError::Invalid("ACCOUNT_CAPITAL_SOURCE_INCOMPLETE_OR_STALE"));
+        if coverage != "COMPLETE" || now < nav_time || now - nav_time > 5000 || recovering != 0 {
+            return Err(StoreError::Invalid(
+                "ACCOUNT_CAPITAL_SOURCE_INCOMPLETE_OR_STALE",
+            ));
         }
-        let account_nav=decimal(nav)?;
-        if account_nav<Decimal::ZERO {
+        let account_nav = decimal(nav)?;
+        if account_nav < Decimal::ZERO {
             return Err(StoreError::Invalid("ACCOUNT_NAV_NEGATIVE"));
         }
         let mut query=self.connection.prepare(
             "SELECT instance_id,amount FROM instance_finance_totals WHERE currency='USD' AND component='INTERNAL_CAPITAL_USD' ORDER BY instance_id"
         )?;
-        let mut rows=query.query([])?;
-        let mut principals=std::collections::BTreeMap::new();
-        let mut assigned=Decimal::ZERO;
-        while let Some(row)=rows.next()? {
-            let id:String=row.get(0)?;
-            let amount=decimal(row.get(1)?)?;
-            if id=="manual" || amount<Decimal::ZERO {
+        let mut rows = query.query([])?;
+        let mut principals = std::collections::BTreeMap::new();
+        let mut assigned = Decimal::ZERO;
+        while let Some(row) = rows.next()? {
+            let id: String = row.get(0)?;
+            let amount = decimal(row.get(1)?)?;
+            if id == "manual" || amount < Decimal::ZERO {
                 return Err(StoreError::Invalid("INTERNAL_CAPITAL_CORRUPT"));
             }
-            assigned=assigned.checked_add(amount).ok_or(StoreError::Invalid("MONEY_OVERFLOW"))?;
-            principals.insert(id,amount);
-            if principals.len()>64 {
+            assigned = assigned
+                .checked_add(amount)
+                .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))?;
+            principals.insert(id, amount);
+            if principals.len() > 64 {
                 return Err(StoreError::Invalid("CAPITAL_SCOPE_LIMIT"));
             }
         }
-        let residual=account_nav.checked_sub(assigned)
+        let residual = account_nav
+            .checked_sub(assigned)
             .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))?;
         // The residual includes economic returns until complete per-owner
         // valuation exists. It must never be presented as trading PnL.
-        if residual<Decimal::ZERO {
+        if residual < Decimal::ZERO {
             return Err(StoreError::Invalid("ACCOUNT_CAPITAL_OVERASSIGNED"));
         }
         let total:String=self.connection.query_row(
             "SELECT amount FROM finance_totals WHERE currency='USD' AND component='INTERNAL_CAPITAL_USD'",
             [],|r|r.get(0)
         ).optional()?.unwrap_or_else(||"0".into());
-        if decimal(total)?!=Decimal::ZERO {
+        if decimal(total)? != Decimal::ZERO {
             return Err(StoreError::Invalid("INTERNAL_CAPITAL_NOT_CONSERVED"));
         }
         Ok(AccountCapitalState {
-            account_nav_usd:account_nav,
-            assigned_usd:assigned,
-            unattributed_residual_usd:residual,
-            strategy_principal_usd:principals,
-            nav_source_as_of:nav_time,
+            account_nav_usd: account_nav,
+            assigned_usd: assigned,
+            unattributed_residual_usd: residual,
+            strategy_principal_usd: principals,
+            nav_source_as_of: nav_time,
         })
     }
 
@@ -67,51 +73,66 @@ impl AccountStore {
         &mut self,
         request: &AuthorizedCapitalAssignment,
     ) -> StoreResult<OperationReceipt> {
-        if request.instance_id=="manual" || request.instance_id.is_empty()
-            || request.operation_id.is_empty() || request.request_hash.is_empty()
-            || request.authority_receipt.is_empty() || request.authority_revision<=0
-            || request.time<self.meta.initialized_at || request.delta_usd==Decimal::ZERO
+        if request.instance_id == "manual"
+            || request.instance_id.is_empty()
+            || request.operation_id.is_empty()
+            || request.request_hash.is_empty()
+            || request.authority_receipt.is_empty()
+            || request.authority_revision <= 0
+            || request.time < self.meta.initialized_at
+            || request.delta_usd == Decimal::ZERO
         {
             return Err(StoreError::Invalid("INVALID_CAPITAL_ASSIGNMENT"));
         }
-        if let Some(old)=self.operation(&request.operation_id)? {
-            if old.kind!="CAPITAL_ASSIGNMENT" || old.request_hash!=request.request_hash {
+        if let Some(old) = self.operation(&request.operation_id)? {
+            if old.kind != "CAPITAL_ASSIGNMENT" || old.request_hash != request.request_hash {
                 return Err(StoreError::Invalid("IDEMPOTENCY_CONFLICT"));
             }
             return Ok(old);
         }
-        let state=self.capital_state(request.time)?;
-        let existing=*state.strategy_principal_usd.get(&request.instance_id)
+        let state = self.capital_state(request.time)?;
+        let existing = *state
+            .strategy_principal_usd
+            .get(&request.instance_id)
             .unwrap_or(&Decimal::ZERO);
-        let next=existing.checked_add(request.delta_usd)
+        let next = existing
+            .checked_add(request.delta_usd)
             .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))?;
-        if next<Decimal::ZERO || request.delta_usd>state.unattributed_residual_usd {
+        if next < Decimal::ZERO || request.delta_usd > state.unattributed_residual_usd {
             return Err(StoreError::Invalid("CAPITAL_ASSIGNMENT_EXCEEDS_AVAILABLE"));
         }
         if self.instance(&request.instance_id)?.is_none() {
             return Err(StoreError::Invalid("STRATEGY_INSTANCE_NOT_FOUND"));
         }
-        let (policy_revision,): (i64,)=self.connection.query_row(
-            "SELECT revision FROM account_policy WHERE singleton=1",[],|r|Ok((r.get(0)?,))
+        let (policy_revision,): (i64,) = self.connection.query_row(
+            "SELECT revision FROM account_policy WHERE singleton=1",
+            [],
+            |r| Ok((r.get(0)?,)),
         )?;
-        if policy_revision!=request.authority_revision {
+        if policy_revision != request.authority_revision {
             return Err(StoreError::Invalid("CAPITAL_AUTHORITY_REVISION_MISMATCH"));
         }
-        let tx=self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
         // Book two opposite legs under one economic event. Neither leg is
         // income or expense. SQL immutability protects the event after commit.
-        for (leg,owner,delta) in [
-            (format!("strategy:{}",request.instance_id),Some(request.instance_id.as_str()),request.delta_usd),
-            (String::from("unattributed"),None,-request.delta_usd),
+        for (leg, owner, delta) in [
+            (
+                format!("strategy:{}", request.instance_id),
+                Some(request.instance_id.as_str()),
+                request.delta_usd,
+            ),
+            (String::from("unattributed"), None, -request.delta_usd),
         ] {
-            let entry_id=format!("capital:{}:{leg}",request.operation_id);
+            let entry_id = format!("capital:{}:{leg}", request.operation_id);
             tx.execute(
                 "INSERT INTO finance_entries(entry_id,economic_event_key,component,allocation_leg,amount,currency,instance_id,source_ref,time,reverses_entry_id) VALUES(?1,?2,'INTERNAL_CAPITAL_USD',?3,?4,'USD',?5,?6,?7,NULL)",
                 params![entry_id,format!("capital:{}",request.operation_id),leg,exact(delta),owner,request.authority_receipt,request.time]
             )?;
             tx.execute(
                 "INSERT INTO finance_source_links(entry_id,source_ref) VALUES(?1,?2)",
-                params![entry_id,request.authority_receipt]
+                params![entry_id, request.authority_receipt],
             )?;
         }
         tx.execute(
@@ -123,10 +144,20 @@ impl AccountStore {
             "INSERT INTO finance_totals(currency,component,amount) VALUES('USD','INTERNAL_CAPITAL_USD','0') ON CONFLICT(currency,component) DO NOTHING",
             []
         )?;
-        let result=format!("strategy:{}|principal_usd:{}|account_nav_as_of:{}",request.instance_id,exact(next),state.nav_source_as_of);
+        let result = format!(
+            "strategy:{}|principal_usd:{}|account_nav_as_of:{}",
+            request.instance_id,
+            exact(next),
+            state.nav_source_as_of
+        );
         tx.execute(
             "INSERT INTO operation_receipts VALUES(?1,'CAPITAL_ASSIGNMENT',?2,?3,?4)",
-            params![request.operation_id,request.request_hash,result,request.time]
+            params![
+                request.operation_id,
+                request.request_hash,
+                result,
+                request.time
+            ],
         )?;
         tx.commit()?;
         self.operation(&request.operation_id)?
@@ -998,7 +1029,9 @@ impl AccountStore {
         let mut added_loss = Decimal::ZERO;
         for e in &page.finance {
             if e.component == "INTERNAL_CAPITAL_USD" {
-                return Err(StoreError::Invalid("CAPITAL_WRITE_REQUIRES_AUTHORIZED_OPERATION"));
+                return Err(StoreError::Invalid(
+                    "CAPITAL_WRITE_REQUIRES_AUTHORIZED_OPERATION",
+                ));
             }
             if e.currency.is_empty() {
                 return Err(StoreError::Invalid("CURRENCY_REQUIRED"));
