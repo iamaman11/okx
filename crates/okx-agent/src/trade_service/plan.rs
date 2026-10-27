@@ -67,6 +67,18 @@ fn quantize_executable_price(
     Ok(price)
 }
 
+/// Missing strategy NAV blocks actual admission, but not a read-only price quote.
+/// An incomplete projection is *never* an affirmative risk admission.
+pub(super) fn instance_nav_gate(nav_complete: bool, record_risk_state: bool) -> Result<bool, &'static str> {
+    if nav_complete {
+        Ok(true)
+    } else if record_risk_state {
+        Err("INSTANCE_NAV_INCOMPLETE")
+    } else {
+        Ok(false)
+    }
+}
+
 impl TradeService {
     #[allow(clippy::too_many_arguments)] // Explicit typed command fields share one admission path.
     pub(super) async fn plan(
@@ -475,12 +487,9 @@ impl TradeService {
                 }
                 if s.instances()?.iter().any(|i| i.instance_id == instance) {
                     let own = s.financial_risk(now(), Some(&instance))?;
-                    if !own.nav_complete {
-                        return Err(okx_execution::StoreError::Invalid(
-                            "INSTANCE_NAV_INCOMPLETE",
-                        ));
-                    }
-                    if own.daily_loss_usd >= daily || own.drawdown_ratio >= drawdown {
+                    let nav_valid = instance_nav_gate(own.nav_complete, record_risk_state)
+                        .map_err(okx_execution::StoreError::Invalid)?;
+                    if nav_valid && (own.daily_loss_usd >= daily || own.drawdown_ratio >= drawdown) {
                         if record_risk_state {
                             s.latch_stop(
                                 &format!("instance:{instance}:risk"),
@@ -536,6 +545,14 @@ impl TradeService {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn missing_instance_nav_allows_only_non_authorizing_preview_projection() {
+        assert_eq!(instance_nav_gate(false, false), Ok(false));
+        assert_eq!(instance_nav_gate(false, true), Err("INSTANCE_NAV_INCOMPLETE"));
+        assert_eq!(instance_nav_gate(true, false), Ok(true));
+        assert_eq!(instance_nav_gate(true, true), Ok(true));
+    }
 
     fn d(value: &str) -> Decimal {
         Decimal::from_str(value).unwrap()
