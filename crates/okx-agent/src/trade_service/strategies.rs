@@ -1,5 +1,5 @@
 use super::*;
-use okx_protocol::trading::{StrategyConfigurationV1, StrategyParametersV1};
+use okx_protocol::trading::{CapitalDirection, StrategyConfigurationV1, StrategyParametersV1};
 impl TradeService {
     pub async fn strategies(
         &self,
@@ -37,6 +37,75 @@ impl TradeService {
         let (state, control) = self.authority(&r, supplied).await?;
         let campaign_limit_usd = state.state.campaign_loss_limit_usd.clone();
         let request_hash = digest(&(r.configuration.account_key.wire(), request))?;
+        if let StrategyRequest::CapitalAssign {
+            idempotency_key,
+            instance_id,
+            direction,
+            amount_usd,
+            expected_authority_revision,
+        } = request
+        {
+            let revision = i64::try_from(*expected_authority_revision)
+                .map_err(|_| "CAPITAL_AUTHORITY_REVISION_INVALID")?;
+            if i64::try_from(state.state.revision).ok() != Some(revision) {
+                return Err("CAPITAL_AUTHORITY_REVISION_MISMATCH".into());
+            }
+            if *direction == CapitalDirection::Assign && !control.access_enabled() {
+                return Err("ACCOUNT_NEW_RISK_PAUSED".into());
+            }
+            let amount = Decimal::from_str(amount_usd).map_err(|_| "INVALID_CAPITAL_AMOUNT")?;
+            let delta = if *direction == CapitalDirection::Assign {
+                amount
+            } else {
+                Decimal::ZERO
+                    .checked_sub(amount)
+                    .ok_or("INVALID_CAPITAL_AMOUNT")?
+            };
+            let verified_authority_receipt = digest(&state)?;
+            let account_key = r.configuration.account_key.wire();
+            let idempotency_key = idempotency_key.clone();
+            let instance_id = instance_id.clone();
+            let operation_hash = request_hash.clone();
+            let observed_at = now();
+            let result = r
+                .execution
+                .store
+                .call(deadline(), move |s| {
+                    // Immutable receipt survives snapshot outages and reruns.
+                    if let Some(prior) = s.operation(&idempotency_key)? {
+                        if prior.kind != "CAPITAL_ASSIGNMENT"
+                            || prior.request_hash != operation_hash
+                        {
+                            return Err(okx_execution::StoreError::Invalid("IDEMPOTENCY_CONFLICT"));
+                        }
+                        let capital = s.capital_state(observed_at).ok();
+                        let coverage = capital.as_ref().map_or("PARTIAL", |v| v.coverage.as_str());
+                        return Ok(
+                            json!({"receipt":prior,"capital":capital,"capital_coverage":coverage}),
+                        );
+                    }
+                    let source = s.capital_state(observed_at)?.nav_source_ref;
+                    let authorized = okx_execution::AuthorizedCapitalAssignment {
+                        account_key,
+                        installation_id: s.meta().installation_id.clone(),
+                        nav_source_ref: source,
+                        operation_id: idempotency_key,
+                        request_hash: operation_hash,
+                        instance_id,
+                        delta_usd: delta,
+                        authority_revision: revision,
+                        authority_receipt: verified_authority_receipt,
+                        time: observed_at,
+                    };
+                    let receipt = s.commit_authorized_capital_assignment(&authorized)?;
+                    let capital = s.capital_state(observed_at)?;
+                    let coverage = capital.coverage.clone();
+                    Ok(json!({"receipt":receipt,"capital":capital,"capital_coverage":coverage}))
+                })
+                .await
+                .map_err(err)?;
+            return Ok(completed(result));
+        }
         let body = request.clone();
         let result = r
             .execution

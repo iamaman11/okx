@@ -368,7 +368,7 @@ fn nav_projection(
     let coverage_reason = match nav.coverage.as_str() {
         "COMPLETE" => Value::Null,
         "UNAVAILABLE_BEFORE_T0" => json!("UNAVAILABLE_BEFORE_T0"),
-        "PARTIAL" if manual => json!("MANUAL_USES_ACCOUNT_CAPITAL"),
+        "NOT_APPLICABLE" if manual => json!("MANUAL_USES_ACCOUNT_CAPITAL"),
         "PARTIAL" if nav.scope_id.starts_with("strategy:") => {
             json!("STRATEGY_CAPITAL_PROVENANCE_MISSING")
         }
@@ -867,7 +867,7 @@ mod tests {
             pnl: None,
             opening_as_of: None,
             current_as_of: None,
-            coverage: "PARTIAL".into(),
+            coverage: "NOT_APPLICABLE".into(),
         };
         let manual = nav_projection("okx:real:a", "A", nav, 2, 10, 1);
         assert_eq!(manual["capital_scope"], "account");

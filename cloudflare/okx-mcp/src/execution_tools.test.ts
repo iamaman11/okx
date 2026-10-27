@@ -71,3 +71,15 @@ for(const action of ['backtest','grid']) {
  for(const bad of [tooMany,duplicate,{...two,instruments:[]}])fail(!validTool('research',bad),'batch instrument bound');
  payloadFixtures.push({tool:'research',action:action+'_batch',positive:two,negative:[tooMany,duplicate,{...two,instruments:[]}]});
 }
+
+
+const capitalAction=payloadFixtures.find(x=>x.tool==='strategies'&&x.action==='capital_assign')!.positive;
+for(const invalid of [
+ {...capitalAction,amount_usd:'0'},
+ {...capitalAction,amount_usd:'-10'},
+ {...capitalAction,direction:'override'},
+ {...capitalAction,expected_authority_revision:0},
+])fail(!validTool('strategies',invalid),'P0.2 invalid capital assignment passed schema');
+const strategiesTool=PUBLIC_TOOLS.find((t:any)=>t.name==='strategies') as any;
+fail(!!strategiesTool?.inputSchema?.$defs?.positiveDecimal,'P0.2 shared public decimal schema missing');
+console.log('strategy_capital_schema_strict_and_tools_factored PASS');

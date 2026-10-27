@@ -361,6 +361,68 @@ pub struct NavWindow {
     pub coverage: String,
 }
 
+/// A book allocation of existing account equity; not an OKX transfer and not a risk budget.
+/// The application authority boundary must authenticate this request before calling SQL.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuthorizedCapitalAssignment {
+    pub account_key: String,
+    pub installation_id: String,
+    pub nav_source_ref: String,
+    pub operation_id: String,
+    pub request_hash: String,
+    pub instance_id: String,
+    pub delta_usd: Decimal,
+    pub authority_revision: i64,
+    pub authority_receipt: String,
+    pub time: i64,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AccountCapitalState {
+    pub account_nav_usd: Decimal,
+    pub assigned_usd: Decimal,
+    pub unattributed_residual_usd: Decimal,
+    pub strategy_principal_usd: std::collections::BTreeMap<String, Decimal>,
+    pub nav_source_as_of: i64,
+    pub nav_source_ref: String,
+    pub coverage: String,
+    pub reason_code: Option<String>,
+}
+
+/// Venue net position and mark observed with the same authenticated account
+/// snapshot as account NAV. Signed contracts reflect OKX net/long/short mode.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ValuationPosition {
+    pub instrument_id: String,
+    pub signed_contracts: Decimal,
+    pub mark_price: Decimal,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StrategyValuationEvidence {
+    pub account_key: String,
+    pub account_nav_source: String,
+    pub as_of: i64,
+    pub conversion: UsdConversionEvidence,
+    pub venue_positions: Vec<ValuationPosition>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StrategyValuation {
+    pub instance_id: String,
+    pub capital_usd: Decimal,
+    pub realized_usd: Decimal,
+    pub unrealized_usd: Decimal,
+    pub equity_usd: Decimal,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StrategyValuationReconciliation {
+    pub account_nav_usd: Decimal,
+    pub attributed_usd: Decimal,
+    pub unattributed_usd: Decimal,
+    pub as_of: i64,
+    pub source_ref: String,
+    pub strategies: Vec<StrategyValuation>,
+    pub coverage: String,
+}
+
 /// Connection stays on its owning blocking worker. It is never a network transaction.
 #[derive(Debug)]
 pub struct AccountStore {

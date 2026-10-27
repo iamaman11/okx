@@ -6,7 +6,8 @@ use crate::{
 use okx_api::{AccountBill, FillHistory};
 use okx_execution::{
     Bill, CashFlow, Fill, FinanceEntry, FundingEvent, IngestPage, NavPoint, SourceCursor,
-    StoreError, StoreResult, UsdConversionEvidence, VenueMark,
+    StoreError, StoreResult, StrategyValuationEvidence, UsdConversionEvidence, ValuationPosition,
+    VenueMark,
 };
 use okx_runtime::PrivateWsHandle;
 use rust_decimal::Decimal;
@@ -27,6 +28,22 @@ fn optional_d(s: &str) -> StoreResult<Decimal> {
         Ok(Decimal::ZERO)
     } else {
         d(s)
+    }
+}
+// An absent amount on a real fill or a funding bill is UNKNOWN, not a zero
+// commission or zero cashflow. Other bill types explicitly permit empty PnL.
+fn required_d(s: &str, reason: &'static str) -> StoreResult<Decimal> {
+    if s.is_empty() {
+        Err(StoreError::Invalid(reason))
+    } else {
+        d(s)
+    }
+}
+fn bill_pnl(sub_type: &str, value: &str) -> StoreResult<Decimal> {
+    if matches!(sub_type, "173" | "174") {
+        required_d(value, "FUNDING_AMOUNT_SOURCE_UNAVAILABLE")
+    } else {
+        optional_d(value)
     }
 }
 fn ts(s: &str) -> StoreResult<i64> {
@@ -178,6 +195,37 @@ pub async fn capture_account_sources(
             })
         })
         .collect::<StoreResult<Vec<_>>>()?;
+    // Strategy valuation uses the same account-identity-verified snapshot.
+    // Missing marks affect strategy coverage, not account/manual NAV.
+    let valuation_positions: StoreResult<Vec<ValuationPosition>> = snapshot
+        .positions
+        .iter()
+        .filter_map(|p| match d(&p.position) {
+            Ok(n) if n == Decimal::ZERO => None,
+            Ok(n) => Some((|| {
+                let signed = match p.position_side.as_str() {
+                    "net" => n,
+                    "long" => n.abs(),
+                    "short" => -n.abs(),
+                    _ => {
+                        return Err(StoreError::Invalid(
+                            "STRATEGY_NAV_POSITION_MODE_UNSUPPORTED",
+                        ));
+                    }
+                };
+                let mark = p
+                    .mark_price
+                    .as_deref()
+                    .ok_or(StoreError::Invalid("STRATEGY_NAV_MARK_MISSING"))?;
+                Ok(ValuationPosition {
+                    instrument_id: p.instrument_id.clone(),
+                    signed_contracts: signed,
+                    mark_price: d(mark)?,
+                })
+            })()),
+            Err(e) => Some(Err(e)),
+        })
+        .collect();
     let source = snapshot.source_received_at.clone();
     let version = format!("{generation}:{}", snapshot.account_generation);
     execution
@@ -248,6 +296,43 @@ pub async fn capture_account_sources(
                 },
             });
             s.ingest_page(&page)?;
+            // One AccountStore, one canonical NAV owner. Strategy failures
+            // are recorded in the existing coverage cursor; manual trading
+            // does not inherit a missing standalone strategy NAV.
+            let strategy_result = if !complete {
+                Err(StoreError::Invalid("FINANCIAL_BACKFILL_PENDING"))
+            } else {
+                match s.capital_state(now) {
+                    Ok(capital) if capital.strategy_principal_usd.is_empty() => Ok(()),
+                    Ok(_) => valuation_positions.and_then(|venue_positions| {
+                        s.commit_reconciled_strategy_nav(&StrategyValuationEvidence {
+                            account_key: s.meta().account_key.clone(),
+                            account_nav_source: source.clone(),
+                            as_of: now,
+                            conversion: fx.clone(),
+                            venue_positions,
+                        })?;
+                        Ok(())
+                    }),
+                    Err(e) => Err(e),
+                }
+            };
+            let gap = match strategy_result {
+                Ok(()) => String::new(),
+                Err(StoreError::Invalid(reason)) => reason.into(),
+                Err(e) => return Err(e),
+            };
+            s.ingest_page(&IngestPage {
+                cursor: Some(SourceCursor {
+                    source: "strategy_valuation".into(),
+                    stream_partition: "account".into(),
+                    cursor: String::new(),
+                    watermark: now,
+                    generation,
+                    coverage_gaps: gap,
+                }),
+                ..Default::default()
+            })?;
             Ok(())
         })
         .await?;
@@ -323,7 +408,7 @@ async fn capture_fills(
                 }
                 let owner = s.by_client_order_id(&r.client_order_id)?;
                 let instance = owner.as_ref().map(|i| i.plan.strategy_instance.clone());
-                let fee = optional_d(&r.fee)?;
+                let fee = required_d(&r.fee, "FILL_FEE_SOURCE_UNAVAILABLE")?;
                 let key = if r.bill_id.is_empty() {
                     format!("fill:{}:{}:{}", r.instrument_id, r.trade_id, r.order_id)
                 } else {
@@ -459,7 +544,7 @@ async fn capture_bills(
                         } else {
                             "REALIZED_PNL"
                         },
-                        optional_d(&b.pnl)?,
+                        bill_pnl(&b.bill_sub_type, &b.pnl)?,
                     ),
                 ] {
                     if value == Decimal::ZERO {
@@ -534,5 +619,32 @@ mod tests {
     fn unknown_currency_and_decimal_do_not_become_zero() {
         assert!(d("NaN").is_err());
         assert!(ts("unknown").is_err());
+    }
+
+    #[test]
+    fn trade_fee_and_funding_are_required_economic_facts() {
+        assert!(matches!(
+            required_d("", "FILL_FEE_SOURCE_UNAVAILABLE"),
+            Err(StoreError::Invalid("FILL_FEE_SOURCE_UNAVAILABLE"))
+        ));
+        assert_eq!(
+            required_d("0", "FILL_FEE_SOURCE_UNAVAILABLE").unwrap(),
+            Decimal::ZERO
+        );
+        assert_eq!(
+            required_d("-0.001", "FILL_FEE_SOURCE_UNAVAILABLE").unwrap(),
+            Decimal::new(-1, 3)
+        );
+        for subtype in ["173", "174"] {
+            assert!(matches!(
+                bill_pnl(subtype, ""),
+                Err(StoreError::Invalid("FUNDING_AMOUNT_SOURCE_UNAVAILABLE"))
+            ));
+            assert_eq!(bill_pnl(subtype, "0").unwrap(), Decimal::ZERO);
+            assert_eq!(bill_pnl(subtype, "-0.05").unwrap(), Decimal::new(-5, 2));
+        }
+        // A transfer or non-funding bill may legitimately omit PnL.
+        assert_eq!(bill_pnl("11", "").unwrap(), Decimal::ZERO);
+        assert_eq!(bill_pnl("12", "").unwrap(), Decimal::ZERO);
     }
 }

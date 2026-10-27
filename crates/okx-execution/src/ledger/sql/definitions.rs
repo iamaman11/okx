@@ -131,7 +131,7 @@ impl AccountStore {
         let partial = positions.len() > 50;
         positions.truncate(50);
         Ok(
-            serde_json::json!({"instance":instance,"definition":self.strategy_definition(id)?,"positions":positions,"positions_partial":partial,"limits":{"allocated_budget_usd":instance.budget,"policy_revision":instance.policy_revision},"nav":self.nav_summary(self.meta.initialized_at,now,&[id.into()],&["USD".into()])?,"risk":self.financial_risk(now,Some(id))?}),
+            serde_json::json!({"instance":instance,"definition":self.strategy_definition(id)?,"positions":positions,"positions_partial":partial,"limits":{"allocated_budget_usd":instance.budget,"policy_revision":instance.policy_revision},"nav":self.nav_summary(self.meta.initialized_at,now,&[id.into()],&["USD".into()])?,"capital_scope":if id == "manual" { "account" } else { "strategy" },"risk":self.financial_risk(now,if id == "manual" { None } else { Some(id) })?}),
         )
     }
 }

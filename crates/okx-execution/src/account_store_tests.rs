@@ -589,17 +589,30 @@ fn unverified_strategy_budget_is_never_strategy_nav() {
     // Even a legacy projection incorrectly labelled COMPLETE cannot establish
     // strategy capital or become an equity/profit figure in portfolio views.
     s.ingest_page(&IngestPage {
-        nav: vec![NavPoint {
-            scope_id: "strategy:a".into(),
-            time: 5,
-            source_version: "legacy-budget-is-not-capital".into(),
-            equity: Decimal::from(12),
-            pnl: Decimal::from(2),
-            flows: Decimal::ZERO,
-            currency: "USD".into(),
-            coverage: "COMPLETE".into(),
-            mark_source: "legacy".into(),
-        }],
+        nav: vec![
+            NavPoint {
+                scope_id: "strategy:a".into(),
+                time: 5,
+                source_version: "legacy-budget-is-not-capital".into(),
+                equity: Decimal::from(12),
+                pnl: Decimal::from(2),
+                flows: Decimal::ZERO,
+                currency: "USD".into(),
+                coverage: "COMPLETE".into(),
+                mark_source: "legacy".into(),
+            },
+            NavPoint {
+                scope_id: "strategy:manual".into(),
+                time: 5,
+                source_version: "legacy-manual-budget".into(),
+                equity: Decimal::from(10),
+                pnl: Decimal::ZERO,
+                flows: Decimal::ZERO,
+                currency: "USD".into(),
+                coverage: "COMPLETE".into(),
+                mark_source: "unverified-manual-budget".into(),
+            },
+        ],
         ..Default::default()
     })
     .unwrap();
@@ -608,7 +621,14 @@ fn unverified_strategy_budget_is_never_strategy_nav() {
     for id in ["manual", "a", "b"] {
         let scope = format!("strategy:{id}");
         let nav = windows.iter().find(|n| n.scope_id == scope).unwrap();
-        assert_eq!(nav.coverage, "PARTIAL");
+        assert_eq!(
+            nav.coverage,
+            if id == "manual" {
+                "NOT_APPLICABLE"
+            } else {
+                "PARTIAL"
+            }
+        );
         assert_eq!(nav.opening_equity, None);
         assert_eq!(nav.current_equity, None);
         assert_eq!(nav.flows, None);
@@ -616,6 +636,14 @@ fn unverified_strategy_budget_is_never_strategy_nav() {
         assert!(!s.financial_risk(5, Some(id)).unwrap().nav_complete);
     }
     assert!(s.financial_risk(5, None).unwrap().nav_complete);
+    let manual_status = s.strategy_status("manual", 5).unwrap();
+    assert_eq!(manual_status["capital_scope"], "account");
+    assert_eq!(manual_status["risk"]["nav_complete"], true);
+    assert_eq!(manual_status["nav"][0]["coverage"], "NOT_APPLICABLE");
+    let funded_without_proof = s.strategy_status("a", 5).unwrap();
+    assert_eq!(funded_without_proof["capital_scope"], "strategy");
+    assert_eq!(funded_without_proof["risk"]["nav_complete"], false);
+    assert_eq!(funded_without_proof["nav"][0]["coverage"], "PARTIAL");
 }
 #[test]
 fn funding_at_event_respects_opposite_instances_and_later_fills() {
@@ -3062,4 +3090,1151 @@ fn k6_v02_sqlite_partial_fills_close_fees_funding_and_replay() {
         .sum::<Decimal>();
     assert_eq!(net, Decimal::new(109770, 6));
     s.integrity_check().unwrap();
+}
+
+#[test]
+fn p02_account_backed_internal_capital_is_conserved_and_not_strategy_nav() {
+    let mut s = store();
+    owned_fill(&mut s, "a", "p02-a", 100, "long", 3);
+    owned_fill(&mut s, "b", "p02-b", 100, "long", 4);
+    let assignment =
+        |key: &str, instance: &str, delta: i64, time: i64| AuthorizedCapitalAssignment {
+            account_key: "okx:real:verified".into(),
+            installation_id: "installation".into(),
+            nav_source_ref: "authenticated-flat".into(),
+            operation_id: key.into(),
+            request_hash: format!("hash:{key}"),
+            instance_id: instance.into(),
+            delta_usd: Decimal::from(delta),
+            authority_revision: 1,
+            authority_receipt: format!("governance:rev1:{key}"),
+            time,
+        };
+    let a = assignment("assign-a", "a", 30, 4);
+    let b = assignment("assign-b", "b", 40, 4);
+    let first = s.commit_authorized_capital_assignment(&a).unwrap();
+    assert_eq!(
+        s.commit_authorized_capital_assignment(&a)
+            .unwrap()
+            .result_ref,
+        first.result_ref
+    );
+    assert!(matches!(
+        s.commit_authorized_capital_assignment(&assignment("over", "b", 71, 4)),
+        Err(StoreError::Invalid("CAPITAL_ASSIGNMENT_EXCEEDS_AVAILABLE"))
+    ));
+    s.commit_authorized_capital_assignment(&b).unwrap();
+    let state = s.capital_state(4).unwrap();
+    assert_eq!(state.account_nav_usd, Decimal::from(100));
+    assert_eq!(state.assigned_usd, Decimal::from(70));
+    assert_eq!(state.unattributed_residual_usd, Decimal::from(30));
+    assert_eq!(state.strategy_principal_usd["a"], Decimal::from(30));
+    assert_eq!(state.strategy_principal_usd["b"], Decimal::from(40));
+    assert_eq!(
+        state.account_nav_usd,
+        state.assigned_usd + state.unattributed_residual_usd
+    );
+    assert_eq!(
+        s.usd_component_total("INTERNAL_CAPITAL_USD").unwrap(),
+        Decimal::ZERO
+    );
+    // No NAV, source watermark or fake profits are generated by principal.
+    assert_eq!(
+        s.nav_summary(1, 4, &["a".into()], &["USD".into()]).unwrap()[0].coverage,
+        "PARTIAL"
+    );
+    assert!(!s.financial_risk(4, Some("a")).unwrap().nav_complete);
+    assert!(
+        s.commit_authorized_capital_assignment(&assignment("takeback", "a", -10, 4))
+            .is_ok()
+    );
+    assert!(matches!(
+        s.commit_authorized_capital_assignment(&assignment("over-release", "a", -21, 4)),
+        Err(StoreError::Invalid("CAPITAL_ASSIGNMENT_EXCEEDS_AVAILABLE"))
+    ));
+    assert!(matches!(
+        s.commit_authorized_capital_assignment(&assignment("manual", "manual", 1, 4)),
+        Err(StoreError::Invalid("INVALID_CAPITAL_ASSIGNMENT"))
+    ));
+    let bogus = IngestPage {
+        finance: vec![FinanceEntry {
+            entry_id: "bogus".into(),
+            economic_event_key: "fake".into(),
+            component: "INTERNAL_CAPITAL_USD".into(),
+            allocation_leg: "strategy:a".into(),
+            amount: Decimal::from(99),
+            currency: "USD".into(),
+            instance_id: Some("a".into()),
+            source_ref: "forged".into(),
+            time: 4,
+            reverses_entry_id: None,
+        }],
+        ..Default::default()
+    };
+    assert!(matches!(
+        s.ingest_page(&bogus),
+        Err(StoreError::Invalid(
+            "CAPITAL_WRITE_REQUIRES_AUTHORIZED_OPERATION"
+        ))
+    ));
+    let p = s.path.clone();
+    let meta = s.meta.clone();
+    drop(s);
+    let mut restored =
+        AccountStore::open_existing(p, &meta.account_key, &meta.installation_id).unwrap();
+    let restored_state = restored.capital_state(4).unwrap();
+    assert_eq!(restored_state.assigned_usd, Decimal::from(60));
+    assert_eq!(restored_state.unattributed_residual_usd, Decimal::from(40));
+    assert_eq!(
+        restored
+            .commit_authorized_capital_assignment(&a)
+            .unwrap()
+            .result_ref,
+        first.result_ref
+    );
+    assert!(matches!(
+        restored.commit_authorized_capital_assignment(&AuthorizedCapitalAssignment {
+            request_hash: "changed".into(),
+            ..a
+        }),
+        Err(StoreError::Invalid("IDEMPOTENCY_CONFLICT"))
+    ));
+}
+#[test]
+fn p02_internal_capital_rejects_incomplete_or_stale_account_nav() {
+    let mut s = store();
+    owned_fill(&mut s, "a", "p02-a2", 100, "long", 3);
+    let a = AuthorizedCapitalAssignment {
+        account_key: "okx:real:verified".into(),
+        installation_id: "installation".into(),
+        nav_source_ref: "authenticated-flat".into(),
+        operation_id: "capital-stale".into(),
+        request_hash: "hash-stale".into(),
+        instance_id: "a".into(),
+        delta_usd: Decimal::ONE,
+        authority_revision: 1,
+        authority_receipt: "governance:rev1".into(),
+        time: 6003,
+    };
+    assert!(matches!(
+        s.commit_authorized_capital_assignment(&a),
+        Err(StoreError::Invalid(
+            "ACCOUNT_CAPITAL_SOURCE_INCOMPLETE_OR_STALE"
+        ))
+    ));
+    s.ingest_page(&IngestPage {
+        nav: vec![NavPoint {
+            scope_id: "account".into(),
+            time: 6003,
+            source_version: "missing-sources".into(),
+            equity: Decimal::from(100),
+            pnl: Decimal::ZERO,
+            flows: Decimal::ZERO,
+            currency: "USD".into(),
+            coverage: "PARTIAL".into(),
+            mark_source: "no-proof".into(),
+        }],
+        ..Default::default()
+    })
+    .unwrap();
+    assert!(matches!(
+        s.commit_authorized_capital_assignment(&a),
+        Err(StoreError::Invalid(
+            "ACCOUNT_CAPITAL_SOURCE_INCOMPLETE_OR_STALE"
+        ))
+    ));
+}
+
+#[test]
+fn p02_capital_is_isolated_per_account_and_identity_bound() {
+    let mut a = store();
+    owned_fill(&mut a, "isolation", "a-isolated", 100, "long", 3);
+    let second_meta = AccountMeta {
+        initialize_operation_id: "connect-demo".into(),
+        release_id: "release-demo".into(),
+        account_key: "okx:demo:independent".into(),
+        installation_id: "installation-demo".into(),
+        initialized_at: 1,
+        opening_source: "authenticated-demo-flat".into(),
+    };
+    let second_snapshot = OpeningSnapshot {
+        opening_equity_usd: Decimal::from(50),
+        source_ref: second_meta.opening_source.clone(),
+        observed_at: 1,
+        positions: 0,
+        orders: 0,
+        conditional_orders: 0,
+        liabilities: Decimal::ZERO,
+        balances: vec![("USDT".into(), Decimal::from(50))],
+    };
+    let mut b =
+        AccountStore::initialize_flat(path(), second_meta.clone(), &second_snapshot).unwrap();
+    b.apply_authority_policy(1, false, "campaign-demo", Decimal::from(20))
+        .unwrap();
+    b.ensure_manual_instance(1).unwrap();
+    owned_fill(&mut b, "isolation", "b-isolated", 100, "long", 3);
+    let input = AuthorizedCapitalAssignment {
+        account_key: a.meta().account_key.clone(),
+        installation_id: a.meta().installation_id.clone(),
+        nav_source_ref: a.meta().opening_source.clone(),
+        operation_id: "cross-account-proof".into(),
+        request_hash: "account-a-hash".into(),
+        instance_id: "isolation".into(),
+        delta_usd: Decimal::from(20),
+        authority_revision: 1,
+        authority_receipt: "authorized-account-a".into(),
+        time: 4,
+    };
+    a.commit_authorized_capital_assignment(&input).unwrap();
+    assert!(matches!(
+        b.commit_authorized_capital_assignment(&input),
+        Err(StoreError::Invalid("INVALID_CAPITAL_ASSIGNMENT"))
+    ));
+    let other = AuthorizedCapitalAssignment {
+        account_key: second_meta.account_key.clone(),
+        installation_id: second_meta.installation_id.clone(),
+        nav_source_ref: second_meta.opening_source.clone(),
+        operation_id: "demo-capital-assignment".into(),
+        request_hash: "account-b-hash".into(),
+        instance_id: "isolation".into(),
+        delta_usd: Decimal::from(15),
+        authority_revision: 1,
+        authority_receipt: "authorized-account-b".into(),
+        time: 4,
+    };
+    b.commit_authorized_capital_assignment(&other).unwrap();
+    assert_eq!(a.capital_state(4).unwrap().assigned_usd, Decimal::from(20));
+    assert_eq!(b.capital_state(4).unwrap().assigned_usd, Decimal::from(15));
+    assert_eq!(
+        a.capital_state(4).unwrap().unattributed_residual_usd,
+        Decimal::from(80)
+    );
+    assert_eq!(
+        b.capital_state(4).unwrap().unattributed_residual_usd,
+        Decimal::from(35)
+    );
+    assert_eq!(
+        a.usd_component_total("INTERNAL_CAPITAL_USD").unwrap(),
+        Decimal::ZERO
+    );
+    assert_eq!(
+        b.usd_component_total("INTERNAL_CAPITAL_USD").unwrap(),
+        Decimal::ZERO
+    );
+    assert_eq!(
+        a.nav_summary(1, 4, &["isolation".into()], &["USD".into()])
+            .unwrap()[0]
+            .coverage,
+        "PARTIAL"
+    );
+    assert_eq!(
+        b.nav_summary(1, 4, &["isolation".into()], &["USD".into()])
+            .unwrap()[0]
+            .coverage,
+        "PARTIAL"
+    );
+    let db = b.path.clone();
+    drop(b);
+    let mut b =
+        AccountStore::open_existing(db, &second_meta.account_key, &second_meta.installation_id)
+            .unwrap();
+    assert_eq!(b.capital_state(4).unwrap().assigned_usd, Decimal::from(15));
+    assert!(matches!(
+        b.commit_authorized_capital_assignment(&input),
+        Err(StoreError::Invalid("INVALID_CAPITAL_ASSIGNMENT"))
+    ));
+}
+
+#[test]
+fn p02_account_loss_can_be_repaired_by_releasing_internal_capital() {
+    let mut s = store();
+    owned_fill(&mut s, "loss-strategy", "loss-a", 100, "long", 3);
+    let first = AuthorizedCapitalAssignment {
+        account_key: s.meta().account_key.clone(),
+        installation_id: s.meta().installation_id.clone(),
+        nav_source_ref: s.meta().opening_source.clone(),
+        operation_id: "p02-initial-capital".into(),
+        request_hash: "initial-hash".into(),
+        instance_id: "loss-strategy".into(),
+        delta_usd: Decimal::from(70),
+        authority_revision: 1,
+        authority_receipt: "governance:rev1".into(),
+        time: 4,
+    };
+    s.commit_authorized_capital_assignment(&first).unwrap();
+    s.ingest_page(&IngestPage {
+        nav: vec![NavPoint {
+            scope_id: "account".into(),
+            time: 5,
+            source_version: "venue-update".into(),
+            equity: Decimal::from(60),
+            pnl: Decimal::from(-40),
+            flows: Decimal::ZERO,
+            currency: "USD".into(),
+            coverage: "COMPLETE".into(),
+            mark_source: "venue:loss".into(),
+        }],
+        ..Default::default()
+    })
+    .unwrap();
+    let before = s.capital_state(5).unwrap();
+    assert_eq!(before.assigned_usd, Decimal::from(70));
+    assert_eq!(before.unattributed_residual_usd, Decimal::from(-10));
+    assert_eq!(before.coverage, "PARTIAL");
+    assert_eq!(
+        before.reason_code.as_deref(),
+        Some("ACCOUNT_CAPITAL_OVERASSIGNED")
+    );
+    let mut adjustment = AuthorizedCapitalAssignment {
+        account_key: first.account_key.clone(),
+        installation_id: first.installation_id.clone(),
+        nav_source_ref: "venue:loss".into(),
+        operation_id: "p02-denied-increase".into(),
+        request_hash: "increase-hash".into(),
+        instance_id: "loss-strategy".into(),
+        delta_usd: Decimal::ONE,
+        authority_revision: 1,
+        authority_receipt: "governance:rev1".into(),
+        time: 5,
+    };
+    assert!(matches!(
+        s.commit_authorized_capital_assignment(&adjustment),
+        Err(StoreError::Invalid("CAPITAL_ASSIGNMENT_EXCEEDS_AVAILABLE"))
+    ));
+    adjustment.operation_id = "p02-repair".into();
+    adjustment.request_hash = "release-hash".into();
+    adjustment.delta_usd = Decimal::from(-15);
+    s.commit_authorized_capital_assignment(&adjustment).unwrap();
+    let after = s.capital_state(5).unwrap();
+    assert_eq!(after.assigned_usd, Decimal::from(55));
+    assert_eq!(after.unattributed_residual_usd, Decimal::from(5));
+    assert_eq!(after.coverage, "COMPLETE");
+    assert_eq!(
+        after.account_nav_usd,
+        after.assigned_usd + after.unattributed_residual_usd
+    );
+    assert_eq!(
+        s.usd_component_total("INTERNAL_CAPITAL_USD").unwrap(),
+        Decimal::ZERO
+    );
+    assert!(
+        !s.financial_risk(5, Some("loss-strategy"))
+            .unwrap()
+            .nav_complete
+    );
+}
+
+fn p02_completed_cursors(s: &mut AccountStore, time: i64) {
+    let mut events = Vec::new();
+    for (source, part) in [
+        ("fills", "SPOT"),
+        ("fills", "SWAP"),
+        ("fills", "FUTURES"),
+        ("fills", "OPTION"),
+        ("bills", "account"),
+        ("account_snapshot", "account"),
+    ] {
+        events.push(SourceCursor {
+            source: source.into(),
+            stream_partition: part.into(),
+            cursor: String::new(),
+            watermark: time,
+            generation: 1,
+            coverage_gaps: String::new(),
+        });
+    }
+    for cursor in events {
+        s.ingest_page(&IngestPage {
+            cursor: Some(cursor),
+            ..Default::default()
+        })
+        .unwrap();
+    }
+}
+fn p02_valuation_witness(s: &AccountStore, time: i64, source: &str) -> StrategyValuationEvidence {
+    StrategyValuationEvidence {
+        account_key: s.meta().account_key.clone(),
+        account_nav_source: source.into(),
+        as_of: time,
+        conversion: UsdConversionEvidence {
+            observed_at: time,
+            source_digest: "authenticated-fx".into(),
+            usd_per_currency: std::collections::BTreeMap::from([
+                ("USD".into(), Decimal::ONE),
+                ("USDT".into(), Decimal::ONE),
+            ]),
+        },
+        venue_positions: Vec::new(),
+    }
+}
+#[test]
+fn p02_valuation_requires_converged_sources_even_with_valid_principal() {
+    let mut s = store();
+    let strategy = StrategyInstance {
+        instance_id: "alpha".into(),
+        definition_id: "fixture".into(),
+        definition_version: "1".into(),
+        parameters: "{}".into(),
+        enabled: false,
+        policy_revision: 1,
+        budget: Decimal::from(10),
+        last_decision_key: None,
+    };
+    s.mutate_instance(
+        "valuation-create",
+        "valuation-hash",
+        "create",
+        &strategy,
+        None,
+        2,
+    )
+    .unwrap();
+    let assign = AuthorizedCapitalAssignment {
+        account_key: s.meta().account_key.clone(),
+        installation_id: s.meta().installation_id.clone(),
+        nav_source_ref: s.meta().opening_source.clone(),
+        operation_id: "valuation-fund".into(),
+        request_hash: "valuation-fund-hash".into(),
+        instance_id: "alpha".into(),
+        delta_usd: Decimal::from(20),
+        authority_revision: 1,
+        authority_receipt: "governance".into(),
+        time: 3,
+    };
+    s.commit_authorized_capital_assignment(&assign).unwrap();
+    assert!(matches!(
+        s.reconcile_strategy_valuation(&p02_valuation_witness(&s, 1, "authenticated-flat")),
+        Err(StoreError::Invalid("STRATEGY_NAV_HISTORY_INCOMPLETE"))
+    ));
+    p02_completed_cursors(&mut s, 4);
+    s.ingest_page(&IngestPage {
+        nav: vec![NavPoint {
+            scope_id: "account".into(),
+            time: 4,
+            source_version: "verified".into(),
+            equity: Decimal::from(100),
+            pnl: Decimal::ZERO,
+            flows: Decimal::ZERO,
+            currency: "USD".into(),
+            coverage: "COMPLETE".into(),
+            mark_source: "account-witness".into(),
+        }],
+        ..Default::default()
+    })
+    .unwrap();
+    let mut witness = p02_valuation_witness(&s, 4, "account-witness");
+    let valid = s.reconcile_strategy_valuation(&witness).unwrap();
+    assert_eq!(valid.coverage, "COMPLETE");
+    assert_eq!(valid.strategies[0].capital_usd, Decimal::from(20));
+    assert_eq!(valid.strategies[0].equity_usd, Decimal::from(20));
+    assert_eq!(valid.attributed_usd, Decimal::from(20));
+    assert_eq!(valid.unattributed_usd, Decimal::from(80));
+    assert_eq!(
+        valid.account_nav_usd,
+        valid.attributed_usd + valid.unattributed_usd
+    );
+    let published = s.commit_reconciled_strategy_nav(&witness).unwrap();
+    assert_eq!(published, valid);
+    assert_eq!(s.commit_reconciled_strategy_nav(&witness).unwrap(), valid);
+    let nav = s
+        .nav_summary(1, 4, &["alpha".into()], &["USD".into()])
+        .unwrap();
+    assert_eq!(nav[0].coverage, "COMPLETE");
+    assert_eq!(nav[0].opening_equity, Some(Decimal::ZERO));
+    assert_eq!(nav[0].current_equity, Some(Decimal::from(20)));
+    assert_eq!(nav[0].flows, Some(Decimal::from(20)));
+    assert_eq!(nav[0].pnl, Some(Decimal::ZERO));
+    assert!(matches!(
+        s.ingest_page(&IngestPage {
+            nav: vec![NavPoint {
+                scope_id: "strategy:alpha".into(),
+                time: 4,
+                source_version: "strategy-reconciled-v1".into(),
+                equity: Decimal::from(999),
+                pnl: Decimal::ZERO,
+                flows: Decimal::ZERO,
+                currency: "USD".into(),
+                coverage: "COMPLETE".into(),
+                mark_source: "forged".into()
+            }],
+            ..Default::default()
+        }),
+        Err(StoreError::Invalid("STRATEGY_NAV_REQUIRES_RECONCILIATION"))
+    ));
+
+    assert!(!s.financial_risk(4, Some("alpha")).unwrap().nav_complete);
+    assert_eq!(
+        s.nav_summary(1, 4, &["alpha".into()], &["USD".into()])
+            .unwrap()[0]
+            .coverage,
+        "COMPLETE"
+    );
+    witness.conversion.usd_per_currency.clear();
+    assert!(s.reconcile_strategy_valuation(&witness).is_ok()); // Flat books need no FX conversion.
+    witness.account_nav_source = "forged".into();
+    assert!(matches!(
+        s.reconcile_strategy_valuation(&witness),
+        Err(StoreError::Invalid("STRATEGY_NAV_ACCOUNT_SOURCE_MISMATCH"))
+    ));
+    let witness = p02_valuation_witness(&s, 4, "account-witness");
+    s.ingest_page(&IngestPage {
+        finance: vec![FinanceEntry {
+            entry_id: "forged-fee".into(),
+            economic_event_key: "fake-fee".into(),
+            component: "FEE".into(),
+            allocation_leg: "account".into(),
+            amount: Decimal::from(-1),
+            currency: "USD".into(),
+            instance_id: Some("alpha".into()),
+            source_ref: "unverified:fee".into(),
+            time: 4,
+            reverses_entry_id: None,
+        }],
+        ..Default::default()
+    })
+    .unwrap();
+    assert!(matches!(
+        s.reconcile_strategy_valuation(&witness),
+        Err(StoreError::Invalid(
+            "STRATEGY_NAV_ECONOMIC_SOURCE_UNVERIFIED"
+        ))
+    ));
+    s.ingest_page(&IngestPage {
+        cursor: Some(SourceCursor {
+            source: "strategy_valuation".into(),
+            stream_partition: "account".into(),
+            cursor: String::new(),
+            watermark: 4,
+            generation: 1,
+            coverage_gaps: "STRATEGY_NAV_ECONOMIC_SOURCE_UNVERIFIED".into(),
+        }),
+        ..Default::default()
+    })
+    .unwrap();
+    assert_eq!(
+        s.nav_summary(1, 4, &["alpha".into()], &["USD".into()])
+            .unwrap()[0]
+            .coverage,
+        "PARTIAL"
+    );
+}
+#[test]
+fn p02_valuation_rejects_missing_mark_and_uses_contract_mechanics() {
+    let mut s = store();
+    owned_fill(&mut s, "alpha", "valuation-fill", 100, "long", 3);
+    let grant = AuthorizedCapitalAssignment {
+        account_key: s.meta().account_key.clone(),
+        installation_id: s.meta().installation_id.clone(),
+        nav_source_ref: s.meta().opening_source.clone(),
+        operation_id: "valuation-grant".into(),
+        request_hash: "valuation-grant-hash".into(),
+        instance_id: "alpha".into(),
+        delta_usd: Decimal::from(20),
+        authority_revision: 1,
+        authority_receipt: "governance".into(),
+        time: 4,
+    };
+    s.commit_authorized_capital_assignment(&grant).unwrap();
+    p02_completed_cursors(&mut s, 5);
+    s.ingest_page(&IngestPage {
+        nav: vec![NavPoint {
+            scope_id: "account".into(),
+            time: 5,
+            source_version: "verified".into(),
+            equity: Decimal::from(101),
+            pnl: Decimal::ONE,
+            flows: Decimal::ZERO,
+            currency: "USD".into(),
+            coverage: "COMPLETE".into(),
+            mark_source: "account-witness".into(),
+        }],
+        ..Default::default()
+    })
+    .unwrap();
+    let mut evidence = p02_valuation_witness(&s, 5, "account-witness");
+    assert!(matches!(
+        s.reconcile_strategy_valuation(&evidence),
+        Err(StoreError::Invalid("STRATEGY_NAV_MARK_MISSING"))
+    ));
+    evidence.venue_positions.push(ValuationPosition {
+        instrument_id: "BTC".into(),
+        signed_contracts: Decimal::ONE,
+        mark_price: Decimal::from(110),
+    });
+    let v = s.reconcile_strategy_valuation(&evidence).unwrap();
+    assert_eq!(v.strategies[0].unrealized_usd, Decimal::new(1, 1));
+    assert_eq!(v.strategies[0].equity_usd, Decimal::new(201, 1));
+    assert_eq!(v.unattributed_usd, Decimal::new(809, 1));
+    assert_eq!(v.account_nav_usd, v.attributed_usd + v.unattributed_usd);
+    evidence.conversion.usd_per_currency.remove("USDT");
+    assert!(matches!(
+        s.reconcile_strategy_valuation(&evidence),
+        Err(StoreError::Invalid("STRATEGY_NAV_FX_MISSING"))
+    ));
+    evidence.venue_positions[0].signed_contracts = Decimal::from(2);
+    assert!(matches!(
+        s.reconcile_strategy_valuation(&evidence),
+        Err(StoreError::Invalid("STRATEGY_NAV_FX_MISSING"))
+    ));
+    evidence
+        .conversion
+        .usd_per_currency
+        .insert("USDT".into(), Decimal::ONE);
+    evidence.venue_positions[0].signed_contracts = Decimal::ONE;
+    // Existing fill identity does not permit inventing a different fee.
+    s.ingest_page(&IngestPage {
+        finance: vec![FinanceEntry {
+            entry_id: "fee-mismatch".into(),
+            economic_event_key: "fill:BTC:valuation-fill:o:valuation-fill".into(),
+            component: "FEE".into(),
+            allocation_leg: "account".into(),
+            amount: Decimal::from(-1),
+            currency: "USDT".into(),
+            instance_id: Some("alpha".into()),
+            source_ref: "fill:f:valuation-fill".into(),
+            time: 5,
+            reverses_entry_id: None,
+        }],
+        ..Default::default()
+    })
+    .unwrap();
+    assert!(matches!(
+        s.reconcile_strategy_valuation(&evidence),
+        Err(StoreError::Invalid("STRATEGY_NAV_FEE_SOURCE_MISMATCH"))
+    ));
+}
+
+#[test]
+fn p02_two_accounts_two_strategies_fees_marks_restart_conserve_nav() {
+    let mut real = store();
+    let demo_meta = AccountMeta {
+        initialize_operation_id: "demo-2x2-init".into(),
+        release_id: "release-demo-2x2".into(),
+        account_key: "okx:demo:verified-2x2".into(),
+        installation_id: "demo-2x2-installation".into(),
+        initialized_at: 1,
+        opening_source: "demo-2x2-opening".into(),
+    };
+    let demo_snapshot = OpeningSnapshot {
+        opening_equity_usd: Decimal::from(50),
+        source_ref: demo_meta.opening_source.clone(),
+        observed_at: 1,
+        positions: 0,
+        orders: 0,
+        conditional_orders: 0,
+        liabilities: Decimal::ZERO,
+        balances: vec![("USDT".into(), Decimal::from(50))],
+    };
+    let mut demo =
+        AccountStore::initialize_flat(path(), demo_meta.clone(), &demo_snapshot).unwrap();
+    demo.apply_authority_policy(1, false, "campaign-demo", Decimal::from(20))
+        .unwrap();
+    demo.ensure_manual_instance(1).unwrap();
+    for (s, left, right) in [
+        (&mut real, "real_a", "real_b"),
+        (&mut demo, "demo_a", "demo_b"),
+    ] {
+        owned_fill(s, left, &format!("{left}-fill"), 100, "long", 3);
+        owned_fill(s, right, &format!("{right}-fill"), 100, "long", 4);
+        let (first, second) = if left == "real_a" { (20, 30) } else { (10, 15) };
+        for (id, amount, time) in [(left, first, 5), (right, second, 6)] {
+            s.commit_authorized_capital_assignment(&AuthorizedCapitalAssignment {
+                account_key: s.meta().account_key.clone(),
+                installation_id: s.meta().installation_id.clone(),
+                nav_source_ref: s.meta().opening_source.clone(),
+                operation_id: format!("capital-{id}"),
+                request_hash: format!("hash-{id}"),
+                instance_id: id.into(),
+                delta_usd: Decimal::from(amount),
+                authority_revision: 1,
+                authority_receipt: format!("governance-{id}"),
+                time,
+            })
+            .unwrap();
+        }
+        let fee = if left == "real_a" {
+            Decimal::from(-1)
+        } else {
+            Decimal::new(-5, 1)
+        };
+        let bill_id = format!("fee-bill-{left}");
+        s.ingest_page(&IngestPage {
+            bills: vec![Bill {
+                bill_id: bill_id.clone(),
+                kind: "trade-fee".into(),
+                time: 7,
+                amount: fee,
+                currency: "USDT".into(),
+                economic_event_key: format!("bill:{bill_id}"),
+            }],
+            finance: vec![FinanceEntry {
+                entry_id: format!("fee-{left}"),
+                economic_event_key: format!("bill:{bill_id}"),
+                component: "FEE".into(),
+                allocation_leg: "account".into(),
+                amount: fee,
+                currency: "USDT".into(),
+                instance_id: Some(left.into()),
+                source_ref: format!("bill:{bill_id}"),
+                time: 7,
+                reverses_entry_id: None,
+            }],
+            ..Default::default()
+        })
+        .unwrap();
+        p02_completed_cursors(s, 10);
+        let account_nav = if left == "real_a" {
+            Decimal::new(992, 1)
+        } else {
+            Decimal::new(497, 1)
+        };
+        s.ingest_page(&IngestPage {
+            nav: vec![NavPoint {
+                scope_id: "account".into(),
+                time: 10,
+                source_version: "2x2".into(),
+                equity: account_nav,
+                pnl: account_nav
+                    - if left == "real_a" {
+                        Decimal::from(100)
+                    } else {
+                        Decimal::from(50)
+                    },
+                flows: Decimal::ZERO,
+                currency: "USD".into(),
+                coverage: "COMPLETE".into(),
+                mark_source: "2x2-venue".into(),
+            }],
+            ..Default::default()
+        })
+        .unwrap();
+        let mut proof = p02_valuation_witness(s, 10, "2x2-venue");
+        proof.venue_positions.push(ValuationPosition {
+            instrument_id: "BTC".into(),
+            signed_contracts: Decimal::from(2),
+            mark_price: Decimal::from(110),
+        });
+        let checked = s.commit_reconciled_strategy_nav(&proof).unwrap();
+        assert_eq!(checked.coverage, "COMPLETE");
+        assert_eq!(checked.strategies.len(), 2);
+        assert_eq!(
+            checked.account_nav_usd,
+            checked.attributed_usd + checked.unattributed_usd
+        );
+        assert_eq!(
+            checked.unattributed_usd,
+            if left == "real_a" {
+                Decimal::from(50)
+            } else {
+                Decimal::from(25)
+            }
+        );
+        assert_eq!(checked.strategies[0].realized_usd, fee);
+        assert_eq!(checked.strategies[0].unrealized_usd, Decimal::new(1, 1));
+        assert_eq!(checked.strategies[1].unrealized_usd, Decimal::new(1, 1));
+        assert_eq!(checked.strategies[1].realized_usd, Decimal::ZERO);
+        for id in [left, right] {
+            let nav = s.nav_summary(1, 10, &[id.into()], &["USD".into()]).unwrap();
+            assert_eq!(nav.len(), 1);
+            assert_eq!(nav[0].coverage, "COMPLETE");
+            assert_eq!(nav[0].opening_equity, Some(Decimal::ZERO));
+            assert_eq!(
+                nav[0].pnl,
+                Some(if id == left {
+                    fee + Decimal::new(1, 1)
+                } else {
+                    Decimal::new(1, 1)
+                })
+            );
+            assert_eq!(
+                nav[0].current_equity,
+                Some(nav[0].flows.unwrap() + nav[0].pnl.unwrap())
+            );
+            assert!(!s.financial_risk(10, Some(id)).unwrap().nav_complete);
+        }
+        assert_eq!(s.commit_reconciled_strategy_nav(&proof).unwrap(), checked);
+    }
+    let realsql = real.path.clone();
+    let realmeta = real.meta.clone();
+    let demosql = demo.path.clone();
+    drop(real);
+    drop(demo);
+    let reloaded_real =
+        AccountStore::open_existing(realsql, &realmeta.account_key, &realmeta.installation_id)
+            .unwrap();
+    let reloaded_demo =
+        AccountStore::open_existing(demosql, &demo_meta.account_key, &demo_meta.installation_id)
+            .unwrap();
+    assert_eq!(
+        reloaded_real
+            .nav_summary(1, 10, &["real_a".into()], &["USD".into()])
+            .unwrap()[0]
+            .coverage,
+        "COMPLETE"
+    );
+    assert_eq!(
+        reloaded_demo
+            .nav_summary(1, 10, &["demo_a".into()], &["USD".into()])
+            .unwrap()[0]
+            .coverage,
+        "COMPLETE"
+    );
+    assert_eq!(
+        reloaded_real.capital_state(10).unwrap().assigned_usd,
+        Decimal::from(50)
+    );
+    assert_eq!(
+        reloaded_demo.capital_state(10).unwrap().assigned_usd,
+        Decimal::from(25)
+    );
+}
+
+#[test]
+fn p02_strategy_nav_expires_on_new_zero_fee_fill_or_new_account_mark() {
+    let mut s = store();
+    let strategy = StrategyInstance {
+        instance_id: "witness".into(),
+        definition_id: "fixture".into(),
+        definition_version: "1".into(),
+        parameters: "{}".into(),
+        enabled: false,
+        policy_revision: 1,
+        budget: Decimal::from(10),
+        last_decision_key: None,
+    };
+    s.mutate_instance(
+        "witness-create",
+        "witness-hash",
+        "create",
+        &strategy,
+        None,
+        2,
+    )
+    .unwrap();
+    s.commit_authorized_capital_assignment(&AuthorizedCapitalAssignment {
+        account_key: s.meta().account_key.clone(),
+        installation_id: s.meta().installation_id.clone(),
+        nav_source_ref: s.meta().opening_source.clone(),
+        operation_id: "witness-capital".into(),
+        request_hash: "witness-capital-hash".into(),
+        instance_id: "witness".into(),
+        delta_usd: Decimal::from(10),
+        authority_revision: 1,
+        authority_receipt: "governance".into(),
+        time: 3,
+    })
+    .unwrap();
+    p02_completed_cursors(&mut s, 4);
+    s.ingest_page(&IngestPage {
+        nav: vec![NavPoint {
+            scope_id: "account".into(),
+            time: 4,
+            source_version: "witness-4".into(),
+            equity: Decimal::from(100),
+            pnl: Decimal::ZERO,
+            flows: Decimal::ZERO,
+            currency: "USD".into(),
+            coverage: "COMPLETE".into(),
+            mark_source: "mark-4".into(),
+        }],
+        ..Default::default()
+    })
+    .unwrap();
+    let witness = p02_valuation_witness(&s, 4, "mark-4");
+    s.commit_reconciled_strategy_nav(&witness).unwrap();
+    let read = |s: &AccountStore, t| {
+        s.nav_summary(1, t, &["witness".into()], &["USD".into()])
+            .unwrap()[0]
+            .coverage
+            .clone()
+    };
+    assert_eq!(read(&s, 4), "COMPLETE");
+    let stable = s.strategy_valuation_revision().unwrap();
+    let finance_only = s.finance_revision().unwrap();
+    // A later mark-to-market witness changes economic NAV without a finance
+    // entry. The old strategy witness must not remain current/COMPLETE.
+    s.ingest_page(&IngestPage {
+        nav: vec![NavPoint {
+            scope_id: "account".into(),
+            time: 5,
+            source_version: "witness-5".into(),
+            equity: Decimal::from(101),
+            pnl: Decimal::ONE,
+            flows: Decimal::ZERO,
+            currency: "USD".into(),
+            coverage: "COMPLETE".into(),
+            mark_source: "mark-5".into(),
+        }],
+        ..Default::default()
+    })
+    .unwrap();
+    assert_ne!(s.strategy_valuation_revision().unwrap(), stable);
+    assert_eq!(s.strategy_valuation_revision_as_of(4).unwrap(), stable);
+    assert_eq!(read(&s, 5), "PARTIAL");
+    assert_eq!(read(&s, 4), "COMPLETE");
+    // A zero-fee fill may change positions while finance_entries stays
+    // unchanged. This makes the old *historical* revision invalid too.
+    s.ingest_page(&IngestPage {
+        fills: vec![Fill {
+            fill_id: "zero-fee-source".into(),
+            instrument_id: "BTC".into(),
+            trade_id: "zero-trade".into(),
+            exchange_order_id: "zero-order".into(),
+            intent_id: None,
+            time: 4,
+            qty: Decimal::ONE,
+            price: Decimal::from(100),
+            fee: Decimal::ZERO,
+            currency: "USDT".into(),
+            side: "buy".into(),
+        }],
+        ..Default::default()
+    })
+    .unwrap();
+    assert_eq!(s.finance_revision().unwrap(), finance_only);
+    assert_ne!(s.strategy_valuation_revision().unwrap(), stable);
+    assert_eq!(read(&s, 4), "PARTIAL");
+    assert_eq!(read(&s, 5), "PARTIAL");
+}
+
+#[test]
+fn p02_same_timestamp_late_bill_replays_new_nav_revision_without_rewriting_history() {
+    let mut s = store();
+    let strategy = StrategyInstance {
+        instance_id: "late".into(),
+        definition_id: "fixture".into(),
+        definition_version: "1".into(),
+        parameters: "{}".into(),
+        enabled: false,
+        policy_revision: 1,
+        budget: Decimal::from(10),
+        last_decision_key: None,
+    };
+    s.mutate_instance("late-create", "late-hash", "create", &strategy, None, 2)
+        .unwrap();
+    s.commit_authorized_capital_assignment(&AuthorizedCapitalAssignment {
+        account_key: s.meta().account_key.clone(),
+        installation_id: s.meta().installation_id.clone(),
+        nav_source_ref: s.meta().opening_source.clone(),
+        operation_id: "late-capital".into(),
+        request_hash: "late-capital-hash".into(),
+        instance_id: "late".into(),
+        delta_usd: Decimal::from(20),
+        authority_revision: 1,
+        authority_receipt: "governance".into(),
+        time: 3,
+    })
+    .unwrap();
+    p02_completed_cursors(&mut s, 4);
+    s.ingest_page(&IngestPage {
+        nav: vec![NavPoint {
+            scope_id: "account".into(),
+            time: 4,
+            source_version: "witness".into(),
+            equity: Decimal::from(100),
+            pnl: Decimal::ZERO,
+            flows: Decimal::ZERO,
+            currency: "USD".into(),
+            coverage: "COMPLETE".into(),
+            mark_source: "witness-source".into(),
+        }],
+        ..Default::default()
+    })
+    .unwrap();
+    let witness = p02_valuation_witness(&s, 4, "witness-source");
+    let first = s.commit_reconciled_strategy_nav(&witness).unwrap();
+    assert_eq!(first.strategies[0].equity_usd, Decimal::from(20));
+    let read = |s: &AccountStore| {
+        s.nav_summary(1, 4, &["late".into()], &["USD".into()])
+            .unwrap()[0]
+            .coverage
+            .clone()
+    };
+    assert_eq!(read(&s), "COMPLETE");
+    let first_version = s.strategy_valuation_revision().unwrap();
+    // Delayed authenticated bill arrives without adding attributable PnL.
+    // The SQL receipt of the first calculation must remain immutable.
+    s.ingest_page(&IngestPage {
+        bills: vec![Bill {
+            bill_id: "late-bill".into(),
+            kind: "2:0".into(),
+            time: 4,
+            amount: Decimal::ZERO,
+            currency: "USDT".into(),
+            economic_event_key: "bill:late-bill".into(),
+        }],
+        ..Default::default()
+    })
+    .unwrap();
+    assert_ne!(s.strategy_valuation_revision().unwrap(), first_version);
+    assert_eq!(read(&s), "PARTIAL");
+    let second = s.commit_reconciled_strategy_nav(&witness).unwrap();
+    assert_eq!(first, second);
+    assert_eq!(read(&s), "COMPLETE");
+    let versions: i64 = s
+        .connection
+        .query_row(
+            "SELECT COUNT(*) FROM nav_points WHERE scope_id='strategy:late' AND time=4
+         AND source_version LIKE 'strategy-reconciled-v1:revision:%'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(versions, 2);
+    assert_eq!(s.commit_reconciled_strategy_nav(&witness).unwrap(), second);
+    // Same timestamp, corrected source and venue equity. This is a separate
+    // immutable account NAV witness and must allow a third strategy revision.
+    let second_version = s.strategy_valuation_revision().unwrap();
+    s.ingest_page(&IngestPage {
+        nav: vec![NavPoint {
+            scope_id: "account".into(),
+            time: 4,
+            source_version: "zz-witness-corrected".into(),
+            equity: Decimal::from(101),
+            pnl: Decimal::ONE,
+            flows: Decimal::ZERO,
+            currency: "USD".into(),
+            coverage: "COMPLETE".into(),
+            mark_source: "witness-corrected".into(),
+        }],
+        ..Default::default()
+    })
+    .unwrap();
+    assert_ne!(s.strategy_valuation_revision().unwrap(), second_version);
+    assert_eq!(read(&s), "PARTIAL");
+    let corrected = p02_valuation_witness(&s, 4, "witness-corrected");
+    let third = s.commit_reconciled_strategy_nav(&corrected).unwrap();
+    assert_eq!(third.account_nav_usd, Decimal::from(101));
+    assert_eq!(third.strategies[0].equity_usd, Decimal::from(20));
+    assert_eq!(third.unattributed_usd, Decimal::from(81));
+    assert_eq!(read(&s), "COMPLETE");
+    assert_eq!(s.commit_reconciled_strategy_nav(&corrected).unwrap(), third);
+    let versions: i64 = s
+        .connection
+        .query_row(
+            "SELECT COUNT(*) FROM nav_points WHERE scope_id='strategy:late'
+         AND time=4 AND source_version LIKE 'strategy-reconciled-v1:revision:%'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(versions, 3);
+    let path = s.path.clone();
+    let meta = s.meta.clone();
+    drop(s);
+    let restored =
+        AccountStore::open_existing(path, &meta.account_key, &meta.installation_id).unwrap();
+    assert_eq!(read(&restored), "COMPLETE");
+}
+
+#[test]
+fn p02_historical_strategy_principal_does_not_look_ahead_after_later_allocation() {
+    let mut s = store();
+    for id in ["past", "future"] {
+        let strategy = StrategyInstance {
+            instance_id: id.into(),
+            definition_id: "fixture".into(),
+            definition_version: "1".into(),
+            parameters: "{}".into(),
+            enabled: false,
+            policy_revision: 1,
+            budget: Decimal::from(10),
+            last_decision_key: None,
+        };
+        s.mutate_instance(
+            &format!("{id}-create"),
+            &format!("{id}-hash"),
+            "create",
+            &strategy,
+            None,
+            2,
+        )
+        .unwrap();
+    }
+    let assignment = |id: &str, time: i64, amount: i64| AuthorizedCapitalAssignment {
+        account_key: "okx:real:verified".into(),
+        installation_id: "installation".into(),
+        nav_source_ref: if time < 6 {
+            "historical-4"
+        } else {
+            "historical-8"
+        }
+        .into(),
+        operation_id: format!("historical-{id}"),
+        request_hash: format!("historical-hash-{id}"),
+        instance_id: id.into(),
+        delta_usd: Decimal::from(amount),
+        authority_revision: 1,
+        authority_receipt: format!("governance-{id}"),
+        time,
+    };
+    // First allocation is covered by the initial source.
+    let mut earlier = assignment("past", 3, 20);
+    earlier.nav_source_ref = s.meta().opening_source.clone();
+    s.commit_authorized_capital_assignment(&earlier).unwrap();
+    p02_completed_cursors(&mut s, 8);
+    for (time, source) in [(4, "historical-4"), (8, "historical-8")] {
+        s.ingest_page(&IngestPage {
+            nav: vec![NavPoint {
+                scope_id: "account".into(),
+                time,
+                source_version: format!("as-of-{time}"),
+                equity: Decimal::from(100),
+                pnl: Decimal::ZERO,
+                flows: Decimal::ZERO,
+                currency: "USD".into(),
+                coverage: "COMPLETE".into(),
+                mark_source: source.into(),
+            }],
+            ..Default::default()
+        })
+        .unwrap();
+    }
+    let second = assignment("future", 6, 30);
+    // At t=6 the as-of account NAV source must be the preceding t=4 witness.
+    let mut second = second;
+    second.nav_source_ref = "historical-4".into();
+    s.commit_authorized_capital_assignment(&second).unwrap();
+    let past = s.capital_state(4).unwrap();
+    assert_eq!(past.assigned_usd, Decimal::from(20));
+    assert_eq!(past.unattributed_residual_usd, Decimal::from(80));
+    assert!(past.strategy_principal_usd.contains_key("past"));
+    assert!(!past.strategy_principal_usd.contains_key("future"));
+    let present = s.capital_state(8).unwrap();
+    assert_eq!(present.assigned_usd, Decimal::from(50));
+    assert_eq!(present.unattributed_residual_usd, Decimal::from(50));
+    assert_eq!(present.strategy_principal_usd["future"], Decimal::from(30));
+    let witness = p02_valuation_witness(&s, 4, "historical-4");
+    let historical = s.reconcile_strategy_valuation(&witness).unwrap();
+    assert_eq!(historical.strategies.len(), 1);
+    assert_eq!(historical.strategies[0].instance_id, "past");
+    assert_eq!(historical.unattributed_usd, Decimal::from(80));
+    assert_eq!(
+        historical.account_nav_usd,
+        historical.attributed_usd + historical.unattributed_usd
+    );
+    let stale = assignment("future-late", 5, 1);
+    assert!(matches!(
+        s.commit_authorized_capital_assignment(&stale),
+        Err(StoreError::Invalid("CAPITAL_ASSIGNMENT_OUT_OF_ORDER"))
+    ));
+    assert_eq!(
+        s.commit_authorized_capital_assignment(&earlier)
+            .unwrap()
+            .kind,
+        "CAPITAL_ASSIGNMENT"
+    );
+    let p = s.path.clone();
+    let meta = s.meta.clone();
+    drop(s);
+    let restored =
+        AccountStore::open_existing(p, &meta.account_key, &meta.installation_id).unwrap();
+    assert_eq!(
+        restored.capital_state(4).unwrap().assigned_usd,
+        Decimal::from(20)
+    );
+    assert_eq!(
+        restored.capital_state(8).unwrap().assigned_usd,
+        Decimal::from(50)
+    );
 }

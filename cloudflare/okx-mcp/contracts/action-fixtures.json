@@ -427,6 +427,48 @@
     ]
   },
   {
+    "tool": "strategies",
+    "action": "capital_assign",
+    "positive": {
+      "action": "capital_assign",
+      "account": "fixture",
+      "idempotency_key": "command_0001",
+      "instance_id": "fixture",
+      "direction": "assign",
+      "amount_usd": "1",
+      "expected_authority_revision": 1
+    },
+    "negative": [
+      {
+        "action": "capital_assign",
+        "account": "fixture",
+        "idempotency_key": "command_0001",
+        "instance_id": "fixture",
+        "direction": "assign",
+        "amount_usd": "1",
+        "expected_authority_revision": 1,
+        "raw_rpc": "forbidden"
+      },
+      {
+        "account": "fixture",
+        "idempotency_key": "command_0001",
+        "instance_id": "fixture",
+        "direction": "assign",
+        "amount_usd": "1",
+        "expected_authority_revision": 1
+      },
+      {
+        "action": 12,
+        "account": "fixture",
+        "idempotency_key": "command_0001",
+        "instance_id": "fixture",
+        "direction": "assign",
+        "amount_usd": "1",
+        "expected_authority_revision": 1
+      }
+    ]
+  },
+  {
     "tool": "market",
     "action": "screen",
     "positive": {

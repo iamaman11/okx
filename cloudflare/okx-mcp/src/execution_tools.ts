@@ -42,7 +42,7 @@ researchRun.allOf=[{oneOf:[{required:['parameters']},{required:['variants']}]},
  {if:{properties:{action:{const:'grid'}}},then:{required:['variants']}}];
 export const ACTION_SCHEMAS:Record<string,Schema[]>={
  accounts:[action('list'),action('status',{account}),action('connect',{...mutation,credential_ref:text(),alias:text(64),label:text(128),limits,enabled:{type:'boolean'}},['idempotency_key','credential_ref','alias','limits','enabled']),pauseResume,action('set_limits',{account,...mutation,expected_revision:integer(),limits:limitsWithEntry})],
- strategies:[action('list',{account}),action('status',{account,...instance}),action('create',{account,...mutation,...instance,definition_id:text(64),version:integer(1,1),parameters:liveStrategyParams,instruments:array(text(64)),timeframe_ms:integer(1000),budget_usd:money}),action('update',{account,...mutation,...instance,expected_revision:integer(),parameters:liveStrategyParams,budget_usd:money}),startStop],
+ strategies:[action('list',{account}),action('status',{account,...instance}),action('create',{account,...mutation,...instance,definition_id:text(64),version:integer(1,1),parameters:liveStrategyParams,instruments:array(text(64)),timeframe_ms:integer(1000),budget_usd:money}),action('update',{account,...mutation,...instance,expected_revision:integer(),parameters:liveStrategyParams,budget_usd:money}),startStop,action('capital_assign',{account,...mutation,...instance,direction:choice('assign','release'),amount_usd:money,expected_authority_revision:integer(1)},['account','idempotency_key','instance_id','direction','amount_usd','expected_authority_revision'])],
  market:[screenCompare,action('instruments',{asset:text(16),settle_currency:text(16)},['asset']),action('snapshot',{instrument:text(64)}),action('microstructure',{instrument:text(64),size_contracts:money},['instrument']),action('capabilities')],
  research:[researchRun,action('benchmark',{idempotency_key:token}),action('status',{job_id:text()}),action('cancel',{job_id:text(),...mutation}),action('result',{job_id:text(),cursor:text(512),limit:integer(1,50),view:choice('summary','trades','equity','variants','export')},['job_id','limit']),action('capabilities'),action('validate',{...range,range_mode:choice('strict','normalize'),instruments:{...array(text(64),8),minItems:1},strategy_id:choice('ema_cross_v1'),parameters:ema,costs,data_mode:choice('counterfactual','historical_observed')},['instruments','timeframe_ms','start_ms','end_ms','strategy_id','parameters','costs','data_mode'])],
  trade:[action('preview',{account,...trade},['account','operation','strategy_instance','instrument','side','sizing','order']),action('execute',{account,...mutation,...trade,expires_in_ms:integer(1,30000)},['account','idempotency_key','operation','strategy_instance','instrument','side','sizing','order','expires_in_ms']),action('status',{account,reference:text()}),action('cancel',{account,...mutation,reference:text()}),action('close',{account,...mutation,reference:text(),expires_in_ms:integer(1,30000)}),action('capabilities',{account}),action('preflight',{account})],
@@ -73,10 +73,28 @@ const TRADE_NOTES:Record<string,{description:string;readOnlyHint:boolean;destruc
 const annotation=(meta:{readOnlyHint:boolean;destructiveHint:boolean})=>({
  readOnlyHint:meta.readOnlyHint,destructiveHint:meta.destructiveHint,openWorldHint:false
 });
+// Deduplicate only the exact, positive-decimal schema in public tools/list.
+// Internal validation retains the fully expanded ACTION_SCHEMAS, including
+// all limits; standard JSON Schema $defs keeps external contracts identical.
+function publicSchema(schema:Schema):Schema {
+ let repeats=0;
+ const factor=(node:any):any=>{
+  if(Array.isArray(node))return node.map(factor);
+  if(node&&typeof node==='object'){
+   if(node.type==='string'&&node.pattern===money.pattern&&Object.keys(node).length===2){
+    repeats++;return {$ref:'#/$defs/positiveDecimal'};
+   }
+   return Object.fromEntries(Object.entries(node).map(([k,v])=>[k,factor(v)]));
+  }
+  return node;
+ };
+ const normalized=factor(schema);
+ return repeats>=2?{...normalized,$defs:{positiveDecimal:money}}:schema;
+}
 export const PUBLIC_TOOLS:Json[]=[
  ...Object.entries(ACTION_SCHEMAS).filter(([name])=>name!=='trade')
    .map(([name,schemas])=>({name,description:TOOL_NOTES[name].description,
-     inputSchema:{oneOf:schemas},annotations:annotation(TOOL_NOTES[name])})),
+     inputSchema:publicSchema({oneOf:schemas}),annotations:annotation(TOOL_NOTES[name])})),
  ...ACTION_SCHEMAS.trade.map(schema=>{
    const scopedAction=String(schema.properties.action.const);
    const {action:_action,...properties}=schema.properties;
@@ -85,7 +103,7 @@ export const PUBLIC_TOOLS:Json[]=[
    const inputSchema={...schema,properties,
      required:(schema.required as string[]).filter(k=>k!=='action')};
    return {name:'trade.'+scopedAction,description:TRADE_NOTES[scopedAction].description,
-     inputSchema,annotations:annotation(TRADE_NOTES[scopedAction])};
+     inputSchema:publicSchema(inputSchema),annotations:annotation(TRADE_NOTES[scopedAction])};
  })
 ];
 export function matches(s:Schema,v:unknown):boolean {
