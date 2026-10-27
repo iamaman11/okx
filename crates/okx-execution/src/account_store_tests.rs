@@ -4129,68 +4129,112 @@ fn p02_same_timestamp_late_bill_replays_new_nav_revision_without_rewriting_histo
 
 #[test]
 fn p02_historical_strategy_principal_does_not_look_ahead_after_later_allocation() {
-    let mut s=store();
+    let mut s = store();
     for id in ["past", "future"] {
-        let strategy=StrategyInstance {
-            instance_id:id.into(),definition_id:"fixture".into(),
-            definition_version:"1".into(),parameters:"{}".into(),enabled:false,
-            policy_revision:1,budget:Decimal::from(10),last_decision_key:None,
+        let strategy = StrategyInstance {
+            instance_id: id.into(),
+            definition_id: "fixture".into(),
+            definition_version: "1".into(),
+            parameters: "{}".into(),
+            enabled: false,
+            policy_revision: 1,
+            budget: Decimal::from(10),
+            last_decision_key: None,
         };
-        s.mutate_instance(&format!("{id}-create"),&format!("{id}-hash"),"create",
-            &strategy,None,2).unwrap();
+        s.mutate_instance(
+            &format!("{id}-create"),
+            &format!("{id}-hash"),
+            "create",
+            &strategy,
+            None,
+            2,
+        )
+        .unwrap();
     }
-    let assignment=|id:&str,time:i64,amount:i64| AuthorizedCapitalAssignment {
-        account_key:"okx:real:verified".into(),installation_id:"installation".into(),
-        nav_source_ref:if time<6 {"historical-4"} else {"historical-8"}.into(),
-        operation_id:format!("historical-{id}"),request_hash:format!("historical-hash-{id}"),
-        instance_id:id.into(),delta_usd:Decimal::from(amount),
-        authority_revision:1,authority_receipt:format!("governance-{id}"),time,
+    let assignment = |id: &str, time: i64, amount: i64| AuthorizedCapitalAssignment {
+        account_key: "okx:real:verified".into(),
+        installation_id: "installation".into(),
+        nav_source_ref: if time < 6 {
+            "historical-4"
+        } else {
+            "historical-8"
+        }
+        .into(),
+        operation_id: format!("historical-{id}"),
+        request_hash: format!("historical-hash-{id}"),
+        instance_id: id.into(),
+        delta_usd: Decimal::from(amount),
+        authority_revision: 1,
+        authority_receipt: format!("governance-{id}"),
+        time,
     };
     // First allocation is covered by the initial source.
-    let mut earlier=assignment("past",3,20);
-    earlier.nav_source_ref=s.meta().opening_source.clone();
+    let mut earlier = assignment("past", 3, 20);
+    earlier.nav_source_ref = s.meta().opening_source.clone();
     s.commit_authorized_capital_assignment(&earlier).unwrap();
-    p02_completed_cursors(&mut s,8);
-    for (time,source) in [(4,"historical-4"),(8,"historical-8")] {
+    p02_completed_cursors(&mut s, 8);
+    for (time, source) in [(4, "historical-4"), (8, "historical-8")] {
         s.ingest_page(&IngestPage {
-            nav:vec![NavPoint {
-                scope_id:"account".into(),time,
-                source_version:format!("as-of-{time}"),
-                equity:Decimal::from(100),pnl:Decimal::ZERO,flows:Decimal::ZERO,
-                currency:"USD".into(),coverage:"COMPLETE".into(),
-                mark_source:source.into(),
-            }],..Default::default()
-        }).unwrap();
+            nav: vec![NavPoint {
+                scope_id: "account".into(),
+                time,
+                source_version: format!("as-of-{time}"),
+                equity: Decimal::from(100),
+                pnl: Decimal::ZERO,
+                flows: Decimal::ZERO,
+                currency: "USD".into(),
+                coverage: "COMPLETE".into(),
+                mark_source: source.into(),
+            }],
+            ..Default::default()
+        })
+        .unwrap();
     }
-    let second=assignment("future",6,30);
+    let second = assignment("future", 6, 30);
     // At t=6 the as-of account NAV source must be the preceding t=4 witness.
-    let mut second=second;
-    second.nav_source_ref="historical-4".into();
+    let mut second = second;
+    second.nav_source_ref = "historical-4".into();
     s.commit_authorized_capital_assignment(&second).unwrap();
-    let past=s.capital_state(4).unwrap();
-    assert_eq!(past.assigned_usd,Decimal::from(20));
-    assert_eq!(past.unattributed_residual_usd,Decimal::from(80));
+    let past = s.capital_state(4).unwrap();
+    assert_eq!(past.assigned_usd, Decimal::from(20));
+    assert_eq!(past.unattributed_residual_usd, Decimal::from(80));
     assert!(past.strategy_principal_usd.contains_key("past"));
     assert!(!past.strategy_principal_usd.contains_key("future"));
-    let present=s.capital_state(8).unwrap();
-    assert_eq!(present.assigned_usd,Decimal::from(50));
-    assert_eq!(present.unattributed_residual_usd,Decimal::from(50));
-    assert_eq!(present.strategy_principal_usd["future"],Decimal::from(30));
-    let witness=p02_valuation_witness(&s,4,"historical-4");
-    let historical=s.reconcile_strategy_valuation(&witness).unwrap();
-    assert_eq!(historical.strategies.len(),1);
-    assert_eq!(historical.strategies[0].instance_id,"past");
-    assert_eq!(historical.unattributed_usd,Decimal::from(80));
-    assert_eq!(historical.account_nav_usd,historical.attributed_usd+historical.unattributed_usd);
-    let stale=assignment("future-late",5,1);
+    let present = s.capital_state(8).unwrap();
+    assert_eq!(present.assigned_usd, Decimal::from(50));
+    assert_eq!(present.unattributed_residual_usd, Decimal::from(50));
+    assert_eq!(present.strategy_principal_usd["future"], Decimal::from(30));
+    let witness = p02_valuation_witness(&s, 4, "historical-4");
+    let historical = s.reconcile_strategy_valuation(&witness).unwrap();
+    assert_eq!(historical.strategies.len(), 1);
+    assert_eq!(historical.strategies[0].instance_id, "past");
+    assert_eq!(historical.unattributed_usd, Decimal::from(80));
+    assert_eq!(
+        historical.account_nav_usd,
+        historical.attributed_usd + historical.unattributed_usd
+    );
+    let stale = assignment("future-late", 5, 1);
     assert!(matches!(
         s.commit_authorized_capital_assignment(&stale),
         Err(StoreError::Invalid("CAPITAL_ASSIGNMENT_OUT_OF_ORDER"))
     ));
-    assert_eq!(s.commit_authorized_capital_assignment(&earlier).unwrap().kind,"CAPITAL_ASSIGNMENT");
-    let p=s.path.clone();let meta=s.meta.clone();
+    assert_eq!(
+        s.commit_authorized_capital_assignment(&earlier)
+            .unwrap()
+            .kind,
+        "CAPITAL_ASSIGNMENT"
+    );
+    let p = s.path.clone();
+    let meta = s.meta.clone();
     drop(s);
-    let restored=AccountStore::open_existing(p,&meta.account_key,&meta.installation_id).unwrap();
-    assert_eq!(restored.capital_state(4).unwrap().assigned_usd,Decimal::from(20));
-    assert_eq!(restored.capital_state(8).unwrap().assigned_usd,Decimal::from(50));
+    let restored =
+        AccountStore::open_existing(p, &meta.account_key, &meta.installation_id).unwrap();
+    assert_eq!(
+        restored.capital_state(4).unwrap().assigned_usd,
+        Decimal::from(20)
+    );
+    assert_eq!(
+        restored.capital_state(8).unwrap().assigned_usd,
+        Decimal::from(50)
+    );
 }

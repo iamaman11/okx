@@ -39,10 +39,14 @@ impl AccountStore {
         } else {
             "SELECT instance_id,amount FROM instance_finance_totals
              WHERE currency='USD' AND component='INTERNAL_CAPITAL_USD'
-               AND ?1>=0 ORDER BY instance_id"
+             ORDER BY instance_id"
         };
         let mut query = self.connection.prepare(sql)?;
-        let mut rows = query.query([now])?;
+        let mut rows = if historical {
+            query.query([now])?
+        } else {
+            query.query([])?
+        };
         let mut principals = std::collections::BTreeMap::new();
         let mut assigned = Decimal::ZERO;
         while let Some(row) = rows.next()? {
@@ -548,11 +552,12 @@ impl AccountStore {
         // Backdated new assignments would corrupt that projection and
         // retroactively change NAV; reject them instead of silently rewriting
         // prior allocations. Exact idempotent retries still return above.
-        let latest_assignment:Option<i64>=self.connection.query_row(
+        let latest_assignment: Option<i64> = self.connection.query_row(
             "SELECT MAX(time) FROM finance_entries WHERE component='INTERNAL_CAPITAL_USD'",
-            [],|r|r.get(0)
+            [],
+            |r| r.get(0),
         )?;
-        if latest_assignment.is_some_and(|last| request.time<last) {
+        if latest_assignment.is_some_and(|last| request.time < last) {
             return Err(StoreError::Invalid("CAPITAL_ASSIGNMENT_OUT_OF_ORDER"));
         }
         let state = self.capital_state(request.time)?;
