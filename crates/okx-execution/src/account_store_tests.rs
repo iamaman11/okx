@@ -589,28 +589,30 @@ fn unverified_strategy_budget_is_never_strategy_nav() {
     // Even a legacy projection incorrectly labelled COMPLETE cannot establish
     // strategy capital or become an equity/profit figure in portfolio views.
     s.ingest_page(&IngestPage {
-        nav: vec![NavPoint {
-            scope_id: "strategy:a".into(),
-            time: 5,
-            source_version: "legacy-budget-is-not-capital".into(),
-            equity: Decimal::from(12),
-            pnl: Decimal::from(2),
-            flows: Decimal::ZERO,
-            currency: "USD".into(),
-            coverage: "COMPLETE".into(),
-            mark_source: "legacy".into(),
-        },
-        NavPoint {
-            scope_id: "strategy:manual".into(),
-            time: 5,
-            source_version: "legacy-manual-budget".into(),
-            equity: Decimal::from(10),
-            pnl: Decimal::ZERO,
-            flows: Decimal::ZERO,
-            currency: "USD".into(),
-            coverage: "COMPLETE".into(),
-            mark_source: "unverified-manual-budget".into(),
-        }],
+        nav: vec![
+            NavPoint {
+                scope_id: "strategy:a".into(),
+                time: 5,
+                source_version: "legacy-budget-is-not-capital".into(),
+                equity: Decimal::from(12),
+                pnl: Decimal::from(2),
+                flows: Decimal::ZERO,
+                currency: "USD".into(),
+                coverage: "COMPLETE".into(),
+                mark_source: "legacy".into(),
+            },
+            NavPoint {
+                scope_id: "strategy:manual".into(),
+                time: 5,
+                source_version: "legacy-manual-budget".into(),
+                equity: Decimal::from(10),
+                pnl: Decimal::ZERO,
+                flows: Decimal::ZERO,
+                currency: "USD".into(),
+                coverage: "COMPLETE".into(),
+                mark_source: "unverified-manual-budget".into(),
+            },
+        ],
         ..Default::default()
     })
     .unwrap();
@@ -621,7 +623,11 @@ fn unverified_strategy_budget_is_never_strategy_nav() {
         let nav = windows.iter().find(|n| n.scope_id == scope).unwrap();
         assert_eq!(
             nav.coverage,
-            if id == "manual" { "NOT_APPLICABLE" } else { "PARTIAL" }
+            if id == "manual" {
+                "NOT_APPLICABLE"
+            } else {
+                "PARTIAL"
+            }
         );
         assert_eq!(nav.opening_equity, None);
         assert_eq!(nav.current_equity, None);
