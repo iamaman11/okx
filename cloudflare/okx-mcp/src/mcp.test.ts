@@ -90,7 +90,7 @@ const accountRow={kind:'nav',capital_scope:'account',additive_with_account_nav:f
  coverage_reason:null,window:{scope_id:'account',currency:'USD',coverage:'COMPLETE',
  opening_equity:'100',current_equity:'100',flows:'0',pnl:'0',
  opening_as_of:1,current_as_of:2}};
-const portfolioEnvelope=(rows:unknown[],quality='complete')=>projectNativeResponse({
+const portfolioEnvelope=(rows:any[],quality='complete')=>projectNativeResponse({
  schema:'okx.agent.response/v1',request_id:'req_finance_p02',status:'completed',
  quality:'FRESH',warnings:[],result:{rows,quality,diagnostics:[]}});
 const manualSummary:any=portfolioEnvelope([accountRow,manualRow]);
