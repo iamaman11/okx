@@ -11,7 +11,8 @@ ALLOWED = {
     "okx-ws": {"okx-api"},
     "okx-observation": {"okx-api"},
     "okx-runtime": {"okx-api", "okx-observation", "okx-ws"},
-    "okx-analysis": {"okx-observation"},
+    "okx-kernel": set(),
+    "okx-analysis": {"okx-kernel", "okx-observation"},
     "okx-research": {"okx-analysis", "okx-observation"},
     "okx-execution": {"okx-api", "okx-analysis", "okx-observation"},
     "okx-protocol": set(),
@@ -76,7 +77,9 @@ def load_graph() -> dict[str, set[str]]:
 # K10 target pure crates must be free of network/storage/runtime dependencies
 # even through workspace-local transitive edges. Report separately while existing
 # K10 migration is unfinished; the ordinary CI DAG check must stay honest.
-K10_TARGET_PURE = ("okx-analysis", "okx-research")
+K10_TARGET_PURE = ("okx-kernel", "okx-analysis", "okx-research")
+# Newly extracted kernel is enforced separately; K10 overall still has adapters.
+K10_ENFORCED_PURE = ("okx-kernel",)
 K10_FORBIDDEN = {
     "okx-api", "okx-ws", "okx-runtime", "okx-github",
     "reqwest", "tokio", "rusqlite", "hyper", "axum", "tonic", "sqlx",
@@ -163,6 +166,11 @@ def self_test() -> int:
         print("self-test failed: clean K10 pure graph rejected", file=sys.stderr)
         return 1
 
+    dirty_kernel = {"okx-kernel": {"okx-api"}, "okx-api": {"reqwest"}}
+    if not pure_dependency_violations(dirty_kernel, K10_ENFORCED_PURE):
+        print("self-test failed: new kernel network violation went unnoticed", file=sys.stderr)
+        return 1
+
     print("ARCHITECTURE_SELF_TEST=PASS")
     return 0
 
@@ -186,6 +194,7 @@ def main() -> int:
         return 0
 
     errors = validate(load_graph())
+    errors.extend(pure_dependency_violations(load_complete_workspace_graph(), K10_ENFORCED_PURE))
     if errors:
         for error in errors:
             print(error, file=sys.stderr)
