@@ -14,7 +14,7 @@ use okx_research::{
     ResearchArtifactStore,
     strategy_registry::{self as replay, Bar, Costs, Mechanics, ReplaySpec},
 };
-use serde_json::{Value, json};
+use serde_json::json;
 
 use super::executor::{CpuExecutor, cpu_worker_budget};
 
