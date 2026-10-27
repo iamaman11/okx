@@ -880,7 +880,12 @@ mod tests {
             "coverage_reason":null
         });
         let readiness = vec![json!({"financial_risk":{"nav_complete":true}})];
-        assert!(summary_is_complete(&readiness, &[account, manual.clone()], true, true));
+        assert!(summary_is_complete(
+            &readiness,
+            &[account, manual.clone()],
+            true,
+            true
+        ));
         assert!(summary_diagnostics(readiness, &[manual], None).is_empty());
     }
 
