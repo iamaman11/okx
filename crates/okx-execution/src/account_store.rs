@@ -388,6 +388,41 @@ pub struct AccountCapitalState {
     pub reason_code: Option<String>,
 }
 
+/// Venue net position and mark observed with the same authenticated account
+/// snapshot as account NAV. Signed contracts reflect OKX net/long/short mode.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ValuationPosition {
+    pub instrument_id: String,
+    pub signed_contracts: Decimal,
+    pub mark_price: Decimal,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StrategyValuationEvidence {
+    pub account_key: String,
+    pub account_nav_source: String,
+    pub as_of: i64,
+    pub conversion: UsdConversionEvidence,
+    pub venue_positions: Vec<ValuationPosition>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StrategyValuation {
+    pub instance_id: String,
+    pub capital_usd: Decimal,
+    pub realized_usd: Decimal,
+    pub unrealized_usd: Decimal,
+    pub equity_usd: Decimal,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StrategyValuationReconciliation {
+    pub account_nav_usd: Decimal,
+    pub attributed_usd: Decimal,
+    pub unattributed_usd: Decimal,
+    pub as_of: i64,
+    pub source_ref: String,
+    pub strategies: Vec<StrategyValuation>,
+    pub coverage: String,
+}
+
 /// Connection stays on its owning blocking worker. It is never a network transaction.
 #[derive(Debug)]
 pub struct AccountStore {
