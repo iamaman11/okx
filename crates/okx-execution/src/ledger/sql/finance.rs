@@ -374,6 +374,24 @@ impl AccountStore {
         })
     }
 
+    /// Valuation needs a stronger fence than finance-history pagination:
+    /// a zero-fee fill or a venue bill can change economic exposure without
+    /// appending a finance entry. Only immutable source tables participate;
+    /// risk-budget allocations and valuation/readback rows do not.
+    pub fn strategy_valuation_revision(&self) -> StoreResult<String> {
+        let (finance, fills, bills, lots, flows): (i64, i64, i64, i64, i64) =
+            self.connection.query_row(
+                "SELECT
+                    (SELECT COALESCE(MAX(rowid),0) FROM finance_entries),
+                    (SELECT COALESCE(MAX(rowid),0) FROM fills),
+                    (SELECT COALESCE(MAX(rowid),0) FROM bills),
+                    (SELECT COALESCE(MAX(rowid),0) FROM position_lots),
+                    (SELECT COALESCE(MAX(rowid),0) FROM cash_flows)",
+                [], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))
+            )?;
+        Ok(format!("f{finance}:x{fills}:b{bills}:p{lots}:c{flows}"))
+    }
+
     /// Atomically publish only a previously source-verified estimate to the
     /// existing NAV points and immutable operation receipts. A matching finance
     /// revision fences replay after a late fill, fee, bill or correction.
@@ -385,7 +403,7 @@ impl AccountStore {
         if summary.strategies.is_empty() {
             return Ok(summary);
         }
-        let revision = self.finance_revision()?;
+        let revision = self.strategy_valuation_revision()?;
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -596,7 +614,7 @@ impl AccountStore {
             return Err(StoreError::Invalid("NAV_SCOPE_LIMIT"));
         }
         let mut result = Vec::new();
-        let revision = self.finance_revision()?;
+        let revision = self.strategy_valuation_revision()?;
         for (scope, currency) in scopes {
             // Only native reconciliation receipts authorize strategy NAV rows.
             // Arbitrary strategy nav_points, including old COMPLETE claims, are
@@ -670,7 +688,26 @@ impl AccountStore {
             } else {
                 false
             };
-            let complete = !valuation_gap
+            // A newer account snapshot supersedes an old strategy witness
+            // even when there is no fill, bill or finance entry (e.g. a pure
+            // mark-to-market move). Historical reads are checked as-of through.
+            let account_source_matches = if strategy {
+                let account_latest:Option<(i64,String)>=self.connection.query_row(
+                    "SELECT time,mark_source FROM nav_points WHERE scope_id='account'
+                     AND currency='USD' AND time<=?1 ORDER BY time DESC,source_version DESC LIMIT 1",
+                    [through],|r|Ok((r.get(0)?,r.get(1)?))
+                ).optional()?;
+                let strategy_source:Option<String>=if let Some((_,_,time,_))=current.as_ref() {
+                    self.connection.query_row(
+                        "SELECT mark_source FROM nav_points WHERE scope_id=?1 AND time=?2
+                         AND source_version='strategy-reconciled-v1'",
+                        params![scope,time],|r|r.get(0)
+                    ).optional()?
+                } else {None};
+                account_latest.zip(strategy_source).is_some_and(|((time,source),witness)|
+                    current.as_ref().is_some_and(|row| row.2==time && source==witness))
+            } else {true};
+            let complete = account_source_matches && !valuation_gap
                 && opening
                     .as_ref()
                     .is_some_and(|v| v.3 == "COMPLETE" && from - v.2 <= 5000)
