@@ -3533,6 +3533,23 @@ fn p02_valuation_requires_converged_sources_even_with_valid_principal() {
         valid.account_nav_usd,
         valid.attributed_usd + valid.unattributed_usd
     );
+    let published=s.commit_reconciled_strategy_nav(&witness).unwrap();
+    assert_eq!(published,valid);
+    assert_eq!(s.commit_reconciled_strategy_nav(&witness).unwrap(),valid);
+    let nav=s.nav_summary(1,4,&["alpha".into()],&["USD".into()]).unwrap();
+    assert_eq!(nav[0].coverage,"COMPLETE");
+    assert_eq!(nav[0].opening_equity,Some(Decimal::ZERO));
+    assert_eq!(nav[0].current_equity,Some(Decimal::from(20)));
+    assert_eq!(nav[0].flows,Some(Decimal::from(20)));
+    assert_eq!(nav[0].pnl,Some(Decimal::ZERO));
+    assert!(matches!(s.ingest_page(&IngestPage {
+        nav:vec![NavPoint {
+            scope_id:"strategy:alpha".into(),time:4,source_version:"strategy-reconciled-v1".into(),
+            equity:Decimal::from(999),pnl:Decimal::ZERO,flows:Decimal::ZERO,
+            currency:"USD".into(),coverage:"COMPLETE".into(),mark_source:"forged".into()
+        }],..Default::default()
+    }),Err(StoreError::Invalid("STRATEGY_NAV_REQUIRES_RECONCILIATION"))));
+
     assert!(!s.financial_risk(4, Some("alpha")).unwrap().nav_complete);
     assert_eq!(
         s.nav_summary(1, 4, &["alpha".into()], &["USD".into()])
