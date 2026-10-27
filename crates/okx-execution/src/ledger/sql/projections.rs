@@ -359,20 +359,10 @@ impl AccountStore {
         }
         if action == "create" {
             let scope = format!("strategy:{}", committed.instance_id);
+            // A budget allocation is a risk-policy fact, not a capital transfer.
+            // Register the strategy view, but do not fabricate opening equity,
+            // return, or a high-watermark without verified finance evidence.
             tx.execute("INSERT INTO nav_scopes VALUES(?1,'USD')", [&scope])?;
-            tx.execute(
-                "INSERT INTO nav_points VALUES(?1,?2,?3,?4,'0','0','USD','COMPLETE',?3)",
-                params![
-                    scope,
-                    now,
-                    format!("allocation:{operation_id}"),
-                    exact(committed.budget)
-                ],
-            )?;
-            tx.execute(
-                "INSERT INTO nav_watermarks VALUES(?1,?2,?2,?3,'COMPLETE')",
-                params![scope, exact(committed.budget), now],
-            )?;
         }
         let result = serde_json::to_string(&committed)
             .map_err(|_| StoreError::Invalid("INSTANCE_SERIALIZATION_FAILED"))?;
