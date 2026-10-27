@@ -1364,6 +1364,117 @@ mod tests {
         assert_eq!(gateway.posts.load(Ordering::SeqCst), 1);
     }
     #[tokio::test]
+    async fn k5_f5_f6_reopen_sql_never_reposts_unknown_or_invents_no_send() {
+        // F5: durable POST claim, no gateway invocation before the owner dies.
+        // F6: gateway accepted the call, but the reply was lost.
+        // In both cases the restarted owner cannot infer absence from SQLite.
+        for (label, reply_lost) in [
+            ("k5_f5_claim_reopen", false),
+            ("k5_f6_lost_reply_reopen", true),
+        ] {
+            let (store, intent, root) = reserved(label, true, false, false).await;
+            let gateway = FixtureGateway {
+                posts: AtomicUsize::new(0),
+                lose: true,
+            };
+            if reply_lost {
+                assert_eq!(
+                    post_once(&store, &intent, deadline(), || gateway.send())
+                        .await
+                        .unwrap(),
+                    None
+                );
+                assert_eq!(gateway.posts.load(Ordering::SeqCst), 1);
+            } else {
+                assert!(
+                    store
+                        .call(deadline(), |s| s.begin_post("intent_fixture", 1, now()))
+                        .await
+                        .unwrap()
+                );
+                assert_eq!(gateway.posts.load(Ordering::SeqCst), 0);
+            }
+
+            // Reopen the durable SQLite owner rather than merely inspecting
+            // the same in-memory AccountStoreHandle as the earlier fixtures.
+            drop(store);
+            let reopened = AccountStoreHandle::open_existing(
+                root.join("account.db"),
+                format!("okx:real:{}", "a".repeat(64)),
+                "installation_test".into(),
+            )
+            .await
+            .unwrap();
+            let promoted = reopened
+                .call(deadline(), |s| s.recover_posting(now()))
+                .await
+                .unwrap();
+            assert_eq!(promoted, if reply_lost { 0 } else { 1 });
+            let restored = reopened
+                .call(deadline(), |s| s.intent("intent_fixture"))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(restored.state, IntentState::Unknown);
+            assert!(
+                reopened
+                    .call(deadline(), |s| s.unsent_release_receipt("intent_fixture"))
+                    .await
+                    .unwrap()
+                    .is_none(),
+                "an unresolved post claim cannot authorize central release"
+            );
+            // Even with the original idempotency key/intent and a fresh owner,
+            // recovery must never invoke place_order for a second time.
+            let count_before = gateway.posts.load(Ordering::SeqCst);
+            for _ in 0..2 {
+                assert_eq!(
+                    post_once(&reopened, &intent, deadline(), || gateway.send())
+                        .await
+                        .unwrap(),
+                    None
+                );
+            }
+            assert_eq!(gateway.posts.load(Ordering::SeqCst), count_before);
+            assert_eq!(
+                reopened
+                    .call(deadline(), |s| s.intent("intent_fixture"))
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .state,
+                IntentState::Unknown
+            );
+
+            if reply_lost {
+                // Only an explicit simulated venue readback can resolve F6.
+                reopened
+                    .call(deadline(), |s| {
+                        s.record_order_readback(
+                            "intent_fixture",
+                            "exchange_f6_readback",
+                            IntentState::Filled,
+                            Decimal::ONE,
+                            now(),
+                        )
+                    })
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    reopened
+                        .call(deadline(), |s| s.intent("intent_fixture"))
+                        .await
+                        .unwrap()
+                        .unwrap()
+                        .state,
+                    IntentState::Filled
+                );
+                assert_eq!(gateway.posts.load(Ordering::SeqCst), 1);
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn restart_posting_reconciles_without_resubmit() {
         let (store, intent, _root) = reserved("restart", true, false, false).await;
         store
