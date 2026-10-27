@@ -636,6 +636,14 @@ fn unverified_strategy_budget_is_never_strategy_nav() {
         assert!(!s.financial_risk(5, Some(id)).unwrap().nav_complete);
     }
     assert!(s.financial_risk(5, None).unwrap().nav_complete);
+    let manual_status = s.strategy_status("manual", 5).unwrap();
+    assert_eq!(manual_status["capital_scope"], "account");
+    assert_eq!(manual_status["risk"]["nav_complete"], true);
+    assert_eq!(manual_status["nav"][0]["coverage"], "NOT_APPLICABLE");
+    let funded_without_proof = s.strategy_status("a", 5).unwrap();
+    assert_eq!(funded_without_proof["capital_scope"], "strategy");
+    assert_eq!(funded_without_proof["risk"]["nav_complete"], false);
+    assert_eq!(funded_without_proof["nav"][0]["coverage"], "PARTIAL");
 }
 #[test]
 fn funding_at_event_respects_opposite_instances_and_later_fills() {
