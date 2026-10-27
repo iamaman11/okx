@@ -892,7 +892,7 @@ mod tests {
     #[test]
     fn unknown_strategy_capital_is_an_explicit_partial_reason() {
         let nav = okx_execution::NavWindow {
-            scope_id: "strategy:manual".into(),
+            scope_id: "strategy:ema".into(),
             currency: "USD".into(),
             opening_equity: None,
             current_equity: None,
