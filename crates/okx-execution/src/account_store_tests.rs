@@ -3676,6 +3676,32 @@ fn p02_valuation_rejects_missing_mark_and_uses_contract_mechanics() {
         s.reconcile_strategy_valuation(&evidence),
         Err(StoreError::Invalid("STRATEGY_NAV_FX_MISSING"))
     ));
+    evidence
+        .conversion
+        .usd_per_currency
+        .insert("USDT".into(), Decimal::ONE);
+    evidence.venue_positions[0].signed_contracts = Decimal::ONE;
+    // Existing fill identity does not permit inventing a different fee.
+    s.ingest_page(&IngestPage {
+        finance: vec![FinanceEntry {
+            entry_id: "fee-mismatch".into(),
+            economic_event_key: "fill:BTC:valuation-fill:o:valuation-fill".into(),
+            component: "FEE".into(),
+            allocation_leg: "account".into(),
+            amount: Decimal::from(-1),
+            currency: "USDT".into(),
+            instance_id: Some("alpha".into()),
+            source_ref: "fill:f:valuation-fill".into(),
+            time: 5,
+            reverses_entry_id: None,
+        }],
+        ..Default::default()
+    })
+    .unwrap();
+    assert!(matches!(
+        s.reconcile_strategy_valuation(&evidence),
+        Err(StoreError::Invalid("STRATEGY_NAV_FEE_SOURCE_MISMATCH"))
+    ));
 }
 
 #[test]
@@ -3731,15 +3757,15 @@ fn p02_two_accounts_two_strategies_fees_marks_restart_conserve_nav() {
         } else {
             Decimal::new(-5, 1)
         };
-        let bill_id=format!("fee-bill-{left}");
+        let bill_id = format!("fee-bill-{left}");
         s.ingest_page(&IngestPage {
             bills: vec![Bill {
-                bill_id:bill_id.clone(),
-                kind:"trade-fee".into(),
-                time:7,
-                amount:fee,
-                currency:"USDT".into(),
-                economic_event_key:format!("bill:{bill_id}"),
+                bill_id: bill_id.clone(),
+                kind: "trade-fee".into(),
+                time: 7,
+                amount: fee,
+                currency: "USDT".into(),
+                economic_event_key: format!("bill:{bill_id}"),
             }],
             finance: vec![FinanceEntry {
                 entry_id: format!("fee-{left}"),

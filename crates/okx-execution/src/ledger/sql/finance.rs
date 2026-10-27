@@ -153,27 +153,36 @@ impl AccountStore {
                     "SELECT instrument_id,trade_id,exchange_order_id,fee,currency FROM fills WHERE fill_id=?1",
                     [id],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?))
                 ).optional()?;
-                if let Some((instrument,trade,order,fee,fee_currency)) = fill {
-                    let canonical=format!("fill:{instrument}:{trade}:{order}");
+                if let Some((instrument, trade, order, fee, fee_currency)) = fill {
+                    let canonical = format!("fill:{instrument}:{trade}:{order}");
                     // Venue-provided bill IDs are also valid economic keys,
                     // but they must be present in the same account ledger.
-                    let linked_bill=if let Some(bill_id)=economic_key.strip_prefix("bill:") {
+                    let linked_bill = if let Some(bill_id) = economic_key.strip_prefix("bill:") {
                         self.connection.query_row(
                             "SELECT EXISTS(SELECT 1 FROM bills WHERE bill_id=?1)",
-                            [bill_id],|row|row.get::<_,bool>(0)
+                            [bill_id],
+                            |row| row.get::<_, bool>(0),
                         )?
-                    } else {false};
-                    if component=="FEE" && (currency!=fee_currency || amount!=decimal(fee)?) {
+                    } else {
+                        false
+                    };
+                    if component == "FEE" && (currency != fee_currency || amount != decimal(fee)?) {
                         return Err(StoreError::Invalid("STRATEGY_NAV_FEE_SOURCE_MISMATCH"));
                     }
-                    economic_key==canonical || linked_bill
-                } else {false}
+                    economic_key == canonical || linked_bill
+                } else {
+                    false
+                }
             } else if let Some(id) = proof.strip_prefix("bill:") {
-                economic_key==proof && self.connection.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM bills WHERE bill_id=?1)",
-                    [id],|row|row.get::<_,bool>(0)
-                )?
-            } else {false};
+                economic_key == proof
+                    && self.connection.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM bills WHERE bill_id=?1)",
+                        [id],
+                        |row| row.get::<_, bool>(0),
+                    )?
+            } else {
+                false
+            };
             if !found {
                 return Err(StoreError::Invalid(
                     "STRATEGY_NAV_ECONOMIC_SOURCE_UNVERIFIED",
