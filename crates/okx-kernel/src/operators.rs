@@ -609,19 +609,26 @@ mod c20_rolling_extension {
             Some(18.5)
         );
         assert_eq!(
-            scalar(Operator::RollingMean, &candles[..3], &[], &[], &[], 4, 60_000).unwrap(),
+            scalar(
+                Operator::RollingMean,
+                &candles[..3],
+                &[],
+                &[],
+                &[],
+                4,
+                60_000
+            )
+            .unwrap(),
             None
         );
         assert_eq!(
-            scalar(Operator::RollingMean, &candles, &[], &[], &[], 0, 60_000)
-                .unwrap_err(),
+            scalar(Operator::RollingMean, &candles, &[], &[], &[], 0, 60_000).unwrap_err(),
             "INVALID_PERIOD"
         );
         let mut invalid = candles.clone();
         invalid[17] = f64::NAN;
         assert_eq!(
-            scalar(Operator::RollingMean, &invalid, &[], &[], &[], 4, 60_000)
-                .unwrap_err(),
+            scalar(Operator::RollingMean, &invalid, &[], &[], &[], 4, 60_000).unwrap_err(),
             "NONFINITE_INPUT"
         );
     }
@@ -635,10 +642,19 @@ mod c20_rolling_extension {
             let mut out = Vec::new();
             for end in 1..=closes.len() {
                 let signal = ema.push_closed(closes[end - 1]).unwrap();
-                let rolling = scalar(Operator::RollingMean, &closes[..end], &[], &[], &[], 4, 60_000).unwrap();
+                let rolling = scalar(
+                    Operator::RollingMean,
+                    &closes[..end],
+                    &[],
+                    &[],
+                    &[],
+                    4,
+                    60_000,
+                )
+                .unwrap();
                 let combined = match (signal, rolling) {
-                    (Some(1), Some(mean)) if closes[end-1] > mean => Some(1),
-                    (Some(-1), Some(mean)) if closes[end-1] < mean => Some(-1),
+                    (Some(1), Some(mean)) if closes[end - 1] > mean => Some(1),
+                    (Some(-1), Some(mean)) if closes[end - 1] < mean => Some(-1),
                     (Some(_), Some(_)) => Some(0),
                     _ => None,
                 };
@@ -646,10 +662,18 @@ mod c20_rolling_extension {
             }
             out
         }
-        let synthetic_closed_candles = vec![10., 11., 12., 13., 14., 15., 14., 13., 12., 11., 12., 13.];
+        let synthetic_closed_candles =
+            vec![10., 11., 12., 13., 14., 15., 14., 13., 12., 11., 12., 13.];
         let first = signals(&synthetic_closed_candles[..8]);
         let full = signals(&synthetic_closed_candles);
-        assert_eq!(first, full[..8], "later candles must not modify prior signals");
-        assert!(full.iter().any(Option::is_some), "composition must produce typed decisions");
+        assert_eq!(
+            first,
+            full[..8],
+            "later candles must not modify prior signals"
+        );
+        assert!(
+            full.iter().any(Option::is_some),
+            "composition must produce typed decisions"
+        );
     }
 }

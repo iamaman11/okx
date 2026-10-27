@@ -300,8 +300,11 @@ mod c20_query_plan_extension {
             vec!["BTC-USDT-SWAP".into()],
             ClosedRange::strict(0, 20 * 3_600_000, 3_600_000).unwrap(),
             vec![Operator::RollingMean],
-            BTreeMap::new(), Vec::new(), None,
-        ).unwrap();
+            BTreeMap::new(),
+            Vec::new(),
+            None,
+        )
+        .unwrap();
         assert_eq!(plan.sources, vec![Source::Candles]);
         assert_eq!(plan.operators[0].output_unit, Unit::Price);
         assert_eq!(plan.operators[0].warmup_bars, 14);
