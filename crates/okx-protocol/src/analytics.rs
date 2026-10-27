@@ -136,7 +136,9 @@ pub enum ResearchResultView {
 pub enum ResearchRequest {
     Capabilities {},
     /// Read-only, opt-in K9 acceptance performed by this same running Agent.
-    Benchmark { idempotency_key: String },
+    Benchmark {
+        idempotency_key: String,
+    },
     Validate {
         instruments: Vec<String>,
         timeframe_ms: u64,
@@ -271,7 +273,9 @@ impl ResearchRequest {
             Self::Capabilities {} => true,
             Self::Benchmark { idempotency_key } => {
                 (8..=128).contains(&idempotency_key.len())
-                    && idempotency_key.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+                    && idempotency_key
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
             },
             Self::Validate {
                 instruments,

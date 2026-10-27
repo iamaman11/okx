@@ -4,7 +4,8 @@ const text=(max=128):Schema=>({type:'string',minLength:1,maxLength:max});
 const token={...text(),minLength:8,pattern:'^[A-Za-z0-9_-]+$'};
 const money={type:'string',pattern:'^(?!0+(\\.0+)?$)(0|[1-9]\\d{0,14})(\\.\\d{1,9})?$'};
 const integer=(min=0,max=Number.MAX_SAFE_INTEGER):Schema=>({type:'integer',minimum:min,maximum:max});
-const choice=(...values:string[]):Schema=>({type:'string',enum:values});
+// Enum values already constrain JSON types; omit redundant type to keep tools/list bounded.
+const choice=(...values:string[]):Schema=>({enum:values});
 const array=(items:Schema,max=32):Schema=>({type:'array',items,maxItems:max,uniqueItems:true});
 const object=(properties:Schema,required=Object.keys(properties)):Schema=>({type:'object',properties,required,additionalProperties:false});
 const action=(name:string,props:Schema={},required=Object.keys(props)):Schema=>object({action:{const:name},...props},['action',...required]);

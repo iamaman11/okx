@@ -61,7 +61,10 @@ pub(super) async fn run(
             }
             let fixture_hash =
                 okx_research::canonical_sha256(&source).map_err(|e| e.to_string())?;
-            Ok((source.into_iter().map(Arc::new).collect::<Vec<_>>(), fixture_hash))
+            Ok((
+                source.into_iter().map(Arc::new).collect::<Vec<_>>(),
+                fixture_hash,
+            ))
         })
         .await?;
     let (sources, fixture_hash) = source;
@@ -154,8 +157,8 @@ pub(super) async fn run(
         .iter()
         .find(|row| row["workers"] == 4)
         .and_then(|row| row["p50_ms"].as_f64());
-    let result_hash = okx_research::canonical_sha256(&expected_hashes)
-        .map_err(|e| e.to_string())?;
+    let result_hash =
+        okx_research::canonical_sha256(&expected_hashes).map_err(|e| e.to_string())?;
     let summary = json!({
         "schema": "okx.k9.native-research/v1",
         "scope": "running_agent_research_kernel; source_and_transport_latency_not_included",
@@ -213,10 +216,8 @@ async fn run_grid(
         async move {
             let hash = cpu
                 .run(token, move |signal| {
-                    replay::grid(&bars, &spec, &variants, &|| {
-                        signal.load(Ordering::Acquire)
-                    })
-                    .map(|grid| grid.test.hash)
+                    replay::grid(&bars, &spec, &variants, &|| signal.load(Ordering::Acquire))
+                        .map(|grid| grid.test.hash)
                 })
                 .await?;
             Ok::<_, String>((index, hash))

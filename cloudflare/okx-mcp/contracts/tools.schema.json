@@ -158,7 +158,6 @@
             "type": "object",
             "properties": {
               "action": {
-                "type": "string",
                 "enum": [
                   "pause",
                   "resume"
@@ -511,7 +510,6 @@
             "type": "object",
             "properties": {
               "action": {
-                "type": "string",
                 "enum": [
                   "start",
                   "stop"
@@ -559,7 +557,6 @@
             "type": "object",
             "properties": {
               "action": {
-                "type": "string",
                 "enum": [
                   "screen",
                   "compare"
@@ -594,7 +591,6 @@
                 "type": "object",
                 "properties": {
                   "instrument_type": {
-                    "type": "string",
                     "enum": [
                       "SPOT",
                       "SWAP",
@@ -883,7 +879,6 @@
             "type": "object",
             "properties": {
               "action": {
-                "type": "string",
                 "enum": [
                   "backtest",
                   "grid"
@@ -922,7 +917,6 @@
                 "maximum": 9007199254740991
               },
               "strategy_id": {
-                "type": "string",
                 "enum": [
                   "ema_cross_v1"
                 ]
@@ -946,7 +940,6 @@
                     "maximum": 1000
                   },
                   "funding_mode": {
-                    "type": "string",
                     "enum": [
                       "observed",
                       "zero_assumption"
@@ -962,7 +955,6 @@
                 "additionalProperties": false
               },
               "data_mode": {
-                "type": "string",
                 "enum": [
                   "historical_observed",
                   "counterfactual"
@@ -1160,7 +1152,6 @@
                 "maximum": 50
               },
               "view": {
-                "type": "string",
                 "enum": [
                   "summary",
                   "trades",
@@ -1222,14 +1213,12 @@
                 "maximum": 9007199254740991
               },
               "range_mode": {
-                "type": "string",
                 "enum": [
                   "strict",
                   "normalize"
                 ]
               },
               "strategy_id": {
-                "type": "string",
                 "enum": [
                   "ema_cross_v1"
                 ]
@@ -1273,7 +1262,6 @@
                     "maximum": 1000
                   },
                   "funding_mode": {
-                    "type": "string",
                     "enum": [
                       "observed",
                       "zero_assumption"
@@ -1289,7 +1277,6 @@
                 "additionalProperties": false
               },
               "data_mode": {
-                "type": "string",
                 "enum": [
                   "counterfactual",
                   "historical_observed"
@@ -1326,7 +1313,6 @@
             "type": "object",
             "properties": {
               "action": {
-                "type": "string",
                 "enum": [
                   "summary",
                   "history"
@@ -1413,7 +1399,6 @@
                       "maxLength": 64
                     },
                     "side": {
-                      "type": "string",
                       "enum": [
                         "long",
                         "short"
@@ -1580,7 +1565,6 @@
             "maxLength": 128
           },
           "operation": {
-            "type": "string",
             "enum": [
               "open",
               "add",
@@ -1600,7 +1584,6 @@
             "maxLength": 64
           },
           "side": {
-            "type": "string",
             "enum": [
               "long",
               "short"
@@ -1653,7 +1636,6 @@
             "type": "object",
             "properties": {
               "type": {
-                "type": "string",
                 "enum": [
                   "limit",
                   "market",
@@ -1774,7 +1756,6 @@
             "pattern": "^[A-Za-z0-9_-]+$"
           },
           "operation": {
-            "type": "string",
             "enum": [
               "open",
               "add",
@@ -1794,7 +1775,6 @@
             "maxLength": 64
           },
           "side": {
-            "type": "string",
             "enum": [
               "long",
               "short"
@@ -1847,7 +1827,6 @@
             "type": "object",
             "properties": {
               "type": {
-                "type": "string",
                 "enum": [
                   "limit",
                   "market",
