@@ -801,6 +801,22 @@ mod tests {
         }
     }
     #[test]
+    fn c20_rolling_mean_reuses_existing_market_pipeline_without_new_routing() {
+        let query = request(vec!["rolling_mean"]);
+        assert!(query.valid());
+        let plan =
+            planner::AnalysisPlan::build(&query.fields, query.start_ms, query.end_ms).unwrap();
+        assert_eq!(plan.sources, std::collections::BTreeSet::from(["candles"]));
+        let response = compute_row(row(), &query, None).unwrap();
+        assert_eq!(response["units"]["rolling_mean"], "price");
+        assert!(response["metrics"]["rolling_mean"].is_number());
+        let mut missing = row();
+        missing.bars = Ok(Arc::new(Vec::new()));
+        let output = compute_row(missing, &query, None).unwrap();
+        assert_eq!(output["quality"], "partial");
+        assert!(output["metrics"]["rolling_mean"].is_null());
+    }
+    #[test]
     fn new_downside_operator_uses_existing_market_plan_and_projection() {
         let query = request(vec!["downside_volatility"]);
         assert!(query.valid());
