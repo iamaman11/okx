@@ -63,6 +63,7 @@ pub enum Operator {
     MaxDrawdown,
     PearsonCorrelation,
     Ema,
+    RollingMean,
     Atr,
     Rsi,
     SpreadBps,
@@ -81,6 +82,7 @@ pub const SUPPORTED_OPERATORS: &[Operator] = &[
     Operator::MaxDrawdown,
     Operator::PearsonCorrelation,
     Operator::Ema,
+    Operator::RollingMean,
     Operator::Atr,
     Operator::Rsi,
     Operator::SpreadBps,
@@ -103,7 +105,7 @@ pub fn registry(op: Operator) -> OperatorInfo {
         Returns | LogReturns | MaxDrawdown => (&["close"], "ratio"),
         RealizedVolatility | DownsideVolatility => (&["close"], "annualized_ratio"),
         PearsonCorrelation => (&["close", "peer_close"], "coefficient"),
-        Ema => (&["close"], "price"),
+        Ema | RollingMean => (&["close"], "price"),
         Atr => (&["high", "low", "close"], "price"),
         Rsi => (&["close"], "index"),
         SpreadBps => (&["bid", "ask"], "bps"),
@@ -271,6 +273,17 @@ pub fn scalar(
                     })
                     .collect::<Vec<_>>();
                 Some(tr[tr.len() - period..].iter().sum::<f64>() / period as f64)
+            }
+        }
+        RollingMean => {
+            if period == 0 || period > 1000 {
+                return Err("INVALID_PERIOD".into());
+            }
+            if n < period {
+                None
+            } else {
+                let tail = &close[n - period..];
+                Some(tail.iter().sum::<f64>() / period as f64)
             }
         }
         Rsi => {
@@ -581,5 +594,62 @@ mod dependency_fixtures {
             .unwrap(),
             Some(0.01)
         );
+    }
+}
+
+#[cfg(test)]
+mod c20_rolling_extension {
+    use super::*;
+
+    #[test]
+    fn c20_rolling_mean_new_operator_finite_and_causal() {
+        let candles = (1..=20).map(f64::from).collect::<Vec<_>>();
+        assert_eq!(
+            scalar(Operator::RollingMean, &candles, &[], &[], &[], 4, 60_000).unwrap(),
+            Some(18.5)
+        );
+        assert_eq!(
+            scalar(Operator::RollingMean, &candles[..3], &[], &[], &[], 4, 60_000).unwrap(),
+            None
+        );
+        assert_eq!(
+            scalar(Operator::RollingMean, &candles, &[], &[], &[], 0, 60_000)
+                .unwrap_err(),
+            "INVALID_PERIOD"
+        );
+        let mut invalid = candles.clone();
+        invalid[17] = f64::NAN;
+        assert_eq!(
+            scalar(Operator::RollingMean, &invalid, &[], &[], &[], 4, 60_000)
+                .unwrap_err(),
+            "NONFINITE_INPUT"
+        );
+    }
+
+    // C20 dry-run composition: new operator and existing causal strategy share
+    // the same closed-bar stream. No order port, exchange, finance or Worker.
+    #[test]
+    fn c20_strategy_composition_uses_closed_bars_and_fake_source() {
+        fn signals(closes: &[f64]) -> Vec<Option<i8>> {
+            let mut ema = EmaKernel::new(EmaParameters { fast: 2, slow: 5 }).unwrap();
+            let mut out = Vec::new();
+            for end in 1..=closes.len() {
+                let signal = ema.push_closed(closes[end - 1]).unwrap();
+                let rolling = scalar(Operator::RollingMean, &closes[..end], &[], &[], &[], 4, 60_000).unwrap();
+                let combined = match (signal, rolling) {
+                    (Some(1), Some(mean)) if closes[end-1] > mean => Some(1),
+                    (Some(-1), Some(mean)) if closes[end-1] < mean => Some(-1),
+                    (Some(_), Some(_)) => Some(0),
+                    _ => None,
+                };
+                out.push(combined);
+            }
+            out
+        }
+        let synthetic_closed_candles = vec![10., 11., 12., 13., 14., 15., 14., 13., 12., 11., 12., 13.];
+        let first = signals(&synthetic_closed_candles[..8]);
+        let full = signals(&synthetic_closed_candles);
+        assert_eq!(first, full[..8], "later candles must not modify prior signals");
+        assert!(full.iter().any(Option::is_some), "composition must produce typed decisions");
     }
 }

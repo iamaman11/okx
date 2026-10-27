@@ -171,6 +171,7 @@ impl QueryPlan {
             sources.extend(inputs.iter().map(|i| i.source));
             let warmup = match op {
                 Operator::Ema => parameters.get("ema_period").copied().unwrap_or(14.0) as u64,
+                Operator::RollingMean => 14,
                 Operator::Atr => parameters.get("atr_period").copied().unwrap_or(14.0) as u64,
                 Operator::Rsi => parameters.get("rsi_period").copied().unwrap_or(14.0) as u64,
                 Operator::PearsonCorrelation => 30,
@@ -286,5 +287,25 @@ mod tests {
             .unwrap_err(),
             "ranking.operator:NOT_PROJECTED"
         );
+    }
+}
+
+#[cfg(test)]
+mod c20_query_plan_extension {
+    use super::*;
+
+    #[test]
+    fn rolling_mean_descriptor_is_routed_without_finance_or_venue_dependency() {
+        let plan = QueryPlan::compile(
+            vec!["BTC-USDT-SWAP".into()],
+            ClosedRange::strict(0, 20 * 3_600_000, 3_600_000).unwrap(),
+            vec![Operator::RollingMean],
+            BTreeMap::new(), Vec::new(), None,
+        ).unwrap();
+        assert_eq!(plan.sources, vec![Source::Candles]);
+        assert_eq!(plan.operators[0].output_unit, Unit::Price);
+        assert_eq!(plan.operators[0].warmup_bars, 14);
+        assert_eq!(plan.operators[0].null_policy, "propagate_missing");
+        assert!(plan.operators[0].deterministic);
     }
 }
