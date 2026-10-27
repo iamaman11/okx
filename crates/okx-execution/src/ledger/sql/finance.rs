@@ -133,7 +133,8 @@ impl AccountStore {
             (
                 String::from("unattributed"),
                 None,
-                Decimal::ZERO.checked_sub(request.delta_usd)
+                Decimal::ZERO
+                    .checked_sub(request.delta_usd)
                     .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))?,
             ),
         ] {

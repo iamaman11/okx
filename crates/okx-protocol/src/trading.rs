@@ -413,10 +413,18 @@ impl StrategyRequest {
             Self::List {} => true,
             Self::Status { instance_id } => name(instance_id),
             Self::CapitalAssign {
-                idempotency_key, instance_id, amount_usd, expected_authority_revision, ..
-            } => id(idempotency_key) && name(instance_id)
-                && instance_id != "manual" && decimal(amount_usd)
-                && *expected_authority_revision>0,
+                idempotency_key,
+                instance_id,
+                amount_usd,
+                expected_authority_revision,
+                ..
+            } => {
+                id(idempotency_key)
+                    && name(instance_id)
+                    && instance_id != "manual"
+                    && decimal(amount_usd)
+                    && *expected_authority_revision > 0
+            }
             Self::Start {
                 idempotency_key,
                 instance_id,
@@ -508,27 +516,35 @@ mod tests {
     }
 }
 
-
 #[cfg(test)]
 mod capital_assignment_tests {
     use super::*;
     #[test]
     fn capital_assignment_is_strict_and_never_manual_nav() {
-        let input=r#"{"action":"capital_assign","idempotency_key":"capital_assignment_01","instance_id":"ema","direction":"assign","amount_usd":"10.25","expected_authority_revision":1}"#;
-        let request:StrategyRequest=serde_json::from_str(input).unwrap();
+        let input = r#"{"action":"capital_assign","idempotency_key":"capital_assignment_01","instance_id":"ema","direction":"assign","amount_usd":"10.25","expected_authority_revision":1}"#;
+        let request: StrategyRequest = serde_json::from_str(input).unwrap();
         assert!(request.valid());
-        let release=input.replace("\"assign\"","\"release\"");
-        assert!(serde_json::from_str::<StrategyRequest>(&release).unwrap().valid());
+        let release = input.replace("\"assign\"", "\"release\"");
+        assert!(
+            serde_json::from_str::<StrategyRequest>(&release)
+                .unwrap()
+                .valid()
+        );
         for bad in [
-            input.replace("\"10.25\"","\"0\""),
-            input.replace("\"10.25\"","\"-1\""),
-            input.replace("\"ema\"","\"manual\""),
-            input.replace("revision\":1","revision\":0"),
+            input.replace("\"10.25\"", "\"0\""),
+            input.replace("\"10.25\"", "\"-1\""),
+            input.replace("\"ema\"", "\"manual\""),
+            input.replace("revision\":1", "revision\":0"),
         ] {
-            assert!(!serde_json::from_str::<StrategyRequest>(&bad).unwrap().valid());
+            assert!(
+                !serde_json::from_str::<StrategyRequest>(&bad)
+                    .unwrap()
+                    .valid()
+            );
         }
-        assert!(serde_json::from_str::<StrategyRequest>(
-            &input.replace("\"assign\"","\"unverified\"")
-        ).is_err());
+        assert!(
+            serde_json::from_str::<StrategyRequest>(&input.replace("\"assign\"", "\"unverified\""))
+                .is_err()
+        );
     }
 }

@@ -3099,9 +3099,9 @@ fn p02_account_backed_internal_capital_is_conserved_and_not_strategy_nav() {
     owned_fill(&mut s, "b", "p02-b", 100, "long", 4);
     let assignment =
         |key: &str, instance: &str, delta: i64, time: i64| AuthorizedCapitalAssignment {
-            account_key:"okx:real:verified".into(),
-            installation_id:"installation".into(),
-            nav_source_ref:"authenticated-flat".into(),
+            account_key: "okx:real:verified".into(),
+            installation_id: "installation".into(),
+            nav_source_ref: "authenticated-flat".into(),
             operation_id: key.into(),
             request_hash: format!("hash:{key}"),
             instance_id: instance.into(),
@@ -3205,9 +3205,9 @@ fn p02_internal_capital_rejects_incomplete_or_stale_account_nav() {
     let mut s = store();
     owned_fill(&mut s, "a", "p02-a2", 100, "long", 3);
     let a = AuthorizedCapitalAssignment {
-        account_key:"okx:real:verified".into(),
-        installation_id:"installation".into(),
-        nav_source_ref:"authenticated-flat".into(),
+        account_key: "okx:real:verified".into(),
+        installation_id: "installation".into(),
+        nav_source_ref: "authenticated-flat".into(),
         operation_id: "capital-stale".into(),
         request_hash: "hash-stale".into(),
         instance_id: "a".into(),
@@ -3245,73 +3245,99 @@ fn p02_internal_capital_rejects_incomplete_or_stale_account_nav() {
     ));
 }
 
-
 #[test]
 fn p02_capital_is_isolated_per_account_and_identity_bound() {
-    let mut a=store();
-    owned_fill(&mut a,"isolation","a-isolated",100,"long",3);
-    let second_meta=AccountMeta{
-        initialize_operation_id:"connect-demo".into(),
-        release_id:"release-demo".into(),
-        account_key:"okx:demo:independent".into(),
-        installation_id:"installation-demo".into(),
-        initialized_at:1,
-        opening_source:"authenticated-demo-flat".into(),
+    let mut a = store();
+    owned_fill(&mut a, "isolation", "a-isolated", 100, "long", 3);
+    let second_meta = AccountMeta {
+        initialize_operation_id: "connect-demo".into(),
+        release_id: "release-demo".into(),
+        account_key: "okx:demo:independent".into(),
+        installation_id: "installation-demo".into(),
+        initialized_at: 1,
+        opening_source: "authenticated-demo-flat".into(),
     };
-    let second_snapshot=OpeningSnapshot{
-        opening_equity_usd:Decimal::from(50),
-        source_ref:second_meta.opening_source.clone(),
-        observed_at:1,
-        positions:0,orders:0,conditional_orders:0,
-        liabilities:Decimal::ZERO,
-        balances:vec![("USDT".into(),Decimal::from(50))],
+    let second_snapshot = OpeningSnapshot {
+        opening_equity_usd: Decimal::from(50),
+        source_ref: second_meta.opening_source.clone(),
+        observed_at: 1,
+        positions: 0,
+        orders: 0,
+        conditional_orders: 0,
+        liabilities: Decimal::ZERO,
+        balances: vec![("USDT".into(), Decimal::from(50))],
     };
-    let mut b=AccountStore::initialize_flat(path(),second_meta.clone(),&second_snapshot).unwrap();
-    b.apply_authority_policy(1,false,"campaign-demo",Decimal::from(20)).unwrap();
+    let mut b =
+        AccountStore::initialize_flat(path(), second_meta.clone(), &second_snapshot).unwrap();
+    b.apply_authority_policy(1, false, "campaign-demo", Decimal::from(20))
+        .unwrap();
     b.ensure_manual_instance(1).unwrap();
-    owned_fill(&mut b,"isolation","b-isolated",100,"long",3);
-    let input=AuthorizedCapitalAssignment{
-        account_key:a.meta().account_key.clone(),
-        installation_id:a.meta().installation_id.clone(),
-        nav_source_ref:a.meta().opening_source.clone(),
-        operation_id:"cross-account-proof".into(),
-        request_hash:"account-a-hash".into(),
-        instance_id:"isolation".into(),
-        delta_usd:Decimal::from(20),
-        authority_revision:1,
-        authority_receipt:"authorized-account-a".into(),
-        time:4,
+    owned_fill(&mut b, "isolation", "b-isolated", 100, "long", 3);
+    let input = AuthorizedCapitalAssignment {
+        account_key: a.meta().account_key.clone(),
+        installation_id: a.meta().installation_id.clone(),
+        nav_source_ref: a.meta().opening_source.clone(),
+        operation_id: "cross-account-proof".into(),
+        request_hash: "account-a-hash".into(),
+        instance_id: "isolation".into(),
+        delta_usd: Decimal::from(20),
+        authority_revision: 1,
+        authority_receipt: "authorized-account-a".into(),
+        time: 4,
     };
     a.commit_authorized_capital_assignment(&input).unwrap();
     assert!(matches!(
         b.commit_authorized_capital_assignment(&input),
         Err(StoreError::Invalid("INVALID_CAPITAL_ASSIGNMENT"))
     ));
-    let other=AuthorizedCapitalAssignment{
-        account_key:second_meta.account_key.clone(),
-        installation_id:second_meta.installation_id.clone(),
-        nav_source_ref:second_meta.opening_source.clone(),
-        operation_id:"demo-capital-assignment".into(),
-        request_hash:"account-b-hash".into(),
-        instance_id:"isolation".into(),
-        delta_usd:Decimal::from(15),
-        authority_revision:1,
-        authority_receipt:"authorized-account-b".into(),
-        time:4,
+    let other = AuthorizedCapitalAssignment {
+        account_key: second_meta.account_key.clone(),
+        installation_id: second_meta.installation_id.clone(),
+        nav_source_ref: second_meta.opening_source.clone(),
+        operation_id: "demo-capital-assignment".into(),
+        request_hash: "account-b-hash".into(),
+        instance_id: "isolation".into(),
+        delta_usd: Decimal::from(15),
+        authority_revision: 1,
+        authority_receipt: "authorized-account-b".into(),
+        time: 4,
     };
     b.commit_authorized_capital_assignment(&other).unwrap();
-    assert_eq!(a.capital_state(4).unwrap().assigned_usd,Decimal::from(20));
-    assert_eq!(b.capital_state(4).unwrap().assigned_usd,Decimal::from(15));
-    assert_eq!(a.capital_state(4).unwrap().unattributed_residual_usd,Decimal::from(80));
-    assert_eq!(b.capital_state(4).unwrap().unattributed_residual_usd,Decimal::from(35));
-    assert_eq!(a.usd_component_total("INTERNAL_CAPITAL_USD").unwrap(),Decimal::ZERO);
-    assert_eq!(b.usd_component_total("INTERNAL_CAPITAL_USD").unwrap(),Decimal::ZERO);
-    assert_eq!(a.nav_summary(1,4,&["isolation".into()],&["USD".into()]).unwrap()[0].coverage,"PARTIAL");
-    assert_eq!(b.nav_summary(1,4,&["isolation".into()],&["USD".into()]).unwrap()[0].coverage,"PARTIAL");
-    let db=b.path.clone();
+    assert_eq!(a.capital_state(4).unwrap().assigned_usd, Decimal::from(20));
+    assert_eq!(b.capital_state(4).unwrap().assigned_usd, Decimal::from(15));
+    assert_eq!(
+        a.capital_state(4).unwrap().unattributed_residual_usd,
+        Decimal::from(80)
+    );
+    assert_eq!(
+        b.capital_state(4).unwrap().unattributed_residual_usd,
+        Decimal::from(35)
+    );
+    assert_eq!(
+        a.usd_component_total("INTERNAL_CAPITAL_USD").unwrap(),
+        Decimal::ZERO
+    );
+    assert_eq!(
+        b.usd_component_total("INTERNAL_CAPITAL_USD").unwrap(),
+        Decimal::ZERO
+    );
+    assert_eq!(
+        a.nav_summary(1, 4, &["isolation".into()], &["USD".into()])
+            .unwrap()[0]
+            .coverage,
+        "PARTIAL"
+    );
+    assert_eq!(
+        b.nav_summary(1, 4, &["isolation".into()], &["USD".into()])
+            .unwrap()[0]
+            .coverage,
+        "PARTIAL"
+    );
+    let db = b.path.clone();
     drop(b);
-    let b=AccountStore::open_existing(db,&second_meta.account_key,&second_meta.installation_id).unwrap();
-    assert_eq!(b.capital_state(4).unwrap().assigned_usd,Decimal::from(15));
+    let b = AccountStore::open_existing(db, &second_meta.account_key, &second_meta.installation_id)
+        .unwrap();
+    assert_eq!(b.capital_state(4).unwrap().assigned_usd, Decimal::from(15));
     assert!(matches!(
         b.commit_authorized_capital_assignment(&input),
         Err(StoreError::Invalid("INVALID_CAPITAL_ASSIGNMENT"))
