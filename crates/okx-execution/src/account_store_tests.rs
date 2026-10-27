@@ -357,9 +357,8 @@ fn allocation_and_bar_claim_survive_retry_and_restart() {
     let m = s.meta.clone();
     drop(s);
     let mut s = AccountStore::open_existing(p, &m.account_key, &m.installation_id).unwrap();
-    assert_eq!(
-        s.financial_risk(7, Some("a")).unwrap().nav_complete,
-        false,
+    assert!(
+        !s.financial_risk(7, Some("a")).unwrap().nav_complete,
         "restart must not restore fictitious strategy NAV",
     );
     // A budget-only revision retains the same immutable strategy
