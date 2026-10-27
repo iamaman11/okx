@@ -361,6 +361,27 @@ pub struct NavWindow {
     pub coverage: String,
 }
 
+/// A book allocation of existing account equity; not an OKX transfer and not a risk budget.
+/// The application authority boundary must authenticate this request before calling SQL.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuthorizedCapitalAssignment {
+    pub operation_id: String,
+    pub request_hash: String,
+    pub instance_id: String,
+    pub delta_usd: Decimal,
+    pub authority_revision: i64,
+    pub authority_receipt: String,
+    pub time: i64,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AccountCapitalState {
+    pub account_nav_usd: Decimal,
+    pub assigned_usd: Decimal,
+    pub unattributed_residual_usd: Decimal,
+    pub strategy_principal_usd: std::collections::BTreeMap<String, Decimal>,
+    pub nav_source_as_of: i64,
+}
+
 /// Connection stays on its owning blocking worker. It is never a network transaction.
 #[derive(Debug)]
 pub struct AccountStore {
