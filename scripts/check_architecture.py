@@ -161,7 +161,7 @@ def self_test() -> int:
     if must_find not in violations:
         print("self-test failed: K10 transitive adapter leak passed", file=sys.stderr)
         return 1
-    clean = {"okx-analysis": {"rust_decimal"}, "okx-research": {"okx-analysis"}}
+    clean = {"okx-kernel": {"serde"}, "okx-analysis": {"rust_decimal"}, "okx-research": {"okx-analysis"}}
     if pure_dependency_violations(clean):
         print("self-test failed: clean K10 pure graph rejected", file=sys.stderr)
         return 1
