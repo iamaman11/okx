@@ -64,6 +64,15 @@ impl TradeService {
             let operation_hash=request_hash.clone();
             let observed_at=now();
             let result=r.execution.store.call(deadline(),move |s| {
+                // Immutable receipt survives snapshot outages and reruns.
+                if let Some(prior)=s.operation(&idempotency_key)? {
+                    if prior.kind!="CAPITAL_ASSIGNMENT" || prior.request_hash!=operation_hash {
+                        return Err(okx_execution::StoreError::Invalid("IDEMPOTENCY_CONFLICT"));
+                    }
+                    let capital=s.capital_state(observed_at).ok();
+                    let coverage=if capital.is_some() { "COMPLETE" } else { "PARTIAL" };
+                    return Ok(json!({"receipt":prior,"capital":capital,"capital_coverage":coverage}));
+                }
                 let source=s.capital_state(observed_at)?.nav_source_ref;
                 let authorized=okx_execution::AuthorizedCapitalAssignment {
                     account_key,
@@ -79,7 +88,7 @@ impl TradeService {
                 };
                 let receipt=s.commit_authorized_capital_assignment(&authorized)?;
                 let capital=s.capital_state(observed_at)?;
-                Ok(json!({"receipt":receipt,"capital":capital}))
+                Ok(json!({"receipt":receipt,"capital":capital,"capital_coverage":"COMPLETE"}))
             }).await.map_err(err)?;
             return Ok(completed(result));
         }

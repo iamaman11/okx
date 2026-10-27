@@ -73,10 +73,28 @@ const TRADE_NOTES:Record<string,{description:string;readOnlyHint:boolean;destruc
 const annotation=(meta:{readOnlyHint:boolean;destructiveHint:boolean})=>({
  readOnlyHint:meta.readOnlyHint,destructiveHint:meta.destructiveHint,openWorldHint:false
 });
+// Deduplicate only the exact, positive-decimal schema in public tools/list.
+// Internal validation retains the fully expanded ACTION_SCHEMAS, including
+// all limits; standard JSON Schema $defs keeps external contracts identical.
+function publicSchema(schema:Schema):Schema {
+ let repeats=0;
+ const factor=(node:any):any=>{
+  if(Array.isArray(node))return node.map(factor);
+  if(node&&typeof node==='object'){
+   if(node.type==='string'&&node.pattern===money.pattern&&Object.keys(node).length===2){
+    repeats++;return {$ref:'#/$defs/positiveDecimal'};
+   }
+   return Object.fromEntries(Object.entries(node).map(([k,v])=>[k,factor(v)]));
+  }
+  return node;
+ };
+ const normalized=factor(schema);
+ return repeats>=2?{...normalized,$defs:{positiveDecimal:money}}:schema;
+}
 export const PUBLIC_TOOLS:Json[]=[
  ...Object.entries(ACTION_SCHEMAS).filter(([name])=>name!=='trade')
    .map(([name,schemas])=>({name,description:TOOL_NOTES[name].description,
-     inputSchema:{oneOf:schemas},annotations:annotation(TOOL_NOTES[name])})),
+     inputSchema:publicSchema({oneOf:schemas}),annotations:annotation(TOOL_NOTES[name])})),
  ...ACTION_SCHEMAS.trade.map(schema=>{
    const scopedAction=String(schema.properties.action.const);
    const {action:_action,...properties}=schema.properties;
@@ -85,7 +103,7 @@ export const PUBLIC_TOOLS:Json[]=[
    const inputSchema={...schema,properties,
      required:(schema.required as string[]).filter(k=>k!=='action')};
    return {name:'trade.'+scopedAction,description:TRADE_NOTES[scopedAction].description,
-     inputSchema,annotations:annotation(TRADE_NOTES[scopedAction])};
+     inputSchema:publicSchema(inputSchema),annotations:annotation(TRADE_NOTES[scopedAction])};
  })
 ];
 export function matches(s:Schema,v:unknown):boolean {
