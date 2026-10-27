@@ -97,14 +97,17 @@ const manualSummary:any=portfolioEnvelope([accountRow,manualRow]);
 if(manualSummary.status!=='completed'||manualSummary.quality!=='complete'||
  manualSummary.data.rows.length!==2||manualSummary.data.rows[1].window.current_equity!==null)
  throw Error('P0.2 manual account-capital label incorrectly degrades complete portfolio');
+// The Rust finance owner marks incomplete sources PARTIAL. The Worker
+// must never upgrade that evidence, including for a manual-shaped row.
 for(const unknown of [
- {...manualRow,capital_scope:'strategy'},
- {...manualRow,additive_with_account_nav:true},
- {...manualRow,coverage_reason:'STRATEGY_CAPITAL_PROVENANCE_MISSING'},
- {...manualRow,window:{...manualWindow,current_equity:'10'}},
  {...manualRow,window:{...manualWindow,coverage:'PARTIAL'}},
+ {...manualRow,capital_scope:'strategy',window:{...manualWindow,coverage:'PARTIAL'}},
+ {...manualRow,additive_with_account_nav:true,window:{...manualWindow,coverage:'PARTIAL'}},
+ {...manualRow,coverage_reason:'STRATEGY_CAPITAL_PROVENANCE_MISSING',
+  window:{...manualWindow,coverage:'PARTIAL'}},
+ {...manualRow,window:{...manualWindow,coverage:'PARTIAL',current_equity:'10'}},
  {kind:'nav',capital_scope:'strategy',coverage_reason:'STRATEGY_CAPITAL_PROVENANCE_MISSING',
-  window:{...manualWindow,scope_id:'strategy:ema_cross'}},
+  window:{...manualWindow,coverage:'PARTIAL',scope_id:'strategy:ema_cross'}},
 ]){
  const response:any=portfolioEnvelope([accountRow,unknown]);
  if(response.status!=='partial'||response.quality!=='partial')
