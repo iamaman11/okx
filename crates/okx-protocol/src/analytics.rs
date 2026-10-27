@@ -135,6 +135,10 @@ pub enum ResearchResultView {
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ResearchRequest {
     Capabilities {},
+    /// Read-only, opt-in K9 acceptance performed by this same running Agent.
+    Benchmark {
+        idempotency_key: String,
+    },
     Validate {
         instruments: Vec<String>,
         timeframe_ms: u64,
@@ -267,6 +271,12 @@ impl ResearchRequest {
     pub fn valid(&self) -> bool {
         match self {
             Self::Capabilities {} => true,
+            Self::Benchmark { idempotency_key } => {
+                (8..=128).contains(&idempotency_key.len())
+                    && idempotency_key
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+            }
             Self::Validate {
                 instruments,
                 timeframe_ms,

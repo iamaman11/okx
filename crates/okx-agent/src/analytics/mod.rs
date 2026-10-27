@@ -1,3 +1,4 @@
+mod benchmark;
 mod budget;
 pub mod cache;
 mod cursor;
@@ -610,6 +611,38 @@ impl AnalyticsService {
             "code_version":value.get("code_version"),
             "result_hash":value.get("hash")
         });
+        // A batch summary is a compact overview, NOT a trade-page of bulky
+        // per-instrument grid payloads. Drill down via an instrument cursor.
+        if matches!(view, ResearchResultView::Summary) && value.get("instruments").is_some() {
+            if cursor.is_some() {
+                return Err("INVALID_CURSOR".into());
+            }
+            let items = value["instruments"]
+                .as_array()
+                .ok_or("RESULT_MANIFEST_INVALID")?;
+            let rows = items
+                .iter()
+                .map(|row| {
+                    json!({
+                        "index": row.get("index"),
+                        "instrument": row.get("instrument"),
+                        "state": row.get("state"),
+                        "reason_code": row.get("reason_code"),
+                        "artifact": row.get("artifact"),
+                        "dataset_hash": row.get("dataset_hash"),
+                        "trades_cursor": row.get("trades_cursor")
+                    })
+                })
+                .collect::<Vec<_>>();
+            return Ok(json!({
+                "view": "summary",
+                "metadata": metadata,
+                "rows": rows,
+                "total_rows": rows.len(),
+                "returned_rows": rows.len(),
+                "next_cursor": null
+            }));
+        }
         if matches!(view, ResearchResultView::Summary) && value.get("instruments").is_none() {
             if cursor.is_some() {
                 return Err("INVALID_CURSOR".into());
@@ -767,7 +800,8 @@ impl AnalyticsService {
             }
             | ResearchRequest::Grid {
                 idempotency_key, ..
-            } => idempotency_key.clone(),
+            }
+            | ResearchRequest::Benchmark { idempotency_key } => idempotency_key.clone(),
             _ => return Err("INVALID_JOB_REQUEST".into()),
         };
         let (job, new, cancel) = self.jobs.enqueue_async(key, hash.clone()).await?;
@@ -796,6 +830,9 @@ impl AnalyticsService {
                         return Err("CANCELLED".into()),
                 };
                 this.jobs.update_async(hash.clone(), jobs::State::Running, None, None).await?;
+                if matches!(request, ResearchRequest::Benchmark { .. }) {
+                    return benchmark::run(this.cpu.clone(), this.artifacts.clone(), cancel.clone()).await;
+                }
                 let instruments = match &request { ResearchRequest::Backtest{instruments,..}|ResearchRequest::Grid{instruments,..}=>instruments.clone(),_=>unreachable!() };
                 if instruments.len()==1 { return this.execute_one(request,cancel.clone()).await; }
                 let mut work=stream::iter(instruments.into_iter().enumerate().map(|(index,instrument)|{
@@ -2184,5 +2221,59 @@ mod research_capabilities_contract {
             "HISTORICAL_RULES_AND_FEES_UNAVAILABLE"
         );
         assert_eq!(report["limits"]["max_grid_variants"], 64);
+    }
+}
+
+#[cfg(test)]
+mod compact_batch_summary_tests {
+    use super::*;
+
+    #[test]
+    fn batch_summary_excludes_bulky_per_instrument_grid_and_preserves_cursor() {
+        let (root, service) = super::artifact_job_fixtures::service();
+        let row = json!({
+            "index": 0,
+            "instrument": "BTC-USDT-SWAP",
+            "state": "completed",
+            "artifact": "sha256:fixture",
+            "trades_cursor": "instrument:0:0",
+            "summary": {"bulky_grid": "x".repeat(12_000)}
+        });
+        let page_id = service
+            .artifacts
+            .publish_evidence(&vec![row.clone()])
+            .unwrap()
+            .0;
+        let result_id = service
+            .artifacts
+            .publish_evidence(&json!({
+                "kind": "research_batch",
+                "instruments": [row],
+                "row_pages": [page_id],
+                "total_rows": 1,
+                "summary": {"quality": "complete", "completed": 1, "failed": 0}
+            }))
+            .unwrap()
+            .0;
+        let (job, new, _) = service
+            .jobs
+            .enqueue("k9-batch-summary-fixture".into(), "b".repeat(64))
+            .unwrap();
+        assert!(new);
+        service
+            .jobs
+            .update(&job.id, jobs::State::Completed, Some(result_id), None)
+            .unwrap();
+        let summary = service
+            .result_page(job.id, None, 1, ResearchResultView::Summary)
+            .unwrap();
+        assert_eq!(summary["view"], "summary");
+        assert_eq!(summary["rows"][0]["state"], "completed");
+        assert_eq!(summary["rows"][0]["trades_cursor"], "instrument:0:0");
+        assert_eq!(summary["returned_rows"], 1);
+        assert!(!summary.to_string().contains("bulky_grid"));
+        assert!(summary.to_string().len() < 6500);
+        drop(service);
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

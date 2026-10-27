@@ -663,6 +663,28 @@
   },
   {
     "tool": "research",
+    "action": "benchmark",
+    "positive": {
+      "action": "benchmark",
+      "idempotency_key": "command_0001"
+    },
+    "negative": [
+      {
+        "action": "benchmark",
+        "idempotency_key": "command_0001",
+        "raw_rpc": "forbidden"
+      },
+      {
+        "idempotency_key": "command_0001"
+      },
+      {
+        "action": 12,
+        "idempotency_key": "command_0001"
+      }
+    ]
+  },
+  {
+    "tool": "research",
     "action": "status",
     "positive": {
       "action": "status",

@@ -8,7 +8,7 @@ pub struct CpuExecutor {
     cpu: Arc<Semaphore>,
     queue: Arc<Semaphore>,
 }
-fn cpu_worker_budget(logical_cores: usize) -> usize {
+pub(super) fn cpu_worker_budget(logical_cores: usize) -> usize {
     logical_cores.saturating_sub(2).max(1)
 }
 impl Default for CpuExecutor {

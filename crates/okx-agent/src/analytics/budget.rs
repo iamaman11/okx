@@ -10,6 +10,10 @@ const ESTIMATED_BYTES_PER_INSTRUMENT: u64 = 16 * MIB;
 const ESTIMATED_BYTES_PER_VARIANT: u64 = 64 * 1024;
 
 pub fn estimated_mib(request: &ResearchRequest) -> Result<u32, String> {
+    // Fixed K9 replay uses the SAME batch admission and CPU ownership as Grid.
+    if matches!(request, ResearchRequest::Benchmark { .. }) {
+        return Ok(3072);
+    }
     let (instruments, start_ms, end_ms, timeframe_ms, variant_count) = match request {
         ResearchRequest::Backtest {
             instruments,
