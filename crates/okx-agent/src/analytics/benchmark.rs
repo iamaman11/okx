@@ -159,6 +159,10 @@ pub(super) async fn run(
         .and_then(|row| row["p50_ms"].as_f64());
     let result_hash =
         okx_research::canonical_sha256(&expected_hashes).map_err(|e| e.to_string())?;
+    let profiles_not_evaluated = [1usize, 4, 8]
+        .into_iter()
+        .filter(|n| *n > cpu_workers)
+        .collect::<Vec<_>>();
     let summary = json!({
         "schema": "okx.k9.native-research/v1",
         "scope": "running_agent_research_kernel; source_and_transport_latency_not_included",
@@ -178,8 +182,7 @@ pub(super) async fn run(
         "result_hash": result_hash,
         "profiles": profile_rows,
         "median_speedup_4_vs_1": four_median.map(|four| one_median / four),
-        "profiles_not_evaluated": [1usize, 4, 8].into_iter()
-            .filter(|n| *n > cpu_workers).collect::<Vec<_>>(),
+        "profiles_not_evaluated": profiles_not_evaluated,
         "full_k9_slo_status": "NOT_EVALUATED_MCP_AND_FINANCE_UNDER_LOAD",
         "side_effects": "research_sqlite_job_and_immutable_artifact_only"
     });
