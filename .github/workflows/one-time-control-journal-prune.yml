@@ -1,0 +1,112 @@
+name: One-time authorized cleanup of CONTROL issue 12
+on:
+  push:
+    branches:
+      - maintenance/control-issue12-journal-prune-20261027
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  prune-old-acknowledged-requests:
+    if: github.repository == 'iamaman11/okx' && github.ref == 'refs/heads/maintenance/control-issue12-journal-prune-20261027'
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Collect issue 12 and prove exactly which historical requests are terminal
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh api --paginate --slurp "repos/iamaman11/okx/issues/12/comments?per_page=100" > "$RUNNER_TEMP/issue12-pages.json"
+          gh api "repos/iamaman11/okx/issues/12" > "$RUNNER_TEMP/issue12-metadata.json"
+          python3 - <<'PY'
+          import hashlib, json, os, pathlib
+          root=pathlib.Path(os.environ["RUNNER_TEMP"])
+          pages=json.loads((root/"issue12-pages.json").read_text())
+          all_comments=[comment for page in pages for comment in page]
+          issue=json.loads((root/"issue12-metadata.json").read_text())
+          assert issue["number"] == 12 and issue["state"] == "open"
+          assert len(all_comments) == issue["comments"], "JOURNAL_CHANGED_DURING_PREFLIGHT"
+          assert len(all_comments) >= 2000, "JOURNAL_NOT_NEAR_CAPACITY"
+          def decode(row):
+              try: return json.loads(row.get("body") or "")
+              except (ValueError, TypeError): return {}
+          results={}
+          for row in all_comments:
+              payload=decode(row)
+              if payload.get("schema") == "okx.windows.control.result/v1" and payload.get("request_id"):
+                  results[payload["request_id"]]=row
+          pending_id="ctl_k9k10_deploy_20261027_a"
+          pending=[row for row in all_comments if decode(row).get("request_id")==pending_id]
+          assert len(pending) == 1 and decode(pending[0])["schema"]=="okx.windows.control/v1", "PENDING_REQUEST_NOT_UNIQUE"
+          assert pending_id not in results, "PENDING_REQUEST_NOW_TERMINAL_INSPECT_FIRST"
+          old=[]
+          for row in all_comments:
+              payload=decode(row)
+              reply=results.get(payload.get("request_id"))
+              if (row["user"]["id"]==44100369
+                  and row["created_at"] < "2026-10-26T00:00:00Z"
+                  and payload.get("schema")=="okx.windows.control/v1"
+                  and reply is not None
+                  and decode(reply).get("operation")==payload.get("operation")):
+                  old.append({"request":row,"receipt":reply})
+          # Keep all terminal receipts. Retire only owner-authored OLD completed requests.
+          selected=old[:min(1200,len(old))]
+          assert len(selected)>=700, f"NOT_ENOUGH_SAFE_COMPLETED_REQUESTS:{len(selected)}"
+          archive={"schema":"okx.control.issue12.terminal-requests-archive/v1",
+                   "issue":12,"original_count":len(all_comments),
+                   "deleted_request_count":len(selected),"entries":selected}
+          data=json.dumps(archive,sort_keys=True,ensure_ascii=False,indent=2).encode("utf-8")
+          (root/"issue12-retired-requests.json").write_bytes(data)
+          sha=hashlib.sha256(data).hexdigest()
+          plan={"schema":"okx.control.issue12.cleanup-plan/v1",
+                "original_count":len(all_comments),
+                "archive_sha256":sha,
+                "delete_ids":[r["request"]["id"] for r in selected]}
+          (root/"issue12-cleanup-plan.json").write_text(json.dumps(plan,indent=2))
+          print(f"SAFE_CANDIDATES={len(old)}, SELECTED={len(selected)}, ARCHIVE_SHA256={sha}")
+          PY
+
+      - name: Archive source requests and matching receipts BEFORE deletion
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: control-issue12-terminal-requests-archive-20261027
+          path: |
+            ${{ runner.temp }}/issue12-retired-requests.json
+            ${{ runner.temp }}/issue12-cleanup-plan.json
+          retention-days: 90
+          if-no-files-found: error
+
+      - name: Retire only previously completed older request comments
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os, pathlib, subprocess, time
+          root=pathlib.Path(os.environ["RUNNER_TEMP"])
+          plan=json.loads((root/"issue12-cleanup-plan.json").read_text())
+          assert plan["schema"]=="okx.control.issue12.cleanup-plan/v1"
+          ids=plan["delete_ids"]
+          assert 700<=len(ids)<=1200 and len(set(ids))==len(ids)
+          for n,comment_id in enumerate(ids,1):
+              command=["gh","api","--method","DELETE",f"repos/iamaman11/okx/issues/comments/{comment_id}"]
+              for attempt in range(5):
+                  result=subprocess.run(command,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+                  if result.returncode==0: break
+                  if attempt==4: raise RuntimeError(f"DELETE_FAILED id={comment_id} after retries: {result.stderr[:180]}")
+                  time.sleep((3,8,16,28)[attempt])
+              if n%100==0:
+                  print(f"RETIRED={n}/{len(ids)}",flush=True)
+              time.sleep(0.85)  # respect GitHub mutation secondary-rate restrictions
+          print(f"RETIRED_TOTAL={len(ids)}",flush=True)
+          PY
+
+      - name: Verify issue 12 capacity restored
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh api "repos/iamaman11/okx/issues/12" --jq '.comments' | tee "$RUNNER_TEMP/remaining.txt"
+          test "$(cat "$RUNNER_TEMP/remaining.txt")" -lt 1800
+          echo "ISSUE_12_CONTROL_CHANNEL_CAPACITY_RESTORED=true" >> "$GITHUB_STEP_SUMMARY"
