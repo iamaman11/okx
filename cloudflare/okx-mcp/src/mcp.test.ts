@@ -78,6 +78,45 @@ console.log("mcp_queued_job_remains_accepted PASS");
 const partial:any=projectNativeResponse({schema:'okx.agent.response/v1',request_id:'req_native_partial',status:'completed',quality:'DEGRADED',warnings:[],result:{rows:[],quality:'partial'}});
 if(partial.status!=='partial'||partial.quality!=='partial')throw Error('partial native quality must remain partial');
 
+// P0.2: manual is an account-capital attribution label, not a second
+// independently funded strategy. Its empty non-additive row must not degrade
+// a verified account, but genuinely missing capital must stay partial.
+const manualWindow={scope_id:'strategy:manual',currency:'USD',coverage:'PARTIAL',
+ opening_equity:null,current_equity:null,flows:null,pnl:null,
+ opening_as_of:null,current_as_of:null};
+const manualRow={kind:'nav',capital_scope:'account',additive_with_account_nav:false,
+ coverage_reason:'MANUAL_USES_ACCOUNT_CAPITAL',window:manualWindow};
+const accountRow={kind:'nav',capital_scope:'account',additive_with_account_nav:false,
+ coverage_reason:null,window:{scope_id:'account',currency:'USD',coverage:'COMPLETE',
+ opening_equity:'100',current_equity:'100',flows:'0',pnl:'0',
+ opening_as_of:1,current_as_of:2}};
+const portfolioEnvelope=(rows:unknown[],quality='complete')=>projectNativeResponse({
+ schema:'okx.agent.response/v1',request_id:'req_finance_p02',status:'completed',
+ quality:'FRESH',warnings:[],result:{rows,quality,diagnostics:[]}});
+const manualSummary:any=portfolioEnvelope([accountRow,manualRow]);
+if(manualSummary.status!=='completed'||manualSummary.quality!=='complete'||
+ manualSummary.data.rows.length!==2||manualSummary.data.rows[1].window.current_equity!==null)
+ throw Error('P0.2 manual account-capital label incorrectly degrades complete portfolio');
+for(const unknown of [
+ {...manualRow,capital_scope:'strategy'},
+ {...manualRow,additive_with_account_nav:true},
+ {...manualRow,coverage_reason:'STRATEGY_CAPITAL_PROVENANCE_MISSING'},
+ {...manualRow,window:{...manualWindow,current_equity:'10'}},
+ {...manualRow,window:{...manualWindow,coverage:'UNAVAILABLE'}},
+ {kind:'nav',capital_scope:'strategy',coverage_reason:'STRATEGY_CAPITAL_PROVENANCE_MISSING',
+  window:{...manualWindow,scope_id:'strategy:ema_cross'}},
+]){
+ const response:any=portfolioEnvelope([accountRow,unknown]);
+ if(response.status!=='partial'||response.quality!=='partial')
+  throw Error('P0.2 unknown/duplicate strategy capital promoted to complete portfolio');
+}
+const missingAccount:any=portfolioEnvelope([{...accountRow,
+ window:{...accountRow.window,coverage:'PARTIAL'}},manualRow]);
+if(missingAccount.status!=='partial')throw Error('P0.2 manual label hid missing account capital');
+const markedPartial:any=portfolioEnvelope([accountRow,manualRow],'partial');
+if(markedPartial.status!=='partial')throw Error('P0.2 authoritative partial quality overruled by manual');
+console.log('mcp_finance_manual_is_account_capital_without_false_partial PASS');
+
 const oversized='x'.repeat(13_000);
 const budgetEnv:any={RUNTIME:{idFromName:()=>0,get:()=>({fetch:async()=>Response.json({schema:'okx.agent.response/v1',request_id:'req_native_large',status:'completed',quality:'FRESH',warnings:[],result:{rows:[oversized]}})})}};
 const budget:any=await(await mcpApi.fetch(new Request('https://fixture/mcp',{method:'POST',body:JSON.stringify({id:3,method:'tools/call',params:{name:'market',arguments:payloadFixtures.find(x=>x.tool==='market')!.positive}})}),budgetEnv,ctx)).json();
