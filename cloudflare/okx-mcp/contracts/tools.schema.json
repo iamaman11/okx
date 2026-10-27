@@ -1080,6 +1080,25 @@
             "type": "object",
             "properties": {
               "action": {
+                "const": "benchmark"
+              },
+              "idempotency_key": {
+                "type": "string",
+                "minLength": 8,
+                "maxLength": 128,
+                "pattern": "^[A-Za-z0-9_-]+$"
+              }
+            },
+            "required": [
+              "action",
+              "idempotency_key"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "action": {
                 "const": "status"
               },
               "job_id": {

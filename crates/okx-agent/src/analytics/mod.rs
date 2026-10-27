@@ -1,3 +1,4 @@
+mod benchmark;
 mod budget;
 pub mod cache;
 mod cursor;
@@ -767,7 +768,8 @@ impl AnalyticsService {
             }
             | ResearchRequest::Grid {
                 idempotency_key, ..
-            } => idempotency_key.clone(),
+            }
+            | ResearchRequest::Benchmark { idempotency_key } => idempotency_key.clone(),
             _ => return Err("INVALID_JOB_REQUEST".into()),
         };
         let (job, new, cancel) = self.jobs.enqueue_async(key, hash.clone()).await?;
@@ -796,6 +798,9 @@ impl AnalyticsService {
                         return Err("CANCELLED".into()),
                 };
                 this.jobs.update_async(hash.clone(), jobs::State::Running, None, None).await?;
+                if matches!(request, ResearchRequest::Benchmark { .. }) {
+                    return benchmark::run(this.cpu.clone(), this.artifacts.clone(), cancel.clone()).await;
+                }
                 let instruments = match &request { ResearchRequest::Backtest{instruments,..}|ResearchRequest::Grid{instruments,..}=>instruments.clone(),_=>unreachable!() };
                 if instruments.len()==1 { return this.execute_one(request,cancel.clone()).await; }
                 let mut work=stream::iter(instruments.into_iter().enumerate().map(|(index,instrument)|{
