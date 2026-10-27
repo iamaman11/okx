@@ -73,6 +73,59 @@ def load_graph() -> dict[str, set[str]]:
     }
 
 
+# K10 target pure crates must be free of network/storage/runtime dependencies
+# even through workspace-local transitive edges. Report separately while existing
+# K10 migration is unfinished; the ordinary CI DAG check must stay honest.
+K10_TARGET_PURE = ("okx-analysis", "okx-research")
+K10_FORBIDDEN = {
+    "okx-api", "okx-ws", "okx-runtime", "okx-github",
+    "reqwest", "tokio", "rusqlite", "hyper", "axum", "tonic", "sqlx",
+}
+
+
+def pure_dependency_violations(
+    graph: dict[str, set[str]],
+    targets: tuple[str, ...] = K10_TARGET_PURE,
+) -> list[str]:
+    """Find the shortest actual dependency path to forbidden adapters/runtime."""
+    from collections import deque
+
+    errors = []
+    for target in targets:
+        if target not in graph:
+            errors.append(f"K10 missing pure crate: {target}")
+            continue
+        visited = {target}
+        queue = deque([(target, [target])])
+        while queue:
+            owner, path = queue.popleft()
+            for dep in sorted(graph.get(owner, ())):
+                next_path = path + [dep]
+                if dep in K10_FORBIDDEN:
+                    errors.append(f"K10 forbidden transitive dependency: {' -> '.join(next_path)}")
+                    continue
+                if dep in graph and dep not in visited:
+                    visited.add(dep)
+                    queue.append((dep, next_path))
+    return errors
+
+
+def load_complete_workspace_graph() -> dict[str, set[str]]:
+    # --no-deps still includes every workspace manifest's direct external
+    # requirements. Follow workspace edges recursively to catch adapter leaks.
+    raw = subprocess.check_output(
+        ["cargo", "metadata", "--no-deps", "--locked", "--format-version", "1"],
+        text=True,
+    )
+    metadata = json.loads(raw)
+    workspace_ids = set(metadata["workspace_members"])
+    return {
+        package["name"]: {dep["name"] for dep in package["dependencies"]}
+        for package in metadata["packages"]
+        if package["id"] in workspace_ids
+    }
+
+
 def self_test() -> int:
     accepted = {name: set(dependencies) for name, dependencies in ALLOWED.items()}
     if validate(accepted):
@@ -94,6 +147,22 @@ def self_test() -> int:
         print("self-test failed: forbidden reverse edge was not rejected", file=sys.stderr)
         return 1
 
+    fixture = {
+        "okx-analysis": {"okx-observation"},
+        "okx-observation": {"okx-api"},
+        "okx-api": {"reqwest", "tokio"},
+        "okx-research": {"okx-analysis"},
+    }
+    violations = pure_dependency_violations(fixture)
+    must_find = "K10 forbidden transitive dependency: okx-analysis -> okx-observation -> okx-api"
+    if must_find not in violations:
+        print("self-test failed: K10 transitive adapter leak passed", file=sys.stderr)
+        return 1
+    clean = {"okx-analysis": {"rust_decimal"}, "okx-research": {"okx-analysis"}}
+    if pure_dependency_violations(clean):
+        print("self-test failed: clean K10 pure graph rejected", file=sys.stderr)
+        return 1
+
     print("ARCHITECTURE_SELF_TEST=PASS")
     return 0
 
@@ -101,10 +170,20 @@ def self_test() -> int:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--self-test", action="store_true")
+    parser.add_argument("--k10-purity", action="store_true", help="strict transitive pure-crate acceptance; currently a blocking target")
     args = parser.parse_args()
 
     if args.self_test:
         return self_test()
+
+    if args.k10_purity:
+        errors = pure_dependency_violations(load_complete_workspace_graph())
+        if errors:
+            for error in errors:
+                print(error, file=sys.stderr)
+            return 1
+        print("K10_TRANSITIVE_PURITY=PASS")
+        return 0
 
     errors = validate(load_graph())
     if errors:
