@@ -387,7 +387,8 @@ impl AccountStore {
                     (SELECT COALESCE(MAX(rowid),0) FROM bills),
                     (SELECT COALESCE(MAX(rowid),0) FROM position_lots),
                     (SELECT COALESCE(MAX(rowid),0) FROM cash_flows)",
-                [], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
             )?;
         Ok(format!("f{finance}:x{fills}:b{bills}:p{lots}:c{flows}"))
     }
@@ -697,17 +698,31 @@ impl AccountStore {
                      AND currency='USD' AND time<=?1 ORDER BY time DESC,source_version DESC LIMIT 1",
                     [through],|r|Ok((r.get(0)?,r.get(1)?))
                 ).optional()?;
-                let strategy_source:Option<String>=if let Some((_,_,time,_))=current.as_ref() {
-                    self.connection.query_row(
-                        "SELECT mark_source FROM nav_points WHERE scope_id=?1 AND time=?2
+                let strategy_source: Option<String> =
+                    if let Some((_, _, time, _)) = current.as_ref() {
+                        self.connection
+                            .query_row(
+                                "SELECT mark_source FROM nav_points WHERE scope_id=?1 AND time=?2
                          AND source_version='strategy-reconciled-v1'",
-                        params![scope,time],|r|r.get(0)
-                    ).optional()?
-                } else {None};
-                account_latest.zip(strategy_source).is_some_and(|((time,source),witness)|
-                    current.as_ref().is_some_and(|row| row.2==time && source==witness))
-            } else {true};
-            let complete = account_source_matches && !valuation_gap
+                                params![scope, time],
+                                |r| r.get(0),
+                            )
+                            .optional()?
+                    } else {
+                        None
+                    };
+                account_latest
+                    .zip(strategy_source)
+                    .is_some_and(|((time, source), witness)| {
+                        current
+                            .as_ref()
+                            .is_some_and(|row| row.2 == time && source == witness)
+                    })
+            } else {
+                true
+            };
+            let complete = account_source_matches
+                && !valuation_gap
                 && opening
                     .as_ref()
                     .is_some_and(|v| v.3 == "COMPLETE" && from - v.2 <= 5000)

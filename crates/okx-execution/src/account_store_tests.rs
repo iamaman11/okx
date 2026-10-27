@@ -3889,63 +3889,109 @@ fn p02_two_accounts_two_strategies_fees_marks_restart_conserve_nav() {
     );
 }
 
-
 #[test]
 fn p02_strategy_nav_expires_on_new_zero_fee_fill_or_new_account_mark() {
-    let mut s=store();
-    let strategy=StrategyInstance{
-        instance_id:"witness".into(),definition_id:"fixture".into(),
-        definition_version:"1".into(),parameters:"{}".into(),enabled:false,
-        policy_revision:1,budget:Decimal::from(10),last_decision_key:None,
+    let mut s = store();
+    let strategy = StrategyInstance {
+        instance_id: "witness".into(),
+        definition_id: "fixture".into(),
+        definition_version: "1".into(),
+        parameters: "{}".into(),
+        enabled: false,
+        policy_revision: 1,
+        budget: Decimal::from(10),
+        last_decision_key: None,
     };
-    s.mutate_instance("witness-create","witness-hash","create",&strategy,None,2).unwrap();
-    s.commit_authorized_capital_assignment(&AuthorizedCapitalAssignment{
-        account_key:s.meta().account_key.clone(),
-        installation_id:s.meta().installation_id.clone(),
-        nav_source_ref:s.meta().opening_source.clone(),
-        operation_id:"witness-capital".into(),request_hash:"witness-capital-hash".into(),
-        instance_id:"witness".into(),delta_usd:Decimal::from(10),
-        authority_revision:1,authority_receipt:"governance".into(),time:3,
-    }).unwrap();
-    p02_completed_cursors(&mut s,4);
-    s.ingest_page(&IngestPage{
-        nav:vec![NavPoint{
-            scope_id:"account".into(),time:4,source_version:"witness-4".into(),
-            equity:Decimal::from(100),pnl:Decimal::ZERO,flows:Decimal::ZERO,
-            currency:"USD".into(),coverage:"COMPLETE".into(),mark_source:"mark-4".into()
-        }],..Default::default()
-    }).unwrap();
-    let witness=p02_valuation_witness(&s,4,"mark-4");
+    s.mutate_instance(
+        "witness-create",
+        "witness-hash",
+        "create",
+        &strategy,
+        None,
+        2,
+    )
+    .unwrap();
+    s.commit_authorized_capital_assignment(&AuthorizedCapitalAssignment {
+        account_key: s.meta().account_key.clone(),
+        installation_id: s.meta().installation_id.clone(),
+        nav_source_ref: s.meta().opening_source.clone(),
+        operation_id: "witness-capital".into(),
+        request_hash: "witness-capital-hash".into(),
+        instance_id: "witness".into(),
+        delta_usd: Decimal::from(10),
+        authority_revision: 1,
+        authority_receipt: "governance".into(),
+        time: 3,
+    })
+    .unwrap();
+    p02_completed_cursors(&mut s, 4);
+    s.ingest_page(&IngestPage {
+        nav: vec![NavPoint {
+            scope_id: "account".into(),
+            time: 4,
+            source_version: "witness-4".into(),
+            equity: Decimal::from(100),
+            pnl: Decimal::ZERO,
+            flows: Decimal::ZERO,
+            currency: "USD".into(),
+            coverage: "COMPLETE".into(),
+            mark_source: "mark-4".into(),
+        }],
+        ..Default::default()
+    })
+    .unwrap();
+    let witness = p02_valuation_witness(&s, 4, "mark-4");
     s.commit_reconciled_strategy_nav(&witness).unwrap();
-    let read=|s:&AccountStore,t|s.nav_summary(1,t,&["witness".into()],&["USD".into()])
-        .unwrap()[0].coverage.clone();
-    assert_eq!(read(&s,4),"COMPLETE");
-    let stable=s.strategy_valuation_revision().unwrap();
-    let finance_only=s.finance_revision().unwrap();
+    let read = |s: &AccountStore, t| {
+        s.nav_summary(1, t, &["witness".into()], &["USD".into()])
+            .unwrap()[0]
+            .coverage
+            .clone()
+    };
+    assert_eq!(read(&s, 4), "COMPLETE");
+    let stable = s.strategy_valuation_revision().unwrap();
+    let finance_only = s.finance_revision().unwrap();
     // A later mark-to-market witness changes economic NAV without a finance
     // entry. The old strategy witness must not remain current/COMPLETE.
-    s.ingest_page(&IngestPage{
-        nav:vec![NavPoint{
-            scope_id:"account".into(),time:5,source_version:"witness-5".into(),
-            equity:Decimal::from(101),pnl:Decimal::ONE,flows:Decimal::ZERO,
-            currency:"USD".into(),coverage:"COMPLETE".into(),mark_source:"mark-5".into()
-        }],..Default::default()
-    }).unwrap();
-    assert_eq!(s.strategy_valuation_revision().unwrap(),stable);
-    assert_eq!(read(&s,5),"PARTIAL");
-    assert_eq!(read(&s,4),"COMPLETE");
+    s.ingest_page(&IngestPage {
+        nav: vec![NavPoint {
+            scope_id: "account".into(),
+            time: 5,
+            source_version: "witness-5".into(),
+            equity: Decimal::from(101),
+            pnl: Decimal::ONE,
+            flows: Decimal::ZERO,
+            currency: "USD".into(),
+            coverage: "COMPLETE".into(),
+            mark_source: "mark-5".into(),
+        }],
+        ..Default::default()
+    })
+    .unwrap();
+    assert_eq!(s.strategy_valuation_revision().unwrap(), stable);
+    assert_eq!(read(&s, 5), "PARTIAL");
+    assert_eq!(read(&s, 4), "COMPLETE");
     // A zero-fee fill may change positions while finance_entries stays
     // unchanged. This makes the old *historical* revision invalid too.
-    s.ingest_page(&IngestPage{
-        fills:vec![Fill{
-            fill_id:"zero-fee-source".into(),instrument_id:"BTC".into(),
-            trade_id:"zero-trade".into(),exchange_order_id:"zero-order".into(),
-            intent_id:None,time:4,qty:Decimal::ONE,price:Decimal::from(100),
-            fee:Decimal::ZERO,currency:"USDT".into(),side:"buy".into(),
-        }],..Default::default()
-    }).unwrap();
-    assert_eq!(s.finance_revision().unwrap(),finance_only);
-    assert_ne!(s.strategy_valuation_revision().unwrap(),stable);
-    assert_eq!(read(&s,4),"PARTIAL");
-    assert_eq!(read(&s,5),"PARTIAL");
+    s.ingest_page(&IngestPage {
+        fills: vec![Fill {
+            fill_id: "zero-fee-source".into(),
+            instrument_id: "BTC".into(),
+            trade_id: "zero-trade".into(),
+            exchange_order_id: "zero-order".into(),
+            intent_id: None,
+            time: 4,
+            qty: Decimal::ONE,
+            price: Decimal::from(100),
+            fee: Decimal::ZERO,
+            currency: "USDT".into(),
+            side: "buy".into(),
+        }],
+        ..Default::default()
+    })
+    .unwrap();
+    assert_eq!(s.finance_revision().unwrap(), finance_only);
+    assert_ne!(s.strategy_valuation_revision().unwrap(), stable);
+    assert_eq!(read(&s, 4), "PARTIAL");
+    assert_eq!(read(&s, 5), "PARTIAL");
 }
