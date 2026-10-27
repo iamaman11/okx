@@ -3,9 +3,9 @@ impl AccountStore {
     /// Account-backed principal, never PnL or independently priced strategy NAV.
     /// All returned balances are exact USD decimals within this AccountStore.
     pub fn capital_state(&self, now: i64) -> StoreResult<AccountCapitalState> {
-        let (nav,nav_time,coverage):(String,i64,String)=self.connection.query_row(
-            "SELECT equity,time,coverage FROM nav_points WHERE scope_id='account' AND currency='USD' AND time<=?1 ORDER BY time DESC,source_version DESC LIMIT 1",
-            [now],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))
+        let (nav,nav_time,coverage,source):(String,i64,String,String)=self.connection.query_row(
+            "SELECT equity,time,coverage,mark_source FROM nav_points WHERE scope_id='account' AND currency='USD' AND time<=?1 ORDER BY time DESC,source_version DESC LIMIT 1",
+            [now],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))
         ).optional()?.ok_or(StoreError::Invalid("ACCOUNT_NAV_SOURCE_MISSING"))?;
         let recovering: i64 = self.connection.query_row(
             "SELECT requires_reconcile FROM storage_recovery WHERE singleton=1",
@@ -62,6 +62,7 @@ impl AccountStore {
             unattributed_residual_usd: residual,
             strategy_principal_usd: principals,
             nav_source_as_of: nav_time,
+            nav_source_ref: source,
         })
     }
 
@@ -73,7 +74,10 @@ impl AccountStore {
         &mut self,
         request: &AuthorizedCapitalAssignment,
     ) -> StoreResult<OperationReceipt> {
-        if request.instance_id == "manual"
+        if request.account_key != self.meta.account_key
+            || request.installation_id != self.meta.installation_id
+            || request.nav_source_ref.is_empty()
+            || request.instance_id == "manual"
             || request.instance_id.is_empty()
             || request.operation_id.is_empty()
             || request.request_hash.is_empty()
@@ -91,6 +95,9 @@ impl AccountStore {
             return Ok(old);
         }
         let state = self.capital_state(request.time)?;
+        if request.nav_source_ref != state.nav_source_ref {
+            return Err(StoreError::Invalid("CAPITAL_NAV_SOURCE_MISMATCH"));
+        }
         let existing = *state
             .strategy_principal_usd
             .get(&request.instance_id)
@@ -123,7 +130,12 @@ impl AccountStore {
                 Some(request.instance_id.as_str()),
                 request.delta_usd,
             ),
-            (String::from("unattributed"), None, -request.delta_usd),
+            (
+                String::from("unattributed"),
+                None,
+                Decimal::ZERO.checked_sub(request.delta_usd)
+                    .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))?,
+            ),
         ] {
             let entry_id = format!("capital:{}:{leg}", request.operation_id);
             tx.execute(

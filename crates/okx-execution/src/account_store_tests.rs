@@ -3099,6 +3099,9 @@ fn p02_account_backed_internal_capital_is_conserved_and_not_strategy_nav() {
     owned_fill(&mut s, "b", "p02-b", 100, "long", 4);
     let assignment =
         |key: &str, instance: &str, delta: i64, time: i64| AuthorizedCapitalAssignment {
+            account_key:"okx:real:verified".into(),
+            installation_id:"installation".into(),
+            nav_source_ref:"authenticated-flat".into(),
             operation_id: key.into(),
             request_hash: format!("hash:{key}"),
             instance_id: instance.into(),
@@ -3202,6 +3205,9 @@ fn p02_internal_capital_rejects_incomplete_or_stale_account_nav() {
     let mut s = store();
     owned_fill(&mut s, "a", "p02-a2", 100, "long", 3);
     let a = AuthorizedCapitalAssignment {
+        account_key:"okx:real:verified".into(),
+        installation_id:"installation".into(),
+        nav_source_ref:"authenticated-flat".into(),
         operation_id: "capital-stale".into(),
         request_hash: "hash-stale".into(),
         instance_id: "a".into(),

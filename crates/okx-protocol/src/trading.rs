@@ -80,10 +80,23 @@ pub enum PositionSide {
     Long,
     Short,
 }
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CapitalDirection {
+    Assign,
+    Release,
+}
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum StrategyRequest {
     List {},
+    CapitalAssign {
+        idempotency_key: String,
+        instance_id: String,
+        direction: CapitalDirection,
+        amount_usd: String,
+        expected_authority_revision: u64,
+    },
     Status {
         instance_id: String,
     },
@@ -399,6 +412,11 @@ impl StrategyRequest {
         match self {
             Self::List {} => true,
             Self::Status { instance_id } => name(instance_id),
+            Self::CapitalAssign {
+                idempotency_key, instance_id, amount_usd, expected_authority_revision, ..
+            } => id(idempotency_key) && name(instance_id)
+                && instance_id != "manual" && decimal(amount_usd)
+                && *expected_authority_revision>0,
             Self::Start {
                 idempotency_key,
                 instance_id,

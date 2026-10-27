@@ -365,6 +365,9 @@ pub struct NavWindow {
 /// The application authority boundary must authenticate this request before calling SQL.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthorizedCapitalAssignment {
+    pub account_key: String,
+    pub installation_id: String,
+    pub nav_source_ref: String,
     pub operation_id: String,
     pub request_hash: String,
     pub instance_id: String,
@@ -380,6 +383,7 @@ pub struct AccountCapitalState {
     pub unattributed_residual_usd: Decimal,
     pub strategy_principal_usd: std::collections::BTreeMap<String, Decimal>,
     pub nav_source_as_of: i64,
+    pub nav_source_ref: String,
 }
 
 /// Connection stays on its owning blocking worker. It is never a network transaction.
