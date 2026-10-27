@@ -3424,117 +3424,186 @@ fn p02_account_loss_can_be_repaired_by_releasing_internal_capital() {
     );
 }
 
-
-fn p02_completed_cursors(s:&mut AccountStore,time:i64) {
-    let mut events=Vec::new();
-    for (source,part) in [
-        ("fills","SPOT"),("fills","SWAP"),("fills","FUTURES"),
-        ("fills","OPTION"),("bills","account"),("account_snapshot","account"),
+fn p02_completed_cursors(s: &mut AccountStore, time: i64) {
+    let mut events = Vec::new();
+    for (source, part) in [
+        ("fills", "SPOT"),
+        ("fills", "SWAP"),
+        ("fills", "FUTURES"),
+        ("fills", "OPTION"),
+        ("bills", "account"),
+        ("account_snapshot", "account"),
     ] {
         events.push(SourceCursor {
-            source:source.into(),stream_partition:part.into(),cursor:String::new(),
-            watermark:time,generation:1,coverage_gaps:String::new(),
+            source: source.into(),
+            stream_partition: part.into(),
+            cursor: String::new(),
+            watermark: time,
+            generation: 1,
+            coverage_gaps: String::new(),
         });
     }
     for cursor in events {
-        s.ingest_page(&IngestPage{cursor:Some(cursor),..Default::default()}).unwrap();
+        s.ingest_page(&IngestPage {
+            cursor: Some(cursor),
+            ..Default::default()
+        })
+        .unwrap();
     }
 }
-fn p02_valuation_witness(s:&AccountStore,time:i64,source:&str)->StrategyValuationEvidence{
+fn p02_valuation_witness(s: &AccountStore, time: i64, source: &str) -> StrategyValuationEvidence {
     StrategyValuationEvidence {
-        account_key:s.meta().account_key.clone(),
-        account_nav_source:source.into(),as_of:time,
-        conversion:UsdConversionEvidence {
-            observed_at:time,source_digest:"authenticated-fx".into(),
-            usd_per_currency:std::collections::BTreeMap::from([
-                ("USD".into(),Decimal::ONE),("USDT".into(),Decimal::ONE)
+        account_key: s.meta().account_key.clone(),
+        account_nav_source: source.into(),
+        as_of: time,
+        conversion: UsdConversionEvidence {
+            observed_at: time,
+            source_digest: "authenticated-fx".into(),
+            usd_per_currency: std::collections::BTreeMap::from([
+                ("USD".into(), Decimal::ONE),
+                ("USDT".into(), Decimal::ONE),
             ]),
         },
-        venue_positions:Vec::new(),
+        venue_positions: Vec::new(),
     }
 }
 #[test]
 fn p02_valuation_requires_converged_sources_even_with_valid_principal() {
-    let mut s=store();
-    let strategy=StrategyInstance {
-        instance_id:"alpha".into(),definition_id:"fixture".into(),
-        definition_version:"1".into(),parameters:"{}".into(),enabled:false,
-        policy_revision:1,budget:Decimal::from(10),last_decision_key:None,
+    let mut s = store();
+    let strategy = StrategyInstance {
+        instance_id: "alpha".into(),
+        definition_id: "fixture".into(),
+        definition_version: "1".into(),
+        parameters: "{}".into(),
+        enabled: false,
+        policy_revision: 1,
+        budget: Decimal::from(10),
+        last_decision_key: None,
     };
-    s.mutate_instance("valuation-create","valuation-hash","create",&strategy,None,2).unwrap();
-    let assign=AuthorizedCapitalAssignment {
-        account_key:s.meta().account_key.clone(),
-        installation_id:s.meta().installation_id.clone(),
-        nav_source_ref:s.meta().opening_source.clone(),
-        operation_id:"valuation-fund".into(),request_hash:"valuation-fund-hash".into(),
-        instance_id:"alpha".into(),delta_usd:Decimal::from(20),
-        authority_revision:1,authority_receipt:"governance".into(),time:3,
+    s.mutate_instance(
+        "valuation-create",
+        "valuation-hash",
+        "create",
+        &strategy,
+        None,
+        2,
+    )
+    .unwrap();
+    let assign = AuthorizedCapitalAssignment {
+        account_key: s.meta().account_key.clone(),
+        installation_id: s.meta().installation_id.clone(),
+        nav_source_ref: s.meta().opening_source.clone(),
+        operation_id: "valuation-fund".into(),
+        request_hash: "valuation-fund-hash".into(),
+        instance_id: "alpha".into(),
+        delta_usd: Decimal::from(20),
+        authority_revision: 1,
+        authority_receipt: "governance".into(),
+        time: 3,
     };
     s.commit_authorized_capital_assignment(&assign).unwrap();
     assert!(matches!(
-        s.reconcile_strategy_valuation(&p02_valuation_witness(&s,1,"authenticated-flat")),
+        s.reconcile_strategy_valuation(&p02_valuation_witness(&s, 1, "authenticated-flat")),
         Err(StoreError::Invalid("STRATEGY_NAV_HISTORY_INCOMPLETE"))
     ));
-    p02_completed_cursors(&mut s,4);
+    p02_completed_cursors(&mut s, 4);
     s.ingest_page(&IngestPage {
-        nav:vec![NavPoint {
-            scope_id:"account".into(),time:4,source_version:"verified".into(),
-            equity:Decimal::from(100),pnl:Decimal::ZERO,flows:Decimal::ZERO,
-            currency:"USD".into(),coverage:"COMPLETE".into(),mark_source:"account-witness".into(),
-        }],..Default::default()
-    }).unwrap();
-    let mut witness=p02_valuation_witness(&s,4,"account-witness");
-    let valid=s.reconcile_strategy_valuation(&witness).unwrap();
-    assert_eq!(valid.coverage,"COMPLETE");
-    assert_eq!(valid.strategies[0].capital_usd,Decimal::from(20));
-    assert_eq!(valid.strategies[0].equity_usd,Decimal::from(20));
-    assert_eq!(valid.attributed_usd,Decimal::from(20));
-    assert_eq!(valid.unattributed_usd,Decimal::from(80));
-    assert_eq!(valid.account_nav_usd,valid.attributed_usd+valid.unattributed_usd);
-    assert!(!s.financial_risk(4,Some("alpha")).unwrap().nav_complete);
-    assert_eq!(s.nav_summary(1,4,&["alpha".into()],&["USD".into()]).unwrap()[0].coverage,"PARTIAL");
+        nav: vec![NavPoint {
+            scope_id: "account".into(),
+            time: 4,
+            source_version: "verified".into(),
+            equity: Decimal::from(100),
+            pnl: Decimal::ZERO,
+            flows: Decimal::ZERO,
+            currency: "USD".into(),
+            coverage: "COMPLETE".into(),
+            mark_source: "account-witness".into(),
+        }],
+        ..Default::default()
+    })
+    .unwrap();
+    let mut witness = p02_valuation_witness(&s, 4, "account-witness");
+    let valid = s.reconcile_strategy_valuation(&witness).unwrap();
+    assert_eq!(valid.coverage, "COMPLETE");
+    assert_eq!(valid.strategies[0].capital_usd, Decimal::from(20));
+    assert_eq!(valid.strategies[0].equity_usd, Decimal::from(20));
+    assert_eq!(valid.attributed_usd, Decimal::from(20));
+    assert_eq!(valid.unattributed_usd, Decimal::from(80));
+    assert_eq!(
+        valid.account_nav_usd,
+        valid.attributed_usd + valid.unattributed_usd
+    );
+    assert!(!s.financial_risk(4, Some("alpha")).unwrap().nav_complete);
+    assert_eq!(
+        s.nav_summary(1, 4, &["alpha".into()], &["USD".into()])
+            .unwrap()[0]
+            .coverage,
+        "PARTIAL"
+    );
     witness.conversion.usd_per_currency.clear();
     assert!(s.reconcile_strategy_valuation(&witness).is_ok()); // Flat books need no FX conversion.
-    witness.account_nav_source="forged".into();
-    assert!(matches!(s.reconcile_strategy_valuation(&witness),
-        Err(StoreError::Invalid("STRATEGY_NAV_ACCOUNT_SOURCE_MISMATCH"))));
+    witness.account_nav_source = "forged".into();
+    assert!(matches!(
+        s.reconcile_strategy_valuation(&witness),
+        Err(StoreError::Invalid("STRATEGY_NAV_ACCOUNT_SOURCE_MISMATCH"))
+    ));
 }
 #[test]
 fn p02_valuation_rejects_missing_mark_and_uses_contract_mechanics() {
-    let mut s=store();
-    owned_fill(&mut s,"alpha","valuation-fill",100,"long",3);
-    let grant=AuthorizedCapitalAssignment {
-        account_key:s.meta().account_key.clone(),
-        installation_id:s.meta().installation_id.clone(),
-        nav_source_ref:s.meta().opening_source.clone(),
-        operation_id:"valuation-grant".into(),request_hash:"valuation-grant-hash".into(),
-        instance_id:"alpha".into(),delta_usd:Decimal::from(20),
-        authority_revision:1,authority_receipt:"governance".into(),time:4,
+    let mut s = store();
+    owned_fill(&mut s, "alpha", "valuation-fill", 100, "long", 3);
+    let grant = AuthorizedCapitalAssignment {
+        account_key: s.meta().account_key.clone(),
+        installation_id: s.meta().installation_id.clone(),
+        nav_source_ref: s.meta().opening_source.clone(),
+        operation_id: "valuation-grant".into(),
+        request_hash: "valuation-grant-hash".into(),
+        instance_id: "alpha".into(),
+        delta_usd: Decimal::from(20),
+        authority_revision: 1,
+        authority_receipt: "governance".into(),
+        time: 4,
     };
     s.commit_authorized_capital_assignment(&grant).unwrap();
-    p02_completed_cursors(&mut s,5);
+    p02_completed_cursors(&mut s, 5);
     s.ingest_page(&IngestPage {
-        nav:vec![NavPoint {
-            scope_id:"account".into(),time:5,source_version:"verified".into(),
-            equity:Decimal::from(101),pnl:Decimal::ONE,flows:Decimal::ZERO,
-            currency:"USD".into(),coverage:"COMPLETE".into(),mark_source:"account-witness".into()
-        }],..Default::default()
-    }).unwrap();
-    let mut evidence=p02_valuation_witness(&s,5,"account-witness");
-    assert!(matches!(s.reconcile_strategy_valuation(&evidence),
-        Err(StoreError::Invalid("STRATEGY_NAV_MARK_MISSING"))));
-    evidence.venue_positions.push(ValuationPosition{
-        instrument_id:"BTC".into(),signed_contracts:Decimal::ONE,mark_price:Decimal::from(110)
+        nav: vec![NavPoint {
+            scope_id: "account".into(),
+            time: 5,
+            source_version: "verified".into(),
+            equity: Decimal::from(101),
+            pnl: Decimal::ONE,
+            flows: Decimal::ZERO,
+            currency: "USD".into(),
+            coverage: "COMPLETE".into(),
+            mark_source: "account-witness".into(),
+        }],
+        ..Default::default()
+    })
+    .unwrap();
+    let mut evidence = p02_valuation_witness(&s, 5, "account-witness");
+    assert!(matches!(
+        s.reconcile_strategy_valuation(&evidence),
+        Err(StoreError::Invalid("STRATEGY_NAV_MARK_MISSING"))
+    ));
+    evidence.venue_positions.push(ValuationPosition {
+        instrument_id: "BTC".into(),
+        signed_contracts: Decimal::ONE,
+        mark_price: Decimal::from(110),
     });
-    let v=s.reconcile_strategy_valuation(&evidence).unwrap();
-    assert_eq!(v.strategies[0].unrealized_usd,Decimal::new(1,1));
-    assert_eq!(v.strategies[0].equity_usd,Decimal::new(201,1));
-    assert_eq!(v.unattributed_usd,Decimal::new(809,1));
-    assert_eq!(v.account_nav_usd,v.attributed_usd+v.unattributed_usd);
+    let v = s.reconcile_strategy_valuation(&evidence).unwrap();
+    assert_eq!(v.strategies[0].unrealized_usd, Decimal::new(1, 1));
+    assert_eq!(v.strategies[0].equity_usd, Decimal::new(201, 1));
+    assert_eq!(v.unattributed_usd, Decimal::new(809, 1));
+    assert_eq!(v.account_nav_usd, v.attributed_usd + v.unattributed_usd);
     evidence.conversion.usd_per_currency.remove("USDT");
-    assert!(matches!(s.reconcile_strategy_valuation(&evidence),
-        Err(StoreError::Invalid("STRATEGY_NAV_FX_MISSING"))));
-    evidence.venue_positions[0].signed_contracts=Decimal::from(2);
-    assert!(matches!(s.reconcile_strategy_valuation(&evidence),
-        Err(StoreError::Invalid("STRATEGY_NAV_FX_MISSING"))));
+    assert!(matches!(
+        s.reconcile_strategy_valuation(&evidence),
+        Err(StoreError::Invalid("STRATEGY_NAV_FX_MISSING"))
+    ));
+    evidence.venue_positions[0].signed_contracts = Decimal::from(2);
+    assert!(matches!(
+        s.reconcile_strategy_valuation(&evidence),
+        Err(StoreError::Invalid("STRATEGY_NAV_FX_MISSING"))
+    ));
 }
