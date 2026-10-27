@@ -21,20 +21,7 @@ function partialQuality(value:unknown):boolean {
    if(++visited>4096||depth>24)return true;
    if(!isObject(next)&&!Array.isArray(next))continue;
    if(Array.isArray(next)){for(const child of next)stack.push([child,depth+1]);continue;}
-   // A manual NAV row is a non-additive label for verified account capital.
-   // Its empty strategy window is intentional, not missing money. Only this
-   // exact shape is excluded; unknown strategy and account NAV remain partial.
-   const window=isObject(next.window)?next.window:undefined;
-   const manualAccountLabel=next.kind==='nav'&&next.capital_scope==='account'&&
-     next.additive_with_account_nav===false&&next.coverage_reason==='MANUAL_USES_ACCOUNT_CAPITAL'&&
-     window?.scope_id==='strategy:manual'&&window.coverage==='PARTIAL'&&
-     window.opening_equity===null&&window.current_equity===null&&
-     window.flows===null&&window.pnl===null&&
-     window.opening_as_of===null&&window.current_as_of===null&&
-     Object.keys(window).every(k=>['scope_id','currency','coverage','opening_equity',
-       'current_equity','flows','pnl','opening_as_of','current_as_of'].includes(k));
    for(const [key,child] of Object.entries(next)){
-     if(key==='window'&&manualAccountLabel)continue;
      if((key==='quality'||key==='coverage')&&typeof child==='string'&&
        ['partial','missing','stale','degraded','not_ready','unavailable'].includes(child.toLowerCase()))return true;
      if(key==='state'&&typeof child==='string'&&child.toLowerCase()==='partial')return true;

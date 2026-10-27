@@ -81,7 +81,7 @@ if(partial.status!=='partial'||partial.quality!=='partial')throw Error('partial 
 // P0.2: manual is an account-capital attribution label, not a second
 // independently funded strategy. Its empty non-additive row must not degrade
 // a verified account, but genuinely missing capital must stay partial.
-const manualWindow={scope_id:'strategy:manual',currency:'USD',coverage:'PARTIAL',
+const manualWindow={scope_id:'strategy:manual',currency:'USD',coverage:'NOT_APPLICABLE',
  opening_equity:null,current_equity:null,flows:null,pnl:null,
  opening_as_of:null,current_as_of:null};
 const manualRow={kind:'nav',capital_scope:'account',additive_with_account_nav:false,
@@ -102,7 +102,7 @@ for(const unknown of [
  {...manualRow,additive_with_account_nav:true},
  {...manualRow,coverage_reason:'STRATEGY_CAPITAL_PROVENANCE_MISSING'},
  {...manualRow,window:{...manualWindow,current_equity:'10'}},
- {...manualRow,window:{...manualWindow,coverage:'UNAVAILABLE'}},
+ {...manualRow,window:{...manualWindow,coverage:'PARTIAL'}},
  {kind:'nav',capital_scope:'strategy',coverage_reason:'STRATEGY_CAPITAL_PROVENANCE_MISSING',
   window:{...manualWindow,scope_id:'strategy:ema_cross'}},
 ]){

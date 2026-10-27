@@ -608,7 +608,10 @@ fn unverified_strategy_budget_is_never_strategy_nav() {
     for id in ["manual", "a", "b"] {
         let scope = format!("strategy:{id}");
         let nav = windows.iter().find(|n| n.scope_id == scope).unwrap();
-        assert_eq!(nav.coverage, "PARTIAL");
+        assert_eq!(
+            nav.coverage,
+            if id == "manual" { "NOT_APPLICABLE" } else { "PARTIAL" }
+        );
         assert_eq!(nav.opening_equity, None);
         assert_eq!(nav.current_equity, None);
         assert_eq!(nav.flows, None);

@@ -42,6 +42,9 @@ impl AccountStore {
             // A risk allocation is not capital. Until a separate, verified strategy
             // capital source exists, legacy strategy NAV points must not be treated
             // as equity, flows or returns (even if they say COMPLETE).
+            // Manual attributes account capital; a second strategy NAV does not
+            // exist. Keep its absence explicit without calling it missing data.
+            let manual = scope == "strategy:manual";
             let capital_known = !scope.starts_with("strategy:");
             let opening = if capital_known { endpoint(from)? } else { None };
             let current = if capital_known {
@@ -82,7 +85,9 @@ impl AccountStore {
                 pnl,
                 opening_as_of: opening.as_ref().map(|v| v.2),
                 current_as_of: current.as_ref().map(|v| v.2),
-                coverage: if from < self.meta.initialized_at {
+                coverage: if manual {
+                    "NOT_APPLICABLE"
+                } else if from < self.meta.initialized_at {
                     "UNAVAILABLE_BEFORE_T0"
                 } else if complete && capital_known {
                     "COMPLETE"
