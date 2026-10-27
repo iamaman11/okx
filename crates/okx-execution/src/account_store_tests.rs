@@ -343,10 +343,24 @@ fn allocation_and_bar_claim_survive_retry_and_restart() {
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
     assert_eq!(amounts, vec!["10", "5"]);
+    // Updating or replaying the risk budget never creates capital facts.
+    let count: i64 = s
+        .connection
+        .query_row(
+            "SELECT COUNT(*) FROM nav_points WHERE scope_id='strategy:a'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, 0);
     let p = s.path.clone();
     let m = s.meta.clone();
     drop(s);
     let mut s = AccountStore::open_existing(p, &m.account_key, &m.installation_id).unwrap();
+    assert!(
+        !s.financial_risk(7, Some("a")).unwrap().nav_complete,
+        "restart must not restore fictitious strategy NAV",
+    );
     // A budget-only revision retains the same immutable strategy
     // definition; the terminal bar must not run a second time.
     assert!(
@@ -543,6 +557,35 @@ fn unverified_strategy_budget_is_never_strategy_nav() {
     s.ensure_manual_instance(2).unwrap();
     owned_fill(&mut s, "a", "a-order", 100, "long", 3);
     owned_fill(&mut s, "b", "b-order", 200, "long", 4);
+    // Policy allocations are recorded, but no risk budget can create an
+    // opening equity, flow, or drawdown high-watermark for a strategy.
+    let scope_count: i64 = s
+        .connection
+        .query_row(
+            "SELECT COUNT(*) FROM nav_scopes WHERE scope_id LIKE 'strategy:%'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let synthetic_nav: i64 = s
+        .connection
+        .query_row(
+            "SELECT COUNT(*) FROM nav_points WHERE scope_id LIKE 'strategy:%'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let synthetic_peak: i64 = s
+        .connection
+        .query_row(
+            "SELECT COUNT(*) FROM nav_watermarks WHERE scope_id LIKE 'strategy:%'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(scope_count, 3);
+    assert_eq!(synthetic_nav, 0);
+    assert_eq!(synthetic_peak, 0);
     // Even a legacy projection incorrectly labelled COMPLETE cannot establish
     // strategy capital or become an equity/profit figure in portfolio views.
     s.ingest_page(&IngestPage {

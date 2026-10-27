@@ -588,24 +588,29 @@ impl TradeService {
                         false,
                     )
                     .await?;
-                // Read-only preview may project costs even when the strategy's
-                // financial capital provenance is missing. Actual execution
-                // still requires complete instance NAV in plan(record_risk_state=true).
+                // A manual trade uses account capital. For a separately funded
+                // strategy, a preview exposes missing capital without granting
+                // permission to post. Neither path is an execution admission.
+                let independent_capital =
+                    plan::requires_independent_strategy_nav(strategy_instance);
                 let binding = strategy_instance.clone();
-                let instance_nav_complete = r
-                    .execution
-                    .store
-                    .call(deadline(), move |store| {
-                        if store.instances()?.iter().any(|i| i.instance_id == binding) {
-                            Ok(Some(
-                                store.financial_risk(now(), Some(&binding))?.nav_complete,
-                            ))
-                        } else {
-                            Ok(None)
-                        }
-                    })
-                    .await
-                    .map_err(err)?;
+                let instance_nav_complete = if independent_capital {
+                    r.execution
+                        .store
+                        .call(deadline(), move |store| {
+                            if store.instances()?.iter().any(|i| i.instance_id == binding) {
+                                Ok(Some(
+                                    store.financial_risk(now(), Some(&binding))?.nav_complete,
+                                ))
+                            } else {
+                                Ok(None)
+                            }
+                        })
+                        .await
+                        .map_err(err)?
+                } else {
+                    None
+                };
                 let instance_nav_blocked = instance_nav_complete == Some(false);
                 // Preview uses the same price-bounded, fee-inclusive cost model as
                 // native admission; do not silently suppress missing fee evidence.
@@ -679,7 +684,8 @@ impl TradeService {
                         "state":if instance_nav_blocked {"blocked"} else {"not_evaluated"},
                         "reason_code":if instance_nav_blocked {Some("INSTANCE_NAV_INCOMPLETE")} else {None},
                         "ready_for_post":false,
-                        "instance_nav_complete":instance_nav_complete
+                        "instance_nav_complete":instance_nav_complete,
+                        "capital_scope":if independent_capital {"strategy"} else {"account"}
                     }}),
                 ))
             }
