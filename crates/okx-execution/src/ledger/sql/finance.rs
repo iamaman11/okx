@@ -379,18 +379,20 @@ impl AccountStore {
     /// appending a finance entry. Only immutable source tables participate;
     /// risk-budget allocations and valuation/readback rows do not.
     pub fn strategy_valuation_revision(&self) -> StoreResult<String> {
-        let (finance, fills, bills, lots, flows): (i64, i64, i64, i64, i64) =
+        let (finance, fills, bills, lots, flows, nav): (i64, i64, i64, i64, i64, i64) =
             self.connection.query_row(
                 "SELECT
                     (SELECT COALESCE(MAX(rowid),0) FROM finance_entries),
                     (SELECT COALESCE(MAX(rowid),0) FROM fills),
                     (SELECT COALESCE(MAX(rowid),0) FROM bills),
                     (SELECT COALESCE(MAX(rowid),0) FROM position_lots),
-                    (SELECT COALESCE(MAX(rowid),0) FROM cash_flows)",
+                    (SELECT COALESCE(MAX(rowid),0) FROM cash_flows),
+                    (SELECT COALESCE(MAX(rowid),0) FROM nav_points
+                     WHERE scope_id='account' AND currency='USD')",
                 [],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
             )?;
-        Ok(format!("f{finance}:x{fills}:b{bills}:p{lots}:c{flows}"))
+        Ok(format!("f{finance}:x{fills}:b{bills}:p{lots}:c{flows}:n{nav}"))
     }
 
     /// Atomically publish only a previously source-verified estimate to the

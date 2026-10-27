@@ -4081,6 +4081,32 @@ fn p02_same_timestamp_late_bill_replays_new_nav_revision_without_rewriting_histo
         .unwrap();
     assert_eq!(versions, 2);
     assert_eq!(s.commit_reconciled_strategy_nav(&witness).unwrap(), second);
+    // Same timestamp, corrected source and venue equity. This is a separate
+    // immutable account NAV witness and must allow a third strategy revision.
+    let second_version=s.strategy_valuation_revision().unwrap();
+    s.ingest_page(&IngestPage{
+        nav:vec![NavPoint {
+            scope_id:"account".into(),time:4,source_version:"zz-witness-corrected".into(),
+            equity:Decimal::from(101),pnl:Decimal::ONE,flows:Decimal::ZERO,
+            currency:"USD".into(),coverage:"COMPLETE".into(),
+            mark_source:"witness-corrected".into(),
+        }],..Default::default()
+    }).unwrap();
+    assert_ne!(s.strategy_valuation_revision().unwrap(),second_version);
+    assert_eq!(read(&s),"PARTIAL");
+    let corrected=p02_valuation_witness(&s,4,"witness-corrected");
+    let third=s.commit_reconciled_strategy_nav(&corrected).unwrap();
+    assert_eq!(third.account_nav_usd,Decimal::from(101));
+    assert_eq!(third.strategies[0].equity_usd,Decimal::from(20));
+    assert_eq!(third.unattributed_usd,Decimal::from(81));
+    assert_eq!(read(&s),"COMPLETE");
+    assert_eq!(s.commit_reconciled_strategy_nav(&corrected).unwrap(),third);
+    let versions:i64=s.connection.query_row(
+        "SELECT COUNT(*) FROM nav_points WHERE scope_id='strategy:late'
+         AND time=4 AND source_version LIKE 'strategy-reconciled-v1:revision:%'",
+        [],|r|r.get(0)
+    ).unwrap();
+    assert_eq!(versions,3);
     let path = s.path.clone();
     let meta = s.meta.clone();
     drop(s);
