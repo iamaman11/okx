@@ -3997,6 +3997,116 @@ fn p02_strategy_nav_expires_on_new_zero_fee_fill_or_new_account_mark() {
     assert_eq!(read(&s, 5), "PARTIAL");
 }
 
+
+#[test]
+fn p02_strategy_nav_window_uses_separate_source_revisions_at_both_endpoints() {
+    let mut s = store();
+    let strategy = StrategyInstance {
+        instance_id: "window".into(),
+        definition_id: "fixture".into(),
+        definition_version: "1".into(),
+        parameters: "{}".into(),
+        enabled: false,
+        policy_revision: 1,
+        budget: Decimal::from(10),
+        last_decision_key: None,
+    };
+    s.mutate_instance("window-create", "window-hash", "create", &strategy, None, 2)
+        .unwrap();
+    s.commit_authorized_capital_assignment(&AuthorizedCapitalAssignment {
+        account_key: s.meta().account_key.clone(),
+        installation_id: s.meta().installation_id.clone(),
+        nav_source_ref: s.meta().opening_source.clone(),
+        operation_id: "window-capital".into(),
+        request_hash: "window-capital-hash".into(),
+        instance_id: "window".into(),
+        delta_usd: Decimal::from(10),
+        authority_revision: 1,
+        authority_receipt: "governance".into(),
+        time: 3,
+    })
+    .unwrap();
+    p02_completed_cursors(&mut s, 5);
+    // Different legitimate account marks change the immutable strategy
+    // source revision. The historical opening must retain its own witness.
+    for (time, mark, account_equity) in
+        [(4, "window-mark-4", 100), (5, "window-mark-5", 101)]
+    {
+        s.ingest_page(&IngestPage {
+            nav: vec![NavPoint {
+                scope_id: "account".into(),
+                time,
+                source_version: format!("window-source-{time}"),
+                equity: Decimal::from(account_equity),
+                pnl: Decimal::ZERO,
+                flows: Decimal::ZERO,
+                currency: "USD".into(),
+                coverage: "COMPLETE".into(),
+                mark_source: mark.into(),
+            }],
+            ..Default::default()
+        })
+        .unwrap();
+        s.commit_reconciled_strategy_nav(&p02_valuation_witness(&s, time, mark))
+            .unwrap();
+    }
+    let checked = s
+        .nav_summary(4, 5, &["window".into()], &["USD".into()])
+        .unwrap();
+    assert_eq!(checked[0].coverage, "COMPLETE");
+    assert_eq!(checked[0].opening_as_of, Some(4));
+    assert_eq!(checked[0].current_as_of, Some(5));
+    assert_eq!(checked[0].opening_equity, Some(Decimal::from(10)));
+    assert_eq!(checked[0].current_equity, Some(Decimal::from(10)));
+    assert_eq!(checked[0].flows, Some(Decimal::ZERO));
+    assert_eq!(checked[0].pnl, Some(Decimal::ZERO));
+
+    let path = s.path.clone();
+    let meta = s.meta.clone();
+    drop(s);
+    let mut restored =
+        AccountStore::open_existing(path, &meta.account_key, &meta.installation_id).unwrap();
+    assert_eq!(
+        restored
+            .nav_summary(4, 5, &["window".into()], &["USD".into()])
+            .unwrap()[0]
+            .coverage,
+        "COMPLETE"
+    );
+    // An as-yet unreconciled future mark invalidates that future window,
+    // but must not retroactively spoil a previously certified interval.
+    restored
+        .ingest_page(&IngestPage {
+            nav: vec![NavPoint {
+                scope_id: "account".into(),
+                time: 6,
+                source_version: "window-source-6".into(),
+                equity: Decimal::from(102),
+                pnl: Decimal::ZERO,
+                flows: Decimal::ZERO,
+                currency: "USD".into(),
+                coverage: "COMPLETE".into(),
+                mark_source: "window-mark-6".into(),
+            }],
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(
+        restored
+            .nav_summary(4, 5, &["window".into()], &["USD".into()])
+            .unwrap()[0]
+            .coverage,
+        "COMPLETE"
+    );
+    assert_eq!(
+        restored
+            .nav_summary(4, 6, &["window".into()], &["USD".into()])
+            .unwrap()[0]
+            .coverage,
+        "PARTIAL"
+    );
+}
+
 #[test]
 fn p02_same_timestamp_late_bill_replays_new_nav_revision_without_rewriting_history() {
     let mut s = store();
