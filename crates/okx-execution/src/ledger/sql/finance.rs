@@ -379,17 +379,24 @@ impl AccountStore {
     /// appending a finance entry. Only immutable source tables participate;
     /// risk-budget allocations and valuation/readback rows do not.
     pub fn strategy_valuation_revision(&self) -> StoreResult<String> {
+        self.strategy_valuation_revision_as_of(i64::MAX)
+    }
+
+    /// Late financial events invalidate a historical period only when their
+    /// exchange timestamp belongs to that period. Future market moves must
+    /// not erase earlier, already verified financial reports.
+    pub fn strategy_valuation_revision_as_of(&self, through: i64) -> StoreResult<String> {
         let (finance, fills, bills, lots, flows, nav): (i64, i64, i64, i64, i64, i64) =
             self.connection.query_row(
                 "SELECT
-                    (SELECT COALESCE(MAX(rowid),0) FROM finance_entries),
-                    (SELECT COALESCE(MAX(rowid),0) FROM fills),
-                    (SELECT COALESCE(MAX(rowid),0) FROM bills),
-                    (SELECT COALESCE(MAX(rowid),0) FROM position_lots),
-                    (SELECT COALESCE(MAX(rowid),0) FROM cash_flows),
+                    (SELECT COALESCE(MAX(rowid),0) FROM finance_entries WHERE time<=?1),
+                    (SELECT COALESCE(MAX(rowid),0) FROM fills WHERE time<=?1),
+                    (SELECT COALESCE(MAX(rowid),0) FROM bills WHERE time<=?1),
+                    (SELECT COALESCE(MAX(rowid),0) FROM position_lots WHERE opened_at<=?1),
+                    (SELECT COALESCE(MAX(rowid),0) FROM cash_flows WHERE time<=?1),
                     (SELECT COALESCE(MAX(rowid),0) FROM nav_points
-                     WHERE scope_id='account' AND currency='USD')",
-                [],
+                     WHERE scope_id='account' AND currency='USD' AND time<=?1)",
+                [through],
                 |r| {
                     Ok((
                         r.get(0)?,
@@ -417,7 +424,7 @@ impl AccountStore {
         if summary.strategies.is_empty() {
             return Ok(summary);
         }
-        let revision = self.strategy_valuation_revision()?;
+        let revision = self.strategy_valuation_revision_as_of(evidence.as_of)?;
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -632,7 +639,7 @@ impl AccountStore {
             return Err(StoreError::Invalid("NAV_SCOPE_LIMIT"));
         }
         let mut result = Vec::new();
-        let revision = self.strategy_valuation_revision()?;
+        let revision = self.strategy_valuation_revision_as_of(through)?;
         for (scope, currency) in scopes {
             // Only native reconciliation receipts authorize strategy NAV rows.
             // Arbitrary strategy nav_points, including old COMPLETE claims, are

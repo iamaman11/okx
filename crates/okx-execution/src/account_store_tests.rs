@@ -3968,7 +3968,8 @@ fn p02_strategy_nav_expires_on_new_zero_fee_fill_or_new_account_mark() {
         ..Default::default()
     })
     .unwrap();
-    assert_eq!(s.strategy_valuation_revision().unwrap(), stable);
+    assert_ne!(s.strategy_valuation_revision().unwrap(), stable);
+    assert_eq!(s.strategy_valuation_revision_as_of(4).unwrap(), stable);
     assert_eq!(read(&s, 5), "PARTIAL");
     assert_eq!(read(&s, 4), "COMPLETE");
     // A zero-fee fill may change positions while finance_entries stays
