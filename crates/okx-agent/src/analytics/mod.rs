@@ -349,7 +349,11 @@ impl AnalyticsService {
         if matches!(mode, ResearchDataMode::HistoricalObserved) {
             return Err("HISTORICAL_RULES_AND_FEES_UNAVAILABLE".into());
         }
-        let mut bars = tokio::select! {loaded=self.sources.candles(&instruments[0],ms,start,end,false)=>loaded?,_=executor::cancelled(cancel.clone())=>return Err("CANCELLED".into())};
+        // K9: accepted research jobs use the existing central public-IP queued
+        // admission (bounded to 15s per page). Preview/validation keep their
+        // separate fail-fast paths; never replay entire instrument after a
+        // local rate defer or bypass the native per-endpoint rate budget.
+        let mut bars = tokio::select! {loaded=self.sources.candles(&instruments[0],ms,start,end,true)=>loaded?,_=executor::cancelled(cancel.clone())=>return Err("CANCELLED".into())};
         let expected_start = start.div_ceil(ms).saturating_mul(ms);
         let expected_end = end / ms * ms;
         if bars.first().is_none_or(|b| b.time > expected_start)
