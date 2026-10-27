@@ -722,7 +722,11 @@ impl AccountStore {
                             .query_row(
                                 "SELECT mark_source FROM nav_points WHERE scope_id=?1 AND time=?2
                          AND source_version=?3",
-                                params![scope, time, format!("strategy-reconciled-v1:revision:{revision}")],
+                                params![
+                                    scope,
+                                    time,
+                                    format!("strategy-reconciled-v1:revision:{revision}")
+                                ],
                                 |r| r.get(0),
                             )
                             .optional()?
