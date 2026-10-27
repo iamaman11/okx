@@ -565,7 +565,10 @@ mod tests {
         assert!(requires_independent_strategy_nav("ema_cross"));
         assert!(requires_independent_strategy_nav("manual-copy"));
         // Unknown strategy capital is never accepted for a real increase.
-        assert_eq!(instance_nav_gate(false, true), Err("INSTANCE_NAV_INCOMPLETE"));
+        assert_eq!(
+            instance_nav_gate(false, true),
+            Err("INSTANCE_NAV_INCOMPLETE")
+        );
     }
 
     #[test]
