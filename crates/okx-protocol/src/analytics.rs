@@ -276,7 +276,7 @@ impl ResearchRequest {
                     && idempotency_key
                         .bytes()
                         .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
-            },
+            }
             Self::Validate {
                 instruments,
                 timeframe_ms,
