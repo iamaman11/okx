@@ -431,7 +431,11 @@ impl AccountStore {
                 ),
             ];
             for (time, equity, pnl, flows, source, version) in points {
-                let receipt_id = format!("strategy-nav:{scope}:{time}");
+                // Same as-of can be revalued after an out-of-order fill, bill
+                // or account correction. Keep both revisions immutable;
+                // readback accepts only the currently verified source revision.
+                let source_version = format!("strategy-reconciled-v1:{version}");
+                let receipt_id = format!("strategy-nav:{scope}:{time}:{source_version}");
                 let previous:Option<(String,String,String)>=tx.query_row(
                     "SELECT kind,request_hash,result_ref FROM operation_receipts WHERE operation_id=?1",
                     [&receipt_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))
@@ -446,12 +450,12 @@ impl AccountStore {
                     params![receipt_id,version,source,time]
                 )?;
                 tx.execute(
-                    "INSERT INTO nav_points VALUES(?1,?2,'strategy-reconciled-v1',?3,?4,?5,'USD','COMPLETE',?6) ON CONFLICT(scope_id,time,source_version) DO NOTHING",
-                    params![scope,time,exact(equity),exact(pnl),exact(flows),source]
+                    "INSERT INTO nav_points VALUES(?1,?2,?3,?4,?5,?6,'USD','COMPLETE',?7) ON CONFLICT(scope_id,time,source_version) DO NOTHING",
+                    params![scope,time,source_version,exact(equity),exact(pnl),exact(flows),source]
                 )?;
                 let actual:(String,String,String,String)=tx.query_row(
-                    "SELECT equity,pnl,flows,mark_source FROM nav_points WHERE scope_id=?1 AND time=?2 AND source_version='strategy-reconciled-v1'",
-                    params![scope,time],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))
+                    "SELECT equity,pnl,flows,mark_source FROM nav_points WHERE scope_id=?1 AND time=?2 AND source_version=?3",
+                    params![scope,time,source_version],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))
                 )?;
                 if actual != (exact(equity), exact(pnl), exact(flows), source.to_owned()) {
                     return Err(StoreError::Invalid("STRATEGY_NAV_WITNESS_CONFLICT"));
@@ -626,13 +630,13 @@ impl AccountStore {
                 let row: Option<(String, String, i64, String)> = if strategy {
                     self.connection.query_row(
                         "SELECT n.equity,n.flows,n.time,n.coverage FROM nav_points n
-                         JOIN operation_receipts o ON o.operation_id='strategy-nav:' || n.scope_id || ':' || n.time
+                         JOIN operation_receipts o ON o.operation_id='strategy-nav:' || n.scope_id || ':' || n.time || ':' || n.source_version
                          WHERE n.scope_id=?1 AND n.time<=?2
-                           AND n.source_version='strategy-reconciled-v1'
+                           AND n.source_version IN ('strategy-reconciled-v1:opening',?3)
                            AND o.kind='STRATEGY_NAV_RECONCILED' AND o.result_ref=n.mark_source
-                           AND (o.request_hash='opening' OR o.request_hash=?3)
-                         ORDER BY n.time DESC LIMIT 1",
-                        params![scope,time,format!("revision:{revision}")],
+                           AND o.request_hash=substr(n.source_version,length('strategy-reconciled-v1:')+1)
+                         ORDER BY n.time DESC, n.source_version DESC LIMIT 1",
+                        params![scope,time,format!("strategy-reconciled-v1:revision:{revision}")],
                         |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))
                     ).optional()?
                 } else {
@@ -647,11 +651,12 @@ impl AccountStore {
             let capital_known=!manual && (!scope.starts_with("strategy:") ||
                 self.connection.query_row(
                     "SELECT EXISTS(SELECT 1 FROM nav_points n JOIN operation_receipts o ON
-                     o.operation_id='strategy-nav:' || n.scope_id || ':' || n.time
-                     WHERE n.scope_id=?1 AND n.time<=?2 AND n.source_version='strategy-reconciled-v1'
-                       AND o.kind='STRATEGY_NAV_RECONCILED' AND o.request_hash=?3
+                     o.operation_id='strategy-nav:' || n.scope_id || ':' || n.time || ':' || n.source_version
+                     WHERE n.scope_id=?1 AND n.time<=?2 AND n.source_version=?3
+                       AND o.kind='STRATEGY_NAV_RECONCILED'
+                       AND o.request_hash=substr(n.source_version,length('strategy-reconciled-v1:')+1)
                        AND o.result_ref=n.mark_source)",
-                    params![scope,through,format!("revision:{revision}")],
+                    params![scope,through,format!("strategy-reconciled-v1:revision:{revision}")],
                     |r|r.get::<_,bool>(0)
                 )?);
             let opening = if capital_known { endpoint(from)? } else { None };
@@ -1623,7 +1628,7 @@ impl AccountStore {
             }
         }
         for n in &page.nav {
-            if n.scope_id.starts_with("strategy:") && n.source_version == "strategy-reconciled-v1" {
+            if n.scope_id.starts_with("strategy:") && n.source_version.starts_with("strategy-reconciled-v1") {
                 return Err(StoreError::Invalid("STRATEGY_NAV_REQUIRES_RECONCILIATION"));
             }
             tx.execute(
