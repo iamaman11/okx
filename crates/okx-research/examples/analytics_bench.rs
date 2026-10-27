@@ -172,7 +172,10 @@ fn k9_fixed_profile() {
     let mut reference_hash = None;
     let mut readings = Vec::new();
     let peak_before = peak_memory();
-    for workers in [1usize, 4, 8].into_iter().filter(|workers| *workers <= logical_cpus) {
+    for workers in [1usize, 4, 8]
+        .into_iter()
+        .filter(|workers| *workers <= logical_cpus)
+    {
         for _ in 0..WARMUPS {
             let observed = run_fixed_batch(&source, &mechanics, &variants, workers);
             if let Some(expected) = &reference_hash {
@@ -204,7 +207,9 @@ fn k9_fixed_profile() {
     }
     let hash = okx_research::canonical_sha256(&reference_hash).unwrap();
     let one_p50 = readings[0]["p50_ms"].as_f64().unwrap();
-    let four_p50 = readings.iter().find(|r| r["workers"] == 4)
+    let four_p50 = readings
+        .iter()
+        .find(|r| r["workers"] == 4)
         .and_then(|r| r["p50_ms"].as_f64());
     println!(
         "K9_REFERENCE_PROFILE_JSON:{}",

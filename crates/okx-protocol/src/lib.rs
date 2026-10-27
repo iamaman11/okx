@@ -700,7 +700,9 @@ pub enum HostControlOperation {
     ControllerUpdateStatus,
     WorkspaceStatus,
     TestWorkspace,
-    K9BenchmarkStart { expected_source_tree: String },
+    K9BenchmarkStart {
+        expected_source_tree: String,
+    },
     K9BenchmarkStatus,
     InitAgentIdentity,
     AgentIdentity,
@@ -765,7 +767,9 @@ impl HostControlOperation {
                 }
                 Ok(())
             }
-            Self::K9BenchmarkStart { expected_source_tree } => validate_source_tree(expected_source_tree),
+            Self::K9BenchmarkStart {
+                expected_source_tree,
+            } => validate_source_tree(expected_source_tree),
             Self::BackupAccount { account_key } => validate_account_wire(account_key),
             Self::RestoreAccount {
                 account_key,

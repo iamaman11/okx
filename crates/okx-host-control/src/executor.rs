@@ -203,9 +203,9 @@ impl HostExecutor {
             HostControlOperation::ControllerUpdateStatus => Ok(controller_update::status_value()),
             HostControlOperation::WorkspaceStatus => self.workspace_status(),
             HostControlOperation::TestWorkspace => self.test_workspace(),
-            HostControlOperation::K9BenchmarkStart { expected_source_tree } => {
-                self.k9_benchmark_start(&expected_source_tree)
-            }
+            HostControlOperation::K9BenchmarkStart {
+                expected_source_tree,
+            } => self.k9_benchmark_start(&expected_source_tree),
             HostControlOperation::K9BenchmarkStatus => self.k9_benchmark_status(),
             HostControlOperation::InitAgentIdentity => self.init_agent_identity(),
             HostControlOperation::AgentIdentity => self.agent_identity(),
@@ -488,7 +488,6 @@ impl HostExecutor {
         }))
     }
 
-
     /// Benchmark the already-reviewed local replay on THIS Windows host.
     /// Uses an isolated exact origin/main worktree: never requires a clean
     /// or stopped production Agent, and never loads exchange credentials.
@@ -531,8 +530,15 @@ impl HostExecutor {
         let job = AgentJob::new()?;
         let mut child = hidden_command("cargo")
             .args([
-                "run", "--locked", "--release", "-p", "okx-research",
-                "--example", "analytics_bench", "--", "--k9-fixed",
+                "run",
+                "--locked",
+                "--release",
+                "-p",
+                "okx-research",
+                "--example",
+                "analytics_bench",
+                "--",
+                "--k9-fixed",
             ])
             .env("CARGO_BUILD_JOBS", "2")
             .current_dir(&worktree)
