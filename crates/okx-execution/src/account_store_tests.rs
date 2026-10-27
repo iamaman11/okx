@@ -3555,7 +3555,7 @@ fn p02_valuation_requires_converged_sources_even_with_valid_principal() {
         s.nav_summary(1, 4, &["alpha".into()], &["USD".into()])
             .unwrap()[0]
             .coverage,
-        "PARTIAL"
+        "COMPLETE"
     );
     witness.conversion.usd_per_currency.clear();
     assert!(s.reconcile_strategy_valuation(&witness).is_ok()); // Flat books need no FX conversion.
@@ -3578,6 +3578,7 @@ fn p02_valuation_requires_converged_sources_even_with_valid_principal() {
         s.reconcile_strategy_valuation(&witness),
         Err(StoreError::Invalid("STRATEGY_NAV_ECONOMIC_SOURCE_UNVERIFIED"))
     ));
+    assert_eq!(s.nav_summary(1,4,&["alpha".into()],&["USD".into()]).unwrap()[0].coverage,"PARTIAL");
 }
 #[test]
 fn p02_valuation_rejects_missing_mark_and_uses_contract_mechanics() {
