@@ -3335,7 +3335,7 @@ fn p02_capital_is_isolated_per_account_and_identity_bound() {
     );
     let db = b.path.clone();
     drop(b);
-    let b = AccountStore::open_existing(db, &second_meta.account_key, &second_meta.installation_id)
+    let mut b = AccountStore::open_existing(db, &second_meta.account_key, &second_meta.installation_id)
         .unwrap();
     assert_eq!(b.capital_state(4).unwrap().assigned_usd, Decimal::from(15));
     assert!(matches!(
