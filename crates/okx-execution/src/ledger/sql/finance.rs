@@ -126,7 +126,7 @@ impl AccountStore {
         // only if its immutable originating fill or bill exists in this
         // account's ledger. Arbitrary finance ingestion is NOT source proof.
         let mut sources=self.connection.prepare(
-            "SELECT instance_id,component,source_ref FROM finance_entries WHERE time>=?1 AND time<=?2 AND instance_id IS NOT NULL ORDER BY time,entry_id"
+            "SELECT instance_id,component,source_ref,economic_event_key,amount,currency FROM finance_entries WHERE time>=?1 AND time<=?2 AND instance_id IS NOT NULL ORDER BY time,entry_id"
         )?;
         let mut source_rows = sources.query(params![self.meta.initialized_at, evidence.as_of])?;
         while let Some(r) = source_rows.next()? {
@@ -145,21 +145,35 @@ impl AccountStore {
                 return Err(StoreError::Invalid("STRATEGY_NAV_COMPONENT_UNKNOWN"));
             }
             let proof: String = r.get(2)?;
+            let economic_key: String = r.get(3)?;
+            let amount = decimal(r.get(4)?)?;
+            let currency: String = r.get(5)?;
             let found = if let Some(id) = proof.strip_prefix("fill:") {
-                self.connection.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM fills WHERE fill_id=?1)",
-                    [id],
-                    |row| row.get::<_, bool>(0),
-                )?
+                let fill:Option<(String,String,String,String,String)>=self.connection.query_row(
+                    "SELECT instrument_id,trade_id,exchange_order_id,fee,currency FROM fills WHERE fill_id=?1",
+                    [id],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?))
+                ).optional()?;
+                if let Some((instrument,trade,order,fee,fee_currency)) = fill {
+                    let canonical=format!("fill:{instrument}:{trade}:{order}");
+                    // Venue-provided bill IDs are also valid economic keys,
+                    // but they must be present in the same account ledger.
+                    let linked_bill=if let Some(bill_id)=economic_key.strip_prefix("bill:") {
+                        self.connection.query_row(
+                            "SELECT EXISTS(SELECT 1 FROM bills WHERE bill_id=?1)",
+                            [bill_id],|row|row.get::<_,bool>(0)
+                        )?
+                    } else {false};
+                    if component=="FEE" && (currency!=fee_currency || amount!=decimal(fee)?) {
+                        return Err(StoreError::Invalid("STRATEGY_NAV_FEE_SOURCE_MISMATCH"));
+                    }
+                    economic_key==canonical || linked_bill
+                } else {false}
             } else if let Some(id) = proof.strip_prefix("bill:") {
-                self.connection.query_row(
+                economic_key==proof && self.connection.query_row(
                     "SELECT EXISTS(SELECT 1 FROM bills WHERE bill_id=?1)",
-                    [id],
-                    |row| row.get::<_, bool>(0),
+                    [id],|row|row.get::<_,bool>(0)
                 )?
-            } else {
-                false
-            };
+            } else {false};
             if !found {
                 return Err(StoreError::Invalid(
                     "STRATEGY_NAV_ECONOMIC_SOURCE_UNVERIFIED",

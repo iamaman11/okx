@@ -3731,16 +3731,25 @@ fn p02_two_accounts_two_strategies_fees_marks_restart_conserve_nav() {
         } else {
             Decimal::new(-5, 1)
         };
+        let bill_id=format!("fee-bill-{left}");
         s.ingest_page(&IngestPage {
+            bills: vec![Bill {
+                bill_id:bill_id.clone(),
+                kind:"trade-fee".into(),
+                time:7,
+                amount:fee,
+                currency:"USDT".into(),
+                economic_event_key:format!("bill:{bill_id}"),
+            }],
             finance: vec![FinanceEntry {
                 entry_id: format!("fee-{left}"),
-                economic_event_key: format!("billable-{left}"),
+                economic_event_key: format!("bill:{bill_id}"),
                 component: "FEE".into(),
                 allocation_leg: "account".into(),
                 amount: fee,
                 currency: "USDT".into(),
                 instance_id: Some(left.into()),
-                source_ref: format!("fill:f:{left}-fill"),
+                source_ref: format!("bill:{bill_id}"),
                 time: 7,
                 reverses_entry_id: None,
             }],
