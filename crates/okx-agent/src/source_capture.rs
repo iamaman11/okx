@@ -30,6 +30,22 @@ fn optional_d(s: &str) -> StoreResult<Decimal> {
         d(s)
     }
 }
+// An absent amount on a real fill or a funding bill is UNKNOWN, not a zero
+// commission or zero cashflow. Other bill types explicitly permit empty PnL.
+fn required_d(s: &str, reason: &'static str) -> StoreResult<Decimal> {
+    if s.is_empty() {
+        Err(StoreError::Invalid(reason))
+    } else {
+        d(s)
+    }
+}
+fn bill_pnl(sub_type: &str, value: &str) -> StoreResult<Decimal> {
+    if matches!(sub_type, "173" | "174") {
+        required_d(value, "FUNDING_AMOUNT_SOURCE_UNAVAILABLE")
+    } else {
+        optional_d(value)
+    }
+}
 fn ts(s: &str) -> StoreResult<i64> {
     s.parse()
         .map_err(|_| StoreError::Invalid("SOURCE_TIMESTAMP_INVALID"))
@@ -392,7 +408,7 @@ async fn capture_fills(
                 }
                 let owner = s.by_client_order_id(&r.client_order_id)?;
                 let instance = owner.as_ref().map(|i| i.plan.strategy_instance.clone());
-                let fee = optional_d(&r.fee)?;
+                let fee = required_d(&r.fee, "FILL_FEE_SOURCE_UNAVAILABLE")?;
                 let key = if r.bill_id.is_empty() {
                     format!("fill:{}:{}:{}", r.instrument_id, r.trade_id, r.order_id)
                 } else {
@@ -528,7 +544,7 @@ async fn capture_bills(
                         } else {
                             "REALIZED_PNL"
                         },
-                        optional_d(&b.pnl)?,
+                        bill_pnl(&b.bill_sub_type, &b.pnl)?,
                     ),
                 ] {
                     if value == Decimal::ZERO {
@@ -603,5 +619,32 @@ mod tests {
     fn unknown_currency_and_decimal_do_not_become_zero() {
         assert!(d("NaN").is_err());
         assert!(ts("unknown").is_err());
+    }
+
+    #[test]
+    fn trade_fee_and_funding_are_required_economic_facts() {
+        assert!(matches!(
+            required_d("", "FILL_FEE_SOURCE_UNAVAILABLE"),
+            Err(StoreError::Invalid("FILL_FEE_SOURCE_UNAVAILABLE"))
+        ));
+        assert_eq!(
+            required_d("0", "FILL_FEE_SOURCE_UNAVAILABLE").unwrap(),
+            Decimal::ZERO
+        );
+        assert_eq!(
+            required_d("-0.001", "FILL_FEE_SOURCE_UNAVAILABLE").unwrap(),
+            Decimal::new(-1, 3)
+        );
+        for subtype in ["173", "174"] {
+            assert!(matches!(
+                bill_pnl(subtype, ""),
+                Err(StoreError::Invalid("FUNDING_AMOUNT_SOURCE_UNAVAILABLE"))
+            ));
+            assert_eq!(bill_pnl(subtype, "0").unwrap(), Decimal::ZERO);
+            assert_eq!(bill_pnl(subtype, "-0.05").unwrap(), Decimal::new(-5, 2));
+        }
+        // A transfer or non-funding bill may legitimately omit PnL.
+        assert_eq!(bill_pnl("11", "").unwrap(), Decimal::ZERO);
+        assert_eq!(bill_pnl("12", "").unwrap(), Decimal::ZERO);
     }
 }
