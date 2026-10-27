@@ -3997,7 +3997,6 @@ fn p02_strategy_nav_expires_on_new_zero_fee_fill_or_new_account_mark() {
     assert_eq!(read(&s, 5), "PARTIAL");
 }
 
-
 #[test]
 fn p02_strategy_nav_window_uses_separate_source_revisions_at_both_endpoints() {
     let mut s = store();
@@ -4029,9 +4028,7 @@ fn p02_strategy_nav_window_uses_separate_source_revisions_at_both_endpoints() {
     p02_completed_cursors(&mut s, 5);
     // Different legitimate account marks change the immutable strategy
     // source revision. The historical opening must retain its own witness.
-    for (time, mark, account_equity) in
-        [(4, "window-mark-4", 100), (5, "window-mark-5", 101)]
-    {
+    for (time, mark, account_equity) in [(4, "window-mark-4", 100), (5, "window-mark-5", 101)] {
         s.ingest_page(&IngestPage {
             nav: vec![NavPoint {
                 scope_id: "account".into(),
