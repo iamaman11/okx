@@ -636,7 +636,15 @@ impl AccountStore {
                         .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))
                 })
                 .transpose()?;
-            let complete = opening
+            let valuation_gap=if strategy {
+                let latest:Option<(i64,String)>=self.connection.query_row(
+                    "SELECT watermark,coverage_gaps FROM source_cursors WHERE source='strategy_valuation' AND stream_partition='account'",
+                    [],|r|Ok((r.get(0)?,r.get(1)?))
+                ).optional()?;
+                latest.is_some_and(|(t,g)|!g.is_empty()&&t<=through&&
+                    current.as_ref().is_none_or(|p|t>=p.2))
+            } else {false};
+            let complete = !valuation_gap && opening
                 .as_ref()
                 .is_some_and(|v| v.3 == "COMPLETE" && from - v.2 <= 5000)
                 && current

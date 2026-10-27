@@ -3599,6 +3599,13 @@ fn p02_valuation_requires_converged_sources_even_with_valid_principal() {
             "STRATEGY_NAV_ECONOMIC_SOURCE_UNVERIFIED"
         ))
     ));
+    s.ingest_page(&IngestPage {
+        cursor:Some(SourceCursor{
+            source:"strategy_valuation".into(),stream_partition:"account".into(),
+            cursor:String::new(),watermark:4,generation:1,
+            coverage_gaps:"STRATEGY_NAV_ECONOMIC_SOURCE_UNVERIFIED".into(),
+        }),..Default::default()
+    }).unwrap();
     assert_eq!(
         s.nav_summary(1, 4, &["alpha".into()], &["USD".into()])
             .unwrap()[0]

@@ -6,7 +6,8 @@ use crate::{
 use okx_api::{AccountBill, FillHistory};
 use okx_execution::{
     Bill, CashFlow, Fill, FinanceEntry, FundingEvent, IngestPage, NavPoint, SourceCursor,
-    StoreError, StoreResult, UsdConversionEvidence, VenueMark,
+    StoreError, StoreResult, StrategyValuationEvidence, UsdConversionEvidence, ValuationPosition,
+    VenueMark,
 };
 use okx_runtime::PrivateWsHandle;
 use rust_decimal::Decimal;
@@ -178,6 +179,29 @@ pub async fn capture_account_sources(
             })
         })
         .collect::<StoreResult<Vec<_>>>()?;
+    // Strategy valuation uses the same account-identity-verified snapshot.
+    // Missing marks affect strategy coverage, not account/manual NAV.
+    let valuation_positions:StoreResult<Vec<ValuationPosition>>=snapshot.positions.iter()
+        .filter_map(|p|match d(&p.position){
+            Ok(n) if n==Decimal::ZERO=>None,
+            Ok(n)=>Some((||{
+                let signed=match p.position_side.as_str(){
+                    "net"=>n,
+                    "long"=>n.abs(),
+                    "short"=>-n.abs(),
+                    _=>return Err(StoreError::Invalid("STRATEGY_NAV_POSITION_MODE_UNSUPPORTED"))
+                };
+                let mark=p.mark_price.as_deref().ok_or(
+                    StoreError::Invalid("STRATEGY_NAV_MARK_MISSING")
+                )?;
+                Ok(ValuationPosition {
+                    instrument_id:p.instrument_id.clone(),
+                    signed_contracts:signed,
+                    mark_price:d(mark)?,
+                })
+            })()),
+            Err(e)=>Some(Err(e)),
+        }).collect();
     let source = snapshot.source_received_at.clone();
     let version = format!("{generation}:{}", snapshot.account_generation);
     execution
@@ -248,6 +272,37 @@ pub async fn capture_account_sources(
                 },
             });
             s.ingest_page(&page)?;
+            // One AccountStore, one canonical NAV owner. Strategy failures
+            // are recorded in the existing coverage cursor; manual trading
+            // does not inherit a missing standalone strategy NAV.
+            let strategy_result=if !complete {
+                Err(StoreError::Invalid("FINANCIAL_BACKFILL_PENDING"))
+            } else {
+                match s.capital_state(now) {
+                    Ok(capital) if capital.strategy_principal_usd.is_empty()=>Ok(()),
+                    Ok(_)=>valuation_positions.and_then(|venue_positions|{
+                        s.commit_reconciled_strategy_nav(&StrategyValuationEvidence{
+                            account_key:s.meta().account_key.clone(),
+                            account_nav_source:source.clone(),
+                            as_of:now,conversion:fx.clone(),venue_positions,
+                        })?;
+                        Ok(())
+                    }),
+                    Err(e)=>Err(e),
+                }
+            };
+            let gap=match strategy_result {
+                Ok(())=>String::new(),
+                Err(StoreError::Invalid(reason))=>reason.into(),
+                Err(e)=>return Err(e),
+            };
+            s.ingest_page(&IngestPage{
+                cursor:Some(SourceCursor {
+                    source:"strategy_valuation".into(),
+                    stream_partition:"account".into(),cursor:String::new(),
+                    watermark:now,generation,coverage_gaps:gap,
+                }),..Default::default()
+            })?;
             Ok(())
         })
         .await?;
