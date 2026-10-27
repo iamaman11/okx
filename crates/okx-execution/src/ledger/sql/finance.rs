@@ -679,6 +679,10 @@ impl AccountStore {
             return Err(StoreError::Invalid("NAV_SCOPE_LIMIT"));
         }
         let mut result = Vec::new();
+        // Each NAV endpoint has its own immutable as-of source revision.
+        // Reusing the end revision for an earlier snapshot makes valid
+        // consecutive reconciled marks look incomplete.
+        let opening_revision = self.strategy_valuation_revision_as_of(from)?;
         let revision = self.strategy_valuation_revision_as_of(through)?;
         for (scope, currency) in scopes {
             // Only native reconciliation receipts authorize strategy NAV rows.
@@ -686,7 +690,9 @@ impl AccountStore {
             // ignored. A new financial event invalidates a prior revision.
             let manual = scope == "strategy:manual";
             let strategy = scope.starts_with("strategy:") && !manual;
-            let endpoint = |time: i64| -> StoreResult<Option<(Decimal, Decimal, i64, String)>> {
+            let endpoint = |time: i64,
+                            source_revision: &str|
+             -> StoreResult<Option<(Decimal, Decimal, i64, String)>> {
                 let row: Option<(String, String, i64, String)> = if strategy {
                     self.connection.query_row(
                         "SELECT n.equity,n.flows,n.time,n.coverage FROM nav_points n
@@ -696,7 +702,7 @@ impl AccountStore {
                            AND o.kind='STRATEGY_NAV_RECONCILED' AND o.result_ref=n.mark_source
                            AND o.request_hash=substr(n.source_version,length('strategy-reconciled-v1:')+1)
                          ORDER BY n.time DESC, n.source_version DESC LIMIT 1",
-                        params![scope,time,format!("strategy-reconciled-v1:revision:{revision}")],
+                        params![scope,time,format!("strategy-reconciled-v1:revision:{source_revision}")],
                         |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))
                     ).optional()?
                 } else {
@@ -719,9 +725,13 @@ impl AccountStore {
                     params![scope,through,format!("strategy-reconciled-v1:revision:{revision}")],
                     |r|r.get::<_,bool>(0)
                 )?);
-            let opening = if capital_known { endpoint(from)? } else { None };
+            let opening = if capital_known {
+                endpoint(from, &opening_revision)?
+            } else {
+                None
+            };
             let current = if capital_known {
-                endpoint(through)?
+                endpoint(through, &revision)?
             } else {
                 None
             };
