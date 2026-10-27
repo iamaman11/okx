@@ -128,26 +128,43 @@ impl AccountStore {
         let mut sources=self.connection.prepare(
             "SELECT instance_id,component,source_ref FROM finance_entries WHERE time>=?1 AND time<=?2 AND instance_id IS NOT NULL ORDER BY time,entry_id"
         )?;
-        let mut source_rows=sources.query(params![self.meta.initialized_at,evidence.as_of])?;
-        while let Some(r)=source_rows.next()? {
-            let instance:String=r.get(0)?;
-            if instance=="manual" {continue}
-            let component:String=r.get(1)?;
-            if !matches!(component.as_str(),"FEE"|"FUNDING"|"REALIZED_PNL"|"LIQUIDATION_COST") {
-                if component=="INTERNAL_CAPITAL_USD" || component=="CAMPAIGN_LOSS_USD" {continue}
+        let mut source_rows = sources.query(params![self.meta.initialized_at, evidence.as_of])?;
+        while let Some(r) = source_rows.next()? {
+            let instance: String = r.get(0)?;
+            if instance == "manual" {
+                continue;
+            }
+            let component: String = r.get(1)?;
+            if !matches!(
+                component.as_str(),
+                "FEE" | "FUNDING" | "REALIZED_PNL" | "LIQUIDATION_COST"
+            ) {
+                if component == "INTERNAL_CAPITAL_USD" || component == "CAMPAIGN_LOSS_USD" {
+                    continue;
+                }
                 return Err(StoreError::Invalid("STRATEGY_NAV_COMPONENT_UNKNOWN"));
             }
-            let proof:String=r.get(2)?;
-            let found=if let Some(id)=proof.strip_prefix("fill:") {
+            let proof: String = r.get(2)?;
+            let found = if let Some(id) = proof.strip_prefix("fill:") {
                 self.connection.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM fills WHERE fill_id=?1)",[id],|row|row.get::<_,bool>(0)
+                    "SELECT EXISTS(SELECT 1 FROM fills WHERE fill_id=?1)",
+                    [id],
+                    |row| row.get::<_, bool>(0),
                 )?
-            } else if let Some(id)=proof.strip_prefix("bill:") {
+            } else if let Some(id) = proof.strip_prefix("bill:") {
                 self.connection.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM bills WHERE bill_id=?1)",[id],|row|row.get::<_,bool>(0)
+                    "SELECT EXISTS(SELECT 1 FROM bills WHERE bill_id=?1)",
+                    [id],
+                    |row| row.get::<_, bool>(0),
                 )?
-            } else {false};
-            if !found {return Err(StoreError::Invalid("STRATEGY_NAV_ECONOMIC_SOURCE_UNVERIFIED"))}
+            } else {
+                false
+            };
+            if !found {
+                return Err(StoreError::Invalid(
+                    "STRATEGY_NAV_ECONOMIC_SOURCE_UNVERIFIED",
+                ));
+            }
         }
         let fx = &evidence.conversion.usd_per_currency;
         let convert = |currency: &str, value: Decimal| -> StoreResult<Decimal> {
@@ -341,26 +358,45 @@ impl AccountStore {
         &mut self,
         evidence: &StrategyValuationEvidence,
     ) -> StoreResult<StrategyValuationReconciliation> {
-        let summary=self.reconcile_strategy_valuation(evidence)?;
-        if summary.strategies.is_empty() {return Ok(summary)}
-        let revision=self.finance_revision()?;
-        let tx=self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let summary = self.reconcile_strategy_valuation(evidence)?;
+        if summary.strategies.is_empty() {
+            return Ok(summary);
+        }
+        let revision = self.finance_revision()?;
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
         for row in &summary.strategies {
-            let scope=format!("strategy:{}",row.instance_id);
-            let points=[
-                (self.meta.initialized_at,Decimal::ZERO,Decimal::ZERO,Decimal::ZERO,self.meta.opening_source.as_str(),String::from("opening")),
-                (evidence.as_of,row.equity_usd,row.realized_usd.checked_add(row.unrealized_usd)
-                    .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))?,row.capital_usd,
-                    evidence.account_nav_source.as_str(),format!("revision:{revision}"))
+            let scope = format!("strategy:{}", row.instance_id);
+            let points = [
+                (
+                    self.meta.initialized_at,
+                    Decimal::ZERO,
+                    Decimal::ZERO,
+                    Decimal::ZERO,
+                    self.meta.opening_source.as_str(),
+                    String::from("opening"),
+                ),
+                (
+                    evidence.as_of,
+                    row.equity_usd,
+                    row.realized_usd
+                        .checked_add(row.unrealized_usd)
+                        .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))?,
+                    row.capital_usd,
+                    evidence.account_nav_source.as_str(),
+                    format!("revision:{revision}"),
+                ),
             ];
-            for (time,equity,pnl,flows,source,version) in points {
-                let receipt_id=format!("strategy-nav:{scope}:{time}");
+            for (time, equity, pnl, flows, source, version) in points {
+                let receipt_id = format!("strategy-nav:{scope}:{time}");
                 let previous:Option<(String,String,String)>=tx.query_row(
                     "SELECT kind,request_hash,result_ref FROM operation_receipts WHERE operation_id=?1",
                     [&receipt_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))
                 ).optional()?;
-                if previous.is_some_and(|(kind,hash,refid)|
-                    kind!="STRATEGY_NAV_RECONCILED"||hash!=version||refid!=source) {
+                if previous.is_some_and(|(kind, hash, refid)| {
+                    kind != "STRATEGY_NAV_RECONCILED" || hash != version || refid != source
+                }) {
                     return Err(StoreError::Invalid("STRATEGY_NAV_WITNESS_CONFLICT"));
                 }
                 tx.execute(
@@ -375,11 +411,14 @@ impl AccountStore {
                     "SELECT equity,pnl,flows,mark_source FROM nav_points WHERE scope_id=?1 AND time=?2 AND source_version='strategy-reconciled-v1'",
                     params![scope,time],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))
                 )?;
-                if actual!=(exact(equity),exact(pnl),exact(flows),source.to_owned()) {
+                if actual != (exact(equity), exact(pnl), exact(flows), source.to_owned()) {
                     return Err(StoreError::Invalid("STRATEGY_NAV_WITNESS_CONFLICT"));
                 }
             }
-            tx.execute("INSERT INTO nav_scopes VALUES(?1,'USD') ON CONFLICT DO NOTHING",[&scope])?;
+            tx.execute(
+                "INSERT INTO nav_scopes VALUES(?1,'USD') ON CONFLICT DO NOTHING",
+                [&scope],
+            )?;
             // No strategy high-water or risk admission from this read model:
             // strategy drawdown and authorization need independent acceptance.
         }
@@ -534,15 +573,15 @@ impl AccountStore {
             return Err(StoreError::Invalid("NAV_SCOPE_LIMIT"));
         }
         let mut result = Vec::new();
-        let revision=self.finance_revision()?;
+        let revision = self.finance_revision()?;
         for (scope, currency) in scopes {
             // Only native reconciliation receipts authorize strategy NAV rows.
             // Arbitrary strategy nav_points, including old COMPLETE claims, are
             // ignored. A new financial event invalidates a prior revision.
-            let manual=scope=="strategy:manual";
-            let strategy=scope.starts_with("strategy:") && !manual;
+            let manual = scope == "strategy:manual";
+            let strategy = scope.starts_with("strategy:") && !manual;
             let endpoint = |time: i64| -> StoreResult<Option<(Decimal, Decimal, i64, String)>> {
-                let row:Option<(String,String,i64,String)>=if strategy {
+                let row: Option<(String, String, i64, String)> = if strategy {
                     self.connection.query_row(
                         "SELECT n.equity,n.flows,n.time,n.coverage FROM nav_points n
                          JOIN operation_receipts o ON o.operation_id='strategy-nav:' || n.scope_id || ':' || n.time
@@ -1497,7 +1536,7 @@ impl AccountStore {
             }
         }
         for n in &page.nav {
-            if n.scope_id.starts_with("strategy:") && n.source_version=="strategy-reconciled-v1" {
+            if n.scope_id.starts_with("strategy:") && n.source_version == "strategy-reconciled-v1" {
                 return Err(StoreError::Invalid("STRATEGY_NAV_REQUIRES_RECONCILIATION"));
             }
             tx.execute(

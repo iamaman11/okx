@@ -3533,22 +3533,34 @@ fn p02_valuation_requires_converged_sources_even_with_valid_principal() {
         valid.account_nav_usd,
         valid.attributed_usd + valid.unattributed_usd
     );
-    let published=s.commit_reconciled_strategy_nav(&witness).unwrap();
-    assert_eq!(published,valid);
-    assert_eq!(s.commit_reconciled_strategy_nav(&witness).unwrap(),valid);
-    let nav=s.nav_summary(1,4,&["alpha".into()],&["USD".into()]).unwrap();
-    assert_eq!(nav[0].coverage,"COMPLETE");
-    assert_eq!(nav[0].opening_equity,Some(Decimal::ZERO));
-    assert_eq!(nav[0].current_equity,Some(Decimal::from(20)));
-    assert_eq!(nav[0].flows,Some(Decimal::from(20)));
-    assert_eq!(nav[0].pnl,Some(Decimal::ZERO));
-    assert!(matches!(s.ingest_page(&IngestPage {
-        nav:vec![NavPoint {
-            scope_id:"strategy:alpha".into(),time:4,source_version:"strategy-reconciled-v1".into(),
-            equity:Decimal::from(999),pnl:Decimal::ZERO,flows:Decimal::ZERO,
-            currency:"USD".into(),coverage:"COMPLETE".into(),mark_source:"forged".into()
-        }],..Default::default()
-    }),Err(StoreError::Invalid("STRATEGY_NAV_REQUIRES_RECONCILIATION"))));
+    let published = s.commit_reconciled_strategy_nav(&witness).unwrap();
+    assert_eq!(published, valid);
+    assert_eq!(s.commit_reconciled_strategy_nav(&witness).unwrap(), valid);
+    let nav = s
+        .nav_summary(1, 4, &["alpha".into()], &["USD".into()])
+        .unwrap();
+    assert_eq!(nav[0].coverage, "COMPLETE");
+    assert_eq!(nav[0].opening_equity, Some(Decimal::ZERO));
+    assert_eq!(nav[0].current_equity, Some(Decimal::from(20)));
+    assert_eq!(nav[0].flows, Some(Decimal::from(20)));
+    assert_eq!(nav[0].pnl, Some(Decimal::ZERO));
+    assert!(matches!(
+        s.ingest_page(&IngestPage {
+            nav: vec![NavPoint {
+                scope_id: "strategy:alpha".into(),
+                time: 4,
+                source_version: "strategy-reconciled-v1".into(),
+                equity: Decimal::from(999),
+                pnl: Decimal::ZERO,
+                flows: Decimal::ZERO,
+                currency: "USD".into(),
+                coverage: "COMPLETE".into(),
+                mark_source: "forged".into()
+            }],
+            ..Default::default()
+        }),
+        Err(StoreError::Invalid("STRATEGY_NAV_REQUIRES_RECONCILIATION"))
+    ));
 
     assert!(!s.financial_risk(4, Some("alpha")).unwrap().nav_complete);
     assert_eq!(
@@ -3564,21 +3576,35 @@ fn p02_valuation_requires_converged_sources_even_with_valid_principal() {
         s.reconcile_strategy_valuation(&witness),
         Err(StoreError::Invalid("STRATEGY_NAV_ACCOUNT_SOURCE_MISMATCH"))
     ));
-    let mut witness=p02_valuation_witness(&s,4,"account-witness");
+    let witness = p02_valuation_witness(&s, 4, "account-witness");
     s.ingest_page(&IngestPage {
-        finance:vec![FinanceEntry{
-            entry_id:"forged-fee".into(),economic_event_key:"fake-fee".into(),
-            component:"FEE".into(),allocation_leg:"account".into(),
-            amount:Decimal::from(-1),currency:"USD".into(),instance_id:Some("alpha".into()),
-            source_ref:"unverified:fee".into(),time:4,reverses_entry_id:None,
+        finance: vec![FinanceEntry {
+            entry_id: "forged-fee".into(),
+            economic_event_key: "fake-fee".into(),
+            component: "FEE".into(),
+            allocation_leg: "account".into(),
+            amount: Decimal::from(-1),
+            currency: "USD".into(),
+            instance_id: Some("alpha".into()),
+            source_ref: "unverified:fee".into(),
+            time: 4,
+            reverses_entry_id: None,
         }],
         ..Default::default()
-    }).unwrap();
+    })
+    .unwrap();
     assert!(matches!(
         s.reconcile_strategy_valuation(&witness),
-        Err(StoreError::Invalid("STRATEGY_NAV_ECONOMIC_SOURCE_UNVERIFIED"))
+        Err(StoreError::Invalid(
+            "STRATEGY_NAV_ECONOMIC_SOURCE_UNVERIFIED"
+        ))
     ));
-    assert_eq!(s.nav_summary(1,4,&["alpha".into()],&["USD".into()]).unwrap()[0].coverage,"PARTIAL");
+    assert_eq!(
+        s.nav_summary(1, 4, &["alpha".into()], &["USD".into()])
+            .unwrap()[0]
+            .coverage,
+        "PARTIAL"
+    );
 }
 #[test]
 fn p02_valuation_rejects_missing_mark_and_uses_contract_mechanics() {
