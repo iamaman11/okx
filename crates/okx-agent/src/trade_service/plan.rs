@@ -67,6 +67,13 @@ fn quantize_executable_price(
     Ok(price)
 }
 
+/// The manual strategy is an execution/attribution label for account capital,
+/// not a separately capitalized investment portfolio. All account-level finance,
+/// limits and STOP checks still apply to manual orders.
+pub(super) fn requires_independent_strategy_nav(instance: &str) -> bool {
+    instance != "manual"
+}
+
 /// Missing strategy NAV blocks actual admission, but not a read-only price quote.
 /// An incomplete projection is *never* an affirmative risk admission.
 pub(super) fn instance_nav_gate(
@@ -488,7 +495,9 @@ impl TradeService {
                     }
                     return Ok(Some("DRAWDOWN_LIMIT"));
                 }
-                if s.instances()?.iter().any(|i| i.instance_id == instance) {
+                if requires_independent_strategy_nav(&instance)
+                    && s.instances()?.iter().any(|i| i.instance_id == instance)
+                {
                     let own = s.financial_risk(now(), Some(&instance))?;
                     let nav_valid = instance_nav_gate(own.nav_complete, record_risk_state)
                         .map_err(okx_execution::StoreError::Invalid)?;
@@ -549,6 +558,15 @@ impl TradeService {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn manual_uses_account_capital_but_independent_strategies_require_own_nav() {
+        assert!(!requires_independent_strategy_nav("manual"));
+        assert!(requires_independent_strategy_nav("ema_cross"));
+        assert!(requires_independent_strategy_nav("manual-copy"));
+        // Unknown strategy capital is never accepted for a real increase.
+        assert_eq!(instance_nav_gate(false, true), Err("INSTANCE_NAV_INCOMPLETE"));
+    }
 
     #[test]
     fn missing_instance_nav_allows_only_non_authorizing_preview_projection() {
