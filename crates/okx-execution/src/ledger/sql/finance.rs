@@ -1628,7 +1628,9 @@ impl AccountStore {
             }
         }
         for n in &page.nav {
-            if n.scope_id.starts_with("strategy:") && n.source_version.starts_with("strategy-reconciled-v1") {
+            if n.scope_id.starts_with("strategy:")
+                && n.source_version.starts_with("strategy-reconciled-v1")
+            {
                 return Err(StoreError::Invalid("STRATEGY_NAV_REQUIRES_RECONCILIATION"));
             }
             tx.execute(

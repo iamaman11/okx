@@ -3996,64 +3996,95 @@ fn p02_strategy_nav_expires_on_new_zero_fee_fill_or_new_account_mark() {
     assert_eq!(read(&s, 5), "PARTIAL");
 }
 
-
 #[test]
 fn p02_same_timestamp_late_bill_replays_new_nav_revision_without_rewriting_history() {
-    let mut s=store();
-    let strategy=StrategyInstance{
-        instance_id:"late".into(),definition_id:"fixture".into(),
-        definition_version:"1".into(),parameters:"{}".into(),enabled:false,
-        policy_revision:1,budget:Decimal::from(10),last_decision_key:None,
+    let mut s = store();
+    let strategy = StrategyInstance {
+        instance_id: "late".into(),
+        definition_id: "fixture".into(),
+        definition_version: "1".into(),
+        parameters: "{}".into(),
+        enabled: false,
+        policy_revision: 1,
+        budget: Decimal::from(10),
+        last_decision_key: None,
     };
-    s.mutate_instance("late-create","late-hash","create",&strategy,None,2).unwrap();
-    s.commit_authorized_capital_assignment(&AuthorizedCapitalAssignment{
-        account_key:s.meta().account_key.clone(),
-        installation_id:s.meta().installation_id.clone(),
-        nav_source_ref:s.meta().opening_source.clone(),
-        operation_id:"late-capital".into(),request_hash:"late-capital-hash".into(),
-        instance_id:"late".into(),delta_usd:Decimal::from(20),
-        authority_revision:1,authority_receipt:"governance".into(),time:3,
-    }).unwrap();
-    p02_completed_cursors(&mut s,4);
-    s.ingest_page(&IngestPage{
-        nav:vec![NavPoint{
-            scope_id:"account".into(),time:4,source_version:"witness".into(),
-            equity:Decimal::from(100),pnl:Decimal::ZERO,flows:Decimal::ZERO,
-            currency:"USD".into(),coverage:"COMPLETE".into(),mark_source:"witness-source".into()
-        }],..Default::default()
-    }).unwrap();
-    let witness=p02_valuation_witness(&s,4,"witness-source");
-    let first=s.commit_reconciled_strategy_nav(&witness).unwrap();
-    assert_eq!(first.strategies[0].equity_usd,Decimal::from(20));
-    let read=|s:&AccountStore|s.nav_summary(1,4,&["late".into()],&["USD".into()])
-        .unwrap()[0].coverage.clone();
-    assert_eq!(read(&s),"COMPLETE");
-    let first_version=s.strategy_valuation_revision().unwrap();
+    s.mutate_instance("late-create", "late-hash", "create", &strategy, None, 2)
+        .unwrap();
+    s.commit_authorized_capital_assignment(&AuthorizedCapitalAssignment {
+        account_key: s.meta().account_key.clone(),
+        installation_id: s.meta().installation_id.clone(),
+        nav_source_ref: s.meta().opening_source.clone(),
+        operation_id: "late-capital".into(),
+        request_hash: "late-capital-hash".into(),
+        instance_id: "late".into(),
+        delta_usd: Decimal::from(20),
+        authority_revision: 1,
+        authority_receipt: "governance".into(),
+        time: 3,
+    })
+    .unwrap();
+    p02_completed_cursors(&mut s, 4);
+    s.ingest_page(&IngestPage {
+        nav: vec![NavPoint {
+            scope_id: "account".into(),
+            time: 4,
+            source_version: "witness".into(),
+            equity: Decimal::from(100),
+            pnl: Decimal::ZERO,
+            flows: Decimal::ZERO,
+            currency: "USD".into(),
+            coverage: "COMPLETE".into(),
+            mark_source: "witness-source".into(),
+        }],
+        ..Default::default()
+    })
+    .unwrap();
+    let witness = p02_valuation_witness(&s, 4, "witness-source");
+    let first = s.commit_reconciled_strategy_nav(&witness).unwrap();
+    assert_eq!(first.strategies[0].equity_usd, Decimal::from(20));
+    let read = |s: &AccountStore| {
+        s.nav_summary(1, 4, &["late".into()], &["USD".into()])
+            .unwrap()[0]
+            .coverage
+            .clone()
+    };
+    assert_eq!(read(&s), "COMPLETE");
+    let first_version = s.strategy_valuation_revision().unwrap();
     // Delayed authenticated bill arrives without adding attributable PnL.
     // The SQL receipt of the first calculation must remain immutable.
-    s.ingest_page(&IngestPage{
-        bills:vec![Bill{
-            bill_id:"late-bill".into(),kind:"2:0".into(),time:4,
-            amount:Decimal::ZERO,currency:"USDT".into(),
-            economic_event_key:"bill:late-bill".into()
-        }],..Default::default()
-    }).unwrap();
-    assert_ne!(s.strategy_valuation_revision().unwrap(),first_version);
-    assert_eq!(read(&s),"PARTIAL");
-    let second=s.commit_reconciled_strategy_nav(&witness).unwrap();
-    assert_eq!(first,second);
-    assert_eq!(read(&s),"COMPLETE");
-    let versions:i64=s.connection.query_row(
-        "SELECT COUNT(*) FROM nav_points WHERE scope_id='strategy:late' AND time=4
+    s.ingest_page(&IngestPage {
+        bills: vec![Bill {
+            bill_id: "late-bill".into(),
+            kind: "2:0".into(),
+            time: 4,
+            amount: Decimal::ZERO,
+            currency: "USDT".into(),
+            economic_event_key: "bill:late-bill".into(),
+        }],
+        ..Default::default()
+    })
+    .unwrap();
+    assert_ne!(s.strategy_valuation_revision().unwrap(), first_version);
+    assert_eq!(read(&s), "PARTIAL");
+    let second = s.commit_reconciled_strategy_nav(&witness).unwrap();
+    assert_eq!(first, second);
+    assert_eq!(read(&s), "COMPLETE");
+    let versions: i64 = s
+        .connection
+        .query_row(
+            "SELECT COUNT(*) FROM nav_points WHERE scope_id='strategy:late' AND time=4
          AND source_version LIKE 'strategy-reconciled-v1:revision:%'",
-        [],|r|r.get(0)
-    ).unwrap();
-    assert_eq!(versions,2);
-    assert_eq!(s.commit_reconciled_strategy_nav(&witness).unwrap(),second);
-    let path=s.path.clone();
-    let meta=s.meta.clone();
-    drop(s);
-    let restored=AccountStore::open_existing(path,&meta.account_key,&meta.installation_id)
+            [],
+            |r| r.get(0),
+        )
         .unwrap();
-    assert_eq!(read(&restored),"COMPLETE");
+    assert_eq!(versions, 2);
+    assert_eq!(s.commit_reconciled_strategy_nav(&witness).unwrap(), second);
+    let path = s.path.clone();
+    let meta = s.meta.clone();
+    drop(s);
+    let restored =
+        AccountStore::open_existing(path, &meta.account_key, &meta.installation_id).unwrap();
+    assert_eq!(read(&restored), "COMPLETE");
 }
