@@ -3600,12 +3600,17 @@ fn p02_valuation_requires_converged_sources_even_with_valid_principal() {
         ))
     ));
     s.ingest_page(&IngestPage {
-        cursor:Some(SourceCursor{
-            source:"strategy_valuation".into(),stream_partition:"account".into(),
-            cursor:String::new(),watermark:4,generation:1,
-            coverage_gaps:"STRATEGY_NAV_ECONOMIC_SOURCE_UNVERIFIED".into(),
-        }),..Default::default()
-    }).unwrap();
+        cursor: Some(SourceCursor {
+            source: "strategy_valuation".into(),
+            stream_partition: "account".into(),
+            cursor: String::new(),
+            watermark: 4,
+            generation: 1,
+            coverage_gaps: "STRATEGY_NAV_ECONOMIC_SOURCE_UNVERIFIED".into(),
+        }),
+        ..Default::default()
+    })
+    .unwrap();
     assert_eq!(
         s.nav_summary(1, 4, &["alpha".into()], &["USD".into()])
             .unwrap()[0]
@@ -3673,110 +3678,178 @@ fn p02_valuation_rejects_missing_mark_and_uses_contract_mechanics() {
     ));
 }
 
-
 #[test]
 fn p02_two_accounts_two_strategies_fees_marks_restart_conserve_nav() {
-    let mut real=store();
-    let demo_meta=AccountMeta {
-        initialize_operation_id:"demo-2x2-init".into(),
-        release_id:"release-demo-2x2".into(),
-        account_key:"okx:demo:verified-2x2".into(),
-        installation_id:"demo-2x2-installation".into(),
-        initialized_at:1,opening_source:"demo-2x2-opening".into(),
+    let mut real = store();
+    let demo_meta = AccountMeta {
+        initialize_operation_id: "demo-2x2-init".into(),
+        release_id: "release-demo-2x2".into(),
+        account_key: "okx:demo:verified-2x2".into(),
+        installation_id: "demo-2x2-installation".into(),
+        initialized_at: 1,
+        opening_source: "demo-2x2-opening".into(),
     };
-    let demo_snapshot=OpeningSnapshot {
-        opening_equity_usd:Decimal::from(50),source_ref:demo_meta.opening_source.clone(),
-        observed_at:1,positions:0,orders:0,conditional_orders:0,
-        liabilities:Decimal::ZERO,balances:vec![("USDT".into(),Decimal::from(50))],
+    let demo_snapshot = OpeningSnapshot {
+        opening_equity_usd: Decimal::from(50),
+        source_ref: demo_meta.opening_source.clone(),
+        observed_at: 1,
+        positions: 0,
+        orders: 0,
+        conditional_orders: 0,
+        liabilities: Decimal::ZERO,
+        balances: vec![("USDT".into(), Decimal::from(50))],
     };
-    let mut demo=AccountStore::initialize_flat(path(),demo_meta.clone(),&demo_snapshot).unwrap();
-    demo.apply_authority_policy(1,false,"campaign-demo",Decimal::from(20)).unwrap();
+    let mut demo =
+        AccountStore::initialize_flat(path(), demo_meta.clone(), &demo_snapshot).unwrap();
+    demo.apply_authority_policy(1, false, "campaign-demo", Decimal::from(20))
+        .unwrap();
     demo.ensure_manual_instance(1).unwrap();
-    for (s,left,right) in [
-        (&mut real,"real_a","real_b"),
-        (&mut demo,"demo_a","demo_b"),
+    for (s, left, right) in [
+        (&mut real, "real_a", "real_b"),
+        (&mut demo, "demo_a", "demo_b"),
     ] {
-        owned_fill(s,left,&format!("{left}-fill"),100,"long",3);
-        owned_fill(s,right,&format!("{right}-fill"),100,"long",4);
-        let (first,second)=if left=="real_a" {(20,30)} else {(10,15)};
-        for (id,amount,time) in [(left,first,5),(right,second,6)] {
+        owned_fill(s, left, &format!("{left}-fill"), 100, "long", 3);
+        owned_fill(s, right, &format!("{right}-fill"), 100, "long", 4);
+        let (first, second) = if left == "real_a" { (20, 30) } else { (10, 15) };
+        for (id, amount, time) in [(left, first, 5), (right, second, 6)] {
             s.commit_authorized_capital_assignment(&AuthorizedCapitalAssignment {
-                account_key:s.meta().account_key.clone(),
-                installation_id:s.meta().installation_id.clone(),
-                nav_source_ref:s.meta().opening_source.clone(),
-                operation_id:format!("capital-{id}"),request_hash:format!("hash-{id}"),
-                instance_id:id.into(),delta_usd:Decimal::from(amount),
-                authority_revision:1,authority_receipt:format!("governance-{id}"),time,
-            }).unwrap();
+                account_key: s.meta().account_key.clone(),
+                installation_id: s.meta().installation_id.clone(),
+                nav_source_ref: s.meta().opening_source.clone(),
+                operation_id: format!("capital-{id}"),
+                request_hash: format!("hash-{id}"),
+                instance_id: id.into(),
+                delta_usd: Decimal::from(amount),
+                authority_revision: 1,
+                authority_receipt: format!("governance-{id}"),
+                time,
+            })
+            .unwrap();
         }
-        let fee=if left=="real_a" {Decimal::from(-1)} else {Decimal::new(-5,1)};
+        let fee = if left == "real_a" {
+            Decimal::from(-1)
+        } else {
+            Decimal::new(-5, 1)
+        };
         s.ingest_page(&IngestPage {
-            finance:vec![FinanceEntry {
-                entry_id:format!("fee-{left}"),
-                economic_event_key:format!("billable-{left}"),
-                component:"FEE".into(),allocation_leg:"account".into(),
-                amount:fee,currency:"USDT".into(),
-                instance_id:Some(left.into()),
-                source_ref:format!("fill:f:{left}-fill"),time:7,reverses_entry_id:None,
+            finance: vec![FinanceEntry {
+                entry_id: format!("fee-{left}"),
+                economic_event_key: format!("billable-{left}"),
+                component: "FEE".into(),
+                allocation_leg: "account".into(),
+                amount: fee,
+                currency: "USDT".into(),
+                instance_id: Some(left.into()),
+                source_ref: format!("fill:f:{left}-fill"),
+                time: 7,
+                reverses_entry_id: None,
             }],
             ..Default::default()
-        }).unwrap();
-        p02_completed_cursors(s,10);
-        let account_nav=if left=="real_a" {Decimal::new(992,1)} else {Decimal::new(497,1)};
-        s.ingest_page(&IngestPage{
-            nav:vec![NavPoint {
-                scope_id:"account".into(),time:10,source_version:"2x2".into(),
-                equity:account_nav,pnl:account_nav- if left=="real_a" {
-                    Decimal::from(100)
-                } else {
-                    Decimal::from(50)
-                },flows:Decimal::ZERO,currency:"USD".into(),
-                coverage:"COMPLETE".into(),mark_source:"2x2-venue".into(),
-            }],..Default::default()
-        }).unwrap();
-        let mut proof=p02_valuation_witness(s,10,"2x2-venue");
-        proof.venue_positions.push(ValuationPosition{
-            instrument_id:"BTC".into(),signed_contracts:Decimal::from(2),
-            mark_price:Decimal::from(110),
+        })
+        .unwrap();
+        p02_completed_cursors(s, 10);
+        let account_nav = if left == "real_a" {
+            Decimal::new(992, 1)
+        } else {
+            Decimal::new(497, 1)
+        };
+        s.ingest_page(&IngestPage {
+            nav: vec![NavPoint {
+                scope_id: "account".into(),
+                time: 10,
+                source_version: "2x2".into(),
+                equity: account_nav,
+                pnl: account_nav
+                    - if left == "real_a" {
+                        Decimal::from(100)
+                    } else {
+                        Decimal::from(50)
+                    },
+                flows: Decimal::ZERO,
+                currency: "USD".into(),
+                coverage: "COMPLETE".into(),
+                mark_source: "2x2-venue".into(),
+            }],
+            ..Default::default()
+        })
+        .unwrap();
+        let mut proof = p02_valuation_witness(s, 10, "2x2-venue");
+        proof.venue_positions.push(ValuationPosition {
+            instrument_id: "BTC".into(),
+            signed_contracts: Decimal::from(2),
+            mark_price: Decimal::from(110),
         });
-        let checked=s.commit_reconciled_strategy_nav(&proof).unwrap();
-        assert_eq!(checked.coverage,"COMPLETE");
-        assert_eq!(checked.strategies.len(),2);
-        assert_eq!(checked.account_nav_usd,checked.attributed_usd+checked.unattributed_usd);
-        assert_eq!(checked.unattributed_usd,
-            if left=="real_a" {Decimal::from(50)} else {Decimal::from(25)}
+        let checked = s.commit_reconciled_strategy_nav(&proof).unwrap();
+        assert_eq!(checked.coverage, "COMPLETE");
+        assert_eq!(checked.strategies.len(), 2);
+        assert_eq!(
+            checked.account_nav_usd,
+            checked.attributed_usd + checked.unattributed_usd
         );
-        assert_eq!(checked.strategies[0].realized_usd,fee);
-        assert_eq!(checked.strategies[0].unrealized_usd,Decimal::new(1,1));
-        assert_eq!(checked.strategies[1].unrealized_usd,Decimal::new(1,1));
-        assert_eq!(checked.strategies[1].realized_usd,Decimal::ZERO);
-        for id in [left,right] {
-            let nav=s.nav_summary(1,10,&[id.into()],&["USD".into()]).unwrap();
-            assert_eq!(nav.len(),1);
-            assert_eq!(nav[0].coverage,"COMPLETE");
-            assert_eq!(nav[0].opening_equity,Some(Decimal::ZERO));
-            assert_eq!(nav[0].pnl,Some(if id==left {fee+Decimal::new(1,1)} else {Decimal::new(1,1)}));
-            assert_eq!(nav[0].current_equity,
-                Some(nav[0].flows.unwrap()+nav[0].pnl.unwrap()));
-            assert!(!s.financial_risk(10,Some(id)).unwrap().nav_complete);
+        assert_eq!(
+            checked.unattributed_usd,
+            if left == "real_a" {
+                Decimal::from(50)
+            } else {
+                Decimal::from(25)
+            }
+        );
+        assert_eq!(checked.strategies[0].realized_usd, fee);
+        assert_eq!(checked.strategies[0].unrealized_usd, Decimal::new(1, 1));
+        assert_eq!(checked.strategies[1].unrealized_usd, Decimal::new(1, 1));
+        assert_eq!(checked.strategies[1].realized_usd, Decimal::ZERO);
+        for id in [left, right] {
+            let nav = s.nav_summary(1, 10, &[id.into()], &["USD".into()]).unwrap();
+            assert_eq!(nav.len(), 1);
+            assert_eq!(nav[0].coverage, "COMPLETE");
+            assert_eq!(nav[0].opening_equity, Some(Decimal::ZERO));
+            assert_eq!(
+                nav[0].pnl,
+                Some(if id == left {
+                    fee + Decimal::new(1, 1)
+                } else {
+                    Decimal::new(1, 1)
+                })
+            );
+            assert_eq!(
+                nav[0].current_equity,
+                Some(nav[0].flows.unwrap() + nav[0].pnl.unwrap())
+            );
+            assert!(!s.financial_risk(10, Some(id)).unwrap().nav_complete);
         }
-        assert_eq!(s.commit_reconciled_strategy_nav(&proof).unwrap(),checked);
+        assert_eq!(s.commit_reconciled_strategy_nav(&proof).unwrap(), checked);
     }
-    let realsql=real.path.clone();
-    let realmeta=real.meta.clone();
-    let demosql=demo.path.clone();
+    let realsql = real.path.clone();
+    let realmeta = real.meta.clone();
+    let demosql = demo.path.clone();
     drop(real);
     drop(demo);
-    let reloaded_real=AccountStore::open_existing(
-        realsql,&realmeta.account_key,&realmeta.installation_id
-    ).unwrap();
-    let reloaded_demo=AccountStore::open_existing(
-        demosql,&demo_meta.account_key,&demo_meta.installation_id
-    ).unwrap();
-    assert_eq!(reloaded_real.nav_summary(1,10,&["real_a".into()],&["USD".into()])
-        .unwrap()[0].coverage,"COMPLETE");
-    assert_eq!(reloaded_demo.nav_summary(1,10,&["demo_a".into()],&["USD".into()])
-        .unwrap()[0].coverage,"COMPLETE");
-    assert_eq!(reloaded_real.capital_state(10).unwrap().assigned_usd,Decimal::from(50));
-    assert_eq!(reloaded_demo.capital_state(10).unwrap().assigned_usd,Decimal::from(25));
+    let reloaded_real =
+        AccountStore::open_existing(realsql, &realmeta.account_key, &realmeta.installation_id)
+            .unwrap();
+    let reloaded_demo =
+        AccountStore::open_existing(demosql, &demo_meta.account_key, &demo_meta.installation_id)
+            .unwrap();
+    assert_eq!(
+        reloaded_real
+            .nav_summary(1, 10, &["real_a".into()], &["USD".into()])
+            .unwrap()[0]
+            .coverage,
+        "COMPLETE"
+    );
+    assert_eq!(
+        reloaded_demo
+            .nav_summary(1, 10, &["demo_a".into()], &["USD".into()])
+            .unwrap()[0]
+            .coverage,
+        "COMPLETE"
+    );
+    assert_eq!(
+        reloaded_real.capital_state(10).unwrap().assigned_usd,
+        Decimal::from(50)
+    );
+    assert_eq!(
+        reloaded_demo.capital_state(10).unwrap().assigned_usd,
+        Decimal::from(25)
+    );
 }
