@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+okx-kernel = { path = "../okx-kernel" }
 okx-observation = { path = "../okx-observation" }
 rust_decimal = "1"
 serde = { version = "1", features = ["derive"] }

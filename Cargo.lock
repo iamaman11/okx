@@ -1507,6 +1507,7 @@ dependencies = [
 name = "okx-analysis"
 version = "0.1.0"
 dependencies = [
+ "okx-kernel",
  "okx-observation",
  "rust_decimal",
  "serde",
@@ -1616,6 +1617,13 @@ dependencies = [
  "sha2 0.10.9",
  "thiserror",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "okx-kernel"
+version = "0.1.0"
+dependencies = [
+ "serde",
 ]
 
 [[package]]

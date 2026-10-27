@@ -12,6 +12,7 @@ members = [
     "crates/okx-observation",
     "crates/okx-ws",
     "crates/okx-runtime",
+    "crates/okx-kernel",
     "crates/okx-analysis",
     "crates/okx-research",
     "crates/okx-execution",
