@@ -384,6 +384,8 @@ pub struct AccountCapitalState {
     pub strategy_principal_usd: std::collections::BTreeMap<String, Decimal>,
     pub nav_source_as_of: i64,
     pub nav_source_ref: String,
+    pub coverage: String,
+    pub reason_code: Option<String>,
 }
 
 /// Connection stays on its owning blocking worker. It is never a network transaction.

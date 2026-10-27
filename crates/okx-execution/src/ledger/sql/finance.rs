@@ -46,9 +46,9 @@ impl AccountStore {
             .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))?;
         // The residual includes economic returns until complete per-owner
         // valuation exists. It must never be presented as trading PnL.
-        if residual < Decimal::ZERO {
-            return Err(StoreError::Invalid("ACCOUNT_CAPITAL_OVERASSIGNED"));
-        }
+        // Known venue losses can reduce equity below previously assigned
+        // principal. Report the deficit, but allow safe deallocation to repair it.
+        let under_collateralized = residual < Decimal::ZERO;
         let total:String=self.connection.query_row(
             "SELECT amount FROM finance_totals WHERE currency='USD' AND component='INTERNAL_CAPITAL_USD'",
             [],|r|r.get(0)
@@ -63,6 +63,12 @@ impl AccountStore {
             strategy_principal_usd: principals,
             nav_source_as_of: nav_time,
             nav_source_ref: source,
+            coverage: if under_collateralized { "PARTIAL" } else { "COMPLETE" }.into(),
+            reason_code: if under_collateralized {
+                Some("ACCOUNT_CAPITAL_OVERASSIGNED".into())
+            } else {
+                None
+            },
         })
     }
 
@@ -105,7 +111,9 @@ impl AccountStore {
         let next = existing
             .checked_add(request.delta_usd)
             .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))?;
-        if next < Decimal::ZERO || request.delta_usd > state.unattributed_residual_usd {
+        if next < Decimal::ZERO
+            || (request.delta_usd > Decimal::ZERO && request.delta_usd > state.unattributed_residual_usd)
+        {
             return Err(StoreError::Invalid("CAPITAL_ASSIGNMENT_EXCEEDS_AVAILABLE"));
         }
         if self.instance(&request.instance_id)?.is_none() {
