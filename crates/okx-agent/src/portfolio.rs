@@ -364,9 +364,11 @@ fn nav_projection(
     through: i64,
     t0: i64,
 ) -> Value {
+    let manual = nav.scope_id == "strategy:manual";
     let coverage_reason = match nav.coverage.as_str() {
         "COMPLETE" => Value::Null,
         "UNAVAILABLE_BEFORE_T0" => json!("UNAVAILABLE_BEFORE_T0"),
+        "PARTIAL" if manual => json!("MANUAL_USES_ACCOUNT_CAPITAL"),
         "PARTIAL" if nav.scope_id.starts_with("strategy:") => {
             json!("STRATEGY_CAPITAL_PROVENANCE_MISSING")
         }
@@ -382,6 +384,8 @@ fn nav_projection(
         "covered_range":{"start_ms":nav.opening_as_of,"end_ms":nav.current_as_of},
         "t0":t0,
         "coverage_reason":coverage_reason,
+        "capital_scope":if manual {"account"} else if nav.scope_id.starts_with("strategy:") {"strategy"} else {"account"},
+        "additive_with_account_nav":false,
         "as_of_ms":nav.current_as_of,
         "window":nav
     })
@@ -399,9 +403,11 @@ fn summary_is_complete(
         && readiness
             .iter()
             .all(|r| r["financial_risk"]["nav_complete"] == true)
-        && navigation
-            .iter()
-            .all(|row| row["window"]["coverage"] == "COMPLETE")
+        && navigation.iter().all(|row| {
+            row["window"]["coverage"] == "COMPLETE"
+                || (row["window"]["scope_id"] == "strategy:manual"
+                    && row["coverage_reason"] == "MANUAL_USES_ACCOUNT_CAPITAL")
+        })
 }
 
 fn summary_diagnostics(
@@ -417,7 +423,10 @@ fn summary_diagnostics(
     diagnostics.extend(
         navigation
             .iter()
-            .filter(|row| row["window"]["coverage"] != "COMPLETE")
+            .filter(|row| {
+                row["window"]["coverage"] != "COMPLETE"
+                    && row["coverage_reason"] != "MANUAL_USES_ACCOUNT_CAPITAL"
+            })
             .take(4)
             .map(|row| {
                 json!({"account":row["account"],"coverage_reason":row["coverage_reason"],"requested_range":row["requested_range"],"covered_range":row["covered_range"],"t0":row["t0"],"as_of_ms":row["as_of_ms"]})
@@ -845,6 +854,34 @@ mod tests {
         let demo =
             json!({"kind":"component","environment":"demo","currency":"USD","component":"FEE"});
         assert_ne!(summary_key(&real), summary_key(&demo));
+    }
+
+    #[test]
+    fn manual_is_an_account_capital_label_without_duplicate_nav_or_partial_quality() {
+        let nav = okx_execution::NavWindow {
+            scope_id: "strategy:manual".into(),
+            currency: "USD".into(),
+            opening_equity: None,
+            current_equity: None,
+            flows: None,
+            pnl: None,
+            opening_as_of: None,
+            current_as_of: None,
+            coverage: "PARTIAL".into(),
+        };
+        let manual = nav_projection("okx:real:a", "A", nav, 2, 10, 1);
+        assert_eq!(manual["capital_scope"], "account");
+        assert_eq!(manual["coverage_reason"], "MANUAL_USES_ACCOUNT_CAPITAL");
+        assert_eq!(manual["additive_with_account_nav"], false);
+        assert!(manual["window"]["opening_equity"].is_null());
+        let account = json!({
+            "kind":"nav",
+            "window":{"scope_id":"account","coverage":"COMPLETE"},
+            "coverage_reason":null
+        });
+        let readiness = vec![json!({"financial_risk":{"nav_complete":true}})];
+        assert!(summary_is_complete(&readiness, &[account, manual.clone()], true, true));
+        assert!(summary_diagnostics(readiness, &[manual], None).is_empty());
     }
 
     #[test]
