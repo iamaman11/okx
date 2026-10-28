@@ -336,19 +336,13 @@ fn external_flow_rejects_non_positive_fx_without_committing_or_advancing_cursor(
         let fx = UsdConversionEvidence {
             observed_at: 5,
             source_digest: "verified-fx".into(),
-            usd_per_currency: std::collections::BTreeMap::from([(
-                "USDT".into(),
-                invalid_rate,
-            )]),
+            usd_per_currency: std::collections::BTreeMap::from([("USDT".into(), invalid_rate)]),
         };
         assert!(matches!(
             s.ingest_page_with_usd(&page, &fx),
             Err(StoreError::Invalid("USD_CONVERSION_SOURCE_UNAVAILABLE"))
         ));
-        assert_eq!(
-            s.stops().unwrap()[0].2,
-            "USD_CONVERSION_SOURCE_UNAVAILABLE"
-        );
+        assert_eq!(s.stops().unwrap()[0].2, "USD_CONVERSION_SOURCE_UNAVAILABLE");
         assert!(s.cursor("bills", "account").unwrap().is_none());
         assert!(s.finance_history(1, 10, 0, "", 100).unwrap().is_empty());
         assert_eq!(
@@ -361,10 +355,7 @@ fn external_flow_rejects_non_positive_fx_without_committing_or_advancing_cursor(
         let valid_fx = UsdConversionEvidence {
             observed_at: 5,
             source_digest: "verified-positive-fx".into(),
-            usd_per_currency: std::collections::BTreeMap::from([(
-                "USDT".into(),
-                Decimal::from(2),
-            )]),
+            usd_per_currency: std::collections::BTreeMap::from([("USDT".into(), Decimal::from(2))]),
         };
         s.ingest_page_with_usd(&page, &valid_fx).unwrap();
         s.ingest_page_with_usd(&page, &valid_fx).unwrap();
@@ -380,13 +371,7 @@ fn external_flow_rejects_non_positive_fx_without_committing_or_advancing_cursor(
                 .count(),
             1
         );
-        assert_eq!(
-            s.cursor("bills", "account")
-                .unwrap()
-                .unwrap()
-                .watermark,
-            5
-        );
+        assert_eq!(s.cursor("bills", "account").unwrap().unwrap().watermark, 5);
     }
 }
 
