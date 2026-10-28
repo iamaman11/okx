@@ -683,17 +683,18 @@ impl AccountStore {
         // NAV uses its own source, while manual has no separate strategy NAV.
         // For an ordinary strategy, both endpoints still retain independent
         // immutable as-of revisions: later facts cannot validate old marks.
-        let requires_strategy_revision = scopes.iter().any(|(scope, _)| {
-            scope.starts_with("strategy:") && scope != "strategy:manual"
-        });
+        let requires_strategy_revision = scopes
+            .iter()
+            .any(|(scope, _)| scope.starts_with("strategy:") && scope != "strategy:manual");
         let (opening_revision, revision) = if requires_strategy_revision {
             (
                 self.strategy_valuation_revision_as_of(from).map_err(|e| {
                     e.with_interruption_stage("ACCOUNT_SQL_NAV_OPENING_REVISION_INTERRUPTED")
                 })?,
-                self.strategy_valuation_revision_as_of(through).map_err(|e| {
-                    e.with_interruption_stage("ACCOUNT_SQL_NAV_CLOSING_REVISION_INTERRUPTED")
-                })?,
+                self.strategy_valuation_revision_as_of(through)
+                    .map_err(|e| {
+                        e.with_interruption_stage("ACCOUNT_SQL_NAV_CLOSING_REVISION_INTERRUPTED")
+                    })?,
             )
         } else {
             (String::new(), String::new())
