@@ -195,6 +195,12 @@ impl AccountStore {
         c.busy_timeout(Duration::from_millis(250))?;
         c.pragma_update(None, "foreign_keys", "ON")?;
         c.pragma_update(None, "synchronous", "FULL")?;
+        // The single AccountStore owner already runs a bounded-cadence
+        // PASSIVE checkpoint (and mandatory durable backups). SQLite's
+        // default 1000-page auto-checkpoint otherwise runs inside COMMIT,
+        // injecting unpredictable disk I/O into time-critical NAV writes.
+        // Keep FULL transaction durability; do not add a second checkpointer.
+        c.pragma_update(None, "wal_autocheckpoint", 0)?;
         if rusqlite::version_number() < 3_051_003 {
             return Err(StoreError::Invalid("SQLITE_WAL_RESET_FIX_REQUIRED"));
         }
