@@ -41,6 +41,12 @@ pub struct SourceCaptureHealth {
     pub last_capture_duration_ms: Option<u64>,
     /// Source's ORIGINAL observation age when verified data was published.
     pub last_snapshot_age_at_publish_ms: Option<i64>,
+    /// SQL cursor read and authenticated balance/positions/orders.
+    pub last_observer_and_cursors_ms: Option<u64>,
+    /// All five source-history fetches and durable cursor ingests.
+    pub last_history_and_ingest_ms: Option<u64>,
+    /// Account NAV, strategy attribution, and coverage reconciliation.
+    pub last_nav_reconciliation_ms: Option<u64>,
 }
 
 fn snapshot_age_at_publish_ms(source_received_at: &str, published_at_ms: i64) -> Option<i64> {
@@ -631,7 +637,12 @@ impl AccountResources {
         health.reason_code = Some(reason_code.to_owned());
     }
 
-    async fn record_source_success(&self, source_received_at: &str, capture_started: Instant) {
+    async fn record_source_success(
+        &self,
+        source_received_at: &str,
+        capture_started: Instant,
+        phases: crate::source_capture::CapturePhaseTimings,
+    ) {
         let now = chrono::Utc::now().timestamp_millis();
         let duration_ms = u64::try_from(capture_started.elapsed().as_millis()).unwrap_or(u64::MAX);
         let snapshot_age_ms = snapshot_age_at_publish_ms(source_received_at, now);
@@ -641,6 +652,9 @@ impl AccountResources {
         health.reason_code = None;
         health.last_capture_duration_ms = Some(duration_ms);
         health.last_snapshot_age_at_publish_ms = snapshot_age_ms;
+        health.last_observer_and_cursors_ms = Some(phases.observer_and_cursors_ms);
+        health.last_history_and_ingest_ms = Some(phases.history_and_ingest_ms);
+        health.last_nav_reconciliation_ms = Some(phases.nav_reconciliation_ms);
     }
 }
 
@@ -688,11 +702,13 @@ fn start_sources(
                 account.verified_source_generation.store(generation,Ordering::Release);
              }
              let capture_started = Instant::now();
-             match crate::runtime::capture_account_sources(&account.observer,&account.private_ws,&account.execution).await {
-                Ok(snapshot)=>{
-                    let source_received_at = snapshot.source_received_at.clone();
-                    *account.latest_snapshot.write().await=Some(snapshot);
-                    account.record_source_success(&source_received_at, capture_started).await;
+             match crate::source_capture::capture_account_sources_measured(&account.observer,&account.private_ws,&account.execution).await {
+                Ok(completed)=>{
+                    let source_received_at = completed.snapshot.source_received_at.clone();
+                    *account.latest_snapshot.write().await=Some(completed.snapshot);
+                    account.record_source_success(
+                        &source_received_at, capture_started, completed.phases
+                    ).await;
                 }
                 Err(error)=>{
                     account.record_source_failure(&source_capture_reason(&error)).await;
