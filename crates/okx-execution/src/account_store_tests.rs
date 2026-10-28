@@ -1337,6 +1337,207 @@ fn p02_immutable_source_rows_reject_time_proof_and_event_link_conflicts() {
 }
 
 #[test]
+fn p02_fill_replay_rejects_changed_provenance_and_preserves_cursor() {
+    let mut s = store();
+    let original = Fill {
+        side: "buy".into(),
+        fill_id: "source-fill".into(),
+        instrument_id: "BTC".into(),
+        trade_id: "source-trade".into(),
+        exchange_order_id: "source-order".into(),
+        intent_id: None,
+        time: 4,
+        qty: Decimal::ONE,
+        price: Decimal::from(100),
+        fee: Decimal::ZERO,
+        currency: "USDT".into(),
+    };
+    let page = IngestPage {
+        fills: vec![original.clone()],
+        ..Default::default()
+    };
+    s.ingest_page(&page).unwrap();
+    s.ingest_page(&page).unwrap();
+    let cursor = SourceCursor {
+        source: "fills".into(),
+        stream_partition: "SWAP".into(),
+        cursor: "new-page".into(),
+        watermark: 10,
+        generation: 1,
+        coverage_gaps: String::new(),
+    };
+
+    for field in 0..4 {
+        let mut changed = original.clone();
+        match field {
+            0 => changed.fill_id = "other-fill-id".into(),
+            1 => changed.intent_id = Some("late-owner".into()),
+            2 => changed.time = 9,
+            _ => changed.side = "sell".into(),
+        }
+        let mut invalid = page.clone();
+        let mut earlier = original.clone();
+        earlier.fill_id = "transient-fill".into();
+        earlier.trade_id = "transient-trade".into();
+        invalid.fills = vec![earlier, changed];
+        invalid.cursor = Some(cursor.clone());
+        assert!(matches!(
+            s.ingest_page(&invalid),
+            Err(StoreError::Invalid("IMMUTABLE_FILL_CONFLICT"))
+        ));
+        assert!(s.cursor("fills", "SWAP").unwrap().is_none());
+        let saved: (i64, i64) = s
+            .connection
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM fills), (SELECT COUNT(*) FROM fill_projection_pending)",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(saved, (1, 1), "the whole page must roll back");
+    }
+    assert_eq!(s.project_pending_fills(10).unwrap(), 1);
+    assert_eq!(s.project_pending_fills(10).unwrap(), 0);
+    assert_eq!(s.active_lots("BTC").unwrap().len(), 1);
+    let mut replay = page;
+    replay.cursor = Some(cursor);
+    s.ingest_page(&replay).unwrap();
+    assert_eq!(
+        s.cursor("fills", "SWAP").unwrap().unwrap().watermark,
+        10
+    );
+}
+
+#[test]
+fn p02_m2_two_account_money_oracle_distinguishes_transfers_from_group_income() {
+    let book = |suffix: &str, opening: i64| {
+        let meta = AccountMeta {
+            initialize_operation_id: format!("oracle-init-{suffix}"),
+            release_id: "oracle-release".into(),
+            account_key: format!("okx:demo:oracle-{suffix}"),
+            installation_id: format!("oracle-install-{suffix}"),
+            initialized_at: 1,
+            opening_source: format!("oracle-opening-{suffix}"),
+        };
+        let snapshot = OpeningSnapshot {
+            opening_equity_usd: Decimal::from(opening),
+            source_ref: meta.opening_source.clone(),
+            observed_at: 1,
+            positions: 0,
+            orders: 0,
+            conditional_orders: 0,
+            liabilities: Decimal::ZERO,
+            balances: vec![("USD".into(), Decimal::from(opening))],
+        };
+        AccountStore::initialize_flat(path(), meta, &snapshot).unwrap()
+    };
+    let mut a = book("a", 1000);
+    let mut b = book("b", 500);
+    let flow = |id: &str, kind: &str, amount: i64| CashFlow {
+        event_id: format!("oracle:{id}"),
+        kind: kind.into(),
+        currency: "USD".into(),
+        amount: Decimal::from(amount),
+        time: 3,
+        source_ref: format!("venue:{id}"),
+    };
+    let economic = |id: &str, component: &str, amount: i64| FinanceEntry {
+        entry_id: format!("entry:{id}"),
+        economic_event_key: format!("bill:{id}"),
+        component: component.into(),
+        allocation_leg: "account".into(),
+        amount: Decimal::from(amount),
+        currency: "USD".into(),
+        instance_id: None,
+        source_ref: format!("bill:{id}"),
+        time: 4,
+        reverses_entry_id: None,
+    };
+    let entries = vec![
+        economic("a-realized", "REALIZED_PNL", 20),
+        economic("a-fee", "FEE", -2),
+        economic("a-funding", "FUNDING", -1),
+    ];
+    let fx = UsdConversionEvidence {
+        observed_at: 5,
+        source_digest: "oracle-usd-identity".into(),
+        usd_per_currency: Default::default(),
+    };
+    let a_page = IngestPage {
+        cash_flows: vec![
+            flow("external-deposit-a", "DEPOSIT", 100),
+            flow("internal-a-to-b-out", "TRANSFER_OUT", -50),
+        ],
+        bills: entries
+            .iter()
+            .map(|e| Bill {
+                bill_id: e.economic_event_key.clone(),
+                kind: e.component.clone(),
+                time: e.time,
+                amount: e.amount,
+                currency: e.currency.clone(),
+                economic_event_key: e.economic_event_key.clone(),
+            })
+            .collect(),
+        finance: entries,
+        ..Default::default()
+    };
+    let b_page = IngestPage {
+        cash_flows: vec![flow("internal-a-to-b-in", "TRANSFER_IN", 50)],
+        ..Default::default()
+    };
+    for (s, page) in [(&mut a, &a_page), (&mut b, &b_page)] {
+        s.ingest_page_with_usd(page, &fx).unwrap();
+        s.ingest_page_with_usd(page, &fx).unwrap();
+    }
+    for (s, equity, flows, pnl) in [
+        (&mut a, 1067, 50, 17),
+        (&mut b, 550, 50, 0),
+    ] {
+        s.ingest_page(&IngestPage {
+            nav: vec![NavPoint {
+                scope_id: "account".into(),
+                time: 6,
+                source_version: "oracle-venue-snapshot".into(),
+                equity: Decimal::from(equity),
+                pnl: Decimal::from(pnl),
+                flows: Decimal::from(flows),
+                currency: "USD".into(),
+                coverage: "COMPLETE".into(),
+                mark_source: "oracle-venue".into(),
+            }],
+            ..Default::default()
+        })
+        .unwrap();
+        let n = s.nav_summary(1, 6, &[], &["USD".into()]).unwrap();
+        let account = n.iter().find(|n| n.scope_id == "account").unwrap();
+        assert_eq!(account.coverage, "COMPLETE");
+        assert_eq!(account.current_equity, Some(Decimal::from(equity)));
+        assert_eq!(account.flows, Some(Decimal::from(flows)));
+        assert_eq!(account.pnl, Some(Decimal::from(pnl)));
+        assert_eq!(
+            s.usd_component_total("INTERNAL_CAPITAL_USD").unwrap(),
+            Decimal::ZERO
+        );
+    }
+    let a_flows = a.usd_component_total("EXTERNAL_FLOW_USD").unwrap();
+    let b_flows = b.usd_component_total("EXTERNAL_FLOW_USD").unwrap();
+    assert_eq!((a_flows, b_flows), (Decimal::from(50), Decimal::from(50)));
+    // The A→B transfer is -50+50 at group scope, not group income.
+    assert_eq!(a_flows + b_flows, Decimal::from(100));
+    let net = a.usd_component_total("REALIZED_PNL").unwrap()
+        + a.usd_component_total("FEE").unwrap()
+        + a.usd_component_total("FUNDING").unwrap();
+    assert_eq!(net, Decimal::from(17));
+    assert_eq!(a.opening_equity_usd().unwrap() + b.opening_equity_usd().unwrap(), Decimal::from(1500));
+    assert_eq!(Decimal::from(1500) + a_flows + b_flows + net, Decimal::from(1617));
+    assert_eq!(Decimal::from(1067) + Decimal::from(550), Decimal::from(1617));
+    assert_eq!(
+        a.usd_component_total("CAMPAIGN_LOSS_USD").unwrap(),
+        Decimal::from(3)
+    );
+}
+#[test]
 fn p02_immutable_nav_replay_rejects_conflict_before_highwater_and_cursor() {
     let mut s = store();
     let opening = NavPoint {

@@ -1531,9 +1531,21 @@ impl AccountStore {
                     params![f.fill_id, f.side],
                 )?;
             }
-            let old:(String,String,String,String)=tx.query_row("SELECT qty,price,fee,currency FROM fills WHERE instrument_id=?1 AND trade_id=?2 AND exchange_order_id=?3",params![f.instrument_id,f.trade_id,f.exchange_order_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)))?;
+            // The exchange (instrument,trade,order) key identifies one
+            // immutable fill. Its time, side and intent ownership are as
+            // material to positions/finance as its quantity, price and fee.
+            let old: (String, Option<String>, i64, String, String, String, String, String) =
+                tx.query_row(
+                    "SELECT fill_id,intent_id,time,side,qty,price,fee,currency FROM fills WHERE instrument_id=?1 AND trade_id=?2 AND exchange_order_id=?3",
+                    params![f.instrument_id, f.trade_id, f.exchange_order_id],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?)),
+                )?;
             if old
                 != (
+                    f.fill_id.clone(),
+                    f.intent_id.clone(),
+                    f.time,
+                    f.side.clone(),
                     exact(f.qty),
                     exact(f.price),
                     exact(f.fee),
