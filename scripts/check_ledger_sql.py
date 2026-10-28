@@ -64,6 +64,14 @@ def main():
             ]:
                 plan = a.execute("EXPLAIN QUERY PLAN " + query).fetchall()
                 assert any(index in row[3] or (index == "idx_lots_active" and "idx_lots_instance_active" in row[3]) for row in plan), plan
+            # Historical strategy valuation must seek the immutable revision, not
+            # scan every previous mark under the (scope,time,version) PK.
+            nav_asof = """SELECT EXISTS(SELECT 1 FROM nav_points n
+                JOIN operation_receipts o ON o.operation_id='strategy-nav:' || n.scope_id || ':' || n.time || ':' || n.source_version
+                WHERE n.scope_id='strategy:a' AND n.time<=100 AND n.source_version='strategy-reconciled-v1:revision:f1'
+                AND o.kind='STRATEGY_NAV_RECONCILED')"""
+            nav_plan = a.execute("EXPLAIN QUERY PLAN " + nav_asof).fetchall()
+            assert any("idx_nav_scope_version_time" in row[3] for row in nav_plan), nav_plan
             # Failure rolls back both facts and source watermark.
             a.execute("BEGIN IMMEDIATE")
             a.execute("INSERT INTO source_cursors VALUES('fills','BTC','next',10,1,'')")
