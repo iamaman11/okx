@@ -1217,6 +1217,126 @@ fn p02_immutable_economic_event_rejects_changed_time_or_reversal_without_advanci
 }
 
 #[test]
+fn p02_immutable_source_rows_reject_time_proof_and_event_link_conflicts() {
+    let mut s = store();
+    let bill = Bill {
+        bill_id: "source-bill".into(),
+        kind: "FUNDING".into(),
+        time: 4,
+        amount: -Decimal::ONE,
+        currency: "USDT".into(),
+        economic_event_key: "bill:source-bill".into(),
+    };
+    let flow = CashFlow {
+        event_id: "source-deposit".into(),
+        kind: "DEPOSIT".into(),
+        currency: "USDT".into(),
+        amount: Decimal::from(10),
+        time: 5,
+        source_ref: "exchange:source-deposit".into(),
+    };
+    let allocation = Allocation {
+        event_id: "risk-budget".into(),
+        instance_id: "manual".into(),
+        delta: Decimal::from(3),
+        currency: "USD".into(),
+        time: 6,
+    };
+    let original = IngestPage {
+        bills: vec![bill.clone()],
+        cash_flows: vec![flow.clone()],
+        allocations: vec![allocation.clone()],
+        ..Default::default()
+    };
+    let fx = UsdConversionEvidence {
+        observed_at: 5,
+        source_digest: "attested-usdt-rate".into(),
+        usd_per_currency: std::collections::BTreeMap::from([("USDT".into(), Decimal::new(125, 2))]),
+    };
+    s.ingest_page_with_usd(&original, &fx).unwrap();
+    s.ingest_page_with_usd(&original, &fx).unwrap();
+    assert_eq!(
+        s.usd_component_total("EXTERNAL_FLOW_USD").unwrap(),
+        Decimal::new(125, 1)
+    );
+
+    let mut bill_time = original.clone();
+    bill_time.bills[0].time = 9;
+    let mut bill_event = original.clone();
+    bill_event.bills[0].economic_event_key = "bill:other".into();
+    let mut flow_time = original.clone();
+    flow_time.cash_flows[0].time = 9;
+    let mut flow_proof = original.clone();
+    flow_proof.cash_flows[0].source_ref = "exchange:other-deposit".into();
+    let mut allocation_time = original.clone();
+    allocation_time.allocations[0].time = 9;
+
+    let cursor = SourceCursor {
+        source: "bills".into(),
+        stream_partition: "account".into(),
+        cursor: "should-not-advance".into(),
+        watermark: 9,
+        generation: 1,
+        coverage_gaps: String::new(),
+    };
+    for (mut invalid, reason) in [
+        (bill_time, "IMMUTABLE_BILL_CONFLICT"),
+        (bill_event, "IMMUTABLE_BILL_CONFLICT"),
+        (flow_time, "IMMUTABLE_CASH_FLOW_CONFLICT"),
+        (flow_proof, "IMMUTABLE_CASH_FLOW_CONFLICT"),
+        (allocation_time, "IMMUTABLE_ALLOCATION_CONFLICT"),
+    ] {
+        // Valid rows earlier in this transaction must also roll back if a
+        // later source in the same page contradicts an immutable row.
+        invalid.bills.push(Bill {
+            bill_id: "must-rollback".into(),
+            ..bill.clone()
+        });
+        invalid
+            .finance
+            .push(fee("must-rollback-fee", "bill:rollback"));
+        invalid.cursor = Some(cursor.clone());
+        assert!(matches!(
+            s.ingest_page_with_usd(&invalid, &fx),
+            Err(StoreError::Invalid(code)) if code == reason
+        ));
+        assert!(s.cursor("bills", "account").unwrap().is_none());
+        let bill_count: i64 = s
+            .connection
+            .query_row("SELECT COUNT(*) FROM bills", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            bill_count, 1,
+            "source conflict must roll back the whole page"
+        );
+        assert!(
+            s.finance_history(1, 10, 0, "", 100)
+                .unwrap()
+                .iter()
+                .all(|row| row.entry_id != "must-rollback-fee")
+        );
+        assert_eq!(
+            s.usd_component_total("EXTERNAL_FLOW_USD").unwrap(),
+            Decimal::new(125, 1)
+        );
+    }
+    // A correct page remains idempotent and can advance its source cursor.
+    let mut replay = original;
+    replay.cursor = Some(cursor);
+    s.ingest_page_with_usd(&replay, &fx).unwrap();
+    assert_eq!(s.cursor("bills", "account").unwrap().unwrap().watermark, 9);
+    let (time, proof): (i64, String) = s
+        .connection
+        .query_row(
+            "SELECT time,source_ref FROM cash_flows WHERE event_id='source-deposit'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!((time, proof), (5, "exchange:source-deposit".to_string()));
+}
+
+#[test]
 fn p02_immutable_nav_replay_rejects_conflict_before_highwater_and_cursor() {
     let mut s = store();
     let opening = NavPoint {
