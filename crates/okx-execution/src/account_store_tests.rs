@@ -3093,6 +3093,76 @@ fn k6_v02_sqlite_partial_fills_close_fees_funding_and_replay() {
 }
 
 #[test]
+fn p02_manual_and_account_nav_do_not_read_strategy_revision_sources() {
+    use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+
+    // The test authorizer is scoped to the isolated T0 fixture, not to the
+    // installed account database. Deny exactly the as-of revision inputs.
+    fn deny_revision_inputs(ctx: AuthContext<'_>) -> Authorization {
+        let forbidden = match ctx.action {
+            AuthAction::Read { table_name, .. } => [
+                "finance_entries",
+                "fills",
+                "bills",
+                "position_lots",
+                "cash_flows",
+            ]
+            .contains(&table_name),
+            _ => false,
+        };
+        if forbidden {
+            Authorization::Deny
+        } else {
+            Authorization::Allow
+        }
+    }
+
+    let mut s = store();
+    s.connection.authorizer(Some(deny_revision_inputs)).unwrap();
+    let manual = s
+        .nav_summary(1, 4, &["manual".into()], &["USD".into()])
+        .unwrap();
+    assert_eq!(manual.len(), 1);
+    assert_eq!(manual[0].scope_id, "strategy:manual");
+    assert_eq!(manual[0].coverage, "NOT_APPLICABLE");
+    let account_only = s.nav_summary(1, 4, &[], &["USD".into()]).unwrap();
+    assert!(account_only.iter().any(|n| n.scope_id == "account"));
+    s.connection
+        .authorizer(None::<fn(AuthContext<'_>) -> Authorization>)
+        .unwrap();
+
+    // An ordinary strategy still requires the exact as-of revision source.
+    owned_fill(
+        &mut s,
+        "revision_gate",
+        "revision-gate-seed",
+        100,
+        "long",
+        3,
+    );
+    s.connection.authorizer(Some(deny_revision_inputs)).unwrap();
+    assert_eq!(
+        s.nav_summary(1, 4, &["manual".into()], &["USD".into()])
+            .unwrap()[0]
+            .coverage,
+        "NOT_APPLICABLE"
+    );
+    assert!(matches!(
+        s.nav_summary(1, 4, &["revision_gate".into()], &["USD".into()]),
+        Err(StoreError::Sql(_))
+    ));
+    s.connection
+        .authorizer(None::<fn(AuthContext<'_>) -> Authorization>)
+        .unwrap();
+    assert_eq!(
+        s.nav_summary(1, 4, &["revision_gate".into()], &["USD".into()])
+            .unwrap()[0]
+            .coverage,
+        "PARTIAL"
+    );
+}
+
+#[test]
 fn p02_account_backed_internal_capital_is_conserved_and_not_strategy_nav() {
     let mut s = store();
     owned_fill(&mut s, "a", "p02-a", 100, "long", 3);
