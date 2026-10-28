@@ -1153,6 +1153,12 @@ fn p02_immutable_economic_event_rejects_changed_time_or_reversal_without_advanci
     let mut linked = original.clone();
     linked.entry_id = "second-alias".into();
     linked.source_ref = "bill:proof".into();
+    linked.time = 5; // Exchange bill posts later than the originating fill.
+    s.ingest_page(&IngestPage {
+        finance: vec![linked.clone()],
+        ..Default::default()
+    })
+    .unwrap();
     s.ingest_page(&IngestPage {
         finance: vec![linked.clone()],
         ..Default::default()
@@ -1177,7 +1183,11 @@ fn p02_immutable_economic_event_rejects_changed_time_or_reversal_without_advanci
         coverage_gaps: String::new(),
     };
     for change_reversal in [false, true] {
-        let mut changed = linked.clone();
+        let mut changed = if change_reversal {
+            linked.clone()
+        } else {
+            original.clone()
+        };
         if change_reversal {
             changed.reverses_entry_id = Some("another-event".into());
         } else {
