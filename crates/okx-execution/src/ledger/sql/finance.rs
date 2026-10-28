@@ -1657,17 +1657,18 @@ impl AccountStore {
                     .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))?;
                 tx.execute("INSERT INTO finance_totals VALUES(?1,?2,?3) ON CONFLICT(currency,component) DO UPDATE SET amount=excluded.amount",params![e.currency,e.component,exact(total)])?;
             }
-            let (entry_id, amount, currency, instance, time, reversal): (
+            let (entry_id, amount, currency, instance, time, reversal, source): (
                 String,
                 String,
                 String,
                 Option<String>,
                 i64,
                 Option<String>,
+                String,
             ) = tx.query_row(
-                "SELECT entry_id,amount,currency,instance_id,time,reverses_entry_id FROM finance_entries WHERE economic_event_key=?1 AND component=?2 AND allocation_leg=?3",
+                "SELECT entry_id,amount,currency,instance_id,time,reverses_entry_id,source_ref FROM finance_entries WHERE economic_event_key=?1 AND component=?2 AND allocation_leg=?3",
                 params![e.economic_event_key, e.component, e.allocation_leg],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)),
             )?;
             if amount != exact(e.amount)
                 || currency != e.currency
@@ -1676,16 +1677,10 @@ impl AccountStore {
             {
                 return Err(StoreError::Invalid("CANONICAL_ECONOMIC_EVENT_CONFLICT"));
             }
-            // A fill and its later bill may share one economic fee with
-            // different source timestamps. Keep the first canonical time;
-            // only a replay of a source already linked to that fee must
-            // preserve that source's previously accepted timestamp.
-            let source_already_linked: bool = tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM finance_source_links WHERE entry_id=?1 AND source_ref=?2)",
-                params![entry_id, e.source_ref],
-                |r| r.get(0),
-            )?;
-            if time != e.time && source_already_linked {
+            // The original source fixes the canonical event timestamp.
+            // A later fill/bill source may have a different posting time:
+            // its proof links to the same economic fee, not a second charge.
+            if time != e.time && source == e.source_ref {
                 return Err(StoreError::Invalid("CANONICAL_ECONOMIC_EVENT_CONFLICT"));
             }
             tx.execute(
