@@ -1251,10 +1251,7 @@ fn p02_immutable_source_rows_reject_time_proof_and_event_link_conflicts() {
     let fx = UsdConversionEvidence {
         observed_at: 5,
         source_digest: "attested-usdt-rate".into(),
-        usd_per_currency: std::collections::BTreeMap::from([(
-            "USDT".into(),
-            Decimal::new(125, 2),
-        )]),
+        usd_per_currency: std::collections::BTreeMap::from([("USDT".into(), Decimal::new(125, 2))]),
     };
     s.ingest_page_with_usd(&original, &fx).unwrap();
     s.ingest_page_with_usd(&original, &fx).unwrap();
@@ -1295,30 +1292,47 @@ fn p02_immutable_source_rows_reject_time_proof_and_event_link_conflicts() {
             bill_id: "must-rollback".into(),
             ..bill.clone()
         });
-        invalid.finance.push(fee("must-rollback-fee", "bill:rollback"));
+        invalid
+            .finance
+            .push(fee("must-rollback-fee", "bill:rollback"));
         invalid.cursor = Some(cursor.clone());
         assert!(matches!(
             s.ingest_page_with_usd(&invalid, &fx),
             Err(StoreError::Invalid(code)) if code == reason
         ));
         assert!(s.cursor("bills", "account").unwrap().is_none());
-        let bill_count: i64 = s.connection.query_row(
-            "SELECT COUNT(*) FROM bills", [], |r| r.get(0)
-        ).unwrap();
-        assert_eq!(bill_count, 1, "source conflict must roll back the whole page");
-        assert!(s.finance_history(1, 10, 0, "", 100).unwrap()
-            .iter().all(|row| row.entry_id != "must-rollback-fee"));
-        assert_eq!(s.usd_component_total("EXTERNAL_FLOW_USD").unwrap(), Decimal::new(125, 1));
+        let bill_count: i64 = s
+            .connection
+            .query_row("SELECT COUNT(*) FROM bills", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            bill_count, 1,
+            "source conflict must roll back the whole page"
+        );
+        assert!(
+            s.finance_history(1, 10, 0, "", 100)
+                .unwrap()
+                .iter()
+                .all(|row| row.entry_id != "must-rollback-fee")
+        );
+        assert_eq!(
+            s.usd_component_total("EXTERNAL_FLOW_USD").unwrap(),
+            Decimal::new(125, 1)
+        );
     }
     // A correct page remains idempotent and can advance its source cursor.
     let mut replay = original;
     replay.cursor = Some(cursor);
     s.ingest_page_with_usd(&replay, &fx).unwrap();
     assert_eq!(s.cursor("bills", "account").unwrap().unwrap().watermark, 9);
-    let (time, proof): (i64, String) = s.connection.query_row(
-        "SELECT time,source_ref FROM cash_flows WHERE event_id='source-deposit'",
-        [], |r| Ok((r.get(0)?, r.get(1)?))
-    ).unwrap();
+    let (time, proof): (i64, String) = s
+        .connection
+        .query_row(
+            "SELECT time,source_ref FROM cash_flows WHERE event_id='source-deposit'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
     assert_eq!((time, proof), (5, "exchange:source-deposit".to_string()));
 }
 
