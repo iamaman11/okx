@@ -1402,10 +1402,7 @@ fn p02_fill_replay_rejects_changed_provenance_and_preserves_cursor() {
     let mut replay = page;
     replay.cursor = Some(cursor);
     s.ingest_page(&replay).unwrap();
-    assert_eq!(
-        s.cursor("fills", "SWAP").unwrap().unwrap().watermark,
-        10
-    );
+    assert_eq!(s.cursor("fills", "SWAP").unwrap().unwrap().watermark, 10);
 }
 
 #[test]
@@ -1490,10 +1487,7 @@ fn p02_m2_two_account_money_oracle_distinguishes_transfers_from_group_income() {
         s.ingest_page_with_usd(page, &fx).unwrap();
         s.ingest_page_with_usd(page, &fx).unwrap();
     }
-    for (s, equity, flows, pnl) in [
-        (&mut a, 1067, 50, 17),
-        (&mut b, 550, 50, 0),
-    ] {
+    for (s, equity, flows, pnl) in [(&mut a, 1067, 50, 17), (&mut b, 550, 50, 0)] {
         s.ingest_page(&IngestPage {
             nav: vec![NavPoint {
                 scope_id: "account".into(),
@@ -1529,9 +1523,18 @@ fn p02_m2_two_account_money_oracle_distinguishes_transfers_from_group_income() {
         + a.usd_component_total("FEE").unwrap()
         + a.usd_component_total("FUNDING").unwrap();
     assert_eq!(net, Decimal::from(17));
-    assert_eq!(a.opening_equity_usd().unwrap() + b.opening_equity_usd().unwrap(), Decimal::from(1500));
-    assert_eq!(Decimal::from(1500) + a_flows + b_flows + net, Decimal::from(1617));
-    assert_eq!(Decimal::from(1067) + Decimal::from(550), Decimal::from(1617));
+    assert_eq!(
+        a.opening_equity_usd().unwrap() + b.opening_equity_usd().unwrap(),
+        Decimal::from(1500)
+    );
+    assert_eq!(
+        Decimal::from(1500) + a_flows + b_flows + net,
+        Decimal::from(1617)
+    );
+    assert_eq!(
+        Decimal::from(1067) + Decimal::from(550),
+        Decimal::from(1617)
+    );
     assert_eq!(
         a.usd_component_total("CAMPAIGN_LOSS_USD").unwrap(),
         Decimal::from(3)
