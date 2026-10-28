@@ -126,9 +126,10 @@ impl ObserverConfigCache {
     {
         let mut current = self.current.lock().await;
         *current = None;
-        let sampled_at = Instant::now();
         let config = fetch().await?;
+        // Receipt and cache age start after authenticated HTTP read completes.
         let received_at = Utc::now();
+        let sampled_at = Instant::now();
         *current = Some(ObservedConfig {
             config: config.clone(),
             received_at,
@@ -154,9 +155,10 @@ impl ObserverConfigCache {
             return Ok((proof.config.clone(), proof.received_at));
         }
         *current = None;
-        let sampled_at = Instant::now();
-        let received_at = Utc::now();
         let config = fetch().await?;
+        // Ordinary read matches post-HELD receipt timing; no fictitiously old proof.
+        let received_at = Utc::now();
+        let sampled_at = Instant::now();
         *current = Some(ObservedConfig {
             config: config.clone(),
             received_at,
@@ -810,6 +812,34 @@ mod tests {
         }
         assert_eq!(fetches.load(Ordering::SeqCst), 1);
         assert!(timestamps.iter().all(|t| *t == timestamps[0]));
+    }
+
+    #[tokio::test]
+    async fn ordinary_config_receipt_follows_authentication_response() {
+        let cache = ObserverConfigCache::default();
+        let completed = Arc::new(std::sync::Mutex::new(None));
+        let witnessed = Arc::clone(&completed);
+        let (config, received_at) = cache
+            .read(|| async move {
+                tokio::task::yield_now().await;
+                *witnessed.lock().expect("fixture lock") = Some(Utc::now());
+                Ok::<_, OkxError>(
+                    serde_json::from_value::<AccountConfig>(
+                        serde_json::json!({"uid":"observer-1","perm":"read_only"}),
+                    )
+                    .expect("fixture config"),
+                )
+            })
+            .await
+            .expect("config response");
+        let finished = (*completed.lock().expect("fixture lock")).unwrap();
+        assert!(received_at >= finished, "receipt must not predate response");
+        assert_eq!(config.uid, "observer-1");
+        let (_, cached_receipt) = cache
+            .read(|| async { panic!("fresh proof must be reused") })
+            .await
+            .expect("cached config");
+        assert_eq!(cached_receipt, received_at);
     }
 
     #[tokio::test]
