@@ -132,10 +132,16 @@ impl AccountStoreHandle {
             let sql_owner_time = started_at.elapsed();
             let queue_ms = u64::try_from(queue_wait.as_millis()).unwrap_or(u64::MAX);
             let owner_ms = u64::try_from(sql_owner_time.as_millis()).unwrap_or(u64::MAX);
-            timings.last_queue_wait_ms.store(queue_ms, Ordering::Relaxed);
+            timings
+                .last_queue_wait_ms
+                .store(queue_ms, Ordering::Relaxed);
             timings.last_sql_owner_ms.store(owner_ms, Ordering::Relaxed);
-            timings.max_queue_wait_ms.fetch_max(queue_ms, Ordering::Relaxed);
-            timings.max_sql_owner_ms.fetch_max(owner_ms, Ordering::Relaxed);
+            timings
+                .max_queue_wait_ms
+                .fetch_max(queue_ms, Ordering::Relaxed);
+            timings
+                .max_sql_owner_ms
+                .fetch_max(owner_ms, Ordering::Relaxed);
             timings.jobs.fetch_add(1, Ordering::Relaxed);
             // Diagnostic only: no account identity, financial facts, or SQL text.
             // The original deadline includes queue wait. Phase-named SQL
