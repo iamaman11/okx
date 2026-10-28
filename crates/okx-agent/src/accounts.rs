@@ -24,6 +24,7 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicU64, Ordering},
     },
+    time::Instant,
 };
 use tokio::{
     sync::{RwLock, Semaphore, watch},
@@ -36,6 +37,17 @@ pub struct SourceCaptureHealth {
     pub last_success_ms: Option<i64>,
     pub last_failure_ms: Option<i64>,
     pub reason_code: Option<String>,
+    /// Duration of the last completed capture, not a substitute for venue freshness.
+    pub last_capture_duration_ms: Option<u64>,
+    /// Source's ORIGINAL observation age when verified data was published.
+    pub last_snapshot_age_at_publish_ms: Option<i64>,
+}
+
+fn snapshot_age_at_publish_ms(source_received_at: &str, published_at_ms: i64) -> Option<i64> {
+    let observed_ms = chrono::DateTime::parse_from_rfc3339(source_received_at)
+        .ok()?
+        .timestamp_millis();
+    published_at_ms.checked_sub(observed_ms)
 }
 
 fn source_capture_reason(error: &AgentError) -> String {
@@ -619,12 +631,16 @@ impl AccountResources {
         health.reason_code = Some(reason_code.to_owned());
     }
 
-    async fn record_source_success(&self) {
+    async fn record_source_success(&self, source_received_at: &str, capture_started: Instant) {
         let now = chrono::Utc::now().timestamp_millis();
+        let duration_ms = u64::try_from(capture_started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let snapshot_age_ms = snapshot_age_at_publish_ms(source_received_at, now);
         let mut health = self.source_capture_health.write().await;
         health.last_attempt_ms = Some(now);
         health.last_success_ms = Some(now);
         health.reason_code = None;
+        health.last_capture_duration_ms = Some(duration_ms);
+        health.last_snapshot_age_at_publish_ms = snapshot_age_ms;
     }
 }
 
@@ -671,10 +687,12 @@ fn start_sources(
                 *account.latest_snapshot.write().await=Some(snapshot);
                 account.verified_source_generation.store(generation,Ordering::Release);
              }
+             let capture_started = Instant::now();
              match crate::runtime::capture_account_sources(&account.observer,&account.private_ws,&account.execution).await {
                 Ok(snapshot)=>{
+                    let source_received_at = snapshot.source_received_at.clone();
                     *account.latest_snapshot.write().await=Some(snapshot);
-                    account.record_source_success().await;
+                    account.record_source_success(&source_received_at, capture_started).await;
                 }
                 Err(error)=>{
                     account.record_source_failure(&source_capture_reason(&error)).await;
@@ -749,6 +767,24 @@ mod tests {
         assert!(!root.join("accounts").exists());
         std::fs::remove_dir_all(root).unwrap();
     }
+    #[test]
+    fn published_age_retains_source_timestamp_even_past_risk_ttl() {
+        let source = "2026-10-28T20:00:00.000Z";
+        let observed = chrono::DateTime::parse_from_rfc3339(source)
+            .unwrap()
+            .timestamp_millis();
+        assert_eq!(
+            snapshot_age_at_publish_ms(source, observed + 4_999),
+            Some(4_999)
+        );
+        assert_eq!(
+            snapshot_age_at_publish_ms(source, observed + 5_001),
+            Some(5_001)
+        );
+        assert_eq!(snapshot_age_at_publish_ms(source, observed - 1), Some(-1));
+        assert_eq!(snapshot_age_at_publish_ms("invalid", observed), None);
+    }
+
     #[test]
     fn source_failure_codes_are_bounded_and_do_not_expose_raw_errors() {
         assert_eq!(
