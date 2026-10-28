@@ -311,6 +311,71 @@ fn missing_fx_stops_risk_and_does_not_commit_zero_loss_or_cursor() {
     assert!(s.finance_history(1, 10, 0, "", 100).unwrap().is_empty());
 }
 #[test]
+fn external_flow_rejects_non_positive_fx_without_committing_or_advancing_cursor() {
+    for invalid_rate in [Decimal::ZERO, -Decimal::ONE] {
+        let mut s = store();
+        let page = IngestPage {
+            cash_flows: vec![CashFlow {
+                event_id: "fx-flow".into(),
+                kind: "DEPOSIT".into(),
+                currency: "USDT".into(),
+                amount: Decimal::from(6),
+                time: 5,
+                source_ref: "exchange:deposit".into(),
+            }],
+            cursor: Some(SourceCursor {
+                source: "bills".into(),
+                stream_partition: "account".into(),
+                cursor: "done".into(),
+                watermark: 5,
+                generation: 1,
+                coverage_gaps: String::new(),
+            }),
+            ..Default::default()
+        };
+        let fx = UsdConversionEvidence {
+            observed_at: 5,
+            source_digest: "verified-fx".into(),
+            usd_per_currency: std::collections::BTreeMap::from([("USDT".into(), invalid_rate)]),
+        };
+        assert!(matches!(
+            s.ingest_page_with_usd(&page, &fx),
+            Err(StoreError::Invalid("USD_CONVERSION_SOURCE_UNAVAILABLE"))
+        ));
+        assert_eq!(s.stops().unwrap()[0].2, "USD_CONVERSION_SOURCE_UNAVAILABLE");
+        assert!(s.cursor("bills", "account").unwrap().is_none());
+        assert!(s.finance_history(1, 10, 0, "", 100).unwrap().is_empty());
+        assert_eq!(
+            s.usd_component_total("EXTERNAL_FLOW_USD").unwrap(),
+            Decimal::ZERO
+        );
+
+        // The failed batch must be safely replayable with verified FX,
+        // without duplicating the original economic deposit.
+        let valid_fx = UsdConversionEvidence {
+            observed_at: 5,
+            source_digest: "verified-positive-fx".into(),
+            usd_per_currency: std::collections::BTreeMap::from([("USDT".into(), Decimal::from(2))]),
+        };
+        s.ingest_page_with_usd(&page, &valid_fx).unwrap();
+        s.ingest_page_with_usd(&page, &valid_fx).unwrap();
+        assert_eq!(
+            s.usd_component_total("EXTERNAL_FLOW_USD").unwrap(),
+            Decimal::from(12)
+        );
+        assert_eq!(
+            s.finance_history(1, 10, 0, "", 100)
+                .unwrap()
+                .into_iter()
+                .filter(|e| e.component == "EXTERNAL_FLOW_USD")
+                .count(),
+            1
+        );
+        assert_eq!(s.cursor("bills", "account").unwrap().unwrap().watermark, 5);
+    }
+}
+
+#[test]
 fn allocation_and_bar_claim_survive_retry_and_restart() {
     let mut s = store();
     owned_fill(&mut s, "a", "a-order", 100, "long", 3);

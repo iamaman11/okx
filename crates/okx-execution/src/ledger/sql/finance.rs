@@ -1054,6 +1054,15 @@ impl AccountStore {
                     }
                 }
             };
+            if rate <= Decimal::ZERO {
+                self.latch_stop(
+                    "usd-conversion-unavailable",
+                    "account",
+                    "USD_CONVERSION_SOURCE_UNAVAILABLE",
+                    fx.observed_at,
+                )?;
+                return Err(StoreError::Invalid("USD_CONVERSION_SOURCE_UNAVAILABLE"));
+            }
             let amount = flow
                 .amount
                 .checked_mul(rate)
