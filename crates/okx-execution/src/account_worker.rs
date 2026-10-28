@@ -4,14 +4,34 @@ use std::{
     path::PathBuf,
     sync::{
         Arc,
+        atomic::{AtomicU64, Ordering},
         mpsc::{RecvTimeoutError, SyncSender, TrySendError, sync_channel},
     },
     time::{Duration, Instant},
 };
 use tokio::sync::oneshot;
 type Job = Box<dyn FnOnce(&mut AccountStore) + Send + 'static>;
+#[derive(Default)]
+struct SqlTimingCounters {
+    jobs: AtomicU64,
+    last_queue_wait_ms: AtomicU64,
+    last_sql_owner_ms: AtomicU64,
+    max_queue_wait_ms: AtomicU64,
+    max_sql_owner_ms: AtomicU64,
+}
+/// Diagnostic-only timings for jobs that reached this account's SQL owner.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct AccountSqlTimingV1 {
+    pub schema: &'static str,
+    pub observed_jobs: u64,
+    pub last_queue_wait_ms: u64,
+    pub last_sql_owner_ms: u64,
+    pub max_queue_wait_ms: u64,
+    pub max_sql_owner_ms: u64,
+}
 struct WorkerOwner {
     sender: SyncSender<Job>,
+    timings: Arc<SqlTimingCounters>,
 }
 #[derive(Clone)]
 pub struct AccountStoreHandle {
@@ -41,6 +61,7 @@ impl AccountStoreHandle {
         factory: impl FnOnce() -> StoreResult<AccountStore> + Send + 'static,
     ) -> StoreResult<Self> {
         let (sender, receiver) = sync_channel::<Job>(128);
+        let timings = Arc::new(SqlTimingCounters::default());
         let (ready_tx, ready_rx) = oneshot::channel();
         std::thread::Builder::new()
             .name("okx-account-sql".into())
@@ -75,8 +96,19 @@ impl AccountStoreHandle {
             .await
             .map_err(|_| StoreError::Invalid("ACCOUNT_WORKER_STOPPED"))??;
         Ok(Self {
-            owner: Arc::new(WorkerOwner { sender }),
+            owner: Arc::new(WorkerOwner { sender, timings }),
         })
+    }
+    pub fn sql_timing(&self) -> AccountSqlTimingV1 {
+        let t = &self.owner.timings;
+        AccountSqlTimingV1 {
+            schema: "okx.account-sql-timing/v1",
+            observed_jobs: t.jobs.load(Ordering::Relaxed),
+            last_queue_wait_ms: t.last_queue_wait_ms.load(Ordering::Relaxed),
+            last_sql_owner_ms: t.last_sql_owner_ms.load(Ordering::Relaxed),
+            max_queue_wait_ms: t.max_queue_wait_ms.load(Ordering::Relaxed),
+            max_sql_owner_ms: t.max_sql_owner_ms.load(Ordering::Relaxed),
+        }
     }
     pub async fn call<T, F>(&self, deadline: Instant, operation: F) -> StoreResult<T>
     where
@@ -88,6 +120,7 @@ impl AccountStoreHandle {
         }
         let (tx, rx) = oneshot::channel();
         let enqueued_at = Instant::now();
+        let timings = Arc::clone(&self.owner.timings);
         let job: Job = Box::new(move |store| {
             let started_at = Instant::now();
             let queue_wait = started_at.duration_since(enqueued_at);
@@ -97,6 +130,13 @@ impl AccountStoreHandle {
                 store.run_before_deadline(deadline, operation)
             };
             let sql_owner_time = started_at.elapsed();
+            let queue_ms = u64::try_from(queue_wait.as_millis()).unwrap_or(u64::MAX);
+            let owner_ms = u64::try_from(sql_owner_time.as_millis()).unwrap_or(u64::MAX);
+            timings.last_queue_wait_ms.store(queue_ms, Ordering::Relaxed);
+            timings.last_sql_owner_ms.store(owner_ms, Ordering::Relaxed);
+            timings.max_queue_wait_ms.fetch_max(queue_ms, Ordering::Relaxed);
+            timings.max_sql_owner_ms.fetch_max(owner_ms, Ordering::Relaxed);
+            timings.jobs.fetch_add(1, Ordering::Relaxed);
             // Diagnostic only: no account identity, financial facts, or SQL text.
             // The original deadline includes queue wait. Phase-named SQL
             // interruptions do not imply that the SQL statement was slow.
