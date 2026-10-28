@@ -11,6 +11,27 @@ use std::{
 };
 use tokio::sync::oneshot;
 type Job = Box<dyn FnOnce(&mut AccountStore) + Send + 'static>;
+
+// A WAL file can stay above the checkpoint byte threshold even after a
+// successful PASSIVE checkpoint. Rechecking it after every SQL job causes
+// repeated disk work and starves the same owner's read/finance queue.
+const MAINTENANCE_INTERVAL: Duration = Duration::from_secs(15);
+struct MaintenanceCadence {
+    next_check: Instant,
+}
+impl MaintenanceCadence {
+    fn new(now: Instant) -> Self {
+        Self { next_check: now }
+    }
+
+    fn due(&mut self, now: Instant) -> bool {
+        if now < self.next_check {
+            return false;
+        }
+        self.next_check = now + MAINTENANCE_INTERVAL;
+        true
+    }
+}
 #[derive(Default)]
 struct SqlTimingCounters {
     jobs: AtomicU64,
@@ -77,18 +98,42 @@ impl AccountStoreHandle {
                     }
                 };
                 let mut last_backup = Instant::now();
+                let mut maintenance_cadence = MaintenanceCadence::new(Instant::now());
                 loop {
                     match receiver.recv_timeout(Duration::from_secs(1)) {
                         Ok(job) => job(&mut store),
                         Err(RecvTimeoutError::Disconnected) => break,
                         Err(RecvTimeoutError::Timeout) => {}
                     }
-                    if let Err(e) =
-                        store.maintenance(last_backup.elapsed() >= Duration::from_secs(900))
-                    {
-                        store.set_maintenance_error(e.to_string());
-                    } else if last_backup.elapsed() >= Duration::from_secs(900) {
-                        last_backup = Instant::now();
+                    // One existing SQL owner and loop; do not start a second
+                    // task or change the durable 15-minute backup requirement.
+                    if !maintenance_cadence.due(Instant::now()) {
+                        continue;
+                    }
+                    let backup_due = last_backup.elapsed() >= Duration::from_secs(900);
+                    let started = Instant::now();
+                    let succeeded = match store.maintenance(backup_due) {
+                        Ok(()) => {
+                            if backup_due {
+                                last_backup = Instant::now();
+                            }
+                            true
+                        }
+                        Err(e) => {
+                            store.set_maintenance_error(e.to_string());
+                            false
+                        }
+                    };
+                    let elapsed = started.elapsed();
+                    if elapsed >= Duration::from_millis(250) || !succeeded {
+                        // Redacted timing identifies maintenance stalls separately
+                        // from SQL job execution. No account IDs or financial data.
+                        eprintln!(
+                            "ACCOUNT_SQL_MAINTENANCE_V1 elapsed_ms={} backup_due={} outcome={}",
+                            elapsed.as_millis(),
+                            backup_due,
+                            if succeeded { "ok" } else { "error" }
+                        );
                     }
                 }
             })?;
@@ -169,5 +214,28 @@ impl AccountStoreHandle {
         // Once accepted, await the committed outcome. Dropping an HTTP request never cancels a SQL commit.
         rx.await
             .map_err(|_| StoreError::Invalid("ACCOUNT_WORKER_STOPPED"))?
+    }
+}
+
+#[cfg(test)]
+mod maintenance_tests {
+    use super::*;
+
+    #[test]
+    fn checkpoint_check_is_bounded_under_rapid_sql_jobs_and_idle_ticks() {
+        let start = Instant::now();
+        let mut cadence = MaintenanceCadence::new(start);
+        // Bootstrap has one immediate maintenance check.
+        assert!(cadence.due(start));
+        // No repeated WAL checkpoint from SQL jobs or 1-second idle polls.
+        for elapsed_ms in [1, 1000, 2000, 5000, 14_999] {
+            assert!(!cadence.due(start + Duration::from_millis(elapsed_ms)));
+        }
+        assert!(cadence.due(start + Duration::from_secs(15)));
+        assert!(!cadence.due(start + Duration::from_millis(15_001)));
+        assert!(cadence.due(start + Duration::from_secs(30)));
+        // A delayed owner still performs one check when it regains control.
+        assert!(cadence.due(start + Duration::from_secs(950)));
+        assert!(!cadence.due(start + Duration::from_secs(951)));
     }
 }
