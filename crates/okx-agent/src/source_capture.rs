@@ -53,6 +53,38 @@ fn ts(s: &str) -> StoreResult<i64> {
 fn deadline() -> Instant {
     Instant::now() + Duration::from_secs(5)
 }
+/// Single-cycle phase timings; source and ledger timestamps stay independent.
+#[derive(Clone, Debug, Default)]
+pub struct CapturePhaseTimings {
+    pub observer_and_cursors_ms: u64,
+    pub history_and_ingest_ms: u64,
+    pub nav_reconciliation_ms: u64,
+}
+
+/// Returned only after the full financial capture succeeds.
+pub struct CaptureCompleted {
+    pub snapshot: okx_observation::AccountSnapshot,
+    pub phases: CapturePhaseTimings,
+}
+
+struct CaptureCursors {
+    spot: Option<SourceCursor>,
+    swap: Option<SourceCursor>,
+    futures: Option<SourceCursor>,
+    options: Option<SourceCursor>,
+    bills: Option<SourceCursor>,
+}
+
+/// Preserve the source partition and its own durable cursor as one argument.
+struct FillHistorySource {
+    partition: &'static str,
+    cursor: Option<SourceCursor>,
+}
+
+fn phase_elapsed_ms(started: Instant) -> u64 {
+    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
 #[derive(Clone)]
 struct Window {
     completed_through: i64,
@@ -121,19 +153,58 @@ impl Window {
         })
     }
 }
+/// Stable account-snapshot contract also used by trade recovery.
 pub async fn capture_account_sources(
     observer: &AccountBootstrapper,
     private_ws: &PrivateWsHandle,
     execution: &ExecutionRuntime,
 ) -> AgentResult<okx_observation::AccountSnapshot> {
+    let completed = capture_account_sources_measured(observer, private_ws, execution).await?;
+    Ok(completed.snapshot)
+}
+
+/// Source-loop-only measured readback; no change to the recovery contract.
+pub async fn capture_account_sources_measured(
+    observer: &AccountBootstrapper,
+    private_ws: &PrivateWsHandle,
+    execution: &ExecutionRuntime,
+) -> AgentResult<CaptureCompleted> {
     let initial = private_ws.status().await;
     if !initial.logged_in || initial.connection_generation == 0 {
         return Err(invalid("PRIVATE_SOURCE_NOT_READY"));
     }
-    let snapshot = observer
-        .snapshot()
-        .await
-        .map_err(|_| invalid("ACCOUNT_SOURCE_UNAVAILABLE"))?;
+    let observer_and_cursors_started = Instant::now();
+    // Read all five history cursors and the opening time in ONE existing
+    // AccountStore job, concurrently with the authenticated venue snapshot.
+    // No cursor is advanced here; the individual page ingests still own
+    // the durable source coverage and failure/replay semantics.
+    let (snapshot, (t0, cursors)) = tokio::try_join!(
+        async {
+            observer
+                .snapshot()
+                .await
+                .map_err(|_| invalid("ACCOUNT_SOURCE_UNAVAILABLE"))
+        },
+        async {
+            execution
+                .store
+                .call(deadline(), |s| {
+                    Ok((
+                        s.meta().initialized_at,
+                        CaptureCursors {
+                            spot: s.cursor("fills", "SPOT")?,
+                            swap: s.cursor("fills", "SWAP")?,
+                            futures: s.cursor("fills", "FUTURES")?,
+                            options: s.cursor("fills", "OPTION")?,
+                            bills: s.cursor("bills", "account")?,
+                        },
+                    ))
+                })
+                .await
+                .map_err(AgentError::from)
+        },
+    )?;
+    let observer_and_cursors_ms = phase_elapsed_ms(observer_and_cursors_started);
     if snapshot.account_uid_fingerprint != execution.uid()
         || !execution
             .verified_uid_matches(&snapshot.account_uid_fingerprint)
@@ -162,18 +233,70 @@ pub async fn capture_account_sources(
         source_digest: fx_source,
         usd_per_currency,
     };
-    let t0 = execution
-        .store
-        .call(deadline(), |s| Ok(s.meta().initialized_at))
-        .await?;
-    // A bounded read per stream per turn; an unfinished window resumes next turn.
+    // A bounded read per stream per turn; an unfinished window resumes next
+    // turn. Venue fetches still run concurrently, and all five durable
+    // cursor writes retain their previous ordered AccountStore owner.
+    let history_started = Instant::now();
     let (spot, swap, futures, options, bills) = tokio::try_join!(
-        capture_fills(execution, private_ws, "SPOT", t0, now, generation, &fx),
-        capture_fills(execution, private_ws, "SWAP", t0, now, generation, &fx),
-        capture_fills(execution, private_ws, "FUTURES", t0, now, generation, &fx),
-        capture_fills(execution, private_ws, "OPTION", t0, now, generation, &fx),
-        capture_bills(execution, private_ws, t0, now, generation, &fx)
+        capture_fills(
+            execution,
+            private_ws,
+            FillHistorySource {
+                partition: "SPOT",
+                cursor: cursors.spot,
+            },
+            t0,
+            now,
+            generation,
+            &fx
+        ),
+        capture_fills(
+            execution,
+            private_ws,
+            FillHistorySource {
+                partition: "SWAP",
+                cursor: cursors.swap,
+            },
+            t0,
+            now,
+            generation,
+            &fx
+        ),
+        capture_fills(
+            execution,
+            private_ws,
+            FillHistorySource {
+                partition: "FUTURES",
+                cursor: cursors.futures,
+            },
+            t0,
+            now,
+            generation,
+            &fx
+        ),
+        capture_fills(
+            execution,
+            private_ws,
+            FillHistorySource {
+                partition: "OPTION",
+                cursor: cursors.options,
+            },
+            t0,
+            now,
+            generation,
+            &fx
+        ),
+        capture_bills(
+            execution,
+            private_ws,
+            cursors.bills,
+            t0,
+            now,
+            generation,
+            &fx
+        )
     )?;
+    let history_and_ingest_ms = phase_elapsed_ms(history_started);
     if private_ws.status().await.connection_generation != initial.connection_generation {
         return Err(invalid("SOURCE_GENERATION_CHANGED"));
     }
@@ -228,6 +351,7 @@ pub async fn capture_account_sources(
         .collect();
     let source = snapshot.source_received_at.clone();
     let version = format!("{generation}:{}", snapshot.account_generation);
+    let nav_started = Instant::now();
     execution
         .store
         .call(deadline(), move |s| {
@@ -336,27 +460,31 @@ pub async fn capture_account_sources(
             Ok(())
         })
         .await?;
+    let nav_reconciliation_ms = phase_elapsed_ms(nav_started);
     if !complete {
         return Err(invalid("FINANCIAL_BACKFILL_PENDING"));
     }
-    Ok(snapshot)
+    Ok(CaptureCompleted {
+        snapshot,
+        phases: CapturePhaseTimings {
+            observer_and_cursors_ms,
+            history_and_ingest_ms,
+            nav_reconciliation_ms,
+        },
+    })
 }
 async fn capture_fills(
     execution: &ExecutionRuntime,
     ws: &PrivateWsHandle,
-    partition: &str,
+    source: FillHistorySource,
     t0: i64,
     now: i64,
     generation: i64,
     fx: &UsdConversionEvidence,
 ) -> AgentResult<bool> {
     let fx = fx.clone();
-    let part = partition.to_string();
-    let cursor = execution
-        .store
-        .call(deadline(), move |s| s.cursor("fills", &part))
-        .await?;
-    let window = Window::resume(cursor.as_ref(), t0, now)?;
+    let partition = source.partition;
+    let window = Window::resume(source.cursor.as_ref(), t0, now)?;
     let rows: Vec<FillHistory> = execution
         .history
         .fills_history_page(
@@ -455,16 +583,13 @@ async fn capture_fills(
 async fn capture_bills(
     execution: &ExecutionRuntime,
     ws: &PrivateWsHandle,
+    cursor: Option<SourceCursor>,
     t0: i64,
     now: i64,
     generation: i64,
     fx: &UsdConversionEvidence,
 ) -> AgentResult<bool> {
     let fx = fx.clone();
-    let cursor = execution
-        .store
-        .call(deadline(), |s| s.cursor("bills", "account"))
-        .await?;
     let window = Window::resume(cursor.as_ref(), t0, now)?;
     let rows: Vec<AccountBill> = execution
         .history
@@ -615,6 +740,56 @@ mod tests {
         let pending = next.cursor("fills", "SWAP", 1, Some("123"), false).unwrap();
         assert_eq!(pending.watermark, 100);
     }
+    #[test]
+    fn five_independent_cursors_keep_unfinished_pages_and_reject_corruption() {
+        let earlier = Window {
+            completed_through: 55,
+            begin: 55,
+            end: 100,
+            after: String::new(),
+        };
+        let future_page = earlier
+            .cursor("fills", "FUTURES", 7, Some("fill-page"), false)
+            .unwrap();
+        let bill_page = Window {
+            completed_through: 88,
+            begin: 88,
+            end: 100,
+            after: String::new(),
+        }
+        .cursor("bills", "account", 7, Some("bill-page"), false)
+        .unwrap();
+        let cursors = CaptureCursors {
+            spot: None,
+            swap: None,
+            futures: Some(future_page),
+            options: None,
+            bills: Some(bill_page),
+        };
+        let spot = Window::resume(cursors.spot.as_ref(), 1, 200).unwrap();
+        let futures = Window::resume(cursors.futures.as_ref(), 1, 200).unwrap();
+        let bills = Window::resume(cursors.bills.as_ref(), 1, 200).unwrap();
+        assert_eq!(spot.begin, 1);
+        assert_eq!(
+            (futures.begin, futures.end, futures.after.as_str()),
+            (55, 100, "fill-page")
+        );
+        assert_eq!(
+            (bills.begin, bills.end, bills.after.as_str()),
+            (88, 100, "bill-page")
+        );
+        assert!(earlier.cursor("fills", "FUTURES", 7, None, false).is_err());
+        let corrupt = SourceCursor {
+            source: "fills".into(),
+            stream_partition: "FUTURES".into(),
+            cursor: "not-a-window".into(),
+            watermark: 55,
+            generation: 7,
+            coverage_gaps: "BACKFILL_PENDING".into(),
+        };
+        assert!(Window::resume(Some(&corrupt), 1, 200).is_err());
+    }
+
     #[test]
     fn unknown_currency_and_decimal_do_not_become_zero() {
         assert!(d("NaN").is_err());
