@@ -390,6 +390,8 @@ async fn account_diagnostics(
     });
     out["source_capture"] = json!(resources.source_capture_health.read().await.clone());
     out["storage"] = facts;
+    // Existing diagnostics surface; no new transport, DB owner or persistent journal.
+    out["storage"]["account_sql_timing"] = json!(resources.execution.store.sql_timing());
     out["access"] = ctx.trade.diagnostic_access(&key).await;
     out["intent"]=intent.as_ref().map(|i|json!({"intent_id":i.intent_id,"client_order_id":i.client_order_id,"exchange_order_id":i.exchange_order_id,"state":i.state.as_str(),"instrument":i.instrument_id,"risk_increase":i.risk_increase,"policy_revision":i.policy_revision,"revision":i.revision,"deadline_ms":i.deadline,"incident":i.incident.as_ref().map(|e|safe_code(e,"INTENT_INCIDENT"))})).unwrap_or(Value::Null);
     Ok(out)
