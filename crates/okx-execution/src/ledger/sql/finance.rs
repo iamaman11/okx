@@ -1763,14 +1763,16 @@ impl AccountStore {
                 params![n.scope_id, n.time, n.source_version],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
             )?;
-            if saved != (
-                exact(n.equity),
-                exact(n.pnl),
-                exact(n.flows),
-                n.currency.clone(),
-                n.coverage.clone(),
-                n.mark_source.clone(),
-            ) {
+            if saved
+                != (
+                    exact(n.equity),
+                    exact(n.pnl),
+                    exact(n.flows),
+                    n.currency.clone(),
+                    n.coverage.clone(),
+                    n.mark_source.clone(),
+                )
+            {
                 return Err(StoreError::Invalid("IMMUTABLE_NAV_SOURCE_CONFLICT"));
             }
             if n.currency == "USD" {
