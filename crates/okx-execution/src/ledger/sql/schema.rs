@@ -169,6 +169,9 @@ impl AccountStore {
         if meta.account_key != account_key || meta.installation_id != installation_id {
             return Err(StoreError::Invalid("ACCOUNT_IDENTITY_MISMATCH"));
         }
+        // Existing v2 databases need the same derived lookup as clean T0 databases.
+        // This is an idempotent index only: no financial facts or schema version change.
+        c.execute_batch("CREATE INDEX IF NOT EXISTS idx_nav_scope_version_time ON nav_points(scope_id,source_version,time)")?;
         Ok(Self {
             connection: c,
             path: path.as_ref().into(),

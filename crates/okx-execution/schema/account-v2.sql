@@ -33,6 +33,8 @@ CREATE TABLE finance_totals(currency TEXT NOT NULL,component TEXT NOT NULL,amoun
 CREATE TABLE instance_finance_totals(instance_id TEXT NOT NULL REFERENCES strategy_instances(instance_id),currency TEXT NOT NULL,component TEXT NOT NULL,amount TEXT NOT NULL,PRIMARY KEY(instance_id,currency,component)) STRICT;
 CREATE TABLE finance_source_links(entry_id TEXT NOT NULL REFERENCES finance_entries(entry_id),source_ref TEXT NOT NULL,PRIMARY KEY(entry_id,source_ref)) STRICT;
 CREATE TABLE nav_points(scope_id TEXT NOT NULL,time INTEGER NOT NULL,source_version TEXT NOT NULL,equity TEXT NOT NULL,pnl TEXT NOT NULL,flows TEXT NOT NULL,currency TEXT NOT NULL,coverage TEXT NOT NULL,mark_source TEXT NOT NULL,PRIMARY KEY(scope_id,time,source_version)) STRICT;
+-- Pure lookup acceleration: strategy NAV as-of queries filter by immutable revision.
+CREATE INDEX idx_nav_scope_version_time ON nav_points(scope_id,source_version,time);
 CREATE TABLE nav_watermarks(scope_id TEXT PRIMARY KEY,highwater TEXT NOT NULL,adjusted_equity TEXT NOT NULL,time INTEGER NOT NULL,coverage TEXT NOT NULL) STRICT;
 CREATE TABLE nav_scopes(scope_id TEXT NOT NULL,currency TEXT NOT NULL,PRIMARY KEY(scope_id,currency)) STRICT;
 CREATE TABLE daily_losses(scope_id TEXT NOT NULL,utc_day INTEGER NOT NULL,loss_usd TEXT NOT NULL,PRIMARY KEY(scope_id,utc_day)) STRICT;
