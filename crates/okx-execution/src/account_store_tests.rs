@@ -1140,6 +1140,175 @@ fn sql_ingest_retry_exactly_once() {
     assert_eq!(v[0].amount, Decimal::new(-25, 2));
 }
 #[test]
+fn p02_immutable_economic_event_rejects_changed_time_or_reversal_without_advancing_cursor() {
+    let mut s = store();
+    let original = fee("canonical-fee", "fill:proof");
+    s.ingest_page(&IngestPage {
+        finance: vec![original.clone()],
+        ..Default::default()
+    })
+    .unwrap();
+
+    // The same economic event can acquire an additional real source link.
+    let mut linked = original.clone();
+    linked.entry_id = "second-alias".into();
+    linked.source_ref = "bill:proof".into();
+    linked.time = 5; // Exchange bill posts later than the originating fill.
+    s.ingest_page(&IngestPage {
+        finance: vec![linked.clone()],
+        ..Default::default()
+    })
+    .unwrap();
+    s.ingest_page(&IngestPage {
+        finance: vec![linked.clone()],
+        ..Default::default()
+    })
+    .unwrap();
+    let source_links: i64 = s
+        .connection
+        .query_row(
+            "SELECT count(*) FROM finance_source_links WHERE entry_id='canonical-fee'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(source_links, 2);
+
+    let cursor = SourceCursor {
+        source: "bills".into(),
+        stream_partition: "account".into(),
+        cursor: "later".into(),
+        watermark: 8,
+        generation: 1,
+        coverage_gaps: String::new(),
+    };
+    for change_reversal in [false, true] {
+        let mut changed = if change_reversal {
+            linked.clone()
+        } else {
+            original.clone()
+        };
+        if change_reversal {
+            changed.reverses_entry_id = Some("another-event".into());
+        } else {
+            changed.time = 8;
+        }
+        assert!(matches!(
+            s.ingest_page(&IngestPage {
+                finance: vec![changed],
+                cursor: Some(cursor.clone()),
+                ..Default::default()
+            }),
+            Err(StoreError::Invalid("CANONICAL_ECONOMIC_EVENT_CONFLICT"))
+        ));
+        assert!(s.cursor("bills", "account").unwrap().is_none());
+    }
+    let rows = s.finance_history(1, 10, 0, "", 20).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].time, original.time);
+    assert_eq!(rows[0].reverses_entry_id, None);
+    assert_eq!(
+        s.finance_totals(1, 10, None)
+            .unwrap()
+            .get(&("USDT".into(), "FEE".into()))
+            .copied(),
+        Some(original.amount)
+    );
+}
+
+#[test]
+fn p02_immutable_nav_replay_rejects_conflict_before_highwater_and_cursor() {
+    let mut s = store();
+    let opening = NavPoint {
+        scope_id: "account".into(),
+        time: 4,
+        source_version: "verified-mark-v1".into(),
+        equity: Decimal::from(110),
+        pnl: Decimal::from(10),
+        flows: Decimal::ZERO,
+        currency: "USD".into(),
+        coverage: "COMPLETE".into(),
+        mark_source: "exchange-snapshot".into(),
+    };
+    s.ingest_page(&IngestPage {
+        nav: vec![opening.clone()],
+        ..Default::default()
+    })
+    .unwrap();
+    // Exact replays remain idempotent and must not create a second NAV row.
+    s.ingest_page(&IngestPage {
+        nav: vec![opening.clone()],
+        ..Default::default()
+    })
+    .unwrap();
+    let cursor = SourceCursor {
+        source: "account_snapshot".into(),
+        stream_partition: "account".into(),
+        cursor: "new-page".into(),
+        watermark: 5,
+        generation: 1,
+        coverage_gaps: String::new(),
+    };
+    for field in 0..3 {
+        let mut conflict = opening.clone();
+        match field {
+            0 => conflict.equity = Decimal::from(9999),
+            1 => conflict.coverage = "PARTIAL".into(),
+            _ => conflict.mark_source = "different-exchange-snapshot".into(),
+        }
+        assert!(matches!(
+            s.ingest_page(&IngestPage {
+                nav: vec![conflict],
+                finance: vec![fee("rolled-back-fee", "bill:later")],
+                cursor: Some(cursor.clone()),
+                ..Default::default()
+            }),
+            Err(StoreError::Invalid("IMMUTABLE_NAV_SOURCE_CONFLICT"))
+        ));
+        assert!(s.cursor("account_snapshot", "account").unwrap().is_none());
+    }
+    let count: i64 = s
+        .connection
+        .query_row(
+            "SELECT count(*) FROM nav_points WHERE scope_id='account' AND time=4",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, 1);
+    let (highwater, adjusted): (String, String) = s
+        .connection
+        .query_row(
+            "SELECT highwater,adjusted_equity FROM nav_watermarks WHERE scope_id='account'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(highwater, "110");
+    assert_eq!(adjusted, "110");
+    assert!(s.finance_history(1, 10, 0, "", 20).unwrap().is_empty());
+
+    // A genuinely new snapshot version remains a legitimate next fact.
+    let mut revised = opening;
+    revised.source_version = "verified-mark-v2".into();
+    revised.equity = Decimal::from(115);
+    revised.pnl = Decimal::from(15);
+    s.ingest_page(&IngestPage {
+        nav: vec![revised],
+        cursor: Some(cursor),
+        ..Default::default()
+    })
+    .unwrap();
+    assert_eq!(
+        s.cursor("account_snapshot", "account")
+            .unwrap()
+            .unwrap()
+            .watermark,
+        5
+    );
+}
+
+#[test]
 fn fee_fill_bill_counted_once() {
     let mut s = store();
     s.ingest_page(&IngestPage {
