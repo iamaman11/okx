@@ -154,10 +154,14 @@ pub async fn portfolio(
             .execution
             .store
             .call(Instant::now() + Duration::from_secs(5), move |s| {
-                let health = s.financial_risk(Utc::now().timestamp_millis(), None)?;
+                let health = s
+                    .financial_risk(Utc::now().timestamp_millis(), None)
+                    .map_err(|e| {
+                        e.with_interruption_stage("ACCOUNT_SQL_PORTFOLIO_RISK_INTERRUPTED")
+                    })?;
                 if history {
-                    Ok((
-                        s.finance_history_filtered(
+                    let entries = s
+                        .finance_history_filtered(
                             from,
                             through,
                             after_time,
@@ -165,7 +169,12 @@ pub async fn portfolio(
                             limit,
                             &instances,
                             &currencies,
-                        )?,
+                        )
+                        .map_err(|e| {
+                            e.with_interruption_stage("ACCOUNT_SQL_PORTFOLIO_HISTORY_INTERRUPTED")
+                        })?;
+                    Ok((
+                        entries,
                         BTreeMap::new(),
                         health,
                         Vec::new(),
@@ -173,11 +182,23 @@ pub async fn portfolio(
                         s.finance_revision()?,
                     ))
                 } else {
+                    let attribution = s
+                        .finance_attribution_filtered(from, through, &instances, &currencies)
+                        .map_err(|e| {
+                            e.with_interruption_stage(
+                                "ACCOUNT_SQL_PORTFOLIO_ATTRIBUTION_INTERRUPTED",
+                            )
+                        })?;
+                    let nav = s
+                        .nav_summary(from, through, &instances, &currencies)
+                        .map_err(|e| {
+                            e.with_interruption_stage("ACCOUNT_SQL_PORTFOLIO_NAV_INTERRUPTED")
+                        })?;
                     Ok((
                         Vec::new(),
-                        s.finance_attribution_filtered(from, through, &instances, &currencies)?,
+                        attribution,
                         health,
-                        s.nav_summary(from, through, &instances, &currencies)?,
+                        nav,
                         s.meta().initialized_at,
                         s.finance_revision()?,
                     ))
@@ -468,6 +489,26 @@ fn summary_key(value: &Value) -> String {
 mod tests {
     use super::*;
     use okx_execution::{AccountMeta, AccountStore, FinanceEntry, IngestPage, OpeningSnapshot};
+    #[test]
+    fn sql_interruption_phase_preserves_other_storage_errors() {
+        let interrupted = okx_execution::StoreError::Sql(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_INTERRUPT),
+            None,
+        ));
+        assert_eq!(
+            interrupted
+                .with_interruption_stage("ACCOUNT_SQL_PORTFOLIO_NAV_INTERRUPTED")
+                .to_string(),
+            "ACCOUNT_SQL_PORTFOLIO_NAV_INTERRUPTED"
+        );
+        let unrelated = okx_execution::StoreError::Invalid("ACCOUNT_WRITER_ALREADY_RUNNING");
+        assert_eq!(
+            unrelated
+                .with_interruption_stage("ACCOUNT_SQL_PORTFOLIO_NAV_INTERRUPTED")
+                .to_string(),
+            "ACCOUNT_WRITER_ALREADY_RUNNING"
+        );
+    }
     fn store(account: &str) -> AccountStore {
         let mut nonce = [0u8; 16];
         getrandom::fill(&mut nonce).unwrap();

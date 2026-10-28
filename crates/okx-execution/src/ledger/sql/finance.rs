@@ -682,8 +682,14 @@ impl AccountStore {
         // Each NAV endpoint has its own immutable as-of source revision.
         // Reusing the end revision for an earlier snapshot makes valid
         // consecutive reconciled marks look incomplete.
-        let opening_revision = self.strategy_valuation_revision_as_of(from)?;
-        let revision = self.strategy_valuation_revision_as_of(through)?;
+        let opening_revision = self.strategy_valuation_revision_as_of(from).map_err(|e| {
+            e.with_interruption_stage("ACCOUNT_SQL_NAV_OPENING_REVISION_INTERRUPTED")
+        })?;
+        let revision = self
+            .strategy_valuation_revision_as_of(through)
+            .map_err(|e| {
+                e.with_interruption_stage("ACCOUNT_SQL_NAV_CLOSING_REVISION_INTERRUPTED")
+            })?;
         for (scope, currency) in scopes {
             // Only native reconciliation receipts authorize strategy NAV rows.
             // Arbitrary strategy nav_points, including old COMPLETE claims, are

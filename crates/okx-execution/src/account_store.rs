@@ -20,6 +20,20 @@ pub enum StoreError {
     #[error("{0}")]
     Invalid(&'static str),
 }
+impl StoreError {
+    /// Attach an operation phase only to a SQLite progress-handler interruption.
+    /// Other storage errors retain their original error owner and diagnostics.
+    pub fn with_interruption_stage(self, stage: &'static str) -> Self {
+        match self {
+            Self::Sql(rusqlite::Error::SqliteFailure(code, _))
+                if code.code == rusqlite::ErrorCode::OperationInterrupted =>
+            {
+                Self::Invalid(stage)
+            }
+            other => other,
+        }
+    }
+}
 pub type StoreResult<T> = Result<T, StoreError>;
 /// Exact economic-event partition by strategy owner (None = unattributed), currency and component.
 pub type FinanceAttribution = std::collections::BTreeMap<(Option<String>, String, String), Decimal>;
