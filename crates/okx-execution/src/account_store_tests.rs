@@ -4351,19 +4351,25 @@ fn p02_existing_v2_rebuilds_strategy_nav_revision_lookup_without_rewriting_facts
     let s = store();
     let path = s.path.clone();
     let meta = s.meta.clone();
-    let before: i64 = s.connection.query_row(
-        "SELECT count(*) FROM nav_points", [], |r| r.get(0)
-    ).unwrap();
-    s.connection.execute_batch("DROP INDEX idx_nav_scope_version_time").unwrap();
+    let before: i64 = s
+        .connection
+        .query_row("SELECT count(*) FROM nav_points", [], |r| r.get(0))
+        .unwrap();
+    s.connection
+        .execute_batch("DROP INDEX idx_nav_scope_version_time")
+        .unwrap();
     drop(s);
-    let recovered = AccountStore::open_existing(
-        &path, &meta.account_key, &meta.installation_id
-    ).unwrap();
-    let version: i64 = recovered.connection.pragma_query_value(None, "user_version", |r| r.get(0)).unwrap();
+    let recovered =
+        AccountStore::open_existing(&path, &meta.account_key, &meta.installation_id).unwrap();
+    let version: i64 = recovered
+        .connection
+        .pragma_query_value(None, "user_version", |r| r.get(0))
+        .unwrap();
     assert_eq!(version, 2);
-    let after: i64 = recovered.connection.query_row(
-        "SELECT count(*) FROM nav_points", [], |r| r.get(0)
-    ).unwrap();
+    let after: i64 = recovered
+        .connection
+        .query_row("SELECT count(*) FROM nav_points", [], |r| r.get(0))
+        .unwrap();
     assert_eq!(after, before);
     let mut plan = recovered.connection.prepare(
         "EXPLAIN QUERY PLAN SELECT EXISTS(SELECT 1 FROM nav_points n \
@@ -4371,9 +4377,22 @@ fn p02_existing_v2_rebuilds_strategy_nav_revision_lookup_without_rewriting_facts
          WHERE n.scope_id=?1 AND n.time<=?2 AND n.source_version=?3 \
          AND o.kind='STRATEGY_NAV_RECONCILED')"
     ).unwrap();
-    let details = plan.query_map(
-        rusqlite::params!["strategy:ema", 12345_i64, "strategy-reconciled-v1:revision:test"],
-        |r| r.get::<_, String>(3)
-    ).unwrap().collect::<Result<Vec<_>, _>>().unwrap();
-    assert!(details.iter().any(|d| d.contains("idx_nav_scope_version_time")), "{details:?}");
+    let details = plan
+        .query_map(
+            rusqlite::params![
+                "strategy:ema",
+                12345_i64,
+                "strategy-reconciled-v1:revision:test"
+            ],
+            |r| r.get::<_, String>(3),
+        )
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert!(
+        details
+            .iter()
+            .any(|d| d.contains("idx_nav_scope_version_time")),
+        "{details:?}"
+    );
 }
