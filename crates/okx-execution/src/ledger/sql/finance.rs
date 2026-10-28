@@ -1555,12 +1555,22 @@ impl AccountStore {
                     b.economic_event_key
                 ],
             )?;
-            let old: (String, String, String) = tx.query_row(
-                "SELECT kind,amount,currency FROM bills WHERE bill_id=?1",
+            let old: (String, String, String, i64, String) = tx.query_row(
+                "SELECT kind,amount,currency,time,economic_event_key FROM bills WHERE bill_id=?1",
                 [&b.bill_id],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
             )?;
-            if old != (b.kind.clone(), exact(b.amount), b.currency.clone()) {
+            // A bill id identifies one immutable economic source, including
+            // its period and its link to the canonical economic event.
+            if old
+                != (
+                    b.kind.clone(),
+                    exact(b.amount),
+                    b.currency.clone(),
+                    b.time,
+                    b.economic_event_key.clone(),
+                )
+            {
                 return Err(StoreError::Invalid("IMMUTABLE_BILL_CONFLICT"));
             }
         }
@@ -1589,12 +1599,22 @@ impl AccountStore {
                     f.source_ref
                 ],
             )?;
-            let old: (String, String, String) = tx.query_row(
-                "SELECT kind,currency,amount FROM cash_flows WHERE event_id=?1",
+            let old: (String, String, String, i64, String) = tx.query_row(
+                "SELECT kind,currency,amount,time,source_ref FROM cash_flows WHERE event_id=?1",
                 [&f.event_id],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
             )?;
-            if old != (f.kind.clone(), f.currency.clone(), exact(f.amount)) {
+            // A replay cannot silently relocate a deposit or replace its
+            // original provenance while reusing the same event id.
+            if old
+                != (
+                    f.kind.clone(),
+                    f.currency.clone(),
+                    exact(f.amount),
+                    f.time,
+                    f.source_ref.clone(),
+                )
+            {
                 return Err(StoreError::Invalid("IMMUTABLE_CASH_FLOW_CONFLICT"));
             }
         }
@@ -1609,12 +1629,19 @@ impl AccountStore {
                     a.time
                 ],
             )?;
-            let old: (String, String, String) = tx.query_row(
-                "SELECT instance_id,delta,currency FROM allocations WHERE event_id=?1",
+            let old: (String, String, String, i64) = tx.query_row(
+                "SELECT instance_id,delta,currency,time FROM allocations WHERE event_id=?1",
                 [&a.event_id],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
             )?;
-            if old != (a.instance_id.clone(), exact(a.delta), a.currency.clone()) {
+            if old
+                != (
+                    a.instance_id.clone(),
+                    exact(a.delta),
+                    a.currency.clone(),
+                    a.time,
+                )
+            {
                 return Err(StoreError::Invalid("IMMUTABLE_ALLOCATION_CONFLICT"));
             }
         }
