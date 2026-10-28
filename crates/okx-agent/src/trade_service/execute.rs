@@ -1481,6 +1481,208 @@ mod tests {
         }
     }
 
+    // Genuine OS-level termination on the Windows CI runner. The child keeps
+    // the original SQLite writer lease open until TerminateProcess kills it.
+    // This is not a Cloudflare/venue failpoint; the gateway is a file fixture.
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "called only as an isolated crash-test subprocess"]
+    fn k5_windows_process_kill_child_fixture() {
+        use std::io::Write as _;
+        let role = std::env::var("OKX_K5_KILL_ROLE").expect("crash fixture role");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let (store, intent, root) = reserved(&format!("kill_{role}"), true, false, false).await;
+            match role.as_str() {
+                "f5" => {
+                    assert!(
+                        store
+                            .call(deadline(), |s| s.begin_post("intent_fixture", 1, now()))
+                            .await
+                            .unwrap()
+                    );
+                    println!("OKX_K5_READY={}", root.display());
+                    std::io::stdout().flush().unwrap();
+                    // Parent kills this OS process after observing the durable claim.
+                    std::future::pending::<()>().await;
+                }
+                "f6" => {
+                    let witness = root.join("venue-accepted.marker");
+                    let ready_root = root.clone();
+                    // The gateway fixture has a durable external acceptance
+                    // witness but never supplies an ACK to the native owner.
+                    let _ = post_once(
+                        &store,
+                        &intent,
+                        Instant::now() + Duration::from_secs(60),
+                        || async move {
+                            let mut f = std::fs::File::create(witness).unwrap();
+                            f.write_all(b"accepted_once").unwrap();
+                            f.sync_all().unwrap();
+                            println!("OKX_K5_READY={}", ready_root.display());
+                            std::io::stdout().flush().unwrap();
+                            std::future::pending::<Result<u32, String>>().await
+                        },
+                    )
+                    .await;
+                    panic!("unresolved F6 gateway returned instead of being killed");
+                }
+                _ => panic!("unrecognized crash fixture role: {role}"),
+            }
+        });
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn k5_windows_actual_process_kill_f5_f6_ten_times_each() {
+        use std::io::BufRead as _;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        for role in ["f5", "f6"] {
+            for run in 0..10 {
+                let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+                    .args([
+                        "--ignored",
+                        "--exact",
+                        "trade_service::execute::tests::k5_windows_process_kill_child_fixture",
+                        "--nocapture",
+                    ])
+                    .env("OKX_K5_KILL_ROLE", role)
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::inherit())
+                    .spawn()
+                    .unwrap();
+                let stdout = child.stdout.take().unwrap();
+                let (tx, rx) = std::sync::mpsc::sync_channel(1);
+                let reader = std::thread::spawn(move || {
+                    for line in std::io::BufReader::new(stdout).lines() {
+                        let line = line.unwrap();
+                        if let Some((_, root)) = line.split_once("OKX_K5_READY=") {
+                            let _ = tx.send(std::path::PathBuf::from(root.trim()));
+                            break;
+                        }
+                    }
+                });
+                // Event-driven readiness from the *durably committed* child,
+                // with a bounded deadline rather than a blind sleep.
+                let root = match rx.recv_timeout(Duration::from_secs(20)) {
+                    Ok(root) => root,
+                    Err(e) => {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        reader.join().unwrap();
+                        panic!("F{role} run {run} did not arm the crash point: {e}");
+                    }
+                };
+                assert!(
+                    child.try_wait().unwrap().is_none(),
+                    "child exited without actual OS termination"
+                );
+                child.kill().unwrap();
+                let exit = child.wait().unwrap();
+                reader.join().unwrap();
+                assert!(!exit.success(), "forced-kill child exited successfully");
+
+                let venue_witness = root.join("venue-accepted.marker");
+                if role == "f6" {
+                    assert_eq!(std::fs::read(&venue_witness).unwrap(), b"accepted_once");
+                } else {
+                    assert!(!venue_witness.exists(), "F5 must have zero sends");
+                }
+
+                // Reopen the actual crash-surviving WAL database, NOT an
+                // online backup. Killing the child must free the writer lease.
+                runtime.block_on(async {
+                    let store = AccountStoreHandle::open_existing(
+                        root.join("account.db"),
+                        format!("okx:real:{}", "a".repeat(64)),
+                        "installation_test".into(),
+                    )
+                    .await
+                    .unwrap();
+                    let changed = store
+                        .call(deadline(), |s| s.recover_posting(now()))
+                        .await
+                        .unwrap();
+                    assert_eq!(changed, 1, "the crashed child left a POSTING claim");
+                    let intent = store
+                        .call(deadline(), |s| s.intent("intent_fixture"))
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    assert_eq!(intent.state, IntentState::Unknown);
+                    assert!(
+                        store
+                            .call(deadline(), |s| {
+                                s.unsent_release_receipt("intent_fixture")
+                            })
+                            .await
+                            .unwrap()
+                            .is_none(),
+                        "crash must never fabricate an unsent release witness"
+                    );
+
+                    let gateway = FixtureGateway {
+                        posts: AtomicUsize::new(0),
+                        lose: false,
+                    };
+                    for _ in 0..2 {
+                        assert_eq!(
+                            post_once(&store, &intent, deadline(), || gateway.send())
+                                .await
+                                .unwrap(),
+                            None,
+                            "replaying an unknown original intent cannot place an order"
+                        );
+                    }
+                    assert_eq!(gateway.posts.load(Ordering::SeqCst), 0);
+                    if role == "f6" {
+                        store
+                            .call(deadline(), |s| {
+                                s.record_order_readback(
+                                    "intent_fixture",
+                                    "fixture-venue-confirmed",
+                                    IntentState::Filled,
+                                    Decimal::ONE,
+                                    now(),
+                                )
+                            })
+                            .await
+                            .unwrap();
+                        assert_eq!(
+                            store
+                                .call(deadline(), |s| s.intent("intent_fixture"))
+                                .await
+                                .unwrap()
+                                .unwrap()
+                                .state,
+                            IntentState::Filled
+                        );
+                        // One and only one externally witnessed acceptance.
+                        assert_eq!(std::fs::read(&venue_witness).unwrap(), b"accepted_once");
+                    } else {
+                        assert_eq!(
+                            store
+                                .call(deadline(), |s| s.intent("intent_fixture"))
+                                .await
+                                .unwrap()
+                                .unwrap()
+                                .state,
+                            IntentState::Unknown,
+                            "F5 cannot be called no-send after a process crash"
+                        );
+                    }
+                });
+            }
+        }
+    }
+
     #[tokio::test]
     async fn restart_posting_reconciles_without_resubmit() {
         let (store, intent, _root) = reserved("restart", true, false, false).await;
