@@ -1481,7 +1481,6 @@ mod tests {
         }
     }
 
-
     // Genuine OS-level termination on the Windows CI runner. The child keeps
     // the original SQLite writer lease open until TerminateProcess kills it.
     // This is not a Cloudflare/venue failpoint; the gateway is a file fixture.
@@ -1496,8 +1495,7 @@ mod tests {
             .build()
             .unwrap();
         runtime.block_on(async {
-            let (store, intent, root) =
-                reserved(&format!("kill_{role}"), true, false, false).await;
+            let (store, intent, root) = reserved(&format!("kill_{role}"), true, false, false).await;
             match role.as_str() {
                 "f5" => {
                     assert!(
