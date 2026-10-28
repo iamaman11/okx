@@ -1395,11 +1395,18 @@ mod tests {
                 assert_eq!(gateway.posts.load(Ordering::SeqCst), 0);
             }
 
-            // Reopen the durable SQLite owner rather than merely inspecting
-            // the same in-memory AccountStoreHandle as the earlier fixtures.
+            // Use the owner's native SQLite online backup to obtain an
+            // immutable crash/recovery image. The live worker still owns its
+            // writer lock until it terminates; reopening that same live file
+            // would only test a race in test teardown, not durability.
+            let recovery_image = root.join("recovery.db");
+            store
+                .call(deadline(), move |s| s.backup(&recovery_image))
+                .await
+                .unwrap();
             drop(store);
             let reopened = AccountStoreHandle::open_existing(
-                root.join("account.db"),
+                root.join("recovery.db"),
                 format!("okx:real:{}", "a".repeat(64)),
                 "installation_test".into(),
             )
