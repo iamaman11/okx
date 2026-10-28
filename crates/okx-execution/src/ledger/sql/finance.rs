@@ -1672,9 +1672,20 @@ impl AccountStore {
             if amount != exact(e.amount)
                 || currency != e.currency
                 || instance != e.instance_id
-                || time != e.time
                 || reversal != e.reverses_entry_id
             {
+                return Err(StoreError::Invalid("CANONICAL_ECONOMIC_EVENT_CONFLICT"));
+            }
+            // A fill and its later bill may share one economic fee with
+            // different source timestamps. Keep the first canonical time;
+            // only a replay of a source already linked to that fee must
+            // preserve that source's previously accepted timestamp.
+            let source_already_linked: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM finance_source_links WHERE entry_id=?1 AND source_ref=?2)",
+                params![entry_id, e.source_ref],
+                |r| r.get(0),
+            )?;
+            if time != e.time && source_already_linked {
                 return Err(StoreError::Invalid("CANONICAL_ECONOMIC_EVENT_CONFLICT"));
             }
             tx.execute(
