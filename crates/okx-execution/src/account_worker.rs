@@ -87,13 +87,34 @@ impl AccountStoreHandle {
             return Err(StoreError::Invalid("ACCOUNT_QUEUE_DEADLINE"));
         }
         let (tx, rx) = oneshot::channel();
+        let enqueued_at = Instant::now();
         let job: Job = Box::new(move |store| {
-            let result = if Instant::now() >= deadline {
+            let started_at = Instant::now();
+            let queue_wait = started_at.duration_since(enqueued_at);
+            let result = if started_at >= deadline {
                 Err(StoreError::Invalid("ACCOUNT_QUEUE_DEADLINE"))
             } else {
                 store.run_before_deadline(deadline, operation)
             };
+            let sql_owner_time = started_at.elapsed();
+            // Diagnostic only: no account identity, financial facts, or SQL text.
+            // The original deadline includes queue wait. Phase-named SQL
+            // interruptions do not imply that the SQL statement was slow.
+            let notable = queue_wait >= Duration::from_millis(250)
+                || sql_owner_time >= Duration::from_millis(500)
+                || result.is_err();
+            let outcome = if result.is_ok() { "ok" } else { "error" };
             let _ = tx.send(result);
+            if notable {
+                eprintln!(
+                    "ACCOUNT_SQL_TIMING_V1 queue_wait_ms={} sql_owner_ms={} total_ms={} remaining_at_start_ms={} outcome={}",
+                    queue_wait.as_millis(),
+                    sql_owner_time.as_millis(),
+                    enqueued_at.elapsed().as_millis(),
+                    deadline.saturating_duration_since(started_at).as_millis(),
+                    outcome,
+                );
+            }
         });
         self.owner.sender.try_send(job).map_err(|e| match e {
             TrySendError::Full(_) => StoreError::Invalid("ACCOUNT_STORAGE_BACKPRESSURE"),
