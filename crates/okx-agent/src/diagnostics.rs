@@ -32,6 +32,10 @@ fn safe_code(message: &str, fallback: &str) -> String {
         fallback.into()
     }
 }
+fn account_snapshot_fresh_at(source_as_of: Option<i64>, observed_now: i64) -> bool {
+    source_as_of.is_some_and(|t| observed_now >= t && observed_now - t <= 5000)
+}
+
 fn lookup(store: &AccountStore, reference: &str) -> StoreResult<Option<StoredIntent>> {
     if let Some(i) = store.intent(reference)? {
         return Ok(Some(i));
@@ -287,8 +291,6 @@ async fn account_diagnostics(
         .as_ref()
         .and_then(|s| chrono::DateTime::parse_from_rfc3339(&s.source_received_at).ok())
         .map(|d| d.timestamp_millis());
-    let now = Utc::now().timestamp_millis();
-    let fresh = source_as_of.is_some_and(|t| now >= t && now - t <= 5000);
     let lookup_reference = reference.clone();
     let facts=resources.execution.store.call(Instant::now()+Duration::from_secs(3),move|s|{
   let intent=lookup_reference.as_deref().map(|r|lookup(s,r)).transpose()?.flatten();let policy=s.policy()?;let stops=s.stops()?;let(version,source_id)=s.sqlite_runtime()?;let(db,wal)=s.storage_bytes()?;let mut coverage=Vec::new();for(source,partition)in[("account_snapshot","account"),("fills","SPOT"),("fills","SWAP"),("fills","FUTURES"),("bills","account")]{let c=s.cursor(source,partition)?;coverage.push(json!({"source":source,"partition":partition,"state":if c.is_some(){"observed"}else{"not_evaluated"},"watermark":c.as_ref().map(|c|c.watermark),"generation":c.as_ref().map(|c|c.generation),"gaps":c.as_ref().map(|c|c.coverage_gaps.chars().take(256).collect::<String>())}));}
@@ -308,6 +310,9 @@ async fn account_diagnostics(
             return Ok(out);
         }
     };
+    // Recompute after awaiting the SQL owner: its FIFO queue or checkpoint
+    // can outlive the 5s evidence TTL. Never report the pre-wait freshness.
+    let fresh = account_snapshot_fresh_at(source_as_of, Utc::now().timestamp_millis());
     let mut blockers = Vec::new();
     if !identity_ready || !fresh {
         blockers.push("WAITING_ACCOUNT_EVIDENCE".into());
@@ -399,6 +404,31 @@ async fn account_diagnostics(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn diagnostic_freshness_is_evaluated_at_response_not_before_sql_wait() {
+        let sampled_at = 1_000_000_i64;
+        assert!(account_snapshot_fresh_at(
+            Some(sampled_at),
+            sampled_at + 5_000
+        ));
+        assert!(!account_snapshot_fresh_at(
+            Some(sampled_at),
+            sampled_at + 5_001
+        ));
+        assert!(!account_snapshot_fresh_at(Some(sampled_at), sampled_at - 1));
+        assert!(!account_snapshot_fresh_at(None, sampled_at));
+        // A snapshot can be fresh when a SQL query is enqueued, but old
+        // when the same request returns after the owner was blocked.
+        assert!(account_snapshot_fresh_at(
+            Some(sampled_at),
+            sampled_at + 2_000
+        ));
+        assert!(!account_snapshot_fresh_at(
+            Some(sampled_at),
+            sampled_at + 7_000
+        ));
+    }
+
     #[test]
     fn common_failure_fields_and_no_secret_debug_dump() {
         let r = report(

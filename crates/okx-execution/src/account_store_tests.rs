@@ -1019,6 +1019,45 @@ fn path() -> PathBuf {
         COUNTER.fetch_add(1, Ordering::Relaxed)
     ))
 }
+#[test]
+fn account_store_wal_has_one_checkpoint_owner_after_initialize_and_reopen() {
+    let store = store();
+    let path = store.path.clone();
+    let meta = store.meta.clone();
+    let auto: i64 = store
+        .connection
+        .pragma_query_value(None, "wal_autocheckpoint", |r| r.get(0))
+        .unwrap();
+    let synchronous: i64 = store
+        .connection
+        .pragma_query_value(None, "synchronous", |r| r.get(0))
+        .unwrap();
+    let mode: String = store
+        .connection
+        .pragma_query_value(None, "journal_mode", |r| r.get(0))
+        .unwrap();
+    assert_eq!(auto, 0, "only the account worker may checkpoint");
+    assert_eq!(synchronous, 2, "FULL durability must not be weakened");
+    assert_eq!(mode, "wal");
+    let (busy, frames, checked) = store.checkpoint().unwrap();
+    assert_eq!(busy, 0);
+    assert_eq!(frames, checked, "manual PASSIVE checkpoint must work");
+    drop(store);
+    let reopened =
+        AccountStore::open_existing(path, &meta.account_key, &meta.installation_id).unwrap();
+    let auto: i64 = reopened
+        .connection
+        .pragma_query_value(None, "wal_autocheckpoint", |r| r.get(0))
+        .unwrap();
+    let synchronous: i64 = reopened
+        .connection
+        .pragma_query_value(None, "synchronous", |r| r.get(0))
+        .unwrap();
+    assert_eq!(auto, 0, "reopen must not revive competing auto-checkpoints");
+    assert_eq!(synchronous, 2);
+    reopened.integrity_check().unwrap();
+}
+
 fn store() -> AccountStore {
     let p = path();
     let m = AccountMeta {
