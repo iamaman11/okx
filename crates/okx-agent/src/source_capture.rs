@@ -89,6 +89,50 @@ fn phase_elapsed_ms(started: Instant) -> u64 {
     u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
+// Fixed vocabulary: a slow or failed operation identifies its owning phase
+// without storing any finance facts, arbitrary SQL text or secret labels.
+#[derive(Clone, Copy)]
+enum NavPhase {
+    FillProjection,
+    FundingAttribution,
+    StopResolution,
+    CashFlows,
+    AccountNavBuild,
+    AccountNavCommit,
+    Capital,
+    StrategyValuation,
+    CursorRead,
+    CursorCommit,
+}
+impl NavPhase {
+    fn code(self) -> &'static str {
+        match self {
+            Self::FillProjection => "fill_projection",
+            Self::FundingAttribution => "funding_attribution",
+            Self::StopResolution => "stop_resolution",
+            Self::CashFlows => "cash_flows",
+            Self::AccountNavBuild => "account_nav_build",
+            Self::AccountNavCommit => "account_nav_commit",
+            Self::Capital => "capital",
+            Self::StrategyValuation => "strategy_valuation",
+            Self::CursorRead => "cursor_read",
+            Self::CursorCommit => "cursor_commit",
+        }
+    }
+}
+fn measured_nav_phase<T>(phase: NavPhase, operation: impl FnOnce() -> StoreResult<T>) -> StoreResult<T> {
+    let started = Instant::now();
+    let result = operation();
+    let elapsed_ms = phase_elapsed_ms(started);
+    if elapsed_ms >= 250 || result.is_err() {
+        eprintln!(
+            "OKX_NAV_PHASE_V1 phase={} elapsed_ms={} outcome={}",
+            phase.code(), elapsed_ms, if result.is_ok() { "ok" } else { "error" }
+        );
+    }
+    result
+}
+
 // With no allocated strategy capital, a prior gap-free cursor for the same
 // source generation already proves NOT_APPLICABLE. Rewriting its watermark
 // every NAV cycle forces an unnecessary second synchronous SQLite commit.
@@ -375,11 +419,12 @@ pub async fn capture_account_sources_measured(
         .store
         .call_with_timing(deadline(), move |s| {
             if complete {
-                s.project_pending_fills(1000)?;
-                s.attribute_pending_funding(&fx, 100)?;
-                s.resolve_stop("usd-conversion-unavailable", &fx.source_digest)?;
+                measured_nav_phase(NavPhase::FillProjection, || s.project_pending_fills(1000))?;
+                measured_nav_phase(NavPhase::FundingAttribution, || s.attribute_pending_funding(&fx, 100))?;
+                measured_nav_phase(NavPhase::StopResolution, || s.resolve_stop("usd-conversion-unavailable", &fx.source_digest))?;
             }
-            let flows = s.cash_flow_totals()?;
+            let flows = measured_nav_phase(NavPhase::CashFlows, || s.cash_flow_totals())?;
+            let page = measured_nav_phase(NavPhase::AccountNavBuild, || {
             let mut page = IngestPage::default();
             let external_usd = s.usd_component_total("EXTERNAL_FLOW_USD")?;
             let account_pnl = usd_equity
@@ -438,7 +483,9 @@ pub async fn capture_account_sources_measured(
                     "FINANCIAL_BACKFILL_PENDING".into()
                 },
             });
-            s.ingest_page(&page)?;
+            Ok(page)
+            })?;
+            measured_nav_phase(NavPhase::AccountNavCommit, || s.ingest_page(&page))?;
             // One AccountStore, one canonical NAV owner. Strategy failures
             // are recorded in the existing coverage cursor; manual trading
             // does not inherit a missing standalone strategy NAV.
@@ -455,13 +502,13 @@ pub async fn capture_account_sources_measured(
             let strategy_result = if !complete {
                 Err(StoreError::Invalid("FINANCIAL_BACKFILL_PENDING"))
             } else {
-                match s.capital_state(now) {
+                match measured_nav_phase(NavPhase::Capital, || s.capital_state(now)) {
                     Ok(capital) if capital.strategy_principal_usd.is_empty() => {
                         no_strategy_capital = true;
                         Ok(())
                     }
                     Ok(_) => valuation_positions.and_then(|venue_positions| {
-                        s.commit_reconciled_strategy_nav_with_cursor(
+                        measured_nav_phase(NavPhase::StrategyValuation, || s.commit_reconciled_strategy_nav_with_cursor(
                             &StrategyValuationEvidence {
                                 account_key: s.meta().account_key.clone(),
                                 account_nav_source: source.clone(),
@@ -470,7 +517,7 @@ pub async fn capture_account_sources_measured(
                                 venue_positions,
                             },
                             &strategy_cursor,
-                        )?;
+                        ))?;
                         strategy_cursor_committed = true;
                         Ok(())
                     }),
@@ -486,7 +533,7 @@ pub async fn capture_account_sources_measured(
             // On incomplete evidence record only the actual coverage gap.
             if !strategy_cursor_committed {
                 let previous = if no_strategy_capital && gap.is_empty() {
-                    s.cursor("strategy_valuation", "account")?
+                    measured_nav_phase(NavPhase::CursorRead, || s.cursor("strategy_valuation", "account"))?
                 } else {
                     None
                 };
@@ -496,13 +543,13 @@ pub async fn capture_account_sources_measured(
                     previous.as_ref(),
                     generation,
                 ) {
-                    s.ingest_page(&IngestPage {
+                    measured_nav_phase(NavPhase::CursorCommit, || s.ingest_page(&IngestPage {
                         cursor: Some(SourceCursor {
                             coverage_gaps: gap,
                             ..strategy_cursor
                         }),
                         ..Default::default()
-                    })?;
+                    }))?;
                 }
             }
             Ok(())

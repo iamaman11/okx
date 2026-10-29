@@ -401,7 +401,12 @@ async fn account_diagnostics(
         "last_inbound_ms": private.last_inbound_ms,
         "last_error_present": private.last_error.is_some(),
     });
-    out["source_capture"] = json!(resources.source_capture_health.read().await.clone());
+    // Bounded per-attempt observations share the existing account health lock.
+    // Compute P95 on demand, never on the SQL writer or source capture path.
+    let capture_health = resources.source_capture_health.read().await;
+    out["finance_window"] = json!(capture_health.finance_window.summary(Utc::now().timestamp_millis()));
+    out["source_capture"] = json!(&*capture_health);
+    drop(capture_health);
     out["storage"] = facts;
     // Existing diagnostics surface; no new transport, DB owner or persistent journal.
     out["storage"]["account_sql_timing"] = json!(resources.execution.store.sql_timing());
