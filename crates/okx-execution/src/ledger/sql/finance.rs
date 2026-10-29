@@ -1740,6 +1740,19 @@ impl AccountStore {
             // any totals. A missing/out-of-order original is retryable without
             // advancing a source cursor; no fictitious profit is recognized.
             if let Some(target) = e.reverses_entry_id.as_deref() {
+                // Preserve the canonical-event contract for conflicting
+                // replays: changing an already recorded reversal pointer is
+                // a CANONICAL_ECONOMIC_EVENT_CONFLICT, not an orphan correction.
+                let canonical: Option<Option<String>> = tx
+                    .query_row(
+                        "SELECT reverses_entry_id FROM finance_entries WHERE economic_event_key=?1 AND component=?2 AND allocation_leg=?3",
+                        params![e.economic_event_key, e.component, e.allocation_leg],
+                        |r| r.get(0),
+                    )
+                    .optional()?;
+                if canonical.is_some_and(|recorded| recorded.as_deref() != Some(target)) {
+                    return Err(StoreError::Invalid("CANONICAL_ECONOMIC_EVENT_CONFLICT"));
+                }
                 let original: Option<ReversalOriginal> = tx
                     .query_row(
                         "SELECT component,allocation_leg,amount,currency,instance_id,reverses_entry_id FROM finance_entries WHERE entry_id=?1",
