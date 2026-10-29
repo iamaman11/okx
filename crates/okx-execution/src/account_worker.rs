@@ -123,30 +123,29 @@ impl AccountStoreHandle {
                     if pending_backup
                         .as_ref()
                         .is_some_and(|backup| backup.handle.is_finished())
+                        && let Some(backup) = pending_backup.take()
                     {
-                        if let Some(backup) = pending_backup.take() {
-                            let elapsed = backup.started.elapsed();
-                            let outcome = match backup.handle.join() {
-                                Ok(Ok(())) => {
-                                    last_backup = Instant::now();
-                                    store.clear_maintenance_error();
-                                    "ok"
-                                }
-                                Ok(Err(error)) => {
-                                    store.set_maintenance_error(error.to_string());
-                                    "error"
-                                }
-                                Err(_) => {
-                                    store.set_maintenance_error("BACKUP_WORKER_PANICKED".into());
-                                    "error"
-                                }
-                            };
-                            eprintln!(
-                                "ACCOUNT_SQL_BACKUP_V1 elapsed_ms={} outcome={}",
-                                elapsed.as_millis(),
-                                outcome
-                            );
-                        }
+                        let elapsed = backup.started.elapsed();
+                        let outcome = match backup.handle.join() {
+                            Ok(Ok(())) => {
+                                last_backup = Instant::now();
+                                store.clear_maintenance_error();
+                                "ok"
+                            }
+                            Ok(Err(error)) => {
+                                store.set_maintenance_error(error.to_string());
+                                "error"
+                            }
+                            Err(_) => {
+                                store.set_maintenance_error("BACKUP_WORKER_PANICKED".into());
+                                "error"
+                            }
+                        };
+                        eprintln!(
+                            "ACCOUNT_SQL_BACKUP_V1 elapsed_ms={} outcome={}",
+                            elapsed.as_millis(),
+                            outcome
+                        );
                     }
                     // One existing cadence/SQL writer/checkpoint owner; only
                     // the backup copy executes on a temporary read-only thread.
