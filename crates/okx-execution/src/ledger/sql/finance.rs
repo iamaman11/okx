@@ -1,5 +1,15 @@
 use super::super::*;
 
+/// Immutable source row required to prove an economic reversal, read by the existing SQL owner.
+struct ReversalOriginal {
+    component: String,
+    allocation_leg: String,
+    amount: String,
+    currency: String,
+    instance_id: Option<String>,
+    reverses_entry_id: Option<String>,
+}
+
 /// Account-owned, monotonic source cursor update shared by ingestion and NAV.
 fn upsert_source_cursor(tx: &rusqlite::Transaction<'_>, c: &SourceCursor) -> StoreResult<()> {
     let prior: Option<(i64,i64)> = tx.query_row(
@@ -1730,29 +1740,31 @@ impl AccountStore {
             // any totals. A missing/out-of-order original is retryable without
             // advancing a source cursor; no fictitious profit is recognized.
             if let Some(target) = e.reverses_entry_id.as_deref() {
-                let original: Option<(
-                    String,
-                    String,
-                    String,
-                    String,
-                    Option<String>,
-                    Option<String>,
-                )> = tx
+                let original: Option<ReversalOriginal> = tx
                     .query_row(
                         "SELECT component,allocation_leg,amount,currency,instance_id,reverses_entry_id FROM finance_entries WHERE entry_id=?1",
                         [target],
-                        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
+                        |r| {
+                            Ok(ReversalOriginal {
+                                component: r.get(0)?,
+                                allocation_leg: r.get(1)?,
+                                amount: r.get(2)?,
+                                currency: r.get(3)?,
+                                instance_id: r.get(4)?,
+                                reverses_entry_id: r.get(5)?,
+                            })
+                        },
                     )
                     .optional()?;
-                let Some((component, leg, amount, currency, instance, reversed)) = original else {
+                let Some(original) = original else {
                     return Err(StoreError::Invalid("FINANCE_REVERSAL_ORIGINAL_MISSING"));
                 };
-                if reversed.is_some()
-                    || component != e.component
-                    || leg != e.allocation_leg
-                    || currency != e.currency
-                    || instance != e.instance_id
-                    || decimal(amount)?.checked_add(e.amount) != Some(Decimal::ZERO)
+                if original.reverses_entry_id.is_some()
+                    || original.component != e.component
+                    || original.allocation_leg != e.allocation_leg
+                    || original.currency != e.currency
+                    || original.instance_id != e.instance_id
+                    || decimal(original.amount)?.checked_add(e.amount) != Some(Decimal::ZERO)
                 {
                     return Err(StoreError::Invalid("FINANCE_REVERSAL_MISMATCH"));
                 }
