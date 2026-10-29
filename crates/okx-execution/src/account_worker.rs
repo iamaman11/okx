@@ -327,6 +327,58 @@ impl AccountStoreHandle {
 }
 
 #[cfg(test)]
+mod diagnostic_fault_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn failed_accepted_sql_job_still_invokes_timing_observer() {
+        use rust_decimal::Decimal;
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        let nonce = NEXT.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "okx-d1-timing-{}-{}.sqlite",
+            std::process::id(),
+            nonce,
+        ));
+        let meta = AccountMeta {
+            initialize_operation_id: "d1-connect".into(),
+            release_id: "test".into(),
+            account_key: format!("okx:demo:d1_{nonce}"),
+            installation_id: "d1-test".into(),
+            initialized_at: 1,
+            opening_source: "verified-test-snapshot".into(),
+        };
+        let opening = OpeningSnapshot {
+            opening_equity_usd: Decimal::from(100),
+            source_ref: meta.opening_source.clone(),
+            observed_at: 1,
+            positions: 0,
+            orders: 0,
+            conditional_orders: 0,
+            liabilities: Decimal::ZERO,
+            balances: vec![("USDT".into(), Decimal::from(100))],
+        };
+        let owner = AccountStoreHandle::initialize_flat(path, meta, opening).await.unwrap();
+        let (seen_tx, seen_rx) = std::sync::mpsc::channel();
+        let failure = owner
+            .call_with_timing_observed(
+                Instant::now() + Duration::from_secs(5),
+                |_store| -> StoreResult<()> { Err(StoreError::Invalid("INJECTED_D1_FAILURE")) },
+                move |timing, success| {
+                    seen_tx.send((timing, success)).unwrap();
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(failure, StoreError::Invalid("INJECTED_D1_FAILURE")));
+        let (timing, success) = seen_rx.try_recv().unwrap();
+        assert!(!success);
+        assert!(timing.sql_owner_ms < 5000);
+        assert_eq!(owner.sql_timing().observed_jobs, 1);
+    }
+}
+
+#[cfg(test)]
 mod maintenance_tests {
     use super::*;
 

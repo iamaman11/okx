@@ -4,6 +4,7 @@ use std::{collections::VecDeque, sync::Mutex};
 
 const SUMMARY_MAX: usize = 2048;
 const DETAIL_MAX: usize = 128;
+const PHASE_MAX: usize = 12;
 
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct Phase {
@@ -115,7 +116,7 @@ impl FinanceTrace {
                 elapsed_ms: None,
                 queue_ms: None,
                 owner_ms: None,
-                phases: Vec::with_capacity(10),
+                phases: Vec::with_capacity(PHASE_MAX),
                 transaction: None,
             });
         });
@@ -123,7 +124,7 @@ impl FinanceTrace {
     pub fn phase_started(&self, id: u64, name: &'static str) {
         self.state(|s| {
             if let Some(c) = s.active.as_mut().filter(|c| c.id == id)
-                && c.phases.len() < 10
+                && c.phases.len() < PHASE_MAX
             {
                 c.phases.push(Phase {
                     name,
@@ -239,6 +240,44 @@ mod tests {
         assert_eq!(selected.transaction.unwrap().commit_outcome, "error");
         assert_eq!(r.problem_ids, vec![1]);
     }
+    #[test]
+    fn external_source_failure_is_attributed_without_sql_owner() {
+        let t = FinanceTrace::default();
+        t.begin(10, 200, 2);
+        t.phase_started(10, "observer_and_cursors");
+        t.phase_finished(10, "observer_and_cursors", 11_000, true);
+        t.phase_started(10, "history_and_ingest");
+        t.phase_finished(10, "history_and_ingest", 33_000, false);
+        t.finish(10, 244, 44, Some("SWAP_FILLS_SOURCE_UNAVAILABLE".into()));
+        let cycle = t.readback(Some(10), 1).selected.unwrap();
+        assert_eq!(cycle.phases.len(), 2);
+        assert_eq!(cycle.phases[0].outcome, "ok");
+        assert_eq!(cycle.phases[1].outcome, "error");
+        assert_eq!(cycle.owner_ms, None);
+    }
+
+    #[test]
+    fn readback_is_available_while_an_owner_phase_remains_in_progress() {
+        let trace = std::sync::Arc::new(FinanceTrace::default());
+        trace.begin(17, 100, 3);
+        trace.phase_started(17, "account_nav_commit");
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+        let owner = std::sync::Arc::clone(&trace);
+        let worker = std::thread::spawn(move || {
+            entered_tx.send(()).unwrap();
+            resume_rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap();
+            owner.phase_finished(17, "account_nav_commit", 20_000, true);
+        });
+        entered_rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap();
+        let active = trace.readback(Some(17), 4).active.unwrap();
+        assert_eq!(active.phases[0].outcome, "in_progress");
+        assert!(active.phases[0].elapsed_us.is_none());
+        resume_tx.send(()).unwrap();
+        worker.join().unwrap();
+        assert_eq!(trace.readback(Some(17), 4).active.unwrap().phases[0].outcome, "ok");
+    }
+
     #[test]
     fn bounded_history_and_stale_callback() {
         let t = FinanceTrace::default();

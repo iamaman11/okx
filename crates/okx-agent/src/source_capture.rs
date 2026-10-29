@@ -283,11 +283,14 @@ pub(crate) async fn capture_account_sources_traced(
         return Err(invalid("PRIVATE_SOURCE_NOT_READY"));
     }
     let observer_and_cursors_started = Instant::now();
+    if let Some((store, id)) = trace.as_ref() {
+        store.phase_started(*id, "observer_and_cursors");
+    }
     // Read all five history cursors and the opening time in ONE existing
     // AccountStore job, concurrently with the authenticated venue snapshot.
     // No cursor is advanced here; the individual page ingests still own
     // the durable source coverage and failure/replay semantics.
-    let (snapshot, (t0, cursors)) = tokio::try_join!(
+    let observer_result = tokio::try_join!(
         async {
             observer
                 .snapshot()
@@ -312,7 +315,16 @@ pub(crate) async fn capture_account_sources_traced(
                 .await
                 .map_err(AgentError::from)
         },
-    )?;
+    );
+    if let Some((store, id)) = trace.as_ref() {
+        store.phase_finished(
+            *id,
+            "observer_and_cursors",
+            u64::try_from(observer_and_cursors_started.elapsed().as_micros()).unwrap_or(u64::MAX),
+            observer_result.is_ok(),
+        );
+    }
+    let (snapshot, (t0, cursors)) = observer_result?;
     let observer_and_cursors_ms = phase_elapsed_ms(observer_and_cursors_started);
     if snapshot.account_uid_fingerprint != execution.uid()
         || !execution
@@ -346,7 +358,10 @@ pub(crate) async fn capture_account_sources_traced(
     // turn. Venue fetches still run concurrently, and all five durable
     // cursor writes retain their previous ordered AccountStore owner.
     let history_started = Instant::now();
-    let (spot, swap, futures, options, bills) = tokio::try_join!(
+    if let Some((store, id)) = trace.as_ref() {
+        store.phase_started(*id, "history_and_ingest");
+    }
+    let history_result = tokio::try_join!(
         capture_fills(
             execution,
             private_ws,
@@ -404,7 +419,16 @@ pub(crate) async fn capture_account_sources_traced(
             generation,
             &fx
         )
-    )?;
+    );
+    if let Some((store, id)) = trace.as_ref() {
+        store.phase_finished(
+            *id,
+            "history_and_ingest",
+            u64::try_from(history_started.elapsed().as_micros()).unwrap_or(u64::MAX),
+            history_result.is_ok(),
+        );
+    }
+    let (spot, swap, futures, options, bills) = history_result?;
     let history_and_ingest_ms = phase_elapsed_ms(history_started);
     if private_ws.status().await.connection_generation != initial.connection_generation {
         return Err(invalid("SOURCE_GENERATION_CHANGED"));

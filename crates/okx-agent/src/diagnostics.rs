@@ -140,7 +140,9 @@ async fn finance_diagnostics(
     let trace = resources
         .finance_trace
         .readback(request.cycle_id, usize::from(limit));
-    let state = if trace.selected_not_found {
+    let state = if trace.selected_not_found
+        || (trace.active.is_none() && trace.recent.is_empty())
+    {
         "NOT_PROVEN"
     } else {
         "OBSERVED"
@@ -159,7 +161,19 @@ async fn finance_diagnostics(
                 b.is_ascii_alphanumeric() || b == b'_' || b == b'-')),
         "state": state,
         "trace": trace,
-        "acceptance_window": window,
+        "acceptance_window": {
+            "state": window.state,
+            "samples": window.samples,
+            "successes": window.successes,
+            "failures": window.failures,
+            "source_age_violations": window.source_age_violations,
+            "tick_gaps": window.tick_gaps,
+            "source_generation_changes": window.source_generation_changes,
+            "capture_attempt_latency": window.capture_attempt_latency,
+            "successful_nav_sql_owner_latency": window.successful_nav_sql_owner_latency,
+            "successful_nav_sql_queue_latency": window.successful_nav_sql_queue_latency,
+            "backup_evidence": window.backup_evidence,
+        },
         "current_readiness": {"state":"NOT_EVALUATED","reason_code":"DIAGNOSTICS_ONLY"},
         "central_budget": {"state":"NOT_EVALUATED","reason_code":"DIAGNOSTICS_ONLY"},
         "next_action": if trace.selected_not_found {
