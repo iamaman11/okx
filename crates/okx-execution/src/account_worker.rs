@@ -1,5 +1,7 @@
 //! One bounded blocking worker per account. No SQLite calls on the async reactor.
-use crate::{AccountMeta, AccountStore, OpeningSnapshot, StoreError, StoreResult, WalMaintenanceObservation};
+use crate::{
+    AccountMeta, AccountStore, OpeningSnapshot, StoreError, StoreResult, WalMaintenanceObservation,
+};
 use std::{
     collections::VecDeque,
     path::PathBuf,
@@ -505,17 +507,23 @@ mod maintenance_history_tests {
         let mut log = MaintenanceHistory::default();
         let maint = log.begin("wal_maintenance");
         assert_eq!(log.events.back().unwrap().outcome, "in_progress");
-        log.wal_observed(maint, WalMaintenanceObservation {
-            wal_before_bytes: Some(5_000_000),
-            wal_after_bytes: Some(4_000_000),
-            checkpoint_mode: "PASSIVE",
-            checkpoint_attempted: true,
-            checkpoint_busy: Some(1),
-            log_frames: Some(1200),
-            checkpointed_frames: Some(1000),
-            checkpoint_elapsed_us: Some(12_000),
-        });
-        assert_eq!(log.events.back().unwrap().wal.unwrap().checkpointed_frames, Some(1000));
+        log.wal_observed(
+            maint,
+            WalMaintenanceObservation {
+                wal_before_bytes: Some(5_000_000),
+                wal_after_bytes: Some(4_000_000),
+                checkpoint_mode: "PASSIVE",
+                checkpoint_attempted: true,
+                checkpoint_busy: Some(1),
+                log_frames: Some(1200),
+                checkpointed_frames: Some(1000),
+                checkpoint_elapsed_us: Some(12_000),
+            },
+        );
+        assert_eq!(
+            log.events.back().unwrap().wal.unwrap().checkpointed_frames,
+            Some(1000)
+        );
         log.finish(maint, Duration::from_millis(120), false);
         assert_eq!(log.events.back().unwrap().elapsed_us, Some(120_000));
         assert_eq!(log.events.back().unwrap().outcome, "error");

@@ -1363,7 +1363,8 @@ fn d1_statement_vm_counters_have_fixed_ids_and_valid_nonnegative_counts() {
 fn d1_maintenance_observation_distinguishes_skipped_and_real_passive_checkpoint() {
     let mut s = store();
     let mut first = None;
-    s.maintenance_observed(|observed| first = Some(observed)).unwrap();
+    s.maintenance_observed(|observed| first = Some(observed))
+        .unwrap();
     let first = first.unwrap();
     assert_eq!(first.checkpoint_mode, "PASSIVE");
     assert!(first.wal_before_bytes.is_some());
@@ -1371,12 +1372,18 @@ fn d1_maintenance_observation_distinguishes_skipped_and_real_passive_checkpoint(
     assert!(!first.checkpoint_attempted);
     assert!(first.checkpoint_busy.is_none());
 
-    s.connection.execute_batch("CREATE TABLE d1_wal_observation(id INTEGER PRIMARY KEY, payload BLOB)").unwrap();
-    s.connection.execute(
-        "INSERT INTO d1_wal_observation(payload) VALUES(zeroblob(8000000))", [],
-    ).unwrap();
+    s.connection
+        .execute_batch("CREATE TABLE d1_wal_observation(id INTEGER PRIMARY KEY, payload BLOB)")
+        .unwrap();
+    s.connection
+        .execute(
+            "INSERT INTO d1_wal_observation(payload) VALUES(zeroblob(8000000))",
+            [],
+        )
+        .unwrap();
     let mut observed = None;
-    s.maintenance_observed(|checkpoint| observed = Some(checkpoint)).unwrap();
+    s.maintenance_observed(|checkpoint| observed = Some(checkpoint))
+        .unwrap();
     let result = observed.unwrap();
     assert!(result.checkpoint_attempted);
     assert_eq!(result.checkpoint_mode, "PASSIVE");
