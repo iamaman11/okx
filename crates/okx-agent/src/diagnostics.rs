@@ -158,9 +158,13 @@ async fn finance_diagnostics(
     let overlap_ids: Vec<_> = active_cycle
         .map(|cycle| {
             let end = cycle.finished_ms.unwrap_or(now_ms);
-            maintenance.events.iter()
-                .filter(|event| event.started_ms <= end
-                    && event.finished_ms.unwrap_or(now_ms) >= cycle.started_ms)
+            maintenance
+                .events
+                .iter()
+                .filter(|event| {
+                    event.started_ms <= end
+                        && event.finished_ms.unwrap_or(now_ms) >= cycle.started_ms
+                })
                 .take(8)
                 .map(|event| event.id)
                 .collect()

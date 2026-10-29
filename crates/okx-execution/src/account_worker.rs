@@ -117,7 +117,10 @@ fn wall_ms() -> i64 {
         .map(|d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
         .unwrap_or(0)
 }
-fn history_lock<T>(history: &Mutex<MaintenanceHistory>, f: impl FnOnce(&mut MaintenanceHistory) -> T) -> T {
+fn history_lock<T>(
+    history: &Mutex<MaintenanceHistory>,
+    f: impl FnOnce(&mut MaintenanceHistory) -> T,
+) -> T {
     let mut guard = history.lock().unwrap_or_else(|e| e.into_inner());
     f(&mut guard)
 }
@@ -239,7 +242,9 @@ impl AccountStoreHandle {
                         }
                     };
                     let elapsed = started.elapsed();
-                    history_lock(&worker_maintenance, |log| log.finish(id, elapsed, succeeded));
+                    history_lock(&worker_maintenance, |log| {
+                        log.finish(id, elapsed, succeeded)
+                    });
                     if elapsed >= Duration::from_millis(250) || !succeeded {
                         eprintln!(
                             "ACCOUNT_SQL_MAINTENANCE_V1 elapsed_ms={} backup_due=false outcome={}",
@@ -262,8 +267,7 @@ impl AccountStoreHandle {
                                     log.finish(id, started.elapsed(), result.is_ok());
                                 });
                                 result
-                            })
-                        {
+                            }) {
                             Ok(handle) => {
                                 pending_backup = Some(PendingBackup {
                                     handle,
@@ -271,9 +275,11 @@ impl AccountStoreHandle {
                                 });
                             }
                             Err(e) => {
-                                history_lock(&worker_maintenance, |log| log.finish(id, Duration::ZERO, false));
+                                history_lock(&worker_maintenance, |log| {
+                                    log.finish(id, Duration::ZERO, false)
+                                });
                                 store.set_maintenance_error(e.to_string());
-                            },
+                            }
                         }
                     }
                 }
@@ -282,7 +288,11 @@ impl AccountStoreHandle {
             .await
             .map_err(|_| StoreError::Invalid("ACCOUNT_WORKER_STOPPED"))??;
         Ok(Self {
-            owner: Arc::new(WorkerOwner { sender, timings, maintenance }),
+            owner: Arc::new(WorkerOwner {
+                sender,
+                timings,
+                maintenance,
+            }),
         })
     }
     /// Reads bounded history without entering the account SQL owner's FIFO.
