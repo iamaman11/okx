@@ -1,5 +1,12 @@
 use super::super::*;
 
+/// Start from the bounded set of unapplied fills, never from immutable history.
+/// SQLite otherwise chooses idx_fills_time to satisfy ORDER BY and scans all
+/// historical fills even when fill_projection_pending is empty.
+const PENDING_FILL_PROJECTION_SQL: &str = "SELECT f.fill_id,f.instrument_id,f.trade_id,f.exchange_order_id,f.intent_id,f.time,f.qty,f.price,f.fee,f.currency,p.side
+    FROM fill_projection_pending p CROSS JOIN fills f ON f.fill_id=p.fill_id
+    ORDER BY f.time,f.fill_id LIMIT ?1";
+
 /// Immutable source row required to prove an economic reversal, read by the existing SQL owner.
 struct ReversalOriginal {
     component: String,
@@ -1364,7 +1371,7 @@ impl AccountStore {
     }
     pub fn project_pending_fills(&mut self, limit: usize) -> StoreResult<usize> {
         let rows = {
-            let mut s=self.connection.prepare("SELECT f.fill_id,f.instrument_id,f.trade_id,f.exchange_order_id,f.intent_id,f.time,f.qty,f.price,f.fee,f.currency,p.side FROM fill_projection_pending p JOIN fills f USING(fill_id) ORDER BY f.time,f.fill_id LIMIT ?1")?;
+            let mut s = self.connection.prepare(PENDING_FILL_PROJECTION_SQL)?;
             s.query_map([limit.min(1000) as i64], |r| {
                 Ok((
                     Fill {
@@ -2092,4 +2099,73 @@ fn finance_filter(
         filter.push_str(&format!(" AND {column} IN({})", placeholders.join(",")));
     }
     Ok((filter, args))
+}
+
+#[cfg(test)]
+mod pending_fill_join_order_tests {
+    use super::*;
+
+    #[test]
+    fn nav_pending_fill_query_reads_pending_before_immutable_history() {
+        let db = rusqlite::Connection::open_in_memory().unwrap();
+        db.execute_batch(
+            "CREATE TABLE fills(
+                fill_id TEXT PRIMARY KEY,
+                instrument_id TEXT,
+                trade_id TEXT,
+                exchange_order_id TEXT,
+                intent_id TEXT,
+                time INTEGER,
+                qty TEXT,
+                price TEXT,
+                fee TEXT,
+                currency TEXT,
+                side TEXT
+            );
+            CREATE INDEX idx_fills_time ON fills(time,fill_id);
+            CREATE TABLE fill_projection_pending(fill_id TEXT PRIMARY KEY,side TEXT);
+            INSERT INTO fills VALUES
+                ('old','BTC-USDT-SWAP','t1','o1',NULL,10,'1','100','0','USDT','buy'),
+                ('new','BTC-USDT-SWAP','t2','o2',NULL,30,'1','101','0','USDT','sell'),
+                ('middle','BTC-USDT-SWAP','t3','o3',NULL,20,'1','102','0','USDT','buy');",
+        )
+        .unwrap();
+
+        // EXPLAIN validates the actual production query, including its ORDER BY.
+        // Without CROSS JOIN SQLite chooses SCAN f USING idx_fills_time on an
+        // empty pending set; this grows with the lifetime immutable ledger.
+        let plan = db
+            .prepare(&format!("EXPLAIN QUERY PLAN {PENDING_FILL_PROJECTION_SQL}"))
+            .unwrap()
+            .query_map([1000_i64], |row| row.get::<_, String>(3))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(
+            plan.iter().any(|detail| detail.starts_with("SCAN p")),
+            "{plan:?}"
+        );
+        assert!(
+            !plan.iter().any(|detail| detail.starts_with("SCAN f")),
+            "{plan:?}"
+        );
+
+        let collect_ids = |limit: i64| {
+            db.prepare(PENDING_FILL_PROJECTION_SQL)
+                .unwrap()
+                .query_map([limit], |row| row.get::<_, String>(0))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        };
+        assert!(collect_ids(1000).is_empty());
+
+        db.execute_batch(
+            "INSERT INTO fill_projection_pending VALUES('new','sell');
+             INSERT INTO fill_projection_pending VALUES('middle','buy');",
+        )
+        .unwrap();
+        assert_eq!(collect_ids(1000), vec!["middle", "new"]);
+        assert_eq!(collect_ids(1), vec!["middle"]);
+    }
 }
