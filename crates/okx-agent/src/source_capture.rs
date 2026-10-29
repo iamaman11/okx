@@ -59,6 +59,10 @@ pub struct CapturePhaseTimings {
     pub observer_and_cursors_ms: u64,
     pub history_and_ingest_ms: u64,
     pub nav_reconciliation_ms: u64,
+    /// Time this NAV job waited in the existing FIFO SQL queue.
+    pub nav_sql_queue_wait_ms: u64,
+    /// Actual on-owner execution of this NAV job, excluding queue wait.
+    pub nav_sql_owner_ms: u64,
 }
 
 /// Returned only after the full financial capture succeeds.
@@ -352,9 +356,9 @@ pub async fn capture_account_sources_measured(
     let source = snapshot.source_received_at.clone();
     let version = format!("{generation}:{}", snapshot.account_generation);
     let nav_started = Instant::now();
-    execution
+    let ((), nav_sql_timing) = execution
         .store
-        .call(deadline(), move |s| {
+        .call_with_timing(deadline(), move |s| {
             if complete {
                 s.project_pending_fills(1000)?;
                 s.attribute_pending_funding(&fx, 100)?;
@@ -470,6 +474,8 @@ pub async fn capture_account_sources_measured(
             observer_and_cursors_ms,
             history_and_ingest_ms,
             nav_reconciliation_ms,
+            nav_sql_queue_wait_ms: nav_sql_timing.queue_wait_ms,
+            nav_sql_owner_ms: nav_sql_timing.sql_owner_ms,
         },
     })
 }

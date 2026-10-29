@@ -47,6 +47,10 @@ pub struct SourceCaptureHealth {
     pub last_history_and_ingest_ms: Option<u64>,
     /// Account NAV, strategy attribution, and coverage reconciliation.
     pub last_nav_reconciliation_ms: Option<u64>,
+    /// Queue wait for the same completed NAV job; excludes SQL execution.
+    pub last_nav_sql_queue_wait_ms: Option<u64>,
+    /// Actual execution of the same completed NAV job; excludes queue wait.
+    pub last_nav_sql_owner_ms: Option<u64>,
 }
 
 fn snapshot_age_at_publish_ms(source_received_at: &str, published_at_ms: i64) -> Option<i64> {
@@ -655,6 +659,8 @@ impl AccountResources {
         health.last_observer_and_cursors_ms = Some(phases.observer_and_cursors_ms);
         health.last_history_and_ingest_ms = Some(phases.history_and_ingest_ms);
         health.last_nav_reconciliation_ms = Some(phases.nav_reconciliation_ms);
+        health.last_nav_sql_queue_wait_ms = Some(phases.nav_sql_queue_wait_ms);
+        health.last_nav_sql_owner_ms = Some(phases.nav_sql_owner_ms);
     }
 }
 
