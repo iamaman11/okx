@@ -1913,7 +1913,19 @@ impl AccountStore {
             )?;
             tx.execute("INSERT INTO operation_receipts VALUES(?1,'FUNDING_ATTRIBUTED',?2,'COMMITTED',?3) ON CONFLICT(operation_id) DO NOTHING",params![format!("funding:{id}"),id,wall_time_ms()])?;
         }
-        tx.commit()?;
+        let commit_started = std::time::Instant::now();
+        let commit_result = tx.commit();
+        let commit_ms = u64::try_from(commit_started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        if commit_ms >= 250 || commit_result.is_err() {
+            // Redacted, fixed-label operational evidence. Does not write to
+            // SQLite, change the transaction boundary or weaken durability.
+            eprintln!(
+                "ACCOUNT_FINANCE_SQL_COMMIT_V1 phase=ingest_page elapsed_ms={} outcome={}",
+                commit_ms,
+                if commit_result.is_ok() { "ok" } else { "error" }
+            );
+        }
+        commit_result?;
         // Only a newly committed fact invalidates the memory view; pure
         // immutable-source replay leaves the existing cache untouched.
         if cash_flows_changed {

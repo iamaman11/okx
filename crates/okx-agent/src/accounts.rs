@@ -51,6 +51,9 @@ pub struct SourceCaptureHealth {
     pub last_nav_sql_queue_wait_ms: Option<u64>,
     /// Actual execution of the same completed NAV job; excludes queue wait.
     pub last_nav_sql_owner_ms: Option<u64>,
+    /// Account-local volatile 30-minute evidence; never written to SQLite.
+    #[serde(skip)]
+    pub(crate) finance_window: crate::finance_window::FinanceWindow,
 }
 
 fn snapshot_age_at_publish_ms(source_received_at: &str, published_at_ms: i64) -> Option<i64> {
@@ -633,12 +636,25 @@ impl AccountResources {
                 == status.connection_generation
     }
 
-    async fn record_source_failure(&self, reason_code: &str) {
+    async fn record_source_failure(&self, reason_code: &str, started: Instant, generation: u64) {
         let now = chrono::Utc::now().timestamp_millis();
+        let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         let mut health = self.source_capture_health.write().await;
         health.last_attempt_ms = Some(now);
         health.last_failure_ms = Some(now);
         health.reason_code = Some(reason_code.to_owned());
+        // Failed captures count in the same bounded window as successful ones.
+        health
+            .finance_window
+            .record(crate::finance_window::FinanceAttempt {
+                at_ms: now,
+                source_generation: generation,
+                elapsed_ms,
+                nav_sql_owner_ms: None,
+                nav_sql_queue_ms: None,
+                snapshot_age_ms: None,
+                failure_code: Some(reason_code.to_owned()),
+            });
     }
 
     async fn record_source_success(
@@ -646,6 +662,7 @@ impl AccountResources {
         source_received_at: &str,
         capture_started: Instant,
         phases: crate::source_capture::CapturePhaseTimings,
+        generation: u64,
     ) {
         let now = chrono::Utc::now().timestamp_millis();
         let duration_ms = u64::try_from(capture_started.elapsed().as_millis()).unwrap_or(u64::MAX);
@@ -661,6 +678,17 @@ impl AccountResources {
         health.last_nav_reconciliation_ms = Some(phases.nav_reconciliation_ms);
         health.last_nav_sql_queue_wait_ms = Some(phases.nav_sql_queue_wait_ms);
         health.last_nav_sql_owner_ms = Some(phases.nav_sql_owner_ms);
+        health
+            .finance_window
+            .record(crate::finance_window::FinanceAttempt {
+                at_ms: now,
+                source_generation: generation,
+                elapsed_ms: duration_ms,
+                nav_sql_owner_ms: Some(phases.nav_sql_owner_ms),
+                nav_sql_queue_ms: Some(phases.nav_sql_queue_wait_ms),
+                snapshot_age_ms,
+                failure_code: None,
+            });
     }
 }
 
@@ -682,42 +710,43 @@ fn start_sources(
         loop {
             tokio::select! { _=shutdown.changed()=>break,_=interval.tick()=>{
              let Some(account)=weak.upgrade()else{break};
+             // The attempt starts at the tick, including identity recovery.
+             let capture_started = Instant::now();
              let generation=account.private_ws.status().await.connection_generation;
              if generation==0 {
-                 account.record_source_failure("PRIVATE_WS_NOT_READY").await;
+                 account.record_source_failure("PRIVATE_WS_NOT_READY", capture_started, generation).await;
                  continue;
              }
              if account.verified_source_generation.load(Ordering::Acquire)!=generation {
                 let snapshot=match account.observer.snapshot().await {
                     Ok(snapshot)=>snapshot,
                     Err(_)=>{
-                        account.record_source_failure("ACCOUNT_SOURCE_UNAVAILABLE").await;
+                        account.record_source_failure("ACCOUNT_SOURCE_UNAVAILABLE", capture_started, generation).await;
                         continue;
                     }
                 };
                 if snapshot.account_uid_fingerprint!=account.configuration.account_key.verified_uid
                     ||!account.execution.verified_uid_matches(&snapshot.account_uid_fingerprint).await.unwrap_or(false) {
-                    account.record_source_failure("ACCOUNT_IDENTITY_MISMATCH").await;
+                    account.record_source_failure("ACCOUNT_IDENTITY_MISMATCH", capture_started, generation).await;
                     eprintln!("account source identity verification failed");continue;
                 }
                 if account.private_ws.status().await.connection_generation!=generation {
-                    account.record_source_failure("PRIVATE_WS_GENERATION_CHANGED").await;
+                    account.record_source_failure("PRIVATE_WS_GENERATION_CHANGED", capture_started, generation).await;
                     continue;
                 }
                 *account.latest_snapshot.write().await=Some(snapshot);
                 account.verified_source_generation.store(generation,Ordering::Release);
              }
-             let capture_started = Instant::now();
              match crate::source_capture::capture_account_sources_measured(&account.observer,&account.private_ws,&account.execution).await {
                 Ok(completed)=>{
                     let source_received_at = completed.snapshot.source_received_at.clone();
                     *account.latest_snapshot.write().await=Some(completed.snapshot);
                     account.record_source_success(
-                        &source_received_at, capture_started, completed.phases
+                        &source_received_at, capture_started, completed.phases, generation
                     ).await;
                 }
                 Err(error)=>{
-                    account.record_source_failure(&source_capture_reason(&error)).await;
+                    account.record_source_failure(&source_capture_reason(&error), capture_started, generation).await;
                     eprintln!("account financial source awaiting coherent readback");
                 }
              }
