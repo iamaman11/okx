@@ -16,6 +16,18 @@ type Job = Box<dyn FnOnce(&mut AccountStore) + Send + 'static>;
 // successful PASSIVE checkpoint. Rechecking it after every SQL job causes
 // repeated disk work and starves the same owner's read/finance queue.
 const MAINTENANCE_INTERVAL: Duration = Duration::from_secs(15);
+// One early recovery backup for a new process provides independent evidence
+// during a 10-minute acceptance window; normal successful cadence stays 15m.
+const FIRST_BACKUP_AFTER: Duration = Duration::from_secs(5 * 60);
+const BACKUP_INTERVAL: Duration = Duration::from_secs(15 * 60);
+fn backup_due(elapsed: Duration, ever_succeeded: bool) -> bool {
+    let interval = if ever_succeeded {
+        BACKUP_INTERVAL
+    } else {
+        FIRST_BACKUP_AFTER
+    };
+    elapsed >= interval
+}
 struct MaintenanceCadence {
     next_check: Instant,
 }
@@ -109,6 +121,7 @@ impl AccountStoreHandle {
                     }
                 };
                 let mut last_backup = Instant::now();
+                let mut backup_ever_succeeded = false;
                 let mut pending_backup: Option<PendingBackup> = None;
                 let mut maintenance_cadence = MaintenanceCadence::new(Instant::now());
                 loop {
@@ -129,6 +142,7 @@ impl AccountStoreHandle {
                         let outcome = match backup.handle.join() {
                             Ok(Ok(())) => {
                                 last_backup = Instant::now();
+                                backup_ever_succeeded = true;
                                 store.clear_maintenance_error();
                                 "ok"
                             }
@@ -168,7 +182,8 @@ impl AccountStoreHandle {
                             if succeeded { "ok" } else { "error" }
                         );
                     }
-                    if pending_backup.is_none() && last_backup.elapsed() >= Duration::from_secs(900)
+                    if pending_backup.is_none()
+                        && backup_due(last_backup.elapsed(), backup_ever_succeeded)
                     {
                         let (path, meta) = store.backup_identity();
                         match std::thread::Builder::new()
@@ -293,6 +308,16 @@ impl AccountStoreHandle {
 #[cfg(test)]
 mod maintenance_tests {
     use super::*;
+
+    #[test]
+    fn first_backup_is_due_before_ten_minute_acceptance_normal_cadence_unchanged() {
+        assert!(!backup_due(Duration::from_secs(299), false));
+        assert!(backup_due(Duration::from_secs(300), false));
+        assert!(backup_due(Duration::from_secs(600), false));
+        assert!(!backup_due(Duration::from_secs(600), true));
+        assert!(!backup_due(Duration::from_secs(899), true));
+        assert!(backup_due(Duration::from_secs(900), true));
+    }
 
     #[test]
     fn checkpoint_check_is_bounded_under_rapid_sql_jobs_and_idle_ticks() {

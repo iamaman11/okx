@@ -2,7 +2,8 @@
 //! these volatile measurements never authorize new risk or survive restart.
 use std::collections::{BTreeMap, VecDeque};
 
-const WINDOW_MS: i64 = 30 * 60 * 1000;
+// Production observation is one bounded ten-minute interval; never reduce TTL or safety gates.
+const WINDOW_MS: i64 = 10 * 60 * 1000;
 const CAPACITY: usize = 2048;
 const MAX_TICK_GAP_MS: i64 = 5000;
 const MAX_SOURCE_AGE_MS: i64 = 5000;
@@ -36,6 +37,8 @@ pub struct FinanceWindowSummary {
     pub schema: &'static str,
     pub start_ms: i64,
     pub end_ms: i64,
+    /// Explicit window size prevents 10-minute results being mistaken for 30-minute proof.
+    pub window_duration_ms: i64,
     /// An empty/new or restarted process never inherits prior acceptance.
     pub state: &'static str,
     pub window_covered_by_samples: bool,
@@ -155,6 +158,7 @@ impl FinanceWindow {
             schema: "okx.finance-window/v1",
             start_ms,
             end_ms: now_ms,
+            window_duration_ms: WINDOW_MS,
             state,
             window_covered_by_samples,
             samples: selected.len(),
@@ -261,6 +265,38 @@ mod tests {
         }
         assert_eq!(w.samples.len(), CAPACITY);
         assert_eq!(w.summary(9_000_000).state, "NOT_PROVEN");
+    }
+
+    #[test]
+    fn full_ten_minute_window_must_elapse_before_clean_evidence() {
+        let mut w = FinanceWindow::default();
+        for t in (0..WINDOW_MS).step_by(2000) {
+            w.record(ok(t, 150));
+        }
+        assert_eq!(w.summary(WINDOW_MS - 1000).state, "NOT_PROVEN");
+        w.record(ok(WINDOW_MS, 150));
+        let s = w.summary(WINDOW_MS);
+        assert_eq!(s.window_duration_ms, 600_000);
+        assert_eq!(s.samples, 300);
+        assert_eq!(s.state, "OBSERVED_CLEAN");
+        assert_eq!(s.capture_attempt_latency.p95_ms, Some(150));
+    }
+
+    #[test]
+    fn old_startup_failure_expires_only_after_entire_ten_minute_window() {
+        let mut w = FinanceWindow::default();
+        let mut startup = ok(0, 20);
+        startup.failure_code = Some("PRIVATE_WS_NOT_READY".into());
+        w.record(startup);
+        for t in (2000..=WINDOW_MS).step_by(2000) {
+            w.record(ok(t, 150));
+        }
+        // The first sample still proves the window boundary, but its failure
+        // must not pollute later windows; gaps and freshness are still checked.
+        let s = w.summary(WINDOW_MS);
+        assert_eq!(s.state, "OBSERVED_CLEAN");
+        assert_eq!(s.failures, 0);
+        assert_eq!(s.samples, 300);
     }
 
     #[test]
