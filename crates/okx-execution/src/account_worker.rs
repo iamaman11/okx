@@ -1,9 +1,10 @@
 //! One bounded blocking worker per account. No SQLite calls on the async reactor.
 use crate::{AccountMeta, AccountStore, OpeningSnapshot, StoreError, StoreResult};
 use std::{
+    collections::VecDeque,
     path::PathBuf,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicU64, Ordering},
         mpsc::{RecvTimeoutError, SyncSender, TrySendError, sync_channel},
     },
@@ -68,9 +69,69 @@ pub struct AccountSqlJobTiming {
     pub queue_wait_ms: u64,
     pub sql_owner_ms: u64,
 }
+const MAINTENANCE_HISTORY_MAX: usize = 64;
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct MaintenanceEvent {
+    pub id: u64,
+    pub kind: &'static str,
+    pub started_ms: i64,
+    pub finished_ms: Option<i64>,
+    pub elapsed_us: Option<u64>,
+    pub outcome: &'static str,
+}
+#[derive(Default)]
+struct MaintenanceHistory {
+    next_id: u64,
+    events: VecDeque<MaintenanceEvent>,
+    evicted: u64,
+}
+impl MaintenanceHistory {
+    fn begin(&mut self, kind: &'static str) -> u64 {
+        self.next_id += 1;
+        let id = self.next_id;
+        if self.events.len() == MAINTENANCE_HISTORY_MAX {
+            self.events.pop_front();
+            self.evicted += 1;
+        }
+        self.events.push_back(MaintenanceEvent {
+            id,
+            kind,
+            started_ms: wall_ms(),
+            finished_ms: None,
+            elapsed_us: None,
+            outcome: "in_progress",
+        });
+        id
+    }
+    fn finish(&mut self, id: u64, elapsed: Duration, ok: bool) {
+        if let Some(event) = self.events.iter_mut().rev().find(|event| event.id == id) {
+            event.finished_ms = Some(wall_ms());
+            event.elapsed_us = Some(u64::try_from(elapsed.as_micros()).unwrap_or(u64::MAX));
+            event.outcome = if ok { "ok" } else { "error" };
+        }
+    }
+}
+fn wall_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
+        .unwrap_or(0)
+}
+fn history_lock<T>(history: &Mutex<MaintenanceHistory>, f: impl FnOnce(&mut MaintenanceHistory) -> T) -> T {
+    let mut guard = history.lock().unwrap_or_else(|e| e.into_inner());
+    f(&mut guard)
+}
+#[derive(serde::Serialize)]
+pub struct AccountMaintenanceTimingV1 {
+    pub schema: &'static str,
+    pub state: &'static str,
+    pub events: Vec<MaintenanceEvent>,
+    pub evicted: u64,
+}
 struct WorkerOwner {
     sender: SyncSender<Job>,
     timings: Arc<SqlTimingCounters>,
+    maintenance: Arc<Mutex<MaintenanceHistory>>,
 }
 
 struct PendingBackup {
@@ -106,6 +167,8 @@ impl AccountStoreHandle {
     ) -> StoreResult<Self> {
         let (sender, receiver) = sync_channel::<Job>(128);
         let timings = Arc::new(SqlTimingCounters::default());
+        let maintenance = Arc::new(Mutex::new(MaintenanceHistory::default()));
+        let worker_maintenance = Arc::clone(&maintenance);
         let (ready_tx, ready_rx) = oneshot::channel();
         std::thread::Builder::new()
             .name("okx-account-sql".into())
@@ -166,6 +229,7 @@ impl AccountStoreHandle {
                     if !maintenance_cadence.due(Instant::now()) {
                         continue;
                     }
+                    let id = history_lock(&worker_maintenance, |log| log.begin("wal_maintenance"));
                     let started = Instant::now();
                     let succeeded = match store.maintenance() {
                         Ok(()) => true,
@@ -175,6 +239,7 @@ impl AccountStoreHandle {
                         }
                     };
                     let elapsed = started.elapsed();
+                    history_lock(&worker_maintenance, |log| log.finish(id, elapsed, succeeded));
                     if elapsed >= Duration::from_millis(250) || !succeeded {
                         eprintln!(
                             "ACCOUNT_SQL_MAINTENANCE_V1 elapsed_ms={} backup_due=false outcome={}",
@@ -186,9 +251,18 @@ impl AccountStoreHandle {
                         && backup_due(last_backup.elapsed(), backup_ever_succeeded)
                     {
                         let (path, meta) = store.backup_identity();
+                        let id = history_lock(&worker_maintenance, |log| log.begin("backup_copy"));
+                        let history_for_backup = Arc::clone(&worker_maintenance);
                         match std::thread::Builder::new()
                             .name("okx-account-backup".into())
-                            .spawn(move || AccountStore::periodic_backup_from_reader(path, meta))
+                            .spawn(move || {
+                                let started = Instant::now();
+                                let result = AccountStore::periodic_backup_from_reader(path, meta);
+                                history_lock(&history_for_backup, |log| {
+                                    log.finish(id, started.elapsed(), result.is_ok());
+                                });
+                                result
+                            })
                         {
                             Ok(handle) => {
                                 pending_backup = Some(PendingBackup {
@@ -196,7 +270,10 @@ impl AccountStoreHandle {
                                     started: Instant::now(),
                                 });
                             }
-                            Err(e) => store.set_maintenance_error(e.to_string()),
+                            Err(e) => {
+                                history_lock(&worker_maintenance, |log| log.finish(id, Duration::ZERO, false));
+                                store.set_maintenance_error(e.to_string());
+                            },
                         }
                     }
                 }
@@ -205,8 +282,25 @@ impl AccountStoreHandle {
             .await
             .map_err(|_| StoreError::Invalid("ACCOUNT_WORKER_STOPPED"))??;
         Ok(Self {
-            owner: Arc::new(WorkerOwner { sender, timings }),
+            owner: Arc::new(WorkerOwner { sender, timings, maintenance }),
         })
+    }
+    /// Reads bounded history without entering the account SQL owner's FIFO.
+    pub fn maintenance_timing(&self) -> AccountMaintenanceTimingV1 {
+        match self.owner.maintenance.try_lock() {
+            Ok(log) => AccountMaintenanceTimingV1 {
+                schema: "okx.account-maintenance/v1",
+                state: "OBSERVED",
+                events: log.events.iter().rev().cloned().collect(),
+                evicted: log.evicted,
+            },
+            Err(_) => AccountMaintenanceTimingV1 {
+                schema: "okx.account-maintenance/v1",
+                state: "NOT_EVALUATED",
+                events: Vec::new(),
+                evicted: 0,
+            },
+        }
     }
     pub fn sql_timing(&self) -> AccountSqlTimingV1 {
         let t = &self.owner.timings;
@@ -380,6 +474,48 @@ mod diagnostic_fault_tests {
         assert!(!success);
         assert!(timing.sql_owner_ms < 5000);
         assert_eq!(owner.sql_timing().observed_jobs, 1);
+    }
+}
+
+#[cfg(test)]
+mod maintenance_history_tests {
+    use super::*;
+
+    #[test]
+    fn maintenance_and_backup_are_bounded_and_measured_independently() {
+        let mut log = MaintenanceHistory::default();
+        let maint = log.begin("wal_maintenance");
+        assert_eq!(log.events.back().unwrap().outcome, "in_progress");
+        log.finish(maint, Duration::from_millis(120), false);
+        assert_eq!(log.events.back().unwrap().elapsed_us, Some(120_000));
+        assert_eq!(log.events.back().unwrap().outcome, "error");
+
+        let backup = log.begin("backup_copy");
+        log.finish(backup, Duration::from_millis(200), true);
+        assert_eq!(log.events.back().unwrap().kind, "backup_copy");
+        assert_eq!(log.events.back().unwrap().elapsed_us, Some(200_000));
+        assert_eq!(log.events.front().unwrap().outcome, "error");
+        for _ in 0..(MAINTENANCE_HISTORY_MAX + 2) {
+            let id = log.begin("wal_maintenance");
+            log.finish(id, Duration::from_millis(1), true);
+        }
+        assert_eq!(log.events.len(), MAINTENANCE_HISTORY_MAX);
+        assert!(log.evicted > 0);
+    }
+
+    #[test]
+    fn diagnostic_readback_never_waits_for_held_maintenance_lock() {
+        let history = Arc::new(Mutex::new(MaintenanceHistory::default()));
+        let handle = AccountStoreHandle {
+            owner: Arc::new(WorkerOwner {
+                sender: sync_channel(1).0,
+                timings: Arc::new(SqlTimingCounters::default()),
+                maintenance: Arc::clone(&history),
+            }),
+        };
+        let _guard = history.lock().unwrap();
+        let readback = handle.maintenance_timing();
+        assert_eq!(readback.state, "NOT_EVALUATED");
     }
 }
 

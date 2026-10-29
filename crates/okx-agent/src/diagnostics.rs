@@ -152,6 +152,22 @@ async fn finance_diagnostics(
         .try_read()
         .ok()
         .map(|health| health.finance_window.summary(Utc::now().timestamp_millis()));
+    let mut maintenance = resources.execution.store.maintenance_timing();
+    let now_ms = Utc::now().timestamp_millis();
+    let active_cycle = trace.selected.as_ref().or(trace.active.as_ref());
+    let overlap_ids: Vec<_> = active_cycle
+        .map(|cycle| {
+            let end = cycle.finished_ms.unwrap_or(now_ms);
+            maintenance.events.iter()
+                .filter(|event| event.started_ms <= end
+                    && event.finished_ms.unwrap_or(now_ms) >= cycle.started_ms)
+                .take(8)
+                .map(|event| event.id)
+                .collect()
+        })
+        .unwrap_or_default();
+    // Correlate across full bounded 10-minute history, then serialize only four events.
+    maintenance.events.truncate(4);
     Ok(json!({
         "schema": "okx.finance-diagnostics/v1",
         "account": resources.configuration.account_key.wire(),
@@ -172,6 +188,10 @@ async fn finance_diagnostics(
                 "backup_evidence": window.backup_evidence,
             }),
             None => json!({"state":"NOT_EVALUATED","reason_code":"HEALTH_BUSY"}),
+        },
+        "operational_findings": {
+            "sql_maintenance": maintenance,
+            "maintenance_overlap_ids": overlap_ids,
         },
         "current_readiness": {"state":"NOT_EVALUATED","reason_code":"DIAGNOSTICS_ONLY"},
         "central_budget": {"state":"NOT_EVALUATED","reason_code":"DIAGNOSTICS_ONLY"},
