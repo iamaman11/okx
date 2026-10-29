@@ -1,5 +1,15 @@
 use super::super::*;
 
+/// Immutable source row required to prove an economic reversal, read by the existing SQL owner.
+struct ReversalOriginal {
+    component: String,
+    allocation_leg: String,
+    amount: String,
+    currency: String,
+    instance_id: Option<String>,
+    reverses_entry_id: Option<String>,
+}
+
 /// Account-owned, monotonic source cursor update shared by ingestion and NAV.
 fn upsert_source_cursor(tx: &rusqlite::Transaction<'_>, c: &SourceCursor) -> StoreResult<()> {
     let prior: Option<(i64,i64)> = tx.query_row(
@@ -1724,6 +1734,66 @@ impl AccountStore {
             }
             if e.currency.is_empty() {
                 return Err(StoreError::Invalid("CURRENCY_REQUIRED"));
+            }
+            // Reversals are economic facts, not an arbitrary positive credit.
+            // Validate the original in this very transaction before changing
+            // any totals. A missing/out-of-order original is retryable without
+            // advancing a source cursor; no fictitious profit is recognized.
+            if let Some(target) = e.reverses_entry_id.as_deref() {
+                // Preserve the canonical-event contract for conflicting
+                // replays: changing an already recorded reversal pointer is
+                // a CANONICAL_ECONOMIC_EVENT_CONFLICT, not an orphan correction.
+                let canonical: Option<Option<String>> = tx
+                    .query_row(
+                        "SELECT reverses_entry_id FROM finance_entries WHERE economic_event_key=?1 AND component=?2 AND allocation_leg=?3",
+                        params![e.economic_event_key, e.component, e.allocation_leg],
+                        |r| r.get(0),
+                    )
+                    .optional()?;
+                if canonical.is_some_and(|recorded| recorded.as_deref() != Some(target)) {
+                    return Err(StoreError::Invalid("CANONICAL_ECONOMIC_EVENT_CONFLICT"));
+                }
+                let original: Option<ReversalOriginal> = tx
+                    .query_row(
+                        "SELECT component,allocation_leg,amount,currency,instance_id,reverses_entry_id FROM finance_entries WHERE entry_id=?1",
+                        [target],
+                        |r| {
+                            Ok(ReversalOriginal {
+                                component: r.get(0)?,
+                                allocation_leg: r.get(1)?,
+                                amount: r.get(2)?,
+                                currency: r.get(3)?,
+                                instance_id: r.get(4)?,
+                                reverses_entry_id: r.get(5)?,
+                            })
+                        },
+                    )
+                    .optional()?;
+                let Some(original) = original else {
+                    return Err(StoreError::Invalid("FINANCE_REVERSAL_ORIGINAL_MISSING"));
+                };
+                if original.reverses_entry_id.is_some()
+                    || original.component != e.component
+                    || original.allocation_leg != e.allocation_leg
+                    || original.currency != e.currency
+                    || original.instance_id != e.instance_id
+                    || decimal(original.amount)?.checked_add(e.amount) != Some(Decimal::ZERO)
+                {
+                    return Err(StoreError::Invalid("FINANCE_REVERSAL_MISMATCH"));
+                }
+                // Single AccountStore owner serializes writers. Prevent a
+                // second economic event reversing the same original; canonical
+                // source-link replays of the *same* event remain idempotent.
+                let previous: Option<String> = tx
+                    .query_row(
+                        "SELECT economic_event_key FROM finance_entries WHERE reverses_entry_id=?1 LIMIT 1",
+                        [target],
+                        |r| r.get(0),
+                    )
+                    .optional()?;
+                if previous.is_some_and(|key| key != e.economic_event_key) {
+                    return Err(StoreError::Invalid("FINANCE_REVERSAL_ALREADY_APPLIED"));
+                }
             }
             let added=tx.execute("INSERT INTO finance_entries VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10) ON CONFLICT(economic_event_key,component,allocation_leg) DO NOTHING",params![e.entry_id,e.economic_event_key,e.component,e.allocation_leg,exact(e.amount),e.currency,e.instance_id,e.source_ref,e.time,e.reverses_entry_id])?;
             if added == 1

@@ -1230,6 +1230,150 @@ fn sql_ingest_retry_exactly_once() {
     assert_eq!(v[0].amount, Decimal::new(-25, 2));
 }
 #[test]
+fn p02_m2_finance_reversal_is_exact_one_owner_and_idempotent_after_restart() {
+    let mut s = store();
+    let mut original = fee("original-fee", "fill:original");
+    original.economic_event_key = "economic:original-fee".into();
+    original.currency = "USD".into();
+    s.ingest_page(&IngestPage {
+        finance: vec![original.clone()],
+        ..Default::default()
+    })
+    .unwrap();
+
+    let mut reversal = original.clone();
+    reversal.entry_id = "reversal-fee".into();
+    reversal.economic_event_key = "economic:reversal-fee".into();
+    reversal.amount = -original.amount;
+    reversal.source_ref = "bill:corrected".into();
+    reversal.time = 8;
+    reversal.reverses_entry_id = Some(original.entry_id.clone());
+    let page = IngestPage {
+        finance: vec![reversal.clone()],
+        ..Default::default()
+    };
+    s.ingest_page(&page).unwrap();
+    s.ingest_page(&page).unwrap();
+    assert_eq!(
+        s.finance_totals(1, 10, None)
+            .unwrap()
+            .get(&("USD".into(), "FEE".into()))
+            .copied(),
+        Some(Decimal::ZERO)
+    );
+    assert_eq!(s.finance_history(1, 10, 0, "", 20).unwrap().len(), 2);
+
+    let path = s.path.clone();
+    let meta = s.meta.clone();
+    drop(s);
+    let mut restored =
+        AccountStore::open_existing(path, &meta.account_key, &meta.installation_id).unwrap();
+    restored.ingest_page(&page).unwrap();
+    assert_eq!(restored.finance_history(1, 10, 0, "", 20).unwrap().len(), 2);
+    assert_eq!(
+        restored
+            .finance_totals(1, 10, None)
+            .unwrap()
+            .get(&("USD".into(), "FEE".into()))
+            .copied(),
+        Some(Decimal::ZERO)
+    );
+
+    let mut second = reversal;
+    second.entry_id = "duplicate-reversal".into();
+    second.economic_event_key = "economic:duplicate-reversal".into();
+    assert!(matches!(
+        restored.ingest_page(&IngestPage {
+            finance: vec![second],
+            ..Default::default()
+        }),
+        Err(StoreError::Invalid("FINANCE_REVERSAL_ALREADY_APPLIED"))
+    ));
+    assert_eq!(restored.finance_history(1, 10, 0, "", 20).unwrap().len(), 2);
+}
+
+#[test]
+fn p02_m2_unverified_or_wrong_reversal_rolls_back_finance_and_source_cursor() {
+    let mut s = store();
+    let mut original = fee("original-fee", "fill:original");
+    original.economic_event_key = "economic:original-fee".into();
+    original.currency = "USD".into();
+    s.ingest_page(&IngestPage {
+        finance: vec![original.clone()],
+        ..Default::default()
+    })
+    .unwrap();
+
+    let cursor = SourceCursor {
+        source: "bills".into(),
+        stream_partition: "account".into(),
+        cursor: "corrected".into(),
+        watermark: 8,
+        generation: 1,
+        coverage_gaps: String::new(),
+    };
+    let mut correction = original.clone();
+    correction.entry_id = "corrected-fee".into();
+    correction.economic_event_key = "economic:corrected-fee".into();
+    correction.amount = -original.amount;
+    correction.time = 8;
+    correction.source_ref = "bill:correction".into();
+    correction.reverses_entry_id = Some("missing-original".into());
+    assert!(matches!(
+        s.ingest_page(&IngestPage {
+            finance: vec![correction.clone()],
+            cursor: Some(cursor.clone()),
+            ..Default::default()
+        }),
+        Err(StoreError::Invalid("FINANCE_REVERSAL_ORIGINAL_MISSING"))
+    ));
+    for changed in 0..5 {
+        let mut wrong = correction.clone();
+        wrong.reverses_entry_id = Some(original.entry_id.clone());
+        match changed {
+            0 => wrong.amount = Decimal::ONE,
+            1 => wrong.currency = "USDT".into(),
+            2 => wrong.component = "FUNDING".into(),
+            3 => wrong.allocation_leg = "strategy:manual".into(),
+            _ => wrong.instance_id = Some("manual".into()),
+        }
+        assert!(matches!(
+            s.ingest_page(&IngestPage {
+                finance: vec![wrong],
+                cursor: Some(cursor.clone()),
+                ..Default::default()
+            }),
+            Err(StoreError::Invalid("FINANCE_REVERSAL_MISMATCH"))
+        ));
+    }
+    assert!(s.cursor("bills", "account").unwrap().is_none());
+    assert_eq!(s.finance_history(1, 10, 0, "", 20).unwrap().len(), 1);
+
+    // A late original can be ingested first, then its reversal retried.
+    correction.reverses_entry_id = Some(original.entry_id);
+    s.ingest_page(&IngestPage {
+        finance: vec![correction.clone()],
+        cursor: Some(cursor),
+        ..Default::default()
+    })
+    .unwrap();
+    assert_eq!(s.cursor("bills", "account").unwrap().unwrap().watermark, 8);
+
+    let mut chain = correction;
+    chain.entry_id = "chain".into();
+    chain.economic_event_key = "economic:chain".into();
+    chain.amount = -chain.amount;
+    chain.reverses_entry_id = Some("corrected-fee".into());
+    assert!(matches!(
+        s.ingest_page(&IngestPage {
+            finance: vec![chain],
+            ..Default::default()
+        }),
+        Err(StoreError::Invalid("FINANCE_REVERSAL_MISMATCH"))
+    ));
+}
+
+#[test]
 fn p02_immutable_economic_event_rejects_changed_time_or_reversal_without_advancing_cursor() {
     let mut s = store();
     let original = fee("canonical-fee", "fill:proof");
