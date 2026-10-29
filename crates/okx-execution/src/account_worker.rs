@@ -50,6 +50,12 @@ pub struct AccountSqlTimingV1 {
     pub max_queue_wait_ms: u64,
     pub max_sql_owner_ms: u64,
 }
+/// Timing tied to one accepted SQL-owner job, not shared last/max counters.
+#[derive(Debug, Clone, Copy)]
+pub struct AccountSqlJobTiming {
+    pub queue_wait_ms: u64,
+    pub sql_owner_ms: u64,
+}
 struct WorkerOwner {
     sender: SyncSender<Job>,
     timings: Arc<SqlTimingCounters>,
@@ -160,6 +166,22 @@ impl AccountStoreHandle {
         T: Send + 'static,
         F: FnOnce(&mut AccountStore) -> StoreResult<T> + Send + 'static,
     {
+        self.call_with_timing(deadline, operation)
+            .await
+            .map(|(value, _)| value)
+    }
+
+    /// Return queue and execution timing with this job's successful result.
+    /// No new worker, queue, or SQL connection; failed calls retain StoreError.
+    pub async fn call_with_timing<T, F>(
+        &self,
+        deadline: Instant,
+        operation: F,
+    ) -> StoreResult<(T, AccountSqlJobTiming)>
+    where
+        T: Send + 'static,
+        F: FnOnce(&mut AccountStore) -> StoreResult<T> + Send + 'static,
+    {
         if Instant::now() >= deadline {
             return Err(StoreError::Invalid("ACCOUNT_QUEUE_DEADLINE"));
         }
@@ -195,7 +217,15 @@ impl AccountStoreHandle {
                 || sql_owner_time >= Duration::from_millis(500)
                 || result.is_err();
             let outcome = if result.is_ok() { "ok" } else { "error" };
-            let _ = tx.send(result);
+            let _ = tx.send(result.map(|value| {
+                (
+                    value,
+                    AccountSqlJobTiming {
+                        queue_wait_ms: queue_ms,
+                        sql_owner_ms: owner_ms,
+                    },
+                )
+            }));
             if notable {
                 eprintln!(
                     "ACCOUNT_SQL_TIMING_V1 queue_wait_ms={} sql_owner_ms={} total_ms={} remaining_at_start_ms={} outcome={}",

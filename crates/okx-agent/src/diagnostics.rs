@@ -36,6 +36,9 @@ fn account_snapshot_fresh_at(source_as_of: Option<i64>, observed_now: i64) -> bo
     source_as_of.is_some_and(|t| observed_now >= t && observed_now - t <= 5000)
 }
 
+fn storage_failure_code(error: &okx_execution::StoreError) -> String {
+    safe_code(&error.to_string(), "ACCOUNT_STORAGE_UNAVAILABLE")
+}
 fn lookup(store: &AccountStore, reference: &str) -> StoreResult<Option<StoredIntent>> {
     if let Some(i) = store.intent(reference)? {
         return Ok(Some(i));
@@ -298,12 +301,13 @@ async fn account_diagnostics(
  }).await;
     let (intent, facts) = match facts {
         Ok(f) => f,
-        Err(_) => {
+        Err(error) => {
+            let reason = storage_failure_code(&error);
             let out = report(
                 "storage",
-                "ACCOUNT_STORAGE_UNAVAILABLE",
+                &reason,
                 &key,
-                vec!["ACCOUNT_STORAGE_UNAVAILABLE".into()],
+                vec![reason.clone()],
                 true,
                 "the Engine retries safe storage reads; do not reinitialize an existing account",
             );
@@ -427,6 +431,27 @@ mod tests {
             Some(sampled_at),
             sampled_at + 7_000
         ));
+    }
+
+    #[test]
+    fn distinguish_sql_queue_deadlines_from_real_storage_outages() {
+        use okx_execution::StoreError;
+        assert_eq!(
+            storage_failure_code(&StoreError::Invalid("ACCOUNT_QUEUE_DEADLINE")),
+            "ACCOUNT_QUEUE_DEADLINE"
+        );
+        assert_eq!(
+            storage_failure_code(&StoreError::Invalid("ACCOUNT_STORAGE_DEADLINE")),
+            "ACCOUNT_STORAGE_DEADLINE"
+        );
+        assert_eq!(
+            storage_failure_code(&StoreError::Invalid("ACCOUNT_STORAGE_BACKPRESSURE")),
+            "ACCOUNT_STORAGE_BACKPRESSURE"
+        );
+        assert_eq!(
+            storage_failure_code(&StoreError::Io(std::io::Error::other("disk detail"))),
+            "ACCOUNT_STORAGE_UNAVAILABLE"
+        );
     }
 
     #[test]

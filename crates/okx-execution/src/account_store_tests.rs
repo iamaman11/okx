@@ -5063,3 +5063,52 @@ fn p02_existing_v2_rebuilds_strategy_nav_revision_lookup_without_rewriting_facts
         "{details:?}"
     );
 }
+
+#[tokio::test]
+async fn sql_job_timing_is_returned_with_its_own_result() {
+    let existing = store();
+    let path = existing.path.clone();
+    let account = existing.meta.account_key.clone();
+    let installation = existing.meta.installation_id.clone();
+    drop(existing);
+    let handle = crate::AccountStoreHandle::open_existing(path, account.clone(), installation)
+        .await
+        .unwrap();
+    let (first, timing) = handle
+        .call_with_timing(std::time::Instant::now() + Duration::from_secs(3), |s| {
+            Ok(s.meta().account_key.clone())
+        })
+        .await
+        .unwrap();
+    assert_eq!(first, account);
+    let counters = handle.sql_timing();
+    assert_eq!(counters.observed_jobs, 1);
+    assert_eq!(counters.last_queue_wait_ms, timing.queue_wait_ms);
+    assert_eq!(counters.last_sql_owner_ms, timing.sql_owner_ms);
+    assert_eq!(
+        handle
+            .call(std::time::Instant::now() - Duration::from_millis(1), |_s| {
+                Ok(())
+            })
+            .await
+            .unwrap_err()
+            .to_string(),
+        "ACCOUNT_QUEUE_DEADLINE"
+    );
+    assert_eq!(handle.sql_timing().observed_jobs, 1);
+    let (second, second_timing) = handle
+        .call_with_timing(std::time::Instant::now() + Duration::from_secs(3), |_s| {
+            Ok(2_u8)
+        })
+        .await
+        .unwrap();
+    assert_eq!(second, 2);
+    assert_eq!(handle.sql_timing().observed_jobs, 2);
+    assert_eq!(
+        handle.sql_timing().last_sql_owner_ms,
+        second_timing.sql_owner_ms
+    );
+    // The first job owns its immutable timing even after later work.
+    assert_eq!(first, account);
+    assert_eq!(counters.last_sql_owner_ms, timing.sql_owner_ms);
+}
