@@ -4213,23 +4213,52 @@ fn p02_valuation_requires_converged_sources_even_with_valid_principal() {
     s.ingest_page(&IngestPage {
         cursor: Some(previous_cursor.clone()),
         ..Default::default()
-    }).unwrap();
-    let rejected = SourceCursor { generation: 1, ..previous_cursor.clone() };
+    })
+    .unwrap();
+    let rejected = SourceCursor {
+        generation: 1,
+        ..previous_cursor.clone()
+    };
     assert!(matches!(
         s.commit_reconciled_strategy_nav_with_cursor(&witness, &rejected),
         Err(StoreError::Invalid("SOURCE_CURSOR_REGRESSION"))
     ));
-    let strategy_points: i64 = s.connection.query_row(
-        "SELECT COUNT(*) FROM nav_points WHERE scope_id='strategy:alpha'",
-        [], |r| r.get(0)
-    ).unwrap();
+    let strategy_points: i64 = s
+        .connection
+        .query_row(
+            "SELECT COUNT(*) FROM nav_points WHERE scope_id='strategy:alpha'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
     assert_eq!(strategy_points, 0);
-    assert_eq!(s.cursor("strategy_valuation", "account").unwrap().unwrap().coverage_gaps, "BEFORE_VALUATION");
-    let accepted = SourceCursor { coverage_gaps: String::new(), ..previous_cursor };
-    let published = s.commit_reconciled_strategy_nav_with_cursor(&witness, &accepted).unwrap();
+    assert_eq!(
+        s.cursor("strategy_valuation", "account")
+            .unwrap()
+            .unwrap()
+            .coverage_gaps,
+        "BEFORE_VALUATION"
+    );
+    let accepted = SourceCursor {
+        coverage_gaps: String::new(),
+        ..previous_cursor
+    };
+    let published = s
+        .commit_reconciled_strategy_nav_with_cursor(&witness, &accepted)
+        .unwrap();
     assert_eq!(published, valid);
-    assert_eq!(s.cursor("strategy_valuation", "account").unwrap().unwrap().coverage_gaps, "");
-    assert_eq!(s.commit_reconciled_strategy_nav_with_cursor(&witness, &accepted).unwrap(), valid);
+    assert_eq!(
+        s.cursor("strategy_valuation", "account")
+            .unwrap()
+            .unwrap()
+            .coverage_gaps,
+        ""
+    );
+    assert_eq!(
+        s.commit_reconciled_strategy_nav_with_cursor(&witness, &accepted)
+            .unwrap(),
+        valid
+    );
     assert_eq!(s.commit_reconciled_strategy_nav(&witness).unwrap(), valid);
     let nav = s
         .nav_summary(1, 4, &["alpha".into()], &["USD".into()])

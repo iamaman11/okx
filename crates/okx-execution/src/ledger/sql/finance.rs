@@ -6,7 +6,7 @@ fn upsert_source_cursor(tx: &rusqlite::Transaction<'_>, c: &SourceCursor) -> Sto
         "SELECT generation,watermark FROM source_cursors WHERE source=?1 AND stream_partition=?2",
         params![c.source,c.stream_partition], |r| Ok((r.get(0)?,r.get(1)?))
     ).optional()?;
-    if prior.is_some_and(|(g,w)| c.generation < g || (c.generation == g && c.watermark < w)) {
+    if prior.is_some_and(|(g, w)| c.generation < g || (c.generation == g && c.watermark < w)) {
         return Err(StoreError::Invalid("SOURCE_CURSOR_REGRESSION"));
     }
     tx.execute(

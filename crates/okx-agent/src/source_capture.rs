@@ -467,7 +467,10 @@ pub async fn capture_account_sources_measured(
             // On incomplete evidence record only the actual coverage gap.
             if !strategy_cursor_committed {
                 s.ingest_page(&IngestPage {
-                    cursor: Some(SourceCursor { coverage_gaps: gap, ..strategy_cursor }),
+                    cursor: Some(SourceCursor {
+                        coverage_gaps: gap,
+                        ..strategy_cursor
+                    }),
                     ..Default::default()
                 })?;
             }
