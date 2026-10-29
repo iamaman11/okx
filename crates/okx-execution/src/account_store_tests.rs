@@ -3764,7 +3764,10 @@ fn p02_cash_flow_totals_cache_is_commit_scoped_and_rebuilt_after_reopen() {
     let mut s = store();
     assert!(s.cash_flow_totals_cache.borrow().is_none());
     let opening = s.cash_flow_totals().unwrap();
-    assert_eq!(opening[&("USDT".into(), "OPENING".into())], Decimal::from(100));
+    assert_eq!(
+        opening[&("USDT".into(), "OPENING".into())],
+        Decimal::from(100)
+    );
     assert_eq!(s.cash_flow_totals().unwrap(), opening);
     assert!(s.cash_flow_totals_cache.borrow().is_some());
     let deposit = CashFlow {
@@ -3778,15 +3781,23 @@ fn p02_cash_flow_totals_cache_is_commit_scoped_and_rebuilt_after_reopen() {
     s.ingest_page(&IngestPage {
         cash_flows: vec![deposit.clone()],
         ..Default::default()
-    }).unwrap();
+    })
+    .unwrap();
     assert!(s.cash_flow_totals_cache.borrow().is_none());
     let with_deposit = s.cash_flow_totals().unwrap();
-    assert_eq!(with_deposit[&("USDT".into(), "DEPOSIT".into())], Decimal::from(7));
+    assert_eq!(
+        with_deposit[&("USDT".into(), "DEPOSIT".into())],
+        Decimal::from(7)
+    );
     s.ingest_page(&IngestPage {
         cash_flows: vec![deposit.clone()],
         ..Default::default()
-    }).unwrap();
-    assert!(s.cash_flow_totals_cache.borrow().is_some(), "idempotent replay must not invalidate");
+    })
+    .unwrap();
+    assert!(
+        s.cash_flow_totals_cache.borrow().is_some(),
+        "idempotent replay must not invalidate"
+    );
     assert_eq!(s.cash_flow_totals().unwrap(), with_deposit);
     let conflicting = CashFlow {
         amount: Decimal::from(9),
@@ -3803,7 +3814,8 @@ fn p02_cash_flow_totals_cache_is_commit_scoped_and_rebuilt_after_reopen() {
     let path = s.path.clone();
     let meta = s.meta.clone();
     drop(s);
-    let reopened = AccountStore::open_existing(path, &meta.account_key, &meta.installation_id).unwrap();
+    let reopened =
+        AccountStore::open_existing(path, &meta.account_key, &meta.installation_id).unwrap();
     assert!(reopened.cash_flow_totals_cache.borrow().is_none());
     assert_eq!(reopened.cash_flow_totals().unwrap(), with_deposit);
 }
@@ -3905,7 +3917,10 @@ fn p02_account_backed_internal_capital_is_conserved_and_not_strategy_nav() {
         AccountStore::open_existing(p, &meta.account_key, &meta.installation_id).unwrap();
     assert!(restored.latest_capital_assignment_time.borrow().is_none());
     let restored_state = restored.capital_state(4).unwrap();
-    assert_eq!(*restored.latest_capital_assignment_time.borrow(), Some(Some(4)));
+    assert_eq!(
+        *restored.latest_capital_assignment_time.borrow(),
+        Some(Some(4))
+    );
     assert_eq!(restored_state.assigned_usd, Decimal::from(60));
     assert_eq!(restored_state.unattributed_residual_usd, Decimal::from(40));
     assert_eq!(

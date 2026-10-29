@@ -43,7 +43,8 @@ impl AccountStore {
         // replay the already-immutable, source-backed assignment legs.
         // Immutable finance history belongs on disk, but its latest
         // assignment timestamp need not be scanned at every NAV cycle.
-        let latest_assignment = if let Some(cached) = *self.latest_capital_assignment_time.borrow() {
+        let cached_assignment = *self.latest_capital_assignment_time.borrow();
+        let latest_assignment = if let Some(cached) = cached_assignment {
             cached
         } else {
             let loaded: Option<i64> = self.connection.query_row(
@@ -1329,8 +1330,9 @@ impl AccountStore {
     pub fn cash_flow_totals(
         &self,
     ) -> StoreResult<std::collections::BTreeMap<(String, String), Decimal>> {
-        if let Some(cached) = self.cash_flow_totals_cache.borrow().as_ref() {
-            return Ok(cached.clone());
+        let cached_totals = self.cash_flow_totals_cache.borrow().clone();
+        if let Some(cached) = cached_totals {
+            return Ok(cached);
         }
         let mut s = self
             .connection
