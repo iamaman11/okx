@@ -742,8 +742,7 @@ mod artifact_job_fixtures {
     // Windows clock granularity is not a unique test-directory owner:
     // concurrent Rust tests can observe the same timestamp and open one
     // SQLite catalog simultaneously, producing a spurious DATABASE_BUSY.
-    static NEXT_FIXTURE: std::sync::atomic::AtomicU64 =
-        std::sync::atomic::AtomicU64::new(0);
+    static NEXT_FIXTURE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     fn unique_fixture_root() -> PathBuf {
         std::env::temp_dir().join(format!(
             "okx-analytics-{}-{}-{}",
