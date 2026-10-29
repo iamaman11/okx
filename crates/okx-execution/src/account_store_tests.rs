@@ -4200,8 +4200,36 @@ fn p02_valuation_requires_converged_sources_even_with_valid_principal() {
         valid.account_nav_usd,
         valid.attributed_usd + valid.unattributed_usd
     );
-    let published = s.commit_reconciled_strategy_nav(&witness).unwrap();
+    // Force a cursor failure after strategy NAV rows were tentatively written.
+    // Neither NAV nor receipt may escape the transaction on rollback.
+    let previous_cursor = SourceCursor {
+        source: "strategy_valuation".into(),
+        stream_partition: "account".into(),
+        cursor: String::new(),
+        watermark: 4,
+        generation: 2,
+        coverage_gaps: "BEFORE_VALUATION".into(),
+    };
+    s.ingest_page(&IngestPage {
+        cursor: Some(previous_cursor.clone()),
+        ..Default::default()
+    }).unwrap();
+    let rejected = SourceCursor { generation: 1, ..previous_cursor.clone() };
+    assert!(matches!(
+        s.commit_reconciled_strategy_nav_with_cursor(&witness, &rejected),
+        Err(StoreError::Invalid("SOURCE_CURSOR_REGRESSION"))
+    ));
+    let strategy_points: i64 = s.connection.query_row(
+        "SELECT COUNT(*) FROM nav_points WHERE scope_id='strategy:alpha'",
+        [], |r| r.get(0)
+    ).unwrap();
+    assert_eq!(strategy_points, 0);
+    assert_eq!(s.cursor("strategy_valuation", "account").unwrap().unwrap().coverage_gaps, "BEFORE_VALUATION");
+    let accepted = SourceCursor { coverage_gaps: String::new(), ..previous_cursor };
+    let published = s.commit_reconciled_strategy_nav_with_cursor(&witness, &accepted).unwrap();
     assert_eq!(published, valid);
+    assert_eq!(s.cursor("strategy_valuation", "account").unwrap().unwrap().coverage_gaps, "");
+    assert_eq!(s.commit_reconciled_strategy_nav_with_cursor(&witness, &accepted).unwrap(), valid);
     assert_eq!(s.commit_reconciled_strategy_nav(&witness).unwrap(), valid);
     let nav = s
         .nav_summary(1, 4, &["alpha".into()], &["USD".into()])

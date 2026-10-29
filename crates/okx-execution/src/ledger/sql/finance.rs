@@ -1,4 +1,20 @@
 use super::super::*;
+
+/// Account-owned, monotonic source cursor update shared by ingestion and NAV.
+fn upsert_source_cursor(tx: &rusqlite::Transaction<'_>, c: &SourceCursor) -> StoreResult<()> {
+    let prior: Option<(i64,i64)> = tx.query_row(
+        "SELECT generation,watermark FROM source_cursors WHERE source=?1 AND stream_partition=?2",
+        params![c.source,c.stream_partition], |r| Ok((r.get(0)?,r.get(1)?))
+    ).optional()?;
+    if prior.is_some_and(|(g,w)| c.generation < g || (c.generation == g && c.watermark < w)) {
+        return Err(StoreError::Invalid("SOURCE_CURSOR_REGRESSION"));
+    }
+    tx.execute(
+        "INSERT INTO source_cursors VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(source,stream_partition) DO UPDATE SET cursor=excluded.cursor,watermark=excluded.watermark,generation=excluded.generation,coverage_gaps=excluded.coverage_gaps",
+        params![c.source,c.stream_partition,c.cursor,c.watermark,c.generation,c.coverage_gaps]
+    )?;
+    Ok(())
+}
 impl AccountStore {
     /// Account-backed principal, never PnL or independently priced strategy NAV.
     /// All returned balances are exact USD decimals within this AccountStore.
@@ -448,11 +464,32 @@ impl AccountStore {
         &mut self,
         evidence: &StrategyValuationEvidence,
     ) -> StoreResult<StrategyValuationReconciliation> {
+        self.commit_reconciled_strategy_nav_with_optional_cursor(evidence, None)
+    }
+
+    /// NAV and COMPLETE source coverage become visible atomically.
+    pub fn commit_reconciled_strategy_nav_with_cursor(
+        &mut self,
+        evidence: &StrategyValuationEvidence,
+        cursor: &SourceCursor,
+    ) -> StoreResult<StrategyValuationReconciliation> {
+        self.commit_reconciled_strategy_nav_with_optional_cursor(evidence, Some(cursor))
+    }
+
+    fn commit_reconciled_strategy_nav_with_optional_cursor(
+        &mut self,
+        evidence: &StrategyValuationEvidence,
+        cursor: Option<&SourceCursor>,
+    ) -> StoreResult<StrategyValuationReconciliation> {
         let summary = self.reconcile_strategy_valuation(evidence)?;
-        if summary.strategies.is_empty() {
+        if summary.strategies.is_empty() && cursor.is_none() {
             return Ok(summary);
         }
-        let revision = self.strategy_valuation_revision_as_of(evidence.as_of)?;
+        let revision = if summary.strategies.is_empty() {
+            String::new()
+        } else {
+            self.strategy_valuation_revision_as_of(evidence.as_of)?
+        };
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -515,6 +552,9 @@ impl AccountStore {
             )?;
             // No strategy high-water or risk admission from this read model:
             // strategy drawdown and authorization need independent acceptance.
+        }
+        if let Some(cursor) = cursor {
+            upsert_source_cursor(&tx, cursor)?;
         }
         tx.commit()?;
         Ok(summary)
@@ -1843,13 +1883,7 @@ impl AccountStore {
             }
         }
         if let Some(c) = &page.cursor {
-            let prior:Option<(i64,i64)>=tx.query_row("SELECT generation,watermark FROM source_cursors WHERE source=?1 AND stream_partition=?2",params![c.source,c.stream_partition],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
-            if prior
-                .is_some_and(|(g, w)| c.generation < g || (c.generation == g && c.watermark < w))
-            {
-                return Err(StoreError::Invalid("SOURCE_CURSOR_REGRESSION"));
-            }
-            tx.execute("INSERT INTO source_cursors VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(source,stream_partition) DO UPDATE SET cursor=excluded.cursor,watermark=excluded.watermark,generation=excluded.generation,coverage_gaps=excluded.coverage_gaps",params![c.source,c.stream_partition,c.cursor,c.watermark,c.generation,c.coverage_gaps])?;
+            upsert_source_cursor(&tx, c)?;
         }
         for id in &page.projected_fill_ids {
             tx.execute("DELETE FROM fill_projection_pending WHERE fill_id=?1", [id])?;
