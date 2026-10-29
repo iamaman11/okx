@@ -554,10 +554,6 @@ impl AccountStore {
     }
     /// Existing single SQL owner remains responsible for all financial writes
     /// and WAL checkpoints. Copying a 150MB+ backup never runs in its FIFO.
-    pub(crate) fn maintenance(&mut self) -> StoreResult<()> {
-        self.maintenance_observed(|_| {})
-    }
-
     /// Observe the single existing PASSIVE checkpoint within its owner turn.
     /// Keep error and busy separate; do not silently claim full completion.
     pub(crate) fn maintenance_observed(
