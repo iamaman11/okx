@@ -1397,18 +1397,24 @@ impl AccountStore {
                 let amount = decimal(row.get(2)?)?;
                 totals.insert(
                     key,
-                    old.checked_add(amount).ok_or(StoreError::Invalid("MONEY_OVERFLOW"))?,
+                    old.checked_add(amount)
+                        .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))?,
                 );
                 count += 1;
             }
             Ok(totals)
-        })();
+        })(
+        );
         observe(AccountSqlStatementStat {
             statement_id: "cash_flow_totals_select",
             elapsed_us: u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX),
             rows: count,
-            vm_steps: statement.get_status(rusqlite::StatementStatus::VmStep).max(0) as u64,
-            fullscan_steps: statement.get_status(rusqlite::StatementStatus::FullscanStep).max(0) as u64,
+            vm_steps: statement
+                .get_status(rusqlite::StatementStatus::VmStep)
+                .max(0) as u64,
+            fullscan_steps: statement
+                .get_status(rusqlite::StatementStatus::FullscanStep)
+                .max(0) as u64,
             sorts: statement.get_status(rusqlite::StatementStatus::Sort).max(0) as u64,
             succeeded: result.is_ok(),
         });
@@ -1429,26 +1435,28 @@ impl AccountStore {
         let rows = {
             let mut s = self.connection.prepare(PENDING_FILL_PROJECTION_SQL)?;
             let started = std::time::Instant::now();
-            let result = s.query_map([limit.min(1000) as i64], |r| {
-                Ok((
-                    Fill {
-                        fill_id: r.get(0)?,
-                        instrument_id: r.get(1)?,
-                        trade_id: r.get(2)?,
-                        exchange_order_id: r.get(3)?,
-                        intent_id: r.get(4)?,
-                        time: r.get(5)?,
-                        qty: Decimal::ZERO,
-                        price: Decimal::ZERO,
-                        fee: Decimal::ZERO,
-                        currency: r.get(9)?,
-                        side: r.get(10)?,
-                    },
-                    r.get::<_, String>(6)?,
-                    r.get::<_, String>(7)?,
-                    r.get::<_, String>(8)?,
-                ))
-            }).and_then(|items| items.collect::<Result<Vec<_>, _>>());
+            let result = s
+                .query_map([limit.min(1000) as i64], |r| {
+                    Ok((
+                        Fill {
+                            fill_id: r.get(0)?,
+                            instrument_id: r.get(1)?,
+                            trade_id: r.get(2)?,
+                            exchange_order_id: r.get(3)?,
+                            intent_id: r.get(4)?,
+                            time: r.get(5)?,
+                            qty: Decimal::ZERO,
+                            price: Decimal::ZERO,
+                            fee: Decimal::ZERO,
+                            currency: r.get(9)?,
+                            side: r.get(10)?,
+                        },
+                        r.get::<_, String>(6)?,
+                        r.get::<_, String>(7)?,
+                        r.get::<_, String>(8)?,
+                    ))
+                })
+                .and_then(|items| items.collect::<Result<Vec<_>, _>>());
             observe(AccountSqlStatementStat {
                 statement_id: "pending_fills_select",
                 elapsed_us: u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX),

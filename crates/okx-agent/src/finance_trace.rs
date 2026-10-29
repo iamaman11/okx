@@ -405,10 +405,13 @@ mod tests {
             succeeded: true,
         };
         t.statement_finished(7, stat);
-        t.statement_finished(7, okx_execution::AccountSqlStatementStat {
-            succeeded: false,
-            ..stat
-        });
+        t.statement_finished(
+            7,
+            okx_execution::AccountSqlStatementStat {
+                succeeded: false,
+                ..stat
+            },
+        );
         t.finish(7, 99, 89, Some("SQL_QUERY_FAILED".into()));
         let readback = t.readback(Some(7), 1);
         let details = &readback.selected.unwrap().sql_details;
