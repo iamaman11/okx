@@ -38,6 +38,7 @@ fn error_code(code: String) -> String {
 // Conservative bound: includes inline VecDeque slots, heap phase buffers,
 // bounded error-code strings and an active cycle. Excludes allocator metadata
 // (small, allocator-dependent); margin is more than 7 MiB.
+#[cfg(test)]
 fn worst_case_allocated_bytes() -> usize {
     let cycle = std::mem::size_of::<Cycle>()
         + PHASE_MAX * std::mem::size_of::<Phase>()

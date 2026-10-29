@@ -145,29 +145,33 @@ async fn finance_diagnostics(
     } else {
         "OBSERVED"
     };
+    // Never queue an explain behind a capture writer's health lock.
+    // A busy health snapshot is NOT_EVALUATED, not a clean acceptance window.
     let window = resources
         .source_capture_health
-        .read()
-        .await
-        .finance_window
-        .summary(Utc::now().timestamp_millis());
+        .try_read()
+        .ok()
+        .map(|health| health.finance_window.summary(Utc::now().timestamp_millis()));
     Ok(json!({
         "schema": "okx.finance-diagnostics/v1",
         "account": resources.configuration.account_key.wire(),
         "state": state,
         "trace": trace,
-        "acceptance_window": {
-            "state": window.state,
-            "samples": window.samples,
-            "successes": window.successes,
-            "failures": window.failures,
-            "source_age_violations": window.source_age_violations,
-            "tick_gaps": window.tick_gaps,
-            "source_generation_changes": window.source_generation_changes,
-            "capture_attempt_latency": window.capture_attempt_latency,
-            "successful_nav_sql_owner_latency": window.successful_nav_sql_owner_latency,
-            "successful_nav_sql_queue_latency": window.successful_nav_sql_queue_latency,
-            "backup_evidence": window.backup_evidence,
+        "acceptance_window": match window {
+            Some(window) => json!({
+                "state": window.state,
+                "samples": window.samples,
+                "successes": window.successes,
+                "failures": window.failures,
+                "source_age_violations": window.source_age_violations,
+                "tick_gaps": window.tick_gaps,
+                "source_generation_changes": window.source_generation_changes,
+                "capture_attempt_latency": window.capture_attempt_latency,
+                "successful_nav_sql_owner_latency": window.successful_nav_sql_owner_latency,
+                "successful_nav_sql_queue_latency": window.successful_nav_sql_queue_latency,
+                "backup_evidence": window.backup_evidence,
+            }),
+            None => json!({"state":"NOT_EVALUATED","reason_code":"HEALTH_BUSY"}),
         },
         "current_readiness": {"state":"NOT_EVALUATED","reason_code":"DIAGNOSTICS_ONLY"},
         "central_budget": {"state":"NOT_EVALUATED","reason_code":"DIAGNOSTICS_ONLY"},

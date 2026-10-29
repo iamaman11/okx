@@ -17,6 +17,32 @@ struct ReversalOriginal {
     reverses_entry_id: Option<String>,
 }
 
+/// Report the transaction phase even if an early validation/SQL error returns
+/// before COMMIT. The observer is diagnostic-only and never changes rollback.
+struct IngestTimingGuard<O: FnOnce(IngestTransactionTiming)> {
+    observe: Option<O>,
+    begin_us: u64,
+    body_started: std::time::Instant,
+    body_us: Option<u64>,
+    commit_us: u64,
+    commit_succeeded: bool,
+}
+
+impl<O: FnOnce(IngestTransactionTiming)> Drop for IngestTimingGuard<O> {
+    fn drop(&mut self) {
+        if let Some(observe) = self.observe.take() {
+            observe(IngestTransactionTiming {
+                begin_us: self.begin_us,
+                body_us: self.body_us.unwrap_or_else(|| {
+                    u64::try_from(self.body_started.elapsed().as_micros()).unwrap_or(u64::MAX)
+                }),
+                commit_us: self.commit_us,
+                commit_succeeded: self.commit_succeeded,
+            });
+        }
+    }
+}
+
 /// Account-owned, monotonic source cursor update shared by ingestion and NAV.
 fn upsert_source_cursor(tx: &rusqlite::Transaction<'_>, c: &SourceCursor) -> StoreResult<()> {
     let prior: Option<(i64,i64)> = tx.query_row(
@@ -1599,11 +1625,30 @@ impl AccountStore {
         observe: impl FnOnce(IngestTransactionTiming),
     ) -> StoreResult<()> {
         let begin_started = std::time::Instant::now();
-        let tx = self
+        let tx_result = self
             .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+            .transaction_with_behavior(TransactionBehavior::Immediate);
         let begin_us = u64::try_from(begin_started.elapsed().as_micros()).unwrap_or(u64::MAX);
-        let body_started = std::time::Instant::now();
+        let tx = match tx_result {
+            Ok(tx) => tx,
+            Err(error) => {
+                observe(IngestTransactionTiming {
+                    begin_us,
+                    body_us: 0,
+                    commit_us: 0,
+                    commit_succeeded: false,
+                });
+                return Err(error.into());
+            }
+        };
+        let mut timing = IngestTimingGuard {
+            observe: Some(observe),
+            begin_us,
+            body_started: std::time::Instant::now(),
+            body_us: None,
+            commit_us: 0,
+            commit_succeeded: false,
+        };
         for f in &page.fills {
             if f.qty <= Decimal::ZERO || f.price <= Decimal::ZERO || f.currency.is_empty() {
                 return Err(StoreError::Invalid("INVALID_FILL"));
@@ -2003,17 +2048,14 @@ impl AccountStore {
             )?;
             tx.execute("INSERT INTO operation_receipts VALUES(?1,'FUNDING_ATTRIBUTED',?2,'COMMITTED',?3) ON CONFLICT(operation_id) DO NOTHING",params![format!("funding:{id}"),id,wall_time_ms()])?;
         }
-        let body_us = u64::try_from(body_started.elapsed().as_micros()).unwrap_or(u64::MAX);
+        timing.body_us =
+            Some(u64::try_from(timing.body_started.elapsed().as_micros()).unwrap_or(u64::MAX));
         let commit_started = std::time::Instant::now();
         let commit_result = tx.commit();
-        let commit_us = u64::try_from(commit_started.elapsed().as_micros()).unwrap_or(u64::MAX);
-        let commit_ms = commit_us / 1000;
-        observe(IngestTransactionTiming {
-            begin_us,
-            body_us,
-            commit_us,
-            commit_succeeded: commit_result.is_ok(),
-        });
+        timing.commit_us =
+            u64::try_from(commit_started.elapsed().as_micros()).unwrap_or(u64::MAX);
+        timing.commit_succeeded = commit_result.is_ok();
+        let commit_ms = timing.commit_us / 1000;
         if commit_ms >= 250 || commit_result.is_err() {
             // Redacted, fixed-label operational evidence. Does not write to
             // SQLite, change the transaction boundary or weaken durability.

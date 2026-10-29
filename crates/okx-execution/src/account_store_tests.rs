@@ -1333,6 +1333,44 @@ fn account_store_wal_has_one_checkpoint_owner_after_initialize_and_reopen() {
     reopened.integrity_check().unwrap();
 }
 
+#[test]
+fn d1_ingest_reports_all_transaction_outcomes_including_pre_commit_errors() {
+    let mut s = store();
+    let mut success = None;
+    s.ingest_page_observed(&IngestPage::default(), |timing| success = Some(timing))
+        .unwrap();
+    let success = success.unwrap();
+    assert!(success.commit_succeeded);
+
+    let mut bad_fill = k5_f7_fixture_fill();
+    bad_fill.qty = Decimal::ZERO;
+    let mut invalid = None;
+    let result = s.ingest_page_observed(
+        &IngestPage {
+            fills: vec![bad_fill],
+            ..Default::default()
+        },
+        |timing| invalid = Some(timing),
+    );
+    assert!(matches!(result, Err(StoreError::Invalid("INVALID_FILL"))));
+    let invalid = invalid.unwrap();
+    assert!(!invalid.commit_succeeded);
+    assert_eq!(invalid.commit_us, 0);
+
+    s.connection.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let mut begin_failure = None;
+    let failed = s.ingest_page_observed(
+        &IngestPage::default(),
+        |timing| begin_failure = Some(timing),
+    );
+    assert!(failed.is_err());
+    s.connection.execute_batch("ROLLBACK").unwrap();
+    let begin_failure = begin_failure.unwrap();
+    assert_eq!(begin_failure.body_us, 0);
+    assert_eq!(begin_failure.commit_us, 0);
+    assert!(!begin_failure.commit_succeeded);
+}
+
 fn store() -> AccountStore {
     let p = path();
     let m = AccountMeta {
