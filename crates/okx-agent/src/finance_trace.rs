@@ -35,8 +35,14 @@ pub(crate) struct Brief {
 }
 impl From<&Cycle> for Brief {
     fn from(v: &Cycle) -> Self {
-        Self { id:v.id, started_ms:v.started_ms, outcome:v.outcome,
-            error_code:v.error_code.clone(), elapsed_ms:v.elapsed_ms, owner_ms:v.owner_ms }
+        Self {
+            id: v.id,
+            started_ms: v.started_ms,
+            outcome: v.outcome,
+            error_code: v.error_code.clone(),
+            elapsed_ms: v.elapsed_ms,
+            owner_ms: v.owner_ms,
+        }
     }
 }
 #[derive(Default)]
@@ -63,65 +69,123 @@ pub(crate) struct Readback {
     pub evicted_detailed: u64,
 }
 impl FinanceTrace {
-    fn state<T>(&self, f: impl FnOnce(&mut State)->T)->T {
-        let mut s=self.state.lock().unwrap_or_else(|e|e.into_inner());
+    fn state<T>(&self, f: impl FnOnce(&mut State) -> T) -> T {
+        let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
         f(&mut s)
     }
-    fn retain(s:&mut State, c:Cycle) {
-        if c.outcome!="succeeded" || c.owner_ms.is_some_and(|x|x>=500)
-            || c.elapsed_ms.is_some_and(|x|x>=1800) {
-            if s.detailed.len()==DETAIL_MAX {s.detailed.pop_front();s.evicted_detailed+=1;}
+    fn retain(s: &mut State, c: Cycle) {
+        if c.outcome != "succeeded"
+            || c.owner_ms.is_some_and(|x| x >= 500)
+            || c.elapsed_ms.is_some_and(|x| x >= 1800)
+        {
+            if s.detailed.len() == DETAIL_MAX {
+                s.detailed.pop_front();
+                s.evicted_detailed += 1;
+            }
             s.detailed.push_back(c.clone());
         }
-        if s.recent.len()==SUMMARY_MAX {s.recent.pop_front();s.evicted_recent+=1;}
+        if s.recent.len() == SUMMARY_MAX {
+            s.recent.pop_front();
+            s.evicted_recent += 1;
+        }
         s.recent.push_back(Brief::from(&c));
     }
-    pub fn begin(&self,id:u64,started_ms:i64,generation:u64) {
-        self.state(|s|{
-            if let Some(mut old)=s.active.take(){
-                old.outcome="interrupted";old.error_code=Some("CAPTURE_INTERRUPTED".into());
-                Self::retain(s,old);
+    pub fn begin(&self, id: u64, started_ms: i64, generation: u64) {
+        self.state(|s| {
+            if let Some(mut old) = s.active.take() {
+                old.outcome = "interrupted";
+                old.error_code = Some("CAPTURE_INTERRUPTED".into());
+                Self::retain(s, old);
             }
-            s.active=Some(Cycle{id,started_ms,finished_ms:None,private_ws_generation:generation,
-                outcome:"in_progress",error_code:None,elapsed_ms:None,queue_ms:None,
-                owner_ms:None,phases:Vec::with_capacity(10)});
+            s.active = Some(Cycle {
+                id,
+                started_ms,
+                finished_ms: None,
+                private_ws_generation: generation,
+                outcome: "in_progress",
+                error_code: None,
+                elapsed_ms: None,
+                queue_ms: None,
+                owner_ms: None,
+                phases: Vec::with_capacity(10),
+            });
         });
     }
-    pub fn phase_started(&self,id:u64,name:&'static str) {
-        self.state(|s|if let Some(c)=s.active.as_mut().filter(|c|c.id==id){
-            if c.phases.len()<10 {c.phases.push(Phase{name,elapsed_us:None,outcome:"in_progress"});}
-        });
-    }
-    pub fn phase_finished(&self,id:u64,name:&'static str,elapsed_us:u64,ok:bool) {
-        self.state(|s|if let Some(c)=s.active.as_mut().filter(|c|c.id==id){
-            if let Some(p)=c.phases.iter_mut().rev().find(|p|p.name==name&&p.elapsed_us.is_none()){
-                p.elapsed_us=Some(elapsed_us);p.outcome=if ok {"ok"}else{"error"};
+    pub fn phase_started(&self, id: u64, name: &'static str) {
+        self.state(|s| {
+            if let Some(c) = s.active.as_mut().filter(|c| c.id == id) {
+                if c.phases.len() < 10 {
+                    c.phases.push(Phase {
+                        name,
+                        elapsed_us: None,
+                        outcome: "in_progress",
+                    });
+                }
             }
         });
     }
-    pub fn owner_finished(&self,id:u64,queue_ms:u64,owner_ms:u64){
-        self.state(|s|if let Some(c)=s.active.as_mut().filter(|c|c.id==id){
-            c.queue_ms=Some(queue_ms);c.owner_ms=Some(owner_ms);
+    pub fn phase_finished(&self, id: u64, name: &'static str, elapsed_us: u64, ok: bool) {
+        self.state(|s| {
+            if let Some(c) = s.active.as_mut().filter(|c| c.id == id) {
+                if let Some(p) = c
+                    .phases
+                    .iter_mut()
+                    .rev()
+                    .find(|p| p.name == name && p.elapsed_us.is_none())
+                {
+                    p.elapsed_us = Some(elapsed_us);
+                    p.outcome = if ok { "ok" } else { "error" };
+                }
+            }
         });
     }
-    pub fn finish(&self,id:u64,finished_ms:i64,elapsed_ms:u64,error:Option<String>){
-        self.state(|s|if let Some(mut c)=s.active.take(){
-            if c.id!=id {s.active=Some(c);return;}
-            c.finished_ms=Some(finished_ms);c.elapsed_ms=Some(elapsed_ms);
-            c.outcome=if error.is_some(){"failed"}else{"succeeded"};
-            c.error_code=error;Self::retain(s,c);
+    pub fn owner_finished(&self, id: u64, queue_ms: u64, owner_ms: u64) {
+        self.state(|s| {
+            if let Some(c) = s.active.as_mut().filter(|c| c.id == id) {
+                c.queue_ms = Some(queue_ms);
+                c.owner_ms = Some(owner_ms);
+            }
+        });
+    }
+    pub fn finish(&self, id: u64, finished_ms: i64, elapsed_ms: u64, error: Option<String>) {
+        self.state(|s| {
+            if let Some(mut c) = s.active.take() {
+                if c.id != id {
+                    s.active = Some(c);
+                    return;
+                }
+                c.finished_ms = Some(finished_ms);
+                c.elapsed_ms = Some(elapsed_ms);
+                c.outcome = if error.is_some() {
+                    "failed"
+                } else {
+                    "succeeded"
+                };
+                c.error_code = error;
+                Self::retain(s, c);
+            }
         });
     }
     /// Copy bounded data under lock; JSON serialization happens later.
-    pub fn readback(&self,id:Option<u64>,limit:usize)->Readback{
-        self.state(|s|{
-            let selected=id.and_then(|key|s.active.iter().chain(s.detailed.iter())
-                .find(|c|c.id==key).cloned());
-            Readback{schema:"okx.finance-cycle-trace/v1",
-                active:s.active.clone(),recent:s.recent.iter().rev().take(limit).cloned().collect(),
-                problem_ids:s.detailed.iter().rev().take(3).map(|c|c.id).collect(),
-                selected_not_found:id.is_some()&&selected.is_none(),selected,
-                evicted_recent:s.evicted_recent,evicted_detailed:s.evicted_detailed}
+    pub fn readback(&self, id: Option<u64>, limit: usize) -> Readback {
+        self.state(|s| {
+            let selected = id.and_then(|key| {
+                s.active
+                    .iter()
+                    .chain(s.detailed.iter())
+                    .find(|c| c.id == key)
+                    .cloned()
+            });
+            Readback {
+                schema: "okx.finance-cycle-trace/v1",
+                active: s.active.clone(),
+                recent: s.recent.iter().rev().take(limit).cloned().collect(),
+                problem_ids: s.detailed.iter().rev().take(3).map(|c| c.id).collect(),
+                selected_not_found: id.is_some() && selected.is_none(),
+                selected,
+                evicted_recent: s.evicted_recent,
+                evicted_detailed: s.evicted_detailed,
+            }
         })
     }
 }
@@ -129,24 +193,32 @@ impl FinanceTrace {
 mod tests {
     use super::*;
     #[test]
-    fn failed_phase_remains_visible(){
-        let t=FinanceTrace::default();t.begin(1,100,7);
-        t.phase_started(1,"account_nav_commit");
-        assert_eq!(t.readback(Some(1),1).active.unwrap().phases[0].outcome,"in_progress");
-        t.phase_finished(1,"account_nav_commit",4_200_000,false);
-        t.owner_finished(1,0,4200);
-        t.finish(1,4400,4300,Some("ACCOUNT_STORAGE_DEADLINE".into()));
-        let r=t.readback(Some(1),4);
-        assert_eq!(r.selected.unwrap().owner_ms,Some(4200));
-        assert_eq!(r.problem_ids,vec![1]);
+    fn failed_phase_remains_visible() {
+        let t = FinanceTrace::default();
+        t.begin(1, 100, 7);
+        t.phase_started(1, "account_nav_commit");
+        assert_eq!(
+            t.readback(Some(1), 1).active.unwrap().phases[0].outcome,
+            "in_progress"
+        );
+        t.phase_finished(1, "account_nav_commit", 4_200_000, false);
+        t.owner_finished(1, 0, 4200);
+        t.finish(1, 4400, 4300, Some("ACCOUNT_STORAGE_DEADLINE".into()));
+        let r = t.readback(Some(1), 4);
+        assert_eq!(r.selected.unwrap().owner_ms, Some(4200));
+        assert_eq!(r.problem_ids, vec![1]);
     }
     #[test]
-    fn bounded_history_and_stale_callback(){
-        let t=FinanceTrace::default();
-        for i in 1..=2060 {t.begin(i,i as i64,1);t.finish(i,i as i64+5,5,None);}
-        t.begin(2061,2061,1);t.owner_finished(2000,0,9999);
-        assert_eq!(t.readback(None,4).active.unwrap().owner_ms,None);
-        let r=t.readback(Some(1),4);
-        assert!(r.evicted_recent>0 && r.recent.len()<=4 && r.selected_not_found);
+    fn bounded_history_and_stale_callback() {
+        let t = FinanceTrace::default();
+        for i in 1..=2060 {
+            t.begin(i, i as i64, 1);
+            t.finish(i, i as i64 + 5, 5, None);
+        }
+        t.begin(2061, 2061, 1);
+        t.owner_finished(2000, 0, 9999);
+        assert_eq!(t.readback(None, 4).active.unwrap().owner_ms, None);
+        let r = t.readback(Some(1), 4);
+        assert!(r.evicted_recent > 0 && r.recent.len() <= 4 && r.selected_not_found);
     }
 }

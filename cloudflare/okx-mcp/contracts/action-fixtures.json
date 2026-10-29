@@ -1340,33 +1340,6 @@
   },
   {
     "tool": "diagnostics",
-    "action": "explain",
-    "positive": {
-      "action": "explain",
-      "account": "real_acceptance",
-      "view": "finance",
-      "limit": 3
-    },
-    "negative": [
-      {
-        "action": "explain",
-        "view": "finance"
-      },
-      {
-        "action": "explain",
-        "account": "real_acceptance",
-        "view": "finance",
-        "limit": 5
-      },
-      {
-        "action": "explain",
-        "account": "real_acceptance",
-        "view": "other"
-      }
-    ]
-  },
-  {
-    "tool": "diagnostics",
     "action": "runtime",
     "positive": {
       "action": "runtime"

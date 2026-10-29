@@ -3,7 +3,10 @@ use crate::{accounts::AccountResources, query::DispatchContext};
 use chrono::Utc;
 use futures_util::{StreamExt, stream};
 use okx_execution::{AccountStore, StoreResult, StoredIntent};
-use okx_protocol::{analytics::ResearchRequest, trading::{DiagnosticsRequest, DiagnosticsView}};
+use okx_protocol::{
+    analytics::ResearchRequest,
+    trading::{DiagnosticsRequest, DiagnosticsView},
+};
 use serde_json::{Value, json};
 use std::{
     sync::Arc,
@@ -64,21 +67,27 @@ pub async fn diagnostics(
 ) -> Result<Value, String> {
     // Finance evidence must be readable without SQL-owner or central RiskBook.
     if request.view == Some(DiagnosticsView::Finance) {
-        return Ok(finance_diagnostics(ctx, request, account).await.unwrap_or_else(|reason| {
-            report(
-                "finance",
-                &safe_code(&reason, "DIAGNOSTICS_UNAVAILABLE"),
-                request.account.as_deref().or(account).unwrap_or("engine"),
-                vec![safe_code(&reason, "DIAGNOSTICS_UNAVAILABLE")],
-                false,
-                "supply an authorized account and valid finance cycle",
-            )
-        }));
+        return Ok(finance_diagnostics(ctx, request, account)
+            .await
+            .unwrap_or_else(|reason| {
+                report(
+                    "finance",
+                    &safe_code(&reason, "DIAGNOSTICS_UNAVAILABLE"),
+                    request.account.as_deref().or(account).unwrap_or("engine"),
+                    vec![safe_code(&reason, "DIAGNOSTICS_UNAVAILABLE")],
+                    false,
+                    "supply an authorized account and valid finance cycle",
+                )
+            }));
     }
     if request.cycle_id.is_some() || request.limit.is_some() {
         return Ok(report(
-            "finance", "INVALID_DIAGNOSTICS_VIEW", "engine",
-            vec!["INVALID_DIAGNOSTICS_VIEW".into()], false, "use view=finance",
+            "finance",
+            "INVALID_DIAGNOSTICS_VIEW",
+            "engine",
+            vec!["INVALID_DIAGNOSTICS_VIEW".into()],
+            false,
+            "use view=finance",
         ));
     }
     let (result, central) = tokio::join!(diagnostics_inner(ctx, request, account), budget(ctx));
@@ -108,16 +117,34 @@ async fn finance_diagnostics(
     if !(1..=4).contains(&limit) {
         return Err("INVALID_DIAGNOSTICS_LIMIT".into());
     }
-    let requested = request.account.as_deref().or(route).ok_or("ACCOUNT_REQUIRED")?;
-    let resources = ctx.accounts.resolve(requested).await.ok_or("ACCOUNT_UNAVAILABLE")?;
+    let requested = request
+        .account
+        .as_deref()
+        .or(route)
+        .ok_or("ACCOUNT_REQUIRED")?;
+    let resources = ctx
+        .accounts
+        .resolve(requested)
+        .await
+        .ok_or("ACCOUNT_UNAVAILABLE")?;
     if let Some(route) = route {
-        let routed = ctx.accounts.resolve(route).await.ok_or("ACCOUNT_UNAVAILABLE")?;
+        let routed = ctx
+            .accounts
+            .resolve(route)
+            .await
+            .ok_or("ACCOUNT_UNAVAILABLE")?;
         if resources.configuration.account_key != routed.configuration.account_key {
             return Err("ACCOUNT_ROUTE_MISMATCH".into());
         }
     }
-    let trace = resources.finance_trace.readback(request.cycle_id, usize::from(limit));
-    let state = if trace.selected_not_found { "NOT_PROVEN" } else { "OBSERVED" };
+    let trace = resources
+        .finance_trace
+        .readback(request.cycle_id, usize::from(limit));
+    let state = if trace.selected_not_found {
+        "NOT_PROVEN"
+    } else {
+        "OBSERVED"
+    };
     let window = resources
         .source_capture_health
         .read()

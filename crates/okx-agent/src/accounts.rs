@@ -640,10 +640,17 @@ impl AccountResources {
                 == status.connection_generation
     }
 
-    async fn record_source_failure(&self, reason_code: &str, started: Instant, generation: u64, cycle_id: u64) {
+    async fn record_source_failure(
+        &self,
+        reason_code: &str,
+        started: Instant,
+        generation: u64,
+        cycle_id: u64,
+    ) {
         let now = chrono::Utc::now().timestamp_millis();
         let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-        self.finance_trace.finish(cycle_id, now, elapsed_ms, Some(reason_code.to_owned()));
+        self.finance_trace
+            .finish(cycle_id, now, elapsed_ms, Some(reason_code.to_owned()));
         let mut health = self.source_capture_health.write().await;
         health.last_attempt_ms = Some(now);
         health.last_failure_ms = Some(now);

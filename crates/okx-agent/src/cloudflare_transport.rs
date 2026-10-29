@@ -6,8 +6,8 @@ use crate::{
 };
 use futures_util::{FutureExt, SinkExt, StreamExt, future::BoxFuture, stream::FuturesUnordered};
 use okx_protocol::{
-    DIRECT_TRANSPORT_FRAME_SCHEMA_V2 as SCHEMA, DIRECT_TRANSPORT_MAX_PAYLOAD_BYTES,
-    AgentOperation, DirectRuntimeProfile, DirectTransportFrame as F,
+    AgentOperation, DIRECT_TRANSPORT_FRAME_SCHEMA_V2 as SCHEMA, DIRECT_TRANSPORT_MAX_PAYLOAD_BYTES,
+    DirectRuntimeProfile, DirectTransportFrame as F,
 };
 use sha2::{Digest, Sha256};
 use std::{
