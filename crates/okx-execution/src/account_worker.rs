@@ -1,5 +1,5 @@
 //! One bounded blocking worker per account. No SQLite calls on the async reactor.
-use crate::{AccountMeta, AccountStore, OpeningSnapshot, StoreError, StoreResult};
+use crate::{AccountMeta, AccountStore, OpeningSnapshot, StoreError, StoreResult, WalMaintenanceObservation};
 use std::{
     collections::VecDeque,
     path::PathBuf,
@@ -78,6 +78,7 @@ pub struct MaintenanceEvent {
     pub finished_ms: Option<i64>,
     pub elapsed_us: Option<u64>,
     pub outcome: &'static str,
+    pub wal: Option<WalMaintenanceObservation>,
 }
 #[derive(Default)]
 struct MaintenanceHistory {
@@ -100,8 +101,14 @@ impl MaintenanceHistory {
             finished_ms: None,
             elapsed_us: None,
             outcome: "in_progress",
+            wal: None,
         });
         id
+    }
+    fn wal_observed(&mut self, id: u64, observation: WalMaintenanceObservation) {
+        if let Some(event) = self.events.iter_mut().rev().find(|event| event.id == id) {
+            event.wal = Some(observation);
+        }
     }
     fn finish(&mut self, id: u64, elapsed: Duration, ok: bool) {
         if let Some(event) = self.events.iter_mut().rev().find(|event| event.id == id) {
@@ -234,7 +241,9 @@ impl AccountStoreHandle {
                     }
                     let id = history_lock(&worker_maintenance, |log| log.begin("wal_maintenance"));
                     let started = Instant::now();
-                    let succeeded = match store.maintenance() {
+                    let succeeded = match store.maintenance_observed(|observation| {
+                        history_lock(&worker_maintenance, |log| log.wal_observed(id, observation));
+                    }) {
                         Ok(()) => true,
                         Err(e) => {
                             store.set_maintenance_error(e.to_string());
@@ -496,6 +505,17 @@ mod maintenance_history_tests {
         let mut log = MaintenanceHistory::default();
         let maint = log.begin("wal_maintenance");
         assert_eq!(log.events.back().unwrap().outcome, "in_progress");
+        log.wal_observed(maint, WalMaintenanceObservation {
+            wal_before_bytes: Some(5_000_000),
+            wal_after_bytes: Some(4_000_000),
+            checkpoint_mode: "PASSIVE",
+            checkpoint_attempted: true,
+            checkpoint_busy: Some(1),
+            log_frames: Some(1200),
+            checkpointed_frames: Some(1000),
+            checkpoint_elapsed_us: Some(12_000),
+        });
+        assert_eq!(log.events.back().unwrap().wal.unwrap().checkpointed_frames, Some(1000));
         log.finish(maint, Duration::from_millis(120), false);
         assert_eq!(log.events.back().unwrap().elapsed_us, Some(120_000));
         assert_eq!(log.events.back().unwrap().outcome, "error");

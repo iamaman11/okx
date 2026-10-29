@@ -43,6 +43,19 @@ pub struct IngestTransactionTiming {
     pub commit_us: u64,
     pub commit_succeeded: bool,
 }
+/// Existing SQL-owner WAL maintenance observation. No SQL text or account facts.
+#[derive(Debug, Clone, Copy, serde::Serialize)]
+pub struct WalMaintenanceObservation {
+    pub wal_before_bytes: Option<u64>,
+    pub wal_after_bytes: Option<u64>,
+    pub checkpoint_mode: &'static str,
+    pub checkpoint_attempted: bool,
+    pub checkpoint_busy: Option<i64>,
+    pub log_frames: Option<i64>,
+    pub checkpointed_frames: Option<i64>,
+    pub checkpoint_elapsed_us: Option<u64>,
+}
+
 /// Fixed-label VM counters for one prepared statement; no SQL or bound values.
 #[derive(Debug, Clone, Copy)]
 pub struct AccountSqlStatementStat {

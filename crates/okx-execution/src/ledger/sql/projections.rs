@@ -555,14 +555,49 @@ impl AccountStore {
     /// Existing single SQL owner remains responsible for all financial writes
     /// and WAL checkpoints. Copying a 150MB+ backup never runs in its FIFO.
     pub(crate) fn maintenance(&mut self) -> StoreResult<()> {
-        let (_, wal) = self.storage_bytes()?;
-        let page_size: i64 = self
-            .connection
-            .pragma_query_value(None, "page_size", |r| r.get(0))?;
-        if wal >= (page_size as u64).saturating_add(24).saturating_mul(1000) {
-            self.checkpoint()?;
-        }
-        Ok(())
+        self.maintenance_observed(|_| {})
+    }
+
+    /// Observe the single existing PASSIVE checkpoint within its owner turn.
+    /// Keep error and busy separate; do not silently claim full completion.
+    pub(crate) fn maintenance_observed(
+        &mut self,
+        observe: impl FnOnce(WalMaintenanceObservation),
+    ) -> StoreResult<()> {
+        let mut measured = WalMaintenanceObservation {
+            wal_before_bytes: None,
+            wal_after_bytes: None,
+            checkpoint_mode: "PASSIVE",
+            checkpoint_attempted: false,
+            checkpoint_busy: None,
+            log_frames: None,
+            checkpointed_frames: None,
+            checkpoint_elapsed_us: None,
+        };
+        let result: StoreResult<()> = (|| {
+            let (_, wal) = self.storage_bytes()?;
+            measured.wal_before_bytes = Some(wal);
+            let page_size: i64 = self
+                .connection
+                .pragma_query_value(None, "page_size", |r| r.get(0))?;
+            if wal >= (page_size as u64).saturating_add(24).saturating_mul(1000) {
+                measured.checkpoint_attempted = true;
+                let started = std::time::Instant::now();
+                let checkpoint = self.checkpoint();
+                measured.checkpoint_elapsed_us =
+                    Some(u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX));
+                if let Ok((busy, log, checked)) = &checkpoint {
+                    measured.checkpoint_busy = Some(*busy);
+                    measured.log_frames = Some(*log);
+                    measured.checkpointed_frames = Some(*checked);
+                }
+                checkpoint?;
+            }
+            Ok(())
+        })();
+        measured.wal_after_bytes = self.storage_bytes().ok().map(|(_, wal)| wal);
+        observe(measured);
+        result
     }
 
     pub(crate) fn backup_identity(&self) -> (PathBuf, AccountMeta) {

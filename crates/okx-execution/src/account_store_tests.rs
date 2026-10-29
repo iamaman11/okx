@@ -1360,6 +1360,35 @@ fn d1_statement_vm_counters_have_fixed_ids_and_valid_nonnegative_counts() {
 }
 
 #[test]
+fn d1_maintenance_observation_distinguishes_skipped_and_real_passive_checkpoint() {
+    let mut s = store();
+    let mut first = None;
+    s.maintenance_observed(|observed| first = Some(observed)).unwrap();
+    let first = first.unwrap();
+    assert_eq!(first.checkpoint_mode, "PASSIVE");
+    assert!(first.wal_before_bytes.is_some());
+    assert!(first.wal_after_bytes.is_some());
+    assert!(!first.checkpoint_attempted);
+    assert!(first.checkpoint_busy.is_none());
+
+    s.connection.execute_batch("CREATE TABLE d1_wal_observation(id INTEGER PRIMARY KEY, payload BLOB)").unwrap();
+    s.connection.execute(
+        "INSERT INTO d1_wal_observation(payload) VALUES(zeroblob(8000000))", [],
+    ).unwrap();
+    let mut observed = None;
+    s.maintenance_observed(|checkpoint| observed = Some(checkpoint)).unwrap();
+    let result = observed.unwrap();
+    assert!(result.checkpoint_attempted);
+    assert_eq!(result.checkpoint_mode, "PASSIVE");
+    assert_eq!(result.checkpoint_busy, Some(0));
+    assert!(result.log_frames.unwrap() >= 1000);
+    assert!(result.checkpointed_frames.unwrap() > 0);
+    assert!(result.checkpoint_elapsed_us.is_some());
+    assert!(result.wal_before_bytes.unwrap() >= 4_000_000);
+    assert!(result.wal_after_bytes.is_some());
+}
+
+#[test]
 fn d1_ingest_reports_all_transaction_outcomes_including_pre_commit_errors() {
     let mut s = store();
     let mut success = None;
