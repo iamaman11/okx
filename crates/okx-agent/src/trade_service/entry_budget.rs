@@ -181,8 +181,47 @@ pub(super) fn size_order(
     Ok(value)
 }
 
+/** Remaining cap after verified price-bound notional and rounded entry fee.
+ * This is headroom for UNKNOWN other costs, NOT proof those costs are zero.
+ * In particular it never grants an exchange POST or a risk reservation.
+ */
+pub(super) fn unproven_entry_cost_headroom(
+    known_entry_usd: Decimal,
+    entry_ceiling_usd: Option<Decimal>,
+) -> Result<Option<Decimal>, String> {
+    let Some(cap) = entry_ceiling_usd else {
+        return Ok(None);
+    };
+    if known_entry_usd <= Decimal::ZERO || cap <= Decimal::ZERO {
+        return Err("ENTRY_SOURCE_INVALID".into());
+    }
+    let remaining = cap.checked_sub(known_entry_usd).ok_or("MONEY_OVERFLOW")?;
+    if remaining < Decimal::ZERO {
+        return Err("ENTRY_BUDGET_EXCEEDED".into());
+    }
+    Ok(Some(remaining))
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn unknown_entry_cost_headroom_is_not_a_cost_proof() {
+        let d = |s: &str| Decimal::from_str(s).unwrap();
+        assert_eq!(
+            unproven_entry_cost_headroom(d("8.2"), Some(d("10"))).unwrap(),
+            Some(d("1.8"))
+        );
+        assert_eq!(unproven_entry_cost_headroom(d("8.2"), None).unwrap(), None);
+        assert_eq!(
+            unproven_entry_cost_headroom(d("10.01"), Some(d("10"))).unwrap_err(),
+            "ENTRY_BUDGET_EXCEEDED"
+        );
+        assert_eq!(
+            unproven_entry_cost_headroom(Decimal::ZERO, Some(d("10"))).unwrap_err(),
+            "ENTRY_SOURCE_INVALID"
+        );
+    }
+
     use super::*;
     fn d(s: &str) -> Decimal {
         dec(s).unwrap()

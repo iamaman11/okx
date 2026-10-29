@@ -89,6 +89,17 @@ pub(super) fn instance_nav_gate(
     }
 }
 
+/// Read-only position count from the actual account snapshot. Malformed sizes must
+/// not be interpreted as a flat account; algos and unknown intents are separate.
+pub(super) fn visible_nonzero_position_count<'a>(
+    positions: impl IntoIterator<Item = &'a str>,
+) -> Result<usize, String> {
+    positions.into_iter().try_fold(0_usize, |count, quantity| {
+        let value = dec(quantity)?;
+        Ok(count + usize::from(value != Decimal::ZERO))
+    })
+}
+
 impl TradeService {
     #[allow(clippy::too_many_arguments)] // Explicit typed command fields share one admission path.
     pub(super) async fn plan(
@@ -557,6 +568,16 @@ impl TradeService {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn exposure_count_never_guesses_flat_on_malformed_size() {
+        assert_eq!(
+            visible_nonzero_position_count(["0", "0.00", "0.01", "-2"]).unwrap(),
+            2
+        );
+        assert!(visible_nonzero_position_count(["", "0"]).is_err());
+        assert!(visible_nonzero_position_count(["NaN"]).is_err());
+    }
+
     use super::*;
 
     #[test]
