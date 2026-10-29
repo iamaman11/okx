@@ -10,6 +10,7 @@ const DETAIL_MAX: usize = 128;
 const PHASE_MAX: usize = 10;
 const SOURCE_PHASE_MAX: usize = 2;
 const ERROR_CODE_MAX: usize = 64;
+const STATEMENT_MAX: usize = 32;
 const ACCOUNT_TRACE_BUDGET_BYTES: usize = 8 * 1024 * 1024;
 
 // The incarnation is scoped to one process start; sequence IDs reset only on restart.
@@ -45,7 +46,8 @@ fn worst_case_allocated_bytes() -> usize {
     let cycle = std::mem::size_of::<Cycle>()
         + PHASE_MAX * std::mem::size_of::<Phase>()
         + SOURCE_PHASE_MAX * std::mem::size_of::<Phase>()
-        + ERROR_CODE_MAX;
+        + ERROR_CODE_MAX
+        + STATEMENT_MAX * std::mem::size_of::<SqlStatement>();
     SUMMARY_MAX * (std::mem::size_of::<Brief>() + ERROR_CODE_MAX) + DETAIL_MAX * cycle + cycle
 }
 
@@ -63,6 +65,18 @@ pub(crate) struct Transaction {
     pub commit_outcome: &'static str,
 }
 #[derive(Clone, Debug, Serialize)]
+pub(crate) struct SqlStatement {
+    pub statement_id: &'static str,
+    pub count: u32,
+    pub elapsed_us: u64,
+    pub max_us: u64,
+    pub rows: u64,
+    pub vm_steps: u64,
+    pub fullscan_steps: u64,
+    pub sorts: u64,
+    pub failures: u32,
+}
+#[derive(Clone, Debug, Serialize)]
 pub(crate) struct Cycle {
     pub id: u64,
     pub started_ms: i64,
@@ -75,6 +89,7 @@ pub(crate) struct Cycle {
     pub owner_ms: Option<u64>,
     pub phases: Vec<Phase>,
     pub source_phases: Vec<Phase>,
+    pub sql_details: Vec<SqlStatement>,
     pub details_truncated: bool,
     pub transaction: Option<Transaction>,
 }
@@ -165,6 +180,7 @@ impl FinanceTrace {
                 owner_ms: None,
                 phases: Vec::with_capacity(PHASE_MAX),
                 source_phases: Vec::with_capacity(SOURCE_PHASE_MAX),
+                sql_details: Vec::new(),
                 details_truncated: false,
                 transaction: None,
             });
@@ -214,6 +230,42 @@ impl FinanceTrace {
             }
         });
     }
+    /// Aggregate fixed statement IDs only; never store SQL text or parameters.
+    pub fn statement_finished(&self, id: u64, stat: okx_execution::AccountSqlStatementStat) {
+        self.state(|s| {
+            if let Some(c) = s.active.as_mut().filter(|c| c.id == id) {
+                if let Some(v) = c
+                    .sql_details
+                    .iter_mut()
+                    .find(|v| v.statement_id == stat.statement_id)
+                {
+                    v.count = v.count.saturating_add(1);
+                    v.elapsed_us = v.elapsed_us.saturating_add(stat.elapsed_us);
+                    v.max_us = v.max_us.max(stat.elapsed_us);
+                    v.rows = v.rows.saturating_add(stat.rows);
+                    v.vm_steps = v.vm_steps.saturating_add(stat.vm_steps);
+                    v.fullscan_steps = v.fullscan_steps.saturating_add(stat.fullscan_steps);
+                    v.sorts = v.sorts.saturating_add(stat.sorts);
+                    v.failures = v.failures.saturating_add(u32::from(!stat.succeeded));
+                } else if c.sql_details.len() < STATEMENT_MAX {
+                    c.sql_details.push(SqlStatement {
+                        statement_id: stat.statement_id,
+                        count: 1,
+                        elapsed_us: stat.elapsed_us,
+                        max_us: stat.elapsed_us,
+                        rows: stat.rows,
+                        vm_steps: stat.vm_steps,
+                        fullscan_steps: stat.fullscan_steps,
+                        sorts: stat.sorts,
+                        failures: u32::from(!stat.succeeded),
+                    });
+                } else {
+                    c.details_truncated = true;
+                }
+            }
+        });
+    }
+
     /// The commit observation is published without joining another SQL job.
     pub fn transaction_finished(
         &self,
