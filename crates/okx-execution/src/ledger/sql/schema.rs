@@ -160,7 +160,7 @@ impl AccountStore {
             return Err(StoreError::Invalid("STORAGE_RECOVERY_INCOMPLETE"));
         }
         let lease = Self::writer_lease(path.as_ref())?;
-        let c = Connection::open_with_flags(path.as_ref(), OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+        let mut c = Connection::open_with_flags(path.as_ref(), OpenFlags::SQLITE_OPEN_READ_WRITE)?;
         Self::configure(&c)?;
         let version: i64 = c.pragma_query_value(None, "user_version", |r| r.get(0))?;
         let journal: String = c.pragma_query_value(None, "journal_mode", |r| r.get(0))?;
@@ -174,6 +174,17 @@ impl AccountStore {
         // Existing v2 databases need the same derived lookup as clean T0 databases.
         // This is an idempotent index only: no financial facts or schema version change.
         c.execute_batch("CREATE INDEX IF NOT EXISTS idx_nav_scope_version_time ON nav_points(scope_id,source_version,time)")?;
+        // Existing v2 ledger: establish an immutable-event provenance fence
+        // once on open, never during the two-second NAV hot path. An invalid
+        // old economic row leaves strategy valuation NOT_PROVEN, but must not
+        // prevent account inspection, reconciliation or reducing risk.
+        if let Err(error) = Self::audit_existing_finance_provenance(&mut c) {
+            if matches!(error, StoreError::Invalid(_)) {
+                eprintln!("ACCOUNT_FINANCE_PROVENANCE_V1 outcome=unverified");
+            } else {
+                return Err(error);
+            }
+        }
         Ok(Self {
             connection: c,
             path: path.as_ref().into(),

@@ -4890,7 +4890,7 @@ fn p02_valuation_requires_converged_sources_even_with_valid_principal() {
         Err(StoreError::Invalid("STRATEGY_NAV_ACCOUNT_SOURCE_MISMATCH"))
     ));
     let witness = p02_valuation_witness(&s, 4, "account-witness");
-    s.ingest_page(&IngestPage {
+    assert!(matches!(s.ingest_page(&IngestPage {
         finance: vec![FinanceEntry {
             entry_id: "forged-fee".into(),
             economic_event_key: "fake-fee".into(),
@@ -4904,14 +4904,9 @@ fn p02_valuation_requires_converged_sources_even_with_valid_principal() {
             reverses_entry_id: None,
         }],
         ..Default::default()
-    })
-    .unwrap();
-    assert!(matches!(
-        s.reconcile_strategy_valuation(&witness),
-        Err(StoreError::Invalid(
-            "STRATEGY_NAV_ECONOMIC_SOURCE_UNVERIFIED"
-        ))
-    ));
+    }), Err(StoreError::Invalid("STRATEGY_NAV_ECONOMIC_SOURCE_UNVERIFIED"))));
+    // Rejected before entry/totals/cursor commit; the prior valuation is intact.
+    assert!(s.reconcile_strategy_valuation(&witness).is_ok());
     s.ingest_page(&IngestPage {
         cursor: Some(SourceCursor {
             source: "strategy_valuation".into(),
@@ -4995,7 +4990,7 @@ fn p02_valuation_rejects_missing_mark_and_uses_contract_mechanics() {
         .insert("USDT".into(), Decimal::ONE);
     evidence.venue_positions[0].signed_contracts = Decimal::ONE;
     // Existing fill identity does not permit inventing a different fee.
-    s.ingest_page(&IngestPage {
+    assert!(matches!(s.ingest_page(&IngestPage {
         finance: vec![FinanceEntry {
             entry_id: "fee-mismatch".into(),
             economic_event_key: "fill:BTC:valuation-fill:o:valuation-fill".into(),
@@ -5009,12 +5004,97 @@ fn p02_valuation_rejects_missing_mark_and_uses_contract_mechanics() {
             reverses_entry_id: None,
         }],
         ..Default::default()
-    })
-    .unwrap();
-    assert!(matches!(
-        s.reconcile_strategy_valuation(&evidence),
-        Err(StoreError::Invalid("STRATEGY_NAV_FEE_SOURCE_MISMATCH"))
-    ));
+    }), Err(StoreError::Invalid("STRATEGY_NAV_FEE_SOURCE_MISMATCH"))));
+    assert!(s.reconcile_strategy_valuation(&evidence).is_ok());
+}
+
+#[test]
+fn f1_current_strategy_valuation_uses_verified_totals_after_large_history_and_restart() {
+    let mut s = store();
+    let strategy = StrategyInstance {
+        instance_id: "alpha".into(),
+        definition_id: "fixture".into(),
+        definition_version: "1".into(),
+        parameters: "{}".into(),
+        enabled: false,
+        policy_revision: 1,
+        budget: Decimal::from(10),
+        last_decision_key: None,
+    };
+    s.mutate_instance("f1-create", "f1-create", "create", &strategy, None, 2)
+        .unwrap();
+    s.commit_authorized_capital_assignment(&AuthorizedCapitalAssignment {
+        account_key: s.meta().account_key.clone(),
+        installation_id: s.meta().installation_id.clone(),
+        nav_source_ref: s.meta().opening_source.clone(),
+        operation_id: "f1-capital".into(),
+        request_hash: "f1-capital".into(),
+        instance_id: "alpha".into(),
+        delta_usd: Decimal::from(20),
+        authority_revision: 1,
+        authority_receipt: "governance".into(),
+        time: 4,
+    }).unwrap();
+    let mut page = IngestPage {
+        bills: vec![Bill {
+            bill_id: "f1-bill".into(),
+            kind: "FEE".into(),
+            time: 7,
+            amount: Decimal::NEGATIVE_ONE,
+            currency: "USDT".into(),
+            economic_event_key: "bill:f1-bill".into(),
+        }],
+        finance: vec![FinanceEntry {
+            entry_id: "f1-attributed-fee".into(),
+            economic_event_key: "bill:f1-bill".into(),
+            component: "FEE".into(),
+            allocation_leg: "account".into(),
+            amount: Decimal::NEGATIVE_ONE,
+            currency: "USDT".into(),
+            instance_id: Some("alpha".into()),
+            source_ref: "bill:f1-bill".into(),
+            time: 7,
+            reverses_entry_id: None,
+        }],
+        ..Default::default()
+    };
+    // The large immutable history is unrelated to the one active strategy.
+    // NAV must depend on current projections, not traverse these rows.
+    for n in 0..2000 {
+        let mut e = fee(&format!("f1-unallocated-{n}"), "unattributed");
+        e.economic_event_key = format!("unattributed-event:{n}");
+        e.instance_id = None;
+        page.finance.push(e);
+    }
+    s.ingest_page(&page).unwrap();
+    p02_completed_cursors(&mut s, 10);
+    s.ingest_page(&IngestPage {
+        nav: vec![NavPoint {
+            scope_id: "account".into(),
+            time: 10,
+            source_version: "f1-live".into(),
+            equity: Decimal::from(100),
+            pnl: Decimal::ZERO,
+            flows: Decimal::ZERO,
+            currency: "USD".into(),
+            coverage: "COMPLETE".into(),
+            mark_source: "f1-account".into(),
+        }],
+        ..Default::default()
+    }).unwrap();
+    let witness = p02_valuation_witness(&s, 10, "f1-account");
+    let result = s.reconcile_strategy_valuation(&witness).unwrap();
+    assert_eq!(result.strategies[0].realized_usd, Decimal::NEGATIVE_ONE);
+    assert_eq!(result.strategies[0].equity_usd, Decimal::from(19));
+    assert_eq!(result.unattributed_usd, Decimal::from(81));
+    // The provenance receipt and totals survive process replacement.
+    let path = s.path.clone();
+    let meta = s.meta.clone();
+    drop(s);
+    let s = AccountStore::open_existing(path, &meta.account_key, &meta.installation_id).unwrap();
+    assert_eq!(s.reconcile_strategy_valuation(&witness).unwrap(), result);
+    let sealed = s.cursor("finance_provenance", "account").unwrap().unwrap();
+    assert!(sealed.watermark >= 2000);
 }
 
 #[test]
