@@ -966,12 +966,8 @@ fn periodic_backup_uses_readonly_snapshot_and_requires_restoration_reconciliatio
         2,
         "only a complete DB and checksum manifest should remain"
     );
-    let restored = AccountStore::open_existing(
-        &target,
-        &meta.account_key,
-        &meta.installation_id,
-    )
-    .unwrap();
+    let restored =
+        AccountStore::open_existing(&target, &meta.account_key, &meta.installation_id).unwrap();
     assert!(restored.storage_recovery_required().unwrap());
     assert_eq!(restored.meta().account_key, meta.account_key);
     drop(restored);

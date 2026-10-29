@@ -169,8 +169,7 @@ impl AccountStoreHandle {
                             if succeeded { "ok" } else { "error" }
                         );
                     }
-                    if pending_backup.is_none()
-                        && last_backup.elapsed() >= Duration::from_secs(900)
+                    if pending_backup.is_none() && last_backup.elapsed() >= Duration::from_secs(900)
                     {
                         let (path, meta) = store.backup_identity();
                         match std::thread::Builder::new()

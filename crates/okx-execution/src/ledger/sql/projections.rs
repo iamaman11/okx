@@ -587,11 +587,13 @@ impl AccountStore {
         let staged = directory.join(format!("account-{now}.pending"));
         let manifest_path = target.with_extension("manifest.json");
         let staged_manifest = directory.join(format!("account-{now}.manifest-pending"));
-        if target.exists() || staged.exists() || manifest_path.exists() || staged_manifest.exists() {
+        if target.exists() || staged.exists() || manifest_path.exists() || staged_manifest.exists()
+        {
             return Err(StoreError::Invalid("BACKUP_ALREADY_EXISTS"));
         }
         let result = (|| -> StoreResult<()> {
-            let source = Connection::open_with_flags(&source_path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+            let source =
+                Connection::open_with_flags(&source_path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
             source.busy_timeout(Duration::from_millis(250))?;
             let mut destination = Connection::open(&staged)?;
             destination.pragma_update(None, "synchronous", "FULL")?;
@@ -606,7 +608,8 @@ impl AccountStore {
                 [now],
             )?;
             destination.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")?;
-            let integrity: String = destination.query_row("PRAGMA quick_check", [], |r| r.get(0))?;
+            let integrity: String =
+                destination.query_row("PRAGMA quick_check", [], |r| r.get(0))?;
             if integrity != "ok" {
                 return Err(StoreError::Invalid("BACKUP_INTEGRITY_FAILED"));
             }
@@ -650,9 +653,8 @@ impl AccountStore {
                 .map(|e| e.path())
                 .filter(|p| {
                     p.extension().is_some_and(|e| e == "db")
-                        && p.file_name().is_some_and(|n| {
-                            n.to_string_lossy().starts_with("account-")
-                        })
+                        && p.file_name()
+                            .is_some_and(|n| n.to_string_lossy().starts_with("account-"))
                 })
                 .collect::<Vec<_>>();
             backups.sort();
