@@ -1152,7 +1152,7 @@ impl AccountStore {
             if e.amount >= Decimal::ZERO
                 || !matches!(
                     e.component.as_str(),
-                    "FEE" | "REALIZED_PNL" | "FUNDING" | "LIQUIDATION_COST"
+                    "FEE" | "REALIZED_PNL" | "FUNDING" | "INTEREST" | "LIQUIDATION_COST"
                 )
             {
                 continue;

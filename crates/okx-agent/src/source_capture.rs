@@ -46,6 +46,26 @@ fn bill_pnl(sub_type: &str, value: &str) -> StoreResult<Decimal> {
         optional_d(value)
     }
 }
+// OKX bill type 7 is interest. Never infer it from an unrelated cash
+// movement or silently classify an ambiguous interest bill as a fee/PnL.
+fn residual_bill_component(
+    bill_type: &str,
+    pnl: &str,
+    fee: &str,
+) -> StoreResult<Option<&'static str>> {
+    if bill_type == "7" {
+        // Venue absent fields may be encoded as either "" or "0".
+        // Only a *nonzero* separate fee/PnL would double-count interest.
+        if optional_d(pnl)? != Decimal::ZERO || optional_d(fee)? != Decimal::ZERO {
+            return Err(StoreError::Invalid("INTEREST_BILL_AMBIGUOUS"));
+        }
+        Ok(Some("INTEREST"))
+    } else if pnl.is_empty() && fee.is_empty() {
+        Ok(Some("UNATTRIBUTED"))
+    } else {
+        Ok(None)
+    }
+}
 fn ts(s: &str) -> StoreResult<i64> {
     s.parse()
         .map_err(|_| StoreError::Invalid("SOURCE_TIMESTAMP_INVALID"))
@@ -745,6 +765,7 @@ async fn capture_bills(
                     .or(s.by_exchange_order_id(&b.order_id)?);
                 let instance = owner.map(|i| i.plan.strategy_instance);
                 let amount = optional_d(&b.balance_change)?;
+                let residual_component = residual_bill_component(&b.bill_type, &b.pnl, &b.fee)?;
                 page.bills.push(Bill {
                     bill_id: b.bill_id.clone(),
                     kind: format!("{}:{}", b.bill_type, b.bill_sub_type),
@@ -810,11 +831,14 @@ async fn capture_bills(
                         reverses_entry_id: None,
                     });
                 }
-                if !transfer && b.pnl.is_empty() && b.fee.is_empty() && amount != Decimal::ZERO {
+                if !transfer
+                    && amount != Decimal::ZERO
+                    && let Some(component) = residual_component
+                {
                     page.finance.push(FinanceEntry {
                         entry_id: format!("{key}:unattributed"),
                         economic_event_key: key.clone(),
-                        component: "UNATTRIBUTED".into(),
+                        component: component.into(),
                         allocation_leg: "account".into(),
                         amount,
                         currency: b.ccy,
@@ -938,6 +962,31 @@ mod tests {
     fn unknown_currency_and_decimal_do_not_become_zero() {
         assert!(d("NaN").is_err());
         assert!(ts("unknown").is_err());
+    }
+
+    #[test]
+    fn interest_bill_has_one_explicit_component_and_ambiguous_sources_fail_closed() {
+        assert_eq!(
+            residual_bill_component("7", "", "").unwrap(),
+            Some("INTEREST")
+        );
+        assert_eq!(
+            residual_bill_component("7", "0", "0").unwrap(),
+            Some("INTEREST")
+        );
+        assert!(matches!(
+            residual_bill_component("7", "", "-0.01"),
+            Err(StoreError::Invalid("INTEREST_BILL_AMBIGUOUS"))
+        ));
+        assert!(matches!(
+            residual_bill_component("7", "0.01", ""),
+            Err(StoreError::Invalid("INTEREST_BILL_AMBIGUOUS"))
+        ));
+        assert_eq!(
+            residual_bill_component("1", "", "").unwrap(),
+            Some("UNATTRIBUTED")
+        );
+        assert_eq!(residual_bill_component("8", "0", "0").unwrap(), None);
     }
 
     #[test]
