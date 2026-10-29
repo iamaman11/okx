@@ -147,6 +147,8 @@ impl AccountStore {
             meta,
             _lease: lease,
             maintenance_error: None,
+            cash_flow_totals_cache: std::cell::RefCell::new(None),
+            latest_capital_assignment_time: std::cell::RefCell::new(None),
         })
     }
     pub fn open_existing(
@@ -178,6 +180,8 @@ impl AccountStore {
             meta,
             _lease: lease,
             maintenance_error: None,
+            cash_flow_totals_cache: std::cell::RefCell::new(None),
+            latest_capital_assignment_time: std::cell::RefCell::new(None),
         })
     }
     pub(super) fn writer_lease(path: &Path) -> StoreResult<std::fs::File> {

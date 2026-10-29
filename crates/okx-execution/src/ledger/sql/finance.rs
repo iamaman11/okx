@@ -1,4 +1,20 @@
 use super::super::*;
+
+/// Account-owned, monotonic source cursor update shared by ingestion and NAV.
+fn upsert_source_cursor(tx: &rusqlite::Transaction<'_>, c: &SourceCursor) -> StoreResult<()> {
+    let prior: Option<(i64,i64)> = tx.query_row(
+        "SELECT generation,watermark FROM source_cursors WHERE source=?1 AND stream_partition=?2",
+        params![c.source,c.stream_partition], |r| Ok((r.get(0)?,r.get(1)?))
+    ).optional()?;
+    if prior.is_some_and(|(g, w)| c.generation < g || (c.generation == g && c.watermark < w)) {
+        return Err(StoreError::Invalid("SOURCE_CURSOR_REGRESSION"));
+    }
+    tx.execute(
+        "INSERT INTO source_cursors VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(source,stream_partition) DO UPDATE SET cursor=excluded.cursor,watermark=excluded.watermark,generation=excluded.generation,coverage_gaps=excluded.coverage_gaps",
+        params![c.source,c.stream_partition,c.cursor,c.watermark,c.generation,c.coverage_gaps]
+    )?;
+    Ok(())
+}
 impl AccountStore {
     /// Account-backed principal, never PnL or independently priced strategy NAV.
     /// All returned balances are exact USD decimals within this AccountStore.
@@ -25,11 +41,20 @@ impl AccountStore {
         // balance. A later allocation must never appear as historical money.
         // Use the fast projection at the latest point; only historical reads
         // replay the already-immutable, source-backed assignment legs.
-        let latest_assignment: Option<i64> = self.connection.query_row(
-            "SELECT MAX(time) FROM finance_entries WHERE component='INTERNAL_CAPITAL_USD'",
-            [],
-            |r| r.get(0),
-        )?;
+        // Immutable finance history belongs on disk, but its latest
+        // assignment timestamp need not be scanned at every NAV cycle.
+        let cached_assignment = *self.latest_capital_assignment_time.borrow();
+        let latest_assignment = if let Some(cached) = cached_assignment {
+            cached
+        } else {
+            let loaded: Option<i64> = self.connection.query_row(
+                "SELECT MAX(time) FROM finance_entries WHERE component='INTERNAL_CAPITAL_USD'",
+                [],
+                |r| r.get(0),
+            )?;
+            *self.latest_capital_assignment_time.borrow_mut() = Some(loaded);
+            loaded
+        };
         let historical = latest_assignment.is_some_and(|last| now < last);
         let sql = if historical {
             "SELECT instance_id,amount FROM finance_entries
@@ -448,11 +473,32 @@ impl AccountStore {
         &mut self,
         evidence: &StrategyValuationEvidence,
     ) -> StoreResult<StrategyValuationReconciliation> {
+        self.commit_reconciled_strategy_nav_with_optional_cursor(evidence, None)
+    }
+
+    /// NAV and COMPLETE source coverage become visible atomically.
+    pub fn commit_reconciled_strategy_nav_with_cursor(
+        &mut self,
+        evidence: &StrategyValuationEvidence,
+        cursor: &SourceCursor,
+    ) -> StoreResult<StrategyValuationReconciliation> {
+        self.commit_reconciled_strategy_nav_with_optional_cursor(evidence, Some(cursor))
+    }
+
+    fn commit_reconciled_strategy_nav_with_optional_cursor(
+        &mut self,
+        evidence: &StrategyValuationEvidence,
+        cursor: Option<&SourceCursor>,
+    ) -> StoreResult<StrategyValuationReconciliation> {
         let summary = self.reconcile_strategy_valuation(evidence)?;
-        if summary.strategies.is_empty() {
+        if summary.strategies.is_empty() && cursor.is_none() {
             return Ok(summary);
         }
-        let revision = self.strategy_valuation_revision_as_of(evidence.as_of)?;
+        let revision = if summary.strategies.is_empty() {
+            String::new()
+        } else {
+            self.strategy_valuation_revision_as_of(evidence.as_of)?
+        };
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -515,6 +561,9 @@ impl AccountStore {
             )?;
             // No strategy high-water or risk admission from this read model:
             // strategy drawdown and authorization need independent acceptance.
+        }
+        if let Some(cursor) = cursor {
+            upsert_source_cursor(&tx, cursor)?;
         }
         tx.commit()?;
         Ok(summary)
@@ -642,6 +691,9 @@ impl AccountStore {
             ],
         )?;
         tx.commit()?;
+        // Rebuild this derived timestamp after a committed allocation,
+        // including one whose event timestamp predates a prior allocation.
+        *self.latest_capital_assignment_time.borrow_mut() = None;
         self.operation(&request.operation_id)?
             .ok_or(StoreError::Invalid("CAPITAL_ASSIGNMENT_RECEIPT_MISSING"))
     }
@@ -1278,6 +1330,10 @@ impl AccountStore {
     pub fn cash_flow_totals(
         &self,
     ) -> StoreResult<std::collections::BTreeMap<(String, String), Decimal>> {
+        let cached_totals = self.cash_flow_totals_cache.borrow().clone();
+        if let Some(cached) = cached_totals {
+            return Ok(cached);
+        }
         let mut s = self
             .connection
             .prepare("SELECT currency,kind,amount FROM cash_flows ORDER BY time,event_id")?;
@@ -1293,6 +1349,7 @@ impl AccountStore {
                     .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))?,
             );
         }
+        *self.cash_flow_totals_cache.borrow_mut() = Some(totals.clone());
         Ok(totals)
     }
     pub fn project_pending_fills(&mut self, limit: usize) -> StoreResult<usize> {
@@ -1596,11 +1653,12 @@ impl AccountStore {
                 tx.execute("INSERT INTO funding_projection_pending VALUES(?1,?2,?3,?4,?5) ON CONFLICT(event_id) DO NOTHING",params![event.event_id,event.instrument_id,event.time,exact(event.amount),event.currency])?;
             }
         }
+        let mut cash_flows_changed = false;
         for f in &page.cash_flows {
             if f.currency.is_empty() || f.source_ref.is_empty() {
                 return Err(StoreError::Invalid("INVALID_CASH_FLOW"));
             }
-            tx.execute(
+            cash_flows_changed |= tx.execute(
                 "INSERT INTO cash_flows VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(event_id) DO NOTHING",
                 params![
                     f.event_id,
@@ -1610,7 +1668,7 @@ impl AccountStore {
                     f.time,
                     f.source_ref
                 ],
-            )?;
+            )? > 0;
             let old: (String, String, String, i64, String) = tx.query_row(
                 "SELECT kind,currency,amount,time,source_ref FROM cash_flows WHERE event_id=?1",
                 [&f.event_id],
@@ -1843,13 +1901,7 @@ impl AccountStore {
             }
         }
         if let Some(c) = &page.cursor {
-            let prior:Option<(i64,i64)>=tx.query_row("SELECT generation,watermark FROM source_cursors WHERE source=?1 AND stream_partition=?2",params![c.source,c.stream_partition],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
-            if prior
-                .is_some_and(|(g, w)| c.generation < g || (c.generation == g && c.watermark < w))
-            {
-                return Err(StoreError::Invalid("SOURCE_CURSOR_REGRESSION"));
-            }
-            tx.execute("INSERT INTO source_cursors VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(source,stream_partition) DO UPDATE SET cursor=excluded.cursor,watermark=excluded.watermark,generation=excluded.generation,coverage_gaps=excluded.coverage_gaps",params![c.source,c.stream_partition,c.cursor,c.watermark,c.generation,c.coverage_gaps])?;
+            upsert_source_cursor(&tx, c)?;
         }
         for id in &page.projected_fill_ids {
             tx.execute("DELETE FROM fill_projection_pending WHERE fill_id=?1", [id])?;
@@ -1862,6 +1914,11 @@ impl AccountStore {
             tx.execute("INSERT INTO operation_receipts VALUES(?1,'FUNDING_ATTRIBUTED',?2,'COMMITTED',?3) ON CONFLICT(operation_id) DO NOTHING",params![format!("funding:{id}"),id,wall_time_ms()])?;
         }
         tx.commit()?;
+        // Only a newly committed fact invalidates the memory view; pure
+        // immutable-source replay leaves the existing cache untouched.
+        if cash_flows_changed {
+            *self.cash_flow_totals_cache.borrow_mut() = None;
+        }
         Ok(())
     }
     pub fn active_lots(&self, instrument: &str) -> StoreResult<Vec<StoredLot>> {

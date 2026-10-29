@@ -427,19 +427,32 @@ pub async fn capture_account_sources_measured(
             // One AccountStore, one canonical NAV owner. Strategy failures
             // are recorded in the existing coverage cursor; manual trading
             // does not inherit a missing standalone strategy NAV.
+            let strategy_cursor = SourceCursor {
+                source: "strategy_valuation".into(),
+                stream_partition: "account".into(),
+                cursor: String::new(),
+                watermark: now,
+                generation,
+                coverage_gaps: String::new(),
+            };
+            let mut strategy_cursor_committed = false;
             let strategy_result = if !complete {
                 Err(StoreError::Invalid("FINANCIAL_BACKFILL_PENDING"))
             } else {
                 match s.capital_state(now) {
                     Ok(capital) if capital.strategy_principal_usd.is_empty() => Ok(()),
                     Ok(_) => valuation_positions.and_then(|venue_positions| {
-                        s.commit_reconciled_strategy_nav(&StrategyValuationEvidence {
-                            account_key: s.meta().account_key.clone(),
-                            account_nav_source: source.clone(),
-                            as_of: now,
-                            conversion: fx.clone(),
-                            venue_positions,
-                        })?;
+                        s.commit_reconciled_strategy_nav_with_cursor(
+                            &StrategyValuationEvidence {
+                                account_key: s.meta().account_key.clone(),
+                                account_nav_source: source.clone(),
+                                as_of: now,
+                                conversion: fx.clone(),
+                                venue_positions,
+                            },
+                            &strategy_cursor,
+                        )?;
+                        strategy_cursor_committed = true;
                         Ok(())
                     }),
                     Err(e) => Err(e),
@@ -450,17 +463,17 @@ pub async fn capture_account_sources_measured(
                 Err(StoreError::Invalid(reason)) => reason.into(),
                 Err(e) => return Err(e),
             };
-            s.ingest_page(&IngestPage {
-                cursor: Some(SourceCursor {
-                    source: "strategy_valuation".into(),
-                    stream_partition: "account".into(),
-                    cursor: String::new(),
-                    watermark: now,
-                    generation,
-                    coverage_gaps: gap,
-                }),
-                ..Default::default()
-            })?;
+            // On success strategy NAV and its cursor are already atomic.
+            // On incomplete evidence record only the actual coverage gap.
+            if !strategy_cursor_committed {
+                s.ingest_page(&IngestPage {
+                    cursor: Some(SourceCursor {
+                        coverage_gaps: gap,
+                        ..strategy_cursor
+                    }),
+                    ..Default::default()
+                })?;
+            }
             Ok(())
         })
         .await?;

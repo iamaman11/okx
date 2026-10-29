@@ -3760,8 +3760,72 @@ fn p02_manual_and_account_nav_do_not_read_strategy_revision_sources() {
 }
 
 #[test]
+fn p02_cash_flow_totals_cache_is_commit_scoped_and_rebuilt_after_reopen() {
+    let mut s = store();
+    assert!(s.cash_flow_totals_cache.borrow().is_none());
+    let opening = s.cash_flow_totals().unwrap();
+    assert_eq!(
+        opening[&("USDT".into(), "OPENING".into())],
+        Decimal::from(100)
+    );
+    assert_eq!(s.cash_flow_totals().unwrap(), opening);
+    assert!(s.cash_flow_totals_cache.borrow().is_some());
+    let deposit = CashFlow {
+        event_id: "cash-cache-deposit".into(),
+        kind: "DEPOSIT".into(),
+        currency: "USDT".into(),
+        amount: Decimal::from(7),
+        time: 3,
+        source_ref: "verified-cash".into(),
+    };
+    s.ingest_page(&IngestPage {
+        cash_flows: vec![deposit.clone()],
+        ..Default::default()
+    })
+    .unwrap();
+    assert!(s.cash_flow_totals_cache.borrow().is_none());
+    let with_deposit = s.cash_flow_totals().unwrap();
+    assert_eq!(
+        with_deposit[&("USDT".into(), "DEPOSIT".into())],
+        Decimal::from(7)
+    );
+    s.ingest_page(&IngestPage {
+        cash_flows: vec![deposit.clone()],
+        ..Default::default()
+    })
+    .unwrap();
+    assert!(
+        s.cash_flow_totals_cache.borrow().is_some(),
+        "idempotent replay must not invalidate"
+    );
+    assert_eq!(s.cash_flow_totals().unwrap(), with_deposit);
+    let conflicting = CashFlow {
+        amount: Decimal::from(9),
+        ..deposit
+    };
+    assert!(matches!(
+        s.ingest_page(&IngestPage {
+            cash_flows: vec![conflicting],
+            ..Default::default()
+        }),
+        Err(StoreError::Invalid("IMMUTABLE_CASH_FLOW_CONFLICT"))
+    ));
+    assert_eq!(s.cash_flow_totals().unwrap(), with_deposit);
+    let path = s.path.clone();
+    let meta = s.meta.clone();
+    drop(s);
+    let reopened =
+        AccountStore::open_existing(path, &meta.account_key, &meta.installation_id).unwrap();
+    assert!(reopened.cash_flow_totals_cache.borrow().is_none());
+    assert_eq!(reopened.cash_flow_totals().unwrap(), with_deposit);
+}
+
+#[test]
 fn p02_account_backed_internal_capital_is_conserved_and_not_strategy_nav() {
     let mut s = store();
+    assert!(s.latest_capital_assignment_time.borrow().is_none());
+    s.capital_state(1).unwrap();
+    assert_eq!(*s.latest_capital_assignment_time.borrow(), Some(None));
     owned_fill(&mut s, "a", "p02-a", 100, "long", 3);
     owned_fill(&mut s, "b", "p02-b", 100, "long", 4);
     let assignment =
@@ -3780,6 +3844,7 @@ fn p02_account_backed_internal_capital_is_conserved_and_not_strategy_nav() {
     let a = assignment("assign-a", "a", 30, 4);
     let b = assignment("assign-b", "b", 40, 4);
     let first = s.commit_authorized_capital_assignment(&a).unwrap();
+    assert!(s.latest_capital_assignment_time.borrow().is_none());
     assert_eq!(
         s.commit_authorized_capital_assignment(&a)
             .unwrap()
@@ -3792,6 +3857,7 @@ fn p02_account_backed_internal_capital_is_conserved_and_not_strategy_nav() {
     ));
     s.commit_authorized_capital_assignment(&b).unwrap();
     let state = s.capital_state(4).unwrap();
+    assert_eq!(*s.latest_capital_assignment_time.borrow(), Some(Some(4)));
     assert_eq!(state.account_nav_usd, Decimal::from(100));
     assert_eq!(state.assigned_usd, Decimal::from(70));
     assert_eq!(state.unattributed_residual_usd, Decimal::from(30));
@@ -3849,7 +3915,12 @@ fn p02_account_backed_internal_capital_is_conserved_and_not_strategy_nav() {
     drop(s);
     let mut restored =
         AccountStore::open_existing(p, &meta.account_key, &meta.installation_id).unwrap();
+    assert!(restored.latest_capital_assignment_time.borrow().is_none());
     let restored_state = restored.capital_state(4).unwrap();
+    assert_eq!(
+        *restored.latest_capital_assignment_time.borrow(),
+        Some(Some(4))
+    );
     assert_eq!(restored_state.assigned_usd, Decimal::from(60));
     assert_eq!(restored_state.unattributed_residual_usd, Decimal::from(40));
     assert_eq!(
@@ -4200,8 +4271,65 @@ fn p02_valuation_requires_converged_sources_even_with_valid_principal() {
         valid.account_nav_usd,
         valid.attributed_usd + valid.unattributed_usd
     );
-    let published = s.commit_reconciled_strategy_nav(&witness).unwrap();
+    // Force a cursor failure after strategy NAV rows were tentatively written.
+    // Neither NAV nor receipt may escape the transaction on rollback.
+    let previous_cursor = SourceCursor {
+        source: "strategy_valuation".into(),
+        stream_partition: "account".into(),
+        cursor: String::new(),
+        watermark: 4,
+        generation: 1,
+        coverage_gaps: "BEFORE_VALUATION".into(),
+    };
+    s.ingest_page(&IngestPage {
+        cursor: Some(previous_cursor.clone()),
+        ..Default::default()
+    })
+    .unwrap();
+    let rejected = SourceCursor {
+        generation: 0,
+        ..previous_cursor.clone()
+    };
+    assert!(matches!(
+        s.commit_reconciled_strategy_nav_with_cursor(&witness, &rejected),
+        Err(StoreError::Invalid("SOURCE_CURSOR_REGRESSION"))
+    ));
+    let strategy_points: i64 = s
+        .connection
+        .query_row(
+            "SELECT COUNT(*) FROM nav_points WHERE scope_id='strategy:alpha'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(strategy_points, 0);
+    assert_eq!(
+        s.cursor("strategy_valuation", "account")
+            .unwrap()
+            .unwrap()
+            .coverage_gaps,
+        "BEFORE_VALUATION"
+    );
+    let accepted = SourceCursor {
+        coverage_gaps: String::new(),
+        ..previous_cursor
+    };
+    let published = s
+        .commit_reconciled_strategy_nav_with_cursor(&witness, &accepted)
+        .unwrap();
     assert_eq!(published, valid);
+    assert_eq!(
+        s.cursor("strategy_valuation", "account")
+            .unwrap()
+            .unwrap()
+            .coverage_gaps,
+        ""
+    );
+    assert_eq!(
+        s.commit_reconciled_strategy_nav_with_cursor(&witness, &accepted)
+            .unwrap(),
+        valid
+    );
     assert_eq!(s.commit_reconciled_strategy_nav(&witness).unwrap(), valid);
     let nav = s
         .nav_summary(1, 4, &["alpha".into()], &["USD".into()])
