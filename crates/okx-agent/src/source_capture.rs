@@ -757,8 +757,7 @@ async fn capture_bills(
                     .or(s.by_exchange_order_id(&b.order_id)?);
                 let instance = owner.map(|i| i.plan.strategy_instance);
                 let amount = optional_d(&b.balance_change)?;
-                let residual_component =
-                    residual_bill_component(&b.bill_type, &b.pnl, &b.fee)?;
+                let residual_component = residual_bill_component(&b.bill_type, &b.pnl, &b.fee)?;
                 page.bills.push(Bill {
                     bill_id: b.bill_id.clone(),
                     kind: format!("{}:{}", b.bill_type, b.bill_sub_type),

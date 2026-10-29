@@ -807,9 +807,7 @@ fn p02_m2_interest_fee_funding_charge_once_with_fx_and_never_refill_on_profit() 
     let fx = UsdConversionEvidence {
         observed_at: 4,
         source_digest: "attested-usdt-usd".into(),
-        usd_per_currency: std::collections::BTreeMap::from([
-            ("USDT".into(), Decimal::from(2))
-        ]),
+        usd_per_currency: std::collections::BTreeMap::from([("USDT".into(), Decimal::from(2))]),
     };
     s.ingest_page_with_usd(&page, &fx).unwrap();
     s.ingest_page_with_usd(&page, &fx).unwrap();
@@ -828,8 +826,17 @@ fn p02_m2_interest_fee_funding_charge_once_with_fx_and_never_refill_on_profit() 
         Some(Decimal::new(-4, 1))
     );
     let events = s.finance_history(1, 10, 0, "", 50).unwrap();
-    assert_eq!(events.iter().filter(|e| e.component == "INTEREST").count(), 1);
-    assert_eq!(events.iter().filter(|e| e.component == "CAMPAIGN_LOSS_USD").count(), 3);
+    assert_eq!(
+        events.iter().filter(|e| e.component == "INTEREST").count(),
+        1
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| e.component == "CAMPAIGN_LOSS_USD")
+            .count(),
+        3
+    );
 
     let path = s.path.clone();
     let meta = s.meta.clone();
@@ -844,10 +851,15 @@ fn p02_m2_interest_fee_funding_charge_once_with_fx_and_never_refill_on_profit() 
     rebate.economic_event_key = "bill:interest-rebate".into();
     rebate.amount = Decimal::new(4, 1);
     rebate.source_ref = "bill:interest-rebate".into();
-    recovered.ingest_page_with_usd(&IngestPage {
-        finance: vec![rebate],
-        ..Default::default()
-    }, &fx).unwrap();
+    recovered
+        .ingest_page_with_usd(
+            &IngestPage {
+                finance: vec![rebate],
+                ..Default::default()
+            },
+            &fx,
+        )
+        .unwrap();
     assert_eq!(recovered.policy().unwrap().4, Decimal::new(15, 1));
 }
 
@@ -887,9 +899,7 @@ fn p02_m2_interest_without_verified_fx_rolls_back_and_preserves_cursor() {
     let verified_fx = UsdConversionEvidence {
         observed_at: 5,
         source_digest: "verified-interest-rate".into(),
-        usd_per_currency: std::collections::BTreeMap::from([
-            ("USDT".into(), Decimal::from(2))
-        ]),
+        usd_per_currency: std::collections::BTreeMap::from([("USDT".into(), Decimal::from(2))]),
     };
     s.ingest_page_with_usd(&page, &verified_fx).unwrap();
     s.ingest_page_with_usd(&page, &verified_fx).unwrap();
