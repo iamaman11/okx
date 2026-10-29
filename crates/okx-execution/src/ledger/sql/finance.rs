@@ -41,11 +41,19 @@ impl AccountStore {
         // balance. A later allocation must never appear as historical money.
         // Use the fast projection at the latest point; only historical reads
         // replay the already-immutable, source-backed assignment legs.
-        let latest_assignment: Option<i64> = self.connection.query_row(
-            "SELECT MAX(time) FROM finance_entries WHERE component='INTERNAL_CAPITAL_USD'",
-            [],
-            |r| r.get(0),
-        )?;
+        // Immutable finance history belongs on disk, but its latest
+        // assignment timestamp need not be scanned at every NAV cycle.
+        let latest_assignment = if let Some(cached) = *self.latest_capital_assignment_time.borrow() {
+            cached
+        } else {
+            let loaded: Option<i64> = self.connection.query_row(
+                "SELECT MAX(time) FROM finance_entries WHERE component='INTERNAL_CAPITAL_USD'",
+                [],
+                |r| r.get(0),
+            )?;
+            *self.latest_capital_assignment_time.borrow_mut() = Some(loaded);
+            loaded
+        };
         let historical = latest_assignment.is_some_and(|last| now < last);
         let sql = if historical {
             "SELECT instance_id,amount FROM finance_entries
@@ -682,6 +690,9 @@ impl AccountStore {
             ],
         )?;
         tx.commit()?;
+        // Rebuild this derived timestamp after a committed allocation,
+        // including one whose event timestamp predates a prior allocation.
+        *self.latest_capital_assignment_time.borrow_mut() = None;
         self.operation(&request.operation_id)?
             .ok_or(StoreError::Invalid("CAPITAL_ASSIGNMENT_RECEIPT_MISSING"))
     }
@@ -1318,6 +1329,9 @@ impl AccountStore {
     pub fn cash_flow_totals(
         &self,
     ) -> StoreResult<std::collections::BTreeMap<(String, String), Decimal>> {
+        if let Some(cached) = self.cash_flow_totals_cache.borrow().as_ref() {
+            return Ok(cached.clone());
+        }
         let mut s = self
             .connection
             .prepare("SELECT currency,kind,amount FROM cash_flows ORDER BY time,event_id")?;
@@ -1333,6 +1347,7 @@ impl AccountStore {
                     .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))?,
             );
         }
+        *self.cash_flow_totals_cache.borrow_mut() = Some(totals.clone());
         Ok(totals)
     }
     pub fn project_pending_fills(&mut self, limit: usize) -> StoreResult<usize> {
@@ -1636,11 +1651,12 @@ impl AccountStore {
                 tx.execute("INSERT INTO funding_projection_pending VALUES(?1,?2,?3,?4,?5) ON CONFLICT(event_id) DO NOTHING",params![event.event_id,event.instrument_id,event.time,exact(event.amount),event.currency])?;
             }
         }
+        let mut cash_flows_changed = false;
         for f in &page.cash_flows {
             if f.currency.is_empty() || f.source_ref.is_empty() {
                 return Err(StoreError::Invalid("INVALID_CASH_FLOW"));
             }
-            tx.execute(
+            cash_flows_changed |= tx.execute(
                 "INSERT INTO cash_flows VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(event_id) DO NOTHING",
                 params![
                     f.event_id,
@@ -1896,6 +1912,11 @@ impl AccountStore {
             tx.execute("INSERT INTO operation_receipts VALUES(?1,'FUNDING_ATTRIBUTED',?2,'COMMITTED',?3) ON CONFLICT(operation_id) DO NOTHING",params![format!("funding:{id}"),id,wall_time_ms()])?;
         }
         tx.commit()?;
+        // Only a newly committed fact invalidates the memory view; pure
+        // immutable-source replay leaves the existing cache untouched.
+        if cash_flows_changed {
+            *self.cash_flow_totals_cache.borrow_mut() = None;
+        }
         Ok(())
     }
     pub fn active_lots(&self, instrument: &str) -> StoreResult<Vec<StoredLot>> {

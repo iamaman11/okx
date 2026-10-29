@@ -445,6 +445,11 @@ pub struct AccountStore {
     meta: AccountMeta,
     _lease: std::fs::File,
     maintenance_error: Option<String>,
+    // Derived memory-only views. SQLite remains the sole durable source;
+    // both are rebuilt after reopen and invalidated only after COMMIT.
+    cash_flow_totals_cache:
+        std::cell::RefCell<Option<std::collections::BTreeMap<(String, String), Decimal>>>,
+    latest_capital_assignment_time: std::cell::RefCell<Option<Option<i64>>>,
 }
 impl AccountStore {
     pub(crate) fn run_before_deadline<T>(
