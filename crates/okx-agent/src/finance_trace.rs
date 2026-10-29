@@ -113,29 +113,28 @@ impl FinanceTrace {
     }
     pub fn phase_started(&self, id: u64, name: &'static str) {
         self.state(|s| {
-            if let Some(c) = s.active.as_mut().filter(|c| c.id == id) {
-                if c.phases.len() < 10 {
-                    c.phases.push(Phase {
-                        name,
-                        elapsed_us: None,
-                        outcome: "in_progress",
-                    });
-                }
+            if let Some(c) = s.active.as_mut().filter(|c| c.id == id)
+                && c.phases.len() < 10
+            {
+                c.phases.push(Phase {
+                    name,
+                    elapsed_us: None,
+                    outcome: "in_progress",
+                });
             }
         });
     }
     pub fn phase_finished(&self, id: u64, name: &'static str, elapsed_us: u64, ok: bool) {
         self.state(|s| {
-            if let Some(c) = s.active.as_mut().filter(|c| c.id == id) {
-                if let Some(p) = c
+            if let Some(c) = s.active.as_mut().filter(|c| c.id == id)
+                && let Some(p) = c
                     .phases
                     .iter_mut()
                     .rev()
                     .find(|p| p.name == name && p.elapsed_us.is_none())
-                {
-                    p.elapsed_us = Some(elapsed_us);
-                    p.outcome = if ok { "ok" } else { "error" };
-                }
+            {
+                p.elapsed_us = Some(elapsed_us);
+                p.outcome = if ok { "ok" } else { "error" };
             }
         });
     }
