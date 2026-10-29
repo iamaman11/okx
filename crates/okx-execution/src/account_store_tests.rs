@@ -1334,6 +1334,28 @@ fn account_store_wal_has_one_checkpoint_owner_after_initialize_and_reopen() {
 }
 
 #[test]
+fn d1_statement_vm_counters_have_fixed_ids_and_valid_nonnegative_counts() {
+    let mut store = store();
+    *store.cash_flow_totals_cache.borrow_mut() = None;
+    let mut cash = None;
+    let flows = store.cash_flow_totals_observed(|stat| cash = Some(stat)).unwrap();
+    assert!(!flows.is_empty());
+    let cash = cash.unwrap();
+    assert_eq!(cash.statement_id, "cash_flow_totals_select");
+    assert!(cash.succeeded);
+    assert!(cash.rows > 0);
+    assert!(cash.vm_steps >= cash.rows);
+
+    let mut projected = None;
+    let count = store.project_pending_fills_observed(100, |stat| projected = Some(stat)).unwrap();
+    let stat = projected.unwrap();
+    assert_eq!(stat.statement_id, "pending_fills_select");
+    assert!(stat.succeeded);
+    assert_eq!(stat.rows, count as u64);
+    assert!(stat.vm_steps > 0);
+}
+
+#[test]
 fn d1_ingest_reports_all_transaction_outcomes_including_pre_commit_errors() {
     let mut s = store();
     let mut success = None;

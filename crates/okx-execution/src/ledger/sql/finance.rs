@@ -1373,32 +1373,63 @@ impl AccountStore {
     pub fn cash_flow_totals(
         &self,
     ) -> StoreResult<std::collections::BTreeMap<(String, String), Decimal>> {
-        let cached_totals = self.cash_flow_totals_cache.borrow().clone();
-        if let Some(cached) = cached_totals {
+        self.cash_flow_totals_observed(|_| {})
+    }
+
+    pub fn cash_flow_totals_observed(
+        &self,
+        observe: impl FnOnce(AccountSqlStatementStat),
+    ) -> StoreResult<std::collections::BTreeMap<(String, String), Decimal>> {
+        if let Some(cached) = self.cash_flow_totals_cache.borrow().clone() {
             return Ok(cached);
         }
-        let mut s = self
+        let mut statement = self
             .connection
             .prepare("SELECT currency,kind,amount FROM cash_flows ORDER BY time,event_id")?;
-        let mut rows = s.query([])?;
-        let mut totals = std::collections::BTreeMap::new();
-        while let Some(r) = rows.next()? {
-            let key = (r.get::<_, String>(0)?, r.get::<_, String>(1)?);
-            let old = *totals.get(&key).unwrap_or(&Decimal::ZERO);
-            let v = decimal(r.get(2)?)?;
-            totals.insert(
-                key,
-                old.checked_add(v)
-                    .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))?,
-            );
-        }
+        let started = std::time::Instant::now();
+        let mut count = 0_u64;
+        let result: StoreResult<std::collections::BTreeMap<(String, String), Decimal>> = (|| {
+            let mut rows = statement.query([])?;
+            let mut totals = std::collections::BTreeMap::new();
+            while let Some(row) = rows.next()? {
+                let key = (row.get::<_, String>(0)?, row.get::<_, String>(1)?);
+                let old = *totals.get(&key).unwrap_or(&Decimal::ZERO);
+                let amount = decimal(row.get(2)?)?;
+                totals.insert(
+                    key,
+                    old.checked_add(amount).ok_or(StoreError::Invalid("MONEY_OVERFLOW"))?,
+                );
+                count += 1;
+            }
+            Ok(totals)
+        })();
+        observe(AccountSqlStatementStat {
+            statement_id: "cash_flow_totals_select",
+            elapsed_us: u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX),
+            rows: count,
+            vm_steps: statement.get_status(rusqlite::StatementStatus::VmStep).max(0) as u64,
+            fullscan_steps: statement.get_status(rusqlite::StatementStatus::FullscanStep).max(0) as u64,
+            sorts: statement.get_status(rusqlite::StatementStatus::Sort).max(0) as u64,
+            succeeded: result.is_ok(),
+        });
+        let totals = result?;
         *self.cash_flow_totals_cache.borrow_mut() = Some(totals.clone());
         Ok(totals)
     }
     pub fn project_pending_fills(&mut self, limit: usize) -> StoreResult<usize> {
+        self.project_pending_fills_observed(limit, |_| {})
+    }
+
+    /// The measured SELECT is bounded and distinct from the projection loop.
+    pub fn project_pending_fills_observed(
+        &mut self,
+        limit: usize,
+        observe: impl FnOnce(AccountSqlStatementStat),
+    ) -> StoreResult<usize> {
         let rows = {
             let mut s = self.connection.prepare(PENDING_FILL_PROJECTION_SQL)?;
-            s.query_map([limit.min(1000) as i64], |r| {
+            let started = std::time::Instant::now();
+            let result = s.query_map([limit.min(1000) as i64], |r| {
                 Ok((
                     Fill {
                         fill_id: r.get(0)?,
@@ -1417,8 +1448,17 @@ impl AccountStore {
                     r.get::<_, String>(7)?,
                     r.get::<_, String>(8)?,
                 ))
-            })?
-            .collect::<Result<Vec<_>, _>>()?
+            }).and_then(|items| items.collect::<Result<Vec<_>, _>>());
+            observe(AccountSqlStatementStat {
+                statement_id: "pending_fills_select",
+                elapsed_us: u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX),
+                rows: result.as_ref().map(|v| v.len() as u64).unwrap_or(0),
+                vm_steps: s.get_status(rusqlite::StatementStatus::VmStep).max(0) as u64,
+                fullscan_steps: s.get_status(rusqlite::StatementStatus::FullscanStep).max(0) as u64,
+                sorts: s.get_status(rusqlite::StatementStatus::Sort).max(0) as u64,
+                succeeded: result.is_ok(),
+            });
+            result?
         };
         let count = rows.len();
         for (mut fill, q, p, fee) in rows {

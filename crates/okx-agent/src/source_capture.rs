@@ -5,7 +5,7 @@ use crate::{
 };
 use okx_api::{AccountBill, FillHistory};
 use okx_execution::{
-    Bill, CashFlow, Fill, FinanceEntry, FundingEvent, IngestPage, NavPoint, SourceCursor,
+    AccountSqlStatementStat, Bill, CashFlow, Fill, FinanceEntry, FundingEvent, IngestPage, NavPoint, SourceCursor,
     StoreError, StoreResult, StrategyValuationEvidence, UsdConversionEvidence, ValuationPosition,
     VenueMark,
 };
@@ -141,6 +141,15 @@ impl NavPhase {
         }
     }
 }
+fn record_statement(
+    trace: &Option<(Arc<crate::finance_trace::FinanceTrace>, u64)>,
+    stat: AccountSqlStatementStat,
+) {
+    if let Some((store, id)) = trace {
+        store.statement_finished(*id, stat);
+    }
+}
+
 fn measured_nav_phase<T>(
     trace: &Option<(Arc<crate::finance_trace::FinanceTrace>, u64)>,
     phase: NavPhase,
@@ -494,7 +503,9 @@ pub(crate) async fn capture_account_sources_traced(
             move |s| {
                 if complete {
                     measured_nav_phase(&nav_trace, NavPhase::FillProjection, || {
-                        s.project_pending_fills(1000)
+                        s.project_pending_fills_observed(1000, |stat| {
+                            record_statement(&nav_trace, stat);
+                        })
                     })?;
                     measured_nav_phase(&nav_trace, NavPhase::FundingAttribution, || {
                         s.attribute_pending_funding(&fx, 100)
@@ -503,8 +514,9 @@ pub(crate) async fn capture_account_sources_traced(
                         s.resolve_stop("usd-conversion-unavailable", &fx.source_digest)
                     })?;
                 }
-                let flows =
-                    measured_nav_phase(&nav_trace, NavPhase::CashFlows, || s.cash_flow_totals())?;
+                let flows = measured_nav_phase(&nav_trace, NavPhase::CashFlows, || {
+                    s.cash_flow_totals_observed(|stat| record_statement(&nav_trace, stat))
+                })?;
                 let page = measured_nav_phase(&nav_trace, NavPhase::AccountNavBuild, || {
                     let mut page = IngestPage::default();
                     let external_usd = s.usd_component_total("EXTERNAL_FLOW_USD")?;

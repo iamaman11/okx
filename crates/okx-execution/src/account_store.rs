@@ -43,6 +43,17 @@ pub struct IngestTransactionTiming {
     pub commit_us: u64,
     pub commit_succeeded: bool,
 }
+/// Fixed-label VM counters for one prepared statement; no SQL or bound values.
+#[derive(Debug, Clone, Copy)]
+pub struct AccountSqlStatementStat {
+    pub statement_id: &'static str,
+    pub elapsed_us: u64,
+    pub rows: u64,
+    pub vm_steps: u64,
+    pub fullscan_steps: u64,
+    pub sorts: u64,
+    pub succeeded: bool,
+}
 /// Exact economic-event partition by strategy owner (None = unattributed), currency and component.
 pub type FinanceAttribution = std::collections::BTreeMap<(Option<String>, String, String), Decimal>;
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

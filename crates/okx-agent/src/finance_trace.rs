@@ -392,6 +392,34 @@ mod tests {
     }
 
     #[test]
+    fn fixed_sql_statement_metrics_aggregate_and_do_not_leak_parameters() {
+        let t = FinanceTrace::default();
+        t.begin(7, 10, 2);
+        let stat = okx_execution::AccountSqlStatementStat {
+            statement_id: "pending_fills_select",
+            elapsed_us: 3000,
+            rows: 2,
+            vm_steps: 400,
+            fullscan_steps: 0,
+            sorts: 1,
+            succeeded: true,
+        };
+        t.statement_finished(7, stat);
+        t.statement_finished(7, okx_execution::AccountSqlStatementStat {
+            succeeded: false,
+            ..stat
+        });
+        t.finish(7, 99, 89, Some("SQL_QUERY_FAILED".into()));
+        let readback = t.readback(Some(7), 1);
+        let details = &readback.selected.unwrap().sql_details;
+        assert_eq!(details.len(), 1);
+        assert_eq!(details[0].count, 2);
+        assert_eq!(details[0].elapsed_us, 6000);
+        assert_eq!(details[0].vm_steps, 800);
+        assert_eq!(details[0].failures, 1);
+    }
+
+    #[test]
     fn bounded_history_and_stale_callback() {
         let t = FinanceTrace::default();
         for i in 1..=2060 {
