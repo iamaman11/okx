@@ -739,12 +739,21 @@ mod tests {
 #[cfg(test)]
 mod artifact_job_fixtures {
     use super::*;
-    pub(super) fn service() -> (PathBuf, AnalyticsService) {
-        let root = std::env::temp_dir().join(format!(
-            "okx-analytics-{}-{}",
+    // Windows clock granularity is not a unique test-directory owner:
+    // concurrent Rust tests can observe the same timestamp and open one
+    // SQLite catalog simultaneously, producing a spurious DATABASE_BUSY.
+    static NEXT_FIXTURE: std::sync::atomic::AtomicU64 =
+        std::sync::atomic::AtomicU64::new(0);
+    fn unique_fixture_root() -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "okx-analytics-{}-{}-{}",
             std::process::id(),
-            chrono::Utc::now().timestamp_nanos_opt().unwrap()
-        ));
+            chrono::Utc::now().timestamp_nanos_opt().unwrap(),
+            NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed),
+        ))
+    }
+    pub(super) fn service() -> (PathBuf, AnalyticsService) {
+        let root = unique_fixture_root();
         let client = okx_api::OkxPublicClient::new(okx_api::OkxEnvironment::new(
             okx_api::Region::Global,
             false,
@@ -756,6 +765,13 @@ mod artifact_job_fixtures {
         )
         .unwrap();
         (root, service)
+    }
+    #[test]
+    fn research_fixture_catalog_roots_are_distinct_even_with_parallel_starts() {
+        let roots = (0..128)
+            .map(|_| unique_fixture_root())
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(roots.len(), 128);
     }
     #[tokio::test(flavor = "current_thread")]
     async fn market_artifact_publication_and_cached_result_roundtrip() {
