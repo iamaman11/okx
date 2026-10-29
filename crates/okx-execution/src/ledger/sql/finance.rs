@@ -1725,6 +1725,51 @@ impl AccountStore {
             if e.currency.is_empty() {
                 return Err(StoreError::Invalid("CURRENCY_REQUIRED"));
             }
+            // Reversals are economic facts, not an arbitrary positive credit.
+            // Validate the original in this very transaction before changing
+            // any totals. A missing/out-of-order original is retryable without
+            // advancing a source cursor; no fictitious profit is recognized.
+            if let Some(target) = e.reverses_entry_id.as_deref() {
+                let original: Option<(
+                    String,
+                    String,
+                    String,
+                    String,
+                    Option<String>,
+                    Option<String>,
+                )> = tx
+                    .query_row(
+                        "SELECT component,allocation_leg,amount,currency,instance_id,reverses_entry_id FROM finance_entries WHERE entry_id=?1",
+                        [target],
+                        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
+                    )
+                    .optional()?;
+                let Some((component, leg, amount, currency, instance, reversed)) = original else {
+                    return Err(StoreError::Invalid("FINANCE_REVERSAL_ORIGINAL_MISSING"));
+                };
+                if reversed.is_some()
+                    || component != e.component
+                    || leg != e.allocation_leg
+                    || currency != e.currency
+                    || instance != e.instance_id
+                    || decimal(amount)?.checked_add(e.amount) != Some(Decimal::ZERO)
+                {
+                    return Err(StoreError::Invalid("FINANCE_REVERSAL_MISMATCH"));
+                }
+                // Single AccountStore owner serializes writers. Prevent a
+                // second economic event reversing the same original; canonical
+                // source-link replays of the *same* event remain idempotent.
+                let previous: Option<String> = tx
+                    .query_row(
+                        "SELECT economic_event_key FROM finance_entries WHERE reverses_entry_id=?1 LIMIT 1",
+                        [target],
+                        |r| r.get(0),
+                    )
+                    .optional()?;
+                if previous.is_some_and(|key| key != e.economic_event_key) {
+                    return Err(StoreError::Invalid("FINANCE_REVERSAL_ALREADY_APPLIED"));
+                }
+            }
             let added=tx.execute("INSERT INTO finance_entries VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10) ON CONFLICT(economic_event_key,component,allocation_leg) DO NOTHING",params![e.entry_id,e.economic_event_key,e.component,e.allocation_leg,exact(e.amount),e.currency,e.instance_id,e.source_ref,e.time,e.reverses_entry_id])?;
             if added == 1
                 && let Some(instance) = &e.instance_id
