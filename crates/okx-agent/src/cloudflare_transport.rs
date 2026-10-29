@@ -87,6 +87,11 @@ fn current_binary_sha256() -> AgentResult<String> {
     Ok(format!("{:x}", digest.finalize()))
 }
 
+/// Existing 64-flight budget reserves its final slot for bounded diagnostics.
+fn flight_admitted(inflight: usize, finance_view: bool) -> bool {
+    inflight < if finance_view { 64 } else { 63 }
+}
+
 fn nonce() -> u128 {
     let mut bytes = [0u8; 16];
     getrandom::fill(&mut bytes).expect("system random unavailable");
@@ -229,7 +234,7 @@ async fn run_session(
         let id=request.request_id.clone();send(&mut sink,F::DeliveryAck{schema:SCHEMA.into(),session_id:session_id.clone(),connection_generation,request_id:id.clone()}).await?;
         if active.contains(&id){continue;}
         let finance_view = matches!(&request.operation, AgentOperation::Diagnostics{request:diagnostic} if diagnostic.view==Some(okx_protocol::trading::DiagnosticsView::Finance));
-        if flights.len() >= if finance_view {64} else {63} {send(&mut sink,F::Response{schema:SCHEMA.into(),session_id:session_id.clone(),connection_generation,response:response(&id,Err("NATIVE_QUEUE_FULL".into()))}).await?;continue;}
+        if !flight_admitted(flights.len(), finance_view) {send(&mut sink,F::Response{schema:SCHEMA.into(),session_id:session_id.clone(),connection_generation,response:response(&id,Err("NATIVE_QUEUE_FULL".into()))}).await?;continue;}
         let governance=operator_governance.filter(|g|g.valid()&&g.session_generation==connection_generation&&g.state.installation_id==ctx.accounts.installation_id()&&g.delivery_challenge.as_ref().and_then(|key|challenges.remove(key)).is_some_and(|t|t.elapsed()<Duration::from_secs(15)));
         let context=ctx.clone();let reads=read_capacity.clone();let fast_reads=finance_capacity.clone();active.insert(id.clone());
         flights.push(async move{
@@ -247,5 +252,33 @@ async fn run_session(
         },_=>unreachable!()}
         }
         }
+    }
+}
+
+#[cfg(test)]
+mod reserved_finance_admission_tests {
+    use super::*;
+
+    #[test]
+    fn ordinary_flights_cannot_fill_diagnostic_slot() {
+        assert!(flight_admitted(62, false));
+        assert!(!flight_admitted(63, false));
+        assert!(flight_admitted(63, true));
+        assert!(!flight_admitted(64, true));
+    }
+
+    #[test]
+    fn finance_read_admission_is_independent_and_fails_fast() {
+        let normal = Arc::new(tokio::sync::Semaphore::new(7));
+        let finance = Arc::new(tokio::sync::Semaphore::new(1));
+        let ordinary: Vec<_> = (0..7)
+            .map(|_| Arc::clone(&normal).try_acquire_owned().unwrap())
+            .collect();
+        assert!(Arc::clone(&normal).try_acquire_owned().is_err());
+        let diagnostic = Arc::clone(&finance).try_acquire_owned().unwrap();
+        assert!(Arc::clone(&finance).try_acquire_owned().is_err());
+        drop(diagnostic);
+        assert!(Arc::clone(&finance).try_acquire_owned().is_ok());
+        drop(ordinary);
     }
 }
