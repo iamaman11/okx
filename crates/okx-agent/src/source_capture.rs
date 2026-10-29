@@ -48,14 +48,22 @@ fn bill_pnl(sub_type: &str, value: &str) -> StoreResult<Decimal> {
 }
 // OKX bill type 7 is interest. Never infer it from an unrelated cash
 // movement or silently classify an ambiguous interest bill as a fee/PnL.
-fn residual_bill_component(bill_type: &str, pnl: &str, fee: &str) -> StoreResult<&'static str> {
+fn residual_bill_component(
+    bill_type: &str,
+    pnl: &str,
+    fee: &str,
+) -> StoreResult<Option<&'static str>> {
     if bill_type == "7" {
-        if !pnl.is_empty() || !fee.is_empty() {
+        // Venue absent fields may be encoded as either "" or "0".
+        // Only a *nonzero* separate fee/PnL would double-count interest.
+        if optional_d(pnl)? != Decimal::ZERO || optional_d(fee)? != Decimal::ZERO {
             return Err(StoreError::Invalid("INTEREST_BILL_AMBIGUOUS"));
         }
-        Ok("INTEREST")
+        Ok(Some("INTEREST"))
+    } else if pnl.is_empty() && fee.is_empty() {
+        Ok(Some("UNATTRIBUTED"))
     } else {
-        Ok("UNATTRIBUTED")
+        Ok(None)
     }
 }
 fn ts(s: &str) -> StoreResult<i64> {
@@ -823,11 +831,14 @@ async fn capture_bills(
                         reverses_entry_id: None,
                     });
                 }
-                if !transfer && b.pnl.is_empty() && b.fee.is_empty() && amount != Decimal::ZERO {
+                if !transfer
+                    && amount != Decimal::ZERO
+                    && let Some(component) = residual_component
+                {
                     page.finance.push(FinanceEntry {
                         entry_id: format!("{key}:unattributed"),
                         economic_event_key: key.clone(),
-                        component: residual_component.into(),
+                        component: component.into(),
                         allocation_leg: "account".into(),
                         amount,
                         currency: b.ccy,
@@ -955,23 +966,27 @@ mod tests {
 
     #[test]
     fn interest_bill_has_one_explicit_component_and_ambiguous_sources_fail_closed() {
-        assert_eq!(residual_bill_component("7", "", "").unwrap(), "INTEREST");
+        assert_eq!(
+            residual_bill_component("7", "", "").unwrap(),
+            Some("INTEREST")
+        );
+        assert_eq!(
+            residual_bill_component("7", "0", "0").unwrap(),
+            Some("INTEREST")
+        );
         assert!(matches!(
-            residual_bill_component("7", "", "0"),
+            residual_bill_component("7", "", "-0.01"),
             Err(StoreError::Invalid("INTEREST_BILL_AMBIGUOUS"))
         ));
         assert!(matches!(
-            residual_bill_component("7", "0", ""),
+            residual_bill_component("7", "0.01", ""),
             Err(StoreError::Invalid("INTEREST_BILL_AMBIGUOUS"))
         ));
         assert_eq!(
             residual_bill_component("1", "", "").unwrap(),
-            "UNATTRIBUTED"
+            Some("UNATTRIBUTED")
         );
-        assert_eq!(
-            residual_bill_component("8", "", "").unwrap(),
-            "UNATTRIBUTED"
-        );
+        assert_eq!(residual_bill_component("8", "0", "0").unwrap(), None);
     }
 
     #[test]
