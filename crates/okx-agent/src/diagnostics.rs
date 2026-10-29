@@ -154,6 +154,9 @@ async fn finance_diagnostics(
     Ok(json!({
         "schema": "okx.finance-diagnostics/v1",
         "account": resources.configuration.account_key.wire(),
+        "process_incarnation": std::env::var("OKX_CONTROL_AGENT_INCAR")
+            .ok().filter(|v| v.len() <= 128 && v.bytes().all(|b|
+                b.is_ascii_alphanumeric() || b == b'_' || b == b'-')),
         "state": state,
         "trace": trace,
         "acceptance_window": window,

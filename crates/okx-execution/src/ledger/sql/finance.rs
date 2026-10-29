@@ -1588,9 +1588,22 @@ impl AccountStore {
         Ok(totals)
     }
     pub fn ingest_page(&mut self, page: &IngestPage) -> StoreResult<()> {
+        self.ingest_page_observed(page, |_| {})
+    }
+
+    /// The observer is diagnostic-only and runs on the existing SQL owner.
+    /// No transaction, cursor, durability, or finance semantics change.
+    pub fn ingest_page_observed(
+        &mut self,
+        page: &IngestPage,
+        observe: impl FnOnce(IngestTransactionTiming),
+    ) -> StoreResult<()> {
+        let begin_started = std::time::Instant::now();
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let begin_us = u64::try_from(begin_started.elapsed().as_micros()).unwrap_or(u64::MAX);
+        let body_started = std::time::Instant::now();
         for f in &page.fills {
             if f.qty <= Decimal::ZERO || f.price <= Decimal::ZERO || f.currency.is_empty() {
                 return Err(StoreError::Invalid("INVALID_FILL"));
@@ -1990,9 +2003,17 @@ impl AccountStore {
             )?;
             tx.execute("INSERT INTO operation_receipts VALUES(?1,'FUNDING_ATTRIBUTED',?2,'COMMITTED',?3) ON CONFLICT(operation_id) DO NOTHING",params![format!("funding:{id}"),id,wall_time_ms()])?;
         }
+        let body_us = u64::try_from(body_started.elapsed().as_micros()).unwrap_or(u64::MAX);
         let commit_started = std::time::Instant::now();
         let commit_result = tx.commit();
-        let commit_ms = u64::try_from(commit_started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let commit_us = u64::try_from(commit_started.elapsed().as_micros()).unwrap_or(u64::MAX);
+        let commit_ms = commit_us / 1000;
+        observe(IngestTransactionTiming {
+            begin_us,
+            body_us,
+            commit_us,
+            commit_succeeded: commit_result.is_ok(),
+        });
         if commit_ms >= 250 || commit_result.is_err() {
             // Redacted, fixed-label operational evidence. Does not write to
             // SQLite, change the transaction boundary or weaken durability.

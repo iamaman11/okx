@@ -543,7 +543,17 @@ pub(crate) async fn capture_account_sources_traced(
                     Ok(page)
                 })?;
                 measured_nav_phase(&nav_trace, NavPhase::AccountNavCommit, || {
-                    s.ingest_page(&page)
+                    s.ingest_page_observed(&page, |timing| {
+                        if let Some((store, id)) = nav_trace.as_ref() {
+                            store.transaction_finished(
+                                *id,
+                                timing.begin_us,
+                                timing.body_us,
+                                timing.commit_us,
+                                timing.commit_succeeded,
+                            );
+                        }
+                    })
                 })?;
                 // One AccountStore, one canonical NAV owner. Strategy failures
                 // are recorded in the existing coverage cursor; manual trading

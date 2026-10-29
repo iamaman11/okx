@@ -35,6 +35,14 @@ impl StoreError {
     }
 }
 pub type StoreResult<T> = Result<T, StoreError>;
+/// Wall-independent timings for the existing immediate ingestion transaction.
+#[derive(Debug, Clone, Copy)]
+pub struct IngestTransactionTiming {
+    pub begin_us: u64,
+    pub body_us: u64,
+    pub commit_us: u64,
+    pub commit_succeeded: bool,
+}
 /// Exact economic-event partition by strategy owner (None = unattributed), currency and component.
 pub type FinanceAttribution = std::collections::BTreeMap<(Option<String>, String, String), Decimal>;
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

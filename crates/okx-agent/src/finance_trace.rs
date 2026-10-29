@@ -12,6 +12,13 @@ pub(crate) struct Phase {
     pub outcome: &'static str,
 }
 #[derive(Clone, Debug, Serialize)]
+pub(crate) struct Transaction {
+    pub begin_us: u64,
+    pub body_us: u64,
+    pub commit_us: u64,
+    pub commit_outcome: &'static str,
+}
+#[derive(Clone, Debug, Serialize)]
 pub(crate) struct Cycle {
     pub id: u64,
     pub started_ms: i64,
@@ -23,6 +30,7 @@ pub(crate) struct Cycle {
     pub queue_ms: Option<u64>,
     pub owner_ms: Option<u64>,
     pub phases: Vec<Phase>,
+    pub transaction: Option<Transaction>,
 }
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct Brief {
@@ -108,6 +116,7 @@ impl FinanceTrace {
                 queue_ms: None,
                 owner_ms: None,
                 phases: Vec::with_capacity(10),
+                transaction: None,
             });
         });
     }
@@ -135,6 +144,26 @@ impl FinanceTrace {
             {
                 p.elapsed_us = Some(elapsed_us);
                 p.outcome = if ok { "ok" } else { "error" };
+            }
+        });
+    }
+    /// The commit observation is published without joining another SQL job.
+    pub fn transaction_finished(
+        &self,
+        id: u64,
+        begin_us: u64,
+        body_us: u64,
+        commit_us: u64,
+        commit_succeeded: bool,
+    ) {
+        self.state(|s| {
+            if let Some(c) = s.active.as_mut().filter(|c| c.id == id) {
+                c.transaction = Some(Transaction {
+                    begin_us,
+                    body_us,
+                    commit_us,
+                    commit_outcome: if commit_succeeded { "ok" } else { "error" },
+                });
             }
         });
     }
@@ -202,9 +231,12 @@ mod tests {
         );
         t.phase_finished(1, "account_nav_commit", 4_200_000, false);
         t.owner_finished(1, 0, 4200);
+        t.transaction_finished(1, 100, 4_100_000, 99_000, false);
         t.finish(1, 4400, 4300, Some("ACCOUNT_STORAGE_DEADLINE".into()));
         let r = t.readback(Some(1), 4);
-        assert_eq!(r.selected.unwrap().owner_ms, Some(4200));
+        let selected = r.selected.unwrap();
+        assert_eq!(selected.owner_ms, Some(4200));
+        assert_eq!(selected.transaction.unwrap().commit_outcome, "error");
         assert_eq!(r.problem_ids, vec![1]);
     }
     #[test]
