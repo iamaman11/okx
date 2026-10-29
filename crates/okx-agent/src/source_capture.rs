@@ -89,6 +89,21 @@ fn phase_elapsed_ms(started: Instant) -> u64 {
     u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
+// With no allocated strategy capital, a prior gap-free cursor for the same
+// source generation already proves NOT_APPLICABLE. Rewriting its watermark
+// every NAV cycle forces an unnecessary second synchronous SQLite commit.
+// A new generation, missing cursor or previous gap must still be persisted.
+fn strategy_cursor_refresh_needed(
+    no_strategy_capital: bool,
+    gap: &str,
+    previous: Option<&SourceCursor>,
+    generation: i64,
+) -> bool {
+    !no_strategy_capital
+        || !gap.is_empty()
+        || previous.is_none_or(|c| c.generation != generation || !c.coverage_gaps.is_empty())
+}
+
 #[derive(Clone)]
 struct Window {
     completed_through: i64,
@@ -436,11 +451,15 @@ pub async fn capture_account_sources_measured(
                 coverage_gaps: String::new(),
             };
             let mut strategy_cursor_committed = false;
+            let mut no_strategy_capital = false;
             let strategy_result = if !complete {
                 Err(StoreError::Invalid("FINANCIAL_BACKFILL_PENDING"))
             } else {
                 match s.capital_state(now) {
-                    Ok(capital) if capital.strategy_principal_usd.is_empty() => Ok(()),
+                    Ok(capital) if capital.strategy_principal_usd.is_empty() => {
+                        no_strategy_capital = true;
+                        Ok(())
+                    }
                     Ok(_) => valuation_positions.and_then(|venue_positions| {
                         s.commit_reconciled_strategy_nav_with_cursor(
                             &StrategyValuationEvidence {
@@ -466,13 +485,25 @@ pub async fn capture_account_sources_measured(
             // On success strategy NAV and its cursor are already atomic.
             // On incomplete evidence record only the actual coverage gap.
             if !strategy_cursor_committed {
-                s.ingest_page(&IngestPage {
-                    cursor: Some(SourceCursor {
-                        coverage_gaps: gap,
-                        ..strategy_cursor
-                    }),
-                    ..Default::default()
-                })?;
+                let previous = if no_strategy_capital && gap.is_empty() {
+                    s.cursor("strategy_valuation", "account")?
+                } else {
+                    None
+                };
+                if strategy_cursor_refresh_needed(
+                    no_strategy_capital,
+                    &gap,
+                    previous.as_ref(),
+                    generation,
+                ) {
+                    s.ingest_page(&IngestPage {
+                        cursor: Some(SourceCursor {
+                            coverage_gaps: gap,
+                            ..strategy_cursor
+                        }),
+                        ..Default::default()
+                    })?;
+                }
             }
             Ok(())
         })
@@ -807,6 +838,38 @@ mod tests {
             coverage_gaps: "BACKFILL_PENDING".into(),
         };
         assert!(Window::resume(Some(&corrupt), 1, 200).is_err());
+    }
+
+    #[test]
+    fn unallocated_strategy_valuation_avoids_repeated_durable_cursor_commits() {
+        let current = SourceCursor {
+            source: "strategy_valuation".into(),
+            stream_partition: "account".into(),
+            cursor: String::new(),
+            watermark: 100,
+            generation: 7,
+            coverage_gaps: String::new(),
+        };
+        // After the first accepted no-capital cycle, no second write is
+        // needed for subsequent account-only NAV snapshots.
+        assert!(!strategy_cursor_refresh_needed(true, "", Some(&current), 7));
+        // A new generation, initial state or prior gap must be recorded.
+        assert!(strategy_cursor_refresh_needed(true, "", None, 7));
+        assert!(strategy_cursor_refresh_needed(true, "", Some(&current), 8));
+        let with_gap = SourceCursor {
+            coverage_gaps: "STRATEGY_NAV_MARK_MISSING".into(),
+            ..current.clone()
+        };
+        assert!(strategy_cursor_refresh_needed(true, "", Some(&with_gap), 7));
+        // Incomplete source and genuine strategy capital never skip their
+        // fail-closed cursor; strategy NAV reconciliation remains unchanged.
+        assert!(strategy_cursor_refresh_needed(
+            true,
+            "FINANCIAL_BACKFILL_PENDING",
+            Some(&current),
+            7
+        ));
+        assert!(strategy_cursor_refresh_needed(false, "", Some(&current), 7));
     }
 
     #[test]
