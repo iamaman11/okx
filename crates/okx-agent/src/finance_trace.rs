@@ -1,10 +1,51 @@
 //! Bounded diagnostic evidence only; no financial data, SQL text or second owner.
 use serde::Serialize;
-use std::{collections::VecDeque, sync::Mutex};
+use std::{
+    collections::VecDeque,
+    sync::{Mutex, OnceLock},
+};
 
 const SUMMARY_MAX: usize = 2048;
 const DETAIL_MAX: usize = 128;
-const PHASE_MAX: usize = 12;
+const PHASE_MAX: usize = 10;
+const SOURCE_PHASE_MAX: usize = 2;
+const ERROR_CODE_MAX: usize = 64;
+const ACCOUNT_TRACE_BUDGET_BYTES: usize = 8 * 1024 * 1024;
+
+// The incarnation is scoped to one process start; sequence IDs reset only on restart.
+fn incarnation() -> &'static str {
+    static ID: OnceLock<String> = OnceLock::new();
+    ID.get_or_init(|| {
+        let started = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        format!("p{}-t{started}", std::process::id())
+    })
+}
+
+fn error_code(code: String) -> String {
+    if !code.is_empty()
+        && code.len() <= ERROR_CODE_MAX
+        && code.bytes().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == b'_')
+    {
+        code
+    } else {
+        "UNCLASSIFIED_FINANCE_ERROR".into()
+    }
+}
+
+// Conservative bound: includes inline VecDeque slots, heap phase buffers,
+// bounded error-code strings and an active cycle. Excludes allocator metadata
+// (small, allocator-dependent); margin is more than 7 MiB.
+fn worst_case_allocated_bytes() -> usize {
+    let cycle = std::mem::size_of::<Cycle>()
+        + PHASE_MAX * std::mem::size_of::<Phase>()
+        + SOURCE_PHASE_MAX * std::mem::size_of::<Phase>()
+        + ERROR_CODE_MAX;
+    SUMMARY_MAX * (std::mem::size_of::<Brief>() + ERROR_CODE_MAX)
+        + DETAIL_MAX * cycle + cycle
+}
 
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct Phase {
@@ -31,6 +72,8 @@ pub(crate) struct Cycle {
     pub queue_ms: Option<u64>,
     pub owner_ms: Option<u64>,
     pub phases: Vec<Phase>,
+    pub source_phases: Vec<Phase>,
+    pub details_truncated: bool,
     pub transaction: Option<Transaction>,
 }
 #[derive(Clone, Debug, Serialize)]
@@ -69,6 +112,8 @@ pub(crate) struct FinanceTrace {
 #[derive(Serialize)]
 pub(crate) struct Readback {
     pub schema: &'static str,
+    pub process_incarnation: &'static str,
+    pub memory_budget_bytes: usize,
     pub active: Option<Cycle>,
     pub recent: Vec<Brief>,
     pub problem_ids: Vec<u64>,
@@ -117,34 +162,53 @@ impl FinanceTrace {
                 queue_ms: None,
                 owner_ms: None,
                 phases: Vec::with_capacity(PHASE_MAX),
+                source_phases: Vec::with_capacity(SOURCE_PHASE_MAX),
+                details_truncated: false,
                 transaction: None,
             });
         });
     }
     pub fn phase_started(&self, id: u64, name: &'static str) {
         self.state(|s| {
-            if let Some(c) = s.active.as_mut().filter(|c| c.id == id)
-                && c.phases.len() < PHASE_MAX
-            {
-                c.phases.push(Phase {
-                    name,
-                    elapsed_us: None,
-                    outcome: "in_progress",
-                });
+            if let Some(c) = s.active.as_mut().filter(|c| c.id == id) {
+                let target = if name == "observer_and_cursors" || name == "history_and_ingest" {
+                    &mut c.source_phases
+                } else {
+                    &mut c.phases
+                };
+                let cap = if name == "observer_and_cursors" || name == "history_and_ingest" {
+                    SOURCE_PHASE_MAX
+                } else {
+                    PHASE_MAX
+                };
+                if target.len() < cap {
+                    target.push(Phase {
+                        name,
+                        elapsed_us: None,
+                        outcome: "in_progress",
+                    });
+                } else {
+                    c.details_truncated = true;
+                }
             }
         });
     }
     pub fn phase_finished(&self, id: u64, name: &'static str, elapsed_us: u64, ok: bool) {
         self.state(|s| {
-            if let Some(c) = s.active.as_mut().filter(|c| c.id == id)
-                && let Some(p) = c
-                    .phases
+            if let Some(c) = s.active.as_mut().filter(|c| c.id == id) {
+                let phases = if name == "observer_and_cursors" || name == "history_and_ingest" {
+                    &mut c.source_phases
+                } else {
+                    &mut c.phases
+                };
+                if let Some(p) = phases
                     .iter_mut()
                     .rev()
                     .find(|p| p.name == name && p.elapsed_us.is_none())
-            {
-                p.elapsed_us = Some(elapsed_us);
-                p.outcome = if ok { "ok" } else { "error" };
+                {
+                    p.elapsed_us = Some(elapsed_us);
+                    p.outcome = if ok { "ok" } else { "error" };
+                }
             }
         });
     }
@@ -190,7 +254,7 @@ impl FinanceTrace {
                 } else {
                     "succeeded"
                 };
-                c.error_code = error;
+                c.error_code = error.map(error_code);
                 Self::retain(s, c);
             }
         });
@@ -207,6 +271,8 @@ impl FinanceTrace {
             });
             Readback {
                 schema: "okx.finance-cycle-trace/v1",
+                process_incarnation: incarnation(),
+                memory_budget_bytes: ACCOUNT_TRACE_BUDGET_BYTES,
                 active: s.active.clone(),
                 recent: s.recent.iter().rev().take(limit).cloned().collect(),
                 problem_ids: s.detailed.iter().rev().take(3).map(|c| c.id).collect(),
@@ -250,9 +316,9 @@ mod tests {
         t.phase_finished(10, "history_and_ingest", 33_000, false);
         t.finish(10, 244, 44, Some("SWAP_FILLS_SOURCE_UNAVAILABLE".into()));
         let cycle = t.readback(Some(10), 1).selected.unwrap();
-        assert_eq!(cycle.phases.len(), 2);
-        assert_eq!(cycle.phases[0].outcome, "ok");
-        assert_eq!(cycle.phases[1].outcome, "error");
+        assert_eq!(cycle.source_phases.len(), 2);
+        assert_eq!(cycle.source_phases[0].outcome, "ok");
+        assert_eq!(cycle.source_phases[1].outcome, "error");
         assert_eq!(cycle.owner_ms, None);
     }
 
@@ -283,6 +349,41 @@ mod tests {
             trace.readback(Some(17), 4).active.unwrap().phases[0].outcome,
             "ok"
         );
+    }
+
+    #[test]
+    fn source_phases_and_sql_phases_do_not_exceed_contract() {
+        let t = FinanceTrace::default();
+        t.begin(1, 0, 1);
+        for _ in 0..14 {
+            t.phase_started(1, "account_nav_commit");
+            t.phase_started(1, "history_and_ingest");
+        }
+        let active = t.readback(None, 4).active.unwrap();
+        assert_eq!(active.phases.len(), PHASE_MAX);
+        assert_eq!(active.source_phases.len(), SOURCE_PHASE_MAX);
+        assert!(active.details_truncated);
+    }
+
+    #[test]
+    fn memory_and_reply_are_bounded_with_maximal_history() {
+        assert!(worst_case_allocated_bytes() < ACCOUNT_TRACE_BUDGET_BYTES);
+        let t = FinanceTrace::default();
+        for i in 1..=2050 {
+            t.begin(i, i as i64, 1);
+            for _ in 0..PHASE_MAX {
+                t.phase_started(i, "account_nav_commit");
+                t.phase_finished(i, "account_nav_commit", 9_999_999, true);
+            }
+            t.finish(i, i as i64 + 2000, 2000, Some("E".repeat(10_000)));
+        }
+        let summary = t.readback(None, 4);
+        assert_eq!(summary.problem_ids.len(), 3);
+        assert_eq!(summary.recent[0].error_code.as_deref(), Some("UNCLASSIFIED_FINANCE_ERROR"));
+        assert!(serde_json::to_vec(&summary).unwrap().len() <= 12 * 1024);
+        let detail = t.readback(Some(2050), 4);
+        assert!(serde_json::to_vec(&detail).unwrap().len() <= 32 * 1024);
+        assert_eq!(incarnation(), detail.process_incarnation);
     }
 
     #[test]
