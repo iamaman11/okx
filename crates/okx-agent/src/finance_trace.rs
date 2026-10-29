@@ -266,16 +266,23 @@ mod tests {
         let owner = std::sync::Arc::clone(&trace);
         let worker = std::thread::spawn(move || {
             entered_tx.send(()).unwrap();
-            resume_rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap();
+            resume_rx
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .unwrap();
             owner.phase_finished(17, "account_nav_commit", 20_000, true);
         });
-        entered_rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap();
+        entered_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
         let active = trace.readback(Some(17), 4).active.unwrap();
         assert_eq!(active.phases[0].outcome, "in_progress");
         assert!(active.phases[0].elapsed_us.is_none());
         resume_tx.send(()).unwrap();
         worker.join().unwrap();
-        assert_eq!(trace.readback(Some(17), 4).active.unwrap().phases[0].outcome, "ok");
+        assert_eq!(
+            trace.readback(Some(17), 4).active.unwrap().phases[0].outcome,
+            "ok"
+        );
     }
 
     #[test]

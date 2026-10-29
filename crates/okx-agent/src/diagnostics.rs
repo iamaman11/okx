@@ -140,9 +140,7 @@ async fn finance_diagnostics(
     let trace = resources
         .finance_trace
         .readback(request.cycle_id, usize::from(limit));
-    let state = if trace.selected_not_found
-        || (trace.active.is_none() && trace.recent.is_empty())
-    {
+    let state = if trace.selected_not_found || (trace.active.is_none() && trace.recent.is_empty()) {
         "NOT_PROVEN"
     } else {
         "OBSERVED"

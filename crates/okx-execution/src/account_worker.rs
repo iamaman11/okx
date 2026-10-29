@@ -358,7 +358,9 @@ mod diagnostic_fault_tests {
             liabilities: Decimal::ZERO,
             balances: vec![("USDT".into(), Decimal::from(100))],
         };
-        let owner = AccountStoreHandle::initialize_flat(path, meta, opening).await.unwrap();
+        let owner = AccountStoreHandle::initialize_flat(path, meta, opening)
+            .await
+            .unwrap();
         let (seen_tx, seen_rx) = std::sync::mpsc::channel();
         let failure = owner
             .call_with_timing_observed(
@@ -370,7 +372,10 @@ mod diagnostic_fault_tests {
             )
             .await
             .unwrap_err();
-        assert!(matches!(failure, StoreError::Invalid("INJECTED_D1_FAILURE")));
+        assert!(matches!(
+            failure,
+            StoreError::Invalid("INJECTED_D1_FAILURE")
+        ));
         let (timing, success) = seen_rx.try_recv().unwrap();
         assert!(!success);
         assert!(timing.sql_owner_ms < 5000);
