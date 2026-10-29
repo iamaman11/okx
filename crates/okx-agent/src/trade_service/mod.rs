@@ -642,6 +642,17 @@ impl TradeService {
                         fee_rate,
                         fx,
                     )?;
+                    let entry_ceiling = entry_budget::enforced_entry_ceiling(
+                        true,
+                        c.environment == okx_protocol::account_governance::AccountEnvironment::Real,
+                        c.limits.max_entry_usd.as_deref().map(dec).transpose()?,
+                        order.max_entry_usd.as_deref().map(dec).transpose()?,
+                    )?;
+                    // Known entry fee/price is NOT an all-in cost proof. Report
+                    // exact remaining capacity for still-unproven immediate
+                    // costs, rather than treating them as zero.
+                    let unproven_headroom =
+                        entry_budget::unproven_entry_cost_headroom(entry.total_usd, entry_ceiling)?;
                     json!({"price_bound_usdt":exact(plan.limit_price),
                            "notional_usdt":exact(entry.notional_usdt),
                            "entry_fee_usdt":exact(entry.fee_usdt),
@@ -651,14 +662,11 @@ impl TradeService {
                            "fee_rate":exact(fee_rate),
                            "fee_currency":"USDT",
                            "fee_rounding":"CEIL_0.000001",
-                           "entry_cap_usd":entry_budget::enforced_entry_ceiling(
-                               true,
-                               c.environment == okx_protocol::account_governance::AccountEnvironment::Real,
-                               c.limits.max_entry_usd.as_deref().map(dec).transpose()?,
-                               order.max_entry_usd.as_deref().map(dec).transpose()?,
-                           )?.map(exact),
+                           "entry_cap_usd":entry_ceiling.map(exact),
                            "account_entry_cap_usd":c.limits.max_entry_usd,
                            "price_enforcement":"VENUE_LIMIT_OR_IOC_FOK",
+                           "remaining_cap_for_unproven_costs_usd":unproven_headroom.map(exact),
+                           "all_in_entry_cost_proven":false,
                            "other_costs":"UNAVAILABLE_NOT_INCLUDED"})
                 } else {
                     json!(null)
@@ -677,9 +685,40 @@ impl TradeService {
                 } else {
                     json!({"state":"not_evaluated"})
                 };
+                // The Observer's ordinary positions/orders are distinct from
+                // pending algos, open UNKNOWN intents and central reservations.
+                // Never equate zero ordinary rows with a proved flat account.
+                let exposure = r.observer.snapshot().await.map_err(err)?;
+                let exposure_fresh =
+                    chrono::DateTime::parse_from_rfc3339(&exposure.source_received_at)
+                        .ok()
+                        .is_some_and(|t| {
+                            crate::config::evidence_fresh(
+                                t.timestamp_millis(),
+                                now(),
+                                crate::config::ACCOUNT_MAX_AGE_MS,
+                            )
+                        })
+                        && exposure.account_uid_fingerprint
+                            == r.configuration.account_key.verified_uid;
+                let visible_positions = plan::visible_nonzero_position_count(
+                    exposure.positions.iter().map(|p| p.position.as_str()),
+                )?;
+                let account_exposure = json!({
+                    "source":"observer_account_snapshot",
+                    "state":if exposure_fresh {"partial"} else {"stale"},
+                    "source_received_at":exposure.source_received_at,
+                    "nonzero_positions":visible_positions,
+                    "pending_ordinary_orders":exposure.pending_orders.len(),
+                    "pending_algo_orders":null,
+                    "unknown_intents":null,
+                    "flat_verified":false,
+                    "reason_code":"ALGO_INTENTS_AND_RESERVATIONS_REQUIRE_INDEPENDENT_READBACK"
+                });
                 Ok(completed(
                     json!({"plan":plan,"entry_costs":costs,"access":c.access_enabled(),"policy_revision":a.state.revision,
                     "admission":"preview_only","side_effects":"none","census":census,
+                    "account_exposure":account_exposure,
                     "financial_admission":{
                         "state":if instance_nav_blocked {"blocked"} else {"not_evaluated"},
                         "reason_code":if instance_nav_blocked {Some("INSTANCE_NAV_INCOMPLETE")} else {None},
