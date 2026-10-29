@@ -1668,7 +1668,7 @@ impl AccountStore {
                     f.time,
                     f.source_ref
                 ],
-            )?;
+            )? > 0;
             let old: (String, String, String, i64, String) = tx.query_row(
                 "SELECT kind,currency,amount,time,source_ref FROM cash_flows WHERE event_id=?1",
                 [&f.event_id],
