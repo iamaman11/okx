@@ -8,6 +8,7 @@ pub mod diagnostics;
 pub mod execution_preflight;
 pub mod execution_runtime;
 pub(crate) mod finance_window;
+pub(crate) mod finance_trace;
 pub mod github_auth;
 pub mod github_mailbox;
 pub mod identity;

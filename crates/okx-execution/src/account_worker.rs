@@ -229,17 +229,20 @@ impl AccountStoreHandle {
             .map(|(value, _)| value)
     }
 
-    /// Return queue and execution timing with this job's successful result.
-    /// No new worker, queue, or SQL connection; failed calls retain StoreError.
-    pub async fn call_with_timing<T, F>(
-        &self,
-        deadline: Instant,
-        operation: F,
-    ) -> StoreResult<(T, AccountSqlJobTiming)>
-    where
-        T: Send + 'static,
-        F: FnOnce(&mut AccountStore) -> StoreResult<T> + Send + 'static,
-    {
+    /// Preserve the established result type for callers.
+    pub async fn call_with_timing<T,F>(
+        &self, deadline:Instant, operation:F
+    )->StoreResult<(T,AccountSqlJobTiming)>
+    where T:Send+'static,F:FnOnce(&mut AccountStore)->StoreResult<T>+Send+'static {
+        self.call_with_timing_observed(deadline,operation,|_,_|{}).await
+    }
+    /// Bounded callback runs on the existing owner even when the job failed.
+    pub async fn call_with_timing_observed<T,F,O>(
+        &self, deadline:Instant, operation:F, observed:O
+    )->StoreResult<(T,AccountSqlJobTiming)>
+    where T:Send+'static,F:FnOnce(&mut AccountStore)->StoreResult<T>+Send+'static,
+          O:FnOnce(AccountSqlJobTiming,bool)+Send+'static {
+
         if Instant::now() >= deadline {
             return Err(StoreError::Invalid("ACCOUNT_QUEUE_DEADLINE"));
         }
@@ -275,6 +278,7 @@ impl AccountStoreHandle {
                 || sql_owner_time >= Duration::from_millis(500)
                 || result.is_err();
             let outcome = if result.is_ok() { "ok" } else { "error" };
+            observed(AccountSqlJobTiming {queue_wait_ms:queue_ms,sql_owner_ms:owner_ms},result.is_ok());
             let _ = tx.send(result.map(|value| {
                 (
                     value,

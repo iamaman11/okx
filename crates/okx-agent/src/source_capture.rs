@@ -14,6 +14,7 @@ use rust_decimal::Decimal;
 use sha2::Digest;
 use std::{
     str::FromStr,
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -141,11 +142,17 @@ impl NavPhase {
     }
 }
 fn measured_nav_phase<T>(
+    trace: &Option<(Arc<crate::finance_trace::FinanceTrace>,u64)>,
     phase: NavPhase,
     operation: impl FnOnce() -> StoreResult<T>,
 ) -> StoreResult<T> {
+    if let Some((store,id))=trace {store.phase_started(*id,phase.code());}
     let started = Instant::now();
     let result = operation();
+    if let Some((store,id))=trace {
+        store.phase_finished(*id,phase.code(),
+            u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX),result.is_ok());
+    }
     let elapsed_ms = phase_elapsed_ms(started);
     if elapsed_ms >= 250 || result.is_err() {
         eprintln!(
@@ -256,6 +263,14 @@ pub async fn capture_account_sources_measured(
     observer: &AccountBootstrapper,
     private_ws: &PrivateWsHandle,
     execution: &ExecutionRuntime,
+) -> AgentResult<CaptureCompleted> {
+    capture_account_sources_traced(observer,private_ws,execution,None).await
+}
+pub(crate) async fn capture_account_sources_traced(
+    observer: &AccountBootstrapper,
+    private_ws: &PrivateWsHandle,
+    execution: &ExecutionRuntime,
+    trace: Option<(Arc<crate::finance_trace::FinanceTrace>,u64)>,
 ) -> AgentResult<CaptureCompleted> {
     let initial = private_ws.status().await;
     if !initial.logged_in || initial.connection_generation == 0 {
@@ -440,20 +455,22 @@ pub async fn capture_account_sources_measured(
     let source = snapshot.source_received_at.clone();
     let version = format!("{generation}:{}", snapshot.account_generation);
     let nav_started = Instant::now();
+    let nav_trace=trace.clone();
+    let owner_trace=trace;
     let ((), nav_sql_timing) = execution
         .store
-        .call_with_timing(deadline(), move |s| {
+        .call_with_timing_observed(deadline(), move |s| {
             if complete {
-                measured_nav_phase(NavPhase::FillProjection, || s.project_pending_fills(1000))?;
-                measured_nav_phase(NavPhase::FundingAttribution, || {
+                measured_nav_phase(&nav_trace,NavPhase::FillProjection, || s.project_pending_fills(1000))?;
+                measured_nav_phase(&nav_trace,NavPhase::FundingAttribution, || {
                     s.attribute_pending_funding(&fx, 100)
                 })?;
-                measured_nav_phase(NavPhase::StopResolution, || {
+                measured_nav_phase(&nav_trace,NavPhase::StopResolution, || {
                     s.resolve_stop("usd-conversion-unavailable", &fx.source_digest)
                 })?;
             }
-            let flows = measured_nav_phase(NavPhase::CashFlows, || s.cash_flow_totals())?;
-            let page = measured_nav_phase(NavPhase::AccountNavBuild, || {
+            let flows = measured_nav_phase(&nav_trace,NavPhase::CashFlows, || s.cash_flow_totals())?;
+            let page = measured_nav_phase(&nav_trace,NavPhase::AccountNavBuild, || {
                 let mut page = IngestPage::default();
                 let external_usd = s.usd_component_total("EXTERNAL_FLOW_USD")?;
                 let account_pnl = usd_equity
@@ -514,7 +531,7 @@ pub async fn capture_account_sources_measured(
                 });
                 Ok(page)
             })?;
-            measured_nav_phase(NavPhase::AccountNavCommit, || s.ingest_page(&page))?;
+            measured_nav_phase(&nav_trace,NavPhase::AccountNavCommit, || s.ingest_page(&page))?;
             // One AccountStore, one canonical NAV owner. Strategy failures
             // are recorded in the existing coverage cursor; manual trading
             // does not inherit a missing standalone strategy NAV.
@@ -531,13 +548,13 @@ pub async fn capture_account_sources_measured(
             let strategy_result = if !complete {
                 Err(StoreError::Invalid("FINANCIAL_BACKFILL_PENDING"))
             } else {
-                match measured_nav_phase(NavPhase::Capital, || s.capital_state(now)) {
+                match measured_nav_phase(&nav_trace,NavPhase::Capital, || s.capital_state(now)) {
                     Ok(capital) if capital.strategy_principal_usd.is_empty() => {
                         no_strategy_capital = true;
                         Ok(())
                     }
                     Ok(_) => valuation_positions.and_then(|venue_positions| {
-                        measured_nav_phase(NavPhase::StrategyValuation, || {
+                        measured_nav_phase(&nav_trace,NavPhase::StrategyValuation, || {
                             s.commit_reconciled_strategy_nav_with_cursor(
                                 &StrategyValuationEvidence {
                                     account_key: s.meta().account_key.clone(),
@@ -564,7 +581,7 @@ pub async fn capture_account_sources_measured(
             // On incomplete evidence record only the actual coverage gap.
             if !strategy_cursor_committed {
                 let previous = if no_strategy_capital && gap.is_empty() {
-                    measured_nav_phase(NavPhase::CursorRead, || {
+                    measured_nav_phase(&nav_trace,NavPhase::CursorRead, || {
                         s.cursor("strategy_valuation", "account")
                     })?
                 } else {
@@ -576,7 +593,7 @@ pub async fn capture_account_sources_measured(
                     previous.as_ref(),
                     generation,
                 ) {
-                    measured_nav_phase(NavPhase::CursorCommit, || {
+                    measured_nav_phase(&nav_trace,NavPhase::CursorCommit, || {
                         s.ingest_page(&IngestPage {
                             cursor: Some(SourceCursor {
                                 coverage_gaps: gap,
@@ -588,6 +605,8 @@ pub async fn capture_account_sources_measured(
                 }
             }
             Ok(())
+        },move |timing,_ok|{
+            if let Some((store,id))=owner_trace.as_ref(){store.owner_finished(*id,timing.queue_wait_ms,timing.sql_owner_ms);}
         })
         .await?;
     let nav_reconciliation_ms = phase_elapsed_ms(nav_started);

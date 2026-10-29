@@ -96,6 +96,8 @@ pub struct AccountResources {
     pub execution: Arc<ExecutionRuntime>,
     pub latest_snapshot: RwLock<Option<okx_observation::AccountSnapshot>>,
     pub source_capture_health: RwLock<SourceCaptureHealth>,
+    pub(crate) finance_trace: Arc<crate::finance_trace::FinanceTrace>,
+    next_finance_cycle: AtomicU64,
     /// Bounded account-local mutation capacity. Never held by reads/analytics.
     pub mutation_capacity: Semaphore,
     source_shutdown: watch::Sender<bool>,
@@ -539,6 +541,8 @@ impl AccountRuntimeRegistry {
         let resources = Arc::new(AccountResources {
             latest_snapshot: RwLock::new(None),
             source_capture_health: RwLock::new(SourceCaptureHealth::default()),
+            finance_trace: Arc::new(crate::finance_trace::FinanceTrace::default()),
+            next_finance_cycle: AtomicU64::new(0),
             configuration,
             observer,
             private_ws,
@@ -636,9 +640,10 @@ impl AccountResources {
                 == status.connection_generation
     }
 
-    async fn record_source_failure(&self, reason_code: &str, started: Instant, generation: u64) {
+    async fn record_source_failure(&self, reason_code: &str, started: Instant, generation: u64, cycle_id: u64) {
         let now = chrono::Utc::now().timestamp_millis();
         let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        self.finance_trace.finish(cycle_id, now, elapsed_ms, Some(reason_code.to_owned()));
         let mut health = self.source_capture_health.write().await;
         health.last_attempt_ms = Some(now);
         health.last_failure_ms = Some(now);
@@ -663,10 +668,12 @@ impl AccountResources {
         capture_started: Instant,
         phases: crate::source_capture::CapturePhaseTimings,
         generation: u64,
+        cycle_id: u64,
     ) {
         let now = chrono::Utc::now().timestamp_millis();
         let duration_ms = u64::try_from(capture_started.elapsed().as_millis()).unwrap_or(u64::MAX);
         let snapshot_age_ms = snapshot_age_at_publish_ms(source_received_at, now);
+        self.finance_trace.finish(cycle_id, now, duration_ms, None);
         let mut health = self.source_capture_health.write().await;
         health.last_attempt_ms = Some(now);
         health.last_success_ms = Some(now);
@@ -713,40 +720,42 @@ fn start_sources(
              // The attempt starts at the tick, including identity recovery.
              let capture_started = Instant::now();
              let generation=account.private_ws.status().await.connection_generation;
+             let cycle_id=account.next_finance_cycle.fetch_add(1,Ordering::Relaxed)+1;
+             account.finance_trace.begin(cycle_id,chrono::Utc::now().timestamp_millis(),generation);
              if generation==0 {
-                 account.record_source_failure("PRIVATE_WS_NOT_READY", capture_started, generation).await;
+                 account.record_source_failure("PRIVATE_WS_NOT_READY", capture_started, generation, cycle_id).await;
                  continue;
              }
              if account.verified_source_generation.load(Ordering::Acquire)!=generation {
                 let snapshot=match account.observer.snapshot().await {
                     Ok(snapshot)=>snapshot,
                     Err(_)=>{
-                        account.record_source_failure("ACCOUNT_SOURCE_UNAVAILABLE", capture_started, generation).await;
+                        account.record_source_failure("ACCOUNT_SOURCE_UNAVAILABLE", capture_started, generation, cycle_id).await;
                         continue;
                     }
                 };
                 if snapshot.account_uid_fingerprint!=account.configuration.account_key.verified_uid
                     ||!account.execution.verified_uid_matches(&snapshot.account_uid_fingerprint).await.unwrap_or(false) {
-                    account.record_source_failure("ACCOUNT_IDENTITY_MISMATCH", capture_started, generation).await;
+                    account.record_source_failure("ACCOUNT_IDENTITY_MISMATCH", capture_started, generation, cycle_id).await;
                     eprintln!("account source identity verification failed");continue;
                 }
                 if account.private_ws.status().await.connection_generation!=generation {
-                    account.record_source_failure("PRIVATE_WS_GENERATION_CHANGED", capture_started, generation).await;
+                    account.record_source_failure("PRIVATE_WS_GENERATION_CHANGED", capture_started, generation, cycle_id).await;
                     continue;
                 }
                 *account.latest_snapshot.write().await=Some(snapshot);
                 account.verified_source_generation.store(generation,Ordering::Release);
              }
-             match crate::source_capture::capture_account_sources_measured(&account.observer,&account.private_ws,&account.execution).await {
+             match crate::source_capture::capture_account_sources_traced(&account.observer,&account.private_ws,&account.execution,Some((Arc::clone(&account.finance_trace),cycle_id))).await {
                 Ok(completed)=>{
                     let source_received_at = completed.snapshot.source_received_at.clone();
                     *account.latest_snapshot.write().await=Some(completed.snapshot);
                     account.record_source_success(
-                        &source_received_at, capture_started, completed.phases, generation
+                        &source_received_at, capture_started, completed.phases, generation, cycle_id
                     ).await;
                 }
                 Err(error)=>{
-                    account.record_source_failure(&source_capture_reason(&error), capture_started, generation).await;
+                    account.record_source_failure(&source_capture_reason(&error), capture_started, generation, cycle_id).await;
                     eprintln!("account financial source awaiting coherent readback");
                 }
              }

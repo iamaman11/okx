@@ -7,7 +7,7 @@ use crate::{
 use futures_util::{FutureExt, SinkExt, StreamExt, future::BoxFuture, stream::FuturesUnordered};
 use okx_protocol::{
     DIRECT_TRANSPORT_FRAME_SCHEMA_V2 as SCHEMA, DIRECT_TRANSPORT_MAX_PAYLOAD_BYTES,
-    DirectRuntimeProfile, DirectTransportFrame as F,
+    AgentOperation, DirectRuntimeProfile, DirectTransportFrame as F,
 };
 use sha2::{Digest, Sha256};
 use std::{
@@ -201,7 +201,8 @@ async fn run_session(
     let mut active = HashSet::new();
     let mut flights: FuturesUnordered<BoxFuture<'static, (String, okx_protocol::AgentResponse)>> =
         FuturesUnordered::new();
-    let read_capacity = Arc::new(tokio::sync::Semaphore::new(8));
+    let read_capacity = Arc::new(tokio::sync::Semaphore::new(7));
+    let finance_capacity = Arc::new(tokio::sync::Semaphore::new(1));
     let mut heartbeat = tokio::time::interval(Duration::from_secs(15));
     heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut last_seen = Instant::now();
@@ -227,10 +228,22 @@ async fn run_session(
         F::Request{request,operator_governance,..}=>{
         let id=request.request_id.clone();send(&mut sink,F::DeliveryAck{schema:SCHEMA.into(),session_id:session_id.clone(),connection_generation,request_id:id.clone()}).await?;
         if active.contains(&id){continue;}
-        if flights.len()>=64{send(&mut sink,F::Response{schema:SCHEMA.into(),session_id:session_id.clone(),connection_generation,response:response(&id,Err("NATIVE_QUEUE_FULL".into()))}).await?;continue;}
+        let finance_view = matches!(&request.operation, AgentOperation::Diagnostics{request:diagnostic} if diagnostic.view==Some(okx_protocol::trading::DiagnosticsView::Finance));
+        if flights.len() >= if finance_view {64} else {63} {send(&mut sink,F::Response{schema:SCHEMA.into(),session_id:session_id.clone(),connection_generation,response:response(&id,Err("NATIVE_QUEUE_FULL".into()))}).await?;continue;}
         let governance=operator_governance.filter(|g|g.valid()&&g.session_generation==connection_generation&&g.state.installation_id==ctx.accounts.installation_id()&&g.delivery_challenge.as_ref().and_then(|key|challenges.remove(key)).is_some_and(|t|t.elapsed()<Duration::from_secs(15)));
-        let context=ctx.clone();let reads=read_capacity.clone();active.insert(id.clone());
-        flights.push(async move{let _permit=if request.operation.direct_transport_read_only(){Some(reads.acquire_owned().await)}else{None};let result=dispatch_with_governance(&context,&request,governance.as_ref()).await;(id,result)}.boxed());
+        let context=ctx.clone();let reads=read_capacity.clone();let fast_reads=finance_capacity.clone();active.insert(id.clone());
+        flights.push(async move{
+            let _permit=if finance_view {
+                match fast_reads.try_acquire_owned() {
+                    Ok(permit)=>Some(permit),
+                    Err(_)=>return (id,response(&request.request_id,Err("NATIVE_DIAGNOSTICS_BUSY".into()))),
+                }
+            } else if request.operation.direct_transport_read_only() {
+                reads.acquire_owned().await.ok()
+            } else {None};
+            let result=dispatch_with_governance(&context,&request,governance.as_ref()).await;
+            (id,result)
+        }.boxed());
         },_=>unreachable!()}
         }
         }

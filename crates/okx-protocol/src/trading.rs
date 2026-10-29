@@ -209,6 +209,17 @@ impl PortfolioScenarioRequest {
 pub struct DiagnosticsRequest {
     pub reference: Option<String>,
     pub account: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub view: Option<DiagnosticsView>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cycle_id: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u8>,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiagnosticsView {
+    Finance,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
