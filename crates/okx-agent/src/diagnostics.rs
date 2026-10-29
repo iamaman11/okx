@@ -288,12 +288,6 @@ async fn account_diagnostics(
     reference: Option<String>,
 ) -> Result<Value, String> {
     let key = resources.configuration.account_key.wire();
-    let identity_ready = resources.source_identity_ready().await;
-    let snapshot = resources.latest_snapshot.read().await.clone();
-    let source_as_of = snapshot
-        .as_ref()
-        .and_then(|s| chrono::DateTime::parse_from_rfc3339(&s.source_received_at).ok())
-        .map(|d| d.timestamp_millis());
     let lookup_reference = reference.clone();
     let facts=resources.execution.store.call(Instant::now()+Duration::from_secs(3),move|s|{
   let intent=lookup_reference.as_deref().map(|r|lookup(s,r)).transpose()?.flatten();let policy=s.policy()?;let stops=s.stops()?;let(version,source_id)=s.sqlite_runtime()?;let(db,wal)=s.storage_bytes()?;let mut coverage=Vec::new();for(source,partition)in[("account_snapshot","account"),("fills","SPOT"),("fills","SWAP"),("fills","FUTURES"),("bills","account")]{let c=s.cursor(source,partition)?;coverage.push(json!({"source":source,"partition":partition,"state":if c.is_some(){"observed"}else{"not_evaluated"},"watermark":c.as_ref().map(|c|c.watermark),"generation":c.as_ref().map(|c|c.generation),"gaps":c.as_ref().map(|c|c.coverage_gaps.chars().take(256).collect::<String>())}));}
@@ -314,8 +308,18 @@ async fn account_diagnostics(
             return Ok(out);
         }
     };
-    // Recompute after awaiting the SQL owner: its FIFO queue or checkpoint
-    // can outlive the 5s evidence TTL. Never report the pre-wait freshness.
+    // A successful capture may publish a new snapshot while this diagnostic
+    // awaits the SQL owner. Read the current source AND identity after that
+    // await, otherwise a stale pre-wait clone can falsely block readiness.
+    // Keep the 5000ms fail-closed gate for genuinely expired evidence.
+    let identity_ready = resources.source_identity_ready().await;
+    let source_as_of = resources
+        .latest_snapshot
+        .read()
+        .await
+        .as_ref()
+        .and_then(|s| chrono::DateTime::parse_from_rfc3339(&s.source_received_at).ok())
+        .map(|d| d.timestamp_millis());
     let fresh = account_snapshot_fresh_at(source_as_of, Utc::now().timestamp_millis());
     let mut blockers = Vec::new();
     if !identity_ready || !fresh {
@@ -431,6 +435,19 @@ mod tests {
             Some(sampled_at),
             sampled_at + 7_000
         ));
+    }
+
+    #[tokio::test]
+    async fn refreshed_snapshot_after_sql_wait_avoids_false_stale_without_weakening_ttl() {
+        let published = tokio::sync::RwLock::new(Some(1_000_000_i64));
+        let sampled_before_wait = *published.read().await;
+        // Finance publishes a newer source while a diagnostic is queued.
+        *published.write().await = Some(1_006_000);
+        let sampled_after_wait = *published.read().await;
+        assert!(!account_snapshot_fresh_at(sampled_before_wait, 1_007_000));
+        assert!(account_snapshot_fresh_at(sampled_after_wait, 1_007_000));
+        // A genuinely expired source must still fail closed.
+        assert!(!account_snapshot_fresh_at(sampled_after_wait, 1_011_001));
     }
 
     #[test]

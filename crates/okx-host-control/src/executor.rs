@@ -1199,6 +1199,34 @@ fn last_runtime_event(stdout: &str) -> Option<Value> {
     })
 }
 
+// Existing account writer logs this only after the read-only SQLite backup
+// has passed quick_check, hashing, durable manifest and atomic publication.
+// Surface a bounded, current-process proof through the existing STATUS
+// response without exposing database paths or raw log contents.
+fn latest_account_backup_event(stderr: &str) -> Option<Value> {
+    // Only the most recent event can attest backup health. A malformed last
+    // event must NOT fall back to an earlier successful backup.
+    let fields = stderr
+        .lines()
+        .rev()
+        .find_map(|line| line.trim().strip_prefix("ACCOUNT_SQL_BACKUP_V1 "))?;
+    let mut parts = fields.split_ascii_whitespace();
+    let elapsed_ms = parts
+        .next()?
+        .strip_prefix("elapsed_ms=")?
+        .parse::<u64>()
+        .ok()?;
+    let outcome = parts.next()?.strip_prefix("outcome=")?;
+    if parts.next().is_some() || !matches!(outcome, "ok" | "error") {
+        return None;
+    }
+    Some(json!({
+        "schema": "okx.account-backup-event/v1",
+        "elapsed_ms": elapsed_ms,
+        "outcome": outcome,
+    }))
+}
+
 fn extract_okx_api_code(line: &str) -> Option<String> {
     if let Some(rest) = line.split("OKX API error ").nth(1) {
         return rest
@@ -1372,6 +1400,7 @@ fn current_launch_summary(root: &Path, launch: &AgentLaunchEvidence) -> Value {
         },
         // A cropped / rotated log cannot establish absence of an earlier error.
         "last_runtime_event": if fully_observed { last_runtime_event(stdout_text) } else { None },
+        "last_account_backup": if fully_observed { latest_account_backup_event(stderr_text) } else { None },
         "startup_markers": if fully_observed {
             Some(json!({
                 "reference_registry_ready": stderr_text.contains("reference registry ready"),
@@ -1641,6 +1670,37 @@ mod tests {
     fn restart_backoff_is_bounded() {
         assert_eq!(RESTART_BACKOFF_SECS, [1, 5, 15, 30, 60]);
     }
+    #[test]
+    fn backup_status_reports_only_valid_current_process_redacted_receipt() {
+        let events = concat!(
+            "ACCOUNT_SQL_BACKUP_V1 elapsed_ms=1200 outcome=ok\n",
+            "ACCOUNT_SQL_BACKUP_V1 elapsed_ms=1510 outcome=error\n",
+        );
+        let last = latest_account_backup_event(events).expect("backup event");
+        assert_eq!(last["schema"], "okx.account-backup-event/v1");
+        assert_eq!(last["elapsed_ms"], 1510);
+        assert_eq!(last["outcome"], "error");
+        assert!(last.get("path").is_none());
+        assert!(
+            latest_account_backup_event("ACCOUNT_SQL_BACKUP_V1 elapsed_ms=x outcome=ok").is_none()
+        );
+        assert!(latest_account_backup_event("unrelated stderr").is_none());
+        // A damaged latest event can never be hidden by an older PASS.
+        assert!(
+            latest_account_backup_event(concat!(
+                "ACCOUNT_SQL_BACKUP_V1 elapsed_ms=1200 outcome=ok\\n",
+                "ACCOUNT_SQL_BACKUP_V1 elapsed_ms=bad outcome=error\\n"
+            ))
+            .is_none()
+        );
+        assert!(
+            latest_account_backup_event(
+                "ACCOUNT_SQL_BACKUP_V1 elapsed_ms=12 outcome=ok unexpected"
+            )
+            .is_none()
+        );
+    }
+
     #[test]
     fn runtime_log_summary_returns_only_structured_bounded_diagnostics() {
         let root =
