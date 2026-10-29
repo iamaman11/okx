@@ -4207,7 +4207,7 @@ fn p02_valuation_requires_converged_sources_even_with_valid_principal() {
         stream_partition: "account".into(),
         cursor: String::new(),
         watermark: 4,
-        generation: 2,
+        generation: 1,
         coverage_gaps: "BEFORE_VALUATION".into(),
     };
     s.ingest_page(&IngestPage {
@@ -4216,7 +4216,7 @@ fn p02_valuation_requires_converged_sources_even_with_valid_principal() {
     })
     .unwrap();
     let rejected = SourceCursor {
-        generation: 1,
+        generation: 0,
         ..previous_cursor.clone()
     };
     assert!(matches!(
