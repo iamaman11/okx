@@ -3,7 +3,10 @@ use crate::{accounts::AccountResources, query::DispatchContext};
 use chrono::Utc;
 use futures_util::{StreamExt, stream};
 use okx_execution::{AccountStore, StoreResult, StoredIntent};
-use okx_protocol::{analytics::ResearchRequest, trading::DiagnosticsRequest};
+use okx_protocol::{
+    analytics::ResearchRequest,
+    trading::{DiagnosticsRequest, DiagnosticsView},
+};
 use serde_json::{Value, json};
 use std::{
     sync::Arc,
@@ -62,6 +65,31 @@ pub async fn diagnostics(
     request: &DiagnosticsRequest,
     account: Option<&str>,
 ) -> Result<Value, String> {
+    // Finance evidence must be readable without SQL-owner or central RiskBook.
+    if request.view == Some(DiagnosticsView::Finance) {
+        return Ok(finance_diagnostics(ctx, request, account)
+            .await
+            .unwrap_or_else(|reason| {
+                report(
+                    "finance",
+                    &safe_code(&reason, "DIAGNOSTICS_UNAVAILABLE"),
+                    request.account.as_deref().or(account).unwrap_or("engine"),
+                    vec![safe_code(&reason, "DIAGNOSTICS_UNAVAILABLE")],
+                    false,
+                    "supply an authorized account and valid finance cycle",
+                )
+            }));
+    }
+    if request.cycle_id.is_some() || request.limit.is_some() {
+        return Ok(report(
+            "finance",
+            "INVALID_DIAGNOSTICS_VIEW",
+            "engine",
+            vec!["INVALID_DIAGNOSTICS_VIEW".into()],
+            false,
+            "use view=finance",
+        ));
+    }
     let (result, central) = tokio::join!(diagnostics_inner(ctx, request, account), budget(ctx));
     let mut out = match result {
         Ok(value) => value,
@@ -77,6 +105,108 @@ pub async fn diagnostics(
     out["central_budget"] = central;
     Ok(out)
 }
+async fn finance_diagnostics(
+    ctx: &DispatchContext,
+    request: &DiagnosticsRequest,
+    route: Option<&str>,
+) -> Result<Value, String> {
+    if request.reference.is_some() {
+        return Err("INVALID_DIAGNOSTICS_VIEW".into());
+    }
+    let limit = request.limit.unwrap_or(3);
+    if !(1..=4).contains(&limit) {
+        return Err("INVALID_DIAGNOSTICS_LIMIT".into());
+    }
+    let requested = request
+        .account
+        .as_deref()
+        .or(route)
+        .ok_or("ACCOUNT_REQUIRED")?;
+    let resources = ctx
+        .accounts
+        .resolve(requested)
+        .await
+        .ok_or("ACCOUNT_UNAVAILABLE")?;
+    if let Some(route) = route {
+        let routed = ctx
+            .accounts
+            .resolve(route)
+            .await
+            .ok_or("ACCOUNT_UNAVAILABLE")?;
+        if resources.configuration.account_key != routed.configuration.account_key {
+            return Err("ACCOUNT_ROUTE_MISMATCH".into());
+        }
+    }
+    let trace = resources
+        .finance_trace
+        .readback(request.cycle_id, usize::from(limit));
+    let state = if trace.selected_not_found || (trace.active.is_none() && trace.recent.is_empty()) {
+        "NOT_PROVEN"
+    } else {
+        "OBSERVED"
+    };
+    // Never queue an explain behind a capture writer's health lock.
+    // A busy health snapshot is NOT_EVALUATED, not a clean acceptance window.
+    let window = resources
+        .source_capture_health
+        .try_read()
+        .ok()
+        .map(|health| health.finance_window.summary(Utc::now().timestamp_millis()));
+    let mut maintenance = resources.execution.store.maintenance_timing();
+    let now_ms = Utc::now().timestamp_millis();
+    let active_cycle = trace.selected.as_ref().or(trace.active.as_ref());
+    let overlap_ids: Vec<_> = active_cycle
+        .map(|cycle| {
+            let end = cycle.finished_ms.unwrap_or(now_ms);
+            maintenance
+                .events
+                .iter()
+                .filter(|event| {
+                    event.started_ms <= end
+                        && event.finished_ms.unwrap_or(now_ms) >= cycle.started_ms
+                })
+                .take(8)
+                .map(|event| event.id)
+                .collect()
+        })
+        .unwrap_or_default();
+    // Correlate across full bounded 10-minute history, then serialize only four events.
+    maintenance.events.truncate(4);
+    Ok(json!({
+        "schema": "okx.finance-diagnostics/v1",
+        "account": resources.configuration.account_key.wire(),
+        "state": state,
+        "trace": trace,
+        "acceptance_window": match window {
+            Some(window) => json!({
+                "state": window.state,
+                "samples": window.samples,
+                "successes": window.successes,
+                "failures": window.failures,
+                "source_age_violations": window.source_age_violations,
+                "tick_gaps": window.tick_gaps,
+                "source_generation_changes": window.source_generation_changes,
+                "capture_attempt_latency": window.capture_attempt_latency,
+                "successful_nav_sql_owner_latency": window.successful_nav_sql_owner_latency,
+                "successful_nav_sql_queue_latency": window.successful_nav_sql_queue_latency,
+                "backup_evidence": window.backup_evidence,
+            }),
+            None => json!({"state":"NOT_EVALUATED","reason_code":"HEALTH_BUSY"}),
+        },
+        "operational_findings": {
+            "sql_maintenance": maintenance,
+            "maintenance_overlap_ids": overlap_ids,
+        },
+        "current_readiness": {"state":"NOT_EVALUATED","reason_code":"DIAGNOSTICS_ONLY"},
+        "central_budget": {"state":"NOT_EVALUATED","reason_code":"DIAGNOSTICS_ONLY"},
+        "next_action": if trace.selected_not_found {
+            "cycle expired; reproduce with retained trace"
+        } else {
+            "inspect measured cycle and failing phase"
+        }
+    }))
+}
+
 async fn diagnostics_inner(
     ctx: &DispatchContext,
     request: &DiagnosticsRequest,

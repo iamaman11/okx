@@ -251,7 +251,7 @@ export const mcpApi={async fetch(request:Request,env:Env,ctx:any):Promise<Respon
       operation:{type:'portfolio_scenario',request:scenario}})));
  }
  const {account,...body}=nativeArgs;
- const payload=nativeName==='portfolio'?nativeArgs:nativeName==='diagnostics'?{reference:nativeArgs.reference??null,account:nativeArgs.account??null}:body;
+ const payload=nativeName==='portfolio'?nativeArgs:nativeName==='diagnostics'?{reference:nativeArgs.reference??null,account:nativeArgs.account??null,view:nativeArgs.view??null,cycle_id:nativeArgs.cycle_id??null,limit:nativeArgs.limit??null}:body;
  const operation={type:nativeName,request:payload};
  return jsonRpc(id,toolResult(await dispatchRuntime(env,{schema:'okx.agent.request/v1',request_id:requestId(),...(typeof account==='string'?{account}:{}),operation})));
  }catch(error){return jsonRpc(id,toolResult(transportFailure(error instanceof Error?error.message:'transport failure')));}

@@ -1333,6 +1333,105 @@ fn account_store_wal_has_one_checkpoint_owner_after_initialize_and_reopen() {
     reopened.integrity_check().unwrap();
 }
 
+#[test]
+fn d1_statement_vm_counters_have_fixed_ids_and_valid_nonnegative_counts() {
+    let mut store = store();
+    *store.cash_flow_totals_cache.borrow_mut() = None;
+    let mut cash = None;
+    let flows = store
+        .cash_flow_totals_observed(|stat| cash = Some(stat))
+        .unwrap();
+    assert!(!flows.is_empty());
+    let cash = cash.unwrap();
+    assert_eq!(cash.statement_id, "cash_flow_totals_select");
+    assert!(cash.succeeded);
+    assert!(cash.rows > 0);
+    assert!(cash.vm_steps >= cash.rows);
+
+    let mut projected = None;
+    let count = store
+        .project_pending_fills_observed(100, |stat| projected = Some(stat))
+        .unwrap();
+    let stat = projected.unwrap();
+    assert_eq!(stat.statement_id, "pending_fills_select");
+    assert!(stat.succeeded);
+    assert_eq!(stat.rows, count as u64);
+    assert!(stat.vm_steps > 0);
+}
+
+#[test]
+fn d1_maintenance_observation_distinguishes_skipped_and_real_passive_checkpoint() {
+    let mut s = store();
+    let mut first = None;
+    s.maintenance_observed(|observed| first = Some(observed))
+        .unwrap();
+    let first = first.unwrap();
+    assert_eq!(first.checkpoint_mode, "PASSIVE");
+    assert!(first.wal_before_bytes.is_some());
+    assert!(first.wal_after_bytes.is_some());
+    assert!(!first.checkpoint_attempted);
+    assert!(first.checkpoint_busy.is_none());
+
+    s.connection
+        .execute_batch("CREATE TABLE d1_wal_observation(id INTEGER PRIMARY KEY, payload BLOB)")
+        .unwrap();
+    s.connection
+        .execute(
+            "INSERT INTO d1_wal_observation(payload) VALUES(zeroblob(8000000))",
+            [],
+        )
+        .unwrap();
+    let mut observed = None;
+    s.maintenance_observed(|checkpoint| observed = Some(checkpoint))
+        .unwrap();
+    let result = observed.unwrap();
+    assert!(result.checkpoint_attempted);
+    assert_eq!(result.checkpoint_mode, "PASSIVE");
+    assert_eq!(result.checkpoint_busy, Some(0));
+    assert!(result.log_frames.unwrap() >= 1000);
+    assert!(result.checkpointed_frames.unwrap() > 0);
+    assert!(result.checkpoint_elapsed_us.is_some());
+    assert!(result.wal_before_bytes.unwrap() >= 4_000_000);
+    assert!(result.wal_after_bytes.is_some());
+}
+
+#[test]
+fn d1_ingest_reports_all_transaction_outcomes_including_pre_commit_errors() {
+    let mut s = store();
+    let mut success = None;
+    s.ingest_page_observed(&IngestPage::default(), |timing| success = Some(timing))
+        .unwrap();
+    let success = success.unwrap();
+    assert!(success.commit_succeeded);
+
+    let mut bad_fill = k5_f7_fixture_fill();
+    bad_fill.qty = Decimal::ZERO;
+    let mut invalid = None;
+    let result = s.ingest_page_observed(
+        &IngestPage {
+            fills: vec![bad_fill],
+            ..Default::default()
+        },
+        |timing| invalid = Some(timing),
+    );
+    assert!(matches!(result, Err(StoreError::Invalid("INVALID_FILL"))));
+    let invalid = invalid.unwrap();
+    assert!(!invalid.commit_succeeded);
+    assert_eq!(invalid.commit_us, 0);
+
+    s.connection.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let mut begin_failure = None;
+    let failed = s.ingest_page_observed(&IngestPage::default(), |timing| {
+        begin_failure = Some(timing)
+    });
+    assert!(failed.is_err());
+    s.connection.execute_batch("ROLLBACK").unwrap();
+    let begin_failure = begin_failure.unwrap();
+    assert_eq!(begin_failure.body_us, 0);
+    assert_eq!(begin_failure.commit_us, 0);
+    assert!(!begin_failure.commit_succeeded);
+}
+
 fn store() -> AccountStore {
     let p = path();
     let m = AccountMeta {

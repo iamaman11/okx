@@ -1,9 +1,12 @@
 //! One bounded blocking worker per account. No SQLite calls on the async reactor.
-use crate::{AccountMeta, AccountStore, OpeningSnapshot, StoreError, StoreResult};
+use crate::{
+    AccountMeta, AccountStore, OpeningSnapshot, StoreError, StoreResult, WalMaintenanceObservation,
+};
 use std::{
+    collections::VecDeque,
     path::PathBuf,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicU64, Ordering},
         mpsc::{RecvTimeoutError, SyncSender, TrySendError, sync_channel},
     },
@@ -68,9 +71,79 @@ pub struct AccountSqlJobTiming {
     pub queue_wait_ms: u64,
     pub sql_owner_ms: u64,
 }
+const MAINTENANCE_HISTORY_MAX: usize = 64;
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct MaintenanceEvent {
+    pub id: u64,
+    pub kind: &'static str,
+    pub started_ms: i64,
+    pub finished_ms: Option<i64>,
+    pub elapsed_us: Option<u64>,
+    pub outcome: &'static str,
+    pub wal: Option<WalMaintenanceObservation>,
+}
+#[derive(Default)]
+struct MaintenanceHistory {
+    next_id: u64,
+    events: VecDeque<MaintenanceEvent>,
+    evicted: u64,
+}
+impl MaintenanceHistory {
+    fn begin(&mut self, kind: &'static str) -> u64 {
+        self.next_id += 1;
+        let id = self.next_id;
+        if self.events.len() == MAINTENANCE_HISTORY_MAX {
+            self.events.pop_front();
+            self.evicted += 1;
+        }
+        self.events.push_back(MaintenanceEvent {
+            id,
+            kind,
+            started_ms: wall_ms(),
+            finished_ms: None,
+            elapsed_us: None,
+            outcome: "in_progress",
+            wal: None,
+        });
+        id
+    }
+    fn wal_observed(&mut self, id: u64, observation: WalMaintenanceObservation) {
+        if let Some(event) = self.events.iter_mut().rev().find(|event| event.id == id) {
+            event.wal = Some(observation);
+        }
+    }
+    fn finish(&mut self, id: u64, elapsed: Duration, ok: bool) {
+        if let Some(event) = self.events.iter_mut().rev().find(|event| event.id == id) {
+            event.finished_ms = Some(wall_ms());
+            event.elapsed_us = Some(u64::try_from(elapsed.as_micros()).unwrap_or(u64::MAX));
+            event.outcome = if ok { "ok" } else { "error" };
+        }
+    }
+}
+fn wall_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
+        .unwrap_or(0)
+}
+fn history_lock<T>(
+    history: &Mutex<MaintenanceHistory>,
+    f: impl FnOnce(&mut MaintenanceHistory) -> T,
+) -> T {
+    let mut guard = history.lock().unwrap_or_else(|e| e.into_inner());
+    f(&mut guard)
+}
+#[derive(serde::Serialize)]
+pub struct AccountMaintenanceTimingV1 {
+    pub schema: &'static str,
+    pub state: &'static str,
+    pub events: Vec<MaintenanceEvent>,
+    pub evicted: u64,
+}
 struct WorkerOwner {
     sender: SyncSender<Job>,
     timings: Arc<SqlTimingCounters>,
+    maintenance: Arc<Mutex<MaintenanceHistory>>,
 }
 
 struct PendingBackup {
@@ -106,6 +179,8 @@ impl AccountStoreHandle {
     ) -> StoreResult<Self> {
         let (sender, receiver) = sync_channel::<Job>(128);
         let timings = Arc::new(SqlTimingCounters::default());
+        let maintenance = Arc::new(Mutex::new(MaintenanceHistory::default()));
+        let worker_maintenance = Arc::clone(&maintenance);
         let (ready_tx, ready_rx) = oneshot::channel();
         std::thread::Builder::new()
             .name("okx-account-sql".into())
@@ -166,8 +241,11 @@ impl AccountStoreHandle {
                     if !maintenance_cadence.due(Instant::now()) {
                         continue;
                     }
+                    let id = history_lock(&worker_maintenance, |log| log.begin("wal_maintenance"));
                     let started = Instant::now();
-                    let succeeded = match store.maintenance() {
+                    let succeeded = match store.maintenance_observed(|observation| {
+                        history_lock(&worker_maintenance, |log| log.wal_observed(id, observation));
+                    }) {
                         Ok(()) => true,
                         Err(e) => {
                             store.set_maintenance_error(e.to_string());
@@ -175,6 +253,9 @@ impl AccountStoreHandle {
                         }
                     };
                     let elapsed = started.elapsed();
+                    history_lock(&worker_maintenance, |log| {
+                        log.finish(id, elapsed, succeeded)
+                    });
                     if elapsed >= Duration::from_millis(250) || !succeeded {
                         eprintln!(
                             "ACCOUNT_SQL_MAINTENANCE_V1 elapsed_ms={} backup_due=false outcome={}",
@@ -186,17 +267,30 @@ impl AccountStoreHandle {
                         && backup_due(last_backup.elapsed(), backup_ever_succeeded)
                     {
                         let (path, meta) = store.backup_identity();
+                        let id = history_lock(&worker_maintenance, |log| log.begin("backup_copy"));
+                        let history_for_backup = Arc::clone(&worker_maintenance);
                         match std::thread::Builder::new()
                             .name("okx-account-backup".into())
-                            .spawn(move || AccountStore::periodic_backup_from_reader(path, meta))
-                        {
+                            .spawn(move || {
+                                let started = Instant::now();
+                                let result = AccountStore::periodic_backup_from_reader(path, meta);
+                                history_lock(&history_for_backup, |log| {
+                                    log.finish(id, started.elapsed(), result.is_ok());
+                                });
+                                result
+                            }) {
                             Ok(handle) => {
                                 pending_backup = Some(PendingBackup {
                                     handle,
                                     started: Instant::now(),
                                 });
                             }
-                            Err(e) => store.set_maintenance_error(e.to_string()),
+                            Err(e) => {
+                                history_lock(&worker_maintenance, |log| {
+                                    log.finish(id, Duration::ZERO, false)
+                                });
+                                store.set_maintenance_error(e.to_string());
+                            }
                         }
                     }
                 }
@@ -205,8 +299,29 @@ impl AccountStoreHandle {
             .await
             .map_err(|_| StoreError::Invalid("ACCOUNT_WORKER_STOPPED"))??;
         Ok(Self {
-            owner: Arc::new(WorkerOwner { sender, timings }),
+            owner: Arc::new(WorkerOwner {
+                sender,
+                timings,
+                maintenance,
+            }),
         })
+    }
+    /// Reads bounded history without entering the account SQL owner's FIFO.
+    pub fn maintenance_timing(&self) -> AccountMaintenanceTimingV1 {
+        match self.owner.maintenance.try_lock() {
+            Ok(log) => AccountMaintenanceTimingV1 {
+                schema: "okx.account-maintenance/v1",
+                state: "OBSERVED",
+                events: log.events.iter().rev().cloned().collect(),
+                evicted: log.evicted,
+            },
+            Err(_) => AccountMaintenanceTimingV1 {
+                schema: "okx.account-maintenance/v1",
+                state: "NOT_EVALUATED",
+                events: Vec::new(),
+                evicted: 0,
+            },
+        }
     }
     pub fn sql_timing(&self) -> AccountSqlTimingV1 {
         let t = &self.owner.timings;
@@ -229,8 +344,7 @@ impl AccountStoreHandle {
             .map(|(value, _)| value)
     }
 
-    /// Return queue and execution timing with this job's successful result.
-    /// No new worker, queue, or SQL connection; failed calls retain StoreError.
+    /// Preserve the established result type for callers.
     pub async fn call_with_timing<T, F>(
         &self,
         deadline: Instant,
@@ -239,6 +353,21 @@ impl AccountStoreHandle {
     where
         T: Send + 'static,
         F: FnOnce(&mut AccountStore) -> StoreResult<T> + Send + 'static,
+    {
+        self.call_with_timing_observed(deadline, operation, |_, _| {})
+            .await
+    }
+    /// Bounded callback runs on the existing owner even when the job failed.
+    pub async fn call_with_timing_observed<T, F, O>(
+        &self,
+        deadline: Instant,
+        operation: F,
+        observed: O,
+    ) -> StoreResult<(T, AccountSqlJobTiming)>
+    where
+        T: Send + 'static,
+        F: FnOnce(&mut AccountStore) -> StoreResult<T> + Send + 'static,
+        O: FnOnce(AccountSqlJobTiming, bool) + Send + 'static,
     {
         if Instant::now() >= deadline {
             return Err(StoreError::Invalid("ACCOUNT_QUEUE_DEADLINE"));
@@ -275,6 +404,13 @@ impl AccountStoreHandle {
                 || sql_owner_time >= Duration::from_millis(500)
                 || result.is_err();
             let outcome = if result.is_ok() { "ok" } else { "error" };
+            observed(
+                AccountSqlJobTiming {
+                    queue_wait_ms: queue_ms,
+                    sql_owner_ms: owner_ms,
+                },
+                result.is_ok(),
+            );
             let _ = tx.send(result.map(|value| {
                 (
                     value,
@@ -302,6 +438,122 @@ impl AccountStoreHandle {
         // Once accepted, await the committed outcome. Dropping an HTTP request never cancels a SQL commit.
         rx.await
             .map_err(|_| StoreError::Invalid("ACCOUNT_WORKER_STOPPED"))?
+    }
+}
+
+#[cfg(test)]
+mod diagnostic_fault_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn failed_accepted_sql_job_still_invokes_timing_observer() {
+        use rust_decimal::Decimal;
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        let nonce = NEXT.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "okx-d1-timing-{}-{}.sqlite",
+            std::process::id(),
+            nonce,
+        ));
+        let meta = AccountMeta {
+            initialize_operation_id: "d1-connect".into(),
+            release_id: "test".into(),
+            account_key: format!("okx:demo:d1_{nonce}"),
+            installation_id: "d1-test".into(),
+            initialized_at: 1,
+            opening_source: "verified-test-snapshot".into(),
+        };
+        let opening = OpeningSnapshot {
+            opening_equity_usd: Decimal::from(100),
+            source_ref: meta.opening_source.clone(),
+            observed_at: 1,
+            positions: 0,
+            orders: 0,
+            conditional_orders: 0,
+            liabilities: Decimal::ZERO,
+            balances: vec![("USDT".into(), Decimal::from(100))],
+        };
+        let owner = AccountStoreHandle::initialize_flat(path, meta, opening)
+            .await
+            .unwrap();
+        let (seen_tx, seen_rx) = std::sync::mpsc::channel();
+        let failure = owner
+            .call_with_timing_observed(
+                Instant::now() + Duration::from_secs(5),
+                |_store| -> StoreResult<()> { Err(StoreError::Invalid("INJECTED_D1_FAILURE")) },
+                move |timing, success| {
+                    seen_tx.send((timing, success)).unwrap();
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            failure,
+            StoreError::Invalid("INJECTED_D1_FAILURE")
+        ));
+        let (timing, success) = seen_rx.try_recv().unwrap();
+        assert!(!success);
+        assert!(timing.sql_owner_ms < 5000);
+        assert_eq!(owner.sql_timing().observed_jobs, 1);
+    }
+}
+
+#[cfg(test)]
+mod maintenance_history_tests {
+    use super::*;
+
+    #[test]
+    fn maintenance_and_backup_are_bounded_and_measured_independently() {
+        let mut log = MaintenanceHistory::default();
+        let maint = log.begin("wal_maintenance");
+        assert_eq!(log.events.back().unwrap().outcome, "in_progress");
+        log.wal_observed(
+            maint,
+            WalMaintenanceObservation {
+                wal_before_bytes: Some(5_000_000),
+                wal_after_bytes: Some(4_000_000),
+                checkpoint_mode: "PASSIVE",
+                checkpoint_attempted: true,
+                checkpoint_busy: Some(1),
+                log_frames: Some(1200),
+                checkpointed_frames: Some(1000),
+                checkpoint_elapsed_us: Some(12_000),
+            },
+        );
+        assert_eq!(
+            log.events.back().unwrap().wal.unwrap().checkpointed_frames,
+            Some(1000)
+        );
+        log.finish(maint, Duration::from_millis(120), false);
+        assert_eq!(log.events.back().unwrap().elapsed_us, Some(120_000));
+        assert_eq!(log.events.back().unwrap().outcome, "error");
+
+        let backup = log.begin("backup_copy");
+        log.finish(backup, Duration::from_millis(200), true);
+        assert_eq!(log.events.back().unwrap().kind, "backup_copy");
+        assert_eq!(log.events.back().unwrap().elapsed_us, Some(200_000));
+        assert_eq!(log.events.front().unwrap().outcome, "error");
+        for _ in 0..(MAINTENANCE_HISTORY_MAX + 2) {
+            let id = log.begin("wal_maintenance");
+            log.finish(id, Duration::from_millis(1), true);
+        }
+        assert_eq!(log.events.len(), MAINTENANCE_HISTORY_MAX);
+        assert!(log.evicted > 0);
+    }
+
+    #[test]
+    fn diagnostic_readback_never_waits_for_held_maintenance_lock() {
+        let history = Arc::new(Mutex::new(MaintenanceHistory::default()));
+        let handle = AccountStoreHandle {
+            owner: Arc::new(WorkerOwner {
+                sender: sync_channel(1).0,
+                timings: Arc::new(SqlTimingCounters::default()),
+                maintenance: Arc::clone(&history),
+            }),
+        };
+        let _guard = history.lock().unwrap();
+        let readback = handle.maintenance_timing();
+        assert_eq!(readback.state, "NOT_EVALUATED");
     }
 }
 
