@@ -1,5 +1,5 @@
 //! Account-local, bounded observations. Financial facts remain in AccountStore;
- //! these volatile measurements never authorize new risk or survive restart.
+//! these volatile measurements never authorize new risk or survive restart.
 use std::collections::{BTreeMap, VecDeque};
 
 const WINDOW_MS: i64 = 30 * 60 * 1000;
@@ -79,7 +79,11 @@ fn latency_summary(mut values: Vec<u64>) -> LatencySummary {
 impl FinanceWindow {
     pub fn record(&mut self, sample: FinanceAttempt) {
         // Time regressions cannot produce a falsely complete window.
-        if self.samples.back().is_some_and(|last| sample.at_ms < last.at_ms) {
+        if self
+            .samples
+            .back()
+            .is_some_and(|last| sample.at_ms < last.at_ms)
+        {
             self.samples.clear();
         }
         self.samples.push_back(sample);
@@ -91,7 +95,9 @@ impl FinanceWindow {
     pub fn summary(&self, now_ms: i64) -> FinanceWindowSummary {
         let start_ms = now_ms.saturating_sub(WINDOW_MS);
         let anchor = self.samples.iter().rev().find(|s| s.at_ms <= start_ms);
-        let selected: Vec<_> = self.samples.iter()
+        let selected: Vec<_> = self
+            .samples
+            .iter()
             .filter(|s| s.at_ms > start_ms && s.at_ms <= now_ms)
             .collect();
         let mut previous = anchor;
@@ -108,9 +114,8 @@ impl FinanceWindow {
             }
             previous = Some(sample);
         }
-        let last_is_fresh = previous.is_some_and(|last| {
-            last.at_ms <= now_ms && now_ms - last.at_ms <= MAX_TICK_GAP_MS
-        });
+        let last_is_fresh = previous
+            .is_some_and(|last| last.at_ms <= now_ms && now_ms - last.at_ms <= MAX_TICK_GAP_MS);
         let window_covered_by_samples = anchor.is_some() && last_is_fresh && !selected.is_empty();
         let mut failures = 0;
         let mut stale = 0;
@@ -124,7 +129,10 @@ impl FinanceWindow {
                 failures += 1;
                 *failure_reasons.entry(code.clone()).or_insert(0) += 1;
             } else {
-                if !sample.snapshot_age_ms.is_some_and(|age| (0..=MAX_SOURCE_AGE_MS).contains(&age)) {
+                if !sample
+                    .snapshot_age_ms
+                    .is_some_and(|age| (0..=MAX_SOURCE_AGE_MS).contains(&age))
+                {
                     stale += 1;
                 }
                 if let Some(ms) = sample.nav_sql_owner_ms {
@@ -236,7 +244,10 @@ mod tests {
         let mut w = FinanceWindow::default();
         w.record(ok(10_000, 100));
         assert_eq!(w.summary(WINDOW_MS).state, "NOT_PROVEN");
-        assert_eq!(FinanceWindow::default().summary(WINDOW_MS).state, "NOT_PROVEN");
+        assert_eq!(
+            FinanceWindow::default().summary(WINDOW_MS).state,
+            "NOT_PROVEN"
+        );
         w.record(ok(5_000, 100)); // clock rollback discards old observations
         assert_eq!(w.summary(WINDOW_MS).state, "NOT_PROVEN");
         assert_eq!(w.summary(WINDOW_MS + 10_000).state, "NOT_PROVEN");

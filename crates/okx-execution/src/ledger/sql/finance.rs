@@ -1921,7 +1921,8 @@ impl AccountStore {
             // SQLite, change the transaction boundary or weaken durability.
             eprintln!(
                 "ACCOUNT_FINANCE_SQL_COMMIT_V1 phase=ingest_page elapsed_ms={} outcome={}",
-                commit_ms, if commit_result.is_ok() { "ok" } else { "error" }
+                commit_ms,
+                if commit_result.is_ok() { "ok" } else { "error" }
             );
         }
         commit_result?;

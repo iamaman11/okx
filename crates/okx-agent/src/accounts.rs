@@ -636,12 +636,7 @@ impl AccountResources {
                 == status.connection_generation
     }
 
-    async fn record_source_failure(
-        &self,
-        reason_code: &str,
-        started: Instant,
-        generation: u64,
-    ) {
+    async fn record_source_failure(&self, reason_code: &str, started: Instant, generation: u64) {
         let now = chrono::Utc::now().timestamp_millis();
         let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         let mut health = self.source_capture_health.write().await;
@@ -649,15 +644,17 @@ impl AccountResources {
         health.last_failure_ms = Some(now);
         health.reason_code = Some(reason_code.to_owned());
         // Failed captures count in the same bounded window as successful ones.
-        health.finance_window.record(crate::finance_window::FinanceAttempt {
-            at_ms: now,
-            source_generation: generation,
-            elapsed_ms,
-            nav_sql_owner_ms: None,
-            nav_sql_queue_ms: None,
-            snapshot_age_ms: None,
-            failure_code: Some(reason_code.to_owned()),
-        });
+        health
+            .finance_window
+            .record(crate::finance_window::FinanceAttempt {
+                at_ms: now,
+                source_generation: generation,
+                elapsed_ms,
+                nav_sql_owner_ms: None,
+                nav_sql_queue_ms: None,
+                snapshot_age_ms: None,
+                failure_code: Some(reason_code.to_owned()),
+            });
     }
 
     async fn record_source_success(
@@ -681,15 +678,17 @@ impl AccountResources {
         health.last_nav_reconciliation_ms = Some(phases.nav_reconciliation_ms);
         health.last_nav_sql_queue_wait_ms = Some(phases.nav_sql_queue_wait_ms);
         health.last_nav_sql_owner_ms = Some(phases.nav_sql_owner_ms);
-        health.finance_window.record(crate::finance_window::FinanceAttempt {
-            at_ms: now,
-            source_generation: generation,
-            elapsed_ms: duration_ms,
-            nav_sql_owner_ms: Some(phases.nav_sql_owner_ms),
-            nav_sql_queue_ms: Some(phases.nav_sql_queue_wait_ms),
-            snapshot_age_ms,
-            failure_code: None,
-        });
+        health
+            .finance_window
+            .record(crate::finance_window::FinanceAttempt {
+                at_ms: now,
+                source_generation: generation,
+                elapsed_ms: duration_ms,
+                nav_sql_owner_ms: Some(phases.nav_sql_owner_ms),
+                nav_sql_queue_ms: Some(phases.nav_sql_queue_wait_ms),
+                snapshot_age_ms,
+                failure_code: None,
+            });
     }
 }
 

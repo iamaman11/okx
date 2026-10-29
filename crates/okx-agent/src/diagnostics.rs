@@ -404,7 +404,11 @@ async fn account_diagnostics(
     // Bounded per-attempt observations share the existing account health lock.
     // Compute P95 on demand, never on the SQL writer or source capture path.
     let capture_health = resources.source_capture_health.read().await;
-    out["finance_window"] = json!(capture_health.finance_window.summary(Utc::now().timestamp_millis()));
+    out["finance_window"] = json!(
+        capture_health
+            .finance_window
+            .summary(Utc::now().timestamp_millis())
+    );
     out["source_capture"] = json!(&*capture_health);
     drop(capture_health);
     out["storage"] = facts;
