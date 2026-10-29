@@ -1104,6 +1104,101 @@ fn periodic_backup_uses_readonly_snapshot_and_requires_restoration_reconciliatio
     std::fs::remove_dir_all(root).unwrap();
 }
 
+#[test]
+fn periodic_backup_keeps_consistent_wal_snapshot_with_concurrent_writes_and_rowids() {
+    // The same production backup path, through a separate SQLite connection:
+    // rowids in financial history must not be renumbered by compaction.
+    let original = store();
+    let original_path = original.path.clone();
+    let meta = original.meta.clone();
+    drop(original);
+    let root = std::env::temp_dir().join(format!(
+        "okx-backup-live-wal-{}-{}",
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let source_path = root.join("account.db");
+    std::fs::rename(&original_path, &source_path).unwrap();
+    let active =
+        AccountStore::open_existing(&source_path, &meta.account_key, &meta.installation_id)
+            .unwrap();
+    active
+        .connection
+        .execute_batch(
+            "CREATE TABLE backup_wal_fixture(payload TEXT NOT NULL);
+             INSERT INTO backup_wal_fixture VALUES('first'),('second'),('third');
+             DELETE FROM backup_wal_fixture WHERE payload='second';
+             WITH RECURSIVE n(x) AS (
+                VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<512
+             ) INSERT INTO backup_wal_fixture SELECT hex(randomblob(4096)) FROM n;",
+        )
+        .unwrap();
+
+    let start = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let backup_start = start.clone();
+    let backup_path = source_path.clone();
+    let backup_meta = meta.clone();
+    let backup = std::thread::spawn(move || {
+        backup_start.wait();
+        AccountStore::periodic_backup_from_reader(backup_path, backup_meta)
+    });
+    start.wait();
+    // A live single-owner writer keeps committing while the backup reads
+    // through its own connection. The backup must not acquire writer ownership.
+    for n in 0..256 {
+        active
+            .connection
+            .execute(
+                "INSERT INTO backup_wal_fixture(payload) VALUES(?1)",
+                [format!("live-{n:04}")],
+            )
+            .unwrap();
+    }
+    backup.join().unwrap().unwrap();
+
+    assert!(!active.storage_recovery_required().unwrap());
+    let snapshots = root.join("backups");
+    let path = std::fs::read_dir(&snapshots)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| path.extension().is_some_and(|ext| ext == "db"))
+        .unwrap();
+    assert!(path.with_extension("manifest.json").is_file());
+    let restored =
+        AccountStore::open_existing(&path, &meta.account_key, &meta.installation_id).unwrap();
+    assert!(restored.storage_recovery_required().unwrap());
+    let preserved_rowid: i64 = restored
+        .connection
+        .query_row(
+            "SELECT rowid FROM backup_wal_fixture WHERE payload='third'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        preserved_rowid, 3,
+        "backup must retain immutable SQLite rowids"
+    );
+    let copied_rows: i64 = restored
+        .connection
+        .query_row("SELECT COUNT(*) FROM backup_wal_fixture", [], |r| r.get(0))
+        .unwrap();
+    let live_rows: i64 = active
+        .connection
+        .query_row("SELECT COUNT(*) FROM backup_wal_fixture", [], |r| r.get(0))
+        .unwrap();
+    assert!(copied_rows >= 514 && copied_rows <= live_rows);
+    let quick_check: String = restored
+        .connection
+        .query_row("PRAGMA quick_check", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(quick_check, "ok");
+    drop(restored);
+    drop(active);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 #[cfg(target_os = "linux")]
 fn rss_kib() -> u64 {
     std::fs::read_to_string("/proc/self/status")

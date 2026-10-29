@@ -599,7 +599,25 @@ impl AccountStore {
             destination.pragma_update(None, "synchronous", "FULL")?;
             {
                 let backup = rusqlite::backup::Backup::new(&source, &mut destination)?;
-                backup.run_to_completion(128, Duration::from_millis(1), None)?;
+                // A separate read-only connection plus a paged backup can restart
+                // from page zero on EVERY commit by the live WAL writer.
+                // A NAV cycle commits every ~2s: large copies may never finish.
+                // One SQLite backup_step(-1) pins a consistent read snapshot
+                // for the complete copy without taking ownership of the writer.
+                // Under WAL, the source read lock permits concurrent writers.
+                // rusqlite::Backup::run_to_completion requires positive
+                // pages_per_step; call SQLite backup_step(-1) directly.
+                // Fail closed on a busy or incomplete snapshot.
+                match backup.step(-1)? {
+                    rusqlite::backup::StepResult::Done => {}
+                    rusqlite::backup::StepResult::Busy | rusqlite::backup::StepResult::Locked => {
+                        return Err(StoreError::Invalid("BACKUP_SOURCE_BUSY"));
+                    }
+                    rusqlite::backup::StepResult::More => {
+                        return Err(StoreError::Invalid("BACKUP_SNAPSHOT_INCOMPLETE"));
+                    }
+                    _ => return Err(StoreError::Invalid("BACKUP_STEP_UNKNOWN")),
+                }
             }
             // As with AccountStore::backup, every restored copy requires
             // reconciliation against the venue and central risk authority.
