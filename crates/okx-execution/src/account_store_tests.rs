@@ -1359,10 +1359,9 @@ fn d1_ingest_reports_all_transaction_outcomes_including_pre_commit_errors() {
 
     s.connection.execute_batch("BEGIN IMMEDIATE").unwrap();
     let mut begin_failure = None;
-    let failed = s.ingest_page_observed(
-        &IngestPage::default(),
-        |timing| begin_failure = Some(timing),
-    );
+    let failed = s.ingest_page_observed(&IngestPage::default(), |timing| {
+        begin_failure = Some(timing)
+    });
     assert!(failed.is_err());
     s.connection.execute_batch("ROLLBACK").unwrap();
     let begin_failure = begin_failure.unwrap();

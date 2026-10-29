@@ -2052,8 +2052,7 @@ impl AccountStore {
             Some(u64::try_from(timing.body_started.elapsed().as_micros()).unwrap_or(u64::MAX));
         let commit_started = std::time::Instant::now();
         let commit_result = tx.commit();
-        timing.commit_us =
-            u64::try_from(commit_started.elapsed().as_micros()).unwrap_or(u64::MAX);
+        timing.commit_us = u64::try_from(commit_started.elapsed().as_micros()).unwrap_or(u64::MAX);
         timing.commit_succeeded = commit_result.is_ok();
         let commit_ms = timing.commit_us / 1000;
         if commit_ms >= 250 || commit_result.is_err() {

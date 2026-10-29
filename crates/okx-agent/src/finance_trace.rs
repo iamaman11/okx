@@ -27,7 +27,9 @@ fn incarnation() -> &'static str {
 fn error_code(code: String) -> String {
     if !code.is_empty()
         && code.len() <= ERROR_CODE_MAX
-        && code.bytes().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == b'_')
+        && code
+            .bytes()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == b'_')
     {
         code
     } else {
@@ -44,8 +46,7 @@ fn worst_case_allocated_bytes() -> usize {
         + PHASE_MAX * std::mem::size_of::<Phase>()
         + SOURCE_PHASE_MAX * std::mem::size_of::<Phase>()
         + ERROR_CODE_MAX;
-    SUMMARY_MAX * (std::mem::size_of::<Brief>() + ERROR_CODE_MAX)
-        + DETAIL_MAX * cycle + cycle
+    SUMMARY_MAX * (std::mem::size_of::<Brief>() + ERROR_CODE_MAX) + DETAIL_MAX * cycle + cycle
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -380,7 +381,10 @@ mod tests {
         }
         let summary = t.readback(None, 4);
         assert_eq!(summary.problem_ids.len(), 3);
-        assert_eq!(summary.recent[0].error_code.as_deref(), Some("UNCLASSIFIED_FINANCE_ERROR"));
+        assert_eq!(
+            summary.recent[0].error_code.as_deref(),
+            Some("UNCLASSIFIED_FINANCE_ERROR")
+        );
         assert!(serde_json::to_vec(&summary).unwrap().len() <= 12 * 1024);
         let detail = t.readback(Some(2050), 4);
         assert!(serde_json::to_vec(&detail).unwrap().len() <= 32 * 1024);
