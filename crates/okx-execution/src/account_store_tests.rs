@@ -924,6 +924,57 @@ fn backup_blocks_risk_until_exchange_and_central_reconcile() {
         .unwrap();
     assert!(s.begin_post("intent", 1, 4).unwrap());
 }
+#[test]
+fn periodic_backup_uses_readonly_snapshot_and_requires_restoration_reconciliation() {
+    // An isolated directory prevents cross-test retention collisions.
+    let original = store();
+    let original_path = original.path.clone();
+    let meta = original.meta.clone();
+    drop(original);
+    let root = std::env::temp_dir().join(format!(
+        "okx-backup-test-{}-{}",
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let source_path = root.join("account.db");
+    std::fs::rename(&original_path, &source_path).unwrap();
+    let mut active =
+        AccountStore::open_existing(&source_path, &meta.account_key, &meta.installation_id)
+            .unwrap();
+    // The backup's source connection is separate and read-only. Risk writes
+    // still have precisely one authorized AccountStore writer.
+    active.ensure_manual_instance(1).unwrap();
+    let snapshot_path = source_path.clone();
+    let snapshot_meta = meta.clone();
+    let backup = std::thread::spawn(move || {
+        AccountStore::periodic_backup_from_reader(snapshot_path, snapshot_meta)
+    });
+    // No source writer lease is transferred to the backup thread.
+    assert!(active.policy().is_ok());
+    backup.join().unwrap().unwrap();
+    assert!(!active.storage_recovery_required().unwrap());
+    let backups = root.join("backups");
+    let target = std::fs::read_dir(&backups)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| path.extension().is_some_and(|ext| ext == "db"))
+        .unwrap();
+    assert!(target.with_extension("manifest.json").is_file());
+    assert_eq!(
+        std::fs::read_dir(&backups).unwrap().count(),
+        2,
+        "only a complete DB and checksum manifest should remain"
+    );
+    let restored =
+        AccountStore::open_existing(&target, &meta.account_key, &meta.installation_id).unwrap();
+    assert!(restored.storage_recovery_required().unwrap());
+    assert_eq!(restored.meta().account_key, meta.account_key);
+    drop(restored);
+    drop(active);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 #[cfg(target_os = "linux")]
 fn rss_kib() -> u64 {
     std::fs::read_to_string("/proc/self/status")

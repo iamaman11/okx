@@ -60,6 +60,11 @@ struct WorkerOwner {
     sender: SyncSender<Job>,
     timings: Arc<SqlTimingCounters>,
 }
+
+struct PendingBackup {
+    handle: std::thread::JoinHandle<StoreResult<()>>,
+    started: Instant,
+}
 #[derive(Clone)]
 pub struct AccountStoreHandle {
     owner: Arc<WorkerOwner>,
@@ -104,6 +109,7 @@ impl AccountStoreHandle {
                     }
                 };
                 let mut last_backup = Instant::now();
+                let mut pending_backup: Option<PendingBackup> = None;
                 let mut maintenance_cadence = MaintenanceCadence::new(Instant::now());
                 loop {
                     match receiver.recv_timeout(Duration::from_secs(1)) {
@@ -111,20 +117,44 @@ impl AccountStoreHandle {
                         Err(RecvTimeoutError::Disconnected) => break,
                         Err(RecvTimeoutError::Timeout) => {}
                     }
-                    // One existing SQL owner and loop; do not start a second
-                    // task or change the durable 15-minute backup requirement.
+                    // The immutable recovery snapshot uses a short-lived
+                    // read-only source connection. Do not join it while it
+                    // runs: the owner's FIFO must stay available for NAV.
+                    if pending_backup
+                        .as_ref()
+                        .is_some_and(|backup| backup.handle.is_finished())
+                        && let Some(backup) = pending_backup.take()
+                    {
+                        let elapsed = backup.started.elapsed();
+                        let outcome = match backup.handle.join() {
+                            Ok(Ok(())) => {
+                                last_backup = Instant::now();
+                                store.clear_maintenance_error();
+                                "ok"
+                            }
+                            Ok(Err(error)) => {
+                                store.set_maintenance_error(error.to_string());
+                                "error"
+                            }
+                            Err(_) => {
+                                store.set_maintenance_error("BACKUP_WORKER_PANICKED".into());
+                                "error"
+                            }
+                        };
+                        eprintln!(
+                            "ACCOUNT_SQL_BACKUP_V1 elapsed_ms={} outcome={}",
+                            elapsed.as_millis(),
+                            outcome
+                        );
+                    }
+                    // One existing cadence/SQL writer/checkpoint owner; only
+                    // the backup copy executes on a temporary read-only thread.
                     if !maintenance_cadence.due(Instant::now()) {
                         continue;
                     }
-                    let backup_due = last_backup.elapsed() >= Duration::from_secs(900);
                     let started = Instant::now();
-                    let succeeded = match store.maintenance(backup_due) {
-                        Ok(()) => {
-                            if backup_due {
-                                last_backup = Instant::now();
-                            }
-                            true
-                        }
+                    let succeeded = match store.maintenance() {
+                        Ok(()) => true,
                         Err(e) => {
                             store.set_maintenance_error(e.to_string());
                             false
@@ -132,14 +162,27 @@ impl AccountStoreHandle {
                     };
                     let elapsed = started.elapsed();
                     if elapsed >= Duration::from_millis(250) || !succeeded {
-                        // Redacted timing identifies maintenance stalls separately
-                        // from SQL job execution. No account IDs or financial data.
                         eprintln!(
-                            "ACCOUNT_SQL_MAINTENANCE_V1 elapsed_ms={} backup_due={} outcome={}",
+                            "ACCOUNT_SQL_MAINTENANCE_V1 elapsed_ms={} backup_due=false outcome={}",
                             elapsed.as_millis(),
-                            backup_due,
                             if succeeded { "ok" } else { "error" }
                         );
+                    }
+                    if pending_backup.is_none() && last_backup.elapsed() >= Duration::from_secs(900)
+                    {
+                        let (path, meta) = store.backup_identity();
+                        match std::thread::Builder::new()
+                            .name("okx-account-backup".into())
+                            .spawn(move || AccountStore::periodic_backup_from_reader(path, meta))
+                        {
+                            Ok(handle) => {
+                                pending_backup = Some(PendingBackup {
+                                    handle,
+                                    started: Instant::now(),
+                                });
+                            }
+                            Err(e) => store.set_maintenance_error(e.to_string()),
+                        }
                     }
                 }
             })?;

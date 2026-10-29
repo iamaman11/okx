@@ -548,7 +548,13 @@ impl AccountStore {
     pub(crate) fn set_maintenance_error(&mut self, error: String) {
         self.maintenance_error = Some(error);
     }
-    pub(crate) fn maintenance(&mut self, backup_due: bool) -> StoreResult<()> {
+
+    pub(crate) fn clear_maintenance_error(&mut self) {
+        self.maintenance_error = None;
+    }
+    /// Existing single SQL owner remains responsible for all financial writes
+    /// and WAL checkpoints. Copying a 150MB+ backup never runs in its FIFO.
+    pub(crate) fn maintenance(&mut self) -> StoreResult<()> {
         let (_, wal) = self.storage_bytes()?;
         let page_size: i64 = self
             .connection
@@ -556,52 +562,117 @@ impl AccountStore {
         if wal >= (page_size as u64).saturating_add(24).saturating_mul(1000) {
             self.checkpoint()?;
         }
-        if !backup_due {
-            return Ok(());
-        }
-        let directory = self
-            .path
+        Ok(())
+    }
+
+    pub(crate) fn backup_identity(&self) -> (PathBuf, AccountMeta) {
+        (self.path.clone(), self.meta.clone())
+    }
+
+    /// A short-lived *read-only* SQLite snapshot reader. The sole account
+    /// writer and its original connection are never borrowed by this backup.
+    /// The destination is a separate immutable recovery artifact, not a second
+    /// ledger or trading authority. The 15-minute cadence stays in the owner.
+    pub(crate) fn periodic_backup_from_reader(
+        source_path: PathBuf,
+        meta: AccountMeta,
+    ) -> StoreResult<()> {
+        let directory = source_path
             .parent()
             .ok_or(StoreError::Invalid("BACKUP_DIRECTORY_MISSING"))?
             .join("backups");
         std::fs::create_dir_all(&directory)?;
         let now = wall_time_ms();
         let target = directory.join(format!("account-{now}.db"));
-        self.backup(&target)?;
-        use sha2::{Digest, Sha256};
-        use std::io::Read;
-        let mut file = std::fs::File::open(&target)?;
-        let mut hash = Sha256::new();
-        let mut buffer = [0u8; 65536];
-        loop {
-            let n = file.read(&mut buffer)?;
-            if n == 0 {
-                break;
+        let staged = directory.join(format!("account-{now}.pending"));
+        let manifest_path = target.with_extension("manifest.json");
+        let staged_manifest = directory.join(format!("account-{now}.manifest-pending"));
+        if target.exists() || staged.exists() || manifest_path.exists() || staged_manifest.exists()
+        {
+            return Err(StoreError::Invalid("BACKUP_ALREADY_EXISTS"));
+        }
+        let result = (|| -> StoreResult<()> {
+            let source =
+                Connection::open_with_flags(&source_path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+            source.busy_timeout(Duration::from_millis(250))?;
+            let mut destination = Connection::open(&staged)?;
+            destination.pragma_update(None, "synchronous", "FULL")?;
+            {
+                let backup = rusqlite::backup::Backup::new(&source, &mut destination)?;
+                backup.run_to_completion(128, Duration::from_millis(1), None)?;
             }
-            hash.update(&buffer[..n]);
+            // As with AccountStore::backup, every restored copy requires
+            // reconciliation against the venue and central risk authority.
+            destination.execute(
+                "UPDATE storage_recovery SET requires_reconcile=1,backup_at=?1,reconciled_evidence=NULL",
+                [now],
+            )?;
+            destination.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")?;
+            let integrity: String =
+                destination.query_row("PRAGMA quick_check", [], |r| r.get(0))?;
+            if integrity != "ok" {
+                return Err(StoreError::Invalid("BACKUP_INTEGRITY_FAILED"));
+            }
+            drop(destination);
+            drop(source);
+
+            use sha2::{Digest, Sha256};
+            use std::io::Read;
+            let mut file = std::fs::File::open(&staged)?;
+            let mut hash = Sha256::new();
+            let mut buffer = [0u8; 65536];
+            loop {
+                let n = file.read(&mut buffer)?;
+                if n == 0 {
+                    break;
+                }
+                hash.update(&buffer[..n]);
+            }
+            let manifest = serde_json::json!({
+                "schema_version": 2,
+                "account_key": meta.account_key,
+                "installation_id": meta.installation_id,
+                "time": now,
+                "sha256": format!("{:x}", hash.finalize())
+            });
+            let mut manifest_file = std::fs::File::create(&staged_manifest)?;
+            use std::io::Write;
+            manifest_file.write_all(
+                &serde_json::to_vec(&manifest)
+                    .map_err(|_| StoreError::Invalid("BACKUP_MANIFEST_FAILED"))?,
+            )?;
+            manifest_file.sync_all()?;
+            // Publish only a complete, integrity-checked, hashed snapshot.
+            // The manifest precedes the DB so an interrupted transfer can
+            // never expose an incomplete *.db as a restorable backup.
+            std::fs::rename(&staged_manifest, &manifest_path)?;
+            std::fs::rename(&staged, &target)?;
+
+            let mut backups = std::fs::read_dir(&directory)?
+                .filter_map(Result::ok)
+                .map(|e| e.path())
+                .filter(|p| {
+                    p.extension().is_some_and(|e| e == "db")
+                        && p.file_name()
+                            .is_some_and(|n| n.to_string_lossy().starts_with("account-"))
+                })
+                .collect::<Vec<_>>();
+            backups.sort();
+            let remove = backups.len().saturating_sub(4);
+            for old in backups.into_iter().take(remove) {
+                std::fs::remove_file(old.with_extension("manifest.json"))?;
+                std::fs::remove_file(old)?;
+            }
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = std::fs::remove_file(&staged);
+            let _ = std::fs::remove_file(&staged_manifest);
+            // A manifest is never evidence without its corresponding DB.
+            if !target.exists() {
+                let _ = std::fs::remove_file(&manifest_path);
+            }
         }
-        let manifest = serde_json::json!({"schema_version":2,"account_key":self.meta.account_key,"installation_id":self.meta.installation_id,"time":now,"sha256":format!("{:x}",hash.finalize())});
-        std::fs::write(
-            target.with_extension("manifest.json"),
-            serde_json::to_vec(&manifest)
-                .map_err(|_| StoreError::Invalid("BACKUP_MANIFEST_FAILED"))?,
-        )?;
-        let mut backups = std::fs::read_dir(&directory)?
-            .filter_map(Result::ok)
-            .map(|e| e.path())
-            .filter(|p| {
-                p.extension().is_some_and(|e| e == "db")
-                    && p.file_name()
-                        .is_some_and(|n| n.to_string_lossy().starts_with("account-"))
-            })
-            .collect::<Vec<_>>();
-        backups.sort();
-        let remove = backups.len().saturating_sub(4);
-        for old in backups.into_iter().take(remove) {
-            std::fs::remove_file(old.with_extension("manifest.json"))?;
-            std::fs::remove_file(old)?;
-        }
-        self.maintenance_error = None;
-        Ok(())
+        result
     }
 }
