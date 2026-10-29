@@ -782,6 +782,125 @@ fn utc_daily_risk_rolls_without_replenishing_campaign_or_clearing_stop() {
     assert_eq!(s.stops().unwrap().len(), 1);
 }
 #[test]
+fn p02_m2_interest_fee_funding_charge_once_with_fx_and_never_refill_on_profit() {
+    let mut s = store();
+    let mut interest = fee("bill-interest", "bill:interest");
+    interest.economic_event_key = "bill:interest".into();
+    interest.component = "INTEREST".into();
+    interest.amount = Decimal::new(-4, 1);
+
+    let mut funding = fee("bill-funding", "bill:funding");
+    funding.economic_event_key = "bill:funding".into();
+    funding.component = "FUNDING".into();
+    funding.amount = Decimal::new(-1, 1);
+
+    let mut profit = fee("bill-profit", "bill:profit");
+    profit.economic_event_key = "bill:profit".into();
+    profit.component = "REALIZED_PNL".into();
+    profit.amount = Decimal::from(4);
+
+    let fee_fact = fee("trade-fee", "fill:fee");
+    let page = IngestPage {
+        finance: vec![interest.clone(), funding, fee_fact, profit],
+        ..Default::default()
+    };
+    let fx = UsdConversionEvidence {
+        observed_at: 4,
+        source_digest: "attested-usdt-usd".into(),
+        usd_per_currency: std::collections::BTreeMap::from([
+            ("USDT".into(), Decimal::from(2))
+        ]),
+    };
+    s.ingest_page_with_usd(&page, &fx).unwrap();
+    s.ingest_page_with_usd(&page, &fx).unwrap();
+    // (0.40 interest + 0.10 funding + 0.25 fee) * 2 USD/USDT.
+    // A 4 USDT realized profit is recorded separately and does not refill risk.
+    assert_eq!(s.policy().unwrap().4, Decimal::new(15, 1));
+    assert_eq!(
+        s.usd_component_total("CAMPAIGN_LOSS_USD").unwrap(),
+        Decimal::new(15, 1)
+    );
+    assert_eq!(
+        s.finance_totals(1, 10, None)
+            .unwrap()
+            .get(&("USDT".into(), "INTEREST".into()))
+            .copied(),
+        Some(Decimal::new(-4, 1))
+    );
+    let events = s.finance_history(1, 10, 0, "", 50).unwrap();
+    assert_eq!(events.iter().filter(|e| e.component == "INTEREST").count(), 1);
+    assert_eq!(events.iter().filter(|e| e.component == "CAMPAIGN_LOSS_USD").count(), 3);
+
+    let path = s.path.clone();
+    let meta = s.meta.clone();
+    drop(s);
+    let mut recovered =
+        AccountStore::open_existing(path, &meta.account_key, &meta.installation_id).unwrap();
+    recovered.ingest_page_with_usd(&page, &fx).unwrap();
+    assert_eq!(recovered.policy().unwrap().4, Decimal::new(15, 1));
+
+    let mut rebate = interest;
+    rebate.entry_id = "bill-interest-rebate".into();
+    rebate.economic_event_key = "bill:interest-rebate".into();
+    rebate.amount = Decimal::new(4, 1);
+    rebate.source_ref = "bill:interest-rebate".into();
+    recovered.ingest_page_with_usd(&IngestPage {
+        finance: vec![rebate],
+        ..Default::default()
+    }, &fx).unwrap();
+    assert_eq!(recovered.policy().unwrap().4, Decimal::new(15, 1));
+}
+
+#[test]
+fn p02_m2_interest_without_verified_fx_rolls_back_and_preserves_cursor() {
+    let mut s = store();
+    let mut interest = fee("bill-interest", "bill:interest");
+    interest.economic_event_key = "bill:interest".into();
+    interest.component = "INTEREST".into();
+    interest.amount = Decimal::new(-4, 1);
+    let cursor = SourceCursor {
+        source: "bills".into(),
+        stream_partition: "account".into(),
+        cursor: "bill-interest".into(),
+        watermark: 5,
+        generation: 1,
+        coverage_gaps: String::new(),
+    };
+    let page = IngestPage {
+        finance: vec![interest],
+        cursor: Some(cursor.clone()),
+        ..Default::default()
+    };
+    let missing_fx = UsdConversionEvidence {
+        observed_at: 5,
+        source_digest: "missing-interest-rate".into(),
+        usd_per_currency: Default::default(),
+    };
+    assert!(matches!(
+        s.ingest_page_with_usd(&page, &missing_fx),
+        Err(StoreError::Invalid("USD_CONVERSION_SOURCE_UNAVAILABLE"))
+    ));
+    assert!(s.cursor("bills", "account").unwrap().is_none());
+    assert!(s.finance_history(1, 10, 0, "", 20).unwrap().is_empty());
+    assert_eq!(s.policy().unwrap().4, Decimal::ZERO);
+
+    let verified_fx = UsdConversionEvidence {
+        observed_at: 5,
+        source_digest: "verified-interest-rate".into(),
+        usd_per_currency: std::collections::BTreeMap::from([
+            ("USDT".into(), Decimal::from(2))
+        ]),
+    };
+    s.ingest_page_with_usd(&page, &verified_fx).unwrap();
+    s.ingest_page_with_usd(&page, &verified_fx).unwrap();
+    assert_eq!(
+        s.cursor("bills", "account").unwrap().unwrap().watermark,
+        cursor.watermark
+    );
+    assert_eq!(s.policy().unwrap().4, Decimal::new(8, 1));
+}
+
+#[test]
 fn campaign_conversion_is_attested_deduplicated_and_profit_never_refills() {
     let mut s = store();
     let e = fee("fee", "fill-source");
