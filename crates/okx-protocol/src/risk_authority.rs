@@ -587,7 +587,10 @@ mod tests {
         {
             *entry_upper_usd = None;
         }
-        assert!(!missing_entry.valid(), "no entry debit is not zero entry debit");
+        assert!(
+            !missing_entry.valid(),
+            "no entry debit is not zero entry debit"
+        );
         let json = serde_json::to_string(&ready).unwrap();
         assert_eq!(serde_json::from_str::<RiskCommand>(&json).unwrap(), ready);
         if let RiskCommandAction::Reserve {

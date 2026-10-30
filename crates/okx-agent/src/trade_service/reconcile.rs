@@ -491,6 +491,11 @@ impl TradeService {
             record_digest: digest(&(i, order, loss, through))?,
             cumulative_loss_usd: exact(loss),
             remaining_exposure_usdt: "0".into(),
+            // Do not invent settled fees from modeled loss; final bill proof
+            // must explicitly populate these before the E1 risk release.
+            cumulative_entry_usd: None,
+            entry_settlement_revision: None,
+            entry_settlement_digest: None,
         };
         let command = self.risk_command(
             &state,
