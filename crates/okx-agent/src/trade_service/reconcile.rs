@@ -1122,12 +1122,20 @@ mod entry_cost_status_tests {
             client_order_id: "client".into(),
             instrument_id: "BTC-USDT-SWAP".into(),
             plan_hash: "a".repeat(64),
+            idempotency_key: "idem".into(),
+            request_hash: "request".into(),
+            state: IntentState::Filled,
+            revision: 1,
+            deadline: 15,
+            policy_revision: 1,
+            risk_increase: true,
+            exchange_order_id: Some("venue-order".into()),
+            incident: None,
             plan: okx_execution::IntentPlan {
                 quantity: Decimal::ONE,
                 side: "buy".into(),
                 ..Default::default()
             },
-            ..StoredIntent::default()
         };
         let source = okx_execution::IntentFillCostEvidence {
             intent_id: intent.intent_id.clone(),
