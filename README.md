@@ -53,9 +53,16 @@ NAV/STOP → protected position/terminal settlement → release`.
   same SQL-owner, RiskBook and post-once execution path. Strategy budget is
   a risk policy, **not** newly created account capital.
 - **Adding finance evidence:** write immutable venue fact + provenance into
-  the single account SQL owner, with exact cursor/replay rules. Only a
-  fully source-bound cumulative debit may become `SETTLE_ENTRY`. An
-  observed `notional + fee` quote does not prove margin/borrowing/FX.
+  the single account SQL owner, with exact cursor/replay rules. The native
+  `EntryCostProof` either stays `Unknown` or persists a quote-bound
+  `ENTRY_ADMISSION_PROVEN` operation receipt *before* central `RESERVE`.
+  After a terminal verified venue readback, the SAME SQL owner links
+  fills to final fee bills, recomputes a conservative cumulative USD
+  charge from the original source-bound FX upper, and persists
+  `ENTRY_SETTLEMENT_PROVEN`. The existing WSS `SETTLE_ENTRY` moves that
+  amount from reserved to consumed before `Resolve(RELEASED)` returns
+  unused reserved capacity. Lost replies replay the original receipt.
+  A known `notional + fee` quote alone never proves margin/borrow/FX.
 - **Handling net-mode positions:** exchange `posSide=net` uses a signed
   position quantity, while native SQL lots use `long` / `short`.
   `trade_service/reconcile.rs::verified_venue_position_direction` is the
