@@ -997,30 +997,29 @@ mod tests {
             "type":"0", "autoLoan":false
         }))
         .unwrap();
-        let snap: okx_observation::AccountSnapshot =
-            serde_json::from_value(serde_json::json!({
-                "schema":"okx.account-snapshot/v1",
-                "source":"fixture-authenticated-account",
-                "source_received_at":at.to_rfc3339(),
-                "account_generation":"authenticated-generation",
-                "quality_reason":"test-native-source",
-                "private_ws_connected":true,
-                "account_level":"2",
-                "position_mode":"long_short_mode",
-                "account_type":"0",
-                "account_uid_fingerprint":okx_api::account_uid_fingerprint("real-fixture-uid"),
-                "api_key_permissions":["trade"],
-                "balance":{
-                    "total_equity_usd":"100",
-                    "details":[{
-                        "currency":"USDT","equity":"100","equity_usd":"100",
-                        "available_equity":"100","available_balance":"100",
-                        "liabilities":"0"
-                    }]
-                },
-                "positions":[],"pending_orders":[]
-            }))
-            .unwrap();
+        let snap: okx_observation::AccountSnapshot = serde_json::from_value(serde_json::json!({
+            "schema":"okx.account-snapshot/v1",
+            "source":"fixture-authenticated-account",
+            "source_received_at":at.to_rfc3339(),
+            "account_generation":"authenticated-generation",
+            "quality_reason":"test-native-source",
+            "private_ws_connected":true,
+            "account_level":"2",
+            "position_mode":"long_short_mode",
+            "account_type":"0",
+            "account_uid_fingerprint":okx_api::account_uid_fingerprint("real-fixture-uid"),
+            "api_key_permissions":["trade"],
+            "balance":{
+                "total_equity_usd":"100",
+                "details":[{
+                    "currency":"USDT","equity":"100","equity_usd":"100",
+                    "available_equity":"100","available_balance":"100",
+                    "liabilities":"0"
+                }]
+            },
+            "positions":[],"pending_orders":[]
+        }))
+        .unwrap();
         let mut open_plan = plan.clone();
         open_plan.side = "buy".into();
         open_plan.position_side = "long".into();
@@ -1030,12 +1029,18 @@ mod tests {
             observed_at_ms: t as u64,
         };
         let applicant =
-            EntryCostProof::source_valued_candidate(known.clone(), &source_fx, t + 1)
-                .unwrap();
-        let assessed = applicant.clone()
+            EntryCostProof::source_valued_candidate(known.clone(), &source_fx, t + 1).unwrap();
+        let assessed = applicant
+            .clone()
             .attest_linear_usdt_sources(
-                &open_plan, "limit", "BTC-USDT-SWAP", &rules,
-                &live_fees, &config, &snap, dec("2").unwrap(),
+                &open_plan,
+                "limit",
+                "BTC-USDT-SWAP",
+                &rules,
+                &live_fees,
+                &config,
+                &snap,
+                dec("2").unwrap(),
             )
             .unwrap();
         assert_eq!(assessed.proven_upper_usd().unwrap(), Some(known.total_usd));
@@ -1043,19 +1048,33 @@ mod tests {
         let mut auto = config.clone();
         auto.auto_loan = true;
         assert_eq!(
-            applicant.clone()
+            applicant
+                .clone()
                 .attest_linear_usdt_sources(
-                    &open_plan, "limit", "BTC-USDT-SWAP", &rules,
-                    &live_fees, &auto, &snap, dec("2").unwrap(),
+                    &open_plan,
+                    "limit",
+                    "BTC-USDT-SWAP",
+                    &rules,
+                    &live_fees,
+                    &auto,
+                    &snap,
+                    dec("2").unwrap(),
                 )
                 .unwrap_err(),
             "ENTRY_AUTO_BORROW_UNSUPPORTED"
         );
         assert_eq!(
-            applicant.clone()
+            applicant
+                .clone()
                 .attest_linear_usdt_sources(
-                    &open_plan, "market", "BTC-USDT-SWAP", &rules,
-                    &live_fees, &config, &snap, dec("2").unwrap(),
+                    &open_plan,
+                    "market",
+                    "BTC-USDT-SWAP",
+                    &rules,
+                    &live_fees,
+                    &config,
+                    &snap,
+                    dec("2").unwrap(),
                 )
                 .unwrap_err(),
             "ENTRY_PRODUCT_OR_PRICE_CAP_UNSUPPORTED"
@@ -1065,8 +1084,14 @@ mod tests {
         assert_eq!(
             applicant
                 .attest_linear_usdt_sources(
-                    &open_plan, "limit", "BTC-USDT-SWAP", &rules,
-                    &live_fees, &config, &no_funds, dec("2").unwrap(),
+                    &open_plan,
+                    "limit",
+                    "BTC-USDT-SWAP",
+                    &rules,
+                    &live_fees,
+                    &config,
+                    &no_funds,
+                    dec("2").unwrap(),
                 )
                 .unwrap()
                 .proven_upper_usd()
