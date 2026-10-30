@@ -1,5 +1,52 @@
 use super::*;
 use okx_api::CancelOrderRequest;
+/// Historical known pricing evidence is not an all-in entry debit proof.
+fn entry_cost_status(
+    stored: Option<okx_execution::EntryQuoteEvidence>,
+) -> Result<Value, String> {
+    let Some(quote) = stored else {
+        return Ok(json!({
+            "state": "not_proven",
+            "all_in_entry_cost_proven": false,
+            "entry_debit_upper_usd": null,
+            "reason_codes": ["ENTRY_QUOTE_NOT_RECORDED"],
+            "next_action": "RECONCILE_ENTRY_COST_SOURCES"
+        }));
+    };
+    let known = entry_budget::quote(
+        quote.quantity,
+        quote.contract_value,
+        quote.limit_price,
+        quote.fee_rate,
+        quote.usd_per_usdt,
+    )?;
+    if known.notional_usdt != quote.notional_usdt
+        || known.fee_usdt != quote.fee_usdt
+        || known.total_usdt != quote.total_usdt
+        || known.total_usd != quote.total_usd
+    {
+        return Err("ENTRY_QUOTE_READBACK_MISMATCH".into());
+    }
+    let proof = entry_budget::EntryCostProof::unproven_linear_quote(known);
+    Ok(json!({
+        "schema": "okx.entry-known-quote/v1",
+        "state": "historical_known_cost_only",
+        "known_notional_usdt": exact(quote.notional_usdt),
+        "known_fee_usdt": exact(quote.fee_usdt),
+        "known_entry_total_usd": exact(quote.total_usd),
+        "source": {
+            "observed_at_ms": quote.observed_at,
+            "fee_generation": quote.fee_generation,
+            "reference_generation": quote.reference_generation,
+            "conversion_source_digest": quote.conversion_digest,
+        },
+        "all_in_entry_cost_proven": false,
+        "entry_debit_upper_usd": null,
+        "reason_codes": proof.missing_reasons(),
+        "next_action": "RECONCILE_ENTRY_COST_SOURCES"
+    }))
+}
+
 impl TradeService {
     async fn find_intent(
         &self,
@@ -25,6 +72,17 @@ impl TradeService {
         reference: &str,
     ) -> Result<Value, String> {
         let mut i = self.find_intent(r, reference).await?;
+        // Historical fee/notional is a recorded fact, not an authorized entry.
+        let entry_costs = if i.risk_increase
+            && r.configuration.account_key.environment == okx_protocol::accounts::Environment::Real
+        {
+            let id = i.intent_id.clone();
+            let quote = r.execution.store.call(deadline(), move |s| s.entry_quote(&id))
+                .await.map_err(err)?;
+            entry_cost_status(quote)?
+        } else {
+            json!(null)
+        };
         let mut protection_failed = false;
         if matches!(i.state, IntentState::Prepared | IntentState::Reserved) {
             if now() >= i.deadline {
@@ -39,7 +97,7 @@ impl TradeService {
                 i = self.find_intent(r, &i.intent_id).await?;
             } else {
                 return Ok(completed(
-                    json!({"intent":i,"remaining_exposure":"not_evaluated"}),
+                    json!({"intent":i,"remaining_exposure":"not_evaluated","entry_costs":entry_costs}),
                 ));
             }
         }
@@ -52,6 +110,7 @@ impl TradeService {
         {
             return Ok(completed(json!({
                 "intent":i,"send_state":"NOT_STARTED",
+                "entry_costs":entry_costs,
                 "rejection_origin":"CENTRAL","primary_reason":i.incident,
                 "central_release":{"state":"not_required","proof":"RESERVE_DENIED"}
             })));
@@ -69,6 +128,7 @@ impl TradeService {
             return Ok(completed(json!({
                 "intent":i,
                 "send_state":"NOT_STARTED",
+                "entry_costs":entry_costs,
                 "rejection_origin":"LOCAL",
                 "primary_reason":i.incident,
                 "finance_state":"NOT_APPLICABLE",
@@ -100,6 +160,7 @@ impl TradeService {
             return Ok(completed(json!({
                 "intent":i,
                 "send_state":"NOT_STARTED",
+                "entry_costs":entry_costs,
                 "rejection_origin":"LOCAL",
                 "primary_reason":i.incident,
                 "finance_state":"NOT_APPLICABLE",
@@ -281,6 +342,7 @@ impl TradeService {
             };
         let mut result = completed(
             json!({"intent":i,"remaining_exposure":if financial{Some(exact(exposure))}else{None},
+                "entry_costs":entry_costs,
                 "entry_fill_evidence":entry_fill_evidence,
                 "protection":protection,"central_release":central_release,
                 "financial_error":financial_error,"financial_complete":financial,
@@ -993,5 +1055,52 @@ impl TradeService {
         };
         self.execute_bound(r, &command, governance, Some(bound_hash))
             .await
+    }
+}
+
+#[cfg(test)]
+mod entry_cost_status_tests {
+    use super::*;
+
+    #[test]
+    fn e1_status_never_promotes_known_quote_into_all_in_entry_permission() {
+        let empty = entry_cost_status(None).unwrap();
+        assert_eq!(empty["all_in_entry_cost_proven"], false);
+        assert!(empty["entry_debit_upper_usd"].is_null());
+        assert_eq!(empty["reason_codes"][0], "ENTRY_QUOTE_NOT_RECORDED");
+        let quote = okx_execution::EntryQuoteEvidence {
+            schema: "okx.entry-known-quote/v1".into(),
+            account_key: "okx:real:test".into(),
+            installation_id: "install".into(), intent_id: "intent".into(),
+            plan_hash: "a".repeat(64), policy_revision: 1,
+            instrument_id: "BTC-USDT-SWAP".into(),
+            quantity: dec("0.01").unwrap(),
+            limit_price: dec("100").unwrap(),
+            contract_value: Decimal::ONE,
+            fee_rate: dec("0.0005").unwrap(),
+            maker_rate: "-0.0002".into(), taker_rate: "0.0005".into(),
+            fee_level: "Lv1".into(), fee_exchange_at: 1,
+            usd_per_usdt: Decimal::ONE,
+            notional_usdt: Decimal::ONE,
+            fee_usdt: dec("0.0005").unwrap(),
+            total_usdt: dec("1.0005").unwrap(),
+            total_usd: dec("1.0005").unwrap(),
+            fee_generation: format!("sha256:{}", "b".repeat(64)),
+            reference_generation: "ref".into(),
+            fee_received_at: 1, conversion_digest: "c".repeat(64),
+            conversion_received_at: 1, observed_at: 1,
+        };
+        let view = entry_cost_status(Some(quote.clone())).unwrap();
+        assert_eq!(view["state"], "historical_known_cost_only");
+        assert_eq!(view["known_entry_total_usd"], "1.0005");
+        assert_eq!(view["all_in_entry_cost_proven"], false);
+        assert!(view["entry_debit_upper_usd"].is_null());
+        assert_eq!(view["reason_codes"].as_array().unwrap().len(), 4);
+        let mut tampered = quote;
+        tampered.total_usd = Decimal::ONE;
+        assert_eq!(
+            entry_cost_status(Some(tampered)).unwrap_err(),
+            "ENTRY_QUOTE_READBACK_MISMATCH"
+        );
     }
 }
