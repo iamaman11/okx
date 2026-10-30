@@ -219,13 +219,6 @@ pub enum RiskReservationState {
     Open,
     Released,
 }
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(
-    tag = "action",
-    rename_all = "SCREAMING_SNAKE_CASE",
-    deny_unknown_fields
-)]
-
 /** The only opening import transport is the authenticated native Risk WS.
  * The financial source is still independently verified in the native SQL
  * owner; serializing a source hash alone does not create this witness.
@@ -281,6 +274,13 @@ impl CampaignOpeningSource {
             })
     }
 }
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    tag = "action",
+    rename_all = "SCREAMING_SNAKE_CASE",
+    deny_unknown_fields
+)]
+
 pub enum RiskCommandAction {
     Summary {},
     InstallEntryOpening {
