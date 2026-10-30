@@ -207,10 +207,14 @@ impl TradeService {
         }
         let mut managed = std::collections::BTreeSet::new();
         for position in &snapshot.positions {
-            let qty = dec(&position.position)?.abs();
-            if qty == Decimal::ZERO {
+            let Some((direction, qty)) =
+                super::reconcile::verified_venue_position_direction(
+                    &position.position_side,
+                    &position.position,
+                )?
+            else {
                 continue;
-            }
+            };
             let instrument = position.instrument_id.clone();
             let lots = r
                 .execution
@@ -220,16 +224,27 @@ impl TradeService {
                 .map_err(err)?;
             let owned = lots
                 .iter()
-                .filter(|l| l.side == position.position_side)
+                .filter(|l| l.side == direction)
                 .collect::<Vec<_>>();
-            if owned.iter().map(|l| l.remaining_qty).sum::<Decimal>() != qty {
+            let total = owned.iter().try_fold(Decimal::ZERO, |total, lot| {
+                if lot.remaining_qty <= Decimal::ZERO {
+                    return Err("STORAGE_RECOVERY_LOT_QUANTITY_INVALID".to_owned());
+                }
+                total.checked_add(lot.remaining_qty)
+                    .ok_or("STORAGE_RECOVERY_LOT_QUANTITY_OVERFLOW".to_owned())
+            })?;
+            if total != qty {
                 return Err("STORAGE_RECOVERY_UNATTRIBUTED_POSITION".into());
             }
+            let mut seen_intents = std::collections::BTreeSet::new();
             for lot in &owned {
                 let id = lot
                     .intent_id
                     .clone()
                     .ok_or("STORAGE_RECOVERY_LOT_OWNER_MISSING")?;
+                if !seen_intents.insert(id.clone()) {
+                    continue;
+                }
                 let owned_intent_qty = owned.iter()
                     .filter(|entry| entry.intent_id.as_deref() == Some(id.as_str()))
                     .try_fold(Decimal::ZERO, |total, entry| {
