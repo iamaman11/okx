@@ -250,7 +250,7 @@ impl TradeService {
                 let protection = protection.ok_or("STORAGE_RECOVERY_PROTECTION_MISSING")?;
                 let intent = intent.ok_or("STORAGE_RECOVERY_PROTECTION_INTENT_MISSING")?;
                 if protection.quantity < owned_intent_qty
-                    || intent.plan.position_side != position.position_side
+                    || intent.plan.position_side != lot.side
                 {
                     return Err("STORAGE_RECOVERY_PROTECTION_INCOMPLETE".into());
                 }
