@@ -1194,6 +1194,9 @@ fn verify_post_held_entry_sources(
     ) {
         return Err("POST_ENTRY_QUOTE_EXPIRED".into());
     }
+    if !fx.valid() {
+        return Err("POST_ENTRY_FX_SOURCE_INVALID".into());
+    }
     let fx_timestamp =
         i64::try_from(fx.observed_at_ms).map_err(|_| "POST_ENTRY_FX_TIMESTAMP_INVALID")?;
     if !crate::config::evidence_fresh(
@@ -1642,6 +1645,21 @@ mod tests {
                 t + crate::config::ACCOUNT_MAX_AGE_MS + 1
             ),
             Err("ENTRY_FEE_SOURCE_STALE".into())
+        );
+        let invalid_provenance = UsdConversion {
+            source_digest: "invalid".into(),
+            ..fx.clone()
+        };
+        assert_eq!(
+            verify_post_held_entry_sources(
+                &quote,
+                &fee,
+                "reference-1",
+                Decimal::ONE,
+                &invalid_provenance,
+                t + 1
+            ),
+            Err("POST_ENTRY_FX_SOURCE_INVALID".into())
         );
         let changed_provenance = UsdConversion {
             source_digest: "c".repeat(64),
