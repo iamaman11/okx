@@ -328,6 +328,10 @@ pub struct IntentFillCostEvidence {
     pub exchange_order_id: String,
     pub reservation_key: String,
     pub fill_count: u64,
+    /// Exact sum of immutable native fill quantities for the bound venue order.
+    /// The independent venue readback must match before this can be labelled
+    /// covered; a valid SQL fills cursor alone cannot prove complete execution.
+    pub filled_quantity: Decimal,
     pub covered_through: i64,
     pub gross_notional_usdt: Decimal,
     /// Rebates are counted as nonnegative costs, never credited as capacity.

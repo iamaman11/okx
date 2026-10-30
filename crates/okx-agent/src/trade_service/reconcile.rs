@@ -1,5 +1,46 @@
 use super::*;
 use okx_api::CancelOrderRequest;
+/// Bind the native immutable fill sum to an independent, exact venue
+/// readback. A cursor-covered subset is not necessarily the whole execution,
+/// especially across partial/late fills or a lost POST response. This check
+/// never proves all-in USD debit, fee currency finality, or settlement.
+fn verify_venue_fill_coverage(
+    intent: &StoredIntent,
+    source: &okx_execution::IntentFillCostEvidence,
+    observed: &okx_api::TradeOrderDetails,
+) -> Result<(), String> {
+    if source.intent_id != intent.intent_id
+        || source.plan_hash != intent.plan_hash
+        || source.exchange_order_id.is_empty()
+        || source.exchange_order_id != observed.order_id
+        || observed.client_order_id != intent.client_order_id
+        || observed.instrument_id != intent.instrument_id
+        || observed.side != intent.plan.side
+    {
+        return Err("ENTRY_FILL_VENUE_IDENTITY_MISMATCH".into());
+    }
+    let update = observed.update_time_ms.parse::<i64>()
+        .map_err(|_| "ENTRY_FILL_VENUE_TIME_UNVERIFIED")?;
+    if update <= 0 || source.covered_through < update {
+        return Err("ENTRY_FILL_VENUE_TIME_UNCOVERED".into());
+    }
+    let venue_filled = dec(&observed.accumulated_fill_size)?;
+    if venue_filled <= Decimal::ZERO
+        || venue_filled > intent.plan.quantity
+        || source.filled_quantity <= Decimal::ZERO
+        || source.filled_quantity != venue_filled
+    {
+        return Err("ENTRY_FILL_VENUE_QUANTITY_MISMATCH".into());
+    }
+    if !matches!(
+        observed.state.as_str(),
+        "live" | "partially_filled" | "filled" | "canceled" | "mmp_canceled"
+    ) {
+        return Err("ENTRY_FILL_VENUE_STATE_UNKNOWN".into());
+    }
+    Ok(())
+}
+
 /// Historical known pricing evidence is not an all-in entry debit proof.
 fn entry_cost_status(stored: Option<okx_execution::EntryQuoteEvidence>) -> Result<Value, String> {
     let Some(quote) = stored else {
@@ -331,10 +372,20 @@ impl TradeService {
                     })
                     .await
                 {
-                    Ok(source) => json!({"state":"verified_native_fills",
-                    "scope":"USDT_fill_notional_and_fee_only",
-                    "all_in_entry_cost_proven":false,
-                    "source":source}),
+                    Ok(source) => match order.as_ref() {
+                        Some(observed) => match verify_venue_fill_coverage(&i, &source, observed) {
+                            Ok(()) => json!({"state":"verified_native_fills_and_venue_quantity",
+                                "scope":"USDT_fill_notional_and_fee_only",
+                                "all_in_entry_cost_proven":false,
+                                "source":source}),
+                            Err(reason) => json!({"state":"incomplete",
+                                "all_in_entry_cost_proven":false,
+                                "reason_code":reason}),
+                        },
+                        None => json!({"state":"incomplete",
+                            "all_in_entry_cost_proven":false,
+                            "reason_code":"ENTRY_FILL_VENUE_ORDER_UNAVAILABLE"}),
+                    },
                     Err(reason) => json!({"state":"incomplete",
                     "all_in_entry_cost_proven":false,
                     "reason_code":err(reason)}),
@@ -1063,6 +1114,75 @@ impl TradeService {
 #[cfg(test)]
 mod entry_cost_status_tests {
     use super::*;
+
+    #[test]
+    fn e1_native_fills_require_independent_exact_venue_quantity_and_time() {
+        let intent = StoredIntent {
+            intent_id: "intent".into(),
+            client_order_id: "client".into(),
+            instrument_id: "BTC-USDT-SWAP".into(),
+            plan_hash: "a".repeat(64),
+            plan: okx_execution::IntentPlan {
+                quantity: Decimal::ONE,
+                side: "buy".into(),
+                ..Default::default()
+            },
+            ..StoredIntent::default()
+        };
+        let source = okx_execution::IntentFillCostEvidence {
+            intent_id: intent.intent_id.clone(),
+            plan_hash: intent.plan_hash.clone(),
+            exchange_order_id: "venue-order".into(),
+            reservation_key: "central-key".into(),
+            fill_count: 2,
+            filled_quantity: Decimal::ONE,
+            covered_through: 10,
+            gross_notional_usdt: Decimal::from(94),
+            conservative_fee_usdt: Decimal::new(3, 2),
+            source_digest: "b".repeat(64),
+        };
+        let order = okx_api::TradeOrderDetails {
+            instrument_id: intent.instrument_id.clone(),
+            order_id: source.exchange_order_id.clone(),
+            client_order_id: intent.client_order_id.clone(),
+            side: "buy".into(),
+            position_side: "long".into(),
+            trade_mode: "cross".into(),
+            order_type: "limit".into(),
+            price: "100".into(),
+            size: "1".into(),
+            accumulated_fill_size: "1".into(),
+            average_fill_price: "94".into(),
+            state: "filled".into(),
+            creation_time_ms: "3".into(),
+            update_time_ms: "10".into(),
+        };
+        assert!(verify_venue_fill_coverage(&intent, &source, &order).is_ok());
+        let mut changed = order.clone();
+        changed.accumulated_fill_size = "0.9".into();
+        assert_eq!(verify_venue_fill_coverage(&intent, &source, &changed),
+            Err("ENTRY_FILL_VENUE_QUANTITY_MISMATCH".into()));
+        changed = order.clone();
+        changed.update_time_ms = "11".into();
+        assert_eq!(verify_venue_fill_coverage(&intent, &source, &changed),
+            Err("ENTRY_FILL_VENUE_TIME_UNCOVERED".into()));
+        changed = order.clone();
+        changed.order_id = "other".into();
+        assert_eq!(verify_venue_fill_coverage(&intent, &source, &changed),
+            Err("ENTRY_FILL_VENUE_IDENTITY_MISMATCH".into()));
+        changed = order.clone();
+        changed.client_order_id = "other".into();
+        assert_eq!(verify_venue_fill_coverage(&intent, &source, &changed),
+            Err("ENTRY_FILL_VENUE_IDENTITY_MISMATCH".into()));
+        changed = order.clone();
+        changed.update_time_ms = "invalid".into();
+        assert_eq!(verify_venue_fill_coverage(&intent, &source, &changed),
+            Err("ENTRY_FILL_VENUE_TIME_UNVERIFIED".into()));
+        changed = order;
+        changed.state = "unknown".into();
+        assert_eq!(verify_venue_fill_coverage(&intent, &source, &changed),
+            Err("ENTRY_FILL_VENUE_STATE_UNKNOWN".into()));
+    }
 
     #[test]
     fn e1_status_never_promotes_known_quote_into_all_in_entry_permission() {

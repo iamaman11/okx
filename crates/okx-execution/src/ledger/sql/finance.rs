@@ -425,6 +425,7 @@ impl AccountStore {
             exchange_order_id,
             reservation_key,
             fill_count: count,
+            filled_quantity: filled_qty,
             covered_through: through,
             gross_notional_usdt: notional,
             conservative_fee_usdt: fees,

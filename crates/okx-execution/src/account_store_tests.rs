@@ -269,6 +269,7 @@ fn e1_intent_fill_cost_uses_only_covered_native_sources_and_survives_restart() {
     s.ingest_page(&complete).unwrap();
     let verified = s.intent_fill_cost_evidence("intent", 6).unwrap();
     assert_eq!(verified.fill_count, 2);
+    assert_eq!(verified.filled_quantity, Decimal::ONE);
     assert_eq!(verified.reservation_key, "central-key");
     assert_eq!(verified.exchange_order_id, "venue-order");
     assert_eq!(verified.gross_notional_usdt, Decimal::from(94));
