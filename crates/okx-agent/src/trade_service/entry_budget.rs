@@ -122,6 +122,7 @@ impl EntryFxUpperBound {
 }
 
 /// A lower bound for immediately usable own collateral is not a cost upper.
+#[allow(dead_code)] // Proven construction needs independently authenticated own-funds sources.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub(super) enum EntryAvailableCollateral {
     Proven {
