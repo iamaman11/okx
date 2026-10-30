@@ -499,6 +499,133 @@ fn k5_recovery_pages_over_100_intents_are_disjoint_and_bounded() {
     assert!(s.reconcilable_intents_page(0, 0).unwrap().is_empty());
 }
 #[test]
+fn e2_real_exchange_fee_over_admission_upper_is_not_discarded() {
+    let mut s = store();
+    let i = intent(&mut s);
+    let quote = e1_source_quote(&s, &i);
+    s.bind_entry_quote(&quote).unwrap();
+    let admitted = EntryAdmissionEvidence {
+        schema: "okx.entry-admission/v2".into(),
+        account_key: s.meta.account_key.clone(),
+        installation_id: s.meta.installation_id.clone(),
+        intent_id: i.intent_id.clone(),
+        plan_hash: i.plan_hash.clone(),
+        quote_digest: format!(
+            "{:x}",
+            sha2::Sha256::digest(serde_json::to_vec(&quote).unwrap())
+        ),
+        admission_usd_per_usdt: Decimal::ONE,
+        other_entry_costs_upper_usd: Decimal::ZERO,
+        entry_upper_usd: quote.total_usd,
+        entry_proof_digest: "a".repeat(64),
+        observed_at: quote.observed_at,
+    };
+    s.bind_entry_admission(&admitted).unwrap();
+    acknowledged_entry_intent(&mut s);
+    s.record_outcome(
+        "intent",
+        IntentState::Filled,
+        Some("venue-order"),
+        "authenticated-terminal-venue-readback",
+        7,
+    )
+    .unwrap();
+    let fee = Decimal::from(-2);
+    let bill_key = "bill:fee-bill".to_owned();
+    let mut finance = FinanceEntry {
+        entry_id: format!("{bill_key}:FEE"),
+        economic_event_key: bill_key.clone(),
+        component: "FEE".into(),
+        allocation_leg: "account".into(),
+        amount: fee,
+        currency: "USDT".into(),
+        instance_id: None,
+        source_ref: "fill:fee-fill".into(),
+        time: 6,
+        reverses_entry_id: None,
+    };
+    s.ingest_page(&IngestPage {
+        fills: vec![Fill {
+            fill_id: "fee-fill".into(),
+            instrument_id: "BTC-USDT-SWAP".into(),
+            trade_id: "fee-trade".into(),
+            exchange_order_id: "venue-order".into(),
+            intent_id: Some("intent".into()),
+            time: 6,
+            qty: Decimal::ONE,
+            price: Decimal::from(100),
+            fee,
+            currency: "USDT".into(),
+            side: "buy".into(),
+        }],
+        finance: vec![finance.clone()],
+        cursor: Some(SourceCursor {
+            source: "fills".into(),
+            stream_partition: "SWAP".into(),
+            cursor: String::new(),
+            watermark: 7,
+            generation: 1,
+            coverage_gaps: String::new(),
+        }),
+        ..Default::default()
+    })
+    .unwrap();
+    s.ingest_page(&IngestPage {
+        bills: vec![Bill {
+            bill_id: "fee-bill".into(),
+            kind: "1:trade".into(),
+            time: 7,
+            amount: fee,
+            currency: "USDT".into(),
+            economic_event_key: bill_key.clone(),
+        }],
+        cursor: Some(SourceCursor {
+            source: "bills".into(),
+            stream_partition: "account".into(),
+            cursor: String::new(),
+            watermark: 7,
+            generation: 1,
+            coverage_gaps: String::new(),
+        }),
+        ..Default::default()
+    })
+    .unwrap();
+    finance.source_ref = bill_key;
+    finance.time = 7;
+    s.ingest_page(&IngestPage {
+        finance: vec![finance],
+        ..Default::default()
+    })
+    .unwrap();
+    let evidence = s.intent_fee_bill_evidence("intent", 7).unwrap();
+    assert_eq!(evidence.conservative_verified_fee_usdt, Decimal::from(2));
+    let settled = s
+        .bind_terminal_entry_settlement("intent", 7, Decimal::ONE, 7)
+        .unwrap();
+    assert_eq!(settled.booked_notional_and_fee_usdt, Decimal::from(102));
+    assert_eq!(settled.cumulative_entry_usd, Decimal::from(102));
+    assert!(settled.cumulative_entry_usd > admitted.entry_upper_usd);
+    assert_eq!(
+        s.bind_terminal_entry_settlement("intent", 7, Decimal::ONE, 7)
+            .unwrap(),
+        settled,
+        "lost acknowledgement must replay the identical source amount"
+    );
+    let path = s.path.clone();
+    let meta = s.meta.clone();
+    drop(s);
+    let mut opened =
+        AccountStore::open_existing(path, &meta.account_key, &meta.installation_id).unwrap();
+    assert_eq!(
+        opened
+            .bind_terminal_entry_settlement("intent", 7, Decimal::ONE, 7)
+            .unwrap(),
+        settled,
+        "restart must not truncate a genuine late fee"
+    );
+}
+
+#[test]
 fn e1_fee_bill_cross_source_receipt_requires_both_immutable_sources() {
     let mut s = store();
     let i = intent(&mut s);

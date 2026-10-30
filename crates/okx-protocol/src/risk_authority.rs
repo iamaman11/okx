@@ -514,7 +514,9 @@ pub enum RiskDecisionStatus {
     Updated,
     Observed,
 }
-fn zero_reporting_amount() -> String { "0".into() }
+fn zero_reporting_amount() -> String {
+    "0".into()
+}
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RiskEntryBudgetSnapshot {
@@ -991,6 +993,29 @@ mod tests {
             terminal_ledger.as_mut().unwrap().state = "UNKNOWN".to_owned();
         }
         assert!(!release.valid());
+    }
+
+    #[test]
+    fn r4_bound_breach_is_explicit_budget_truth_not_reusable_headroom() {
+        let mut budget: RiskEntryBudgetSnapshot = serde_json::from_value(
+            serde_json::json!({
+                "campaign_id": format!("sha256:{}", "c".repeat(64)),
+                "limit_usd": "10",
+                "consumed_usd": "10.04",
+                "reserved_usd": "0",
+                "remaining_usd": "0",
+                "bound_breach_usd": "0.04",
+                "opening_source_digest": "a".repeat(64),
+                "opening_as_of_ms": 1
+            }),
+        )
+        .unwrap();
+        assert!(budget.valid(), "confirmed over-reserve debit remains valid");
+        budget.bound_breach_usd = "0.03".into();
+        assert!(!budget.valid(), "a lower forged breach cannot validate");
+        budget.bound_breach_usd = "0.04".into();
+        budget.remaining_usd = "1".into();
+        assert!(!budget.valid(), "negative remaining is represented as zero");
     }
 
     #[test]
