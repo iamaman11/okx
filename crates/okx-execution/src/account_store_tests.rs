@@ -427,6 +427,38 @@ fn e1_fee_bill_cross_source_receipt_requires_both_immutable_sources() {
             .unwrap(),
         settled
     );
+    // Financial history keeps capturing later unrelated bills. This must
+    // replay the original immutable receipt and original causal source
+    // digest rather than minting a different settlement/revision.
+    s.ingest_page(&IngestPage {
+        cursor: Some(SourceCursor {
+            source: "fills".into(),
+            stream_partition: "SWAP".into(),
+            cursor: String::new(),
+            watermark: 8,
+            generation: 1,
+            coverage_gaps: String::new(),
+        }),
+        ..Default::default()
+    })
+    .unwrap();
+    s.ingest_page(&IngestPage {
+        cursor: Some(SourceCursor {
+            source: "bills".into(),
+            stream_partition: "account".into(),
+            cursor: String::new(),
+            watermark: 8,
+            generation: 1,
+            coverage_gaps: String::new(),
+        }),
+        ..Default::default()
+    })
+    .unwrap();
+    assert_eq!(
+        s.bind_terminal_entry_settlement("intent", 7, Decimal::ONE, 8)
+            .unwrap(),
+        settled
+    );
     assert!(matches!(
         s.bind_terminal_entry_settlement("intent", 7, Decimal::new(5, 1), 7),
         Err(StoreError::Invalid("ENTRY_SETTLEMENT_FILL_BILL_INCOMPLETE"))
