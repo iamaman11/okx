@@ -833,9 +833,8 @@ impl TradeService {
                         .call(deadline(), move |s| s.by_client_order_id(&client))
                         .await
                         .map_err(err)?;
-                    if known.is_none() {
-                        return Err("UNATTRIBUTED_PENDING_ORDER".into());
-                    }
+                    let known = known.ok_or("UNATTRIBUTED_PENDING_ORDER")?;
+                    verify_pending_order_binding(order, &known)?;
                 }
                 if algos
                     .samples
@@ -918,9 +917,9 @@ impl TradeService {
         let mut source_floor = started_at;
         for (key, row, proof, read, account_floor) in pages {
             source_floor = source_floor.min(account_floor);
+            evidence.push((key.clone(), proof));
             keys.push(key);
             occupied.push(row);
-            evidence.push(proof);
             if let Some(read) = read {
                 post_reads.push(read);
             }
@@ -939,7 +938,7 @@ impl TradeService {
         {
             return Err("COHORT_EVIDENCE_STALE".into());
         }
-        let content = digest(&evidence)?;
+        let content = canonical_census_content(evidence, &keys)?;
         Ok((
             NativeRiskCensus {
                 account_keys: keys,
@@ -957,6 +956,58 @@ impl TradeService {
         ))
     }
 }
+/// Concurrent account reads must produce one deterministic, complete cohort
+/// digest regardless of completion order. Duplicated/missing keys fail closed.
+fn canonical_census_content(
+    mut evidence: Vec<(String, String)>,
+    expected_keys: &[String],
+) -> Result<String, String> {
+    evidence.sort_by(|a, b| a.0.cmp(&b.0));
+    if evidence.len() != expected_keys.len()
+        || !expected_keys.windows(2).all(|pair| pair[0] < pair[1])
+        || evidence.iter().zip(expected_keys).any(|((key, _), expected)| key != expected)
+    {
+        return Err("COHORT_EVIDENCE_SCOPE_MISMATCH".into());
+    }
+    digest(&evidence)
+}
+
+/// A matching client ID alone does not prove that a live venue obligation
+/// belongs to this durable intent. Compare the actual order and saved plan.
+fn verify_pending_order_binding(
+    order: &okx_observation::PendingOrderState,
+    intent: &StoredIntent,
+) -> Result<(), String> {
+    if order.client_order_id.as_deref() != Some(intent.client_order_id.as_str())
+        || order.order_id.is_empty()
+        || intent.exchange_order_id.as_deref() != Some(order.order_id.as_str())
+        || order.instrument_id != intent.instrument_id
+        || order.side != intent.plan.side
+        || order.position_side.as_deref() != Some(intent.plan.position_side.as_str())
+        || !matches!(order.state.as_str(), "live" | "partially_filled")
+        || intent.state.terminal()
+    {
+        return Err("PENDING_ORDER_INTENT_MISMATCH".into());
+    }
+    let qty = dec(&order.size)?;
+    let filled = dec(&order.accumulated_fill_size)?;
+    if qty <= Decimal::ZERO || qty != intent.plan.quantity
+        || filled < Decimal::ZERO || filled > qty
+    {
+        return Err("PENDING_ORDER_QUANTITY_MISMATCH".into());
+    }
+    if intent.risk_increase {
+        let price = dec(order.price.as_deref().ok_or("PENDING_ORDER_PRICE_UNPROVEN")?)?;
+        if price <= Decimal::ZERO || intent.plan.limit_price <= Decimal::ZERO
+            || (intent.plan.side == "buy" && price > intent.plan.limit_price)
+            || (intent.plan.side == "sell" && price < intent.plan.limit_price)
+        {
+            return Err("PENDING_ORDER_PRICE_BOUND_MISMATCH".into());
+        }
+    }
+    Ok(())
+}
+
 /// Validate actual source time, not the timestamp at which a new census is
 /// assembled. Both the venue account read and SQLite financial projection
 /// must be current before a complete native risk witness may be issued.
@@ -1188,6 +1239,80 @@ mod tests {
         );
         assert!(verify_post_held_fx("1", "invalid").is_err());
     }
+    #[test]
+    fn e2_census_canonical_digest_rejects_missing_duplicate_and_order_variation() {
+        let keys = vec!["a".to_owned(), "b".to_owned()];
+        let rows = vec![("a".to_owned(), "proof_a".to_owned()),
+                        ("b".to_owned(), "proof_b".to_owned())];
+        assert_eq!(
+            canonical_census_content(rows.clone(), &keys),
+            canonical_census_content(rows.iter().rev().cloned().collect(), &keys)
+        );
+        assert!(canonical_census_content(vec![rows[0].clone()], &keys).is_err());
+        assert!(canonical_census_content(vec![rows[0].clone(), rows[0].clone()], &keys).is_err());
+    }
+
+    #[test]
+    fn e2_pending_venue_order_cannot_steal_matching_client_id() {
+        let plan = IntentPlan {
+            side: "buy".into(), position_side: "long".into(),
+            quantity: dec("2").unwrap(), limit_price: dec("100").unwrap(),
+            ..IntentPlan::default()
+        };
+        let intent = StoredIntent {
+            plan, intent_id: "intent_test".into(), idempotency_key: "test_id".into(),
+            request_hash: "a".repeat(64), client_order_id: "client_test".into(),
+            state: IntentState::Acknowledged, revision: 1, deadline: 123,
+            plan_hash: "b".repeat(64), policy_revision: 1, risk_increase: true,
+            instrument_id: "BTC-USDT-SWAP".into(),
+            exchange_order_id: Some("exchange_test".into()), incident: None,
+        };
+        let order = okx_observation::PendingOrderState {
+            order_id: "exchange_test".into(), client_order_id: Some("client_test".into()),
+            instrument_type: "SWAP".into(), instrument_id: "BTC-USDT-SWAP".into(),
+            side: "buy".into(), position_side: Some("long".into()),
+            trade_mode: "cross".into(), order_type: "limit".into(),
+            price: Some("99".into()), size: "2".into(),
+            accumulated_fill_size: "0.5".into(), average_fill_price: None,
+            state: "partially_filled".into(), reduce_only: Some(false),
+            creation_time_ms: "1".into(), update_time_ms: "2".into(),
+        };
+        assert!(verify_pending_order_binding(&order, &intent).is_ok());
+        let mut foreign = order.clone();
+        foreign.order_id = "foreign_exchange_order".into();
+        assert_eq!(
+            verify_pending_order_binding(&foreign, &intent),
+            Err("PENDING_ORDER_INTENT_MISMATCH".into())
+        );
+        let mut changed = order.clone();
+        changed.side = "sell".into();
+        assert!(verify_pending_order_binding(&changed, &intent).is_err());
+        changed = order.clone();
+        changed.size = "3".into();
+        assert_eq!(
+            verify_pending_order_binding(&changed, &intent),
+            Err("PENDING_ORDER_QUANTITY_MISMATCH".into())
+        );
+        changed = order.clone();
+        changed.accumulated_fill_size = "2.1".into();
+        assert!(verify_pending_order_binding(&changed, &intent).is_err());
+        changed = order.clone();
+        changed.price = Some("101".into());
+        assert_eq!(
+            verify_pending_order_binding(&changed, &intent),
+            Err("PENDING_ORDER_PRICE_BOUND_MISMATCH".into())
+        );
+        changed = order.clone();
+        changed.price = None;
+        assert_eq!(
+            verify_pending_order_binding(&changed, &intent),
+            Err("PENDING_ORDER_PRICE_UNPROVEN".into())
+        );
+        let mut terminal = intent;
+        terminal.state = IntentState::Cancelled;
+        assert!(verify_pending_order_binding(&order, &terminal).is_err());
+    }
+
     #[test]
     fn e2_census_uses_oldest_verified_account_and_financial_source() {
         let received = "2026-10-30T00:00:00Z";
