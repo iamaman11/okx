@@ -936,14 +936,14 @@ impl TradeService {
                         .filter(|l| l.side == position_direction)
                         .try_fold(Decimal::ZERO, |total, lot| {
                             if lot.remaining_qty <= Decimal::ZERO {
-                                return Err("UNATTRIBUTED_EXCHANGE_POSITION".into());
+                                return Err("UNATTRIBUTED_EXCHANGE_POSITION".to_owned());
                             }
                             total
                                 .checked_add(lot.remaining_qty)
-                                .ok_or_else(|| "COHORT_POSITION_QUANTITY_OVERFLOW".into())
+                                .ok_or_else(|| "COHORT_POSITION_QUANTITY_OVERFLOW".to_owned())
                         })?;
                     if covered != actual_qty {
-                        return Err("UNATTRIBUTED_EXCHANGE_POSITION".into());
+                        return Err("UNATTRIBUTED_EXCHANGE_POSITION".to_owned());
                     }
                     for lot in lots.iter().filter(|l| l.side == position_direction) {
                         let id = lot.intent_id.clone().ok_or("UNATTRIBUTED_POSITION_LOT")?;
@@ -966,11 +966,11 @@ impl TradeService {
                             })
                             .try_fold(Decimal::ZERO, |total, lot| {
                                 if lot.remaining_qty <= Decimal::ZERO {
-                                    return Err("COHORT_POSITION_LOT_QUANTITY_INVALID".into());
+                                    return Err("COHORT_POSITION_LOT_QUANTITY_INVALID".to_owned());
                                 }
                                 total
                                     .checked_add(lot.remaining_qty)
-                                    .ok_or_else(|| "COHORT_POSITION_QUANTITY_OVERFLOW".into())
+                                    .ok_or_else(|| "COHORT_POSITION_QUANTITY_OVERFLOW".to_owned())
                             })?;
                         if protection.quantity < owned_qty
                             || receipt.plan_hash.is_empty()
