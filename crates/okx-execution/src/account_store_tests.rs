@@ -59,7 +59,7 @@ fn e1_intent_fill_cost_uses_only_covered_native_sources_and_survives_restart() {
         side: "buy".into(),
     };
     let first = fill(1, Decimal::new(4, 1), 100, Decimal::new(-1, 2));
-    let second = fill(2, Decimal::new(6, 1), 110, Decimal::new(-2, 2));
+    let second = fill(2, Decimal::new(6, 1), 90, Decimal::new(-2, 2));
     let page = IngestPage {
         fills: vec![first, second],
         ..Default::default()
@@ -99,7 +99,7 @@ fn e1_intent_fill_cost_uses_only_covered_native_sources_and_survives_restart() {
     s.ingest_page(&complete).unwrap();
     let verified = s.intent_fill_cost_evidence("intent", 6).unwrap();
     assert_eq!(verified.fill_count, 2);
-    assert_eq!(verified.gross_notional_usdt, Decimal::from(106));
+    assert_eq!(verified.gross_notional_usdt, Decimal::from(94));
     assert_eq!(verified.conservative_fee_usdt, Decimal::new(3, 2));
     assert_eq!(verified.source_digest.len(), 64);
     s.ingest_page(&page).unwrap();
@@ -117,6 +117,52 @@ fn e1_intent_fill_cost_uses_only_covered_native_sources_and_survives_restart() {
         reopened.intent_fill_cost_evidence("intent", 6).unwrap(),
         verified
     );
+}
+
+#[test]
+fn e1_intent_fill_cost_rejects_wrong_side_price_and_overfills() {
+    let cases = [
+        ("sell", "1", "100", "ENTRY_FILL_SOURCE_INVALID"),
+        ("buy", "1", "101", "ENTRY_FILL_PRICE_BOUND_VIOLATED"),
+        ("buy", "1.01", "100", "ENTRY_FILL_QUANTITY_EXCEEDED"),
+    ];
+    for (side, qty, price, expected) in cases {
+        let mut s = store();
+        intent(&mut s);
+        s.ingest_page(&IngestPage {
+            fills: vec![Fill {
+                fill_id: "unbound-fill".into(),
+                instrument_id: "BTC-USDT-SWAP".into(),
+                trade_id: "unbound-trade".into(),
+                exchange_order_id: "unbound-order".into(),
+                intent_id: Some("intent".into()),
+                time: 6,
+                qty: Decimal::from_str_exact(qty).unwrap(),
+                price: Decimal::from_str_exact(price).unwrap(),
+                fee: Decimal::new(-1, 2),
+                currency: "USDT".into(),
+                side: side.into(),
+            }],
+            ..Default::default()
+        })
+        .unwrap();
+        s.ingest_page(&IngestPage {
+            cursor: Some(SourceCursor {
+                source: "fills".into(),
+                stream_partition: "SWAP".into(),
+                cursor: String::new(),
+                watermark: 6,
+                generation: 1,
+                coverage_gaps: String::new(),
+            }),
+            ..Default::default()
+        })
+        .unwrap();
+        match s.intent_fill_cost_evidence("intent", 6) {
+            Err(StoreError::Invalid(reason)) => assert_eq!(reason, expected),
+            other => panic!("misbound fill should never become proof: {other:?}"),
+        }
+    }
 }
 
 #[test]

@@ -226,18 +226,21 @@ impl AccountStore {
         {
             return Err(StoreError::Invalid("ENTRY_FILL_COVERAGE_UNPROVEN"));
         }
-        let (plan_hash, instrument, contract_value, inverse, currency, increase): (
+        let (plan_hash, instrument, contract_value, inverse, currency, increase, side, planned_quantity, bound_price): (
             String,
             String,
             String,
             bool,
             String,
             bool,
+            String,
+            String,
+            String,
         ) = self
             .connection
             .query_row(
                 "SELECT i.plan_hash,i.instrument_id,p.contract_value,p.inverse,
-                        p.settlement_currency,i.risk_increase
+                        p.settlement_currency,i.risk_increase,p.side,p.quantity,p.limit_price
                  FROM intents i JOIN intent_plans p ON p.intent_id=i.intent_id
                  WHERE i.intent_id=?1",
                 [intent_id],
@@ -249,6 +252,9 @@ impl AccountStore {
                         r.get(3)?,
                         r.get(4)?,
                         r.get(5)?,
+                        r.get(6)?,
+                        r.get(7)?,
+                        r.get(8)?,
                     ))
                 },
             )
@@ -258,6 +264,14 @@ impl AccountStore {
             return Err(StoreError::Invalid("ENTRY_FILL_INSTRUMENT_UNSUPPORTED"));
         }
         let ct = decimal(contract_value.clone())?;
+        let planned_qty = decimal(planned_quantity.clone())?;
+        let price_bound = decimal(bound_price.clone())?;
+        if !matches!(side.as_str(), "buy" | "sell")
+            || planned_qty <= Decimal::ZERO
+            || price_bound <= Decimal::ZERO
+        {
+            return Err(StoreError::Invalid("ENTRY_FILL_PLAN_INVALID"));
+        }
         if ct <= Decimal::ZERO {
             return Err(StoreError::Invalid("ENTRY_FILL_CONTRACT_INVALID"));
         }
@@ -270,6 +284,9 @@ impl AccountStore {
             plan_hash.as_str(),
             instrument.as_str(),
             contract_value.as_str(),
+            side.as_str(),
+            planned_quantity.as_str(),
+            bound_price.as_str(),
             through,
             cursor.watermark,
             cursor.generation,
@@ -277,13 +294,14 @@ impl AccountStore {
         .map_err(|_| StoreError::Invalid("ENTRY_FILL_DIGEST_INVALID"))?;
         hasher.update(&header);
         let mut statement = self.connection.prepare(
-            "SELECT fill_id,instrument_id,trade_id,exchange_order_id,time,qty,price,fee,currency
+            "SELECT fill_id,instrument_id,trade_id,exchange_order_id,time,qty,price,fee,currency,side
              FROM fills WHERE intent_id=?1 AND time<=?2 ORDER BY fill_id LIMIT 10001",
         )?;
         let mut rows = statement.query(params![intent_id, through])?;
         let mut count = 0u64;
         let mut notional = Decimal::ZERO;
         let mut fees = Decimal::ZERO;
+        let mut filled_qty = Decimal::ZERO;
         while let Some(row) = rows.next()? {
             count += 1;
             if count > 10000 {
@@ -299,6 +317,7 @@ impl AccountStore {
                 String,
                 String,
                 String,
+                String,
             ) = (
                 row.get(0)?,
                 row.get(1)?,
@@ -309,10 +328,12 @@ impl AccountStore {
                 row.get(6)?,
                 row.get(7)?,
                 row.get(8)?,
+                row.get(9)?,
             );
             if source.1 != instrument
                 || source.4 < self.meta.initialized_at
                 || source.8 != "USDT"
+                || source.9 != side
                 || source.0.is_empty()
                 || source.2.is_empty()
                 || source.3.is_empty()
@@ -324,6 +345,19 @@ impl AccountStore {
             let fee = decimal(source.7.clone())?;
             if qty <= Decimal::ZERO || price <= Decimal::ZERO {
                 return Err(StoreError::Invalid("ENTRY_FILL_SOURCE_INVALID"));
+            }
+            // A fill attributed to an intent is not enough: prove that it
+            // could have resulted from the exact persisted bounded order.
+            if (side == "buy" && price > price_bound)
+                || (side == "sell" && price < price_bound)
+            {
+                return Err(StoreError::Invalid("ENTRY_FILL_PRICE_BOUND_VIOLATED"));
+            }
+            filled_qty = filled_qty
+                .checked_add(qty)
+                .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))?;
+            if filled_qty > planned_qty {
+                return Err(StoreError::Invalid("ENTRY_FILL_QUANTITY_EXCEEDED"));
             }
             let gross = qty
                 .checked_mul(ct)
