@@ -1,4 +1,4 @@
-import {initializeRiskBook,installCampaignEntryProof} from "./risk_book.js";
+import {initializeRiskBook,installCampaignEntryProof,openingDigest,type CampaignEntryOpeningSource} from "./risk_book.js";
 import {handleNativeRiskCommand} from "./risk_authority.js";
 import {initial,account} from "./account_governance.test.js";
 function check(v:boolean,n:string){if(!v)throw Error(n);}
@@ -74,9 +74,19 @@ check((await handleNativeRiskCommand(s,session,{schema:"okx.risk-command/v1",com
  await t.put("generation",session.connection_generation);
  await t.put("account_access_v1",governance);
  await initializeRiskBook(t,initial.installation_id);
- check(await installCampaignEntryProof(t,{campaign_id:governance.campaign_id,
-   limit_usd:"10",consumed_usd:"0",source_digest:sourceDigest,as_of_ms:now}),
-   "native fixture independently attests zero opening spend");
+ const campaignStart=now-100000;
+ const nativeOpening:CampaignEntryOpeningSource={
+   campaign_id:governance.campaign_id,limit_usd:"10",consumed_usd:"0",
+   source_digest:sourceDigest,as_of_ms:now,campaign_started_at_ms:campaignStart,
+   accounts:[{account_key:account.account_key,history_from_ms:campaignStart,
+     history_through_ms:now,consumed_entry_usd:"0",
+     order_history_complete:true,fill_history_complete:true,
+     bill_history_complete:true,finance_provenance_sealed:true,
+     source_digest:"a".repeat(64)}]
+ };
+ nativeOpening.source_digest=await openingDigest(nativeOpening);
+ check(await installCampaignEntryProof(t,nativeOpening),
+   "synthetic native opening covers all managed real accounts");
  const census={complete:true,source_digest:sourceDigest,content_digest:hash,
    generated_at_ms:now,source_read_floor_ms:now,
    account_keys:[account.account_key],
@@ -110,7 +120,7 @@ check((await handleNativeRiskCommand(s,session,{schema:"okx.risk-command/v1",com
    summary.budget?.entry_budget?.reserved_usd==="6"&&
    summary.budget.entry_budget.remaining_usd==="4"&&
    summary.budget.entry_budget.consumed_usd==="0"&&
-   summary.budget.entry_budget.opening_source_digest===sourceDigest,
+   summary.budget.entry_budget.opening_source_digest===nativeOpening.source_digest,
    "central readback separates modelled loss and entry spend for every source");
  const replay=await handleNativeRiskCommand(t,session,externalHuman,now);
  check(replay.status==="HELD"&&replay.reservation_key===admitted[0].reservation_key,
