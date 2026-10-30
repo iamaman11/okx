@@ -146,10 +146,9 @@ impl TradeService {
         Ok(())
     }
 
-    /// The existing 1-second TradeService maintenance owner installs a
-    /// ZERO opening only after the background incremental account captures
-    /// have reached one common cut-off across the immutable real cohort.
-    /// A nonzero or older-than-capture campaign remains explicitly pending.
+    /// The existing maintenance owner installs one complete cohort opening,
+    /// including independently settled historical native entry USD. External
+    /// or unsettled history remains pending, never inferred as zero.
     pub(super) async fn install_captured_empty_campaign_opening(
         &self,
         state: &CentralGovernanceSnapshot,
@@ -208,11 +207,11 @@ impl TradeService {
                 return Err("ENTRY_OPENING_IDENTITY_UNVERIFIED".into());
             }
             let campaign = origin.campaign_id.clone();
-            let source_digest = resource
+            let (spent, source_digest) = resource
                 .execution
                 .store
                 .call(until, move |store| {
-                    store.seal_captured_empty_campaign(&campaign, from, through)
+                    store.seal_captured_campaign_baseline(&campaign, from, through)
                 })
                 .await
                 .map_err(err)?;
@@ -221,7 +220,7 @@ impl TradeService {
                 history_from_ms: origin.started_at_ms,
                 history_through_ms: u64::try_from(through)
                     .map_err(|_| "ENTRY_OPENING_TIME_INVALID")?,
-                consumed_entry_usd: exact(Decimal::ZERO),
+                consumed_entry_usd: exact(spent),
                 order_history_complete: true,
                 fill_history_complete: true,
                 bill_history_complete: true,
