@@ -257,6 +257,8 @@ pub struct EntrySettlementEvidence {
     pub reservation_key: String,
     pub venue_order_id: String,
     pub venue_update_ms: i64,
+    /// Original SQL cursor cut-off for deterministic receipt replay.
+    pub source_covered_through_ms: i64,
     pub venue_filled_quantity: Decimal,
     pub booked_notional_and_fee_usdt: Decimal,
     pub cumulative_entry_usd: Decimal,
