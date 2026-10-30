@@ -450,9 +450,12 @@ impl AccountStore {
             economic_event_key: String,
             amount: String,
             currency: String,
+            allocation_leg: String,
+            finance_time: i64,
             reversal: Option<String>,
             bill_id: Option<String>,
             bill_time: Option<i64>,
+            bill_kind: Option<String>,
             bill_currency: Option<String>,
             bill_linked: bool,
         }
@@ -485,7 +488,7 @@ impl AccountStore {
             .map_err(|_| StoreError::Invalid("ENTRY_FEE_BILL_DIGEST_INVALID"))?,
         );
         let mut fee_rows = self.connection.prepare(
-            "SELECT fill_id,fee,currency FROM fills
+            "SELECT fill_id,fee,currency,time FROM fills
              WHERE intent_id=?1 AND time<=?2 ORDER BY fill_id LIMIT 10001",
         )?;
         // Source-ref first index makes each immutable fee lookup addressable.
@@ -493,7 +496,7 @@ impl AccountStore {
         // or from fills. Its source_links must include BOTH original sources.
         let mut linked = self.connection.prepare(
             "SELECT e.entry_id,e.economic_event_key,e.amount,e.currency,
-                    e.reverses_entry_id,b.bill_id,b.time,b.currency,
+                    e.allocation_leg,e.time,e.reverses_entry_id,b.bill_id,b.time,b.kind,b.currency,
                     EXISTS(SELECT 1 FROM finance_source_links lb
                       WHERE lb.entry_id=e.entry_id
                         AND lb.source_ref='bill:'||b.bill_id)
@@ -514,6 +517,7 @@ impl AccountStore {
             let id: String = row.get(0)?;
             let fee: String = row.get(1)?;
             let currency: String = row.get(2)?;
+            let fill_time: i64 = row.get(3)?;
             let fee = decimal(fee)?;
             if fee == Decimal::ZERO {
                 // No finance fee event exists for an actual zero-fee fill.
@@ -530,21 +534,38 @@ impl AccountStore {
                 economic_event_key: source.get(1)?,
                 amount: source.get(2)?,
                 currency: source.get(3)?,
-                reversal: source.get(4)?,
-                bill_id: source.get(5)?,
-                bill_time: source.get(6)?,
-                bill_currency: source.get(7)?,
-                bill_linked: source.get(8)?,
+                allocation_leg: source.get(4)?,
+                finance_time: source.get(5)?,
+                reversal: source.get(6)?,
+                bill_id: source.get(7)?,
+                bill_time: source.get(8)?,
+                bill_kind: source.get(9)?,
+                bill_currency: source.get(10)?,
+                bill_linked: source.get(11)?,
             };
             if rows.next()?.is_some() {
                 return Err(StoreError::Invalid("ENTRY_FEE_BILL_LINK_AMBIGUOUS"));
             }
+            // A linked fee still cannot settle an entry if the bill
+            // predates the fill, the finance event is outside the
+            // claimed covered window, or the link belongs to a non-account
+            // allocation. Do not equate a source-link match with money proof.
             if proof.reversal.is_some()
+                || proof.allocation_leg != "account"
+                || fill_time <= 0
+                || proof.finance_time < fill_time
+                || proof.finance_time > through
                 || !proof.economic_event_key.starts_with("bill:")
                 || proof.bill_id.as_deref() != proof.economic_event_key.strip_prefix("bill:")
                 || proof
                     .bill_time
-                    .is_none_or(|t| t <= 0 || t > through || t > bills.watermark)
+                    .is_none_or(|t| t < fill_time || t > through || t > bills.watermark)
+                || proof.bill_kind.as_deref().is_none_or(|kind| {
+                    kind.is_empty()
+                        || kind.starts_with("7:")
+                        || kind == "1:11"
+                        || kind == "1:12"
+                })
                 || proof.bill_currency.as_deref() != Some(currency.as_str())
                 || !proof.bill_linked
                 || proof.currency != currency
@@ -555,7 +576,7 @@ impl AccountStore {
             total = total
                 .checked_add(fee.abs())
                 .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))?;
-            let data = serde_json::to_vec(&(id, fee_source, currency, proof))
+            let data = serde_json::to_vec(&(id, fee_source, currency, fill_time, proof))
                 .map_err(|_| StoreError::Invalid("ENTRY_FEE_BILL_DIGEST_INVALID"))?;
             hasher.update((data.len() as u64).to_le_bytes());
             hasher.update(data);
