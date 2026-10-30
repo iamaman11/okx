@@ -238,6 +238,136 @@ impl AccountStore {
         Ok(Some(proof))
     }
 
+    /// E1.4 final source: only a terminal, independently read-back exchange
+    /// order whose complete fills and fee bills exist in the sole SQL owner
+    /// can produce a cumulative USD charge. Partial/zero-fill or stale pages
+    /// do NOT create a terminal accounting claim. The up-front source-bound
+    /// FX upper and fixed costs are taken from the SAME durable admission
+    /// used for Worker RESERVE; no observed spot FX is promoted here.
+    pub fn bind_terminal_entry_settlement(
+        &mut self,
+        id: &str,
+        venue_updated_at: i64,
+        venue_filled_quantity: Decimal,
+        covered_through: i64,
+    ) -> StoreResult<EntrySettlementEvidence> {
+        let intent = self.intent(id)?.ok_or(StoreError::Invalid("ENTRY_SETTLEMENT_INTENT_MISSING"))?;
+        if !matches!(intent.state, IntentState::Filled | IntentState::Cancelled)
+            || venue_updated_at <= 0
+            || covered_through < venue_updated_at
+            || venue_filled_quantity <= Decimal::ZERO
+            || venue_filled_quantity > intent.plan.quantity
+        {
+            return Err(StoreError::Invalid("ENTRY_SETTLEMENT_TERMINAL_SOURCE_UNVERIFIED"));
+        }
+        let admission = self.entry_admission(id)?
+            .ok_or(StoreError::Invalid("ENTRY_SETTLEMENT_ADMISSION_MISSING"))?;
+        let bill = self.intent_fee_bill_evidence(id, covered_through)?;
+        let fill = &bill.fill;
+        if fill.intent_id != id
+            || fill.plan_hash != intent.plan_hash
+            || fill.filled_quantity != venue_filled_quantity
+            || fill.exchange_order_id.is_empty()
+            || fill.fill_count == 0
+            || bill.linked_bill_count != fill.fill_count
+            || bill.conservative_verified_fee_usdt != fill.conservative_fee_usdt
+            || bill.bills_covered_through < venue_updated_at
+        {
+            return Err(StoreError::Invalid("ENTRY_SETTLEMENT_FILL_BILL_INCOMPLETE"));
+        }
+        let central = self.central_receipt(id)?
+            .ok_or(StoreError::Invalid("ENTRY_SETTLEMENT_CENTRAL_RECEIPT_MISSING"))?;
+        if central.reservation_key != fill.reservation_key
+            || central.account_key != admission.account_key
+            || central.plan_hash != admission.plan_hash
+        {
+            return Err(StoreError::Invalid("ENTRY_SETTLEMENT_RESERVATION_MISMATCH"));
+        }
+        let full_usdt = fill.gross_notional_usdt
+            .checked_add(bill.conservative_verified_fee_usdt)
+            .ok_or(StoreError::Invalid("ENTRY_SETTLEMENT_MONEY_OVERFLOW"))?;
+        let usd = full_usdt
+            .checked_mul(admission.fx_upper_usd_per_usdt)
+            .ok_or(StoreError::Invalid("ENTRY_SETTLEMENT_MONEY_OVERFLOW"))?
+            .round_dp_with_strategy(9, rust_decimal::RoundingStrategy::ToPositiveInfinity)
+            .checked_add(admission.other_entry_costs_upper_usd)
+            .ok_or(StoreError::Invalid("ENTRY_SETTLEMENT_MONEY_OVERFLOW"))?;
+        if full_usdt <= Decimal::ZERO || usd <= Decimal::ZERO
+            || usd > admission.entry_upper_usd
+        {
+            return Err(StoreError::Invalid("ENTRY_SETTLEMENT_EXCEEDS_RESERVED_UPPER"));
+        }
+        let bytes = serde_json::to_vec(&(
+            "okx.entry-terminal-settlement/v1",
+            &self.meta.account_key,
+            &self.meta.installation_id,
+            id,
+            &intent.plan_hash,
+            &admission.entry_proof_digest,
+            &fill.source_digest,
+            &bill.source_digest,
+            &fill.reservation_key,
+            &fill.exchange_order_id,
+            venue_updated_at,
+            venue_filled_quantity,
+            full_usdt,
+            usd,
+        )).map_err(|_| StoreError::Invalid("ENTRY_SETTLEMENT_SOURCE_DIGEST_INVALID"))?;
+        let settlement = EntrySettlementEvidence {
+            schema: "okx.entry-terminal-settlement/v1".into(),
+            account_key: self.meta.account_key.clone(),
+            intent_id: id.into(),
+            plan_hash: intent.plan_hash,
+            reservation_key: fill.reservation_key.clone(),
+            venue_order_id: fill.exchange_order_id.clone(),
+            venue_update_ms: venue_updated_at,
+            venue_filled_quantity,
+            booked_notional_and_fee_usdt: full_usdt,
+            cumulative_entry_usd: usd,
+            settlement_revision: 1,
+            source_digest: format!("{:x}", Sha256::digest(bytes)),
+        };
+        let key = format!("entry-settlement:{id}");
+        if let Some(prior) = self.operation(&key)? {
+            if prior.kind != "ENTRY_SETTLEMENT_PROVEN"
+                || prior.request_hash != settlement.plan_hash
+            {
+                return Err(StoreError::Invalid("ENTRY_SETTLEMENT_IDEMPOTENCY_CONFLICT"));
+            }
+            let saved: EntrySettlementEvidence = serde_json::from_str(&prior.result_ref)
+                .map_err(|_| StoreError::Invalid("ENTRY_SETTLEMENT_RECEIPT_CORRUPT"))?;
+            // Cursor watermark can advance even when all immutable economic
+            // facts stay unchanged. An ACK replay must use the original
+            // durable digest/revision, but cannot accept a changed venue
+            // filled quantity, cost, account, reservation or order.
+            if saved.schema != settlement.schema
+                || saved.account_key != settlement.account_key
+                || saved.intent_id != settlement.intent_id
+                || saved.plan_hash != settlement.plan_hash
+                || saved.reservation_key != settlement.reservation_key
+                || saved.venue_order_id != settlement.venue_order_id
+                || saved.venue_update_ms != settlement.venue_update_ms
+                || saved.venue_filled_quantity != settlement.venue_filled_quantity
+                || saved.booked_notional_and_fee_usdt != settlement.booked_notional_and_fee_usdt
+                || saved.cumulative_entry_usd != settlement.cumulative_entry_usd
+                || saved.settlement_revision != 1
+                || saved.source_digest.len() != 64
+                || prior.committed_at != saved.venue_update_ms
+            {
+                return Err(StoreError::Invalid("ENTRY_SETTLEMENT_IDEMPOTENCY_CONFLICT"));
+            }
+            return Ok(saved);
+        }
+        let encoded = serde_json::to_string(&settlement)
+            .map_err(|_| StoreError::Invalid("ENTRY_SETTLEMENT_SERIALIZATION_FAILED"))?;
+        self.connection.execute(
+            "INSERT INTO operation_receipts(operation_id,kind,request_hash,result_ref,committed_at)
+             VALUES(?1,'ENTRY_SETTLEMENT_PROVEN',?2,?3,?4)",
+            params![key, settlement.plan_hash, encoded, settlement.venue_update_ms],
+        )?;
+        Ok(settlement)
+    }
+
     /// Durable address of a central reservation attempt, committed before
     /// any WSS RESERVE. A crash or lost ACK cannot orphan the Worker grant.
     pub fn mark_reserve_attempt(&mut self, id: &str, key: &str, now: i64) -> StoreResult<()> {
