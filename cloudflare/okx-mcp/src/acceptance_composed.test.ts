@@ -219,7 +219,7 @@ async function call(tool:string,args:Record<string,unknown>){
 const config=await call('accounts',{action:'list'});
 check(config.status==='completed'&&config.data.accounts.length===0,'central empty read');
 const connectArgs={action:'connect',alias:'fixture_a',label:'Fixture A',
- credential_ref:'credential_fixture_a',enabled:true,limits:acceptanceEntryLimits,
+ credential_ref:'credential_fixture_a',enabled:true,limits,
  idempotency_key:'fixture_connect_0001'};
 const first=await call('accounts',connectArgs);
 check(first.status==='completed'&&first.data.account.account_key===accountKey&&
@@ -256,7 +256,7 @@ const resume=await call('accounts',{action:'resume',account:'fixture_a',expected
 check(resume.status==='completed'&&resume.data.revision===3&&
  resume.data.accounts[0].explicit_pause===false,'central resume');
 await recordNativePolicy('resume');
-const revisedLimits={...acceptanceEntryLimits,max_order_loss_usdt:'0.5'};
+const revisedLimits={...limits,max_order_loss_usdt:'0.5'};
 const limitsArgs={action:'set_limits',account:'fixture_a',expected_revision:3,
  idempotency_key:'fixture_limits_0001',limits:revisedLimits};
 const revised=await call('accounts',limitsArgs);
@@ -323,10 +323,22 @@ console.log('mcp_central_owner_composed_fake_venue PASS central connect/pause/re
 // transaction code on the way to a fake venue. This intentionally follows the
 // A2 policy trace: it must not alter its exact committed CAS evidence.
 const realConnect=await call('accounts',{action:'connect',alias:'fixture_real',
- label:'Fixture Real',credential_ref:'credential_fixture_real',enabled:true,limits:acceptanceEntryLimits,
+ label:'Fixture Real',credential_ref:'credential_fixture_real',enabled:true,limits,
  idempotency_key:'fixture_connect_real_0001'});
 check(realConnect.status==='completed'&&realConnect.data.account.account_key===
  'okx:real:'+verifiedUid,'real account identity arrived via same MCP connect path');
+// The existing connect schema is intentionally small. A real account's
+// independent entry ceiling is installed through the authorized limits CAS.
+const preEntryPolicy=(await governanceRequest(storage,'GET')).body as Governance;
+const enableEntry=await call('accounts',{
+ action:'set_limits',account:'fixture_real',
+ expected_revision:preEntryPolicy.revision,
+ idempotency_key:'fixture_real_entry_cap_001',
+ limits:acceptanceEntryLimits
+});
+check(enableEntry.status==='completed'&&
+ enableEntry.data.accounts.find((a:any)=>a.id==='fixture_real')?.limits.max_entry_usd==='10',
+ 'real account entry cap installed by existing typed management CAS');
 // Simulates the authenticated fixture socket's own generation, not an
 // externally asserted MCP parameter or a production WSS attestation.
 await storage.put('generation',generation);
