@@ -433,6 +433,120 @@ impl AccountStore {
         })
     }
 
+    /// Read-only F1/E1 source cross-check. Native fill fee and bill fee must
+    /// resolve to the SAME existing finance event; the account bill stream
+    /// must be covered through the requested time. Missing bill linkage is
+    /// UNKNOWN, not a made-up zero fee or release permission. This is run on
+    /// the sole SQL owner, off the NAV hot path.
+    pub fn intent_fee_bill_evidence(
+        &self,
+        intent_id: &str,
+        through: i64,
+    ) -> StoreResult<IntentFeeBillEvidence> {
+        use sha2::{Digest, Sha256};
+        let fill = self.intent_fill_cost_evidence(intent_id, through)?;
+        let bills = self.cursor("bills", "account")?
+            .ok_or(StoreError::Invalid("ENTRY_BILLS_COVERAGE_UNPROVEN"))?;
+        if !bills.cursor.is_empty() || !bills.coverage_gaps.is_empty()
+            || bills.generation <= 0 || bills.watermark < through
+        {
+            return Err(StoreError::Invalid("ENTRY_BILLS_COVERAGE_UNPROVEN"));
+        }
+        let mut hasher = Sha256::new();
+        hasher.update(serde_json::to_vec(&(
+            "okx.intent-fee-bill-evidence/v1",
+            self.meta.account_key.as_str(),
+            self.meta.installation_id.as_str(),
+            intent_id,
+            fill.source_digest.as_str(),
+            through,
+            bills.watermark,
+            bills.generation,
+        )).map_err(|_| StoreError::Invalid("ENTRY_FEE_BILL_DIGEST_INVALID"))?);
+        let mut fee_rows = self.connection.prepare(
+            "SELECT fill_id,fee,currency FROM fills
+             WHERE intent_id=?1 AND time<=?2 ORDER BY fill_id LIMIT 10001"
+        )?;
+        // Source-ref first index makes each immutable fee lookup addressable.
+        // The canonical finance entry may have first arrived from bill history
+        // or from fills. Its source_links must include BOTH original sources.
+        let mut linked = self.connection.prepare(
+            "SELECT e.entry_id,e.economic_event_key,e.amount,e.currency,
+                    e.reverses_entry_id,b.bill_id,b.time,b.currency,
+                    EXISTS(SELECT 1 FROM finance_source_links lb
+                      WHERE lb.entry_id=e.entry_id
+                        AND lb.source_ref='bill:'||b.bill_id)
+             FROM finance_source_links fl
+             JOIN finance_entries e ON e.entry_id=fl.entry_id AND e.component='FEE'
+             LEFT JOIN bills b ON b.economic_event_key=e.economic_event_key
+                              AND e.economic_event_key='bill:'||b.bill_id
+             WHERE fl.source_ref=?1 ORDER BY e.entry_id LIMIT 2"
+        )?;
+        let mut scanned = fee_rows.query(params![intent_id, through])?;
+        let mut count = 0_u64;
+        let mut total = Decimal::ZERO;
+        while let Some(row) = scanned.next()? {
+            count += 1;
+            if count > 10000 {
+                return Err(StoreError::Invalid("ENTRY_FILL_HISTORY_TOO_LARGE"));
+            }
+            let id: String = row.get(0)?;
+            let fee: String = row.get(1)?;
+            let currency: String = row.get(2)?;
+            let fee = decimal(fee)?;
+            if fee == Decimal::ZERO {
+                // No finance fee event exists for an actual zero-fee fill.
+                // A zero amount in fills alone does NOT prove the final bill.
+                return Err(StoreError::Invalid("ENTRY_ZERO_FEE_BILL_UNPROVEN"));
+            }
+            let fee_source = format!("fill:{id}");
+            let mut rows = linked.query([fee_source.as_str()])?;
+            let Some(source) = rows.next()? else {
+                return Err(StoreError::Invalid("ENTRY_FEE_BILL_LINK_MISSING"));
+            };
+            let proof: (
+                String, String, String, String, Option<String>,
+                Option<String>, Option<i64>, Option<String>, bool,
+            ) = (
+                source.get(0)?, source.get(1)?, source.get(2)?,
+                source.get(3)?, source.get(4)?, source.get(5)?,
+                source.get(6)?, source.get(7)?, source.get(8)?,
+            );
+            if rows.next()?.is_some() {
+                return Err(StoreError::Invalid("ENTRY_FEE_BILL_LINK_AMBIGUOUS"));
+            }
+            if proof.4.is_some()
+                || !proof.1.starts_with("bill:")
+                || proof.5.as_deref() != proof.1.strip_prefix("bill:")
+                || proof.6.is_none_or(|t| t <= 0 || t > bills.watermark)
+                || proof.7.as_deref() != Some(currency.as_str())
+                || !proof.8
+                || proof.3 != currency
+                || decimal(proof.2.clone())? != fee
+            {
+                return Err(StoreError::Invalid("ENTRY_FEE_BILL_SOURCE_MISMATCH"));
+            }
+            total = total.checked_add(fee.abs())
+                .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))?;
+            let data = serde_json::to_vec(&(id, fee_source, currency, proof))
+                .map_err(|_| StoreError::Invalid("ENTRY_FEE_BILL_DIGEST_INVALID"))?;
+            hasher.update((data.len() as u64).to_le_bytes());
+            hasher.update(data);
+        }
+        if count != fill.fill_count || count == 0
+            || total != fill.conservative_fee_usdt
+        {
+            return Err(StoreError::Invalid("ENTRY_FEE_BILL_TOTAL_MISMATCH"));
+        }
+        Ok(IntentFeeBillEvidence {
+            fill,
+            linked_bill_count: count,
+            bills_covered_through: bills.watermark,
+            conservative_verified_fee_usdt: total,
+            source_digest: format!("{:x}", hasher.finalize()),
+        })
+    }
+
     /// Account-backed principal, never PnL or independently priced strategy NAV.
     /// All returned balances are exact USD decimals within this AccountStore.
     pub fn capital_state(&self, now: i64) -> StoreResult<AccountCapitalState> {

@@ -338,6 +338,17 @@ pub struct IntentFillCostEvidence {
     pub conservative_fee_usdt: Decimal,
     pub source_digest: String,
 }
+/// Authenticated immutable fill fee cross-checked against an actual venue
+/// bill and the existing canonical finance event. This is not proof of
+/// final margin debit, future bills, FX upper bound, or a central settlement.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct IntentFeeBillEvidence {
+    pub fill: IntentFillCostEvidence,
+    pub linked_bill_count: u64,
+    pub bills_covered_through: i64,
+    pub conservative_verified_fee_usdt: Decimal,
+    pub source_digest: String,
+}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Bill {
     pub bill_id: String,
