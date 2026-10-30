@@ -300,25 +300,26 @@ impl AccountHistoryApi {
             .await
     }
 
-    /// Complete venue evidence for ONE authenticated account and a single
-    /// fixed cut-off. Each of five instrument classes and the account-wide
-    /// bill stream must pass exhaustive pagination and cross-source joins.
-    /// No permission to initialize RiskBook is issued by this read alone.
+    /// Complete monetary opening evidence for ONE authenticated account
+    /// at a fixed cut-off. Filled orders and ALL fill/bill events are
+    /// mandatory; canceled-without-fill orders outside the short recent
+    /// window are NOT part of consumed money. This is never proof of
+    /// absence of lost POSTs; recovery uses complete_campaign_orders.
+    /// Only the native SQL finance owner can classify the monetary events.
     pub async fn complete_campaign_account_history(
         &self,
         started_at_ms: i64,
         through_ms: i64,
         observed_at_ms: i64,
     ) -> Result<CompleteCampaignAccountHistory, OkxError> {
-        verify_campaign_order_window(started_at_ms, through_ms, observed_at_ms)?;
+        verify_campaign_money_window(started_at_ms, through_ms, observed_at_ms)?;
         let mut orders = Vec::new();
         for instrument_type in ["SPOT", "MARGIN", "SWAP", "FUTURES", "OPTION"] {
             let proof = self
-                .complete_campaign_orders(
+                .complete_campaign_spend_orders(
                     instrument_type,
                     started_at_ms,
                     through_ms,
-                    observed_at_ms,
                 )
                 .await?;
             if orders.len().saturating_add(proof.orders.len()) > CAMPAIGN_MAX_EVIDENCE_ROWS {
@@ -348,8 +349,21 @@ impl AccountHistoryApi {
         observed_at_ms: i64,
     ) -> Result<CompleteCampaignOrderHistory, OkxError> {
         verify_campaign_order_window(campaign_started_at_ms, through_ms, observed_at_ms)?;
+        self.complete_campaign_spend_orders(instrument_type, campaign_started_at_ms, through_ms)
+            .await
+    }
+
+    /// Spend evidence can use full three-month completed-order archives.
+    /// It proves no negative result about canceled-unfilled orders and MUST
+    /// NOT be called by crash recovery or post-once admission logic.
+    async fn complete_campaign_spend_orders(
+        &self,
+        instrument_type: &str,
+        started_at_ms: i64,
+        through_ms: i64,
+    ) -> Result<CompleteCampaignOrderHistory, OkxError> {
         let recent = self
-            .complete_order_source(instrument_type, campaign_started_at_ms, through_ms, false)
+            .complete_order_source(instrument_type, started_at_ms, through_ms, false)
             .await?;
         let archive = self
             .complete_order_source(instrument_type, campaign_started_at_ms, through_ms, true)
