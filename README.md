@@ -66,8 +66,9 @@ NAV/STOP → protected position/terminal settlement → release`.
   `trade.status` reads the source-bound SQL admission and labels it as
   cost proof **only**, never POST permission. T0 creation and v2 reopening
   install the same immutable SQL receipt triggers; an ACK retry rechecks
-  the originally covered fill/bill cut-off and source digest even after
-  history cursors advance. With missing opening campaign coverage or an
+  the originally covered fill/bill cut-off and content digest even after
+  history cursors/generations advance. Capture watermarks remain mandatory
+  coverage checks but are not part of the hash of immutable economic facts. With missing opening campaign coverage or an
   Unknown cost component, the Engine still fails closed.
 - **Handling net-mode positions:** exchange `posSide=net` uses a signed
   position quantity, while native SQL lots use `long` / `short`.
