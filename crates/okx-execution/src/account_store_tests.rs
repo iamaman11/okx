@@ -266,13 +266,13 @@ fn e1_sql_known_quote_is_immutable_scoped_and_never_all_in_permission() {
     assert_eq!(s.entry_admission(&i.intent_id).unwrap(), None);
     let original_quote = serde_json::to_vec(&proof).unwrap();
     let admitted = EntryAdmissionEvidence {
-        schema: "okx.entry-admission/v1".into(),
+        schema: "okx.entry-admission/v2".into(),
         account_key: s.meta.account_key.clone(),
         installation_id: s.meta.installation_id.clone(),
         intent_id: i.intent_id.clone(),
         plan_hash: i.plan_hash.clone(),
         quote_digest: format!("{:x}", sha2::Sha256::digest(original_quote)),
-        fx_upper_usd_per_usdt: Decimal::ONE,
+        admission_usd_per_usdt: Decimal::ONE,
         other_entry_costs_upper_usd: Decimal::new(95, 2),
         entry_upper_usd: Decimal::from(101),
         entry_proof_digest: "a".repeat(64),
@@ -314,7 +314,7 @@ fn e1_sql_known_quote_is_immutable_scoped_and_never_all_in_permission() {
         Err(StoreError::Invalid("ENTRY_ADMISSION_SOURCE_UNVERIFIED"))
     ));
     corrupted = admitted.clone();
-    corrupted.fx_upper_usd_per_usdt = Decimal::new(99, 2);
+    corrupted.admission_usd_per_usdt = Decimal::new(99, 2);
     assert!(matches!(
         s.bind_entry_admission(&corrupted),
         Err(StoreError::Invalid("ENTRY_ADMISSION_SOURCE_UNVERIFIED"))
@@ -505,7 +505,7 @@ fn e1_fee_bill_cross_source_receipt_requires_both_immutable_sources() {
     let quote = e1_source_quote(&s, &i);
     s.bind_entry_quote(&quote).unwrap();
     let admitted = EntryAdmissionEvidence {
-        schema: "okx.entry-admission/v1".into(),
+        schema: "okx.entry-admission/v2".into(),
         account_key: s.meta.account_key.clone(),
         installation_id: s.meta.installation_id.clone(),
         intent_id: i.intent_id.clone(),
@@ -514,7 +514,7 @@ fn e1_fee_bill_cross_source_receipt_requires_both_immutable_sources() {
             "{:x}",
             sha2::Sha256::digest(serde_json::to_vec(&quote).unwrap())
         ),
-        fx_upper_usd_per_usdt: Decimal::ONE,
+        admission_usd_per_usdt: Decimal::ONE,
         other_entry_costs_upper_usd: Decimal::ONE,
         entry_upper_usd: quote.total_usd + Decimal::ONE,
         entry_proof_digest: "a".repeat(64),

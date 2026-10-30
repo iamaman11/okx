@@ -606,13 +606,13 @@ impl TradeService {
                         .map_err(|_| "ENTRY_ADMISSION_QUOTE_SERIALIZATION_FAILED")?;
                     Ok::<okx_execution::EntryAdmissionEvidence, String>(
                         okx_execution::EntryAdmissionEvidence {
-                            schema: "okx.entry-admission/v1".into(),
+                            schema: "okx.entry-admission/v2".into(),
                             account_key: entry_receipt.account_key.clone(),
                             installation_id: entry_receipt.installation_id.clone(),
                             intent_id: entry_receipt.intent_id.clone(),
                             plan_hash: entry_receipt.plan_hash.clone(),
                             quote_digest: format!("{:x}", Sha256::digest(serialized)),
-                            fx_upper_usd_per_usdt: fx_upper,
+                            admission_usd_per_usdt: fx_upper,
                             other_entry_costs_upper_usd: fixed_upper,
                             entry_upper_usd: *upper,
                             entry_proof_digest: source_digest.clone(),

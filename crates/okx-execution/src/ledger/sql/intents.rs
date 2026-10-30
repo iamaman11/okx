@@ -154,7 +154,7 @@ impl AccountStore {
         let expected_quote_digest = format!("{:x}", Sha256::digest(bytes));
         let computed = quote
             .total_usdt
-            .checked_mul(proof.fx_upper_usd_per_usdt)
+            .checked_mul(proof.admission_usd_per_usdt)
             .ok_or(StoreError::Invalid("ENTRY_ADMISSION_UPPER_OVERFLOW"))?
             .round_dp_with_strategy(9, rust_decimal::RoundingStrategy::ToPositiveInfinity)
             .checked_add(proof.other_entry_costs_upper_usd)
@@ -164,7 +164,7 @@ impl AccountStore {
                 && v.bytes()
                     .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
         };
-        if proof.schema != "okx.entry-admission/v1"
+        if proof.schema != "okx.entry-admission/v2"
             || proof.account_key != self.meta.account_key
             || proof.installation_id != self.meta.installation_id
             || proof.intent_id != quote.intent_id
@@ -172,8 +172,8 @@ impl AccountStore {
             || !digest_valid(&proof.quote_digest)
             || proof.quote_digest != expected_quote_digest
             || !digest_valid(&proof.entry_proof_digest)
-            || proof.fx_upper_usd_per_usdt < quote.usd_per_usdt
-            || proof.fx_upper_usd_per_usdt <= Decimal::ZERO
+            || proof.admission_usd_per_usdt != quote.usd_per_usdt
+            || proof.admission_usd_per_usdt <= Decimal::ZERO
             || proof.other_entry_costs_upper_usd < Decimal::ZERO
             || proof.entry_upper_usd != computed
             || proof.entry_upper_usd < quote.total_usd
@@ -241,7 +241,7 @@ impl AccountStore {
     /// order whose complete fills and fee bills exist in the sole SQL owner
     /// can produce a cumulative USD charge. Partial/zero-fill or stale pages
     /// do NOT create a terminal accounting claim. The up-front source-bound
-    /// FX upper and fixed costs are taken from the SAME durable admission
+    /// Frozen admission FX and separately verified entry fees come from the SAME durable admission
     /// used for Worker RESERVE; no observed spot FX is promoted here.
     pub fn bind_terminal_entry_settlement(
         &mut self,
@@ -324,7 +324,7 @@ impl AccountStore {
             .checked_add(bill.conservative_verified_fee_usdt)
             .ok_or(StoreError::Invalid("ENTRY_SETTLEMENT_MONEY_OVERFLOW"))?;
         let usd = full_usdt
-            .checked_mul(admission.fx_upper_usd_per_usdt)
+            .checked_mul(admission.admission_usd_per_usdt)
             .ok_or(StoreError::Invalid("ENTRY_SETTLEMENT_MONEY_OVERFLOW"))?
             .round_dp_with_strategy(9, rust_decimal::RoundingStrategy::ToPositiveInfinity)
             .checked_add(admission.other_entry_costs_upper_usd)

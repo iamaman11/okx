@@ -355,7 +355,7 @@ fn entry_cost_status(
             return Err("ENTRY_ADMISSION_READBACK_MISMATCH".into());
         }
         return Ok(json!({
-            "schema":"okx.entry-admission/v1",
+            "schema":"okx.entry-admission/v2",
             "state":"source_bound_entry_cost",
             "known_notional_usdt":exact(quote.notional_usdt),
             "known_fee_usdt":exact(quote.fee_usdt),
@@ -2039,13 +2039,13 @@ mod entry_cost_status_tests {
         assert!(view["entry_budget_upper_reporting"].is_null());
         assert_eq!(view["reason_codes"].as_array().unwrap().len(), 5);
         let admitted = okx_execution::EntryAdmissionEvidence {
-            schema: "okx.entry-admission/v1".into(),
+            schema: "okx.entry-admission/v2".into(),
             account_key: quote.account_key.clone(),
             installation_id: quote.installation_id.clone(),
             intent_id: quote.intent_id.clone(),
             plan_hash: quote.plan_hash.clone(),
             quote_digest: "c".repeat(64),
-            fx_upper_usd_per_usdt: Decimal::ONE,
+            admission_usd_per_usdt: Decimal::ONE,
             other_entry_costs_upper_usd: Decimal::ONE,
             entry_upper_usd: Decimal::new(20005, 4),
             entry_proof_digest: "d".repeat(64),
