@@ -1,6 +1,6 @@
 import {governanceRequest,lowerCampaignLimit,enrollObservedAccount,setAccountPause,stopNewRealRisk,initializeGovernance,GOVERNANCE_STORAGE_KEY} from "./account_governance_store.js";
 import {FRAME_SCHEMA} from "./shared.js";
-import {installCampaignEntryProof,readRiskBook} from "./risk_book.js";
+import {installCampaignEntryProof,openingDigest,readRiskBook,type CampaignEntryOpeningSource} from "./risk_book.js";
 import {initial,limits} from "./account_governance.test.js";
 function ok(v:boolean,label:string){if(!v)throw Error(label);}
 class Storage{
@@ -45,11 +45,29 @@ ok(JSON.stringify(await lowerCampaignLimit(s,{expected_revision:revision,campaig
  const budgetStore=new Storage();
  ok((await initializeGovernance(budgetStore,initial)).status===200,
    "campaign cap transaction starts with legitimate installation");
- ok(await installCampaignEntryProof(budgetStore,{
+ ok((await enrollObservedAccount(budgetStore,{
+   ...observation,idempotency_key:"budget_real_enrollment"
+ })).status===200,"opening requires registered real cohort");
+ const budgetPolicy=(await governanceRequest(budgetStore,"GET")).body;
+ const openingAt=1792344435177,openingFrom=openingAt-100000;
+ const manifest:CampaignEntryOpeningSource={
    campaign_id:initial.campaign_id,limit_usd:"10",consumed_usd:"7",
-   source_digest:"f".repeat(64),as_of_ms:1792344435177
- }),"synthetic opening source attestation exists before budget mutation");
- const change={expected_revision:0,max_total_modelled_loss_usdt:"5",accounts:[]};
+   source_digest:"f".repeat(64),as_of_ms:openingAt,
+   campaign_started_at_ms:openingFrom,
+   accounts:(budgetPolicy.accounts as any[])
+    .filter(a=>a.environment==="real")
+    .map(a=>({account_key:a.account_key,history_from_ms:openingFrom,
+      history_through_ms:openingAt,consumed_entry_usd:"7",
+      order_history_complete:true,fill_history_complete:true,
+      bill_history_complete:true,finance_provenance_sealed:true,
+      source_digest:"e".repeat(64)}))
+    .sort((a,b)=>a.account_key.localeCompare(b.account_key))
+ };
+ manifest.source_digest=await openingDigest(manifest);
+ ok(await installCampaignEntryProof(budgetStore,manifest),
+   "synthetic full-cohort finance opening exists before budget mutation");
+ const change={expected_revision:budgetPolicy.revision,max_total_modelled_loss_usdt:budgetPolicy.max_total_modelled_loss_usdt,
+   accounts:budgetPolicy.accounts};
  const beforeBook=await readRiskBook(budgetStore);
  const denied=await governanceRequest(budgetStore,"POST",{
    ...change,campaign_entry_limit_usd:"6",idempotency_key:"lower_entry_below_booked"
@@ -57,7 +75,7 @@ ok(JSON.stringify(await lowerCampaignLimit(s,{expected_revision:revision,campaig
  ok(denied.status===409&&denied.body.reason==="ENTRY_LIMIT_BELOW_CONSUMED_OR_RESERVED",
    "cannot lower entry cap beneath already consumed source-proven money");
  ok((await readRiskBook(budgetStore))?.sequence===beforeBook?.sequence&&
-   (await governanceRequest(budgetStore,"GET")).body.revision===0,
+   (await governanceRequest(budgetStore,"GET")).body.revision===budgetPolicy.revision,
    "denied cap change leaves policy and RiskBook untouched");
  const accepted=await governanceRequest(budgetStore,"POST",{
    ...change,campaign_entry_limit_usd:"8",idempotency_key:"lower_entry_atomic_001"
