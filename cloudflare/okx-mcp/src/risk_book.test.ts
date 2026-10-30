@@ -156,24 +156,63 @@ check(mid.consumed_usd==="0.5"&&mid.reserved_usd==="1.5",
 check((await beginRiskPost(sa,held.entry.key,p,1,d,{connection_generation:77,expected_book_sequence:2,census:later,source_proof:native,causal_proof,now_ms:now+3})).status==="DENIED","no duplicate POST fence");
 check((await inspectRisk(sa,held.entry.key))?.entry.state==="POSTED","addressed readback");
 const terminalCensus={...census,occupied:census.occupied.map(v=>({...v,cumulative_loss_usd:v.account_key===accountKey(request)?"2":"0"})),source_digest:a,generated_at_ms:now+4,source_read_floor_ms:now+4};
-check((await transitionRisk(sa,held.entry.key,p,"RELEASED",d,{connection_generation:77,expected_book_sequence:4,terminal:{census:terminalCensus,source_proof:{...native,source_digest:a},ledger:{account_uid:a,run_id:base.run_id,intent_id:request.intent_id,state:"FILLED",record_digest:p,cumulative_loss_usd:"2",remaining_exposure_usdt:"0",cumulative_entry_usd:"1.5",entry_settlement_revision:2,entry_settlement_digest:d},now_ms:now+5}})).status==="UPDATED","terminal exact release consumes cumulative losses");
-check((await readRiskBook(sa))?.consumed_loss_usd==="2"&&(await readRiskBook(sa))?.occupied_usdt==="0","loss survives restart and release");
+const ledgerFinal={account_uid:a,run_id:base.run_id,intent_id:request.intent_id,
+ state:"FILLED",record_digest:p,cumulative_loss_usd:"2",remaining_exposure_usdt:"0",
+ cumulative_entry_usd:"1.5",entry_settlement_revision:2,entry_settlement_digest:d} as const;
+const terminalProof=(ledger:typeof ledgerFinal)=>({
+ census:terminalCensus,source_proof:{...native,source_digest:a},ledger,now_ms:now+5
+});
+// The historical implementation accepted a NEW charge during RELEASE without
+// a prior SETTLE_ENTRY. Denial must not advance RiskBook CAS or loss/entry money.
+const beforeTerminal=(await readRiskBook(sa))!;
+const premature=await transitionRisk(sa,held.entry.key,p,"RELEASED",d,{
+ connection_generation:77,expected_book_sequence:4,terminal:terminalProof(ledgerFinal)
+});
+const afterDenied=(await readRiskBook(sa))!;
+check(premature.status==="DENIED"&&premature.reason==="TERMINAL_ENTRY_SETTLEMENT_UNPROVEN"&&
+ afterDenied.sequence===beforeTerminal.sequence&&
+ afterDenied.consumed_loss_usd===beforeTerminal.consumed_loss_usd&&
+ afterDenied.entry_budget?.consumed_usd===beforeTerminal.entry_budget?.consumed_usd&&
+ afterDenied.entry_budget?.reserved_usd===beforeTerminal.entry_budget?.reserved_usd,
+ "RELEASE cannot invent the final debit or change money/CAS on denial");
+const fullyBooked=await settleEntrySpend(sa,held.entry.key,p,{
+ connection_generation:77,expected_book_sequence:4,cumulative_entry_usd:"1.5",
+ revision:2,source_digest:d
+});
+check(fullyBooked.status==="UPDATED"&&fullyBooked.book_sequence===5,
+ "final entry debit must first cross typed SETTLE_ENTRY exactly once");
+const conflictingTerminal=await transitionRisk(sa,held.entry.key,p,"RELEASED",d,{
+ connection_generation:77,expected_book_sequence:5,
+ terminal:terminalProof({...ledgerFinal,entry_settlement_digest:a})
+});
+check(conflictingTerminal.status==="DENIED"&&
+ (await readRiskBook(sa))!.sequence===5,
+ "terminal source digest cannot change without consuming RiskBook CAS");
+const committed=await transitionRisk(sa,held.entry.key,p,"RELEASED",d,{
+ connection_generation:77,expected_book_sequence:5,terminal:terminalProof(ledgerFinal)
+});
+check(committed.status==="UPDATED","terminal release uses EXACT previously settled source");
+check((await readRiskBook(sa))?.consumed_loss_usd==="2"&&
+ (await readRiskBook(sa))?.occupied_usdt==="0","loss survives restart and release");
 const finalEntry=(await readRiskBook(sa))!.entry_budget!;
 check(finalEntry.consumed_usd==="1.5"&&finalEntry.reserved_usd==="0",
  "terminal release returns unused reserve but NEVER refunds spent entry cost");
 const terminalReplay=await settleEntrySpend(sa,held.entry.key,p,{
  connection_generation:77,expected_book_sequence:4,cumulative_entry_usd:"1.5",
- revision:2,source_digest:d});
+ revision:2,source_digest:d
+});
 check(terminalReplay.status==="UPDATED",
- "lost final settlement acknowledgement remains readable after terminal release");
+ "lost final SETTLE_ENTRY reply remains idempotently readable after release");
 const wrongGenerationReplay=await settleEntrySpend(sa,held.entry.key,p,{
  connection_generation:76,expected_book_sequence:4,cumulative_entry_usd:"1.5",
- revision:2,source_digest:d});
+ revision:2,source_digest:d
+});
 check(wrongGenerationReplay.status==="DENIED",
  "old authenticated generation cannot replay terminal settlement after recovery");
 const tamperedTerminalReplay=await settleEntrySpend(sa,held.entry.key,p,{
  connection_generation:77,expected_book_sequence:4,cumulative_entry_usd:"1.5",
- revision:2,source_digest:a});
+ revision:2,source_digest:a
+});
 check(tamperedTerminalReplay.status==="DENIED"&&
  tamperedTerminalReplay.reason==="ENTRY_SETTLEMENT_REVISION_CONFLICT",
  "terminal replay may not replace the final financial source digest");
@@ -181,8 +220,9 @@ const finalAgain=(await readRiskBook(sa))!.entry_budget!;
 check(finalAgain.consumed_usd==="1.5"&&finalAgain.reserved_usd==="0",
  "replayed terminal settlement cannot debit twice or revive a released grant");
 const forbiddenTerminalIncrease=await settleEntrySpend(sa,held.entry.key,p,{
- connection_generation:77,expected_book_sequence:5,cumulative_entry_usd:"1.6",
- revision:3,source_digest:d});
+ connection_generation:77,expected_book_sequence:(await readRiskBook(sa))!.sequence,
+ cumulative_entry_usd:"1.6",revision:3,source_digest:d
+});
 check(forbiddenTerminalIncrease.status==="DENIED",
  "released intent cannot accept any new settlement revision");
 const reported={...census,occupied:census.occupied.map(v=>({...v,cumulative_loss_usd:v.account_key===accountKey(request)?"17":"0"}))};
