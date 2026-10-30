@@ -914,10 +914,7 @@ impl TradeService {
                 // This is the earliest REST response across every pending
                 // derivative-algo scope. Complete coverage is insufficient
                 // if the underlying source timestamp is absent or stale.
-                let algo_source_floor = verified_algo_source_time(
-                    algos.received_at_ms,
-                    now(),
-                )?;
+                let algo_source_floor = verified_algo_source_time(algos.received_at_ms, now())?;
                 let mut managed_algos = std::collections::BTreeSet::new();
                 for p in &snapshot.positions {
                     let actual_qty = dec(&p.position)?;
@@ -1039,7 +1036,8 @@ impl TradeService {
                     financial.0.nav_complete,
                     financial.0.source_as_of,
                     now(),
-                )?.min(algo_source_floor);
+                )?
+                .min(algo_source_floor);
                 // Bind SQL source quality and financial state to the same
                 // content proof as the account and conditional-order reads.
                 let data = digest(&(
@@ -1142,15 +1140,11 @@ fn verified_algo_source_time(
     source_received_at_ms: u64,
     observed_at_ms: i64,
 ) -> Result<i64, String> {
-    let source = i64::try_from(source_received_at_ms)
-        .map_err(|_| "COHORT_ALGO_SOURCE_TIME_INVALID")?;
+    let source =
+        i64::try_from(source_received_at_ms).map_err(|_| "COHORT_ALGO_SOURCE_TIME_INVALID")?;
     if source <= 0
         || source > observed_at_ms
-        || !crate::config::evidence_fresh(
-            source,
-            observed_at_ms,
-            crate::config::ACCOUNT_MAX_AGE_MS,
-        )
+        || !crate::config::evidence_fresh(source, observed_at_ms, crate::config::ACCOUNT_MAX_AGE_MS)
     {
         return Err("COHORT_ALGO_SOURCE_STALE".into());
     }
