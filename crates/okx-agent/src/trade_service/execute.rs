@@ -696,6 +696,58 @@ impl TradeService {
             _ => Err((reason, false)),
         }
     }
+    async fn revalidate_held_entry_quote(
+        &self,
+        r: &AccountResources,
+        intent: &StoredIntent,
+        until: Instant,
+    ) -> Result<(), String> {
+        let id = intent.intent_id.clone();
+        let quote = r.execution.store.call(until, move |s| s.entry_quote(&id))
+            .await.map_err(err)?
+            .ok_or("POST_ENTRY_QUOTE_MISSING")?;
+        let rules = self.public_ws.instrument_rules(&intent.instrument_id).await
+            .ok_or("POST_ENTRY_RULES_UNAVAILABLE")?;
+        if rules.instrument.state != "live"
+            || rules.instrument.contract_type.as_deref() != Some("linear")
+            || rules.instrument.settle_currency.as_deref() != Some("USDT")
+        {
+            return Err("POST_ENTRY_INSTRUMENT_CHANGED".into());
+        }
+        plan::verify_linear_usdt_entry_units(
+            &intent.instrument_id,
+            rules.instrument.contract_value_currency.as_deref(),
+        ).map_err(str::to_owned)?;
+        let ct = dec(rules.instrument.contract_value.as_deref()
+            .ok_or("POST_ENTRY_CONTRACT_VALUE_MISSING")?)?;
+        let lot = dec(&rules.instrument.lot_size)?;
+        let tick = dec(&rules.instrument.tick_size)?;
+        if ct <= Decimal::ZERO || lot <= Decimal::ZERO || tick <= Decimal::ZERO
+            || (quote.quantity / lot).fract() != Decimal::ZERO
+            || (quote.limit_price / tick).fract() != Decimal::ZERO
+        {
+            return Err("POST_ENTRY_SPEC_OR_PRECISION_CHANGED".into());
+        }
+        let fee = r.observer.fee_schedule(&rules).await.map_err(err)?;
+        let snap = r.observer.snapshot_after_held().await.map_err(err)?;
+        if snap.account_uid_fingerprint != r.configuration.account_key.verified_uid {
+            return Err("POST_ENTRY_ACCOUNT_CHANGED".into());
+        }
+        let fx = Self::usd_conversion(&snap)?;
+        verify_post_held_entry_sources(
+            &quote,
+            &fee,
+            &rules.reference_generation,
+            ct,
+            &fx,
+            now(),
+        )?;
+        if Instant::now() >= until {
+            return Err("COMMAND_EXPIRED".into());
+        }
+        Ok(())
+    }
+
     async fn fence_inspect_retry(
         &self,
         state: &CentralGovernanceSnapshot,
@@ -716,6 +768,10 @@ impl TradeService {
             if Instant::now() >= until {
                 return Err("COMMAND_EXPIRED".into());
             }
+            // A fresh census and a valid FX fence do not revalidate tariff or
+            // contract mechanics. Bind the same immutable SQL quote against
+            // actual post-HELD source data on EACH CAS attempt before POST.
+            self.revalidate_held_entry_quote(fx.owner, intent, until).await?;
             let (census, causal_proof) = self
                 .census_after_held(
                     state,
@@ -1064,6 +1120,48 @@ impl TradeService {
         ))
     }
 }
+/// The reserved known quote is source-bound but NOT an all-in debit proof.
+/// If any source changes after HELD, do not reuse the prior risk grant. Fail
+/// rather than silently refresh the amount/cost or issue a second venue POST.
+fn verify_post_held_entry_sources(
+    quote: &okx_execution::EntryQuoteEvidence,
+    fee: &okx_observation::FeeScheduleSnapshot,
+    reference_generation: &str,
+    contract_value: Decimal,
+    fx: &UsdConversion,
+    observed_at_ms: i64,
+) -> Result<(), String> {
+    let current_fee = entry_budget::verified_entry_fee_rate(
+        fee, &quote.instrument_id, reference_generation, observed_at_ms,
+    )?;
+    if quote.contract_value != contract_value
+        || quote.reference_generation != reference_generation
+        || quote.fee_generation != fee.fee_generation
+        || quote.maker_rate != fee.maker_rate
+        || quote.taker_rate != fee.taker_rate
+        || quote.fee_level != fee.level
+        || quote.fee_rate != current_fee
+    {
+        return Err("POST_ENTRY_FEE_OR_SPEC_CHANGED".into());
+    }
+    if !crate::config::evidence_fresh(
+        quote.observed_at, observed_at_ms, crate::config::ACCOUNT_MAX_AGE_MS,
+    ) {
+        return Err("POST_ENTRY_QUOTE_EXPIRED".into());
+    }
+    let fx_timestamp = i64::try_from(fx.observed_at_ms)
+        .map_err(|_| "POST_ENTRY_FX_TIMESTAMP_INVALID")?;
+    if !crate::config::evidence_fresh(
+        fx_timestamp, observed_at_ms, crate::config::ACCOUNT_MAX_AGE_MS,
+    ) {
+        return Err("POST_ENTRY_FX_STALE".into());
+    }
+    if quote.usd_per_usdt != dec(&fx.usd_per_usdt)? {
+        return Err("POST_ENTRY_FX_CHANGED".into());
+    }
+    Ok(())
+}
+
 /// The SQL owner is the authority for the local send state. A missing venue
 /// row does not prove no-send after POSTING/UNKNOWN; preserve those obligations
 /// and deny further account risk until a terminal readback is reconciled.
@@ -1393,6 +1491,90 @@ where
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn e1_held_entry_sources_reject_tampering_and_stale_tariffs() {
+        use okx_observation::{FeeScheduleInput, FeeScheduleSnapshot};
+        let stamp = "2026-10-30T00:00:00Z";
+        let t = chrono::DateTime::parse_from_rfc3339(stamp)
+            .unwrap().timestamp_millis();
+        let fee = FeeScheduleSnapshot::from_input(FeeScheduleInput {
+            instrument_id: "BTC-USDT-SWAP".into(),
+            reference_generation: "reference-1".into(),
+            source_received_at: stamp.into(),
+            exchange_timestamp_ms: t.to_string(),
+            level: "Lv1".into(),
+            maker_rate: "-0.0002".into(),
+            taker_rate: "0.0005".into(),
+            exact_for_instrument: true,
+        }).unwrap();
+        let mut quote = okx_execution::EntryQuoteEvidence {
+            schema: "okx.entry-known-quote/v1".into(),
+            account_key: "okx:real:test".into(),
+            installation_id: "test".into(),
+            intent_id: "intent".into(),
+            plan_hash: "a".repeat(64),
+            policy_revision: 1,
+            instrument_id: "BTC-USDT-SWAP".into(),
+            quantity: dec("1").unwrap(),
+            limit_price: dec("100").unwrap(),
+            contract_value: dec("1").unwrap(),
+            fee_rate: dec("0.0005").unwrap(),
+            maker_rate: fee.maker_rate.clone(),
+            taker_rate: fee.taker_rate.clone(),
+            fee_level: fee.level.clone(),
+            fee_exchange_at: t,
+            usd_per_usdt: Decimal::ONE,
+            notional_usdt: dec("100").unwrap(),
+            fee_usdt: dec("0.05").unwrap(),
+            total_usdt: dec("100.05").unwrap(),
+            total_usd: dec("100.05").unwrap(),
+            fee_generation: fee.fee_generation.clone(),
+            reference_generation: fee.reference_generation.clone(),
+            fee_received_at: t,
+            conversion_digest: "b".repeat(64),
+            conversion_received_at: t,
+            observed_at: t,
+        };
+        let fx = UsdConversion {
+            usd_per_usdt: "1".into(),
+            source_digest: "c".repeat(64),
+            observed_at_ms: t as u64,
+        };
+        assert!(verify_post_held_entry_sources(
+            &quote, &fee, "reference-1", Decimal::ONE, &fx, t + 1
+        ).is_ok());
+        assert_eq!(
+            verify_post_held_entry_sources(&quote, &fee, "reference-2",
+                Decimal::ONE, &fx, t + 1),
+            Err("POST_ENTRY_FEE_OR_SPEC_CHANGED".into())
+        );
+        assert_eq!(
+            verify_post_held_entry_sources(&quote, &fee, "reference-1",
+                dec("2").unwrap(), &fx, t + 1),
+            Err("POST_ENTRY_FEE_OR_SPEC_CHANGED".into())
+        );
+        quote.fee_generation = "tampered".into();
+        assert!(verify_post_held_entry_sources(
+            &quote, &fee, "reference-1", Decimal::ONE, &fx, t + 1
+        ).is_err());
+        quote.fee_generation = fee.fee_generation.clone();
+        assert_eq!(
+            verify_post_held_entry_sources(&quote, &fee, "reference-1",
+                Decimal::ONE, &fx,
+                t + crate::config::ACCOUNT_MAX_AGE_MS + 1),
+            Err("ENTRY_FEE_SOURCE_STALE".into())
+        );
+        let modified_fx = UsdConversion {
+            usd_per_usdt: "1.01".into(),
+            ..fx
+        };
+        assert_eq!(
+            verify_post_held_entry_sources(&quote, &fee, "reference-1",
+                Decimal::ONE, &modified_fx, t + 1),
+            Err("POST_ENTRY_FX_CHANGED".into())
+        );
+    }
 
     #[test]
     fn k4_post_held_fx_same_rate_or_changed_rate() {
