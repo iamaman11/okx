@@ -1020,6 +1020,7 @@ mod tests {
         .unwrap();
         let cursors = CaptureCursors {
             spot: None,
+            margin: None,
             swap: None,
             futures: Some(future_page),
             options: None,
