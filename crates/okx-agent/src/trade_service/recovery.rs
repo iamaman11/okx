@@ -177,79 +177,42 @@ impl TradeService {
         }
         let generation = r.private_ws.status().await.connection_generation;
         let (state, _) = self.authority(r, None).await?;
-        let mut history_proofs = Vec::new();
-        let mut witnessed_orders = std::collections::BTreeSet::new();
-        // Recovery has to account for every instrument class allowed by
-        // OKX, not only swaps/futures. Otherwise an external SPOT/MARGIN
-        // order can be missing while a recovery falsely claims completeness.
-        for kind in ["SPOT", "MARGIN", "SWAP", "FUTURES", "OPTION"] {
-            let history = r
-                .execution
-                .history
-                .complete_campaign_orders(
-                    kind,
-                    backup,
-                    started,
-                    chrono::Utc::now().timestamp_millis(),
-                )
-                .await
-                .map_err(|_| "STORAGE_RECOVERY_ORDER_HISTORY_NOT_PROVEN")?;
-            if history.from_ms != backup || history.through_ms != started {
-                return Err("STORAGE_RECOVERY_ORDER_HISTORY_SCOPE_MISMATCH".into());
-            }
-            history_proofs.push(history.source_digest);
-            for order in history.orders {
-                witnessed_orders.insert(order.order_id.clone());
-                let updated = order
-                    .update_time_ms
-                    .parse::<i64>()
-                    .map_err(|_| "STORAGE_RECOVERY_ORDER_TIME_INVALID")?;
-                if updated < backup {
-                    continue;
-                }
-                let client = order.client_order_id.clone();
-                let known = r
-                    .execution
-                    .store
-                    .call(deadline(), move |s| s.by_client_order_id(&client))
-                    .await
-                    .map_err(err)?
-                    .ok_or("STORAGE_RECOVERY_LOST_ORDER_FACT")?;
-                if known.instrument_id != order.instrument_id
-                    || known
-                        .exchange_order_id
-                        .as_ref()
-                        .is_some_and(|id| id != &order.order_id)
-                {
-                    return Err("STORAGE_RECOVERY_ORDER_IDENTITY_MISMATCH".into());
-                }
-            }
-        }
-        // A complete order list does not prove the money side. Native venue
-        // fills and account-wide fee bills must independently cover the same
-        // backup→current window; otherwise the crash witness stays blocked.
-        // The result is source evidence, not a synthetic USD opening budget.
-        let money = r
+        // One native account-wide source, one cutoff, and one content hash.
+        // It exhausts both order endpoints for every instrument class,
+        // all fills and every account bill. Source joins establish complete
+        // economic identities without inventing an opening USD cost.
+        let history = r
             .execution
             .history
-            .complete_campaign_money_history(
+            .complete_campaign_account_history(
                 backup,
                 started,
                 chrono::Utc::now().timestamp_millis(),
             )
             .await
-            .map_err(|_| "STORAGE_RECOVERY_MONEY_HISTORY_NOT_PROVEN")?;
-        if money.from_ms != backup || money.through_ms != started {
-            return Err("STORAGE_RECOVERY_MONEY_HISTORY_SCOPE_MISMATCH".into());
+            .map_err(|_| "STORAGE_RECOVERY_ACCOUNT_HISTORY_NOT_PROVEN")?;
+        if history.from_ms != backup || history.through_ms != started {
+            return Err("STORAGE_RECOVERY_ACCOUNT_HISTORY_SCOPE_MISMATCH".into());
         }
-        if money
-            .fills
-            .iter()
-            .any(|fill| !witnessed_orders.contains(&fill.order_id))
-        {
-            return Err("STORAGE_RECOVERY_FILL_ORDER_LINK_UNPROVEN".into());
+        let history_proofs = vec![history.source_digest];
+        for order in history.orders {
+            let client = order.client_order_id.clone();
+            let known = r
+                .execution
+                .store
+                .call(deadline(), move |s| s.by_client_order_id(&client))
+                .await
+                .map_err(err)?
+                .ok_or("STORAGE_RECOVERY_LOST_ORDER_FACT")?;
+            if known.instrument_id != order.instrument_id
+                || known
+                    .exchange_order_id
+                    .as_ref()
+                    .is_some_and(|id| id != &order.order_id)
+            {
+                return Err("STORAGE_RECOVERY_ORDER_IDENTITY_MISMATCH".into());
+            }
         }
-        history_proofs.push(money.source_digest);
         let snapshot = crate::source_capture::capture_account_sources(
             &r.observer,
             &r.private_ws,
