@@ -130,10 +130,10 @@ pub(super) fn verify_entry_rules_match(
     {
         return Err("ENTRY_VENUE_RULES_OR_PRECISION_CHANGED".into());
     }
-    if let Some(max) = &rules.instrument.max_limit_size {
-        if plan.quantity > dec(max)? {
-            return Err("ENTRY_VENUE_MAX_SIZE_CHANGED".into());
-        }
+    if let Some(max) = &rules.instrument.max_limit_size
+        && plan.quantity > dec(max)?
+    {
+        return Err("ENTRY_VENUE_MAX_SIZE_CHANGED".into());
     }
     Ok(())
 }

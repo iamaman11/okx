@@ -1862,7 +1862,7 @@ mod tests {
                 "uid",
                 true,
                 t,
-                t + crate::config::ACCOUNT_MAX_AGE_MS as i64 + 1,
+                t + crate::config::ACCOUNT_MAX_AGE_MS + 1,
             ),
             Err("COHORT_ACCOUNT_SOURCE_STALE".into())
         );
@@ -1876,7 +1876,7 @@ mod tests {
                 "uid",
                 "uid",
                 true,
-                t - crate::config::ACCOUNT_MAX_AGE_MS as i64 - 1,
+                t - crate::config::ACCOUNT_MAX_AGE_MS - 1,
                 t,
             ),
             Err("COHORT_FINANCIAL_SOURCE_STALE".into())

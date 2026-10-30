@@ -101,9 +101,10 @@ fn e1_sql_known_quote_is_immutable_scoped_and_never_all_in_permission() {
     ));
     changed = proof.clone();
     changed.fee_rate = Decimal::ZERO;
+    // Native owner checks fee vs authenticated maker/taker before math.
     assert!(matches!(
         s.bind_entry_quote(&changed),
-        Err(StoreError::Invalid("ENTRY_QUOTE_ARITHMETIC_MISMATCH"))
+        Err(StoreError::Invalid("ENTRY_QUOTE_SCOPE_UNVERIFIED"))
     ));
     assert_eq!(s.entry_quote(&i.intent_id).unwrap(), Some(proof.clone()));
     reserve(&mut s);
