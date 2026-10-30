@@ -1028,11 +1028,12 @@ impl TradeService {
             record_digest: digest(&(i, order, loss, through))?,
             cumulative_loss_usd: exact(loss),
             remaining_exposure_usdt: "0".into(),
-            // Worker already atomically transferred the exact cumulative
-            // amount from reservation to consumed. The terminal revision
-            // advances from 1 to 2 without charging an additional cent.
+            // The previous SETTLE_ENTRY committed the entire observed
+            // amount. Terminal RELEASE must not create another revision or
+            // claim a new debit; Worker compares these exact immutable
+            // SQL-backed fields to the existing settled RiskBook entry.
             cumulative_entry_usd: Some(exact(settlement.cumulative_entry_usd)),
-            entry_settlement_revision: Some(settlement.settlement_revision + 1),
+            entry_settlement_revision: Some(settlement.settlement_revision),
             entry_settlement_digest: Some(settlement.source_digest.clone()),
         };
         let command = self.risk_command(
