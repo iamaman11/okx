@@ -916,10 +916,14 @@ impl TradeService {
                 let algo_source_floor = verified_algo_source_time(algos.received_at_ms, now())?;
                 let mut managed_algos = std::collections::BTreeSet::new();
                 for p in &snapshot.positions {
-                    let actual_qty = dec(&p.position)?;
-                    if actual_qty == Decimal::ZERO {
+                    let Some((position_direction, actual_qty)) =
+                        super::reconcile::verified_venue_position_direction(
+                            &p.position_side,
+                            &p.position,
+                        )?
+                    else {
                         continue;
-                    }
+                    };
                     let instrument = p.instrument_id.clone();
                     let lots = r
                         .execution
@@ -929,12 +933,18 @@ impl TradeService {
                         .map_err(err)?;
                     let covered = lots
                         .iter()
-                        .filter(|l| l.side == p.position_side)
-                        .fold(Decimal::ZERO, |s, l| s + l.remaining_qty);
-                    if covered != dec(&p.position)?.abs() {
+                        .filter(|l| l.side == position_direction)
+                        .try_fold(Decimal::ZERO, |total, lot| {
+                            if lot.remaining_qty <= Decimal::ZERO {
+                                return Err("UNATTRIBUTED_EXCHANGE_POSITION".into());
+                            }
+                            total.checked_add(lot.remaining_qty)
+                                .ok_or_else(|| "COHORT_POSITION_QUANTITY_OVERFLOW".into())
+                        })?;
+                    if covered != actual_qty {
                         return Err("UNATTRIBUTED_EXCHANGE_POSITION".into());
                     }
-                    for lot in lots.iter().filter(|l| l.side == p.position_side) {
+                    for lot in lots.iter().filter(|l| l.side == position_direction) {
                         let id = lot.intent_id.clone().ok_or("UNATTRIBUTED_POSITION_LOT")?;
                         let owner_id = id.clone();
                         let (protection, receipt) = r
@@ -949,8 +959,17 @@ impl TradeService {
                         let receipt = receipt.ok_or("CENTRAL_RESERVATION_UNVERIFIED")?;
                         let owned_qty = lots
                             .iter()
-                            .filter(|l| l.intent_id.as_deref() == Some(&owner_id))
-                            .fold(Decimal::ZERO, |n, l| n + l.remaining_qty);
+                            .filter(|l| {
+                                l.side == position_direction
+                                    && l.intent_id.as_deref() == Some(&owner_id)
+                            })
+                            .try_fold(Decimal::ZERO, |total, lot| {
+                                if lot.remaining_qty <= Decimal::ZERO {
+                                    return Err("COHORT_POSITION_LOT_QUANTITY_INVALID".into());
+                                }
+                                total.checked_add(lot.remaining_qty)
+                                    .ok_or_else(|| "COHORT_POSITION_QUANTITY_OVERFLOW".into())
+                            })?;
                         if protection.quantity < owned_qty
                             || receipt.plan_hash.is_empty()
                             || receipt.reservation_key.starts_with("local:")
