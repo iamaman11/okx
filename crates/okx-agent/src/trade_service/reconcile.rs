@@ -126,6 +126,57 @@ fn verified_order_readback(
     Ok(filled)
 }
 
+/// Replace is a NEW entry, not a retry of the canceled entry. Even after
+/// a successful cancel ACK, an unavailable venue readback or ANY executed
+/// quantity must never be treated as an empty old order.
+fn verify_empty_canceled_order_for_replace(
+    intent: &StoredIntent,
+    order: &okx_api::TradeOrderDetails,
+) -> Result<(), String> {
+    if !matches!(order.state.as_str(), "canceled" | "mmp_canceled") {
+        return Err("REPLACE_CANCELED_READBACK_UNPROVEN".into());
+    }
+    verified_terminal_order_update_time(intent, Some(order))
+        .map_err(|_| "REPLACE_CANCELED_READBACK_UNPROVEN")?;
+    let filled = verified_order_readback(intent, order)
+        .map_err(|_| "REPLACE_CANCELED_READBACK_UNPROVEN")?;
+    if filled != Decimal::ZERO {
+        return Err("REPLACE_PARTIAL_FILL_REQUIRES_EXPLICIT_CLOSE".into());
+    }
+    Ok(())
+}
+
+/// The authoritative SQL lots for one intent must agree on direction and
+/// contain only positive remaining exposure. Never silently add opposite
+/// sides, skip negative lots or overflow before constructing a close order.
+fn verified_close_lot_exposure<'a>(
+    lots: impl IntoIterator<Item = (&'a str, Decimal)>,
+) -> Result<(PositionSide, Decimal), String> {
+    let mut direction: Option<&str> = None;
+    let mut quantity = Decimal::ZERO;
+    for (side, remaining) in lots {
+        if !matches!(side, "long" | "short") {
+            return Err("CLOSE_LOT_SIDE_UNATTESTED".into());
+        }
+        if remaining <= Decimal::ZERO {
+            return Err("CLOSE_LOT_QUANTITY_UNVERIFIED".into());
+        }
+        if direction.is_some_and(|old| old != side) {
+            return Err("CLOSE_LOT_MIXED_DIRECTIONS".into());
+        }
+        direction = Some(side);
+        quantity = quantity
+            .checked_add(remaining)
+            .ok_or("CLOSE_LOT_QUANTITY_OVERFLOW")?;
+    }
+    let side = match direction {
+        Some("long") => PositionSide::Long,
+        Some("short") => PositionSide::Short,
+        _ => return Err("NO_ATTRIBUTED_POSITION_TO_CLOSE".into()),
+    };
+    Ok((side, quantity))
+}
+
 /// A terminal local state alone is not source proof that an exchange order is
 /// terminal. No real release without matching exchange identity, covered final
 /// update and a bounded executed quantity. In particular, missing readback is
@@ -930,11 +981,17 @@ impl TradeService {
             return Ok(());
         }
         let snapshot = r.observer.snapshot().await.map_err(err)?;
-        if snapshot.positions.iter().any(|p| {
-            p.instrument_id == i.instrument_id
-                && p.position_side == i.plan.position_side
-                && dec(&p.position).is_ok_and(|q| q != Decimal::ZERO)
-        }) {
+        // A malformed position, including a different side on this venue
+        // instrument, is never proof of flat. In hedge mode a protective
+        // order must not be removed merely because ONE side reads zero.
+        let exposed = verified_position_quantity(
+            snapshot
+                .positions
+                .iter()
+                .filter(|position| position.instrument_id == i.instrument_id)
+                .map(|position| position.position.as_str()),
+        )?;
+        if exposed > Decimal::ZERO {
             return Err("PROTECTION_STILL_REQUIRED".into());
         }
         let key = format!("cleanup_{}", &i.client_order_id);
@@ -1145,15 +1202,23 @@ impl TradeService {
         if !matches!(after.state, IntentState::Cancelled | IntentState::Rejected) {
             return Ok(uncertain(&after.intent_id, "REPLACE_CANCEL_NOT_TERMINAL"));
         }
-        if let Ok(order) = r
+        // A timeout, not-found reply or incomplete venue order is UNKNOWN,
+        // never evidence of a zero-fill cancel. No second POST on that path.
+        let old_order = match r
             .execution
             .trade
             .order_by_client_id(&target.instrument_id, &target.client_order_id)
             .await
-            && dec(&order.accumulated_fill_size)? > Decimal::ZERO
         {
-            return Err("REPLACE_PARTIAL_FILL_REQUIRES_EXPLICIT_CLOSE".into());
-        }
+            Ok(order) => order,
+            Err(_) => {
+                return Ok(uncertain(
+                    &after.intent_id,
+                    "REPLACE_ORDER_READBACK_UNKNOWN_NO_POST",
+                ));
+            }
+        };
+        verify_empty_canceled_order_for_replace(&after, &old_order)?;
         let remaining = expires_in_ms.saturating_sub(begun.elapsed().as_millis() as u64);
         if remaining == 0 {
             return Err("COMMAND_EXPIRED".into());
@@ -1212,15 +1277,9 @@ impl TradeService {
             .iter()
             .filter(|l| l.intent_id.as_deref() == Some(&original.intent_id))
             .collect::<Vec<_>>();
-        let quantity = mine.iter().fold(Decimal::ZERO, |s, l| s + l.remaining_qty);
-        if quantity <= Decimal::ZERO {
-            return Err("NO_ATTRIBUTED_POSITION_TO_CLOSE".into());
-        }
-        let side = match mine.first().map(|l| l.side.as_str()) {
-            Some("long") => PositionSide::Long,
-            Some("short") => PositionSide::Short,
-            _ => return Err("POSITION_SIDE_UNATTESTED".into()),
-        };
+        let (side, quantity) = verified_close_lot_exposure(
+            mine.iter().map(|lot| (lot.side.as_str(), lot.remaining_qty)),
+        )?;
         let command = TradeRequest::Execute {
             idempotency_key: key.into(),
             operation: TradeOperation::Close,
@@ -1453,6 +1512,111 @@ mod entry_cost_status_tests {
         assert_eq!(
             verified_position_quantity(["79228162514264337593543950335", "1"].into_iter()),
             Err("POSITION_QUANTITY_OVERFLOW".into())
+        );
+    }
+
+    #[test]
+    fn e2_replace_requires_independent_terminal_zero_fill_order_readback() {
+        let intent = StoredIntent {
+            intent_id: "intent".into(),
+            client_order_id: "client".into(),
+            instrument_id: "BTC-USDT-SWAP".into(),
+            plan_hash: "a".repeat(64),
+            idempotency_key: "idem".into(),
+            request_hash: "request".into(),
+            state: IntentState::Cancelled,
+            revision: 2,
+            deadline: 40,
+            policy_revision: 1,
+            risk_increase: true,
+            exchange_order_id: Some("venue".into()),
+            incident: None,
+            plan: okx_execution::IntentPlan {
+                quantity: Decimal::ONE,
+                side: "buy".into(),
+                ..Default::default()
+            },
+        };
+        let order = okx_api::TradeOrderDetails {
+            instrument_id: intent.instrument_id.clone(),
+            order_id: "venue".into(),
+            client_order_id: "client".into(),
+            side: "buy".into(),
+            position_side: "long".into(),
+            trade_mode: "cross".into(),
+            order_type: "limit".into(),
+            price: "100".into(),
+            size: "1".into(),
+            accumulated_fill_size: "0".into(),
+            average_fill_price: "".into(),
+            state: "canceled".into(),
+            creation_time_ms: "1".into(),
+            update_time_ms: "2".into(),
+        };
+        assert!(verify_empty_canceled_order_for_replace(&intent, &order).is_ok());
+        let mut partial = order.clone();
+        partial.accumulated_fill_size = "0.1".into();
+        assert_eq!(
+            verify_empty_canceled_order_for_replace(&intent, &partial),
+            Err("REPLACE_PARTIAL_FILL_REQUIRES_EXPLICIT_CLOSE".into())
+        );
+        let mut nonterminal = order.clone();
+        nonterminal.state = "live".into();
+        assert_eq!(
+            verify_empty_canceled_order_for_replace(&intent, &nonterminal),
+            Err("REPLACE_CANCELED_READBACK_UNPROVEN".into())
+        );
+        let mut wrong_id = order.clone();
+        wrong_id.order_id = "other".into();
+        assert_eq!(
+            verify_empty_canceled_order_for_replace(&intent, &wrong_id),
+            Err("REPLACE_CANCELED_READBACK_UNPROVEN".into())
+        );
+        let mut missing_time = order.clone();
+        missing_time.update_time_ms = "0".into();
+        assert_eq!(
+            verify_empty_canceled_order_for_replace(&intent, &missing_time),
+            Err("REPLACE_CANCELED_READBACK_UNPROVEN".into())
+        );
+        let mut malformed = order;
+        malformed.accumulated_fill_size = "unreadable".into();
+        assert_eq!(
+            verify_empty_canceled_order_for_replace(&intent, &malformed),
+            Err("REPLACE_CANCELED_READBACK_UNPROVEN".into())
+        );
+    }
+
+    #[test]
+    fn e2_close_lots_require_one_side_positive_amounts_and_exact_sum() {
+        assert_eq!(
+            verified_close_lot_exposure([("long", dec("0.2").unwrap()), ("long", dec("0.3").unwrap())])
+                .map(|(_, quantity)| quantity),
+            Ok(dec("0.5").unwrap())
+        );
+        assert!(verified_close_lot_exposure([("short", Decimal::ONE)]).is_ok());
+        assert_eq!(
+            verified_close_lot_exposure(std::iter::empty()),
+            Err("NO_ATTRIBUTED_POSITION_TO_CLOSE".into())
+        );
+        assert_eq!(
+            verified_close_lot_exposure([("long", Decimal::ONE), ("short", Decimal::ONE)]),
+            Err("CLOSE_LOT_MIXED_DIRECTIONS".into())
+        );
+        assert_eq!(
+            verified_close_lot_exposure([("long", Decimal::ZERO)]),
+            Err("CLOSE_LOT_QUANTITY_UNVERIFIED".into())
+        );
+        assert_eq!(
+            verified_close_lot_exposure([("long", Decimal::NEGATIVE_ONE)]),
+            Err("CLOSE_LOT_QUANTITY_UNVERIFIED".into())
+        );
+        assert_eq!(
+            verified_close_lot_exposure([("unknown", Decimal::ONE)]),
+            Err("CLOSE_LOT_SIDE_UNATTESTED".into())
+        );
+        assert_eq!(
+            verified_close_lot_exposure([("long", Decimal::MAX), ("long", Decimal::ONE)]),
+            Err("CLOSE_LOT_QUANTITY_OVERFLOW".into())
         );
     }
 
