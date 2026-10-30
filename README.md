@@ -87,10 +87,15 @@ NAV/STOP → protected position/terminal settlement → release`.
   returns a canonical content digest, only when even canceled-without-fill
   orders remain provable (under two hours with a margin). Equal-time
   contradictory economic facts from different archives are rejected.
-  Crash recovery now uses that same full history instead of a last-100
-  sample: backups older than the provable venue horizon cannot establish
-  absence of a lost POST. For older campaigns and recovery, sources fail
-  closed pending independent proof. The cross-account importer is not yet
+  Crash recovery now uses the same complete order history, with separate
+  exhaustive fills history for all instrument types and the unfiltered
+  account-wide bill archive. Every fill must have its original fee bill
+  with matching currency and economic identity; recovery also binds fills
+  to the exact observed orders. Backups older than the provable venue
+  horizon cannot establish absence of a lost POST. These facts are
+  content-addressed venue evidence, NOT a certified USD expense or
+  independently proven campaign inception. For older campaigns and
+  recovery, sources fail closed pending independent proof. The cross-account importer is not yet
   connected, so RiskBook leaves admission blocked.
   Missing all-in FX/margin/borrow sources now reject the prepared SQL intent
   as `ENTRY_ALL_IN_COST_UNPROVEN` BEFORE any central RESERVE attempt: known
