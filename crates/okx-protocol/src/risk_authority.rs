@@ -620,7 +620,7 @@ mod tests {
             settlement_revision: 2,
             source_digest: "b".repeat(64),
         };
-        let command = RiskCommand {
+        let mut command = RiskCommand {
             schema: RISK_COMMAND_SCHEMA_V1.into(),
             command_id: "settle_entry_00001".into(),
             installation_id: "installation_test".into(),
