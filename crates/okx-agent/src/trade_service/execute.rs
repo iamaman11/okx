@@ -938,7 +938,8 @@ impl TradeService {
                             if lot.remaining_qty <= Decimal::ZERO {
                                 return Err("UNATTRIBUTED_EXCHANGE_POSITION".into());
                             }
-                            total.checked_add(lot.remaining_qty)
+                            total
+                                .checked_add(lot.remaining_qty)
                                 .ok_or_else(|| "COHORT_POSITION_QUANTITY_OVERFLOW".into())
                         })?;
                     if covered != actual_qty {
@@ -967,7 +968,8 @@ impl TradeService {
                                 if lot.remaining_qty <= Decimal::ZERO {
                                     return Err("COHORT_POSITION_LOT_QUANTITY_INVALID".into());
                                 }
-                                total.checked_add(lot.remaining_qty)
+                                total
+                                    .checked_add(lot.remaining_qty)
                                     .ok_or_else(|| "COHORT_POSITION_QUANTITY_OVERFLOW".into())
                             })?;
                         if protection.quantity < owned_qty
