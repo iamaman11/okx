@@ -1,4 +1,4 @@
-import {initializeRiskBook} from "./risk_book.js";
+import {initializeRiskBook,installCampaignEntryProof} from "./risk_book.js";
 import {handleNativeRiskCommand} from "./risk_authority.js";
 import {initial,account} from "./account_governance.test.js";
 function check(v:boolean,n:string){if(!v)throw Error(n);}
@@ -19,7 +19,7 @@ await s.put("generation",99);
 await s.put("account_access_v1",initial);
 const base={schema:"okx.risk-command/v1",command_id:"risk_command_00001",installation_id:initial.installation_id,
  action:{action:"RESERVE",venue:"okx",account_uid:uid,run_id:"run_12345678",
- intent_id:"intent_12345678",strategy_id:"momentum_A",instrument_id:"BTC-USDT-SWAP",plan_sha256:hash,requested_loss_usdt:"1",
+ intent_id:"intent_12345678",strategy_id:"momentum_A",instrument_id:"BTC-USDT-SWAP",plan_sha256:hash,requested_loss_usdt:"1",entry_upper_usd:"1",entry_proof_digest:hash,
  policy_revision:1,census:{complete:true,source_digest:hash,
  content_digest:hash,source_read_floor_ms:now,generated_at_ms:now,
  account_keys:["okx:real:"+uid],occupied:[{account_key:"okx:real:"+uid,occupied_usdt:"0",cumulative_loss_usd:"0"}],
@@ -72,6 +72,9 @@ check((await handleNativeRiskCommand(s,session,{schema:"okx.risk-command/v1",com
  await t.put("generation",session.connection_generation);
  await t.put("account_access_v1",governance);
  await initializeRiskBook(t,initial.installation_id);
+ check(await installCampaignEntryProof(t,{campaign_id:governance.campaign_id,
+   limit_usd:"10",consumed_usd:"0",source_digest:sourceDigest,as_of_ms:now}),
+   "native fixture independently attests zero opening spend");
  const census={complete:true,source_digest:sourceDigest,content_digest:hash,
    generated_at_ms:now,source_read_floor_ms:now,
    account_keys:[account.account_key],
@@ -84,7 +87,7 @@ check((await handleNativeRiskCommand(s,session,{schema:"okx.risk-command/v1",com
    action:{action:"RESERVE",venue:"okx",account_uid:sameUid,
      run_id:"run_three_sources_001",intent_id:"intent_"+origin+"_0001",
      strategy_id:strategy,instrument_id:"BTC-USDT-SWAP",
-     plan_sha256:plan,requested_loss_usdt:"1",requested_loss_usd:"1",
+     plan_sha256:plan,requested_loss_usdt:"1",requested_loss_usd:"1",entry_upper_usd:"2",entry_proof_digest:sourceDigest,
      usd_conversion:{usd_per_usdt:"1",source_digest:sourceDigest,observed_at_ms:now},
      policy_revision:1,census}
  });

@@ -48,6 +48,9 @@ export type Account = TradingAccess & {
 export type Governance = {
   schema:typeof GOVERNANCE_SCHEMA;
   revision:number;installation_id:string;campaign_id:string;campaign_loss_limit_usd:string;
+  /** E1 spend budget, never the campaign modeled/realized loss limit.
+   * Absent on pre-E1 policies: opening consumption must be imported first. */
+  campaign_entry_limit_usd?:string;
   max_total_modelled_loss_usdt:string;
   accounts:Account[];
 };
@@ -108,11 +111,14 @@ function validAccount(a:unknown):a is Account{
 export function validGovernance(value:unknown):value is Governance{
   if(!record(value))return false;
   const fields=["schema","revision","installation_id","campaign_id","campaign_loss_limit_usd","max_total_modelled_loss_usdt","accounts"];
+  if("campaign_entry_limit_usd" in value)fields.push("campaign_entry_limit_usd");
   if(Object.keys(value).sort().join("|")!==fields.sort().join("|"))return false;
   if(value.schema!==GOVERNANCE_SCHEMA||!Number.isSafeInteger(value.revision)||(value.revision as number)<0
     ||typeof value.installation_id!=="string"||value.installation_id.length<8||!ID.test(value.installation_id)
     ||typeof value.campaign_id!=="string"||!/^sha256:[0-9a-f]{64}$/.test(value.campaign_id)
-    ||!positive(value.campaign_loss_limit_usd)||!positive(value.max_total_modelled_loss_usdt)
+    ||!positive(value.campaign_loss_limit_usd)||
+    !(!("campaign_entry_limit_usd" in value)||positive(value.campaign_entry_limit_usd))||
+    !positive(value.max_total_modelled_loss_usdt)
     ||!Array.isArray(value.accounts)||value.accounts.length>32||!value.accounts.every(validAccount))return false;
   const accounts=value.accounts as Account[];
   return new Set(accounts.map(a=>a.account_key)).size===accounts.length

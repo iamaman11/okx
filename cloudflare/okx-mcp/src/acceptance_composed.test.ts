@@ -7,7 +7,7 @@ import {governanceRequest,initializeGovernance,enrollObservedAccount,setAccountP
 import {initial,limits} from './account_governance.test.js';
 import type {Governance} from './account_governance.js';
 import {handleNativeRiskCommand} from './risk_authority.js';
-import {readRiskBook} from './risk_book.js';
+import {readRiskBook,installCampaignEntryProof} from './risk_book.js';
 
 function check(ok:unknown,message:string):asserts ok{if(!ok)throw Error(message);}
 class Storage {
@@ -64,6 +64,10 @@ async function recordNativePolicy(stage:string):Promise<void>{
  });
 }
 check((await initializeGovernance(storage,initial)).status===200,'synthetic central installation');
+check(await installCampaignEntryProof(storage,{
+ campaign_id:initial.campaign_id,limit_usd:"10",consumed_usd:"0",
+ source_digest:"c".repeat(64),as_of_ms:1792890000000
+}),"synthetic full-history opening entry amount attested");
 const ctx={auth:{scope:['mcp:use']}};
 let id=0,venuePostCount=0,transportCalls=0;
 const intents=new Map<string,{intent_id:string;state:string;plan:Record<string,unknown>;protected:boolean}>();
@@ -140,7 +144,7 @@ const handler=async(url:string,init?:RequestInit)=>{
      action:{action:'RESERVE',venue:'okx',account_uid:row.uid_fingerprint,
        run_id:'run_fixture_real_001',intent_id:intentId,
        strategy_id:String(req.strategy_instance),instrument_id:String(req.instrument),
-       plan_sha256:planHash,requested_loss_usdt:'0.5',requested_loss_usd:'0.5',
+       plan_sha256:planHash,requested_loss_usdt:'0.5',requested_loss_usd:'0.5',entry_upper_usd:'1',entry_proof_digest:census.source_digest,
        usd_conversion:{usd_per_usdt:'1',source_digest:census.source_digest,observed_at_ms:at},
        policy_revision:governance.revision,census}
    },at);

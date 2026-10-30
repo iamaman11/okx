@@ -3,7 +3,7 @@ function yes(v:boolean,s:string){if(!v)throw Error(s);}
 export const limits:Limits={max_modelled_loss_usdt:"5",max_order_loss_usdt:"1",max_notional_usdt:"100",
  max_leverage:"3",max_daily_realized_loss_usdt:"2",max_drawdown_ratio:"0.1",allowed_instruments:["BTC-USDT-SWAP"]};
 export const initial:Governance={schema:"okx.governance/v3",revision:0,installation_id:"installation_test",
- campaign_id:"sha256:"+"c".repeat(64),campaign_loss_limit_usd:"10",max_total_modelled_loss_usdt:"5",accounts:[]};
+ campaign_id:"sha256:"+"c".repeat(64),campaign_loss_limit_usd:"10",campaign_entry_limit_usd:"10",max_total_modelled_loss_usdt:"5",accounts:[]};
 export const account:Account={id:"primary",label:"Primary",venue:"okx",environment:"real",uid_fingerprint:"a".repeat(64),
  identity_verified:true,enabled:true,explicit_pause:false,policy_revision:1,account_key:"okx:real:"+"a".repeat(64),limits,strategies:[]};
 const policy:Governance={...initial,revision:1,accounts:[account]};

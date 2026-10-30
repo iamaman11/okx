@@ -1,4 +1,4 @@
-import {accountKey,amount,units,readRiskBook,initializeRiskBook,inspectRisk,reserveRisk,transitionRisk,beginRiskPost,releaseUnsentRisk} from "./risk_book.js";
+import {accountKey,amount,units,readRiskBook,initializeRiskBook,inspectRisk,reserveRisk,transitionRisk,beginRiskPost,releaseUnsentRisk,installCampaignEntryProof,settleEntrySpend} from "./risk_book.js";
 function check(value: boolean, label:string) { if(!value) throw Error(label); }
 class Storage {
   map=new Map<string,unknown>();
@@ -20,7 +20,14 @@ const census={complete:true as const,source_digest:d,content_digest:a,
   source_read_floor_ms:now,generated_at_ms:now,
   account_keys:["okx:real:"+a,"okx:real:"+b],occupied:[{account_key:"okx:real:"+a,occupied_usdt:"0",cumulative_loss_usd:"0"},{account_key:"okx:real:"+b,occupied_usdt:"0",cumulative_loss_usd:"0"}]};
 const base={venue:"okx",environment:"real" as const,run_id:"run_20261018_AAA",
-  loss_usd:"6",usd_conversion:{usd_per_usdt:"1",source_digest:d,observed_at_ms:now},plan_hash:p,policy_revision:1,now_ms:now,strategy_id:"momentum_A",instrument_id:"BTC-USDT-SWAP"};
+  loss_usd:"6",entry_upper_usd:"2",entry_proof_digest:d,usd_conversion:{usd_per_usdt:"1",source_digest:d,observed_at_ms:now},plan_hash:p,policy_revision:1,now_ms:now,strategy_id:"momentum_A",instrument_id:"BTC-USDT-SWAP"};
+async function setupRiskBook(store:Storage){
+ await initializeRiskBook(store,"installation_test");
+ check(await installCampaignEntryProof(store,{
+  campaign_id:governance.campaign_id,limit_usd:"10",consumed_usd:"0",
+  source_digest:d,as_of_ms:now,
+ }),"fixture opening finance history attested before E1 admission");
+}
 const sa=new Storage();
 function account(uid:string){
  return {
@@ -34,10 +41,10 @@ function account(uid:string){
  };
 }
 const governance={
- schema:"okx.governance/v3",revision:1,installation_id:"installation_test",campaign_id:"sha256:"+d,campaign_loss_limit_usd:"10",
+ schema:"okx.governance/v3",revision:1,installation_id:"installation_test",campaign_id:"sha256:"+d,campaign_loss_limit_usd:"10",campaign_entry_limit_usd:"10",
  max_total_modelled_loss_usdt:"10",accounts:[account(a),account(b)]
 };
-await sa.put("account_access_v1",governance);await sa.put("generation",77);await initializeRiskBook(sa,"installation_test");
+await sa.put("account_access_v1",governance);await sa.put("generation",77);await setupRiskBook(sa);
 const native={connection_generation:77,source_digest:d,native_account_evidence_complete:true,native_order_evidence_complete:true,native_ledger_evidence_complete:true};
 const request={...base,uid:a,intent_id:"intent_12345678",loss_usdt:"6"};
 const reserve=(input= request,storage=sa)=>reserveRisk(storage,policy,census,input,native);
@@ -63,23 +70,65 @@ const invalid=await beginRiskPost(sa,held.entry.key,p,1,d,{connection_generation
 check(invalid.status==="DENIED"&&invalid.reason==="INVALID_NATIVE_POST_FENCE","wrong order of cohort readings cannot authorize POST");
 const begun=await beginRiskPost(sa,held.entry.key,p,1,d,{connection_generation:77,expected_book_sequence:1,census:later,source_proof:native,causal_proof,now_ms:now+2});
 check(begun.status==="POST_AUTHORIZED","same-content fresh causal proof with -60s host skew");
+const partial=await settleEntrySpend(sa,held.entry.key,p,{
+ connection_generation:77,expected_book_sequence:2,cumulative_entry_usd:"0.5",
+ revision:1,source_digest:d});
+check(partial.status==="UPDATED"&&partial.book_sequence===3,
+ "partial fill moves exactly its consumed entry money from reserved to spent");
+const partialReplay=await settleEntrySpend(sa,held.entry.key,p,{
+ connection_generation:77,expected_book_sequence:3,cumulative_entry_usd:"0.5",
+ revision:1,source_digest:d});
+check(partialReplay.status==="UPDATED"&&partialReplay.book_sequence===3,
+ "lost settlement acknowledgement cannot charge entry twice");
+const conflicting=await settleEntrySpend(sa,held.entry.key,p,{
+ connection_generation:77,expected_book_sequence:3,cumulative_entry_usd:"0.6",
+ revision:1,source_digest:d});
+check(conflicting.status==="DENIED"&&conflicting.reason==="ENTRY_SETTLEMENT_REVISION_CONFLICT",
+ "same revision cannot substitute a different cumulative spend");
+const mid=(await readRiskBook(sa))!.entry_budget!;
+check(mid.consumed_usd==="0.5"&&mid.reserved_usd==="1.5",
+ "partial settlement conserves spent+reserved across Worker restart");
 
 check((await beginRiskPost(sa,held.entry.key,p,1,d,{connection_generation:77,expected_book_sequence:2,census:later,source_proof:native,causal_proof,now_ms:now+3})).status==="DENIED","no duplicate POST fence");
 check((await inspectRisk(sa,held.entry.key))?.entry.state==="POSTED","addressed readback");
 const terminalCensus={...census,occupied:census.occupied.map(v=>({...v,cumulative_loss_usd:v.account_key===accountKey(request)?"2":"0"})),source_digest:a,generated_at_ms:now+4,source_read_floor_ms:now+4};
-check((await transitionRisk(sa,held.entry.key,p,"RELEASED",d,{connection_generation:77,expected_book_sequence:2,terminal:{census:terminalCensus,source_proof:{...native,source_digest:a},ledger:{account_uid:a,run_id:base.run_id,intent_id:request.intent_id,state:"FILLED",record_digest:p,cumulative_loss_usd:"2",remaining_exposure_usdt:"0"},now_ms:now+5}})).status==="UPDATED","terminal exact release consumes cumulative losses");
+check((await transitionRisk(sa,held.entry.key,p,"RELEASED",d,{connection_generation:77,expected_book_sequence:3,terminal:{census:terminalCensus,source_proof:{...native,source_digest:a},ledger:{account_uid:a,run_id:base.run_id,intent_id:request.intent_id,state:"FILLED",record_digest:p,cumulative_loss_usd:"2",remaining_exposure_usdt:"0",cumulative_entry_usd:"1.5",entry_settlement_revision:2,entry_settlement_digest:d},now_ms:now+5}})).status==="UPDATED","terminal exact release consumes cumulative losses");
 check((await readRiskBook(sa))?.consumed_loss_usd==="2"&&(await readRiskBook(sa))?.occupied_usdt==="0","loss survives restart and release");
+const finalEntry=(await readRiskBook(sa))!.entry_budget!;
+check(finalEntry.consumed_usd==="1.5"&&finalEntry.reserved_usd==="0",
+ "terminal release returns unused reserve but NEVER refunds spent entry cost");
 const reported={...census,occupied:census.occupied.map(v=>({...v,cumulative_loss_usd:v.account_key===accountKey(request)?"17":"0"}))};
 const campaign=await reserveRisk(sa,policy,reported,{...request,intent_id:"new_intent_001",loss_usdt:"4",loss_usd:"4"},native);
 check(campaign.status==="DENIED"&&campaign.reason==="CAMPAIGN_LOSS_BUDGET_EXHAUSTED","fresh losses charged before reserve even when admission denied");
 check((await readRiskBook(sa))?.consumed_loss_usd==="17","campaign losses remain charged without releasing any new reservation");
 console.log("risk_concurrent_accounts_campaign_limit PASS");
+const unproven=new Storage();
+await unproven.put("account_access_v1",governance);await unproven.put("generation",77);
+await initializeRiskBook(unproven,"installation_test");
+const noImport=await reserveRisk(unproven,policy,census,request,native);
+check(noImport.status==="DENIED"&&noImport.reason==="CAMPAIGN_ENTRY_BASELINE_NOT_PROVEN",
+ "existing campaign with unknown prior spend must never start at zero");
+const entryRace=new Storage();
+await entryRace.put("account_access_v1",governance);await entryRace.put("generation",77);
+await setupRiskBook(entryRace);
+const bounded={...request,loss_usdt:"1",loss_usd:"1",entry_upper_usd:"7"};
+const entryResults=await Promise.all([
+ reserveRisk(entryRace,policy,census,bounded,native),
+ reserveRisk(entryRace,policy,census,{...bounded,intent_id:"intent_competing_entry"},native)
+]);
+check(entryResults.filter(x=>x.status==="HELD").length===1&&
+ entryResults.some(x=>x.status==="DENIED"&&x.reason==="CAMPAIGN_ENTRY_BUDGET_EXHAUSTED"),
+ "concurrent distinct orders cannot spend the same campaign entry capacity");
+const afterRace=(await readRiskBook(entryRace))!.entry_budget!;
+check(afterRace.reserved_usd==="7"&&afterRace.consumed_usd==="0",
+ "denied entry race leaves one exact reservation and no phantom consumed money");
+console.log("entry_budget_race_and_monotonic_settlement PASS");
 // A fresh reservation can be released only by the exact current native SQL
 // writer's durable no-post receipt. No venue, fills or finance source needed.
 const unsent=new Storage();
 await unsent.put("account_access_v1",governance);
 await unsent.put("generation",77);
-await initializeRiskBook(unsent,"installation_test");
+await setupRiskBook(unsent);
 const rescue=await reserveRisk(unsent,policy,census,{...request,intent_id:"intent_unsent_001"},native);
 if(rescue.status!=="HELD")throw Error("unsent reserve");
 const receipt={reservation_key:rescue.entry.key,account_key:accountKey(request),
@@ -102,7 +151,7 @@ console.log("risk_unsent_cas_release PASS");
 const postUnsent=new Storage();
 await postUnsent.put("account_access_v1",governance);
 await postUnsent.put("generation",77);
-await initializeRiskBook(postUnsent,"installation_test");
+await setupRiskBook(postUnsent);
 const postRes=await reserveRisk(postUnsent,policy,census,{...request,intent_id:"intent_f4_unsent"},native);
 if(postRes.status!=="HELD")throw Error("F4 reserve");
 const f4read={...census,generated_at_ms:now+1,source_read_floor_ms:now+1};
@@ -126,7 +175,7 @@ console.log("risk_f4_unsent_after_central_post PASS");
 const neverArrived=new Storage();
 await neverArrived.put("account_access_v1",governance);
 await neverArrived.put("generation",77);
-await initializeRiskBook(neverArrived,"installation_test");
+await setupRiskBook(neverArrived);
 const lateIntent="intent_f2_late_001";
 const lateRequest={...request,intent_id:lateIntent};
 const lateKey=[base.venue,"real",a,base.run_id,lateIntent]
@@ -156,7 +205,7 @@ for(const abortFirst of [true,false]){
   const racing=new Storage();
   await racing.put("account_access_v1",governance);
   await racing.put("generation",77);
-  await initializeRiskBook(racing,"installation_test");
+  await setupRiskBook(racing);
   const id=abortFirst?"intent_f2_abort_first":"intent_f2_reserve_first";
   const requestRace={...request,intent_id:id};
   const key=[base.venue,"real",a,base.run_id,id].map(v=>v.length+":"+v).join("");
