@@ -71,7 +71,7 @@ fn quantize_executable_price(
 /// OKX SWAP reference payloads may omit baseCcy/quoteCcy; ctValCcy is
 /// material and must match the base asset in the authenticated instId.
 /// This is NOT an all-in fee/FX/margin proof and grants no exchange POST.
-fn verify_linear_usdt_entry_units(
+pub(super) fn verify_linear_usdt_entry_units(
     instrument: &str,
     contract_value_currency: Option<&str>,
 ) -> Result<(), &'static str> {
