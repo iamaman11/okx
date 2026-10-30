@@ -154,19 +154,39 @@ impl EntryCostProof {
         }
     }
 
-    /// The upper rate must be independently source-bound; observed FX is not
-    /// permission to POST. Round the entire USDT obligation upward to 1e-9 USD
-    /// before adding further proven USD-denominated costs. An Unknown in any
-    /// mandatory dimension means not proven, not zero.
-    pub(super) fn proven_upper_usd(&self) -> Result<Option<Decimal>, String> {
+    /// Source-classified FX maximum and all additional non-FX upper charges
+    /// are the only components persisted with the native entry admission.
+    /// Unknown never becomes a zero charge.
+    pub(super) fn verified_fx_and_fixed_costs(
+        &self,
+    ) -> Result<Option<(Decimal, Decimal)>, String> {
         let Some(fx_upper) = self.fx_bound.rate(self.quote.observed_usd_per_usdt)? else {
+            return Ok(None);
+        };
+        let mut extra = Decimal::ZERO;
+        for cost in [
+            &self.extra_immediate_fees,
+            &self.borrowing,
+            &self.collateral_or_margin,
+        ] {
+            let Some(value) = cost.upper()? else {
+                return Ok(None);
+            };
+            extra = extra.checked_add(value).ok_or("MONEY_OVERFLOW")?;
+        }
+        Ok(Some((fx_upper, extra)))
+    }
+
+    /// One pure arithmetic path is shared by SQL admission and later actual
+    /// fill/bill settlement. The rate is a verified upper, never observed FX.
+    pub(super) fn proven_upper_usd(&self) -> Result<Option<Decimal>, String> {
+        let Some((fx_upper, fixed_upper)) = self.verified_fx_and_fixed_costs()? else {
             return Ok(None);
         };
         if self.quote.total_usdt <= Decimal::ZERO {
             return Err("ENTRY_SOURCE_INVALID".into());
         }
-        let mut upper = self
-            .quote
+        let upper = self.quote
             .total_usdt
             .checked_mul(fx_upper)
             .ok_or("MONEY_OVERFLOW")?
@@ -174,17 +194,10 @@ impl EntryCostProof {
         if upper < self.quote.total_usd {
             return Err("ENTRY_FX_BOUND_BELOW_KNOWN_QUOTE".into());
         }
-        for cost in [
-            &self.extra_immediate_fees,
-            &self.borrowing,
-            &self.collateral_or_margin,
-        ] {
-            let Some(additional) = cost.upper()? else {
-                return Ok(None);
-            };
-            upper = upper.checked_add(additional).ok_or("MONEY_OVERFLOW")?;
-        }
-        Ok(Some(upper))
+        upper
+            .checked_add(fixed_upper)
+            .ok_or_else(|| "MONEY_OVERFLOW".into())
+            .map(Some)
     }
 
     pub(super) fn missing_reasons(&self) -> Vec<&'static str> {
