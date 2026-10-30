@@ -500,6 +500,21 @@ impl RiskEntryBudgetSnapshot {
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct RiskCampaignOrigin {
+    pub campaign_id: String,
+    pub installation_id: String,
+    pub started_at_ms: u64,
+}
+impl RiskCampaignOrigin {
+    pub fn valid(&self) -> bool {
+        self.campaign_id.starts_with("sha256:")
+            && hash(&self.campaign_id[7..])
+            && token(&self.installation_id)
+            && self.started_at_ms > 0
+    }
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RiskBudgetSnapshot {
     pub campaign_limit_usd: String,
     pub consumed_loss_usd: String,
@@ -507,6 +522,10 @@ pub struct RiskBudgetSnapshot {
     pub remaining_loss_usd: String,
     pub occupied_modelled_loss_usdt: String,
     pub source_as_of_ms: Option<u64>,
+    /// Existing RiskBook installation is the only owner of inception.
+    /// Missing for old installations is NOT a zero-spend proof.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub campaign_origin: Option<RiskCampaignOrigin>,
     /// Only present after authenticated opening finance spend reconciliation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub entry_budget: Option<RiskEntryBudgetSnapshot>,
@@ -523,9 +542,19 @@ impl RiskBudgetSnapshot {
             .iter()
             .all(|v| v.as_str() == "0" || positive(v))
             && self
+                .campaign_origin
+                .as_ref()
+                .is_none_or(RiskCampaignOrigin::valid)
+            && self
                 .entry_budget
                 .as_ref()
                 .is_none_or(RiskEntryBudgetSnapshot::valid)
+            && self.entry_budget.as_ref().is_none_or(|opened| {
+                self.campaign_origin.as_ref().is_none_or(|origin| {
+                    origin.campaign_id == opened.campaign_id
+                        && origin.started_at_ms <= opened.opening_as_of_ms
+                })
+            })
     }
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
