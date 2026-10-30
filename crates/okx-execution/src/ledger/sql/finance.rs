@@ -385,7 +385,10 @@ impl AccountStore {
         }
         let (fills, bills, unresolved, lots): (i64, i64, i64, i64) = self.connection.query_row(
             "SELECT (SELECT COUNT(*) FROM fills WHERE time>?1 AND time<=?2),
-                        (SELECT COUNT(*) FROM bills WHERE time>?1 AND time<=?2),
+                        (SELECT COUNT(*) FROM bills
+                         WHERE time>?1 AND time<=?2
+                           AND kind NOT IN ('1:11','1:12','8:173','8:174')
+                           AND kind NOT LIKE '7:%'),
                         (SELECT COUNT(*) FROM intents
                          WHERE state NOT IN ('REJECTED','CANCELLED','FILLED')),
                         (SELECT COUNT(*) FROM position_lots WHERE remaining_qty!='0')",
@@ -393,6 +396,10 @@ impl AccountStore {
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )?;
         if fills != 0 || bills != 0 {
+            // Recognized transfer/funding/interest bills were already
+            // classified and ingested by the existing finance owner. They
+            // do not constitute opening turnover. Any other bill, including
+            // an unknown category, remains budget-relevant until classified.
             // Nonempty sources require the historical linear-contract,
             // opening/closing classification and event-time FX policy.
             return Err(StoreError::Invalid("BASELINE_RECONCILIATION_REQUIRED"));
