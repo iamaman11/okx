@@ -254,6 +254,17 @@ pub enum RiskCommandAction {
         policy_revision: u64,
         census: NativeRiskCensus,
     },
+    /// E1: native SQL-authoritative cumulative entry costs, never an MCP
+    /// user-supplied debit. No sender is registered until a complete
+    /// fills/bills/FX source binding is proven.
+    SettleEntry {
+        reservation_key: String,
+        plan_sha256: String,
+        expected_risk_book_sequence: u64,
+        cumulative_entry_usd: String,
+        settlement_revision: u64,
+        source_digest: String,
+    },
     ReleaseUnsent {
         reservation_key: String,
         plan_sha256: String,
@@ -346,6 +357,22 @@ impl RiskCommand {
                     && usd_conversion.valid()
                     && *policy_revision > 0
                     && census.valid()
+            }
+            RiskCommandAction::SettleEntry {
+                reservation_key,
+                plan_sha256,
+                expected_risk_book_sequence,
+                cumulative_entry_usd,
+                settlement_revision,
+                source_digest,
+            } => {
+                !reservation_key.is_empty()
+                    && reservation_key.len() <= 512
+                    && hash(plan_sha256)
+                    && *expected_risk_book_sequence > 0
+                    && *settlement_revision > 0
+                    && (cumulative_entry_usd == "0" || positive(cumulative_entry_usd))
+                    && hash(source_digest)
             }
             RiskCommandAction::ReleaseUnsent {
                 reservation_key,
@@ -583,6 +610,38 @@ impl RiskResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn e1_entry_settlement_requires_exact_plan_bound_native_revision() {
+        let action = RiskCommandAction::SettleEntry {
+            reservation_key: "central:existing-reserve".into(),
+            plan_sha256: "a".repeat(64),
+            expected_risk_book_sequence: 4,
+            cumulative_entry_usd: "1.25".into(),
+            settlement_revision: 2,
+            source_digest: "b".repeat(64),
+        };
+        let command = RiskCommand {
+            schema: RISK_COMMAND_SCHEMA_V1.into(),
+            command_id: "settle_entry_00001".into(),
+            installation_id: "installation_test".into(),
+            action: action.clone(),
+        };
+        assert!(command.valid());
+        let encoded = serde_json::to_value(&command).unwrap();
+        assert_eq!(encoded["action"]["action"], "SETTLE_ENTRY");
+        assert!(serde_json::from_value::<RiskCommand>(encoded).unwrap().valid());
+        if let RiskCommandAction::SettleEntry { cumulative_entry_usd, .. } =
+            &mut command.action
+        {
+            *cumulative_entry_usd = "-0.01".into();
+        }
+        assert!(!command.valid(), "negative settlement cannot credit campaign spend");
+        let mut missing_source = action;
+        if let RiskCommandAction::SettleEntry { source_digest, .. } = &mut missing_source {
+            *source_digest = "not_source_evidence".into();
+        }
+        assert!(!RiskCommand {action:missing_source, ..command}.valid());
+    }
     #[test]
     fn entry_budget_readback_never_invents_unproved_history() {
         let plain: RiskBudgetSnapshot = serde_json::from_value(serde_json::json!({

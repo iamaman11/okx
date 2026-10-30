@@ -139,6 +139,48 @@ check((await handleNativeRiskCommand(s,session,{schema:"okx.risk-command/v1",com
  const first=await handleNativeRiskCommand(t,session,post("human",0,"a".repeat(64),4),now+2);
  check(first.status==="POST_AUTHORIZED"&&first.risk_book_sequence===5,
    "fresh verified all-account census permits one exact central post fence");
+ // This is an authenticated native-only settlement command, not an MCP
+ // trading request. Use an isolated copy so revocation/late-no-send tests
+ // continue to exercise their original risk-book sequence.
+ const settlements=new Store();settlements.map=structuredClone(t.map);
+ const sett=(seq:number,revision:number,amount:string,digest:string)=>({
+   schema:"okx.risk-command/v1",command_id:"settle_native_0001",
+   installation_id:initial.installation_id,
+   action:{action:"SETTLE_ENTRY",reservation_key:admitted[0].reservation_key,
+     plan_sha256:"a".repeat(64),expected_risk_book_sequence:seq,
+     cumulative_entry_usd:amount,settlement_revision:revision,source_digest:digest}
+ });
+ check((await handleNativeRiskCommand(settlements,{...session,runtime_profile:"demo_acceptance"},
+   sett(5,1,"0.5",sourceDigest),now+3)).status==="DENIED",
+   "demo/public socket never inherits native money settlement authority");
+ const partial=await handleNativeRiskCommand(settlements,session,
+   sett(5,1,"0.5",sourceDigest),now+3);
+ check(partial.status==="UPDATED"&&partial.risk_book_sequence===6,
+   "native WSS settlement moves exactly one proved cumulative increment");
+ const replay=await handleNativeRiskCommand(settlements,session,
+   sett(6,1,"0.5",sourceDigest),now+4);
+ check(replay.status==="UPDATED"&&replay.risk_book_sequence===6,
+   "lost settlement receipt can be replayed without charging twice");
+ check((await handleNativeRiskCommand(settlements,session,
+   sett(6,1,"0.6",sourceDigest),now+5)).reason===
+     "ENTRY_SETTLEMENT_REVISION_CONFLICT",
+   "same source revision cannot replace settled amount");
+ check((await handleNativeRiskCommand(settlements,session,
+   sett(6,1,"0.5",hash),now+5)).reason===
+     "ENTRY_SETTLEMENT_REVISION_CONFLICT",
+   "same revision cannot substitute a different source digest");
+ check((await handleNativeRiskCommand(settlements,session,
+   sett(6,2,"3",sourceDigest),now+6)).reason===
+     "ENTRY_SETTLEMENT_REGRESSION",
+   "settlement above held cost never draws from another account");
+ const settledSummary=await handleNativeRiskCommand(settlements,session,{
+   schema:"okx.risk-command/v1",command_id:"summary_settled_001",
+   installation_id:initial.installation_id,action:{action:"SUMMARY"}},now+7);
+ check(settledSummary.budget?.entry_budget?.consumed_usd==="0.5"&&
+   settledSummary.budget.entry_budget.reserved_usd==="5.5",
+   "partial source settlement conserves sum across all three reservations");
+ console.log("native_e1_wss_entry_settlement_cas PASS");
+
  check((await handleNativeRiskCommand(t,session,
    post("human_retry",0,"a".repeat(64),4),now+3)).status==="DENIED",
    "central RiskBook must never authorize the same POST twice");

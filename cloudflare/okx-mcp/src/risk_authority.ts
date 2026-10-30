@@ -1,7 +1,7 @@
 import {validGovernance,projectRiskPolicy,accessEnabled,GOVERNANCE_STORAGE_KEY} from "./account_governance.js";
 import {amount,units,beginRiskPost,readRiskBook,inspectRisk,reserveRisk,transitionRisk,
   type CompleteRiskCensus,type NativeSessionRiskProof,type CausalPostProof,type RiskReservation,
-  type TerminalRiskReleaseProof,type UnsentRiskReleaseProof,releaseUnsentRisk,inspectNoReserveFence} from "./risk_book.js";
+  type TerminalRiskReleaseProof,type UnsentRiskReleaseProof,releaseUnsentRisk,inspectNoReserveFence,settleEntrySpend} from "./risk_book.js";
 
 const COMMAND_SCHEMA="okx.risk-command/v1";
 const RESULT_SCHEMA="okx.risk-result/v1";
@@ -194,6 +194,34 @@ export async function handleNativeRiskCommand(
         policy_revision:a.policy_revision as number,
         existing_modelled_loss_usdt:result.existing_modelled_loss_usdt!,reservation_state:null}
       :deny(id,result.reason??"POST_FENCE_DENIED");
+  }
+  if(a.action==="SETTLE_ENTRY"){
+    // Only an authenticated engine WSS is eligible to arrive here. The
+    // complete native source verifier must supply cumulative value/revision;
+    // this is intentionally not an MCP/HTTP/action user input.
+    if(typeof a.reservation_key!=="string"||a.reservation_key.length>512||
+      typeof a.plan_sha256!=="string"||!SHA.test(a.plan_sha256)||
+      !Number.isSafeInteger(a.expected_risk_book_sequence)||
+      (a.expected_risk_book_sequence as number)<=0||
+      typeof a.cumulative_entry_usd!=="string"||
+      typeof a.source_digest!=="string"||!SHA.test(a.source_digest)||
+      !Number.isSafeInteger(a.settlement_revision)||(a.settlement_revision as number)<1)
+      return deny(id,"INVALID_NATIVE_ENTRY_SETTLEMENT");
+    const result=await settleEntrySpend(storage,a.reservation_key,a.plan_sha256,{
+      connection_generation:session.connection_generation,
+      expected_book_sequence:a.expected_risk_book_sequence as number,
+      cumulative_entry_usd:a.cumulative_entry_usd,
+      revision:a.settlement_revision as number,
+      source_digest:a.source_digest,
+    });
+    if(result.status!=="UPDATED")return deny(id,result.reason??"ENTRY_SETTLEMENT_DENIED");
+    const observed=await inspectRisk(storage,a.reservation_key);
+    return observed?.entry&&observed.meta
+      ?{schema:RESULT_SCHEMA,command_id:id,status:"UPDATED",reason:null,
+        reservation_key:observed.entry.key,risk_book_sequence:observed.meta.sequence,
+        policy_revision:observed.entry.policy_revision,
+        existing_modelled_loss_usdt:null,reservation_state:null}
+      :deny(id,"ENTRY_SETTLEMENT_READBACK_UNAVAILABLE");
   }
   if(a.action==="RELEASE_UNSENT"){
     if(typeof a.reservation_key!=="string"||typeof a.plan_sha256!=="string"||
