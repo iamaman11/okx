@@ -312,14 +312,19 @@ impl AccountHistoryApi {
     ) -> Result<CompleteCampaignAccountHistory, OkxError> {
         verify_campaign_order_window(started_at_ms, through_ms, observed_at_ms)?;
         let mut orders = Vec::new();
-        for instrument_type in ["SPOT","MARGIN","SWAP","FUTURES","OPTION"] {
+        for instrument_type in ["SPOT", "MARGIN", "SWAP", "FUTURES", "OPTION"] {
             let proof = self
                 .complete_campaign_orders(
-                    instrument_type, started_at_ms, through_ms, observed_at_ms
+                    instrument_type,
+                    started_at_ms,
+                    through_ms,
+                    observed_at_ms,
                 )
                 .await?;
             if orders.len().saturating_add(proof.orders.len()) > CAMPAIGN_MAX_EVIDENCE_ROWS {
-                return Err(OkxError::Response("campaign order evidence capacity exceeded".into()));
+                return Err(OkxError::Response(
+                    "campaign order evidence capacity exceeded".into(),
+                ));
             }
             orders.extend(proof.orders);
         }
@@ -395,7 +400,9 @@ impl AccountHistoryApi {
                 None
             };
             if rows.len().saturating_add(chunk.len()) > CAMPAIGN_MAX_EVIDENCE_ROWS {
-                return Err(OkxError::Response("campaign order source capacity exceeded".into()));
+                return Err(OkxError::Response(
+                    "campaign order source capacity exceeded".into(),
+                ));
             }
             rows.extend(chunk);
             if count < HISTORY_PAGE_LIMIT {
@@ -454,7 +461,9 @@ impl AccountHistoryApi {
                     None
                 };
                 if fills.len().saturating_add(rows.len()) > CAMPAIGN_MAX_EVIDENCE_ROWS {
-                    return Err(OkxError::Response("campaign fill evidence capacity exceeded".into()));
+                    return Err(OkxError::Response(
+                        "campaign fill evidence capacity exceeded".into(),
+                    ));
                 }
                 fills.extend(rows);
                 if count < HISTORY_PAGE_LIMIT {
@@ -493,7 +502,9 @@ impl AccountHistoryApi {
                 None
             };
             if bills.len().saturating_add(rows.len()) > CAMPAIGN_MAX_EVIDENCE_ROWS {
-                return Err(OkxError::Response("campaign bill evidence capacity exceeded".into()));
+                return Err(OkxError::Response(
+                    "campaign bill evidence capacity exceeded".into(),
+                ));
             }
             bills.extend(rows);
             if count < HISTORY_PAGE_LIMIT {
@@ -1327,13 +1338,13 @@ mod tests {
             "ccy":"USDT","fee":"0","ts":from_ms+1_000
         }))
         .unwrap();
-        let unlinked = complete_campaign_money_witness(
-            from_ms, through_ms, vec![], vec![unrelated_bill],
-        )
-        .unwrap();
-        assert!(complete_campaign_account_witness(
-            from_ms, through_ms, vec![order.clone()], unlinked
-        ).is_err());
+        let unlinked =
+            complete_campaign_money_witness(from_ms, through_ms, vec![], vec![unrelated_bill])
+                .unwrap();
+        assert!(
+            complete_campaign_account_witness(from_ms, through_ms, vec![order.clone()], unlinked)
+                .is_err()
+        );
         let other =
             complete_campaign_money_witness(from_ms + 1, through_ms, vec![], vec![]).unwrap();
         assert!(
