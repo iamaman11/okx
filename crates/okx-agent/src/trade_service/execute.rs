@@ -65,14 +65,16 @@ impl TradeService {
             if qty <= Decimal::ZERO || price <= Decimal::ZERO {
                 return Err("ENTRY_OPENING_INVALID_FILL".into());
             }
-            // Negative venue fee = debit; positive rebate is never a credit
-            // to the spent entry budget. Sell proceeds never refund entry.
+            // Only a negative venue fee is a debit; a positive rebate is
+            // neither an entry cost nor a refund of already consumed budget.
+            // Sell proceeds never refund entry.
             let debit = if fill.side == "buy" {
                 qty.checked_mul(price).ok_or("MONEY_OVERFLOW")?
             } else {
                 Decimal::ZERO
             };
-            let debit = debit.checked_add(fee.abs()).ok_or("MONEY_OVERFLOW")?;
+            let fee_debit = if fee < Decimal::ZERO { -fee } else { Decimal::ZERO };
+            let debit = debit.checked_add(fee_debit).ok_or("MONEY_OVERFLOW")?;
             total = total.checked_add(debit).ok_or("MONEY_OVERFLOW")?;
         }
         if observed_bills.len() != history.bills.len() {
@@ -1953,8 +1955,8 @@ mod tests {
         history.bills[0].fee = "0.03".into();
         assert_eq!(
             TradeService::historical_usd_spot_entry(&history).unwrap(),
-            dec("5.03").unwrap(),
-            "rebate never increases campaign budget"
+            dec("5").unwrap(),
+            "rebate neither increases nor refunds campaign entry spend"
         );
         history.fills[0].instrument_type = "SWAP".into();
         assert!(
