@@ -624,22 +624,19 @@ impl TradeService {
                         .await
                         .ok_or("INSTRUMENT_RULES_UNAVAILABLE")?;
                     let fees = r.observer.fee_schedule(&rules).await.map_err(err)?;
-                    let fee_rate = entry_budget::verified_entry_fee_rate(
-                        &fees,
-                        instrument,
-                        &rules.reference_generation,
-                        now(),
-                    )?;
                     let source = r.observer.snapshot().await.map_err(err)?;
                     let conversion = Self::usd_conversion(&source)?;
-                    let fx = dec(&conversion.usd_per_usdt)?;
-                    let entry = entry_budget::quote(
-                        plan.quantity,
-                        plan.contract_value,
-                        plan.limit_price,
-                        fee_rate,
-                        fx,
+                    let (entry, fee_rate) = entry_budget::verified_known_entry_quote(
+                        &plan,
+                        instrument,
+                        &rules,
+                        &fees,
+                        &conversion,
+                        &source.account_uid_fingerprint,
+                        &r.configuration.account_key.verified_uid,
+                        now(),
                     )?;
+                    let fx = dec(&conversion.usd_per_usdt)?;
                     let entry_ceiling = entry_budget::enforced_entry_ceiling(
                         true,
                         c.environment == okx_protocol::account_governance::AccountEnvironment::Real,

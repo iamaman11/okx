@@ -229,30 +229,18 @@ impl TradeService {
                 .instrument_rules(instrument)
                 .await
                 .ok_or("ENTRY_INSTRUMENT_RULES_UNAVAILABLE")?;
-            plan::verify_entry_rules_match(&rules, instrument, &plan)?;
             let fees = r.observer.fee_schedule(&rules).await.map_err(err)?;
-            let rate = entry_budget::verified_entry_fee_rate(
-                &fees,
-                instrument,
-                &rules.reference_generation,
-                now(),
-            )?;
             let quote_snapshot = r.observer.snapshot().await.map_err(err)?;
-            if quote_snapshot.account_uid_fingerprint != r.configuration.account_key.verified_uid {
-                return Err("ENTRY_QUOTE_ACCOUNT_IDENTITY_MISMATCH".into());
-            }
             let fx = Self::usd_conversion(&quote_snapshot)?;
-            let fx_time =
-                i64::try_from(fx.observed_at_ms).map_err(|_| "ENTRY_FX_TIMESTAMP_INVALID")?;
-            if !crate::config::evidence_fresh(fx_time, now(), crate::config::ACCOUNT_MAX_AGE_MS) {
-                return Err("ENTRY_FX_SOURCE_STALE".into());
-            }
-            let quote = entry_budget::quote(
-                plan.quantity,
-                plan.contract_value,
-                plan.limit_price,
-                rate,
-                dec(&fx.usd_per_usdt)?,
+            let (quote, rate) = entry_budget::verified_known_entry_quote(
+                &plan,
+                instrument,
+                &rules,
+                &fees,
+                &fx,
+                &quote_snapshot.account_uid_fingerprint,
+                &r.configuration.account_key.verified_uid,
+                now(),
             )?;
             let ceiling = entry_budget::enforced_entry_ceiling(
                 true,
