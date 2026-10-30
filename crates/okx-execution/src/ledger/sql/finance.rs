@@ -465,9 +465,7 @@ impl AccountStore {
             |row| row.get(0),
         )?;
         if unknown_fill != 0 {
-            return Err(StoreError::Invalid(
-                "ENTRY_POST_OPENING_FILL_NOT_SETTLED",
-            ));
+            return Err(StoreError::Invalid("ENTRY_POST_OPENING_FILL_NOT_SETTLED"));
         }
         let unknown_bill: i64 = self.connection.query_row(
             "SELECT EXISTS(

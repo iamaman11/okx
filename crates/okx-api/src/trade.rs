@@ -1116,8 +1116,12 @@ fn validate_place(request: &PlaceOrderRequest) -> Result<(), OkxError> {
     validate_client_id("clOrdId", &request.client_order_id)?;
     validate_nonempty("sz", &request.size)?;
     validate_nonempty("px", &request.price)?;
-    if request.reduce_only.is_some() && (request.position_side != ApiPositionSide::Net || request.reduce_only != Some(true)) {
-        return Err(OkxError::Config("reduceOnly requires confirmed net-mode reduction".to_owned()));
+    if request.reduce_only.is_some()
+        && (request.position_side != ApiPositionSide::Net || request.reduce_only != Some(true))
+    {
+        return Err(OkxError::Config(
+            "reduceOnly requires confirmed net-mode reduction".to_owned(),
+        ));
     }
     for attached in &request.attached_algo_orders {
         validate_client_id("attachAlgoClOrdId", &attached.client_order_id)?;
@@ -1449,7 +1453,10 @@ mod tests {
         assert_eq!(encoded["reduceOnly"], true);
         validate_place(&opening).unwrap();
         opening.position_side = ApiPositionSide::Long;
-        assert!(validate_place(&opening).is_err(), "hedge order may not misstate reduceOnly");
+        assert!(
+            validate_place(&opening).is_err(),
+            "hedge order may not misstate reduceOnly"
+        );
     }
 
     #[test]

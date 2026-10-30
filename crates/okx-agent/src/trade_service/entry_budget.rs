@@ -286,7 +286,10 @@ impl EntryCostProof {
         }
         super::plan::verify_entry_rules_match(rules, instrument, plan)?;
         if account.account_level != "2"
-            || !matches!(account.position_mode.as_str(), "long_short_mode" | "net_mode")
+            || !matches!(
+                account.position_mode.as_str(),
+                "long_short_mode" | "net_mode"
+            )
             || snapshot.account_level != account.account_level
             || snapshot.position_mode != account.position_mode
             || snapshot.account_type != account.account_type

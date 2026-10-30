@@ -408,12 +408,14 @@ impl TradeService {
                 .filter(|p| p.instrument_id == instrument)
                 .try_fold(Decimal::ZERO, |sum, p| {
                     let normalized = super::reconcile::verified_venue_position_direction(
-                        &p.position_side, &p.position,
+                        &p.position_side,
+                        &p.position,
                     )?;
                     let amount = normalized
                         .filter(|(direction, _)| *direction == side_name)
                         .map_or(Decimal::ZERO, |(_, quantity)| quantity);
-                    sum.checked_add(amount).ok_or("POSITION_QUANTITY_OVERFLOW".into())
+                    sum.checked_add(amount)
+                        .ok_or("POSITION_QUANTITY_OVERFLOW".into())
                 })?;
             if qty > position {
                 return Err("REDUCE_WOULD_INCREASE_OR_REVERSE".into());

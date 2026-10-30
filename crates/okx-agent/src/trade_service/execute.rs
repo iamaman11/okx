@@ -882,7 +882,10 @@ impl TradeService {
         let post_snapshot = r.observer.snapshot().await.map_err(err)?;
         if post_account.position_mode != post_snapshot.position_mode
             || post_snapshot.account_uid_fingerprint != r.configuration.account_key.verified_uid
-            || !matches!(post_snapshot.position_mode.as_str(), "net_mode" | "long_short_mode")
+            || !matches!(
+                post_snapshot.position_mode.as_str(),
+                "net_mode" | "long_short_mode"
+            )
         {
             return Err("POST_ACCOUNT_POSITION_MODE_UNVERIFIED".into());
         }
@@ -903,7 +906,11 @@ impl TradeService {
             } else {
                 ApiPositionSide::Short
             },
-            reduce_only: if net_mode && !increase { Some(true) } else { None },
+            reduce_only: if net_mode && !increase {
+                Some(true)
+            } else {
+                None
+            },
             order_type: match order.order_type.as_str() {
                 "limit" => ApiOrderType::Limit,
                 "post_only" => ApiOrderType::PostOnly,
