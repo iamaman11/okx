@@ -232,7 +232,10 @@ impl AccountHistoryApi {
         after: Option<&str>,
         archive: bool,
     ) -> Result<Vec<HistoricalOrder>, OkxError> {
-        if !matches!(instrument_type, "SPOT" | "MARGIN" | "SWAP" | "FUTURES" | "OPTION") {
+        if !matches!(
+            instrument_type,
+            "SPOT" | "MARGIN" | "SWAP" | "FUTURES" | "OPTION"
+        ) {
             return Err(OkxError::Config("invalid history instrument type".into()));
         }
         let mut params = history_window_params(begin, end, after)?;
