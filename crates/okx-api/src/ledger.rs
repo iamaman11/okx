@@ -316,11 +316,7 @@ impl AccountHistoryApi {
         let mut orders = Vec::new();
         for instrument_type in ["SPOT", "MARGIN", "SWAP", "FUTURES", "OPTION"] {
             let proof = self
-                .complete_campaign_spend_orders(
-                    instrument_type,
-                    started_at_ms,
-                    through_ms,
-                )
+                .complete_campaign_spend_orders(instrument_type, started_at_ms, through_ms)
                 .await?;
             if orders.len().saturating_add(proof.orders.len()) > CAMPAIGN_MAX_EVIDENCE_ROWS {
                 return Err(OkxError::Response(
@@ -1355,10 +1351,8 @@ mod tests {
         // all-cohort RiskBook opening or a lost-POST absence assertion.
         assert!(verify_campaign_money_window(beginning, observed, observed).is_ok());
         assert!(verify_campaign_order_window(beginning, observed, observed).is_err());
-        let money = complete_campaign_money_witness(beginning, observed, vec![], vec![])
-            .unwrap();
-        let source =
-            complete_campaign_account_witness(beginning, observed, vec![], money).unwrap();
+        let money = complete_campaign_money_witness(beginning, observed, vec![], vec![]).unwrap();
+        let source = complete_campaign_account_witness(beginning, observed, vec![], money).unwrap();
         assert!(source.orders.is_empty());
         assert!(source.fills.is_empty());
         assert!(source.bills.is_empty());
@@ -1368,10 +1362,10 @@ mod tests {
         let foreign: AccountBill = serde_json::from_value(serde_json::json!({
             "billId":"123456","ordId":"unproven_order","ccy":"USDT",
             "fee":"0","ts":(beginning+1000).to_string()
-        })).unwrap();
-        let money = complete_campaign_money_witness(
-            beginning, observed, vec![], vec![foreign]
-        ).unwrap();
+        }))
+        .unwrap();
+        let money =
+            complete_campaign_money_witness(beginning, observed, vec![], vec![foreign]).unwrap();
         assert!(complete_campaign_account_witness(beginning, observed, vec![], money).is_err());
     }
 
@@ -1518,11 +1512,13 @@ mod tests {
         assert!(verify_campaign_money_window(from, observed, observed).is_ok());
         assert!(verify_campaign_order_window(from, observed, observed).is_err());
         let dt = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(observed).unwrap();
-        let old = dt.checked_sub_months(chrono::Months::new(3))
-            .unwrap().timestamp_millis();
+        let old = dt
+            .checked_sub_months(chrono::Months::new(3))
+            .unwrap()
+            .timestamp_millis();
         assert!(verify_campaign_money_window(old, observed, observed).is_err());
         assert!(verify_campaign_money_window(old + 86_400_000, observed, observed).is_ok());
-        assert!(verify_campaign_money_window(from, observed, observed-1).is_err());
+        assert!(verify_campaign_money_window(from, observed, observed - 1).is_err());
         assert!(verify_campaign_money_window(0, observed, observed).is_err());
         // Fee bills/fills without executed orders remain separately
         // source-classified; this guard never invents historical USD.
