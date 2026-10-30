@@ -76,6 +76,27 @@ fn verified_position_quantity<'a>(
     })
 }
 
+/// The first real campaign accepts protection only when the live order
+/// covers exactly the remaining first-test position. Matching the original
+/// fill count alone can leave an overprotective order after a partial close.
+fn protection_covers_live_position(
+    opening_side: &str,
+    protection_side: &str,
+    cumulative_fill: Decimal,
+    venue_position: Decimal,
+    protection_size: &str,
+) -> bool {
+    let opposite = matches!(
+        (opening_side, protection_side),
+        ("buy", "sell") | ("sell", "buy")
+    );
+    opposite
+        && cumulative_fill > Decimal::ZERO
+        && venue_position > Decimal::ZERO
+        && cumulative_fill == venue_position
+        && dec(protection_size).ok() == Some(venue_position)
+}
+
 /// Every venue readback must refer to this durable intent before it can
 /// change local state, protection requirements, or exchange-order identity.
 /// An exchange lookup by client ID alone is a lookup, not an identity proof.
@@ -362,11 +383,13 @@ impl TradeService {
                             && p.failure_code.is_empty()
                             && p.stop_loss_trigger_price_type == "mark"
                             && dec(&p.stop_loss_trigger_price).ok() == i.plan.stop_price
-                            && filled > Decimal::ZERO
-                            && filled == position_qty
-                            && dec(&p.size).ok() == Some(position_qty)
-                            && ((i.plan.side == "buy" && p.side == "sell")
-                                || (i.plan.side == "sell" && p.side == "buy")) =>
+                            && protection_covers_live_position(
+                                &i.plan.side,
+                                &p.side,
+                                filled,
+                                position_qty,
+                                &p.size,
+                            ) =>
                     {
                         let source_digest = digest(&p)?;
                         let protection = okx_execution::ProtectionReceipt {
@@ -1377,6 +1400,26 @@ mod entry_cost_status_tests {
             verify_venue_fill_coverage(&intent, &source, &changed),
             Err("ENTRY_FILL_VENUE_STATE_UNKNOWN".into())
         );
+    }
+
+    #[test]
+    fn e2_protective_readback_requires_exact_venue_exposure_and_opposite_side() {
+        let one = Decimal::ONE;
+        let half = dec("0.5").unwrap();
+        assert!(protection_covers_live_position("buy", "sell", one, one, "1"));
+        assert!(protection_covers_live_position("sell", "buy", one, one, "1"));
+        assert!(!protection_covers_live_position("buy", "buy", one, one, "1"));
+        assert!(!protection_covers_live_position("buy", "close", one, one, "1"));
+        assert!(!protection_covers_live_position("buy", "sell", one, half, "1"));
+        assert!(!protection_covers_live_position("buy", "sell", one, one, "0.5"));
+        assert!(!protection_covers_live_position("buy", "sell", one, one, "invalid"));
+        assert!(!protection_covers_live_position(
+            "buy",
+            "sell",
+            Decimal::ZERO,
+            one,
+            "1"
+        ));
     }
 
     #[test]
