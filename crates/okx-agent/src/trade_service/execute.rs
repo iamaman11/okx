@@ -911,6 +911,13 @@ impl TradeService {
                 {
                     return Err("COHORT_EVIDENCE_INCOMPLETE".into());
                 }
+                // This is the earliest REST response across every pending
+                // derivative-algo scope. Complete coverage is insufficient
+                // if the underlying source timestamp is absent or stale.
+                let algo_source_floor = verified_algo_source_time(
+                    algos.received_at_ms,
+                    now(),
+                )?;
                 let mut managed_algos = std::collections::BTreeSet::new();
                 for p in &snapshot.positions {
                     let actual_qty = dec(&p.position)?;
@@ -1032,7 +1039,7 @@ impl TradeService {
                     financial.0.nav_complete,
                     financial.0.source_as_of,
                     now(),
-                )?;
+                )?.min(algo_source_floor);
                 // Bind SQL source quality and financial state to the same
                 // content proof as the account and conditional-order reads.
                 let data = digest(&(
@@ -1128,6 +1135,28 @@ impl TradeService {
         ))
     }
 }
+/// The pending derivative-algo census covers multiple private REST scopes.
+/// A successful query or empty array without a fresh source timestamp is not
+/// independently sufficient evidence that no unprotected order exists.
+fn verified_algo_source_time(
+    source_received_at_ms: u64,
+    observed_at_ms: i64,
+) -> Result<i64, String> {
+    let source = i64::try_from(source_received_at_ms)
+        .map_err(|_| "COHORT_ALGO_SOURCE_TIME_INVALID")?;
+    if source <= 0
+        || source > observed_at_ms
+        || !crate::config::evidence_fresh(
+            source,
+            observed_at_ms,
+            crate::config::ACCOUNT_MAX_AGE_MS,
+        )
+    {
+        return Err("COHORT_ALGO_SOURCE_STALE".into());
+    }
+    Ok(source)
+}
+
 /// E2 strict first-test boundary: a zero external occupancy witness can
 /// only be produced from a genuinely flat venue inventory. Matching SQL
 /// intent/central receipt IDs alone do not prove the monetary risk of an
@@ -1656,6 +1685,31 @@ mod tests {
         );
         assert!(verify_post_held_fx("1", "invalid").is_err());
     }
+    #[test]
+    fn e2_algo_census_source_age_is_part_of_cohort_proof() {
+        let now_ms = 1_798_758_000_000_i64;
+        assert_eq!(verified_algo_source_time(now_ms as u64, now_ms), Ok(now_ms));
+        assert_eq!(
+            verified_algo_source_time(0, now_ms),
+            Err("COHORT_ALGO_SOURCE_STALE".into())
+        );
+        assert_eq!(
+            verified_algo_source_time((now_ms + 1) as u64, now_ms),
+            Err("COHORT_ALGO_SOURCE_STALE".into())
+        );
+        assert_eq!(
+            verified_algo_source_time(
+                (now_ms - crate::config::ACCOUNT_MAX_AGE_MS - 1) as u64,
+                now_ms,
+            ),
+            Err("COHORT_ALGO_SOURCE_STALE".into())
+        );
+        assert_eq!(
+            verified_algo_source_time(u64::MAX, now_ms),
+            Err("COHORT_ALGO_SOURCE_TIME_INVALID".into())
+        );
+    }
+
     #[test]
     fn e2_census_zero_risk_is_only_attested_for_actual_venue_flat() {
         assert_eq!(
