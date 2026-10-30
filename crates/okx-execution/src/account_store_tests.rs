@@ -448,17 +448,6 @@ fn e1_fee_bill_cross_source_receipt_requires_both_immutable_sources() {
             )
             .is_err()
     );
-    let path = s.path.clone();
-    let meta = s.meta.clone();
-    drop(s);
-    let mut restored =
-        AccountStore::open_existing(path, &meta.account_key, &meta.installation_id).unwrap();
-    assert_eq!(
-        restored
-            .bind_terminal_entry_settlement("intent", 7, Decimal::ONE, 7)
-            .unwrap(),
-        settled
-    );
     assert_eq!(s.intent_fee_bill_evidence("intent", 7).unwrap(), evidence);
     assert!(matches!(
         s.intent_fee_bill_evidence("intent", 8),
@@ -467,11 +456,17 @@ fn e1_fee_bill_cross_source_receipt_requires_both_immutable_sources() {
     let db = s.path.clone();
     let meta = s.meta.clone();
     drop(s);
-    let reopened =
+    let mut reopened =
         AccountStore::open_existing(db, &meta.account_key, &meta.installation_id).unwrap();
     assert_eq!(
         reopened.intent_fee_bill_evidence("intent", 7).unwrap(),
         evidence
+    );
+    assert_eq!(
+        reopened
+            .bind_terminal_entry_settlement("intent", 7, Decimal::ONE, 7)
+            .unwrap(),
+        settled
     );
     reopened
         .connection
