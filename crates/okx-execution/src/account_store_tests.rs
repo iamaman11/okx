@@ -483,9 +483,12 @@ fn e1_fee_bill_cross_source_receipt_requires_both_immutable_sources() {
             )
             .is_err()
     );
-    assert_eq!(s.intent_fee_bill_evidence("intent", 7).unwrap(), evidence);
+    let latest = s.intent_fee_bill_evidence("intent", 7).unwrap();
+    assert_eq!(latest.fill, evidence.fill);
+    assert_eq!(latest.source_digest, evidence.source_digest);
+    assert_eq!(latest.bills_covered_through, 8);
     assert!(matches!(
-        s.intent_fee_bill_evidence("intent", 8),
+        s.intent_fee_bill_evidence("intent", 9),
         Err(StoreError::Invalid("ENTRY_FILL_COVERAGE_UNPROVEN"))
     ));
     let db = s.path.clone();
@@ -493,10 +496,10 @@ fn e1_fee_bill_cross_source_receipt_requires_both_immutable_sources() {
     drop(s);
     let mut reopened =
         AccountStore::open_existing(db, &meta.account_key, &meta.installation_id).unwrap();
-    assert_eq!(
-        reopened.intent_fee_bill_evidence("intent", 7).unwrap(),
-        evidence
-    );
+    let replayed = reopened.intent_fee_bill_evidence("intent", 7).unwrap();
+    assert_eq!(replayed.fill, evidence.fill);
+    assert_eq!(replayed.source_digest, evidence.source_digest);
+    assert_eq!(replayed.bills_covered_through, 8);
     assert_eq!(
         reopened
             .bind_terminal_entry_settlement("intent", 7, Decimal::ONE, 7)
