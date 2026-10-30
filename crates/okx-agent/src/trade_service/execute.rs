@@ -582,7 +582,7 @@ impl TradeService {
                 entry_budget::EntryCostProof::unproven_linear_quote(quote.clone());
             let verified_entry =
                 entry_budget::reserve_entry_evidence(&entry_cost_proof, &entry_receipt, ceiling)?;
-            let cost_components = entry_cost_proof.verified_fx_and_fixed_costs()?;
+            let cost_components = entry_cost_proof.verified_fx_and_entry_fees()?;
             if verified_entry.is_some() != cost_components.is_some() {
                 return Err("ENTRY_PROOF_COMPONENTS_UNVERIFIED".into());
             }
