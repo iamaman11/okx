@@ -173,6 +173,21 @@ function riskKey(entry: Pick<RiskEntry, "venue"|"environment"|"uid"|"run_id"|"in
   return [entry.venue, entry.environment, entry.uid, entry.run_id, entry.intent_id]
     .map(x => x.length + ":" + x).join("");
 }
+/** Immutable campaign inception, created only in the authenticated
+ * installation transaction. It is an authority timestamp, NOT a claim
+ * that older real-account activity has been reconciled. Legacy books
+ * without this receipt remain NOT_PROVEN for entry opening.
+ */
+export interface CampaignOrigin {
+  campaign_id:string;
+  installation_id:string;
+  started_at_ms:number;
+}
+function validCampaignOrigin(v:any,installation_id:string):v is CampaignOrigin {
+  return !!v&&/^sha256:[0-9a-f]{64}$/.test(v.campaign_id)&&
+    v.installation_id===installation_id&&
+    Number.isSafeInteger(v.started_at_ms)&&v.started_at_ms>0;
+}
 export interface CampaignEntryBudget {
   campaign_id:string;limit_usd:string;consumed_usd:string;reserved_usd:string;
   opening_source_digest:string;opening_as_of_ms:number;
@@ -241,6 +256,9 @@ export async function installCampaignEntryProof(tx:any,source:CampaignEntryOpeni
   const governance:unknown=await tx.get(GOVERNANCE_STORAGE_KEY);
   if(!validMeta(meta)||!validGovernance(governance)||
      meta.entry_budget!==undefined||meta.installation_id!==governance.installation_id||
+     !validCampaignOrigin(meta.campaign_origin,meta.installation_id)||
+     meta.campaign_origin.campaign_id!==governance.campaign_id||
+     source.campaign_started_at_ms!==meta.campaign_origin.started_at_ms||
      meta.occupied_usdt!=="0"||meta.occupied_usd!=="0"||
      source.campaign_id!==governance.campaign_id||
      units(governance.campaign_entry_limit_usd)===null||
@@ -283,11 +301,18 @@ export async function installCampaignEntryProof(tx:any,source:CampaignEntryOpeni
   },sequence:meta.sequence+1});
   return true;
 }
-export interface RiskMeta { entry_budget?:CampaignEntryBudget; source_as_of_ms:number; schema:typeof RISK_BOOK_SCHEMA; sequence:number; installation_id:string; occupied_usdt:string; occupied_usd:string; consumed_loss_usd:string; campaign_limit_usd:string; accounts:Record<string,string>; }
-function validMeta(v:any):v is RiskMeta {return !!v&&v.schema===RISK_BOOK_SCHEMA&&Number.isSafeInteger(v.source_as_of_ms)&&v.source_as_of_ms>=0&&Number.isSafeInteger(v.sequence)&&v.sequence>=0&&typeof v.installation_id==="string"&&(v.entry_budget===undefined||validEntryBudget(v.entry_budget))&&units(v.occupied_usdt)!==null&&units(v.occupied_usd)!==null&&units(v.consumed_loss_usd)!==null&&units(v.campaign_limit_usd)!==null&&units(v.campaign_limit_usd)!>0n&&!!v.accounts&&Object.keys(v.accounts).length<=32&&Object.values(v.accounts).every(x=>units(x)!==null)&&Object.values(v.accounts).reduce<bigint>((sum,x)=>sum+units(x)!,0n)===units(v.occupied_usdt);}
-export async function initializeRiskBook(tx:any,installation_id:string):Promise<void>{
+export interface RiskMeta { entry_budget?:CampaignEntryBudget; campaign_origin?:CampaignOrigin; source_as_of_ms:number; schema:typeof RISK_BOOK_SCHEMA; sequence:number; installation_id:string; occupied_usdt:string; occupied_usd:string; consumed_loss_usd:string; campaign_limit_usd:string; accounts:Record<string,string>; }
+function validMeta(v:any):v is RiskMeta {return !!v&&v.schema===RISK_BOOK_SCHEMA&&Number.isSafeInteger(v.source_as_of_ms)&&v.source_as_of_ms>=0&&Number.isSafeInteger(v.sequence)&&v.sequence>=0&&typeof v.installation_id==="string"&&(v.entry_budget===undefined||validEntryBudget(v.entry_budget))&&(v.campaign_origin===undefined||validCampaignOrigin(v.campaign_origin,v.installation_id))&&units(v.occupied_usdt)!==null&&units(v.occupied_usd)!==null&&units(v.consumed_loss_usd)!==null&&units(v.campaign_limit_usd)!==null&&units(v.campaign_limit_usd)!>0n&&!!v.accounts&&Object.keys(v.accounts).length<=32&&Object.values(v.accounts).every(x=>units(x)!==null)&&Object.values(v.accounts).reduce<bigint>((sum,x)=>sum+units(x)!,0n)===units(v.occupied_usdt);}
+export async function initializeRiskBook(
+ tx:any,installation_id:string,campaign_origin?:CampaignOrigin
+):Promise<void>{
  if(await tx.get(KEY)!==undefined)throw Error("RISK_ALREADY_INITIALIZED");
- await tx.put(KEY,{schema:RISK_BOOK_SCHEMA,source_as_of_ms:0,sequence:0,installation_id,occupied_usdt:"0",occupied_usd:"0",consumed_loss_usd:"0",campaign_limit_usd:"10",accounts:{}} satisfies RiskMeta);
+ if(campaign_origin!==undefined&&!validCampaignOrigin(campaign_origin,installation_id))
+   throw Error("CAMPAIGN_ORIGIN_INVALID");
+ await tx.put(KEY,{schema:RISK_BOOK_SCHEMA,source_as_of_ms:0,sequence:0,installation_id,
+   ...(campaign_origin===undefined?{}:{campaign_origin}),
+   occupied_usdt:"0",occupied_usd:"0",consumed_loss_usd:"0",
+   campaign_limit_usd:"10",accounts:{}} satisfies RiskMeta);
 }
 /** A campaign ceiling may only be lowered. Existing loss and held risk remain charged. */
 export async function lowerRiskBookLimit(tx:any,limit:string):Promise<boolean>{
