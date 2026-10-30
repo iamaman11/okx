@@ -444,6 +444,18 @@ impl AccountStore {
         through: i64,
     ) -> StoreResult<IntentFeeBillEvidence> {
         use sha2::{Digest, Sha256};
+        #[derive(serde::Serialize)]
+        struct FeeBillSource {
+            entry_id: String,
+            economic_event_key: String,
+            amount: String,
+            currency: String,
+            reversal: Option<String>,
+            bill_id: Option<String>,
+            bill_time: Option<i64>,
+            bill_currency: Option<String>,
+            bill_linked: bool,
+        }
         let fill = self.intent_fill_cost_evidence(intent_id, through)?;
         if !finance_proof_sealed(&self.connection)? {
             return Err(StoreError::Invalid("ENTRY_FINANCE_PROVENANCE_UNSEALED"));
@@ -513,40 +525,31 @@ impl AccountStore {
             let Some(source) = rows.next()? else {
                 return Err(StoreError::Invalid("ENTRY_FEE_BILL_LINK_MISSING"));
             };
-            let proof: (
-                String,
-                String,
-                String,
-                String,
-                Option<String>,
-                Option<String>,
-                Option<i64>,
-                Option<String>,
-                bool,
-            ) = (
-                source.get(0)?,
-                source.get(1)?,
-                source.get(2)?,
-                source.get(3)?,
-                source.get(4)?,
-                source.get(5)?,
-                source.get(6)?,
-                source.get(7)?,
-                source.get(8)?,
-            );
+            let proof = FeeBillSource {
+                entry_id: source.get(0)?,
+                economic_event_key: source.get(1)?,
+                amount: source.get(2)?,
+                currency: source.get(3)?,
+                reversal: source.get(4)?,
+                bill_id: source.get(5)?,
+                bill_time: source.get(6)?,
+                bill_currency: source.get(7)?,
+                bill_linked: source.get(8)?,
+            };
             if rows.next()?.is_some() {
                 return Err(StoreError::Invalid("ENTRY_FEE_BILL_LINK_AMBIGUOUS"));
             }
-            if proof.4.is_some()
-                || !proof.1.starts_with("bill:")
-                || proof.5.as_deref() != proof.1.strip_prefix("bill:")
-                || proof
-                    .6
-                    .is_none_or(|t| t <= 0 || t > through || t > bills.watermark)
-                || proof.7.as_deref() != Some(currency.as_str())
-                || !proof.8
-                || proof.3 != currency
-                || decimal(proof.2.clone())? != fee
+            if proof.reversal.is_some()
+                || !proof.economic_event_key.starts_with("bill:")
+                || proof.bill_id.as_deref()
+                    != proof.economic_event_key.strip_prefix("bill:")
+                || proof.bill_time.is_none_or(|t| {
+                    t <= 0 || t > through || t > bills.watermark
+                })
+                || proof.bill_currency.as_deref() != Some(currency.as_str())
+                || !proof.bill_linked
+                || proof.currency != currency
+                || decimal(proof.amount.clone())? != fee
             {
                 return Err(StoreError::Invalid("ENTRY_FEE_BILL_SOURCE_MISMATCH"));
             }
