@@ -93,17 +93,14 @@ fn e1_t09_opening_rejects_cash_flows_and_nonterminal_risk() {
         s.seal_empty_campaign_entry_opening(&campaign, 1, 3, &venue, 0, 0)
             .is_err()
     );
-    s.connection
-        .execute(
-            "DELETE FROM cash_flows WHERE event_id='unexpected-flow'",
-            [],
-        )
-        .unwrap();
-    let mut s = s;
-    let i = intent(&mut s);
+    // Cash flows are immutable: verify unresolved exposure in a separate
+    // clean account fixture rather than erasing an authenticated source.
+    let mut unresolved = store();
+    let i = intent(&mut unresolved);
     assert_eq!(i.state, IntentState::Prepared);
     assert!(
-        s.seal_empty_campaign_entry_opening(&campaign, 1, 3, &venue, 0, 0)
+        unresolved
+            .seal_empty_campaign_entry_opening(&campaign, 1, 3, &venue, 0, 0)
             .is_err(),
         "an unposted or unknown native intent never attests a flat campaign"
     );
