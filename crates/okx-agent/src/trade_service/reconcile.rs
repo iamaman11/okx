@@ -76,6 +76,25 @@ fn verified_position_quantity<'a>(
     })
 }
 
+/// Protection cleanup must inspect the whole instrument (both hedge
+/// sides), not just the original side. A malformed or overflowing position
+/// is UNKNOWN exposure and may never authorize removing a live stop.
+fn verify_instrument_is_flat<'a>(
+    instrument: &str,
+    positions: impl IntoIterator<Item = (&'a str, &'a str)>,
+) -> Result<(), String> {
+    let exposure = verified_position_quantity(
+        positions
+            .into_iter()
+            .filter(|(id, _)| *id == instrument)
+            .map(|(_, quantity)| quantity),
+    )?;
+    if exposure != Decimal::ZERO {
+        return Err("PROTECTION_STILL_REQUIRED".into());
+    }
+    Ok(())
+}
+
 /// The first real campaign accepts protection only when the live order
 /// covers exactly the remaining first-test position. Matching the original
 /// fill count alone can leave an overprotective order after a partial close.
@@ -981,19 +1000,12 @@ impl TradeService {
             return Ok(());
         }
         let snapshot = r.observer.snapshot().await.map_err(err)?;
-        // A malformed position, including a different side on this venue
-        // instrument, is never proof of flat. In hedge mode a protective
-        // order must not be removed merely because ONE side reads zero.
-        let exposed = verified_position_quantity(
-            snapshot
-                .positions
-                .iter()
-                .filter(|position| position.instrument_id == i.instrument_id)
-                .map(|position| position.position.as_str()),
+        verify_instrument_is_flat(
+            &i.instrument_id,
+            snapshot.positions.iter().map(|position| {
+                (position.instrument_id.as_str(), position.position.as_str())
+            }),
         )?;
-        if exposed > Decimal::ZERO {
-            return Err("PROTECTION_STILL_REQUIRED".into());
-        }
         let key = format!("cleanup_{}", &i.client_order_id);
         let hash = digest(&(
             i.intent_id.clone(),
@@ -1511,6 +1523,32 @@ mod entry_cost_status_tests {
         );
         assert_eq!(
             verified_position_quantity(["79228162514264337593543950335", "1"].into_iter()),
+            Err("POSITION_QUANTITY_OVERFLOW".into())
+        );
+    }
+
+    #[test]
+    fn e2_cleanup_does_not_remove_protection_for_any_unverified_hedge_side() {
+        let instrument = "BTC-USDT-SWAP";
+        assert!(verify_instrument_is_flat(instrument, [
+            (instrument, "0"), (instrument, "0"), ("ETH-USDT-SWAP", "20"),
+        ])
+        .is_ok());
+        assert_eq!(
+            verify_instrument_is_flat(instrument, [
+                (instrument, "0"), (instrument, "-0.2"),
+            ]),
+            Err("PROTECTION_STILL_REQUIRED".into())
+        );
+        assert_eq!(
+            verify_instrument_is_flat(instrument, [(instrument, "unreadable")]),
+            Err("POSITION_QUANTITY_UNVERIFIED".into())
+        );
+        assert_eq!(
+            verify_instrument_is_flat(instrument, [
+                (instrument, "79228162514264337593543950335"),
+                (instrument, "1"),
+            ]),
             Err("POSITION_QUANTITY_OVERFLOW".into())
         );
     }
