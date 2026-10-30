@@ -46,6 +46,19 @@ pub struct CompleteCampaignMoneyHistory {
     pub source_digest: String,
 }
 
+/// One fixed-cut-off account-wide venue witness. Native account identity
+/// and original campaign inception MUST still be independently attested by
+/// the authenticated finance owner before any Worker budget opening.
+#[derive(Debug, Clone)]
+pub struct CompleteCampaignAccountHistory {
+    pub from_ms: i64,
+    pub through_ms: i64,
+    pub orders: Vec<HistoricalOrder>,
+    pub fills: Vec<FillHistory>,
+    pub bills: Vec<AccountBill>,
+    pub source_digest: String,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct PositionHistory {
     #[serde(rename = "instType", default)]
@@ -280,6 +293,34 @@ impl AccountHistoryApi {
                 &params,
             )
             .await
+    }
+
+    /// Complete venue evidence for ONE authenticated account and a single
+    /// fixed cut-off. Each of five instrument classes and the account-wide
+    /// bill stream must pass exhaustive pagination and cross-source joins.
+    /// No permission to initialize RiskBook is issued by this read alone.
+    pub async fn complete_campaign_account_history(
+        &self,
+        started_at_ms: i64,
+        through_ms: i64,
+        observed_at_ms: i64,
+    ) -> Result<CompleteCampaignAccountHistory, OkxError> {
+        verify_campaign_order_window(started_at_ms, through_ms, observed_at_ms)?;
+        let mut orders = Vec::new();
+        for instrument_type in ["SPOT","MARGIN","SWAP","FUTURES","OPTION"] {
+            let proof = self
+                .complete_campaign_orders(
+                    instrument_type, started_at_ms, through_ms, observed_at_ms
+                )
+                .await?;
+            orders.extend(proof.orders);
+        }
+        let money = self.complete_campaign_money_history(
+            started_at_ms, through_ms, observed_at_ms
+        ).await?;
+        complete_campaign_account_witness(
+            started_at_ms, through_ms, orders, money
+        )
     }
 
     /// A campaign opening MUST NOT silently promote the archive's missing
@@ -703,6 +744,73 @@ fn complete_campaign_orders_witness(
         instrument_type: instrument_type.into(),
         orders: merged.rows,
         source_digest: format!("{:x}", Sha256::digest(canonical)),
+    })
+}
+
+/// Exact joins of authenticated venue economic facts. Contract valuation,
+/// historic FX and campaign start provenance are NOT asserted here.
+fn complete_campaign_account_witness(
+    from_ms: i64,
+    through_ms: i64,
+    mut orders: Vec<HistoricalOrder>,
+    money: CompleteCampaignMoneyHistory,
+) -> Result<CompleteCampaignAccountHistory, OkxError> {
+    if from_ms <= 0
+        || through_ms < from_ms
+        || money.from_ms != from_ms
+        || money.through_ms != through_ms
+    {
+        return Err(OkxError::Response("campaign account source cut-off mismatch".into()));
+    }
+    let mut seen = BTreeMap::new();
+    for order in &orders {
+        if order.order_id.is_empty() ||
+            !matches!(order.instrument_type.as_str(),"SPOT"|"MARGIN"|"SWAP"|"FUTURES"|"OPTION") ||
+            order.creation_time_ms.parse::<i64>().ok().is_none_or(|v|v<from_ms||v>through_ms) ||
+            order.update_time_ms.parse::<i64>().ok().is_none_or(|v|v<from_ms||v>through_ms) ||
+            seen.insert(order.order_id.as_str(),order).is_some()
+        {
+            return Err(OkxError::Response("campaign account order identity conflict".into()));
+        }
+    }
+    let mut executed = BTreeMap::<&str, rust_decimal::Decimal>::new();
+    for fill in &money.fills {
+        let order = seen.get(fill.order_id.as_str())
+            .ok_or_else(|| OkxError::Response("campaign fill has no proven venue order".into()))?;
+        if order.instrument_id != fill.instrument_id ||
+            order.instrument_type != fill.instrument_type
+        {
+            return Err(OkxError::Response("campaign fill order instrument mismatch".into()));
+        }
+        let size = fill.fill_size.parse::<rust_decimal::Decimal>()
+            .map_err(|_|OkxError::Response("campaign fill quantity invalid".into()))?;
+        let previous=executed.get(fill.order_id.as_str()).copied()
+            .unwrap_or(rust_decimal::Decimal::ZERO);
+        let new=previous.checked_add(size)
+            .ok_or_else(||OkxError::Response("campaign fill quantity overflow".into()))?;
+        executed.insert(fill.order_id.as_str(),new);
+    }
+    for order in &orders {
+        let order_size=order.accumulated_fill_size.parse::<rust_decimal::Decimal>()
+            .map_err(|_|OkxError::Response("campaign venue order filled size invalid".into()))?;
+        if order_size<rust_decimal::Decimal::ZERO ||
+            executed.get(order.order_id.as_str()).copied()
+                .unwrap_or(rust_decimal::Decimal::ZERO)!=order_size
+        {
+            return Err(OkxError::Response("campaign venue order and fills disagree".into()));
+        }
+    }
+    // Bills without an order identifier (e.g. funding or account transfers)
+    // remain raw evidence; their economic meaning/currency must be classified
+    // by the SQL finance owner, not silently interpreted as zero entry cost.
+    orders.sort_by(|a,b|a.order_id.cmp(&b.order_id));
+    let encoded=serde_json::to_vec(&(
+        "okx.campaign-account-history/v1",
+        from_ms, through_ms, &orders, &money.source_digest,
+    )).map_err(|_|OkxError::Response("campaign account digest invalid".into()))?;
+    Ok(CompleteCampaignAccountHistory {
+        from_ms,through_ms,orders,fills:money.fills,bills:money.bills,
+        source_digest:format!("{:x}",Sha256::digest(encoded)),
     })
 }
 
