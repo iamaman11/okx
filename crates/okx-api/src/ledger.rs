@@ -323,12 +323,10 @@ impl AccountHistoryApi {
             }
             orders.extend(proof.orders);
         }
-        let money = self.complete_campaign_money_history(
-            started_at_ms, through_ms, observed_at_ms
-        ).await?;
-        complete_campaign_account_witness(
-            started_at_ms, through_ms, orders, money
-        )
+        let money = self
+            .complete_campaign_money_history(started_at_ms, through_ms, observed_at_ms)
+            .await?;
+        complete_campaign_account_witness(started_at_ms, through_ms, orders, money)
     }
 
     /// A campaign opening MUST NOT silently promote the archive's missing
@@ -792,57 +790,95 @@ fn complete_campaign_account_witness(
         || money.from_ms != from_ms
         || money.through_ms != through_ms
     {
-        return Err(OkxError::Response("campaign account source cut-off mismatch".into()));
+        return Err(OkxError::Response(
+            "campaign account source cut-off mismatch".into(),
+        ));
     }
     let mut seen = BTreeMap::new();
     for order in &orders {
-        if order.order_id.is_empty() ||
-            !matches!(order.instrument_type.as_str(),"SPOT"|"MARGIN"|"SWAP"|"FUTURES"|"OPTION") ||
-            order.creation_time_ms.parse::<i64>().ok().is_none_or(|v|v<from_ms||v>through_ms) ||
-            order.update_time_ms.parse::<i64>().ok().is_none_or(|v|v<from_ms||v>through_ms) ||
-            seen.insert(order.order_id.as_str(),order).is_some()
+        if order.order_id.is_empty()
+            || !matches!(
+                order.instrument_type.as_str(),
+                "SPOT" | "MARGIN" | "SWAP" | "FUTURES" | "OPTION"
+            )
+            || order
+                .creation_time_ms
+                .parse::<i64>()
+                .ok()
+                .is_none_or(|v| v < from_ms || v > through_ms)
+            || order
+                .update_time_ms
+                .parse::<i64>()
+                .ok()
+                .is_none_or(|v| v < from_ms || v > through_ms)
+            || seen.insert(order.order_id.as_str(), order).is_some()
         {
-            return Err(OkxError::Response("campaign account order identity conflict".into()));
+            return Err(OkxError::Response(
+                "campaign account order identity conflict".into(),
+            ));
         }
     }
     let mut executed = BTreeMap::<&str, rust_decimal::Decimal>::new();
     for fill in &money.fills {
-        let order = seen.get(fill.order_id.as_str())
+        let order = seen
+            .get(fill.order_id.as_str())
             .ok_or_else(|| OkxError::Response("campaign fill has no proven venue order".into()))?;
-        if order.instrument_id != fill.instrument_id ||
-            order.instrument_type != fill.instrument_type
+        if order.instrument_id != fill.instrument_id
+            || order.instrument_type != fill.instrument_type
         {
-            return Err(OkxError::Response("campaign fill order instrument mismatch".into()));
+            return Err(OkxError::Response(
+                "campaign fill order instrument mismatch".into(),
+            ));
         }
-        let size = fill.fill_size.parse::<rust_decimal::Decimal>()
-            .map_err(|_|OkxError::Response("campaign fill quantity invalid".into()))?;
-        let previous=executed.get(fill.order_id.as_str()).copied()
+        let size = fill
+            .fill_size
+            .parse::<rust_decimal::Decimal>()
+            .map_err(|_| OkxError::Response("campaign fill quantity invalid".into()))?;
+        let previous = executed
+            .get(fill.order_id.as_str())
+            .copied()
             .unwrap_or(rust_decimal::Decimal::ZERO);
-        let new=previous.checked_add(size)
-            .ok_or_else(||OkxError::Response("campaign fill quantity overflow".into()))?;
-        executed.insert(fill.order_id.as_str(),new);
+        let new = previous
+            .checked_add(size)
+            .ok_or_else(|| OkxError::Response("campaign fill quantity overflow".into()))?;
+        executed.insert(fill.order_id.as_str(), new);
     }
     for order in &orders {
-        let order_size=order.accumulated_fill_size.parse::<rust_decimal::Decimal>()
-            .map_err(|_|OkxError::Response("campaign venue order filled size invalid".into()))?;
-        if order_size<rust_decimal::Decimal::ZERO ||
-            executed.get(order.order_id.as_str()).copied()
-                .unwrap_or(rust_decimal::Decimal::ZERO)!=order_size
+        let order_size = order
+            .accumulated_fill_size
+            .parse::<rust_decimal::Decimal>()
+            .map_err(|_| OkxError::Response("campaign venue order filled size invalid".into()))?;
+        if order_size < rust_decimal::Decimal::ZERO
+            || executed
+                .get(order.order_id.as_str())
+                .copied()
+                .unwrap_or(rust_decimal::Decimal::ZERO)
+                != order_size
         {
-            return Err(OkxError::Response("campaign venue order and fills disagree".into()));
+            return Err(OkxError::Response(
+                "campaign venue order and fills disagree".into(),
+            ));
         }
     }
     // Bills without an order identifier (e.g. funding or account transfers)
     // remain raw evidence; their economic meaning/currency must be classified
     // by the SQL finance owner, not silently interpreted as zero entry cost.
-    orders.sort_by(|a,b|a.order_id.cmp(&b.order_id));
-    let encoded=serde_json::to_vec(&(
+    orders.sort_by(|a, b| a.order_id.cmp(&b.order_id));
+    let encoded = serde_json::to_vec(&(
         "okx.campaign-account-history/v1",
-        from_ms, through_ms, &orders, &money.source_digest,
-    )).map_err(|_|OkxError::Response("campaign account digest invalid".into()))?;
+        from_ms,
+        through_ms,
+        &orders,
+        &money.source_digest,
+    ))
+    .map_err(|_| OkxError::Response("campaign account digest invalid".into()))?;
     Ok(CompleteCampaignAccountHistory {
-        from_ms,through_ms,orders,fills:money.fills,bills:money.bills,
-        source_digest:format!("{:x}",Sha256::digest(encoded)),
+        from_ms,
+        through_ms,
+        orders,
+        fills: money.fills,
+        bills: money.bills,
+        source_digest: format!("{:x}", Sha256::digest(encoded)),
     })
 }
 
@@ -1241,31 +1277,44 @@ mod tests {
 
     #[test]
     fn campaign_account_history_rejects_missing_order_and_fill_quantity_mismatch() {
-        let from_ms=1_791_579_300_000i64;
-        let through_ms=from_ms+20_000;
-        let order=canceled_demo_order("123456",&(from_ms+1_000).to_string());
-        let empty=complete_campaign_money_witness(
-            from_ms, through_ms, vec![], vec![]
-        ).unwrap();
-        let source=complete_campaign_account_witness(
-            from_ms,through_ms,vec![order.clone()],empty.clone()
-        ).unwrap();
-        assert_eq!(source.orders.len(),1);
-        assert_eq!(source.source_digest.len(),64);
-        let mut erroneously_filled=order.clone();
-        erroneously_filled.accumulated_fill_size="1".into();
-        assert!(complete_campaign_account_witness(
-            from_ms,through_ms,vec![erroneously_filled],empty.clone()
-        ).is_err());
-        assert!(complete_campaign_account_witness(
-            from_ms,through_ms,vec![order.clone(),order.clone()],empty.clone()
-        ).is_err());
-        let other=complete_campaign_money_witness(
-            from_ms+1,through_ms,vec![],vec![]
-        ).unwrap();
-        assert!(complete_campaign_account_witness(
-            from_ms,through_ms,vec![order],other
-        ).is_err());
+        let from_ms = 1_791_579_300_000i64;
+        let through_ms = from_ms + 20_000;
+        let order = canceled_demo_order("123456", &(from_ms + 1_000).to_string());
+        let empty = complete_campaign_money_witness(from_ms, through_ms, vec![], vec![]).unwrap();
+        let source = complete_campaign_account_witness(
+            from_ms,
+            through_ms,
+            vec![order.clone()],
+            empty.clone(),
+        )
+        .unwrap();
+        assert_eq!(source.orders.len(), 1);
+        assert_eq!(source.source_digest.len(), 64);
+        let mut erroneously_filled = order.clone();
+        erroneously_filled.accumulated_fill_size = "1".into();
+        assert!(
+            complete_campaign_account_witness(
+                from_ms,
+                through_ms,
+                vec![erroneously_filled],
+                empty.clone()
+            )
+            .is_err()
+        );
+        assert!(
+            complete_campaign_account_witness(
+                from_ms,
+                through_ms,
+                vec![order.clone(), order.clone()],
+                empty.clone()
+            )
+            .is_err()
+        );
+        let other =
+            complete_campaign_money_witness(from_ms + 1, through_ms, vec![], vec![]).unwrap();
+        assert!(
+            complete_campaign_account_witness(from_ms, through_ms, vec![order], other).is_err()
+        );
     }
 
     #[test]
