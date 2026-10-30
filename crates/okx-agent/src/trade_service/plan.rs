@@ -67,6 +67,29 @@ fn quantize_executable_price(
     Ok(price)
 }
 
+/// Verify the dimensional unit of contract value before using qty*ct*price.
+/// OKX SWAP reference payloads may omit baseCcy/quoteCcy; ctValCcy is
+/// material and must match the base asset in the authenticated instId.
+/// This is NOT an all-in fee/FX/margin proof and grants no exchange POST.
+fn verify_linear_usdt_entry_units(
+    instrument: &str,
+    contract_value_currency: Option<&str>,
+) -> Result<(), &'static str> {
+    let base = instrument
+        .strip_suffix("-USDT-SWAP")
+        .filter(|base| {
+            !base.is_empty()
+                && base
+                    .bytes()
+                    .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
+        })
+        .ok_or("ENTRY_CONTRACT_UNIT_UNVERIFIED")?;
+    if contract_value_currency != Some(base) {
+        return Err("ENTRY_CONTRACT_UNIT_UNVERIFIED");
+    }
+    Ok(())
+}
+
 /// The manual strategy is an execution/attribution label for account capital,
 /// not a separately capitalized investment portfolio. All account-level finance,
 /// limits and STOP checks still apply to manual orders.
@@ -194,6 +217,12 @@ impl TradeService {
         let tick = dec(&rules.instrument.tick_size)?;
         let lot = dec(&rules.instrument.lot_size)?;
         let minimum = dec(&rules.instrument.min_size)?;
+        if increase {
+            verify_linear_usdt_entry_units(
+                instrument,
+                rules.instrument.contract_value_currency.as_deref(),
+            )?;
+        }
         let ct = dec(rules
             .instrument
             .contract_value
@@ -579,6 +608,30 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn e1_linear_swap_contract_value_unit_is_not_guessed_from_empty_base_fields() {
+        assert_eq!(
+            verify_linear_usdt_entry_units("DOGE-USDT-SWAP", Some("DOGE")),
+            Ok(())
+        );
+        assert_eq!(
+            verify_linear_usdt_entry_units("BTC-USDT-SWAP", Some("USDT")),
+            Err("ENTRY_CONTRACT_UNIT_UNVERIFIED")
+        );
+        assert_eq!(
+            verify_linear_usdt_entry_units("BTC-USDT-SWAP", None),
+            Err("ENTRY_CONTRACT_UNIT_UNVERIFIED")
+        );
+        assert_eq!(
+            verify_linear_usdt_entry_units("BTC-USD-SWAP", Some("BTC")),
+            Err("ENTRY_CONTRACT_UNIT_UNVERIFIED")
+        );
+        assert_eq!(
+            verify_linear_usdt_entry_units("DOGE-USDT-SWAP", Some("BTC")),
+            Err("ENTRY_CONTRACT_UNIT_UNVERIFIED")
+        );
+    }
 
     #[test]
     fn manual_uses_account_capital_but_independent_strategies_require_own_nav() {
