@@ -17,12 +17,10 @@ mod recovery_history_tests {
     fn crash_history_window_never_certifies_expired_or_future_backup() {
         let observed = 1_800_000_000_000;
         assert!(verify_recovery_order_history_window(observed - 60_000, observed).is_ok());
-        assert!(verify_recovery_order_history_window(
-            observed - 119 * 60_000, observed
-        ).is_err());
-        assert!(verify_recovery_order_history_window(
-            observed - 89 * 86_400_000, observed
-        ).is_err());
+        assert!(verify_recovery_order_history_window(observed - 119 * 60_000, observed).is_err());
+        assert!(
+            verify_recovery_order_history_window(observed - 89 * 86_400_000, observed).is_err()
+        );
         assert!(verify_recovery_order_history_window(observed + 1, observed).is_err());
         assert!(verify_recovery_order_history_window(0, observed).is_err());
     }
