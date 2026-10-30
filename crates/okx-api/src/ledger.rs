@@ -9,6 +9,8 @@ const HISTORY_PAGE_LIMIT: usize = 100;
 const HISTORY_MAX_PAGES: usize = 1;
 // Campaign bootstrap is an explicit bounded operation, not a maintenance poll.
 const CAMPAIGN_ORDER_MAX_PAGES_PER_SOURCE: usize = 256;
+// Explicit bounded read footprint for one on-demand campaign reconstruction.
+const CAMPAIGN_MAX_EVIDENCE_ROWS: usize = 30_000;
 const CAMPAIGN_UNFILLED_CANCEL_RETENTION_MS: i64 = 2 * 60 * 60 * 1_000;
 const CAMPAIGN_RETENTION_SAFETY_MS: i64 = 60 * 1_000;
 const RECENT_ORDER_HISTORY_PATH: &str = "/api/v5/trade/orders-history";
@@ -316,6 +318,9 @@ impl AccountHistoryApi {
                     instrument_type, started_at_ms, through_ms, observed_at_ms
                 )
                 .await?;
+            if orders.len().saturating_add(proof.orders.len()) > CAMPAIGN_MAX_EVIDENCE_ROWS {
+                return Err(OkxError::Response("campaign order evidence capacity exceeded".into()));
+            }
             orders.extend(proof.orders);
         }
         let money = self.complete_campaign_money_history(
@@ -391,6 +396,9 @@ impl AccountHistoryApi {
             } else {
                 None
             };
+            if rows.len().saturating_add(chunk.len()) > CAMPAIGN_MAX_EVIDENCE_ROWS {
+                return Err(OkxError::Response("campaign order source capacity exceeded".into()));
+            }
             rows.extend(chunk);
             if count < HISTORY_PAGE_LIMIT {
                 return Ok(BoundedHistory {
@@ -447,6 +455,9 @@ impl AccountHistoryApi {
                 } else {
                     None
                 };
+                if fills.len().saturating_add(rows.len()) > CAMPAIGN_MAX_EVIDENCE_ROWS {
+                    return Err(OkxError::Response("campaign fill evidence capacity exceeded".into()));
+                }
                 fills.extend(rows);
                 if count < HISTORY_PAGE_LIMIT {
                     complete = true;
@@ -483,6 +494,9 @@ impl AccountHistoryApi {
             } else {
                 None
             };
+            if bills.len().saturating_add(rows.len()) > CAMPAIGN_MAX_EVIDENCE_ROWS {
+                return Err(OkxError::Response("campaign bill evidence capacity exceeded".into()));
+            }
             bills.extend(rows);
             if count < HISTORY_PAGE_LIMIT {
                 complete = true;
