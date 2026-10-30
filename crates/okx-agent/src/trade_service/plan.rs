@@ -274,10 +274,12 @@ impl TradeService {
         }
         let fee_rate = if increase {
             let fee = r.observer.fee_schedule(&rules).await.map_err(err)?;
-            if !fee.exact_for_instrument || fee.reference_generation != rules.reference_generation {
-                return Err("FEE_SOURCE_GENERATION_MISMATCH".into());
-            }
-            dec(&fee.taker_rate)?.abs().max(dec(&fee.maker_rate)?.abs())
+            entry_budget::verified_entry_fee_rate(
+                &fee,
+                instrument,
+                &rules.reference_generation,
+                now(),
+            )?
         } else {
             Decimal::ZERO
         };

@@ -114,6 +114,61 @@ impl EntryCostProof {
     }
 }
 
+
+/** Validate the native observer's instrument-specific fee generation and
+ * receipt age. Both preview and execution must use this same source gate;
+ * a correct maker/taker number from an old response is not current evidence.
+ * This is only the known USDT quote fee, never the all-in debit authority.
+ */
+pub(super) fn verified_entry_fee_rate(
+    fee: &okx_observation::FeeScheduleSnapshot,
+    instrument: &str,
+    reference_generation: &str,
+    observed_at_ms: i64,
+) -> Result<Decimal, String> {
+    if fee.schema != okx_observation::FEE_SCHEDULE_SCHEMA_V1
+        || fee.instrument_id != instrument
+        || !fee.exact_for_instrument
+        || fee.reference_generation != reference_generation
+    {
+        return Err("ENTRY_FEE_SOURCE_SCOPE_MISMATCH".into());
+    }
+    let source_time = chrono::DateTime::parse_from_rfc3339(&fee.source_received_at)
+        .map_err(|_| "ENTRY_FEE_SOURCE_TIME_INVALID")?
+        .timestamp_millis();
+    if source_time <= 0
+        || source_time > observed_at_ms
+        || !crate::config::evidence_fresh(
+            source_time,
+            observed_at_ms,
+            crate::config::ACCOUNT_MAX_AGE_MS,
+        )
+    {
+        return Err("ENTRY_FEE_SOURCE_STALE".into());
+    }
+    let exchange_time = fee.exchange_timestamp_ms.parse::<i64>()
+        .map_err(|_| "ENTRY_FEE_EXCHANGE_TIME_INVALID")?;
+    if exchange_time <= 0 || exchange_time > observed_at_ms {
+        return Err("ENTRY_FEE_EXCHANGE_TIME_INVALID".into());
+    }
+    let canonical = serde_json::to_vec(&(
+        &fee.instrument_id,
+        &fee.reference_generation,
+        &fee.level,
+        &fee.maker_rate,
+        &fee.taker_rate,
+        fee.exact_for_instrument,
+    ))
+    .map_err(|_| "ENTRY_FEE_GENERATION_INVALID")?;
+    let generation = format!("sha256:{:x}", Sha256::digest(canonical));
+    if fee.fee_generation != generation {
+        return Err("ENTRY_FEE_GENERATION_INVALID".into());
+    }
+    let maker = dec(&fee.maker_rate)?;
+    let taker = dec(&fee.taker_rate)?;
+    Ok(maker.abs().max(taker.abs()))
+}
+
 pub(super) fn quote(
     qty: Decimal,
     ct: Decimal,
@@ -307,6 +362,73 @@ pub(super) fn unproven_entry_cost_headroom(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn e1_fee_source_must_be_current_exact_and_content_bound() {
+        let stamp = "2026-10-30T00:00:00Z";
+        let now_ms = chrono::DateTime::parse_from_rfc3339(stamp)
+            .unwrap().timestamp_millis();
+        let input = okx_observation::FeeScheduleInput {
+            instrument_id: "BTC-USDT-SWAP".into(),
+            reference_generation: "ref_generation".into(),
+            source_received_at: stamp.into(),
+            exchange_timestamp_ms: now_ms.to_string(),
+            level: "Lv1".into(),
+            maker_rate: "-0.0002".into(),
+            taker_rate: "0.0005".into(),
+            exact_for_instrument: true,
+        };
+        let fee = okx_observation::FeeScheduleSnapshot::from_input(input).unwrap();
+        assert_eq!(
+            verified_entry_fee_rate(
+                &fee, "BTC-USDT-SWAP", "ref_generation", now_ms,
+            ),
+            Ok(d("0.0005"))
+        );
+        assert_eq!(
+            verified_entry_fee_rate(
+                &fee, "ETH-USDT-SWAP", "ref_generation", now_ms,
+            ),
+            Err("ENTRY_FEE_SOURCE_SCOPE_MISMATCH".into())
+        );
+        assert_eq!(
+            verified_entry_fee_rate(
+                &fee, "BTC-USDT-SWAP", "foreign_generation", now_ms,
+            ),
+            Err("ENTRY_FEE_SOURCE_SCOPE_MISMATCH".into())
+        );
+        assert_eq!(
+            verified_entry_fee_rate(
+                &fee, "BTC-USDT-SWAP", "ref_generation",
+                now_ms + crate::config::ACCOUNT_MAX_AGE_MS + 1,
+            ),
+            Err("ENTRY_FEE_SOURCE_STALE".into())
+        );
+        let mut changed = fee.clone();
+        changed.taker_rate = "0.0001".into();
+        assert_eq!(
+            verified_entry_fee_rate(
+                &changed, "BTC-USDT-SWAP", "ref_generation", now_ms,
+            ),
+            Err("ENTRY_FEE_GENERATION_INVALID".into())
+        );
+        changed = fee.clone();
+        changed.exchange_timestamp_ms = (now_ms + 1).to_string();
+        assert_eq!(
+            verified_entry_fee_rate(
+                &changed, "BTC-USDT-SWAP", "ref_generation", now_ms,
+            ),
+            Err("ENTRY_FEE_EXCHANGE_TIME_INVALID".into())
+        );
+        changed = fee.clone();
+        changed.source_received_at = "invalid".into();
+        assert_eq!(
+            verified_entry_fee_rate(
+                &changed, "BTC-USDT-SWAP", "ref_generation", now_ms,
+            ),
+            Err("ENTRY_FEE_SOURCE_TIME_INVALID".into())
+        );
+    }
+
     #[test]
     fn e1_cost_proof_never_equates_margin_or_unknown_fees_with_zero() {
         let quote = quote(d("0.09"), d("1"), d("101"), d("0.0005"), d("1")).unwrap();

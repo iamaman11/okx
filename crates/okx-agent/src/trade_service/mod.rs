@@ -624,14 +624,12 @@ impl TradeService {
                         .await
                         .ok_or("INSTRUMENT_RULES_UNAVAILABLE")?;
                     let fees = r.observer.fee_schedule(&rules).await.map_err(err)?;
-                    if !fees.exact_for_instrument
-                        || fees.reference_generation != rules.reference_generation
-                    {
-                        return Err("FEE_SOURCE_GENERATION_MISMATCH".into());
-                    }
-                    let fee_rate = dec(&fees.taker_rate)?
-                        .abs()
-                        .max(dec(&fees.maker_rate)?.abs());
+                    let fee_rate = entry_budget::verified_entry_fee_rate(
+                        &fees,
+                        instrument,
+                        &rules.reference_generation,
+                        now(),
+                    )?;
                     let source = r.observer.snapshot().await.map_err(err)?;
                     let conversion = Self::usd_conversion(&source)?;
                     let fx = dec(&conversion.usd_per_usdt)?;
