@@ -179,6 +179,15 @@ check((await handleNativeRiskCommand(s,session,{schema:"okx.risk-command/v1",com
    sett(6,1,"0.5",sourceDigest),now+4);
  check(settlementReplay.status==="UPDATED"&&settlementReplay.risk_book_sequence===6,
    "lost settlement receipt can be replayed without charging twice");
+ const staleReplay=await handleNativeRiskCommand(settlements,session,
+   sett(5,1,"0.5",sourceDigest),now+4);
+ check(staleReplay.status==="UPDATED"&&staleReplay.risk_book_sequence===6,
+   "native WSS lost ACK replays with the ORIGINAL CAS without a second charge");
+ const staleIncrease=await handleNativeRiskCommand(settlements,session,
+   sett(5,2,"0.75",sourceDigest),now+4);
+ check(staleIncrease.status==="DENIED"&&staleIncrease.reason===
+   "ENTRY_SETTLEMENT_SOURCE_OR_STATE_UNPROVEN",
+   "WSS may acknowledge an identical old settlement, never new spend on stale CAS");
  check((await handleNativeRiskCommand(settlements,session,
    sett(6,1,"0.6",sourceDigest),now+5)).reason===
      "ENTRY_SETTLEMENT_REVISION_CONFLICT",
