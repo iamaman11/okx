@@ -392,6 +392,33 @@ const replayAltered=await settleEntrySpend(breachStore,bHeld.entry.key,p,{
   cumulative_entry_usd:"2.04",revision:1,source_digest:a
 });
 check(replayAltered.status==="DENIED","same settlement revision cannot add hidden fee");
+// A genuine full fee overrun does NOT permanently orphan terminal occupancy.
+// RELEASE must use the same independently settled cumulative source and
+// retain the irreversible budget-breach STOP after freeing the old position.
+const bCensus={...census,source_digest:a,
+  generated_at_ms:now+4,source_read_floor_ms:now+4};
+const bLedger={
+  account_uid:a,run_id:base.run_id,intent_id:breachRequest.intent_id,
+  state:"FILLED" as const,record_digest:p,cumulative_loss_usd:"0",
+  remaining_exposure_usdt:"0",cumulative_entry_usd:"2.03",
+  entry_settlement_revision:1,entry_settlement_digest:a
+};
+const bReleased=await transitionRisk(breachStore,bHeld.entry.key,p,"RELEASED",d,{
+  connection_generation:77,
+  expected_book_sequence:(await readRiskBook(breachStore))!.sequence,
+  terminal:{
+    census:bCensus,source_proof:{...native,source_digest:a},
+    ledger:bLedger,now_ms:now+5
+  }
+});
+check(bReleased.status==="UPDATED",
+  "source-proven overrun permits terminal cleanup without refunding entry money");
+const afterBreachRelease=(await readRiskBook(breachStore))!;
+check(afterBreachRelease.occupied_usdt==="0"&&
+  afterBreachRelease.entry_budget?.consumed_usd==="2.03"&&
+  afterBreachRelease.entry_budget?.reserved_usd==="0"&&
+  afterBreachRelease.entry_budget?.bound_breach_usd==="0.03",
+  "terminal release frees exposure but retains the entire breach and spent turnover");
 const forbidden=await reserveRisk(breachStore,policy,census,{
   ...breachRequest,intent_id:"intent_breach_002"
 },native);
