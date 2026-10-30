@@ -101,7 +101,9 @@ NAV/STOP → protected position/terminal settlement → release`.
   identity without creating a second ledger. A fresh authenticated Worker
   governance initialization records `campaign_origin` atomically in its
   existing RiskBook and exposes it through the existing typed native
-  `SUMMARY`. The Rust protocol checks campaign identity, installation
+  `SUMMARY`. A decoded non-null entry budget is invalid unless its opening
+  source matches that immutable origin; no runtime or test may manufacture
+  an `entry_budget` for a legacy originless campaign. The Rust protocol checks campaign identity, installation
   and causal opening timestamp. Legacy campaigns lacking the original
   inception receipt remain `NOT_PROVEN`, never receive a fabricated date. For older
   campaigns and recovery, sources fail closed pending independent proof.
