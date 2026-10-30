@@ -1322,6 +1322,18 @@ mod tests {
             )
             .is_err()
         );
+        let unrelated_bill: AccountBill = serde_json::from_value(serde_json::json!({
+            "billId":"7654321","ordId":"not_observed_order",
+            "ccy":"USDT","fee":"0","ts":from_ms+1_000
+        }))
+        .unwrap();
+        let unlinked = complete_campaign_money_witness(
+            from_ms, through_ms, vec![], vec![unrelated_bill],
+        )
+        .unwrap();
+        assert!(complete_campaign_account_witness(
+            from_ms, through_ms, vec![order.clone()], unlinked
+        ).is_err());
         let other =
             complete_campaign_money_witness(from_ms + 1, through_ms, vec![], vec![]).unwrap();
         assert!(
