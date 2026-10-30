@@ -77,7 +77,7 @@ export async function handleNativeRiskCommand(
       return deny(id,"STALE_NATIVE_INSPECTION_SESSION");
     if(!isObject(a.source)||!Array.isArray(a.source.accounts))
       return deny(id,"ENTRY_OPENING_SOURCE_INVALID");
-    if(!Number.isSafeInteger(a.source.as_of_ms)||a.source.as_of_ms>now_ms||
+    if(typeof a.source.as_of_ms!=="number"||!Number.isSafeInteger(a.source.as_of_ms)||a.source.as_of_ms>now_ms||
       now_ms-a.source.as_of_ms>60_000)
       return deny(id,"ENTRY_OPENING_SOURCE_STALE");
     const accepted=await storage.transaction(async(tx:any)=>
