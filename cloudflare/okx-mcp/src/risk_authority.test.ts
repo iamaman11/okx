@@ -89,8 +89,28 @@ check((await handleNativeRiskCommand(s,session,{schema:"okx.risk-command/v1",com
      source_digest:"a".repeat(64)}]
  };
  nativeOpening.source_digest=await openingDigest(nativeOpening);
- check(await installCampaignEntryProof(t,nativeOpening),
-   "synthetic native opening covers all managed real accounts");
+ const install=(source:CampaignEntryOpeningSource)=>({
+   schema:"okx.risk-command/v1",command_id:"native_opening_001",
+   installation_id:initial.installation_id,
+   action:{action:"INSTALL_ENTRY_OPENING",source}});
+ check((await handleNativeRiskCommand(t,{...session,hello:false},
+   install(nativeOpening),now)).reason==="NATIVE_PRODUCTION_SESSION_REQUIRED",
+   "unauthenticated channel cannot install campaign opening");
+ check((await handleNativeRiskCommand(t,{...session,connection_generation:98},
+   install(nativeOpening),now)).reason==="STALE_NATIVE_INSPECTION_SESSION",
+   "stale native channel cannot install campaign opening");
+ check((await handleNativeRiskCommand(t,session,
+   install({...nativeOpening,source_digest:"f".repeat(64)}),now))
+   .reason==="ENTRY_OPENING_SOURCE_NOT_PROVEN",
+   "syntactically valid but mismatched hash is not an opening proof");
+ const opened=await handleNativeRiskCommand(t,session,install(nativeOpening),now);
+ check(opened.status==="OBSERVED"&&
+   opened.budget?.entry_budget?.opening_source_digest===nativeOpening.source_digest&&
+   opened.budget.entry_budget.consumed_usd==="0",
+   "full native opening is atomically installed and read back");
+ check((await handleNativeRiskCommand(t,session,install(nativeOpening),now))
+   .reason==="ENTRY_OPENING_SOURCE_NOT_PROVEN",
+   "repeated opening cannot reset consumed funds");
  const census={complete:true,source_digest:sourceDigest,content_digest:hash,
    generated_at_ms:now,source_read_floor_ms:now,
    account_keys:[account.account_key],

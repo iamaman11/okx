@@ -258,7 +258,10 @@ impl CampaignOpeningSource {
             && self.campaign_started_at_ms > 0
             && !self.accounts.is_empty()
             && self.accounts.len() <= 32
-            && self.accounts.windows(2).all(|pair| pair[0].account_key < pair[1].account_key)
+            && self
+                .accounts
+                .windows(2)
+                .all(|pair| pair[0].account_key < pair[1].account_key)
             && self.accounts.iter().all(|row| {
                 row.account_key.starts_with("okx:real:")
                     && row.account_key.len() == 73
@@ -698,6 +701,57 @@ impl RiskResult {
 }
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn campaign_opening_requires_full_cohort_and_serializes_to_native_ws() {
+        let row = CampaignOpeningAccount {
+            account_key: format!("okx:real:{}", "b".repeat(64)),
+            history_from_ms: 1_000,
+            history_through_ms: 2_000,
+            consumed_entry_usd: "0".into(),
+            order_history_complete: true,
+            fill_history_complete: true,
+            bill_history_complete: true,
+            finance_provenance_sealed: true,
+            source_digest: "a".repeat(64),
+        };
+        let source = CampaignOpeningSource {
+            campaign_id: format!("sha256:{}", "c".repeat(64)),
+            limit_usd: "10".into(),
+            consumed_usd: "0".into(),
+            source_digest: "d".repeat(64),
+            as_of_ms: 2_000,
+            campaign_started_at_ms: 1_000,
+            accounts: vec![row.clone()],
+        };
+        let command = RiskCommand {
+            schema: RISK_COMMAND_SCHEMA_V1.into(),
+            command_id: "opening_test_001".into(),
+            installation_id: "test_install".into(),
+            action: RiskCommandAction::InstallEntryOpening {
+                source: source.clone(),
+            },
+        };
+        assert!(command.valid());
+        let wire = serde_json::to_value(&command).unwrap();
+        assert_eq!(wire["action"]["action"], "INSTALL_ENTRY_OPENING");
+        assert_eq!(
+            serde_json::from_value::<RiskCommand>(wire).unwrap(),
+            command
+        );
+        let mut invalid = source.clone();
+        invalid.accounts[0].bill_history_complete = false;
+        assert!(!invalid.valid());
+        invalid = source.clone();
+        invalid.accounts[0].history_from_ms += 1;
+        assert!(!invalid.valid());
+        invalid = source.clone();
+        invalid.accounts.push(row);
+        assert!(!invalid.valid());
+        invalid = source;
+        invalid.consumed_usd = "-1".into();
+        assert!(!invalid.valid());
+    }
+
     use super::*;
     #[test]
     fn e1_entry_settlement_requires_exact_plan_bound_native_revision() {

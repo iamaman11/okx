@@ -236,7 +236,9 @@ impl AccountStore {
             return Err(StoreError::Invalid("ENTRY_OPENING_NONEMPTY_OR_INVALID"));
         }
         if !finance_proof_sealed(&self.connection)? {
-            return Err(StoreError::Invalid("ENTRY_OPENING_FINANCE_PROVENANCE_UNSEALED"));
+            return Err(StoreError::Invalid(
+                "ENTRY_OPENING_FINANCE_PROVENANCE_UNSEALED",
+            ));
         }
         // An empty fresh venue history cannot be reconciled with an already
         // nonempty local ledger. Such a mismatch is an operational blocker,
