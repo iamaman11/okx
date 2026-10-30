@@ -550,7 +550,7 @@ impl RiskBudgetSnapshot {
                 .as_ref()
                 .is_none_or(RiskEntryBudgetSnapshot::valid)
             && self.entry_budget.as_ref().is_none_or(|opened| {
-                self.campaign_origin.as_ref().is_none_or(|origin| {
+                self.campaign_origin.as_ref().is_some_and(|origin| {
                     origin.campaign_id == opened.campaign_id
                         && origin.started_at_ms <= opened.opening_as_of_ms
                 })
@@ -863,6 +863,47 @@ mod tests {
             terminal_ledger.as_mut().unwrap().state = "UNKNOWN".to_owned();
         }
         assert!(!release.valid());
+    }
+
+    #[test]
+    fn entry_budget_requires_original_installation_owned_campaign_inception() {
+        let campaign = format!("sha256:{}", "a".repeat(64));
+        let origin = RiskCampaignOrigin {
+            campaign_id: campaign.clone(),
+            installation_id: "installation_test".into(),
+            started_at_ms: 1_790_000_000_000,
+        };
+        let entry = RiskEntryBudgetSnapshot {
+            campaign_id: campaign.clone(),
+            limit_usd: "10".into(),
+            consumed_usd: "0".into(),
+            reserved_usd: "0".into(),
+            remaining_usd: "10".into(),
+            opening_source_digest: "b".repeat(64),
+            opening_as_of_ms: 1_790_000_000_100,
+        };
+        let mut view = RiskBudgetSnapshot {
+            campaign_limit_usd: "10".into(),
+            consumed_loss_usd: "0".into(),
+            reserved_loss_usd: "0".into(),
+            remaining_loss_usd: "10".into(),
+            occupied_modelled_loss_usdt: "0".into(),
+            source_as_of_ms: None,
+            campaign_origin: Some(origin),
+            entry_budget: Some(entry),
+        };
+        assert!(view.valid());
+        view.campaign_origin = None;
+        assert!(!view.valid(), "a previous Worker must not mint an opening timestamp");
+        view.campaign_origin = Some(RiskCampaignOrigin {
+            campaign_id: format!("sha256:{}", "c".repeat(64)),
+            ..view.campaign_origin.clone().unwrap_or(RiskCampaignOrigin {
+                campaign_id: campaign.clone(),
+                installation_id: "installation_test".into(),
+                started_at_ms: 1_790_000_000_000,
+            })
+        });
+        assert!(!view.valid(), "another campaign's inception is not a source");
     }
 
     #[test]
