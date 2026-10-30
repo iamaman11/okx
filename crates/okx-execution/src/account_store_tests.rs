@@ -329,11 +329,14 @@ fn e1_fee_bill_cross_source_receipt_requires_both_immutable_sources() {
 
 #[test]
 fn e1_bill_must_follow_actual_fill_and_not_be_interest_or_transfer() {
-    for (bill_time, bill_kind, expected_valid) in [
-        (5_i64, "2:trade", false),
-        (7_i64, "7:interest", false),
-        (7_i64, "1:11", false),
-        (7_i64, "2:trade", true),
+    for (bill_time, bill_kind, fee_time, allocation_leg, expected_valid) in [
+        (5_i64, "2:trade", 6_i64, "account", false),
+        (7_i64, "7:interest", 6_i64, "account", false),
+        (7_i64, "1:11", 6_i64, "account", false),
+        (7_i64, "2:173", 6_i64, "account", false),
+        (7_i64, "2:trade", 8_i64, "account", false),
+        (7_i64, "2:trade", 6_i64, "not-account", false),
+        (7_i64, "2:trade", 6_i64, "account", true),
     ] {
         let mut s = store();
         intent(&mut s);
@@ -342,12 +345,12 @@ fn e1_bill_must_follow_actual_fill_and_not_be_interest_or_transfer() {
             entry_id: "bill:linked-bill:FEE".into(),
             economic_event_key: "bill:linked-bill".into(),
             component: "FEE".into(),
-            allocation_leg: "account".into(),
+            allocation_leg: allocation_leg.into(),
             amount: Decimal::new(-1, 2),
             currency: "USDT".into(),
             instance_id: None,
             source_ref: "fill:linked-fill".into(),
-            time: 6,
+            time: fee_time,
             reverses_entry_id: None,
         };
         s.ingest_page(&IngestPage {
@@ -410,7 +413,7 @@ fn e1_bill_must_follow_actual_fill_and_not_be_interest_or_transfer() {
             assert!(matches!(
                 result,
                 Err(StoreError::Invalid("ENTRY_FEE_BILL_SOURCE_MISMATCH"))
-            ), "uncausal or unrelated bill kind {bill_kind} at {bill_time} cannot settle a fill");
+            ), "fee witness with kind={bill_kind}, bill_time={bill_time}, finance_time={fee_time}, allocation={allocation_leg} cannot settle a fill");
         }
     }
 }
