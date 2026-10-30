@@ -193,13 +193,15 @@ pub(super) fn verified_known_entry_quote(
     observed_at_ms: i64,
 ) -> Result<(EntryQuote, Decimal), String> {
     plan::verify_entry_rules_match(rules, instrument, plan)?;
-    let reference_time = chrono::DateTime::parse_from_rfc3339(
-        &rules.source_received_at,
-    ).map_err(|_| "ENTRY_REFERENCE_SOURCE_TIME_INVALID")?.timestamp_millis();
+    let reference_time = chrono::DateTime::parse_from_rfc3339(&rules.source_received_at)
+        .map_err(|_| "ENTRY_REFERENCE_SOURCE_TIME_INVALID")?
+        .timestamp_millis();
     if reference_time <= 0
         || reference_time > observed_at_ms
         || !crate::config::evidence_fresh(
-            reference_time, observed_at_ms, crate::config::ACCOUNT_MAX_AGE_MS,
+            reference_time,
+            observed_at_ms,
+            crate::config::ACCOUNT_MAX_AGE_MS,
         )
     {
         return Err("ENTRY_REFERENCE_SOURCE_STALE".into());
@@ -208,19 +210,28 @@ pub(super) fn verified_known_entry_quote(
         return Err("ENTRY_QUOTE_ACCOUNT_IDENTITY_MISMATCH".into());
     }
     let fee_rate = verified_entry_fee_rate(
-        fees, instrument, &rules.reference_generation, observed_at_ms,
+        fees,
+        instrument,
+        &rules.reference_generation,
+        observed_at_ms,
     )?;
-    let fx_time = i64::try_from(conversion.observed_at_ms)
-        .map_err(|_| "ENTRY_FX_TIMESTAMP_INVALID")?;
-    if fx_time <= 0 || fx_time > observed_at_ms
+    let fx_time =
+        i64::try_from(conversion.observed_at_ms).map_err(|_| "ENTRY_FX_TIMESTAMP_INVALID")?;
+    if fx_time <= 0
+        || fx_time > observed_at_ms
         || !crate::config::evidence_fresh(
-            fx_time, observed_at_ms, crate::config::ACCOUNT_MAX_AGE_MS,
+            fx_time,
+            observed_at_ms,
+            crate::config::ACCOUNT_MAX_AGE_MS,
         )
     {
         return Err("ENTRY_FX_SOURCE_STALE".into());
     }
     if conversion.source_digest.len() != 64
-        || !conversion.source_digest.bytes().all(|c| c.is_ascii_hexdigit())
+        || !conversion
+            .source_digest
+            .bytes()
+            .all(|c| c.is_ascii_hexdigit())
     {
         return Err("ENTRY_FX_SOURCE_DIGEST_INVALID".into());
     }
@@ -228,9 +239,16 @@ pub(super) fn verified_known_entry_quote(
     if fx <= Decimal::ZERO {
         return Err("ENTRY_FX_SOURCE_INVALID".into());
     }
-    Ok((quote(
-        plan.quantity, plan.contract_value, plan.limit_price, fee_rate, fx,
-    )?, fee_rate))
+    Ok((
+        quote(
+            plan.quantity,
+            plan.contract_value,
+            plan.limit_price,
+            fee_rate,
+            fx,
+        )?,
+        fee_rate,
+    ))
 }
 
 pub(super) fn quote(
@@ -496,19 +514,32 @@ mod tests {
         let spec = okx_observation::InstrumentSpec {
             instrument_id: "BTC-USDT-SWAP".into(),
             instrument_type: okx_observation::InstrumentType::Swap,
-            instrument_family: None, underlying: None, state: "live".into(),
+            instrument_family: None,
+            underlying: None,
+            state: "live".into(),
             rule_type: None,
             funding_requirement: okx_observation::FundingRequirement::Unknown,
-            base_currency: Some("BTC".into()), quote_currency: Some("USDT".into()),
-            settle_currency: Some("USDT".into()), tick_size: "0.1".into(),
-            lot_size: "0.01".into(), min_size: "0.01".into(),
-            max_limit_size: Some("10".into()), max_market_size: None,
-            max_limit_amount: None, max_market_amount: None,
-            contract_type: Some("linear".into()), contract_value: Some("0.01".into()),
-            contract_value_currency: Some("BTC".into()), fee_group_id: None,
-            max_leverage: None, list_time_ms: None, expiry_time_ms: None,
-            initial_price_limit_pct: None, floating_price_limit_pct: None,
-            maximum_price_limit_pct: None, upcoming_rule_changes: Vec::new(),
+            base_currency: Some("BTC".into()),
+            quote_currency: Some("USDT".into()),
+            settle_currency: Some("USDT".into()),
+            tick_size: "0.1".into(),
+            lot_size: "0.01".into(),
+            min_size: "0.01".into(),
+            max_limit_size: Some("10".into()),
+            max_market_size: None,
+            max_limit_amount: None,
+            max_market_amount: None,
+            contract_type: Some("linear".into()),
+            contract_value: Some("0.01".into()),
+            contract_value_currency: Some("BTC".into()),
+            fee_group_id: None,
+            max_leverage: None,
+            list_time_ms: None,
+            expiry_time_ms: None,
+            initial_price_limit_pct: None,
+            floating_price_limit_pct: None,
+            maximum_price_limit_pct: None,
+            upcoming_rule_changes: Vec::new(),
         };
         let rules = okx_observation::InstrumentRulesSnapshot {
             reference_generation: "reference-1".into(),
@@ -516,17 +547,21 @@ mod tests {
             instrument: spec,
         };
         let stamp = "2026-10-30T00:00:00Z";
-        let t = chrono::DateTime::parse_from_rfc3339(stamp).unwrap().timestamp_millis();
-        let fees = okx_observation::FeeScheduleSnapshot::from_input(
-            okx_observation::FeeScheduleInput {
+        let t = chrono::DateTime::parse_from_rfc3339(stamp)
+            .unwrap()
+            .timestamp_millis();
+        let fees =
+            okx_observation::FeeScheduleSnapshot::from_input(okx_observation::FeeScheduleInput {
                 instrument_id: "BTC-USDT-SWAP".into(),
                 reference_generation: "reference-1".into(),
                 source_received_at: stamp.into(),
                 exchange_timestamp_ms: t.to_string(),
-                level: "Lv1".into(), maker_rate: "-0.0002".into(),
-                taker_rate: "0.0005".into(), exact_for_instrument: true,
-            }
-        ).unwrap();
+                level: "Lv1".into(),
+                maker_rate: "-0.0002".into(),
+                taker_rate: "0.0005".into(),
+                exact_for_instrument: true,
+            })
+            .unwrap();
         let plan = IntentPlan {
             contract_value: dec("0.01").unwrap(),
             quantity: dec("0.02").unwrap(),
@@ -538,40 +573,102 @@ mod tests {
             source_digest: "a".repeat(64),
             observed_at_ms: t as u64,
         };
-        let verified = || verified_known_entry_quote(
-            &plan, "BTC-USDT-SWAP", &rules, &fees, &fx,
-            "uid", "uid", t,
-        );
+        let verified = || {
+            verified_known_entry_quote(&plan, "BTC-USDT-SWAP", &rules, &fees, &fx, "uid", "uid", t)
+        };
         let (known, fee) = verified().unwrap();
         assert_eq!(fee, dec("0.0005").unwrap());
         assert_eq!(known.fee_usdt, dec("0.005001").unwrap());
         assert_eq!(known.total_usdt, dec("10.005021").unwrap());
-        assert_eq!(verified_known_entry_quote(
-            &plan, "BTC-USDT-SWAP", &rules, &fees, &fx,
-            "wrong", "uid", t,
-        ), Err("ENTRY_QUOTE_ACCOUNT_IDENTITY_MISMATCH".into()));
-        let stale = UsdConversion { observed_at_ms:
-            (t - crate::config::ACCOUNT_MAX_AGE_MS - 1) as u64, ..fx.clone() };
-        assert_eq!(verified_known_entry_quote(
-            &plan, "BTC-USDT-SWAP", &rules, &fees, &stale, "uid", "uid", t
-        ), Err("ENTRY_FX_SOURCE_STALE".into()));
+        assert_eq!(
+            verified_known_entry_quote(
+                &plan,
+                "BTC-USDT-SWAP",
+                &rules,
+                &fees,
+                &fx,
+                "wrong",
+                "uid",
+                t,
+            ),
+            Err("ENTRY_QUOTE_ACCOUNT_IDENTITY_MISMATCH".into())
+        );
+        let stale = UsdConversion {
+            observed_at_ms: (t - crate::config::ACCOUNT_MAX_AGE_MS - 1) as u64,
+            ..fx.clone()
+        };
+        assert_eq!(
+            verified_known_entry_quote(
+                &plan,
+                "BTC-USDT-SWAP",
+                &rules,
+                &fees,
+                &stale,
+                "uid",
+                "uid",
+                t
+            ),
+            Err("ENTRY_FX_SOURCE_STALE".into())
+        );
         let mut stale_rules = rules.clone();
         stale_rules.source_received_at = "2026-10-29T23:00:00Z".into();
-        assert_eq!(verified_known_entry_quote(
-            &plan, "BTC-USDT-SWAP", &stale_rules, &fees, &fx, "uid", "uid", t
-        ), Err("ENTRY_REFERENCE_SOURCE_STALE".into()));
+        assert_eq!(
+            verified_known_entry_quote(
+                &plan,
+                "BTC-USDT-SWAP",
+                &stale_rules,
+                &fees,
+                &fx,
+                "uid",
+                "uid",
+                t
+            ),
+            Err("ENTRY_REFERENCE_SOURCE_STALE".into())
+        );
         stale_rules.source_received_at = "not-a-date".into();
-        assert_eq!(verified_known_entry_quote(
-            &plan, "BTC-USDT-SWAP", &stale_rules, &fees, &fx, "uid", "uid", t
-        ), Err("ENTRY_REFERENCE_SOURCE_TIME_INVALID".into()));
-        let corrupted = UsdConversion { source_digest: "invalid".into(), ..fx.clone() };
-        assert_eq!(verified_known_entry_quote(
-            &plan, "BTC-USDT-SWAP", &rules, &fees, &corrupted, "uid", "uid", t
-        ), Err("ENTRY_FX_SOURCE_DIGEST_INVALID".into()));
-        assert_eq!(verified_known_entry_quote(
-            &plan, "BTC-USDT-SWAP", &rules, &fees, &fx,
-            "uid", "uid", t + crate::config::ACCOUNT_MAX_AGE_MS + 1
-        ), Err("ENTRY_FEE_SOURCE_STALE".into()));
+        assert_eq!(
+            verified_known_entry_quote(
+                &plan,
+                "BTC-USDT-SWAP",
+                &stale_rules,
+                &fees,
+                &fx,
+                "uid",
+                "uid",
+                t
+            ),
+            Err("ENTRY_REFERENCE_SOURCE_TIME_INVALID".into())
+        );
+        let corrupted = UsdConversion {
+            source_digest: "invalid".into(),
+            ..fx.clone()
+        };
+        assert_eq!(
+            verified_known_entry_quote(
+                &plan,
+                "BTC-USDT-SWAP",
+                &rules,
+                &fees,
+                &corrupted,
+                "uid",
+                "uid",
+                t
+            ),
+            Err("ENTRY_FX_SOURCE_DIGEST_INVALID".into())
+        );
+        assert_eq!(
+            verified_known_entry_quote(
+                &plan,
+                "BTC-USDT-SWAP",
+                &rules,
+                &fees,
+                &fx,
+                "uid",
+                "uid",
+                t + crate::config::ACCOUNT_MAX_AGE_MS + 1
+            ),
+            Err("ENTRY_FEE_SOURCE_STALE".into())
+        );
     }
 
     #[test]

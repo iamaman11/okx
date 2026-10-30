@@ -1,9 +1,7 @@
 use super::*;
 use okx_api::CancelOrderRequest;
 /// Historical known pricing evidence is not an all-in entry debit proof.
-fn entry_cost_status(
-    stored: Option<okx_execution::EntryQuoteEvidence>,
-) -> Result<Value, String> {
+fn entry_cost_status(stored: Option<okx_execution::EntryQuoteEvidence>) -> Result<Value, String> {
     let Some(quote) = stored else {
         return Ok(json!({
             "state": "not_proven",
@@ -77,8 +75,12 @@ impl TradeService {
             && r.configuration.account_key.environment == okx_protocol::accounts::Environment::Real
         {
             let id = i.intent_id.clone();
-            let quote = r.execution.store.call(deadline(), move |s| s.entry_quote(&id))
-                .await.map_err(err)?;
+            let quote = r
+                .execution
+                .store
+                .call(deadline(), move |s| s.entry_quote(&id))
+                .await
+                .map_err(err)?;
             entry_cost_status(quote)?
         } else {
             json!(null)
@@ -1071,15 +1073,19 @@ mod entry_cost_status_tests {
         let quote = okx_execution::EntryQuoteEvidence {
             schema: "okx.entry-known-quote/v1".into(),
             account_key: "okx:real:test".into(),
-            installation_id: "install".into(), intent_id: "intent".into(),
-            plan_hash: "a".repeat(64), policy_revision: 1,
+            installation_id: "install".into(),
+            intent_id: "intent".into(),
+            plan_hash: "a".repeat(64),
+            policy_revision: 1,
             instrument_id: "BTC-USDT-SWAP".into(),
             quantity: dec("0.01").unwrap(),
             limit_price: dec("100").unwrap(),
             contract_value: Decimal::ONE,
             fee_rate: dec("0.0005").unwrap(),
-            maker_rate: "-0.0002".into(), taker_rate: "0.0005".into(),
-            fee_level: "Lv1".into(), fee_exchange_at: 1,
+            maker_rate: "-0.0002".into(),
+            taker_rate: "0.0005".into(),
+            fee_level: "Lv1".into(),
+            fee_exchange_at: 1,
             usd_per_usdt: Decimal::ONE,
             notional_usdt: Decimal::ONE,
             fee_usdt: dec("0.0005").unwrap(),
@@ -1087,8 +1093,10 @@ mod entry_cost_status_tests {
             total_usd: dec("1.0005").unwrap(),
             fee_generation: format!("sha256:{}", "b".repeat(64)),
             reference_generation: "ref".into(),
-            fee_received_at: 1, conversion_digest: "c".repeat(64),
-            conversion_received_at: 1, observed_at: 1,
+            fee_received_at: 1,
+            conversion_digest: "c".repeat(64),
+            conversion_received_at: 1,
+            observed_at: 1,
         };
         let view = entry_cost_status(Some(quote.clone())).unwrap();
         assert_eq!(view["state"], "historical_known_cost_only");
