@@ -219,6 +219,36 @@ impl AccountHistoryApi {
             .private_get("/api/v5/trade/fills-history", &params)
             .await
     }
+    /// A complete opening campaign requires BOTH independent order sources:
+    /// recent orders include canceled/unfilled cases which the archived
+    /// endpoint may omit, while archived orders cover the longer history.
+    /// Never merge their pagination cursors or infer a gap-free result from
+    /// one bounded 100-row sample; each source must be exhausted separately.
+    pub async fn orders_history_page(
+        &self,
+        instrument_type: &str,
+        begin: i64,
+        end: i64,
+        after: Option<&str>,
+        archive: bool,
+    ) -> Result<Vec<HistoricalOrder>, OkxError> {
+        if !matches!(instrument_type, "SPOT" | "MARGIN" | "SWAP" | "FUTURES" | "OPTION") {
+            return Err(OkxError::Config("invalid history instrument type".into()));
+        }
+        let mut params = history_window_params(begin, end, after)?;
+        params.push(("instType", instrument_type.into()));
+        self.client
+            .private_get(
+                if archive {
+                    ARCHIVE_ORDER_HISTORY_PATH
+                } else {
+                    RECENT_ORDER_HISTORY_PATH
+                },
+                &params,
+            )
+            .await
+    }
+
     pub async fn bills_history_page(
         &self,
         begin: i64,
