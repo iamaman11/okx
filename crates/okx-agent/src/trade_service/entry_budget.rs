@@ -84,22 +84,33 @@ pub(super) enum BudgetValuation {
         source_digest: String,
         basis: &'static str,
     },
-    Pending { reason: &'static str },
+    Pending {
+        reason: &'static str,
+    },
 }
 impl BudgetValuation {
     fn rate(&self, observed: Decimal) -> Result<Option<Decimal>, String> {
         match self {
             Self::Pending { .. } => Ok(None),
-            Self::AdmissionSnapshot { usd_per_usdt, observed_at_ms, source_digest, basis } => {
-                if *usd_per_usdt <= Decimal::ZERO || observed <= Decimal::ZERO
-                    || *observed_at_ms <= 0 {
+            Self::AdmissionSnapshot {
+                usd_per_usdt,
+                observed_at_ms,
+                source_digest,
+                basis,
+            } => {
+                if *usd_per_usdt <= Decimal::ZERO
+                    || observed <= Decimal::ZERO
+                    || *observed_at_ms <= 0
+                {
                     return Err("ENTRY_VALUATION_INVALID".into());
                 }
                 if *usd_per_usdt != observed {
                     return Err("ENTRY_VALUATION_RATE_MISMATCH".into());
                 }
-                if basis.is_empty() || source_digest.len() != 64
-                    || !source_digest.bytes().all(|b| b.is_ascii_hexdigit()) {
+                if basis.is_empty()
+                    || source_digest.len() != 64
+                    || !source_digest.bytes().all(|b| b.is_ascii_hexdigit())
+                {
                     return Err("ENTRY_VALUATION_SOURCE_INVALID".into());
                 }
                 Ok(Some(*usd_per_usdt))
@@ -107,15 +118,25 @@ impl BudgetValuation {
         }
     }
     fn reason(&self) -> Option<&'static str> {
-        match self { Self::Pending { reason } => Some(*reason), _ => None }
+        match self {
+            Self::Pending { reason } => Some(*reason),
+            _ => None,
+        }
     }
     /// Bind a frozen rate to the exact independently authenticated SQL quote.
     fn bind(&self, receipt: &okx_execution::EntryQuoteEvidence) -> Result<(), String> {
-        if let Self::AdmissionSnapshot { usd_per_usdt, observed_at_ms, source_digest, .. } = self {
+        if let Self::AdmissionSnapshot {
+            usd_per_usdt,
+            observed_at_ms,
+            source_digest,
+            ..
+        } = self
+        {
             if *usd_per_usdt != receipt.usd_per_usdt
                 || source_digest != &receipt.conversion_digest
                 || *observed_at_ms > receipt.observed_at
-                || receipt.observed_at - *observed_at_ms > 5_000 {
+                || receipt.observed_at - *observed_at_ms > 5_000
+            {
                 return Err("ENTRY_VALUATION_RECEIPT_MISMATCH".into());
             }
         }
@@ -1041,6 +1062,52 @@ mod tests {
             reason: "ADMISSION_FX_SNAPSHOT_UNPROVEN",
         };
         assert_eq!(p.proven_upper_usd().unwrap(), None);
+    }
+
+    #[test]
+    fn r4_frozen_admission_fx_valuates_turnover_not_margin_twice() {
+        let quote = quote(d("8"), Decimal::ONE, Decimal::ONE, d("0.0005"), d("1.01"))
+            .unwrap();
+        assert_eq!(quote.notional_usdt, d("8"));
+        assert_eq!(quote.fee_usdt, d("0.004"));
+        assert_eq!(quote.total_usdt, d("8.004"));
+        assert_eq!(quote.total_usd, d("8.08404"));
+        let mut proof = EntryCostProof::unproven_linear_quote(quote);
+        proof.extra_immediate_fees = EntryCostEvidence::NotApplicable {
+            basis: "no-extra-fee",
+            source_digest: "a".repeat(64),
+        };
+        proof.borrowing = EntryCostEvidence::NotApplicable {
+            basis: "no-borrow",
+            source_digest: "b".repeat(64),
+        };
+        proof.collateral_or_margin = EntryCostEvidence::Proven {
+            upper_usd: d("4.04"),
+            basis: "margin-requirement",
+            source_digest: "c".repeat(64),
+        };
+        proof.available_collateral = EntryAvailableCollateral::Proven {
+            available_lower_usd: d("20"),
+            basis: "own-collateral",
+            source_digest: "d".repeat(64),
+        };
+        proof.valuation = BudgetValuation::AdmissionSnapshot {
+            usd_per_usdt: d("1.01"),
+            observed_at_ms: 1_000,
+            source_digest: "e".repeat(64),
+            basis: "frozen-admission",
+        };
+        assert_eq!(proof.proven_upper_usd().unwrap(), Some(d("8.08404")));
+        // Later rates belong to current FX PnL, not historical budget charge.
+        assert_eq!(proof.proven_upper_usd().unwrap(), Some(d("8.08404")));
+        assert_ne!(
+            proof.quote.total_usdt * d("0.97"),
+            proof.proven_upper_usd().unwrap().unwrap()
+        );
+        assert_ne!(
+            proof.quote.total_usdt * d("1.05"),
+            proof.proven_upper_usd().unwrap().unwrap()
+        );
     }
 
     #[test]
