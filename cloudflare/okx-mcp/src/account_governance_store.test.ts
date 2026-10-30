@@ -58,8 +58,8 @@ ok(JSON.stringify(await lowerCampaignLimit(s,{expected_revision:revision,campaig
     .filter(a=>a.environment==="real")
     .map(a=>({account_key:a.account_key,history_from_ms:openingFrom,
       history_through_ms:openingAt,consumed_entry_usd:"7",
-      order_history_complete:true,fill_history_complete:true,
-      bill_history_complete:true,finance_provenance_sealed:true,
+      order_history_complete:true as const,fill_history_complete:true as const,
+      bill_history_complete:true as const,finance_provenance_sealed:true as const,
       source_digest:"e".repeat(64)}))
     .sort((a,b)=>a.account_key.localeCompare(b.account_key))
  };
