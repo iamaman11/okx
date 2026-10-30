@@ -1,4 +1,25 @@
 use super::super::*;
+// One derived schema for BOTH T0 creation and reopening an existing v2
+// database. The persisted schema version and original finance facts stay
+// unchanged; every future ENTRY_ADMISSION/SETTLEMENT receipt is immutable.
+const ACCOUNT_DERIVED_SCHEMA: &str = "
+CREATE INDEX IF NOT EXISTS idx_nav_scope_version_time ON nav_points(scope_id,source_version,time);
+CREATE INDEX IF NOT EXISTS idx_finance_source_component ON finance_entries(source_ref,component);
+CREATE INDEX IF NOT EXISTS idx_finance_links_source ON finance_source_links(source_ref,entry_id);
+CREATE INDEX IF NOT EXISTS idx_fills_intent ON fills(intent_id,fill_id);
+CREATE TRIGGER IF NOT EXISTS immutable_entry_quote_update BEFORE UPDATE ON operation_receipts
+    WHEN OLD.kind='ENTRY_QUOTE_UNPROVEN' BEGIN SELECT RAISE(ABORT,'IMMUTABLE_ENTRY_QUOTE'); END;
+CREATE TRIGGER IF NOT EXISTS immutable_entry_quote_delete BEFORE DELETE ON operation_receipts
+    WHEN OLD.kind='ENTRY_QUOTE_UNPROVEN' BEGIN SELECT RAISE(ABORT,'IMMUTABLE_ENTRY_QUOTE'); END;
+CREATE TRIGGER IF NOT EXISTS immutable_entry_admission_update BEFORE UPDATE ON operation_receipts
+    WHEN OLD.kind='ENTRY_ADMISSION_PROVEN' BEGIN SELECT RAISE(ABORT,'IMMUTABLE_ENTRY_ADMISSION'); END;
+CREATE TRIGGER IF NOT EXISTS immutable_entry_admission_delete BEFORE DELETE ON operation_receipts
+    WHEN OLD.kind='ENTRY_ADMISSION_PROVEN' BEGIN SELECT RAISE(ABORT,'IMMUTABLE_ENTRY_ADMISSION'); END;
+CREATE TRIGGER IF NOT EXISTS immutable_entry_settlement_update BEFORE UPDATE ON operation_receipts
+    WHEN OLD.kind='ENTRY_SETTLEMENT_PROVEN' BEGIN SELECT RAISE(ABORT,'IMMUTABLE_ENTRY_SETTLEMENT'); END;
+CREATE TRIGGER IF NOT EXISTS immutable_entry_settlement_delete BEFORE DELETE ON operation_receipts
+    WHEN OLD.kind='ENTRY_SETTLEMENT_PROVEN' BEGIN SELECT RAISE(ABORT,'IMMUTABLE_ENTRY_SETTLEMENT'); END;
+";
 impl AccountStore {
     pub fn initialize_or_inspect_exact(
         path: impl AsRef<Path>,
@@ -63,6 +84,7 @@ impl AccountStore {
         c.pragma_update(None, "journal_mode", "WAL")?;
         let tx = c.transaction_with_behavior(TransactionBehavior::Immediate)?;
         tx.execute_batch(include_str!("../../../schema/account-v2.sql"))?;
+        tx.execute_batch(ACCOUNT_DERIVED_SCHEMA)?;
         tx.execute(
             "INSERT INTO account_meta VALUES(1,?1,?2,2,?3,?4,?5,?6)",
             params![
@@ -173,7 +195,7 @@ impl AccountStore {
         }
         // Existing v2 databases need the same derived lookup as clean T0 databases.
         // This is an idempotent index only: no financial facts or schema version change.
-        c.execute_batch("CREATE INDEX IF NOT EXISTS idx_nav_scope_version_time ON nav_points(scope_id,source_version,time); CREATE INDEX IF NOT EXISTS idx_finance_source_component ON finance_entries(source_ref,component); CREATE INDEX IF NOT EXISTS idx_finance_links_source ON finance_source_links(source_ref,entry_id); CREATE INDEX IF NOT EXISTS idx_fills_intent ON fills(intent_id,fill_id); CREATE TRIGGER IF NOT EXISTS immutable_entry_quote_update BEFORE UPDATE ON operation_receipts WHEN OLD.kind='ENTRY_QUOTE_UNPROVEN' BEGIN SELECT RAISE(ABORT,'IMMUTABLE_ENTRY_QUOTE'); END; CREATE TRIGGER IF NOT EXISTS immutable_entry_quote_delete BEFORE DELETE ON operation_receipts WHEN OLD.kind='ENTRY_QUOTE_UNPROVEN' BEGIN SELECT RAISE(ABORT,'IMMUTABLE_ENTRY_QUOTE'); END; CREATE TRIGGER IF NOT EXISTS immutable_entry_admission_update BEFORE UPDATE ON operation_receipts WHEN OLD.kind='ENTRY_ADMISSION_PROVEN' BEGIN SELECT RAISE(ABORT,'IMMUTABLE_ENTRY_ADMISSION'); END; CREATE TRIGGER IF NOT EXISTS immutable_entry_admission_delete BEFORE DELETE ON operation_receipts WHEN OLD.kind='ENTRY_ADMISSION_PROVEN' BEGIN SELECT RAISE(ABORT,'IMMUTABLE_ENTRY_ADMISSION'); END; CREATE TRIGGER IF NOT EXISTS immutable_entry_settlement_update BEFORE UPDATE ON operation_receipts WHEN OLD.kind='ENTRY_SETTLEMENT_PROVEN' BEGIN SELECT RAISE(ABORT,'IMMUTABLE_ENTRY_SETTLEMENT'); END; CREATE TRIGGER IF NOT EXISTS immutable_entry_settlement_delete BEFORE DELETE ON operation_receipts WHEN OLD.kind='ENTRY_SETTLEMENT_PROVEN' BEGIN SELECT RAISE(ABORT,'IMMUTABLE_ENTRY_SETTLEMENT'); END;")?;
+        c.execute_batch(ACCOUNT_DERIVED_SCHEMA)?;
         // Existing v2 ledger: establish an immutable-event provenance fence
         // once on open, never during the two-second NAV hot path. An invalid
         // old economic row leaves strategy valuation NOT_PROVEN, but must not
