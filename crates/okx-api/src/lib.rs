@@ -30,8 +30,8 @@ pub use error::OkxError;
 pub use instrument::InstrumentType;
 pub use ledger::{
     AccountBill, AccountHistoryApi, BoundedHistory, CompleteCampaignAccountHistory,
-    CompleteCampaignMoneyHistory, CompleteCampaignOrderHistory, FillHistory,
-    HistoricalOrder, PositionHistory,
+    CompleteCampaignMoneyHistory, CompleteCampaignOrderHistory, FillHistory, HistoricalOrder,
+    PositionHistory,
 };
 pub use market_data::{
     MarketDataApi, PublicCandle, PublicFundingHistory, PublicFundingRate, PublicIndexTicker,
