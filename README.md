@@ -78,8 +78,16 @@ NAV/STOP → protected position/terminal settlement → release`.
   sources: a single 100-row read or one archive alone is never complete
   order history. To install campaign opening, source coverage must run
   from independently proven actual campaign inception to a common cut-off
-  over every managed real account; the current importer is not yet
+  over every managed real account. The on-demand typed
+  `AccountHistoryApi::complete_campaign_orders` now exhausts BOTH order
+  sources with a bounded page limit, verifies order scope/causality and
+  returns a canonical content digest, only when even canceled-without-fill
+  orders remain provable (under two hours with a margin). For older campaigns
+  the native source fails closed. The cross-account importer is not yet
   connected, so RiskBook leaves admission blocked.
+  Missing all-in FX/margin/borrow sources now reject the prepared SQL intent
+  as `ENTRY_ALL_IN_COST_UNPROVEN` BEFORE any central RESERVE attempt: known
+  quote remains readable, and no orphaned risk marker can be created.
 - **Handling net-mode positions:** exchange `posSide=net` uses a signed
   position quantity, while native SQL lots use `long` / `short`.
   `trade_service/reconcile.rs::verified_venue_position_direction` is the
