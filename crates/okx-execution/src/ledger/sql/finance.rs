@@ -263,7 +263,7 @@ impl AccountStore {
                    ON r.intent_id=i.intent_id AND r.plan_hash=i.plan_hash
                     AND r.account_key=?2 AND r.installation_id=?3
                  WHERE i.intent_id=?1",
-                params![intent_id,self.meta.account_key,self.meta.installation_id],
+                params![intent_id, self.meta.account_key, self.meta.installation_id],
                 |r| {
                     Ok((
                         r.get(0)?,

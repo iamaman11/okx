@@ -176,7 +176,7 @@ fn e1_intent_fill_cost_rejects_wrong_side_price_and_overfills() {
     for (side, qty, price, expected) in cases {
         let mut s = store();
         intent(&mut s);
-    acknowledged_entry_intent(&mut s);
+        acknowledged_entry_intent(&mut s);
         s.ingest_page(&IngestPage {
             fills: vec![Fill {
                 fill_id: "unbound-fill".into(),
