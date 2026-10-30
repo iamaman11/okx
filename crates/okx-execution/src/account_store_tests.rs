@@ -32,6 +32,15 @@ fn e1_sql_known_quote_is_immutable_scoped_and_never_all_in_permission() {
     s.bind_entry_quote(&proof).unwrap();
     s.bind_entry_quote(&proof).unwrap();
     assert_eq!(s.entry_quote(&i.intent_id).unwrap(), Some(proof.clone()));
+    assert!(s.connection.execute(
+        "UPDATE operation_receipts SET result_ref='tampered' WHERE operation_id='entry-quote:intent'",
+        []
+    ).is_err());
+    assert!(s.connection.execute(
+        "DELETE FROM operation_receipts WHERE operation_id='entry-quote:intent'",
+        []
+    ).is_err());
+    assert_eq!(s.entry_quote(&i.intent_id).unwrap(), Some(proof.clone()));
     let mut changed = proof.clone();
     changed.total_usd += Decimal::ONE;
     assert!(matches!(

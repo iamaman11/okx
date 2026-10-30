@@ -46,6 +46,8 @@ CREATE TABLE source_cursors(source TEXT NOT NULL,stream_partition TEXT NOT NULL,
 CREATE TABLE risk_receipts(reservation_key TEXT PRIMARY KEY,intent_id TEXT NOT NULL UNIQUE REFERENCES intents(intent_id),account_key TEXT NOT NULL,installation_id TEXT NOT NULL,instance_id TEXT,plan_hash TEXT NOT NULL,policy_revision INTEGER NOT NULL,receipt_hash TEXT NOT NULL,requested_loss_usd TEXT NOT NULL,conversion_digest TEXT NOT NULL,state TEXT NOT NULL) STRICT;
 CREATE INDEX idx_risk_receipts_active ON risk_receipts(state,intent_id);
 CREATE TABLE operation_receipts(operation_id TEXT PRIMARY KEY,kind TEXT NOT NULL,request_hash TEXT NOT NULL,result_ref TEXT NOT NULL,committed_at INTEGER NOT NULL) STRICT;
+CREATE TRIGGER IF NOT EXISTS immutable_entry_quote_update BEFORE UPDATE ON operation_receipts WHEN OLD.kind='ENTRY_QUOTE_UNPROVEN' BEGIN SELECT RAISE(ABORT,'IMMUTABLE_ENTRY_QUOTE'); END;
+CREATE TRIGGER IF NOT EXISTS immutable_entry_quote_delete BEFORE DELETE ON operation_receipts WHEN OLD.kind='ENTRY_QUOTE_UNPROVEN' BEGIN SELECT RAISE(ABORT,'IMMUTABLE_ENTRY_QUOTE'); END;
 CREATE TABLE account_policy(singleton INTEGER PRIMARY KEY CHECK(singleton=1),revision INTEGER NOT NULL,paused INTEGER NOT NULL CHECK(paused IN(0,1)),campaign_id TEXT NOT NULL,campaign_limit TEXT NOT NULL,campaign_loss TEXT NOT NULL) STRICT;
 CREATE TABLE storage_recovery(singleton INTEGER PRIMARY KEY CHECK(singleton=1),requires_reconcile INTEGER NOT NULL CHECK(requires_reconcile IN(0,1)),backup_at INTEGER,reconciled_evidence TEXT) STRICT;
 PRAGMA user_version=2;

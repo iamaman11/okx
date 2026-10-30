@@ -4,11 +4,13 @@ impl AccountStore {
     /// No second ledger/table: one immutable, idempotent record in the existing
     /// operation_receipts journal, bound to the original saved intent/plan.
     /// Its kind explicitly denies any claim of ALL-IN cost authorization.
-    pub fn bind_entry_quote(&mut self, quote: &EntryQuoteEvidence) -> StoreResult<()> {
+    fn verified_stored_entry_quote(
+        &self,
+        quote: &EntryQuoteEvidence,
+    ) -> StoreResult<StoredIntent> {
         let intent = self.intent(&quote.intent_id)?
             .ok_or(StoreError::Invalid("ENTRY_QUOTE_INTENT_MISSING"))?;
-        if intent.state != IntentState::Prepared
-            || quote.schema != "okx.entry-known-quote/v1"
+        if quote.schema != "okx.entry-known-quote/v1"
             || quote.account_key != self.meta.account_key
             || quote.installation_id != self.meta.installation_id
             || quote.plan_hash != intent.plan_hash
@@ -55,6 +57,14 @@ impl AccountStore {
         ) {
             return Err(StoreError::Invalid("ENTRY_QUOTE_ARITHMETIC_MISMATCH"));
         }
+        Ok(intent)
+    }
+
+    pub fn bind_entry_quote(&mut self, quote: &EntryQuoteEvidence) -> StoreResult<()> {
+        let intent = self.verified_stored_entry_quote(quote)?;
+        if intent.state != IntentState::Prepared {
+            return Err(StoreError::Invalid("ENTRY_QUOTE_INTENT_STATE_INVALID"));
+        }
         let name = format!("entry-quote:{}", intent.intent_id);
         let encoded = serde_json::to_string(quote)
             .map_err(|_| StoreError::Invalid("ENTRY_QUOTE_SERIALIZATION_FAILED"))?;
@@ -83,9 +93,14 @@ impl AccountStore {
         }
         let quote: EntryQuoteEvidence = serde_json::from_str(&receipt.result_ref)
             .map_err(|_| StoreError::Invalid("ENTRY_QUOTE_CORRUPT"))?;
-        if quote.intent_id != intent_id || quote.plan_hash != receipt.request_hash {
+        if quote.intent_id != intent_id || quote.plan_hash != receipt.request_hash
+            || quote.observed_at != receipt.committed_at
+        {
             return Err(StoreError::Invalid("ENTRY_QUOTE_CORRUPT"));
         }
+        // Revalidate against the actual durable plan and exact arithmetic on
+        // EVERY read, including after Windows restart and v2 DB reopen.
+        self.verified_stored_entry_quote(&quote)?;
         Ok(Some(quote))
     }
     /// Durable address of a central reservation attempt, committed before
