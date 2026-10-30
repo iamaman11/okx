@@ -123,6 +123,24 @@ fn r4_followup_requires_terminal_native_fill_and_central_settlement() {
     }
     assert!(s.verify_captured_campaign_continuity(from, through).is_ok());
     let intent = intent(&mut s);
+    let quote = e1_source_quote(&s, &intent);
+    s.bind_entry_quote(&quote).unwrap();
+    let admitted = EntryAdmissionEvidence {
+        schema: "okx.entry-admission/v2".into(),
+        account_key: s.meta.account_key.clone(),
+        installation_id: s.meta.installation_id.clone(),
+        intent_id: intent.intent_id.clone(),
+        plan_hash: intent.plan_hash.clone(),
+        quote_digest: format!(
+            "{:x}", sha2::Sha256::digest(serde_json::to_vec(&quote).unwrap())
+        ),
+        admission_usd_per_usdt: Decimal::ONE,
+        other_entry_costs_upper_usd: Decimal::new(95, 2),
+        entry_upper_usd: Decimal::from(101),
+        entry_proof_digest: "a".repeat(64),
+        observed_at: quote.observed_at,
+    };
+    s.bind_entry_admission(&admitted).unwrap();
     s.connection
         .execute(
             "UPDATE intents SET state='FILLED',exchange_order_id='exchange',
@@ -155,17 +173,39 @@ fn r4_followup_requires_terminal_native_fill_and_central_settlement() {
             rusqlite::params![intent.intent_id, intent.plan_hash],
         )
         .unwrap();
+    let terminal = EntrySettlementEvidence {
+        schema: "okx.entry-terminal-settlement/v1".into(),
+        account_key: s.meta.account_key.clone(),
+        intent_id: intent.intent_id.clone(),
+        plan_hash: intent.plan_hash.clone(),
+        reservation_key: "reservation".into(),
+        venue_order_id: "exchange".into(),
+        venue_update_ms: 30,
+        source_covered_through_ms: 80,
+        venue_filled_quantity: Decimal::ONE,
+        booked_notional_and_fee_usdt: Decimal::from(50),
+        cumulative_entry_usd: Decimal::from(50),
+        settlement_revision: 1,
+        source_digest: "e".repeat(64),
+    };
     s.connection
         .execute(
             "INSERT INTO operation_receipts(operation_id,kind,request_hash,result_ref,committed_at)
-         VALUES('entry-settlement:intent','ENTRY_SETTLEMENT_PROVEN',?1,
-                'immutable-native-filled-bill-proof',30)",
-            [intent.plan_hash.as_str()],
+             VALUES('entry-settlement:intent','ENTRY_SETTLEMENT_PROVEN',?1,?2,30)",
+            rusqlite::params![intent.plan_hash, serde_json::to_string(&terminal).unwrap()],
         )
         .unwrap();
     assert!(
         s.verify_captured_campaign_continuity(from, through).is_ok(),
         "native terminal release permits the next bounded entry"
+    );
+    let campaign = format!("sha256:{}", "c".repeat(64));
+    let (spent, baseline) = s.seal_captured_campaign_baseline(&campaign, from, through).unwrap();
+    assert_eq!(spent, Decimal::from(50), "historical admitted SWAP USD is not a fake zero");
+    assert_eq!(
+        s.seal_captured_campaign_baseline(&campaign, from, through).unwrap(),
+        (spent, baseline),
+        "lost central opening ACK cannot double count an immutable entry"
     );
     s.connection
         .execute(
