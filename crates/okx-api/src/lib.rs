@@ -29,7 +29,8 @@ pub use config::{Credentials, OkxEnvironment, Region, WsLoginMaterial};
 pub use error::OkxError;
 pub use instrument::InstrumentType;
 pub use ledger::{
-    AccountBill, AccountHistoryApi, BoundedHistory, CompleteCampaignOrderHistory, FillHistory,
+    AccountBill, AccountHistoryApi, BoundedHistory, CompleteCampaignMoneyHistory,
+    CompleteCampaignOrderHistory, FillHistory,
     HistoricalOrder, PositionHistory,
 };
 pub use market_data::{
