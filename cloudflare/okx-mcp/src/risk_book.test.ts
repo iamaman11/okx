@@ -38,7 +38,11 @@ async function openingFixture():Promise<CampaignEntryOpeningSource>{
  return source;
 }
 async function setupRiskBook(store:Storage){
- await initializeRiskBook(store,"installation_test");
+ await initializeRiskBook(store,"installation_test",{
+   installation_id:"installation_test",
+   campaign_id:governance.campaign_id,
+   started_at_ms:now-100_000
+ });
  // Synthetic complete-venue fixture ONLY; no production native opening
  // importer exists yet. A hash alone cannot prove real campaign history.
  check(await installCampaignEntryProof(store,await openingFixture()),
