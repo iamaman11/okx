@@ -201,7 +201,10 @@ pub(super) fn reserve_entry_evidence(
         || receipt.reference_generation.is_empty()
         || receipt.fee_generation.is_empty()
         || receipt.conversion_digest.len() != 64
-        || !receipt.conversion_digest.bytes().all(|b| b.is_ascii_hexdigit())
+        || !receipt
+            .conversion_digest
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit())
         || independently_recomputed != proof.quote
         || receipt.notional_usdt != independently_recomputed.notional_usdt
         || receipt.fee_usdt != independently_recomputed.fee_usdt
