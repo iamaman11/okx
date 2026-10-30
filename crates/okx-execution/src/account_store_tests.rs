@@ -2,6 +2,69 @@ use super::*;
 use std::sync::atomic::{AtomicU64, Ordering};
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 #[test]
+fn e1_sql_known_quote_is_immutable_scoped_and_never_all_in_permission() {
+    let mut s = store();
+    let i = intent(&mut s);
+    let mut proof = EntryQuoteEvidence {
+        schema: "okx.entry-known-quote/v1".into(),
+        account_key: s.meta.account_key.clone(),
+        installation_id: s.meta.installation_id.clone(),
+        intent_id: i.intent_id.clone(),
+        plan_hash: i.plan_hash.clone(),
+        policy_revision: i.policy_revision,
+        instrument_id: i.instrument_id.clone(),
+        quantity: Decimal::ONE,
+        limit_price: Decimal::from(100),
+        contract_value: Decimal::ONE,
+        fee_rate: Decimal::new(5, 4),
+        usd_per_usdt: Decimal::ONE,
+        notional_usdt: Decimal::from(100),
+        fee_usdt: Decimal::new(5, 2),
+        total_usdt: Decimal::new(10005, 2),
+        total_usd: Decimal::new(10005, 2),
+        fee_generation: format!("sha256:{}", "a".repeat(64)),
+        reference_generation: "test_reference".into(),
+        fee_received_at: 10,
+        conversion_digest: "b".repeat(64),
+        conversion_received_at: 10,
+        observed_at: 11,
+    };
+    s.bind_entry_quote(&proof).unwrap();
+    s.bind_entry_quote(&proof).unwrap();
+    assert_eq!(s.entry_quote(&i.intent_id).unwrap(), Some(proof.clone()));
+    let mut changed = proof.clone();
+    changed.total_usd += Decimal::ONE;
+    assert!(matches!(
+        s.bind_entry_quote(&changed),
+        Err(StoreError::Invalid("ENTRY_QUOTE_ARITHMETIC_MISMATCH"))
+    ));
+    changed = proof.clone();
+    changed.fee_generation = format!("sha256:{}", "c".repeat(64));
+    assert!(matches!(
+        s.bind_entry_quote(&changed),
+        Err(StoreError::Invalid("ENTRY_QUOTE_IDEMPOTENCY_CONFLICT"))
+    ));
+    changed = proof.clone();
+    changed.account_key = "other".into();
+    assert!(matches!(
+        s.bind_entry_quote(&changed),
+        Err(StoreError::Invalid("ENTRY_QUOTE_SCOPE_UNVERIFIED"))
+    ));
+    changed = proof.clone();
+    changed.fee_rate = Decimal::ZERO;
+    assert!(matches!(
+        s.bind_entry_quote(&changed),
+        Err(StoreError::Invalid("ENTRY_QUOTE_ARITHMETIC_MISMATCH"))
+    ));
+    assert_eq!(s.entry_quote(&i.intent_id).unwrap(), Some(proof.clone()));
+    reserve(&mut s);
+    assert!(s.entry_quote(&i.intent_id).unwrap().is_some());
+    // No proof flag is emitted and no SQL risk grant is minted by the quote.
+    assert_eq!(s.central_receipt(&i.intent_id).unwrap().is_some(), true);
+    proof.observed_at = 9;
+    assert!(s.bind_entry_quote(&proof).is_err());
+}
+#[test]
 fn e2_census_retains_terminal_intents_until_central_release() {
     let mut s = store();
     let i = intent(&mut s);

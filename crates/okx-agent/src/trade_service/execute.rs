@@ -221,6 +221,74 @@ impl TradeService {
         if increase
             && r.configuration.account_key.environment == okx_protocol::accounts::Environment::Real
         {
+            // E1 staging: persist exactly what the live venue price, fee and
+            // conversion sources can prove before requesting central risk.
+            // The receipt says UNPROVEN; it cannot authorize the exchange.
+            let rules = self.public_ws.instrument_rules(instrument).await
+                .ok_or("ENTRY_INSTRUMENT_RULES_UNAVAILABLE")?;
+            if rules.instrument.state != "live"
+                || rules.instrument.settle_currency.as_deref() != Some("USDT")
+                || rules.instrument.contract_type.as_deref() != Some("linear")
+                || dec(rules.instrument.contract_value.as_deref()
+                    .ok_or("ENTRY_CONTRACT_VALUE_UNAVAILABLE")?)? != plan.contract_value
+            {
+                return Err("ENTRY_INSTRUMENT_SOURCE_CHANGED".into());
+            }
+            let fees = r.observer.fee_schedule(&rules).await.map_err(err)?;
+            let rate = entry_budget::verified_entry_fee_rate(
+                &fees, instrument, &rules.reference_generation, now()
+            )?;
+            let quote_snapshot = r.observer.snapshot().await.map_err(err)?;
+            if quote_snapshot.account_uid_fingerprint
+                != r.configuration.account_key.verified_uid
+            {
+                return Err("ENTRY_QUOTE_ACCOUNT_IDENTITY_MISMATCH".into());
+            }
+            let fx = Self::usd_conversion(&quote_snapshot)?;
+            let quote = entry_budget::quote(
+                plan.quantity, plan.contract_value, plan.limit_price,
+                rate, dec(&fx.usd_per_usdt)?
+            )?;
+            let ceiling = entry_budget::enforced_entry_ceiling(
+                true, true,
+                control.limits.max_entry_usd.as_deref().map(dec).transpose()?,
+                order.max_entry_usd.as_deref().map(dec).transpose()?,
+            )?.ok_or("ENTRY_ACCOUNT_CAP_MISSING")?;
+            if quote.total_usd > ceiling {
+                return Err("ENTRY_QUOTE_EXCEEDS_ACCOUNT_CAP".into());
+            }
+            if Instant::now() >= until {
+                return Err("COMMAND_EXPIRED".into());
+            }
+            let fee_received_at = chrono::DateTime::parse_from_rfc3339(
+                &fees.source_received_at
+            ).map_err(err)?.timestamp_millis();
+            let entry_receipt = okx_execution::EntryQuoteEvidence {
+                schema: "okx.entry-known-quote/v1".into(),
+                account_key: r.configuration.account_key.wire(),
+                installation_id: self.accounts.installation_id().into(),
+                intent_id: prepared.intent_id.clone(),
+                plan_hash: prepared.plan_hash.clone(),
+                policy_revision: prepared.policy_revision,
+                instrument_id: instrument.clone(),
+                quantity: plan.quantity,
+                limit_price: plan.limit_price,
+                contract_value: plan.contract_value,
+                fee_rate: rate,
+                usd_per_usdt: dec(&fx.usd_per_usdt)?,
+                notional_usdt: quote.notional_usdt,
+                fee_usdt: quote.fee_usdt,
+                total_usdt: quote.total_usdt,
+                total_usd: quote.total_usd,
+                fee_generation: fees.fee_generation.clone(),
+                reference_generation: rules.reference_generation.clone(),
+                fee_received_at,
+                conversion_digest: fx.source_digest,
+                conversion_received_at: fx.observed_at_ms as i64,
+                observed_at: now(),
+            };
+            r.execution.store.call(until, move |s| s.bind_entry_quote(&entry_receipt))
+                .await.map_err(err)?;
             let census = self.census(&state).await?;
             let snapshot = r.observer.snapshot().await.map_err(err)?;
             let conversion = Self::usd_conversion(&snapshot)?;

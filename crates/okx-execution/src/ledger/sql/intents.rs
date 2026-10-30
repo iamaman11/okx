@@ -1,5 +1,93 @@
 use super::super::*;
 impl AccountStore {
+
+    /// No second ledger/table: one immutable, idempotent record in the existing
+    /// operation_receipts journal, bound to the original saved intent/plan.
+    /// Its kind explicitly denies any claim of ALL-IN cost authorization.
+    pub fn bind_entry_quote(&mut self, quote: &EntryQuoteEvidence) -> StoreResult<()> {
+        let intent = self.intent(&quote.intent_id)?
+            .ok_or(StoreError::Invalid("ENTRY_QUOTE_INTENT_MISSING"))?;
+        if intent.state != IntentState::Prepared
+            || quote.schema != "okx.entry-known-quote/v1"
+            || quote.account_key != self.meta.account_key
+            || quote.installation_id != self.meta.installation_id
+            || quote.plan_hash != intent.plan_hash
+            || quote.policy_revision != intent.policy_revision
+            || quote.instrument_id != intent.instrument_id
+            || !intent.risk_increase
+            || quote.quantity != intent.plan.quantity
+            || quote.limit_price != intent.plan.limit_price
+            || quote.contract_value != intent.plan.contract_value
+            || quote.quantity <= Decimal::ZERO
+            || quote.limit_price <= Decimal::ZERO
+            || quote.contract_value <= Decimal::ZERO
+            || quote.fee_rate < Decimal::ZERO
+            || quote.usd_per_usdt <= Decimal::ZERO
+            || quote.fee_received_at <= 0
+            || quote.conversion_received_at <= 0
+            || quote.observed_at <= 0
+            || quote.fee_received_at > quote.observed_at
+            || quote.conversion_received_at > quote.observed_at
+            || quote.fee_generation.len() != 71
+            || !quote.fee_generation.starts_with("sha256:")
+            || !quote.fee_generation[7..].bytes().all(|c| c.is_ascii_hexdigit())
+            || quote.reference_generation.is_empty()
+            || quote.conversion_digest.len() != 64
+            || !quote.conversion_digest.bytes().all(|c| c.is_ascii_hexdigit())
+        {
+            return Err(StoreError::Invalid("ENTRY_QUOTE_SCOPE_UNVERIFIED"));
+        }
+        let notional = quote.quantity
+            .checked_mul(quote.contract_value)
+            .and_then(|v| v.checked_mul(quote.limit_price))
+            .ok_or(StoreError::Invalid("ENTRY_QUOTE_OVERFLOW"))?;
+        let fee = notional
+            .checked_mul(quote.fee_rate)
+            .ok_or(StoreError::Invalid("ENTRY_QUOTE_OVERFLOW"))?
+            .round_dp_with_strategy(6, rust_decimal::RoundingStrategy::ToPositiveInfinity);
+        let total_usdt = notional.checked_add(fee)
+            .ok_or(StoreError::Invalid("ENTRY_QUOTE_OVERFLOW"))?;
+        let usd = total_usdt.checked_mul(quote.usd_per_usdt)
+            .ok_or(StoreError::Invalid("ENTRY_QUOTE_OVERFLOW"))?
+            .round_dp_with_strategy(9, rust_decimal::RoundingStrategy::ToPositiveInfinity);
+        if (notional, fee, total_usdt, usd) != (
+            quote.notional_usdt, quote.fee_usdt, quote.total_usdt, quote.total_usd
+        ) {
+            return Err(StoreError::Invalid("ENTRY_QUOTE_ARITHMETIC_MISMATCH"));
+        }
+        let name = format!("entry-quote:{}", intent.intent_id);
+        let encoded = serde_json::to_string(quote)
+            .map_err(|_| StoreError::Invalid("ENTRY_QUOTE_SERIALIZATION_FAILED"))?;
+        if let Some(prior) = self.operation(&name)? {
+            if prior.kind != "ENTRY_QUOTE_UNPROVEN"
+                || prior.request_hash != intent.plan_hash
+                || prior.result_ref != encoded
+            {
+                return Err(StoreError::Invalid("ENTRY_QUOTE_IDEMPOTENCY_CONFLICT"));
+            }
+            return Ok(());
+        }
+        self.connection.execute(
+            "INSERT INTO operation_receipts(operation_id,kind,request_hash,result_ref,committed_at)
+             VALUES(?1,'ENTRY_QUOTE_UNPROVEN',?2,?3,?4)",
+            params![name, intent.plan_hash, encoded, quote.observed_at],
+        )?;
+        Ok(())
+    }
+
+    pub fn entry_quote(&self, intent_id: &str) -> StoreResult<Option<EntryQuoteEvidence>> {
+        let name = format!("entry-quote:{intent_id}");
+        let Some(receipt) = self.operation(&name)? else { return Ok(None); };
+        if receipt.kind != "ENTRY_QUOTE_UNPROVEN" {
+            return Err(StoreError::Invalid("ENTRY_QUOTE_INVALID_RECEIPT"));
+        }
+        let quote: EntryQuoteEvidence = serde_json::from_str(&receipt.result_ref)
+            .map_err(|_| StoreError::Invalid("ENTRY_QUOTE_CORRUPT"))?;
+        if quote.intent_id != intent_id || quote.plan_hash != receipt.request_hash {
+            return Err(StoreError::Invalid("ENTRY_QUOTE_CORRUPT"));
+        }
+        Ok(Some(quote))
+    }
     /// Durable address of a central reservation attempt, committed before
     /// any WSS RESERVE. A crash or lost ACK cannot orphan the Worker grant.
     pub fn mark_reserve_attempt(&mut self, id: &str, key: &str, now: i64) -> StoreResult<()> {

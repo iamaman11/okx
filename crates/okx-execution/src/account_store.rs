@@ -185,6 +185,35 @@ pub struct CentralReceipt {
     pub requested_loss_usd: Decimal,
     pub conversion_digest: String,
 }
+/// A durable *known* price-bound fee/notional quote. This does NOT prove
+/// all-in margin, borrow, FX upper bound or the opening campaign balance.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct EntryQuoteEvidence {
+    pub schema: String,
+    pub account_key: String,
+    pub installation_id: String,
+    pub intent_id: String,
+    pub plan_hash: String,
+    pub policy_revision: i64,
+    pub instrument_id: String,
+    pub quantity: Decimal,
+    pub limit_price: Decimal,
+    pub contract_value: Decimal,
+    pub fee_rate: Decimal,
+    pub usd_per_usdt: Decimal,
+    pub notional_usdt: Decimal,
+    pub fee_usdt: Decimal,
+    pub total_usdt: Decimal,
+    pub total_usd: Decimal,
+    pub fee_generation: String,
+    pub reference_generation: String,
+    pub fee_received_at: i64,
+    pub conversion_digest: String,
+    pub conversion_received_at: i64,
+    pub observed_at: i64,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct IntentPlan {
     pub strategy_definition_id: String,
