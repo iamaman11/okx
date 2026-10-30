@@ -364,7 +364,13 @@ impl AccountHistoryApi {
         let archive = self
             .complete_order_source(instrument_type, started_at_ms, through_ms, true)
             .await?;
-        complete_campaign_orders_witness(instrument_type, started_at_ms, through_ms, recent, archive)
+        complete_campaign_orders_witness(
+            instrument_type,
+            started_at_ms,
+            through_ms,
+            recent,
+            archive,
+        )
     }
 
     async fn complete_order_source(
