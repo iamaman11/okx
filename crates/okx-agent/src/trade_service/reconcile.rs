@@ -62,6 +62,35 @@ fn terminal_order_update_time(
         .transpose()
 }
 
+/// Every venue readback must refer to this durable intent before it can
+/// change local state, protection requirements, or exchange-order identity.
+/// An exchange lookup by client ID alone is a lookup, not an identity proof.
+fn verified_order_readback(
+    intent: &StoredIntent,
+    order: &okx_api::TradeOrderDetails,
+) -> Result<Decimal, String> {
+    if order.order_id.is_empty()
+        || order.client_order_id != intent.client_order_id
+        || order.instrument_id != intent.instrument_id
+        || order.side != intent.plan.side
+        || intent
+            .exchange_order_id
+            .as_deref()
+            .is_some_and(|id| id != order.order_id)
+    {
+        return Err("ORDER_READBACK_IDENTITY_MISMATCH".into());
+    }
+    if dec(&order.size)? != intent.plan.quantity {
+        return Err("ORDER_READBACK_PLAN_MISMATCH".into());
+    }
+    let filled = dec(&order.accumulated_fill_size)
+        .map_err(|_| "ORDER_READBACK_FILLED_SIZE_INVALID")?;
+    if filled < Decimal::ZERO || filled > intent.plan.quantity {
+        return Err("ORDER_READBACK_FILLED_SIZE_INVALID".into());
+    }
+    Ok(filled)
+}
+
 /// A terminal local state alone is not source proof that an exchange order is
 /// terminal. No real release without matching exchange identity, covered final
 /// update and a bounded executed quantity. In particular, missing readback is
@@ -71,19 +100,13 @@ fn verified_terminal_order_update_time(
     order: Option<&okx_api::TradeOrderDetails>,
 ) -> Result<i64, String> {
     let o = order.ok_or("TERMINAL_ORDER_READBACK_MISSING")?;
-    if o.instrument_id != intent.instrument_id
-        || o.client_order_id != intent.client_order_id
-        || intent.exchange_order_id.as_deref() != Some(o.order_id.as_str())
-        || o.side != intent.plan.side
-    {
+    if intent.exchange_order_id.as_deref() != Some(o.order_id.as_str()) {
         return Err("TERMINAL_ORDER_IDENTITY_MISMATCH".into());
     }
+    verified_order_readback(intent, o)
+        .map_err(|_| "TERMINAL_ORDER_IDENTITY_OR_SIZE_UNVERIFIED")?;
     if !matches!(o.state.as_str(), "filled" | "canceled" | "mmp_canceled") {
         return Err("TERMINAL_ORDER_STATE_UNVERIFIED".into());
-    }
-    let filled = dec(&o.accumulated_fill_size).map_err(|_| "TERMINAL_ORDER_FILLED_SIZE_INVALID")?;
-    if filled < Decimal::ZERO || filled > intent.plan.quantity {
-        return Err("TERMINAL_ORDER_FILLED_SIZE_INVALID".into());
     }
     terminal_order_update_time(Some(o))?.ok_or_else(|| "TERMINAL_ORDER_READBACK_MISSING".into())
 }
@@ -283,15 +306,9 @@ impl TradeService {
                 "canceled" | "mmp_canceled" => IntentState::Cancelled,
                 _ => return Ok(uncertain(&i.intent_id, "EXCHANGE_ORDER_STATE_UNKNOWN")),
             };
-            if dec(&o.size)? != i.plan.quantity
-                || o.side != i.plan.side
-                || o.instrument_id != i.instrument_id
-            {
-                return Err("ORDER_READBACK_PLAN_MISMATCH".into());
-            }
+            let filled = verified_order_readback(&i, o)?;
             let id = i.intent_id.clone();
             let order_id = o.order_id.clone();
-            let filled = dec(&o.accumulated_fill_size)?;
             if !i.state.terminal() {
                 r.execution
                     .store
@@ -1253,6 +1270,7 @@ mod entry_cost_status_tests {
             update_time_ms: "10".into(),
         };
         assert!(verify_venue_fill_coverage(&intent, &source, &order).is_ok());
+        assert_eq!(verified_order_readback(&intent, &order), Ok(Decimal::ONE));
         assert_eq!(
             verified_terminal_order_update_time(&intent, Some(&order)),
             Ok(10)
@@ -1274,10 +1292,20 @@ mod entry_cost_status_tests {
             Err("TERMINAL_ORDER_IDENTITY_MISMATCH".into())
         );
         changed = order.clone();
+        changed.client_order_id = "wrong-client".into();
+        assert_eq!(
+            verified_order_readback(&intent, &changed),
+            Err("ORDER_READBACK_IDENTITY_MISMATCH".into())
+        );
+        changed = order.clone();
         changed.accumulated_fill_size = "1.1".into();
         assert_eq!(
+            verified_order_readback(&intent, &changed),
+            Err("ORDER_READBACK_FILLED_SIZE_INVALID".into())
+        );
+        assert_eq!(
             verified_terminal_order_update_time(&intent, Some(&changed)),
-            Err("TERMINAL_ORDER_FILLED_SIZE_INVALID".into())
+            Err("TERMINAL_ORDER_IDENTITY_OR_SIZE_UNVERIFIED".into())
         );
         let mut changed = order.clone();
         changed.accumulated_fill_size = "0.9".into();
