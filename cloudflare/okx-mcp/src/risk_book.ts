@@ -682,19 +682,19 @@ export async function transitionRisk(
       const before=units(entry.entry_settled_usd);
       const ceiling=units(entry.entry_upper_usd);
       const budget=meta.entry_budget;
+      // Terminal RELEASE is NOT a second way to debit the campaign.
+      // Every actual USD charge must have crossed SETTLE_ENTRY first.
+      // Only the already-booked cumulative amount/revision/source digest
+      // may release unused reserved capacity. saveEntry owns that one
+      // reserved-capacity refund in the SAME RiskBook transaction.
       if(!budget||cumulative===null||before===null||ceiling===null||
-        cumulative<before||cumulative>ceiling||
+        cumulative!==before||cumulative>ceiling||
         !Number.isSafeInteger(ledger.entry_settlement_revision)||
-        ledger.entry_settlement_revision!<=entry.entry_settlement_revision!||
+        entry.entry_settlement_revision!<1||
+        ledger.entry_settlement_revision!==entry.entry_settlement_revision||
         !HEX.test(ledger.entry_settlement_digest??"")||
-        units(budget.reserved_usd)!<cumulative-before)
+        ledger.entry_settlement_digest!==entry.entry_settlement_digest)
         return {status:"DENIED" as const,reason:"TERMINAL_ENTRY_SETTLEMENT_UNPROVEN"};
-      meta.entry_budget={...budget,
-        consumed_usd:amount(units(budget.consumed_usd)!+cumulative-before),
-        reserved_usd:amount(units(budget.reserved_usd)!-cumulative+before)};
-      entry.entry_settled_usd=amount(cumulative);
-      entry.entry_settlement_revision=ledger.entry_settlement_revision;
-      entry.entry_settlement_digest=ledger.entry_settlement_digest;
     }
     if(to==="RELEASED"){
       const seenKey="risk_loss_v2:"+accountKey(entry),previous=units(await tx.get(seenKey)??"0")!,current=units(native.terminal!.ledger.cumulative_loss_usd)!;
