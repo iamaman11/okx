@@ -4890,21 +4890,26 @@ fn p02_valuation_requires_converged_sources_even_with_valid_principal() {
         Err(StoreError::Invalid("STRATEGY_NAV_ACCOUNT_SOURCE_MISMATCH"))
     ));
     let witness = p02_valuation_witness(&s, 4, "account-witness");
-    assert!(matches!(s.ingest_page(&IngestPage {
-        finance: vec![FinanceEntry {
-            entry_id: "forged-fee".into(),
-            economic_event_key: "fake-fee".into(),
-            component: "FEE".into(),
-            allocation_leg: "account".into(),
-            amount: Decimal::from(-1),
-            currency: "USD".into(),
-            instance_id: Some("alpha".into()),
-            source_ref: "unverified:fee".into(),
-            time: 4,
-            reverses_entry_id: None,
-        }],
-        ..Default::default()
-    }), Err(StoreError::Invalid("STRATEGY_NAV_ECONOMIC_SOURCE_UNVERIFIED"))));
+    assert!(matches!(
+        s.ingest_page(&IngestPage {
+            finance: vec![FinanceEntry {
+                entry_id: "forged-fee".into(),
+                economic_event_key: "fake-fee".into(),
+                component: "FEE".into(),
+                allocation_leg: "account".into(),
+                amount: Decimal::from(-1),
+                currency: "USD".into(),
+                instance_id: Some("alpha".into()),
+                source_ref: "unverified:fee".into(),
+                time: 4,
+                reverses_entry_id: None,
+            }],
+            ..Default::default()
+        }),
+        Err(StoreError::Invalid(
+            "STRATEGY_NAV_ECONOMIC_SOURCE_UNVERIFIED"
+        ))
+    ));
     // Rejected before entry/totals/cursor commit; the prior valuation is intact.
     assert!(s.reconcile_strategy_valuation(&witness).is_ok());
     s.ingest_page(&IngestPage {
@@ -4990,21 +4995,24 @@ fn p02_valuation_rejects_missing_mark_and_uses_contract_mechanics() {
         .insert("USDT".into(), Decimal::ONE);
     evidence.venue_positions[0].signed_contracts = Decimal::ONE;
     // Existing fill identity does not permit inventing a different fee.
-    assert!(matches!(s.ingest_page(&IngestPage {
-        finance: vec![FinanceEntry {
-            entry_id: "fee-mismatch".into(),
-            economic_event_key: "fill:BTC:valuation-fill:o:valuation-fill".into(),
-            component: "FEE".into(),
-            allocation_leg: "account".into(),
-            amount: Decimal::from(-1),
-            currency: "USDT".into(),
-            instance_id: Some("alpha".into()),
-            source_ref: "fill:f:valuation-fill".into(),
-            time: 5,
-            reverses_entry_id: None,
-        }],
-        ..Default::default()
-    }), Err(StoreError::Invalid("STRATEGY_NAV_FEE_SOURCE_MISMATCH"))));
+    assert!(matches!(
+        s.ingest_page(&IngestPage {
+            finance: vec![FinanceEntry {
+                entry_id: "fee-mismatch".into(),
+                economic_event_key: "fill:BTC:valuation-fill:o:valuation-fill".into(),
+                component: "FEE".into(),
+                allocation_leg: "account".into(),
+                amount: Decimal::from(-1),
+                currency: "USDT".into(),
+                instance_id: Some("alpha".into()),
+                source_ref: "fill:f:valuation-fill".into(),
+                time: 5,
+                reverses_entry_id: None,
+            }],
+            ..Default::default()
+        }),
+        Err(StoreError::Invalid("STRATEGY_NAV_FEE_SOURCE_MISMATCH"))
+    ));
     assert!(s.reconcile_strategy_valuation(&evidence).is_ok());
 }
 
@@ -5034,7 +5042,8 @@ fn f1_current_strategy_valuation_uses_verified_totals_after_large_history_and_re
         authority_revision: 1,
         authority_receipt: "governance".into(),
         time: 4,
-    }).unwrap();
+    })
+    .unwrap();
     let mut page = IngestPage {
         bills: vec![Bill {
             bill_id: "f1-bill".into(),
@@ -5081,7 +5090,8 @@ fn f1_current_strategy_valuation_uses_verified_totals_after_large_history_and_re
             mark_source: "f1-account".into(),
         }],
         ..Default::default()
-    }).unwrap();
+    })
+    .unwrap();
     let witness = p02_valuation_witness(&s, 10, "f1-account");
     let result = s.reconcile_strategy_valuation(&witness).unwrap();
     assert_eq!(result.strategies[0].realized_usd, Decimal::NEGATIVE_ONE);

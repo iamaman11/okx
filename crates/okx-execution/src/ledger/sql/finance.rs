@@ -4,9 +4,14 @@ use super::super::*;
  * immutable finance journal for every two-second NAV. The existing cursor
  * table stores the highest fully verified finance rowid; a missing/stale
  * cursor is NOT evidence of financial completeness. */
+type StrategyReversalSource = (String, String, String, Option<String>, Option<String>);
+
 fn verify_strategy_finance_source(db: &Connection, e: &FinanceEntry) -> StoreResult<()> {
     if e.instance_id.as_deref().is_none_or(|id| id == "manual")
-        || matches!(e.component.as_str(), "INTERNAL_CAPITAL_USD" | "CAMPAIGN_LOSS_USD")
+        || matches!(
+            e.component.as_str(),
+            "INTERNAL_CAPITAL_USD" | "CAMPAIGN_LOSS_USD"
+        )
     {
         return Ok(());
     }
@@ -19,7 +24,7 @@ fn verify_strategy_finance_source(db: &Connection, e: &FinanceEntry) -> StoreRes
     if let Some(reversed_id) = e.reverses_entry_id.as_deref() {
         // A correction derives its provenance from the immutable original.
         // The write path also checks reversal uniqueness before insert.
-        let original: Option<(String, String, String, Option<String>, Option<String>)> = db
+        let original: Option<StrategyReversalSource> = db
             .query_row(
                 "SELECT component,amount,currency,instance_id,reverses_entry_id FROM finance_entries WHERE entry_id=?1",
                 [reversed_id],
@@ -33,7 +38,9 @@ fn verify_strategy_finance_source(db: &Connection, e: &FinanceEntry) -> StoreRes
                 && chained.is_none()
                 && decimal(amount).ok().and_then(|n| n.checked_add(e.amount)) == Some(Decimal::ZERO)
         }) {
-            return Err(StoreError::Invalid("STRATEGY_NAV_ECONOMIC_SOURCE_UNVERIFIED"));
+            return Err(StoreError::Invalid(
+                "STRATEGY_NAV_ECONOMIC_SOURCE_UNVERIFIED",
+            ));
         }
         return Ok(());
     }
@@ -56,9 +63,7 @@ fn verify_strategy_finance_source(db: &Connection, e: &FinanceEntry) -> StoreRes
             } else {
                 false
             };
-            if e.component == "FEE"
-                && (e.currency != fee_currency || e.amount != decimal(fee)?)
-            {
+            if e.component == "FEE" && (e.currency != fee_currency || e.amount != decimal(fee)?) {
                 return Err(StoreError::Invalid("STRATEGY_NAV_FEE_SOURCE_MISMATCH"));
             }
             e.economic_event_key == canonical || linked_bill
@@ -76,7 +81,9 @@ fn verify_strategy_finance_source(db: &Connection, e: &FinanceEntry) -> StoreRes
         false
     };
     if !found {
-        return Err(StoreError::Invalid("STRATEGY_NAV_ECONOMIC_SOURCE_UNVERIFIED"));
+        return Err(StoreError::Invalid(
+            "STRATEGY_NAV_ECONOMIC_SOURCE_UNVERIFIED",
+        ));
     }
     Ok(())
 }
@@ -124,7 +131,6 @@ fn advance_finance_provenance(
     }
     Ok(())
 }
-
 
 /// Start from the bounded set of unapplied fills, never from immutable history.
 /// SQLite otherwise chooses idx_fills_time to satisfy ORDER BY and scans all
@@ -302,9 +308,7 @@ impl AccountStore {
     /// One-time existing-v2 migration fence. No second database or schema
     /// version: audit immutable historical evidence on open, never in NAV.
     /// Invalid old rows leave the proof unsealed and risk fails closed.
-    pub(super) fn audit_existing_finance_provenance(
-        db: &mut Connection,
-    ) -> StoreResult<()> {
+    pub(super) fn audit_existing_finance_provenance(db: &mut Connection) -> StoreResult<()> {
         if finance_proof_sealed(db)? {
             return Ok(());
         }
@@ -414,7 +418,9 @@ impl AccountStore {
         // F1: check an atomic, monotonic provenance proof, not all finance rows.
         // An old/foreign/unverified entry must never inherit a COMPLETE NAV.
         if !finance_proof_sealed(&self.connection)? {
-            return Err(StoreError::Invalid("STRATEGY_NAV_ECONOMIC_SOURCE_UNVERIFIED"));
+            return Err(StoreError::Invalid(
+                "STRATEGY_NAV_ECONOMIC_SOURCE_UNVERIFIED",
+            ));
         }
         let fx = &evidence.conversion.usd_per_currency;
         let convert = |currency: &str, value: Decimal| -> StoreResult<Decimal> {
@@ -451,11 +457,9 @@ impl AccountStore {
         // internal assignments are NEVER extra strategy profit.
         // Current NAV consumes the existing event-updated projection.
         // True historical as-of queries retain their immutable ledger fold.
-        let latest_time: Option<i64> = self.connection.query_row(
-            "SELECT MAX(time) FROM finance_entries",
-            [],
-            |r| r.get(0),
-        )?;
+        let latest_time: Option<i64> =
+            self.connection
+                .query_row("SELECT MAX(time) FROM finance_entries", [], |r| r.get(0))?;
         let attribution = if latest_time.is_some_and(|t| t > evidence.as_of) {
             self.finance_attribution_filtered(self.meta.initialized_at, evidence.as_of, &[], &[])?
         } else {
@@ -1840,7 +1844,11 @@ impl AccountStore {
             commit_us: 0,
             commit_succeeded: false,
         };
-        if page.cursor.as_ref().is_some_and(|c| c.source == "finance_provenance") {
+        if page
+            .cursor
+            .as_ref()
+            .is_some_and(|c| c.source == "finance_provenance")
+        {
             return Err(StoreError::Invalid("FINANCE_PROVENANCE_CURSOR_INTERNAL"));
         }
         let finance_rowid_before = finance_rowid(&tx)?;
