@@ -314,8 +314,13 @@ fn verified_terminal_order_update_time(
     terminal_order_update_time(Some(o))?.ok_or_else(|| "TERMINAL_ORDER_READBACK_MISSING".into())
 }
 
-/// Historical known pricing evidence is not an all-in entry debit proof.
-fn entry_cost_status(stored: Option<okx_execution::EntryQuoteEvidence>) -> Result<Value, String> {
+/// The native SQL owner independently verifies both records on readback.
+/// An observed price-only quote is NOT authority to submit. A fully sourced
+/// admission is still cost evidence, not an exchange POST authorization.
+fn entry_cost_status(
+    stored: Option<okx_execution::EntryQuoteEvidence>,
+    admission: Option<okx_execution::EntryAdmissionEvidence>,
+) -> Result<Value, String> {
     let Some(quote) = stored else {
         return Ok(json!({
             "state": "not_proven",
@@ -338,6 +343,29 @@ fn entry_cost_status(stored: Option<okx_execution::EntryQuoteEvidence>) -> Resul
         || known.total_usd != quote.total_usd
     {
         return Err("ENTRY_QUOTE_READBACK_MISMATCH".into());
+    }
+    if let Some(cost) = admission {
+        if cost.intent_id != quote.intent_id
+            || cost.plan_hash != quote.plan_hash
+            || cost.account_key != quote.account_key
+            || cost.installation_id != quote.installation_id
+            || cost.entry_upper_usd < quote.total_usd
+            || cost.entry_upper_usd <= Decimal::ZERO
+        {
+            return Err("ENTRY_ADMISSION_READBACK_MISMATCH".into());
+        }
+        return Ok(json!({
+            "schema":"okx.entry-admission/v1",
+            "state":"source_bound_entry_cost",
+            "known_notional_usdt":exact(quote.notional_usdt),
+            "known_fee_usdt":exact(quote.fee_usdt),
+            "known_entry_total_usd":exact(quote.total_usd),
+            "all_in_entry_cost_proven":true,
+            "entry_debit_upper_usd":exact(cost.entry_upper_usd),
+            "entry_proof_digest":cost.entry_proof_digest,
+            "source":{"quote_digest":cost.quote_digest,"observed_at_ms":cost.observed_at},
+            "authorization":"COST_PROOF_ONLY_NOT_POST_AUTHORITY",
+        }));
     }
     let proof = entry_budget::EntryCostProof::unproven_linear_quote(known);
     Ok(json!({
@@ -389,13 +417,15 @@ impl TradeService {
             && r.configuration.account_key.environment == okx_protocol::accounts::Environment::Real
         {
             let id = i.intent_id.clone();
-            let quote = r
+            let (quote, admission) = r
                 .execution
                 .store
-                .call(deadline(), move |s| s.entry_quote(&id))
+                .call(deadline(), move |s| {
+                    Ok((s.entry_quote(&id)?, s.entry_admission(&id)?))
+                })
                 .await
                 .map_err(err)?;
-            entry_cost_status(quote)?
+            entry_cost_status(quote, admission)?
         } else {
             json!(null)
         };
@@ -1967,7 +1997,7 @@ mod entry_cost_status_tests {
 
     #[test]
     fn e1_status_never_promotes_known_quote_into_all_in_entry_permission() {
-        let empty = entry_cost_status(None).unwrap();
+        let empty = entry_cost_status(None, None).unwrap();
         assert_eq!(empty["all_in_entry_cost_proven"], false);
         assert!(empty["entry_debit_upper_usd"].is_null());
         assert_eq!(empty["reason_codes"][0], "ENTRY_QUOTE_NOT_RECORDED");
@@ -1999,16 +2029,39 @@ mod entry_cost_status_tests {
             conversion_received_at: 1,
             observed_at: 1,
         };
-        let view = entry_cost_status(Some(quote.clone())).unwrap();
+        let view = entry_cost_status(Some(quote.clone()), None).unwrap();
         assert_eq!(view["state"], "historical_known_cost_only");
         assert_eq!(view["known_entry_total_usd"], "1.0005");
         assert_eq!(view["all_in_entry_cost_proven"], false);
         assert!(view["entry_debit_upper_usd"].is_null());
         assert_eq!(view["reason_codes"].as_array().unwrap().len(), 4);
+        let admitted = okx_execution::EntryAdmissionEvidence {
+            schema: "okx.entry-admission/v1".into(),
+            account_key: quote.account_key.clone(),
+            installation_id: quote.installation_id.clone(),
+            intent_id: quote.intent_id.clone(),
+            plan_hash: quote.plan_hash.clone(),
+            quote_digest: "c".repeat(64),
+            fx_upper_usd_per_usdt: Decimal::ONE,
+            other_entry_costs_upper_usd: Decimal::ONE,
+            entry_upper_usd: Decimal::new(20005, 4),
+            entry_proof_digest: "d".repeat(64),
+            observed_at: quote.observed_at,
+        };
+        let shown = entry_cost_status(Some(quote.clone()), Some(admitted.clone())).unwrap();
+        assert_eq!(shown["all_in_entry_cost_proven"], true);
+        assert_eq!(shown["entry_debit_upper_usd"], "2.0005");
+        assert_eq!(shown["authorization"], "COST_PROOF_ONLY_NOT_POST_AUTHORITY");
+        let mut mismatched = admitted;
+        mismatched.plan_hash = "different".into();
+        assert_eq!(
+            entry_cost_status(Some(quote.clone()), Some(mismatched)).unwrap_err(),
+            "ENTRY_ADMISSION_READBACK_MISMATCH"
+        );
         let mut tampered = quote;
         tampered.total_usd = Decimal::ONE;
         assert_eq!(
-            entry_cost_status(Some(tampered)).unwrap_err(),
+            entry_cost_status(Some(tampered), None).unwrap_err(),
             "ENTRY_QUOTE_READBACK_MISMATCH"
         );
     }
