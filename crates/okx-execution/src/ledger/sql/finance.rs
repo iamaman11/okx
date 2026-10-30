@@ -203,10 +203,6 @@ fn upsert_source_cursor(tx: &rusqlite::Transaction<'_>, c: &SourceCursor) -> Sto
     Ok(())
 }
 impl AccountStore {
-    /// Read bounded native fill evidence for one persisted risk-increasing
-    /// intent. The source coverage cursor is mandatory: a partial page is
-    /// NOT an absence-of-fills proof. This does not price margin, non-USDT
-    /// fees, borrowing or FX and cannot authorize a reserve or venue POST.
     /// Seal a genuinely empty campaign monetary window after the native
     /// authenticated venue adapter has exhaustively paginated orders, fills
     /// and bills from RiskBook-owned inception (not AccountStore T0).
@@ -243,15 +239,26 @@ impl AccountStore {
         // An empty fresh venue history cannot be reconciled with an already
         // nonempty local ledger. Such a mismatch is an operational blocker,
         // never evidence that the opening spend is zero.
-        let (fills, bills, finance): (i64, i64, i64) = self.connection.query_row(
-            "SELECT (SELECT COUNT(*) FROM fills),
-                    (SELECT COUNT(*) FROM bills),
-                    (SELECT COUNT(*) FROM finance_entries)",
-            [],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        )?;
-        if fills != 0 || bills != 0 || finance != 0 {
+        let (fills, bills, finance, cash_debits, unresolved, lots): (i64, i64, i64, i64, i64, i64) =
+            self.connection.query_row(
+                "SELECT (SELECT COUNT(*) FROM fills),
+                        (SELECT COUNT(*) FROM bills),
+                        (SELECT COUNT(*) FROM finance_entries),
+                        (SELECT COUNT(*) FROM cash_flows WHERE kind!='OPENING'),
+                        (SELECT COUNT(*) FROM intents
+                          WHERE state NOT IN ('REJECTED','CANCELLED','FILLED')),
+                        (SELECT COUNT(*) FROM position_lots WHERE remaining_qty!='0')",
+                [],
+                |r| Ok((
+                    r.get(0)?, r.get(1)?, r.get(2)?,
+                    r.get(3)?, r.get(4)?, r.get(5)?
+                )),
+            )?;
+        if fills != 0 || bills != 0 || finance != 0 || cash_debits != 0 {
             return Err(StoreError::Invalid("ENTRY_OPENING_LOCAL_LEDGER_NOT_EMPTY"));
+        }
+        if unresolved != 0 || lots != 0 {
+            return Err(StoreError::Invalid("ENTRY_OPENING_UNRESOLVED_NATIVE_EXPOSURE"));
         }
         let canonical = serde_json::to_vec(&(
             "okx.campaign-empty-opening-sql/v1",
@@ -277,7 +284,12 @@ impl AccountStore {
              WHEN OLD.kind='CAMPAIGN_ENTRY_OPENING_SEALED'
              BEGIN SELECT RAISE(ABORT,'IMMUTABLE_CAMPAIGN_ENTRY_OPENING'); END;",
         )?;
-        let key = format!("campaign_entry_opening:{campaign_id}");
+        // Only RiskBook owns the FINAL campaign balance. SQL owns immutable
+        // per-attempt witnesses: a lost WSS reply or expired freshness window
+        // must not permanently pin the account to a superseded cut-off.
+        // Each fully verified retry gets its own immutable receipt, while an
+        // identical source/cut-off is an idempotent readback.
+        let key = format!("campaign_entry_opening:{campaign_id}:{proof}");
         self.connection.execute(
             "INSERT OR IGNORE INTO operation_receipts
              (operation_id,kind,request_hash,result_ref,committed_at)
@@ -300,6 +312,10 @@ impl AccountStore {
         Ok(proof)
     }
 
+    /// Read bounded native fill evidence for one persisted risk-increasing
+    /// intent. The source coverage cursor is mandatory: a partial page is
+    /// NOT an absence-of-fills proof. This does not price margin, non-USDT
+    /// fees, borrowing or FX and cannot authorize a reserve or venue POST.
     pub fn intent_fill_cost_evidence(
         &self,
         intent_id: &str,

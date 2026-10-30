@@ -17,9 +17,15 @@ fn e1_campaign_empty_opening_sql_receipt_is_durable_and_immutable() {
             .unwrap(),
         first
     );
-    assert!(
+    let fresh = s
+        .seal_empty_campaign_entry_opening(&campaign, 1, 3, &venue, 0, 0)
+        .unwrap();
+    assert_ne!(first, fresh, "new venue cut-off is a new append-only witness");
+    assert_eq!(
         s.seal_empty_campaign_entry_opening(&campaign, 1, 3, &venue, 0, 0)
-            .is_err()
+            .unwrap(),
+        fresh,
+        "identical retry is readback-only"
     );
     assert!(
         s.seal_empty_campaign_entry_opening(&campaign, 1, 2, &venue, 1, 0)
@@ -33,7 +39,7 @@ fn e1_campaign_empty_opening_sql_receipt_is_durable_and_immutable() {
         s.connection
             .execute(
                 "UPDATE operation_receipts SET result_ref='bad' WHERE operation_id=?1",
-                [format!("campaign_entry_opening:{campaign}")],
+                [format!("campaign_entry_opening:{campaign}:{first}")],
             )
             .is_err()
     );
@@ -41,7 +47,7 @@ fn e1_campaign_empty_opening_sql_receipt_is_durable_and_immutable() {
         s.connection
             .execute(
                 "DELETE FROM operation_receipts WHERE operation_id=?1",
-                [format!("campaign_entry_opening:{campaign}")],
+                [format!("campaign_entry_opening:{campaign}:{first}")],
             )
             .is_err()
     );
@@ -66,6 +72,48 @@ fn e1_campaign_empty_opening_refuses_unreconciled_money() {
         s.seal_empty_campaign_entry_opening(&campaign, 1, 2, &venue, 0, 0)
             .is_err()
     );
+}
+
+#[test]
+fn e1_t09_opening_rejects_cash_flows_and_nonterminal_risk() {
+    let s = store();
+    let campaign = format!("sha256:{}", "c".repeat(64));
+    let venue = "d".repeat(64);
+    s.connection.execute(
+        "INSERT INTO cash_flows(event_id,kind,currency,amount,time,source_ref)
+         VALUES('unexpected-flow','WITHDRAWAL','USD','-1',2,'venue:unexpected')",
+        [],
+    ).unwrap();
+    assert!(s.seal_empty_campaign_entry_opening(&campaign, 1, 3, &venue, 0, 0).is_err());
+    s.connection.execute("DELETE FROM cash_flows WHERE event_id='unexpected-flow'", []).unwrap();
+    let mut s = s;
+    let i = intent(&mut s);
+    assert_eq!(i.state, IntentState::Prepared);
+    assert!(s.seal_empty_campaign_entry_opening(&campaign, 1, 3, &venue, 0, 0).is_err(),
+        "an unposted or unknown native intent never attests a flat campaign");
+}
+
+#[test]
+fn e1_t10_lost_opening_reply_can_retry_without_mutating_previous_receipt() {
+    let s = store();
+    let campaign = format!("sha256:{}", "e".repeat(64));
+    let first_venue = "a".repeat(64);
+    let first = s.seal_empty_campaign_entry_opening(&campaign, 1, 200, &first_venue, 0, 0).unwrap();
+    // Model a lost Worker response followed by a new authenticated full
+    // venue sweep with a new source digest and observed cut-off.
+    let second_venue = "b".repeat(64);
+    let second = s.seal_empty_campaign_entry_opening(&campaign, 1, 220, &second_venue, 0, 0).unwrap();
+    assert_ne!(first, second);
+    let mut statement = s.connection.prepare(
+        "SELECT result_ref FROM operation_receipts
+         WHERE kind='CAMPAIGN_ENTRY_OPENING_SEALED' ORDER BY committed_at"
+    ).unwrap();
+    let receipts: Vec<String> = statement.query_map([], |row| row.get(0))
+        .unwrap().map(Result::unwrap).collect();
+    assert_eq!(receipts, vec![first, second]);
+    assert!(s.connection.execute(
+        "DELETE FROM operation_receipts WHERE kind='CAMPAIGN_ENTRY_OPENING_SEALED'",[]
+    ).is_err());
 }
 
 /// Native SQL fixture for a source-identical linear USDT quote. Source
