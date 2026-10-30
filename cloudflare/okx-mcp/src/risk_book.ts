@@ -24,6 +24,8 @@ export interface RiskEntry {
   /** Campaign entry costs are independent of modelled loss. */
   entry_upper_usd?:string;entry_proof_digest?:string;
   entry_settled_usd?:string;entry_settlement_revision?:number;entry_settlement_digest?:string;
+  /** Cumulative verified expense above the original reservation, never a refund. */
+  entry_bound_breach_usd?:string;
   usd_conversion:{usd_per_usdt:string;source_digest:string;observed_at_ms:number};
   state: RiskEntryState;
   created_at_ms: number;
@@ -153,7 +155,12 @@ function validEntry(entry: RiskEntry): boolean {
       && entry.posted_at_ms > entry.created_at_ms)
     && (entry.entry_upper_usd===undefined ||
         units(entry.entry_upper_usd)!>0n && units(entry.entry_settled_usd)!==null &&
-        units(entry.entry_settled_usd)!<=units(entry.entry_upper_usd)! &&
+        (entry.entry_bound_breach_usd===undefined
+          ?units(entry.entry_settled_usd)!<=units(entry.entry_upper_usd)!
+          :units(entry.entry_bound_breach_usd)!==null &&
+           units(entry.entry_bound_breach_usd)===
+           (units(entry.entry_settled_usd)!>units(entry.entry_upper_usd)!
+             ?units(entry.entry_settled_usd)!-units(entry.entry_upper_usd)!:0n)) &&
         HEX.test(entry.entry_proof_digest??"") &&
         Number.isSafeInteger(entry.entry_settlement_revision) &&
         entry.entry_settlement_revision!>=0 &&
@@ -190,6 +197,8 @@ function validCampaignOrigin(v:any,installation_id:string):v is CampaignOrigin {
 }
 export interface CampaignEntryBudget {
   campaign_id:string;limit_usd:string;consumed_usd:string;reserved_usd:string;
+  /** Monotonic native over-reserve debit, not reusable budget headroom. */
+  bound_breach_usd?:string;
   opening_source_digest:string;opening_as_of_ms:number;
   /** Immutable all-managed-real-account opening scope. New enrolled accounts
    * cannot silently inherit a historical campaign balance. */
@@ -198,8 +207,9 @@ export interface CampaignEntryBudget {
 function validEntryBudget(v:any):v is CampaignEntryBudget{
   return !!v&&/^sha256:[0-9a-f]{64}$/.test(v.campaign_id)&&
     units(v.limit_usd)!>0n&&units(v.consumed_usd)!==null&&
-    units(v.reserved_usd)!==null&&
-    units(v.consumed_usd)!+units(v.reserved_usd)!<=units(v.limit_usd)!&&
+    units(v.reserved_usd)!==null&&units(v.bound_breach_usd??"0")!==null&&
+    units(v.consumed_usd)!+units(v.reserved_usd)!
+      <=units(v.limit_usd)!+units(v.bound_breach_usd??"0")!&&
     HEX.test(v.opening_source_digest)&&
     Array.isArray(v.opening_account_keys)&&v.opening_account_keys.length>0&&
     v.opening_account_keys.length<=32&&
@@ -295,7 +305,7 @@ export async function installCampaignEntryProof(tx:any,source:CampaignEntryOpeni
      await openingDigest(source)!==source.source_digest)return false;
   await tx.put(KEY,{...meta,entry_budget:{
     campaign_id:source.campaign_id,limit_usd:source.limit_usd,
-    consumed_usd:source.consumed_usd,reserved_usd:"0",
+    consumed_usd:source.consumed_usd,reserved_usd:"0",bound_breach_usd:"0",
     opening_source_digest:source.source_digest,opening_as_of_ms:source.as_of_ms,
     opening_account_keys:managed,
   },sequence:meta.sequence+1});
@@ -391,10 +401,12 @@ async function saveEntry(tx:any,meta:RiskMeta,entry:RiskEntry,delta:bigint){
  if(delta<0n && entry.entry_upper_usd!==undefined){
    const ceiling=units(entry.entry_upper_usd),settled=units(entry.entry_settled_usd);
    const reserved=units(meta.entry_budget?.reserved_usd);
+   const refundable=ceiling!==null&&settled!==null&&ceiling>settled
+     ?ceiling-settled:0n;
    if(!meta.entry_budget||ceiling===null||settled===null||reserved===null||
-      ceiling<settled||reserved<ceiling-settled)
+      reserved<refundable)
      throw Error("ENTRY_BUDGET_SETTLEMENT_CORRUPT");
-   meta.entry_budget={...meta.entry_budget,reserved_usd:amount(reserved-ceiling+settled)};
+   meta.entry_budget={...meta.entry_budget,reserved_usd:amount(reserved-refundable)};
  }
  const next={...meta,sequence:meta.sequence+1,occupied_usdt:amount(units(meta.occupied_usdt)!+delta),occupied_usd:amount(units(meta.occupied_usd)!+(delta===0n?0n:delta>0n?units(entry.loss_usd)!:-units(entry.loss_usd)!)),accounts:{...meta.accounts,[a]:amount(units(meta.accounts[a]??"0")!+delta)}};
  await tx.put(s,amount(strategy+delta));
@@ -525,6 +537,8 @@ export async function reserveRisk(
       return {status:"DENIED",reason:"CAMPAIGN_OPENING_COHORT_CHANGED"};
     if(proposed===null||proposed<=0n||!HEX.test(input.entry_proof_digest??""))
       return {status:"DENIED",reason:"ENTRY_COST_PROOF_UNAVAILABLE"};
+    if(units(entryBudget.bound_breach_usd??"0")!>0n)
+      return {status:"DENIED",reason:"BUDGET_BOUND_BREACH"};
     if(units(entryBudget.consumed_usd)!+units(entryBudget.reserved_usd)!+proposed>
        units(entryBudget.limit_usd)!)
       return {status:"DENIED",reason:"CAMPAIGN_ENTRY_BUDGET_EXHAUSTED"};
@@ -761,7 +775,7 @@ export async function settleEntrySpend(
        await tx.get("generation")!==native.connection_generation)
       return {status:"DENIED" as const,reason:"ENTRY_SETTLEMENT_SOURCE_OR_STATE_UNPROVEN"};
     const before=units(entry.entry_settled_usd),ceiling=units(entry.entry_upper_usd);
-    if(before===null||ceiling===null||total<before||total>ceiling||
+    if(before===null||ceiling===null||total<before||
        native.revision<entry.entry_settlement_revision!)
       return {status:"DENIED" as const,reason:"ENTRY_SETTLEMENT_REGRESSION"};
     if(native.revision===entry.entry_settlement_revision){
@@ -782,15 +796,27 @@ export async function settleEntrySpend(
        meta.sequence!==native.expected_book_sequence)
       return {status:"DENIED" as const,reason:"ENTRY_SETTLEMENT_SOURCE_OR_STATE_UNPROVEN"};
     const delta=total-before,reserved=units(meta.entry_budget.reserved_usd);
-    if(reserved===null||reserved<delta)
+    // Native complete bills are money truth, even if the venue charged more
+    // than the admission upper. Move only the original unspent reservation;
+    // book EVERY excess cent as consumed and mark an irreversible breach.
+    const oldUnsettled=ceiling>before?ceiling-before:0n;
+    const reservedDebit=delta<oldUnsettled?delta:oldUnsettled;
+    const excess=delta-reservedDebit;
+    if(reserved===null||reserved<reservedDebit)
       return {status:"DENIED" as const,reason:"ENTRY_SETTLEMENT_RESERVE_CORRUPT"};
+    const bound=units(meta.entry_budget.bound_breach_usd??"0");
+    if(bound===null)
+      return {status:"DENIED" as const,reason:"ENTRY_BOUND_BREACH_STATE_CORRUPT"};
     meta.entry_budget={...meta.entry_budget,
        consumed_usd:amount(units(meta.entry_budget.consumed_usd)!+delta),
-       reserved_usd:amount(reserved-delta)};
+       reserved_usd:amount(reserved-reservedDebit),
+       bound_breach_usd:amount(bound+excess)};
     const next=await saveEntry(tx,meta,{...entry,entry_settled_usd:amount(total),
+      entry_bound_breach_usd:amount(total>ceiling?total-ceiling:0n),
       entry_settlement_revision:native.revision,entry_settlement_digest:native.source_digest,
       transition_proof:native.source_digest},0n);
-    return {status:"UPDATED" as const,book_sequence:next.sequence};
+    return {status:"UPDATED" as const,book_sequence:next.sequence,
+      reason:excess>0n?"BUDGET_BOUND_BREACH":undefined};
   });
 }
 

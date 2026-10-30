@@ -329,11 +329,12 @@ impl AccountStore {
             .round_dp_with_strategy(9, rust_decimal::RoundingStrategy::ToPositiveInfinity)
             .checked_add(admission.other_entry_costs_upper_usd)
             .ok_or(StoreError::Invalid("ENTRY_SETTLEMENT_MONEY_OVERFLOW"))?;
-        if full_usdt <= Decimal::ZERO || usd <= Decimal::ZERO || usd > admission.entry_upper_usd {
-            return Err(StoreError::Invalid(
-                "ENTRY_SETTLEMENT_EXCEEDS_RESERVED_UPPER",
-            ));
+        if full_usdt <= Decimal::ZERO || usd <= Decimal::ZERO {
+            return Err(StoreError::Invalid("ENTRY_SETTLEMENT_MONEY_INVALID"));
         }
+        // A genuine exchange debit above the approved quote is not permission
+        // to hide it. The cumulative proof retains the full native amount;
+        // RiskBook records the breach atomically and bans new entry grants.
         let bytes = serde_json::to_vec(&(
             "okx.entry-terminal-settlement/v1",
             &self.meta.account_key,

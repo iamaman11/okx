@@ -514,6 +514,7 @@ pub enum RiskDecisionStatus {
     Updated,
     Observed,
 }
+fn zero_reporting_amount() -> String { "0".into() }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RiskEntryBudgetSnapshot {
@@ -522,6 +523,8 @@ pub struct RiskEntryBudgetSnapshot {
     pub consumed_usd: String,
     pub reserved_usd: String,
     pub remaining_usd: String,
+    #[serde(default = "zero_reporting_amount")]
+    pub bound_breach_usd: String,
     pub opening_source_digest: String,
     pub opening_as_of_ms: u64,
 }
@@ -541,21 +544,22 @@ impl RiskEntryBudgetSnapshot {
                         * 10u128.pow(9 - fraction.len() as u32),
                 )
         }
-        let (Some(limit), Some(consumed), Some(reserved), Some(remaining)) = (
+        let (Some(limit), Some(consumed), Some(reserved), Some(remaining), Some(breach)) = (
             exact_units(&self.limit_usd),
             exact_units(&self.consumed_usd),
             exact_units(&self.reserved_usd),
             exact_units(&self.remaining_usd),
+            exact_units(&self.bound_breach_usd),
         ) else {
             return false;
         };
         self.campaign_id.starts_with("sha256:")
             && hash(&self.campaign_id[7..])
             && limit > 0
-            && consumed
-                .checked_add(reserved)
-                .and_then(|v| v.checked_add(remaining))
-                == Some(limit)
+            && consumed.checked_add(reserved).is_some_and(|held| {
+                held <= limit.saturating_add(breach)
+                    && remaining == limit.saturating_sub(held)
+            })
             && hash(&self.opening_source_digest)
             && self.opening_as_of_ms > 0
     }
@@ -1003,6 +1007,7 @@ mod tests {
             consumed_usd: "0".into(),
             reserved_usd: "0".into(),
             remaining_usd: "10".into(),
+            bound_breach_usd: "0".into(),
             opening_source_digest: "b".repeat(64),
             opening_as_of_ms: 1_790_000_000_100,
         };

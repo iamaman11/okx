@@ -15,7 +15,7 @@ interface Result {
     /** Immutable installation-owned inception; null on legacy books. */
     campaign_origin?:{campaign_id:string;installation_id:string;started_at_ms:number}|null;
     /** Null means opening finance history NOT PROVEN, not a zero spend. */
-    entry_budget?:{campaign_id:string;limit_usd:string;consumed_usd:string;reserved_usd:string;remaining_usd:string;opening_source_digest:string;opening_as_of_ms:number}|null};
+    entry_budget?:{campaign_id:string;limit_usd:string;consumed_usd:string;reserved_usd:string;remaining_usd:string;bound_breach_usd:string;opening_source_digest:string;opening_as_of_ms:number}|null};
   reason:string|null;reservation_key:string|null;
   risk_book_sequence:number|null;policy_revision:number|null;
   existing_modelled_loss_usdt:string|null;
@@ -115,8 +115,13 @@ export async function handleNativeRiskCommand(
         entry_budget:meta.entry_budget?{
           campaign_id:meta.entry_budget.campaign_id,limit_usd:meta.entry_budget.limit_usd,
           consumed_usd:meta.entry_budget.consumed_usd,reserved_usd:meta.entry_budget.reserved_usd,
-          remaining_usd:amount(units(meta.entry_budget.limit_usd)!-
-            units(meta.entry_budget.consumed_usd)!-units(meta.entry_budget.reserved_usd)!),
+          bound_breach_usd:meta.entry_budget.bound_breach_usd??"0",
+          remaining_usd:amount((()=>{
+            const remaining=units(meta.entry_budget!.limit_usd)!-
+              units(meta.entry_budget!.consumed_usd)!-
+              units(meta.entry_budget!.reserved_usd)!;
+            return remaining>0n?remaining:0n;
+          })()),
           opening_source_digest:meta.entry_budget.opening_source_digest,
           opening_as_of_ms:meta.entry_budget.opening_as_of_ms
         }:null}};
@@ -242,7 +247,8 @@ export async function handleNativeRiskCommand(
     if(result.status!=="UPDATED")return deny(id,result.reason??"ENTRY_SETTLEMENT_DENIED");
     const observed=await inspectRisk(storage,a.reservation_key);
     return observed?.entry&&observed.meta
-      ?{schema:RESULT_SCHEMA,command_id:id,status:"UPDATED",reason:null,
+      ?{schema:RESULT_SCHEMA,command_id:id,status:"UPDATED",
+        reason:result.reason??null,
         reservation_key:observed.entry.key,risk_book_sequence:observed.meta.sequence,
         policy_revision:observed.entry.policy_revision,
         existing_modelled_loss_usdt:null,reservation_state:null}
