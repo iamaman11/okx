@@ -1,4 +1,4 @@
-import {accountKey,amount,units,readRiskBook,initializeRiskBook,inspectRisk,reserveRisk,transitionRisk,beginRiskPost,releaseUnsentRisk,installCampaignEntryProof,settleEntrySpend} from "./risk_book.js";
+import {accountKey,amount,units,readRiskBook,initializeRiskBook,inspectRisk,reserveRisk,transitionRisk,beginRiskPost,releaseUnsentRisk,installCampaignEntryProof,openingDigest,settleEntrySpend,type CampaignEntryOpeningSource} from "./risk_book.js";
 function check(value: boolean, label:string) { if(!value) throw Error(label); }
 class Storage {
   map=new Map<string,unknown>();
@@ -21,12 +21,28 @@ const census={complete:true as const,source_digest:d,content_digest:a,
   account_keys:["okx:real:"+a,"okx:real:"+b],occupied:[{account_key:"okx:real:"+a,occupied_usdt:"0",cumulative_loss_usd:"0"},{account_key:"okx:real:"+b,occupied_usdt:"0",cumulative_loss_usd:"0"}]};
 const base={venue:"okx",environment:"real" as const,run_id:"run_20261018_AAA",
   loss_usd:"6",entry_upper_usd:"2",entry_proof_digest:d,usd_conversion:{usd_per_usdt:"1",source_digest:d,observed_at_ms:now},plan_hash:p,policy_revision:1,now_ms:now,strategy_id:"momentum_A",instrument_id:"BTC-USDT-SWAP"};
+async function openingFixture():Promise<CampaignEntryOpeningSource>{
+ const start=now-100_000;
+ const accounts=[a,b].map(uid=>({
+  account_key:"okx:real:"+uid,
+  history_from_ms:start,history_through_ms:now,consumed_entry_usd:"0",
+  order_history_complete:true as const,fill_history_complete:true as const,
+  bill_history_complete:true as const,finance_provenance_sealed:true as const,
+  source_digest:uid,
+ }));
+ const source:CampaignEntryOpeningSource={
+  campaign_id:governance.campaign_id,limit_usd:"10",consumed_usd:"0",
+  source_digest:d,as_of_ms:now,campaign_started_at_ms:start,accounts
+ };
+ source.source_digest=await openingDigest(source);
+ return source;
+}
 async function setupRiskBook(store:Storage){
  await initializeRiskBook(store,"installation_test");
- check(await installCampaignEntryProof(store,{
-  campaign_id:governance.campaign_id,limit_usd:"10",consumed_usd:"0",
-  source_digest:d,as_of_ms:now,
- }),"fixture opening finance history attested before E1 admission");
+ // Synthetic complete-venue fixture ONLY; no production native opening
+ // importer exists yet. A hash alone cannot prove real campaign history.
+ check(await installCampaignEntryProof(store,await openingFixture()),
+  "synthetic full-cohort opening witness accepted in isolated test");
 }
 const sa=new Storage();
 function account(uid:string){
@@ -131,6 +147,39 @@ await initializeRiskBook(unproven,"installation_test");
 const noImport=await reserveRisk(unproven,policy,census,request,native);
 check(noImport.status==="DENIED"&&noImport.reason==="CAMPAIGN_ENTRY_BASELINE_NOT_PROVEN",
  "existing campaign with unknown prior spend must never start at zero");
+const absentOpening=new Storage();
+await absentOpening.put("account_access_v1",governance);
+await initializeRiskBook(absentOpening,"installation_test");
+const opening=await openingFixture();
+const untrusted=[
+ {...opening,source_digest:d},
+ {...opening,accounts:opening.accounts.slice(0,1)},
+ {...opening,accounts:[...opening.accounts].reverse()},
+ {...opening,accounts:opening.accounts.map((row,i)=>i===0?{...row,fill_history_complete:false as never}:row)},
+ {...opening,accounts:opening.accounts.map((row,i)=>i===0?{...row,history_from_ms:row.history_from_ms+1}:row)},
+ {...opening,accounts:opening.accounts.map((row,i)=>i===0?{...row,history_through_ms:row.history_through_ms-1}:row)},
+ {...opening,accounts:opening.accounts.map((row,i)=>i===0?{...row,source_digest:"not-a-hash"}:row)},
+ {...opening,consumed_usd:"1"},
+ {...opening,campaign_started_at_ms:opening.as_of_ms+1},
+] as CampaignEntryOpeningSource[];
+for(let i=0;i<untrusted.length;i++){
+ const accepted=await installCampaignEntryProof(absentOpening,untrusted[i]);
+ check(!accepted,"E1 opening unproven history rejected "+i);
+ check((await readRiskBook(absentOpening))?.entry_budget===undefined,
+  "bad opening must not install any entry budget "+i);
+}
+const provedOpening=await openingFixture();
+provedOpening.accounts[0]={...provedOpening.accounts[0],consumed_entry_usd:"3"};
+provedOpening.accounts[1]={...provedOpening.accounts[1],consumed_entry_usd:"2"};
+provedOpening.consumed_usd="5";
+provedOpening.source_digest=await openingDigest(provedOpening);
+check(await installCampaignEntryProof(absentOpening,provedOpening),
+ "complete synthetic consumed history is imported without assuming zero");
+check((await readRiskBook(absentOpening))?.entry_budget?.consumed_usd==="5",
+ "opening spend cannot be overwritten with synthetic zero");
+check(!await installCampaignEntryProof(absentOpening,await openingFixture()),
+ "campaign opening is immutable after first acceptance");
+console.log("entry_opening_all_managed_history_evidence PASS");
 const entryRace=new Storage();
 await entryRace.put("account_access_v1",governance);await entryRace.put("generation",77);
 await setupRiskBook(entryRace);
