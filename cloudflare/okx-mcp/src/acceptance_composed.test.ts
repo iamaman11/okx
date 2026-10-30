@@ -9,7 +9,7 @@ import {initial,limits} from './account_governance.test.js';
 const acceptanceEntryLimits={...limits,max_entry_usd:'10'};
 import type {Governance} from './account_governance.js';
 import {handleNativeRiskCommand} from './risk_authority.js';
-import {readRiskBook,installCampaignEntryProof} from './risk_book.js';
+import {readRiskBook,installCampaignEntryProof,openingDigest,type CampaignEntryOpeningSource} from './risk_book.js';
 
 function check(ok:unknown,message:string):asserts ok{if(!ok)throw Error(message);}
 class Storage {
@@ -66,10 +66,6 @@ async function recordNativePolicy(stage:string):Promise<void>{
  });
 }
 check((await initializeGovernance(storage,initial)).status===200,'synthetic central installation');
-check(await installCampaignEntryProof(storage,{
- campaign_id:initial.campaign_id,limit_usd:"10",consumed_usd:"0",
- source_digest:"c".repeat(64),as_of_ms:1792890000000
-}),"synthetic full-history opening entry amount attested");
 const ctx={auth:{scope:['mcp:use']}};
 let id=0,venuePostCount=0,transportCalls=0;
 const intents=new Map<string,{intent_id:string;state:string;plan:Record<string,unknown>;protected:boolean}>();
@@ -339,6 +335,26 @@ const enableEntry=await call('accounts',{
 check(enableEntry.status==='completed'&&
  enableEntry.data.accounts.find((a:any)=>a.id==='fixture_real')?.limits.max_entry_usd==='10',
  'real account entry cap installed by existing typed management CAS');
+// Only after registering the real cohort can the synthetic history fixture
+// claim complete coverage. The initial empty-governance state proves no spend
+// for NO real account, not a safe opening for a future account.
+const openingAsOf=1792890000000,openingFrom=openingAsOf-100000;
+const activePolicy=(await governanceRequest(storage,'GET')).body as Governance;
+const witnessed:CampaignEntryOpeningSource={
+ campaign_id:activePolicy.campaign_id,limit_usd:"10",consumed_usd:"0",
+ source_digest:"c".repeat(64),as_of_ms:openingAsOf,
+ campaign_started_at_ms:openingFrom,
+ accounts:activePolicy.accounts.filter(a=>a.environment==='real')
+  .map(a=>({account_key:a.account_key,history_from_ms:openingFrom,
+   history_through_ms:openingAsOf,consumed_entry_usd:"0",
+   order_history_complete:true,fill_history_complete:true,
+   bill_history_complete:true,finance_provenance_sealed:true,
+   source_digest:"a".repeat(64)}))
+  .sort((a,b)=>a.account_key.localeCompare(b.account_key))
+};
+witnessed.source_digest=await openingDigest(witnessed);
+check(await installCampaignEntryProof(storage,witnessed),
+ "synthetic full-cohort finance opening is only admissible after account enrollment");
 // Simulates the authenticated fixture socket's own generation, not an
 // externally asserted MCP parameter or a production WSS attestation.
 await storage.put('generation',generation);
