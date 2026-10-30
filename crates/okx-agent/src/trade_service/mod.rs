@@ -685,7 +685,7 @@ impl TradeService {
                            "entry_total_usdt":exact(entry.total_usdt),
                            "entry_total_usd":exact(entry.total_usd),
                            "usd_per_usdt":exact(fx),
-                           "admission_fx_snapshot_state":"PENDING_INDEPENDENT_COST_SOURCES",
+                           "admission_fx_snapshot_state":if all_in_upper.is_some() {"SOURCE_CLASSIFIED_CANDIDATE"} else {"PENDING_INDEPENDENT_COST_SOURCES"},
                            "entry_total_usd_basis":"QUOTED_FX_PREVIEW_NOT_FROZEN_ADMISSION",
                            "fee_rate":exact(fee_rate),
                            "fee_model_currency":"USDT",
@@ -700,7 +700,7 @@ impl TradeService {
                            "entry_budget_upper_reporting":all_in_upper.map(exact),
                            "entry_cost_proof_schema":"okx.entry-cost-proof/v1",
                            "entry_cost_reason_codes":missing,
-                           "other_costs":"UNAVAILABLE_NOT_INCLUDED"})
+                           "other_costs":if all_in_upper.is_some() {"CLASSIFIED"} else {"UNAVAILABLE_NOT_INCLUDED"}})
                 } else {
                     json!(null)
                 };
