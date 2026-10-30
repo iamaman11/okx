@@ -86,8 +86,7 @@ pub(super) fn verified_live_protection(
         || source.algo_order_id.is_empty()
         || source.state != "live"
         || !matches!(source.position_side.as_str(), "net" | "long" | "short")
-        || (source.position_side != "net"
-            && source.position_side != intent.plan.position_side)
+        || (source.position_side != "net" && source.position_side != intent.plan.position_side)
         || !source.failure_code.is_empty()
         || source.stop_loss_trigger_price_type != "mark"
         || !opposite
@@ -164,15 +163,16 @@ fn verified_intent_position_quantity<'a>(
 ) -> Result<Decimal, String> {
     positions
         .into_iter()
-        .try_fold(Decimal::ZERO, |total, (side, raw)| {
-            match verified_venue_position_direction(side, raw)? {
+        .try_fold(
+            Decimal::ZERO,
+            |total, (side, raw)| match verified_venue_position_direction(side, raw)? {
                 None => Ok(total),
                 Some((direction, quantity)) if direction == expected_side => total
                     .checked_add(quantity)
                     .ok_or_else(|| "VENUE_POSITION_QUANTITY_OVERFLOW".into()),
                 Some(_) => Err("VENUE_POSITION_OPPOSITE_EXPOSURE_UNVERIFIED".into()),
-            }
-        })
+            },
+        )
 }
 
 /// Protection cleanup must inspect the whole instrument (both hedge
@@ -536,7 +536,9 @@ impl TradeService {
                 self.cleanup_flat_protection(r, &i).await?;
             }
             if i.risk_increase && exposed {
-                let algo_client = i.client_order_id.get(..31)
+                let algo_client = i
+                    .client_order_id
+                    .get(..31)
                     .map(|client| format!("s{client}"))
                     .ok_or("PROTECTION_CLIENT_ID_INVALID")?;
                 let p = r
@@ -1641,8 +1643,10 @@ mod entry_cost_status_tests {
         assert!(verified_live_protection(&intent, Decimal::ONE, &p).is_ok());
         let mut changed = p.clone();
         changed.size = "0.5".into();
-        assert_eq!(verified_live_protection(&intent, Decimal::ONE, &changed),
-            Err("PROTECTION_LIVE_SOURCE_UNVERIFIED".into()));
+        assert_eq!(
+            verified_live_protection(&intent, Decimal::ONE, &changed),
+            Err("PROTECTION_LIVE_SOURCE_UNVERIFIED".into())
+        );
         changed = p.clone();
         changed.state = "pause".into();
         assert!(verified_live_protection(&intent, Decimal::ONE, &changed).is_err());
@@ -1676,8 +1680,10 @@ mod entry_cost_status_tests {
         assert!(verified_live_protection(&intent, Decimal::ZERO, &p).is_err());
         let mut short_client = intent;
         short_client.client_order_id = "short".into();
-        assert_eq!(verified_live_protection(&short_client, Decimal::ONE, &p),
-            Err("PROTECTION_CLIENT_ID_INVALID".into()));
+        assert_eq!(
+            verified_live_protection(&short_client, Decimal::ONE, &p),
+            Err("PROTECTION_CLIENT_ID_INVALID".into())
+        );
     }
 
     #[test]
@@ -1704,14 +1710,16 @@ mod entry_cost_status_tests {
     fn e2_position_direction_is_identical_for_net_status_census_and_recovery() {
         let one = Decimal::ONE;
         let half = dec("0.5").unwrap();
-        assert_eq!(verified_venue_position_direction("net", "1"),
-            Ok(Some(("long", one))));
-        assert_eq!(verified_venue_position_direction("net", "-0.5"),
-            Ok(Some(("short", half))));
         assert_eq!(
-            verified_intent_position_quantity("long", [
-                ("net", "0.25"), ("net", "0.75")
-            ]),
+            verified_venue_position_direction("net", "1"),
+            Ok(Some(("long", one)))
+        );
+        assert_eq!(
+            verified_venue_position_direction("net", "-0.5"),
+            Ok(Some(("short", half)))
+        );
+        assert_eq!(
+            verified_intent_position_quantity("long", [("net", "0.25"), ("net", "0.75")]),
             Ok(one)
         );
         assert_eq!(
@@ -1726,10 +1734,14 @@ mod entry_cost_status_tests {
             verified_intent_position_quantity("short", [("long", "0")]),
             Ok(Decimal::ZERO)
         );
-        assert_eq!(verified_venue_position_direction("long", "1"),
-            Ok(Some(("long", one))));
-        assert_eq!(verified_venue_position_direction("short", "0.5"),
-            Ok(Some(("short", half))));
+        assert_eq!(
+            verified_venue_position_direction("long", "1"),
+            Ok(Some(("long", one)))
+        );
+        assert_eq!(
+            verified_venue_position_direction("short", "0.5"),
+            Ok(Some(("short", half)))
+        );
         for side in ["long", "short", "net"] {
             assert_eq!(verified_venue_position_direction(side, "0"), Ok(None));
         }
