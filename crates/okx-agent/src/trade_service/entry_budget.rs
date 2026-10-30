@@ -1084,11 +1084,19 @@ mod tests {
         // coerced to hedge mode or borrowing-disabled.
         auto.auto_loan = None;
         assert_eq!(
-            applicant.clone()
+            applicant
+                .clone()
                 .attest_linear_usdt_sources(
-                    &open_plan, "limit", "BTC-USDT-SWAP", &rules,
-                    &live_fees, &auto, &snap, dec("2").unwrap(),
-                ).unwrap_err(),
+                    &open_plan,
+                    "limit",
+                    "BTC-USDT-SWAP",
+                    &rules,
+                    &live_fees,
+                    &auto,
+                    &snap,
+                    dec("2").unwrap(),
+                )
+                .unwrap_err(),
             "ENTRY_AUTO_BORROW_UNVERIFIED_OR_ENABLED"
         );
         let mut net = config.clone();
@@ -1096,12 +1104,21 @@ mod tests {
         let mut net_snapshot = snap.clone();
         net_snapshot.position_mode = "net_mode".into();
         assert_eq!(
-            applicant.clone()
+            applicant
+                .clone()
                 .attest_linear_usdt_sources(
-                    &open_plan, "limit", "BTC-USDT-SWAP", &rules,
-                    &live_fees, &net, &net_snapshot, dec("2").unwrap(),
-                ).unwrap()
-                .proven_upper_usd().unwrap(),
+                    &open_plan,
+                    "limit",
+                    "BTC-USDT-SWAP",
+                    &rules,
+                    &live_fees,
+                    &net,
+                    &net_snapshot,
+                    dec("2").unwrap(),
+                )
+                .unwrap()
+                .proven_upper_usd()
+                .unwrap(),
             Some(known.total_usd)
         );
         let mut no_funds = snap.clone();

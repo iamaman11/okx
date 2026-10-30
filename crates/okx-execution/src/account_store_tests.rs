@@ -93,10 +93,13 @@ fn r4_campaign_zero_only_after_all_six_incremental_money_cursors_complete() {
         ),
         "an external fill is never silently treated as zero historical spend"
     );
-    assert!(matches!(
-        s.verify_captured_campaign_continuity(from, through),
-        Err(StoreError::Invalid("ENTRY_POST_OPENING_FILL_NOT_SETTLED"))
-    ), "even a fully covered but unowned venue fill may never authorize a second entry");
+    assert!(
+        matches!(
+            s.verify_captured_campaign_continuity(from, through),
+            Err(StoreError::Invalid("ENTRY_POST_OPENING_FILL_NOT_SETTLED"))
+        ),
+        "even a fully covered but unowned venue fill may never authorize a second entry"
+    );
 }
 
 #[test]
