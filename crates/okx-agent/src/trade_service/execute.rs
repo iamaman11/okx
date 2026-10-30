@@ -243,6 +243,14 @@ impl TradeService {
         if !source.valid() || Instant::now() >= until {
             return Err("ENTRY_OPENING_SOURCE_INVALID".into());
         }
+        // Completed monetary source pages alone do not prove absence of
+        // live pending orders, unprotected positions or UNKNOWN obligations.
+        // The same authenticated whole-cohort census used for RESERVE must
+        // pass before an opening can be installed.
+        let census = self.census(state).await?;
+        if !census.complete {
+            return Err("ENTRY_OPENING_LIVE_CENSUS_INCOMPLETE".into());
+        }
         let result = self
             .risk
             .request(self.risk_command(
