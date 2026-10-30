@@ -152,18 +152,17 @@ impl AccountStore {
         let bytes = serde_json::to_vec(&quote)
             .map_err(|_| StoreError::Invalid("ENTRY_ADMISSION_QUOTE_DIGEST_INVALID"))?;
         let expected_quote_digest = format!("{:x}", Sha256::digest(bytes));
-        let computed = quote.total_usdt
+        let computed = quote
+            .total_usdt
             .checked_mul(proof.fx_upper_usd_per_usdt)
             .ok_or(StoreError::Invalid("ENTRY_ADMISSION_UPPER_OVERFLOW"))?
-            .round_dp_with_strategy(
-                9,
-                rust_decimal::RoundingStrategy::ToPositiveInfinity,
-            )
+            .round_dp_with_strategy(9, rust_decimal::RoundingStrategy::ToPositiveInfinity)
             .checked_add(proof.other_entry_costs_upper_usd)
             .ok_or(StoreError::Invalid("ENTRY_ADMISSION_UPPER_OVERFLOW"))?;
         let digest_valid = |v: &str| {
             v.len() == 64
-                && v.bytes().all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
+                && v.bytes()
+                    .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
         };
         if proof.schema != "okx.entry-admission/v1"
             || proof.account_key != self.meta.account_key
@@ -251,27 +250,33 @@ impl AccountStore {
         venue_filled_quantity: Decimal,
         covered_through: i64,
     ) -> StoreResult<EntrySettlementEvidence> {
-        let intent = self.intent(id)?.ok_or(StoreError::Invalid("ENTRY_SETTLEMENT_INTENT_MISSING"))?;
+        let intent = self
+            .intent(id)?
+            .ok_or(StoreError::Invalid("ENTRY_SETTLEMENT_INTENT_MISSING"))?;
         if !matches!(intent.state, IntentState::Filled | IntentState::Cancelled)
             || venue_updated_at <= 0
             || covered_through < venue_updated_at
             || venue_filled_quantity <= Decimal::ZERO
             || venue_filled_quantity > intent.plan.quantity
         {
-            return Err(StoreError::Invalid("ENTRY_SETTLEMENT_TERMINAL_SOURCE_UNVERIFIED"));
+            return Err(StoreError::Invalid(
+                "ENTRY_SETTLEMENT_TERMINAL_SOURCE_UNVERIFIED",
+            ));
         }
-        let admission = self.entry_admission(id)?
+        let admission = self
+            .entry_admission(id)?
             .ok_or(StoreError::Invalid("ENTRY_SETTLEMENT_ADMISSION_MISSING"))?;
         let began_post: Option<i64> = self.connection.query_row(
             "SELECT begin_post_at FROM intents WHERE intent_id=?1",
             [id],
             |row| row.get(0),
         )?;
-        if began_post.is_none_or(|at| at <= 0
-            || at < admission.observed_at
-            || venue_updated_at < at)
+        if began_post
+            .is_none_or(|at| at <= 0 || at < admission.observed_at || venue_updated_at < at)
         {
-            return Err(StoreError::Invalid("ENTRY_SETTLEMENT_POST_CAUSALITY_UNVERIFIED"));
+            return Err(StoreError::Invalid(
+                "ENTRY_SETTLEMENT_POST_CAUSALITY_UNVERIFIED",
+            ));
         }
         let bill = self.intent_fee_bill_evidence(id, covered_through)?;
         let fill = &bill.fill;
@@ -286,15 +291,17 @@ impl AccountStore {
         {
             return Err(StoreError::Invalid("ENTRY_SETTLEMENT_FILL_BILL_INCOMPLETE"));
         }
-        let central = self.central_receipt(id)?
-            .ok_or(StoreError::Invalid("ENTRY_SETTLEMENT_CENTRAL_RECEIPT_MISSING"))?;
+        let central = self.central_receipt(id)?.ok_or(StoreError::Invalid(
+            "ENTRY_SETTLEMENT_CENTRAL_RECEIPT_MISSING",
+        ))?;
         if central.reservation_key != fill.reservation_key
             || central.account_key != admission.account_key
             || central.plan_hash != admission.plan_hash
         {
             return Err(StoreError::Invalid("ENTRY_SETTLEMENT_RESERVATION_MISMATCH"));
         }
-        let full_usdt = fill.gross_notional_usdt
+        let full_usdt = fill
+            .gross_notional_usdt
             .checked_add(bill.conservative_verified_fee_usdt)
             .ok_or(StoreError::Invalid("ENTRY_SETTLEMENT_MONEY_OVERFLOW"))?;
         let usd = full_usdt
@@ -303,10 +310,10 @@ impl AccountStore {
             .round_dp_with_strategy(9, rust_decimal::RoundingStrategy::ToPositiveInfinity)
             .checked_add(admission.other_entry_costs_upper_usd)
             .ok_or(StoreError::Invalid("ENTRY_SETTLEMENT_MONEY_OVERFLOW"))?;
-        if full_usdt <= Decimal::ZERO || usd <= Decimal::ZERO
-            || usd > admission.entry_upper_usd
-        {
-            return Err(StoreError::Invalid("ENTRY_SETTLEMENT_EXCEEDS_RESERVED_UPPER"));
+        if full_usdt <= Decimal::ZERO || usd <= Decimal::ZERO || usd > admission.entry_upper_usd {
+            return Err(StoreError::Invalid(
+                "ENTRY_SETTLEMENT_EXCEEDS_RESERVED_UPPER",
+            ));
         }
         let bytes = serde_json::to_vec(&(
             "okx.entry-terminal-settlement/v1",
@@ -323,7 +330,8 @@ impl AccountStore {
             venue_filled_quantity,
             full_usdt,
             usd,
-        )).map_err(|_| StoreError::Invalid("ENTRY_SETTLEMENT_SOURCE_DIGEST_INVALID"))?;
+        ))
+        .map_err(|_| StoreError::Invalid("ENTRY_SETTLEMENT_SOURCE_DIGEST_INVALID"))?;
         let settlement = EntrySettlementEvidence {
             schema: "okx.entry-terminal-settlement/v1".into(),
             account_key: self.meta.account_key.clone(),
@@ -340,8 +348,7 @@ impl AccountStore {
         };
         let key = format!("entry-settlement:{id}");
         if let Some(prior) = self.operation(&key)? {
-            if prior.kind != "ENTRY_SETTLEMENT_PROVEN"
-                || prior.request_hash != settlement.plan_hash
+            if prior.kind != "ENTRY_SETTLEMENT_PROVEN" || prior.request_hash != settlement.plan_hash
             {
                 return Err(StoreError::Invalid("ENTRY_SETTLEMENT_IDEMPOTENCY_CONFLICT"));
             }
@@ -374,7 +381,12 @@ impl AccountStore {
         self.connection.execute(
             "INSERT INTO operation_receipts(operation_id,kind,request_hash,result_ref,committed_at)
              VALUES(?1,'ENTRY_SETTLEMENT_PROVEN',?2,?3,?4)",
-            params![key, settlement.plan_hash, encoded, settlement.venue_update_ms],
+            params![
+                key,
+                settlement.plan_hash,
+                encoded,
+                settlement.venue_update_ms
+            ],
         )?;
         Ok(settlement)
     }
