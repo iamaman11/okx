@@ -949,12 +949,7 @@ impl TradeService {
             .execution
             .store
             .call(deadline(), move |s| {
-                s.bind_terminal_entry_settlement(
-                    &id,
-                    venue_updated_at,
-                    filled,
-                    through.watermark,
-                )
+                s.bind_terminal_entry_settlement(&id, venue_updated_at, filled, through.watermark)
             })
             .await
             .map_err(err)?;
@@ -972,9 +967,8 @@ impl TradeService {
                 RiskCommandAction::SettleEntry {
                     reservation_key: settlement.reservation_key.clone(),
                     plan_sha256: settlement.plan_hash.clone(),
-                    expected_risk_book_sequence: observed
-                        .risk_book_sequence
-                        .ok_or("RISK_SEQUENCE_MISSING")?,
+                    expected_risk_book_sequence:
+                        observed.risk_book_sequence.ok_or("RISK_SEQUENCE_MISSING")?,
                     cumulative_entry_usd: exact(settlement.cumulative_entry_usd),
                     settlement_revision: settlement.settlement_revision,
                     source_digest: settlement.source_digest.clone(),
@@ -983,7 +977,9 @@ impl TradeService {
             .await
             .map_err(str::to_owned)?;
         if settled.status != RiskDecisionStatus::Updated {
-            return Err(settled.reason.unwrap_or("CENTRAL_ENTRY_SETTLEMENT_PENDING".into()));
+            return Err(settled
+                .reason
+                .unwrap_or("CENTRAL_ENTRY_SETTLEMENT_PENDING".into()));
         }
         let settlement_sequence = settled
             .risk_book_sequence
