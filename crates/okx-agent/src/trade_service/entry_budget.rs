@@ -221,6 +221,44 @@ impl EntryCostProof {
         }
     }
 
+    /// Candidate valuation shares the authenticated USDT->USD source with
+    /// sizing/preview. Other economic dimensions stay Pending and MUST NOT
+    /// grant a real reservation merely because the FX source is fresh.
+    pub(super) fn source_valued_candidate(
+        quote: EntryQuote,
+        conversion: &UsdConversion,
+        observed_at_ms: i64,
+    ) -> Result<Self, String> {
+        let source_at = i64::try_from(conversion.observed_at_ms)
+            .map_err(|_| "ENTRY_VALUATION_TIME_INVALID")?;
+        if source_at <= 0
+            || source_at > observed_at_ms
+            || observed_at_ms - source_at > 5_000
+        {
+            return Err("ENTRY_VALUATION_SOURCE_STALE".into());
+        }
+        if conversion.source_digest.len() != 64
+            || !conversion
+                .source_digest
+                .bytes()
+                .all(|c| c.is_ascii_hexdigit())
+        {
+            return Err("ENTRY_VALUATION_SOURCE_INVALID".into());
+        }
+        let rate = dec(&conversion.usd_per_usdt)?;
+        if rate != quote.observed_usd_per_usdt {
+            return Err("ENTRY_VALUATION_RATE_MISMATCH".into());
+        }
+        let mut candidate = Self::unproven_linear_quote(quote);
+        candidate.valuation = BudgetValuation::AdmissionSnapshot {
+            usd_per_usdt: rate,
+            observed_at_ms: source_at,
+            source_digest: conversion.source_digest.clone(),
+            basis: "account.usdt.equity_usd_div_equity:usdt_to_usd",
+        };
+        Ok(candidate)
+    }
+
     /// Only opening notional plus immediate opening fees consume entry budget.
     /// Margin is verified against a LOWER bound on own available funds, not
     /// added to entry spend. Borrowing is unsupported in the first Real lane.
@@ -1107,6 +1145,34 @@ mod tests {
         assert_ne!(
             proof.quote.total_usdt * d("1.05"),
             proof.proven_upper_usd().unwrap().unwrap()
+        );
+    }
+
+    #[test]
+    fn r4_candidate_valuation_is_fresh_and_still_no_post_permission() {
+        let cost = quote(d("8"), Decimal::ONE, Decimal::ONE, d("0.0005"), d("1.01"))
+            .unwrap();
+        let fx = UsdConversion {
+            usd_per_usdt: "1.01".into(),
+            source_digest: "a".repeat(64),
+            observed_at_ms: 1_000,
+        };
+        let candidate = EntryCostProof::source_valued_candidate(
+            cost.clone(), &fx, 1_100,
+        ).unwrap();
+        assert_eq!(candidate.proven_upper_usd().unwrap(), None);
+        assert_eq!(candidate.missing_reasons().len(), 4);
+        assert_eq!(
+            EntryCostProof::source_valued_candidate(cost.clone(), &fx, 6_001).unwrap_err(),
+            "ENTRY_VALUATION_SOURCE_STALE"
+        );
+        let different = UsdConversion {
+            usd_per_usdt: "1.02".into(),
+            ..fx
+        };
+        assert_eq!(
+            EntryCostProof::source_valued_candidate(cost, &different, 1_100).unwrap_err(),
+            "ENTRY_VALUATION_RATE_MISMATCH"
         );
     }
 

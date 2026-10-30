@@ -584,8 +584,11 @@ impl TradeService {
             // central entry-spend authority. Until authenticated venue
             // applicability and an independently bounded FX source exist,
             // unproven_linear_quote produces no upper and no proof digest.
-            let entry_cost_proof =
-                entry_budget::EntryCostProof::unproven_linear_quote(quote.clone());
+            let entry_cost_proof = entry_budget::EntryCostProof::source_valued_candidate(
+                quote.clone(),
+                &fx,
+                entry_receipt.observed_at,
+            )?;
             let verified_entry =
                 entry_budget::reserve_entry_evidence(&entry_cost_proof, &entry_receipt, ceiling)?;
             let cost_components = entry_cost_proof.verified_fx_and_entry_fees()?;

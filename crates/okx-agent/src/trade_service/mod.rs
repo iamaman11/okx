@@ -648,7 +648,11 @@ impl TradeService {
                     // costs, rather than treating them as zero.
                     let unproven_headroom =
                         entry_budget::unproven_entry_cost_headroom(entry.total_usd, entry_ceiling)?;
-                    let proof = entry_budget::EntryCostProof::unproven_linear_quote(entry.clone());
+                    let proof = entry_budget::EntryCostProof::source_valued_candidate(
+                        entry.clone(),
+                        &conversion,
+                        now(),
+                    )?;
                     let all_in_upper = proof.proven_upper_usd()?;
                     let missing = proof.missing_reasons();
                     json!({"price_bound_usdt":exact(plan.limit_price),
