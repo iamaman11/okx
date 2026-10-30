@@ -254,30 +254,31 @@ impl TradeService {
         // Expose the immutable, cursor-covered source ledger for this intent,
         // not an estimate from venue order status or a permission to settle
         // central USD entry spend. Missing coverage remains explicitly blocked.
-        let entry_fill_evidence = if financial && i.risk_increase {
-            let evidence_id = i.intent_id.clone();
-            match r
-                .execution
-                .store
-                .call(deadline(), move |s| {
-                    let cursor = s.cursor("fills", "SWAP")?.ok_or(
-                        okx_execution::StoreError::Invalid("ENTRY_FILL_COVERAGE_UNPROVEN"),
-                    )?;
-                    s.intent_fill_cost_evidence(&evidence_id, cursor.watermark)
-                })
-                .await
-            {
-                Ok(source) => json!({"state":"verified_native_fills",
+        let entry_fill_evidence =
+            if financial && i.risk_increase {
+                let evidence_id = i.intent_id.clone();
+                match r
+                    .execution
+                    .store
+                    .call(deadline(), move |s| {
+                        let cursor = s.cursor("fills", "SWAP")?.ok_or(
+                            okx_execution::StoreError::Invalid("ENTRY_FILL_COVERAGE_UNPROVEN"),
+                        )?;
+                        s.intent_fill_cost_evidence(&evidence_id, cursor.watermark)
+                    })
+                    .await
+                {
+                    Ok(source) => json!({"state":"verified_native_fills",
                     "scope":"USDT_fill_notional_and_fee_only",
                     "all_in_entry_cost_proven":false,
                     "source":source}),
-                Err(reason) => json!({"state":"incomplete",
+                    Err(reason) => json!({"state":"incomplete",
                     "all_in_entry_cost_proven":false,
                     "reason_code":err(reason)}),
-            }
-        } else {
-            json!({"state":"not_evaluated","all_in_entry_cost_proven":false})
-        };
+                }
+            } else {
+                json!({"state":"not_evaluated","all_in_entry_cost_proven":false})
+            };
         let mut result = completed(
             json!({"intent":i,"remaining_exposure":if financial{Some(exact(exposure))}else{None},
                 "entry_fill_evidence":entry_fill_evidence,
