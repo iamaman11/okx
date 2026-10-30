@@ -1345,6 +1345,37 @@ mod tests {
     }
 
     #[test]
+    fn seven_day_zero_spend_source_never_claims_seven_day_lost_post_proof() {
+        let observed = chrono::DateTime::parse_from_rfc3339("2026-10-30T12:00:00Z")
+            .unwrap()
+            .timestamp_millis();
+        let beginning = observed - 7 * 86_400_000;
+        // Full authenticated empty finance windows may support later
+        // native dollar classification. They are still NOT themselves an
+        // all-cohort RiskBook opening or a lost-POST absence assertion.
+        assert!(verify_campaign_money_window(beginning, observed, observed).is_ok());
+        assert!(verify_campaign_order_window(beginning, observed, observed).is_err());
+        let money = complete_campaign_money_witness(beginning, observed, vec![], vec![])
+            .unwrap();
+        let source =
+            complete_campaign_account_witness(beginning, observed, vec![], money).unwrap();
+        assert!(source.orders.is_empty());
+        assert!(source.fills.is_empty());
+        assert!(source.bills.is_empty());
+        assert_eq!(source.source_digest.len(), 64);
+        // Monetary ambiguity is not suppressed by the missing canceled
+        // order history: an unexplained bill still blocks this witness.
+        let foreign: AccountBill = serde_json::from_value(serde_json::json!({
+            "billId":"123456","ordId":"unproven_order","ccy":"USDT",
+            "fee":"0","ts":(beginning+1000).to_string()
+        })).unwrap();
+        let money = complete_campaign_money_witness(
+            beginning, observed, vec![], vec![foreign]
+        ).unwrap();
+        assert!(complete_campaign_account_witness(beginning, observed, vec![], money).is_err());
+    }
+
+    #[test]
     fn campaign_account_history_rejects_missing_order_and_fill_quantity_mismatch() {
         let from_ms = 1_791_579_300_000i64;
         let through_ms = from_ms + 20_000;
