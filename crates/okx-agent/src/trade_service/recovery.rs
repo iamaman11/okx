@@ -207,11 +207,10 @@ impl TradeService {
         }
         let mut managed = std::collections::BTreeSet::new();
         for position in &snapshot.positions {
-            let Some((direction, qty)) =
-                super::reconcile::verified_venue_position_direction(
-                    &position.position_side,
-                    &position.position,
-                )?
+            let Some((direction, qty)) = super::reconcile::verified_venue_position_direction(
+                &position.position_side,
+                &position.position,
+            )?
             else {
                 continue;
             };
@@ -230,7 +229,8 @@ impl TradeService {
                 if lot.remaining_qty <= Decimal::ZERO {
                     return Err("STORAGE_RECOVERY_LOT_QUANTITY_INVALID".to_owned());
                 }
-                total.checked_add(lot.remaining_qty)
+                total
+                    .checked_add(lot.remaining_qty)
                     .ok_or("STORAGE_RECOVERY_LOT_QUANTITY_OVERFLOW".to_owned())
             })?;
             if total != qty {
@@ -245,13 +245,15 @@ impl TradeService {
                 if !seen_intents.insert(id.clone()) {
                     continue;
                 }
-                let owned_intent_qty = owned.iter()
+                let owned_intent_qty = owned
+                    .iter()
                     .filter(|entry| entry.intent_id.as_deref() == Some(id.as_str()))
                     .try_fold(Decimal::ZERO, |total, entry| {
                         if entry.remaining_qty <= Decimal::ZERO {
                             return Err("STORAGE_RECOVERY_LOT_QUANTITY_INVALID".to_owned());
                         }
-                        total.checked_add(entry.remaining_qty)
+                        total
+                            .checked_add(entry.remaining_qty)
                             .ok_or("STORAGE_RECOVERY_LOT_QUANTITY_OVERFLOW".to_owned())
                     })?;
                 let (protection, intent) = r
@@ -264,15 +266,14 @@ impl TradeService {
                     .map_err(err)?;
                 let protection = protection.ok_or("STORAGE_RECOVERY_PROTECTION_MISSING")?;
                 let intent = intent.ok_or("STORAGE_RECOVERY_PROTECTION_INTENT_MISSING")?;
-                if protection.quantity < owned_intent_qty
-                    || intent.plan.position_side != lot.side
-                {
+                if protection.quantity < owned_intent_qty || intent.plan.position_side != lot.side {
                     return Err("STORAGE_RECOVERY_PROTECTION_INCOMPLETE".into());
                 }
                 // Inventory proves only that an algo ID exists. It cannot
                 // attest a live trigger, correct side or current quantity.
                 // Use the same exact venue-source gate as trade.status.
-                let client = intent.client_order_id
+                let client = intent
+                    .client_order_id
                     .get(..31)
                     .map(|v| format!("s{v}"))
                     .ok_or("STORAGE_RECOVERY_PROTECTION_CLIENT_INVALID")?;
