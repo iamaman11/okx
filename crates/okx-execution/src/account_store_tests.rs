@@ -454,6 +454,9 @@ fn e1_fee_bill_cross_source_receipt_requires_both_immutable_sources() {
         ..Default::default()
     })
     .unwrap();
+    let progressed = s.intent_fee_bill_evidence("intent", 7).unwrap();
+    assert_eq!(progressed.fill.source_digest, evidence.fill.source_digest);
+    assert_eq!(progressed.source_digest, evidence.source_digest);
     assert_eq!(
         s.bind_terminal_entry_settlement("intent", 7, Decimal::ONE, 8)
             .unwrap(),
