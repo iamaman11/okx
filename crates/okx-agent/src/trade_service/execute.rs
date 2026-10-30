@@ -90,13 +90,62 @@ impl TradeService {
     /// Opening may be installed once for the entire authenticated cohort.
     /// Unknown venue events never imply zero. Non-USD historical instruments
     /// remain unsupported until a historical contract+FX source exists.
+    /// No historical network pagination is permitted on the POST command
+    /// path. Background capture owns source cursors; only the SQL owner can
+    /// certify an absence of *unaccounted* campaign events in a fresh window.
     async fn ensure_campaign_opening(
         &self,
         state: &CentralGovernanceSnapshot,
         until: Instant,
     ) -> Result<(), String> {
-        let summary = self
-            .risk
+        let summary = self.risk
+            .request(self.risk_command(
+                state,
+                format!("opening_status_{}", now()),
+                RiskCommandAction::Summary {},
+            ))
+            .await
+            .map_err(str::to_owned)?;
+        if summary.status != RiskDecisionStatus::Observed {
+            return Err("ENTRY_OPENING_CENTRAL_SUMMARY_UNAVAILABLE".into());
+        }
+        let entry = summary.budget
+            .ok_or("ENTRY_OPENING_CENTRAL_BUDGET_MISSING")?
+            .entry_budget
+            .ok_or("BASELINE_RECONCILIATION_REQUIRED")?;
+        let from = i64::try_from(entry.opening_as_of_ms)
+            .map_err(|_| "ENTRY_OPENING_CUTOFF_INVALID")?;
+        let through = now().saturating_sub(2_000);
+        if through <= from {
+            return Err("ENTRY_OPENING_CAPTURE_PENDING".into());
+        }
+        for account in state.state.accounts.iter().filter(|a| {
+            a.environment == okx_protocol::account_governance::AccountEnvironment::Real
+        }) {
+            if Instant::now() >= until {
+                return Err("COMMAND_EXPIRED".into());
+            }
+            let resource = self.resources(&account.account_key).await?;
+            if !resource.source_identity_ready().await {
+                return Err("ENTRY_OPENING_IDENTITY_UNVERIFIED".into());
+            }
+            resource.execution.store.call(until, move |store| {
+                store.verify_captured_empty_window(from, through)
+            }).await.map_err(err)?;
+        }
+        Ok(())
+    }
+
+    /// The existing 1-second TradeService maintenance owner installs a
+    /// ZERO opening only after the background incremental account captures
+    /// have reached one common cut-off across the immutable real cohort.
+    /// A nonzero or older-than-capture campaign remains explicitly pending.
+    pub(super) async fn install_captured_empty_campaign_opening(
+        &self,
+        state: &CentralGovernanceSnapshot,
+        until: Instant,
+    ) -> Result<(), String> {
+        let summary = self.risk
             .request(self.risk_command(
                 state,
                 format!("opening_summary_{}", now()),
@@ -107,51 +156,9 @@ impl TradeService {
         if summary.status != RiskDecisionStatus::Observed {
             return Err("ENTRY_OPENING_CENTRAL_SUMMARY_UNAVAILABLE".into());
         }
-        let budget = summary
-            .budget
+        let budget = summary.budget
             .ok_or("ENTRY_OPENING_CENTRAL_BUDGET_MISSING")?;
-        if let Some(entry) = budget.entry_budget {
-            // An imported opening is a historical snapshot, NOT perpetual
-            // proof that nobody subsequently traded outside RiskBook. Until
-            // native post-opening fill/bill settlement is independently
-            // reconciled, any money event after that cut-off blocks new risk.
-            // This deliberately rejects even own fills rather than silently
-            // letting a second trade spend untracked campaign capacity.
-            let from = i64::try_from(entry.opening_as_of_ms)
-                .map_err(|_| "ENTRY_OPENING_CUTOFF_INVALID")?;
-            let through = now();
-            if through <= from {
-                return Err("ENTRY_OPENING_CUTOFF_NOT_FRESH".into());
-            }
-            for account in state.state.accounts.iter().filter(|a| {
-                a.environment == okx_protocol::account_governance::AccountEnvironment::Real
-            }) {
-                if Instant::now() >= until {
-                    return Err("COMMAND_EXPIRED".into());
-                }
-                let resource = self.resources(&account.account_key).await?;
-                if !resource.source_identity_ready().await {
-                    return Err("ENTRY_OPENING_IDENTITY_UNVERIFIED".into());
-                }
-                let money = tokio::time::timeout(
-                    until.saturating_duration_since(Instant::now()),
-                    resource.execution.history.complete_campaign_money_history(
-                        from,
-                        through,
-                        now(),
-                    ),
-                )
-                .await
-                .map_err(|_| "ENTRY_OPENING_POST_CUTOFF_HISTORY_DEADLINE")?
-                .map_err(|_| "ENTRY_OPENING_POST_CUTOFF_HISTORY_UNAVAILABLE")?;
-                if money.from_ms != from
-                    || money.through_ms != through
-                    || !money.fills.is_empty()
-                    || !money.bills.is_empty()
-                {
-                    return Err("ENTRY_OPENING_POST_CUTOFF_MONEY_UNRECONCILED".into());
-                }
-            }
+        if budget.entry_budget.is_some() {
             return Ok(());
         }
         let origin = budget
@@ -179,7 +186,7 @@ impl TradeService {
         if !self.accounts.failures().await.is_empty() {
             return Err("ENTRY_OPENING_COHORT_UNAVAILABLE".into());
         }
-        let through = now();
+        let through = now().saturating_sub(2_000);
         for account in cohort {
             if Instant::now() >= until {
                 return Err("COMMAND_EXPIRED".into());
@@ -188,46 +195,16 @@ impl TradeService {
             if !resource.source_identity_ready().await {
                 return Err("ENTRY_OPENING_IDENTITY_UNVERIFIED".into());
             }
-            let history = tokio::time::timeout(
-                until.saturating_duration_since(Instant::now()),
-                resource
-                    .execution
-                    .history
-                    .complete_campaign_account_history(from, through, now()),
-            )
-            .await
-            .map_err(|_| "ENTRY_OPENING_HISTORY_DEADLINE")?
-            .map_err(|_| "ENTRY_OPENING_HISTORY_UNAVAILABLE")?;
-            if history.from_ms != from || history.through_ms != through {
-                return Err("ENTRY_OPENING_HISTORY_SCOPE_MISMATCH".into());
-            }
-            let spent = Self::historical_usd_spot_entry(&history)?;
-            let venue_fill_count = history.fills.len();
-            let venue_bill_count = history.bills.len();
             let campaign = origin.campaign_id.clone();
-            let source = history.source_digest;
-            let source_digest = resource
-                .execution
-                .store
-                .call(until, move |store| {
-                    store.seal_campaign_entry_opening(
-                        &campaign,
-                        from,
-                        through,
-                        &source,
-                        venue_fill_count,
-                        venue_bill_count,
-                        spent,
-                    )
-                })
-                .await
-                .map_err(err)?;
+            let source_digest = resource.execution.store.call(until, move |store| {
+                store.seal_captured_empty_campaign(&campaign, from, through)
+            }).await.map_err(err)?;
             rows.push(CampaignOpeningAccount {
                 account_key: account.account_key.clone(),
                 history_from_ms: origin.started_at_ms,
                 history_through_ms: u64::try_from(through)
                     .map_err(|_| "ENTRY_OPENING_TIME_INVALID")?,
-                consumed_entry_usd: exact(spent),
+                consumed_entry_usd: exact(Decimal::ZERO),
                 order_history_complete: true,
                 fill_history_complete: true,
                 bill_history_complete: true,
