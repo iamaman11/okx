@@ -11,6 +11,109 @@ pub(super) struct EntryQuote {
     pub(super) total_usd: Decimal,
 }
 
+/// E1 cost evidence is explicit. An unavailable mandatory entry cost can
+/// never be represented as zero or silently counted as NotApplicable.
+// Staged E1: venue evidence constructors follow with the RiskBook binding.
+// Only Unknown can be constructed by preview until authenticated proofs exist.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq)]
+pub(super) enum EntryCostEvidence {
+    Proven {
+        upper_usd: Decimal,
+        basis: &'static str,
+    },
+    NotApplicable {
+        basis: &'static str,
+    },
+    Unknown {
+        reason: &'static str,
+    },
+}
+impl EntryCostEvidence {
+    fn upper(&self) -> Result<Option<Decimal>, String> {
+        match self {
+            Self::Proven { upper_usd, .. } if *upper_usd >= Decimal::ZERO => Ok(Some(*upper_usd)),
+            Self::NotApplicable { .. } => Ok(Some(Decimal::ZERO)),
+            Self::Unknown { .. } => Ok(None),
+            Self::Proven { .. } => Err("ENTRY_COST_NEGATIVE".into()),
+        }
+    }
+    fn reason(&self) -> Option<&'static str> {
+        match self {
+            Self::Unknown { reason } => Some(*reason),
+            _ => None,
+        }
+    }
+}
+
+/// A conservative bound for NOTIONAL+known USDT entry fee is not the actual
+/// margin-account debit. All-in entry permission requires separately proved
+/// venue fee currency, borrow/collateral applicability, and bounded FX.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct EntryCostProof {
+    pub(super) quote: EntryQuote,
+    pub(super) extra_immediate_fees: EntryCostEvidence,
+    pub(super) borrowing: EntryCostEvidence,
+    pub(super) collateral_or_margin: EntryCostEvidence,
+    pub(super) fx_bound: EntryCostEvidence,
+}
+impl EntryCostProof {
+    /// Preview/size-order produces an *incomplete* proof until the venue and
+    /// central authority provide independent cost/applicability evidence.
+    pub(super) fn unproven_linear_quote(quote: EntryQuote) -> Self {
+        Self {
+            quote,
+            extra_immediate_fees: EntryCostEvidence::Unknown {
+                reason: "ADDITIONAL_ENTRY_FEES_UNPROVEN",
+            },
+            borrowing: EntryCostEvidence::Unknown {
+                reason: "BORROWING_APPLICABILITY_UNPROVEN",
+            },
+            collateral_or_margin: EntryCostEvidence::Unknown {
+                reason: "MARGIN_ENTRY_DEBIT_UNPROVEN",
+            },
+            fx_bound: EntryCostEvidence::Unknown {
+                reason: "FX_UPPER_BOUND_UNPROVEN",
+            },
+        }
+    }
+
+    /// No Unknown cost may become an authorization. The quote.total_usd is
+    /// treated as a conservative notional+fee bound, not as exact margin debit.
+    pub(super) fn proven_upper_usd(&self) -> Result<Option<Decimal>, String> {
+        let mut additional = Decimal::ZERO;
+        for cost in [
+            &self.extra_immediate_fees,
+            &self.borrowing,
+            &self.collateral_or_margin,
+            &self.fx_bound,
+        ] {
+            let Some(upper) = cost.upper()? else {
+                return Ok(None);
+            };
+            additional = additional.checked_add(upper).ok_or("MONEY_OVERFLOW")?;
+        }
+        Ok(Some(
+            self.quote
+                .total_usd
+                .checked_add(additional)
+                .ok_or("MONEY_OVERFLOW")?,
+        ))
+    }
+
+    pub(super) fn missing_reasons(&self) -> Vec<&'static str> {
+        [
+            &self.extra_immediate_fees,
+            &self.borrowing,
+            &self.collateral_or_margin,
+            &self.fx_bound,
+        ]
+        .into_iter()
+        .filter_map(EntryCostEvidence::reason)
+        .collect()
+    }
+}
+
 pub(super) fn quote(
     qty: Decimal,
     ct: Decimal,
@@ -204,6 +307,37 @@ pub(super) fn unproven_entry_cost_headroom(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn e1_cost_proof_never_equates_margin_or_unknown_fees_with_zero() {
+        let quote = quote(d("0.09"), d("1"), d("101"), d("0.0005"), d("1")).unwrap();
+        assert_eq!(quote.total_usd, d("9.094545"));
+        let mut p = EntryCostProof::unproven_linear_quote(quote);
+        assert_eq!(p.proven_upper_usd().unwrap(), None);
+        assert_eq!(p.missing_reasons().len(), 4);
+        // Explicit venue non-applicability is evidence, not a guessed zero.
+        p.extra_immediate_fees = EntryCostEvidence::NotApplicable {
+            basis: "venue:no-other-immediate-fees",
+        };
+        p.borrowing = EntryCostEvidence::NotApplicable {
+            basis: "venue:no-borrow",
+        };
+        p.collateral_or_margin = EntryCostEvidence::NotApplicable {
+            basis: "conservative-notional-cover",
+        };
+        // An observed rate is not necessarily a bounded FX rate.
+        assert_eq!(p.proven_upper_usd().unwrap(), None);
+        p.fx_bound = EntryCostEvidence::Proven {
+            upper_usd: Decimal::ZERO,
+            basis: "bounded-fx-evidence",
+        };
+        assert_eq!(p.proven_upper_usd().unwrap(), Some(d("9.094545")));
+        p.extra_immediate_fees = EntryCostEvidence::Proven {
+            upper_usd: d("-0.01"),
+            basis: "invalid-rebate",
+        };
+        assert_eq!(p.proven_upper_usd().unwrap_err(), "ENTRY_COST_NEGATIVE");
+    }
+
     #[test]
     fn unknown_entry_cost_headroom_is_not_a_cost_proof() {
         let d = |s: &str| Decimal::from_str(s).unwrap();

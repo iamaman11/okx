@@ -653,6 +653,9 @@ impl TradeService {
                     // costs, rather than treating them as zero.
                     let unproven_headroom =
                         entry_budget::unproven_entry_cost_headroom(entry.total_usd, entry_ceiling)?;
+                    let proof = entry_budget::EntryCostProof::unproven_linear_quote(entry.clone());
+                    let all_in_upper = proof.proven_upper_usd()?;
+                    let missing = proof.missing_reasons();
                     json!({"price_bound_usdt":exact(plan.limit_price),
                            "notional_usdt":exact(entry.notional_usdt),
                            "entry_fee_usdt":exact(entry.fee_usdt),
@@ -666,7 +669,10 @@ impl TradeService {
                            "account_entry_cap_usd":c.limits.max_entry_usd,
                            "price_enforcement":"VENUE_LIMIT_OR_IOC_FOK",
                            "remaining_cap_for_unproven_costs_usd":unproven_headroom.map(exact),
-                           "all_in_entry_cost_proven":false,
+                           "all_in_entry_cost_proven":all_in_upper.is_some(),
+                           "entry_debit_upper_usd":all_in_upper.map(exact),
+                           "entry_cost_proof_schema":"okx.entry-cost-proof/v1",
+                           "entry_cost_reason_codes":missing,
                            "other_costs":"UNAVAILABLE_NOT_INCLUDED"})
                 } else {
                     json!(null)
