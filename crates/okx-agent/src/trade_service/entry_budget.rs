@@ -58,20 +58,28 @@ pub(super) enum EntryFxUpperBound {
         source_digest: String,
         basis: &'static str,
     },
-    Unknown { reason: &'static str },
+    Unknown {
+        reason: &'static str,
+    },
 }
 impl EntryFxUpperBound {
     fn rate(&self, observed: Decimal) -> Result<Option<Decimal>, String> {
         match self {
             Self::Unknown { .. } => Ok(None),
-            Self::Proven { usd_per_usdt_upper, source_digest, .. } => {
+            Self::Proven {
+                usd_per_usdt_upper,
+                source_digest,
+                ..
+            } => {
                 if *usd_per_usdt_upper <= Decimal::ZERO || observed <= Decimal::ZERO {
                     return Err("ENTRY_FX_UPPER_BOUND_INVALID".into());
                 }
                 if *usd_per_usdt_upper < observed {
                     return Err("ENTRY_FX_BOUND_BELOW_OBSERVED".into());
                 }
-                if source_digest.len() != 64 || !source_digest.bytes().all(|b| b.is_ascii_hexdigit()) {
+                if source_digest.len() != 64
+                    || !source_digest.bytes().all(|b| b.is_ascii_hexdigit())
+                {
                     return Err("ENTRY_FX_BOUND_SOURCE_INVALID".into());
                 }
                 Ok(Some(*usd_per_usdt_upper))
@@ -130,7 +138,9 @@ impl EntryCostProof {
         if self.quote.total_usdt <= Decimal::ZERO {
             return Err("ENTRY_SOURCE_INVALID".into());
         }
-        let mut upper = self.quote.total_usdt
+        let mut upper = self
+            .quote
+            .total_usdt
             .checked_mul(fx_upper)
             .ok_or("MONEY_OVERFLOW")?
             .round_dp_with_strategy(9, RoundingStrategy::ToPositiveInfinity);
@@ -775,13 +785,19 @@ mod tests {
             source_digest: "a".repeat(64),
             basis: "invalid-lower-than-observed",
         };
-        assert_eq!(p.proven_upper_usd().unwrap_err(), "ENTRY_FX_BOUND_BELOW_OBSERVED");
+        assert_eq!(
+            p.proven_upper_usd().unwrap_err(),
+            "ENTRY_FX_BOUND_BELOW_OBSERVED"
+        );
         p.fx_bound = EntryFxUpperBound::Proven {
             usd_per_usdt_upper: d("1"),
             source_digest: "bad".into(),
             basis: "invalid-source",
         };
-        assert_eq!(p.proven_upper_usd().unwrap_err(), "ENTRY_FX_BOUND_SOURCE_INVALID");
+        assert_eq!(
+            p.proven_upper_usd().unwrap_err(),
+            "ENTRY_FX_BOUND_SOURCE_INVALID"
+        );
         p.fx_bound = EntryFxUpperBound::Unknown {
             reason: "FX_UPPER_BOUND_UNPROVEN",
         };

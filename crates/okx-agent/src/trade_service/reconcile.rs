@@ -81,8 +81,7 @@ fn verified_terminal_order_update_time(
     if !matches!(o.state.as_str(), "filled" | "canceled" | "mmp_canceled") {
         return Err("TERMINAL_ORDER_STATE_UNVERIFIED".into());
     }
-    let filled = dec(&o.accumulated_fill_size)
-        .map_err(|_| "TERMINAL_ORDER_FILLED_SIZE_INVALID")?;
+    let filled = dec(&o.accumulated_fill_size).map_err(|_| "TERMINAL_ORDER_FILLED_SIZE_INVALID")?;
     if filled < Decimal::ZERO || filled > intent.plan.quantity {
         return Err("TERMINAL_ORDER_FILLED_SIZE_INVALID".into());
     }
@@ -657,9 +656,7 @@ impl TradeService {
             .map_err(err)?
             .ok_or("FILL_COVERAGE_MISSING")?;
         let venue_updated_at = verified_terminal_order_update_time(i, order)?;
-        if !complete.coverage_gaps.is_empty()
-            || complete.watermark < venue_updated_at
-        {
+        if !complete.coverage_gaps.is_empty() || complete.watermark < venue_updated_at {
             return Err("FILL_COVERAGE_INCOMPLETE".into());
         }
         let observed = self
@@ -697,9 +694,7 @@ impl TradeService {
             })
             .await
             .map_err(err)?;
-        if !through.coverage_gaps.is_empty()
-            || through.watermark < venue_updated_at
-        {
+        if !through.coverage_gaps.is_empty() || through.watermark < venue_updated_at {
             return Err("FINANCIAL_COVERAGE_INCOMPLETE".into());
         }
         let proof = TerminalRiskLedgerProof {
@@ -1258,7 +1253,10 @@ mod entry_cost_status_tests {
             update_time_ms: "10".into(),
         };
         assert!(verify_venue_fill_coverage(&intent, &source, &order).is_ok());
-        assert_eq!(verified_terminal_order_update_time(&intent, Some(&order)), Ok(10));
+        assert_eq!(
+            verified_terminal_order_update_time(&intent, Some(&order)),
+            Ok(10)
+        );
         assert_eq!(
             verified_terminal_order_update_time(&intent, None),
             Err("TERMINAL_ORDER_READBACK_MISSING".into())
