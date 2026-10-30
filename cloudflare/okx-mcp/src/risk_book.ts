@@ -728,19 +728,29 @@ export async function settleEntrySpend(
     const entry:RiskEntry|undefined=await tx.get(entryKey(key));
     if(!validMeta(meta)||!meta.entry_budget||!entry||!validEntry(entry)||
        entry.plan_hash!==plan_hash||
-       !["POSTED","UNKNOWN","OPEN"].includes(entry.state)||
-       await tx.get("generation")!==native.connection_generation||
-       meta.sequence!==native.expected_book_sequence)
+       await tx.get("generation")!==native.connection_generation)
       return {status:"DENIED" as const,reason:"ENTRY_SETTLEMENT_SOURCE_OR_STATE_UNPROVEN"};
     const before=units(entry.entry_settled_usd),ceiling=units(entry.entry_upper_usd);
     if(before===null||ceiling===null||total<before||total>ceiling||
        native.revision<entry.entry_settlement_revision!)
       return {status:"DENIED" as const,reason:"ENTRY_SETTLEMENT_REGRESSION"};
     if(native.revision===entry.entry_settlement_revision){
-      return total===before&&entry.entry_settlement_digest===native.source_digest
-        ?{status:"UPDATED" as const,book_sequence:meta.sequence}
-        :{status:"DENIED" as const,reason:"ENTRY_SETTLEMENT_REVISION_CONFLICT"};
+      // An ACK can be lost after the transaction committed; meanwhile the
+      // RiskBook sequence may advance for another account or a terminal
+      // release. Replaying the EXACT cumulative amount/revision/digest is
+      // read-only even with the original now-stale CAS, and must not debit
+      // entry spend twice. Never accept a future or unknown CAS sequence.
+      if(native.expected_book_sequence>meta.sequence ||
+         !["POSTED","UNKNOWN","OPEN","RELEASED"].includes(entry.state)||
+         total!==before||entry.entry_settlement_digest!==native.source_digest)
+        return {status:"DENIED" as const,reason:"ENTRY_SETTLEMENT_REVISION_CONFLICT"};
+      return {status:"UPDATED" as const,book_sequence:meta.sequence};
     }
+    // A strictly NEW cumulative settlement requires the exact current
+    // global CAS and an active post-once intent; no terminal revival.
+    if(!["POSTED","UNKNOWN","OPEN"].includes(entry.state)||
+       meta.sequence!==native.expected_book_sequence)
+      return {status:"DENIED" as const,reason:"ENTRY_SETTLEMENT_SOURCE_OR_STATE_UNPROVEN"};
     const delta=total-before,reserved=units(meta.entry_budget.reserved_usd);
     if(reserved===null||reserved<delta)
       return {status:"DENIED" as const,reason:"ENTRY_SETTLEMENT_RESERVE_CORRUPT"};
