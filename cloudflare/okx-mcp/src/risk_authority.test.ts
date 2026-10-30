@@ -73,8 +73,12 @@ check((await handleNativeRiskCommand(s,session,{schema:"okx.risk-command/v1",com
  }]};
  await t.put("generation",session.connection_generation);
  await t.put("account_access_v1",governance);
- await initializeRiskBook(t,initial.installation_id);
  const campaignStart=now-100000;
+ await initializeRiskBook(t,initial.installation_id,{
+   installation_id:initial.installation_id,
+   campaign_id:governance.campaign_id,
+   started_at_ms:campaignStart
+ });
  const nativeOpening:CampaignEntryOpeningSource={
    campaign_id:governance.campaign_id,limit_usd:"10",consumed_usd:"0",
    source_digest:sourceDigest,as_of_ms:now,campaign_started_at_ms:campaignStart,
