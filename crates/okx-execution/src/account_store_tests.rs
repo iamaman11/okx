@@ -17,12 +17,20 @@ fn e1_sql_known_quote_is_immutable_scoped_and_never_all_in_permission() {
         limit_price: Decimal::from(100),
         contract_value: Decimal::ONE,
         fee_rate: Decimal::new(5, 4),
+        maker_rate: Decimal::new(-2, 4),
+        taker_rate: Decimal::new(5, 4),
+        fee_level: "Lv1".into(),
+        fee_exchange_at: 10,
         usd_per_usdt: Decimal::ONE,
         notional_usdt: Decimal::from(100),
         fee_usdt: Decimal::new(5, 2),
         total_usdt: Decimal::new(10005, 2),
         total_usd: Decimal::new(10005, 2),
-        fee_generation: format!("sha256:{}", "a".repeat(64)),
+        fee_generation: format!("sha256:{:x}", sha2::Sha256::digest(
+            serde_json::to_vec(&(
+                "BTC-USDT-SWAP", "test_reference", "Lv1", "-0.0002", "0.0005", true
+            )).unwrap()
+        )),
         reference_generation: "test_reference".into(),
         fee_received_at: 10,
         conversion_digest: "b".repeat(64),
@@ -51,7 +59,19 @@ fn e1_sql_known_quote_is_immutable_scoped_and_never_all_in_permission() {
     changed.fee_generation = format!("sha256:{}", "c".repeat(64));
     assert!(matches!(
         s.bind_entry_quote(&changed),
-        Err(StoreError::Invalid("ENTRY_QUOTE_IDEMPOTENCY_CONFLICT"))
+        Err(StoreError::Invalid("ENTRY_QUOTE_FEE_HASH_INVALID"))
+    ));
+    changed = proof.clone();
+    changed.maker_rate = Decimal::new(-3, 4);
+    assert!(matches!(
+        s.bind_entry_quote(&changed),
+        Err(StoreError::Invalid("ENTRY_QUOTE_FEE_HASH_INVALID"))
+    ));
+    changed = proof.clone();
+    changed.fee_exchange_at = 0;
+    assert!(matches!(
+        s.bind_entry_quote(&changed),
+        Err(StoreError::Invalid("ENTRY_QUOTE_SCOPE_UNVERIFIED"))
     ));
     changed = proof.clone();
     changed.account_key = "other".into();

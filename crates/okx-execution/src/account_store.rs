@@ -201,6 +201,12 @@ pub struct EntryQuoteEvidence {
     pub limit_price: Decimal,
     pub contract_value: Decimal,
     pub fee_rate: Decimal,
+    /// Raw authenticated tariff components, required to recompute the
+    /// reference-bound fee_generation on the sole SQL owner.
+    pub maker_rate: Decimal,
+    pub taker_rate: Decimal,
+    pub fee_level: String,
+    pub fee_exchange_at: i64,
     pub usd_per_usdt: Decimal,
     pub notional_usdt: Decimal,
     pub fee_usdt: Decimal,

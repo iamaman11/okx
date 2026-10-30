@@ -282,6 +282,11 @@ impl TradeService {
                 limit_price: plan.limit_price,
                 contract_value: plan.contract_value,
                 fee_rate: rate,
+                maker_rate: dec(&fees.maker_rate)?,
+                taker_rate: dec(&fees.taker_rate)?,
+                fee_level: fees.level.clone(),
+                fee_exchange_at: fees.exchange_timestamp_ms.parse::<i64>()
+                    .map_err(|_| "ENTRY_FEE_EXCHANGE_TIME_INVALID")?,
                 usd_per_usdt: dec(&fx.usd_per_usdt)?,
                 notional_usdt: quote.notional_usdt,
                 fee_usdt: quote.fee_usdt,

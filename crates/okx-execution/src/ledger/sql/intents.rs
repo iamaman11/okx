@@ -1,4 +1,5 @@
 use super::super::*;
+use sha2::{Digest, Sha256};
 impl AccountStore {
 
     /// No second ledger/table: one immutable, idempotent record in the existing
@@ -24,12 +25,19 @@ impl AccountStore {
             || quote.limit_price <= Decimal::ZERO
             || quote.contract_value <= Decimal::ZERO
             || quote.fee_rate < Decimal::ZERO
+            || quote.fee_rate != quote.maker_rate.abs().max(quote.taker_rate.abs())
+            || quote.fee_level.is_empty()
+            || quote.fee_exchange_at <= 0
             || quote.usd_per_usdt <= Decimal::ZERO
             || quote.fee_received_at <= 0
             || quote.conversion_received_at <= 0
             || quote.observed_at <= 0
             || quote.fee_received_at > quote.observed_at
+            || quote.fee_exchange_at > quote.observed_at
             || quote.conversion_received_at > quote.observed_at
+            || quote.observed_at - quote.fee_received_at > 5_000
+            || quote.observed_at - quote.fee_exchange_at > 5_000
+            || quote.observed_at - quote.conversion_received_at > 5_000
             || quote.fee_generation.len() != 71
             || !quote.fee_generation.starts_with("sha256:")
             || !quote.fee_generation[7..].bytes().all(|c| c.is_ascii_hexdigit())
@@ -38,6 +46,18 @@ impl AccountStore {
             || !quote.conversion_digest.bytes().all(|c| c.is_ascii_hexdigit())
         {
             return Err(StoreError::Invalid("ENTRY_QUOTE_SCOPE_UNVERIFIED"));
+        }
+        let tariff_bytes = serde_json::to_vec(&(
+            &quote.instrument_id,
+            &quote.reference_generation,
+            &quote.fee_level,
+            quote.maker_rate.to_string(),
+            quote.taker_rate.to_string(),
+            true,
+        )).map_err(|_| StoreError::Invalid("ENTRY_QUOTE_FEE_HASH_INVALID"))?;
+        let tariff_digest = format!("sha256:{:x}", Sha256::digest(tariff_bytes));
+        if tariff_digest != quote.fee_generation {
+            return Err(StoreError::Invalid("ENTRY_QUOTE_FEE_HASH_INVALID"));
         }
         let notional = quote.quantity
             .checked_mul(quote.contract_value)
