@@ -343,6 +343,22 @@ impl TradeService {
                 })
                 .await
                 .map_err(err)?;
+            // An absent all-in proof is a native decision, not a reason to
+            // create a fictitious central RESERVE attempt and send a WSS
+            // request with null money. Finish the SQL intent as unsent,
+            // preserving the immutable known quote for trader inspection.
+            if verified_entry.is_none() {
+                let rejected = prepared.intent_id.clone();
+                r.execution
+                    .store
+                    .call(until, move |s| {
+                        s.reject_unsent(&rejected, "ENTRY_ALL_IN_COST_UNPROVEN", now())?;
+                        Ok(())
+                    })
+                    .await
+                    .map_err(err)?;
+                return Err("ENTRY_ALL_IN_COST_UNPROVEN".into());
+            }
             let census = self.census(&state).await?;
             let snapshot = r.observer.snapshot().await.map_err(err)?;
             let conversion = Self::usd_conversion(&snapshot)?;
