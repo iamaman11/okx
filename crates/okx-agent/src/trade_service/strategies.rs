@@ -309,7 +309,8 @@ impl TradeService {
                 let result = tokio::time::timeout(
                     Duration::from_secs(4),
                     self.install_captured_empty_campaign_opening(&authority, until),
-                ).await;
+                )
+                .await;
                 if let Ok(Err(reason)) = result {
                     eprintln!("OKX_ENTRY_BASELINE_V1 state=PENDING reason={reason}");
                 }

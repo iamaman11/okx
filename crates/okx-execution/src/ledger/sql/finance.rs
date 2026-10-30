@@ -355,9 +355,7 @@ impl AccountStore {
             return Err(StoreError::Invalid("ENTRY_OPENING_WINDOW_INVALID"));
         }
         if from_ms < self.meta.initialized_at {
-            return Err(StoreError::Invalid(
-                "BASELINE_RECONCILIATION_REQUIRED",
-            ));
+            return Err(StoreError::Invalid("BASELINE_RECONCILIATION_REQUIRED"));
         }
         let mut frontiers = Vec::new();
         for (source, partition) in [
@@ -385,35 +383,31 @@ impl AccountStore {
                 "ENTRY_OPENING_FINANCE_PROVENANCE_UNSEALED",
             ));
         }
-        let (fills, bills, unresolved, lots): (i64, i64, i64, i64) =
-            self.connection.query_row(
-                "SELECT (SELECT COUNT(*) FROM fills WHERE time>?1 AND time<=?2),
+        let (fills, bills, unresolved, lots): (i64, i64, i64, i64) = self.connection.query_row(
+            "SELECT (SELECT COUNT(*) FROM fills WHERE time>?1 AND time<=?2),
                         (SELECT COUNT(*) FROM bills WHERE time>?1 AND time<=?2),
                         (SELECT COUNT(*) FROM intents
                          WHERE state NOT IN ('REJECTED','CANCELLED','FILLED')),
                         (SELECT COUNT(*) FROM position_lots WHERE remaining_qty!='0')",
-                params![from_ms, through_ms],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-            )?;
+            params![from_ms, through_ms],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )?;
         if fills != 0 || bills != 0 {
             // Nonempty sources require the historical linear-contract,
             // opening/closing classification and event-time FX policy.
-            return Err(StoreError::Invalid(
-                "BASELINE_RECONCILIATION_REQUIRED",
-            ));
+            return Err(StoreError::Invalid("BASELINE_RECONCILIATION_REQUIRED"));
         }
         if unresolved != 0 || lots != 0 {
-            return Err(StoreError::Invalid("ENTRY_OPENING_UNRESOLVED_NATIVE_EXPOSURE"));
+            return Err(StoreError::Invalid(
+                "ENTRY_OPENING_UNRESOLVED_NATIVE_EXPOSURE",
+            ));
         }
         Ok(frontiers)
     }
 
-    pub fn verify_captured_empty_window(
-        &self,
-        from_ms: i64,
-        through_ms: i64,
-    ) -> StoreResult<()> {
-        self.captured_empty_frontiers(from_ms, through_ms).map(|_| ())
+    pub fn verify_captured_empty_window(&self, from_ms: i64, through_ms: i64) -> StoreResult<()> {
+        self.captured_empty_frontiers(from_ms, through_ms)
+            .map(|_| ())
     }
 
     /// Source-backed zero opening from the EXISTING incremental account writer.
@@ -474,7 +468,14 @@ impl AccountStore {
             [key],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )?;
-        if saved != ("CAMPAIGN_ENTRY_OPENING_SEALED".into(), proof.clone(), proof.clone(), through_ms) {
+        if saved
+            != (
+                "CAMPAIGN_ENTRY_OPENING_SEALED".into(),
+                proof.clone(),
+                proof.clone(),
+                through_ms,
+            )
+        {
             return Err(StoreError::Invalid("ENTRY_OPENING_SQL_RECEIPT_CONFLICT"));
         }
         Ok(proof)

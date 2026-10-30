@@ -98,7 +98,8 @@ impl TradeService {
         state: &CentralGovernanceSnapshot,
         until: Instant,
     ) -> Result<(), String> {
-        let summary = self.risk
+        let summary = self
+            .risk
             .request(self.risk_command(
                 state,
                 format!("opening_status_{}", now()),
@@ -109,19 +110,22 @@ impl TradeService {
         if summary.status != RiskDecisionStatus::Observed {
             return Err("ENTRY_OPENING_CENTRAL_SUMMARY_UNAVAILABLE".into());
         }
-        let entry = summary.budget
+        let entry = summary
+            .budget
             .ok_or("ENTRY_OPENING_CENTRAL_BUDGET_MISSING")?
             .entry_budget
             .ok_or("BASELINE_RECONCILIATION_REQUIRED")?;
-        let from = i64::try_from(entry.opening_as_of_ms)
-            .map_err(|_| "ENTRY_OPENING_CUTOFF_INVALID")?;
+        let from =
+            i64::try_from(entry.opening_as_of_ms).map_err(|_| "ENTRY_OPENING_CUTOFF_INVALID")?;
         let through = now().saturating_sub(2_000);
         if through <= from {
             return Err("ENTRY_OPENING_CAPTURE_PENDING".into());
         }
-        for account in state.state.accounts.iter().filter(|a| {
-            a.environment == okx_protocol::account_governance::AccountEnvironment::Real
-        }) {
+        for account in
+            state.state.accounts.iter().filter(|a| {
+                a.environment == okx_protocol::account_governance::AccountEnvironment::Real
+            })
+        {
             if Instant::now() >= until {
                 return Err("COMMAND_EXPIRED".into());
             }
@@ -129,9 +133,14 @@ impl TradeService {
             if !resource.source_identity_ready().await {
                 return Err("ENTRY_OPENING_IDENTITY_UNVERIFIED".into());
             }
-            resource.execution.store.call(until, move |store| {
-                store.verify_captured_empty_window(from, through)
-            }).await.map_err(err)?;
+            resource
+                .execution
+                .store
+                .call(until, move |store| {
+                    store.verify_captured_empty_window(from, through)
+                })
+                .await
+                .map_err(err)?;
         }
         Ok(())
     }
@@ -145,7 +154,8 @@ impl TradeService {
         state: &CentralGovernanceSnapshot,
         until: Instant,
     ) -> Result<(), String> {
-        let summary = self.risk
+        let summary = self
+            .risk
             .request(self.risk_command(
                 state,
                 format!("opening_summary_{}", now()),
@@ -156,7 +166,8 @@ impl TradeService {
         if summary.status != RiskDecisionStatus::Observed {
             return Err("ENTRY_OPENING_CENTRAL_SUMMARY_UNAVAILABLE".into());
         }
-        let budget = summary.budget
+        let budget = summary
+            .budget
             .ok_or("ENTRY_OPENING_CENTRAL_BUDGET_MISSING")?;
         if budget.entry_budget.is_some() {
             return Ok(());
@@ -196,9 +207,14 @@ impl TradeService {
                 return Err("ENTRY_OPENING_IDENTITY_UNVERIFIED".into());
             }
             let campaign = origin.campaign_id.clone();
-            let source_digest = resource.execution.store.call(until, move |store| {
-                store.seal_captured_empty_campaign(&campaign, from, through)
-            }).await.map_err(err)?;
+            let source_digest = resource
+                .execution
+                .store
+                .call(until, move |store| {
+                    store.seal_captured_empty_campaign(&campaign, from, through)
+                })
+                .await
+                .map_err(err)?;
             rows.push(CampaignOpeningAccount {
                 account_key: account.account_key.clone(),
                 history_from_ms: origin.started_at_ms,

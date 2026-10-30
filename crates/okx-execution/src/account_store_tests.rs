@@ -9,7 +9,10 @@ fn r4_campaign_zero_only_after_all_six_incremental_money_cursors_complete() {
     let campaign = format!("sha256:{}", "c".repeat(64));
     let from = 2_i64;
     let through = 80_i64;
-    assert!(s.seal_captured_empty_campaign(&campaign, from, through).is_err());
+    assert!(
+        s.seal_captured_empty_campaign(&campaign, from, through)
+            .is_err()
+    );
     for (source, part) in [
         ("fills", "SPOT"),
         ("fills", "MARGIN"),
@@ -24,42 +27,53 @@ fn r4_campaign_zero_only_after_all_six_incremental_money_cursors_complete() {
             rusqlite::params![source, part],
         ).unwrap();
     }
-    let proof = s.seal_captured_empty_campaign(&campaign, from, through).unwrap();
+    let proof = s
+        .seal_captured_empty_campaign(&campaign, from, through)
+        .unwrap();
     assert_eq!(proof.len(), 64);
     assert_eq!(
-        s.seal_captured_empty_campaign(&campaign, from, through).unwrap(),
+        s.seal_captured_empty_campaign(&campaign, from, through)
+            .unwrap(),
         proof,
         "same committed cursor receipt must be idempotent"
     );
     assert!(s.verify_captured_empty_window(from, through).is_ok());
     // Internal transfers are independent of entry turnover.
-    s.connection.execute(
-        "INSERT INTO cash_flows(event_id,kind,currency,amount,time,source_ref)
+    s.connection
+        .execute(
+            "INSERT INTO cash_flows(event_id,kind,currency,amount,time,source_ref)
          VALUES('outside-entry','WITHDRAWAL','USDT','-1',20,'authenticated-transfer')",
-        [],
-    ).unwrap();
+            [],
+        )
+        .unwrap();
     assert!(s.verify_captured_empty_window(from, through).is_ok());
-    s.connection.execute(
-        "UPDATE source_cursors SET coverage_gaps='BACKFILL_PENDING'
+    s.connection
+        .execute(
+            "UPDATE source_cursors SET coverage_gaps='BACKFILL_PENDING'
          WHERE source='fills' AND stream_partition='MARGIN'",
-        [],
-    ).unwrap();
+            [],
+        )
+        .unwrap();
     assert_eq!(
         s.verify_captured_empty_window(from, through),
         Err(StoreError::Invalid("ENTRY_BASELINE_CAPTURE_PENDING"))
     );
-    s.connection.execute(
-        "UPDATE source_cursors SET coverage_gaps=''
+    s.connection
+        .execute(
+            "UPDATE source_cursors SET coverage_gaps=''
          WHERE source='fills' AND stream_partition='MARGIN'",
-        [],
-    ).unwrap();
-    s.connection.execute(
-        "INSERT INTO fills(fill_id,instrument_id,trade_id,exchange_order_id,
+            [],
+        )
+        .unwrap();
+    s.connection
+        .execute(
+            "INSERT INTO fills(fill_id,instrument_id,trade_id,exchange_order_id,
           intent_id,time,qty,price,fee,currency,side)
          VALUES('outside','BTC-USDT-SWAP','trade','ord',NULL,50,
                 '1','100','-0.05','USDT','buy')",
-        [],
-    ).unwrap();
+            [],
+        )
+        .unwrap();
     assert_eq!(
         s.verify_captured_empty_window(from, through),
         Err(StoreError::Invalid("BASELINE_RECONCILIATION_REQUIRED")),

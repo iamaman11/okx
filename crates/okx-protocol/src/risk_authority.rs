@@ -559,8 +559,7 @@ impl RiskEntryBudgetSnapshot {
             && hash(&self.campaign_id[7..])
             && limit > 0
             && consumed.checked_add(reserved).is_some_and(|held| {
-                held <= limit.saturating_add(breach)
-                    && remaining == limit.saturating_sub(held)
+                held <= limit.saturating_add(breach) && remaining == limit.saturating_sub(held)
             })
             && hash(&self.opening_source_digest)
             && self.opening_as_of_ms > 0
@@ -997,18 +996,16 @@ mod tests {
 
     #[test]
     fn r4_bound_breach_is_explicit_budget_truth_not_reusable_headroom() {
-        let mut budget: RiskEntryBudgetSnapshot = serde_json::from_value(
-            serde_json::json!({
-                "campaign_id": format!("sha256:{}", "c".repeat(64)),
-                "limit_usd": "10",
-                "consumed_usd": "10.04",
-                "reserved_usd": "0",
-                "remaining_usd": "0",
-                "bound_breach_usd": "0.04",
-                "opening_source_digest": "a".repeat(64),
-                "opening_as_of_ms": 1
-            }),
-        )
+        let mut budget: RiskEntryBudgetSnapshot = serde_json::from_value(serde_json::json!({
+            "campaign_id": format!("sha256:{}", "c".repeat(64)),
+            "limit_usd": "10",
+            "consumed_usd": "10.04",
+            "reserved_usd": "0",
+            "remaining_usd": "0",
+            "bound_breach_usd": "0.04",
+            "opening_source_digest": "a".repeat(64),
+            "opening_as_of_ms": 1
+        }))
         .unwrap();
         assert!(budget.valid(), "confirmed over-reserve debit remains valid");
         budget.bound_breach_usd = "0.03".into();
