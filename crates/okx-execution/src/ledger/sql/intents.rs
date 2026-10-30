@@ -141,6 +141,90 @@ impl AccountStore {
         self.verified_stored_entry_quote(&quote)?;
         Ok(Some(quote))
     }
+    /// Validate the independently produced native cost proof against the
+    /// immutable quote on EVERY read, including after a Windows restart.
+    /// The digest here is a binding to the native source witness, not a
+    /// cryptographic claim that arbitrary user-supplied evidence is trusted.
+    fn verified_entry_admission(&self, proof: &EntryAdmissionEvidence) -> StoreResult<()> {
+        let quote = self
+            .entry_quote(&proof.intent_id)?
+            .ok_or(StoreError::Invalid("ENTRY_ADMISSION_QUOTE_MISSING"))?;
+        let bytes = serde_json::to_vec(&quote)
+            .map_err(|_| StoreError::Invalid("ENTRY_ADMISSION_QUOTE_DIGEST_INVALID"))?;
+        let expected_quote_digest = format!("{:x}", Sha256::digest(bytes));
+        let digest_valid = |v: &str| {
+            v.len() == 64
+                && v.bytes().all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
+        };
+        if proof.schema != "okx.entry-admission/v1"
+            || proof.account_key != self.meta.account_key
+            || proof.installation_id != self.meta.installation_id
+            || proof.intent_id != quote.intent_id
+            || proof.plan_hash != quote.plan_hash
+            || !digest_valid(&proof.quote_digest)
+            || proof.quote_digest != expected_quote_digest
+            || !digest_valid(&proof.entry_proof_digest)
+            || proof.entry_upper_usd < quote.total_usd
+            || proof.entry_upper_usd <= Decimal::ZERO
+            || proof.observed_at < quote.observed_at
+            || proof.observed_at - quote.observed_at > 5_000
+        {
+            return Err(StoreError::Invalid("ENTRY_ADMISSION_SOURCE_UNVERIFIED"));
+        }
+        Ok(())
+    }
+
+    /// A fully admitted entry is a native, source-bound quote + USD upper +
+    /// proof digest. Replays are exact; source tampering is never an update.
+    pub fn bind_entry_admission(&mut self, proof: &EntryAdmissionEvidence) -> StoreResult<()> {
+        self.verified_entry_admission(proof)?;
+        let key = format!("entry-admission:{}", proof.intent_id);
+        let body = serde_json::to_string(proof)
+            .map_err(|_| StoreError::Invalid("ENTRY_ADMISSION_SERIALIZATION_FAILED"))?;
+        if let Some(prior) = self.operation(&key)? {
+            if prior.kind != "ENTRY_ADMISSION_PROVEN"
+                || prior.request_hash != proof.plan_hash
+                || prior.result_ref != body
+                || prior.committed_at != proof.observed_at
+            {
+                return Err(StoreError::Invalid("ENTRY_ADMISSION_IDEMPOTENCY_CONFLICT"));
+            }
+            return Ok(());
+        }
+        let intent = self
+            .intent(&proof.intent_id)?
+            .ok_or(StoreError::Invalid("ENTRY_ADMISSION_INTENT_MISSING"))?;
+        if intent.state != IntentState::Prepared {
+            return Err(StoreError::Invalid("ENTRY_ADMISSION_INTENT_STATE_INVALID"));
+        }
+        self.connection.execute(
+            "INSERT INTO operation_receipts(operation_id,kind,request_hash,result_ref,committed_at)
+             VALUES(?1,'ENTRY_ADMISSION_PROVEN',?2,?3,?4)",
+            params![key, proof.plan_hash, body, proof.observed_at],
+        )?;
+        Ok(())
+    }
+
+    pub fn entry_admission(&self, id: &str) -> StoreResult<Option<EntryAdmissionEvidence>> {
+        let key = format!("entry-admission:{id}");
+        let Some(receipt) = self.operation(&key)? else {
+            return Ok(None);
+        };
+        if receipt.kind != "ENTRY_ADMISSION_PROVEN" {
+            return Err(StoreError::Invalid("ENTRY_ADMISSION_INVALID_RECEIPT"));
+        }
+        let proof: EntryAdmissionEvidence = serde_json::from_str(&receipt.result_ref)
+            .map_err(|_| StoreError::Invalid("ENTRY_ADMISSION_CORRUPT"))?;
+        if proof.intent_id != id
+            || proof.plan_hash != receipt.request_hash
+            || proof.observed_at != receipt.committed_at
+        {
+            return Err(StoreError::Invalid("ENTRY_ADMISSION_CORRUPT"));
+        }
+        self.verified_entry_admission(&proof)?;
+        Ok(Some(proof))
+    }
+
     /// Durable address of a central reservation attempt, committed before
     /// any WSS RESERVE. A crash or lost ACK cannot orphan the Worker grant.
     pub fn mark_reserve_attempt(&mut self, id: &str, key: &str, now: i64) -> StoreResult<()> {
