@@ -282,11 +282,7 @@ impl AccountHistoryApi {
         through_ms: i64,
         observed_at_ms: i64,
     ) -> Result<CompleteCampaignOrderHistory, OkxError> {
-        verify_campaign_order_window(
-            campaign_started_at_ms,
-            through_ms,
-            observed_at_ms,
-        )?;
+        verify_campaign_order_window(campaign_started_at_ms, through_ms, observed_at_ms)?;
         let recent = self
             .complete_order_source(instrument_type, campaign_started_at_ms, through_ms, false)
             .await?;
@@ -587,9 +583,15 @@ fn complete_campaign_orders_witness(
     for order in &merged.rows {
         if order.instrument_type != instrument_type
             || order.order_id.is_empty()
-            || order.creation_time_ms.parse::<i64>().ok()
+            || order
+                .creation_time_ms
+                .parse::<i64>()
+                .ok()
                 .is_none_or(|v| v < from_ms || v > through_ms)
-            || order.update_time_ms.parse::<i64>().ok()
+            || order
+                .update_time_ms
+                .parse::<i64>()
+                .ok()
                 .is_none_or(|v| v < from_ms || v > through_ms)
         {
             return Err(OkxError::Response(
@@ -872,9 +874,10 @@ mod tests {
     fn campaign_order_window_requires_provable_short_retention() {
         let now = 1_800_000_000_000_i64;
         assert!(verify_campaign_order_window(now - 60_000, now, now).is_ok());
-        assert!(verify_campaign_order_window(
-            now - CAMPAIGN_UNFILLED_CANCEL_RETENTION_MS, now, now
-        ).is_err());
+        assert!(
+            verify_campaign_order_window(now - CAMPAIGN_UNFILLED_CANCEL_RETENTION_MS, now, now)
+                .is_err()
+        );
         assert!(verify_campaign_order_window(now - 120_000, now, now - 1).is_err());
         assert!(verify_campaign_order_window(now - 120_000, now - 120_000, now).is_err());
         assert!(verify_campaign_order_window(0, now, now).is_err());
@@ -894,35 +897,77 @@ mod tests {
             update_time_ms: (since + 1_000).to_string(),
             ..canceled_demo_order("123456", &(since + 1_000).to_string())
         };
-        let recent = BoundedHistory { rows: vec![order.clone()], pages: 1, complete: true };
-        let archive = BoundedHistory { rows: vec![], pages: 1, complete: true };
+        let recent = BoundedHistory {
+            rows: vec![order.clone()],
+            pages: 1,
+            complete: true,
+        };
+        let archive = BoundedHistory {
+            rows: vec![],
+            pages: 1,
+            complete: true,
+        };
         let proved = complete_campaign_orders_witness(
-            "SWAP", since, through, recent.clone(), archive.clone()
-        ).unwrap();
+            "SWAP",
+            since,
+            through,
+            recent.clone(),
+            archive.clone(),
+        )
+        .unwrap();
         assert_eq!(proved.orders.len(), 1);
         assert_eq!(proved.source_digest.len(), 64);
         assert_eq!(proved.from_ms, since);
         assert_eq!(proved.through_ms, through);
-        assert!(complete_campaign_orders_witness(
-            "SWAP", since, through,
-            BoundedHistory { complete: false, ..recent.clone() }, archive.clone()
-        ).is_err());
+        assert!(
+            complete_campaign_orders_witness(
+                "SWAP",
+                since,
+                through,
+                BoundedHistory {
+                    complete: false,
+                    ..recent.clone()
+                },
+                archive.clone()
+            )
+            .is_err()
+        );
         let mut early = order.clone();
         early.creation_time_ms = (since - 1).to_string();
-        assert!(complete_campaign_orders_witness(
-            "SWAP", since, through,
-            BoundedHistory { rows: vec![early], pages: 1, complete: true }, archive.clone()
-        ).is_err());
+        assert!(
+            complete_campaign_orders_witness(
+                "SWAP",
+                since,
+                through,
+                BoundedHistory {
+                    rows: vec![early],
+                    pages: 1,
+                    complete: true
+                },
+                archive.clone()
+            )
+            .is_err()
+        );
         let mut conflicting = order;
         conflicting.side = "sell".into();
-        assert!(complete_campaign_orders_witness(
-            "SWAP", since, through,
-            recent,
-            BoundedHistory { rows: vec![conflicting], pages: 1, complete: true }
-        ).is_err());
-        assert!(complete_campaign_orders_witness(
-            "SWAP", since, through, archive.clone(), archive
-        ).is_ok());
+        assert!(
+            complete_campaign_orders_witness(
+                "SWAP",
+                since,
+                through,
+                recent,
+                BoundedHistory {
+                    rows: vec![conflicting],
+                    pages: 1,
+                    complete: true
+                }
+            )
+            .is_err()
+        );
+        assert!(
+            complete_campaign_orders_witness("SWAP", since, through, archive.clone(), archive)
+                .is_ok()
+        );
     }
 
     #[test]
