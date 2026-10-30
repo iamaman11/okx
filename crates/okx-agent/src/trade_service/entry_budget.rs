@@ -297,8 +297,8 @@ impl EntryCostProof {
         {
             return Err("ENTRY_ACCOUNT_MODE_SOURCE_UNSUPPORTED".into());
         }
-        if account.auto_loan {
-            return Err("ENTRY_AUTO_BORROW_UNSUPPORTED".into());
+        if account.auto_loan != Some(false) {
+            return Err("ENTRY_AUTO_BORROW_UNVERIFIED_OR_ENABLED".into());
         }
         if leverage < Decimal::ONE {
             return Err("ENTRY_LEVERAGE_SOURCE_UNSUPPORTED".into());
@@ -1047,7 +1047,7 @@ mod tests {
         assert_eq!(assessed.proven_upper_usd().unwrap(), Some(known.total_usd));
         assert_eq!(assessed.missing_reasons(), Vec::<&'static str>::new());
         let mut auto = config.clone();
-        auto.auto_loan = true;
+        auto.auto_loan = Some(true);
         assert_eq!(
             applicant
                 .clone()
@@ -1062,7 +1062,7 @@ mod tests {
                     dec("2").unwrap(),
                 )
                 .unwrap_err(),
-            "ENTRY_AUTO_BORROW_UNSUPPORTED"
+            "ENTRY_AUTO_BORROW_UNVERIFIED_OR_ENABLED"
         );
         assert_eq!(
             applicant
@@ -1079,6 +1079,30 @@ mod tests {
                 )
                 .unwrap_err(),
             "ENTRY_PRODUCT_OR_PRICE_CAP_UNSUPPORTED"
+        );
+        // Neither a missing field nor a net-mode account is silently
+        // coerced to hedge mode or borrowing-disabled.
+        auto.auto_loan = None;
+        assert_eq!(
+            applicant.clone()
+                .attest_linear_usdt_sources(
+                    &open_plan, "limit", "BTC-USDT-SWAP", &rules,
+                    &live_fees, &auto, &snap, dec("2").unwrap(),
+                ).unwrap_err(),
+            "ENTRY_AUTO_BORROW_UNVERIFIED_OR_ENABLED"
+        );
+        let mut net = config.clone();
+        net.position_mode = "net_mode".into();
+        let mut net_snapshot = snap.clone();
+        net_snapshot.position_mode = "net_mode".into();
+        assert_eq!(
+            applicant.clone()
+                .attest_linear_usdt_sources(
+                    &open_plan, "limit", "BTC-USDT-SWAP", &rules,
+                    &live_fees, &net, &net_snapshot, dec("2").unwrap(),
+                ).unwrap()
+                .proven_upper_usd().unwrap(),
+            Some(known.total_usd)
         );
         let mut no_funds = snap.clone();
         no_funds.balance.details[0].available_balance = Some("1".into());

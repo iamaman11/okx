@@ -1734,6 +1734,9 @@ fn verify_pending_order_binding(
         )
         || (order.position_side.as_deref() != Some("net")
             && order.position_side.as_deref() != Some(intent.plan.position_side.as_str()))
+        || (order.position_side.as_deref() == Some("net")
+            && ((intent.risk_increase && order.reduce_only == Some(true))
+                || (!intent.risk_increase && order.reduce_only != Some(true))))
         || !matches!(order.state.as_str(), "live" | "partially_filled")
         || intent.state.terminal()
     {
