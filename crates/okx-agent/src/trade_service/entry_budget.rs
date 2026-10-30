@@ -997,7 +997,10 @@ mod tests {
             basis: "authenticated-borrow-charge",
             source_digest: "b".repeat(64),
         };
-        assert_eq!(p.proven_upper_usd().unwrap_err(), "ENTRY_BORROWING_UNSUPPORTED");
+        assert_eq!(
+            p.proven_upper_usd().unwrap_err(),
+            "ENTRY_BORROWING_UNSUPPORTED"
+        );
         p.borrowing = EntryCostEvidence::NotApplicable {
             basis: "venue:no-borrow",
             source_digest: "b".repeat(64),

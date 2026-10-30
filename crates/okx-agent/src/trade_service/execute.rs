@@ -73,7 +73,11 @@ impl TradeService {
             } else {
                 Decimal::ZERO
             };
-            let fee_debit = if fee < Decimal::ZERO { -fee } else { Decimal::ZERO };
+            let fee_debit = if fee < Decimal::ZERO {
+                -fee
+            } else {
+                Decimal::ZERO
+            };
             let debit = debit.checked_add(fee_debit).ok_or("MONEY_OVERFLOW")?;
             total = total.checked_add(debit).ok_or("MONEY_OVERFLOW")?;
         }
