@@ -65,6 +65,15 @@ const governance={
  max_total_modelled_loss_usdt:"10",accounts:[account(a),account(b)]
 };
 await sa.put("account_access_v1",governance);await sa.put("generation",77);await setupRiskBook(sa);
+// A persisted entry budget without its original campaign inception (or
+// reattached to another campaign) is corrupt, not available capital.
+const corruptedOrigin=new Storage();
+corruptedOrigin.map=structuredClone(sa.map);
+const originalMeta=await corruptedOrigin.get("risk_meta_v2") as any;
+await corruptedOrigin.put("risk_meta_v2",{...originalMeta,
+ campaign_origin:{...originalMeta.campaign_origin,campaign_id:"sha256:"+"f".repeat(64)}});
+check(await readRiskBook(corruptedOrigin)===null,
+ "cross-campaign budget never validates as money authority");
 const native={connection_generation:77,source_digest:d,native_account_evidence_complete:true,native_order_evidence_complete:true,native_ledger_evidence_complete:true};
 const request={...base,uid:a,intent_id:"intent_12345678",loss_usdt:"6"};
 const reserve=(input= request,storage=sa)=>reserveRisk(storage,policy,census,input,native);
