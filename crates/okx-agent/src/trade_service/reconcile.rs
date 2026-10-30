@@ -395,10 +395,33 @@ impl TradeService {
                 {
                     Ok(source) => match order.as_ref() {
                         Some(observed) => match verify_venue_fill_coverage(&i, &source, observed) {
-                            Ok(()) => json!({"state":"verified_native_fills_and_venue_quantity",
-                                "scope":"USDT_fill_notional_and_fee_only",
-                                "all_in_entry_cost_proven":false,
-                                "source":source}),
+                            Ok(()) => {
+                                // The independent venue order proves the
+                                // filled quantity, not that the venue has
+                                // published its final fee bill. Cross-check
+                                // each raw fill's fee with the SAME account
+                                // finance event linked by a real bill.
+                                let bill_id = i.intent_id.clone();
+                                let through = source.covered_through;
+                                match r.execution.store.call(deadline(), move |s| {
+                                    s.intent_fee_bill_evidence(&bill_id, through)
+                                }).await {
+                                    Ok(billed) => json!({
+                                        "state":"verified_native_fill_and_bill_fee_sources",
+                                        "scope":"USDT_fee_bill_source_link_only",
+                                        "final_bill_and_margin_debit_proven":false,
+                                        "all_in_entry_cost_proven":false,
+                                        "source":billed,
+                                    }),
+                                    Err(reason) => json!({
+                                        "state":"native_fills_verified_bill_pending",
+                                        "scope":"USDT_fill_notional_and_fee_only",
+                                        "all_in_entry_cost_proven":false,
+                                        "reason_code":err(reason),
+                                        "source":source,
+                                    }),
+                                }
+                            },
                             Err(reason) => json!({"state":"incomplete",
                                 "all_in_entry_cost_proven":false,
                                 "reason_code":reason}),
