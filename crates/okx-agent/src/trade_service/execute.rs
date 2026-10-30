@@ -1209,12 +1209,10 @@ fn verify_post_held_entry_sources(
     if quote.usd_per_usdt != dec(&fx.usd_per_usdt)? {
         return Err("POST_ENTRY_FX_CHANGED".into());
     }
-    // The held reservation was bound to the original immutable FX source.
-    // A changed generation is not proof of the same cost upper bound,
-    // even if the observed rate happens to be numerically identical.
-    if quote.conversion_digest != fx.source_digest {
-        return Err("POST_ENTRY_FX_PROVENANCE_CHANGED".into());
-    }
+    // The historical quote keeps its original source digest in SQL.
+    // The authenticated post-HELD read can legitimately have a new account
+    // generation: its FX source must be valid/fresh and its exact observed
+    // conversion must still match the originally reserved rate.
     Ok(())
 }
 
@@ -1661,20 +1659,20 @@ mod tests {
             ),
             Err("POST_ENTRY_FX_SOURCE_INVALID".into())
         );
-        let changed_provenance = UsdConversion {
+        let refreshed_same_rate = UsdConversion {
             source_digest: "c".repeat(64),
             ..fx.clone()
         };
-        assert_eq!(
+        assert!(
             verify_post_held_entry_sources(
                 &quote,
                 &fee,
                 "reference-1",
                 Decimal::ONE,
-                &changed_provenance,
+                &refreshed_same_rate,
                 t + 1
-            ),
-            Err("POST_ENTRY_FX_PROVENANCE_CHANGED".into())
+            )
+            .is_ok()
         );
         let modified_fx = UsdConversion {
             usd_per_usdt: "1.01".into(),
