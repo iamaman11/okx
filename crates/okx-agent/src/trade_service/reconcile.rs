@@ -1623,6 +1623,7 @@ mod entry_cost_status_tests {
             incident: None,
             plan: okx_execution::IntentPlan {
                 side: "buy".into(),
+                position_side: "long".into(),
                 quantity: Decimal::ONE,
                 stop_price: Some(dec("96").unwrap()),
                 ..Default::default()
