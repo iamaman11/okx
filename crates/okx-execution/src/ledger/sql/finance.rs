@@ -236,6 +236,9 @@ impl AccountStore {
             side,
             planned_quantity,
             bound_price,
+            exchange_order_id,
+            begin_post_at,
+            reservation_key,
         ): (
             String,
             String,
@@ -246,14 +249,21 @@ impl AccountStore {
             String,
             String,
             String,
+            Option<String>,
+            Option<i64>,
+            Option<String>,
         ) = self
             .connection
             .query_row(
                 "SELECT i.plan_hash,i.instrument_id,p.contract_value,p.inverse,
-                        p.settlement_currency,i.risk_increase,p.side,p.quantity,p.limit_price
+                        p.settlement_currency,i.risk_increase,p.side,p.quantity,p.limit_price,
+                        i.exchange_order_id,i.begin_post_at,r.reservation_key
                  FROM intents i JOIN intent_plans p ON p.intent_id=i.intent_id
+                 LEFT JOIN risk_receipts r
+                   ON r.intent_id=i.intent_id AND r.plan_hash=i.plan_hash
+                    AND r.account_key=?2 AND r.installation_id=?3
                  WHERE i.intent_id=?1",
-                [intent_id],
+                params![intent_id,self.meta.account_key,self.meta.installation_id],
                 |r| {
                     Ok((
                         r.get(0)?,
@@ -265,6 +275,9 @@ impl AccountStore {
                         r.get(6)?,
                         r.get(7)?,
                         r.get(8)?,
+                        r.get(9)?,
+                        r.get(10)?,
+                        r.get(11)?,
                     ))
                 },
             )
@@ -272,6 +285,17 @@ impl AccountStore {
             .ok_or(StoreError::Invalid("ENTRY_FILL_INTENT_NOT_FOUND"))?;
         if !increase || inverse || !instrument.ends_with("-USDT-SWAP") || currency != "USDT" {
             return Err(StoreError::Invalid("ENTRY_FILL_INSTRUMENT_UNSUPPORTED"));
+        }
+        // A fill row's intent_id is attribution, not proof that the exchange
+        // actually accepted *this* order. Resolve the durable POST fence,
+        // central reservation and exact order ID before monetary evaluation.
+        let (Some(exchange_order_id), Some(posted_at), Some(reservation_key)) =
+            (exchange_order_id, begin_post_at, reservation_key)
+        else {
+            return Err(StoreError::Invalid("ENTRY_FILL_ORDER_UNVERIFIED"));
+        };
+        if exchange_order_id.is_empty() || reservation_key.is_empty() || posted_at <= 0 {
+            return Err(StoreError::Invalid("ENTRY_FILL_ORDER_UNVERIFIED"));
         }
         let ct = decimal(contract_value.clone())?;
         let planned_qty = decimal(planned_quantity.clone())?;
@@ -297,6 +321,9 @@ impl AccountStore {
             side.as_str(),
             planned_quantity.as_str(),
             bound_price.as_str(),
+            exchange_order_id.as_str(),
+            reservation_key.as_str(),
+            posted_at,
             through,
             cursor.watermark,
             cursor.generation,
@@ -342,6 +369,7 @@ impl AccountStore {
             );
             if source.1 != instrument
                 || source.4 < self.meta.initialized_at
+                || source.4 < posted_at
                 || source.8 != "USDT"
                 || source.9 != side
                 || source.0.is_empty()
@@ -349,6 +377,9 @@ impl AccountStore {
                 || source.3.is_empty()
             {
                 return Err(StoreError::Invalid("ENTRY_FILL_SOURCE_INVALID"));
+            }
+            if source.3 != exchange_order_id {
+                return Err(StoreError::Invalid("ENTRY_FILL_EXCHANGE_ORDER_MISMATCH"));
             }
             let qty = decimal(source.5.clone())?;
             let price = decimal(source.6.clone())?;
@@ -389,6 +420,8 @@ impl AccountStore {
         Ok(IntentFillCostEvidence {
             intent_id: intent_id.to_owned(),
             plan_hash,
+            exchange_order_id,
+            reservation_key,
             fill_count: count,
             covered_through: through,
             gross_notional_usdt: notional,

@@ -286,6 +286,10 @@ pub struct Fill {
 pub struct IntentFillCostEvidence {
     pub intent_id: String,
     pub plan_hash: String,
+    /// Physical exchange order and central reservation must both be durable
+    /// before any cumulative native settlement evidence is available.
+    pub exchange_order_id: String,
+    pub reservation_key: String,
     pub fill_count: u64,
     pub covered_through: i64,
     pub gross_notional_usdt: Decimal,

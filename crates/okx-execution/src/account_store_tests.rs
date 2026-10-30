@@ -45,11 +45,12 @@ fn k5_recovery_pages_over_100_intents_are_disjoint_and_bounded() {
 fn e1_intent_fill_cost_uses_only_covered_native_sources_and_survives_restart() {
     let mut s = store();
     intent(&mut s);
+    acknowledged_entry_intent(&mut s);
     let fill = |n: u32, qty: Decimal, price: i64, fee: Decimal| Fill {
         fill_id: format!("fill-{n}"),
         instrument_id: "BTC-USDT-SWAP".into(),
         trade_id: format!("trade-{n}"),
-        exchange_order_id: format!("order-{n}"),
+        exchange_order_id: "venue-order".into(),
         intent_id: Some("intent".into()),
         time: 4 + i64::from(n),
         qty,
@@ -99,6 +100,8 @@ fn e1_intent_fill_cost_uses_only_covered_native_sources_and_survives_restart() {
     s.ingest_page(&complete).unwrap();
     let verified = s.intent_fill_cost_evidence("intent", 6).unwrap();
     assert_eq!(verified.fill_count, 2);
+    assert_eq!(verified.reservation_key, "central-key");
+    assert_eq!(verified.exchange_order_id, "venue-order");
     assert_eq!(verified.gross_notional_usdt, Decimal::from(94));
     assert_eq!(verified.conservative_fee_usdt, Decimal::new(3, 2));
     assert_eq!(verified.source_digest.len(), 64);
@@ -120,6 +123,50 @@ fn e1_intent_fill_cost_uses_only_covered_native_sources_and_survives_restart() {
 }
 
 #[test]
+fn e1_intent_fill_cost_requires_real_post_and_matching_venue_order() {
+    let mut s = store();
+    intent(&mut s);
+    s.ingest_page(&IngestPage {
+        cursor: Some(SourceCursor {
+            source: "fills".into(),
+            stream_partition: "SWAP".into(),
+            cursor: String::new(),
+            watermark: 10,
+            generation: 1,
+            coverage_gaps: String::new(),
+        }),
+        ..Default::default()
+    })
+    .unwrap();
+    assert!(matches!(
+        s.intent_fill_cost_evidence("intent", 10),
+        Err(StoreError::Invalid("ENTRY_FILL_ORDER_UNVERIFIED"))
+    ));
+    acknowledged_entry_intent(&mut s);
+    s.ingest_page(&IngestPage {
+        fills: vec![Fill {
+            fill_id: "foreign-order-fill".into(),
+            instrument_id: "BTC-USDT-SWAP".into(),
+            trade_id: "foreign-order-trade".into(),
+            exchange_order_id: "some-other-order".into(),
+            intent_id: Some("intent".into()),
+            time: 6,
+            qty: Decimal::ONE,
+            price: Decimal::from(100),
+            fee: Decimal::new(-1, 2),
+            currency: "USDT".into(),
+            side: "buy".into(),
+        }],
+        ..Default::default()
+    })
+    .unwrap();
+    assert!(matches!(
+        s.intent_fill_cost_evidence("intent", 10),
+        Err(StoreError::Invalid("ENTRY_FILL_EXCHANGE_ORDER_MISMATCH"))
+    ));
+}
+
+#[test]
 fn e1_intent_fill_cost_rejects_wrong_side_price_and_overfills() {
     let cases = [
         ("sell", "1", "100", "ENTRY_FILL_SOURCE_INVALID"),
@@ -129,12 +176,13 @@ fn e1_intent_fill_cost_rejects_wrong_side_price_and_overfills() {
     for (side, qty, price, expected) in cases {
         let mut s = store();
         intent(&mut s);
+    acknowledged_entry_intent(&mut s);
         s.ingest_page(&IngestPage {
             fills: vec![Fill {
                 fill_id: "unbound-fill".into(),
                 instrument_id: "BTC-USDT-SWAP".into(),
                 trade_id: "unbound-trade".into(),
-                exchange_order_id: "unbound-order".into(),
+                exchange_order_id: "venue-order".into(),
                 intent_id: Some("intent".into()),
                 time: 6,
                 qty: Decimal::from_str_exact(qty).unwrap(),
@@ -169,6 +217,7 @@ fn e1_intent_fill_cost_rejects_wrong_side_price_and_overfills() {
 fn e1_intent_fill_cost_rejects_unverified_currency_and_missing_fills() {
     let mut s = store();
     intent(&mut s);
+    acknowledged_entry_intent(&mut s);
     s.ingest_page(&IngestPage {
         cursor: Some(SourceCursor {
             source: "fills".into(),
@@ -190,7 +239,7 @@ fn e1_intent_fill_cost_rejects_unverified_currency_and_missing_fills() {
             fill_id: "fee-in-other-currency".into(),
             instrument_id: "BTC-USDT-SWAP".into(),
             trade_id: "foreign-fee".into(),
-            exchange_order_id: "order-foreign".into(),
+            exchange_order_id: "venue-order".into(),
             intent_id: Some("intent".into()),
             time: 8,
             qty: Decimal::ONE,
@@ -1681,6 +1730,18 @@ fn reserve(s: &mut AccountStore) {
             conversion_digest: "usd-conversion".into(),
         },
         3,
+    )
+    .unwrap();
+}
+fn acknowledged_entry_intent(s: &mut AccountStore) {
+    reserve(s);
+    assert!(s.begin_post("intent", 1, 4).unwrap());
+    s.record_outcome(
+        "intent",
+        IntentState::Acknowledged,
+        Some("venue-order"),
+        "venue-order-ack",
+        4,
     )
     .unwrap();
 }
