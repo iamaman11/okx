@@ -205,7 +205,7 @@ export interface CampaignEntryOpeningSource {
   source_digest:string;as_of_ms:number;campaign_started_at_ms:number;
   accounts:CampaignEntryOpeningAccount[];
 }
-async function openingDigest(source:CampaignEntryOpeningSource):Promise<string>{
+export async function openingDigest(source:CampaignEntryOpeningSource):Promise<string>{
   const payload=JSON.stringify([
     "okx.campaign-entry-opening/v1",
     source.campaign_id,source.limit_usd,source.consumed_usd,
