@@ -222,6 +222,24 @@ pub struct EntryQuoteEvidence {
     pub observed_at: i64,
 }
 
+/// Durable native-to-Worker entry authorization envelope. The Rust Engine
+/// creates this ONLY after its independently sourced EntryCostProof verifies
+/// the immutable SQL quote and all mandatory costs. This is stored in the
+/// existing operation_receipts journal, not a second financial ledger.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct EntryAdmissionEvidence {
+    pub schema: String,
+    pub account_key: String,
+    pub installation_id: String,
+    pub intent_id: String,
+    pub plan_hash: String,
+    pub quote_digest: String,
+    pub entry_upper_usd: Decimal,
+    pub entry_proof_digest: String,
+    pub observed_at: i64,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct IntentPlan {
     pub strategy_definition_id: String,
