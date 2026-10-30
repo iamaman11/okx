@@ -61,7 +61,10 @@ NAV/STOP → protected position/terminal settlement → release`.
   charge from the original source-bound FX upper, and persists
   `ENTRY_SETTLEMENT_PROVEN`. The existing WSS `SETTLE_ENTRY` moves that
   amount from reserved to consumed before `Resolve(RELEASED)` returns
-  unused reserved capacity. Lost replies replay the original receipt.
+  unused reserved capacity. `RELEASED` must exactly match the ALREADY
+  settled amount, revision and digest; it cannot invent a new financial
+  debit. Denied terminal proofs do not change the loss/entry budgets
+  or advance RiskBook CAS. Lost replies replay the original receipt.
   A known `notional + fee` quote alone never proves margin/borrow/FX.
   `trade.status` reads the source-bound SQL admission and labels it as
   cost proof **only**, never POST permission. T0 creation and v2 reopening
@@ -82,8 +85,12 @@ NAV/STOP → protected position/terminal settlement → release`.
   `AccountHistoryApi::complete_campaign_orders` now exhausts BOTH order
   sources with a bounded page limit, verifies order scope/causality and
   returns a canonical content digest, only when even canceled-without-fill
-  orders remain provable (under two hours with a margin). For older campaigns
-  the native source fails closed. The cross-account importer is not yet
+  orders remain provable (under two hours with a margin). Equal-time
+  contradictory economic facts from different archives are rejected.
+  Crash recovery now uses that same full history instead of a last-100
+  sample: backups older than the provable venue horizon cannot establish
+  absence of a lost POST. For older campaigns and recovery, sources fail
+  closed pending independent proof. The cross-account importer is not yet
   connected, so RiskBook leaves admission blocked.
   Missing all-in FX/margin/borrow sources now reject the prepared SQL intent
   as `ENTRY_ALL_IN_COST_UNPROVEN` BEFORE any central RESERVE attempt: known
