@@ -1,11 +1,16 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use sha2::{Digest, Sha256};
 
 use crate::{OkxError, OkxRestClient, instrument::InstrumentType};
 
 const HISTORY_PAGE_LIMIT: usize = 100;
 const HISTORY_MAX_PAGES: usize = 1;
+// Campaign bootstrap is an explicit bounded operation, not a maintenance poll.
+const CAMPAIGN_ORDER_MAX_PAGES_PER_SOURCE: usize = 256;
+const CAMPAIGN_UNFILLED_CANCEL_RETENTION_MS: i64 = 2 * 60 * 60 * 1_000;
+const CAMPAIGN_RETENTION_SAFETY_MS: i64 = 60 * 1_000;
 const RECENT_ORDER_HISTORY_PATH: &str = "/api/v5/trade/orders-history";
 const ARCHIVE_ORDER_HISTORY_PATH: &str = "/api/v5/trade/orders-history-archive";
 
@@ -14,6 +19,18 @@ pub struct BoundedHistory<T> {
     pub rows: Vec<T>,
     pub pages: usize,
     pub complete: bool,
+}
+
+/// Source-bound result of TWO exhausted OKX order archives, not a
+/// partial 100-row sample. A valid campaign start is supplied by the
+/// existing authenticated installation authority, NEVER inferred here.
+#[derive(Debug, Clone)]
+pub struct CompleteCampaignOrderHistory {
+    pub from_ms: i64,
+    pub through_ms: i64,
+    pub instrument_type: String,
+    pub orders: Vec<HistoricalOrder>,
+    pub source_digest: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -252,6 +269,90 @@ impl AccountHistoryApi {
             .await
     }
 
+    /// A campaign opening MUST NOT silently promote the archive's missing
+    /// canceled-without-fills orders to a zero-debit assertion. OKX retains
+    /// some incomplete canceled orders for only two hours. Use a fresh
+    /// bounded window, exhaust recent and archive separately, then bind
+    /// all returned economic identities into one content digest. Earlier
+    /// campaigns need independent archival authority, not this API.
+    pub async fn complete_campaign_orders(
+        &self,
+        instrument_type: &str,
+        campaign_started_at_ms: i64,
+        through_ms: i64,
+        observed_at_ms: i64,
+    ) -> Result<CompleteCampaignOrderHistory, OkxError> {
+        verify_campaign_order_window(
+            campaign_started_at_ms,
+            through_ms,
+            observed_at_ms,
+        )?;
+        let recent = self
+            .complete_order_source(instrument_type, campaign_started_at_ms, through_ms, false)
+            .await?;
+        let archive = self
+            .complete_order_source(instrument_type, campaign_started_at_ms, through_ms, true)
+            .await?;
+        complete_campaign_orders_witness(
+            instrument_type,
+            campaign_started_at_ms,
+            through_ms,
+            recent,
+            archive,
+        )
+    }
+
+    async fn complete_order_source(
+        &self,
+        instrument_type: &str,
+        begin: i64,
+        end: i64,
+        archive: bool,
+    ) -> Result<BoundedHistory<HistoricalOrder>, OkxError> {
+        let mut rows = Vec::new();
+        let mut after: Option<String> = None;
+        let mut seen_cursors = BTreeSet::new();
+        for page in 0..CAMPAIGN_ORDER_MAX_PAGES_PER_SOURCE {
+            let chunk = self
+                .orders_history_page(instrument_type, begin, end, after.as_deref(), archive)
+                .await?;
+            let count = chunk.len();
+            if count > HISTORY_PAGE_LIMIT {
+                return Err(OkxError::Response(
+                    "campaign order source returned an oversized page".into(),
+                ));
+            }
+            let next = if count == HISTORY_PAGE_LIMIT {
+                let last = chunk.last().ok_or_else(|| {
+                    OkxError::Response("campaign order source missing last row".into())
+                })?;
+                if last.order_id.is_empty()
+                    || !last.order_id.bytes().all(|b| b.is_ascii_digit())
+                    || !seen_cursors.insert(last.order_id.clone())
+                {
+                    return Err(OkxError::Response(
+                        "campaign order pagination stalled or invalid".into(),
+                    ));
+                }
+                Some(last.order_id.clone())
+            } else {
+                None
+            };
+            rows.extend(chunk);
+            if count < HISTORY_PAGE_LIMIT {
+                return Ok(BoundedHistory {
+                    rows,
+                    pages: page + 1,
+                    complete: true,
+                });
+            }
+            after = next;
+        }
+        Err(OkxError::Response(
+            "campaign order source exceeds bounded full-pagination capacity".into(),
+        ))
+    }
+
     pub async fn bills_history_page(
         &self,
         begin: i64,
@@ -440,6 +541,77 @@ fn history_window_params(
         params.push(("after", after.into()));
     }
     Ok(params)
+}
+
+/// A venue history response contains no intrinsic campaign start. The
+/// caller must provide the immutable campaign inception, and that start
+/// must be within the weakest source's retention window. A minute of
+/// boundary headroom rejects ambiguous oldest canceled orders.
+fn verify_campaign_order_window(
+    started_at_ms: i64,
+    through_ms: i64,
+    observed_at_ms: i64,
+) -> Result<(), OkxError> {
+    if started_at_ms <= 0
+        || through_ms < started_at_ms
+        || observed_at_ms < through_ms
+        || observed_at_ms - through_ms > CAMPAIGN_RETENTION_SAFETY_MS
+        || observed_at_ms - started_at_ms
+            >= CAMPAIGN_UNFILLED_CANCEL_RETENTION_MS - CAMPAIGN_RETENTION_SAFETY_MS
+    {
+        return Err(OkxError::Config(
+            "campaign order start or cut-off outside provable venue history".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn complete_campaign_orders_witness(
+    instrument_type: &str,
+    from_ms: i64,
+    through_ms: i64,
+    recent: BoundedHistory<HistoricalOrder>,
+    archive: BoundedHistory<HistoricalOrder>,
+) -> Result<CompleteCampaignOrderHistory, OkxError> {
+    if !recent.complete || !archive.complete {
+        return Err(OkxError::Response(
+            "campaign order history pagination incomplete".into(),
+        ));
+    }
+    let merged = merge_order_histories(recent, archive)?;
+    if !merged.complete {
+        return Err(OkxError::Response(
+            "campaign order history pagination incomplete".into(),
+        ));
+    }
+    for order in &merged.rows {
+        if order.instrument_type != instrument_type
+            || order.order_id.is_empty()
+            || order.creation_time_ms.parse::<i64>().ok()
+                .is_none_or(|v| v < from_ms || v > through_ms)
+            || order.update_time_ms.parse::<i64>().ok()
+                .is_none_or(|v| v < from_ms || v > through_ms)
+        {
+            return Err(OkxError::Response(
+                "campaign order history scope or causal time invalid".into(),
+            ));
+        }
+    }
+    let canonical = serde_json::to_vec(&(
+        "okx.campaign-orders-window/v1",
+        instrument_type,
+        from_ms,
+        through_ms,
+        &merged.rows,
+    ))
+    .map_err(|_| OkxError::Response("campaign order digest serialization failed".into()))?;
+    Ok(CompleteCampaignOrderHistory {
+        from_ms,
+        through_ms,
+        instrument_type: instrument_type.into(),
+        orders: merged.rows,
+        source_digest: format!("{:x}", Sha256::digest(canonical)),
+    })
 }
 
 fn merge_order_histories(
@@ -694,6 +866,63 @@ mod tests {
         assert_eq!(bill.bill_sub_type, "173");
         assert_eq!(bill.position_balance_change, "-0.05");
         assert_eq!(bill.timestamp_ms, "1790884800000");
+    }
+
+    #[test]
+    fn campaign_order_window_requires_provable_short_retention() {
+        let now = 1_800_000_000_000_i64;
+        assert!(verify_campaign_order_window(now - 60_000, now, now).is_ok());
+        assert!(verify_campaign_order_window(
+            now - CAMPAIGN_UNFILLED_CANCEL_RETENTION_MS, now, now
+        ).is_err());
+        assert!(verify_campaign_order_window(now - 120_000, now, now - 1).is_err());
+        assert!(verify_campaign_order_window(now - 120_000, now - 120_000, now).is_err());
+        assert!(verify_campaign_order_window(0, now, now).is_err());
+    }
+
+    #[test]
+    fn campaign_order_witness_requires_exhaustion_and_causal_identity() {
+        let since = 1_800_000_000_000_i64;
+        let through = since + 20_000;
+        let order = HistoricalOrder {
+            instrument_type: "SWAP".into(),
+            instrument_id: "BTC-USDT-SWAP".into(),
+            order_id: "123456".into(),
+            client_order_id: "client".into(),
+            side: "buy".into(),
+            creation_time_ms: since.to_string(),
+            update_time_ms: (since + 1_000).to_string(),
+            ..canceled_demo_order("123456", &(since + 1_000).to_string())
+        };
+        let recent = BoundedHistory { rows: vec![order.clone()], pages: 1, complete: true };
+        let archive = BoundedHistory { rows: vec![], pages: 1, complete: true };
+        let proved = complete_campaign_orders_witness(
+            "SWAP", since, through, recent.clone(), archive.clone()
+        ).unwrap();
+        assert_eq!(proved.orders.len(), 1);
+        assert_eq!(proved.source_digest.len(), 64);
+        assert_eq!(proved.from_ms, since);
+        assert_eq!(proved.through_ms, through);
+        assert!(complete_campaign_orders_witness(
+            "SWAP", since, through,
+            BoundedHistory { complete: false, ..recent.clone() }, archive.clone()
+        ).is_err());
+        let mut early = order.clone();
+        early.creation_time_ms = (since - 1).to_string();
+        assert!(complete_campaign_orders_witness(
+            "SWAP", since, through,
+            BoundedHistory { rows: vec![early], pages: 1, complete: true }, archive.clone()
+        ).is_err());
+        let mut conflicting = order;
+        conflicting.side = "sell".into();
+        assert!(complete_campaign_orders_witness(
+            "SWAP", since, through,
+            recent,
+            BoundedHistory { rows: vec![conflicting], pages: 1, complete: true }
+        ).is_err());
+        assert!(complete_campaign_orders_witness(
+            "SWAP", since, through, archive.clone(), archive
+        ).is_ok());
     }
 
     #[test]
