@@ -225,11 +225,20 @@ impl TradeService {
             if owned.iter().map(|l| l.remaining_qty).sum::<Decimal>() != qty {
                 return Err("STORAGE_RECOVERY_UNATTRIBUTED_POSITION".into());
             }
-            for lot in owned {
+            for lot in &owned {
                 let id = lot
                     .intent_id
                     .clone()
                     .ok_or("STORAGE_RECOVERY_LOT_OWNER_MISSING")?;
+                let owned_intent_qty = owned.iter()
+                    .filter(|entry| entry.intent_id.as_deref() == Some(id.as_str()))
+                    .try_fold(Decimal::ZERO, |total, entry| {
+                        if entry.remaining_qty <= Decimal::ZERO {
+                            return Err("STORAGE_RECOVERY_LOT_QUANTITY_INVALID".to_owned());
+                        }
+                        total.checked_add(entry.remaining_qty)
+                            .ok_or("STORAGE_RECOVERY_LOT_QUANTITY_OVERFLOW".to_owned())
+                    })?;
                 let (protection, intent) = r
                     .execution
                     .store
@@ -240,7 +249,7 @@ impl TradeService {
                     .map_err(err)?;
                 let protection = protection.ok_or("STORAGE_RECOVERY_PROTECTION_MISSING")?;
                 let intent = intent.ok_or("STORAGE_RECOVERY_PROTECTION_INTENT_MISSING")?;
-                if protection.quantity < lot.remaining_qty
+                if protection.quantity < owned_intent_qty
                     || intent.plan.position_side != position.position_side
                 {
                     return Err("STORAGE_RECOVERY_PROTECTION_INCOMPLETE".into());
@@ -258,7 +267,7 @@ impl TradeService {
                     .algo_order_by_client_id(&client)
                     .await
                     .map_err(|_| "STORAGE_RECOVERY_PROTECTION_READBACK_UNAVAILABLE")?;
-                super::reconcile::verified_live_protection(&intent, qty, &algo)
+                super::reconcile::verified_live_protection(&intent, owned_intent_qty, &algo)
                     .map_err(|_| "STORAGE_RECOVERY_PROTECTION_LIVE_UNVERIFIED")?;
                 if algo.algo_order_id != protection.algo_id {
                     return Err("STORAGE_RECOVERY_PROTECTION_IDENTITY_MISMATCH".into());
