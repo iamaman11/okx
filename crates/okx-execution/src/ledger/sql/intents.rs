@@ -278,7 +278,26 @@ impl AccountStore {
                 "ENTRY_SETTLEMENT_POST_CAUSALITY_UNVERIFIED",
             ));
         }
-        let bill = self.intent_fee_bill_evidence(id, covered_through)?;
+        // Re-read the ORIGINAL immutable SQL cut-off on lost-ACK replay,
+        // even if the ongoing source-capture cursor has advanced. Verify
+        // the original source digest again; no new amount or different bill
+        // witness may silently inherit the previous Worker authority.
+        let key = format!("entry-settlement:{id}");
+        let previous = self.operation(&key)?;
+        let saved = previous
+            .as_ref()
+            .map(|receipt| {
+                serde_json::from_str::<EntrySettlementEvidence>(&receipt.result_ref)
+                    .map_err(|_| StoreError::Invalid("ENTRY_SETTLEMENT_RECEIPT_CORRUPT"))
+            })
+            .transpose()?;
+        let witness_through = saved
+            .as_ref()
+            .map_or(covered_through, |proof| proof.source_covered_through_ms);
+        if witness_through < venue_updated_at || witness_through > covered_through {
+            return Err(StoreError::Invalid("ENTRY_SETTLEMENT_COVERAGE_REGRESSION"));
+        }
+        let bill = self.intent_fee_bill_evidence(id, witness_through)?;
         let fill = &bill.fill;
         if fill.intent_id != id
             || fill.plan_hash != intent.plan_hash
@@ -340,20 +359,19 @@ impl AccountStore {
             reservation_key: fill.reservation_key.clone(),
             venue_order_id: fill.exchange_order_id.clone(),
             venue_update_ms: venue_updated_at,
+            source_covered_through_ms: witness_through,
             venue_filled_quantity,
             booked_notional_and_fee_usdt: full_usdt,
             cumulative_entry_usd: usd,
             settlement_revision: 1,
             source_digest: format!("{:x}", Sha256::digest(bytes)),
         };
-        let key = format!("entry-settlement:{id}");
-        if let Some(prior) = self.operation(&key)? {
+        if let Some(prior) = previous {
+            let saved = saved.ok_or(StoreError::Invalid("ENTRY_SETTLEMENT_RECEIPT_CORRUPT"))?;
             if prior.kind != "ENTRY_SETTLEMENT_PROVEN" || prior.request_hash != settlement.plan_hash
             {
                 return Err(StoreError::Invalid("ENTRY_SETTLEMENT_IDEMPOTENCY_CONFLICT"));
             }
-            let saved: EntrySettlementEvidence = serde_json::from_str(&prior.result_ref)
-                .map_err(|_| StoreError::Invalid("ENTRY_SETTLEMENT_RECEIPT_CORRUPT"))?;
             // Cursor watermark can advance even when all immutable economic
             // facts stay unchanged. An ACK replay must use the original
             // durable digest/revision, but cannot accept a changed venue
@@ -365,11 +383,12 @@ impl AccountStore {
                 || saved.reservation_key != settlement.reservation_key
                 || saved.venue_order_id != settlement.venue_order_id
                 || saved.venue_update_ms != settlement.venue_update_ms
+                || saved.source_covered_through_ms != settlement.source_covered_through_ms
                 || saved.venue_filled_quantity != settlement.venue_filled_quantity
                 || saved.booked_notional_and_fee_usdt != settlement.booked_notional_and_fee_usdt
                 || saved.cumulative_entry_usd != settlement.cumulative_entry_usd
                 || saved.settlement_revision != 1
-                || saved.source_digest.len() != 64
+                || saved.source_digest != settlement.source_digest
                 || prior.committed_at != saved.venue_update_ms
             {
                 return Err(StoreError::Invalid("ENTRY_SETTLEMENT_IDEMPOTENCY_CONFLICT"));
