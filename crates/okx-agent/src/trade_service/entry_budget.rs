@@ -657,16 +657,26 @@ mod tests {
             ),
             Err("ENTRY_FX_SOURCE_DIGEST_INVALID".into())
         );
+        let observed_late = t + crate::config::ACCOUNT_MAX_AGE_MS + 1;
+        let mut current_rules = rules.clone();
+        current_rules.source_received_at =
+            chrono::DateTime::<chrono::Utc>::from_timestamp_millis(observed_late)
+                .unwrap()
+                .to_rfc3339();
+        let current_fx = UsdConversion {
+            observed_at_ms: observed_late as u64,
+            ..fx.clone()
+        };
         assert_eq!(
             verified_known_entry_quote(
                 &plan,
                 "BTC-USDT-SWAP",
-                &rules,
+                &current_rules,
                 &fees,
-                &fx,
+                &current_fx,
                 "uid",
                 "uid",
-                t + crate::config::ACCOUNT_MAX_AGE_MS + 1
+                observed_late
             ),
             Err("ENTRY_FEE_SOURCE_STALE".into())
         );
