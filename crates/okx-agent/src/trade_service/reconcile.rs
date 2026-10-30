@@ -19,7 +19,9 @@ fn verify_venue_fill_coverage(
     {
         return Err("ENTRY_FILL_VENUE_IDENTITY_MISMATCH".into());
     }
-    let update = observed.update_time_ms.parse::<i64>()
+    let update = observed
+        .update_time_ms
+        .parse::<i64>()
         .map_err(|_| "ENTRY_FILL_VENUE_TIME_UNVERIFIED")?;
     if update <= 0 || source.covered_through < update {
         return Err("ENTRY_FILL_VENUE_TIME_UNCOVERED".into());
@@ -46,14 +48,18 @@ fn verify_venue_fill_coverage(
 fn terminal_order_update_time(
     order: Option<&okx_api::TradeOrderDetails>,
 ) -> Result<Option<i64>, String> {
-    order.map(|o| {
-        let at = o.update_time_ms.parse::<i64>()
-            .map_err(|_| "TERMINAL_ORDER_UPDATE_TIME_INVALID")?;
-        if at <= 0 {
-            return Err("TERMINAL_ORDER_UPDATE_TIME_INVALID".into());
-        }
-        Ok(at)
-    }).transpose()
+    order
+        .map(|o| {
+            let at = o
+                .update_time_ms
+                .parse::<i64>()
+                .map_err(|_| "TERMINAL_ORDER_UPDATE_TIME_INVALID")?;
+            if at <= 0 {
+                return Err("TERMINAL_ORDER_UPDATE_TIME_INVALID".into());
+            }
+            Ok(at)
+        })
+        .transpose()
 }
 
 /// Historical known pricing evidence is not an all-in entry debit proof.
@@ -1134,9 +1140,9 @@ mod entry_cost_status_tests {
     #[test]
     fn e2_terminal_cursors_never_trust_invalid_exchange_order_time() {
         assert_eq!(terminal_order_update_time(None), Ok(None));
-        let order = |t: &str| serde_json::from_value::<okx_api::TradeOrderDetails>(
-            json!({"uTime":t})
-        ).unwrap();
+        let order = |t: &str| {
+            serde_json::from_value::<okx_api::TradeOrderDetails>(json!({"uTime":t})).unwrap()
+        };
         assert_eq!(terminal_order_update_time(Some(&order("16"))), Ok(Some(16)));
         for invalid in ["", "invalid", "0", "-1", "9223372036854775808"] {
             assert_eq!(
@@ -1199,28 +1205,40 @@ mod entry_cost_status_tests {
         assert!(verify_venue_fill_coverage(&intent, &source, &order).is_ok());
         let mut changed = order.clone();
         changed.accumulated_fill_size = "0.9".into();
-        assert_eq!(verify_venue_fill_coverage(&intent, &source, &changed),
-            Err("ENTRY_FILL_VENUE_QUANTITY_MISMATCH".into()));
+        assert_eq!(
+            verify_venue_fill_coverage(&intent, &source, &changed),
+            Err("ENTRY_FILL_VENUE_QUANTITY_MISMATCH".into())
+        );
         changed = order.clone();
         changed.update_time_ms = "11".into();
-        assert_eq!(verify_venue_fill_coverage(&intent, &source, &changed),
-            Err("ENTRY_FILL_VENUE_TIME_UNCOVERED".into()));
+        assert_eq!(
+            verify_venue_fill_coverage(&intent, &source, &changed),
+            Err("ENTRY_FILL_VENUE_TIME_UNCOVERED".into())
+        );
         changed = order.clone();
         changed.order_id = "other".into();
-        assert_eq!(verify_venue_fill_coverage(&intent, &source, &changed),
-            Err("ENTRY_FILL_VENUE_IDENTITY_MISMATCH".into()));
+        assert_eq!(
+            verify_venue_fill_coverage(&intent, &source, &changed),
+            Err("ENTRY_FILL_VENUE_IDENTITY_MISMATCH".into())
+        );
         changed = order.clone();
         changed.client_order_id = "other".into();
-        assert_eq!(verify_venue_fill_coverage(&intent, &source, &changed),
-            Err("ENTRY_FILL_VENUE_IDENTITY_MISMATCH".into()));
+        assert_eq!(
+            verify_venue_fill_coverage(&intent, &source, &changed),
+            Err("ENTRY_FILL_VENUE_IDENTITY_MISMATCH".into())
+        );
         changed = order.clone();
         changed.update_time_ms = "invalid".into();
-        assert_eq!(verify_venue_fill_coverage(&intent, &source, &changed),
-            Err("ENTRY_FILL_VENUE_TIME_UNVERIFIED".into()));
+        assert_eq!(
+            verify_venue_fill_coverage(&intent, &source, &changed),
+            Err("ENTRY_FILL_VENUE_TIME_UNVERIFIED".into())
+        );
         changed = order;
         changed.state = "unknown".into();
-        assert_eq!(verify_venue_fill_coverage(&intent, &source, &changed),
-            Err("ENTRY_FILL_VENUE_STATE_UNKNOWN".into()));
+        assert_eq!(
+            verify_venue_fill_coverage(&intent, &source, &changed),
+            Err("ENTRY_FILL_VENUE_STATE_UNKNOWN".into())
+        );
     }
 
     #[test]
