@@ -1406,13 +1406,27 @@ mod entry_cost_status_tests {
     fn e2_protective_readback_requires_exact_venue_exposure_and_opposite_side() {
         let one = Decimal::ONE;
         let half = dec("0.5").unwrap();
-        assert!(protection_covers_live_position("buy", "sell", one, one, "1"));
-        assert!(protection_covers_live_position("sell", "buy", one, one, "1"));
-        assert!(!protection_covers_live_position("buy", "buy", one, one, "1"));
-        assert!(!protection_covers_live_position("buy", "close", one, one, "1"));
-        assert!(!protection_covers_live_position("buy", "sell", one, half, "1"));
-        assert!(!protection_covers_live_position("buy", "sell", one, one, "0.5"));
-        assert!(!protection_covers_live_position("buy", "sell", one, one, "invalid"));
+        assert!(protection_covers_live_position(
+            "buy", "sell", one, one, "1"
+        ));
+        assert!(protection_covers_live_position(
+            "sell", "buy", one, one, "1"
+        ));
+        assert!(!protection_covers_live_position(
+            "buy", "buy", one, one, "1"
+        ));
+        assert!(!protection_covers_live_position(
+            "buy", "close", one, one, "1"
+        ));
+        assert!(!protection_covers_live_position(
+            "buy", "sell", one, half, "1"
+        ));
+        assert!(!protection_covers_live_position(
+            "buy", "sell", one, one, "0.5"
+        ));
+        assert!(!protection_covers_live_position(
+            "buy", "sell", one, one, "invalid"
+        ));
         assert!(!protection_covers_live_position(
             "buy",
             "sell",
