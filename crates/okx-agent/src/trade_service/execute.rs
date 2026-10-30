@@ -11,8 +11,8 @@ struct PostFxFence<'a> {
 }
 impl TradeService {
     /// Native, completely classified USD-denominated spot opening spend.
-    /// A buy consumes gross USD notional; any execution fee consumes
-    /// additional USD, including on a sell. Rebates never replenish budget.
+    /// An opening buy consumes gross USD notional and its fee. Exit fees
+    /// remain cashflow/risk costs, not new entry turnover.
     /// No other instrument, conversion, bill type or currency is guessed.
     /// Completeness and fill↔order↔bill identity must already be established
     /// by AccountHistoryApi's authenticated campaign witness.
@@ -73,7 +73,7 @@ impl TradeService {
             } else {
                 Decimal::ZERO
             };
-            let fee_debit = if fee < Decimal::ZERO {
+            let fee_debit = if fill.side == "buy" && fee < Decimal::ZERO {
                 -fee
             } else {
                 Decimal::ZERO
@@ -1989,6 +1989,19 @@ mod tests {
             dec("5").unwrap(),
             "rebate neither increases nor refunds campaign entry spend"
         );
+        history.fills[0].side = "sell".into();
+        history.orders[0].side = "sell".into();
+        history.fills[0].fee = "-0.1".into();
+        history.bills[0].fee = "-0.1".into();
+        assert_eq!(
+            TradeService::historical_usd_spot_entry(&history).unwrap(),
+            Decimal::ZERO,
+            "closing notional/fee must not be charged as an opening"
+        );
+        history.fills[0].side = "buy".into();
+        history.orders[0].side = "buy".into();
+        history.fills[0].fee = "0.03".into();
+        history.bills[0].fee = "0.03".into();
         history.fills[0].instrument_type = "SWAP".into();
         assert!(
             TradeService::historical_usd_spot_entry(&history).is_err(),
