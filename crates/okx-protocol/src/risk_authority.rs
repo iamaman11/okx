@@ -427,6 +427,47 @@ pub enum RiskDecisionStatus {
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct RiskEntryBudgetSnapshot {
+    pub campaign_id: String,
+    pub limit_usd: String,
+    pub consumed_usd: String,
+    pub reserved_usd: String,
+    pub remaining_usd: String,
+    pub opening_source_digest: String,
+    pub opening_as_of_ms: u64,
+}
+impl RiskEntryBudgetSnapshot {
+    pub fn valid(&self) -> bool {
+        fn exact_units(value: &str) -> Option<u128> {
+            if value != "0" && !positive(value) {
+                return None;
+            }
+            let (whole, fraction) = value.split_once('.').unwrap_or((value, ""));
+            whole
+                .parse::<u128>()
+                .ok()?
+                .checked_mul(1_000_000_000)?
+                .checked_add(fraction.parse::<u128>().ok().unwrap_or(0)
+                    * 10u128.pow(9 - fraction.len() as u32))
+        }
+        let (Some(limit), Some(consumed), Some(reserved), Some(remaining)) = (
+            exact_units(&self.limit_usd),
+            exact_units(&self.consumed_usd),
+            exact_units(&self.reserved_usd),
+            exact_units(&self.remaining_usd),
+        ) else {
+            return false;
+        };
+        self.campaign_id.starts_with("sha256:")
+            && hash(&self.campaign_id[7..])
+            && limit > 0
+            && consumed.checked_add(reserved).and_then(|v| v.checked_add(remaining)) == Some(limit)
+            && hash(&self.opening_source_digest)
+            && self.opening_as_of_ms > 0
+    }
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RiskBudgetSnapshot {
     pub campaign_limit_usd: String,
     pub consumed_loss_usd: String,
@@ -434,6 +475,9 @@ pub struct RiskBudgetSnapshot {
     pub remaining_loss_usd: String,
     pub occupied_modelled_loss_usdt: String,
     pub source_as_of_ms: Option<u64>,
+    /// Only present after authenticated opening finance spend reconciliation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entry_budget: Option<RiskEntryBudgetSnapshot>,
 }
 impl RiskBudgetSnapshot {
     pub fn valid(&self) -> bool {
@@ -446,6 +490,7 @@ impl RiskBudgetSnapshot {
             ]
             .iter()
             .all(|v| v.as_str() == "0" || positive(v))
+            && self.entry_budget.as_ref().is_none_or(RiskEntryBudgetSnapshot::valid)
     }
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -530,6 +575,46 @@ impl RiskResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn entry_budget_readback_never_invents_unproved_history() {
+        let plain: RiskBudgetSnapshot = serde_json::from_value(serde_json::json!({
+            "campaign_limit_usd": "10",
+            "consumed_loss_usd": "0",
+            "reserved_loss_usd": "0",
+            "remaining_loss_usd": "10",
+            "occupied_modelled_loss_usdt": "0",
+            "source_as_of_ms": null,
+            "entry_budget": null
+        }))
+        .unwrap();
+        assert!(plain.valid() && plain.entry_budget.is_none());
+        let ready: RiskBudgetSnapshot = serde_json::from_value(serde_json::json!({
+            "campaign_limit_usd": "10",
+            "consumed_loss_usd": "0",
+            "reserved_loss_usd": "0",
+            "remaining_loss_usd": "10",
+            "occupied_modelled_loss_usdt": "0",
+            "source_as_of_ms": null,
+            "entry_budget": {
+                "campaign_id": format!("sha256:{}", "c".repeat(64)),
+                "limit_usd": "10",
+                "consumed_usd": "1",
+                "reserved_usd": "3",
+                "remaining_usd": "6",
+                "opening_source_digest": "d".repeat(64),
+                "opening_as_of_ms": 1000
+            }
+        }))
+        .unwrap();
+        assert!(ready.valid());
+        let mut wrong_sum = ready.clone();
+        wrong_sum.entry_budget.as_mut().unwrap().remaining_usd = "5".into();
+        assert!(!wrong_sum.valid(), "budget is an exact conservation readback");
+        let mut tampered = serde_json::to_value(&ready).unwrap();
+        tampered["entry_budget"]["untrusted_field"] = true.into();
+        assert!(serde_json::from_value::<RiskBudgetSnapshot>(tampered).is_err());
+    }
+
     #[test]
     fn exact_contract_denies_partial_native_risk_proof() {
         let uid = "a".repeat(64);

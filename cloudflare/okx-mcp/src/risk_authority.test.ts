@@ -42,7 +42,9 @@ check((await s.get("risk_book_v1"))===undefined,"denials make no reservation");
 
 await initializeRiskBook(s,initial.installation_id);
 const summary=await handleNativeRiskCommand(s,session,{schema:"okx.risk-command/v1",command_id:"summary_12345",installation_id:initial.installation_id,action:{action:"SUMMARY"}},now);
-check(summary.status==="OBSERVED"&&summary.budget?.remaining_loss_usd==="10"&&summary.budget.source_as_of_ms===null,"global summary comes from central owner with explicit source quality");
+check(summary.status==="OBSERVED"&&summary.budget?.remaining_loss_usd==="10"&&summary.budget.source_as_of_ms===null&&
+ summary.budget.entry_budget===null,
+ "unproven campaign entry opening is explicitly null rather than zero");
 const own=account.account_key,other="okx:real:"+"b".repeat(64);
 await s.put("account_access_v1",{...initial,revision:1,accounts:[account,{...account,id:"secondary",account_key:other,uid_fingerprint:"b".repeat(64)}]});
 const meta:any=await s.get("risk_meta_v2");
@@ -104,8 +106,12 @@ check((await handleNativeRiskCommand(s,session,{schema:"okx.risk-command/v1",com
    schema:"okx.risk-command/v1",command_id:"summary_three_001",
    installation_id:initial.installation_id,action:{action:"SUMMARY"}},now);
  check(summary.status==="OBSERVED"&&summary.budget?.reserved_loss_usd==="3"&&
-   summary.budget?.remaining_loss_usd==="7",
-   "three distinct sources consume the same campaign, not three separate budgets");
+   summary.budget?.remaining_loss_usd==="7"&&
+   summary.budget?.entry_budget?.reserved_usd==="6"&&
+   summary.budget.entry_budget.remaining_usd==="4"&&
+   summary.budget.entry_budget.consumed_usd==="0"&&
+   summary.budget.entry_budget.opening_source_digest===sourceDigest,
+   "central readback separates modelled loss and entry spend for every source");
  const replay=await handleNativeRiskCommand(t,session,externalHuman,now);
  check(replay.status==="HELD"&&replay.reservation_key===admitted[0].reservation_key,
    "identical external retry returns the same central reservation");

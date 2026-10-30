@@ -180,7 +180,9 @@ export interface CampaignEntryBudget {
 function validEntryBudget(v:any):v is CampaignEntryBudget{
   return !!v&&/^sha256:[0-9a-f]{64}$/.test(v.campaign_id)&&
     units(v.limit_usd)!>0n&&units(v.consumed_usd)!==null&&
-    units(v.reserved_usd)!==null&&HEX.test(v.opening_source_digest)&&
+    units(v.reserved_usd)!==null&&
+    units(v.consumed_usd)!+units(v.reserved_usd)!<=units(v.limit_usd)!&&
+    HEX.test(v.opening_source_digest)&&
     Number.isSafeInteger(v.opening_as_of_ms)&&v.opening_as_of_ms>0;
 }
 /** No public or WebSocket route. A future source-complete native finance

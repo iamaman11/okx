@@ -57,6 +57,8 @@ export type Governance = {
 export type AccountUpdate = {id:string;label:string;enabled:boolean;explicit_pause:boolean;limits:Limits;strategies:StrategyLimits[]};
 export type GovernanceUpdate = {
   expected_revision:number;
+  /** Optional CAS reduction / first configuration, never a reset of spend. */
+  campaign_entry_limit_usd?:string;
   max_total_modelled_loss_usdt:string;accounts:AccountUpdate[];
 };
 const SHA=/^[0-9a-f]{64}$/;
@@ -132,6 +134,10 @@ export function reviseGovernance(previous:Governance,change:GovernanceUpdate):Go
     ||change.expected_revision!==previous.revision
     ||!Number.isSafeInteger(previous.revision+1)
     ||!positive(change.max_total_modelled_loss_usdt)
+    ||(change.campaign_entry_limit_usd!==undefined &&
+       (!positive(change.campaign_entry_limit_usd) ||
+        (previous.campaign_entry_limit_usd!==undefined &&
+         units(change.campaign_entry_limit_usd)!>units(previous.campaign_entry_limit_usd)!)))
     ||!Array.isArray(change.accounts)||change.accounts.length!==previous.accounts.length)return null;
   const remaining=new Map(previous.accounts.map(a=>[a.id,a]));
   const accounts:Account[]=[];
@@ -146,6 +152,8 @@ export function reviseGovernance(previous:Governance,change:GovernanceUpdate):Go
   }
   if(remaining.size!==0)return null;
   const next:Governance={...previous,revision:previous.revision+1,
+    ...(change.campaign_entry_limit_usd===undefined?{}:
+       {campaign_entry_limit_usd:change.campaign_entry_limit_usd}),
     max_total_modelled_loss_usdt:change.max_total_modelled_loss_usdt,accounts};
   return validGovernance(next)?next:null;
 }

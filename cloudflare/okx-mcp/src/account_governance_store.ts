@@ -79,7 +79,10 @@ export async function governanceRequest(storage:any,method:string,raw?:unknown):
     return validGovernance(policy)?{status:200,body:result(policy)}:fail(503,"INSTALLATION_ACCESS_MISSING_OR_CORRUPT");
   }
   if(method!=="POST")return fail(405,"METHOD_NOT_ALLOWED");
-  if(!record(raw)||Object.keys(raw).sort().join(",")!=="accounts,expected_revision,idempotency_key,max_total_modelled_loss_usdt")
+  if(!record(raw))return fail(400,"INVALID_ACCESS_REQUEST");
+  const fields=["accounts","expected_revision","idempotency_key","max_total_modelled_loss_usdt"];
+  if("campaign_entry_limit_usd" in raw)fields.push("campaign_entry_limit_usd");
+  if(Object.keys(raw).sort().join(",")!==fields.sort().join(","))
     return fail(400,"INVALID_ACCESS_REQUEST");
   if(new TextEncoder().encode(JSON.stringify(raw)).byteLength>32768)return fail(413,"ACCESS_REQUEST_TOO_LARGE");
   return mutate(storage,raw.idempotency_key,raw,policy=>{
