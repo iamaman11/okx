@@ -760,7 +760,9 @@ impl TradeService {
         let mut sequence = held
             .risk_book_sequence
             .ok_or("RESERVATION_SEQUENCE_MISSING")?;
-        for _ in 0..4 {
+        // One original attempt plus at most two bounded CAS retries.
+        // Every attempt shares the original after-HELD five-second window.
+        for _ in 0..3 {
             if Instant::now() >= until {
                 return Err("COMMAND_EXPIRED".into());
             }
@@ -1042,9 +1044,21 @@ impl TradeService {
                     &financial.0.drawdown_ratio,
                     &financial.1,
                 ))?;
+                // No accepted monetary projection for independently occupied
+                // exposure exists yet. The central DO accounts for its own
+                // HELD grants separately, but a local open venue obligation
+                // must never be silently invented as "zero external risk".
+                // The first bounded acceptance supports a provably flat
+                // account; managed open exposure remains NO-GO until native
+                // position/order/stop monetary occupancy is source-proven.
+                let flat_occupied = certified_flat_external_exposure(
+                    snapshot.positions.iter().map(|p| p.position.as_str()),
+                    snapshot.pending_orders.len(),
+                    algos.samples.len(),
+                )?;
                 let occupancy = RiskAccountOccupancy {
                     account_key: c.account_key.clone(),
-                    occupied_usdt: "0".into(),
+                    occupied_usdt: flat_occupied.into(),
                     cumulative_loss_usd: exact(financial.1),
                 };
                 let read = started
@@ -1114,6 +1128,27 @@ impl TradeService {
         ))
     }
 }
+/// E2 strict first-test boundary: a zero external occupancy witness can
+/// only be produced from a genuinely flat venue inventory. Matching SQL
+/// intent/central receipt IDs alone do not prove the monetary risk of an
+/// already-open position, active order or algo. Those require the full priced
+/// occupancy projection before allowing concurrent increases.
+fn certified_flat_external_exposure<'a>(
+    positions: impl IntoIterator<Item = &'a str>,
+    open_orders: usize,
+    conditional_orders: usize,
+) -> Result<&'static str, String> {
+    if open_orders != 0 || conditional_orders != 0 {
+        return Err("COHORT_NONFLAT_EXPOSURE_UNPRICED".into());
+    }
+    for amount in positions {
+        if dec(amount)? != Decimal::ZERO {
+            return Err("COHORT_NONFLAT_EXPOSURE_UNPRICED".into());
+        }
+    }
+    Ok("0")
+}
+
 /// The reserved known quote is source-bound but NOT an all-in debit proof.
 /// If any source changes after HELD, do not reuse the prior risk grant. Fail
 /// rather than silently refresh the amount/cost or issue a second venue POST.
@@ -1621,6 +1656,31 @@ mod tests {
         );
         assert!(verify_post_held_fx("1", "invalid").is_err());
     }
+    #[test]
+    fn e2_census_zero_risk_is_only_attested_for_actual_venue_flat() {
+        assert_eq!(
+            certified_flat_external_exposure(["0", "0.000"].into_iter(), 0, 0),
+            Ok("0")
+        );
+        assert_eq!(
+            certified_flat_external_exposure(["0", "-0.01"].into_iter(), 0, 0),
+            Err("COHORT_NONFLAT_EXPOSURE_UNPRICED".into())
+        );
+        assert_eq!(
+            certified_flat_external_exposure(["0"].into_iter(), 1, 0),
+            Err("COHORT_NONFLAT_EXPOSURE_UNPRICED".into())
+        );
+        assert_eq!(
+            certified_flat_external_exposure(["0"].into_iter(), 0, 1),
+            Err("COHORT_NONFLAT_EXPOSURE_UNPRICED".into())
+        );
+        assert!(certified_flat_external_exposure(["unknown"].into_iter(), 0, 0).is_err());
+        assert_eq!(
+            certified_flat_external_exposure(std::iter::empty::<&str>(), 0, 0),
+            Ok("0")
+        );
+    }
+
     #[test]
     fn e2_census_canonical_digest_rejects_missing_duplicate_and_order_variation() {
         let keys = vec!["a".to_owned(), "b".to_owned()];
