@@ -153,13 +153,21 @@ check((await handleNativeRiskCommand(s,session,{schema:"okx.risk-command/v1",com
  check((await handleNativeRiskCommand(settlements,{...session,runtime_profile:"demo_acceptance"},
    sett(5,1,"0.5",sourceDigest),now+3)).status==="DENIED",
    "demo/public socket never inherits native money settlement authority");
+ const heldCommand=sett(5,1,"0.5",sourceDigest);
+ heldCommand.action.reservation_key=admitted[1].reservation_key!;
+ heldCommand.action.plan_sha256="b".repeat(64);
+ const heldCannotSettle=await handleNativeRiskCommand(t,session,
+   heldCommand,now+2);
+ check(heldCannotSettle.status==="DENIED"&&
+   heldCannotSettle.reason==="ENTRY_SETTLEMENT_SOURCE_OR_STATE_UNPROVEN",
+   "money cannot settle before the only authorized exchange POST");
  const partial=await handleNativeRiskCommand(settlements,session,
    sett(5,1,"0.5",sourceDigest),now+3);
  check(partial.status==="UPDATED"&&partial.risk_book_sequence===6,
    "native WSS settlement moves exactly one proved cumulative increment");
- const replay=await handleNativeRiskCommand(settlements,session,
+ const settlementReplay=await handleNativeRiskCommand(settlements,session,
    sett(6,1,"0.5",sourceDigest),now+4);
- check(replay.status==="UPDATED"&&replay.risk_book_sequence===6,
+ check(settlementReplay.status==="UPDATED"&&settlementReplay.risk_book_sequence===6,
    "lost settlement receipt can be replayed without charging twice");
  check((await handleNativeRiskCommand(settlements,session,
    sett(6,1,"0.6",sourceDigest),now+5)).reason===

@@ -629,18 +629,33 @@ mod tests {
         assert!(command.valid());
         let encoded = serde_json::to_value(&command).unwrap();
         assert_eq!(encoded["action"]["action"], "SETTLE_ENTRY");
-        assert!(serde_json::from_value::<RiskCommand>(encoded).unwrap().valid());
-        if let RiskCommandAction::SettleEntry { cumulative_entry_usd, .. } =
-            &mut command.action
+        assert!(
+            serde_json::from_value::<RiskCommand>(encoded)
+                .unwrap()
+                .valid()
+        );
+        if let RiskCommandAction::SettleEntry {
+            cumulative_entry_usd,
+            ..
+        } = &mut command.action
         {
             *cumulative_entry_usd = "-0.01".into();
         }
-        assert!(!command.valid(), "negative settlement cannot credit campaign spend");
+        assert!(
+            !command.valid(),
+            "negative settlement cannot credit campaign spend"
+        );
         let mut missing_source = action;
         if let RiskCommandAction::SettleEntry { source_digest, .. } = &mut missing_source {
             *source_digest = "not_source_evidence".into();
         }
-        assert!(!RiskCommand {action:missing_source, ..command}.valid());
+        assert!(
+            !RiskCommand {
+                action: missing_source,
+                ..command
+            }
+            .valid()
+        );
     }
     #[test]
     fn entry_budget_readback_never_invents_unproved_history() {
