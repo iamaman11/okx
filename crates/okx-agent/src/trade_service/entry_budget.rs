@@ -121,6 +121,44 @@ impl EntryFxUpperBound {
     }
 }
 
+/// A lower bound for immediately usable own collateral is not a cost upper.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub(super) enum EntryAvailableCollateral {
+    Proven {
+        available_lower_usd: Decimal,
+        basis: &'static str,
+        source_digest: String,
+    },
+    Unknown {
+        reason: &'static str,
+    },
+}
+impl EntryAvailableCollateral {
+    fn lower(&self) -> Result<Option<Decimal>, String> {
+        match self {
+            Self::Proven {
+                available_lower_usd,
+                basis,
+                source_digest,
+            } => {
+                verified_cost_source(basis, source_digest)?;
+                if *available_lower_usd < Decimal::ZERO {
+                    return Err("ENTRY_AVAILABLE_COLLATERAL_NEGATIVE".into());
+                }
+                Ok(Some(*available_lower_usd))
+            }
+            Self::Unknown { .. } => Ok(None),
+        }
+    }
+
+    fn reason(&self) -> Option<&'static str> {
+        match self {
+            Self::Unknown { reason } => Some(*reason),
+            _ => None,
+        }
+    }
+}
+
 /// Known quote total_usd uses an observed FX conversion; it is never an
 /// admission upper bound. All fees/collateral/borrowing must be classified
 /// separately by source. A proven FX maximum multiplies the FULL USDT
@@ -130,7 +168,11 @@ pub(super) struct EntryCostProof {
     pub(super) quote: EntryQuote,
     pub(super) extra_immediate_fees: EntryCostEvidence,
     pub(super) borrowing: EntryCostEvidence,
+    /// Required margin/collateral is a separate funding requirement, never
+    /// another charge against the entry-notional budget.
     pub(super) collateral_or_margin: EntryCostEvidence,
+    /// Certified LOWER bound for available own collateral, in USD.
+    pub(super) available_collateral: EntryAvailableCollateral,
     pub(super) fx_bound: EntryFxUpperBound,
 }
 impl EntryCostProof {
@@ -146,7 +188,10 @@ impl EntryCostProof {
                 reason: "BORROWING_APPLICABILITY_UNPROVEN",
             },
             collateral_or_margin: EntryCostEvidence::Unknown {
-                reason: "MARGIN_ENTRY_DEBIT_UNPROVEN",
+                reason: "MARGIN_REQUIREMENT_UNPROVEN",
+            },
+            available_collateral: EntryAvailableCollateral::Unknown {
+                reason: "AVAILABLE_COLLATERAL_LOWER_UNPROVEN",
             },
             fx_bound: EntryFxUpperBound::Unknown {
                 reason: "FX_UPPER_BOUND_UNPROVEN",
@@ -154,31 +199,39 @@ impl EntryCostProof {
         }
     }
 
-    /// Source-classified FX maximum and all additional non-FX upper charges
-    /// are the only components persisted with the native entry admission.
-    /// Unknown never becomes a zero charge.
-    pub(super) fn verified_fx_and_fixed_costs(&self) -> Result<Option<(Decimal, Decimal)>, String> {
+    /// Only opening notional plus immediate opening fees consume entry budget.
+    /// Margin is verified against a LOWER bound on own available funds, not
+    /// added to entry spend. Borrowing is unsupported in the first Real lane.
+    /// UNKNOWN in any independent dimension denies admission.
+    pub(super) fn verified_fx_and_entry_fees(&self) -> Result<Option<(Decimal, Decimal)>, String> {
         let Some(fx_upper) = self.fx_bound.rate(self.quote.observed_usd_per_usdt)? else {
             return Ok(None);
         };
-        let mut extra = Decimal::ZERO;
-        for cost in [
-            &self.extra_immediate_fees,
-            &self.borrowing,
-            &self.collateral_or_margin,
-        ] {
-            let Some(value) = cost.upper()? else {
-                return Ok(None);
-            };
-            extra = extra.checked_add(value).ok_or("MONEY_OVERFLOW")?;
+        let Some(fees_upper) = self.extra_immediate_fees.upper()? else {
+            return Ok(None);
+        };
+        let Some(borrowing_upper) = self.borrowing.upper()? else {
+            return Ok(None);
+        };
+        let Some(margin_upper) = self.collateral_or_margin.upper()? else {
+            return Ok(None);
+        };
+        let Some(available_lower) = self.available_collateral.lower()? else {
+            return Ok(None);
+        };
+        if borrowing_upper > Decimal::ZERO {
+            return Err("ENTRY_BORROWING_UNSUPPORTED".into());
         }
-        Ok(Some((fx_upper, extra)))
+        if margin_upper > available_lower {
+            return Err("ENTRY_COLLATERAL_INSUFFICIENT".into());
+        }
+        Ok(Some((fx_upper, fees_upper)))
     }
 
     /// One pure arithmetic path is shared by SQL admission and later actual
     /// fill/bill settlement. The rate is a verified upper, never observed FX.
     pub(super) fn proven_upper_usd(&self) -> Result<Option<Decimal>, String> {
-        let Some((fx_upper, fixed_upper)) = self.verified_fx_and_fixed_costs()? else {
+        let Some((fx_upper, fixed_upper)) = self.verified_fx_and_entry_fees()? else {
             return Ok(None);
         };
         if self.quote.total_usdt <= Decimal::ZERO {
@@ -207,6 +260,7 @@ impl EntryCostProof {
         ]
         .into_iter()
         .filter_map(EntryCostEvidence::reason)
+        .chain(self.available_collateral.reason())
         .chain(self.fx_bound.reason())
         .collect()
     }
@@ -858,7 +912,7 @@ mod tests {
         assert_eq!(quote.total_usd, d("9.094545"));
         let mut p = EntryCostProof::unproven_linear_quote(quote);
         assert_eq!(p.proven_upper_usd().unwrap(), None);
-        assert_eq!(p.missing_reasons().len(), 4);
+        assert_eq!(p.missing_reasons().len(), 5);
         // Explicit venue non-applicability is evidence, not a guessed zero.
         p.extra_immediate_fees = EntryCostEvidence::NotApplicable {
             basis: "venue:no-other-immediate-fees",
@@ -870,6 +924,11 @@ mod tests {
         };
         p.collateral_or_margin = EntryCostEvidence::NotApplicable {
             basis: "conservative-notional-cover",
+            source_digest: "c".repeat(64),
+        };
+        p.available_collateral = EntryAvailableCollateral::Proven {
+            available_lower_usd: d("20"),
+            basis: "authenticated-available-own-collateral",
             source_digest: "c".repeat(64),
         };
         // An observed rate is not necessarily a bounded FX rate.
@@ -911,6 +970,37 @@ mod tests {
             source_digest: "d".repeat(64),
         };
         assert_eq!(p.proven_upper_usd().unwrap(), Some(d("9.3764359")));
+        // A positive margin requirement cannot be charged a second time.
+        p.collateral_or_margin = EntryCostEvidence::Proven {
+            upper_usd: d("4"),
+            basis: "authenticated-margin-upper",
+            source_digest: "e".repeat(64),
+        };
+        assert_eq!(p.proven_upper_usd().unwrap(), Some(d("9.3764359")));
+        p.available_collateral = EntryAvailableCollateral::Proven {
+            available_lower_usd: d("3.99"),
+            basis: "authenticated-available-own-collateral",
+            source_digest: "f".repeat(64),
+        };
+        assert_eq!(
+            p.proven_upper_usd().unwrap_err(),
+            "ENTRY_COLLATERAL_INSUFFICIENT"
+        );
+        p.available_collateral = EntryAvailableCollateral::Proven {
+            available_lower_usd: d("20"),
+            basis: "authenticated-available-own-collateral",
+            source_digest: "c".repeat(64),
+        };
+        p.borrowing = EntryCostEvidence::Proven {
+            upper_usd: d("0.01"),
+            basis: "authenticated-borrow-charge",
+            source_digest: "b".repeat(64),
+        };
+        assert_eq!(p.proven_upper_usd().unwrap_err(), "ENTRY_BORROWING_UNSUPPORTED");
+        p.borrowing = EntryCostEvidence::NotApplicable {
+            basis: "venue:no-borrow",
+            source_digest: "b".repeat(64),
+        };
         p.extra_immediate_fees = EntryCostEvidence::Proven {
             upper_usd: d("-0.01"),
             basis: "invalid-rebate",
