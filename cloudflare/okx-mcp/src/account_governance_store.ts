@@ -45,7 +45,14 @@ export async function initializeGovernance(storage:any,configuration:Governance,
       if(!Number.isInteger(removed)||removed<0||removed>3)throw Error("RETIREMENT_DELETE_UNCONFIRMED");
       retired=removed;
     }
-    await initializeRiskBook(tx,configuration.installation_id);
+    // Canonical campaign inception belongs to the same authenticated,
+    // one-time installation transaction as governance and RiskBook. The
+    // existing installation cannot retroactively claim this timestamp.
+    await initializeRiskBook(tx,configuration.installation_id,{
+      installation_id:configuration.installation_id,
+      campaign_id:configuration.campaign_id,
+      started_at_ms:Date.now()
+    });
     await tx.put(GOVERNANCE_STORAGE_KEY,configuration);
     const reply={status:200,body:{...result(configuration),...(retired===undefined?{}:{retired_financial_keys_removed:retired})}};
     if(receiptKey)await tx.put(receiptKey,{hash:bodyHash,reply});
