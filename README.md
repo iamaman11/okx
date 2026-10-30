@@ -100,8 +100,10 @@ NAV/STOP → protected position/terminal settlement → release`.
   at a common cut-off. It verifies exact order/fill quantity and bill/fee
   identity without creating a second ledger. A fresh authenticated Worker
   governance initialization records `campaign_origin` atomically in its
-  existing RiskBook; legacy campaigns with no originally recorded inception
-  remain `NOT_PROVEN`, never receive a fabricated timestamp. For older
+  existing RiskBook and exposes it through the existing typed native
+  `SUMMARY`. The Rust protocol checks campaign identity, installation
+  and causal opening timestamp. Legacy campaigns lacking the original
+  inception receipt remain `NOT_PROVEN`, never receive a fabricated date. For older
   campaigns and recovery, sources fail closed pending independent proof.
   A complete native all-managed-account USD expense importer is still not
   connected, so RiskBook leaves admission blocked.
