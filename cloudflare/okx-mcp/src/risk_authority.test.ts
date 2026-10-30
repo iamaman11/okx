@@ -66,7 +66,7 @@ check((await handleNativeRiskCommand(s,session,{schema:"okx.risk-command/v1",com
  const t=new Store(),sameUid=account.uid_fingerprint;
  const sourceDigest="d".repeat(64),freshDigest="e".repeat(64),proof="f".repeat(64);
  const governance={...initial,revision:1,max_total_modelled_loss_usdt:"3",accounts:[{
-   ...account,limits:{...account.limits,max_modelled_loss_usdt:"3",max_order_loss_usdt:"1"},
+   ...account,limits:{...account.limits,max_modelled_loss_usdt:"3",max_order_loss_usdt:"1",max_entry_usd:"10"},
    strategies:[{id:"native_alpha",enabled:true,allocated_capital_usdt:"1",
      max_modelled_loss_usdt:"1",max_daily_realized_loss_usdt:"2",
      max_drawdown_ratio:"0.1"}]

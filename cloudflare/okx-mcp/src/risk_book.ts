@@ -437,6 +437,13 @@ export async function reserveRisk(
     if(!account)return {status:"DENIED",reason:"ACCOUNT_NOT_ACTIVE"};
     if(!account.limits.allowed_instruments.includes(input.instrument_id))
       return {status:"DENIED",reason:"INSTRUMENT_NOT_ALLOWED_BY_ACCOUNT"};
+    // An account-level entry cap is independent of the campaign entry
+    // ceiling and the loss model. Missing saved cap is NOT unlimited.
+    const accountEntryCap=units(account.limits.max_entry_usd);
+    if(accountEntryCap===null||accountEntryCap<=0n)
+      return {status:"DENIED",reason:"ACCOUNT_ENTRY_LIMIT_UNPROVEN"};
+    if(proposed>accountEntryCap)
+      return {status:"DENIED",reason:"ACCOUNT_ENTRY_LIMIT_EXCEEDED"};
     const maxOrder=units(account.limits.max_order_loss_usdt);
     const maxStrategy=units(strategy?.max_modelled_loss_usdt??account.limits.max_modelled_loss_usdt);
     if(maxOrder===null||maxStrategy===null||requested>maxOrder||requested>maxStrategy)
@@ -742,6 +749,11 @@ export async function beginRiskPost(
       &&accessEnabled(a));
     if(!account||!account.limits.allowed_instruments.includes(entry.instrument_id))
       return {status:"DENIED" as const,reason:"ACCOUNT_OR_INSTRUMENT_REVOKED"};
+    const freshAccountCap=units(account.limits.max_entry_usd);
+    const reservedEntryUpper=units(entry.entry_upper_usd);
+    if(freshAccountCap===null||freshAccountCap<=0n||reservedEntryUpper===null||
+       reservedEntryUpper>freshAccountCap)
+      return {status:"DENIED" as const,reason:"POST_ACCOUNT_ENTRY_LIMIT_UNPROVEN_OR_EXCEEDED"};
     for(const [owner,value] of Object.entries(stored.accounts)){
       if(!occupied.has(owner)&&units(value)!>0n)return {status:"DENIED" as const,reason:"POST_OCCUPANCY_COHORT_MISMATCH"};
       occupied.set(owner,(occupied.get(owner)??0n)+units(value)!);

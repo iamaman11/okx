@@ -35,7 +35,7 @@ function account(uid:string){
   environment:"real",uid_fingerprint:uid,identity_verified:true,enabled:true,explicit_pause:false,policy_revision:1,account_key:"okx:real:"+uid,
   strategies:[{id:"momentum_A",enabled:true,allocated_capital_usdt:"6",
     max_modelled_loss_usdt:"6",max_daily_realized_loss_usdt:"2",max_drawdown_ratio:"0.1"}],
-  limits:{max_modelled_loss_usdt:"10",max_order_loss_usdt:"6",max_notional_usdt:"100",
+  limits:{max_modelled_loss_usdt:"10",max_order_loss_usdt:"6",max_notional_usdt:"100",max_entry_usd:"10",
     max_leverage:"3",max_daily_realized_loss_usdt:"2",max_drawdown_ratio:"0.1",
     allowed_instruments:["BTC-USDT-SWAP"]}
  };
@@ -68,6 +68,24 @@ const causal_proof={reserve_anchor:held.entry.key,
     started_after_held_ms:2,completed_after_held_ms:20}))};
 const invalid=await beginRiskPost(sa,held.entry.key,p,1,d,{connection_generation:77,expected_book_sequence:1,census:later,source_proof:native,causal_proof:{...causal_proof,account_reads:[...causal_proof.account_reads].reverse()},now_ms:now+2});
 check(invalid.status==="DENIED"&&invalid.reason==="INVALID_NATIVE_POST_FENCE","wrong order of cohort readings cannot authorize POST");
+// The Worker rechecks the currently stored per-account cap immediately
+// before the only possible POST, even if RESERVE was already HELD.
+const postCap=new Storage();
+postCap.map=structuredClone(sa.map);
+const postCapGov={...governance,accounts:[
+ {...account(a),limits:{...account(a).limits,max_entry_usd:"1"}},
+ account(b)
+]};
+await postCap.put("account_access_v1",postCapGov);
+const narrowedPost=await beginRiskPost(postCap,held.entry.key,p,1,d,{
+ connection_generation:77,expected_book_sequence:2,census:later,
+ source_proof:native,causal_proof,now_ms:now+2
+});
+check(narrowedPost.status==="DENIED"&&
+ narrowedPost.reason==="POST_ACCOUNT_ENTRY_LIMIT_UNPROVEN_OR_EXCEEDED",
+ "after HELD, a tighter central account cap blocks the only exchange POST");
+check((await inspectRisk(postCap,held.entry.key))?.entry.state==="HELD",
+ "denied POST does not consume its one-shot exchange send fence");
 const begun=await beginRiskPost(sa,held.entry.key,p,1,d,{connection_generation:77,expected_book_sequence:2,census:later,source_proof:native,causal_proof,now_ms:now+2});
 check(begun.status==="POST_AUTHORIZED","same-content fresh causal proof with -60s host skew");
 const partial=await settleEntrySpend(sa,held.entry.key,p,{
@@ -127,6 +145,25 @@ check(entryResults.filter(x=>x.status==="HELD").length===1&&
 const afterRace=(await readRiskBook(entryRace))!.entry_budget!;
 check(afterRace.reserved_usd==="7"&&afterRace.consumed_usd==="0",
  "denied entry race leaves one exact reservation and no phantom consumed money");
+// Per-account cap is checked INDEPENDENTLY of campaign spend and loss.
+const localCap=new Storage();
+await localCap.put("generation",77);
+const capPolicy={...governance,accounts:[{...account(a),
+ limits:{...account(a).limits,max_entry_usd:"1.5"}},account(b)]};
+await localCap.put("account_access_v1",capPolicy);
+await setupRiskBook(localCap);
+const tooBig=await reserveRisk(localCap,policy,census,request,native);
+check(tooBig.status==="DENIED"&&tooBig.reason==="ACCOUNT_ENTRY_LIMIT_EXCEEDED",
+ "campaign room must not bypass the account maximum entry expense");
+check((await readRiskBook(localCap))?.entry_budget?.reserved_usd==="0",
+ "account cap rejection must not consume any entry reservation");
+await localCap.put("account_access_v1",{...capPolicy,accounts:[{
+ ...capPolicy.accounts[0],limits:{...capPolicy.accounts[0].limits,max_entry_usd:null}
+},capPolicy.accounts[1]]});
+const noAccountCap=await reserveRisk(localCap,policy,census,request,native);
+check(noAccountCap.status==="DENIED"&&noAccountCap.reason==="ACCOUNT_ENTRY_LIMIT_UNPROVEN",
+ "legacy missing account cap is not unlimited");
+console.log("entry_account_limit_independent_of_campaign PASS");
 console.log("entry_budget_race_and_monotonic_settlement PASS");
 // A fresh reservation can be released only by the exact current native SQL
 // writer's durable no-post receipt. No venue, fills or finance source needed.
