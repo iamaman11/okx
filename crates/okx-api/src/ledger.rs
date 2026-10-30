@@ -1335,7 +1335,7 @@ mod tests {
         );
         let unrelated_bill: AccountBill = serde_json::from_value(serde_json::json!({
             "billId":"7654321","ordId":"not_observed_order",
-            "ccy":"USDT","fee":"0","ts":from_ms+1_000
+            "ccy":"USDT","fee":"0","ts":(from_ms+1_000).to_string()
         }))
         .unwrap();
         let unlinked =
@@ -1359,13 +1359,13 @@ mod tests {
         let fill: FillHistory = serde_json::from_value(serde_json::json!({
             "instType":"SWAP","instId":"BTC-USDT-SWAP","tradeId":"trade001",
             "ordId":"order001","billId":"123","fillPx":"100","fillSz":"1",
-            "fee":"-0.05","feeCcy":"USDT","fillTime":begin+1_000
+            "fee":"-0.05","feeCcy":"USDT","fillTime":(begin+1_000).to_string()
         }))
         .unwrap();
         let bill: AccountBill = serde_json::from_value(serde_json::json!({
             "billId":"123","instType":"SWAP","instId":"BTC-USDT-SWAP",
             "ordId":"order001","tradeId":"trade001","ccy":"USDT",
-            "fee":"-0.05","ts":begin+1_001
+            "fee":"-0.05","ts":(begin+1_001).to_string()
         }))
         .unwrap();
         let source =
