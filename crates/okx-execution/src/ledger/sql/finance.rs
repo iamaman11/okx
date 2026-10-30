@@ -541,11 +541,10 @@ impl AccountStore {
             }
             if proof.reversal.is_some()
                 || !proof.economic_event_key.starts_with("bill:")
-                || proof.bill_id.as_deref()
-                    != proof.economic_event_key.strip_prefix("bill:")
-                || proof.bill_time.is_none_or(|t| {
-                    t <= 0 || t > through || t > bills.watermark
-                })
+                || proof.bill_id.as_deref() != proof.economic_event_key.strip_prefix("bill:")
+                || proof
+                    .bill_time
+                    .is_none_or(|t| t <= 0 || t > through || t > bills.watermark)
                 || proof.bill_currency.as_deref() != Some(currency.as_str())
                 || !proof.bill_linked
                 || proof.currency != currency
