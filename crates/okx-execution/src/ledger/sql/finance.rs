@@ -249,16 +249,24 @@ impl AccountStore {
                           WHERE state NOT IN ('REJECTED','CANCELLED','FILLED')),
                         (SELECT COUNT(*) FROM position_lots WHERE remaining_qty!='0')",
                 [],
-                |r| Ok((
-                    r.get(0)?, r.get(1)?, r.get(2)?,
-                    r.get(3)?, r.get(4)?, r.get(5)?
-                )),
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                    ))
+                },
             )?;
         if fills != 0 || bills != 0 || finance != 0 || cash_debits != 0 {
             return Err(StoreError::Invalid("ENTRY_OPENING_LOCAL_LEDGER_NOT_EMPTY"));
         }
         if unresolved != 0 || lots != 0 {
-            return Err(StoreError::Invalid("ENTRY_OPENING_UNRESOLVED_NATIVE_EXPOSURE"));
+            return Err(StoreError::Invalid(
+                "ENTRY_OPENING_UNRESOLVED_NATIVE_EXPOSURE",
+            ));
         }
         let canonical = serde_json::to_vec(&(
             "okx.campaign-empty-opening-sql/v1",
