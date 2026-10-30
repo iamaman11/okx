@@ -223,16 +223,26 @@ check((await handleNativeRiskCommand(s,session,{schema:"okx.risk-command/v1",com
    sett(6,1,"0.5",hash),now+5)).reason===
      "ENTRY_SETTLEMENT_REVISION_CONFLICT",
    "same revision cannot substitute a different source digest");
+ const lateFee=await handleNativeRiskCommand(settlements,session,
+   sett(6,2,"3",sourceDigest),now+6);
+ check(lateFee.status==="UPDATED"&&lateFee.reason==="BUDGET_BOUND_BREACH",
+   "venue late fee above the entry upper must be booked, not discarded");
+ const lateReplay=await handleNativeRiskCommand(settlements,session,
+   sett(6,2,"3",sourceDigest),now+6);
+ check(lateReplay.status==="UPDATED",
+   "lost native WSS ACK for an over-bound debit remains idempotent");
  check((await handleNativeRiskCommand(settlements,session,
-   sett(6,2,"3",sourceDigest),now+6)).reason===
-     "ENTRY_SETTLEMENT_REGRESSION",
-   "settlement above held cost never draws from another account");
+   sett(7,2,"3.01",sourceDigest),now+6)).reason===
+     "ENTRY_SETTLEMENT_REVISION_CONFLICT",
+   "a duplicate bound-breach revision cannot increase the expense");
  const settledSummary=await handleNativeRiskCommand(settlements,session,{
    schema:"okx.risk-command/v1",command_id:"summary_settled_001",
    installation_id:initial.installation_id,action:{action:"SUMMARY"}},now+7);
- check(settledSummary.budget?.entry_budget?.consumed_usd==="0.5"&&
-   settledSummary.budget.entry_budget.reserved_usd==="5.5",
-   "partial source settlement conserves sum across all three reservations");
+ check(settledSummary.budget?.entry_budget?.consumed_usd==="3"&&
+   settledSummary.budget.entry_budget.reserved_usd==="4"&&
+   settledSummary.budget.entry_budget.bound_breach_usd==="1"&&
+   settledSummary.budget.entry_budget.remaining_usd==="3",
+   "full actual debit booked; other accounts retain four USD of held budget");
  console.log("native_e1_wss_entry_settlement_cas PASS");
 
  check((await handleNativeRiskCommand(t,session,
