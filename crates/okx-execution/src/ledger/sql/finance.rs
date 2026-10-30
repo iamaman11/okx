@@ -459,7 +459,8 @@ impl AccountStore {
                      (r.state IS NULL OR r.state!='RELEASED'
                       OR r.plan_hash!=i.plan_hash
                       OR e.kind IS NULL OR e.kind!='ENTRY_SETTLEMENT_PROVEN'
-                      OR e.request_hash!=i.plan_hash)))
+                      OR e.request_hash!=i.plan_hash
+                      OR e.committed_at>?2)))
                LIMIT 1)",
             params![from_ms, through_ms],
             |row| row.get(0),
@@ -528,7 +529,7 @@ impl AccountStore {
         let frontiers = self.captured_complete_frontiers(from_ms, through_ms)?;
         self.verify_captured_campaign_continuity(from_ms, through_ms)?;
         let mut stmt = self.connection.prepare(
-            "SELECT result_ref,committed_at FROM operation_receipts
+            "SELECT operation_id,result_ref,committed_at FROM operation_receipts
              WHERE kind='ENTRY_SETTLEMENT_PROVEN'
                AND committed_at>?1 AND committed_at<=?2
              ORDER BY operation_id LIMIT 10001",
@@ -540,11 +541,13 @@ impl AccountStore {
             if witnesses.len() >= 10_000 {
                 return Err(StoreError::Invalid("ENTRY_OPENING_HISTORY_TOO_LARGE"));
             }
-            let encoded: String = row.get(0)?;
-            let time: i64 = row.get(1)?;
+            let operation_id: String = row.get(0)?;
+            let encoded: String = row.get(1)?;
+            let time: i64 = row.get(2)?;
             let value: EntrySettlementEvidence = serde_json::from_str(&encoded)
                 .map_err(|_| StoreError::Invalid("ENTRY_OPENING_SETTLEMENT_CORRUPT"))?;
-            if value.schema != "okx.entry-terminal-settlement/v1"
+            if operation_id != format!("entry-settlement:{}", value.intent_id)
+                || value.schema != "okx.entry-terminal-settlement/v1"
                 || value.account_key != self.meta.account_key
                 || value.venue_update_ms != time
                 || value.cumulative_entry_usd <= Decimal::ZERO
@@ -553,17 +556,18 @@ impl AccountStore {
             {
                 return Err(StoreError::Invalid("ENTRY_OPENING_SETTLEMENT_INVALID"));
             }
-            let native: Option<(String, i64, String)> = self.connection.query_row(
-                "SELECT i.plan_hash,i.begin_post_at,r.state
+            let native: Option<(String, i64, String, String)> = self.connection.query_row(
+                "SELECT i.plan_hash,i.begin_post_at,r.state,r.reservation_key
                  FROM intents i JOIN risk_receipts r ON r.intent_id=i.intent_id
                  WHERE i.intent_id=?1 AND i.exchange_order_id=?2
                    AND i.risk_increase=1 AND i.state IN ('FILLED','CANCELLED')
                    AND r.plan_hash=i.plan_hash",
                 params![value.intent_id, value.venue_order_id],
-                |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?)),
+                |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)),
             ).optional()?;
-            if native.as_ref().is_none_or(|(hash,post,state)| {
+            if native.as_ref().is_none_or(|(hash,post,state,reservation)| {
                 hash != &value.plan_hash || *post < from_ms || state != "RELEASED"
+                    || reservation != &value.reservation_key
             }) {
                 return Err(StoreError::Invalid("ENTRY_OPENING_SETTLEMENT_NOT_RELEASED"));
             }
@@ -580,6 +584,7 @@ impl AccountStore {
                 ))?,
             ).map_err(|_| StoreError::Invalid("ENTRY_OPENING_ADMISSION_INVALID"))?;
             if admission.account_key != value.account_key
+                || admission.installation_id != self.meta.installation_id
                 || admission.intent_id != value.intent_id
                 || admission.plan_hash != value.plan_hash
                 || value.cumulative_entry_usd > admission.entry_upper_usd
