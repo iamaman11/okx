@@ -277,14 +277,14 @@ impl AccountStore {
             Option<i64>,
             Option<String>,
         ) = self.connection.query_row(
-                "SELECT i.exchange_order_id,i.begin_post_at,r.reservation_key
+            "SELECT i.exchange_order_id,i.begin_post_at,r.reservation_key
                  FROM intents i LEFT JOIN risk_receipts r
                   ON r.intent_id=i.intent_id AND r.plan_hash=i.plan_hash
                    AND r.account_key=?2 AND r.installation_id=?3
                  WHERE i.intent_id=?1",
-                params![intent_id, self.meta.account_key, self.meta.installation_id],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-            )?;
+            params![intent_id, self.meta.account_key, self.meta.installation_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )?;
         if !increase || inverse || !instrument.ends_with("-USDT-SWAP") || currency != "USDT" {
             return Err(StoreError::Invalid("ENTRY_FILL_INSTRUMENT_UNSUPPORTED"));
         }
