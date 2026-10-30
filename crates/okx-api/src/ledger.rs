@@ -253,7 +253,10 @@ impl AccountHistoryApi {
         end: i64,
         after: Option<&str>,
     ) -> Result<Vec<FillHistory>, OkxError> {
-        if !matches!(instrument_type, "SPOT" | "MARGIN" | "SWAP" | "FUTURES" | "OPTION") {
+        if !matches!(
+            instrument_type,
+            "SPOT" | "MARGIN" | "SWAP" | "FUTURES" | "OPTION"
+        ) {
             return Err(OkxError::Config("invalid history instrument type".into()));
         }
         let mut params = history_window_params(begin, end, after)?;
@@ -422,7 +425,12 @@ impl AccountHistoryApi {
             let mut complete = false;
             for _ in 0..CAMPAIGN_ORDER_MAX_PAGES_PER_SOURCE {
                 let rows = self
-                    .fills_history_page(instrument_type, started_at_ms, through_ms, after.as_deref())
+                    .fills_history_page(
+                        instrument_type,
+                        started_at_ms,
+                        through_ms,
+                        after.as_deref(),
+                    )
                     .await?;
                 let count = rows.len();
                 if count > HISTORY_PAGE_LIMIT {
@@ -431,7 +439,9 @@ impl AccountHistoryApi {
                 let next = if count == HISTORY_PAGE_LIMIT {
                     let id = rows.last().map(|fill| fill.bill_id.as_str()).unwrap_or("");
                     if !valid_campaign_cursor(id) || !seen_cursors.insert(id.to_owned()) {
-                        return Err(OkxError::Response("campaign fills cursor invalid or stalled".into()));
+                        return Err(OkxError::Response(
+                            "campaign fills cursor invalid or stalled".into(),
+                        ));
                     }
                     Some(id.to_owned())
                 } else {
@@ -445,7 +455,9 @@ impl AccountHistoryApi {
                 after = next;
             }
             if !complete {
-                return Err(OkxError::Response("campaign fills pagination incomplete".into()));
+                return Err(OkxError::Response(
+                    "campaign fills pagination incomplete".into(),
+                ));
             }
         }
         let mut bills = Vec::new();
@@ -453,7 +465,9 @@ impl AccountHistoryApi {
         let mut seen_cursors = BTreeSet::new();
         let mut complete = false;
         for _ in 0..CAMPAIGN_ORDER_MAX_PAGES_PER_SOURCE {
-            let rows = self.bills_history_page(started_at_ms, through_ms, after.as_deref()).await?;
+            let rows = self
+                .bills_history_page(started_at_ms, through_ms, after.as_deref())
+                .await?;
             let count = rows.len();
             if count > HISTORY_PAGE_LIMIT {
                 return Err(OkxError::Response("campaign bills page oversized".into()));
@@ -461,7 +475,9 @@ impl AccountHistoryApi {
             let next = if count == HISTORY_PAGE_LIMIT {
                 let id = rows.last().map(|bill| bill.bill_id.as_str()).unwrap_or("");
                 if !valid_campaign_cursor(id) || !seen_cursors.insert(id.to_owned()) {
-                    return Err(OkxError::Response("campaign bills cursor invalid or stalled".into()));
+                    return Err(OkxError::Response(
+                        "campaign bills cursor invalid or stalled".into(),
+                    ));
                 }
                 Some(id.to_owned())
             } else {
@@ -475,7 +491,9 @@ impl AccountHistoryApi {
             after = next;
         }
         if !complete {
-            return Err(OkxError::Response("campaign bills pagination incomplete".into()));
+            return Err(OkxError::Response(
+                "campaign bills pagination incomplete".into(),
+            ));
         }
         complete_campaign_money_witness(started_at_ms, through_ms, fills, bills)
     }
@@ -815,9 +833,7 @@ fn complete_campaign_account_witness(
 }
 
 fn valid_campaign_cursor(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 64
-        && value.bytes().all(|b| b.is_ascii_digit())
+    !value.is_empty() && value.len() <= 64 && value.bytes().all(|b| b.is_ascii_digit())
 }
 
 /// Pure owner-independent source consistency, not a finance authorization.
@@ -839,7 +855,10 @@ fn complete_campaign_money_witness(
         } else {
             &fill.fill_time_ms
         };
-        let when = ts.parse::<i64>().ok().filter(|v| *v >= from_ms && *v <= through_ms);
+        let when = ts
+            .parse::<i64>()
+            .ok()
+            .filter(|v| *v >= from_ms && *v <= through_ms);
         if !matches!(
             fill.instrument_type.as_str(),
             "SPOT" | "MARGIN" | "SWAP" | "FUTURES" | "OPTION"
@@ -850,23 +869,42 @@ fn complete_campaign_money_witness(
             || fill.order_id.is_empty()
             || fill.fee.is_empty()
             || fill.fee_currency.is_empty()
-            || fill.fill_price.parse::<rust_decimal::Decimal>().ok().is_none_or(|v| v <= rust_decimal::Decimal::ZERO)
-            || fill.fill_size.parse::<rust_decimal::Decimal>().ok().is_none_or(|v| v <= rust_decimal::Decimal::ZERO)
+            || fill
+                .fill_price
+                .parse::<rust_decimal::Decimal>()
+                .ok()
+                .is_none_or(|v| v <= rust_decimal::Decimal::ZERO)
+            || fill
+                .fill_size
+                .parse::<rust_decimal::Decimal>()
+                .ok()
+                .is_none_or(|v| v <= rust_decimal::Decimal::ZERO)
             || fill.fee.parse::<rust_decimal::Decimal>().is_err()
-            || !fill_ids.insert((fill.instrument_id.clone(),fill.trade_id.clone(),fill.order_id.clone()))
+            || !fill_ids.insert((
+                fill.instrument_id.clone(),
+                fill.trade_id.clone(),
+                fill.order_id.clone(),
+            ))
         {
-            return Err(OkxError::Response("campaign fill identity, currency or scope unproven".into()));
+            return Err(OkxError::Response(
+                "campaign fill identity, currency or scope unproven".into(),
+            ));
         }
     }
     for bill in &bills {
         if !valid_campaign_cursor(&bill.bill_id)
-            || bill.timestamp_ms.parse::<i64>().ok()
+            || bill
+                .timestamp_ms
+                .parse::<i64>()
+                .ok()
                 .is_none_or(|v| v < from_ms || v > through_ms)
             || bill.ccy.is_empty()
             || !bill_ids.insert(bill.bill_id.clone())
             || (!bill.fee.is_empty() && bill.fee.parse::<rust_decimal::Decimal>().is_err())
         {
-            return Err(OkxError::Response("campaign bill identity, currency or scope unproven".into()));
+            return Err(OkxError::Response(
+                "campaign bill identity, currency or scope unproven".into(),
+            ));
         }
     }
     // The evidence can contain thousands of fills/bills: use indexed joins
@@ -885,11 +923,18 @@ fn complete_campaign_money_witness(
             || bill.fee.parse::<rust_decimal::Decimal>().ok()
                 != fill.fee.parse::<rust_decimal::Decimal>().ok()
         {
-            return Err(OkxError::Response("campaign fill and fee bill disagree".into()));
+            return Err(OkxError::Response(
+                "campaign fill and fee bill disagree".into(),
+            ));
         }
     }
-    fills.sort_by(|a, b| (&a.instrument_id,&a.trade_id,&a.order_id)
-        .cmp(&(&b.instrument_id,&b.trade_id,&b.order_id)));
+    fills.sort_by(|a, b| {
+        (&a.instrument_id, &a.trade_id, &a.order_id).cmp(&(
+            &b.instrument_id,
+            &b.trade_id,
+            &b.order_id,
+        ))
+    });
     bills.sort_by(|a, b| a.bill_id.cmp(&b.bill_id));
     let bytes = serde_json::to_vec(&(
         "okx.campaign-money-window/v1",
@@ -897,13 +942,14 @@ fn complete_campaign_money_witness(
         through_ms,
         &fills,
         &bills,
-    )).map_err(|_| OkxError::Response("campaign money digest invalid".into()))?;
+    ))
+    .map_err(|_| OkxError::Response("campaign money digest invalid".into()))?;
     Ok(CompleteCampaignMoneyHistory {
         from_ms,
         through_ms,
         fills,
         bills,
-        source_digest: format!("{:x}",Sha256::digest(bytes)),
+        source_digest: format!("{:x}", Sha256::digest(bytes)),
     })
 }
 
@@ -1216,32 +1262,56 @@ mod tests {
             "instType":"SWAP","instId":"BTC-USDT-SWAP","tradeId":"trade001",
             "ordId":"order001","billId":"123","fillPx":"100","fillSz":"1",
             "fee":"-0.05","feeCcy":"USDT","fillTime":begin+1_000
-        })).unwrap();
+        }))
+        .unwrap();
         let bill: AccountBill = serde_json::from_value(serde_json::json!({
             "billId":"123","instType":"SWAP","instId":"BTC-USDT-SWAP",
             "ordId":"order001","tradeId":"trade001","ccy":"USDT",
             "fee":"-0.05","ts":begin+1_001
-        })).unwrap();
-        let source = complete_campaign_money_witness(begin,end,vec![fill.clone()],vec![bill.clone()]).unwrap();
-        assert_eq!(source.fills.len(),1);
-        assert_eq!(source.bills.len(),1);
-        assert_eq!(source.source_digest.len(),64);
+        }))
+        .unwrap();
+        let source =
+            complete_campaign_money_witness(begin, end, vec![fill.clone()], vec![bill.clone()])
+                .unwrap();
+        assert_eq!(source.fills.len(), 1);
+        assert_eq!(source.bills.len(), 1);
+        assert_eq!(source.source_digest.len(), 64);
         assert_eq!(
-            complete_campaign_money_witness(begin,end,vec![fill.clone()],vec![bill.clone()])
-                .unwrap().source_digest,
+            complete_campaign_money_witness(begin, end, vec![fill.clone()], vec![bill.clone()])
+                .unwrap()
+                .source_digest,
             source.source_digest
         );
-        assert!(complete_campaign_money_witness(begin,end,vec![fill.clone()],vec![]).is_err());
-        let mut different_currency=bill.clone();
-        different_currency.ccy="BTC".into();
-        assert!(complete_campaign_money_witness(begin,end,vec![fill.clone()],vec![different_currency]).is_err());
-        let mut altered_fee=bill.clone();
-        altered_fee.fee="-0.06".into();
-        assert!(complete_campaign_money_witness(begin,end,vec![fill.clone()],vec![altered_fee]).is_err());
-        assert!(complete_campaign_money_witness(begin,end,vec![fill.clone(),fill.clone()],vec![bill.clone()]).is_err());
-        let mut stale=fill;
-        stale.fill_time_ms=(begin-1).to_string();
-        assert!(complete_campaign_money_witness(begin,end,vec![stale],vec![bill]).is_err());
+        assert!(complete_campaign_money_witness(begin, end, vec![fill.clone()], vec![]).is_err());
+        let mut different_currency = bill.clone();
+        different_currency.ccy = "BTC".into();
+        assert!(
+            complete_campaign_money_witness(
+                begin,
+                end,
+                vec![fill.clone()],
+                vec![different_currency]
+            )
+            .is_err()
+        );
+        let mut altered_fee = bill.clone();
+        altered_fee.fee = "-0.06".into();
+        assert!(
+            complete_campaign_money_witness(begin, end, vec![fill.clone()], vec![altered_fee])
+                .is_err()
+        );
+        assert!(
+            complete_campaign_money_witness(
+                begin,
+                end,
+                vec![fill.clone(), fill.clone()],
+                vec![bill.clone()]
+            )
+            .is_err()
+        );
+        let mut stale = fill;
+        stale.fill_time_ms = (begin - 1).to_string();
+        assert!(complete_campaign_money_witness(begin, end, vec![stale], vec![bill]).is_err());
     }
 
     #[test]
