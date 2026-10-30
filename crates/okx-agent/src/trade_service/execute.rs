@@ -224,45 +224,57 @@ impl TradeService {
             // E1 staging: persist exactly what the live venue price, fee and
             // conversion sources can prove before requesting central risk.
             // The receipt says UNPROVEN; it cannot authorize the exchange.
-            let rules = self.public_ws.instrument_rules(instrument).await
+            let rules = self
+                .public_ws
+                .instrument_rules(instrument)
+                .await
                 .ok_or("ENTRY_INSTRUMENT_RULES_UNAVAILABLE")?;
             plan::verify_entry_rules_match(&rules, instrument, &plan)?;
             let fees = r.observer.fee_schedule(&rules).await.map_err(err)?;
             let rate = entry_budget::verified_entry_fee_rate(
-                &fees, instrument, &rules.reference_generation, now()
+                &fees,
+                instrument,
+                &rules.reference_generation,
+                now(),
             )?;
             let quote_snapshot = r.observer.snapshot().await.map_err(err)?;
-            if quote_snapshot.account_uid_fingerprint
-                != r.configuration.account_key.verified_uid
-            {
+            if quote_snapshot.account_uid_fingerprint != r.configuration.account_key.verified_uid {
                 return Err("ENTRY_QUOTE_ACCOUNT_IDENTITY_MISMATCH".into());
             }
             let fx = Self::usd_conversion(&quote_snapshot)?;
-            let fx_time = i64::try_from(fx.observed_at_ms)
-                .map_err(|_| "ENTRY_FX_TIMESTAMP_INVALID")?;
-            if !crate::config::evidence_fresh(
-                fx_time, now(), crate::config::ACCOUNT_MAX_AGE_MS
-            ) {
+            let fx_time =
+                i64::try_from(fx.observed_at_ms).map_err(|_| "ENTRY_FX_TIMESTAMP_INVALID")?;
+            if !crate::config::evidence_fresh(fx_time, now(), crate::config::ACCOUNT_MAX_AGE_MS) {
                 return Err("ENTRY_FX_SOURCE_STALE".into());
             }
             let quote = entry_budget::quote(
-                plan.quantity, plan.contract_value, plan.limit_price,
-                rate, dec(&fx.usd_per_usdt)?
+                plan.quantity,
+                plan.contract_value,
+                plan.limit_price,
+                rate,
+                dec(&fx.usd_per_usdt)?,
             )?;
             let ceiling = entry_budget::enforced_entry_ceiling(
-                true, true,
-                control.limits.max_entry_usd.as_deref().map(dec).transpose()?,
+                true,
+                true,
+                control
+                    .limits
+                    .max_entry_usd
+                    .as_deref()
+                    .map(dec)
+                    .transpose()?,
                 order.max_entry_usd.as_deref().map(dec).transpose()?,
-            )?.ok_or("ENTRY_ACCOUNT_CAP_MISSING")?;
+            )?
+            .ok_or("ENTRY_ACCOUNT_CAP_MISSING")?;
             if quote.total_usd > ceiling {
                 return Err("ENTRY_QUOTE_EXCEEDS_ACCOUNT_CAP".into());
             }
             if Instant::now() >= until {
                 return Err("COMMAND_EXPIRED".into());
             }
-            let fee_received_at = chrono::DateTime::parse_from_rfc3339(
-                &fees.source_received_at
-            ).map_err(err)?.timestamp_millis();
+            let fee_received_at = chrono::DateTime::parse_from_rfc3339(&fees.source_received_at)
+                .map_err(err)?
+                .timestamp_millis();
             let entry_receipt = okx_execution::EntryQuoteEvidence {
                 schema: "okx.entry-known-quote/v1".into(),
                 account_key: r.configuration.account_key.wire(),
@@ -278,7 +290,9 @@ impl TradeService {
                 maker_rate: fees.maker_rate.clone(),
                 taker_rate: fees.taker_rate.clone(),
                 fee_level: fees.level.clone(),
-                fee_exchange_at: fees.exchange_timestamp_ms.parse::<i64>()
+                fee_exchange_at: fees
+                    .exchange_timestamp_ms
+                    .parse::<i64>()
                     .map_err(|_| "ENTRY_FEE_EXCHANGE_TIME_INVALID")?,
                 usd_per_usdt: dec(&fx.usd_per_usdt)?,
                 notional_usdt: quote.notional_usdt,
@@ -292,8 +306,11 @@ impl TradeService {
                 conversion_received_at: fx.observed_at_ms as i64,
                 observed_at: now(),
             };
-            r.execution.store.call(until, move |s| s.bind_entry_quote(&entry_receipt))
-                .await.map_err(err)?;
+            r.execution
+                .store
+                .call(until, move |s| s.bind_entry_quote(&entry_receipt))
+                .await
+                .map_err(err)?;
             let census = self.census(&state).await?;
             let snapshot = r.observer.snapshot().await.map_err(err)?;
             let conversion = Self::usd_conversion(&snapshot)?;
@@ -696,15 +713,23 @@ impl TradeService {
         until: Instant,
     ) -> Result<(), String> {
         let id = intent.intent_id.clone();
-        let quote = r.execution.store.call(until, move |s| s.entry_quote(&id))
-            .await.map_err(err)?
+        let quote = r
+            .execution
+            .store
+            .call(until, move |s| s.entry_quote(&id))
+            .await
+            .map_err(err)?
             .ok_or("POST_ENTRY_QUOTE_MISSING")?;
-        let rules = self.public_ws.instrument_rules(&intent.instrument_id).await
+        let rules = self
+            .public_ws
+            .instrument_rules(&intent.instrument_id)
+            .await
             .ok_or("POST_ENTRY_RULES_UNAVAILABLE")?;
-        plan::verify_entry_rules_match(
-            &rules, &intent.instrument_id, &intent.plan,
-        )?;
-        let ct = dec(rules.instrument.contract_value.as_deref()
+        plan::verify_entry_rules_match(&rules, &intent.instrument_id, &intent.plan)?;
+        let ct = dec(rules
+            .instrument
+            .contract_value
+            .as_deref()
             .ok_or("POST_ENTRY_CONTRACT_VALUE_MISSING")?)?;
         let fee = r.observer.fee_schedule(&rules).await.map_err(err)?;
         let snap = r.observer.snapshot_after_held().await.map_err(err)?;
@@ -712,14 +737,7 @@ impl TradeService {
             return Err("POST_ENTRY_ACCOUNT_CHANGED".into());
         }
         let fx = Self::usd_conversion(&snap)?;
-        verify_post_held_entry_sources(
-            &quote,
-            &fee,
-            &rules.reference_generation,
-            ct,
-            &fx,
-            now(),
-        )?;
+        verify_post_held_entry_sources(&quote, &fee, &rules.reference_generation, ct, &fx, now())?;
         if Instant::now() >= until {
             return Err("COMMAND_EXPIRED".into());
         }
@@ -749,7 +767,8 @@ impl TradeService {
             // A fresh census and a valid FX fence do not revalidate tariff or
             // contract mechanics. Bind the same immutable SQL quote against
             // actual post-HELD source data on EACH CAS attempt before POST.
-            self.revalidate_held_entry_quote(fx.owner, intent, until).await?;
+            self.revalidate_held_entry_quote(fx.owner, intent, until)
+                .await?;
             let (census, causal_proof) = self
                 .census_after_held(
                     state,
@@ -981,11 +1000,8 @@ impl TradeService {
                     .await
                     .map_err(err)?;
                 let (local_intents, pending_central) = local_intents;
-                let local_intent_digest = verify_local_intent_coverage(
-                    &local_intents,
-                    &pending_central,
-                    &c.account_key,
-                )?;
+                let local_intent_digest =
+                    verify_local_intent_coverage(&local_intents, &pending_central, &c.account_key)?;
                 if r.private_ws.status().await.connection_generation != generation
                     || !r.source_identity_ready().await
                     || !r
@@ -1110,7 +1126,10 @@ fn verify_post_held_entry_sources(
     observed_at_ms: i64,
 ) -> Result<(), String> {
     let current_fee = entry_budget::verified_entry_fee_rate(
-        fee, &quote.instrument_id, reference_generation, observed_at_ms,
+        fee,
+        &quote.instrument_id,
+        reference_generation,
+        observed_at_ms,
     )?;
     if quote.contract_value != contract_value
         || quote.reference_generation != reference_generation
@@ -1123,14 +1142,18 @@ fn verify_post_held_entry_sources(
         return Err("POST_ENTRY_FEE_OR_SPEC_CHANGED".into());
     }
     if !crate::config::evidence_fresh(
-        quote.observed_at, observed_at_ms, crate::config::ACCOUNT_MAX_AGE_MS,
+        quote.observed_at,
+        observed_at_ms,
+        crate::config::ACCOUNT_MAX_AGE_MS,
     ) {
         return Err("POST_ENTRY_QUOTE_EXPIRED".into());
     }
-    let fx_timestamp = i64::try_from(fx.observed_at_ms)
-        .map_err(|_| "POST_ENTRY_FX_TIMESTAMP_INVALID")?;
+    let fx_timestamp =
+        i64::try_from(fx.observed_at_ms).map_err(|_| "POST_ENTRY_FX_TIMESTAMP_INVALID")?;
     if !crate::config::evidence_fresh(
-        fx_timestamp, observed_at_ms, crate::config::ACCOUNT_MAX_AGE_MS,
+        fx_timestamp,
+        observed_at_ms,
+        crate::config::ACCOUNT_MAX_AGE_MS,
     ) {
         return Err("POST_ENTRY_FX_STALE".into());
     }
@@ -1173,8 +1196,13 @@ fn verify_local_intent_coverage(
         if intent.state == IntentState::Prepared && central_pending {
             return Err("COHORT_UNRESOLVED_RESERVE_ATTEMPT".into());
         }
-        if matches!(intent.state, IntentState::Acknowledged | IntentState::PartiallyFilled)
-            && intent.exchange_order_id.as_ref().is_none_or(String::is_empty)
+        if matches!(
+            intent.state,
+            IntentState::Acknowledged | IntentState::PartiallyFilled
+        ) && intent
+            .exchange_order_id
+            .as_ref()
+            .is_none_or(String::is_empty)
         {
             return Err("COHORT_EXCHANGE_ORDER_ID_UNPROVEN".into());
         }
@@ -1209,7 +1237,10 @@ fn canonical_census_content(
     evidence.sort_by(|a, b| a.0.cmp(&b.0));
     if evidence.len() != expected_keys.len()
         || !expected_keys.windows(2).all(|pair| pair[0] < pair[1])
-        || evidence.iter().zip(expected_keys).any(|((key, _), expected)| key != expected)
+        || evidence
+            .iter()
+            .zip(expected_keys)
+            .any(|((key, _), expected)| key != expected)
     {
         return Err("COHORT_EVIDENCE_SCOPE_MISMATCH".into());
     }
@@ -1235,14 +1266,17 @@ fn verify_pending_order_binding(
     }
     let qty = dec(&order.size)?;
     let filled = dec(&order.accumulated_fill_size)?;
-    if qty <= Decimal::ZERO || qty != intent.plan.quantity
-        || filled < Decimal::ZERO || filled > qty
+    if qty <= Decimal::ZERO || qty != intent.plan.quantity || filled < Decimal::ZERO || filled > qty
     {
         return Err("PENDING_ORDER_QUANTITY_MISMATCH".into());
     }
     if intent.risk_increase {
-        let price = dec(order.price.as_deref().ok_or("PENDING_ORDER_PRICE_UNPROVEN")?)?;
-        if price <= Decimal::ZERO || intent.plan.limit_price <= Decimal::ZERO
+        let price = dec(order
+            .price
+            .as_deref()
+            .ok_or("PENDING_ORDER_PRICE_UNPROVEN")?)?;
+        if price <= Decimal::ZERO
+            || intent.plan.limit_price <= Decimal::ZERO
             || (intent.plan.side == "buy" && price > intent.plan.limit_price)
             || (intent.plan.side == "sell" && price < intent.plan.limit_price)
         {
@@ -1475,7 +1509,8 @@ mod tests {
         use okx_observation::{FeeScheduleInput, FeeScheduleSnapshot};
         let stamp = "2026-10-30T00:00:00Z";
         let t = chrono::DateTime::parse_from_rfc3339(stamp)
-            .unwrap().timestamp_millis();
+            .unwrap()
+            .timestamp_millis();
         let fee = FeeScheduleSnapshot::from_input(FeeScheduleInput {
             instrument_id: "BTC-USDT-SWAP".into(),
             reference_generation: "reference-1".into(),
@@ -1485,7 +1520,8 @@ mod tests {
             maker_rate: "-0.0002".into(),
             taker_rate: "0.0005".into(),
             exact_for_instrument: true,
-        }).unwrap();
+        })
+        .unwrap();
         let mut quote = okx_execution::EntryQuoteEvidence {
             schema: "okx.entry-known-quote/v1".into(),
             account_key: "okx:real:test".into(),
@@ -1519,28 +1555,40 @@ mod tests {
             source_digest: "c".repeat(64),
             observed_at_ms: t as u64,
         };
-        assert!(verify_post_held_entry_sources(
-            &quote, &fee, "reference-1", Decimal::ONE, &fx, t + 1
-        ).is_ok());
+        assert!(
+            verify_post_held_entry_sources(&quote, &fee, "reference-1", Decimal::ONE, &fx, t + 1)
+                .is_ok()
+        );
         assert_eq!(
-            verify_post_held_entry_sources(&quote, &fee, "reference-2",
-                Decimal::ONE, &fx, t + 1),
+            verify_post_held_entry_sources(&quote, &fee, "reference-2", Decimal::ONE, &fx, t + 1),
             Err("POST_ENTRY_FEE_OR_SPEC_CHANGED".into())
         );
         assert_eq!(
-            verify_post_held_entry_sources(&quote, &fee, "reference-1",
-                dec("2").unwrap(), &fx, t + 1),
+            verify_post_held_entry_sources(
+                &quote,
+                &fee,
+                "reference-1",
+                dec("2").unwrap(),
+                &fx,
+                t + 1
+            ),
             Err("POST_ENTRY_FEE_OR_SPEC_CHANGED".into())
         );
         quote.fee_generation = "tampered".into();
-        assert!(verify_post_held_entry_sources(
-            &quote, &fee, "reference-1", Decimal::ONE, &fx, t + 1
-        ).is_err());
+        assert!(
+            verify_post_held_entry_sources(&quote, &fee, "reference-1", Decimal::ONE, &fx, t + 1)
+                .is_err()
+        );
         quote.fee_generation = fee.fee_generation.clone();
         assert_eq!(
-            verify_post_held_entry_sources(&quote, &fee, "reference-1",
-                Decimal::ONE, &fx,
-                t + crate::config::ACCOUNT_MAX_AGE_MS + 1),
+            verify_post_held_entry_sources(
+                &quote,
+                &fee,
+                "reference-1",
+                Decimal::ONE,
+                &fx,
+                t + crate::config::ACCOUNT_MAX_AGE_MS + 1
+            ),
             Err("ENTRY_FEE_SOURCE_STALE".into())
         );
         let modified_fx = UsdConversion {
@@ -1548,8 +1596,14 @@ mod tests {
             ..fx
         };
         assert_eq!(
-            verify_post_held_entry_sources(&quote, &fee, "reference-1",
-                Decimal::ONE, &modified_fx, t + 1),
+            verify_post_held_entry_sources(
+                &quote,
+                &fee,
+                "reference-1",
+                Decimal::ONE,
+                &modified_fx,
+                t + 1
+            ),
             Err("POST_ENTRY_FX_CHANGED".into())
         );
     }
@@ -1570,8 +1624,10 @@ mod tests {
     #[test]
     fn e2_census_canonical_digest_rejects_missing_duplicate_and_order_variation() {
         let keys = vec!["a".to_owned(), "b".to_owned()];
-        let rows = vec![("a".to_owned(), "proof_a".to_owned()),
-                        ("b".to_owned(), "proof_b".to_owned())];
+        let rows = vec![
+            ("a".to_owned(), "proof_a".to_owned()),
+            ("b".to_owned(), "proof_b".to_owned()),
+        ];
         assert_eq!(
             canonical_census_content(rows.clone(), &keys),
             canonical_census_content(rows.iter().rev().cloned().collect(), &keys)
@@ -1583,25 +1639,39 @@ mod tests {
     #[test]
     fn e2_active_real_intents_have_complete_bounded_central_coverage() {
         let plan = IntentPlan {
-            side: "buy".into(), position_side: "long".into(),
-            quantity: dec("1").unwrap(), limit_price: dec("100").unwrap(),
+            side: "buy".into(),
+            position_side: "long".into(),
+            quantity: dec("1").unwrap(),
+            limit_price: dec("100").unwrap(),
             ..IntentPlan::default()
         };
         let mut intent = StoredIntent {
-            plan, intent_id: "intent_123".into(), idempotency_key: "key_123".into(),
-            request_hash: "a".repeat(64), client_order_id: "client_123".into(),
-            state: IntentState::Prepared, revision: 1, deadline: 123,
-            plan_hash: "b".repeat(64), policy_revision: 3, risk_increase: true,
+            plan,
+            intent_id: "intent_123".into(),
+            idempotency_key: "key_123".into(),
+            request_hash: "a".repeat(64),
+            client_order_id: "client_123".into(),
+            state: IntentState::Prepared,
+            revision: 1,
+            deadline: 123,
+            plan_hash: "b".repeat(64),
+            policy_revision: 3,
+            risk_increase: true,
             instrument_id: "BTC-USDT-SWAP".into(),
-            exchange_order_id: None, incident: None,
+            exchange_order_id: None,
+            incident: None,
         };
         let account = format!("okx:real:{}", "a".repeat(64));
         let receipt = CentralReceipt {
             reservation_key: "central:receipt_123".into(),
-            account_key: account.clone(), installation_id: "install".into(),
-            instance_id: Some("manual".into()), intent_id: intent.intent_id.clone(),
-            plan_hash: intent.plan_hash.clone(), policy_revision: 3,
-            receipt_hash: "c".repeat(64), requested_loss_usd: dec("1").unwrap(),
+            account_key: account.clone(),
+            installation_id: "install".into(),
+            instance_id: Some("manual".into()),
+            intent_id: intent.intent_id.clone(),
+            plan_hash: intent.plan_hash.clone(),
+            policy_revision: 3,
+            receipt_hash: "c".repeat(64),
+            requested_loss_usd: dec("1").unwrap(),
             conversion_digest: "d".repeat(64),
         };
         assert!(verify_local_intent_coverage(&[(intent.clone(), None)], &[], &account).is_ok());
@@ -1610,7 +1680,10 @@ mod tests {
             verify_local_intent_coverage(&[(intent.clone(), None)], &[], &account),
             Err("COHORT_CENTRAL_RESERVATION_MISSING".into())
         );
-        assert!(verify_local_intent_coverage(&[(intent.clone(), Some(receipt.clone()))], &[], &account).is_ok());
+        assert!(
+            verify_local_intent_coverage(&[(intent.clone(), Some(receipt.clone()))], &[], &account)
+                .is_ok()
+        );
         let mut wrong = receipt.clone();
         wrong.account_key = "other".into();
         assert_eq!(
@@ -1623,22 +1696,37 @@ mod tests {
             Err("COHORT_UNRESOLVED_POST_OUTCOME".into())
         );
         intent.state = IntentState::Unknown;
-        assert!(verify_local_intent_coverage(&[(intent.clone(), Some(receipt.clone()))], &[], &account).is_err());
+        assert!(
+            verify_local_intent_coverage(&[(intent.clone(), Some(receipt.clone()))], &[], &account)
+                .is_err()
+        );
         intent.state = IntentState::Acknowledged;
         assert_eq!(
             verify_local_intent_coverage(&[(intent.clone(), Some(receipt.clone()))], &[], &account),
             Err("COHORT_EXCHANGE_ORDER_ID_UNPROVEN".into())
         );
         intent.exchange_order_id = Some("venue_abc".into());
-        assert!(verify_local_intent_coverage(&[(intent.clone(), Some(receipt.clone()))], &[], &account).is_ok());
+        assert!(
+            verify_local_intent_coverage(&[(intent.clone(), Some(receipt.clone()))], &[], &account)
+                .is_ok()
+        );
         let unresolved = vec![intent.intent_id.clone()];
-        assert!(verify_local_intent_coverage(
-            &[(intent.clone(), Some(receipt.clone()))], &unresolved, &account
-        ).is_ok());
+        assert!(
+            verify_local_intent_coverage(
+                &[(intent.clone(), Some(receipt.clone()))],
+                &unresolved,
+                &account
+            )
+            .is_ok()
+        );
         let mut terminal = intent.clone();
         terminal.state = IntentState::Filled;
         assert_eq!(
-            verify_local_intent_coverage(&[(terminal, Some(receipt.clone()))], &unresolved, &account),
+            verify_local_intent_coverage(
+                &[(terminal, Some(receipt.clone()))],
+                &unresolved,
+                &account
+            ),
             Err("COHORT_TERMINAL_RISK_RELEASE_PENDING".into())
         );
         let mut attempted = intent.clone();
@@ -1649,8 +1737,14 @@ mod tests {
             Err("COHORT_UNRESOLVED_RESERVE_ATTEMPT".into())
         );
         assert_eq!(
-            verify_local_intent_coverage(&[(intent.clone(), Some(receipt.clone())),
-                                          (intent.clone(), Some(receipt.clone()))], &[], &account),
+            verify_local_intent_coverage(
+                &[
+                    (intent.clone(), Some(receipt.clone())),
+                    (intent.clone(), Some(receipt.clone()))
+                ],
+                &[],
+                &account
+            ),
             Err("COHORT_LOCAL_INTENT_CORRUPT".into())
         );
         let many = vec![(intent, Some(receipt)); 100];
@@ -1663,27 +1757,45 @@ mod tests {
     #[test]
     fn e2_pending_venue_order_cannot_steal_matching_client_id() {
         let plan = IntentPlan {
-            side: "buy".into(), position_side: "long".into(),
-            quantity: dec("2").unwrap(), limit_price: dec("100").unwrap(),
+            side: "buy".into(),
+            position_side: "long".into(),
+            quantity: dec("2").unwrap(),
+            limit_price: dec("100").unwrap(),
             ..IntentPlan::default()
         };
         let intent = StoredIntent {
-            plan, intent_id: "intent_test".into(), idempotency_key: "test_id".into(),
-            request_hash: "a".repeat(64), client_order_id: "client_test".into(),
-            state: IntentState::Acknowledged, revision: 1, deadline: 123,
-            plan_hash: "b".repeat(64), policy_revision: 1, risk_increase: true,
+            plan,
+            intent_id: "intent_test".into(),
+            idempotency_key: "test_id".into(),
+            request_hash: "a".repeat(64),
+            client_order_id: "client_test".into(),
+            state: IntentState::Acknowledged,
+            revision: 1,
+            deadline: 123,
+            plan_hash: "b".repeat(64),
+            policy_revision: 1,
+            risk_increase: true,
             instrument_id: "BTC-USDT-SWAP".into(),
-            exchange_order_id: Some("exchange_test".into()), incident: None,
+            exchange_order_id: Some("exchange_test".into()),
+            incident: None,
         };
         let order = okx_observation::PendingOrderState {
-            order_id: "exchange_test".into(), client_order_id: Some("client_test".into()),
-            instrument_type: "SWAP".into(), instrument_id: "BTC-USDT-SWAP".into(),
-            side: "buy".into(), position_side: Some("long".into()),
-            trade_mode: "cross".into(), order_type: "limit".into(),
-            price: Some("99".into()), size: "2".into(),
-            accumulated_fill_size: "0.5".into(), average_fill_price: None,
-            state: "partially_filled".into(), reduce_only: Some(false),
-            creation_time_ms: "1".into(), update_time_ms: "2".into(),
+            order_id: "exchange_test".into(),
+            client_order_id: Some("client_test".into()),
+            instrument_type: "SWAP".into(),
+            instrument_id: "BTC-USDT-SWAP".into(),
+            side: "buy".into(),
+            position_side: Some("long".into()),
+            trade_mode: "cross".into(),
+            order_type: "limit".into(),
+            price: Some("99".into()),
+            size: "2".into(),
+            accumulated_fill_size: "0.5".into(),
+            average_fill_price: None,
+            state: "partially_filled".into(),
+            reduce_only: Some(false),
+            creation_time_ms: "1".into(),
+            update_time_ms: "2".into(),
         };
         assert!(verify_pending_order_binding(&order, &intent).is_ok());
         let mut foreign = order.clone();
@@ -1745,7 +1857,11 @@ mod tests {
         );
         assert_eq!(
             census_source_floor(
-                received, "uid", "uid", true, t,
+                received,
+                "uid",
+                "uid",
+                true,
+                t,
                 t + crate::config::ACCOUNT_MAX_AGE_MS as i64 + 1,
             ),
             Err("COHORT_ACCOUNT_SOURCE_STALE".into())
@@ -1756,8 +1872,12 @@ mod tests {
         );
         assert_eq!(
             census_source_floor(
-                received, "uid", "uid", true,
-                t - crate::config::ACCOUNT_MAX_AGE_MS as i64 - 1, t,
+                received,
+                "uid",
+                "uid",
+                true,
+                t - crate::config::ACCOUNT_MAX_AGE_MS as i64 - 1,
+                t,
             ),
             Err("COHORT_FINANCIAL_SOURCE_STALE".into())
         );

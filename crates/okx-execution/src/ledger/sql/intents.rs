@@ -1,15 +1,12 @@
 use super::super::*;
 use sha2::{Digest, Sha256};
 impl AccountStore {
-
     /// No second ledger/table: one immutable, idempotent record in the existing
     /// operation_receipts journal, bound to the original saved intent/plan.
     /// Its kind explicitly denies any claim of ALL-IN cost authorization.
-    fn verified_stored_entry_quote(
-        &self,
-        quote: &EntryQuoteEvidence,
-    ) -> StoreResult<StoredIntent> {
-        let intent = self.intent(&quote.intent_id)?
+    fn verified_stored_entry_quote(&self, quote: &EntryQuoteEvidence) -> StoreResult<StoredIntent> {
+        let intent = self
+            .intent(&quote.intent_id)?
             .ok_or(StoreError::Invalid("ENTRY_QUOTE_INTENT_MISSING"))?;
         let maker = Decimal::from_str(&quote.maker_rate)
             .map_err(|_| StoreError::Invalid("ENTRY_QUOTE_FEE_RATE_INVALID"))?;
@@ -44,10 +41,15 @@ impl AccountStore {
             || quote.observed_at - quote.conversion_received_at > 5_000
             || quote.fee_generation.len() != 71
             || !quote.fee_generation.starts_with("sha256:")
-            || !quote.fee_generation[7..].bytes().all(|c| c.is_ascii_hexdigit())
+            || !quote.fee_generation[7..]
+                .bytes()
+                .all(|c| c.is_ascii_hexdigit())
             || quote.reference_generation.is_empty()
             || quote.conversion_digest.len() != 64
-            || !quote.conversion_digest.bytes().all(|c| c.is_ascii_hexdigit())
+            || !quote
+                .conversion_digest
+                .bytes()
+                .all(|c| c.is_ascii_hexdigit())
         {
             return Err(StoreError::Invalid("ENTRY_QUOTE_SCOPE_UNVERIFIED"));
         }
@@ -58,12 +60,14 @@ impl AccountStore {
             &quote.maker_rate,
             &quote.taker_rate,
             true,
-        )).map_err(|_| StoreError::Invalid("ENTRY_QUOTE_FEE_HASH_INVALID"))?;
+        ))
+        .map_err(|_| StoreError::Invalid("ENTRY_QUOTE_FEE_HASH_INVALID"))?;
         let tariff_digest = format!("sha256:{:x}", Sha256::digest(tariff_bytes));
         if tariff_digest != quote.fee_generation {
             return Err(StoreError::Invalid("ENTRY_QUOTE_FEE_HASH_INVALID"));
         }
-        let notional = quote.quantity
+        let notional = quote
+            .quantity
             .checked_mul(quote.contract_value)
             .and_then(|v| v.checked_mul(quote.limit_price))
             .ok_or(StoreError::Invalid("ENTRY_QUOTE_OVERFLOW"))?;
@@ -71,14 +75,21 @@ impl AccountStore {
             .checked_mul(quote.fee_rate)
             .ok_or(StoreError::Invalid("ENTRY_QUOTE_OVERFLOW"))?
             .round_dp_with_strategy(6, rust_decimal::RoundingStrategy::ToPositiveInfinity);
-        let total_usdt = notional.checked_add(fee)
+        let total_usdt = notional
+            .checked_add(fee)
             .ok_or(StoreError::Invalid("ENTRY_QUOTE_OVERFLOW"))?;
-        let usd = total_usdt.checked_mul(quote.usd_per_usdt)
+        let usd = total_usdt
+            .checked_mul(quote.usd_per_usdt)
             .ok_or(StoreError::Invalid("ENTRY_QUOTE_OVERFLOW"))?
             .round_dp_with_strategy(9, rust_decimal::RoundingStrategy::ToPositiveInfinity);
-        if (notional, fee, total_usdt, usd) != (
-            quote.notional_usdt, quote.fee_usdt, quote.total_usdt, quote.total_usd
-        ) {
+        if (notional, fee, total_usdt, usd)
+            != (
+                quote.notional_usdt,
+                quote.fee_usdt,
+                quote.total_usdt,
+                quote.total_usd,
+            )
+        {
             return Err(StoreError::Invalid("ENTRY_QUOTE_ARITHMETIC_MISMATCH"));
         }
         Ok(intent)
@@ -111,13 +122,16 @@ impl AccountStore {
 
     pub fn entry_quote(&self, intent_id: &str) -> StoreResult<Option<EntryQuoteEvidence>> {
         let name = format!("entry-quote:{intent_id}");
-        let Some(receipt) = self.operation(&name)? else { return Ok(None); };
+        let Some(receipt) = self.operation(&name)? else {
+            return Ok(None);
+        };
         if receipt.kind != "ENTRY_QUOTE_UNPROVEN" {
             return Err(StoreError::Invalid("ENTRY_QUOTE_INVALID_RECEIPT"));
         }
         let quote: EntryQuoteEvidence = serde_json::from_str(&receipt.result_ref)
             .map_err(|_| StoreError::Invalid("ENTRY_QUOTE_CORRUPT"))?;
-        if quote.intent_id != intent_id || quote.plan_hash != receipt.request_hash
+        if quote.intent_id != intent_id
+            || quote.plan_hash != receipt.request_hash
             || quote.observed_at != receipt.committed_at
         {
             return Err(StoreError::Invalid("ENTRY_QUOTE_CORRUPT"));
@@ -403,7 +417,8 @@ impl AccountStore {
     /// exchange exposure. A historically retained RELEASED SQL receipt is
     /// not permission to consider its position/order centrally reserved.
     pub fn active_central_receipt(&self, id: &str) -> StoreResult<Option<CentralReceipt>> {
-        let state: Option<String> = self.connection
+        let state: Option<String> = self
+            .connection
             .query_row(
                 "SELECT state FROM risk_receipts WHERE intent_id=?1",
                 [id],
@@ -864,7 +879,10 @@ impl AccountStore {
         if live.len() >= limit || unresolved.len() >= limit || all.len() >= limit {
             return Err(StoreError::Invalid("COHORT_LOCAL_INTENTS_TRUNCATED"));
         }
-        Ok((all.into_values().collect(), unresolved.into_iter().collect()))
+        Ok((
+            all.into_values().collect(),
+            unresolved.into_iter().collect(),
+        ))
     }
 
     pub fn active_intents(&self, limit: usize) -> StoreResult<Vec<StoredIntent>> {
@@ -897,12 +915,20 @@ mod active_receipt_tests {
     #[test]
     fn released_or_no_send_receipt_never_covers_open_exposure() {
         for state in [
-            "HELD", "POSTED", "UNKNOWN", "OPEN", "TERMINAL_PENDING_CENTRAL",
+            "HELD",
+            "POSTED",
+            "UNKNOWN",
+            "OPEN",
+            "TERMINAL_PENDING_CENTRAL",
         ] {
             assert!(risk_receipt_covers_exposure(state), "{state}");
         }
         for state in [
-            "RELEASED", "UNSENT_PENDING_CENTRAL", "", "CORRUPT", "PREPARED",
+            "RELEASED",
+            "UNSENT_PENDING_CENTRAL",
+            "",
+            "CORRUPT",
+            "PREPARED",
         ] {
             assert!(!risk_receipt_covers_exposure(state), "{state}");
         }

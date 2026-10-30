@@ -114,7 +114,6 @@ impl EntryCostProof {
     }
 }
 
-
 /** Validate the native observer's instrument-specific fee generation and
  * receipt age. Both preview and execution must use this same source gate;
  * a correct maker/taker number from an old response is not current evidence.
@@ -146,7 +145,9 @@ pub(super) fn verified_entry_fee_rate(
     {
         return Err("ENTRY_FEE_SOURCE_STALE".into());
     }
-    let exchange_time = fee.exchange_timestamp_ms.parse::<i64>()
+    let exchange_time = fee
+        .exchange_timestamp_ms
+        .parse::<i64>()
         .map_err(|_| "ENTRY_FEE_EXCHANGE_TIME_INVALID")?;
     if exchange_time <= 0 || exchange_time > observed_at_ms {
         return Err("ENTRY_FEE_EXCHANGE_TIME_INVALID".into());
@@ -373,7 +374,8 @@ mod tests {
     fn e1_fee_source_must_be_current_exact_and_content_bound() {
         let stamp = "2026-10-30T00:00:00Z";
         let now_ms = chrono::DateTime::parse_from_rfc3339(stamp)
-            .unwrap().timestamp_millis();
+            .unwrap()
+            .timestamp_millis();
         let input = okx_observation::FeeScheduleInput {
             instrument_id: "BTC-USDT-SWAP".into(),
             reference_generation: "ref_generation".into(),
@@ -386,26 +388,22 @@ mod tests {
         };
         let fee = okx_observation::FeeScheduleSnapshot::from_input(input).unwrap();
         assert_eq!(
-            verified_entry_fee_rate(
-                &fee, "BTC-USDT-SWAP", "ref_generation", now_ms,
-            ),
+            verified_entry_fee_rate(&fee, "BTC-USDT-SWAP", "ref_generation", now_ms,),
             Ok(d("0.0005"))
         );
         assert_eq!(
-            verified_entry_fee_rate(
-                &fee, "ETH-USDT-SWAP", "ref_generation", now_ms,
-            ),
+            verified_entry_fee_rate(&fee, "ETH-USDT-SWAP", "ref_generation", now_ms,),
+            Err("ENTRY_FEE_SOURCE_SCOPE_MISMATCH".into())
+        );
+        assert_eq!(
+            verified_entry_fee_rate(&fee, "BTC-USDT-SWAP", "foreign_generation", now_ms,),
             Err("ENTRY_FEE_SOURCE_SCOPE_MISMATCH".into())
         );
         assert_eq!(
             verified_entry_fee_rate(
-                &fee, "BTC-USDT-SWAP", "foreign_generation", now_ms,
-            ),
-            Err("ENTRY_FEE_SOURCE_SCOPE_MISMATCH".into())
-        );
-        assert_eq!(
-            verified_entry_fee_rate(
-                &fee, "BTC-USDT-SWAP", "ref_generation",
+                &fee,
+                "BTC-USDT-SWAP",
+                "ref_generation",
                 now_ms + crate::config::ACCOUNT_MAX_AGE_MS + 1,
             ),
             Err("ENTRY_FEE_SOURCE_STALE".into())
@@ -413,34 +411,26 @@ mod tests {
         let mut changed = fee.clone();
         changed.taker_rate = "0.0001".into();
         assert_eq!(
-            verified_entry_fee_rate(
-                &changed, "BTC-USDT-SWAP", "ref_generation", now_ms,
-            ),
+            verified_entry_fee_rate(&changed, "BTC-USDT-SWAP", "ref_generation", now_ms,),
             Err("ENTRY_FEE_GENERATION_INVALID".into())
         );
         changed = fee.clone();
         changed.exchange_timestamp_ms = (now_ms + 1).to_string();
         assert_eq!(
-            verified_entry_fee_rate(
-                &changed, "BTC-USDT-SWAP", "ref_generation", now_ms,
-            ),
+            verified_entry_fee_rate(&changed, "BTC-USDT-SWAP", "ref_generation", now_ms,),
             Err("ENTRY_FEE_EXCHANGE_TIME_INVALID".into())
         );
         changed = fee.clone();
         changed.exchange_timestamp_ms =
             (now_ms - crate::config::ACCOUNT_MAX_AGE_MS - 1).to_string();
         assert_eq!(
-            verified_entry_fee_rate(
-                &changed, "BTC-USDT-SWAP", "ref_generation", now_ms,
-            ),
+            verified_entry_fee_rate(&changed, "BTC-USDT-SWAP", "ref_generation", now_ms,),
             Err("ENTRY_FEE_EXCHANGE_TIME_STALE".into())
         );
         changed = fee.clone();
         changed.source_received_at = "invalid".into();
         assert_eq!(
-            verified_entry_fee_rate(
-                &changed, "BTC-USDT-SWAP", "ref_generation", now_ms,
-            ),
+            verified_entry_fee_rate(&changed, "BTC-USDT-SWAP", "ref_generation", now_ms,),
             Err("ENTRY_FEE_SOURCE_TIME_INVALID".into())
         );
     }

@@ -27,11 +27,20 @@ fn e1_sql_known_quote_is_immutable_scoped_and_never_all_in_permission() {
         fee_usdt: Decimal::new(5, 2),
         total_usdt: Decimal::new(10005, 2),
         total_usd: Decimal::new(10005, 2),
-        fee_generation: format!("sha256:{:x}", sha2::Sha256::digest(
-            serde_json::to_vec(&(
-                "BTC-USDT-SWAP", "test_reference", "Lv1", "-0.0002", "0.0005", true
-            )).unwrap()
-        )),
+        fee_generation: format!(
+            "sha256:{:x}",
+            sha2::Sha256::digest(
+                serde_json::to_vec(&(
+                    "BTC-USDT-SWAP",
+                    "test_reference",
+                    "Lv1",
+                    "-0.0002",
+                    "0.0005",
+                    true
+                ))
+                .unwrap()
+            )
+        ),
         reference_generation: "test_reference".into(),
         fee_received_at: 10,
         conversion_digest: "b".repeat(64),
@@ -45,10 +54,14 @@ fn e1_sql_known_quote_is_immutable_scoped_and_never_all_in_permission() {
         "UPDATE operation_receipts SET result_ref='tampered' WHERE operation_id='entry-quote:intent'",
         []
     ).is_err());
-    assert!(s.connection.execute(
-        "DELETE FROM operation_receipts WHERE operation_id='entry-quote:intent'",
-        []
-    ).is_err());
+    assert!(
+        s.connection
+            .execute(
+                "DELETE FROM operation_receipts WHERE operation_id='entry-quote:intent'",
+                []
+            )
+            .is_err()
+    );
     assert_eq!(s.entry_quote(&i.intent_id).unwrap(), Some(proof.clone()));
     let mut changed = proof.clone();
     changed.total_usd += Decimal::ONE;
@@ -96,19 +109,31 @@ fn e1_sql_known_quote_is_immutable_scoped_and_never_all_in_permission() {
     reserve(&mut s);
     assert!(s.entry_quote(&i.intent_id).unwrap().is_some());
     // No proof flag is emitted and no SQL risk grant is minted by the quote.
-    assert_eq!(s.central_receipt(&i.intent_id).unwrap().is_some(), true);
+    assert!(s.central_receipt(&i.intent_id).unwrap().is_some());
     proof.observed_at = 9;
     assert!(s.bind_entry_quote(&proof).is_err());
     let file = s.path.clone();
     let owner = s.meta.clone();
     drop(s);
-    let reopened = AccountStore::open_existing(&file, &owner.account_key,
-        &owner.installation_id).unwrap();
-    assert_eq!(reopened.entry_quote(&i.intent_id).unwrap().unwrap().total_usd,
-        Decimal::new(10005, 2));
-    assert!(reopened.connection.execute(
-        "DELETE FROM operation_receipts WHERE operation_id='entry-quote:intent'", []
-    ).is_err());
+    let reopened =
+        AccountStore::open_existing(&file, &owner.account_key, &owner.installation_id).unwrap();
+    assert_eq!(
+        reopened
+            .entry_quote(&i.intent_id)
+            .unwrap()
+            .unwrap()
+            .total_usd,
+        Decimal::new(10005, 2)
+    );
+    assert!(
+        reopened
+            .connection
+            .execute(
+                "DELETE FROM operation_receipts WHERE operation_id='entry-quote:intent'",
+                []
+            )
+            .is_err()
+    );
 }
 #[test]
 fn e2_census_retains_terminal_intents_until_central_release() {
@@ -123,12 +148,22 @@ fn e2_census_retains_terminal_intents_until_central_release() {
     assert!(pending.contains(&i.intent_id));
     reserve(&mut s);
     assert!(s.begin_post(&i.intent_id, 1, 4).unwrap());
-    s.record_outcome(&i.intent_id, IntentState::Filled, Some("order_1"), "venue", 5)
-        .unwrap();
+    s.record_outcome(
+        &i.intent_id,
+        IntentState::Filled,
+        Some("order_1"),
+        "venue",
+        5,
+    )
+    .unwrap();
     let (all, pending) = s.risk_census_intents(100).unwrap();
-    assert!(all.iter().any(|x| x.intent_id == i.intent_id && x.state.terminal()));
+    assert!(
+        all.iter()
+            .any(|x| x.intent_id == i.intent_id && x.state.terminal())
+    );
     assert!(pending.contains(&i.intent_id));
-    s.acknowledge_central_release("central-key", "verified").unwrap();
+    s.acknowledge_central_release("central-key", "verified")
+        .unwrap();
     let (after, pending) = s.risk_census_intents(100).unwrap();
     assert!(!after.iter().any(|x| x.intent_id == i.intent_id));
     assert!(!pending.contains(&i.intent_id));
