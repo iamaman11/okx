@@ -94,8 +94,16 @@ NAV/STOP → protected position/terminal settlement → release`.
   to the exact observed orders. Backups older than the provable venue
   horizon cannot establish absence of a lost POST. These facts are
   content-addressed venue evidence, NOT a certified USD expense or
-  independently proven campaign inception. For older campaigns and
-  recovery, sources fail closed pending independent proof. The cross-account importer is not yet
+  independently proven campaign inception. The native API now exposes
+  one `CompleteCampaignAccountHistory` from independently exhausted recent
+  and archive orders, instrument-partitioned fills, and account-wide bills
+  at a common cut-off. It verifies exact order/fill quantity and bill/fee
+  identity without creating a second ledger. A fresh authenticated Worker
+  governance initialization records `campaign_origin` atomically in its
+  existing RiskBook; legacy campaigns with no originally recorded inception
+  remain `NOT_PROVEN`, never receive a fabricated timestamp. For older
+  campaigns and recovery, sources fail closed pending independent proof.
+  A complete native all-managed-account USD expense importer is still not
   connected, so RiskBook leaves admission blocked.
   Missing all-in FX/margin/borrow sources now reject the prepared SQL intent
   as `ENTRY_ALL_IN_COST_UNPROVEN` BEFORE any central RESERVE attempt: known
