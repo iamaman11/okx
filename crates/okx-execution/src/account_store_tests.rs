@@ -318,6 +318,52 @@ fn e1_fee_bill_cross_source_receipt_requires_both_immutable_sources() {
 }
 
 #[test]
+fn e1_zero_fee_without_explicit_bill_finality_is_unknown_not_free() {
+    let mut s = store();
+    intent(&mut s);
+    acknowledged_entry_intent(&mut s);
+    s.ingest_page(&IngestPage {
+        fills: vec![Fill {
+            fill_id: "zero-fee".into(),
+            instrument_id: "BTC-USDT-SWAP".into(),
+            trade_id: "zero-trade".into(),
+            exchange_order_id: "venue-order".into(),
+            intent_id: Some("intent".into()),
+            time: 6,
+            qty: Decimal::ONE,
+            price: Decimal::from(100),
+            fee: Decimal::ZERO,
+            currency: "USDT".into(),
+            side: "buy".into(),
+        }],
+        cursor: Some(SourceCursor {
+            source: "fills".into(),
+            stream_partition: "SWAP".into(),
+            cursor: String::new(),
+            watermark: 7,
+            generation: 1,
+            coverage_gaps: String::new(),
+        }),
+        ..Default::default()
+    }).unwrap();
+    s.ingest_page(&IngestPage {
+        cursor: Some(SourceCursor {
+            source: "bills".into(),
+            stream_partition: "account".into(),
+            cursor: String::new(),
+            watermark: 7,
+            generation: 1,
+            coverage_gaps: String::new(),
+        }),
+        ..Default::default()
+    }).unwrap();
+    assert!(matches!(
+        s.intent_fee_bill_evidence("intent", 7),
+        Err(StoreError::Invalid("ENTRY_ZERO_FEE_BILL_UNPROVEN"))
+    ));
+}
+
+#[test]
 fn e1_fee_bill_amount_and_currency_mismatch_never_become_verified() {
     for (booked_fee, booked_currency) in [
         (Decimal::new(-2, 2), "USDT"),
