@@ -262,6 +262,17 @@ impl AccountStore {
         }
         let admission = self.entry_admission(id)?
             .ok_or(StoreError::Invalid("ENTRY_SETTLEMENT_ADMISSION_MISSING"))?;
+        let began_post: Option<i64> = self.connection.query_row(
+            "SELECT begin_post_at FROM intents WHERE intent_id=?1",
+            [id],
+            |row| row.get(0),
+        )?;
+        if began_post.is_none_or(|at| at <= 0
+            || at < admission.observed_at
+            || venue_updated_at < at)
+        {
+            return Err(StoreError::Invalid("ENTRY_SETTLEMENT_POST_CAUSALITY_UNVERIFIED"));
+        }
         let bill = self.intent_fee_bill_evidence(id, covered_through)?;
         let fill = &bill.fill;
         if fill.intent_id != id
