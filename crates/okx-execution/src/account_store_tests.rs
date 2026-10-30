@@ -55,13 +55,22 @@ fn e1_missing_native_cost_source_rejects_intent_without_phantom_risk_reserve() {
     let known = e1_source_quote(&s, &intent);
     s.bind_entry_quote(&known).unwrap();
     assert_eq!(s.entry_admission(&intent.intent_id).unwrap(), None);
-    assert!(s.reject_unsent("intent", "ENTRY_ALL_IN_COST_UNPROVEN", 3).unwrap());
-    assert_eq!(s.intent("intent").unwrap().unwrap().state, IntentState::Rejected);
+    assert!(
+        s.reject_unsent("intent", "ENTRY_ALL_IN_COST_UNPROVEN", 3)
+            .unwrap()
+    );
+    assert_eq!(
+        s.intent("intent").unwrap().unwrap().state,
+        IntentState::Rejected
+    );
     assert_eq!(s.entry_quote("intent").unwrap(), Some(known));
     assert!(s.operation("risk-reserve:intent").unwrap().is_none());
     assert!(s.central_receipt("intent").unwrap().is_none());
     assert!(s.unsent_release_receipt("intent").unwrap().is_none());
-    assert!(!s.reject_unsent("intent", "ENTRY_ALL_IN_COST_UNPROVEN", 3).unwrap());
+    assert!(
+        !s.reject_unsent("intent", "ENTRY_ALL_IN_COST_UNPROVEN", 3)
+            .unwrap()
+    );
 }
 
 #[test]
