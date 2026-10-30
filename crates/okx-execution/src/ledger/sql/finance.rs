@@ -226,7 +226,17 @@ impl AccountStore {
         {
             return Err(StoreError::Invalid("ENTRY_FILL_COVERAGE_UNPROVEN"));
         }
-        let (plan_hash, instrument, contract_value, inverse, currency, increase, side, planned_quantity, bound_price): (
+        let (
+            plan_hash,
+            instrument,
+            contract_value,
+            inverse,
+            currency,
+            increase,
+            side,
+            planned_quantity,
+            bound_price,
+        ): (
             String,
             String,
             String,
@@ -348,9 +358,7 @@ impl AccountStore {
             }
             // A fill attributed to an intent is not enough: prove that it
             // could have resulted from the exact persisted bounded order.
-            if (side == "buy" && price > price_bound)
-                || (side == "sell" && price < price_bound)
-            {
+            if (side == "buy" && price > price_bound) || (side == "sell" && price < price_bound) {
                 return Err(StoreError::Invalid("ENTRY_FILL_PRICE_BOUND_VIOLATED"));
             }
             filled_qty = filled_qty
