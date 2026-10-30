@@ -668,6 +668,24 @@ fn merge_order_histories(
                         "archive order history contains invalid uTime for ordId {order_id}"
                     ))
                 })?;
+                // A merge is only a choice between different snapshots in
+                // time, not permission to rewrite an economic event. Equal
+                // uTime on independently authenticated endpoints must agree
+                // on all fields that affect order accounting. Otherwise the
+                // result depends on endpoint enumeration order.
+                if timestamp == prior
+                    && (previous.state != order.state
+                        || previous.accumulated_fill_size != order.accumulated_fill_size
+                        || previous.average_fill_price != order.average_fill_price
+                        || previous.fee != order.fee
+                        || previous.fee_currency != order.fee_currency
+                        || previous.order_type != order.order_type
+                        || previous.creation_time_ms != order.creation_time_ms)
+                {
+                    return Err(OkxError::Response(format!(
+                        "recent/archive order economic conflict for ordId {order_id}"
+                    )));
+                }
                 if timestamp >= prior {
                     orders.insert(order_id.to_owned(), order);
                 }
@@ -868,6 +886,26 @@ mod tests {
         assert_eq!(bill.bill_sub_type, "173");
         assert_eq!(bill.position_balance_change, "-0.05");
         assert_eq!(bill.timestamp_ms, "1790884800000");
+    }
+
+    #[test]
+    fn same_time_conflicting_archive_fills_cannot_mint_campaign_history() {
+        let mut original = canceled_demo_order("123456", "1791579301000");
+        original.accumulated_fill_size = "1".into();
+        original.fee = "-0.01".into();
+        let mut changed = original.clone();
+        changed.accumulated_fill_size = "2".into();
+        let source = BoundedHistory {
+            rows: vec![original],
+            pages: 1,
+            complete: true,
+        };
+        let archive = BoundedHistory {
+            rows: vec![changed],
+            pages: 1,
+            complete: true,
+        };
+        assert!(merge_order_histories(source, archive).is_err());
     }
 
     #[test]
