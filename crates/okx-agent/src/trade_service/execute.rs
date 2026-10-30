@@ -1206,6 +1206,12 @@ fn verify_post_held_entry_sources(
     if quote.usd_per_usdt != dec(&fx.usd_per_usdt)? {
         return Err("POST_ENTRY_FX_CHANGED".into());
     }
+    // The held reservation was bound to the original immutable FX source.
+    // A changed generation is not proof of the same cost upper bound,
+    // even if the observed rate happens to be numerically identical.
+    if quote.conversion_digest != fx.source_digest {
+        return Err("POST_ENTRY_FX_PROVENANCE_CHANGED".into());
+    }
     Ok(())
 }
 
@@ -1598,7 +1604,7 @@ mod tests {
         };
         let fx = UsdConversion {
             usd_per_usdt: "1".into(),
-            source_digest: "c".repeat(64),
+            source_digest: "b".repeat(64),
             observed_at_ms: t as u64,
         };
         assert!(
@@ -1636,6 +1642,21 @@ mod tests {
                 t + crate::config::ACCOUNT_MAX_AGE_MS + 1
             ),
             Err("ENTRY_FEE_SOURCE_STALE".into())
+        );
+        let changed_provenance = UsdConversion {
+            source_digest: "c".repeat(64),
+            ..fx.clone()
+        };
+        assert_eq!(
+            verify_post_held_entry_sources(
+                &quote,
+                &fee,
+                "reference-1",
+                Decimal::ONE,
+                &changed_provenance,
+                t + 1
+            ),
+            Err("POST_ENTRY_FX_PROVENANCE_CHANGED".into())
         );
         let modified_fx = UsdConversion {
             usd_per_usdt: "1.01".into(),
