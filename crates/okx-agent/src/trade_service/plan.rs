@@ -243,7 +243,7 @@ impl TradeService {
         if !crate::config::evidence_fresh(received, now(), crate::config::ACCOUNT_MAX_AGE_MS)
             || received > now()
             || snap.account_uid_fingerprint != r.configuration.account_key.verified_uid
-            || snap.position_mode != "long_short_mode"
+            || !matches!(snap.position_mode.as_str(), "long_short_mode" | "net_mode")
         {
             return Err("ACCOUNT_EVIDENCE_STALE_OR_MISMATCHED".into());
         }
@@ -405,9 +405,15 @@ impl TradeService {
             let position = snap
                 .positions
                 .iter()
-                .filter(|p| p.instrument_id == instrument && p.position_side == side_name)
+                .filter(|p| p.instrument_id == instrument)
                 .try_fold(Decimal::ZERO, |sum, p| {
-                    dec(&p.position).map(|q| sum + q.abs())
+                    let normalized = super::reconcile::verified_venue_position_direction(
+                        &p.position_side, &p.position,
+                    )?;
+                    let amount = normalized
+                        .filter(|(direction, _)| *direction == side_name)
+                        .map_or(Decimal::ZERO, |(_, quantity)| quantity);
+                    sum.checked_add(amount).ok_or("POSITION_QUANTITY_OVERFLOW".into())
                 })?;
             if qty > position {
                 return Err("REDUCE_WOULD_INCREASE_OR_REVERSE".into());

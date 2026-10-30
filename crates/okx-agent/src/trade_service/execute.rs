@@ -878,6 +878,15 @@ impl TradeService {
             })
             .into_iter()
             .collect();
+        let post_account = r.execution.account.config().await.map_err(err)?;
+        let post_snapshot = r.observer.snapshot().await.map_err(err)?;
+        if post_account.position_mode != post_snapshot.position_mode
+            || post_snapshot.account_uid_fingerprint != r.configuration.account_key.verified_uid
+            || !matches!(post_snapshot.position_mode.as_str(), "net_mode" | "long_short_mode")
+        {
+            return Err("POST_ACCOUNT_POSITION_MODE_UNVERIFIED".into());
+        }
+        let net_mode = post_snapshot.position_mode == "net_mode";
         let venue = PlaceOrderRequest {
             instrument_id: instrument.clone(),
             trade_mode: ApiTradeMode::Cross,
@@ -887,11 +896,14 @@ impl TradeService {
             } else {
                 ApiOrderSide::Sell
             },
-            position_side: if *side == PositionSide::Long {
+            position_side: if net_mode {
+                ApiPositionSide::Net
+            } else if *side == PositionSide::Long {
                 ApiPositionSide::Long
             } else {
                 ApiPositionSide::Short
             },
+            reduce_only: if net_mode && !increase { Some(true) } else { None },
             order_type: match order.order_type.as_str() {
                 "limit" => ApiOrderType::Limit,
                 "post_only" => ApiOrderType::PostOnly,
@@ -1709,7 +1721,12 @@ fn verify_pending_order_binding(
         || intent.exchange_order_id.as_deref() != Some(order.order_id.as_str())
         || order.instrument_id != intent.instrument_id
         || order.side != intent.plan.side
-        || order.position_side.as_deref() != Some(intent.plan.position_side.as_str())
+        || !matches!(
+            order.position_side.as_deref(),
+            Some("net") | Some("long") | Some("short")
+        )
+        || (order.position_side.as_deref() != Some("net")
+            && order.position_side.as_deref() != Some(intent.plan.position_side.as_str()))
         || !matches!(order.state.as_str(), "live" | "partially_filled")
         || intent.state.terminal()
     {

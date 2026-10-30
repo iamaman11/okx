@@ -53,6 +53,7 @@ pub enum ApiOrderSide {
 pub enum ApiPositionSide {
     Long,
     Short,
+    Net,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -103,6 +104,9 @@ pub struct PlaceOrderRequest {
     pub side: ApiOrderSide,
     #[serde(rename = "posSide")]
     pub position_side: ApiPositionSide,
+    /// Required for a net-mode reduction, never sent for hedge-mode orders.
+    #[serde(rename = "reduceOnly", skip_serializing_if = "Option::is_none")]
+    pub reduce_only: Option<bool>,
     #[serde(rename = "ordType")]
     pub order_type: ApiOrderType,
     #[serde(rename = "sz")]
@@ -1112,6 +1116,9 @@ fn validate_place(request: &PlaceOrderRequest) -> Result<(), OkxError> {
     validate_client_id("clOrdId", &request.client_order_id)?;
     validate_nonempty("sz", &request.size)?;
     validate_nonempty("px", &request.price)?;
+    if request.reduce_only.is_some() && (request.position_side != ApiPositionSide::Net || request.reduce_only != Some(true)) {
+        return Err(OkxError::Config("reduceOnly requires confirmed net-mode reduction".to_owned()));
+    }
     for attached in &request.attached_algo_orders {
         validate_client_id("attachAlgoClOrdId", &attached.client_order_id)?;
         if !attached.take_profit_trigger_price.is_empty()
@@ -1409,6 +1416,7 @@ mod tests {
             client_order_id: "okx01234567890123456789012345678".to_owned(),
             side: ApiOrderSide::Buy,
             position_side: ApiPositionSide::Long,
+            reduce_only: None,
             order_type: ApiOrderType::Limit,
             size: "1.25".to_owned(),
             price: "0.10000".to_owned(),
@@ -1427,6 +1435,21 @@ mod tests {
         assert_eq!(encoded["sz"], "1.25");
         assert_eq!(encoded["px"], "0.10000");
         assert!(encoded.get("reduceOnly").is_none());
+    }
+
+    #[test]
+    fn net_mode_open_and_reduce_only_payloads_are_unambiguous() {
+        let mut opening = place();
+        opening.position_side = ApiPositionSide::Net;
+        let encoded = serde_json::to_value(&opening).unwrap();
+        assert_eq!(encoded["posSide"], "net");
+        assert!(encoded.get("reduceOnly").is_none());
+        opening.reduce_only = Some(true);
+        let encoded = serde_json::to_value(&opening).unwrap();
+        assert_eq!(encoded["reduceOnly"], true);
+        validate_place(&opening).unwrap();
+        opening.position_side = ApiPositionSide::Long;
+        assert!(validate_place(&opening).is_err(), "hedge order may not misstate reduceOnly");
     }
 
     #[test]
