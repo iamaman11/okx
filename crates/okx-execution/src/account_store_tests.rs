@@ -4,6 +4,70 @@ use std::sync::atomic::{AtomicU64, Ordering};
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[test]
+fn r4_campaign_zero_only_after_all_six_incremental_money_cursors_complete() {
+    let s = store();
+    let campaign = format!("sha256:{}", "c".repeat(64));
+    let from = 2_i64;
+    let through = 80_i64;
+    assert!(s.seal_captured_empty_campaign(&campaign, from, through).is_err());
+    for (source, part) in [
+        ("fills", "SPOT"),
+        ("fills", "MARGIN"),
+        ("fills", "SWAP"),
+        ("fills", "FUTURES"),
+        ("fills", "OPTION"),
+        ("bills", "account"),
+    ] {
+        s.connection.execute(
+            "INSERT INTO source_cursors(source,stream_partition,cursor,watermark,generation,coverage_gaps)
+             VALUES(?1,?2,'',100,1,'')",
+            rusqlite::params![source, part],
+        ).unwrap();
+    }
+    let proof = s.seal_captured_empty_campaign(&campaign, from, through).unwrap();
+    assert_eq!(proof.len(), 64);
+    assert_eq!(
+        s.seal_captured_empty_campaign(&campaign, from, through).unwrap(),
+        proof,
+        "same committed cursor receipt must be idempotent"
+    );
+    assert!(s.verify_captured_empty_window(from, through).is_ok());
+    // Internal transfers are independent of entry turnover.
+    s.connection.execute(
+        "INSERT INTO cash_flows(event_id,kind,currency,amount,time,source_ref)
+         VALUES('outside-entry','WITHDRAWAL','USDT','-1',20,'authenticated-transfer')",
+        [],
+    ).unwrap();
+    assert!(s.verify_captured_empty_window(from, through).is_ok());
+    s.connection.execute(
+        "UPDATE source_cursors SET coverage_gaps='BACKFILL_PENDING'
+         WHERE source='fills' AND stream_partition='MARGIN'",
+        [],
+    ).unwrap();
+    assert_eq!(
+        s.verify_captured_empty_window(from, through),
+        Err(StoreError::Invalid("ENTRY_BASELINE_CAPTURE_PENDING"))
+    );
+    s.connection.execute(
+        "UPDATE source_cursors SET coverage_gaps=''
+         WHERE source='fills' AND stream_partition='MARGIN'",
+        [],
+    ).unwrap();
+    s.connection.execute(
+        "INSERT INTO fills(fill_id,instrument_id,trade_id,exchange_order_id,
+          intent_id,time,qty,price,fee,currency,side)
+         VALUES('outside','BTC-USDT-SWAP','trade','ord',NULL,50,
+                '1','100','-0.05','USDT','buy')",
+        [],
+    ).unwrap();
+    assert_eq!(
+        s.verify_captured_empty_window(from, through),
+        Err(StoreError::Invalid("BASELINE_RECONCILIATION_REQUIRED")),
+        "an external fill is never silently treated as zero historical spend"
+    );
+}
+
+#[test]
 fn e1_campaign_empty_opening_sql_receipt_is_durable_and_immutable() {
     let s = store();
     let campaign = format!("sha256:{}", "c".repeat(64));
