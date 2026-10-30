@@ -68,20 +68,20 @@ const causal_proof={reserve_anchor:held.entry.key,
     started_after_held_ms:2,completed_after_held_ms:20}))};
 const invalid=await beginRiskPost(sa,held.entry.key,p,1,d,{connection_generation:77,expected_book_sequence:1,census:later,source_proof:native,causal_proof:{...causal_proof,account_reads:[...causal_proof.account_reads].reverse()},now_ms:now+2});
 check(invalid.status==="DENIED"&&invalid.reason==="INVALID_NATIVE_POST_FENCE","wrong order of cohort readings cannot authorize POST");
-const begun=await beginRiskPost(sa,held.entry.key,p,1,d,{connection_generation:77,expected_book_sequence:1,census:later,source_proof:native,causal_proof,now_ms:now+2});
+const begun=await beginRiskPost(sa,held.entry.key,p,1,d,{connection_generation:77,expected_book_sequence:2,census:later,source_proof:native,causal_proof,now_ms:now+2});
 check(begun.status==="POST_AUTHORIZED","same-content fresh causal proof with -60s host skew");
 const partial=await settleEntrySpend(sa,held.entry.key,p,{
- connection_generation:77,expected_book_sequence:2,cumulative_entry_usd:"0.5",
- revision:1,source_digest:d});
-check(partial.status==="UPDATED"&&partial.book_sequence===3,
- "partial fill moves exactly its consumed entry money from reserved to spent");
-const partialReplay=await settleEntrySpend(sa,held.entry.key,p,{
  connection_generation:77,expected_book_sequence:3,cumulative_entry_usd:"0.5",
  revision:1,source_digest:d});
-check(partialReplay.status==="UPDATED"&&partialReplay.book_sequence===3,
+check(partial.status==="UPDATED"&&partial.book_sequence===4,
+ "partial fill moves exactly its consumed entry money from reserved to spent");
+const partialReplay=await settleEntrySpend(sa,held.entry.key,p,{
+ connection_generation:77,expected_book_sequence:4,cumulative_entry_usd:"0.5",
+ revision:1,source_digest:d});
+check(partialReplay.status==="UPDATED"&&partialReplay.book_sequence===4,
  "lost settlement acknowledgement cannot charge entry twice");
 const conflicting=await settleEntrySpend(sa,held.entry.key,p,{
- connection_generation:77,expected_book_sequence:3,cumulative_entry_usd:"0.6",
+ connection_generation:77,expected_book_sequence:4,cumulative_entry_usd:"0.6",
  revision:1,source_digest:d});
 check(conflicting.status==="DENIED"&&conflicting.reason==="ENTRY_SETTLEMENT_REVISION_CONFLICT",
  "same revision cannot substitute a different cumulative spend");
@@ -92,7 +92,7 @@ check(mid.consumed_usd==="0.5"&&mid.reserved_usd==="1.5",
 check((await beginRiskPost(sa,held.entry.key,p,1,d,{connection_generation:77,expected_book_sequence:2,census:later,source_proof:native,causal_proof,now_ms:now+3})).status==="DENIED","no duplicate POST fence");
 check((await inspectRisk(sa,held.entry.key))?.entry.state==="POSTED","addressed readback");
 const terminalCensus={...census,occupied:census.occupied.map(v=>({...v,cumulative_loss_usd:v.account_key===accountKey(request)?"2":"0"})),source_digest:a,generated_at_ms:now+4,source_read_floor_ms:now+4};
-check((await transitionRisk(sa,held.entry.key,p,"RELEASED",d,{connection_generation:77,expected_book_sequence:3,terminal:{census:terminalCensus,source_proof:{...native,source_digest:a},ledger:{account_uid:a,run_id:base.run_id,intent_id:request.intent_id,state:"FILLED",record_digest:p,cumulative_loss_usd:"2",remaining_exposure_usdt:"0",cumulative_entry_usd:"1.5",entry_settlement_revision:2,entry_settlement_digest:d},now_ms:now+5}})).status==="UPDATED","terminal exact release consumes cumulative losses");
+check((await transitionRisk(sa,held.entry.key,p,"RELEASED",d,{connection_generation:77,expected_book_sequence:4,terminal:{census:terminalCensus,source_proof:{...native,source_digest:a},ledger:{account_uid:a,run_id:base.run_id,intent_id:request.intent_id,state:"FILLED",record_digest:p,cumulative_loss_usd:"2",remaining_exposure_usdt:"0",cumulative_entry_usd:"1.5",entry_settlement_revision:2,entry_settlement_digest:d},now_ms:now+5}})).status==="UPDATED","terminal exact release consumes cumulative losses");
 check((await readRiskBook(sa))?.consumed_loss_usd==="2"&&(await readRiskBook(sa))?.occupied_usdt==="0","loss survives restart and release");
 const finalEntry=(await readRiskBook(sa))!.entry_budget!;
 check(finalEntry.consumed_usd==="1.5"&&finalEntry.reserved_usd==="0",
@@ -138,7 +138,7 @@ check((await releaseUnsentRisk(unsent,rescue.entry.key,p,1,76,receipt)).status==
   "stale authenticated generation cannot release");
 check((await releaseUnsentRisk(unsent,rescue.entry.key,p,1,77,
   {...receipt,plan_hash:d})).status==="DENIED","wrong plan cannot release");
-check((await releaseUnsentRisk(unsent,rescue.entry.key,p,1,77,receipt)).status==="UPDATED",
+check((await releaseUnsentRisk(unsent,rescue.entry.key,p,2,77,receipt)).status==="UPDATED",
   "exact no-send SQL proof releases HELD");
 check((await releaseUnsentRisk(unsent,rescue.entry.key,p,2,77,receipt)).status==="DENIED",
   "central release tombstone prevents repeated budget mutation");
@@ -160,11 +160,11 @@ const f4proof={reserve_anchor:postRes.entry.key,native_incarnation:"a".repeat(32
     account_key,private_generation:77,source_read_id:"e".repeat(64),
     content_digest:d,started_after_held_ms:2,completed_after_held_ms:14}))};
 const f4=await beginRiskPost(postUnsent,postRes.entry.key,p,1,d,{
-  connection_generation:77,expected_book_sequence:1,census:f4read,
+  connection_generation:77,expected_book_sequence:2,census:f4read,
   source_proof:native,causal_proof:f4proof,now_ms:now+2});
 check(f4.status==="POST_AUTHORIZED","F4 central post authorized");
 const f4receipt={...receipt,reservation_key:postRes.entry.key,intent_id:"intent_f4_unsent"};
-check((await releaseUnsentRisk(postUnsent,postRes.entry.key,p,2,77,f4receipt)).status==="UPDATED",
+check((await releaseUnsentRisk(postUnsent,postRes.entry.key,p,3,77,f4receipt)).status==="UPDATED",
  "F4 central POSTED + native never-claimed release is safe");
 check((await beginRiskPost(postUnsent,postRes.entry.key,p,1,d,{
  connection_generation:77,expected_book_sequence:3,census:f4read,source_proof:native,
@@ -184,17 +184,17 @@ const lateProof={...receipt,reservation_key:lateKey,intent_id:lateIntent};
 check((await releaseUnsentRisk(neverArrived,lateKey,p,0,77,
   {...lateProof,account_key:"okx:real:"+b})).status==="DENIED",
   "wrong native account cannot abort another risk identity");
-check((await releaseUnsentRisk(neverArrived,lateKey,p,0,77,lateProof)).status==="UPDATED",
+check((await releaseUnsentRisk(neverArrived,lateKey,p,2,77,lateProof)).status==="UPDATED",
   "SQL no-send fences an absent reservation with initial sequence zero");
 const lateAttempt=await reserveRisk(neverArrived,policy,census,lateRequest,native);
 check(lateAttempt.status==="DENIED"&&lateAttempt.reason==="RESERVE_FENCED_NO_SEND",
   "a delayed exchange-independent RESERVE never mints risk after the no-send fence");
 const absentBook=await readRiskBook(neverArrived);
 check(absentBook?.occupied_usdt==="0"&&absentBook?.consumed_loss_usd==="0"&&
-  absentBook?.sequence===1,"negative fence only advances book CAS, never consumes risk");
+  absentBook?.sequence===2,"negative fence only advances book CAS, never consumes risk");
 check((await releaseUnsentRisk(neverArrived,lateKey,p,1,77,lateProof)).status==="UPDATED",
   "repeated no-send fence is idempotent under new CAS sequence");
-check((await readRiskBook(neverArrived))?.sequence===1,
+check((await readRiskBook(neverArrived))?.sequence===2,
   "idempotent absent release does not advance central book");
 check((await releaseUnsentRisk(neverArrived,lateKey,p,1,77,
   {...lateProof,record_digest:d})).status==="DENIED",
@@ -210,7 +210,7 @@ for(const abortFirst of [true,false]){
   const requestRace={...request,intent_id:id};
   const key=[base.venue,"real",a,base.run_id,id].map(v=>v.length+":"+v).join("");
   const sqlProof={...receipt,reservation_key:key,intent_id:id};
-  const release=()=>releaseUnsentRisk(racing,key,p,0,77,sqlProof);
+  const release=()=>releaseUnsentRisk(racing,key,p,1,77,sqlProof);
   const reserve=()=>reserveRisk(racing,policy,census,requestRace,native);
   const first=abortFirst?await Promise.all([release(),reserve()]):await Promise.all([reserve(),release()]);
   const returnedRelease=abortFirst?first[0]:first[1];

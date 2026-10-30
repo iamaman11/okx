@@ -193,10 +193,11 @@ export async function installCampaignEntryProof(tx:any,source:{
      meta.entry_budget!==undefined||meta.installation_id!==governance.installation_id||
      meta.occupied_usdt!=="0"||meta.occupied_usd!=="0"||
      source.campaign_id!==governance.campaign_id||
-     units(governance.campaign_entry_limit_usd)!>0n||
+     units(governance.campaign_entry_limit_usd)===null||
+     units(governance.campaign_entry_limit_usd)!<=0n||
      units(source.limit_usd)!==units(governance.campaign_entry_limit_usd)||
      !HEX.test(source.source_digest)||!Number.isSafeInteger(source.as_of_ms)||
-     source.as_of_ms<=0||units(source.limit_usd)!>0n||
+     source.as_of_ms<=0||units(source.limit_usd)!<=0n||
      units(source.consumed_usd)===null||
      units(source.consumed_usd)!>units(source.limit_usd)!)return false;
   await tx.put(KEY,{...meta,entry_budget:{

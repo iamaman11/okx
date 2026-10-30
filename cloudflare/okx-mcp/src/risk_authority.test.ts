@@ -131,7 +131,7 @@ check((await handleNativeRiskCommand(s,session,{schema:"okx.risk-command/v1",com
          started_after_held_ms:5,completed_after_held_ms:20}]}}
  });
  const first=await handleNativeRiskCommand(t,session,post("human",0,"a".repeat(64),3),now+2);
- check(first.status==="POST_AUTHORIZED"&&first.risk_book_sequence===4,
+ check(first.status==="POST_AUTHORIZED"&&first.risk_book_sequence===5,
    "fresh verified all-account census permits one exact central post fence");
  check((await handleNativeRiskCommand(t,session,
    post("human_retry",0,"a".repeat(64),4),now+3)).status==="DENIED",
