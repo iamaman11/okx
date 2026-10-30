@@ -12,6 +12,8 @@ interface Result {
   schema:typeof RESULT_SCHEMA;command_id:string;status:ResultStatus;
   account_budget?:{account_key:string;active_reservations:number;occupied_usd:string;cumulative_loss_usd:string;latest_activity_ms:number};
   budget?:{campaign_limit_usd:string;consumed_loss_usd:string;reserved_loss_usd:string;remaining_loss_usd:string;occupied_modelled_loss_usdt:string;source_as_of_ms:number|null;
+    /** Immutable installation-owned inception; null on legacy books. */
+    campaign_origin?:{campaign_id:string;installation_id:string;started_at_ms:number}|null;
     /** Null means opening finance history NOT PROVEN, not a zero spend. */
     entry_budget?:{campaign_id:string;limit_usd:string;consumed_usd:string;reserved_usd:string;remaining_usd:string;opening_source_digest:string;opening_as_of_ms:number}|null};
   reason:string|null;reservation_key:string|null;
@@ -87,6 +89,7 @@ export async function handleNativeRiskCommand(
     const remaining=units(meta.campaign_limit_usd)!-units(meta.consumed_loss_usd)!-units(meta.occupied_usd)!;
     return {schema:RESULT_SCHEMA,command_id:id,status:"OBSERVED",reason:null,reservation_key:null,risk_book_sequence:meta.sequence,policy_revision:installation.revision,existing_modelled_loss_usdt:null,reservation_state:null,
       budget:{campaign_limit_usd:meta.campaign_limit_usd,consumed_loss_usd:meta.consumed_loss_usd,reserved_loss_usd:meta.occupied_usd,remaining_loss_usd:amount(remaining<0n?0n:remaining),occupied_modelled_loss_usdt:meta.occupied_usdt,source_as_of_ms:meta.source_as_of_ms||null,
+        campaign_origin:meta.campaign_origin??null,
         entry_budget:meta.entry_budget?{
           campaign_id:meta.entry_budget.campaign_id,limit_usd:meta.entry_budget.limit_usd,
           consumed_usd:meta.entry_budget.consumed_usd,reserved_usd:meta.entry_budget.reserved_usd,
