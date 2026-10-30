@@ -230,15 +230,38 @@ impl TradeService {
                     .intent_id
                     .clone()
                     .ok_or("STORAGE_RECOVERY_LOT_OWNER_MISSING")?;
-                let protection = r
+                let (protection, intent) = r
                     .execution
                     .store
-                    .call(deadline(), move |s| s.protection(&id))
+                    .call(deadline(), move |s| {
+                        Ok((s.protection(&id)?, s.intent(&id)?))
+                    })
                     .await
-                    .map_err(err)?
-                    .ok_or("STORAGE_RECOVERY_PROTECTION_MISSING")?;
-                if protection.quantity < lot.remaining_qty {
+                    .map_err(err)?;
+                let protection = protection.ok_or("STORAGE_RECOVERY_PROTECTION_MISSING")?;
+                let intent = intent.ok_or("STORAGE_RECOVERY_PROTECTION_INTENT_MISSING")?;
+                if protection.quantity < lot.remaining_qty
+                    || intent.plan.position_side != position.position_side
+                {
                     return Err("STORAGE_RECOVERY_PROTECTION_INCOMPLETE".into());
+                }
+                // Inventory proves only that an algo ID exists. It cannot
+                // attest a live trigger, correct side or current quantity.
+                // Use the same exact venue-source gate as trade.status.
+                let client = intent.client_order_id
+                    .get(..31)
+                    .map(|v| format!("s{v}"))
+                    .ok_or("STORAGE_RECOVERY_PROTECTION_CLIENT_INVALID")?;
+                let algo = r
+                    .execution
+                    .trade
+                    .algo_order_by_client_id(&client)
+                    .await
+                    .map_err(|_| "STORAGE_RECOVERY_PROTECTION_READBACK_UNAVAILABLE")?;
+                super::reconcile::verified_live_protection(&intent, qty, &algo)
+                    .map_err(|_| "STORAGE_RECOVERY_PROTECTION_LIVE_UNVERIFIED")?;
+                if algo.algo_order_id != protection.algo_id {
+                    return Err("STORAGE_RECOVERY_PROTECTION_IDENTITY_MISMATCH".into());
                 }
                 managed.insert(protection.algo_id);
             }
