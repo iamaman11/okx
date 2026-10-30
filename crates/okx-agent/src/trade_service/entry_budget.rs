@@ -151,6 +151,13 @@ pub(super) fn verified_entry_fee_rate(
     if exchange_time <= 0 || exchange_time > observed_at_ms {
         return Err("ENTRY_FEE_EXCHANGE_TIME_INVALID".into());
     }
+    if !crate::config::evidence_fresh(
+        exchange_time,
+        observed_at_ms,
+        crate::config::ACCOUNT_MAX_AGE_MS,
+    ) {
+        return Err("ENTRY_FEE_EXCHANGE_TIME_STALE".into());
+    }
     let canonical = serde_json::to_vec(&(
         &fee.instrument_id,
         &fee.reference_generation,
@@ -418,6 +425,15 @@ mod tests {
                 &changed, "BTC-USDT-SWAP", "ref_generation", now_ms,
             ),
             Err("ENTRY_FEE_EXCHANGE_TIME_INVALID".into())
+        );
+        changed = fee.clone();
+        changed.exchange_timestamp_ms =
+            (now_ms - crate::config::ACCOUNT_MAX_AGE_MS - 1).to_string();
+        assert_eq!(
+            verified_entry_fee_rate(
+                &changed, "BTC-USDT-SWAP", "ref_generation", now_ms,
+            ),
+            Err("ENTRY_FEE_EXCHANGE_TIME_STALE".into())
         );
         changed = fee.clone();
         changed.source_received_at = "invalid".into();

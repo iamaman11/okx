@@ -245,6 +245,13 @@ impl TradeService {
                 return Err("ENTRY_QUOTE_ACCOUNT_IDENTITY_MISMATCH".into());
             }
             let fx = Self::usd_conversion(&quote_snapshot)?;
+            let fx_time = i64::try_from(fx.observed_at_ms)
+                .map_err(|_| "ENTRY_FX_TIMESTAMP_INVALID")?;
+            if !crate::config::evidence_fresh(
+                fx_time, now(), crate::config::ACCOUNT_MAX_AGE_MS
+            ) {
+                return Err("ENTRY_FX_SOURCE_STALE".into());
+            }
             let quote = entry_budget::quote(
                 plan.quantity, plan.contract_value, plan.limit_price,
                 rate, dec(&fx.usd_per_usdt)?

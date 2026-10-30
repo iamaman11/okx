@@ -72,6 +72,16 @@ fn e1_sql_known_quote_is_immutable_scoped_and_never_all_in_permission() {
     assert_eq!(s.central_receipt(&i.intent_id).unwrap().is_some(), true);
     proof.observed_at = 9;
     assert!(s.bind_entry_quote(&proof).is_err());
+    let file = s.path.clone();
+    let owner = s.meta.clone();
+    drop(s);
+    let reopened = AccountStore::open_existing(&file, &owner.account_key,
+        &owner.installation_id).unwrap();
+    assert_eq!(reopened.entry_quote(&i.intent_id).unwrap().unwrap().total_usd,
+        Decimal::new(10005, 2));
+    assert!(reopened.connection.execute(
+        "DELETE FROM operation_receipts WHERE operation_id='entry-quote:intent'", []
+    ).is_err());
 }
 #[test]
 fn e2_census_retains_terminal_intents_until_central_release() {
