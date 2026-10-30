@@ -37,10 +37,7 @@ pub(super) enum EntryCostEvidence {
 /// is necessary, not sufficient, for a venue attestation: the native source
 /// owner must independently bind the digest to the actual captured fact.
 fn verified_cost_source(basis: &str, digest: &str) -> Result<(), String> {
-    if basis.is_empty()
-        || digest.len() != 64
-        || !digest.bytes().all(|ch| ch.is_ascii_hexdigit())
-    {
+    if basis.is_empty() || digest.len() != 64 || !digest.bytes().all(|ch| ch.is_ascii_hexdigit()) {
         return Err("ENTRY_COST_SOURCE_UNVERIFIED".into());
     }
     Ok(())
@@ -59,7 +56,10 @@ impl EntryCostEvidence {
                 verified_cost_source(basis, source_digest)?;
                 Ok(Some(*upper_usd))
             }
-            Self::NotApplicable { basis, source_digest } => {
+            Self::NotApplicable {
+                basis,
+                source_digest,
+            } => {
                 verified_cost_source(basis, source_digest)?;
                 Ok(Some(Decimal::ZERO))
             }
