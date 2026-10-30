@@ -94,6 +94,7 @@ pub struct CaptureCompleted {
 
 struct CaptureCursors {
     spot: Option<SourceCursor>,
+    margin: Option<SourceCursor>,
     swap: Option<SourceCursor>,
     futures: Option<SourceCursor>,
     options: Option<SourceCursor>,
@@ -318,7 +319,7 @@ pub(crate) async fn capture_account_sources_traced(
     if let Some((store, id)) = trace.as_ref() {
         store.phase_started(*id, "observer_and_cursors");
     }
-    // Read all five history cursors and the opening time in ONE existing
+    // Read all six monetary history cursors and the opening time in ONE existing
     // AccountStore job, concurrently with the authenticated venue snapshot.
     // No cursor is advanced here; the individual page ingests still own
     // the durable source coverage and failure/replay semantics.
@@ -337,6 +338,7 @@ pub(crate) async fn capture_account_sources_traced(
                         s.meta().initialized_at,
                         CaptureCursors {
                             spot: s.cursor("fills", "SPOT")?,
+                            margin: s.cursor("fills", "MARGIN")?,
                             swap: s.cursor("fills", "SWAP")?,
                             futures: s.cursor("fills", "FUTURES")?,
                             options: s.cursor("fills", "OPTION")?,
@@ -410,6 +412,18 @@ pub(crate) async fn capture_account_sources_traced(
             execution,
             private_ws,
             FillHistorySource {
+                partition: "MARGIN",
+                cursor: cursors.margin,
+            },
+            t0,
+            now,
+            generation,
+            &fx
+        ),
+        capture_fills(
+            execution,
+            private_ws,
+            FillHistorySource {
                 partition: "SWAP",
                 cursor: cursors.swap,
             },
@@ -460,12 +474,12 @@ pub(crate) async fn capture_account_sources_traced(
             history_result.is_ok(),
         );
     }
-    let (spot, swap, futures, options, bills) = history_result?;
+    let (spot, margin, swap, futures, options, bills) = history_result?;
     let history_and_ingest_ms = phase_elapsed_ms(history_started);
     if private_ws.status().await.connection_generation != initial.connection_generation {
         return Err(invalid("SOURCE_GENERATION_CHANGED"));
     }
-    let complete = spot && swap && futures && options && bills;
+    let complete = spot && margin && swap && futures && options && bills;
     let balances = snapshot.balance.details.clone();
     let usd_equity = d(&snapshot.balance.total_equity_usd)?;
     // Validate all supplied marks even though no unproven strategy capital
@@ -740,6 +754,7 @@ async fn capture_fills(
         .map_err(|_| {
             invalid(match partition {
                 "SPOT" => "SPOT_FILLS_SOURCE_UNAVAILABLE",
+                "MARGIN" => "MARGIN_FILLS_SOURCE_UNAVAILABLE",
                 "SWAP" => "SWAP_FILLS_SOURCE_UNAVAILABLE",
                 "FUTURES" => "FUTURES_FILLS_SOURCE_UNAVAILABLE",
                 "OPTION" => "OPTION_FILLS_SOURCE_UNAVAILABLE",
