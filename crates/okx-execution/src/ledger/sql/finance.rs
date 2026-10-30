@@ -565,6 +565,8 @@ impl AccountStore {
                         || kind.starts_with("7:")
                         || kind == "1:11"
                         || kind == "1:12"
+                        || kind.ends_with(":173")
+                        || kind.ends_with(":174")
                 })
                 || proof.bill_currency.as_deref() != Some(currency.as_str())
                 || !proof.bill_linked
