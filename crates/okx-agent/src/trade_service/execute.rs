@@ -803,7 +803,7 @@ impl TradeService {
                             .execution
                             .store
                             .call(deadline(), move |s| {
-                                Ok((s.protection(&id)?, s.central_receipt(&id)?))
+                                Ok((s.protection(&id)?, s.active_central_receipt(&id)?))
                             })
                             .await
                             .map_err(err)?;
@@ -858,7 +858,7 @@ impl TradeService {
                         active
                             .into_iter()
                             .map(|intent| {
-                                let central = s.central_receipt(&intent.intent_id)?;
+                                let central = s.active_central_receipt(&intent.intent_id)?;
                                 Ok((intent, central))
                             })
                             .collect::<okx_execution::StoreResult<Vec<_>>>()

@@ -272,6 +272,23 @@ impl AccountStore {
         })
         .transpose()
     }
+    /// Only a central reservation still charged to the risk book can cover
+    /// exchange exposure. A historically retained RELEASED SQL receipt is
+    /// not permission to consider its position/order centrally reserved.
+    pub fn active_central_receipt(&self, id: &str) -> StoreResult<Option<CentralReceipt>> {
+        let state: Option<String> = self.connection
+            .query_row(
+                "SELECT state FROM risk_receipts WHERE intent_id=?1",
+                [id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if state.as_deref().is_some_and(risk_receipt_covers_exposure) {
+            self.central_receipt(id)
+        } else {
+            Ok(None)
+        }
+    }
     pub fn by_exchange_order_id(&self, key: &str) -> StoreResult<Option<StoredIntent>> {
         self.find_intent("exchange_order_id", key)
     }
@@ -710,4 +727,31 @@ impl AccountStore {
             .collect()
     }
     // Cache an already-authorized revision. This grants no new financial authority.
+}
+
+/// SQL risk receipt state is read under the existing single AccountStore owner.
+fn risk_receipt_covers_exposure(state: &str) -> bool {
+    matches!(
+        state,
+        "HELD" | "POSTED" | "UNKNOWN" | "OPEN" | "TERMINAL_PENDING_CENTRAL"
+    )
+}
+
+#[cfg(test)]
+mod active_receipt_tests {
+    use super::*;
+
+    #[test]
+    fn released_or_no_send_receipt_never_covers_open_exposure() {
+        for state in [
+            "HELD", "POSTED", "UNKNOWN", "OPEN", "TERMINAL_PENDING_CENTRAL",
+        ] {
+            assert!(risk_receipt_covers_exposure(state), "{state}");
+        }
+        for state in [
+            "RELEASED", "UNSENT_PENDING_CENTRAL", "", "CORRUPT", "PREPARED",
+        ] {
+            assert!(!risk_receipt_covers_exposure(state), "{state}");
+        }
+    }
 }
