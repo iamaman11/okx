@@ -5213,7 +5213,9 @@ fn f1_fill_fee_with_bill_id_is_verified_before_bill_history_and_never_doubled() 
             finance: vec![unproven.clone()],
             ..Default::default()
         }),
-        Err(StoreError::Invalid("STRATEGY_NAV_ECONOMIC_SOURCE_UNVERIFIED"))
+        Err(StoreError::Invalid(
+            "STRATEGY_NAV_ECONOMIC_SOURCE_UNVERIFIED"
+        ))
     ));
     let verified_reversal = FinanceEntry {
         entry_id: "f1-verified-reversal".into(),
