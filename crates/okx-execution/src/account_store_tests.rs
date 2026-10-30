@@ -84,10 +84,13 @@ fn r4_campaign_zero_only_after_all_six_incremental_money_cursors_complete() {
             [],
         )
         .unwrap();
-    assert!(matches!(
-        s.verify_captured_empty_window(from, through),
-        Err(StoreError::Invalid("BASELINE_RECONCILIATION_REQUIRED"))
-    ), "an external fill is never silently treated as zero historical spend");
+    assert!(
+        matches!(
+            s.verify_captured_empty_window(from, through),
+            Err(StoreError::Invalid("BASELINE_RECONCILIATION_REQUIRED"))
+        ),
+        "an external fill is never silently treated as zero historical spend"
+    );
 }
 
 #[test]
