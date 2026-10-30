@@ -303,9 +303,35 @@ impl TradeService {
                 &entry_receipt,
                 ceiling,
             )?;
+            // The native source attestation and its Worker RESERVE upper
+            // must survive a crash together with the same immutable quote.
+            // No admission operation receipt exists for an Unknown cost.
+            let entry_admission = verified_entry.as_ref().map(|(upper, source_digest)| {
+                let serialized = serde_json::to_vec(&entry_receipt)
+                    .map_err(|_| "ENTRY_ADMISSION_QUOTE_SERIALIZATION_FAILED")?;
+                Ok::<okx_execution::EntryAdmissionEvidence, String>(
+                    okx_execution::EntryAdmissionEvidence {
+                        schema: "okx.entry-admission/v1".into(),
+                        account_key: entry_receipt.account_key.clone(),
+                        installation_id: entry_receipt.installation_id.clone(),
+                        intent_id: entry_receipt.intent_id.clone(),
+                        plan_hash: entry_receipt.plan_hash.clone(),
+                        quote_digest: format!("{:x}", Sha256::digest(serialized)),
+                        entry_upper_usd: *upper,
+                        entry_proof_digest: source_digest.clone(),
+                        observed_at: entry_receipt.observed_at,
+                    },
+                )
+            }).transpose()?;
             r.execution
                 .store
-                .call(until, move |s| s.bind_entry_quote(&entry_receipt))
+                .call(until, move |s| {
+                    s.bind_entry_quote(&entry_receipt)?;
+                    if let Some(proof) = entry_admission {
+                        s.bind_entry_admission(&proof)?;
+                    }
+                    Ok(())
+                })
                 .await
                 .map_err(err)?;
             let census = self.census(&state).await?;
