@@ -184,7 +184,7 @@ const lateProof={...receipt,reservation_key:lateKey,intent_id:lateIntent};
 check((await releaseUnsentRisk(neverArrived,lateKey,p,0,77,
   {...lateProof,account_key:"okx:real:"+b})).status==="DENIED",
   "wrong native account cannot abort another risk identity");
-check((await releaseUnsentRisk(neverArrived,lateKey,p,2,77,lateProof)).status==="UPDATED",
+check((await releaseUnsentRisk(neverArrived,lateKey,p,1,77,lateProof)).status==="UPDATED",
   "SQL no-send fences an absent reservation with initial sequence zero");
 const lateAttempt=await reserveRisk(neverArrived,policy,census,lateRequest,native);
 check(lateAttempt.status==="DENIED"&&lateAttempt.reason==="RESERVE_FENCED_NO_SEND",
@@ -192,7 +192,7 @@ check(lateAttempt.status==="DENIED"&&lateAttempt.reason==="RESERVE_FENCED_NO_SEN
 const absentBook=await readRiskBook(neverArrived);
 check(absentBook?.occupied_usdt==="0"&&absentBook?.consumed_loss_usd==="0"&&
   absentBook?.sequence===2,"negative fence only advances book CAS, never consumes risk");
-check((await releaseUnsentRisk(neverArrived,lateKey,p,1,77,lateProof)).status==="UPDATED",
+check((await releaseUnsentRisk(neverArrived,lateKey,p,2,77,lateProof)).status==="UPDATED",
   "repeated no-send fence is idempotent under new CAS sequence");
 check((await readRiskBook(neverArrived))?.sequence===2,
   "idempotent absent release does not advance central book");

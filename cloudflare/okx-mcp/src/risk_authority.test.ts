@@ -130,7 +130,7 @@ check((await handleNativeRiskCommand(s,session,{schema:"okx.risk-command/v1",com
          source_read_id:"b".repeat(64),content_digest:hash,
          started_after_held_ms:5,completed_after_held_ms:20}]}}
  });
- const first=await handleNativeRiskCommand(t,session,post("human",0,"a".repeat(64),3),now+2);
+ const first=await handleNativeRiskCommand(t,session,post("human",0,"a".repeat(64),4),now+2);
  check(first.status==="POST_AUTHORIZED"&&first.risk_book_sequence===5,
    "fresh verified all-account census permits one exact central post fence");
  check((await handleNativeRiskCommand(t,session,
@@ -148,7 +148,7 @@ check((await handleNativeRiskCommand(s,session,{schema:"okx.risk-command/v1",com
    schema:"okx.risk-command/v1",command_id:"unsent_chat_00001",
    installation_id:initial.installation_id,
    action:{action:"RELEASE_UNSENT",reservation_key:admitted[1].reservation_key,
-     plan_sha256:"b".repeat(64),expected_risk_book_sequence:4,
+     plan_sha256:"b".repeat(64),expected_risk_book_sequence:5,
      proof:{reservation_key:admitted[1].reservation_key,
        account_key:account.account_key,intent_id:"intent_chat_0001",
        plan_hash:"b".repeat(64),request_hash:"e".repeat(64),
