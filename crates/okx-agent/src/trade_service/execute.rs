@@ -294,6 +294,15 @@ impl TradeService {
                 conversion_received_at: fx.observed_at_ms as i64,
                 observed_at: now(),
             };
+            // This is the only bridge from immutable SQL pricing to
+            // central entry-spend authority. Until authenticated venue
+            // applicability and an independently bounded FX source exist,
+            // unproven_linear_quote produces no upper and no proof digest.
+            let verified_entry = entry_budget::reserve_entry_evidence(
+                &entry_budget::EntryCostProof::unproven_linear_quote(quote.clone()),
+                &entry_receipt,
+                ceiling,
+            )?;
             r.execution
                 .store
                 .call(until, move |s| s.bind_entry_quote(&entry_receipt))
@@ -319,11 +328,15 @@ impl TradeService {
                     plan_sha256: prepared.plan_hash.clone(),
                     requested_loss_usdt: exact(usdt),
                     requested_loss_usd: exact(usd),
-                    // A loss model is not a source-verified entry-debit bound.
-                    // Remain fail-closed until the same order carries full
-                    // venue spec/fees/FX/applicability proof in this contract.
-                    entry_upper_usd: None,
-                    entry_proof_digest: None,
+                    // Only the exact SQL-quote-bound ALL-IN proof may
+                    // authorize the independent entry-spend budget. An
+                    // Unknown dimension never substitutes zero or a quote.
+                    entry_upper_usd: verified_entry
+                        .as_ref()
+                        .map(|(upper, _)| exact(*upper)),
+                    entry_proof_digest: verified_entry
+                        .as_ref()
+                        .map(|(_, proof_digest)| proof_digest.clone()),
                     usd_conversion: conversion.clone(),
                     policy_revision: state.state.revision,
                     census,
@@ -1608,6 +1621,26 @@ mod tests {
             source_digest: "b".repeat(64),
             observed_at_ms: t as u64,
         };
+        let known = entry_budget::quote(
+            quote.quantity,
+            quote.contract_value,
+            quote.limit_price,
+            quote.fee_rate,
+            quote.usd_per_usdt,
+        )
+        .unwrap();
+        let unproven = entry_budget::EntryCostProof::unproven_linear_quote(known.clone());
+        assert_eq!(
+            entry_budget::reserve_entry_evidence(&unproven, &quote, dec("101").unwrap()),
+            Ok(None),
+            "a correctly priced SQL quote cannot invent margin, fees, borrowing or bounded FX"
+        );
+        let mut tampered = unproven;
+        tampered.quote.total_usd += Decimal::ONE;
+        assert_eq!(
+            entry_budget::reserve_entry_evidence(&tampered, &quote, dec("101").unwrap()),
+            Err("ENTRY_RESERVE_QUOTE_BINDING_MISMATCH".into())
+        );
         assert!(
             verify_post_held_entry_sources(&quote, &fee, "reference-1", Decimal::ONE, &fx, t + 1)
                 .is_ok()
