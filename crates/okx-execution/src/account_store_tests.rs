@@ -59,6 +59,8 @@ fn e1_sql_known_quote_is_immutable_scoped_and_never_all_in_permission() {
         intent_id: i.intent_id.clone(),
         plan_hash: i.plan_hash.clone(),
         quote_digest: format!("{:x}", sha2::Sha256::digest(original_quote)),
+        fx_upper_usd_per_usdt: Decimal::ONE,
+        other_entry_costs_upper_usd: Decimal::new(95, 2),
         entry_upper_usd: Decimal::from(101),
         entry_proof_digest: "a".repeat(64),
         observed_at: proof.observed_at,
@@ -87,6 +89,18 @@ fn e1_sql_known_quote_is_immutable_scoped_and_never_all_in_permission() {
     ));
     corrupted = admitted.clone();
     corrupted.entry_upper_usd = proof.total_usd - Decimal::ONE;
+    assert!(matches!(
+        s.bind_entry_admission(&corrupted),
+        Err(StoreError::Invalid("ENTRY_ADMISSION_SOURCE_UNVERIFIED"))
+    ));
+    corrupted = admitted.clone();
+    corrupted.fx_upper_usd_per_usdt = Decimal::new(99, 2);
+    assert!(matches!(
+        s.bind_entry_admission(&corrupted),
+        Err(StoreError::Invalid("ENTRY_ADMISSION_SOURCE_UNVERIFIED"))
+    ));
+    corrupted = admitted.clone();
+    corrupted.other_entry_costs_upper_usd = Decimal::ZERO;
     assert!(matches!(
         s.bind_entry_admission(&corrupted),
         Err(StoreError::Invalid("ENTRY_ADMISSION_SOURCE_UNVERIFIED"))
