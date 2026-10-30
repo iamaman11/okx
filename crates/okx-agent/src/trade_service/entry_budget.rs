@@ -229,12 +229,9 @@ impl EntryCostProof {
         conversion: &UsdConversion,
         observed_at_ms: i64,
     ) -> Result<Self, String> {
-        let source_at = i64::try_from(conversion.observed_at_ms)
-            .map_err(|_| "ENTRY_VALUATION_TIME_INVALID")?;
-        if source_at <= 0
-            || source_at > observed_at_ms
-            || observed_at_ms - source_at > 5_000
-        {
+        let source_at =
+            i64::try_from(conversion.observed_at_ms).map_err(|_| "ENTRY_VALUATION_TIME_INVALID")?;
+        if source_at <= 0 || source_at > observed_at_ms || observed_at_ms - source_at > 5_000 {
             return Err("ENTRY_VALUATION_SOURCE_STALE".into());
         }
         if conversion.source_digest.len() != 64
@@ -1104,8 +1101,7 @@ mod tests {
 
     #[test]
     fn r4_frozen_admission_fx_valuates_turnover_not_margin_twice() {
-        let quote = quote(d("8"), Decimal::ONE, Decimal::ONE, d("0.0005"), d("1.01"))
-            .unwrap();
+        let quote = quote(d("8"), Decimal::ONE, Decimal::ONE, d("0.0005"), d("1.01")).unwrap();
         assert_eq!(quote.notional_usdt, d("8"));
         assert_eq!(quote.fee_usdt, d("0.004"));
         assert_eq!(quote.total_usdt, d("8.004"));
@@ -1150,16 +1146,13 @@ mod tests {
 
     #[test]
     fn r4_candidate_valuation_is_fresh_and_still_no_post_permission() {
-        let cost = quote(d("8"), Decimal::ONE, Decimal::ONE, d("0.0005"), d("1.01"))
-            .unwrap();
+        let cost = quote(d("8"), Decimal::ONE, Decimal::ONE, d("0.0005"), d("1.01")).unwrap();
         let fx = UsdConversion {
             usd_per_usdt: "1.01".into(),
             source_digest: "a".repeat(64),
             observed_at_ms: 1_000,
         };
-        let candidate = EntryCostProof::source_valued_candidate(
-            cost.clone(), &fx, 1_100,
-        ).unwrap();
+        let candidate = EntryCostProof::source_valued_candidate(cost.clone(), &fx, 1_100).unwrap();
         assert_eq!(candidate.proven_upper_usd().unwrap(), None);
         assert_eq!(candidate.missing_reasons().len(), 4);
         assert_eq!(
