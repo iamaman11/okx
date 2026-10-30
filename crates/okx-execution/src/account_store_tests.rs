@@ -5195,6 +5195,56 @@ fn f1_fill_fee_with_bill_id_is_verified_before_bill_history_and_never_doubled() 
             .count(),
         1
     );
+    // A matching original is not authority to invent a profitable reversal.
+    let unproven = FinanceEntry {
+        entry_id: "f1-forged-reversal".into(),
+        economic_event_key: "correction:forged".into(),
+        component: "FEE".into(),
+        allocation_leg: "account".into(),
+        amount: Decimal::new(1, 2),
+        currency: "USDT".into(),
+        instance_id: Some("alpha".into()),
+        source_ref: "forged:reversal".into(),
+        time: 6,
+        reverses_entry_id: Some("f1-early-fill-fee".into()),
+    };
+    assert!(matches!(
+        s.ingest_page(&IngestPage {
+            finance: vec![unproven.clone()],
+            ..Default::default()
+        }),
+        Err(StoreError::Invalid("STRATEGY_NAV_ECONOMIC_SOURCE_UNVERIFIED"))
+    ));
+    let verified_reversal = FinanceEntry {
+        entry_id: "f1-verified-reversal".into(),
+        economic_event_key: "bill:f1-correction".into(),
+        source_ref: "bill:f1-correction".into(),
+        ..unproven
+    };
+    let correction = IngestPage {
+        bills: vec![Bill {
+            bill_id: "f1-correction".into(),
+            kind: "FEE_REVERSAL".into(),
+            time: 6,
+            amount: verified_reversal.amount,
+            currency: verified_reversal.currency.clone(),
+            economic_event_key: verified_reversal.economic_event_key.clone(),
+        }],
+        finance: vec![verified_reversal],
+        ..Default::default()
+    };
+    s.ingest_page(&correction).unwrap();
+    s.ingest_page(&correction).unwrap();
+    let balance: String = s
+        .connection
+        .query_row(
+            "SELECT amount FROM instance_finance_totals
+             WHERE instance_id='alpha' AND component='FEE' AND currency='USDT'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(balance, "0");
 }
 
 #[test]

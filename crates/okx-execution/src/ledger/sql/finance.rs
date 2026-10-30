@@ -42,7 +42,8 @@ fn verify_strategy_finance_source(db: &Connection, e: &FinanceEntry) -> StoreRes
                 "STRATEGY_NAV_ECONOMIC_SOURCE_UNVERIFIED",
             ));
         }
-        return Ok(());
+        // Matching the original does not authenticate the correction.
+        // Its own new bill/fill must also exist in this account ledger.
     }
     let found = if let Some(id) = e.source_ref.strip_prefix("fill:") {
         let fill: Option<(String, String, String, String, String)> = db
