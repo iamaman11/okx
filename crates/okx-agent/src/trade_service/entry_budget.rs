@@ -256,6 +256,122 @@ impl EntryCostProof {
         Ok(candidate)
     }
 
+    /// A narrow source-backed first production lane: authenticated 2-level
+    /// OKX linear USDT-settled swap, hedge account, no auto-borrow/liabilities,
+    /// buy with an exchange-enforced maximum price. It never applies to
+    /// short sells, market-without-price-cap, portfolio margin or other models.
+    /// We require enough own *available* USDT for the full notional + fee;
+    /// this deliberately over-collateralizes compared with leverage, rather
+    /// than treating small margin as permission to open large turnover.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn attest_linear_usdt_sources(
+        mut self,
+        plan: &IntentPlan,
+        order_type: &str,
+        instrument: &str,
+        rules: &okx_observation::InstrumentRulesSnapshot,
+        fees: &okx_observation::FeeScheduleSnapshot,
+        account: &okx_api::AccountConfig,
+        snapshot: &okx_observation::AccountSnapshot,
+        leverage: Decimal,
+    ) -> Result<Self, String> {
+        if !matches!(order_type, "limit" | "post_only")
+            || plan.side != "buy"
+            || rules.instrument.instrument_id != instrument
+            || rules.instrument.state != "live"
+            || rules.instrument.contract_type.as_deref() != Some("linear")
+            || rules.instrument.settle_currency.as_deref() != Some("USDT")
+            || rules.instrument.contract_value_currency.as_deref()
+                != instrument.strip_suffix("-USDT-SWAP")
+        {
+            return Err("ENTRY_PRODUCT_OR_PRICE_CAP_UNSUPPORTED".into());
+        }
+        super::plan::verify_entry_rules_match(rules, instrument, plan)?;
+        if account.account_level != "2"
+            || account.position_mode != "long_short_mode"
+            || snapshot.account_level != account.account_level
+            || snapshot.position_mode != account.position_mode
+            || snapshot.account_type != account.account_type
+            || okx_api::account_uid_fingerprint(&account.uid)
+                != snapshot.account_uid_fingerprint
+        {
+            return Err("ENTRY_ACCOUNT_MODE_SOURCE_UNSUPPORTED".into());
+        }
+        if account.auto_loan {
+            return Err("ENTRY_AUTO_BORROW_UNSUPPORTED".into());
+        }
+        if leverage < Decimal::ONE {
+            return Err("ENTRY_LEVERAGE_SOURCE_UNSUPPORTED".into());
+        }
+        // Fee generation, scope and age are independently verified against
+        // the same instrument revision in the shared producer.
+        let rate = verified_entry_fee_rate(
+            fees, instrument, &rules.reference_generation, now(),
+        )?;
+        if rate != self.quote.fee_usdt
+            .checked_div(self.quote.notional_usdt)
+            .unwrap_or(Decimal::ZERO)
+            && self.quote.fee_usdt != self.quote.notional_usdt
+                .checked_mul(rate).ok_or("MONEY_OVERFLOW")?
+                .round_dp_with_strategy(6, RoundingStrategy::ToPositiveInfinity)
+        {
+            return Err("ENTRY_FEE_SOURCE_CHANGED".into());
+        }
+        let available = snapshot.balance.details.iter()
+            .find(|b| b.currency == "USDT")
+            .ok_or("ENTRY_USDT_OWN_FUNDS_SOURCE_MISSING")?;
+        // Absence of liabilities is not a certified zero for this mode.
+        let liabilities = dec(available.liabilities.as_deref()
+            .ok_or("ENTRY_USDT_LIABILITIES_UNPROVEN")?)?;
+        if liabilities != Decimal::ZERO {
+            return Err("ENTRY_EXISTING_BORROW_UNSUPPORTED".into());
+        }
+        let avail_eq = dec(available.available_equity.as_deref()
+            .ok_or("ENTRY_AVAILABLE_EQUITY_UNPROVEN")?)?;
+        let avail_bal = dec(available.available_balance.as_deref()
+            .ok_or("ENTRY_AVAILABLE_BALANCE_UNPROVEN")?)?;
+        if avail_eq < Decimal::ZERO || avail_bal < Decimal::ZERO {
+            return Err("ENTRY_OWN_FUNDS_NEGATIVE".into());
+        }
+        // Taking the minimum of two independently reported available-fund
+        // measures can only reduce the admissible size.
+        let own_usd = avail_eq.min(avail_bal)
+            .checked_mul(self.quote.observed_usd_per_usdt)
+            .ok_or("MONEY_OVERFLOW")?;
+        let conservative_margin_usd = self.quote.total_usd;
+        let source_digest = digest(&(
+            "okx.linear-usdt-swap-entry-sources/v1",
+            instrument,
+            &rules.reference_generation,
+            &rules.instrument,
+            &fees.fee_generation,
+            &snapshot.account_generation,
+            &snapshot.account_uid_fingerprint,
+            account,
+            available,
+            leverage,
+        ))?;
+        self.extra_immediate_fees = EntryCostEvidence::NotApplicable {
+            basis: "linear-usdt-swap:maker-taker-fee-covered-by-quote",
+            source_digest: source_digest.clone(),
+        };
+        self.borrowing = EntryCostEvidence::NotApplicable {
+            basis: "authenticated-auto-loan-disabled-and-usdt-liabilities-zero",
+            source_digest: source_digest.clone(),
+        };
+        self.collateral_or_margin = EntryCostEvidence::Proven {
+            upper_usd: conservative_margin_usd,
+            basis: "cross-margin-at-most-full-notional-plus-entry-fee-for-leverage-ge-one",
+            source_digest: source_digest.clone(),
+        };
+        self.available_collateral = EntryAvailableCollateral::Proven {
+            available_lower_usd: own_usd,
+            basis: "account-usdt-min-available-equity-and-balance",
+            source_digest,
+        };
+        Ok(self)
+    }
+
     /// Only opening notional plus immediate opening fees consume entry budget.
     /// Margin is verified against a LOWER bound on own available funds, not
     /// added to entry spend. Borrowing is unsupported in the first Real lane.

@@ -648,10 +648,15 @@ impl TradeService {
                     // costs, rather than treating them as zero.
                     let unproven_headroom =
                         entry_budget::unproven_entry_cost_headroom(entry.total_usd, entry_ceiling)?;
+                    let account = r.execution.account.config().await.map_err(err)?;
+                    let leverage = dec(&r.observer
+                        .configured_leverage(instrument, okx_api::MarginMode::Cross, if plan.position_side == "long" { "long" } else { "short" })
+                        .await.map_err(err)?)?;
                     let proof = entry_budget::EntryCostProof::source_valued_candidate(
-                        entry.clone(),
-                        &conversion,
-                        now(),
+                        entry.clone(), &conversion, now(),
+                    )?.attest_linear_usdt_sources(
+                        &plan, &order.order_type, instrument, &rules, &fees,
+                        &account, &source, leverage,
                     )?;
                     let all_in_upper = proof.proven_upper_usd()?;
                     let missing = proof.missing_reasons();
