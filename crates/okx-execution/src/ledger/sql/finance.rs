@@ -4,6 +4,15 @@ use super::super::*;
  * immutable finance journal for every two-second NAV. The existing cursor
  * table stores the highest fully verified finance rowid; a missing/stale
  * cursor is NOT evidence of financial completeness. */
+/// Signed fee: debit (<0) consumes entry, rebate (>0) does not free cap.
+fn entry_fee_debit(fee: Decimal) -> Decimal {
+    if fee < Decimal::ZERO {
+        -fee
+    } else {
+        Decimal::ZERO
+    }
+}
+
 type StrategyReversalSource = (String, String, String, Option<String>, Option<String>);
 
 fn verify_strategy_finance_source(db: &Connection, e: &FinanceEntry) -> StoreResult<()> {
@@ -541,7 +550,7 @@ impl AccountStore {
                 .checked_add(gross)
                 .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))?;
             fees = fees
-                .checked_add(fee.abs())
+                .checked_add(entry_fee_debit(fee))
                 .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))?;
             // Length-delimited immutable venue row; independent of ingestion order.
             let bytes = serde_json::to_vec(&source)
@@ -709,7 +718,7 @@ impl AccountStore {
                 return Err(StoreError::Invalid("ENTRY_FEE_BILL_SOURCE_MISMATCH"));
             }
             total = total
-                .checked_add(fee.abs())
+                .checked_add(entry_fee_debit(fee))
                 .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))?;
             let data = serde_json::to_vec(&(id, fee_source, currency, fill_time, proof))
                 .map_err(|_| StoreError::Invalid("ENTRY_FEE_BILL_DIGEST_INVALID"))?;
