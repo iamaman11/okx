@@ -1561,7 +1561,7 @@ mod tests {
         );
         assert_eq!(
             verify_post_held_entry_sources(&quote, &fee, "reference-2", Decimal::ONE, &fx, t + 1),
-            Err("POST_ENTRY_FEE_OR_SPEC_CHANGED".into())
+            Err("ENTRY_FEE_SOURCE_SCOPE_MISMATCH".into())
         );
         assert_eq!(
             verify_post_held_entry_sources(
