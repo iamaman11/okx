@@ -157,8 +157,8 @@ fn verify_empty_canceled_order_for_replace(
     }
     verified_terminal_order_update_time(intent, Some(order))
         .map_err(|_| "REPLACE_CANCELED_READBACK_UNPROVEN")?;
-    let filled = verified_order_readback(intent, order)
-        .map_err(|_| "REPLACE_CANCELED_READBACK_UNPROVEN")?;
+    let filled =
+        verified_order_readback(intent, order).map_err(|_| "REPLACE_CANCELED_READBACK_UNPROVEN")?;
     if filled != Decimal::ZERO {
         return Err("REPLACE_PARTIAL_FILL_REQUIRES_EXPLICIT_CLOSE".into());
     }
@@ -1002,9 +1002,10 @@ impl TradeService {
         let snapshot = r.observer.snapshot().await.map_err(err)?;
         verify_instrument_is_flat(
             &i.instrument_id,
-            snapshot.positions.iter().map(|position| {
-                (position.instrument_id.as_str(), position.position.as_str())
-            }),
+            snapshot
+                .positions
+                .iter()
+                .map(|position| (position.instrument_id.as_str(), position.position.as_str())),
         )?;
         let key = format!("cleanup_{}", &i.client_order_id);
         let hash = digest(&(
@@ -1290,7 +1291,8 @@ impl TradeService {
             .filter(|l| l.intent_id.as_deref() == Some(&original.intent_id))
             .collect::<Vec<_>>();
         let (side, quantity) = verified_close_lot_exposure(
-            mine.iter().map(|lot| (lot.side.as_str(), lot.remaining_qty)),
+            mine.iter()
+                .map(|lot| (lot.side.as_str(), lot.remaining_qty)),
         )?;
         let command = TradeRequest::Execute {
             idempotency_key: key.into(),
@@ -1530,14 +1532,19 @@ mod entry_cost_status_tests {
     #[test]
     fn e2_cleanup_does_not_remove_protection_for_any_unverified_hedge_side() {
         let instrument = "BTC-USDT-SWAP";
-        assert!(verify_instrument_is_flat(instrument, [
-            (instrument, "0"), (instrument, "0"), ("ETH-USDT-SWAP", "20"),
-        ])
-        .is_ok());
+        assert!(
+            verify_instrument_is_flat(
+                instrument,
+                [
+                    (instrument, "0"),
+                    (instrument, "0"),
+                    ("ETH-USDT-SWAP", "20"),
+                ]
+            )
+            .is_ok()
+        );
         assert_eq!(
-            verify_instrument_is_flat(instrument, [
-                (instrument, "0"), (instrument, "-0.2"),
-            ]),
+            verify_instrument_is_flat(instrument, [(instrument, "0"), (instrument, "-0.2"),]),
             Err("PROTECTION_STILL_REQUIRED".into())
         );
         assert_eq!(
@@ -1545,10 +1552,13 @@ mod entry_cost_status_tests {
             Err("POSITION_QUANTITY_UNVERIFIED".into())
         );
         assert_eq!(
-            verify_instrument_is_flat(instrument, [
-                (instrument, "79228162514264337593543950335"),
-                (instrument, "1"),
-            ]),
+            verify_instrument_is_flat(
+                instrument,
+                [
+                    (instrument, "79228162514264337593543950335"),
+                    (instrument, "1"),
+                ]
+            ),
             Err("POSITION_QUANTITY_OVERFLOW".into())
         );
     }
@@ -1627,8 +1637,11 @@ mod entry_cost_status_tests {
     #[test]
     fn e2_close_lots_require_one_side_positive_amounts_and_exact_sum() {
         assert_eq!(
-            verified_close_lot_exposure([("long", dec("0.2").unwrap()), ("long", dec("0.3").unwrap())])
-                .map(|(_, quantity)| quantity),
+            verified_close_lot_exposure([
+                ("long", dec("0.2").unwrap()),
+                ("long", dec("0.3").unwrap())
+            ])
+            .map(|(_, quantity)| quantity),
             Ok(dec("0.5").unwrap())
         );
         assert!(verified_close_lot_exposure([("short", Decimal::ONE)]).is_ok());
