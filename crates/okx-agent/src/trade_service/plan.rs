@@ -415,7 +415,7 @@ impl TradeService {
                         .filter(|(direction, _)| *direction == side_name)
                         .map_or(Decimal::ZERO, |(_, quantity)| quantity);
                     sum.checked_add(amount)
-                        .ok_or("POSITION_QUANTITY_OVERFLOW".into())
+                        .ok_or_else(|| "POSITION_QUANTITY_OVERFLOW".to_owned())
                 })?;
             if qty > position {
                 return Err("REDUCE_WOULD_INCREASE_OR_REVERSE".into());

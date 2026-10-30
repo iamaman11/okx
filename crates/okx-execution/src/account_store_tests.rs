@@ -93,6 +93,10 @@ fn r4_campaign_zero_only_after_all_six_incremental_money_cursors_complete() {
         ),
         "an external fill is never silently treated as zero historical spend"
     );
+    assert!(matches!(
+        s.verify_captured_campaign_continuity(from, through),
+        Err(StoreError::Invalid("ENTRY_POST_OPENING_FILL_NOT_SETTLED"))
+    ), "even a fully covered but unowned venue fill may never authorize a second entry");
 }
 
 #[test]
@@ -115,22 +119,6 @@ fn r4_followup_requires_terminal_native_fill_and_central_settlement() {
         ).unwrap();
     }
     assert!(s.verify_captured_campaign_continuity(from, through).is_ok());
-    s.connection.execute(
-        "INSERT INTO fills(fill_id,instrument_id,trade_id,exchange_order_id,intent_id,
-          time,qty,price,fee,currency,side)
-         VALUES('external','BTC-USDT-SWAP','trade','exchange',NULL,20,'1','100','-0.01','USDT','buy')",
-        [],
-    ).unwrap();
-    assert!(
-        matches!(
-            s.verify_captured_campaign_continuity(from, through),
-            Err(StoreError::Invalid("ENTRY_POST_OPENING_FILL_NOT_SETTLED"))
-        ),
-        "unattributed exchange fill cannot spend unreserved money"
-    );
-    s.connection
-        .execute("DELETE FROM fills WHERE fill_id='external'", [])
-        .unwrap();
     let intent = intent(&mut s);
     s.connection
         .execute(
