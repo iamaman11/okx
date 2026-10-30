@@ -909,7 +909,6 @@ impl TradeService {
                 .map_err(err)?;
             return Ok(());
         }
-        let census = self.census(&state).await?;
         let (through, loss) = r
             .execution
             .store
@@ -922,9 +921,74 @@ impl TradeService {
             })
             .await
             .map_err(err)?;
-        if !through.coverage_gaps.is_empty() || through.watermark < venue_updated_at {
+        if !through.cursor.is_empty()
+            || !through.coverage_gaps.is_empty()
+            || through.watermark < venue_updated_at
+        {
             return Err("FINANCIAL_COVERAGE_INCOMPLETE".into());
         }
+        // A terminal POST may free entry capacity only after the independent
+        // venue order and all immutable native fill/fee bills agree. The
+        // SQL owner commits the exact final cumulative proof BEFORE any WSS
+        // SETTLE_ENTRY. A lost central reply reuses that same receipt.
+        let venue_order = order.ok_or("TERMINAL_ENTRY_VENUE_ORDER_UNAVAILABLE")?;
+        if !matches!(
+            venue_order.state.as_str(),
+            "filled" | "canceled" | "mmp_canceled"
+        ) {
+            return Err("TERMINAL_ENTRY_VENUE_STATE_UNVERIFIED".into());
+        }
+        let filled = verified_order_readback(i, venue_order)?;
+        if filled <= Decimal::ZERO {
+            // A zero-fill release needs its own independently verified
+            // no-fee proof; do not treat absence of fills as zero debit.
+            return Err("TERMINAL_ZERO_FILL_ENTRY_FEES_UNPROVEN".into());
+        }
+        let id = i.intent_id.clone();
+        let settlement = r
+            .execution
+            .store
+            .call(deadline(), move |s| {
+                s.bind_terminal_entry_settlement(
+                    &id,
+                    venue_updated_at,
+                    filled,
+                    through.watermark,
+                )
+            })
+            .await
+            .map_err(err)?;
+        if settlement.reservation_key != receipt.reservation_key
+            || settlement.plan_hash != i.plan_hash
+            || settlement.venue_order_id != venue_order.order_id
+        {
+            return Err("TERMINAL_ENTRY_SETTLEMENT_IDENTITY_MISMATCH".into());
+        }
+        let settled = self
+            .risk
+            .request(self.risk_command(
+                &state,
+                format!("settle_{}", i.client_order_id),
+                RiskCommandAction::SettleEntry {
+                    reservation_key: settlement.reservation_key.clone(),
+                    plan_sha256: settlement.plan_hash.clone(),
+                    expected_risk_book_sequence: observed
+                        .risk_book_sequence
+                        .ok_or("RISK_SEQUENCE_MISSING")?,
+                    cumulative_entry_usd: exact(settlement.cumulative_entry_usd),
+                    settlement_revision: settlement.settlement_revision,
+                    source_digest: settlement.source_digest.clone(),
+                },
+            ))
+            .await
+            .map_err(str::to_owned)?;
+        if settled.status != RiskDecisionStatus::Updated {
+            return Err(settled.reason.unwrap_or("CENTRAL_ENTRY_SETTLEMENT_PENDING".into()));
+        }
+        let settlement_sequence = settled
+            .risk_book_sequence
+            .ok_or("ENTRY_SETTLEMENT_SEQUENCE_MISSING")?;
+        let census = self.census(&state).await?;
         let proof = TerminalRiskLedgerProof {
             account_uid: r.configuration.account_key.verified_uid.clone(),
             run_id: "continuous_engine".into(),
@@ -938,11 +1002,12 @@ impl TradeService {
             record_digest: digest(&(i, order, loss, through))?,
             cumulative_loss_usd: exact(loss),
             remaining_exposure_usdt: "0".into(),
-            // Do not invent settled fees from modeled loss; final bill proof
-            // must explicitly populate these before the E1 risk release.
-            cumulative_entry_usd: None,
-            entry_settlement_revision: None,
-            entry_settlement_digest: None,
+            // Worker already atomically transferred the exact cumulative
+            // amount from reservation to consumed. The terminal revision
+            // advances from 1 to 2 without charging an additional cent.
+            cumulative_entry_usd: Some(exact(settlement.cumulative_entry_usd)),
+            entry_settlement_revision: Some(settlement.settlement_revision + 1),
+            entry_settlement_digest: Some(settlement.source_digest.clone()),
         };
         let command = self.risk_command(
             &state,
@@ -950,9 +1015,7 @@ impl TradeService {
             RiskCommandAction::Resolve {
                 reservation_key: receipt.reservation_key.clone(),
                 plan_sha256: i.plan_hash.clone(),
-                expected_risk_book_sequence: observed
-                    .risk_book_sequence
-                    .ok_or("RISK_SEQUENCE_MISSING")?,
+                expected_risk_book_sequence: settlement_sequence,
                 next_state: RiskResolution::Released,
                 source_proof_sha256: digest(&proof)?,
                 terminal_census: Some(census),
