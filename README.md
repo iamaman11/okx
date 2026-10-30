@@ -109,6 +109,10 @@ NAV/STOP → protected position/terminal settlement → release`.
   connected, so RiskBook leaves admission blocked. The existing native
   RiskBook SUMMARY exposes authenticated campaign inception, but the
   historical venue content digest is deliberately NOT a USD debit proof.
+  Authenticated OKX history timestamps and monetary amounts are parsed from
+  their original string wire fields; native test fixtures preserve that wire
+  representation. A malformed history field rejects the source instead of
+  fabricating an opening campaign budget.
   Opening imports additionally require currency/contract valuation for
   every observed economic event, the SQL owner and all-managed-account
   aggregation. No unknown source may become `consumed_usd=0`.
