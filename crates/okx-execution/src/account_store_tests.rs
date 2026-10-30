@@ -52,7 +52,7 @@ fn e1_source_quote(s: &AccountStore, i: &StoredIntent) -> EntryQuoteEvidence {
 fn e1_sql_known_quote_is_immutable_scoped_and_never_all_in_permission() {
     let mut s = store();
     let i = intent(&mut s);
-    let proof = e1_source_quote(&s, &i);
+    let mut proof = e1_source_quote(&s, &i);
     s.bind_entry_quote(&proof).unwrap();
     s.bind_entry_quote(&proof).unwrap();
     assert_eq!(s.entry_quote(&i.intent_id).unwrap(), Some(proof.clone()));
