@@ -152,7 +152,7 @@ fn r4_followup_requires_terminal_native_fill_and_central_settlement() {
         .execute(
             "INSERT INTO fills(fill_id,instrument_id,trade_id,exchange_order_id,intent_id,
            time,qty,price,fee,currency,side)
-         VALUES('bound','BTC-USDT-SWAP','trade2','exchange',?1,20,'1','100','-0.01','USDT','buy')",
+         VALUES('bound','BTC-USDT-SWAP','trade2','exchange',?1,20,'1','5','-0.01','USDT','buy')",
             [intent.intent_id.as_str()],
         )
         .unwrap();
@@ -183,8 +183,8 @@ fn r4_followup_requires_terminal_native_fill_and_central_settlement() {
         venue_update_ms: 30,
         source_covered_through_ms: 80,
         venue_filled_quantity: Decimal::ONE,
-        booked_notional_and_fee_usdt: Decimal::from(50),
-        cumulative_entry_usd: Decimal::from(50),
+        booked_notional_and_fee_usdt: Decimal::new(501, 2),
+        cumulative_entry_usd: Decimal::new(501, 2),
         settlement_revision: 1,
         source_digest: "e".repeat(64),
     };
@@ -201,7 +201,7 @@ fn r4_followup_requires_terminal_native_fill_and_central_settlement() {
     );
     let campaign = format!("sha256:{}", "c".repeat(64));
     let (spent, baseline) = s.seal_captured_campaign_baseline(&campaign, from, through).unwrap();
-    assert_eq!(spent, Decimal::from(50), "historical admitted SWAP USD is not a fake zero");
+    assert_eq!(spent, Decimal::new(501, 2), "historical admitted SWAP USD is not a fake zero");
     assert_eq!(
         s.seal_captured_campaign_baseline(&campaign, from, through).unwrap(),
         (spent, baseline),
