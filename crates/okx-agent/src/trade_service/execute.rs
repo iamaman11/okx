@@ -331,9 +331,7 @@ impl TradeService {
                     // Only the exact SQL-quote-bound ALL-IN proof may
                     // authorize the independent entry-spend budget. An
                     // Unknown dimension never substitutes zero or a quote.
-                    entry_upper_usd: verified_entry
-                        .as_ref()
-                        .map(|(upper, _)| exact(*upper)),
+                    entry_upper_usd: verified_entry.as_ref().map(|(upper, _)| exact(*upper)),
                     entry_proof_digest: verified_entry
                         .as_ref()
                         .map(|(_, proof_digest)| proof_digest.clone()),
