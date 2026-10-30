@@ -352,6 +352,52 @@ check(noAccountCap.status==="DENIED"&&noAccountCap.reason==="ACCOUNT_ENTRY_LIMIT
  "legacy missing account cap is not unlimited");
 console.log("entry_account_limit_independent_of_campaign PASS");
 console.log("entry_budget_race_and_monotonic_settlement PASS");
+// A real venue can invoice MORE than the frozen admitted upper. Preserve
+// native money truth rather than dropping the debit to satisfy a budget cap.
+// The first breach also disables every NEW risk grant, including an old HELD
+// intent that has not yet been granted BEGIN_POST authority.
+const breachStore=new Storage();
+await breachStore.put("account_access_v1",governance);
+await breachStore.put("generation",77);
+await setupRiskBook(breachStore);
+const breachRequest={...base,uid:a,intent_id:"intent_breach_001",loss_usdt:"1",loss_usd:"1"};
+const bHeld=await reserveRisk(breachStore,policy,census,breachRequest,native);
+if(bHeld.status!=="HELD")throw Error("Breach fixture not HELD");
+const bFence=await beginRiskPost(breachStore,bHeld.entry.key,p,1,d,{
+  connection_generation:77,expected_book_sequence:bHeld.book_sequence!,
+  census:later,source_proof:native,
+  causal_proof:{...causal_proof,reserve_anchor:bHeld.entry.key},now_ms:now+2
+});
+check(bFence.status==="POST_AUTHORIZED","breach fixture authorized once");
+const bSettle=await settleEntrySpend(breachStore,bHeld.entry.key,p,{
+  connection_generation:77,expected_book_sequence:bFence.book_sequence!,
+  cumulative_entry_usd:"2.03",revision:1,source_digest:a
+});
+check(bSettle.status==="UPDATED"&&bSettle.reason==="BUDGET_BOUND_BREACH",
+  "native fee-bound breach must settle full money with explicit incident");
+const bMeta=(await readRiskBook(breachStore))!;
+check(bMeta.entry_budget?.consumed_usd==="2.03"&&
+  bMeta.entry_budget.reserved_usd==="0"&&
+  bMeta.entry_budget.bound_breach_usd==="0.03",
+  "breach is not truncated and reserve is never negative");
+const repeat=await settleEntrySpend(breachStore,bHeld.entry.key,p,{
+  connection_generation:77,expected_book_sequence:bFence.book_sequence!,
+  cumulative_entry_usd:"2.03",revision:1,source_digest:a
+});
+check(repeat.status==="UPDATED"&&
+  (await readRiskBook(breachStore))?.entry_budget?.consumed_usd==="2.03",
+  "lost ACK cannot debit a bound breach twice");
+const replayAltered=await settleEntrySpend(breachStore,bHeld.entry.key,p,{
+  connection_generation:77,expected_book_sequence:bFence.book_sequence!,
+  cumulative_entry_usd:"2.04",revision:1,source_digest:a
+});
+check(replayAltered.status==="DENIED","same settlement revision cannot add hidden fee");
+const forbidden=await reserveRisk(breachStore,policy,census,{
+  ...breachRequest,intent_id:"intent_breach_002"
+},native);
+check(forbidden.status==="DENIED"&&forbidden.reason==="BUDGET_BOUND_BREACH",
+  "after a bound breach, even unused campaign headroom cannot mint new risk");
+console.log("entry_budget_native_breach_conservation PASS");
 // A fresh reservation can be released only by the exact current native SQL
 // writer's durable no-post receipt. No venue, fills or finance source needed.
 const unsent=new Storage();

@@ -869,6 +869,8 @@ export async function beginRiskPost(
     if(stored.sequence!==native.expected_book_sequence)return {status:"DENIED" as const,reason:"STALE_RISK_BOOK_SEQUENCE"};
     const entry:RiskEntry|undefined=await tx.get(entryKey(key));
     if(!entry||!validEntry(entry)||entry.plan_hash!==plan_hash||entry.state!=="HELD"||entry.policy_revision!==policy_revision)return {status:"DENIED" as const,reason:"INTENT_NOT_HELD_EXACTLY_ONCE"};
+    if(units(stored.entry_budget?.bound_breach_usd??"0")!>0n)
+      return {status:"DENIED" as const,reason:"BUDGET_BOUND_BREACH"};
     if(!stored.entry_budget||entry.entry_upper_usd===undefined||
        stored.entry_budget.campaign_id!==governance.campaign_id||
        units(stored.entry_budget.limit_usd)!==units(governance.campaign_entry_limit_usd)||
