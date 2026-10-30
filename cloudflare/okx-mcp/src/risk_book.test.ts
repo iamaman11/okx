@@ -242,8 +242,17 @@ check(noImport.status==="DENIED"&&noImport.reason==="CAMPAIGN_ENTRY_BASELINE_NOT
  "existing campaign with unknown prior spend must never start at zero");
 const absentOpening=new Storage();
 await absentOpening.put("account_access_v1",governance);
-await initializeRiskBook(absentOpening,"installation_test");
+await initializeRiskBook(absentOpening,"installation_test",{
+ installation_id:"installation_test",
+ campaign_id:governance.campaign_id,
+ started_at_ms:now-100_000
+});
 const opening=await openingFixture();
+const legacy=new Storage();
+await legacy.put("account_access_v1",governance);
+await initializeRiskBook(legacy,"installation_test");
+check(!await installCampaignEntryProof(legacy,opening),
+ "old RiskBook without original installation timestamp cannot claim zero baseline");
 const untrusted=[
  {...opening,source_digest:d},
  {...opening,accounts:opening.accounts.slice(0,1)},
@@ -254,6 +263,7 @@ const untrusted=[
  {...opening,accounts:opening.accounts.map((row,i)=>i===0?{...row,source_digest:"not-a-hash"}:row)},
  {...opening,consumed_usd:"1"},
  {...opening,campaign_started_at_ms:opening.as_of_ms+1},
+ {...opening,campaign_started_at_ms:opening.campaign_started_at_ms+1},
 ] as CampaignEntryOpeningSource[];
 for(let i=0;i<untrusted.length;i++){
  const accepted=await installCampaignEntryProof(absentOpening,untrusted[i]);
