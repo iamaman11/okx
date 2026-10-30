@@ -223,6 +223,24 @@ impl TradeService {
                 }
             }
         }
+        // A complete order list does not prove the money side. Native venue
+        // fills and account-wide fee bills must independently cover the same
+        // backup→current window; otherwise the crash witness stays blocked.
+        // The result is source evidence, not a synthetic USD opening budget.
+        let money = r
+            .execution
+            .history
+            .complete_campaign_money_history(
+                backup,
+                started,
+                chrono::Utc::now().timestamp_millis(),
+            )
+            .await
+            .map_err(|_| "STORAGE_RECOVERY_MONEY_HISTORY_NOT_PROVEN")?;
+        if money.from_ms != backup || money.through_ms != started {
+            return Err("STORAGE_RECOVERY_MONEY_HISTORY_SCOPE_MISMATCH".into());
+        }
+        history_proofs.push(money.source_digest);
         let snapshot = crate::source_capture::capture_account_sources(
             &r.observer,
             &r.private_ws,
