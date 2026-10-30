@@ -2,7 +2,7 @@
 use super::*;
 use rust_decimal::RoundingStrategy;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub(super) struct EntryQuote {
     pub(super) quantity: Decimal,
     pub(super) notional_usdt: Decimal,
@@ -18,7 +18,7 @@ pub(super) struct EntryQuote {
 // Staged E1: venue evidence constructors follow with the RiskBook binding.
 // Only Unknown can be constructed by preview until authenticated proofs exist.
 #[allow(dead_code)]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub(super) enum EntryCostEvidence {
     Proven {
         upper_usd: Decimal,
@@ -51,7 +51,7 @@ impl EntryCostEvidence {
 /// USD/USDT conversion is a *rate*, not an additional charge in USD.
 /// No NotApplicable state: even a USD-pegged quote requires a sourced bound.
 #[allow(dead_code)] // Verified proof constructors are gated until native venue source binding.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub(super) enum EntryFxUpperBound {
     Proven {
         usd_per_usdt_upper: Decimal,
@@ -98,7 +98,7 @@ impl EntryFxUpperBound {
 /// admission upper bound. All fees/collateral/borrowing must be classified
 /// separately by source. A proven FX maximum multiplies the FULL USDT
 /// obligation before separately denominated USD charges are added.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub(super) struct EntryCostProof {
     pub(super) quote: EntryQuote,
     pub(super) extra_immediate_fees: EntryCostEvidence,
@@ -171,6 +171,74 @@ impl EntryCostProof {
         .chain(self.fx_bound.reason())
         .collect()
     }
+}
+
+/// E1.3: only a fully classified, independently sourced cost proof may
+/// become a Worker RESERVE amount. The immutable SQL quote is the reference
+/// for identity and exact arithmetic; a preview price or a hand-computed fee
+/// must never be promoted into budget authority.
+pub(super) fn reserve_entry_evidence(
+    proof: &EntryCostProof,
+    receipt: &okx_execution::EntryQuoteEvidence,
+    account_cap: Decimal,
+) -> Result<Option<(Decimal, String)>, String> {
+    if account_cap <= Decimal::ZERO {
+        return Err("ENTRY_BUDGET_INVALID".into());
+    }
+    let independently_recomputed = quote(
+        receipt.quantity,
+        receipt.contract_value,
+        receipt.limit_price,
+        receipt.fee_rate,
+        receipt.usd_per_usdt,
+    )?;
+    if receipt.schema != "okx.entry-known-quote/v1"
+        || receipt.account_key.is_empty()
+        || receipt.installation_id.is_empty()
+        || receipt.intent_id.is_empty()
+        || receipt.plan_hash.len() != 64
+        || !receipt.plan_hash.bytes().all(|b| b.is_ascii_hexdigit())
+        || receipt.reference_generation.is_empty()
+        || receipt.fee_generation.is_empty()
+        || receipt.conversion_digest.len() != 64
+        || !receipt.conversion_digest.bytes().all(|b| b.is_ascii_hexdigit())
+        || independently_recomputed != proof.quote
+        || receipt.notional_usdt != independently_recomputed.notional_usdt
+        || receipt.fee_usdt != independently_recomputed.fee_usdt
+        || receipt.total_usdt != independently_recomputed.total_usdt
+        || receipt.total_usd != independently_recomputed.total_usd
+    {
+        return Err("ENTRY_RESERVE_QUOTE_BINDING_MISMATCH".into());
+    }
+    let Some(upper) = proof.proven_upper_usd()? else {
+        return Ok(None);
+    };
+    if upper <= Decimal::ZERO || upper < receipt.total_usd {
+        return Err("ENTRY_RESERVE_BOUND_INVALID".into());
+    }
+    if upper > account_cap {
+        return Err("ENTRY_RESERVE_ACCOUNT_CAP_EXCEEDED".into());
+    }
+    // The actual source evidence must be checked by its native owner BEFORE
+    // creating Proven/NotApplicable variants. There is no such producer for
+    // margin, borrowing, fee currency and bounded FX yet, so the production
+    // path still yields None. Bind the future grant to the exact SQL quote,
+    // its provenance and all classified dimensions in one canonical digest.
+    let proof_digest = digest(&(
+        "okx.entry-all-in-reserve/v1",
+        &receipt.account_key,
+        &receipt.installation_id,
+        &receipt.intent_id,
+        &receipt.plan_hash,
+        receipt.policy_revision,
+        &receipt.reference_generation,
+        &receipt.fee_generation,
+        &receipt.conversion_digest,
+        &receipt.observed_at,
+        &proof,
+        exact(upper),
+    ))?;
+    Ok(Some((upper, proof_digest)))
 }
 
 /** Validate the native observer's instrument-specific fee generation and
