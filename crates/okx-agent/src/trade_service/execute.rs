@@ -845,6 +845,28 @@ impl TradeService {
                 {
                     return Err("UNATTRIBUTED_CONDITIONAL_ORDER".into());
                 }
+                // Active SQL intents are obligations too. A fresh venue
+                // snapshot can omit a still-UNKNOWN POST, and a pending order
+                // cannot be considered managed without its central receipt.
+                // The 100th row is a positive truncation signal: never
+                // misreport a bounded local scan as complete.
+                let local_intents = r
+                    .execution
+                    .store
+                    .call(deadline(), |s| {
+                        let active = s.active_intents(100)?;
+                        active
+                            .into_iter()
+                            .map(|intent| {
+                                let central = s.central_receipt(&intent.intent_id)?;
+                                Ok((intent, central))
+                            })
+                            .collect::<okx_execution::StoreResult<Vec<_>>>()
+                    })
+                    .await
+                    .map_err(err)?;
+                let local_intent_digest =
+                    verify_local_intent_coverage(&local_intents, &c.account_key)?;
                 if r.private_ws.status().await.connection_generation != generation
                     || !r.source_identity_ready().await
                     || !r
@@ -879,6 +901,7 @@ impl TradeService {
                 let data = digest(&(
                     &snapshot,
                     &algos,
+                    &local_intent_digest,
                     financial.0.source_as_of,
                     &financial.0.daily_loss_usd,
                     &financial.0.drawdown_ratio,
@@ -956,6 +979,52 @@ impl TradeService {
         ))
     }
 }
+/// The SQL owner is the authority for the local send state. A missing venue
+/// row does not prove no-send after POSTING/UNKNOWN; preserve those obligations
+/// and deny further account risk until a terminal readback is reconciled.
+fn verify_local_intent_coverage(
+    active: &[(StoredIntent, Option<CentralReceipt>)],
+    account_key: &str,
+) -> Result<String, String> {
+    const PAGE_LIMIT: usize = 100;
+    if active.len() >= PAGE_LIMIT {
+        return Err("COHORT_LOCAL_INTENTS_TRUNCATED".into());
+    }
+    let mut ids = std::collections::BTreeSet::new();
+    for (intent, receipt) in active {
+        if !ids.insert(intent.intent_id.as_str())
+            || intent.plan_hash.is_empty()
+            || intent.plan.quantity <= Decimal::ZERO
+        {
+            return Err("COHORT_LOCAL_INTENT_CORRUPT".into());
+        }
+        if matches!(intent.state, IntentState::Posting | IntentState::Unknown) {
+            return Err("COHORT_UNRESOLVED_POST_OUTCOME".into());
+        }
+        if matches!(intent.state, IntentState::Acknowledged | IntentState::PartiallyFilled)
+            && intent.exchange_order_id.as_ref().is_none_or(String::is_empty)
+        {
+            return Err("COHORT_EXCHANGE_ORDER_ID_UNPROVEN".into());
+        }
+        if intent.risk_increase {
+            if intent.state != IntentState::Prepared && receipt.is_none() {
+                return Err("COHORT_CENTRAL_RESERVATION_MISSING".into());
+            }
+            if let Some(receipt) = receipt
+                && (receipt.account_key != account_key
+                    || receipt.intent_id != intent.intent_id
+                    || receipt.plan_hash != intent.plan_hash
+                    || receipt.reservation_key.starts_with("local:")
+                    || receipt.reservation_key.is_empty()
+                    || receipt.policy_revision != intent.policy_revision)
+            {
+                return Err("COHORT_CENTRAL_RESERVATION_MISMATCH".into());
+            }
+        }
+    }
+    digest(&active)
+}
+
 /// Concurrent account reads must produce one deterministic, complete cohort
 /// digest regardless of completion order. Duplicated/missing keys fail closed.
 fn canonical_census_content(
@@ -1250,6 +1319,69 @@ mod tests {
         );
         assert!(canonical_census_content(vec![rows[0].clone()], &keys).is_err());
         assert!(canonical_census_content(vec![rows[0].clone(), rows[0].clone()], &keys).is_err());
+    }
+
+    #[test]
+    fn e2_active_real_intents_have_complete_bounded_central_coverage() {
+        let plan = IntentPlan {
+            side: "buy".into(), position_side: "long".into(),
+            quantity: dec("1").unwrap(), limit_price: dec("100").unwrap(),
+            ..IntentPlan::default()
+        };
+        let mut intent = StoredIntent {
+            plan, intent_id: "intent_123".into(), idempotency_key: "key_123".into(),
+            request_hash: "a".repeat(64), client_order_id: "client_123".into(),
+            state: IntentState::Prepared, revision: 1, deadline: 123,
+            plan_hash: "b".repeat(64), policy_revision: 3, risk_increase: true,
+            instrument_id: "BTC-USDT-SWAP".into(),
+            exchange_order_id: None, incident: None,
+        };
+        let account = format!("okx:real:{}", "a".repeat(64));
+        let receipt = CentralReceipt {
+            reservation_key: "central:receipt_123".into(),
+            account_key: account.clone(), installation_id: "install".into(),
+            instance_id: Some("manual".into()), intent_id: intent.intent_id.clone(),
+            plan_hash: intent.plan_hash.clone(), policy_revision: 3,
+            receipt_hash: "c".repeat(64), requested_loss_usd: dec("1").unwrap(),
+            conversion_digest: "d".repeat(64),
+        };
+        assert!(verify_local_intent_coverage(&[(intent.clone(), None)], &account).is_ok());
+        intent.state = IntentState::Reserved;
+        assert_eq!(
+            verify_local_intent_coverage(&[(intent.clone(), None)], &account),
+            Err("COHORT_CENTRAL_RESERVATION_MISSING".into())
+        );
+        assert!(verify_local_intent_coverage(&[(intent.clone(), Some(receipt.clone()))], &account).is_ok());
+        let mut wrong = receipt.clone();
+        wrong.account_key = "other".into();
+        assert_eq!(
+            verify_local_intent_coverage(&[(intent.clone(), Some(wrong))], &account),
+            Err("COHORT_CENTRAL_RESERVATION_MISMATCH".into())
+        );
+        intent.state = IntentState::Posting;
+        assert_eq!(
+            verify_local_intent_coverage(&[(intent.clone(), Some(receipt.clone()))], &account),
+            Err("COHORT_UNRESOLVED_POST_OUTCOME".into())
+        );
+        intent.state = IntentState::Unknown;
+        assert!(verify_local_intent_coverage(&[(intent.clone(), Some(receipt.clone()))], &account).is_err());
+        intent.state = IntentState::Acknowledged;
+        assert_eq!(
+            verify_local_intent_coverage(&[(intent.clone(), Some(receipt.clone()))], &account),
+            Err("COHORT_EXCHANGE_ORDER_ID_UNPROVEN".into())
+        );
+        intent.exchange_order_id = Some("venue_abc".into());
+        assert!(verify_local_intent_coverage(&[(intent.clone(), Some(receipt.clone()))], &account).is_ok());
+        assert_eq!(
+            verify_local_intent_coverage(&[(intent.clone(), Some(receipt.clone())),
+                                          (intent.clone(), Some(receipt.clone()))], &account),
+            Err("COHORT_LOCAL_INTENT_CORRUPT".into())
+        );
+        let many = vec![(intent, Some(receipt)); 100];
+        assert_eq!(
+            verify_local_intent_coverage(&many, &account),
+            Err("COHORT_LOCAL_INTENTS_TRUNCATED".into())
+        );
     }
 
     #[test]
