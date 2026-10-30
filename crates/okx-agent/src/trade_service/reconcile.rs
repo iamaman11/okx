@@ -62,6 +62,20 @@ fn terminal_order_update_time(
         .transpose()
 }
 
+/// Actual parsed venue positions, not an opening order's cumulative fills,
+/// determine whether the first-test position is flat and whether protection
+/// covers all current exposure. Invalid amounts may never count as zero.
+fn verified_position_quantity<'a>(
+    amounts: impl IntoIterator<Item = &'a str>,
+) -> Result<Decimal, String> {
+    amounts.into_iter().try_fold(Decimal::ZERO, |total, value| {
+        let quantity = dec(value).map_err(|_| "POSITION_QUANTITY_UNVERIFIED")?;
+        total
+            .checked_add(quantity.abs())
+            .ok_or_else(|| "POSITION_QUANTITY_OVERFLOW".into())
+    })
+}
+
 /// Every venue readback must refer to this durable intent before it can
 /// change local state, protection requirements, or exchange-order identity.
 /// An exchange lookup by client ID alone is a lookup, not an identity proof.
@@ -319,15 +333,21 @@ impl TradeService {
             }
             i = self.find_intent(r, &i.intent_id).await?;
             let snapshot = r.observer.snapshot().await.map_err(err)?;
-            let exposed = snapshot.positions.iter().any(|p| {
-                p.instrument_id == i.instrument_id
-                    && p.position_side == i.plan.position_side
-                    && dec(&p.position).is_ok_and(|q| q != Decimal::ZERO)
-            });
+            let position_qty = verified_position_quantity(
+                snapshot
+                    .positions
+                    .iter()
+                    .filter(|p| {
+                        p.instrument_id == i.instrument_id
+                            && p.position_side == i.plan.position_side
+                    })
+                    .map(|p| p.position.as_str()),
+            )?;
+            let exposed = position_qty > Decimal::ZERO;
             if !exposed && i.risk_increase {
                 self.cleanup_flat_protection(r, &i).await?;
             }
-            if filled > Decimal::ZERO && i.risk_increase && exposed {
+            if i.risk_increase && exposed {
                 let algo_client = format!("s{}", &i.client_order_id[..31]);
                 let p = r
                     .execution
@@ -342,15 +362,18 @@ impl TradeService {
                             && p.failure_code.is_empty()
                             && p.stop_loss_trigger_price_type == "mark"
                             && dec(&p.stop_loss_trigger_price).ok() == i.plan.stop_price
-                            && dec(&p.size).ok() == Some(filled)
-                            && p.side != i.plan.side =>
+                            && filled > Decimal::ZERO
+                            && filled == position_qty
+                            && dec(&p.size).ok() == Some(position_qty)
+                            && ((i.plan.side == "buy" && p.side == "sell")
+                                || (i.plan.side == "sell" && p.side == "buy")) =>
                     {
                         let source_digest = digest(&p)?;
                         let protection = okx_execution::ProtectionReceipt {
                             intent_id: i.intent_id.clone(),
                             algo_id: p.algo_order_id,
                             side: p.side,
-                            quantity: filled,
+                            quantity: position_qty,
                             trigger_price: i.plan.stop_price.ok_or("STOP_PRICE_MISSING")?,
                             trigger_basis: "mark".into(),
                             verified_at: now(),
@@ -1353,6 +1376,26 @@ mod entry_cost_status_tests {
         assert_eq!(
             verify_venue_fill_coverage(&intent, &source, &changed),
             Err("ENTRY_FILL_VENUE_STATE_UNKNOWN".into())
+        );
+    }
+
+    #[test]
+    fn e2_position_source_does_not_treat_malformed_exposure_as_flat() {
+        assert_eq!(
+            verified_position_quantity(["0", "0"].into_iter()),
+            Ok(Decimal::ZERO)
+        );
+        assert_eq!(
+            verified_position_quantity(["0.5", "-0.25"].into_iter()),
+            Ok(dec("0.75").unwrap())
+        );
+        assert_eq!(
+            verified_position_quantity(["0", "unreadable"].into_iter()),
+            Err("POSITION_QUANTITY_UNVERIFIED".into())
+        );
+        assert_eq!(
+            verified_position_quantity(["79228162514264337593543950335", "1"].into_iter()),
+            Err("POSITION_QUANTITY_OVERFLOW".into())
         );
     }
 
