@@ -152,6 +152,15 @@ impl AccountStore {
         let bytes = serde_json::to_vec(&quote)
             .map_err(|_| StoreError::Invalid("ENTRY_ADMISSION_QUOTE_DIGEST_INVALID"))?;
         let expected_quote_digest = format!("{:x}", Sha256::digest(bytes));
+        let computed = quote.total_usdt
+            .checked_mul(proof.fx_upper_usd_per_usdt)
+            .ok_or(StoreError::Invalid("ENTRY_ADMISSION_UPPER_OVERFLOW"))?
+            .round_dp_with_strategy(
+                9,
+                rust_decimal::RoundingStrategy::ToPositiveInfinity,
+            )
+            .checked_add(proof.other_entry_costs_upper_usd)
+            .ok_or(StoreError::Invalid("ENTRY_ADMISSION_UPPER_OVERFLOW"))?;
         let digest_valid = |v: &str| {
             v.len() == 64
                 && v.bytes().all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
@@ -164,6 +173,10 @@ impl AccountStore {
             || !digest_valid(&proof.quote_digest)
             || proof.quote_digest != expected_quote_digest
             || !digest_valid(&proof.entry_proof_digest)
+            || proof.fx_upper_usd_per_usdt < quote.usd_per_usdt
+            || proof.fx_upper_usd_per_usdt <= Decimal::ZERO
+            || proof.other_entry_costs_upper_usd < Decimal::ZERO
+            || proof.entry_upper_usd != computed
             || proof.entry_upper_usd < quote.total_usd
             || proof.entry_upper_usd <= Decimal::ZERO
             || proof.observed_at < quote.observed_at
