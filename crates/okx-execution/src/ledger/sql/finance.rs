@@ -343,24 +343,15 @@ impl AccountStore {
         Ok(proof)
     }
 
-    /// Source-backed zero opening from the EXISTING incremental account writer.
-    /// A complete source cursor is required for every venue money stream;
-    /// missing pages, an older campaign than the initial capture, or any
-    /// potentially budget-relevant event remains pending, never zero.
-    /// This permits opening even after unrelated pre-campaign activity.
-    pub fn seal_captured_empty_campaign(
+    /// Read-only, source-cursor-backed absence witness. Used both during
+    /// bootstrap and immediately before a new risk admission. No archive
+    /// request, ledger mutation or fake gap-free state is performed here.
+    fn captured_empty_frontiers(
         &self,
-        campaign_id: &str,
         from_ms: i64,
         through_ms: i64,
-    ) -> StoreResult<String> {
-        use sha2::{Digest, Sha256};
-        if !campaign_id.starts_with("sha256:")
-            || campaign_id.len() != 71
-            || !campaign_id[7..].bytes().all(|b| b.is_ascii_hexdigit())
-            || from_ms <= 0
-            || through_ms <= from_ms
-        {
+    ) -> StoreResult<Vec<(&'static str, &'static str, i64, i64)>> {
+        if from_ms <= 0 || through_ms <= from_ms {
             return Err(StoreError::Invalid("ENTRY_OPENING_WINDOW_INVALID"));
         }
         if from_ms < self.meta.initialized_at {
@@ -414,6 +405,39 @@ impl AccountStore {
         if unresolved != 0 || lots != 0 {
             return Err(StoreError::Invalid("ENTRY_OPENING_UNRESOLVED_NATIVE_EXPOSURE"));
         }
+        Ok(frontiers)
+    }
+
+    pub fn verify_captured_empty_window(
+        &self,
+        from_ms: i64,
+        through_ms: i64,
+    ) -> StoreResult<()> {
+        self.captured_empty_frontiers(from_ms, through_ms).map(|_| ())
+    }
+
+    /// Source-backed zero opening from the EXISTING incremental account writer.
+    /// A complete source cursor is required for every venue money stream;
+    /// missing pages, an older campaign than the initial capture, or any
+    /// potentially budget-relevant event remains pending, never zero.
+    /// This permits opening even after unrelated pre-campaign activity.
+    pub fn seal_captured_empty_campaign(
+        &self,
+        campaign_id: &str,
+        from_ms: i64,
+        through_ms: i64,
+    ) -> StoreResult<String> {
+        use sha2::{Digest, Sha256};
+        if !campaign_id.starts_with("sha256:")
+            || campaign_id.len() != 71
+            || !campaign_id[7..].bytes().all(|b| b.is_ascii_hexdigit())
+            || from_ms <= 0
+            || through_ms <= from_ms
+        {
+            return Err(StoreError::Invalid("ENTRY_OPENING_WINDOW_INVALID"));
+        }
+        let frontiers = self.captured_empty_frontiers(from_ms, through_ms)?;
+        let (fills, bills) = (0_i64, 0_i64);
         let bytes = serde_json::to_vec(&(
             "okx.campaign-captured-zero/v1",
             self.meta.account_key.as_str(),
