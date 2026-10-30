@@ -721,13 +721,15 @@ export async function transitionRisk(
       const before=units(entry.entry_settled_usd);
       const ceiling=units(entry.entry_upper_usd);
       const budget=meta.entry_budget;
+      const recordedBreach=units(entry.entry_bound_breach_usd??"0");
       // Terminal RELEASE is NOT a second way to debit the campaign.
       // Every actual USD charge must have crossed SETTLE_ENTRY first.
       // Only the already-booked cumulative amount/revision/source digest
       // may release unused reserved capacity. saveEntry owns that one
       // reserved-capacity refund in the SAME RiskBook transaction.
       if(!budget||cumulative===null||before===null||ceiling===null||
-        cumulative!==before||cumulative>ceiling||
+        cumulative!==before||recordedBreach===null||
+        recordedBreach!==(cumulative>ceiling?cumulative-ceiling:0n)||
         !Number.isSafeInteger(ledger.entry_settlement_revision)||
         entry.entry_settlement_revision!<1||
         ledger.entry_settlement_revision!==entry.entry_settlement_revision||
