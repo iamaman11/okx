@@ -244,6 +244,26 @@ pub struct EntryAdmissionEvidence {
     pub observed_at: i64,
 }
 
+/// Native single-owner terminal financial witness. This is conservative
+/// USD ENTRY consumption, not an account NAV or an arbitrary MCP input.
+/// An immutable operation receipt makes lost Worker replies replayable.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct EntrySettlementEvidence {
+    pub schema: String,
+    pub account_key: String,
+    pub intent_id: String,
+    pub plan_hash: String,
+    pub reservation_key: String,
+    pub venue_order_id: String,
+    pub venue_update_ms: i64,
+    pub venue_filled_quantity: Decimal,
+    pub booked_notional_and_fee_usdt: Decimal,
+    pub cumulative_entry_usd: Decimal,
+    pub settlement_revision: u64,
+    pub source_digest: String,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct IntentPlan {
     pub strategy_definition_id: String,
