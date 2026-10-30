@@ -139,10 +139,14 @@ impl TradeService {
         }
         let backup = local.backup_at.ok_or("STORAGE_RECOVERY_BACKUP_MISSING")?;
         let started = now();
-        // The venue archive has a bounded retention horizon. Older or truncated
-        // histories cannot establish absence of a lost POST.
-        if started < backup || started - backup > 89 * 86_400_000 {
-            return Err("STORAGE_RECOVERY_HISTORY_UNAVAILABLE".into());
+        // A post-crash audit cannot claim coverage from the last 100
+        // completed orders: OKX also drops some canceled/unfilled orders
+        // after two hours. Full recent+archive history must be exhaustively
+        // paginated since the backup. Older recovery needs an independent
+        // retained source and stays blocked instead of treating missing
+        // orders as evidence of absence.
+        if started < backup || started - backup >= 119 * 60_000 {
+            return Err("STORAGE_RECOVERY_ORDER_HISTORY_NOT_PROVEN".into());
         }
         if !r.source_identity_ready().await {
             return Err("STORAGE_RECOVERY_SOURCE_UNVERIFIED".into());
@@ -157,14 +161,19 @@ impl TradeService {
             let history = r
                 .execution
                 .history
-                .orders_history(kind)
+                .complete_campaign_orders(
+                    &kind.to_string(),
+                    backup,
+                    started,
+                    chrono::Utc::now().timestamp_millis(),
+                )
                 .await
-                .map_err(err)?;
-            if !history.complete {
-                return Err("STORAGE_RECOVERY_ORDER_HISTORY_PARTIAL".into());
+                .map_err(|_| "STORAGE_RECOVERY_ORDER_HISTORY_NOT_PROVEN")?;
+            if history.from_ms != backup || history.through_ms != started {
+                return Err("STORAGE_RECOVERY_ORDER_HISTORY_SCOPE_MISMATCH".into());
             }
-            history_proofs.push(digest(&history.rows)?);
-            for order in history.rows {
+            history_proofs.push(history.source_digest);
+            for order in history.orders {
                 let updated = order
                     .update_time_ms
                     .parse::<i64>()
