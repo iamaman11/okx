@@ -292,8 +292,7 @@ impl EntryCostProof {
             || snapshot.account_level != account.account_level
             || snapshot.position_mode != account.position_mode
             || snapshot.account_type != account.account_type
-            || okx_api::account_uid_fingerprint(&account.uid)
-                != snapshot.account_uid_fingerprint
+            || okx_api::account_uid_fingerprint(&account.uid) != snapshot.account_uid_fingerprint
         {
             return Err("ENTRY_ACCOUNT_MODE_SOURCE_UNSUPPORTED".into());
         }
@@ -305,37 +304,45 @@ impl EntryCostProof {
         }
         // Fee generation, scope and age are independently verified against
         // the same instrument revision in the shared producer.
-        let rate = verified_entry_fee_rate(
-            fees, instrument, &rules.reference_generation, now(),
-        )?;
-        if rate != self.quote.fee_usdt
-            .checked_div(self.quote.notional_usdt)
-            .unwrap_or(Decimal::ZERO)
-            && self.quote.fee_usdt != self.quote.notional_usdt
-                .checked_mul(rate).ok_or("MONEY_OVERFLOW")?
-                .round_dp_with_strategy(6, RoundingStrategy::ToPositiveInfinity)
-        {
+        let rate = verified_entry_fee_rate(fees, instrument, &rules.reference_generation, now())?;
+        let rounded_fee = self
+            .quote
+            .notional_usdt
+            .checked_mul(rate)
+            .ok_or("MONEY_OVERFLOW")?
+            .round_dp_with_strategy(6, RoundingStrategy::ToPositiveInfinity);
+        if self.quote.fee_usdt != rounded_fee {
             return Err("ENTRY_FEE_SOURCE_CHANGED".into());
         }
-        let available = snapshot.balance.details.iter()
+        let available = snapshot
+            .balance
+            .details
+            .iter()
             .find(|b| b.currency == "USDT")
             .ok_or("ENTRY_USDT_OWN_FUNDS_SOURCE_MISSING")?;
         // Absence of liabilities is not a certified zero for this mode.
-        let liabilities = dec(available.liabilities.as_deref()
+        let liabilities = dec(available
+            .liabilities
+            .as_deref()
             .ok_or("ENTRY_USDT_LIABILITIES_UNPROVEN")?)?;
         if liabilities != Decimal::ZERO {
             return Err("ENTRY_EXISTING_BORROW_UNSUPPORTED".into());
         }
-        let avail_eq = dec(available.available_equity.as_deref()
+        let avail_eq = dec(available
+            .available_equity
+            .as_deref()
             .ok_or("ENTRY_AVAILABLE_EQUITY_UNPROVEN")?)?;
-        let avail_bal = dec(available.available_balance.as_deref()
+        let avail_bal = dec(available
+            .available_balance
+            .as_deref()
             .ok_or("ENTRY_AVAILABLE_BALANCE_UNPROVEN")?)?;
         if avail_eq < Decimal::ZERO || avail_bal < Decimal::ZERO {
             return Err("ENTRY_OWN_FUNDS_NEGATIVE".into());
         }
         // Taking the minimum of two independently reported available-fund
         // measures can only reduce the admissible size.
-        let own_usd = avail_eq.min(avail_bal)
+        let own_usd = avail_eq
+            .min(avail_bal)
             .checked_mul(self.quote.observed_usd_per_usdt)
             .ok_or("MONEY_OVERFLOW")?;
         let conservative_margin_usd = self.quote.total_usd;
@@ -979,6 +986,93 @@ mod tests {
         assert_eq!(fee, dec("0.0005").unwrap());
         assert_eq!(known.fee_usdt, dec("0.005001").unwrap());
         assert_eq!(known.total_usdt, dec("10.005021").unwrap());
+        // Exercise the same production source classifier as live preview/execute.
+        // No public MCP-provided Verified evidence or test-only RiskBook grant.
+        let at = chrono::Utc::now();
+        let mut live_fees = fees.clone();
+        live_fees.source_received_at = at.to_rfc3339();
+        live_fees.exchange_timestamp_ms = at.timestamp_millis().to_string();
+        let config: okx_api::AccountConfig = serde_json::from_value(serde_json::json!({
+            "acctLv":"2", "posMode":"long_short_mode", "uid":"real-fixture-uid",
+            "type":"0", "autoLoan":false
+        }))
+        .unwrap();
+        let snap: okx_observation::AccountSnapshot =
+            serde_json::from_value(serde_json::json!({
+                "schema":"okx.account-snapshot/v1",
+                "source":"fixture-authenticated-account",
+                "source_received_at":at.to_rfc3339(),
+                "account_generation":"authenticated-generation",
+                "quality_reason":"test-native-source",
+                "private_ws_connected":true,
+                "account_level":"2",
+                "position_mode":"long_short_mode",
+                "account_type":"0",
+                "account_uid_fingerprint":okx_api::account_uid_fingerprint("real-fixture-uid"),
+                "api_key_permissions":["trade"],
+                "balance":{
+                    "total_equity_usd":"100",
+                    "details":[{
+                        "currency":"USDT","equity":"100","equity_usd":"100",
+                        "available_equity":"100","available_balance":"100",
+                        "liabilities":"0"
+                    }]
+                },
+                "positions":[],"pending_orders":[]
+            }))
+            .unwrap();
+        let mut open_plan = plan.clone();
+        open_plan.side = "buy".into();
+        open_plan.position_side = "long".into();
+        let source_fx = UsdConversion {
+            usd_per_usdt: "1".into(),
+            source_digest: "a".repeat(64),
+            observed_at_ms: t as u64,
+        };
+        let applicant =
+            EntryCostProof::source_valued_candidate(known.clone(), &source_fx, t + 1)
+                .unwrap();
+        let assessed = applicant.clone()
+            .attest_linear_usdt_sources(
+                &open_plan, "limit", "BTC-USDT-SWAP", &rules,
+                &live_fees, &config, &snap, dec("2").unwrap(),
+            )
+            .unwrap();
+        assert_eq!(assessed.proven_upper_usd().unwrap(), Some(known.total_usd));
+        assert_eq!(assessed.missing_reasons(), Vec::<&'static str>::new());
+        let mut auto = config.clone();
+        auto.auto_loan = true;
+        assert_eq!(
+            applicant.clone()
+                .attest_linear_usdt_sources(
+                    &open_plan, "limit", "BTC-USDT-SWAP", &rules,
+                    &live_fees, &auto, &snap, dec("2").unwrap(),
+                )
+                .unwrap_err(),
+            "ENTRY_AUTO_BORROW_UNSUPPORTED"
+        );
+        assert_eq!(
+            applicant.clone()
+                .attest_linear_usdt_sources(
+                    &open_plan, "market", "BTC-USDT-SWAP", &rules,
+                    &live_fees, &config, &snap, dec("2").unwrap(),
+                )
+                .unwrap_err(),
+            "ENTRY_PRODUCT_OR_PRICE_CAP_UNSUPPORTED"
+        );
+        let mut no_funds = snap.clone();
+        no_funds.balance.details[0].available_balance = Some("1".into());
+        assert_eq!(
+            applicant
+                .attest_linear_usdt_sources(
+                    &open_plan, "limit", "BTC-USDT-SWAP", &rules,
+                    &live_fees, &config, &no_funds, dec("2").unwrap(),
+                )
+                .unwrap()
+                .proven_upper_usd()
+                .unwrap_err(),
+            "ENTRY_COLLATERAL_INSUFFICIENT"
+        );
         assert_eq!(
             verified_known_entry_quote(
                 &plan,

@@ -585,16 +585,33 @@ impl TradeService {
             // applicability and an independently bounded FX source exist,
             // unproven_linear_quote produces no upper and no proof digest.
             let account = r.execution.account.config().await.map_err(err)?;
-            let leverage = dec(&r.observer
-                .configured_leverage(instrument, okx_api::MarginMode::Cross, if plan.position_side == "long" { "long" } else { "short" })
-                .await.map_err(err)?)?;
+            let leverage = dec(&r
+                .observer
+                .configured_leverage(
+                    instrument,
+                    okx_api::MarginMode::Cross,
+                    if plan.position_side == "long" {
+                        "long"
+                    } else {
+                        "short"
+                    },
+                )
+                .await
+                .map_err(err)?)?;
             let entry_cost_proof = entry_budget::EntryCostProof::source_valued_candidate(
                 quote.clone(),
                 &fx,
                 entry_receipt.observed_at,
-            )?.attest_linear_usdt_sources(
-                &plan, &order.order_type, instrument, &rules, &fees,
-                &account, &quote_snapshot, leverage,
+            )?
+            .attest_linear_usdt_sources(
+                &plan,
+                &order.order_type,
+                instrument,
+                &rules,
+                &fees,
+                &account,
+                &quote_snapshot,
+                leverage,
             )?;
             let verified_entry =
                 entry_budget::reserve_entry_evidence(&entry_cost_proof, &entry_receipt, ceiling)?;
