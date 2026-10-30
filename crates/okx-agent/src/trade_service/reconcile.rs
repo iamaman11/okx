@@ -62,6 +62,41 @@ fn terminal_order_update_time(
         .transpose()
 }
 
+/// One native source gate for active protective order evidence. A saved
+/// SQL protection receipt or an algo ID in an inventory is not proof of a
+/// live, correctly sized exchange stop. Shared by trade.status and restart
+/// recovery; this performs no network or SQL calls of its own.
+pub(super) fn verified_live_protection(
+    intent: &StoredIntent,
+    quantity: Decimal,
+    source: &okx_api::TradeAlgoOrderDetails,
+) -> Result<(), String> {
+    let client_id = intent
+        .client_order_id
+        .get(..31)
+        .ok_or("PROTECTION_CLIENT_ID_INVALID")?;
+    let expected_client = format!("s{client_id}");
+    let opposite = matches!(
+        (intent.plan.side.as_str(), source.side.as_str()),
+        ("buy", "sell") | ("sell", "buy")
+    );
+    if quantity <= Decimal::ZERO
+        || source.instrument_id != intent.instrument_id
+        || source.client_order_id != expected_client
+        || source.algo_order_id.is_empty()
+        || source.state != "live"
+        || !source.failure_code.is_empty()
+        || source.stop_loss_trigger_price_type != "mark"
+        || !opposite
+        || intent.plan.stop_price.is_none()
+        || dec(&source.stop_loss_trigger_price).ok() != intent.plan.stop_price
+        || dec(&source.size).ok() != Some(quantity)
+    {
+        return Err("PROTECTION_LIVE_SOURCE_UNVERIFIED".into());
+    }
+    Ok(())
+}
+
 /// Actual parsed venue positions, not an opening order's cumulative fills,
 /// determine whether the first-test position is flat and whether protection
 /// covers all current exposure. Invalid amounts may never count as zero.
@@ -439,7 +474,9 @@ impl TradeService {
                 self.cleanup_flat_protection(r, &i).await?;
             }
             if i.risk_increase && exposed {
-                let algo_client = format!("s{}", &i.client_order_id[..31]);
+                let algo_client = i.client_order_id.get(..31)
+                    .map(|client| format!("s{client}"))
+                    .ok_or("PROTECTION_CLIENT_ID_INVALID")?;
                 let p = r
                     .execution
                     .trade
@@ -447,12 +484,7 @@ impl TradeService {
                     .await;
                 match p {
                     Ok(p)
-                        if p.instrument_id == i.instrument_id
-                            && p.client_order_id == algo_client
-                            && p.state == "live"
-                            && p.failure_code.is_empty()
-                            && p.stop_loss_trigger_price_type == "mark"
-                            && dec(&p.stop_loss_trigger_price).ok() == i.plan.stop_price
+                        if verified_live_protection(&i, position_qty, &p).is_ok()
                             && protection_covers_live_position(
                                 &i.plan.side,
                                 &p.side,
@@ -1507,6 +1539,73 @@ mod entry_cost_status_tests {
             one,
             "1"
         ));
+    }
+
+    #[test]
+    fn e2_shared_protection_check_is_strict_about_live_venue_state_and_size() {
+        let intent = StoredIntent {
+            intent_id: "intent".into(),
+            client_order_id: "c".repeat(32),
+            instrument_id: "BTC-USDT-SWAP".into(),
+            plan_hash: "a".repeat(64),
+            idempotency_key: "key".into(),
+            request_hash: "req".into(),
+            state: IntentState::Filled,
+            revision: 1,
+            deadline: 100,
+            policy_revision: 1,
+            risk_increase: true,
+            exchange_order_id: Some("order".into()),
+            incident: None,
+            plan: okx_execution::IntentPlan {
+                side: "buy".into(),
+                quantity: Decimal::ONE,
+                stop_price: Some(dec("96").unwrap()),
+                ..Default::default()
+            },
+        };
+        let p = okx_api::TradeAlgoOrderDetails {
+            instrument_id: "BTC-USDT-SWAP".into(),
+            algo_order_id: "algo".into(),
+            client_order_id: format!("s{}", "c".repeat(31)),
+            state: "live".into(),
+            stop_loss_trigger_price_type: "mark".into(),
+            stop_loss_trigger_price: "96".into(),
+            size: "1".into(),
+            side: "sell".into(),
+            ..serde_json::from_value::<okx_api::TradeAlgoOrderDetails>(json!({})).unwrap()
+        };
+        assert!(verified_live_protection(&intent, Decimal::ONE, &p).is_ok());
+        let mut changed = p.clone();
+        changed.size = "0.5".into();
+        assert_eq!(verified_live_protection(&intent, Decimal::ONE, &changed),
+            Err("PROTECTION_LIVE_SOURCE_UNVERIFIED".into()));
+        changed = p.clone();
+        changed.state = "pause".into();
+        assert!(verified_live_protection(&intent, Decimal::ONE, &changed).is_err());
+        changed = p.clone();
+        changed.side = "buy".into();
+        assert!(verified_live_protection(&intent, Decimal::ONE, &changed).is_err());
+        changed = p.clone();
+        changed.stop_loss_trigger_price_type = "last".into();
+        assert!(verified_live_protection(&intent, Decimal::ONE, &changed).is_err());
+        changed = p.clone();
+        changed.stop_loss_trigger_price = "95".into();
+        assert!(verified_live_protection(&intent, Decimal::ONE, &changed).is_err());
+        changed = p.clone();
+        changed.client_order_id = "wrong".into();
+        assert!(verified_live_protection(&intent, Decimal::ONE, &changed).is_err());
+        changed = p.clone();
+        changed.failure_code = "failure".into();
+        assert!(verified_live_protection(&intent, Decimal::ONE, &changed).is_err());
+        changed = p.clone();
+        changed.algo_order_id.clear();
+        assert!(verified_live_protection(&intent, Decimal::ONE, &changed).is_err());
+        assert!(verified_live_protection(&intent, Decimal::ZERO, &p).is_err());
+        let mut short_client = intent;
+        short_client.client_order_id = "short".into();
+        assert_eq!(verified_live_protection(&short_client, Decimal::ONE, &p),
+            Err("PROTECTION_CLIENT_ID_INVALID".into()));
     }
 
     #[test]
