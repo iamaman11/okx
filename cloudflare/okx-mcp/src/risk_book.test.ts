@@ -114,6 +114,25 @@ const partialReplay=await settleEntrySpend(sa,held.entry.key,p,{
  revision:1,source_digest:d});
 check(partialReplay.status==="UPDATED"&&partialReplay.book_sequence===4,
  "lost settlement acknowledgement cannot charge entry twice");
+const replayWithOriginalCas=await settleEntrySpend(sa,held.entry.key,p,{
+ connection_generation:77,expected_book_sequence:3,cumulative_entry_usd:"0.5",
+ revision:1,source_digest:d});
+check(replayWithOriginalCas.status==="UPDATED"&&replayWithOriginalCas.book_sequence===4,
+ "exact native retry with the original stale CAS must be read-only and successful");
+const bogusFutureSequence=await settleEntrySpend(sa,held.entry.key,p,{
+ connection_generation:77,expected_book_sequence:5,cumulative_entry_usd:"0.5",
+ revision:1,source_digest:d});
+check(bogusFutureSequence.status==="DENIED"&&bogusFutureSequence.reason===
+ "ENTRY_SETTLEMENT_REVISION_CONFLICT",
+ "future CAS sequence cannot be used even to inspect an idempotent settlement");
+const alteredStaleSource=await settleEntrySpend(sa,held.entry.key,p,{
+ connection_generation:77,expected_book_sequence:3,cumulative_entry_usd:"0.5",
+ revision:1,source_digest:a});
+check(alteredStaleSource.status==="DENIED",
+ "stale CAS cannot overwrite the authoritative settlement digest");
+check((await readRiskBook(sa))?.entry_budget?.consumed_usd==="0.5"&&
+ (await readRiskBook(sa))?.entry_budget?.reserved_usd==="1.5",
+ "all idempotent and denied settlement replays conserve the entry ledger");
 const spoof=await settleEntrySpend(sa,held.entry.key,p,{
  connection_generation:77,expected_book_sequence:4,cumulative_entry_usd:"0.5",
  revision:1,source_digest:a});
@@ -136,6 +155,19 @@ check((await readRiskBook(sa))?.consumed_loss_usd==="2"&&(await readRiskBook(sa)
 const finalEntry=(await readRiskBook(sa))!.entry_budget!;
 check(finalEntry.consumed_usd==="1.5"&&finalEntry.reserved_usd==="0",
  "terminal release returns unused reserve but NEVER refunds spent entry cost");
+const terminalReplay=await settleEntrySpend(sa,held.entry.key,p,{
+ connection_generation:77,expected_book_sequence:4,cumulative_entry_usd:"1.5",
+ revision:2,source_digest:d});
+check(terminalReplay.status==="UPDATED",
+ "lost final settlement acknowledgement remains readable after terminal release");
+const finalAgain=(await readRiskBook(sa))!.entry_budget!;
+check(finalAgain.consumed_usd==="1.5"&&finalAgain.reserved_usd==="0",
+ "replayed terminal settlement cannot debit twice or revive a released grant");
+const forbiddenTerminalIncrease=await settleEntrySpend(sa,held.entry.key,p,{
+ connection_generation:77,expected_book_sequence:5,cumulative_entry_usd:"1.6",
+ revision:3,source_digest:d});
+check(forbiddenTerminalIncrease.status==="DENIED",
+ "released intent cannot accept any new settlement revision");
 const reported={...census,occupied:census.occupied.map(v=>({...v,cumulative_loss_usd:v.account_key===accountKey(request)?"17":"0"}))};
 const campaign=await reserveRisk(sa,policy,reported,{...request,intent_id:"new_intent_001",loss_usdt:"4",loss_usd:"4"},native);
 check(campaign.status==="DENIED"&&campaign.reason==="CAMPAIGN_LOSS_BUDGET_EXHAUSTED","fresh losses charged before reserve even when admission denied");
