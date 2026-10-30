@@ -5189,7 +5189,9 @@ fn f1_fill_fee_with_bill_id_is_verified_before_bill_history_and_never_doubled() 
         s.finance_history(1, 10, 0, "", 100)
             .unwrap()
             .iter()
-            .filter(|entry| entry.component == "FEE" && entry.instance_id.as_deref() == Some("alpha"))
+            .filter(
+                |entry| entry.component == "FEE" && entry.instance_id.as_deref() == Some("alpha"),
+            )
             .count(),
         1
     );
