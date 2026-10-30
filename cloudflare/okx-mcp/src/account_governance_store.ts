@@ -1,6 +1,6 @@
 import {GOVERNANCE_STORAGE_KEY,validGovernance,validLimits,accessEnabled,
   reviseGovernance,type GovernanceUpdate,type Governance,type Account,type Limits} from "./account_governance.js";
-import {initializeRiskBook,lowerRiskBookLimit,units} from "./risk_book.js";
+import {initializeRiskBook,lowerRiskBookLimit,lowerCampaignEntryLimit,units} from "./risk_book.js";
 export {GOVERNANCE_STORAGE_KEY} from "./account_governance.js";
 
 type Reply={status:number;body:Record<string,unknown>};
@@ -54,7 +54,7 @@ export async function initializeGovernance(storage:any,configuration:Governance,
   });
 }
 /** Every accepted mutation has one durable body-bound outcome. */
-async function mutate(storage:any,key:unknown,input:unknown,fn:(policy:Governance)=>Reply):Promise<Reply>{
+async function mutate(storage:any,key:unknown,input:unknown,fn:(policy:Governance,tx:any)=>Reply|Promise<Reply>):Promise<Reply>{
   if(!operationKey(key))return fail(400,"IDEMPOTENCY_KEY_REQUIRED");
   const hash=await digest(input),receiptKey="access_operation:"+key;
   return storage.transaction(async(tx:any)=>{
@@ -62,7 +62,7 @@ async function mutate(storage:any,key:unknown,input:unknown,fn:(policy:Governanc
     if(receipt!==undefined)return receipt.hash===hash?receipt.reply:fail(409,"IDEMPOTENCY_CONFLICT");
     const previous:unknown=await tx.get(GOVERNANCE_STORAGE_KEY);
     if(!validGovernance(previous))return fail(503,"INSTALLATION_ACCESS_MISSING_OR_CORRUPT");
-    const reply=fn(previous);
+    const reply=await fn(previous,tx);
     if(reply.status===200){
       const next=reply.body.configuration as Governance;
       if(!validGovernance(next))return fail(503,"ACCESS_INVARIANTS_REJECTED");
@@ -85,9 +85,14 @@ export async function governanceRequest(storage:any,method:string,raw?:unknown):
   if(Object.keys(raw).sort().join(",")!==fields.sort().join(","))
     return fail(400,"INVALID_ACCESS_REQUEST");
   if(new TextEncoder().encode(JSON.stringify(raw)).byteLength>32768)return fail(413,"ACCESS_REQUEST_TOO_LARGE");
-  return mutate(storage,raw.idempotency_key,raw,policy=>{
+  return mutate(storage,raw.idempotency_key,raw,async(policy,tx)=>{
     const revised=reviseGovernance(policy,raw as unknown as GovernanceUpdate);
-    return revised?{status:200,body:{...result(revised),configuration:revised}}:fail(409,"ACCESS_REVISION_OR_LIMITS_REJECTED");
+    if(!revised)return fail(409,"ACCESS_REVISION_OR_LIMITS_REJECTED");
+    if(revised.campaign_entry_limit_usd!==policy.campaign_entry_limit_usd &&
+      !await lowerCampaignEntryLimit(tx,policy.campaign_entry_limit_usd,
+        revised.campaign_entry_limit_usd))
+      return fail(409,"ENTRY_LIMIT_BELOW_CONSUMED_OR_RESERVED");
+    return {status:200,body:{...result(revised),configuration:revised}};
   });
 }
 /** Owner-only, body-bound, monotonic campaign reduction. It never resets risk. */

@@ -223,6 +223,28 @@ export async function lowerRiskBookLimit(tx:any,limit:string):Promise<boolean>{
  if(!validMeta(meta)||next===null||next<=0n||next>=units(meta.campaign_limit_usd)!||next<units(meta.consumed_loss_usd)!+units(meta.occupied_usd)!)return false;
  await tx.put(KEY,{...meta,campaign_limit_usd:limit,sequence:meta.sequence+1});return true;
 }
+/** Same owner / same transaction as governance CAS. A lowered campaign
+ * entry cap never refunds existing consumed spend or drops HELD reservations.
+ * A missing imported opening balance remains missing, not zero.
+ */
+export async function lowerCampaignEntryLimit(
+  tx:any,previousCap:string|undefined,nextCap:string|undefined
+):Promise<boolean>{
+  const meta:RiskMeta=await tx.get(KEY);
+  if(!validMeta(meta)||!nextCap||units(nextCap)===null||units(nextCap)!<=0n||
+     (previousCap!==undefined &&
+       (units(previousCap)===null||units(nextCap)!>units(previousCap)!)))
+    return false;
+  const budget=meta.entry_budget;
+  if(!budget)return true; // Proof is still uninstalled, hence NO E1 admissions.
+  if(previousCap===undefined||units(budget.limit_usd)!==units(previousCap))
+    return false;
+  if(units(nextCap)!<units(budget.consumed_usd)!+units(budget.reserved_usd)!)
+    return false;
+  if(units(nextCap)===units(budget.limit_usd))return true;
+  await tx.put(KEY,{...meta,entry_budget:{...budget,limit_usd:nextCap},sequence:meta.sequence+1});
+  return true;
+}
 const entryKey=(key:string)=>"risk_entry_v2:"+key;
 const noReserveKey=(key:string)=>"risk_no_reserve_v1:"+key;
 /** Permanent negative fence in the existing Worker RiskBook, never occupancy. */

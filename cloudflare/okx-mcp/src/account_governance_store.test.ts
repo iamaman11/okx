@@ -1,5 +1,6 @@
 import {governanceRequest,lowerCampaignLimit,enrollObservedAccount,setAccountPause,stopNewRealRisk,initializeGovernance,GOVERNANCE_STORAGE_KEY} from "./account_governance_store.js";
 import {FRAME_SCHEMA} from "./shared.js";
+import {installCampaignEntryProof,readRiskBook} from "./risk_book.js";
 import {initial,limits} from "./account_governance.test.js";
 function ok(v:boolean,label:string){if(!v)throw Error(label);}
 class Storage{
@@ -38,6 +39,46 @@ const lowered=await lowerCampaignLimit(s,{expected_revision:revision,campaign_lo
 ok(lowered.status===200&&lowered.body.campaign_loss_limit_usd==="8","owner may only lower campaign ceiling");
 ok((await lowerCampaignLimit(s,{expected_revision:revision+1,campaign_loss_limit_usd:"10",idempotency_key:"raise_campaign_01"})).status===409,"campaign ceiling cannot increase");
 ok(JSON.stringify(await lowerCampaignLimit(s,{expected_revision:revision,campaign_loss_limit_usd:"8",idempotency_key:"lower_campaign_01"}))===JSON.stringify(lowered),"campaign lowering is body-bound idempotent");
+// Once the native finance owner has verified opening consumption, lowering
+// the centrally configured cap must update the same RiskBook transaction.
+{
+ const budgetStore=new Storage();
+ ok((await initializeGovernance(budgetStore,initial)).status===200,
+   "campaign cap transaction starts with legitimate installation");
+ ok(await installCampaignEntryProof(budgetStore,{
+   campaign_id:initial.campaign_id,limit_usd:"10",consumed_usd:"7",
+   source_digest:"f".repeat(64),as_of_ms:1792344435177
+ }),"synthetic opening source attestation exists before budget mutation");
+ const change={expected_revision:0,max_total_modelled_loss_usdt:"5",accounts:[]};
+ const beforeBook=await readRiskBook(budgetStore);
+ const denied=await governanceRequest(budgetStore,"POST",{
+   ...change,campaign_entry_limit_usd:"6",idempotency_key:"lower_entry_below_booked"
+ });
+ ok(denied.status===409&&denied.body.reason==="ENTRY_LIMIT_BELOW_CONSUMED_OR_RESERVED",
+   "cannot lower entry cap beneath already consumed source-proven money");
+ ok((await readRiskBook(budgetStore))?.sequence===beforeBook?.sequence&&
+   (await governanceRequest(budgetStore,"GET")).body.revision===0,
+   "denied cap change leaves policy and RiskBook untouched");
+ const accepted=await governanceRequest(budgetStore,"POST",{
+   ...change,campaign_entry_limit_usd:"8",idempotency_key:"lower_entry_atomic_001"
+ });
+ const afterBook=await readRiskBook(budgetStore);
+ ok(accepted.status===200&&accepted.body.campaign_entry_limit_usd==="8"&&
+   afterBook?.entry_budget?.limit_usd==="8"&&
+   afterBook?.entry_budget?.consumed_usd==="7"&&
+   afterBook.sequence===beforeBook!.sequence+1,
+   "cap and booked amount updated atomically without reset");
+ ok((await governanceRequest(budgetStore,"POST",{
+   ...change,campaign_entry_limit_usd:"8",idempotency_key:"lower_entry_atomic_001"
+ })).status===200,"replayed cap CAS cannot charge or change twice");
+ ok((await readRiskBook(budgetStore))?.sequence===afterBook.sequence,
+   "idempotent replay does not increment RiskBook sequence");
+ const reboot=new Storage();reboot.map=structuredClone(budgetStore.map);
+ ok((await readRiskBook(reboot))?.entry_budget?.consumed_usd==="7"&&
+   (await governanceRequest(reboot,"GET")).body.campaign_entry_limit_usd==="8",
+   "entry budget survives restart with exact consumed money");
+}
+console.log("entry_cap_governance_and_riskbook_atomic PASS");
 console.log("account_governance_lower_campaign_limit_monotonic PASS");
 const restarted=new Storage();restarted.map=structuredClone(s.map);
 ok(((await governanceRequest(restarted,"GET")).body.accounts as any[])[0].enabled,"access_survives_restart");
