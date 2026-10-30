@@ -10,6 +10,144 @@ struct PostFxFence<'a> {
     conversion: &'a UsdConversion,
 }
 impl TradeService {
+    /// On-demand E1 opening for a *provably empty* campaign only. A prior
+    /// fill, unexplained bill, unavailable real account or incomplete archive
+    /// blocks the import; a policy cap or local T0 never establishes zero.
+    async fn ensure_empty_campaign_opening(
+        &self,
+        state: &CentralGovernanceSnapshot,
+        until: Instant,
+    ) -> Result<(), String> {
+        let summary = self
+            .risk
+            .request(self.risk_command(
+                state,
+                format!("opening_summary_{}", now()),
+                RiskCommandAction::Summary {},
+            ))
+            .await
+            .map_err(str::to_owned)?;
+        if summary.status != RiskDecisionStatus::Observed {
+            return Err("ENTRY_OPENING_CENTRAL_SUMMARY_UNAVAILABLE".into());
+        }
+        let budget = summary.budget.ok_or("ENTRY_OPENING_CENTRAL_BUDGET_MISSING")?;
+        if budget.entry_budget.is_some() {
+            return Ok(());
+        }
+        let origin = budget.campaign_origin.ok_or("ENTRY_CAMPAIGN_ORIGIN_UNPROVEN")?;
+        if origin.installation_id != self.accounts.installation_id()
+            || origin.campaign_id != state.state.campaign_id
+        {
+            return Err("ENTRY_CAMPAIGN_ORIGIN_MISMATCH".into());
+        }
+        let from = i64::try_from(origin.started_at_ms)
+            .map_err(|_| "ENTRY_CAMPAIGN_ORIGIN_INVALID")?;
+        let mut rows = Vec::new();
+        let cohort = state
+            .state
+            .accounts
+            .iter()
+            .filter(|account| {
+                account.environment
+                    == okx_protocol::account_governance::AccountEnvironment::Real
+            })
+            .collect::<Vec<_>>();
+        if cohort.is_empty() || cohort.len() > 32 {
+            return Err("ENTRY_OPENING_COHORT_INVALID".into());
+        }
+        if !self.accounts.failures().await.is_empty() {
+            return Err("ENTRY_OPENING_COHORT_UNAVAILABLE".into());
+        }
+        let through = now();
+        for account in cohort {
+            if Instant::now() >= until {
+                return Err("COMMAND_EXPIRED".into());
+            }
+            let resource = self.resources(&account.account_key).await?;
+            if !resource.source_identity_ready().await {
+                return Err("ENTRY_OPENING_IDENTITY_UNVERIFIED".into());
+            }
+            let history = tokio::time::timeout(
+                until.saturating_duration_since(Instant::now()),
+                resource.execution.history.complete_campaign_account_history(
+                    from, through, now(),
+                ),
+            )
+            .await
+            .map_err(|_| "ENTRY_OPENING_HISTORY_DEADLINE")?
+            .map_err(|_| "ENTRY_OPENING_HISTORY_UNAVAILABLE")?;
+            if history.from_ms != from || history.through_ms != through
+                || !history.fills.is_empty() || !history.bills.is_empty()
+            {
+                return Err("ENTRY_OPENING_NONEMPTY_MONEY_NEEDS_CLASSIFICATION".into());
+            }
+            let campaign = origin.campaign_id.clone();
+            let source = history.source_digest;
+            let source_digest = resource
+                .execution
+                .store
+                .call(until, move |store| {
+                    store.seal_empty_campaign_entry_opening(
+                        &campaign, from, through, &source, 0, 0,
+                    )
+                })
+                .await
+                .map_err(err)?;
+            rows.push(CampaignOpeningAccount {
+                account_key: account.account_key.clone(),
+                history_from_ms: origin.started_at_ms,
+                history_through_ms: u64::try_from(through)
+                    .map_err(|_| "ENTRY_OPENING_TIME_INVALID")?,
+                consumed_entry_usd: "0".into(),
+                order_history_complete: true,
+                fill_history_complete: true,
+                bill_history_complete: true,
+                finance_provenance_sealed: true,
+                source_digest,
+            });
+        }
+        rows.sort_by(|a, b| a.account_key.cmp(&b.account_key));
+        let limit_usd = state
+            .state
+            .campaign_entry_limit_usd
+            .clone()
+            .ok_or("ENTRY_CAMPAIGN_LIMIT_MISSING")?;
+        let mut source = CampaignOpeningSource {
+            campaign_id: origin.campaign_id,
+            limit_usd,
+            consumed_usd: "0".into(),
+            source_digest: String::new(),
+            as_of_ms: u64::try_from(through)
+                .map_err(|_| "ENTRY_OPENING_TIME_INVALID")?,
+            campaign_started_at_ms: origin.started_at_ms,
+            accounts: rows,
+        };
+        source.source_digest = digest(&(
+            "okx.campaign-entry-opening/v1",
+            &source.campaign_id,
+            &source.limit_usd,
+            &source.consumed_usd,
+            source.campaign_started_at_ms,
+            source.as_of_ms,
+            &source.accounts,
+        ))?;
+        if !source.valid() || Instant::now() >= until {
+            return Err("ENTRY_OPENING_SOURCE_INVALID".into());
+        }
+        let result = self.risk.request(self.risk_command(
+            state,
+            format!("install_opening_{}", now()),
+            RiskCommandAction::InstallEntryOpening { source: source.clone() },
+        )).await.map_err(str::to_owned)?;
+        if result.status != RiskDecisionStatus::Observed
+            || result.budget.as_ref().and_then(|budget| budget.entry_budget.as_ref())
+                .is_none_or(|opened| opened.opening_source_digest != source.source_digest)
+        {
+            return Err(result.reason.unwrap_or("ENTRY_OPENING_INSTALL_UNPROVEN".into()));
+        }
+        Ok(())
+    }
+
     pub(super) async fn execute(
         &self,
         r: &Arc<AccountResources>,
@@ -97,6 +235,11 @@ impl TradeService {
             operation,
             TradeOperation::Open | TradeOperation::Add | TradeOperation::Replace
         );
+        if increase
+            && r.configuration.account_key.environment == okx_protocol::accounts::Environment::Real
+        {
+            self.ensure_empty_campaign_opening(&state, until).await?;
+        }
         let plan = loop {
             match self
                 .plan(

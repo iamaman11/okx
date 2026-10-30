@@ -1,7 +1,7 @@
 import {validGovernance,projectRiskPolicy,accessEnabled,GOVERNANCE_STORAGE_KEY} from "./account_governance.js";
 import {amount,units,beginRiskPost,readRiskBook,inspectRisk,reserveRisk,transitionRisk,
   type CompleteRiskCensus,type NativeSessionRiskProof,type CausalPostProof,type RiskReservation,
-  type TerminalRiskReleaseProof,type UnsentRiskReleaseProof,releaseUnsentRisk,inspectNoReserveFence,settleEntrySpend} from "./risk_book.js";
+  type TerminalRiskReleaseProof,type UnsentRiskReleaseProof,releaseUnsentRisk,inspectNoReserveFence,settleEntrySpend,installCampaignEntryProof,type CampaignEntryOpeningSource} from "./risk_book.js";
 
 const COMMAND_SCHEMA="okx.risk-command/v1";
 const RESULT_SCHEMA="okx.risk-result/v1";
@@ -68,6 +68,25 @@ export async function handleNativeRiskCommand(
   const installation=await storage.get(GOVERNANCE_STORAGE_KEY);
   if(!validGovernance(installation)||raw.installation_id!==installation.installation_id)return deny(id,"INSTALLATION_ID_MISMATCH");
   const a=raw.action;
+  if(a.action==="INSTALL_ENTRY_OPENING"){
+    // No public MCP route: only the authenticated current native WSS session
+    // can submit SQL-owner opening facts. The transaction rechecks campaign
+    // inception, exact registered real-account cohort, financial scope and
+    // consumed total; digest syntax alone is never accepted as a baseline.
+    if(await storage.get("generation")!==session.connection_generation)
+      return deny(id,"STALE_NATIVE_INSPECTION_SESSION");
+    if(!isObject(a.source)||!Array.isArray(a.source.accounts))
+      return deny(id,"ENTRY_OPENING_SOURCE_INVALID");
+    const accepted=await storage.transaction(async(tx:any)=>
+      installCampaignEntryProof(tx,a.source as unknown as CampaignEntryOpeningSource));
+    if(!accepted)return deny(id,"ENTRY_OPENING_SOURCE_NOT_PROVEN");
+    // The existing exact typed SUMMARY is the receipt/readback. Do not add
+    // an independently maintained balance or a new externally writable API.
+    return handleNativeRiskCommand(storage,session,{
+      schema:COMMAND_SCHEMA,command_id:id,installation_id:raw.installation_id,
+      action:{action:"SUMMARY"}
+    },now_ms);
+  }
   if(a.action==="ACCOUNT_SUMMARY"){
     if(await storage.get("generation")!==session.connection_generation)return deny(id,"STALE_NATIVE_INSPECTION_SESSION");
     if(typeof a.account_key!=="string"||!/^okx:real:[0-9a-f]{64}$/.test(a.account_key)||!installation.accounts.some((v:any)=>v.account_key===a.account_key))return deny(id,"ACCOUNT_ACCESS_MISSING");

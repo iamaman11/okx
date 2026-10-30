@@ -225,8 +225,67 @@ pub enum RiskReservationState {
     rename_all = "SCREAMING_SNAKE_CASE",
     deny_unknown_fields
 )]
+
+/** The only opening import transport is the authenticated native Risk WS.
+ * The financial source is still independently verified in the native SQL
+ * owner; serializing a source hash alone does not create this witness.
+ */
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CampaignOpeningAccount {
+    pub account_key: String,
+    pub history_from_ms: u64,
+    pub history_through_ms: u64,
+    pub consumed_entry_usd: String,
+    pub order_history_complete: bool,
+    pub fill_history_complete: bool,
+    pub bill_history_complete: bool,
+    pub finance_provenance_sealed: bool,
+    pub source_digest: String,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CampaignOpeningSource {
+    pub campaign_id: String,
+    pub limit_usd: String,
+    pub consumed_usd: String,
+    pub source_digest: String,
+    pub as_of_ms: u64,
+    pub campaign_started_at_ms: u64,
+    pub accounts: Vec<CampaignOpeningAccount>,
+}
+impl CampaignOpeningSource {
+    pub fn valid(&self) -> bool {
+        self.campaign_id.starts_with("sha256:")
+            && hash(&self.campaign_id[7..])
+            && positive(&self.limit_usd)
+            && (self.consumed_usd == "0" || positive(&self.consumed_usd))
+            && hash(&self.source_digest)
+            && self.as_of_ms >= self.campaign_started_at_ms
+            && self.campaign_started_at_ms > 0
+            && !self.accounts.is_empty()
+            && self.accounts.len() <= 32
+            && self.accounts.windows(2).all(|pair| pair[0].account_key < pair[1].account_key)
+            && self.accounts.iter().all(|row| {
+                row.account_key.starts_with("okx:real:")
+                    && row.account_key.len() == 73
+                    && hash(&row.account_key[9..])
+                    && row.history_from_ms == self.campaign_started_at_ms
+                    && row.history_through_ms == self.as_of_ms
+                    && (row.consumed_entry_usd == "0" || positive(&row.consumed_entry_usd))
+                    && row.order_history_complete
+                    && row.fill_history_complete
+                    && row.bill_history_complete
+                    && row.finance_provenance_sealed
+                    && hash(&row.source_digest)
+            })
+    }
+}
 pub enum RiskCommandAction {
     Summary {},
+    InstallEntryOpening {
+        source: CampaignOpeningSource,
+    },
     AccountSummary {
         account_key: String,
     },
@@ -308,6 +367,7 @@ impl RiskCommand {
         }
         match &self.action {
             RiskCommandAction::Summary {} => true,
+            RiskCommandAction::InstallEntryOpening { source } => source.valid(),
             RiskCommandAction::AccountSummary { account_key } => {
                 account_key.starts_with("okx:real:")
                     && account_key.len() == 73

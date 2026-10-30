@@ -207,6 +207,97 @@ impl AccountStore {
     /// intent. The source coverage cursor is mandatory: a partial page is
     /// NOT an absence-of-fills proof. This does not price margin, non-USDT
     /// fees, borrowing or FX and cannot authorize a reserve or venue POST.
+    /// Seal a genuinely empty campaign monetary window after the native
+    /// authenticated venue adapter has exhaustively paginated orders, fills
+    /// and bills from RiskBook-owned inception (not AccountStore T0).
+    /// NONEMPTY venue history is deliberately unsupported until its contract
+    /// valuation, fee FX and economic event classification are all proved.
+    /// A SQL receipt is immutable and scoped to this installation/account.
+    pub fn seal_empty_campaign_entry_opening(
+        &self,
+        campaign_id: &str,
+        from_ms: i64,
+        through_ms: i64,
+        venue_source_digest: &str,
+        venue_fill_count: usize,
+        venue_bill_count: usize,
+    ) -> StoreResult<String> {
+        use sha2::{Digest, Sha256};
+        if !campaign_id.starts_with("sha256:")
+            || campaign_id.len() != 71
+            || !campaign_id[7..].bytes().all(|b| b.is_ascii_hexdigit())
+            || venue_source_digest.len() != 64
+            || !venue_source_digest.bytes().all(|b| b.is_ascii_hexdigit())
+            || from_ms <= 0
+            || through_ms < from_ms
+            || venue_fill_count != 0
+            || venue_bill_count != 0
+        {
+            return Err(StoreError::Invalid("ENTRY_OPENING_NONEMPTY_OR_INVALID"));
+        }
+        if !finance_proof_sealed(&self.connection)? {
+            return Err(StoreError::Invalid("ENTRY_OPENING_FINANCE_PROVENANCE_UNSEALED"));
+        }
+        // An empty fresh venue history cannot be reconciled with an already
+        // nonempty local ledger. Such a mismatch is an operational blocker,
+        // never evidence that the opening spend is zero.
+        let (fills, bills, finance): (i64, i64, i64) = self.connection.query_row(
+            "SELECT (SELECT COUNT(*) FROM fills),
+                    (SELECT COUNT(*) FROM bills),
+                    (SELECT COUNT(*) FROM finance_entries)",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )?;
+        if fills != 0 || bills != 0 || finance != 0 {
+            return Err(StoreError::Invalid("ENTRY_OPENING_LOCAL_LEDGER_NOT_EMPTY"));
+        }
+        let canonical = serde_json::to_vec(&(
+            "okx.campaign-empty-opening-sql/v1",
+            self.meta.account_key.as_str(),
+            self.meta.installation_id.as_str(),
+            campaign_id,
+            from_ms,
+            through_ms,
+            venue_source_digest,
+        ))
+        .map_err(|_| StoreError::Invalid("ENTRY_OPENING_SERIALIZATION_FAILED"))?;
+        let proof = format!("{:x}", Sha256::digest(canonical));
+        // Install the immutable receipt guards even for a database created
+        // before this release. These are the existing single SQL owner and
+        // operation_receipts table, not a second financial ledger.
+        self.connection.execute_batch(
+            "CREATE TRIGGER IF NOT EXISTS immutable_campaign_opening_update
+             BEFORE UPDATE ON operation_receipts
+             WHEN OLD.kind='CAMPAIGN_ENTRY_OPENING_SEALED'
+             BEGIN SELECT RAISE(ABORT,'IMMUTABLE_CAMPAIGN_ENTRY_OPENING'); END;
+             CREATE TRIGGER IF NOT EXISTS immutable_campaign_opening_delete
+             BEFORE DELETE ON operation_receipts
+             WHEN OLD.kind='CAMPAIGN_ENTRY_OPENING_SEALED'
+             BEGIN SELECT RAISE(ABORT,'IMMUTABLE_CAMPAIGN_ENTRY_OPENING'); END;",
+        )?;
+        let key = format!("campaign_entry_opening:{campaign_id}");
+        self.connection.execute(
+            "INSERT OR IGNORE INTO operation_receipts
+             (operation_id,kind,request_hash,result_ref,committed_at)
+             VALUES(?1,'CAMPAIGN_ENTRY_OPENING_SEALED',?2,?2,?3)",
+            params![key, proof, through_ms],
+        )?;
+        let stored: (String, String, String, i64) = self.connection.query_row(
+            "SELECT kind,request_hash,result_ref,committed_at
+             FROM operation_receipts WHERE operation_id=?1",
+            [key],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )?;
+        if stored.0 != "CAMPAIGN_ENTRY_OPENING_SEALED"
+            || stored.1 != proof
+            || stored.2 != proof
+            || stored.3 != through_ms
+        {
+            return Err(StoreError::Invalid("ENTRY_OPENING_SQL_RECEIPT_CONFLICT"));
+        }
+        Ok(proof)
+    }
+
     pub fn intent_fill_cost_evidence(
         &self,
         intent_id: &str,
