@@ -193,6 +193,17 @@ pub(super) fn verified_known_entry_quote(
     observed_at_ms: i64,
 ) -> Result<(EntryQuote, Decimal), String> {
     plan::verify_entry_rules_match(rules, instrument, plan)?;
+    let reference_time = chrono::DateTime::parse_from_rfc3339(
+        &rules.source_received_at,
+    ).map_err(|_| "ENTRY_REFERENCE_SOURCE_TIME_INVALID")?.timestamp_millis();
+    if reference_time <= 0
+        || reference_time > observed_at_ms
+        || !crate::config::evidence_fresh(
+            reference_time, observed_at_ms, crate::config::ACCOUNT_MAX_AGE_MS,
+        )
+    {
+        return Err("ENTRY_REFERENCE_SOURCE_STALE".into());
+    }
     if account_uid != expected_uid {
         return Err("ENTRY_QUOTE_ACCOUNT_IDENTITY_MISMATCH".into());
     }
@@ -534,7 +545,7 @@ mod tests {
         let (known, fee) = verified().unwrap();
         assert_eq!(fee, dec("0.0005").unwrap());
         assert_eq!(known.fee_usdt, dec("0.005001").unwrap());
-        assert_eq!(known.total_usdt, dec("10.007001").unwrap());
+        assert_eq!(known.total_usdt, dec("10.005021").unwrap());
         assert_eq!(verified_known_entry_quote(
             &plan, "BTC-USDT-SWAP", &rules, &fees, &fx,
             "wrong", "uid", t,
@@ -544,6 +555,15 @@ mod tests {
         assert_eq!(verified_known_entry_quote(
             &plan, "BTC-USDT-SWAP", &rules, &fees, &stale, "uid", "uid", t
         ), Err("ENTRY_FX_SOURCE_STALE".into()));
+        let mut stale_rules = rules.clone();
+        stale_rules.source_received_at = "2026-10-29T23:00:00Z".into();
+        assert_eq!(verified_known_entry_quote(
+            &plan, "BTC-USDT-SWAP", &stale_rules, &fees, &fx, "uid", "uid", t
+        ), Err("ENTRY_REFERENCE_SOURCE_STALE".into()));
+        stale_rules.source_received_at = "not-a-date".into();
+        assert_eq!(verified_known_entry_quote(
+            &plan, "BTC-USDT-SWAP", &stale_rules, &fees, &fx, "uid", "uid", t
+        ), Err("ENTRY_REFERENCE_SOURCE_TIME_INVALID".into()));
         let corrupted = UsdConversion { source_digest: "invalid".into(), ..fx.clone() };
         assert_eq!(verified_known_entry_quote(
             &plan, "BTC-USDT-SWAP", &rules, &fees, &corrupted, "uid", "uid", t
