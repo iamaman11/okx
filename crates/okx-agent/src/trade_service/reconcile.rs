@@ -83,8 +83,8 @@ fn verified_order_readback(
     if dec(&order.size)? != intent.plan.quantity {
         return Err("ORDER_READBACK_PLAN_MISMATCH".into());
     }
-    let filled = dec(&order.accumulated_fill_size)
-        .map_err(|_| "ORDER_READBACK_FILLED_SIZE_INVALID")?;
+    let filled =
+        dec(&order.accumulated_fill_size).map_err(|_| "ORDER_READBACK_FILLED_SIZE_INVALID")?;
     if filled < Decimal::ZERO || filled > intent.plan.quantity {
         return Err("ORDER_READBACK_FILLED_SIZE_INVALID".into());
     }
@@ -103,8 +103,7 @@ fn verified_terminal_order_update_time(
     if intent.exchange_order_id.as_deref() != Some(o.order_id.as_str()) {
         return Err("TERMINAL_ORDER_IDENTITY_MISMATCH".into());
     }
-    verified_order_readback(intent, o)
-        .map_err(|_| "TERMINAL_ORDER_IDENTITY_OR_SIZE_UNVERIFIED")?;
+    verified_order_readback(intent, o).map_err(|_| "TERMINAL_ORDER_IDENTITY_OR_SIZE_UNVERIFIED")?;
     if !matches!(o.state.as_str(), "filled" | "canceled" | "mmp_canceled") {
         return Err("TERMINAL_ORDER_STATE_UNVERIFIED".into());
     }
@@ -1296,6 +1295,18 @@ mod entry_cost_status_tests {
         assert_eq!(
             verified_order_readback(&intent, &changed),
             Err("ORDER_READBACK_IDENTITY_MISMATCH".into())
+        );
+        changed = order.clone();
+        changed.order_id = "other-venue-order".into();
+        assert_eq!(
+            verified_order_readback(&intent, &changed),
+            Err("ORDER_READBACK_IDENTITY_MISMATCH".into())
+        );
+        changed = order.clone();
+        changed.size = "2".into();
+        assert_eq!(
+            verified_order_readback(&intent, &changed),
+            Err("ORDER_READBACK_PLAN_MISMATCH".into())
         );
         changed = order.clone();
         changed.accumulated_fill_size = "1.1".into();
