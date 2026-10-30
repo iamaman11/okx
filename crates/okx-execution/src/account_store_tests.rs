@@ -2,6 +2,66 @@ use super::*;
 use sha2::Digest;
 use std::sync::atomic::{AtomicU64, Ordering};
 static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+#[test]
+fn e1_campaign_empty_opening_sql_receipt_is_durable_and_immutable() {
+    let s = store();
+    let campaign = format!("sha256:{}", "c".repeat(64));
+    let venue = "d".repeat(64);
+    let first = s
+        .seal_empty_campaign_entry_opening(&campaign, 1, 2, &venue, 0, 0)
+        .unwrap();
+    assert_eq!(first.len(), 64);
+    assert_eq!(
+        s.seal_empty_campaign_entry_opening(&campaign, 1, 2, &venue, 0, 0)
+            .unwrap(),
+        first
+    );
+    assert!(s
+        .seal_empty_campaign_entry_opening(&campaign, 1, 3, &venue, 0, 0)
+        .is_err());
+    assert!(s
+        .seal_empty_campaign_entry_opening(&campaign, 1, 2, &venue, 1, 0)
+        .is_err());
+    assert!(s
+        .seal_empty_campaign_entry_opening(&campaign, 1, 2, &venue, 0, 1)
+        .is_err());
+    assert!(s
+        .connection
+        .execute(
+            "UPDATE operation_receipts SET result_ref='bad' WHERE operation_id=?1",
+            [format!("campaign_entry_opening:{campaign}")],
+        )
+        .is_err());
+    assert!(s
+        .connection
+        .execute(
+            "DELETE FROM operation_receipts WHERE operation_id=?1",
+            [format!("campaign_entry_opening:{campaign}")],
+        )
+        .is_err());
+}
+
+#[test]
+fn e1_campaign_empty_opening_refuses_unreconciled_money() {
+    let s = store();
+    let campaign = format!("sha256:{}", "c".repeat(64));
+    let venue = "d".repeat(64);
+    s.connection
+        .execute(
+            "INSERT INTO finance_entries(
+             entry_id,economic_event_key,component,allocation_leg,amount,
+             currency,instance_id,source_ref,time,reverses_entry_id)
+             VALUES('unexpected','unexpected','FEE','account','-1',
+                    'USDT',NULL,'bill:unexpected',2,NULL)",
+            [],
+        )
+        .unwrap();
+    assert!(s
+        .seal_empty_campaign_entry_opening(&campaign, 1, 2, &venue, 0, 0)
+        .is_err());
+}
+
 /// Native SQL fixture for a source-identical linear USDT quote. Source
 /// timestamps precede the durable BEGIN_POST; source hashes are canonical.
 fn e1_source_quote(s: &AccountStore, i: &StoredIntent) -> EntryQuoteEvidence {
