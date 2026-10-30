@@ -50,6 +50,60 @@ fn e1_sql_known_quote_is_immutable_scoped_and_never_all_in_permission() {
     s.bind_entry_quote(&proof).unwrap();
     s.bind_entry_quote(&proof).unwrap();
     assert_eq!(s.entry_quote(&i.intent_id).unwrap(), Some(proof.clone()));
+    assert_eq!(s.entry_admission(&i.intent_id).unwrap(), None);
+    let original_quote = serde_json::to_vec(&proof).unwrap();
+    let admitted = EntryAdmissionEvidence {
+        schema: "okx.entry-admission/v1".into(),
+        account_key: s.meta.account_key.clone(),
+        installation_id: s.meta.installation_id.clone(),
+        intent_id: i.intent_id.clone(),
+        plan_hash: i.plan_hash.clone(),
+        quote_digest: format!("{:x}", sha2::Sha256::digest(original_quote)),
+        entry_upper_usd: Decimal::from(101),
+        entry_proof_digest: "a".repeat(64),
+        observed_at: proof.observed_at,
+    };
+    s.bind_entry_admission(&admitted).unwrap();
+    s.bind_entry_admission(&admitted).unwrap();
+    assert_eq!(s.entry_admission(&i.intent_id).unwrap(), Some(admitted.clone()));
+    assert!(
+        s.connection.execute(
+            "UPDATE operation_receipts SET result_ref='tampered'
+             WHERE operation_id='entry-admission:intent'",
+            [],
+        ).is_err()
+    );
+    assert!(
+        s.connection.execute(
+            "DELETE FROM operation_receipts WHERE operation_id='entry-admission:intent'",
+            [],
+        ).is_err()
+    );
+    let mut corrupted = admitted.clone();
+    corrupted.entry_proof_digest = "b".repeat(64);
+    assert!(matches!(
+        s.bind_entry_admission(&corrupted),
+        Err(StoreError::Invalid("ENTRY_ADMISSION_IDEMPOTENCY_CONFLICT"))
+    ));
+    corrupted = admitted.clone();
+    corrupted.entry_upper_usd = proof.total_usd - Decimal::ONE;
+    assert!(matches!(
+        s.bind_entry_admission(&corrupted),
+        Err(StoreError::Invalid("ENTRY_ADMISSION_SOURCE_UNVERIFIED"))
+    ));
+    corrupted = admitted.clone();
+    corrupted.quote_digest = "b".repeat(64);
+    assert!(matches!(
+        s.bind_entry_admission(&corrupted),
+        Err(StoreError::Invalid("ENTRY_ADMISSION_SOURCE_UNVERIFIED"))
+    ));
+    corrupted = admitted.clone();
+    corrupted.entry_proof_digest = "not-a-source".into();
+    assert!(matches!(
+        s.bind_entry_admission(&corrupted),
+        Err(StoreError::Invalid("ENTRY_ADMISSION_SOURCE_UNVERIFIED"))
+    ));
+    assert_eq!(s.entry_admission(&i.intent_id).unwrap(), Some(admitted));
     assert!(s.connection.execute(
         "UPDATE operation_receipts SET result_ref='tampered' WHERE operation_id='entry-quote:intent'",
         []
