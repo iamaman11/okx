@@ -195,6 +195,29 @@ fn strategy_cursor_refresh_needed(
         || previous.is_none_or(|c| c.generation != generation || !c.coverage_gaps.is_empty())
 }
 
+/// The ordinary OKX fills-history and bills-archive endpoints are limited
+/// to the last three calendar months. Do not silently certify empty history
+/// when a first capture or a resumed page starts outside that venue window.
+/// A one-day safety margin avoids claiming the ambiguous boundary as proven.
+/// Older campaign history requires an independently verified archival source.
+fn verify_history_retrieval_window(begin: i64, now: i64) -> AgentResult<()> {
+    let current = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(now)
+        .ok_or_else(|| invalid("HISTORY_WINDOW_TIME_INVALID"))?;
+    let retention_floor = current
+        .checked_sub_months(chrono::Months::new(3))
+        .ok_or_else(|| invalid("HISTORY_WINDOW_TIME_INVALID"))?
+        .timestamp_millis()
+        .checked_add(86_400_000)
+        .ok_or_else(|| invalid("HISTORY_WINDOW_TIME_INVALID"))?;
+    if begin <= 0 || begin > now {
+        return Err(invalid("HISTORY_WINDOW_TIME_INVALID"));
+    }
+    if begin < retention_floor {
+        return Err(invalid("HISTORY_OUTSIDE_EXCHANGE_RETENTION_NOT_PROVEN"));
+    }
+    Ok(())
+}
+
 #[derive(Clone)]
 struct Window {
     completed_through: i64,
@@ -700,6 +723,7 @@ async fn capture_fills(
     let fx = fx.clone();
     let partition = source.partition;
     let window = Window::resume(source.cursor.as_ref(), t0, now)?;
+    verify_history_retrieval_window(window.begin, now)?;
     let rows: Vec<FillHistory> = execution
         .history
         .fills_history_page(
@@ -806,6 +830,7 @@ async fn capture_bills(
 ) -> AgentResult<bool> {
     let fx = fx.clone();
     let window = Window::resume(cursor.as_ref(), t0, now)?;
+    verify_history_retrieval_window(window.begin, now)?;
     let rows: Vec<AccountBill> = execution
         .history
         .bills_history_page(
@@ -1007,6 +1032,40 @@ mod tests {
             coverage_gaps: "BACKFILL_PENDING".into(),
         };
         assert!(Window::resume(Some(&corrupt), 1, 200).is_err());
+    }
+
+    #[test]
+    fn campaign_history_cannot_be_inferred_from_expired_okx_fills_or_bills_window() {
+        // A calendar boundary, not an arbitrary 90-day threshold, protects
+        // E1.1 when data retention differs across months/leap years.
+        let now = chrono::DateTime::parse_from_rfc3339("2026-10-30T12:00:00Z")
+            .unwrap()
+            .timestamp_millis();
+        let now_dt = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(now).unwrap();
+        let three_months_ago = now_dt
+            .checked_sub_months(chrono::Months::new(3))
+            .unwrap()
+            .timestamp_millis();
+        assert!(verify_history_retrieval_window(now - 86_400_000, now).is_ok());
+        assert!(verify_history_retrieval_window(three_months_ago + 86_400_000, now).is_ok());
+        assert!(verify_history_retrieval_window(three_months_ago, now).is_err());
+        assert!(verify_history_retrieval_window(three_months_ago - 1, now).is_err());
+        assert!(verify_history_retrieval_window(now + 1, now).is_err());
+        assert!(verify_history_retrieval_window(0, now).is_err());
+
+        // A seemingly gap-free but still uncompleted history page is NOT
+        // safe merely because the cursor is well-formed.
+        let old = SourceCursor {
+            source: "fills".into(),
+            stream_partition: "SWAP".into(),
+            cursor: format!("{}|{}|cursor-id", three_months_ago, now),
+            watermark: three_months_ago,
+            generation: 1,
+            coverage_gaps: "BACKFILL_PENDING".into(),
+        };
+        let resumed = Window::resume(Some(&old), three_months_ago, now).unwrap();
+        assert_eq!(resumed.begin, three_months_ago);
+        assert!(verify_history_retrieval_window(resumed.begin, now).is_err());
     }
 
     #[test]
