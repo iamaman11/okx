@@ -1,4 +1,5 @@
 use super::*;
+use sha2::Digest;
 use std::sync::atomic::{AtomicU64, Ordering};
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 #[test]
@@ -17,8 +18,8 @@ fn e1_sql_known_quote_is_immutable_scoped_and_never_all_in_permission() {
         limit_price: Decimal::from(100),
         contract_value: Decimal::ONE,
         fee_rate: Decimal::new(5, 4),
-        maker_rate: Decimal::new(-2, 4),
-        taker_rate: Decimal::new(5, 4),
+        maker_rate: "-0.0002".into(),
+        taker_rate: "0.0005".into(),
         fee_level: "Lv1".into(),
         fee_exchange_at: 10,
         usd_per_usdt: Decimal::ONE,
@@ -62,7 +63,13 @@ fn e1_sql_known_quote_is_immutable_scoped_and_never_all_in_permission() {
         Err(StoreError::Invalid("ENTRY_QUOTE_FEE_HASH_INVALID"))
     ));
     changed = proof.clone();
-    changed.maker_rate = Decimal::new(-3, 4);
+    changed.maker_rate = "-0.0003".into();
+    assert!(matches!(
+        s.bind_entry_quote(&changed),
+        Err(StoreError::Invalid("ENTRY_QUOTE_FEE_HASH_INVALID"))
+    ));
+    changed = proof.clone();
+    changed.taker_rate = "0.000500".into();
     assert!(matches!(
         s.bind_entry_quote(&changed),
         Err(StoreError::Invalid("ENTRY_QUOTE_FEE_HASH_INVALID"))

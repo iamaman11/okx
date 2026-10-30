@@ -203,8 +203,10 @@ pub struct EntryQuoteEvidence {
     pub fee_rate: Decimal,
     /// Raw authenticated tariff components, required to recompute the
     /// reference-bound fee_generation on the sole SQL owner.
-    pub maker_rate: Decimal,
-    pub taker_rate: Decimal,
+    /// Preserve the venue strings verbatim; normalized Decimal formatting
+    /// can change the authenticated canonical fee_generation bytes.
+    pub maker_rate: String,
+    pub taker_rate: String,
     pub fee_level: String,
     pub fee_exchange_at: i64,
     pub usd_per_usdt: Decimal,

@@ -11,6 +11,10 @@ impl AccountStore {
     ) -> StoreResult<StoredIntent> {
         let intent = self.intent(&quote.intent_id)?
             .ok_or(StoreError::Invalid("ENTRY_QUOTE_INTENT_MISSING"))?;
+        let maker = Decimal::from_str(&quote.maker_rate)
+            .map_err(|_| StoreError::Invalid("ENTRY_QUOTE_FEE_RATE_INVALID"))?;
+        let taker = Decimal::from_str(&quote.taker_rate)
+            .map_err(|_| StoreError::Invalid("ENTRY_QUOTE_FEE_RATE_INVALID"))?;
         if quote.schema != "okx.entry-known-quote/v1"
             || quote.account_key != self.meta.account_key
             || quote.installation_id != self.meta.installation_id
@@ -25,7 +29,7 @@ impl AccountStore {
             || quote.limit_price <= Decimal::ZERO
             || quote.contract_value <= Decimal::ZERO
             || quote.fee_rate < Decimal::ZERO
-            || quote.fee_rate != quote.maker_rate.abs().max(quote.taker_rate.abs())
+            || quote.fee_rate != maker.abs().max(taker.abs())
             || quote.fee_level.is_empty()
             || quote.fee_exchange_at <= 0
             || quote.usd_per_usdt <= Decimal::ZERO
@@ -51,8 +55,8 @@ impl AccountStore {
             &quote.instrument_id,
             &quote.reference_generation,
             &quote.fee_level,
-            quote.maker_rate.to_string(),
-            quote.taker_rate.to_string(),
+            &quote.maker_rate,
+            &quote.taker_rate,
             true,
         )).map_err(|_| StoreError::Invalid("ENTRY_QUOTE_FEE_HASH_INVALID"))?;
         let tariff_digest = format!("sha256:{:x}", Sha256::digest(tariff_bytes));
