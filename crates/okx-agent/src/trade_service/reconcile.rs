@@ -152,6 +152,26 @@ pub(super) fn verified_venue_position_direction(
     Ok(Some((direction, quantity)))
 }
 
+/// A one-intent status view must not present a net-mode opposite
+/// position as zero exposure. Such a read is inconclusive for its stop,
+/// so the existing reconcile/STOP route stays responsible.
+fn verified_intent_position_quantity<'a>(
+    expected_side: &str,
+    positions: impl IntoIterator<Item = (&'a str, &'a str)>,
+) -> Result<Decimal, String> {
+    positions
+        .into_iter()
+        .try_fold(Decimal::ZERO, |total, (side, raw)| {
+            match verified_venue_position_direction(side, raw)? {
+                None => Ok(total),
+                Some((direction, quantity)) if direction == expected_side => total
+                    .checked_add(quantity)
+                    .ok_or_else(|| "VENUE_POSITION_QUANTITY_OVERFLOW".into()),
+                Some(_) => Err("VENUE_POSITION_OPPOSITE_EXPOSURE_UNVERIFIED".into()),
+            }
+        })
+}
+
 /// Protection cleanup must inspect the whole instrument (both hedge
 /// sides), not just the original side. A malformed or overflowing position
 /// is UNKNOWN exposure and may never authorize removing a live stop.
@@ -500,26 +520,14 @@ impl TradeService {
             }
             i = self.find_intent(r, &i.intent_id).await?;
             let snapshot = r.observer.snapshot().await.map_err(err)?;
-            let position_qty = snapshot
-                .positions
-                .iter()
-                .filter(|p| p.instrument_id == i.instrument_id)
-                .try_fold(Decimal::ZERO, |total, p| {
-                    match verified_venue_position_direction(
-                        &p.position_side,
-                        &p.position,
-                    )? {
-                        None => Ok(total),
-                        Some((direction, amount))
-                            if direction == i.plan.position_side =>
-                        {
-                            total.checked_add(amount).ok_or_else(|| {
-                                "VENUE_POSITION_QUANTITY_OVERFLOW".into()
-                            })
-                        }
-                        Some(_) => Err("VENUE_POSITION_OPPOSITE_EXPOSURE_UNVERIFIED".into()),
-                    }
-                })?;
+            let position_qty = verified_intent_position_quantity(
+                &i.plan.position_side,
+                snapshot
+                    .positions
+                    .iter()
+                    .filter(|p| p.instrument_id == i.instrument_id)
+                    .map(|p| (p.position_side.as_str(), p.position.as_str())),
+            )?;
             let exposed = position_qty > Decimal::ZERO;
             if !exposed && i.risk_increase {
                 self.cleanup_flat_protection(r, &i).await?;
@@ -1687,6 +1695,24 @@ mod entry_cost_status_tests {
             Ok(Some(("long", one))));
         assert_eq!(verified_venue_position_direction("net", "-0.5"),
             Ok(Some(("short", half))));
+        assert_eq!(
+            verified_intent_position_quantity("long", [
+                ("net", "0.25"), ("net", "0.75")
+            ]),
+            Ok(one)
+        );
+        assert_eq!(
+            verified_intent_position_quantity("short", [("net", "-0.5")]),
+            Ok(half)
+        );
+        assert_eq!(
+            verified_intent_position_quantity("long", [("net", "-0.5")]),
+            Err("VENUE_POSITION_OPPOSITE_EXPOSURE_UNVERIFIED".into())
+        );
+        assert_eq!(
+            verified_intent_position_quantity("short", [("long", "0")]),
+            Ok(Decimal::ZERO)
+        );
         assert_eq!(verified_venue_position_direction("long", "1"),
             Ok(Some(("long", one))));
         assert_eq!(verified_venue_position_direction("short", "0.5"),
