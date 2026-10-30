@@ -74,50 +74,52 @@ impl EntryCostEvidence {
     }
 }
 
-/// USD/USDT conversion is a *rate*, not an additional charge in USD.
-/// No NotApplicable state: even a USD-pegged quote requires a sourced bound.
-#[allow(dead_code)] // Verified proof constructors are gated until native venue source binding.
+/// Valuation is frozen at final admission, not a guaranteed future FX upper.
+#[allow(dead_code)] // Source-backed proof producer is required before live admission.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
-pub(super) enum EntryFxUpperBound {
-    Proven {
-        usd_per_usdt_upper: Decimal,
+pub(super) enum BudgetValuation {
+    AdmissionSnapshot {
+        usd_per_usdt: Decimal,
+        observed_at_ms: i64,
         source_digest: String,
         basis: &'static str,
     },
-    Unknown {
-        reason: &'static str,
-    },
+    Pending { reason: &'static str },
 }
-impl EntryFxUpperBound {
+impl BudgetValuation {
     fn rate(&self, observed: Decimal) -> Result<Option<Decimal>, String> {
         match self {
-            Self::Unknown { .. } => Ok(None),
-            Self::Proven {
-                usd_per_usdt_upper,
-                source_digest,
-                basis,
-            } => {
-                if *usd_per_usdt_upper <= Decimal::ZERO || observed <= Decimal::ZERO {
-                    return Err("ENTRY_FX_UPPER_BOUND_INVALID".into());
+            Self::Pending { .. } => Ok(None),
+            Self::AdmissionSnapshot { usd_per_usdt, observed_at_ms, source_digest, basis } => {
+                if *usd_per_usdt <= Decimal::ZERO || observed <= Decimal::ZERO
+                    || *observed_at_ms <= 0 {
+                    return Err("ENTRY_VALUATION_INVALID".into());
                 }
-                if *usd_per_usdt_upper < observed {
-                    return Err("ENTRY_FX_BOUND_BELOW_OBSERVED".into());
+                if *usd_per_usdt != observed {
+                    return Err("ENTRY_VALUATION_RATE_MISMATCH".into());
                 }
-                if basis.is_empty()
-                    || source_digest.len() != 64
-                    || !source_digest.bytes().all(|b| b.is_ascii_hexdigit())
-                {
-                    return Err("ENTRY_FX_BOUND_SOURCE_INVALID".into());
+                if basis.is_empty() || source_digest.len() != 64
+                    || !source_digest.bytes().all(|b| b.is_ascii_hexdigit()) {
+                    return Err("ENTRY_VALUATION_SOURCE_INVALID".into());
                 }
-                Ok(Some(*usd_per_usdt_upper))
+                Ok(Some(*usd_per_usdt))
             }
         }
     }
     fn reason(&self) -> Option<&'static str> {
-        match self {
-            Self::Unknown { reason } => Some(*reason),
-            _ => None,
+        match self { Self::Pending { reason } => Some(*reason), _ => None }
+    }
+    /// Bind a frozen rate to the exact independently authenticated SQL quote.
+    fn bind(&self, receipt: &okx_execution::EntryQuoteEvidence) -> Result<(), String> {
+        if let Self::AdmissionSnapshot { usd_per_usdt, observed_at_ms, source_digest, .. } = self {
+            if *usd_per_usdt != receipt.usd_per_usdt
+                || source_digest != &receipt.conversion_digest
+                || *observed_at_ms > receipt.observed_at
+                || receipt.observed_at - *observed_at_ms > 5_000 {
+                return Err("ENTRY_VALUATION_RECEIPT_MISMATCH".into());
+            }
         }
+        Ok(())
     }
 }
 
@@ -160,10 +162,8 @@ impl EntryAvailableCollateral {
     }
 }
 
-/// Known quote total_usd uses an observed FX conversion; it is never an
-/// admission upper bound. All fees/collateral/borrowing must be classified
-/// separately by source. A proven FX maximum multiplies the FULL USDT
-/// obligation before separately denominated USD charges are added.
+/// Entry turnover is opening notional plus fees at the source-bound admission
+/// valuation. Collateral and future risk are independent dimensions.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub(super) struct EntryCostProof {
     pub(super) quote: EntryQuote,
@@ -174,10 +174,10 @@ pub(super) struct EntryCostProof {
     pub(super) collateral_or_margin: EntryCostEvidence,
     /// Certified LOWER bound for available own collateral, in USD.
     pub(super) available_collateral: EntryAvailableCollateral,
-    pub(super) fx_bound: EntryFxUpperBound,
+    pub(super) valuation: BudgetValuation,
 }
 impl EntryCostProof {
-    /// A missing venue cost or FX maximum remains Unknown, including on a
+    /// A missing venue cost or admission valuation remains Pending, including on a
     /// seemingly USD-pegged linear instrument. No synthetic source is implied.
     pub(super) fn unproven_linear_quote(quote: EntryQuote) -> Self {
         Self {
@@ -194,8 +194,8 @@ impl EntryCostProof {
             available_collateral: EntryAvailableCollateral::Unknown {
                 reason: "AVAILABLE_COLLATERAL_LOWER_UNPROVEN",
             },
-            fx_bound: EntryFxUpperBound::Unknown {
-                reason: "FX_UPPER_BOUND_UNPROVEN",
+            valuation: BudgetValuation::Pending {
+                reason: "ADMISSION_FX_SNAPSHOT_UNPROVEN",
             },
         }
     }
@@ -205,7 +205,7 @@ impl EntryCostProof {
     /// added to entry spend. Borrowing is unsupported in the first Real lane.
     /// UNKNOWN in any independent dimension denies admission.
     pub(super) fn verified_fx_and_entry_fees(&self) -> Result<Option<(Decimal, Decimal)>, String> {
-        let Some(fx_upper) = self.fx_bound.rate(self.quote.observed_usd_per_usdt)? else {
+        let Some(fx_upper) = self.valuation.rate(self.quote.observed_usd_per_usdt)? else {
             return Ok(None);
         };
         let Some(fees_upper) = self.extra_immediate_fees.upper()? else {
@@ -230,7 +230,7 @@ impl EntryCostProof {
     }
 
     /// One pure arithmetic path is shared by SQL admission and later actual
-    /// fill/bill settlement. The rate is a verified upper, never observed FX.
+    /// fill/bill settlement. The rate is frozen at admission, not a future FX upper.
     pub(super) fn proven_upper_usd(&self) -> Result<Option<Decimal>, String> {
         let Some((fx_upper, fixed_upper)) = self.verified_fx_and_entry_fees()? else {
             return Ok(None);
@@ -244,8 +244,8 @@ impl EntryCostProof {
             .checked_mul(fx_upper)
             .ok_or("MONEY_OVERFLOW")?
             .round_dp_with_strategy(9, RoundingStrategy::ToPositiveInfinity);
-        if upper < self.quote.total_usd {
-            return Err("ENTRY_FX_BOUND_BELOW_KNOWN_QUOTE".into());
+        if upper != self.quote.total_usd {
+            return Err("ENTRY_VALUATION_RECOMPUTE_MISMATCH".into());
         }
         upper
             .checked_add(fixed_upper)
@@ -262,7 +262,7 @@ impl EntryCostProof {
         .into_iter()
         .filter_map(EntryCostEvidence::reason)
         .chain(self.available_collateral.reason())
-        .chain(self.fx_bound.reason())
+        .chain(self.valuation.reason())
         .collect()
     }
 }
@@ -307,6 +307,7 @@ pub(super) fn reserve_entry_evidence(
     {
         return Err("ENTRY_RESERVE_QUOTE_BINDING_MISMATCH".into());
     }
+    proof.valuation.bind(receipt)?;
     let Some(upper) = proof.proven_upper_usd()? else {
         return Ok(None);
     };
@@ -318,8 +319,8 @@ pub(super) fn reserve_entry_evidence(
     }
     // The actual source evidence must be checked by its native owner BEFORE
     // creating Proven/NotApplicable variants. There is no such producer for
-    // margin, borrowing, fee currency and bounded FX yet, so the production
-    // path still yields None. Bind the future grant to the exact SQL quote,
+    // margin, borrowing, fee currency and frozen FX yet, so the production
+    // path still yields None. Bind any future grant to the exact SQL quote,
     // its provenance and all classified dimensions in one canonical digest.
     let proof_digest = digest(&(
         "okx.entry-all-in-reserve/v1",
@@ -932,14 +933,15 @@ mod tests {
             basis: "authenticated-available-own-collateral",
             source_digest: "c".repeat(64),
         };
-        // An observed rate is not necessarily a bounded FX rate.
+        // Fresh candidate source is not yet an admission.
         assert_eq!(p.proven_upper_usd().unwrap(), None);
-        p.fx_bound = EntryFxUpperBound::Proven {
-            usd_per_usdt_upper: d("1.02"),
+        p.valuation = BudgetValuation::AdmissionSnapshot {
+            usd_per_usdt: d("1"),
+            observed_at_ms: 1,
             source_digest: "a".repeat(64),
-            basis: "source-bound-maximum",
+            basis: "frozen-admission-source",
         };
-        assert_eq!(p.proven_upper_usd().unwrap(), Some(d("9.2764359")));
+        assert_eq!(p.proven_upper_usd().unwrap(), Some(d("9.094545")));
         p.borrowing = EntryCostEvidence::NotApplicable {
             basis: "venue:no-borrow",
             source_digest: "missing-source".into(),
@@ -970,14 +972,14 @@ mod tests {
             basis: "verified-third-currency-fee",
             source_digest: "d".repeat(64),
         };
-        assert_eq!(p.proven_upper_usd().unwrap(), Some(d("9.3764359")));
+        assert_eq!(p.proven_upper_usd().unwrap(), Some(d("9.194545")));
         // A positive margin requirement cannot be charged a second time.
         p.collateral_or_margin = EntryCostEvidence::Proven {
             upper_usd: d("4"),
             basis: "authenticated-margin-upper",
             source_digest: "e".repeat(64),
         };
-        assert_eq!(p.proven_upper_usd().unwrap(), Some(d("9.3764359")));
+        assert_eq!(p.proven_upper_usd().unwrap(), Some(d("9.194545")));
         p.available_collateral = EntryAvailableCollateral::Proven {
             available_lower_usd: d("3.99"),
             basis: "authenticated-available-own-collateral",
@@ -1015,26 +1017,28 @@ mod tests {
             basis: "verified-no-additional-fee",
             source_digest: "f".repeat(64),
         };
-        p.fx_bound = EntryFxUpperBound::Proven {
-            usd_per_usdt_upper: d("0.99"),
+        p.valuation = BudgetValuation::AdmissionSnapshot {
+            usd_per_usdt: d("0.99"),
+            observed_at_ms: 1,
             source_digest: "a".repeat(64),
-            basis: "invalid-lower-than-observed",
+            basis: "different-rate",
         };
         assert_eq!(
             p.proven_upper_usd().unwrap_err(),
-            "ENTRY_FX_BOUND_BELOW_OBSERVED"
+            "ENTRY_VALUATION_RATE_MISMATCH"
         );
-        p.fx_bound = EntryFxUpperBound::Proven {
-            usd_per_usdt_upper: d("1"),
+        p.valuation = BudgetValuation::AdmissionSnapshot {
+            usd_per_usdt: d("1"),
+            observed_at_ms: 1,
             source_digest: "bad".into(),
             basis: "invalid-source",
         };
         assert_eq!(
             p.proven_upper_usd().unwrap_err(),
-            "ENTRY_FX_BOUND_SOURCE_INVALID"
+            "ENTRY_VALUATION_SOURCE_INVALID"
         );
-        p.fx_bound = EntryFxUpperBound::Unknown {
-            reason: "FX_UPPER_BOUND_UNPROVEN",
+        p.valuation = BudgetValuation::Pending {
+            reason: "ADMISSION_FX_SNAPSHOT_UNPROVEN",
         };
         assert_eq!(p.proven_upper_usd().unwrap(), None);
     }

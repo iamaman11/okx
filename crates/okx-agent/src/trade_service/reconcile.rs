@@ -325,7 +325,7 @@ fn entry_cost_status(
         return Ok(json!({
             "state": "not_proven",
             "all_in_entry_cost_proven": false,
-            "entry_debit_upper_usd": null,
+            "entry_budget_upper_reporting": null,
             "reason_codes": ["ENTRY_QUOTE_NOT_RECORDED"],
             "next_action": "RECONCILE_ENTRY_COST_SOURCES"
         }));
@@ -361,7 +361,9 @@ fn entry_cost_status(
             "known_fee_usdt":exact(quote.fee_usdt),
             "known_entry_total_usd":exact(quote.total_usd),
             "all_in_entry_cost_proven":true,
-            "entry_debit_upper_usd":exact(cost.entry_upper_usd),
+            "entry_budget_upper_reporting":exact(cost.entry_upper_usd),
+            "entry_budget_metric":"OpeningNotionalPlusEntryFees",
+            "valuation_mode":"AdmissionSnapshot",
             "entry_proof_digest":cost.entry_proof_digest,
             "source":{"quote_digest":cost.quote_digest,"observed_at_ms":cost.observed_at},
             "authorization":"COST_PROOF_ONLY_NOT_POST_AUTHORITY",
@@ -381,7 +383,7 @@ fn entry_cost_status(
             "conversion_source_digest": quote.conversion_digest,
         },
         "all_in_entry_cost_proven": false,
-        "entry_debit_upper_usd": null,
+        "entry_budget_upper_reporting": null,
         "reason_codes": proof.missing_reasons(),
         "next_action": "RECONCILE_ENTRY_COST_SOURCES"
     }))
@@ -2000,7 +2002,7 @@ mod entry_cost_status_tests {
     fn e1_status_never_promotes_known_quote_into_all_in_entry_permission() {
         let empty = entry_cost_status(None, None).unwrap();
         assert_eq!(empty["all_in_entry_cost_proven"], false);
-        assert!(empty["entry_debit_upper_usd"].is_null());
+        assert!(empty["entry_budget_upper_reporting"].is_null());
         assert_eq!(empty["reason_codes"][0], "ENTRY_QUOTE_NOT_RECORDED");
         let quote = okx_execution::EntryQuoteEvidence {
             schema: "okx.entry-known-quote/v1".into(),
@@ -2034,8 +2036,8 @@ mod entry_cost_status_tests {
         assert_eq!(view["state"], "historical_known_cost_only");
         assert_eq!(view["known_entry_total_usd"], "1.0005");
         assert_eq!(view["all_in_entry_cost_proven"], false);
-        assert!(view["entry_debit_upper_usd"].is_null());
-        assert_eq!(view["reason_codes"].as_array().unwrap().len(), 4);
+        assert!(view["entry_budget_upper_reporting"].is_null());
+        assert_eq!(view["reason_codes"].as_array().unwrap().len(), 5);
         let admitted = okx_execution::EntryAdmissionEvidence {
             schema: "okx.entry-admission/v1".into(),
             account_key: quote.account_key.clone(),
@@ -2051,7 +2053,7 @@ mod entry_cost_status_tests {
         };
         let shown = entry_cost_status(Some(quote.clone()), Some(admitted.clone())).unwrap();
         assert_eq!(shown["all_in_entry_cost_proven"], true);
-        assert_eq!(shown["entry_debit_upper_usd"], "2.0005");
+        assert_eq!(shown["entry_budget_upper_reporting"], "2.0005");
         assert_eq!(shown["authorization"], "COST_PROOF_ONLY_NOT_POST_AUTHORITY");
         let mut mismatched = admitted;
         mismatched.plan_hash = "different".into();
