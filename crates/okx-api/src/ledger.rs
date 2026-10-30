@@ -761,8 +761,15 @@ fn complete_campaign_money_witness(
             return Err(OkxError::Response("campaign bill identity, currency or scope unproven".into()));
         }
     }
+    // The evidence can contain thousands of fills/bills: use indexed joins
+    // rather than O(fills × bills) scans inside the single native reader.
+    let billed: BTreeMap<&str, &AccountBill> = bills
+        .iter()
+        .map(|bill| (bill.bill_id.as_str(), bill))
+        .collect();
     for fill in &fills {
-        let bill = bills.iter().find(|bill| bill.bill_id == fill.bill_id)
+        let bill = billed
+            .get(fill.bill_id.as_str())
             .ok_or_else(|| OkxError::Response("campaign fill fee bill unavailable".into()))?;
         if bill.ccy != fill.fee_currency
             || !bill.order_id.is_empty() && bill.order_id != "0" && bill.order_id != fill.order_id
@@ -1062,6 +1069,42 @@ mod tests {
         assert_eq!(bill.bill_sub_type, "173");
         assert_eq!(bill.position_balance_change, "-0.05");
         assert_eq!(bill.timestamp_ms, "1790884800000");
+    }
+
+    #[test]
+    fn campaign_money_window_binds_immutable_order_fill_to_original_fee_bill() {
+        let begin = 1_800_000_000_000i64;
+        let end = begin + 10_000;
+        let fill: FillHistory = serde_json::from_value(serde_json::json!({
+            "instType":"SWAP","instId":"BTC-USDT-SWAP","tradeId":"trade001",
+            "ordId":"order001","billId":"123","fillPx":"100","fillSz":"1",
+            "fee":"-0.05","feeCcy":"USDT","fillTime":begin+1_000
+        })).unwrap();
+        let bill: AccountBill = serde_json::from_value(serde_json::json!({
+            "billId":"123","instType":"SWAP","instId":"BTC-USDT-SWAP",
+            "ordId":"order001","tradeId":"trade001","ccy":"USDT",
+            "fee":"-0.05","ts":begin+1_001
+        })).unwrap();
+        let source = complete_campaign_money_witness(begin,end,vec![fill.clone()],vec![bill.clone()]).unwrap();
+        assert_eq!(source.fills.len(),1);
+        assert_eq!(source.bills.len(),1);
+        assert_eq!(source.source_digest.len(),64);
+        assert_eq!(
+            complete_campaign_money_witness(begin,end,vec![fill.clone()],vec![bill.clone()])
+                .unwrap().source_digest,
+            source.source_digest
+        );
+        assert!(complete_campaign_money_witness(begin,end,vec![fill.clone()],vec![]).is_err());
+        let mut different_currency=bill.clone();
+        different_currency.ccy="BTC".into();
+        assert!(complete_campaign_money_witness(begin,end,vec![fill.clone()],vec![different_currency]).is_err());
+        let mut altered_fee=bill.clone();
+        altered_fee.fee="-0.06".into();
+        assert!(complete_campaign_money_witness(begin,end,vec![fill.clone()],vec![altered_fee]).is_err());
+        assert!(complete_campaign_money_witness(begin,end,vec![fill.clone(),fill.clone()],vec![bill.clone()]).is_err());
+        let mut stale=fill;
+        stale.fill_time_ms=(begin-1).to_string();
+        assert!(complete_campaign_money_witness(begin,end,vec![stale],vec![bill]).is_err());
     }
 
     #[test]
