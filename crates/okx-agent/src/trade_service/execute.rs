@@ -854,19 +854,24 @@ impl TradeService {
                     .execution
                     .store
                     .call(deadline(), |s| {
-                        let active = s.active_intents(100)?;
-                        active
+                        let (intents, pending) = s.risk_census_intents(100)?;
+                        let covered = intents
                             .into_iter()
                             .map(|intent| {
                                 let central = s.active_central_receipt(&intent.intent_id)?;
                                 Ok((intent, central))
                             })
-                            .collect::<okx_execution::StoreResult<Vec<_>>>()
+                            .collect::<okx_execution::StoreResult<Vec<_>>>()?;
+                        Ok((covered, pending))
                     })
                     .await
                     .map_err(err)?;
-                let local_intent_digest =
-                    verify_local_intent_coverage(&local_intents, &c.account_key)?;
+                let (local_intents, pending_central) = local_intents;
+                let local_intent_digest = verify_local_intent_coverage(
+                    &local_intents,
+                    &pending_central,
+                    &c.account_key,
+                )?;
                 if r.private_ws.status().await.connection_generation != generation
                     || !r.source_identity_ready().await
                     || !r
@@ -984,6 +989,7 @@ impl TradeService {
 /// and deny further account risk until a terminal readback is reconciled.
 fn verify_local_intent_coverage(
     active: &[(StoredIntent, Option<CentralReceipt>)],
+    unresolved: &[String],
     account_key: &str,
 ) -> Result<String, String> {
     const PAGE_LIMIT: usize = 100;
@@ -991,6 +997,9 @@ fn verify_local_intent_coverage(
         return Err("COHORT_LOCAL_INTENTS_TRUNCATED".into());
     }
     let mut ids = std::collections::BTreeSet::new();
+    if unresolved.windows(2).any(|pair| pair[0] >= pair[1]) {
+        return Err("COHORT_UNRESOLVED_INTENT_SCOPE_INVALID".into());
+    }
     for (intent, receipt) in active {
         if !ids.insert(intent.intent_id.as_str())
             || intent.plan_hash.is_empty()
@@ -1000,6 +1009,13 @@ fn verify_local_intent_coverage(
         }
         if matches!(intent.state, IntentState::Posting | IntentState::Unknown) {
             return Err("COHORT_UNRESOLVED_POST_OUTCOME".into());
+        }
+        let central_pending = unresolved.binary_search(&intent.intent_id).is_ok();
+        if intent.state.terminal() && central_pending {
+            return Err("COHORT_TERMINAL_RISK_RELEASE_PENDING".into());
+        }
+        if intent.state == IntentState::Prepared && central_pending {
+            return Err("COHORT_UNRESOLVED_RESERVE_ATTEMPT".into());
         }
         if matches!(intent.state, IntentState::Acknowledged | IntentState::PartiallyFilled)
             && intent.exchange_order_id.as_ref().is_none_or(String::is_empty)
@@ -1022,7 +1038,10 @@ fn verify_local_intent_coverage(
             }
         }
     }
-    digest(&active)
+    if unresolved.iter().any(|id| !ids.contains(id.as_str())) {
+        return Err("COHORT_UNRESOLVED_INTENT_SCOPE_INVALID".into());
+    }
+    digest(&(active, unresolved))
 }
 
 /// Concurrent account reads must produce one deterministic, complete cohort
@@ -1345,41 +1364,58 @@ mod tests {
             receipt_hash: "c".repeat(64), requested_loss_usd: dec("1").unwrap(),
             conversion_digest: "d".repeat(64),
         };
-        assert!(verify_local_intent_coverage(&[(intent.clone(), None)], &account).is_ok());
+        assert!(verify_local_intent_coverage(&[(intent.clone(), None)], &[], &account).is_ok());
         intent.state = IntentState::Reserved;
         assert_eq!(
-            verify_local_intent_coverage(&[(intent.clone(), None)], &account),
+            verify_local_intent_coverage(&[(intent.clone(), None)], &[], &account),
             Err("COHORT_CENTRAL_RESERVATION_MISSING".into())
         );
-        assert!(verify_local_intent_coverage(&[(intent.clone(), Some(receipt.clone()))], &account).is_ok());
+        assert!(verify_local_intent_coverage(&[(intent.clone(), Some(receipt.clone()))], &[], &account).is_ok());
         let mut wrong = receipt.clone();
         wrong.account_key = "other".into();
         assert_eq!(
-            verify_local_intent_coverage(&[(intent.clone(), Some(wrong))], &account),
+            verify_local_intent_coverage(&[(intent.clone(), Some(wrong))], &[], &account),
             Err("COHORT_CENTRAL_RESERVATION_MISMATCH".into())
         );
         intent.state = IntentState::Posting;
         assert_eq!(
-            verify_local_intent_coverage(&[(intent.clone(), Some(receipt.clone()))], &account),
+            verify_local_intent_coverage(&[(intent.clone(), Some(receipt.clone()))], &[], &account),
             Err("COHORT_UNRESOLVED_POST_OUTCOME".into())
         );
         intent.state = IntentState::Unknown;
-        assert!(verify_local_intent_coverage(&[(intent.clone(), Some(receipt.clone()))], &account).is_err());
+        assert!(verify_local_intent_coverage(&[(intent.clone(), Some(receipt.clone()))], &[], &account).is_err());
         intent.state = IntentState::Acknowledged;
         assert_eq!(
-            verify_local_intent_coverage(&[(intent.clone(), Some(receipt.clone()))], &account),
+            verify_local_intent_coverage(&[(intent.clone(), Some(receipt.clone()))], &[], &account),
             Err("COHORT_EXCHANGE_ORDER_ID_UNPROVEN".into())
         );
         intent.exchange_order_id = Some("venue_abc".into());
-        assert!(verify_local_intent_coverage(&[(intent.clone(), Some(receipt.clone()))], &account).is_ok());
+        assert!(verify_local_intent_coverage(&[(intent.clone(), Some(receipt.clone()))], &[], &account).is_ok());
+        let unresolved = vec![intent.intent_id.clone()];
+        assert!(verify_local_intent_coverage(
+            &[(intent.clone(), Some(receipt.clone()))], &unresolved, &account
+        ).is_ok());
+        let mut terminal = intent.clone();
+        terminal.state = IntentState::Filled;
+        assert_eq!(
+            verify_local_intent_coverage(&[(terminal, Some(receipt.clone()))], &unresolved, &account),
+            Err("COHORT_TERMINAL_RISK_RELEASE_PENDING".into())
+        );
+        let mut attempted = intent.clone();
+        attempted.state = IntentState::Prepared;
+        attempted.exchange_order_id = None;
+        assert_eq!(
+            verify_local_intent_coverage(&[(attempted, None)], &unresolved, &account),
+            Err("COHORT_UNRESOLVED_RESERVE_ATTEMPT".into())
+        );
         assert_eq!(
             verify_local_intent_coverage(&[(intent.clone(), Some(receipt.clone())),
-                                          (intent.clone(), Some(receipt.clone()))], &account),
+                                          (intent.clone(), Some(receipt.clone()))], &[], &account),
             Err("COHORT_LOCAL_INTENT_CORRUPT".into())
         );
         let many = vec![(intent, Some(receipt)); 100];
         assert_eq!(
-            verify_local_intent_coverage(&many, &account),
+            verify_local_intent_coverage(&many, &[], &account),
             Err("COHORT_LOCAL_INTENTS_TRUNCATED".into())
         );
     }

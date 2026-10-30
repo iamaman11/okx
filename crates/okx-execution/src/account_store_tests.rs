@@ -2,6 +2,30 @@ use super::*;
 use std::sync::atomic::{AtomicU64, Ordering};
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 #[test]
+fn e2_census_retains_terminal_intents_until_central_release() {
+    let mut s = store();
+    let i = intent(&mut s);
+    assert!(matches!(
+        s.risk_census_intents(0),
+        Err(StoreError::Invalid("COHORT_CENSUS_LIMIT_INVALID"))
+    ));
+    let (live, pending) = s.risk_census_intents(100).unwrap();
+    assert!(live.iter().any(|x| x.intent_id == i.intent_id));
+    assert!(pending.contains(&i.intent_id));
+    reserve(&mut s);
+    assert!(s.begin_post(&i.intent_id, 1, 4).unwrap());
+    s.record_outcome(&i.intent_id, IntentState::Filled, Some("order_1"), "venue", 5)
+        .unwrap();
+    let (all, pending) = s.risk_census_intents(100).unwrap();
+    assert!(all.iter().any(|x| x.intent_id == i.intent_id && x.state.terminal()));
+    assert!(pending.contains(&i.intent_id));
+    s.acknowledge_central_release("central-key", "verified").unwrap();
+    let (after, pending) = s.risk_census_intents(100).unwrap();
+    assert!(!after.iter().any(|x| x.intent_id == i.intent_id));
+    assert!(!pending.contains(&i.intent_id));
+}
+
+#[test]
 fn k5_recovery_pages_over_100_intents_are_disjoint_and_bounded() {
     let mut s = store();
     let first = intent(&mut s);

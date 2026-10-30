@@ -714,6 +714,32 @@ impl AccountStore {
         tx.commit()?;
         Ok(n)
     }
+    /// Bounded combined local account obligations, including terminal
+    /// intents whose RiskBook reservations have NOT yet been released.
+    pub fn risk_census_intents(
+        &self,
+        limit: usize,
+    ) -> StoreResult<(Vec<StoredIntent>, Vec<String>)> {
+        if limit == 0 || limit > 100 {
+            return Err(StoreError::Invalid("COHORT_CENSUS_LIMIT_INVALID"));
+        }
+        let live = self.active_intents(limit)?;
+        let pending = self.reconcilable_intents_page(limit, 0)?;
+        let mut all = std::collections::BTreeMap::new();
+        for intent in &live {
+            all.insert(intent.intent_id.clone(), intent.clone());
+        }
+        let mut unresolved = std::collections::BTreeSet::new();
+        for intent in pending {
+            unresolved.insert(intent.intent_id.clone());
+            all.insert(intent.intent_id.clone(), intent);
+        }
+        if live.len() >= limit || unresolved.len() >= limit || all.len() >= limit {
+            return Err(StoreError::Invalid("COHORT_LOCAL_INTENTS_TRUNCATED"));
+        }
+        Ok((all.into_values().collect(), unresolved.into_iter().collect()))
+    }
+
     pub fn active_intents(&self, limit: usize) -> StoreResult<Vec<StoredIntent>> {
         let mut s=self.connection.prepare("SELECT intent_id FROM intents WHERE state IN('PREPARED','RESERVED','POSTING','UNKNOWN','ACKNOWLEDGED','PARTIALLY_FILLED') ORDER BY state,updated_at,intent_id LIMIT ?1")?;
         let ids = s
