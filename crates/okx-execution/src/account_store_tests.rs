@@ -71,8 +71,11 @@ fn e1_intent_fill_cost_uses_only_covered_native_sources_and_survives_restart() {
     ));
     let pending = IngestPage {
         cursor: Some(SourceCursor {
-            source: "fills".into(), stream_partition: "SWAP".into(),
-            cursor: "1|6|continuation".into(), watermark: 1, generation: 1,
+            source: "fills".into(),
+            stream_partition: "SWAP".into(),
+            cursor: "1|6|continuation".into(),
+            watermark: 1,
+            generation: 1,
             coverage_gaps: "BACKFILL_PENDING".into(),
         }),
         ..Default::default()
@@ -84,8 +87,11 @@ fn e1_intent_fill_cost_uses_only_covered_native_sources_and_survives_restart() {
     ));
     let complete = IngestPage {
         cursor: Some(SourceCursor {
-            source: "fills".into(), stream_partition: "SWAP".into(),
-            cursor: String::new(), watermark: 6, generation: 1,
+            source: "fills".into(),
+            stream_partition: "SWAP".into(),
+            cursor: String::new(),
+            watermark: 6,
+            generation: 1,
             coverage_gaps: String::new(),
         }),
         ..Default::default()
@@ -105,9 +111,12 @@ fn e1_intent_fill_cost_uses_only_covered_native_sources_and_survives_restart() {
     let path = s.path.clone();
     let meta = s.meta.clone();
     drop(s);
-    let reopened = AccountStore::open_existing(path, &meta.account_key, &meta.installation_id)
-        .unwrap();
-    assert_eq!(reopened.intent_fill_cost_evidence("intent", 6).unwrap(), verified);
+    let reopened =
+        AccountStore::open_existing(path, &meta.account_key, &meta.installation_id).unwrap();
+    assert_eq!(
+        reopened.intent_fill_cost_evidence("intent", 6).unwrap(),
+        verified
+    );
 }
 
 #[test]
@@ -116,12 +125,16 @@ fn e1_intent_fill_cost_rejects_unverified_currency_and_missing_fills() {
     intent(&mut s);
     s.ingest_page(&IngestPage {
         cursor: Some(SourceCursor {
-            source: "fills".into(), stream_partition: "SWAP".into(),
-            cursor: String::new(), watermark: 10, generation: 1,
+            source: "fills".into(),
+            stream_partition: "SWAP".into(),
+            cursor: String::new(),
+            watermark: 10,
+            generation: 1,
             coverage_gaps: String::new(),
         }),
         ..Default::default()
-    }).unwrap();
+    })
+    .unwrap();
     assert!(matches!(
         s.intent_fill_cost_evidence("intent", 10),
         Err(StoreError::Invalid("ENTRY_FILL_EVIDENCE_EMPTY"))
@@ -141,7 +154,8 @@ fn e1_intent_fill_cost_rejects_unverified_currency_and_missing_fills() {
             side: "buy".into(),
         }],
         ..Default::default()
-    }).unwrap();
+    })
+    .unwrap();
     assert!(matches!(
         s.intent_fill_cost_evidence("intent", 10),
         Err(StoreError::Invalid("ENTRY_FILL_SOURCE_INVALID"))
