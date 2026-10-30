@@ -55,6 +55,7 @@ const concurrent=await Promise.all([governanceRequest(s,"POST",{...update,idempo
 ok(concurrent.filter(r=>r.status===200).length===1&&concurrent.filter(r=>r.status===409).length===1,"concurrent CAS one winner");
 ok((await governanceRequest(s,"POST",update)).status===400,"all mutations require idempotency key");
 const current=(await governanceRequest(s,"GET")).body;
+const currentRevision=current.revision as number;
 const entryRequest={expected_revision:current.revision,
  max_total_modelled_loss_usdt:current.max_total_modelled_loss_usdt,
  accounts:current.accounts,campaign_entry_limit_usd:"8",
@@ -65,11 +66,11 @@ ok(changedEntry.status===200&&changedEntry.body.campaign_entry_limit_usd==="8",
 ok(JSON.stringify(await governanceRequest(s,"POST",entryRequest))===JSON.stringify(changedEntry),
  "lost entry cap CAS reply is idempotent");
 ok((await governanceRequest(s,"POST",{
- ...entryRequest,expected_revision:current.revision+1,campaign_entry_limit_usd:"10",
+ ...entryRequest,expected_revision:currentRevision+1,campaign_entry_limit_usd:"10",
  idempotency_key:"entry_campaign_raise_001"
 })).status===409,"global entry limit cannot be raised by routine CAS");
 ok((await governanceRequest(s,"POST",{
- ...entryRequest,expected_revision:current.revision+1,campaign_entry_limit_usd:"0",
+ ...entryRequest,expected_revision:currentRevision+1,campaign_entry_limit_usd:"0",
  idempotency_key:"entry_campaign_zero_001"
 })).status===409,"cannot set entry cap zero to credit consumption");
 ok((await stopNewRealRisk(s,"stop_real_test_01")).status===200,"emergency stop persisted");

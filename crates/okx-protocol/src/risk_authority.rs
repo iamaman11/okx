@@ -447,8 +447,10 @@ impl RiskEntryBudgetSnapshot {
                 .parse::<u128>()
                 .ok()?
                 .checked_mul(1_000_000_000)?
-                .checked_add(fraction.parse::<u128>().ok().unwrap_or(0)
-                    * 10u128.pow(9 - fraction.len() as u32))
+                .checked_add(
+                    fraction.parse::<u128>().ok().unwrap_or(0)
+                        * 10u128.pow(9 - fraction.len() as u32),
+                )
         }
         let (Some(limit), Some(consumed), Some(reserved), Some(remaining)) = (
             exact_units(&self.limit_usd),
@@ -461,7 +463,10 @@ impl RiskEntryBudgetSnapshot {
         self.campaign_id.starts_with("sha256:")
             && hash(&self.campaign_id[7..])
             && limit > 0
-            && consumed.checked_add(reserved).and_then(|v| v.checked_add(remaining)) == Some(limit)
+            && consumed
+                .checked_add(reserved)
+                .and_then(|v| v.checked_add(remaining))
+                == Some(limit)
             && hash(&self.opening_source_digest)
             && self.opening_as_of_ms > 0
     }
@@ -490,7 +495,10 @@ impl RiskBudgetSnapshot {
             ]
             .iter()
             .all(|v| v.as_str() == "0" || positive(v))
-            && self.entry_budget.as_ref().is_none_or(RiskEntryBudgetSnapshot::valid)
+            && self
+                .entry_budget
+                .as_ref()
+                .is_none_or(RiskEntryBudgetSnapshot::valid)
     }
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -609,7 +617,10 @@ mod tests {
         assert!(ready.valid());
         let mut wrong_sum = ready.clone();
         wrong_sum.entry_budget.as_mut().unwrap().remaining_usd = "5".into();
-        assert!(!wrong_sum.valid(), "budget is an exact conservation readback");
+        assert!(
+            !wrong_sum.valid(),
+            "budget is an exact conservation readback"
+        );
         let mut tampered = serde_json::to_value(&ready).unwrap();
         tampered["entry_budget"]["untrusted_field"] = true.into();
         assert!(serde_json::from_value::<RiskBudgetSnapshot>(tampered).is_err());
