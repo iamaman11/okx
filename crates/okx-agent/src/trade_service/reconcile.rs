@@ -1607,7 +1607,7 @@ mod entry_cost_status_tests {
             Err("CLOSE_LOT_QUANTITY_UNVERIFIED".into())
         );
         assert_eq!(
-            verified_close_lot_exposure([("long", Decimal::NEGATIVE_ONE)]),
+            verified_close_lot_exposure([("long", -Decimal::ONE)]),
             Err("CLOSE_LOT_QUANTITY_UNVERIFIED".into())
         );
         assert_eq!(
