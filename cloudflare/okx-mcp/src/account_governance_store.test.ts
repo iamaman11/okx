@@ -49,7 +49,10 @@ ok(JSON.stringify(await lowerCampaignLimit(s,{expected_revision:revision,campaig
    ...observation,idempotency_key:"budget_real_enrollment"
  })).status===200,"opening requires registered real cohort");
  const budgetPolicy=(await governanceRequest(budgetStore,"GET")).body;
- const openingAt=1792344435177,openingFrom=openingAt-100000;
+ const origin=(await readRiskBook(budgetStore))!.campaign_origin!;
+ ok(origin.campaign_id===initial.campaign_id&&origin.started_at_ms>0,
+   "governance creates immutable campaign inception in same transaction");
+ const openingFrom=origin.started_at_ms,openingAt=openingFrom+100000;
  const manifest:CampaignEntryOpeningSource={
    campaign_id:initial.campaign_id,limit_usd:"10",consumed_usd:"7",
    source_digest:"f".repeat(64),as_of_ms:openingAt,
