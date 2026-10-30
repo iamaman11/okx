@@ -328,6 +328,94 @@ fn e1_fee_bill_cross_source_receipt_requires_both_immutable_sources() {
 }
 
 #[test]
+fn e1_bill_must_follow_actual_fill_and_not_be_interest_or_transfer() {
+    for (bill_time, bill_kind, expected_valid) in [
+        (5_i64, "2:trade", false),
+        (7_i64, "7:interest", false),
+        (7_i64, "1:11", false),
+        (7_i64, "2:trade", true),
+    ] {
+        let mut s = store();
+        intent(&mut s);
+        acknowledged_entry_intent(&mut s);
+        let fee = FinanceEntry {
+            entry_id: "bill:linked-bill:FEE".into(),
+            economic_event_key: "bill:linked-bill".into(),
+            component: "FEE".into(),
+            allocation_leg: "account".into(),
+            amount: Decimal::new(-1, 2),
+            currency: "USDT".into(),
+            instance_id: None,
+            source_ref: "fill:linked-fill".into(),
+            time: 6,
+            reverses_entry_id: None,
+        };
+        s.ingest_page(&IngestPage {
+            fills: vec![Fill {
+                fill_id: "linked-fill".into(),
+                instrument_id: "BTC-USDT-SWAP".into(),
+                trade_id: "trade-1".into(),
+                exchange_order_id: "venue-order".into(),
+                intent_id: Some("intent".into()),
+                time: 6,
+                qty: Decimal::ONE,
+                price: Decimal::from(100),
+                fee: Decimal::new(-1, 2),
+                currency: "USDT".into(),
+                side: "buy".into(),
+            }],
+            finance: vec![fee.clone()],
+            cursor: Some(SourceCursor {
+                source: "fills".into(),
+                stream_partition: "SWAP".into(),
+                cursor: String::new(),
+                watermark: 7,
+                generation: 1,
+                coverage_gaps: String::new(),
+            }),
+            ..Default::default()
+        })
+        .unwrap();
+        s.ingest_page(&IngestPage {
+            bills: vec![Bill {
+                bill_id: "linked-bill".into(),
+                kind: bill_kind.into(),
+                time: bill_time,
+                amount: Decimal::new(-1, 2),
+                currency: "USDT".into(),
+                economic_event_key: "bill:linked-bill".into(),
+            }],
+            finance: vec![FinanceEntry {
+                source_ref: "bill:linked-bill".into(),
+                time: bill_time,
+                ..fee
+            }],
+            cursor: Some(SourceCursor {
+                source: "bills".into(),
+                stream_partition: "account".into(),
+                cursor: String::new(),
+                watermark: 7,
+                generation: 1,
+                coverage_gaps: String::new(),
+            }),
+            ..Default::default()
+        })
+        .unwrap();
+        let result = s.intent_fee_bill_evidence("intent", 7);
+        if expected_valid {
+            let verified = result.unwrap();
+            assert_eq!(verified.linked_bill_count, 1);
+            assert_eq!(verified.conservative_verified_fee_usdt, Decimal::new(1, 2));
+        } else {
+            assert!(matches!(
+                result,
+                Err(StoreError::Invalid("ENTRY_FEE_BILL_SOURCE_MISMATCH"))
+            ), "uncausal or unrelated bill kind {bill_kind} at {bill_time} cannot settle a fill");
+        }
+    }
+}
+
+#[test]
 fn e1_zero_fee_without_explicit_bill_finality_is_unknown_not_free() {
     let mut s = store();
     intent(&mut s);
