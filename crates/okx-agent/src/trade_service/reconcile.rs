@@ -41,6 +41,21 @@ fn verify_venue_fill_coverage(
     Ok(())
 }
 
+/// One authoritative exchange update timestamp is reused for both fills and
+/// bills cursor checks. Malformed uTime may never bypass final reconciliation.
+fn terminal_order_update_time(
+    order: Option<&okx_api::TradeOrderDetails>,
+) -> Result<Option<i64>, String> {
+    order.map(|o| {
+        let at = o.update_time_ms.parse::<i64>()
+            .map_err(|_| "TERMINAL_ORDER_UPDATE_TIME_INVALID")?;
+        if at <= 0 {
+            return Err("TERMINAL_ORDER_UPDATE_TIME_INVALID".into());
+        }
+        Ok(at)
+    }).transpose()
+}
+
 /// Historical known pricing evidence is not an all-in entry debit proof.
 fn entry_cost_status(stored: Option<okx_execution::EntryQuoteEvidence>) -> Result<Value, String> {
     let Some(quote) = stored else {
@@ -543,7 +558,15 @@ impl TradeService {
             .await
             .map_err(err)?;
         let Some(receipt) = receipt else {
-            return Ok(());
+            // Rejected PRE-RESERVE / centrally DENIED intents are handled by
+            // their independent SQL witnesses before terminal reconciliation.
+            // For any risk-increasing terminal intent with a possible POST,
+            // absent local central receipt does not prove released capacity.
+            return if i.risk_increase {
+                Err("TERMINAL_CENTRAL_RESERVATION_UNVERIFIED".into())
+            } else {
+                Ok(())
+            };
         };
         if receipt.reservation_key.starts_with("local:") {
             return Ok(());
@@ -572,12 +595,9 @@ impl TradeService {
             .await
             .map_err(err)?
             .ok_or("FILL_COVERAGE_MISSING")?;
+        let venue_updated_at = terminal_order_update_time(order)?;
         if !complete.coverage_gaps.is_empty()
-            || order.is_some_and(|o| {
-                o.update_time_ms
-                    .parse::<i64>()
-                    .is_ok_and(|at| complete.watermark < at)
-            })
+            || venue_updated_at.is_some_and(|at| complete.watermark < at)
         {
             return Err("FILL_COVERAGE_INCOMPLETE".into());
         }
@@ -617,11 +637,7 @@ impl TradeService {
             .await
             .map_err(err)?;
         if !through.coverage_gaps.is_empty()
-            || order.is_some_and(|o| {
-                o.update_time_ms
-                    .parse::<i64>()
-                    .is_ok_and(|at| through.watermark < at)
-            })
+            || venue_updated_at.is_some_and(|at| through.watermark < at)
         {
             return Err("FINANCIAL_COVERAGE_INCOMPLETE".into());
         }
@@ -1114,6 +1130,21 @@ impl TradeService {
 #[cfg(test)]
 mod entry_cost_status_tests {
     use super::*;
+
+    #[test]
+    fn e2_terminal_cursors_never_trust_invalid_exchange_order_time() {
+        assert_eq!(terminal_order_update_time(None), Ok(None));
+        let order = |t: &str| serde_json::from_value::<okx_api::TradeOrderDetails>(
+            json!({"uTime":t})
+        ).unwrap();
+        assert_eq!(terminal_order_update_time(Some(&order("16"))), Ok(Some(16)));
+        for invalid in ["", "invalid", "0", "-1", "9223372036854775808"] {
+            assert_eq!(
+                terminal_order_update_time(Some(&order(invalid))),
+                Err("TERMINAL_ORDER_UPDATE_TIME_INVALID".into())
+            );
+        }
+    }
 
     #[test]
     fn e1_native_fills_require_independent_exact_venue_quantity_and_time() {
