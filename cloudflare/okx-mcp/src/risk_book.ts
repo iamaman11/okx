@@ -185,12 +185,42 @@ function validEntryBudget(v:any):v is CampaignEntryBudget{
     HEX.test(v.opening_source_digest)&&
     Number.isSafeInteger(v.opening_as_of_ms)&&v.opening_as_of_ms>0;
 }
-/** No public or WebSocket route. A future source-complete native finance
- * import must verify this opening spend before calling the migration.
- * Never assume that an existing trading campaign has spent zero. */
-export async function installCampaignEntryProof(tx:any,source:{
-  campaign_id:string;limit_usd:string;consumed_usd:string;source_digest:string;as_of_ms:number
-}):Promise<boolean>{
+/** E1.1 history is a single full-cohort fact, not an unexplained
+ * initial zero. Each managed real account must supply immutable native
+ * finance provenance, complete order/fill/bill history through the same
+ * cut-off, and an explicit cost total. An empty list is never zero spend. */
+export interface CampaignEntryOpeningAccount {
+  account_key:string;
+  history_from_ms:number;
+  history_through_ms:number;
+  consumed_entry_usd:string;
+  order_history_complete:true;
+  fill_history_complete:true;
+  bill_history_complete:true;
+  finance_provenance_sealed:true;
+  source_digest:string;
+}
+export interface CampaignEntryOpeningSource {
+  campaign_id:string;limit_usd:string;consumed_usd:string;
+  source_digest:string;as_of_ms:number;campaign_started_at_ms:number;
+  accounts:CampaignEntryOpeningAccount[];
+}
+async function openingDigest(source:CampaignEntryOpeningSource):Promise<string>{
+  const payload=JSON.stringify([
+    "okx.campaign-entry-opening/v1",
+    source.campaign_id,source.limit_usd,source.consumed_usd,
+    source.campaign_started_at_ms,source.as_of_ms,source.accounts
+  ]);
+  const bytes=new TextEncoder().encode(payload);
+  const hash=await crypto.subtle.digest("SHA-256",bytes);
+  return Array.from(new Uint8Array(hash),v=>v.toString(16).padStart(2,"0")).join("");
+}
+/** No public, MCP or WSS route. The future native importer must bind each
+ * account row to independently authenticated venue history and the actual
+ * campaign inception. A syntactically valid hash by itself is NOT such an
+ * attestation. No production importer is connected until that exists.
+ */
+export async function installCampaignEntryProof(tx:any,source:CampaignEntryOpeningSource):Promise<boolean>{
   const meta:RiskMeta=await tx.get(KEY);
   const governance:unknown=await tx.get(GOVERNANCE_STORAGE_KEY);
   if(!validMeta(meta)||!validGovernance(governance)||
@@ -201,9 +231,34 @@ export async function installCampaignEntryProof(tx:any,source:{
      units(governance.campaign_entry_limit_usd)!<=0n||
      units(source.limit_usd)!==units(governance.campaign_entry_limit_usd)||
      !HEX.test(source.source_digest)||!Number.isSafeInteger(source.as_of_ms)||
-     source.as_of_ms<=0||units(source.limit_usd)!<=0n||
-     units(source.consumed_usd)===null||
-     units(source.consumed_usd)!>units(source.limit_usd)!)return false;
+     source.as_of_ms<=0||!Number.isSafeInteger(source.campaign_started_at_ms)||
+     source.campaign_started_at_ms<=0||source.campaign_started_at_ms>source.as_of_ms||
+     units(source.limit_usd)!<=0n||units(source.consumed_usd)===null||
+     units(source.consumed_usd)!>units(source.limit_usd)!||
+     !Array.isArray(source.accounts))return false;
+  const managed=governance.accounts
+    .filter(a=>a.environment==="real")
+    .map(a=>a.account_key).sort();
+  if(managed.length===0||managed.length!==source.accounts.length)return false;
+  let witnessed=0n;
+  for(let i=0;i<managed.length;i++){
+    const row=source.accounts[i];
+    const cost=units(row?.consumed_entry_usd);
+    if(!row||row.account_key!==managed[i]||
+       !HEX.test(row.source_digest)||
+       row.order_history_complete!==true||
+       row.fill_history_complete!==true||
+       row.bill_history_complete!==true||
+       row.finance_provenance_sealed!==true||
+       !Number.isSafeInteger(row.history_from_ms)||
+       row.history_from_ms!==source.campaign_started_at_ms||
+       !Number.isSafeInteger(row.history_through_ms)||
+       row.history_through_ms!==source.as_of_ms||
+       cost===null)return false;
+    witnessed+=cost;
+  }
+  if(witnessed!==units(source.consumed_usd)||
+     await openingDigest(source)!==source.source_digest)return false;
   await tx.put(KEY,{...meta,entry_budget:{
     campaign_id:source.campaign_id,limit_usd:source.limit_usd,
     consumed_usd:source.consumed_usd,reserved_usd:"0",
