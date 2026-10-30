@@ -106,7 +106,12 @@ NAV/STOP → protected position/terminal settlement → release`.
   inception receipt remain `NOT_PROVEN`, never receive a fabricated date. For older
   campaigns and recovery, sources fail closed pending independent proof.
   A complete native all-managed-account USD expense importer is still not
-  connected, so RiskBook leaves admission blocked.
+  connected, so RiskBook leaves admission blocked. The existing native
+  RiskBook SUMMARY exposes authenticated campaign inception, but the
+  historical venue content digest is deliberately NOT a USD debit proof.
+  Opening imports additionally require currency/contract valuation for
+  every observed economic event, the SQL owner and all-managed-account
+  aggregation. No unknown source may become `consumed_usd=0`.
   Missing all-in FX/margin/borrow sources now reject the prepared SQL intent
   as `ENTRY_ALL_IN_COST_UNPROVEN` BEFORE any central RESERVE attempt: known
   quote remains readable, and no orphaned risk marker can be created.
