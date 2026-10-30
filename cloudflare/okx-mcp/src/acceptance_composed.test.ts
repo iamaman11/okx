@@ -338,7 +338,8 @@ check(enableEntry.status==='completed'&&
 // Only after registering the real cohort can the synthetic history fixture
 // claim complete coverage. The initial empty-governance state proves no spend
 // for NO real account, not a safe opening for a future account.
-const openingAsOf=1792890000000,openingFrom=openingAsOf-100000;
+const openingFrom=(await readRiskBook(storage))!.campaign_origin!.started_at_ms;
+const openingAsOf=openingFrom+100000;
 const activePolicy=(await governanceRequest(storage,'GET')).body as Governance;
 const witnessed:CampaignEntryOpeningSource={
  campaign_id:activePolicy.campaign_id,limit_usd:"10",consumed_usd:"0",
