@@ -180,6 +180,32 @@ check((await readRiskBook(absentOpening))?.entry_budget?.consumed_usd==="5",
 check(!await installCampaignEntryProof(absentOpening,await openingFixture()),
  "campaign opening is immutable after first acceptance");
 console.log("entry_opening_all_managed_history_evidence PASS");
+// A later real-account enrollment cannot inherit the two-account opening.
+// Even if the native census is now complete for all three accounts, the
+// original consumed amount covered only the two original account histories.
+const enrolledAfterOpening=new Storage();
+await enrolledAfterOpening.put("account_access_v1",governance);
+await enrolledAfterOpening.put("generation",77);
+await setupRiskBook(enrolledAfterOpening);
+const third=account(p),thirdKey=third.account_key;
+await enrolledAfterOpening.put("account_access_v1",{
+ ...governance,accounts:[...governance.accounts,third]
+});
+const extendedPolicy={...policy,
+ account_limits_usdt:{...policy.account_limits_usdt,[thirdKey]:"10"}
+};
+const extendedCensus={...census,
+ account_keys:[...census.account_keys,thirdKey],
+ occupied:[...census.occupied,{account_key:thirdKey,
+  occupied_usdt:"0",cumulative_loss_usd:"0"}]
+};
+const laterEntry=await reserveRisk(enrolledAfterOpening,extendedPolicy,
+ extendedCensus,request,native);
+check(laterEntry.status==="DENIED"&&laterEntry.reason==="CAMPAIGN_OPENING_COHORT_CHANGED",
+ "new managed real account cannot inherit an older campaign opening");
+check((await readRiskBook(enrolledAfterOpening))?.entry_budget?.reserved_usd==="0",
+ "cohort mismatch never allocates missing entry budget");
+console.log("entry_opening_new_account_fails_closed PASS");
 const entryRace=new Storage();
 await entryRace.put("account_access_v1",governance);await entryRace.put("generation",77);
 await setupRiskBook(entryRace);
