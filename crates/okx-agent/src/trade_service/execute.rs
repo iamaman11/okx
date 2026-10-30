@@ -138,7 +138,7 @@ impl TradeService {
                 .execution
                 .store
                 .call(until, move |store| {
-                    store.verify_captured_empty_window(from, through)
+                    store.verify_captured_campaign_continuity(from, through)
                 })
                 .await
                 .map_err(err)?;

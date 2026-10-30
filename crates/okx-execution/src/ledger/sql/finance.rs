@@ -346,7 +346,7 @@ impl AccountStore {
     /// Read-only, source-cursor-backed absence witness. Used both during
     /// bootstrap and immediately before a new risk admission. No archive
     /// request, ledger mutation or fake gap-free state is performed here.
-    fn captured_empty_frontiers(
+    fn captured_complete_frontiers(
         &self,
         from_ms: i64,
         through_ms: i64,
@@ -383,6 +383,15 @@ impl AccountStore {
                 "ENTRY_OPENING_FINANCE_PROVENANCE_UNSEALED",
             ));
         }
+        Ok(frontiers)
+    }
+
+    fn captured_empty_frontiers(
+        &self,
+        from_ms: i64,
+        through_ms: i64,
+    ) -> StoreResult<Vec<(&'static str, &'static str, i64, i64)>> {
+        let frontiers = self.captured_complete_frontiers(from_ms, through_ms)?;
         let (fills, bills, unresolved, lots): (i64, i64, i64, i64) = self.connection.query_row(
             "SELECT (SELECT COUNT(*) FROM fills WHERE time>?1 AND time<=?2),
                         (SELECT COUNT(*) FROM bills
@@ -415,6 +424,89 @@ impl AccountStore {
     pub fn verify_captured_empty_window(&self, from_ms: i64, through_ms: i64) -> StoreResult<()> {
         self.captured_empty_frontiers(from_ms, through_ms)
             .map(|_| ())
+    }
+
+    /// After a fully imported zero opening, a *completed previous* trade
+    /// must not make the next risk-increasing order impossible. The only
+    /// permissible post-opening monetary rows are terminal native intents
+    /// with exact exchange identity and (for entries) durable all-in native
+    /// settlement AND central release readback. Unknown/external fills and
+    /// unlinked fee bills remain fail-closed, without a hot-path archive scan.
+    /// This is an indexed SQL read; RiskBook remains the owner of spent money.
+    pub fn verify_captured_campaign_continuity(
+        &self,
+        from_ms: i64,
+        through_ms: i64,
+    ) -> StoreResult<()> {
+        self.captured_complete_frontiers(from_ms, through_ms)?;
+        let unknown_fill: i64 = self.connection.query_row(
+            "SELECT EXISTS(
+               SELECT 1 FROM fills f
+               LEFT JOIN intents i ON i.intent_id=f.intent_id
+               LEFT JOIN intent_plans p ON p.intent_id=i.intent_id
+               LEFT JOIN risk_receipts r ON r.intent_id=i.intent_id
+               LEFT JOIN operation_receipts e
+                 ON e.operation_id='entry-settlement:'||i.intent_id
+               WHERE f.time>?1 AND f.time<=?2
+               AND (i.intent_id IS NULL OR p.intent_id IS NULL
+                 OR i.instrument_id!=f.instrument_id
+                 OR i.exchange_order_id IS NULL
+                 OR i.exchange_order_id!=f.exchange_order_id
+                 OR i.begin_post_at IS NULL OR i.begin_post_at>f.time
+                 OR i.state NOT IN ('FILLED','CANCELLED')
+                 OR p.side!=f.side
+                 OR (i.risk_increase=1 AND
+                     (r.state IS NULL OR r.state!='RELEASED'
+                      OR r.plan_hash!=i.plan_hash
+                      OR e.kind IS NULL OR e.kind!='ENTRY_SETTLEMENT_PROVEN'
+                      OR e.request_hash!=i.plan_hash)))
+               LIMIT 1)",
+            params![from_ms, through_ms],
+            |row| row.get(0),
+        )?;
+        if unknown_fill != 0 {
+            return Err(StoreError::Invalid(
+                "ENTRY_POST_OPENING_FILL_NOT_SETTLED",
+            ));
+        }
+        let unknown_bill: i64 = self.connection.query_row(
+            "SELECT EXISTS(
+               SELECT 1 FROM bills b
+               WHERE b.time>?1 AND b.time<=?2
+               AND b.kind NOT IN ('1:11','1:12','8:173','8:174')
+               AND b.kind NOT LIKE '7:%'
+               AND NOT EXISTS(
+                 SELECT 1 FROM finance_entries e
+                 JOIN finance_source_links l ON l.entry_id=e.entry_id
+                 JOIN fills f ON l.source_ref='fill:'||f.fill_id
+                 WHERE e.economic_event_key=b.economic_event_key
+                   AND e.component='FEE'
+                   AND f.time>?1 AND f.time<=?2
+               ) LIMIT 1)",
+            params![from_ms, through_ms],
+            |row| row.get(0),
+        )?;
+        if unknown_bill != 0 {
+            return Err(StoreError::Invalid(
+                "ENTRY_POST_OPENING_BILL_NOT_RECONCILED",
+            ));
+        }
+        let exposures: i64 = self.connection.query_row(
+            "SELECT EXISTS(
+               SELECT 1 FROM intents
+               WHERE state NOT IN ('REJECTED','CANCELLED','FILLED')
+             ) OR EXISTS(
+               SELECT 1 FROM position_lots WHERE remaining_qty!='0'
+             )",
+            [],
+            |row| row.get(0),
+        )?;
+        if exposures != 0 {
+            return Err(StoreError::Invalid(
+                "ENTRY_POST_OPENING_NATIVE_EXPOSURE_UNRESOLVED",
+            ));
+        }
+        Ok(())
     }
 
     /// Source-backed zero opening from the EXISTING incremental account writer.

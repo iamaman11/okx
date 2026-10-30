@@ -96,6 +96,76 @@ fn r4_campaign_zero_only_after_all_six_incremental_money_cursors_complete() {
 }
 
 #[test]
+fn r4_followup_requires_terminal_native_fill_and_central_settlement() {
+    let mut s = store();
+    let from = 2_i64;
+    let through = 80_i64;
+    for (source, part) in [
+        ("fills", "SPOT"), ("fills", "MARGIN"), ("fills", "SWAP"),
+        ("fills", "FUTURES"), ("fills", "OPTION"), ("bills", "account"),
+    ] {
+        s.connection.execute(
+            "INSERT INTO source_cursors(source,stream_partition,cursor,watermark,generation,coverage_gaps)
+             VALUES(?1,?2,'',100,1,'')",
+            rusqlite::params![source,part]
+        ).unwrap();
+    }
+    assert!(s.verify_captured_campaign_continuity(from, through).is_ok());
+    s.connection.execute(
+        "INSERT INTO fills(fill_id,instrument_id,trade_id,exchange_order_id,intent_id,
+          time,qty,price,fee,currency,side)
+         VALUES('external','BTC-USDT-SWAP','trade','exchange',NULL,20,'1','100','-0.01','USDT','buy')",
+        [],
+    ).unwrap();
+    assert!(matches!(
+        s.verify_captured_campaign_continuity(from, through),
+        Err(StoreError::Invalid("ENTRY_POST_OPENING_FILL_NOT_SETTLED"))
+    ), "unattributed exchange fill cannot spend unreserved money");
+    s.connection.execute("DELETE FROM fills WHERE fill_id='external'",[]).unwrap();
+    let intent = intent(&mut s);
+    s.connection.execute(
+        "UPDATE intents SET state='FILLED',exchange_order_id='exchange',
+         begin_post_at=10 WHERE intent_id=?1",
+        [intent.intent_id.as_str()],
+    ).unwrap();
+    s.connection.execute(
+        "INSERT INTO fills(fill_id,instrument_id,trade_id,exchange_order_id,intent_id,
+           time,qty,price,fee,currency,side)
+         VALUES('bound','BTC-USDT-SWAP','trade2','exchange',?1,20,'1','100','-0.01','USDT','buy')",
+        [intent.intent_id.as_str()],
+    ).unwrap();
+    assert!(matches!(
+        s.verify_captured_campaign_continuity(from, through),
+        Err(StoreError::Invalid("ENTRY_POST_OPENING_FILL_NOT_SETTLED"))
+    ), "a FILLED status alone cannot grant a new opening");
+    s.connection.execute(
+        "INSERT INTO risk_receipts(reservation_key,intent_id,account_key,installation_id,
+          instance_id,plan_hash,policy_revision,receipt_hash,requested_loss_usd,
+          conversion_digest,state)
+         VALUES('reservation',?1,'okx:real:verified','installation',NULL,?2,
+                1,'receipt','1','conversion','RELEASED')",
+        rusqlite::params![intent.intent_id,intent.plan_hash],
+    ).unwrap();
+    s.connection.execute(
+        "INSERT INTO operation_receipts(operation_id,kind,request_hash,result_ref,committed_at)
+         VALUES('entry-settlement:intent','ENTRY_SETTLEMENT_PROVEN',?1,
+                'immutable-native-filled-bill-proof',30)",
+        [intent.plan_hash.as_str()],
+    ).unwrap();
+    assert!(s.verify_captured_campaign_continuity(from, through).is_ok(),
+        "native terminal release permits the next bounded entry");
+    s.connection.execute(
+        "INSERT INTO bills(bill_id,kind,time,amount,currency,economic_event_key)
+         VALUES('unexpected','2:0',22,'-0.01','USDT','bill:unexpected')",
+        [],
+    ).unwrap();
+    assert!(matches!(
+        s.verify_captured_campaign_continuity(from, through),
+        Err(StoreError::Invalid("ENTRY_POST_OPENING_BILL_NOT_RECONCILED"))
+    ), "standalone fees cannot be excluded from campaign consumption");
+}
+
+#[test]
 fn e1_campaign_empty_opening_sql_receipt_is_durable_and_immutable() {
     let s = store();
     let campaign = format!("sha256:{}", "c".repeat(64));
