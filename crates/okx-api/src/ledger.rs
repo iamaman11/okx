@@ -430,7 +430,7 @@ impl AccountHistoryApi {
         through_ms: i64,
         observed_at_ms: i64,
     ) -> Result<CompleteCampaignMoneyHistory, OkxError> {
-        verify_campaign_order_window(started_at_ms, through_ms, observed_at_ms)?;
+        verify_campaign_money_window(started_at_ms, through_ms, observed_at_ms)?;
         let mut fills = Vec::new();
         for instrument_type in ["SPOT", "MARGIN", "SWAP", "FUTURES", "OPTION"] {
             let mut after: Option<String> = None;
@@ -709,6 +709,38 @@ fn history_window_params(
         params.push(("after", after.into()));
     }
     Ok(params)
+}
+
+/// A monetary campaign audit does not need canceled/unfilled order
+/// history to establish entry spending. It DOES require a complete,
+/// gap-free venue fill AND bill archive from the externally proven campaign
+/// inception. Do not relax the separate two-hour lost-POST recovery proof.
+/// OKX's ordinary money archives retain the last three calendar months;
+/// reject the oldest day's ambiguous boundary rather than claiming zero.
+fn verify_campaign_money_window(
+    started_at_ms: i64,
+    through_ms: i64,
+    observed_at_ms: i64,
+) -> Result<(), OkxError> {
+    let observed = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(observed_at_ms)
+        .ok_or_else(|| OkxError::Config("campaign money observation time invalid".into()))?;
+    let floor = observed
+        .checked_sub_months(chrono::Months::new(3))
+        .ok_or_else(|| OkxError::Config("campaign money archive date invalid".into()))?
+        .timestamp_millis()
+        .checked_add(86_400_000)
+        .ok_or_else(|| OkxError::Config("campaign money archive date invalid".into()))?;
+    if started_at_ms <= 0
+        || through_ms < started_at_ms
+        || observed_at_ms < through_ms
+        || observed_at_ms - through_ms > CAMPAIGN_RETENTION_SAFETY_MS
+        || started_at_ms < floor
+    {
+        return Err(OkxError::Config(
+            "campaign fills and bills history outside provable archive".into(),
+        ));
+    }
+    Ok(())
 }
 
 /// A venue history response contains no intrinsic campaign start. The
@@ -1430,6 +1462,25 @@ mod tests {
             complete: true,
         };
         assert!(merge_order_histories(source, archive).is_err());
+    }
+
+    #[test]
+    fn money_archive_and_lost_post_history_have_distinct_retention_gates() {
+        let observed = chrono::DateTime::parse_from_rfc3339("2026-10-30T12:00:00Z")
+            .unwrap()
+            .timestamp_millis();
+        let from = observed - 7 * 86_400_000;
+        assert!(verify_campaign_money_window(from, observed, observed).is_ok());
+        assert!(verify_campaign_order_window(from, observed, observed).is_err());
+        let dt = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(observed).unwrap();
+        let old = dt.checked_sub_months(chrono::Months::new(3))
+            .unwrap().timestamp_millis();
+        assert!(verify_campaign_money_window(old, observed, observed).is_err());
+        assert!(verify_campaign_money_window(old + 86_400_000, observed, observed).is_ok());
+        assert!(verify_campaign_money_window(from, observed, observed-1).is_err());
+        assert!(verify_campaign_money_window(0, observed, observed).is_err());
+        // Fee bills/fills without executed orders remain separately
+        // source-classified; this guard never invents historical USD.
     }
 
     #[test]
