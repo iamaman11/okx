@@ -56,6 +56,14 @@ NAV/STOP → protected position/terminal settlement → release`.
   the single account SQL owner, with exact cursor/replay rules. Only a
   fully source-bound cumulative debit may become `SETTLE_ENTRY`. An
   observed `notional + fee` quote does not prove margin/borrowing/FX.
+- **Handling net-mode positions:** exchange `posSide=net` uses a signed
+  position quantity, while native SQL lots use `long` / `short`.
+  `trade_service/reconcile.rs::verified_venue_position_direction` is the
+  shared proof for status, pre-POST cohort and recovery. A different or
+  malformed direction cannot be interpreted as flat. The same module's
+  `verified_live_protection` binds each protection to actual venue
+  side/size/trigger; recovery must read the *live* algo, not only its
+  stored SQL receipt.
 - **Diagnosing a denial:** inspect one `trade.status` or bounded
   `diagnostics.explain(view=finance)` result and its source/reason.
   Typical owners: `ENTRY_*_UNPROVEN` = native venue/SQL input;
