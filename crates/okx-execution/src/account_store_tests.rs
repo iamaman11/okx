@@ -4890,28 +4890,28 @@ fn p02_valuation_requires_converged_sources_even_with_valid_principal() {
         Err(StoreError::Invalid("STRATEGY_NAV_ACCOUNT_SOURCE_MISMATCH"))
     ));
     let witness = p02_valuation_witness(&s, 4, "account-witness");
-    s.ingest_page(&IngestPage {
-        finance: vec![FinanceEntry {
-            entry_id: "forged-fee".into(),
-            economic_event_key: "fake-fee".into(),
-            component: "FEE".into(),
-            allocation_leg: "account".into(),
-            amount: Decimal::from(-1),
-            currency: "USD".into(),
-            instance_id: Some("alpha".into()),
-            source_ref: "unverified:fee".into(),
-            time: 4,
-            reverses_entry_id: None,
-        }],
-        ..Default::default()
-    })
-    .unwrap();
     assert!(matches!(
-        s.reconcile_strategy_valuation(&witness),
+        s.ingest_page(&IngestPage {
+            finance: vec![FinanceEntry {
+                entry_id: "forged-fee".into(),
+                economic_event_key: "fake-fee".into(),
+                component: "FEE".into(),
+                allocation_leg: "account".into(),
+                amount: Decimal::from(-1),
+                currency: "USD".into(),
+                instance_id: Some("alpha".into()),
+                source_ref: "unverified:fee".into(),
+                time: 4,
+                reverses_entry_id: None,
+            }],
+            ..Default::default()
+        }),
         Err(StoreError::Invalid(
             "STRATEGY_NAV_ECONOMIC_SOURCE_UNVERIFIED"
         ))
     ));
+    // Rejected before entry/totals/cursor commit; the prior valuation is intact.
+    assert!(s.reconcile_strategy_valuation(&witness).is_ok());
     s.ingest_page(&IngestPage {
         cursor: Some(SourceCursor {
             source: "strategy_valuation".into(),
@@ -4995,26 +4995,258 @@ fn p02_valuation_rejects_missing_mark_and_uses_contract_mechanics() {
         .insert("USDT".into(), Decimal::ONE);
     evidence.venue_positions[0].signed_contracts = Decimal::ONE;
     // Existing fill identity does not permit inventing a different fee.
-    s.ingest_page(&IngestPage {
+    assert!(matches!(
+        s.ingest_page(&IngestPage {
+            finance: vec![FinanceEntry {
+                entry_id: "fee-mismatch".into(),
+                economic_event_key: "fill:BTC:valuation-fill:o:valuation-fill".into(),
+                component: "FEE".into(),
+                allocation_leg: "account".into(),
+                amount: Decimal::from(-1),
+                currency: "USDT".into(),
+                instance_id: Some("alpha".into()),
+                source_ref: "fill:f:valuation-fill".into(),
+                time: 5,
+                reverses_entry_id: None,
+            }],
+            ..Default::default()
+        }),
+        Err(StoreError::Invalid("STRATEGY_NAV_FEE_SOURCE_MISMATCH"))
+    ));
+    assert!(s.reconcile_strategy_valuation(&evidence).is_ok());
+}
+
+#[test]
+fn f1_current_strategy_valuation_uses_verified_totals_after_large_history_and_restart() {
+    let mut s = store();
+    let strategy = StrategyInstance {
+        instance_id: "alpha".into(),
+        definition_id: "fixture".into(),
+        definition_version: "1".into(),
+        parameters: "{}".into(),
+        enabled: false,
+        policy_revision: 1,
+        budget: Decimal::from(10),
+        last_decision_key: None,
+    };
+    s.mutate_instance("f1-create", "f1-create", "create", &strategy, None, 2)
+        .unwrap();
+    s.commit_authorized_capital_assignment(&AuthorizedCapitalAssignment {
+        account_key: s.meta().account_key.clone(),
+        installation_id: s.meta().installation_id.clone(),
+        nav_source_ref: s.meta().opening_source.clone(),
+        operation_id: "f1-capital".into(),
+        request_hash: "f1-capital".into(),
+        instance_id: "alpha".into(),
+        delta_usd: Decimal::from(20),
+        authority_revision: 1,
+        authority_receipt: "governance".into(),
+        time: 4,
+    })
+    .unwrap();
+    let mut page = IngestPage {
+        bills: vec![Bill {
+            bill_id: "f1-bill".into(),
+            kind: "FEE".into(),
+            time: 7,
+            amount: Decimal::NEGATIVE_ONE,
+            currency: "USDT".into(),
+            economic_event_key: "bill:f1-bill".into(),
+        }],
         finance: vec![FinanceEntry {
-            entry_id: "fee-mismatch".into(),
-            economic_event_key: "fill:BTC:valuation-fill:o:valuation-fill".into(),
+            entry_id: "f1-attributed-fee".into(),
+            economic_event_key: "bill:f1-bill".into(),
             component: "FEE".into(),
             allocation_leg: "account".into(),
-            amount: Decimal::from(-1),
+            amount: Decimal::NEGATIVE_ONE,
             currency: "USDT".into(),
             instance_id: Some("alpha".into()),
-            source_ref: "fill:f:valuation-fill".into(),
-            time: 5,
+            source_ref: "bill:f1-bill".into(),
+            time: 7,
             reverses_entry_id: None,
+        }],
+        ..Default::default()
+    };
+    // The large immutable history is unrelated to the one active strategy.
+    // NAV must depend on current projections, not traverse these rows.
+    for n in 0..2000 {
+        let mut e = fee(&format!("f1-unallocated-{n}"), "unattributed");
+        e.economic_event_key = format!("unattributed-event:{n}");
+        e.instance_id = None;
+        page.finance.push(e);
+    }
+    s.ingest_page(&page).unwrap();
+    p02_completed_cursors(&mut s, 10);
+    s.ingest_page(&IngestPage {
+        nav: vec![NavPoint {
+            scope_id: "account".into(),
+            time: 10,
+            source_version: "f1-live".into(),
+            equity: Decimal::from(100),
+            pnl: Decimal::ZERO,
+            flows: Decimal::ZERO,
+            currency: "USD".into(),
+            coverage: "COMPLETE".into(),
+            mark_source: "f1-account".into(),
         }],
         ..Default::default()
     })
     .unwrap();
+    let witness = p02_valuation_witness(&s, 10, "f1-account");
+    let result = s.reconcile_strategy_valuation(&witness).unwrap();
+    assert_eq!(result.strategies[0].realized_usd, Decimal::NEGATIVE_ONE);
+    assert_eq!(result.strategies[0].equity_usd, Decimal::from(19));
+    assert_eq!(result.unattributed_usd, Decimal::from(81));
+    // The provenance receipt and totals survive process replacement.
+    let path = s.path.clone();
+    let meta = s.meta.clone();
+    drop(s);
+    let s = AccountStore::open_existing(path, &meta.account_key, &meta.installation_id).unwrap();
+    assert_eq!(s.reconcile_strategy_valuation(&witness).unwrap(), result);
+    let sealed = s.cursor("finance_provenance", "account").unwrap().unwrap();
+    assert!(sealed.watermark >= 2000);
+}
+
+#[test]
+fn f1_fill_fee_with_bill_id_is_verified_before_bill_history_and_never_doubled() {
+    let mut s = store();
+    owned_fill(&mut s, "alpha", "f1-seed", 100, "long", 3);
+    let fee = FinanceEntry {
+        entry_id: "f1-early-fill-fee".into(),
+        economic_event_key: "bill:f1-later-bill".into(),
+        component: "FEE".into(),
+        allocation_leg: "account".into(),
+        amount: Decimal::new(-1, 2),
+        currency: "USDT".into(),
+        instance_id: Some("alpha".into()),
+        source_ref: "fill:BTC:f1-trade:f1-order".into(),
+        time: 4,
+        reverses_entry_id: None,
+    };
+    let first = IngestPage {
+        fills: vec![Fill {
+            fill_id: "BTC:f1-trade:f1-order".into(),
+            instrument_id: "BTC".into(),
+            trade_id: "f1-trade".into(),
+            exchange_order_id: "f1-order".into(),
+            intent_id: Some("f1-seed".into()),
+            time: 4,
+            qty: Decimal::ONE,
+            price: Decimal::from(100),
+            fee: fee.amount,
+            currency: fee.currency.clone(),
+            side: "buy".into(),
+        }],
+        finance: vec![fee.clone()],
+        ..Default::default()
+    };
+    // The authenticated fill carries an exchange bill ID, but the separate
+    // bill page has not yet arrived. It must not deadlock fills-first capture.
+    s.ingest_page(&first).unwrap();
+    s.ingest_page(&first).unwrap();
+    let later = IngestPage {
+        bills: vec![Bill {
+            bill_id: "f1-later-bill".into(),
+            kind: "FEE".into(),
+            time: 5,
+            amount: fee.amount,
+            currency: "USDT".into(),
+            economic_event_key: "bill:f1-later-bill".into(),
+        }],
+        finance: vec![FinanceEntry {
+            entry_id: "f1-bill-alias".into(),
+            source_ref: "bill:f1-later-bill".into(),
+            time: 5,
+            ..fee.clone()
+        }],
+        ..Default::default()
+    };
+    s.ingest_page(&later).unwrap();
+    s.ingest_page(&later).unwrap();
+    let total: String = s
+        .connection
+        .query_row(
+            "SELECT amount FROM instance_finance_totals
+             WHERE instance_id='alpha' AND component='FEE' AND currency='USDT'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(total, "-0.01");
+    let conflicting_fee = FinanceEntry {
+        entry_id: "f1-duplicate-fill-fee".into(),
+        economic_event_key: "bill:another-bill".into(),
+        ..fee
+    };
     assert!(matches!(
-        s.reconcile_strategy_valuation(&evidence),
-        Err(StoreError::Invalid("STRATEGY_NAV_FEE_SOURCE_MISMATCH"))
+        s.ingest_page(&IngestPage {
+            finance: vec![conflicting_fee],
+            ..Default::default()
+        }),
+        Err(StoreError::Invalid("FINANCE_FILL_SOURCE_REUSED"))
     ));
+    assert_eq!(
+        s.finance_history(1, 10, 0, "", 100)
+            .unwrap()
+            .iter()
+            .filter(
+                |entry| entry.component == "FEE" && entry.instance_id.as_deref() == Some("alpha"),
+            )
+            .count(),
+        1
+    );
+    // A matching original is not authority to invent a profitable reversal.
+    let unproven = FinanceEntry {
+        entry_id: "f1-forged-reversal".into(),
+        economic_event_key: "correction:forged".into(),
+        component: "FEE".into(),
+        allocation_leg: "account".into(),
+        amount: Decimal::new(1, 2),
+        currency: "USDT".into(),
+        instance_id: Some("alpha".into()),
+        source_ref: "forged:reversal".into(),
+        time: 6,
+        reverses_entry_id: Some("f1-early-fill-fee".into()),
+    };
+    assert!(matches!(
+        s.ingest_page(&IngestPage {
+            finance: vec![unproven.clone()],
+            ..Default::default()
+        }),
+        Err(StoreError::Invalid(
+            "STRATEGY_NAV_ECONOMIC_SOURCE_UNVERIFIED"
+        ))
+    ));
+    let verified_reversal = FinanceEntry {
+        entry_id: "f1-verified-reversal".into(),
+        economic_event_key: "bill:f1-correction".into(),
+        source_ref: "bill:f1-correction".into(),
+        ..unproven
+    };
+    let correction = IngestPage {
+        bills: vec![Bill {
+            bill_id: "f1-correction".into(),
+            kind: "FEE_REVERSAL".into(),
+            time: 6,
+            amount: verified_reversal.amount,
+            currency: verified_reversal.currency.clone(),
+            economic_event_key: verified_reversal.economic_event_key.clone(),
+        }],
+        finance: vec![verified_reversal],
+        ..Default::default()
+    };
+    s.ingest_page(&correction).unwrap();
+    s.ingest_page(&correction).unwrap();
+    let balance: String = s
+        .connection
+        .query_row(
+            "SELECT amount FROM instance_finance_totals
+             WHERE instance_id='alpha' AND component='FEE' AND currency='USDT'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(balance, "0");
 }
 
 #[test]

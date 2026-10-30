@@ -1,5 +1,149 @@
 use super::super::*;
 
+/* F1: provenance is verified at the event boundary, not by replaying the
+ * immutable finance journal for every two-second NAV. The existing cursor
+ * table stores the highest fully verified finance rowid; a missing/stale
+ * cursor is NOT evidence of financial completeness. */
+type StrategyReversalSource = (String, String, String, Option<String>, Option<String>);
+
+fn verify_strategy_finance_source(db: &Connection, e: &FinanceEntry) -> StoreResult<()> {
+    if e.instance_id.as_deref().is_none_or(|id| id == "manual")
+        || matches!(
+            e.component.as_str(),
+            "INTERNAL_CAPITAL_USD" | "CAMPAIGN_LOSS_USD"
+        )
+    {
+        return Ok(());
+    }
+    if !matches!(
+        e.component.as_str(),
+        "FEE" | "FUNDING" | "REALIZED_PNL" | "LIQUIDATION_COST"
+    ) {
+        return Err(StoreError::Invalid("STRATEGY_NAV_COMPONENT_UNKNOWN"));
+    }
+    if let Some(reversed_id) = e.reverses_entry_id.as_deref() {
+        // A correction derives its provenance from the immutable original.
+        // The write path also checks reversal uniqueness before insert.
+        let original: Option<StrategyReversalSource> = db
+            .query_row(
+                "SELECT component,amount,currency,instance_id,reverses_entry_id FROM finance_entries WHERE entry_id=?1",
+                [reversed_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+            .optional()?;
+        if !original.is_some_and(|(component, amount, currency, owner, chained)| {
+            component == e.component
+                && currency == e.currency
+                && owner == e.instance_id
+                && chained.is_none()
+                && decimal(amount).ok().and_then(|n| n.checked_add(e.amount)) == Some(Decimal::ZERO)
+        }) {
+            return Err(StoreError::Invalid(
+                "STRATEGY_NAV_ECONOMIC_SOURCE_UNVERIFIED",
+            ));
+        }
+        // Matching the original does not authenticate the correction.
+        // Its own new bill/fill must also exist in this account ledger.
+    }
+    let found = if let Some(id) = e.source_ref.strip_prefix("fill:") {
+        let fill: Option<(String, String, String, String, String)> = db
+            .query_row(
+                "SELECT instrument_id,trade_id,exchange_order_id,fee,currency FROM fills WHERE fill_id=?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+            .optional()?;
+        if let Some((instrument, trade, order, fee, fee_currency)) = fill {
+            let canonical = format!("fill:{instrument}:{trade}:{order}");
+            if e.component == "FEE" && (e.currency != fee_currency || e.amount != decimal(fee)?) {
+                return Err(StoreError::Invalid("STRATEGY_NAV_FEE_SOURCE_MISMATCH"));
+            }
+            // The venue fill already proves its fee. Its bill ID may be
+            // known before the bill-history page arrives, so waiting for a
+            // separate bill row would deadlock fills-first source capture.
+            // One fill source cannot claim two different economic fee keys.
+            let canonical_or_bill = e.economic_event_key == canonical
+                || e.economic_event_key
+                    .strip_prefix("bill:")
+                    .is_some_and(|bill_id| !bill_id.is_empty());
+            if canonical_or_bill && e.component == "FEE" {
+                let reused: bool = db.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM finance_entries
+                     WHERE source_ref=?1 AND component='FEE'
+                       AND economic_event_key<>?2 AND reverses_entry_id IS NULL)",
+                    params![e.source_ref, e.economic_event_key],
+                    |row| row.get(0),
+                )?;
+                if reused {
+                    return Err(StoreError::Invalid("FINANCE_FILL_SOURCE_REUSED"));
+                }
+            }
+            canonical_or_bill
+        } else {
+            false
+        }
+    } else if let Some(id) = e.source_ref.strip_prefix("bill:") {
+        e.economic_event_key == e.source_ref
+            && db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM bills WHERE bill_id=?1)",
+                [id],
+                |r| r.get::<_, bool>(0),
+            )?
+    } else {
+        false
+    };
+    if !found {
+        return Err(StoreError::Invalid(
+            "STRATEGY_NAV_ECONOMIC_SOURCE_UNVERIFIED",
+        ));
+    }
+    Ok(())
+}
+
+fn finance_rowid(db: &Connection) -> StoreResult<i64> {
+    Ok(db.query_row(
+        "SELECT COALESCE(MAX(rowid),0) FROM finance_entries",
+        [],
+        |r| r.get(0),
+    )?)
+}
+
+fn provenance_watermark(db: &Connection) -> StoreResult<Option<i64>> {
+    Ok(db.query_row(
+        "SELECT watermark FROM source_cursors WHERE source='finance_provenance' AND stream_partition='account' AND cursor='' AND coverage_gaps='' AND generation=0",
+        [],
+        |r| r.get(0),
+    ).optional()?)
+}
+
+fn finance_proof_sealed(db: &Connection) -> StoreResult<bool> {
+    let latest = finance_rowid(db)?;
+    Ok(provenance_watermark(db)? == Some(latest)
+        || (latest == 0 && provenance_watermark(db)?.is_none()))
+}
+
+fn advance_finance_provenance(
+    tx: &rusqlite::Transaction<'_>,
+    previous_rowid: i64,
+) -> StoreResult<()> {
+    let prior = provenance_watermark(tx)?;
+    if prior != Some(previous_rowid) && !(previous_rowid == 0 && prior.is_none()) {
+        // Existing unverified history must not be silently grandfathered in.
+        return Ok(());
+    }
+    let latest = finance_rowid(tx)?;
+    if latest != previous_rowid {
+        tx.execute(
+            "INSERT INTO source_cursors(source,stream_partition,cursor,watermark,generation,coverage_gaps)
+             VALUES('finance_provenance','account','',?1,0,'')
+             ON CONFLICT(source,stream_partition)
+             DO UPDATE SET cursor='',watermark=excluded.watermark,generation=0,coverage_gaps=''",
+            [latest],
+        )?;
+    }
+    Ok(())
+}
+
 /// Start from the bounded set of unapplied fills, never from immutable history.
 /// SQLite otherwise chooses idx_fills_time to satisfy ORDER BY and scans all
 /// historical fills even when fill_projection_pending is empty.
@@ -173,6 +317,71 @@ impl AccountStore {
         })
     }
 
+    /// One-time existing-v2 migration fence. No second database or schema
+    /// version: audit immutable historical evidence on open, never in NAV.
+    /// Invalid old rows leave the proof unsealed and risk fails closed.
+    pub(super) fn audit_existing_finance_provenance(db: &mut Connection) -> StoreResult<()> {
+        if finance_proof_sealed(db)? {
+            return Ok(());
+        }
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let last = finance_rowid(&tx)?;
+        {
+            let mut stmt = tx.prepare(
+                "SELECT entry_id,economic_event_key,component,allocation_leg,amount,currency,instance_id,source_ref,time,reverses_entry_id
+                 FROM finance_entries
+                 WHERE instance_id IS NOT NULL AND instance_id<>'manual'
+                 ORDER BY rowid",
+            )?;
+            let mut rows = stmt.query([])?;
+            while let Some(r) = rows.next()? {
+                let entry = FinanceEntry {
+                    entry_id: r.get(0)?,
+                    economic_event_key: r.get(1)?,
+                    component: r.get(2)?,
+                    allocation_leg: r.get(3)?,
+                    amount: decimal(r.get(4)?)?,
+                    currency: r.get(5)?,
+                    instance_id: r.get(6)?,
+                    source_ref: r.get(7)?,
+                    time: r.get(8)?,
+                    reverses_entry_id: r.get(9)?,
+                };
+                verify_strategy_finance_source(&tx, &entry)?;
+            }
+        }
+        tx.execute(
+            "INSERT INTO source_cursors(source,stream_partition,cursor,watermark,generation,coverage_gaps)
+             VALUES('finance_provenance','account','',?1,0,'')
+             ON CONFLICT(source,stream_partition)
+             DO UPDATE SET cursor='',watermark=excluded.watermark,generation=0,coverage_gaps=''",
+            [last],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Bounded by current (instance,currency,component) combinations, not
+    /// lifetime finance_entries. Historical reports keep their own fold.
+    fn current_strategy_finance_totals(&self) -> StoreResult<FinanceAttribution> {
+        let mut stmt = self.connection.prepare(
+            "SELECT instance_id,currency,component,amount FROM instance_finance_totals ORDER BY instance_id,currency,component LIMIT 4097",
+        )?;
+        let mut rows = stmt.query([])?;
+        let mut totals = std::collections::BTreeMap::new();
+        while let Some(r) = rows.next()? {
+            let owner: String = r.get(0)?;
+            let currency: String = r.get(1)?;
+            let component: String = r.get(2)?;
+            let amount = decimal(r.get(3)?)?;
+            if totals.len() >= 4096 {
+                return Err(StoreError::Invalid("FINANCE_ATTRIBUTION_GROUP_LIMIT"));
+            }
+            totals.insert((Some(owner), currency, component), amount);
+        }
+        Ok(totals)
+    }
+
     /// Verify and price known strategy capital without creating a NAV point or
     /// unlocking risk. Only a converged exchange snapshot and five complete
     /// post-T0 history streams may supply a COMPLETE calculation.
@@ -211,79 +420,19 @@ impl AccountStore {
                 return Err(StoreError::Invalid("STRATEGY_NAV_HISTORY_INCOMPLETE"));
             }
         }
-        let pending:i64=self.connection.query_row(
-            "SELECT (SELECT COUNT(*) FROM fill_projection_pending)+(SELECT COUNT(*) FROM funding_projection_pending)",
-            [],|r|r.get(0)
+        let pending: bool = self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM fill_projection_pending LIMIT 1) OR EXISTS(SELECT 1 FROM funding_projection_pending LIMIT 1)",
+            [], |r| r.get(0)
         )?;
-        if pending != 0 {
+        if pending {
             return Err(StoreError::Invalid("STRATEGY_NAV_PROJECTION_PENDING"));
         }
-        // A modeled economic component can be counted as strategy profit
-        // only if its immutable originating fill or bill exists in this
-        // account's ledger. Arbitrary finance ingestion is NOT source proof.
-        let mut sources=self.connection.prepare(
-            "SELECT instance_id,component,source_ref,economic_event_key,amount,currency FROM finance_entries WHERE time>=?1 AND time<=?2 AND instance_id IS NOT NULL ORDER BY time,entry_id"
-        )?;
-        let mut source_rows = sources.query(params![self.meta.initialized_at, evidence.as_of])?;
-        while let Some(r) = source_rows.next()? {
-            let instance: String = r.get(0)?;
-            if instance == "manual" {
-                continue;
-            }
-            let component: String = r.get(1)?;
-            if !matches!(
-                component.as_str(),
-                "FEE" | "FUNDING" | "REALIZED_PNL" | "LIQUIDATION_COST"
-            ) {
-                if component == "INTERNAL_CAPITAL_USD" || component == "CAMPAIGN_LOSS_USD" {
-                    continue;
-                }
-                return Err(StoreError::Invalid("STRATEGY_NAV_COMPONENT_UNKNOWN"));
-            }
-            let proof: String = r.get(2)?;
-            let economic_key: String = r.get(3)?;
-            let amount = decimal(r.get(4)?)?;
-            let currency: String = r.get(5)?;
-            let found = if let Some(id) = proof.strip_prefix("fill:") {
-                let fill:Option<(String,String,String,String,String)>=self.connection.query_row(
-                    "SELECT instrument_id,trade_id,exchange_order_id,fee,currency FROM fills WHERE fill_id=?1",
-                    [id],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?))
-                ).optional()?;
-                if let Some((instrument, trade, order, fee, fee_currency)) = fill {
-                    let canonical = format!("fill:{instrument}:{trade}:{order}");
-                    // Venue-provided bill IDs are also valid economic keys,
-                    // but they must be present in the same account ledger.
-                    let linked_bill = if let Some(bill_id) = economic_key.strip_prefix("bill:") {
-                        self.connection.query_row(
-                            "SELECT EXISTS(SELECT 1 FROM bills WHERE bill_id=?1)",
-                            [bill_id],
-                            |row| row.get::<_, bool>(0),
-                        )?
-                    } else {
-                        false
-                    };
-                    if component == "FEE" && (currency != fee_currency || amount != decimal(fee)?) {
-                        return Err(StoreError::Invalid("STRATEGY_NAV_FEE_SOURCE_MISMATCH"));
-                    }
-                    economic_key == canonical || linked_bill
-                } else {
-                    false
-                }
-            } else if let Some(id) = proof.strip_prefix("bill:") {
-                economic_key == proof
-                    && self.connection.query_row(
-                        "SELECT EXISTS(SELECT 1 FROM bills WHERE bill_id=?1)",
-                        [id],
-                        |row| row.get::<_, bool>(0),
-                    )?
-            } else {
-                false
-            };
-            if !found {
-                return Err(StoreError::Invalid(
-                    "STRATEGY_NAV_ECONOMIC_SOURCE_UNVERIFIED",
-                ));
-            }
+        // F1: check an atomic, monotonic provenance proof, not all finance rows.
+        // An old/foreign/unverified entry must never inherit a COMPLETE NAV.
+        if !finance_proof_sealed(&self.connection)? {
+            return Err(StoreError::Invalid(
+                "STRATEGY_NAV_ECONOMIC_SOURCE_UNVERIFIED",
+            ));
         }
         let fx = &evidence.conversion.usd_per_currency;
         let convert = |currency: &str, value: Decimal| -> StoreResult<Decimal> {
@@ -318,9 +467,17 @@ impl AccountStore {
             .collect::<std::collections::BTreeMap<_, _>>();
         // Only economic components count. USD risk mirrors, deposits and
         // internal assignments are NEVER extra strategy profit.
-        for ((owner, currency, component), amount) in
+        // Current NAV consumes the existing event-updated projection.
+        // True historical as-of queries retain their immutable ledger fold.
+        let latest_time: Option<i64> =
+            self.connection
+                .query_row("SELECT MAX(time) FROM finance_entries", [], |r| r.get(0))?;
+        let attribution = if latest_time.is_some_and(|t| t > evidence.as_of) {
             self.finance_attribution_filtered(self.meta.initialized_at, evidence.as_of, &[], &[])?
-        {
+        } else {
+            self.current_strategy_finance_totals()?
+        };
+        for ((owner, currency, component), amount) in attribution {
             let Some(owner) = owner else { continue };
             if owner == "manual" {
                 continue;
@@ -683,6 +840,7 @@ impl AccountStore {
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let finance_rowid_before = finance_rowid(&tx)?;
         // Book two opposite legs under one economic event. Neither leg is
         // income or expense. SQL immutability protects the event after commit.
         for (leg, owner, delta) in [
@@ -733,6 +891,7 @@ impl AccountStore {
                 request.time
             ],
         )?;
+        advance_finance_provenance(&tx, finance_rowid_before)?;
         tx.commit()?;
         // Rebuild this derived timestamp after a committed allocation,
         // including one whose event timestamp predates a prior allocation.
@@ -1697,6 +1856,14 @@ impl AccountStore {
             commit_us: 0,
             commit_succeeded: false,
         };
+        if page
+            .cursor
+            .as_ref()
+            .is_some_and(|c| c.source == "finance_provenance")
+        {
+            return Err(StoreError::Invalid("FINANCE_PROVENANCE_CURSOR_INTERNAL"));
+        }
+        let finance_rowid_before = finance_rowid(&tx)?;
         for f in &page.fills {
             if f.qty <= Decimal::ZERO || f.price <= Decimal::ZERO || f.currency.is_empty() {
                 return Err(StoreError::Invalid("INVALID_FILL"));
@@ -1848,6 +2015,9 @@ impl AccountStore {
             if e.currency.is_empty() {
                 return Err(StoreError::Invalid("CURRENCY_REQUIRED"));
             }
+            // Proof is checked against raw fills/bills already inserted by
+            // this same transaction, before a delta reaches durable totals.
+            verify_strategy_finance_source(&tx, e)?;
             // Reversals are economic facts, not an arbitrary positive credit.
             // Validate the original in this very transaction before changing
             // any totals. A missing/out-of-order original is retryable without
@@ -2096,6 +2266,7 @@ impl AccountStore {
             )?;
             tx.execute("INSERT INTO operation_receipts VALUES(?1,'FUNDING_ATTRIBUTED',?2,'COMMITTED',?3) ON CONFLICT(operation_id) DO NOTHING",params![format!("funding:{id}"),id,wall_time_ms()])?;
         }
+        advance_finance_provenance(&tx, finance_rowid_before)?;
         timing.body_us =
             Some(u64::try_from(timing.body_started.elapsed().as_micros()).unwrap_or(u64::MAX));
         let commit_started = std::time::Instant::now();
