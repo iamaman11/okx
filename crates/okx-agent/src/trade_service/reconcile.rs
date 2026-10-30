@@ -111,6 +111,47 @@ fn verified_position_quantity<'a>(
     })
 }
 
+/// The venue's net_mode position direction is encoded in the SIGNED
+/// `pos` field, not the `posSide` label ("net"). Native SQL lots instead
+/// use long/short. This is the sole normalization shared by status,
+/// all-account census and recovery. Unknown or inconsistent sources cannot
+/// certify a flat position or permit a new order.
+pub(super) fn verified_venue_position_direction(
+    position_side: &str,
+    raw_position: &str,
+) -> Result<Option<(&'static str, Decimal)>, String> {
+    let signed = dec(raw_position).map_err(|_| "VENUE_POSITION_QUANTITY_UNVERIFIED")?;
+    if signed == Decimal::ZERO {
+        if !matches!(position_side, "net" | "long" | "short") {
+            return Err("VENUE_POSITION_SIDE_UNVERIFIED".into());
+        }
+        return Ok(None);
+    }
+    let (direction, quantity) = match position_side {
+        "net" if signed > Decimal::ZERO => ("long", signed),
+        "net" => (
+            "short",
+            signed
+                .checked_mul(-Decimal::ONE)
+                .ok_or("VENUE_POSITION_QUANTITY_OVERFLOW")?,
+        ),
+        "long" if signed > Decimal::ZERO => ("long", signed),
+        "short" => (
+            "short",
+            if signed < Decimal::ZERO {
+                signed
+                    .checked_mul(-Decimal::ONE)
+                    .ok_or("VENUE_POSITION_QUANTITY_OVERFLOW")?
+            } else {
+                signed
+            },
+        ),
+        "long" => return Err("VENUE_POSITION_SIDE_QUANTITY_MISMATCH".into()),
+        _ => return Err("VENUE_POSITION_SIDE_UNVERIFIED".into()),
+    };
+    Ok(Some((direction, quantity)))
+}
+
 /// Protection cleanup must inspect the whole instrument (both hedge
 /// sides), not just the original side. A malformed or overflowing position
 /// is UNKNOWN exposure and may never authorize removing a live stop.
@@ -459,16 +500,26 @@ impl TradeService {
             }
             i = self.find_intent(r, &i.intent_id).await?;
             let snapshot = r.observer.snapshot().await.map_err(err)?;
-            let position_qty = verified_position_quantity(
-                snapshot
-                    .positions
-                    .iter()
-                    .filter(|p| {
-                        p.instrument_id == i.instrument_id
-                            && p.position_side == i.plan.position_side
-                    })
-                    .map(|p| p.position.as_str()),
-            )?;
+            let position_qty = snapshot
+                .positions
+                .iter()
+                .filter(|p| p.instrument_id == i.instrument_id)
+                .try_fold(Decimal::ZERO, |total, p| {
+                    match verified_venue_position_direction(
+                        &p.position_side,
+                        &p.position,
+                    )? {
+                        None => Ok(total),
+                        Some((direction, amount))
+                            if direction == i.plan.position_side =>
+                        {
+                            total.checked_add(amount).ok_or_else(|| {
+                                "VENUE_POSITION_QUANTITY_OVERFLOW".into()
+                            })
+                        }
+                        Some(_) => Err("VENUE_POSITION_OPPOSITE_EXPOSURE_UNVERIFIED".into()),
+                    }
+                })?;
             let exposed = position_qty > Decimal::ZERO;
             if !exposed && i.risk_increase {
                 self.cleanup_flat_protection(r, &i).await?;
@@ -1625,6 +1676,39 @@ mod entry_cost_status_tests {
         assert_eq!(
             verified_position_quantity(["79228162514264337593543950335", "1"].into_iter()),
             Err("POSITION_QUANTITY_OVERFLOW".into())
+        );
+    }
+
+    #[test]
+    fn e2_position_direction_is_identical_for_net_status_census_and_recovery() {
+        let one = Decimal::ONE;
+        let half = dec("0.5").unwrap();
+        assert_eq!(verified_venue_position_direction("net", "1"),
+            Ok(Some(("long", one))));
+        assert_eq!(verified_venue_position_direction("net", "-0.5"),
+            Ok(Some(("short", half))));
+        assert_eq!(verified_venue_position_direction("long", "1"),
+            Ok(Some(("long", one))));
+        assert_eq!(verified_venue_position_direction("short", "0.5"),
+            Ok(Some(("short", half))));
+        for side in ["long", "short", "net"] {
+            assert_eq!(verified_venue_position_direction(side, "0"), Ok(None));
+        }
+        assert_eq!(
+            verified_venue_position_direction("long", "-1"),
+            Err("VENUE_POSITION_SIDE_QUANTITY_MISMATCH".into())
+        );
+        assert_eq!(
+            verified_venue_position_direction("unknown", "0"),
+            Err("VENUE_POSITION_SIDE_UNVERIFIED".into())
+        );
+        assert_eq!(
+            verified_venue_position_direction("unknown", "1"),
+            Err("VENUE_POSITION_SIDE_UNVERIFIED".into())
+        );
+        assert_eq!(
+            verified_venue_position_direction("net", "bad"),
+            Err("VENUE_POSITION_QUANTITY_UNVERIFIED".into())
         );
     }
 
