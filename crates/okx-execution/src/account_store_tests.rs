@@ -410,10 +410,13 @@ fn e1_bill_must_follow_actual_fill_and_not_be_interest_or_transfer() {
             assert_eq!(verified.linked_bill_count, 1);
             assert_eq!(verified.conservative_verified_fee_usdt, Decimal::new(1, 2));
         } else {
-            assert!(matches!(
-                result,
-                Err(StoreError::Invalid("ENTRY_FEE_BILL_SOURCE_MISMATCH"))
-            ), "fee witness with kind={bill_kind}, bill_time={bill_time}, finance_time={fee_time}, allocation={allocation_leg} cannot settle a fill");
+            assert!(
+                matches!(
+                    result,
+                    Err(StoreError::Invalid("ENTRY_FEE_BILL_SOURCE_MISMATCH"))
+                ),
+                "fee witness with kind={bill_kind}, bill_time={bill_time}, finance_time={fee_time}, allocation={allocation_leg} cannot settle a fill"
+            );
         }
     }
 }
