@@ -1180,6 +1180,35 @@ mod tests {
     }
 
     #[test]
+    fn campaign_account_history_rejects_missing_order_and_fill_quantity_mismatch() {
+        let from_ms=1_791_579_300_000i64;
+        let through_ms=from_ms+20_000;
+        let order=canceled_demo_order("123456",&(from_ms+1_000).to_string());
+        let empty=complete_campaign_money_witness(
+            from_ms, through_ms, vec![], vec![]
+        ).unwrap();
+        let source=complete_campaign_account_witness(
+            from_ms,through_ms,vec![order.clone()],empty.clone()
+        ).unwrap();
+        assert_eq!(source.orders.len(),1);
+        assert_eq!(source.source_digest.len(),64);
+        let mut erroneously_filled=order.clone();
+        erroneously_filled.accumulated_fill_size="1".into();
+        assert!(complete_campaign_account_witness(
+            from_ms,through_ms,vec![erroneously_filled],empty.clone()
+        ).is_err());
+        assert!(complete_campaign_account_witness(
+            from_ms,through_ms,vec![order.clone(),order.clone()],empty.clone()
+        ).is_err());
+        let other=complete_campaign_money_witness(
+            from_ms+1,through_ms,vec![],vec![]
+        ).unwrap();
+        assert!(complete_campaign_account_witness(
+            from_ms,through_ms,vec![order],other
+        ).is_err());
+    }
+
+    #[test]
     fn campaign_money_window_binds_immutable_order_fill_to_original_fee_bill() {
         let begin = 1_800_000_000_000i64;
         let end = begin + 10_000;
