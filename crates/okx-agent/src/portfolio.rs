@@ -488,7 +488,9 @@ fn summary_key(value: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use okx_execution::{AccountMeta, AccountStore, Bill, FinanceEntry, IngestPage, OpeningSnapshot};
+    use okx_execution::{
+        AccountMeta, AccountStore, Bill, FinanceEntry, IngestPage, OpeningSnapshot,
+    };
     #[test]
     fn sql_interruption_phase_preserves_other_storage_errors() {
         let interrupted = okx_execution::StoreError::Sql(rusqlite::Error::SqliteFailure(

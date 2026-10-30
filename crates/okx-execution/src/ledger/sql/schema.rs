@@ -173,7 +173,7 @@ impl AccountStore {
         }
         // Existing v2 databases need the same derived lookup as clean T0 databases.
         // This is an idempotent index only: no financial facts or schema version change.
-        c.execute_batch("CREATE INDEX IF NOT EXISTS idx_nav_scope_version_time ON nav_points(scope_id,source_version,time)")?;
+        c.execute_batch("CREATE INDEX IF NOT EXISTS idx_nav_scope_version_time ON nav_points(scope_id,source_version,time); CREATE INDEX IF NOT EXISTS idx_finance_source_component ON finance_entries(source_ref,component)")?;
         // Existing v2 ledger: establish an immutable-event provenance fence
         // once on open, never during the two-second NAV hot path. An invalid
         // old economic row leaves strategy valuation NOT_PROVEN, but must not

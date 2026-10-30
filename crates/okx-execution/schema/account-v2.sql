@@ -29,6 +29,7 @@ CREATE INDEX idx_lots_active ON position_lots(instrument_id,side,instance_id,ope
 CREATE TABLE finance_entries(entry_id TEXT PRIMARY KEY,economic_event_key TEXT NOT NULL,component TEXT NOT NULL,allocation_leg TEXT NOT NULL,amount TEXT NOT NULL,currency TEXT NOT NULL,instance_id TEXT REFERENCES strategy_instances(instance_id),source_ref TEXT NOT NULL,time INTEGER NOT NULL,reverses_entry_id TEXT REFERENCES finance_entries(entry_id),UNIQUE(economic_event_key,component,allocation_leg)) STRICT;
 CREATE INDEX idx_finance_time ON finance_entries(time,entry_id);
 CREATE INDEX idx_finance_instance ON finance_entries(instance_id,time,entry_id);
+CREATE INDEX idx_finance_source_component ON finance_entries(source_ref,component);
 CREATE TABLE finance_totals(currency TEXT NOT NULL,component TEXT NOT NULL,amount TEXT NOT NULL,PRIMARY KEY(currency,component)) STRICT;
 CREATE TABLE instance_finance_totals(instance_id TEXT NOT NULL REFERENCES strategy_instances(instance_id),currency TEXT NOT NULL,component TEXT NOT NULL,amount TEXT NOT NULL,PRIMARY KEY(instance_id,currency,component)) STRICT;
 CREATE TABLE finance_source_links(entry_id TEXT NOT NULL REFERENCES finance_entries(entry_id),source_ref TEXT NOT NULL,PRIMARY KEY(entry_id,source_ref)) STRICT;

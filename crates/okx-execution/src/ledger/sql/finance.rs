@@ -54,19 +54,30 @@ fn verify_strategy_finance_source(db: &Connection, e: &FinanceEntry) -> StoreRes
             .optional()?;
         if let Some((instrument, trade, order, fee, fee_currency)) = fill {
             let canonical = format!("fill:{instrument}:{trade}:{order}");
-            let linked_bill = if let Some(id) = e.economic_event_key.strip_prefix("bill:") {
-                db.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM bills WHERE bill_id=?1)",
-                    [id],
-                    |r| r.get::<_, bool>(0),
-                )?
-            } else {
-                false
-            };
             if e.component == "FEE" && (e.currency != fee_currency || e.amount != decimal(fee)?) {
                 return Err(StoreError::Invalid("STRATEGY_NAV_FEE_SOURCE_MISMATCH"));
             }
-            e.economic_event_key == canonical || linked_bill
+            // The venue fill already proves its fee. Its bill ID may be
+            // known before the bill-history page arrives, so waiting for a
+            // separate bill row would deadlock fills-first source capture.
+            // One fill source cannot claim two different economic fee keys.
+            let canonical_or_bill = e.economic_event_key == canonical
+                || e.economic_event_key
+                    .strip_prefix("bill:")
+                    .is_some_and(|bill_id| !bill_id.is_empty());
+            if canonical_or_bill && e.component == "FEE" {
+                let reused: bool = db.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM finance_entries
+                     WHERE source_ref=?1 AND component='FEE'
+                       AND economic_event_key<>?2 AND reverses_entry_id IS NULL)",
+                    params![e.source_ref, e.economic_event_key],
+                    |row| row.get(0),
+                )?;
+                if reused {
+                    return Err(StoreError::Invalid("FINANCE_FILL_SOURCE_REUSED"));
+                }
+            }
+            canonical_or_bill
         } else {
             false
         }

@@ -5108,6 +5108,94 @@ fn f1_current_strategy_valuation_uses_verified_totals_after_large_history_and_re
 }
 
 #[test]
+fn f1_fill_fee_with_bill_id_is_verified_before_bill_history_and_never_doubled() {
+    let mut s = store();
+    owned_fill(&mut s, "alpha", "f1-seed", 100, "long", 3);
+    let fee = FinanceEntry {
+        entry_id: "f1-early-fill-fee".into(),
+        economic_event_key: "bill:f1-later-bill".into(),
+        component: "FEE".into(),
+        allocation_leg: "account".into(),
+        amount: Decimal::new(-1, 2),
+        currency: "USDT".into(),
+        instance_id: Some("alpha".into()),
+        source_ref: "fill:BTC:f1-trade:f1-order".into(),
+        time: 4,
+        reverses_entry_id: None,
+    };
+    let first = IngestPage {
+        fills: vec![Fill {
+            fill_id: "BTC:f1-trade:f1-order".into(),
+            instrument_id: "BTC".into(),
+            trade_id: "f1-trade".into(),
+            exchange_order_id: "f1-order".into(),
+            intent_id: Some("f1-seed".into()),
+            time: 4,
+            qty: Decimal::ONE,
+            price: Decimal::from(100),
+            fee: fee.amount,
+            currency: fee.currency.clone(),
+            side: "buy".into(),
+        }],
+        finance: vec![fee.clone()],
+        ..Default::default()
+    };
+    // The authenticated fill carries an exchange bill ID, but the separate
+    // bill page has not yet arrived. It must not deadlock fills-first capture.
+    s.ingest_page(&first).unwrap();
+    s.ingest_page(&first).unwrap();
+    let later = IngestPage {
+        bills: vec![Bill {
+            bill_id: "f1-later-bill".into(),
+            kind: "FEE".into(),
+            time: 5,
+            amount: fee.amount,
+            currency: "USDT".into(),
+            economic_event_key: "bill:f1-later-bill".into(),
+        }],
+        finance: vec![FinanceEntry {
+            entry_id: "f1-bill-alias".into(),
+            source_ref: "bill:f1-later-bill".into(),
+            time: 5,
+            ..fee.clone()
+        }],
+        ..Default::default()
+    };
+    s.ingest_page(&later).unwrap();
+    s.ingest_page(&later).unwrap();
+    let total: String = s
+        .connection
+        .query_row(
+            "SELECT amount FROM instance_finance_totals
+             WHERE instance_id='alpha' AND component='FEE' AND currency='USDT'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(total, "-0.01");
+    let conflicting_fee = FinanceEntry {
+        entry_id: "f1-duplicate-fill-fee".into(),
+        economic_event_key: "bill:another-bill".into(),
+        ..fee
+    };
+    assert!(matches!(
+        s.ingest_page(&IngestPage {
+            finance: vec![conflicting_fee],
+            ..Default::default()
+        }),
+        Err(StoreError::Invalid("FINANCE_FILL_SOURCE_REUSED"))
+    ));
+    assert_eq!(
+        s.finance_history(1, 10, 0, "", 100)
+            .unwrap()
+            .iter()
+            .filter(|entry| entry.component == "FEE" && entry.instance_id.as_deref() == Some("alpha"))
+            .count(),
+        1
+    );
+}
+
+#[test]
 fn p02_two_accounts_two_strategies_fees_marks_restart_conserve_nav() {
     let mut real = store();
     let demo_meta = AccountMeta {
