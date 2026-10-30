@@ -236,9 +236,6 @@ impl AccountStore {
             side,
             planned_quantity,
             bound_price,
-            exchange_order_id,
-            begin_post_at,
-            reservation_key,
         ): (
             String,
             String,
@@ -249,21 +246,14 @@ impl AccountStore {
             String,
             String,
             String,
-            Option<String>,
-            Option<i64>,
-            Option<String>,
         ) = self
             .connection
             .query_row(
                 "SELECT i.plan_hash,i.instrument_id,p.contract_value,p.inverse,
-                        p.settlement_currency,i.risk_increase,p.side,p.quantity,p.limit_price,
-                        i.exchange_order_id,i.begin_post_at,r.reservation_key
+                        p.settlement_currency,i.risk_increase,p.side,p.quantity,p.limit_price
                  FROM intents i JOIN intent_plans p ON p.intent_id=i.intent_id
-                 LEFT JOIN risk_receipts r
-                   ON r.intent_id=i.intent_id AND r.plan_hash=i.plan_hash
-                    AND r.account_key=?2 AND r.installation_id=?3
                  WHERE i.intent_id=?1",
-                params![intent_id, self.meta.account_key, self.meta.installation_id],
+                [intent_id],
                 |r| {
                     Ok((
                         r.get(0)?,
@@ -275,14 +265,26 @@ impl AccountStore {
                         r.get(6)?,
                         r.get(7)?,
                         r.get(8)?,
-                        r.get(9)?,
-                        r.get(10)?,
-                        r.get(11)?,
                     ))
                 },
             )
             .optional()?
             .ok_or(StoreError::Invalid("ENTRY_FILL_INTENT_NOT_FOUND"))?;
+        // Addressable PK-backed read of the only authorized SQL order and
+        // central receipt, separate from the immutable contract mechanics.
+        let (exchange_order_id, begin_post_at, reservation_key): (
+            Option<String>,
+            Option<i64>,
+            Option<String>,
+        ) = self.connection.query_row(
+                "SELECT i.exchange_order_id,i.begin_post_at,r.reservation_key
+                 FROM intents i LEFT JOIN risk_receipts r
+                  ON r.intent_id=i.intent_id AND r.plan_hash=i.plan_hash
+                   AND r.account_key=?2 AND r.installation_id=?3
+                 WHERE i.intent_id=?1",
+                params![intent_id, self.meta.account_key, self.meta.installation_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )?;
         if !increase || inverse || !instrument.ends_with("-USDT-SWAP") || currency != "USDT" {
             return Err(StoreError::Invalid("ENTRY_FILL_INSTRUMENT_UNSUPPORTED"));
         }
