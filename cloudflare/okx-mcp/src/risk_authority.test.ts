@@ -99,6 +99,9 @@ check((await handleNativeRiskCommand(s,session,{schema:"okx.risk-command/v1",com
  check((await handleNativeRiskCommand(t,{...session,connection_generation:98},
    install(nativeOpening),now)).reason==="STALE_NATIVE_INSPECTION_SESSION",
    "stale native channel cannot install campaign opening");
+ check((await handleNativeRiskCommand(t,session,install(nativeOpening),now+60_001))
+   .reason==="ENTRY_OPENING_SOURCE_STALE",
+   "stale historical cut-off cannot initialize a live campaign");
  check((await handleNativeRiskCommand(t,session,
    install({...nativeOpening,source_digest:"f".repeat(64)}),now))
    .reason==="ENTRY_OPENING_SOURCE_NOT_PROVEN",
