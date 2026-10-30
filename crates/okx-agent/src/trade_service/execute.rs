@@ -734,7 +734,7 @@ impl TradeService {
         let mut occupied = Vec::new();
         let mut evidence = Vec::new();
         let mut post_reads = Vec::new();
-        let floor = now();
+        let started_at = now();
         use futures_util::{StreamExt, TryStreamExt, stream};
         let cohort = state
             .state
@@ -856,7 +856,6 @@ impl TradeService {
                 {
                     return Err("COHORT_SOURCE_GENERATION_CHANGED".into());
                 }
-                let data = digest(&(snapshot, algos))?;
                 let financial = r
                     .execution
                     .store
@@ -865,9 +864,27 @@ impl TradeService {
                     })
                     .await
                     .map_err(err)?;
-                if !financial.0.nav_complete {
-                    return Err("COHORT_FINANCIAL_SOURCE_INCOMPLETE".into());
-                }
+                // A freshly constructed census is not proof that its underlying
+                // account or ledger sources were fresh. Keep the actual oldest
+                // source timestamp, not just the time at which we read it.
+                let source_floor = census_source_floor(
+                    &snapshot.source_received_at,
+                    &snapshot.account_uid_fingerprint,
+                    &c.uid_fingerprint,
+                    financial.0.nav_complete,
+                    financial.0.source_as_of,
+                    now(),
+                )?;
+                // Bind SQL source quality and financial state to the same
+                // content proof as the account and conditional-order reads.
+                let data = digest(&(
+                    &snapshot,
+                    &algos,
+                    financial.0.source_as_of,
+                    &financial.0.daily_loss_usd,
+                    &financial.0.drawdown_ratio,
+                    &financial.1,
+                ))?;
                 let occupancy = RiskAccountOccupancy {
                     account_key: c.account_key.clone(),
                     occupied_usdt: "0".into(),
@@ -893,12 +910,14 @@ impl TradeService {
                         })
                     })
                     .transpose()?;
-                Ok::<_, String>((c.account_key, occupancy, data, read))
+                Ok::<_, String>((c.account_key, occupancy, data, read, source_floor))
             })
             .buffer_unordered(8)
             .try_collect::<Vec<_>>()
             .await?;
-        for (key, row, proof, read) in pages {
+        let mut source_floor = started_at;
+        for (key, row, proof, read, account_floor) in pages {
+            source_floor = source_floor.min(account_floor);
             keys.push(key);
             occupied.push(row);
             evidence.push(proof);
@@ -911,7 +930,13 @@ impl TradeService {
         keys.sort();
         occupied.sort_by(|a, b| a.account_key.cmp(&b.account_key));
         let generated = now();
-        if !crate::config::evidence_fresh(floor, generated, crate::config::ACCOUNT_MAX_AGE_MS) {
+        if source_floor > generated
+            || !crate::config::evidence_fresh(
+                source_floor,
+                generated,
+                crate::config::ACCOUNT_MAX_AGE_MS,
+            )
+        {
             return Err("COHORT_EVIDENCE_STALE".into());
         }
         let content = digest(&evidence)?;
@@ -920,9 +945,9 @@ impl TradeService {
                 account_keys: keys,
                 occupied,
                 generated_at_ms: generated as u64,
-                source_digest: digest(&(content.clone(), floor, generated))?,
+                source_digest: digest(&(content.clone(), source_floor, generated))?,
                 content_digest: content,
-                source_read_floor_ms: floor as u64,
+                source_read_floor_ms: source_floor as u64,
                 complete: true,
                 native_account_evidence_complete: true,
                 native_order_evidence_complete: true,
@@ -932,6 +957,49 @@ impl TradeService {
         ))
     }
 }
+/// Validate actual source time, not the timestamp at which a new census is
+/// assembled. Both the venue account read and SQLite financial projection
+/// must be current before a complete native risk witness may be issued.
+fn census_source_floor(
+    account_received_at: &str,
+    observed_uid: &str,
+    expected_uid: &str,
+    nav_complete: bool,
+    financial_as_of: i64,
+    observed_at: i64,
+) -> Result<i64, String> {
+    if observed_uid != expected_uid {
+        return Err("COHORT_IDENTITY_MISMATCH".into());
+    }
+    let account_as_of = chrono::DateTime::parse_from_rfc3339(account_received_at)
+        .map_err(|_| "COHORT_ACCOUNT_SOURCE_TIME_INVALID")?
+        .timestamp_millis();
+    if account_as_of <= 0
+        || account_as_of > observed_at
+        || !crate::config::evidence_fresh(
+            account_as_of,
+            observed_at,
+            crate::config::ACCOUNT_MAX_AGE_MS,
+        )
+    {
+        return Err("COHORT_ACCOUNT_SOURCE_STALE".into());
+    }
+    if !nav_complete {
+        return Err("COHORT_FINANCIAL_SOURCE_INCOMPLETE".into());
+    }
+    if financial_as_of <= 0
+        || financial_as_of > observed_at
+        || !crate::config::evidence_fresh(
+            financial_as_of,
+            observed_at,
+            crate::config::ACCOUNT_MAX_AGE_MS,
+        )
+    {
+        return Err("COHORT_FINANCIAL_SOURCE_STALE".into());
+    }
+    Ok(account_as_of.min(financial_as_of))
+}
+
 /// Compare exact 9-decimal USD/USDT conversion values on native fresh
 /// post-HELD snapshot; content equality is allowed only after a new read.
 fn verify_post_held_fx(reserved: &str, observed: &str) -> Result<(), String> {
@@ -1120,6 +1188,52 @@ mod tests {
         );
         assert!(verify_post_held_fx("1", "invalid").is_err());
     }
+    #[test]
+    fn e2_census_uses_oldest_verified_account_and_financial_source() {
+        let received = "2026-10-30T00:00:00Z";
+        let t = chrono::DateTime::parse_from_rfc3339(received)
+            .unwrap()
+            .timestamp_millis();
+        assert_eq!(
+            census_source_floor(received, "uid", "uid", true, t - 120, t + 300),
+            Ok(t - 120)
+        );
+        assert_eq!(
+            census_source_floor(received, "uid", "other", true, t, t),
+            Err("COHORT_IDENTITY_MISMATCH".into())
+        );
+        assert_eq!(
+            census_source_floor("invalid", "uid", "uid", true, t, t),
+            Err("COHORT_ACCOUNT_SOURCE_TIME_INVALID".into())
+        );
+        assert_eq!(
+            census_source_floor(received, "uid", "uid", true, t, t - 1),
+            Err("COHORT_ACCOUNT_SOURCE_STALE".into())
+        );
+        assert_eq!(
+            census_source_floor(
+                received, "uid", "uid", true, t,
+                t + crate::config::ACCOUNT_MAX_AGE_MS as i64 + 1,
+            ),
+            Err("COHORT_ACCOUNT_SOURCE_STALE".into())
+        );
+        assert_eq!(
+            census_source_floor(received, "uid", "uid", false, t, t),
+            Err("COHORT_FINANCIAL_SOURCE_INCOMPLETE".into())
+        );
+        assert_eq!(
+            census_source_floor(
+                received, "uid", "uid", true,
+                t - crate::config::ACCOUNT_MAX_AGE_MS as i64 - 1, t,
+            ),
+            Err("COHORT_FINANCIAL_SOURCE_STALE".into())
+        );
+        assert_eq!(
+            census_source_floor(received, "uid", "uid", true, t + 1, t),
+            Err("COHORT_FINANCIAL_SOURCE_STALE".into())
+        );
+    }
+
     struct FixtureGateway {
         posts: AtomicUsize,
         lose: bool,
