@@ -82,10 +82,17 @@ NAV/STOP → protected position/terminal settlement → release`.
   order history. To install campaign opening, source coverage must run
   from independently proven actual campaign inception to a common cut-off
   over every managed real account. The on-demand typed
-  `AccountHistoryApi::complete_campaign_orders` now exhausts BOTH order
+  `AccountHistoryApi::complete_campaign_orders` exhausts BOTH order
   sources with a bounded page limit, verifies order scope/causality and
   returns a canonical content digest, only when even canceled-without-fill
-  orders remain provable (under two hours with a margin). Equal-time
+  orders remain provable (under two hours with a margin). The separate
+  `complete_campaign_account_history` reconstructs FINANCIAL spending
+  from all instrument fills and account bills over their three-month
+  archive horizon; it cross-checks the required executed-order evidence
+  without demanding extinct canceled-unfilled order rows. Its result
+  **cannot** prove absence of a lost POST and is never a RiskBook
+  grant without native USD classification and an authenticated opening.
+  Equal-time
   contradictory economic facts from different archives are rejected.
   Crash recovery now uses the same complete order history, with separate
   exhaustive fills history for all instrument types and the unfiltered
