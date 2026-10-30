@@ -62,6 +62,33 @@ fn terminal_order_update_time(
         .transpose()
 }
 
+/// A terminal local state alone is not source proof that an exchange order is
+/// terminal. No real release without matching exchange identity, covered final
+/// update and a bounded executed quantity. In particular, missing readback is
+/// UNKNOWN, not a zero-fill terminal outcome.
+fn verified_terminal_order_update_time(
+    intent: &StoredIntent,
+    order: Option<&okx_api::TradeOrderDetails>,
+) -> Result<i64, String> {
+    let o = order.ok_or("TERMINAL_ORDER_READBACK_MISSING")?;
+    if o.instrument_id != intent.instrument_id
+        || o.client_order_id != intent.client_order_id
+        || intent.exchange_order_id.as_deref() != Some(o.order_id.as_str())
+        || o.side != intent.plan.side
+    {
+        return Err("TERMINAL_ORDER_IDENTITY_MISMATCH".into());
+    }
+    if !matches!(o.state.as_str(), "filled" | "canceled" | "mmp_canceled") {
+        return Err("TERMINAL_ORDER_STATE_UNVERIFIED".into());
+    }
+    let filled = dec(&o.accumulated_fill_size)
+        .map_err(|_| "TERMINAL_ORDER_FILLED_SIZE_INVALID")?;
+    if filled < Decimal::ZERO || filled > intent.plan.quantity {
+        return Err("TERMINAL_ORDER_FILLED_SIZE_INVALID".into());
+    }
+    terminal_order_update_time(Some(o))?.ok_or_else(|| "TERMINAL_ORDER_READBACK_MISSING".into())
+}
+
 /// Historical known pricing evidence is not an all-in entry debit proof.
 fn entry_cost_status(stored: Option<okx_execution::EntryQuoteEvidence>) -> Result<Value, String> {
     let Some(quote) = stored else {
@@ -629,9 +656,9 @@ impl TradeService {
             .await
             .map_err(err)?
             .ok_or("FILL_COVERAGE_MISSING")?;
-        let venue_updated_at = terminal_order_update_time(order)?;
+        let venue_updated_at = verified_terminal_order_update_time(i, order)?;
         if !complete.coverage_gaps.is_empty()
-            || venue_updated_at.is_some_and(|at| complete.watermark < at)
+            || complete.watermark < venue_updated_at
         {
             return Err("FILL_COVERAGE_INCOMPLETE".into());
         }
@@ -671,7 +698,7 @@ impl TradeService {
             .await
             .map_err(err)?;
         if !through.coverage_gaps.is_empty()
-            || venue_updated_at.is_some_and(|at| through.watermark < at)
+            || through.watermark < venue_updated_at
         {
             return Err("FINANCIAL_COVERAGE_INCOMPLETE".into());
         }
@@ -1231,6 +1258,29 @@ mod entry_cost_status_tests {
             update_time_ms: "10".into(),
         };
         assert!(verify_venue_fill_coverage(&intent, &source, &order).is_ok());
+        assert_eq!(verified_terminal_order_update_time(&intent, Some(&order)), Ok(10));
+        assert_eq!(
+            verified_terminal_order_update_time(&intent, None),
+            Err("TERMINAL_ORDER_READBACK_MISSING".into())
+        );
+        let mut changed = order.clone();
+        changed.state = "partially_filled".into();
+        assert_eq!(
+            verified_terminal_order_update_time(&intent, Some(&changed)),
+            Err("TERMINAL_ORDER_STATE_UNVERIFIED".into())
+        );
+        changed = order.clone();
+        changed.order_id = "other".into();
+        assert_eq!(
+            verified_terminal_order_update_time(&intent, Some(&changed)),
+            Err("TERMINAL_ORDER_IDENTITY_MISMATCH".into())
+        );
+        changed = order.clone();
+        changed.accumulated_fill_size = "1.1".into();
+        assert_eq!(
+            verified_terminal_order_update_time(&intent, Some(&changed)),
+            Err("TERMINAL_ORDER_FILLED_SIZE_INVALID".into())
+        );
         let mut changed = order.clone();
         changed.accumulated_fill_size = "0.9".into();
         assert_eq!(
