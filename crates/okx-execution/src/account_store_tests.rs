@@ -211,6 +211,196 @@ fn k5_recovery_pages_over_100_intents_are_disjoint_and_bounded() {
     assert!(s.reconcilable_intents_page(0, 0).unwrap().is_empty());
 }
 #[test]
+fn e1_fee_bill_cross_source_receipt_requires_both_immutable_sources() {
+    let mut s = store();
+    intent(&mut s);
+    acknowledged_entry_intent(&mut s);
+    let fill_id = "fee-fill";
+    let bill_id = "fee-bill";
+    let cost = Decimal::new(-1, 2);
+    let fill_ref = format!("fill:{fill_id}");
+    let bill_ref = format!("bill:{bill_id}");
+    let mut fee = FinanceEntry {
+        entry_id: format!("{bill_ref}:FEE"),
+        economic_event_key: bill_ref.clone(),
+        component: "FEE".into(),
+        allocation_leg: "account".into(),
+        amount: cost,
+        currency: "USDT".into(),
+        instance_id: None,
+        source_ref: fill_ref,
+        time: 6,
+        reverses_entry_id: None,
+    };
+    s.ingest_page(&IngestPage {
+        fills: vec![Fill {
+            fill_id: fill_id.into(),
+            instrument_id: "BTC-USDT-SWAP".into(),
+            trade_id: "fee-trade".into(),
+            exchange_order_id: "venue-order".into(),
+            intent_id: Some("intent".into()),
+            time: 6,
+            qty: Decimal::ONE,
+            price: Decimal::from(100),
+            fee: cost,
+            currency: "USDT".into(),
+            side: "buy".into(),
+        }],
+        finance: vec![fee.clone()],
+        cursor: Some(SourceCursor {
+            source: "fills".into(),
+            stream_partition: "SWAP".into(),
+            cursor: String::new(),
+            watermark: 7,
+            generation: 1,
+            coverage_gaps: String::new(),
+        }),
+        ..Default::default()
+    }).unwrap();
+    assert!(matches!(
+        s.intent_fee_bill_evidence("intent", 7),
+        Err(StoreError::Invalid("ENTRY_BILLS_COVERAGE_UNPROVEN"))
+    ));
+    let bill = Bill {
+        bill_id: bill_id.into(),
+        kind: "1:trade".into(),
+        time: 7,
+        amount: cost,
+        currency: "USDT".into(),
+        economic_event_key: bill_ref.clone(),
+    };
+    s.ingest_page(&IngestPage {
+        bills: vec![bill],
+        cursor: Some(SourceCursor {
+            source: "bills".into(),
+            stream_partition: "account".into(),
+            cursor: String::new(),
+            watermark: 7,
+            generation: 1,
+            coverage_gaps: String::new(),
+        }),
+        ..Default::default()
+    }).unwrap();
+    assert!(matches!(
+        s.intent_fee_bill_evidence("intent", 7),
+        Err(StoreError::Invalid("ENTRY_FEE_BILL_SOURCE_MISMATCH"))
+    ));
+    fee.source_ref = bill_ref;
+    fee.time = 7;
+    s.ingest_page(&IngestPage {
+        finance: vec![fee.clone()],
+        ..Default::default()
+    }).unwrap();
+    let evidence = s.intent_fee_bill_evidence("intent", 7).unwrap();
+    assert_eq!(evidence.fill.filled_quantity, Decimal::ONE);
+    assert_eq!(evidence.linked_bill_count, 1);
+    assert_eq!(evidence.bills_covered_through, 7);
+    assert_eq!(evidence.conservative_verified_fee_usdt, Decimal::new(1, 2));
+    assert_eq!(evidence.source_digest.len(), 64);
+    assert_eq!(s.intent_fee_bill_evidence("intent", 7).unwrap(), evidence);
+    assert!(matches!(
+        s.intent_fee_bill_evidence("intent", 8),
+        Err(StoreError::Invalid("ENTRY_FILL_COVERAGE_UNPROVEN"))
+    ));
+    let db = s.path.clone();
+    let meta = s.meta.clone();
+    drop(s);
+    let reopened = AccountStore::open_existing(db, &meta.account_key, &meta.installation_id)
+        .unwrap();
+    assert_eq!(reopened.intent_fee_bill_evidence("intent", 7).unwrap(), evidence);
+    reopened.connection.execute(
+        "DELETE FROM finance_source_links WHERE source_ref='bill:fee-bill'", []
+    ).unwrap();
+    assert!(matches!(
+        reopened.intent_fee_bill_evidence("intent", 7),
+        Err(StoreError::Invalid("ENTRY_FEE_BILL_SOURCE_MISMATCH"))
+    ));
+}
+
+#[test]
+fn e1_fee_bill_amount_and_currency_mismatch_never_become_verified() {
+    for (booked_fee, booked_currency) in [
+        (Decimal::new(-2, 2), "USDT"),
+        (Decimal::new(-1, 2), "BTC"),
+    ] {
+        let mut s = store();
+        intent(&mut s);
+        acknowledged_entry_intent(&mut s);
+        s.ingest_page(&IngestPage {
+            fills: vec![Fill {
+                fill_id: "fill-1".into(),
+                instrument_id: "BTC-USDT-SWAP".into(),
+                trade_id: "trade-1".into(),
+                exchange_order_id: "venue-order".into(),
+                intent_id: Some("intent".into()),
+                time: 6,
+                qty: Decimal::ONE,
+                price: Decimal::from(100),
+                fee: Decimal::new(-1, 2),
+                currency: "USDT".into(),
+                side: "buy".into(),
+            }],
+            finance: vec![FinanceEntry {
+                entry_id: "bill:fee1:FEE".into(),
+                economic_event_key: "bill:fee1".into(),
+                component: "FEE".into(),
+                allocation_leg: "account".into(),
+                amount: booked_fee,
+                currency: booked_currency.into(),
+                instance_id: None,
+                source_ref: "fill:fill-1".into(),
+                time: 6,
+                reverses_entry_id: None,
+            }],
+            cursor: Some(SourceCursor {
+                source: "fills".into(),
+                stream_partition: "SWAP".into(),
+                cursor: String::new(),
+                watermark: 7,
+                generation: 1,
+                coverage_gaps: String::new(),
+            }),
+            ..Default::default()
+        }).unwrap();
+        s.ingest_page(&IngestPage {
+            bills: vec![Bill {
+                bill_id: "fee1".into(),
+                kind: "1:trade".into(),
+                time: 7,
+                amount: booked_fee,
+                currency: booked_currency.into(),
+                economic_event_key: "bill:fee1".into(),
+            }],
+            finance: vec![FinanceEntry {
+                entry_id: "bill:fee1:FEE".into(),
+                economic_event_key: "bill:fee1".into(),
+                component: "FEE".into(),
+                allocation_leg: "account".into(),
+                amount: booked_fee,
+                currency: booked_currency.into(),
+                instance_id: None,
+                source_ref: "bill:fee1".into(),
+                time: 7,
+                reverses_entry_id: None,
+            }],
+            cursor: Some(SourceCursor {
+                source: "bills".into(),
+                stream_partition: "account".into(),
+                cursor: String::new(),
+                watermark: 7,
+                generation: 1,
+                coverage_gaps: String::new(),
+            }),
+            ..Default::default()
+        }).unwrap();
+        assert!(matches!(
+            s.intent_fee_bill_evidence("intent", 7),
+            Err(StoreError::Invalid("ENTRY_FEE_BILL_SOURCE_MISMATCH"))
+        ));
+    }
+}
+
+#[test]
 fn e1_intent_fill_cost_uses_only_covered_native_sources_and_survives_restart() {
     let mut s = store();
     intent(&mut s);
