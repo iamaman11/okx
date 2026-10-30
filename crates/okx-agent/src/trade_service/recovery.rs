@@ -1,5 +1,33 @@
 use super::*;
 
+// Conservative bound for OKX's short-lived canceled/unfilled order
+// history. An expired archive cannot establish absence of lost POSTs.
+fn verify_recovery_order_history_window(backup: i64, observed: i64) -> Result<(), String> {
+    if backup <= 0 || observed < backup || observed - backup >= 119 * 60_000 {
+        return Err("STORAGE_RECOVERY_ORDER_HISTORY_NOT_PROVEN".into());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod recovery_history_tests {
+    use super::verify_recovery_order_history_window;
+
+    #[test]
+    fn crash_history_window_never_certifies_expired_or_future_backup() {
+        let observed = 1_800_000_000_000;
+        assert!(verify_recovery_order_history_window(observed - 60_000, observed).is_ok());
+        assert!(verify_recovery_order_history_window(
+            observed - 119 * 60_000, observed
+        ).is_err());
+        assert!(verify_recovery_order_history_window(
+            observed - 89 * 86_400_000, observed
+        ).is_err());
+        assert!(verify_recovery_order_history_window(observed + 1, observed).is_err());
+        assert!(verify_recovery_order_history_window(0, observed).is_err());
+    }
+}
+
 fn recovery_matches(
     local: &okx_execution::RecoverySnapshot,
     central: &RiskAccountBudget,
@@ -145,9 +173,7 @@ impl TradeService {
         // paginated since the backup. Older recovery needs an independent
         // retained source and stays blocked instead of treating missing
         // orders as evidence of absence.
-        if started < backup || started - backup >= 119 * 60_000 {
-            return Err("STORAGE_RECOVERY_ORDER_HISTORY_NOT_PROVEN".into());
-        }
+        verify_recovery_order_history_window(backup, started)?;
         if !r.source_identity_ready().await {
             return Err("STORAGE_RECOVERY_SOURCE_UNVERIFIED".into());
         }
