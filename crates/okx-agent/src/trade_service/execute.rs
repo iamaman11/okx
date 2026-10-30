@@ -576,7 +576,7 @@ impl TradeService {
                 fee_generation: fees.fee_generation.clone(),
                 reference_generation: rules.reference_generation.clone(),
                 fee_received_at,
-                conversion_digest: fx.source_digest,
+                conversion_digest: fx.source_digest.clone(),
                 conversion_received_at: fx.observed_at_ms as i64,
                 observed_at: now(),
             };
