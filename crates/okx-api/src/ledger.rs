@@ -860,6 +860,18 @@ fn complete_campaign_account_witness(
             ));
         }
     }
+    // A financial bill referencing an order outside the authoritative
+    // window is an unproven obligation, not an extra zero-cost row.
+    for bill in &money.bills {
+        if !bill.order_id.is_empty()
+            && bill.order_id != "0"
+            && !seen.contains_key(bill.order_id.as_str())
+        {
+            return Err(OkxError::Response(
+                "campaign bill refers to an unproven venue order".into(),
+            ));
+        }
+    }
     // Bills without an order identifier (e.g. funding or account transfers)
     // remain raw evidence; their economic meaning/currency must be classified
     // by the SQL finance owner, not silently interpreted as zero entry cost.
