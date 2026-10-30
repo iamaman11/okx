@@ -343,6 +343,119 @@ impl AccountStore {
         Ok(proof)
     }
 
+    /// Source-backed zero opening from the EXISTING incremental account writer.
+    /// A complete source cursor is required for every venue money stream;
+    /// missing pages, an older campaign than the initial capture, or any
+    /// potentially budget-relevant event remains pending, never zero.
+    /// This permits opening even after unrelated pre-campaign activity.
+    pub fn seal_captured_empty_campaign(
+        &self,
+        campaign_id: &str,
+        from_ms: i64,
+        through_ms: i64,
+    ) -> StoreResult<String> {
+        use sha2::{Digest, Sha256};
+        if !campaign_id.starts_with("sha256:")
+            || campaign_id.len() != 71
+            || !campaign_id[7..].bytes().all(|b| b.is_ascii_hexdigit())
+            || from_ms <= 0
+            || through_ms <= from_ms
+        {
+            return Err(StoreError::Invalid("ENTRY_OPENING_WINDOW_INVALID"));
+        }
+        if from_ms < self.meta.initialized_at {
+            return Err(StoreError::Invalid(
+                "BASELINE_RECONCILIATION_REQUIRED",
+            ));
+        }
+        let mut frontiers = Vec::new();
+        for (source, partition) in [
+            ("fills", "SPOT"),
+            ("fills", "MARGIN"),
+            ("fills", "SWAP"),
+            ("fills", "FUTURES"),
+            ("fills", "OPTION"),
+            ("bills", "account"),
+        ] {
+            let cursor = self
+                .cursor(source, partition)?
+                .ok_or(StoreError::Invalid("ENTRY_BASELINE_CAPTURE_PENDING"))?;
+            if cursor.generation <= 0
+                || !cursor.cursor.is_empty()
+                || !cursor.coverage_gaps.is_empty()
+                || cursor.watermark < through_ms
+            {
+                return Err(StoreError::Invalid("ENTRY_BASELINE_CAPTURE_PENDING"));
+            }
+            frontiers.push((source, partition, cursor.generation, cursor.watermark));
+        }
+        if !finance_proof_sealed(&self.connection)? {
+            return Err(StoreError::Invalid(
+                "ENTRY_OPENING_FINANCE_PROVENANCE_UNSEALED",
+            ));
+        }
+        let (fills, bills, unresolved, lots): (i64, i64, i64, i64) =
+            self.connection.query_row(
+                "SELECT (SELECT COUNT(*) FROM fills WHERE time>?1 AND time<=?2),
+                        (SELECT COUNT(*) FROM bills WHERE time>?1 AND time<=?2),
+                        (SELECT COUNT(*) FROM intents
+                         WHERE state NOT IN ('REJECTED','CANCELLED','FILLED')),
+                        (SELECT COUNT(*) FROM position_lots WHERE remaining_qty!='0')",
+                params![from_ms, through_ms],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )?;
+        if fills != 0 || bills != 0 {
+            // Nonempty sources require the historical linear-contract,
+            // opening/closing classification and event-time FX policy.
+            return Err(StoreError::Invalid(
+                "BASELINE_RECONCILIATION_REQUIRED",
+            ));
+        }
+        if unresolved != 0 || lots != 0 {
+            return Err(StoreError::Invalid("ENTRY_OPENING_UNRESOLVED_NATIVE_EXPOSURE"));
+        }
+        let bytes = serde_json::to_vec(&(
+            "okx.campaign-captured-zero/v1",
+            self.meta.account_key.as_str(),
+            self.meta.installation_id.as_str(),
+            campaign_id,
+            from_ms,
+            through_ms,
+            &frontiers,
+            fills,
+            bills,
+        ))
+        .map_err(|_| StoreError::Invalid("ENTRY_OPENING_SERIALIZATION_FAILED"))?;
+        let proof = format!("{:x}", Sha256::digest(bytes));
+        self.connection.execute_batch(
+            "CREATE TRIGGER IF NOT EXISTS immutable_campaign_opening_update
+             BEFORE UPDATE ON operation_receipts
+             WHEN OLD.kind='CAMPAIGN_ENTRY_OPENING_SEALED'
+             BEGIN SELECT RAISE(ABORT,'IMMUTABLE_CAMPAIGN_ENTRY_OPENING'); END;
+             CREATE TRIGGER IF NOT EXISTS immutable_campaign_opening_delete
+             BEFORE DELETE ON operation_receipts
+             WHEN OLD.kind='CAMPAIGN_ENTRY_OPENING_SEALED'
+             BEGIN SELECT RAISE(ABORT,'IMMUTABLE_CAMPAIGN_ENTRY_OPENING'); END;",
+        )?;
+        let key = format!("campaign_entry_opening:{campaign_id}:{proof}");
+        self.connection.execute(
+            "INSERT OR IGNORE INTO operation_receipts
+             (operation_id,kind,request_hash,result_ref,committed_at)
+             VALUES(?1,'CAMPAIGN_ENTRY_OPENING_SEALED',?2,?2,?3)",
+            params![key, proof, through_ms],
+        )?;
+        let saved: (String, String, String, i64) = self.connection.query_row(
+            "SELECT kind,request_hash,result_ref,committed_at
+             FROM operation_receipts WHERE operation_id=?1",
+            [key],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )?;
+        if saved != ("CAMPAIGN_ENTRY_OPENING_SEALED".into(), proof.clone(), proof.clone(), through_ms) {
+            return Err(StoreError::Invalid("ENTRY_OPENING_SQL_RECEIPT_CONFLICT"));
+        }
+        Ok(proof)
+    }
+
     /// Read bounded native fill evidence for one persisted risk-increasing
     /// intent. The source coverage cursor is mandatory: a partial page is
     /// NOT an absence-of-fills proof. This does not price margin, non-USDT
