@@ -54,10 +54,10 @@ fn r4_campaign_zero_only_after_all_six_incremental_money_cursors_complete() {
             [],
         )
         .unwrap();
-    assert_eq!(
+    assert!(matches!(
         s.verify_captured_empty_window(from, through),
         Err(StoreError::Invalid("ENTRY_BASELINE_CAPTURE_PENDING"))
-    );
+    ));
     s.connection
         .execute(
             "UPDATE source_cursors SET coverage_gaps=''
@@ -74,11 +74,10 @@ fn r4_campaign_zero_only_after_all_six_incremental_money_cursors_complete() {
             [],
         )
         .unwrap();
-    assert_eq!(
+    assert!(matches!(
         s.verify_captured_empty_window(from, through),
-        Err(StoreError::Invalid("BASELINE_RECONCILIATION_REQUIRED")),
-        "an external fill is never silently treated as zero historical spend"
-    );
+        Err(StoreError::Invalid("BASELINE_RECONCILIATION_REQUIRED"))
+    ), "an external fill is never silently treated as zero historical spend");
 }
 
 #[test]
