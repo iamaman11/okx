@@ -226,14 +226,7 @@ impl TradeService {
             // The receipt says UNPROVEN; it cannot authorize the exchange.
             let rules = self.public_ws.instrument_rules(instrument).await
                 .ok_or("ENTRY_INSTRUMENT_RULES_UNAVAILABLE")?;
-            if rules.instrument.state != "live"
-                || rules.instrument.settle_currency.as_deref() != Some("USDT")
-                || rules.instrument.contract_type.as_deref() != Some("linear")
-                || dec(rules.instrument.contract_value.as_deref()
-                    .ok_or("ENTRY_CONTRACT_VALUE_UNAVAILABLE")?)? != plan.contract_value
-            {
-                return Err("ENTRY_INSTRUMENT_SOURCE_CHANGED".into());
-            }
+            plan::verify_entry_rules_match(&rules, instrument, &plan)?;
             let fees = r.observer.fee_schedule(&rules).await.map_err(err)?;
             let rate = entry_budget::verified_entry_fee_rate(
                 &fees, instrument, &rules.reference_generation, now()
@@ -708,26 +701,11 @@ impl TradeService {
             .ok_or("POST_ENTRY_QUOTE_MISSING")?;
         let rules = self.public_ws.instrument_rules(&intent.instrument_id).await
             .ok_or("POST_ENTRY_RULES_UNAVAILABLE")?;
-        if rules.instrument.state != "live"
-            || rules.instrument.contract_type.as_deref() != Some("linear")
-            || rules.instrument.settle_currency.as_deref() != Some("USDT")
-        {
-            return Err("POST_ENTRY_INSTRUMENT_CHANGED".into());
-        }
-        plan::verify_linear_usdt_entry_units(
-            &intent.instrument_id,
-            rules.instrument.contract_value_currency.as_deref(),
-        ).map_err(str::to_owned)?;
+        plan::verify_entry_rules_match(
+            &rules, &intent.instrument_id, &intent.plan,
+        )?;
         let ct = dec(rules.instrument.contract_value.as_deref()
             .ok_or("POST_ENTRY_CONTRACT_VALUE_MISSING")?)?;
-        let lot = dec(&rules.instrument.lot_size)?;
-        let tick = dec(&rules.instrument.tick_size)?;
-        if ct <= Decimal::ZERO || lot <= Decimal::ZERO || tick <= Decimal::ZERO
-            || (quote.quantity / lot).fract() != Decimal::ZERO
-            || (quote.limit_price / tick).fract() != Decimal::ZERO
-        {
-            return Err("POST_ENTRY_SPEC_OR_PRECISION_CHANGED".into());
-        }
         let fee = r.observer.fee_schedule(&rules).await.map_err(err)?;
         let snap = r.observer.snapshot_after_held().await.map_err(err)?;
         if snap.account_uid_fingerprint != r.configuration.account_key.verified_uid {

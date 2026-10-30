@@ -90,6 +90,49 @@ pub(super) fn verify_linear_usdt_entry_units(
     Ok(())
 }
 
+/// Re-check exact venue contract and price quantization against the
+/// immutable intent plan. This check is used before risk reservation and
+/// again after HELD. It never grants entry-cost authority by itself.
+pub(super) fn verify_entry_rules_match(
+    rules: &okx_observation::InstrumentRulesSnapshot,
+    instrument: &str,
+    plan: &IntentPlan,
+) -> Result<(), String> {
+    if rules.instrument.instrument_id != instrument
+        || rules.instrument.state != "live"
+        || rules.instrument.settle_currency.as_deref() != Some("USDT")
+        || rules.instrument.contract_type.as_deref() != Some("linear")
+    {
+        return Err("ENTRY_INSTRUMENT_SOURCE_CHANGED".into());
+    }
+    verify_linear_usdt_entry_units(
+        instrument, rules.instrument.contract_value_currency.as_deref(),
+    ).map_err(str::to_owned)?;
+    let ct = dec(rules.instrument.contract_value.as_deref()
+        .ok_or("ENTRY_CONTRACT_VALUE_UNAVAILABLE")?)?;
+    let lot = dec(&rules.instrument.lot_size)?;
+    let minimum = dec(&rules.instrument.min_size)?;
+    let tick = dec(&rules.instrument.tick_size)?;
+    if ct <= Decimal::ZERO
+        || ct != plan.contract_value
+        || lot <= Decimal::ZERO
+        || minimum <= Decimal::ZERO
+        || tick <= Decimal::ZERO
+        || plan.quantity < minimum
+        || (plan.quantity / lot).fract() != Decimal::ZERO
+        || (plan.limit_price / tick).fract() != Decimal::ZERO
+        || plan.limit_price <= Decimal::ZERO
+    {
+        return Err("ENTRY_VENUE_RULES_OR_PRECISION_CHANGED".into());
+    }
+    if let Some(max) = &rules.instrument.max_limit_size {
+        if plan.quantity > dec(max)? {
+            return Err("ENTRY_VENUE_MAX_SIZE_CHANGED".into());
+        }
+    }
+    Ok(())
+}
+
 /// The manual strategy is an execution/attribution label for account capital,
 /// not a separately capitalized investment portfolio. All account-level finance,
 /// limits and STOP checks still apply to manual orders.
@@ -610,6 +653,56 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn e1_changed_venue_rules_never_reuse_original_entry_plan() {
+        let spec = okx_observation::InstrumentSpec {
+            instrument_id: "BTC-USDT-SWAP".into(),
+            instrument_type: okx_observation::InstrumentType::Swap,
+            instrument_family: None, underlying: None, state: "live".into(),
+            rule_type: None,
+            funding_requirement: okx_observation::FundingRequirement::Unknown,
+            base_currency: Some("BTC".into()), quote_currency: Some("USDT".into()),
+            settle_currency: Some("USDT".into()), tick_size: "0.1".into(),
+            lot_size: "0.01".into(), min_size: "0.01".into(),
+            max_limit_size: Some("10".into()), max_market_size: None,
+            max_limit_amount: None, max_market_amount: None,
+            contract_type: Some("linear".into()), contract_value: Some("0.01".into()),
+            contract_value_currency: Some("BTC".into()), fee_group_id: None,
+            max_leverage: None, list_time_ms: None, expiry_time_ms: None,
+            initial_price_limit_pct: None, floating_price_limit_pct: None,
+            maximum_price_limit_pct: None, upcoming_rule_changes: Vec::new(),
+        };
+        let mut rules = okx_observation::InstrumentRulesSnapshot {
+            reference_generation: "reference-a".into(),
+            source_received_at: "2026-10-30T00:00:00Z".into(),
+            instrument: spec,
+        };
+        let mut plan = IntentPlan {
+            contract_value: dec("0.01").unwrap(),
+            quantity: dec("0.02").unwrap(),
+            limit_price: dec("50000.1").unwrap(),
+            ..Default::default()
+        };
+        assert!(verify_entry_rules_match(&rules,"BTC-USDT-SWAP",&plan).is_ok());
+        rules.instrument.contract_value_currency = Some("USDT".into());
+        assert!(verify_entry_rules_match(&rules,"BTC-USDT-SWAP",&plan).is_err());
+        rules.instrument.contract_value_currency = Some("BTC".into());
+        rules.instrument.lot_size = "0.03".into();
+        assert!(verify_entry_rules_match(&rules,"BTC-USDT-SWAP",&plan).is_err());
+        rules.instrument.lot_size = "0.01".into();
+        rules.instrument.tick_size = "0.2".into();
+        assert!(verify_entry_rules_match(&rules,"BTC-USDT-SWAP",&plan).is_err());
+        rules.instrument.tick_size = "0.1".into();
+        rules.instrument.min_size = "0.03".into();
+        assert!(verify_entry_rules_match(&rules,"BTC-USDT-SWAP",&plan).is_err());
+        rules.instrument.min_size = "0.01".into();
+        rules.instrument.max_limit_size = Some("0.01".into());
+        assert!(verify_entry_rules_match(&rules,"BTC-USDT-SWAP",&plan).is_err());
+        rules.instrument.max_limit_size = Some("10".into());
+        plan.quantity = dec("0.01").unwrap();
+        assert!(verify_entry_rules_match(&rules,"BTC-USDT-SWAP",&plan).is_ok());
+    }
 
     #[test]
     fn e1_linear_swap_contract_value_unit_is_not_guessed_from_empty_base_fields() {
