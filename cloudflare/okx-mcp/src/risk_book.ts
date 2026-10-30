@@ -673,7 +673,7 @@ export async function transitionRisk(
       const governance:unknown=await tx.get(GOVERNANCE_STORAGE_KEY);
       const policy=validGovernance(governance)?projectRiskPolicy(governance):null;
       const occupied=policy?censusRisk(proof.census,policy,proof.now_ms):null;
-      if(!occupied||!await applyCensusLoss(tx,meta,proof.census))
+      if(!occupied)
         return {status:"DENIED" as const,reason:"TERMINAL_ACCOUNT_EXPOSURE_NOT_FLAT"};
     }
     if(to==="RELEASED" && entry.entry_upper_usd!==undefined){
@@ -696,6 +696,11 @@ export async function transitionRisk(
         ledger.entry_settlement_digest!==entry.entry_settlement_digest)
         return {status:"DENIED" as const,reason:"TERMINAL_ENTRY_SETTLEMENT_UNPROVEN"};
     }
+    // Commit source-proven loss changes only AFTER validating the entire
+    // terminal entry proof. A DENIED RELEASE must not mutate either campaign
+    // budget or advance the global RiskBook CAS sequence.
+    if(to==="RELEASED" && !await applyCensusLoss(tx,meta,native.terminal!.census))
+      return {status:"DENIED" as const,reason:"TERMINAL_ACCOUNT_EXPOSURE_NOT_FLAT"};
     if(to==="RELEASED"){
       const seenKey="risk_loss_v2:"+accountKey(entry),previous=units(await tx.get(seenKey)??"0")!,current=units(native.terminal!.ledger.cumulative_loss_usd)!;
       if(current<previous)return {status:"DENIED" as const,reason:"CUMULATIVE_LOSS_REGRESSION"};
