@@ -706,6 +706,11 @@ mod tests {
             "remaining_loss_usd": "10",
             "occupied_modelled_loss_usdt": "0",
             "source_as_of_ms": null,
+            "campaign_origin": {
+                "campaign_id": format!("sha256:{}", "c".repeat(64)),
+                "installation_id": "installation_test",
+                "started_at_ms": 500
+            },
             "entry_budget": {
                 "campaign_id": format!("sha256:{}", "c".repeat(64)),
                 "limit_usd": "10",
@@ -718,6 +723,12 @@ mod tests {
         }))
         .unwrap();
         assert!(ready.valid());
+        let mut originless = ready.clone();
+        originless.campaign_origin = None;
+        assert!(
+            !originless.valid(),
+            "opened campaign must retain its immutable inception authority"
+        );
         let mut wrong_sum = ready.clone();
         wrong_sum.entry_budget.as_mut().unwrap().remaining_usd = "5".into();
         assert!(
