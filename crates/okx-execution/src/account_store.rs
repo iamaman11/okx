@@ -235,6 +235,10 @@ pub struct EntryAdmissionEvidence {
     pub intent_id: String,
     pub plan_hash: String,
     pub quote_digest: String,
+    /// The independently source-bound maximum USD per USDT, not spot.
+    pub fx_upper_usd_per_usdt: Decimal,
+    /// All independently classified extra entry debit outside quote USDT.
+    pub other_entry_costs_upper_usd: Decimal,
     pub entry_upper_usd: Decimal,
     pub entry_proof_digest: String,
     pub observed_at: i64,
