@@ -157,9 +157,7 @@ impl EntryCostProof {
     /// Source-classified FX maximum and all additional non-FX upper charges
     /// are the only components persisted with the native entry admission.
     /// Unknown never becomes a zero charge.
-    pub(super) fn verified_fx_and_fixed_costs(
-        &self,
-    ) -> Result<Option<(Decimal, Decimal)>, String> {
+    pub(super) fn verified_fx_and_fixed_costs(&self) -> Result<Option<(Decimal, Decimal)>, String> {
         let Some(fx_upper) = self.fx_bound.rate(self.quote.observed_usd_per_usdt)? else {
             return Ok(None);
         };
@@ -186,7 +184,8 @@ impl EntryCostProof {
         if self.quote.total_usdt <= Decimal::ZERO {
             return Err("ENTRY_SOURCE_INVALID".into());
         }
-        let upper = self.quote
+        let upper = self
+            .quote
             .total_usdt
             .checked_mul(fx_upper)
             .ok_or("MONEY_OVERFLOW")?
