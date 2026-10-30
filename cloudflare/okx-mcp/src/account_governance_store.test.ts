@@ -66,12 +66,12 @@ ok(JSON.stringify(await lowerCampaignLimit(s,{expected_revision:revision,campaig
  ok(accepted.status===200&&accepted.body.campaign_entry_limit_usd==="8"&&
    afterBook?.entry_budget?.limit_usd==="8"&&
    afterBook?.entry_budget?.consumed_usd==="7"&&
-   afterBook.sequence===beforeBook!.sequence+1,
+   afterBook?.sequence===beforeBook!.sequence+1,
    "cap and booked amount updated atomically without reset");
  ok((await governanceRequest(budgetStore,"POST",{
    ...change,campaign_entry_limit_usd:"8",idempotency_key:"lower_entry_atomic_001"
  })).status===200,"replayed cap CAS cannot charge or change twice");
- ok((await readRiskBook(budgetStore))?.sequence===afterBook.sequence,
+ ok((await readRiskBook(budgetStore))?.sequence===afterBook?.sequence,
    "idempotent replay does not increment RiskBook sequence");
  const reboot=new Storage();reboot.map=structuredClone(budgetStore.map);
  ok((await readRiskBook(reboot))?.entry_budget?.consumed_usd==="7"&&
