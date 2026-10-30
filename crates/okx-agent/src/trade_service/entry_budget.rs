@@ -182,6 +182,7 @@ pub(super) fn verified_entry_fee_rate(
 /// USD/USDT ratio is not a certified maximum FX conversion for a live order.
 /// Consumers must retain EntryCostProof::Unknown until all additional
 /// cost sources and the campaign opening balance are independently proven.
+#[allow(clippy::too_many_arguments)] // One pure source gate; independent venue, fee, FX and identity facts.
 pub(super) fn verified_known_entry_quote(
     plan: &IntentPlan,
     instrument: &str,
