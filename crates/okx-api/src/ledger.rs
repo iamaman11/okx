@@ -33,6 +33,19 @@ pub struct CompleteCampaignOrderHistory {
     pub source_digest: String,
 }
 
+/// Complete authenticated venue *facts* for a campaign account, not a
+/// currency-converted entry expense. Only the native finance SQL owner,
+/// with verified account/cohort, campaign inception and FX sources, can
+/// turn this into an opening USD budget receipt.
+#[derive(Debug, Clone)]
+pub struct CompleteCampaignMoneyHistory {
+    pub from_ms: i64,
+    pub through_ms: i64,
+    pub fills: Vec<FillHistory>,
+    pub bills: Vec<AccountBill>,
+    pub source_digest: String,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct PositionHistory {
     #[serde(rename = "instType", default)]
@@ -227,7 +240,7 @@ impl AccountHistoryApi {
         end: i64,
         after: Option<&str>,
     ) -> Result<Vec<FillHistory>, OkxError> {
-        if !matches!(instrument_type, "SPOT" | "SWAP" | "FUTURES" | "OPTION") {
+        if !matches!(instrument_type, "SPOT" | "MARGIN" | "SWAP" | "FUTURES" | "OPTION") {
             return Err(OkxError::Config("invalid history instrument type".into()));
         }
         let mut params = history_window_params(begin, end, after)?;
@@ -347,6 +360,83 @@ impl AccountHistoryApi {
         Err(OkxError::Response(
             "campaign order source exceeds bounded full-pagination capacity".into(),
         ))
+    }
+
+    /// On-demand venue source for E1 campaign opening. Every instrument
+    /// partition and the full unfiltered bills stream are exhausted at the
+    /// SAME fixed cut-off. Partial pagination and missing fee bills fail
+    /// closed. This method DOES NOT assert a campaign inception, a USD FX
+    /// bound, or that source contents alone prove initial spending.
+    pub async fn complete_campaign_money_history(
+        &self,
+        started_at_ms: i64,
+        through_ms: i64,
+        observed_at_ms: i64,
+    ) -> Result<CompleteCampaignMoneyHistory, OkxError> {
+        verify_campaign_order_window(started_at_ms, through_ms, observed_at_ms)?;
+        let mut fills = Vec::new();
+        for instrument_type in ["SPOT", "MARGIN", "SWAP", "FUTURES", "OPTION"] {
+            let mut after: Option<String> = None;
+            let mut seen_cursors = BTreeSet::new();
+            let mut complete = false;
+            for _ in 0..CAMPAIGN_ORDER_MAX_PAGES_PER_SOURCE {
+                let rows = self
+                    .fills_history_page(instrument_type, started_at_ms, through_ms, after.as_deref())
+                    .await?;
+                let count = rows.len();
+                if count > HISTORY_PAGE_LIMIT {
+                    return Err(OkxError::Response("campaign fills page oversized".into()));
+                }
+                let next = if count == HISTORY_PAGE_LIMIT {
+                    let id = rows.last().map(|fill| fill.bill_id.as_str()).unwrap_or("");
+                    if !valid_campaign_cursor(id) || !seen_cursors.insert(id.to_owned()) {
+                        return Err(OkxError::Response("campaign fills cursor invalid or stalled".into()));
+                    }
+                    Some(id.to_owned())
+                } else {
+                    None
+                };
+                fills.extend(rows);
+                if count < HISTORY_PAGE_LIMIT {
+                    complete = true;
+                    break;
+                }
+                after = next;
+            }
+            if !complete {
+                return Err(OkxError::Response("campaign fills pagination incomplete".into()));
+            }
+        }
+        let mut bills = Vec::new();
+        let mut after: Option<String> = None;
+        let mut seen_cursors = BTreeSet::new();
+        let mut complete = false;
+        for _ in 0..CAMPAIGN_ORDER_MAX_PAGES_PER_SOURCE {
+            let rows = self.bills_history_page(started_at_ms, through_ms, after.as_deref()).await?;
+            let count = rows.len();
+            if count > HISTORY_PAGE_LIMIT {
+                return Err(OkxError::Response("campaign bills page oversized".into()));
+            }
+            let next = if count == HISTORY_PAGE_LIMIT {
+                let id = rows.last().map(|bill| bill.bill_id.as_str()).unwrap_or("");
+                if !valid_campaign_cursor(id) || !seen_cursors.insert(id.to_owned()) {
+                    return Err(OkxError::Response("campaign bills cursor invalid or stalled".into()));
+                }
+                Some(id.to_owned())
+            } else {
+                None
+            };
+            bills.extend(rows);
+            if count < HISTORY_PAGE_LIMIT {
+                complete = true;
+                break;
+            }
+            after = next;
+        }
+        if !complete {
+            return Err(OkxError::Response("campaign bills pagination incomplete".into()));
+        }
+        complete_campaign_money_witness(started_at_ms, through_ms, fills, bills)
     }
 
     pub async fn bills_history_page(
@@ -613,6 +703,92 @@ fn complete_campaign_orders_witness(
         instrument_type: instrument_type.into(),
         orders: merged.rows,
         source_digest: format!("{:x}", Sha256::digest(canonical)),
+    })
+}
+
+fn valid_campaign_cursor(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 64
+        && value.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// Pure owner-independent source consistency, not a finance authorization.
+/// Hash source facts only after validating every native fill and fee bill.
+fn complete_campaign_money_witness(
+    from_ms: i64,
+    through_ms: i64,
+    mut fills: Vec<FillHistory>,
+    mut bills: Vec<AccountBill>,
+) -> Result<CompleteCampaignMoneyHistory, OkxError> {
+    if from_ms <= 0 || through_ms < from_ms {
+        return Err(OkxError::Response("campaign money window invalid".into()));
+    }
+    let mut fill_ids = BTreeSet::new();
+    let mut bill_ids = BTreeSet::new();
+    for fill in &fills {
+        let ts = if fill.fill_time_ms.is_empty() {
+            &fill.timestamp_ms
+        } else {
+            &fill.fill_time_ms
+        };
+        let when = ts.parse::<i64>().ok().filter(|v| *v >= from_ms && *v <= through_ms);
+        if !matches!(
+            fill.instrument_type.as_str(),
+            "SPOT" | "MARGIN" | "SWAP" | "FUTURES" | "OPTION"
+        ) || when.is_none()
+            || fill.instrument_id.is_empty()
+            || !valid_campaign_cursor(&fill.bill_id)
+            || fill.trade_id.is_empty()
+            || fill.order_id.is_empty()
+            || fill.fee.is_empty()
+            || fill.fee_currency.is_empty()
+            || fill.fill_price.parse::<rust_decimal::Decimal>().ok().is_none_or(|v| v <= rust_decimal::Decimal::ZERO)
+            || fill.fill_size.parse::<rust_decimal::Decimal>().ok().is_none_or(|v| v <= rust_decimal::Decimal::ZERO)
+            || fill.fee.parse::<rust_decimal::Decimal>().is_err()
+            || !fill_ids.insert((fill.instrument_id.clone(),fill.trade_id.clone(),fill.order_id.clone()))
+        {
+            return Err(OkxError::Response("campaign fill identity, currency or scope unproven".into()));
+        }
+    }
+    for bill in &bills {
+        if !valid_campaign_cursor(&bill.bill_id)
+            || bill.timestamp_ms.parse::<i64>().ok()
+                .is_none_or(|v| v < from_ms || v > through_ms)
+            || bill.ccy.is_empty()
+            || !bill_ids.insert(bill.bill_id.clone())
+            || (!bill.fee.is_empty() && bill.fee.parse::<rust_decimal::Decimal>().is_err())
+        {
+            return Err(OkxError::Response("campaign bill identity, currency or scope unproven".into()));
+        }
+    }
+    for fill in &fills {
+        let bill = bills.iter().find(|bill| bill.bill_id == fill.bill_id)
+            .ok_or_else(|| OkxError::Response("campaign fill fee bill unavailable".into()))?;
+        if bill.ccy != fill.fee_currency
+            || !bill.order_id.is_empty() && bill.order_id != "0" && bill.order_id != fill.order_id
+            || !bill.trade_id.is_empty() && bill.trade_id != "0" && bill.trade_id != fill.trade_id
+            || bill.fee.parse::<rust_decimal::Decimal>().ok()
+                != fill.fee.parse::<rust_decimal::Decimal>().ok()
+        {
+            return Err(OkxError::Response("campaign fill and fee bill disagree".into()));
+        }
+    }
+    fills.sort_by(|a, b| (&a.instrument_id,&a.trade_id,&a.order_id)
+        .cmp(&(&b.instrument_id,&b.trade_id,&b.order_id)));
+    bills.sort_by(|a, b| a.bill_id.cmp(&b.bill_id));
+    let bytes = serde_json::to_vec(&(
+        "okx.campaign-money-window/v1",
+        from_ms,
+        through_ms,
+        &fills,
+        &bills,
+    )).map_err(|_| OkxError::Response("campaign money digest invalid".into()))?;
+    Ok(CompleteCampaignMoneyHistory {
+        from_ms,
+        through_ms,
+        fills,
+        bills,
+        source_digest: format!("{:x}",Sha256::digest(bytes)),
     })
 }
 
