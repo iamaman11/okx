@@ -178,15 +178,16 @@ impl TradeService {
         let generation = r.private_ws.status().await.connection_generation;
         let (state, _) = self.authority(r, None).await?;
         let mut history_proofs = Vec::new();
-        for kind in [
-            okx_api::InstrumentType::Swap,
-            okx_api::InstrumentType::Futures,
-        ] {
+        let mut witnessed_orders = std::collections::BTreeSet::new();
+        // Recovery has to account for every instrument class allowed by
+        // OKX, not only swaps/futures. Otherwise an external SPOT/MARGIN
+        // order can be missing while a recovery falsely claims completeness.
+        for kind in ["SPOT", "MARGIN", "SWAP", "FUTURES", "OPTION"] {
             let history = r
                 .execution
                 .history
                 .complete_campaign_orders(
-                    &kind.to_string(),
+                    kind,
                     backup,
                     started,
                     chrono::Utc::now().timestamp_millis(),
@@ -198,6 +199,7 @@ impl TradeService {
             }
             history_proofs.push(history.source_digest);
             for order in history.orders {
+                witnessed_orders.insert(order.order_id.clone());
                 let updated = order
                     .update_time_ms
                     .parse::<i64>()
@@ -239,6 +241,13 @@ impl TradeService {
             .map_err(|_| "STORAGE_RECOVERY_MONEY_HISTORY_NOT_PROVEN")?;
         if money.from_ms != backup || money.through_ms != started {
             return Err("STORAGE_RECOVERY_MONEY_HISTORY_SCOPE_MISMATCH".into());
+        }
+        if money
+            .fills
+            .iter()
+            .any(|fill| !witnessed_orders.contains(&fill.order_id))
+        {
+            return Err("STORAGE_RECOVERY_FILL_ORDER_LINK_UNPROVEN".into());
         }
         history_proofs.push(money.source_digest);
         let snapshot = crate::source_capture::capture_account_sources(
