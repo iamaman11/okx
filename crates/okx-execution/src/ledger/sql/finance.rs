@@ -311,6 +311,10 @@ impl AccountStore {
         if ct <= Decimal::ZERO {
             return Err(StoreError::Invalid("ENTRY_FILL_CONTRACT_INVALID"));
         }
+        // A cursor watermark or private generation can advance after an
+        // immutable venue event. Check source coverage above on EVERY read,
+        // but hash only the chosen covered-through cut-off and economic facts.
+        // Otherwise a lost Worker ACK changes digest on ordinary recapture.
         let mut hasher = Sha256::new();
         let header = serde_json::to_vec(&(
             "okx.intent-fill-cost-evidence/v1",
@@ -327,8 +331,6 @@ impl AccountStore {
             reservation_key.as_str(),
             posted_at,
             through,
-            cursor.watermark,
-            cursor.generation,
         ))
         .map_err(|_| StoreError::Invalid("ENTRY_FILL_DIGEST_INVALID"))?;
         hasher.update(&header);
@@ -473,6 +475,8 @@ impl AccountStore {
         {
             return Err(StoreError::Invalid("ENTRY_BILLS_COVERAGE_UNPROVEN"));
         }
+        // A later source generation/watermark cannot change the source
+        // digest of the same fixed through-window and immutable fee bills.
         let mut hasher = Sha256::new();
         hasher.update(
             serde_json::to_vec(&(
@@ -482,8 +486,6 @@ impl AccountStore {
                 intent_id,
                 fill.source_digest.as_str(),
                 through,
-                bills.watermark,
-                bills.generation,
             ))
             .map_err(|_| StoreError::Invalid("ENTRY_FEE_BILL_DIGEST_INVALID"))?,
         );
