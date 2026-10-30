@@ -488,7 +488,7 @@ fn summary_key(value: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use okx_execution::{AccountMeta, AccountStore, FinanceEntry, IngestPage, OpeningSnapshot};
+    use okx_execution::{AccountMeta, AccountStore, Bill, FinanceEntry, IngestPage, OpeningSnapshot};
     #[test]
     fn sql_interruption_phase_preserves_other_storage_errors() {
         let interrupted = okx_execution::StoreError::Sql(rusqlite::Error::SqliteFailure(
@@ -583,15 +583,36 @@ mod tests {
         .into_iter()
         .enumerate()
         {
+            // A strategy result must cite a durable venue source. The
+            // unattributed residual is not claimed by any strategy.
+            let source_ref = if let Some(instance_id) = instance {
+                let bill_id = format!("fixture-{instance_id}-{n}");
+                let source = format!("bill:{bill_id}");
+                page.bills.push(Bill {
+                    bill_id,
+                    kind: "REALIZED_PNL".into(),
+                    time: 12,
+                    amount: Decimal::from(amount),
+                    currency: "USD".into(),
+                    economic_event_key: source.clone(),
+                });
+                source
+            } else {
+                "verified-exchange-fixture".into()
+            };
             page.finance.push(FinanceEntry {
                 entry_id: format!("fact-{n}"),
-                economic_event_key: format!("economic-{n}"),
+                economic_event_key: if instance.is_some() {
+                    source_ref.clone()
+                } else {
+                    format!("economic-{n}")
+                },
                 component: "REALIZED_PNL".into(),
                 allocation_leg: instance.unwrap_or("unattributed").into(),
                 amount: Decimal::from(amount),
                 currency: "USD".into(),
                 instance_id: instance.map(str::to_owned),
-                source_ref: "verified-exchange-fixture".into(),
+                source_ref,
                 time: 12,
                 reverses_entry_id: None,
             });
