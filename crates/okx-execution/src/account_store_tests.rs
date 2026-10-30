@@ -47,6 +47,16 @@ fn r4_campaign_zero_only_after_all_six_incremental_money_cursors_complete() {
         )
         .unwrap();
     assert!(s.verify_captured_empty_window(from, through).is_ok());
+    // Known cash transfers, funding and interest are not new opening
+    // notional; an unknown bill kind remains a blocker.
+    for kind in ["1:11", "1:12", "8:173", "8:174", "7:4"] {
+        s.connection.execute(
+            "INSERT INTO bills(bill_id,kind,time,amount,currency,economic_event_key)
+             VALUES(?1,?1,?2,'0','USDT',?1)",
+            rusqlite::params![kind, 18_i64],
+        ).unwrap();
+    }
+    assert!(s.verify_captured_empty_window(from, through).is_ok());
     s.connection
         .execute(
             "UPDATE source_cursors SET coverage_gaps='BACKFILL_PENDING'
