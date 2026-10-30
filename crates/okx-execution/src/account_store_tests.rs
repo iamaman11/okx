@@ -62,29 +62,37 @@ fn e1_positive_usd_opening_is_immutable_and_never_replays_as_zero() {
     let campaign = format!("sha256:{}", "c".repeat(64));
     let venue = "d".repeat(64);
     let paid = Decimal::new(501, 2);
-    let source = s.seal_campaign_entry_opening(
-        &campaign, 1, 2, &venue, 1, 1, paid
-    ).unwrap();
+    let source = s
+        .seal_campaign_entry_opening(&campaign, 1, 2, &venue, 1, 1, paid)
+        .unwrap();
     assert_eq!(
         s.seal_campaign_entry_opening(&campaign, 1, 2, &venue, 1, 1, paid)
-            .unwrap(), source
+            .unwrap(),
+        source
     );
     assert_ne!(
-        s.seal_campaign_entry_opening(
-            &campaign, 1, 2, &venue, 0, 0, Decimal::ZERO
-        ).unwrap(), source,
+        s.seal_campaign_entry_opening(&campaign, 1, 2, &venue, 0, 0, Decimal::ZERO)
+            .unwrap(),
+        source,
         "a separate zero proof does not overwrite positive historical evidence"
     );
-    assert!(s.seal_campaign_entry_opening(
-        &campaign, 1, 2, &venue, 1, 1, Decimal::ZERO
-    ).is_err());
-    assert!(s.seal_campaign_entry_opening(
-        &campaign, 1, 2, &venue, 1, 0, paid
-    ).is_err());
-    let count: i64 = s.connection.query_row(
-        "SELECT COUNT(*) FROM operation_receipts
-         WHERE kind='CAMPAIGN_ENTRY_OPENING_SEALED'", [], |r|r.get(0)
-    ).unwrap();
+    assert!(
+        s.seal_campaign_entry_opening(&campaign, 1, 2, &venue, 1, 1, Decimal::ZERO)
+            .is_err()
+    );
+    assert!(
+        s.seal_campaign_entry_opening(&campaign, 1, 2, &venue, 1, 0, paid)
+            .is_err()
+    );
+    let count: i64 = s
+        .connection
+        .query_row(
+            "SELECT COUNT(*) FROM operation_receipts
+         WHERE kind='CAMPAIGN_ENTRY_OPENING_SEALED'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
     assert_eq!(count, 2);
 }
 

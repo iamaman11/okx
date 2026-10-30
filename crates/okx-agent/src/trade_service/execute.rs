@@ -21,11 +21,13 @@ impl TradeService {
     ) -> Result<Decimal, String> {
         use rust_decimal::RoundingStrategy;
         let orders = history
-            .orders.iter()
+            .orders
+            .iter()
             .map(|o| (o.order_id.as_str(), o))
             .collect::<std::collections::BTreeMap<_, _>>();
         let bills = history
-            .bills.iter()
+            .bills
+            .iter()
             .map(|b| (b.bill_id.as_str(), b))
             .collect::<std::collections::BTreeMap<_, _>>();
         if orders.len() != history.orders.len() || bills.len() != history.bills.len() {
@@ -34,9 +36,11 @@ impl TradeService {
         let mut observed_bills = std::collections::BTreeSet::new();
         let mut total = Decimal::ZERO;
         for fill in &history.fills {
-            let order = orders.get(fill.order_id.as_str())
+            let order = orders
+                .get(fill.order_id.as_str())
                 .ok_or("ENTRY_OPENING_ORDER_UNPROVEN")?;
-            let bill = bills.get(fill.bill_id.as_str())
+            let bill = bills
+                .get(fill.bill_id.as_str())
                 .ok_or("ENTRY_OPENING_BILL_UNPROVEN")?;
             if fill.instrument_type != "SPOT"
                 || !fill.instrument_id.ends_with("-USD")
@@ -126,12 +130,18 @@ impl TradeService {
                 let money = tokio::time::timeout(
                     until.saturating_duration_since(Instant::now()),
                     resource.execution.history.complete_campaign_money_history(
-                        from, through, now(),
+                        from,
+                        through,
+                        now(),
                     ),
-                ).await.map_err(|_| "ENTRY_OPENING_POST_CUTOFF_HISTORY_DEADLINE")?
-                    .map_err(|_| "ENTRY_OPENING_POST_CUTOFF_HISTORY_UNAVAILABLE")?;
-                if money.from_ms != from || money.through_ms != through
-                    || !money.fills.is_empty() || !money.bills.is_empty()
+                )
+                .await
+                .map_err(|_| "ENTRY_OPENING_POST_CUTOFF_HISTORY_DEADLINE")?
+                .map_err(|_| "ENTRY_OPENING_POST_CUTOFF_HISTORY_UNAVAILABLE")?;
+                if money.from_ms != from
+                    || money.through_ms != through
+                    || !money.fills.is_empty()
+                    || !money.bills.is_empty()
                 {
                     return Err("ENTRY_OPENING_POST_CUTOFF_MONEY_UNRECONCILED".into());
                 }
@@ -195,8 +205,13 @@ impl TradeService {
                 .store
                 .call(until, move |store| {
                     store.seal_campaign_entry_opening(
-                        &campaign, from, through, &source,
-                        venue_fill_count, venue_bill_count, spent,
+                        &campaign,
+                        from,
+                        through,
+                        &source,
+                        venue_fill_count,
+                        venue_bill_count,
+                        spent,
                     )
                 })
                 .await
@@ -1909,19 +1924,26 @@ mod tests {
     fn e1_positive_historical_usd_spot_is_classified_without_usdt_fx_guess() {
         let order: okx_api::HistoricalOrder = serde_json::from_value(serde_json::json!({
             "instType":"SPOT","instId":"BTC-USD","ordId":"123","side":"buy"
-        })).unwrap();
+        }))
+        .unwrap();
         let fill: okx_api::FillHistory = serde_json::from_value(serde_json::json!({
             "instType":"SPOT","instId":"BTC-USD","tradeId":"11","ordId":"123",
             "billId":"111","side":"buy","fillPx":"100","fillSz":"0.05",
             "fee":"-0.01","feeCcy":"USD"
-        })).unwrap();
+        }))
+        .unwrap();
         let bill: okx_api::AccountBill = serde_json::from_value(serde_json::json!({
             "billId":"111","instType":"SPOT","instId":"BTC-USD","ordId":"123",
             "tradeId":"11","ccy":"USD","fee":"-0.01","type":"2"
-        })).unwrap();
+        }))
+        .unwrap();
         let mut history = okx_api::CompleteCampaignAccountHistory {
-            from_ms: 1, through_ms: 100, orders: vec![order], fills: vec![fill],
-            bills: vec![bill], source_digest:"f".repeat(64),
+            from_ms: 1,
+            through_ms: 100,
+            orders: vec![order],
+            fills: vec![fill],
+            bills: vec![bill],
+            source_digest: "f".repeat(64),
         };
         assert_eq!(
             TradeService::historical_usd_spot_entry(&history).unwrap(),
@@ -1929,37 +1951,60 @@ mod tests {
         );
         history.fills[0].fee = "0.03".into();
         history.bills[0].fee = "0.03".into();
-        assert_eq!(TradeService::historical_usd_spot_entry(&history).unwrap(),
-            dec("5.03").unwrap(), "rebate never increases campaign budget");
-        history.fills[0].instrument_type="SWAP".into();
-        assert!(TradeService::historical_usd_spot_entry(&history).is_err(),
-            "SWAP cannot be priced without historical contract unit");
-        history.fills[0].instrument_type="SPOT".into();
-        history.fills[0].fee_currency="USDT".into();
-        assert!(TradeService::historical_usd_spot_entry(&history).is_err(),
-            "no observed USD/USDT rate may be promoted into a guaranteed source");
-        history.fills[0].fee_currency="USD".into();
-        history.bills.push(serde_json::from_value(serde_json::json!({
-            "billId":"112","instType":"SPOT","instId":"BTC-USD",
-            "ccy":"USD","fee":"-1","type":"7"
-        })).unwrap());
-        assert!(TradeService::historical_usd_spot_entry(&history).is_err(),
-            "standalone bills and borrow costs cannot be treated as zero");
+        assert_eq!(
+            TradeService::historical_usd_spot_entry(&history).unwrap(),
+            dec("5.03").unwrap(),
+            "rebate never increases campaign budget"
+        );
+        history.fills[0].instrument_type = "SWAP".into();
+        assert!(
+            TradeService::historical_usd_spot_entry(&history).is_err(),
+            "SWAP cannot be priced without historical contract unit"
+        );
+        history.fills[0].instrument_type = "SPOT".into();
+        history.fills[0].fee_currency = "USDT".into();
+        assert!(
+            TradeService::historical_usd_spot_entry(&history).is_err(),
+            "no observed USD/USDT rate may be promoted into a guaranteed source"
+        );
+        history.fills[0].fee_currency = "USD".into();
+        history.bills.push(
+            serde_json::from_value(serde_json::json!({
+                "billId":"112","instType":"SPOT","instId":"BTC-USD",
+                "ccy":"USD","fee":"-1","type":"7"
+            }))
+            .unwrap(),
+        );
+        assert!(
+            TradeService::historical_usd_spot_entry(&history).is_err(),
+            "standalone bills and borrow costs cannot be treated as zero"
+        );
     }
 
     #[test]
     fn e1_empty_history_is_zero_but_unclassified_bill_never_is() {
         let mut history = okx_api::CompleteCampaignAccountHistory {
-            from_ms: 1, through_ms: 100, orders:vec![], fills:vec![], bills:vec![],
-            source_digest:"f".repeat(64),
+            from_ms: 1,
+            through_ms: 100,
+            orders: vec![],
+            fills: vec![],
+            bills: vec![],
+            source_digest: "f".repeat(64),
         };
-        assert_eq!(TradeService::historical_usd_spot_entry(&history).unwrap(),
-                   Decimal::ZERO);
-        history.bills.push(serde_json::from_value(serde_json::json!({
-            "billId":"999","ccy":"USD","fee":"-1","type":"2"
-        })).unwrap());
-        assert_eq!(TradeService::historical_usd_spot_entry(&history),
-            Err("ENTRY_OPENING_STANDALONE_BILL_UNCLASSIFIED".into()));
+        assert_eq!(
+            TradeService::historical_usd_spot_entry(&history).unwrap(),
+            Decimal::ZERO
+        );
+        history.bills.push(
+            serde_json::from_value(serde_json::json!({
+                "billId":"999","ccy":"USD","fee":"-1","type":"2"
+            }))
+            .unwrap(),
+        );
+        assert_eq!(
+            TradeService::historical_usd_spot_entry(&history),
+            Err("ENTRY_OPENING_STANDALONE_BILL_UNCLASSIFIED".into())
+        );
     }
 
     #[test]

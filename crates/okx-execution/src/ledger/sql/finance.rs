@@ -210,6 +210,9 @@ impl AccountStore {
     /// risks) and stores an immutable account-scoped receipt. UNKNOWN money
     /// cannot be imported as zero.
     /// A SQL receipt is immutable and scoped to this installation/account.
+    // This immutable SQL witness carries the complete source scope as distinct
+    // attested dimensions; preserve the existing call sites and wire semantics.
+    #[expect(clippy::too_many_arguments, reason = "source-proven campaign opening dimensions")]
     pub fn seal_campaign_entry_opening(
         &self,
         campaign_id: &str,
