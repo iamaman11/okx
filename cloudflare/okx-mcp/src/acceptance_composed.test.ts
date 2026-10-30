@@ -347,8 +347,8 @@ const witnessed:CampaignEntryOpeningSource={
  accounts:activePolicy.accounts.filter(a=>a.environment==='real')
   .map(a=>({account_key:a.account_key,history_from_ms:openingFrom,
    history_through_ms:openingAsOf,consumed_entry_usd:"0",
-   order_history_complete:true,fill_history_complete:true,
-   bill_history_complete:true,finance_provenance_sealed:true,
+   order_history_complete:true as const,fill_history_complete:true as const,
+   bill_history_complete:true as const,finance_provenance_sealed:true as const,
    source_digest:"a".repeat(64)}))
   .sort((a,b)=>a.account_key.localeCompare(b.account_key))
 };
