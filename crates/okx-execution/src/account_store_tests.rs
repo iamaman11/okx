@@ -6,46 +6,46 @@ static COUNTER: AtomicU64 = AtomicU64::new(0);
 /// timestamps precede the durable BEGIN_POST; source hashes are canonical.
 fn e1_source_quote(s: &AccountStore, i: &StoredIntent) -> EntryQuoteEvidence {
     EntryQuoteEvidence {
-            schema: "okx.entry-known-quote/v1".into(),
-            account_key: s.meta.account_key.clone(),
-            installation_id: s.meta.installation_id.clone(),
-            intent_id: i.intent_id.clone(),
-            plan_hash: i.plan_hash.clone(),
-            policy_revision: i.policy_revision,
-            instrument_id: i.instrument_id.clone(),
-            quantity: Decimal::ONE,
-            limit_price: Decimal::from(100),
-            contract_value: Decimal::ONE,
-            fee_rate: Decimal::new(5, 4),
-            maker_rate: "-0.0002".into(),
-            taker_rate: "0.0005".into(),
-            fee_level: "Lv1".into(),
-            fee_exchange_at: 1,
-            usd_per_usdt: Decimal::ONE,
-            notional_usdt: Decimal::from(100),
-            fee_usdt: Decimal::new(5, 2),
-            total_usdt: Decimal::new(10005, 2),
-            total_usd: Decimal::new(10005, 2),
-            fee_generation: format!(
-                "sha256:{:x}",
-                sha2::Sha256::digest(
-                    serde_json::to_vec(&(
-                        "BTC-USDT-SWAP",
-                        "test_reference",
-                        "Lv1",
-                        "-0.0002",
-                        "0.0005",
-                        true
-                    ))
-                    .unwrap()
-                )
-            ),
-            reference_generation: "test_reference".into(),
-            fee_received_at: 1,
-            conversion_digest: "b".repeat(64),
-            conversion_received_at: 1,
-            observed_at: 2,
-        }
+        schema: "okx.entry-known-quote/v1".into(),
+        account_key: s.meta.account_key.clone(),
+        installation_id: s.meta.installation_id.clone(),
+        intent_id: i.intent_id.clone(),
+        plan_hash: i.plan_hash.clone(),
+        policy_revision: i.policy_revision,
+        instrument_id: i.instrument_id.clone(),
+        quantity: Decimal::ONE,
+        limit_price: Decimal::from(100),
+        contract_value: Decimal::ONE,
+        fee_rate: Decimal::new(5, 4),
+        maker_rate: "-0.0002".into(),
+        taker_rate: "0.0005".into(),
+        fee_level: "Lv1".into(),
+        fee_exchange_at: 1,
+        usd_per_usdt: Decimal::ONE,
+        notional_usdt: Decimal::from(100),
+        fee_usdt: Decimal::new(5, 2),
+        total_usdt: Decimal::new(10005, 2),
+        total_usd: Decimal::new(10005, 2),
+        fee_generation: format!(
+            "sha256:{:x}",
+            sha2::Sha256::digest(
+                serde_json::to_vec(&(
+                    "BTC-USDT-SWAP",
+                    "test_reference",
+                    "Lv1",
+                    "-0.0002",
+                    "0.0005",
+                    true
+                ))
+                .unwrap()
+            )
+        ),
+        reference_generation: "test_reference".into(),
+        fee_received_at: 1,
+        conversion_digest: "b".repeat(64),
+        conversion_received_at: 1,
+        observed_at: 2,
+    }
 }
 
 #[test]
@@ -73,19 +73,26 @@ fn e1_sql_known_quote_is_immutable_scoped_and_never_all_in_permission() {
     };
     s.bind_entry_admission(&admitted).unwrap();
     s.bind_entry_admission(&admitted).unwrap();
-    assert_eq!(s.entry_admission(&i.intent_id).unwrap(), Some(admitted.clone()));
-    assert!(
-        s.connection.execute(
-            "UPDATE operation_receipts SET result_ref='tampered'
-             WHERE operation_id='entry-admission:intent'",
-            [],
-        ).is_err()
+    assert_eq!(
+        s.entry_admission(&i.intent_id).unwrap(),
+        Some(admitted.clone())
     );
     assert!(
-        s.connection.execute(
-            "DELETE FROM operation_receipts WHERE operation_id='entry-admission:intent'",
-            [],
-        ).is_err()
+        s.connection
+            .execute(
+                "UPDATE operation_receipts SET result_ref='tampered'
+             WHERE operation_id='entry-admission:intent'",
+                [],
+            )
+            .is_err()
+    );
+    assert!(
+        s.connection
+            .execute(
+                "DELETE FROM operation_receipts WHERE operation_id='entry-admission:intent'",
+                [],
+            )
+            .is_err()
     );
     let mut corrupted = admitted.clone();
     corrupted.entry_proof_digest = "b".repeat(64);
@@ -296,9 +303,10 @@ fn e1_fee_bill_cross_source_receipt_requires_both_immutable_sources() {
         installation_id: s.meta.installation_id.clone(),
         intent_id: i.intent_id.clone(),
         plan_hash: i.plan_hash.clone(),
-        quote_digest: format!("{:x}", sha2::Sha256::digest(
-            serde_json::to_vec(&quote).unwrap()
-        )),
+        quote_digest: format!(
+            "{:x}",
+            sha2::Sha256::digest(serde_json::to_vec(&quote).unwrap())
+        ),
         fx_upper_usd_per_usdt: Decimal::ONE,
         other_entry_costs_upper_usd: Decimal::ONE,
         entry_upper_usd: quote.total_usd + Decimal::ONE,
@@ -308,7 +316,9 @@ fn e1_fee_bill_cross_source_receipt_requires_both_immutable_sources() {
     s.bind_entry_admission(&admitted).unwrap();
     assert!(matches!(
         s.bind_terminal_entry_settlement("intent", 7, Decimal::ONE, 7),
-        Err(StoreError::Invalid("ENTRY_SETTLEMENT_TERMINAL_SOURCE_UNVERIFIED"))
+        Err(StoreError::Invalid(
+            "ENTRY_SETTLEMENT_TERMINAL_SOURCE_UNVERIFIED"
+        ))
     ));
     acknowledged_entry_intent(&mut s);
     s.record_outcome(
@@ -317,7 +327,8 @@ fn e1_fee_bill_cross_source_receipt_requires_both_immutable_sources() {
         Some("venue-order"),
         "authenticated-terminal-venue-readback",
         7,
-    ).unwrap();
+    )
+    .unwrap();
     let fill_id = "fee-fill";
     let bill_id = "fee-bill";
     let cost = Decimal::new(-1, 2);
@@ -412,29 +423,40 @@ fn e1_fee_bill_cross_source_receipt_requires_both_immutable_sources() {
     assert_eq!(settled.reservation_key, "central-key");
     assert_eq!(settled.source_digest.len(), 64);
     assert_eq!(
-        s.bind_terminal_entry_settlement("intent", 7, Decimal::ONE, 7).unwrap(),
+        s.bind_terminal_entry_settlement("intent", 7, Decimal::ONE, 7)
+            .unwrap(),
         settled
     );
     assert!(matches!(
         s.bind_terminal_entry_settlement("intent", 7, Decimal::new(5, 1), 7),
         Err(StoreError::Invalid("ENTRY_SETTLEMENT_FILL_BILL_INCOMPLETE"))
     ));
-    assert!(s.connection.execute(
-        "UPDATE operation_receipts SET result_ref='tampered'
+    assert!(
+        s.connection
+            .execute(
+                "UPDATE operation_receipts SET result_ref='tampered'
          WHERE operation_id='entry-settlement:intent'",
-        []
-    ).is_err());
-    assert!(s.connection.execute(
-        "DELETE FROM operation_receipts WHERE operation_id='entry-settlement:intent'",
-        []
-    ).is_err());
+                []
+            )
+            .is_err()
+    );
+    assert!(
+        s.connection
+            .execute(
+                "DELETE FROM operation_receipts WHERE operation_id='entry-settlement:intent'",
+                []
+            )
+            .is_err()
+    );
     let path = s.path.clone();
     let meta = s.meta.clone();
     drop(s);
     let mut restored =
         AccountStore::open_existing(path, &meta.account_key, &meta.installation_id).unwrap();
     assert_eq!(
-        restored.bind_terminal_entry_settlement("intent", 7, Decimal::ONE, 7).unwrap(),
+        restored
+            .bind_terminal_entry_settlement("intent", 7, Decimal::ONE, 7)
+            .unwrap(),
         settled
     );
     assert_eq!(s.intent_fee_bill_evidence("intent", 7).unwrap(), evidence);
