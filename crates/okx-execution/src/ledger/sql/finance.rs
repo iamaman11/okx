@@ -203,6 +203,106 @@ fn upsert_source_cursor(tx: &rusqlite::Transaction<'_>, c: &SourceCursor) -> Sto
     Ok(())
 }
 impl AccountStore {
+    /// Read bounded native fill evidence for one persisted risk-increasing
+    /// intent. The source coverage cursor is mandatory: a partial page is
+    /// NOT an absence-of-fills proof. This does not price margin, non-USDT
+    /// fees, borrowing or FX and cannot authorize a reserve or venue POST.
+    pub fn intent_fill_cost_evidence(
+        &self,
+        intent_id: &str,
+        through: i64,
+    ) -> StoreResult<IntentFillCostEvidence> {
+        use sha2::{Digest, Sha256};
+        if through < self.meta.initialized_at {
+            return Err(StoreError::Invalid("ENTRY_FILL_WINDOW_INVALID"));
+        }
+        let cursor = self
+            .cursor("fills", "SWAP")?
+            .ok_or(StoreError::Invalid("ENTRY_FILL_COVERAGE_UNPROVEN"))?;
+        if !cursor.cursor.is_empty()
+            || !cursor.coverage_gaps.is_empty()
+            || cursor.generation <= 0
+            || cursor.watermark < through
+        {
+            return Err(StoreError::Invalid("ENTRY_FILL_COVERAGE_UNPROVEN"));
+        }
+        let (plan_hash, instrument, contract_value, inverse, currency, increase):
+            (String, String, String, bool, String, bool) = self.connection.query_row(
+                "SELECT i.plan_hash,i.instrument_id,p.contract_value,p.inverse,
+                        p.settlement_currency,i.risk_increase
+                 FROM intents i JOIN intent_plans p ON p.intent_id=i.intent_id
+                 WHERE i.intent_id=?1",
+                [intent_id],
+                |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?)),
+            ).optional()?.ok_or(StoreError::Invalid("ENTRY_FILL_INTENT_NOT_FOUND"))?;
+        if !increase || inverse || !instrument.ends_with("-USDT-SWAP") || currency != "USDT" {
+            return Err(StoreError::Invalid("ENTRY_FILL_INSTRUMENT_UNSUPPORTED"));
+        }
+        let ct = decimal(contract_value.clone())?;
+        if ct <= Decimal::ZERO {
+            return Err(StoreError::Invalid("ENTRY_FILL_CONTRACT_INVALID"));
+        }
+        let mut hasher = Sha256::new();
+        let header = serde_json::to_vec(&(
+            "okx.intent-fill-cost-evidence/v1", self.meta.account_key.as_str(),
+            self.meta.installation_id.as_str(), intent_id, plan_hash.as_str(),
+            instrument.as_str(), contract_value.as_str(), through,
+            cursor.watermark, cursor.generation,
+        )).map_err(|_| StoreError::Invalid("ENTRY_FILL_DIGEST_INVALID"))?;
+        hasher.update(&header);
+        let mut statement = self.connection.prepare(
+            "SELECT fill_id,instrument_id,trade_id,exchange_order_id,time,qty,price,fee,currency
+             FROM fills WHERE intent_id=?1 AND time<=?2 ORDER BY fill_id LIMIT 10001"
+        )?;
+        let mut rows = statement.query(params![intent_id,through])?;
+        let mut count = 0u64;
+        let mut notional = Decimal::ZERO;
+        let mut fees = Decimal::ZERO;
+        while let Some(row) = rows.next()? {
+            count += 1;
+            if count > 10000 {
+                return Err(StoreError::Invalid("ENTRY_FILL_HISTORY_TOO_LARGE"));
+            }
+            let source: (String,String,String,String,i64,String,String,String,String) = (
+                row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,
+                row.get(4)?,row.get(5)?,row.get(6)?,row.get(7)?,row.get(8)?,
+            );
+            if source.1 != instrument || source.4 < self.meta.initialized_at
+                || source.8 != "USDT" || source.0.is_empty()
+                || source.2.is_empty() || source.3.is_empty()
+            {
+                return Err(StoreError::Invalid("ENTRY_FILL_SOURCE_INVALID"));
+            }
+            let qty = decimal(source.5.clone())?;
+            let price = decimal(source.6.clone())?;
+            let fee = decimal(source.7.clone())?;
+            if qty <= Decimal::ZERO || price <= Decimal::ZERO {
+                return Err(StoreError::Invalid("ENTRY_FILL_SOURCE_INVALID"));
+            }
+            let gross = qty.checked_mul(ct)
+                .and_then(|v| v.checked_mul(price))
+                .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))?;
+            notional = notional.checked_add(gross)
+                .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))?;
+            fees = fees.checked_add(fee.abs())
+                .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))?;
+            // Length-delimited immutable venue row; independent of ingestion order.
+            let bytes = serde_json::to_vec(&source)
+                .map_err(|_| StoreError::Invalid("ENTRY_FILL_DIGEST_INVALID"))?;
+            hasher.update((bytes.len() as u64).to_le_bytes());
+            hasher.update(bytes);
+        }
+        if count == 0 {
+            return Err(StoreError::Invalid("ENTRY_FILL_EVIDENCE_EMPTY"));
+        }
+        Ok(IntentFillCostEvidence {
+            intent_id: intent_id.to_owned(), plan_hash, fill_count: count,
+            covered_through: through, gross_notional_usdt: notional,
+            conservative_fee_usdt: fees,
+            source_digest: format!("{:x}", hasher.finalize()),
+        })
+    }
+
     /// Account-backed principal, never PnL or independently priced strategy NAV.
     /// All returned balances are exact USD decimals within this AccountStore.
     pub fn capital_state(&self, now: i64) -> StoreResult<AccountCapitalState> {

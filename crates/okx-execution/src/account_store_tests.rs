@@ -42,6 +42,113 @@ fn k5_recovery_pages_over_100_intents_are_disjoint_and_bounded() {
     assert!(s.reconcilable_intents_page(0, 0).unwrap().is_empty());
 }
 #[test]
+fn e1_intent_fill_cost_uses_only_covered_native_sources_and_survives_restart() {
+    let mut s = store();
+    intent(&mut s);
+    let fill = |n: u32, qty: Decimal, price: i64, fee: Decimal| Fill {
+        fill_id: format!("fill-{n}"),
+        instrument_id: "BTC-USDT-SWAP".into(),
+        trade_id: format!("trade-{n}"),
+        exchange_order_id: format!("order-{n}"),
+        intent_id: Some("intent".into()),
+        time: 4 + i64::from(n),
+        qty,
+        price: Decimal::from(price),
+        fee,
+        currency: "USDT".into(),
+        side: "buy".into(),
+    };
+    let first = fill(1, Decimal::new(4, 1), 100, Decimal::new(-1, 2));
+    let second = fill(2, Decimal::new(6, 1), 110, Decimal::new(-2, 2));
+    let page = IngestPage {
+        fills: vec![first, second],
+        ..Default::default()
+    };
+    s.ingest_page(&page).unwrap();
+    assert!(matches!(
+        s.intent_fill_cost_evidence("intent", 6),
+        Err(StoreError::Invalid("ENTRY_FILL_COVERAGE_UNPROVEN"))
+    ));
+    let pending = IngestPage {
+        cursor: Some(SourceCursor {
+            source: "fills".into(), stream_partition: "SWAP".into(),
+            cursor: "1|6|continuation".into(), watermark: 1, generation: 1,
+            coverage_gaps: "BACKFILL_PENDING".into(),
+        }),
+        ..Default::default()
+    };
+    s.ingest_page(&pending).unwrap();
+    assert!(matches!(
+        s.intent_fill_cost_evidence("intent", 6),
+        Err(StoreError::Invalid("ENTRY_FILL_COVERAGE_UNPROVEN"))
+    ));
+    let complete = IngestPage {
+        cursor: Some(SourceCursor {
+            source: "fills".into(), stream_partition: "SWAP".into(),
+            cursor: String::new(), watermark: 6, generation: 1,
+            coverage_gaps: String::new(),
+        }),
+        ..Default::default()
+    };
+    s.ingest_page(&complete).unwrap();
+    let verified = s.intent_fill_cost_evidence("intent", 6).unwrap();
+    assert_eq!(verified.fill_count, 2);
+    assert_eq!(verified.gross_notional_usdt, Decimal::from(106));
+    assert_eq!(verified.conservative_fee_usdt, Decimal::new(3, 2));
+    assert_eq!(verified.source_digest.len(), 64);
+    s.ingest_page(&page).unwrap();
+    assert_eq!(s.intent_fill_cost_evidence("intent", 6).unwrap(), verified);
+    assert!(matches!(
+        s.intent_fill_cost_evidence("intent", 7),
+        Err(StoreError::Invalid("ENTRY_FILL_COVERAGE_UNPROVEN"))
+    ));
+    let path = s.path.clone();
+    let meta = s.meta.clone();
+    drop(s);
+    let reopened = AccountStore::open_existing(path, &meta.account_key, &meta.installation_id)
+        .unwrap();
+    assert_eq!(reopened.intent_fill_cost_evidence("intent", 6).unwrap(), verified);
+}
+
+#[test]
+fn e1_intent_fill_cost_rejects_unverified_currency_and_missing_fills() {
+    let mut s = store();
+    intent(&mut s);
+    s.ingest_page(&IngestPage {
+        cursor: Some(SourceCursor {
+            source: "fills".into(), stream_partition: "SWAP".into(),
+            cursor: String::new(), watermark: 10, generation: 1,
+            coverage_gaps: String::new(),
+        }),
+        ..Default::default()
+    }).unwrap();
+    assert!(matches!(
+        s.intent_fill_cost_evidence("intent", 10),
+        Err(StoreError::Invalid("ENTRY_FILL_EVIDENCE_EMPTY"))
+    ));
+    s.ingest_page(&IngestPage {
+        fills: vec![Fill {
+            fill_id: "fee-in-other-currency".into(),
+            instrument_id: "BTC-USDT-SWAP".into(),
+            trade_id: "foreign-fee".into(),
+            exchange_order_id: "order-foreign".into(),
+            intent_id: Some("intent".into()),
+            time: 8,
+            qty: Decimal::ONE,
+            price: Decimal::from(100),
+            fee: Decimal::new(-1, 2),
+            currency: "BTC".into(),
+            side: "buy".into(),
+        }],
+        ..Default::default()
+    }).unwrap();
+    assert!(matches!(
+        s.intent_fill_cost_evidence("intent", 10),
+        Err(StoreError::Invalid("ENTRY_FILL_SOURCE_INVALID"))
+    ));
+}
+
+#[test]
 fn f0_crash_before_prepare_commit_is_retriable_once() {
     let s = store();
     assert!(s.reconcilable_intents(16).unwrap().is_empty());

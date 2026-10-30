@@ -15,6 +15,7 @@ CREATE TABLE orders(order_id TEXT PRIMARY KEY,exchange_order_id TEXT UNIQUE,inte
 CREATE INDEX idx_orders_intent ON orders(intent_id);
 CREATE INDEX idx_orders_active ON orders(state,order_id);
 CREATE TABLE fills(fill_id TEXT PRIMARY KEY,instrument_id TEXT NOT NULL,trade_id TEXT NOT NULL,exchange_order_id TEXT NOT NULL,intent_id TEXT REFERENCES intents(intent_id),time INTEGER NOT NULL,qty TEXT NOT NULL,price TEXT NOT NULL,fee TEXT NOT NULL,currency TEXT NOT NULL,side TEXT NOT NULL CHECK(side IN('buy','sell')),UNIQUE(instrument_id,trade_id,exchange_order_id)) STRICT;
+CREATE INDEX idx_fills_intent ON fills(intent_id,fill_id);
 CREATE INDEX idx_fills_time ON fills(time,fill_id);
 CREATE INDEX idx_fills_instrument_time ON fills(instrument_id,time,fill_id);
 CREATE TABLE fill_projection_pending(fill_id TEXT PRIMARY KEY REFERENCES fills(fill_id),side TEXT NOT NULL) STRICT;

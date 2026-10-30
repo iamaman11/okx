@@ -280,6 +280,19 @@ pub struct Fill {
     pub fee: Decimal,
     pub currency: String,
 }
+/// Bounded, immutable per-intent evidence derived from authenticated venue
+/// fills. NOT an all-in USD entry cost, campaign opening balance, or POST grant.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct IntentFillCostEvidence {
+    pub intent_id: String,
+    pub plan_hash: String,
+    pub fill_count: u64,
+    pub covered_through: i64,
+    pub gross_notional_usdt: Decimal,
+    /// Rebates are counted as nonnegative costs, never credited as capacity.
+    pub conservative_fee_usdt: Decimal,
+    pub source_digest: String,
+}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Bill {
     pub bill_id: String,
