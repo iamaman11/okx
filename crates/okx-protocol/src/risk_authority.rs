@@ -894,13 +894,19 @@ mod tests {
         };
         assert!(view.valid());
         view.campaign_origin = None;
-        assert!(!view.valid(), "a previous Worker must not mint an opening timestamp");
+        assert!(
+            !view.valid(),
+            "a previous Worker must not mint an opening timestamp"
+        );
         view.campaign_origin = Some(RiskCampaignOrigin {
             campaign_id: format!("sha256:{}", "c".repeat(64)),
             installation_id: "installation_test".into(),
             started_at_ms: 1_790_000_000_000,
         });
-        assert!(!view.valid(), "another campaign's inception is not a source");
+        assert!(
+            !view.valid(),
+            "another campaign's inception is not a source"
+        );
     }
 
     #[test]
