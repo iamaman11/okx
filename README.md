@@ -70,6 +70,16 @@ NAV/STOP → protected position/terminal settlement → release`.
   history cursors/generations advance. Capture watermarks remain mandatory
   coverage checks but are not part of the hash of immutable economic facts. With missing opening campaign coverage or an
   Unknown cost component, the Engine still fails closed.
+- **Campaign opening history:** native fills and bills capture reject a
+  history page whose beginning is outside OKX's last-three-calendar-months
+  source window (including the boundary safety margin). An empty expired
+  page is **NOT** evidence of zero expense. Existing `AccountHistoryApi`
+  provides independently paginated *recent* and *archived* order-history
+  sources: a single 100-row read or one archive alone is never complete
+  order history. To install campaign opening, source coverage must run
+  from independently proven actual campaign inception to a common cut-off
+  over every managed real account; the current importer is not yet
+  connected, so RiskBook leaves admission blocked.
 - **Handling net-mode positions:** exchange `posSide=net` uses a signed
   position quantity, while native SQL lots use `long` / `short`.
   `trade_service/reconcile.rs::verified_venue_position_direction` is the
