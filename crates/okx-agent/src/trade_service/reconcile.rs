@@ -85,6 +85,9 @@ pub(super) fn verified_live_protection(
         || source.client_order_id != expected_client
         || source.algo_order_id.is_empty()
         || source.state != "live"
+        || !matches!(source.position_side.as_str(), "net" | "long" | "short")
+        || (source.position_side != "net"
+            && source.position_side != intent.plan.position_side)
         || !source.failure_code.is_empty()
         || source.stop_loss_trigger_price_type != "mark"
         || !opposite
@@ -1632,6 +1635,7 @@ mod entry_cost_status_tests {
             stop_loss_trigger_price: "96".into(),
             size: "1".into(),
             side: "sell".into(),
+            position_side: "net".into(),
             ..serde_json::from_value::<okx_api::TradeAlgoOrderDetails>(json!({})).unwrap()
         };
         assert!(verified_live_protection(&intent, Decimal::ONE, &p).is_ok());
@@ -1654,6 +1658,15 @@ mod entry_cost_status_tests {
         changed = p.clone();
         changed.client_order_id = "wrong".into();
         assert!(verified_live_protection(&intent, Decimal::ONE, &changed).is_err());
+        changed = p.clone();
+        changed.position_side = "short".into();
+        assert!(verified_live_protection(&intent, Decimal::ONE, &changed).is_err());
+        changed = p.clone();
+        changed.position_side.clear();
+        assert!(verified_live_protection(&intent, Decimal::ONE, &changed).is_err());
+        changed = p.clone();
+        changed.position_side = "long".into();
+        assert!(verified_live_protection(&intent, Decimal::ONE, &changed).is_ok());
         changed = p.clone();
         changed.failure_code = "failure".into();
         assert!(verified_live_protection(&intent, Decimal::ONE, &changed).is_err());
