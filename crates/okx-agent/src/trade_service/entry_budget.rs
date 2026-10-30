@@ -23,21 +23,47 @@ pub(super) enum EntryCostEvidence {
     Proven {
         upper_usd: Decimal,
         basis: &'static str,
+        source_digest: String,
     },
     NotApplicable {
         basis: &'static str,
+        source_digest: String,
     },
     Unknown {
         reason: &'static str,
     },
 }
+/// Every classified zero and positive cost must identify a source. This
+/// is necessary, not sufficient, for a venue attestation: the native source
+/// owner must independently bind the digest to the actual captured fact.
+fn verified_cost_source(basis: &str, digest: &str) -> Result<(), String> {
+    if basis.is_empty()
+        || digest.len() != 64
+        || !digest.bytes().all(|ch| ch.is_ascii_hexdigit())
+    {
+        return Err("ENTRY_COST_SOURCE_UNVERIFIED".into());
+    }
+    Ok(())
+}
 impl EntryCostEvidence {
     fn upper(&self) -> Result<Option<Decimal>, String> {
         match self {
-            Self::Proven { upper_usd, .. } if *upper_usd >= Decimal::ZERO => Ok(Some(*upper_usd)),
-            Self::NotApplicable { .. } => Ok(Some(Decimal::ZERO)),
+            Self::Proven {
+                upper_usd,
+                basis,
+                source_digest,
+            } => {
+                if *upper_usd < Decimal::ZERO {
+                    return Err("ENTRY_COST_NEGATIVE".into());
+                }
+                verified_cost_source(basis, source_digest)?;
+                Ok(Some(*upper_usd))
+            }
+            Self::NotApplicable { basis, source_digest } => {
+                verified_cost_source(basis, source_digest)?;
+                Ok(Some(Decimal::ZERO))
+            }
             Self::Unknown { .. } => Ok(None),
-            Self::Proven { .. } => Err("ENTRY_COST_NEGATIVE".into()),
         }
     }
     fn reason(&self) -> Option<&'static str> {
@@ -69,7 +95,7 @@ impl EntryFxUpperBound {
             Self::Proven {
                 usd_per_usdt_upper,
                 source_digest,
-                ..
+                basis,
             } => {
                 if *usd_per_usdt_upper <= Decimal::ZERO || observed <= Decimal::ZERO {
                     return Err("ENTRY_FX_UPPER_BOUND_INVALID".into());
@@ -77,7 +103,8 @@ impl EntryFxUpperBound {
                 if *usd_per_usdt_upper < observed {
                     return Err("ENTRY_FX_BOUND_BELOW_OBSERVED".into());
                 }
-                if source_digest.len() != 64
+                if basis.is_empty()
+                    || source_digest.len() != 64
                     || !source_digest.bytes().all(|b| b.is_ascii_hexdigit())
                 {
                     return Err("ENTRY_FX_BOUND_SOURCE_INVALID".into());
@@ -823,12 +850,15 @@ mod tests {
         // Explicit venue non-applicability is evidence, not a guessed zero.
         p.extra_immediate_fees = EntryCostEvidence::NotApplicable {
             basis: "venue:no-other-immediate-fees",
+            source_digest: "a".repeat(64),
         };
         p.borrowing = EntryCostEvidence::NotApplicable {
             basis: "venue:no-borrow",
+            source_digest: "b".repeat(64),
         };
         p.collateral_or_margin = EntryCostEvidence::NotApplicable {
             basis: "conservative-notional-cover",
+            source_digest: "c".repeat(64),
         };
         // An observed rate is not necessarily a bounded FX rate.
         assert_eq!(p.proven_upper_usd().unwrap(), None);
@@ -838,18 +868,46 @@ mod tests {
             basis: "source-bound-maximum",
         };
         assert_eq!(p.proven_upper_usd().unwrap(), Some(d("9.2764359")));
+        p.borrowing = EntryCostEvidence::NotApplicable {
+            basis: "venue:no-borrow",
+            source_digest: "missing-source".into(),
+        };
+        assert_eq!(
+            p.proven_upper_usd().unwrap_err(),
+            "ENTRY_COST_SOURCE_UNVERIFIED"
+        );
+        p.borrowing = EntryCostEvidence::NotApplicable {
+            basis: "venue:no-borrow",
+            source_digest: "b".repeat(64),
+        };
+        p.collateral_or_margin = EntryCostEvidence::Proven {
+            upper_usd: Decimal::ZERO,
+            basis: "",
+            source_digest: "c".repeat(64),
+        };
+        assert_eq!(
+            p.proven_upper_usd().unwrap_err(),
+            "ENTRY_COST_SOURCE_UNVERIFIED"
+        );
+        p.collateral_or_margin = EntryCostEvidence::NotApplicable {
+            basis: "conservative-notional-cover",
+            source_digest: "c".repeat(64),
+        };
         p.extra_immediate_fees = EntryCostEvidence::Proven {
             upper_usd: d("0.1"),
             basis: "verified-third-currency-fee",
+            source_digest: "d".repeat(64),
         };
         assert_eq!(p.proven_upper_usd().unwrap(), Some(d("9.3764359")));
         p.extra_immediate_fees = EntryCostEvidence::Proven {
             upper_usd: d("-0.01"),
             basis: "invalid-rebate",
+            source_digest: "e".repeat(64),
         };
         assert_eq!(p.proven_upper_usd().unwrap_err(), "ENTRY_COST_NEGATIVE");
         p.extra_immediate_fees = EntryCostEvidence::NotApplicable {
             basis: "verified-no-additional-fee",
+            source_digest: "f".repeat(64),
         };
         p.fx_bound = EntryFxUpperBound::Proven {
             usd_per_usdt_upper: d("0.99"),
