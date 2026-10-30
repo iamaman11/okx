@@ -125,6 +125,12 @@ const bogusFutureSequence=await settleEntrySpend(sa,held.entry.key,p,{
 check(bogusFutureSequence.status==="DENIED"&&bogusFutureSequence.reason===
  "ENTRY_SETTLEMENT_REVISION_CONFLICT",
  "future CAS sequence cannot be used even to inspect an idempotent settlement");
+const staleNewExpense=await settleEntrySpend(sa,held.entry.key,p,{
+ connection_generation:77,expected_book_sequence:3,cumulative_entry_usd:"0.75",
+ revision:2,source_digest:d});
+check(staleNewExpense.status==="DENIED"&&
+ staleNewExpense.reason==="ENTRY_SETTLEMENT_SOURCE_OR_STATE_UNPROVEN",
+ "new spend can never slip through the stale-CAS read-only replay exception");
 const alteredStaleSource=await settleEntrySpend(sa,held.entry.key,p,{
  connection_generation:77,expected_book_sequence:3,cumulative_entry_usd:"0.5",
  revision:1,source_digest:a});
