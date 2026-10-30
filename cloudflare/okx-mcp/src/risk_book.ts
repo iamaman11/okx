@@ -176,6 +176,9 @@ function riskKey(entry: Pick<RiskEntry, "venue"|"environment"|"uid"|"run_id"|"in
 export interface CampaignEntryBudget {
   campaign_id:string;limit_usd:string;consumed_usd:string;reserved_usd:string;
   opening_source_digest:string;opening_as_of_ms:number;
+  /** Immutable all-managed-real-account opening scope. New enrolled accounts
+   * cannot silently inherit a historical campaign balance. */
+  opening_account_keys:string[];
 }
 function validEntryBudget(v:any):v is CampaignEntryBudget{
   return !!v&&/^sha256:[0-9a-f]{64}$/.test(v.campaign_id)&&
@@ -183,7 +186,20 @@ function validEntryBudget(v:any):v is CampaignEntryBudget{
     units(v.reserved_usd)!==null&&
     units(v.consumed_usd)!+units(v.reserved_usd)!<=units(v.limit_usd)!&&
     HEX.test(v.opening_source_digest)&&
+    Array.isArray(v.opening_account_keys)&&v.opening_account_keys.length>0&&
+    v.opening_account_keys.length<=32&&
+    v.opening_account_keys.every((k:string,i:number)=>
+      /^okx:real:[0-9a-f]{64}$/.test(k)&&
+      (i===0||v.opening_account_keys[i-1]<k))&&
     Number.isSafeInteger(v.opening_as_of_ms)&&v.opening_as_of_ms>0;
+}
+function openingCoversManagedCohort(
+  budget:CampaignEntryBudget,accounts:{account_key:string;environment:string}[]
+):boolean{
+  const registered=accounts.filter(a=>a.environment==="real")
+    .map(a=>a.account_key).sort();
+  return registered.length===budget.opening_account_keys.length&&
+    registered.every((key,i)=>key===budget.opening_account_keys[i]);
 }
 /** E1.1 history is a single full-cohort fact, not an unexplained
  * initial zero. Each managed real account must supply immutable native
@@ -263,6 +279,7 @@ export async function installCampaignEntryProof(tx:any,source:CampaignEntryOpeni
     campaign_id:source.campaign_id,limit_usd:source.limit_usd,
     consumed_usd:source.consumed_usd,reserved_usd:"0",
     opening_source_digest:source.source_digest,opening_as_of_ms:source.as_of_ms,
+    opening_account_keys:managed,
   },sequence:meta.sequence+1});
   return true;
 }
@@ -479,6 +496,8 @@ export async function reserveRisk(
     if(!entryBudget || entryBudget.campaign_id!==governance.campaign_id||
        units(entryBudget.limit_usd)!==units(governance.campaign_entry_limit_usd))
       return {status:"DENIED",reason:"CAMPAIGN_ENTRY_BASELINE_NOT_PROVEN"};
+    if(!openingCoversManagedCohort(entryBudget,governance.accounts))
+      return {status:"DENIED",reason:"CAMPAIGN_OPENING_COHORT_CHANGED"};
     if(proposed===null||proposed<=0n||!HEX.test(input.entry_proof_digest??""))
       return {status:"DENIED",reason:"ENTRY_COST_PROOF_UNAVAILABLE"};
     if(units(entryBudget.consumed_usd)!+units(entryBudget.reserved_usd)!+proposed>
@@ -787,6 +806,7 @@ export async function beginRiskPost(
     if(!stored.entry_budget||entry.entry_upper_usd===undefined||
        stored.entry_budget.campaign_id!==governance.campaign_id||
        units(stored.entry_budget.limit_usd)!==units(governance.campaign_entry_limit_usd)||
+       !openingCoversManagedCohort(stored.entry_budget,governance.accounts)||
        !HEX.test(entry.entry_proof_digest??""))
       return {status:"DENIED" as const,reason:"ENTRY_RESERVATION_NOT_PROVEN"};
     // The anchor lives in Worker storage and uses Worker time only; the
