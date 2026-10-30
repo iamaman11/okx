@@ -448,27 +448,33 @@ impl AccountStore {
         if !finance_proof_sealed(&self.connection)? {
             return Err(StoreError::Invalid("ENTRY_FINANCE_PROVENANCE_UNSEALED"));
         }
-        let bills = self.cursor("bills", "account")?
+        let bills = self
+            .cursor("bills", "account")?
             .ok_or(StoreError::Invalid("ENTRY_BILLS_COVERAGE_UNPROVEN"))?;
-        if !bills.cursor.is_empty() || !bills.coverage_gaps.is_empty()
-            || bills.generation <= 0 || bills.watermark < through
+        if !bills.cursor.is_empty()
+            || !bills.coverage_gaps.is_empty()
+            || bills.generation <= 0
+            || bills.watermark < through
         {
             return Err(StoreError::Invalid("ENTRY_BILLS_COVERAGE_UNPROVEN"));
         }
         let mut hasher = Sha256::new();
-        hasher.update(serde_json::to_vec(&(
-            "okx.intent-fee-bill-evidence/v1",
-            self.meta.account_key.as_str(),
-            self.meta.installation_id.as_str(),
-            intent_id,
-            fill.source_digest.as_str(),
-            through,
-            bills.watermark,
-            bills.generation,
-        )).map_err(|_| StoreError::Invalid("ENTRY_FEE_BILL_DIGEST_INVALID"))?);
+        hasher.update(
+            serde_json::to_vec(&(
+                "okx.intent-fee-bill-evidence/v1",
+                self.meta.account_key.as_str(),
+                self.meta.installation_id.as_str(),
+                intent_id,
+                fill.source_digest.as_str(),
+                through,
+                bills.watermark,
+                bills.generation,
+            ))
+            .map_err(|_| StoreError::Invalid("ENTRY_FEE_BILL_DIGEST_INVALID"))?,
+        );
         let mut fee_rows = self.connection.prepare(
             "SELECT fill_id,fee,currency FROM fills
-             WHERE intent_id=?1 AND time<=?2 ORDER BY fill_id LIMIT 10001"
+             WHERE intent_id=?1 AND time<=?2 ORDER BY fill_id LIMIT 10001",
         )?;
         // Source-ref first index makes each immutable fee lookup addressable.
         // The canonical finance entry may have first arrived from bill history
@@ -483,7 +489,7 @@ impl AccountStore {
              JOIN finance_entries e ON e.entry_id=fl.entry_id AND e.component='FEE'
              LEFT JOIN bills b ON b.economic_event_key=e.economic_event_key
                               AND e.economic_event_key='bill:'||b.bill_id
-             WHERE fl.source_ref=?1 ORDER BY e.entry_id LIMIT 2"
+             WHERE fl.source_ref=?1 ORDER BY e.entry_id LIMIT 2",
         )?;
         let mut scanned = fee_rows.query(params![intent_id, through])?;
         let mut count = 0_u64;
@@ -508,12 +514,25 @@ impl AccountStore {
                 return Err(StoreError::Invalid("ENTRY_FEE_BILL_LINK_MISSING"));
             };
             let proof: (
-                String, String, String, String, Option<String>,
-                Option<String>, Option<i64>, Option<String>, bool,
+                String,
+                String,
+                String,
+                String,
+                Option<String>,
+                Option<String>,
+                Option<i64>,
+                Option<String>,
+                bool,
             ) = (
-                source.get(0)?, source.get(1)?, source.get(2)?,
-                source.get(3)?, source.get(4)?, source.get(5)?,
-                source.get(6)?, source.get(7)?, source.get(8)?,
+                source.get(0)?,
+                source.get(1)?,
+                source.get(2)?,
+                source.get(3)?,
+                source.get(4)?,
+                source.get(5)?,
+                source.get(6)?,
+                source.get(7)?,
+                source.get(8)?,
             );
             if rows.next()?.is_some() {
                 return Err(StoreError::Invalid("ENTRY_FEE_BILL_LINK_AMBIGUOUS"));
@@ -521,7 +540,9 @@ impl AccountStore {
             if proof.4.is_some()
                 || !proof.1.starts_with("bill:")
                 || proof.5.as_deref() != proof.1.strip_prefix("bill:")
-                || proof.6.is_none_or(|t| t <= 0 || t > through || t > bills.watermark)
+                || proof
+                    .6
+                    .is_none_or(|t| t <= 0 || t > through || t > bills.watermark)
                 || proof.7.as_deref() != Some(currency.as_str())
                 || !proof.8
                 || proof.3 != currency
@@ -529,16 +550,15 @@ impl AccountStore {
             {
                 return Err(StoreError::Invalid("ENTRY_FEE_BILL_SOURCE_MISMATCH"));
             }
-            total = total.checked_add(fee.abs())
+            total = total
+                .checked_add(fee.abs())
                 .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))?;
             let data = serde_json::to_vec(&(id, fee_source, currency, proof))
                 .map_err(|_| StoreError::Invalid("ENTRY_FEE_BILL_DIGEST_INVALID"))?;
             hasher.update((data.len() as u64).to_le_bytes());
             hasher.update(data);
         }
-        if count != fill.fill_count || count == 0
-            || total != fill.conservative_fee_usdt
-        {
+        if count != fill.fill_count || count == 0 || total != fill.conservative_fee_usdt {
             return Err(StoreError::Invalid("ENTRY_FEE_BILL_TOTAL_MISMATCH"));
         }
         Ok(IntentFeeBillEvidence {

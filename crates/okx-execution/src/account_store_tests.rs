@@ -256,7 +256,8 @@ fn e1_fee_bill_cross_source_receipt_requires_both_immutable_sources() {
             coverage_gaps: String::new(),
         }),
         ..Default::default()
-    }).unwrap();
+    })
+    .unwrap();
     assert!(matches!(
         s.intent_fee_bill_evidence("intent", 7),
         Err(StoreError::Invalid("ENTRY_BILLS_COVERAGE_UNPROVEN"))
@@ -280,7 +281,8 @@ fn e1_fee_bill_cross_source_receipt_requires_both_immutable_sources() {
             coverage_gaps: String::new(),
         }),
         ..Default::default()
-    }).unwrap();
+    })
+    .unwrap();
     assert!(matches!(
         s.intent_fee_bill_evidence("intent", 7),
         Err(StoreError::Invalid("ENTRY_FEE_BILL_SOURCE_MISMATCH"))
@@ -290,7 +292,8 @@ fn e1_fee_bill_cross_source_receipt_requires_both_immutable_sources() {
     s.ingest_page(&IngestPage {
         finance: vec![fee.clone()],
         ..Default::default()
-    }).unwrap();
+    })
+    .unwrap();
     let evidence = s.intent_fee_bill_evidence("intent", 7).unwrap();
     assert_eq!(evidence.fill.filled_quantity, Decimal::ONE);
     assert_eq!(evidence.linked_bill_count, 1);
@@ -305,12 +308,19 @@ fn e1_fee_bill_cross_source_receipt_requires_both_immutable_sources() {
     let db = s.path.clone();
     let meta = s.meta.clone();
     drop(s);
-    let reopened = AccountStore::open_existing(db, &meta.account_key, &meta.installation_id)
+    let reopened =
+        AccountStore::open_existing(db, &meta.account_key, &meta.installation_id).unwrap();
+    assert_eq!(
+        reopened.intent_fee_bill_evidence("intent", 7).unwrap(),
+        evidence
+    );
+    reopened
+        .connection
+        .execute(
+            "DELETE FROM finance_source_links WHERE source_ref='bill:fee-bill'",
+            [],
+        )
         .unwrap();
-    assert_eq!(reopened.intent_fee_bill_evidence("intent", 7).unwrap(), evidence);
-    reopened.connection.execute(
-        "DELETE FROM finance_source_links WHERE source_ref='bill:fee-bill'", []
-    ).unwrap();
     assert!(matches!(
         reopened.intent_fee_bill_evidence("intent", 7),
         Err(StoreError::Invalid("ENTRY_FEE_BILL_SOURCE_MISMATCH"))
@@ -345,7 +355,8 @@ fn e1_zero_fee_without_explicit_bill_finality_is_unknown_not_free() {
             coverage_gaps: String::new(),
         }),
         ..Default::default()
-    }).unwrap();
+    })
+    .unwrap();
     s.ingest_page(&IngestPage {
         cursor: Some(SourceCursor {
             source: "bills".into(),
@@ -356,7 +367,8 @@ fn e1_zero_fee_without_explicit_bill_finality_is_unknown_not_free() {
             coverage_gaps: String::new(),
         }),
         ..Default::default()
-    }).unwrap();
+    })
+    .unwrap();
     assert!(matches!(
         s.intent_fee_bill_evidence("intent", 7),
         Err(StoreError::Invalid("ENTRY_ZERO_FEE_BILL_UNPROVEN"))
@@ -365,10 +377,9 @@ fn e1_zero_fee_without_explicit_bill_finality_is_unknown_not_free() {
 
 #[test]
 fn e1_fee_bill_amount_and_currency_mismatch_never_become_verified() {
-    for (booked_fee, booked_currency) in [
-        (Decimal::new(-2, 2), "USDT"),
-        (Decimal::new(-1, 2), "BTC"),
-    ] {
+    for (booked_fee, booked_currency) in
+        [(Decimal::new(-2, 2), "USDT"), (Decimal::new(-1, 2), "BTC")]
+    {
         let mut s = store();
         intent(&mut s);
         acknowledged_entry_intent(&mut s);
@@ -407,7 +418,8 @@ fn e1_fee_bill_amount_and_currency_mismatch_never_become_verified() {
                 coverage_gaps: String::new(),
             }),
             ..Default::default()
-        }).unwrap();
+        })
+        .unwrap();
         s.ingest_page(&IngestPage {
             bills: vec![Bill {
                 bill_id: "fee1".into(),
@@ -438,7 +450,8 @@ fn e1_fee_bill_amount_and_currency_mismatch_never_become_verified() {
                 coverage_gaps: String::new(),
             }),
             ..Default::default()
-        }).unwrap();
+        })
+        .unwrap();
         assert!(matches!(
             s.intent_fee_bill_evidence("intent", 7),
             Err(StoreError::Invalid("ENTRY_FEE_BILL_SOURCE_MISMATCH"))

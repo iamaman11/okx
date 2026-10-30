@@ -403,9 +403,14 @@ impl TradeService {
                                 // finance event linked by a real bill.
                                 let bill_id = i.intent_id.clone();
                                 let through = source.covered_through;
-                                match r.execution.store.call(deadline(), move |s| {
-                                    s.intent_fee_bill_evidence(&bill_id, through)
-                                }).await {
+                                match r
+                                    .execution
+                                    .store
+                                    .call(deadline(), move |s| {
+                                        s.intent_fee_bill_evidence(&bill_id, through)
+                                    })
+                                    .await
+                                {
                                     Ok(billed) => json!({
                                         "state":"verified_native_fill_and_bill_fee_sources",
                                         "scope":"USDT_fee_bill_source_link_only",
@@ -421,7 +426,7 @@ impl TradeService {
                                         "source":source,
                                     }),
                                 }
-                            },
+                            }
                             Err(reason) => json!({"state":"incomplete",
                                 "all_in_entry_cost_proven":false,
                                 "reason_code":reason}),
