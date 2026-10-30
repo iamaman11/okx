@@ -131,14 +131,12 @@ impl BudgetValuation {
             source_digest,
             ..
         } = self
-        {
-            if *usd_per_usdt != receipt.usd_per_usdt
+            && (*usd_per_usdt != receipt.usd_per_usdt
                 || source_digest != &receipt.conversion_digest
                 || *observed_at_ms > receipt.observed_at
-                || receipt.observed_at - *observed_at_ms > 5_000
-            {
-                return Err("ENTRY_VALUATION_RECEIPT_MISMATCH".into());
-            }
+                || receipt.observed_at - *observed_at_ms > 5_000)
+        {
+            return Err("ENTRY_VALUATION_RECEIPT_MISMATCH".into());
         }
         Ok(())
     }
