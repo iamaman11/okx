@@ -166,6 +166,17 @@ const terminalReplay=await settleEntrySpend(sa,held.entry.key,p,{
  revision:2,source_digest:d});
 check(terminalReplay.status==="UPDATED",
  "lost final settlement acknowledgement remains readable after terminal release");
+const wrongGenerationReplay=await settleEntrySpend(sa,held.entry.key,p,{
+ connection_generation:76,expected_book_sequence:4,cumulative_entry_usd:"1.5",
+ revision:2,source_digest:d});
+check(wrongGenerationReplay.status==="DENIED",
+ "old authenticated generation cannot replay terminal settlement after recovery");
+const tamperedTerminalReplay=await settleEntrySpend(sa,held.entry.key,p,{
+ connection_generation:77,expected_book_sequence:4,cumulative_entry_usd:"1.5",
+ revision:2,source_digest:a});
+check(tamperedTerminalReplay.status==="DENIED"&&
+ tamperedTerminalReplay.reason==="ENTRY_SETTLEMENT_REVISION_CONFLICT",
+ "terminal replay may not replace the final financial source digest");
 const finalAgain=(await readRiskBook(sa))!.entry_budget!;
 check(finalAgain.consumed_usd==="1.5"&&finalAgain.reserved_usd==="0",
  "replayed terminal settlement cannot debit twice or revive a released grant");
