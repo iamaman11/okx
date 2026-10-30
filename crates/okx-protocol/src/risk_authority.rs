@@ -43,6 +43,12 @@ pub struct TerminalRiskLedgerProof {
     pub record_digest: String,
     pub cumulative_loss_usd: String,
     pub remaining_exposure_usdt: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cumulative_entry_usd: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entry_settlement_revision: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entry_settlement_digest: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -238,6 +244,12 @@ pub enum RiskCommandAction {
         plan_sha256: String,
         requested_loss_usdt: String,
         requested_loss_usd: String,
+        /** Incomplete until venue spec/fee/FX/economic cost are proven.
+         * None is NOT zero and Worker must reject its reservation. */
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        entry_upper_usd: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        entry_proof_digest: Option<String>,
         usd_conversion: UsdConversion,
         policy_revision: u64,
         census: NativeRiskCensus,
@@ -304,6 +316,8 @@ impl RiskCommand {
                 plan_sha256,
                 requested_loss_usdt,
                 requested_loss_usd,
+                entry_upper_usd,
+                entry_proof_digest,
                 usd_conversion,
                 policy_revision,
                 census,
@@ -327,6 +341,8 @@ impl RiskCommand {
                     && hash(plan_sha256)
                     && positive(requested_loss_usdt)
                     && positive(requested_loss_usd)
+                    && matches!((entry_upper_usd.as_deref(), entry_proof_digest.as_deref()),
+                        (Some(value), Some(digest)) if positive(value) && hash(digest))
                     && usd_conversion.valid()
                     && *policy_revision > 0
                     && census.valid()
@@ -532,6 +548,8 @@ mod tests {
                 plan_sha256: "c".repeat(64),
                 requested_loss_usdt: "1".to_owned(),
                 requested_loss_usd: "1".into(),
+                entry_upper_usd: Some("2".into()),
+                entry_proof_digest: Some("b".repeat(64)),
                 usd_conversion: UsdConversion {
                     usd_per_usdt: "1".into(),
                     source_digest: "a".repeat(64),
@@ -562,6 +580,14 @@ mod tests {
             census.complete = true;
         }
         assert!(ready.valid());
+        let mut missing_entry = ready.clone();
+        if let RiskCommandAction::Reserve {
+            entry_upper_usd, ..
+        } = &mut missing_entry.action
+        {
+            *entry_upper_usd = None;
+        }
+        assert!(!missing_entry.valid(), "no entry debit is not zero entry debit");
         let json = serde_json::to_string(&ready).unwrap();
         assert_eq!(serde_json::from_str::<RiskCommand>(&json).unwrap(), ready);
         if let RiskCommandAction::Reserve {
@@ -622,6 +648,9 @@ mod tests {
                 record_digest: "f".repeat(64),
                 cumulative_loss_usd: "0".into(),
                 remaining_exposure_usdt: "0".into(),
+                cumulative_entry_usd: None,
+                entry_settlement_revision: None,
+                entry_settlement_digest: None,
             });
         }
         assert!(release.valid());

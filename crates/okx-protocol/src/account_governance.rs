@@ -230,6 +230,10 @@ pub struct AccountGovernance {
     pub installation_id: String,
     pub campaign_id: String,
     pub campaign_loss_limit_usd: String,
+    /// Independent cumulative entry spend, absent on pre-E1 saved policies.
+    /// Missing means NOT_PROVEN, never an authorized zero budget.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub campaign_entry_limit_usd: Option<String>,
     pub max_total_modelled_loss_usdt: String,
     pub accounts: Vec<AccountControl>,
 }
@@ -241,6 +245,7 @@ impl AccountGovernance {
             || !self.campaign_id.starts_with("sha256:")
             || !lower_sha256(&self.campaign_id[7..])
             || positive(&self.campaign_loss_limit_usd).is_none()
+            || !optional_positive(&self.campaign_entry_limit_usd)
             || positive(&self.max_total_modelled_loss_usdt).is_none()
             || self.accounts.len() > 32
         {
@@ -347,6 +352,7 @@ mod tests {
             installation_id: "installation_test".into(),
             campaign_id: format!("sha256:{}", "a".repeat(64)),
             campaign_loss_limit_usd: "10".into(),
+            campaign_entry_limit_usd: None,
             max_total_modelled_loss_usdt: "5".into(),
             accounts: vec![],
         };

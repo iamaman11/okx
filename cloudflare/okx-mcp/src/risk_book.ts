@@ -23,7 +23,7 @@ export interface RiskEntry {
   loss_usd:string;
   /** Campaign entry costs are independent of modelled loss. */
   entry_upper_usd?:string;entry_proof_digest?:string;
-  entry_settled_usd?:string;entry_settlement_revision?:number;
+  entry_settled_usd?:string;entry_settlement_revision?:number;entry_settlement_digest?:string;
   usd_conversion:{usd_per_usdt:string;source_digest:string;observed_at_ms:number};
   state: RiskEntryState;
   created_at_ms: number;
@@ -156,7 +156,9 @@ function validEntry(entry: RiskEntry): boolean {
         units(entry.entry_settled_usd)!<=units(entry.entry_upper_usd)! &&
         HEX.test(entry.entry_proof_digest??"") &&
         Number.isSafeInteger(entry.entry_settlement_revision) &&
-        entry.entry_settlement_revision!>=0)
+        entry.entry_settlement_revision!>=0 &&
+        (entry.entry_settlement_revision===0 ||
+          HEX.test(entry.entry_settlement_digest??"")))
     && units(entry.loss_usd)!==null && !!entry.usd_conversion && units(entry.usd_conversion.usd_per_usdt)!==null && HEX.test(entry.usd_conversion.source_digest)
     && units(entry.loss_usdt) !== null && units(entry.loss_usdt)! > 0n
     && ["HELD","POSTED","UNKNOWN","OPEN","RELEASED"].includes(entry.state)
@@ -436,7 +438,7 @@ export async function reserveRisk(
       intent_id:input.intent_id, plan_hash:input.plan_hash,
       policy_revision:input.policy_revision, loss_usdt:input.loss_usdt,loss_usd:input.loss_usd,
       entry_upper_usd:input.entry_upper_usd,entry_settled_usd:"0",
-      entry_proof_digest:input.entry_proof_digest,entry_settlement_revision:0,
+      entry_proof_digest:input.entry_proof_digest,entry_settlement_revision:0,entry_settlement_digest:undefined,
       usd_conversion:input.usd_conversion,
       state:"HELD", created_at_ms:input.now_ms,
       reserve_source_digest:census.source_digest,
@@ -587,6 +589,7 @@ export async function transitionRisk(
         reserved_usd:amount(units(budget.reserved_usd)!-cumulative+before)};
       entry.entry_settled_usd=amount(cumulative);
       entry.entry_settlement_revision=ledger.entry_settlement_revision;
+      entry.entry_settlement_digest=ledger.entry_settlement_digest;
     }
     if(to==="RELEASED"){
       const seenKey="risk_loss_v2:"+accountKey(entry),previous=units(await tx.get(seenKey)??"0")!,current=units(native.terminal!.ledger.cumulative_loss_usd)!;
@@ -629,7 +632,7 @@ export async function settleEntrySpend(
        native.revision<entry.entry_settlement_revision!)
       return {status:"DENIED" as const,reason:"ENTRY_SETTLEMENT_REGRESSION"};
     if(native.revision===entry.entry_settlement_revision){
-      return total===before
+      return total===before&&entry.entry_settlement_digest===native.source_digest
         ?{status:"UPDATED" as const,book_sequence:meta.sequence}
         :{status:"DENIED" as const,reason:"ENTRY_SETTLEMENT_REVISION_CONFLICT"};
     }
@@ -640,7 +643,8 @@ export async function settleEntrySpend(
        consumed_usd:amount(units(meta.entry_budget.consumed_usd)!+delta),
        reserved_usd:amount(reserved-delta)};
     const next=await saveEntry(tx,meta,{...entry,entry_settled_usd:amount(total),
-      entry_settlement_revision:native.revision,transition_proof:native.source_digest},0n);
+      entry_settlement_revision:native.revision,entry_settlement_digest:native.source_digest,
+      transition_proof:native.source_digest},0n);
     return {status:"UPDATED" as const,book_sequence:next.sequence};
   });
 }

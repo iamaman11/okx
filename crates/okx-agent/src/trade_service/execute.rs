@@ -241,6 +241,11 @@ impl TradeService {
                     plan_sha256: prepared.plan_hash.clone(),
                     requested_loss_usdt: exact(usdt),
                     requested_loss_usd: exact(usd),
+                    // A loss model is not a source-verified entry-debit bound.
+                    // Remain fail-closed until the same order carries full
+                    // venue spec/fees/FX/applicability proof in this contract.
+                    entry_upper_usd: None,
+                    entry_proof_digest: None,
                     usd_conversion: conversion.clone(),
                     policy_revision: state.state.revision,
                     census,

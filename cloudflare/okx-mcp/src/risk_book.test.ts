@@ -80,6 +80,11 @@ const partialReplay=await settleEntrySpend(sa,held.entry.key,p,{
  revision:1,source_digest:d});
 check(partialReplay.status==="UPDATED"&&partialReplay.book_sequence===4,
  "lost settlement acknowledgement cannot charge entry twice");
+const spoof=await settleEntrySpend(sa,held.entry.key,p,{
+ connection_generation:77,expected_book_sequence:4,cumulative_entry_usd:"0.5",
+ revision:1,source_digest:a});
+check(spoof.status==="DENIED"&&spoof.reason==="ENTRY_SETTLEMENT_REVISION_CONFLICT",
+ "same revision must also preserve source digest, not just the amount");
 const conflicting=await settleEntrySpend(sa,held.entry.key,p,{
  connection_generation:77,expected_book_sequence:4,cumulative_entry_usd:"0.6",
  revision:1,source_digest:d});
