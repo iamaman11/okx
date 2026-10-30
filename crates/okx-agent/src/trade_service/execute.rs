@@ -10,10 +10,77 @@ struct PostFxFence<'a> {
     conversion: &'a UsdConversion,
 }
 impl TradeService {
-    /// On-demand E1 opening for a *provably empty* campaign only. A prior
-    /// fill, unexplained bill, unavailable real account or incomplete archive
-    /// blocks the import; a policy cap or local T0 never establishes zero.
-    async fn ensure_empty_campaign_opening(
+    /// Native, completely classified USD-denominated spot opening spend.
+    /// A buy consumes gross USD notional; any execution fee consumes
+    /// additional USD, including on a sell. Rebates never replenish budget.
+    /// No other instrument, conversion, bill type or currency is guessed.
+    /// Completeness and fill↔order↔bill identity must already be established
+    /// by AccountHistoryApi's authenticated campaign witness.
+    fn historical_usd_spot_entry(
+        history: &okx_api::CompleteCampaignAccountHistory,
+    ) -> Result<Decimal, String> {
+        use rust_decimal::RoundingStrategy;
+        let orders = history
+            .orders.iter()
+            .map(|o| (o.order_id.as_str(), o))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let bills = history
+            .bills.iter()
+            .map(|b| (b.bill_id.as_str(), b))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        if orders.len() != history.orders.len() || bills.len() != history.bills.len() {
+            return Err("ENTRY_OPENING_DUPLICATE_VENUE_ID".into());
+        }
+        let mut observed_bills = std::collections::BTreeSet::new();
+        let mut total = Decimal::ZERO;
+        for fill in &history.fills {
+            let order = orders.get(fill.order_id.as_str())
+                .ok_or("ENTRY_OPENING_ORDER_UNPROVEN")?;
+            let bill = bills.get(fill.bill_id.as_str())
+                .ok_or("ENTRY_OPENING_BILL_UNPROVEN")?;
+            if fill.instrument_type != "SPOT"
+                || !fill.instrument_id.ends_with("-USD")
+                || fill.fee_currency != "USD"
+                || bill.ccy != "USD"
+                || bill.bill_type != "2"
+                || bill.instrument_id != fill.instrument_id
+                || bill.order_id != fill.order_id
+                || bill.trade_id != fill.trade_id
+                || order.instrument_type != "SPOT"
+                || order.instrument_id != fill.instrument_id
+                || !matches!(fill.side.as_str(), "buy" | "sell")
+                || order.side != fill.side
+                || bill.fee != fill.fee
+                || !observed_bills.insert(fill.bill_id.as_str())
+            {
+                return Err("ENTRY_OPENING_UNSUPPORTED_OR_UNCLASSIFIED_MONEY".into());
+            }
+            let qty = dec(&fill.fill_size)?;
+            let price = dec(&fill.fill_price)?;
+            let fee = dec(&fill.fee)?;
+            if qty <= Decimal::ZERO || price <= Decimal::ZERO {
+                return Err("ENTRY_OPENING_INVALID_FILL".into());
+            }
+            // Negative venue fee = debit; positive rebate is never a credit
+            // to the spent entry budget. Sell proceeds never refund entry.
+            let debit = if fill.side == "buy" {
+                qty.checked_mul(price).ok_or("MONEY_OVERFLOW")?
+            } else {
+                Decimal::ZERO
+            };
+            let debit = debit.checked_add(fee.abs()).ok_or("MONEY_OVERFLOW")?;
+            total = total.checked_add(debit).ok_or("MONEY_OVERFLOW")?;
+        }
+        if observed_bills.len() != history.bills.len() {
+            return Err("ENTRY_OPENING_STANDALONE_BILL_UNCLASSIFIED".into());
+        }
+        Ok(total.round_dp_with_strategy(9, RoundingStrategy::ToPositiveInfinity))
+    }
+
+    /// Opening may be installed once for the entire authenticated cohort.
+    /// Unknown venue events never imply zero. Non-USD historical instruments
+    /// remain unsupported until a historical contract+FX source exists.
+    async fn ensure_campaign_opening(
         &self,
         state: &CentralGovernanceSnapshot,
         until: Instant,
@@ -33,7 +100,42 @@ impl TradeService {
         let budget = summary
             .budget
             .ok_or("ENTRY_OPENING_CENTRAL_BUDGET_MISSING")?;
-        if budget.entry_budget.is_some() {
+        if let Some(entry) = budget.entry_budget {
+            // An imported opening is a historical snapshot, NOT perpetual
+            // proof that nobody subsequently traded outside RiskBook. Until
+            // native post-opening fill/bill settlement is independently
+            // reconciled, any money event after that cut-off blocks new risk.
+            // This deliberately rejects even own fills rather than silently
+            // letting a second trade spend untracked campaign capacity.
+            let from = i64::try_from(entry.opening_as_of_ms)
+                .map_err(|_| "ENTRY_OPENING_CUTOFF_INVALID")?;
+            let through = now();
+            if through <= from {
+                return Err("ENTRY_OPENING_CUTOFF_NOT_FRESH".into());
+            }
+            for account in state.state.accounts.iter().filter(|a| {
+                a.environment == okx_protocol::account_governance::AccountEnvironment::Real
+            }) {
+                if Instant::now() >= until {
+                    return Err("COMMAND_EXPIRED".into());
+                }
+                let resource = self.resources(&account.account_key).await?;
+                if !resource.source_identity_ready().await {
+                    return Err("ENTRY_OPENING_IDENTITY_UNVERIFIED".into());
+                }
+                let money = tokio::time::timeout(
+                    until.saturating_duration_since(Instant::now()),
+                    resource.execution.history.complete_campaign_money_history(
+                        from, through, now(),
+                    ),
+                ).await.map_err(|_| "ENTRY_OPENING_POST_CUTOFF_HISTORY_DEADLINE")?
+                    .map_err(|_| "ENTRY_OPENING_POST_CUTOFF_HISTORY_UNAVAILABLE")?;
+                if money.from_ms != from || money.through_ms != through
+                    || !money.fills.is_empty() || !money.bills.is_empty()
+                {
+                    return Err("ENTRY_OPENING_POST_CUTOFF_MONEY_UNRECONCILED".into());
+                }
+            }
             return Ok(());
         }
         let origin = budget
@@ -80,20 +182,22 @@ impl TradeService {
             .await
             .map_err(|_| "ENTRY_OPENING_HISTORY_DEADLINE")?
             .map_err(|_| "ENTRY_OPENING_HISTORY_UNAVAILABLE")?;
-            if history.from_ms != from
-                || history.through_ms != through
-                || !history.fills.is_empty()
-                || !history.bills.is_empty()
-            {
-                return Err("ENTRY_OPENING_NONEMPTY_MONEY_NEEDS_CLASSIFICATION".into());
+            if history.from_ms != from || history.through_ms != through {
+                return Err("ENTRY_OPENING_HISTORY_SCOPE_MISMATCH".into());
             }
+            let spent = Self::historical_usd_spot_entry(&history)?;
+            let venue_fill_count = history.fills.len();
+            let venue_bill_count = history.bills.len();
             let campaign = origin.campaign_id.clone();
             let source = history.source_digest;
             let source_digest = resource
                 .execution
                 .store
                 .call(until, move |store| {
-                    store.seal_empty_campaign_entry_opening(&campaign, from, through, &source, 0, 0)
+                    store.seal_campaign_entry_opening(
+                        &campaign, from, through, &source,
+                        venue_fill_count, venue_bill_count, spent,
+                    )
                 })
                 .await
                 .map_err(err)?;
@@ -102,7 +206,7 @@ impl TradeService {
                 history_from_ms: origin.started_at_ms,
                 history_through_ms: u64::try_from(through)
                     .map_err(|_| "ENTRY_OPENING_TIME_INVALID")?,
-                consumed_entry_usd: "0".into(),
+                consumed_entry_usd: exact(spent),
                 order_history_complete: true,
                 fill_history_complete: true,
                 bill_history_complete: true,
@@ -111,6 +215,10 @@ impl TradeService {
             });
         }
         rows.sort_by(|a, b| a.account_key.cmp(&b.account_key));
+        let consumed = rows.iter().try_fold(Decimal::ZERO, |sum, account| {
+            sum.checked_add(dec(&account.consumed_entry_usd)?)
+                .ok_or_else(|| "MONEY_OVERFLOW".to_owned())
+        })?;
         let limit_usd = state
             .state
             .campaign_entry_limit_usd
@@ -119,7 +227,7 @@ impl TradeService {
         let mut source = CampaignOpeningSource {
             campaign_id: origin.campaign_id,
             limit_usd,
-            consumed_usd: "0".into(),
+            consumed_usd: exact(consumed),
             source_digest: String::new(),
             as_of_ms: u64::try_from(through).map_err(|_| "ENTRY_OPENING_TIME_INVALID")?,
             campaign_started_at_ms: origin.started_at_ms,
@@ -252,7 +360,7 @@ impl TradeService {
         if increase
             && r.configuration.account_key.environment == okx_protocol::accounts::Environment::Real
         {
-            self.ensure_empty_campaign_opening(&state, until).await?;
+            self.ensure_campaign_opening(&state, until).await?;
         }
         let plan = loop {
             match self
@@ -1796,6 +1904,63 @@ where
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn e1_positive_historical_usd_spot_is_classified_without_usdt_fx_guess() {
+        let order: okx_api::HistoricalOrder = serde_json::from_value(serde_json::json!({
+            "instType":"SPOT","instId":"BTC-USD","ordId":"123","side":"buy"
+        })).unwrap();
+        let fill: okx_api::FillHistory = serde_json::from_value(serde_json::json!({
+            "instType":"SPOT","instId":"BTC-USD","tradeId":"11","ordId":"123",
+            "billId":"111","side":"buy","fillPx":"100","fillSz":"0.05",
+            "fee":"-0.01","feeCcy":"USD"
+        })).unwrap();
+        let bill: okx_api::AccountBill = serde_json::from_value(serde_json::json!({
+            "billId":"111","instType":"SPOT","instId":"BTC-USD","ordId":"123",
+            "tradeId":"11","ccy":"USD","fee":"-0.01","type":"2"
+        })).unwrap();
+        let mut history = okx_api::CompleteCampaignAccountHistory {
+            from_ms: 1, through_ms: 100, orders: vec![order], fills: vec![fill],
+            bills: vec![bill], source_digest:"f".repeat(64),
+        };
+        assert_eq!(
+            TradeService::historical_usd_spot_entry(&history).unwrap(),
+            dec("5.01").unwrap()
+        );
+        history.fills[0].fee = "0.03".into();
+        history.bills[0].fee = "0.03".into();
+        assert_eq!(TradeService::historical_usd_spot_entry(&history).unwrap(),
+            dec("5.03").unwrap(), "rebate never increases campaign budget");
+        history.fills[0].instrument_type="SWAP".into();
+        assert!(TradeService::historical_usd_spot_entry(&history).is_err(),
+            "SWAP cannot be priced without historical contract unit");
+        history.fills[0].instrument_type="SPOT".into();
+        history.fills[0].fee_currency="USDT".into();
+        assert!(TradeService::historical_usd_spot_entry(&history).is_err(),
+            "no observed USD/USDT rate may be promoted into a guaranteed source");
+        history.fills[0].fee_currency="USD".into();
+        history.bills.push(serde_json::from_value(serde_json::json!({
+            "billId":"112","instType":"SPOT","instId":"BTC-USD",
+            "ccy":"USD","fee":"-1","type":"7"
+        })).unwrap());
+        assert!(TradeService::historical_usd_spot_entry(&history).is_err(),
+            "standalone bills and borrow costs cannot be treated as zero");
+    }
+
+    #[test]
+    fn e1_empty_history_is_zero_but_unclassified_bill_never_is() {
+        let mut history = okx_api::CompleteCampaignAccountHistory {
+            from_ms: 1, through_ms: 100, orders:vec![], fills:vec![], bills:vec![],
+            source_digest:"f".repeat(64),
+        };
+        assert_eq!(TradeService::historical_usd_spot_entry(&history).unwrap(),
+                   Decimal::ZERO);
+        history.bills.push(serde_json::from_value(serde_json::json!({
+            "billId":"999","ccy":"USD","fee":"-1","type":"2"
+        })).unwrap());
+        assert_eq!(TradeService::historical_usd_spot_entry(&history),
+            Err("ENTRY_OPENING_STANDALONE_BILL_UNCLASSIFIED".into()));
+    }
 
     #[test]
     fn e1_held_entry_sources_reject_tampering_and_stale_tariffs() {

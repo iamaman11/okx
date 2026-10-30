@@ -203,13 +203,14 @@ fn upsert_source_cursor(tx: &rusqlite::Transaction<'_>, c: &SourceCursor) -> Sto
     Ok(())
 }
 impl AccountStore {
-    /// Seal a genuinely empty campaign monetary window after the native
-    /// authenticated venue adapter has exhaustively paginated orders, fills
-    /// and bills from RiskBook-owned inception (not AccountStore T0).
-    /// NONEMPTY venue history is deliberately unsupported until its contract
-    /// valuation, fee FX and economic event classification are all proved.
+    /// Seal an externally classified USD-denominated campaign monetary
+    /// window. Only the native authenticated adapter can call this after
+    /// exhausting venue orders, fills and bills and classifying every item.
+    /// The SQL writer refuses local-ledger divergence (including unposted
+    /// risks) and stores an immutable account-scoped receipt. UNKNOWN money
+    /// cannot be imported as zero.
     /// A SQL receipt is immutable and scoped to this installation/account.
-    pub fn seal_empty_campaign_entry_opening(
+    pub fn seal_campaign_entry_opening(
         &self,
         campaign_id: &str,
         from_ms: i64,
@@ -217,6 +218,7 @@ impl AccountStore {
         venue_source_digest: &str,
         venue_fill_count: usize,
         venue_bill_count: usize,
+        consumed_entry_usd: Decimal,
     ) -> StoreResult<String> {
         use sha2::{Digest, Sha256};
         if !campaign_id.starts_with("sha256:")
@@ -226,8 +228,10 @@ impl AccountStore {
             || !venue_source_digest.bytes().all(|b| b.is_ascii_hexdigit())
             || from_ms <= 0
             || through_ms < from_ms
-            || venue_fill_count != 0
-            || venue_bill_count != 0
+            || venue_fill_count != venue_bill_count
+            || consumed_entry_usd < Decimal::ZERO
+            || (venue_fill_count == 0 && consumed_entry_usd != Decimal::ZERO)
+            || (venue_fill_count > 0 && consumed_entry_usd <= Decimal::ZERO)
         {
             return Err(StoreError::Invalid("ENTRY_OPENING_NONEMPTY_OR_INVALID"));
         }
@@ -236,9 +240,10 @@ impl AccountStore {
                 "ENTRY_OPENING_FINANCE_PROVENANCE_UNSEALED",
             ));
         }
-        // An empty fresh venue history cannot be reconciled with an already
-        // nonempty local ledger. Such a mismatch is an operational blocker,
-        // never evidence that the opening spend is zero.
+        // Current native ledger must still be at its authenticated flat
+        // opening. The venue may report historical activity before native
+        // initialization; duplicate post-initialization money is not
+        // automatically reconciled or counted twice. Any divergence blocks.
         let (fills, bills, finance, cash_debits, unresolved, lots): (i64, i64, i64, i64, i64, i64) =
             self.connection.query_row(
                 "SELECT (SELECT COUNT(*) FROM fills),
@@ -269,13 +274,16 @@ impl AccountStore {
             ));
         }
         let canonical = serde_json::to_vec(&(
-            "okx.campaign-empty-opening-sql/v1",
+            "okx.campaign-entry-opening-sql/v2",
             self.meta.account_key.as_str(),
             self.meta.installation_id.as_str(),
             campaign_id,
             from_ms,
             through_ms,
             venue_source_digest,
+            venue_fill_count,
+            venue_bill_count,
+            consumed_entry_usd.to_string(),
         ))
         .map_err(|_| StoreError::Invalid("ENTRY_OPENING_SERIALIZATION_FAILED"))?;
         let proof = format!("{:x}", Sha256::digest(canonical));

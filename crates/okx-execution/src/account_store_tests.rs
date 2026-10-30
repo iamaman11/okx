@@ -9,33 +9,33 @@ fn e1_campaign_empty_opening_sql_receipt_is_durable_and_immutable() {
     let campaign = format!("sha256:{}", "c".repeat(64));
     let venue = "d".repeat(64);
     let first = s
-        .seal_empty_campaign_entry_opening(&campaign, 1, 2, &venue, 0, 0)
+        .seal_campaign_entry_opening(&campaign, 1, 2, &venue, 0, 0, Decimal::ZERO)
         .unwrap();
     assert_eq!(first.len(), 64);
     assert_eq!(
-        s.seal_empty_campaign_entry_opening(&campaign, 1, 2, &venue, 0, 0)
+        s.seal_campaign_entry_opening(&campaign, 1, 2, &venue, 0, 0, Decimal::ZERO)
             .unwrap(),
         first
     );
     let fresh = s
-        .seal_empty_campaign_entry_opening(&campaign, 1, 3, &venue, 0, 0)
+        .seal_campaign_entry_opening(&campaign, 1, 3, &venue, 0, 0, Decimal::ZERO)
         .unwrap();
     assert_ne!(
         first, fresh,
         "new venue cut-off is a new append-only witness"
     );
     assert_eq!(
-        s.seal_empty_campaign_entry_opening(&campaign, 1, 3, &venue, 0, 0)
+        s.seal_campaign_entry_opening(&campaign, 1, 3, &venue, 0, 0, Decimal::ZERO)
             .unwrap(),
         fresh,
         "identical retry is readback-only"
     );
     assert!(
-        s.seal_empty_campaign_entry_opening(&campaign, 1, 2, &venue, 1, 0)
+        s.seal_campaign_entry_opening(&campaign, 1, 2, &venue, 1, 0, Decimal::ZERO)
             .is_err()
     );
     assert!(
-        s.seal_empty_campaign_entry_opening(&campaign, 1, 2, &venue, 0, 1)
+        s.seal_campaign_entry_opening(&campaign, 1, 2, &venue, 0, 1, Decimal::ZERO)
             .is_err()
     );
     assert!(
@@ -57,6 +57,38 @@ fn e1_campaign_empty_opening_sql_receipt_is_durable_and_immutable() {
 }
 
 #[test]
+fn e1_positive_usd_opening_is_immutable_and_never_replays_as_zero() {
+    let s = store();
+    let campaign = format!("sha256:{}", "c".repeat(64));
+    let venue = "d".repeat(64);
+    let paid = Decimal::new(501, 2);
+    let source = s.seal_campaign_entry_opening(
+        &campaign, 1, 2, &venue, 1, 1, paid
+    ).unwrap();
+    assert_eq!(
+        s.seal_campaign_entry_opening(&campaign, 1, 2, &venue, 1, 1, paid)
+            .unwrap(), source
+    );
+    assert_ne!(
+        s.seal_campaign_entry_opening(
+            &campaign, 1, 2, &venue, 0, 0, Decimal::ZERO
+        ).unwrap(), source,
+        "a separate zero proof does not overwrite positive historical evidence"
+    );
+    assert!(s.seal_campaign_entry_opening(
+        &campaign, 1, 2, &venue, 1, 1, Decimal::ZERO
+    ).is_err());
+    assert!(s.seal_campaign_entry_opening(
+        &campaign, 1, 2, &venue, 1, 0, paid
+    ).is_err());
+    let count: i64 = s.connection.query_row(
+        "SELECT COUNT(*) FROM operation_receipts
+         WHERE kind='CAMPAIGN_ENTRY_OPENING_SEALED'", [], |r|r.get(0)
+    ).unwrap();
+    assert_eq!(count, 2);
+}
+
+#[test]
 fn e1_campaign_empty_opening_refuses_unreconciled_money() {
     let s = store();
     let campaign = format!("sha256:{}", "c".repeat(64));
@@ -72,7 +104,7 @@ fn e1_campaign_empty_opening_refuses_unreconciled_money() {
         )
         .unwrap();
     assert!(
-        s.seal_empty_campaign_entry_opening(&campaign, 1, 2, &venue, 0, 0)
+        s.seal_campaign_entry_opening(&campaign, 1, 2, &venue, 0, 0, Decimal::ZERO)
             .is_err()
     );
 }
@@ -90,7 +122,7 @@ fn e1_t09_opening_rejects_cash_flows_and_nonterminal_risk() {
         )
         .unwrap();
     assert!(
-        s.seal_empty_campaign_entry_opening(&campaign, 1, 3, &venue, 0, 0)
+        s.seal_campaign_entry_opening(&campaign, 1, 3, &venue, 0, 0, Decimal::ZERO)
             .is_err()
     );
     // Cash flows are immutable: verify unresolved exposure in a separate
@@ -100,7 +132,7 @@ fn e1_t09_opening_rejects_cash_flows_and_nonterminal_risk() {
     assert_eq!(i.state, IntentState::Prepared);
     assert!(
         unresolved
-            .seal_empty_campaign_entry_opening(&campaign, 1, 3, &venue, 0, 0)
+            .seal_campaign_entry_opening(&campaign, 1, 3, &venue, 0, 0, Decimal::ZERO)
             .is_err(),
         "an unposted or unknown native intent never attests a flat campaign"
     );
@@ -112,13 +144,13 @@ fn e1_t10_lost_opening_reply_can_retry_without_mutating_previous_receipt() {
     let campaign = format!("sha256:{}", "e".repeat(64));
     let first_venue = "a".repeat(64);
     let first = s
-        .seal_empty_campaign_entry_opening(&campaign, 1, 200, &first_venue, 0, 0)
+        .seal_campaign_entry_opening(&campaign, 1, 200, &first_venue, 0, 0, Decimal::ZERO)
         .unwrap();
     // Model a lost Worker response followed by a new authenticated full
     // venue sweep with a new source digest and observed cut-off.
     let second_venue = "b".repeat(64);
     let second = s
-        .seal_empty_campaign_entry_opening(&campaign, 1, 220, &second_venue, 0, 0)
+        .seal_campaign_entry_opening(&campaign, 1, 220, &second_venue, 0, 0, Decimal::ZERO)
         .unwrap();
     assert_ne!(first, second);
     let mut statement = s
