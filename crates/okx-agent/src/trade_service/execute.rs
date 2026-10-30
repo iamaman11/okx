@@ -16,6 +16,7 @@ impl TradeService {
     /// No other instrument, conversion, bill type or currency is guessed.
     /// Completeness and fill↔order↔bill identity must already be established
     /// by AccountHistoryApi's authenticated campaign witness.
+    #[cfg(test)]
     fn historical_usd_spot_entry(
         history: &okx_api::CompleteCampaignAccountHistory,
     ) -> Result<Decimal, String> {
