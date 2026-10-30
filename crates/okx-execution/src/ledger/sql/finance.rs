@@ -445,6 +445,9 @@ impl AccountStore {
     ) -> StoreResult<IntentFeeBillEvidence> {
         use sha2::{Digest, Sha256};
         let fill = self.intent_fill_cost_evidence(intent_id, through)?;
+        if !finance_proof_sealed(&self.connection)? {
+            return Err(StoreError::Invalid("ENTRY_FINANCE_PROVENANCE_UNSEALED"));
+        }
         let bills = self.cursor("bills", "account")?
             .ok_or(StoreError::Invalid("ENTRY_BILLS_COVERAGE_UNPROVEN"))?;
         if !bills.cursor.is_empty() || !bills.coverage_gaps.is_empty()
@@ -518,7 +521,7 @@ impl AccountStore {
             if proof.4.is_some()
                 || !proof.1.starts_with("bill:")
                 || proof.5.as_deref() != proof.1.strip_prefix("bill:")
-                || proof.6.is_none_or(|t| t <= 0 || t > bills.watermark)
+                || proof.6.is_none_or(|t| t <= 0 || t > through || t > bills.watermark)
                 || proof.7.as_deref() != Some(currency.as_str())
                 || !proof.8
                 || proof.3 != currency
