@@ -1124,11 +1124,9 @@ mod tests {
         let registry = Arc::new(registry);
         let budget = RateBudget::new();
         let public_environment = OkxEnvironment::new(okx_api::Region::Global, false);
-        let reference = okx_observation::ReferenceRegistry::from_public(
-            "2026-10-31T00:00:00Z",
-            vec![],
-        )
-        .unwrap();
+        let reference =
+            okx_observation::ReferenceRegistry::from_public("2026-10-31T00:00:00Z", vec![])
+                .unwrap();
         let (_public_coordinator, public_ws) =
             okx_runtime::PublicWsCoordinator::new_with_rate_budget(
                 public_environment,
