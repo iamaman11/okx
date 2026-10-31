@@ -255,8 +255,7 @@ impl AccountStore {
         if intent.state != IntentState::Cancelled || !intent.risk_increase
             || !intent.instrument_id.ends_with("-USDT-SWAP")
             || venue_updated_at <= 0
-            || venue_updated_at.checked_add(2_000)
-                .is_none_or(|min| covered_through < min)
+            || covered_through < venue_updated_at
         {
             return Err(StoreError::Invalid("ZERO_ENTRY_VENUE_TERMINAL_UNVERIFIED"));
         }
@@ -310,10 +309,17 @@ impl AccountStore {
             "SELECT EXISTS(SELECT 1 FROM fills
                  WHERE (intent_id=?1 OR exchange_order_id=?2)
                    AND time<=?4)
-               OR EXISTS(SELECT 1 FROM bills
-                 WHERE time>=?3 AND time<=?4
-                   AND kind NOT IN ('1:11','1:12','8:173','8:174')
-                   AND kind NOT LIKE '7:%')",
+               OR EXISTS(SELECT 1 FROM bill_order_sources o
+                 JOIN bills b ON b.bill_id=o.bill_id
+                 WHERE o.exchange_order_id=?2
+                   AND b.time>=?3 AND b.time<=?4)
+               OR EXISTS(SELECT 1 FROM bills b
+                 LEFT JOIN bill_order_sources o ON o.bill_id=b.bill_id
+                 WHERE o.bill_id IS NULL
+                   AND b.time>=?3 AND b.time<=?4
+                   AND b.amount!='0'
+                   AND b.kind NOT IN ('1:11','1:12','8:173','8:174')
+                   AND b.kind NOT LIKE '7:%')",
             params![id,venue_id,post.unwrap(),proof_through], |r| r.get(0),
         )?;
         if unexplained != 0 {

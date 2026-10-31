@@ -32,6 +32,17 @@ CREATE TABLE IF NOT EXISTS campaign_entry_totals(
     covered_through_ms INTEGER NOT NULL,
     consumed_usd TEXT NOT NULL
 ) STRICT;
+CREATE TABLE IF NOT EXISTS bill_order_sources(
+    bill_id TEXT PRIMARY KEY REFERENCES bills(bill_id),
+    instrument_id TEXT NOT NULL,
+    exchange_order_id TEXT NOT NULL,
+    trade_id TEXT NOT NULL
+) STRICT;
+CREATE INDEX IF NOT EXISTS idx_bill_order_sources_order ON bill_order_sources(exchange_order_id,bill_id);
+CREATE TRIGGER IF NOT EXISTS immutable_bill_order_source_update BEFORE UPDATE ON bill_order_sources
+    BEGIN SELECT RAISE(ABORT,'IMMUTABLE_BILL_ORDER_SOURCE'); END;
+CREATE TRIGGER IF NOT EXISTS immutable_bill_order_source_delete BEFORE DELETE ON bill_order_sources
+    BEGIN SELECT RAISE(ABORT,'IMMUTABLE_BILL_ORDER_SOURCE'); END;
 CREATE TABLE IF NOT EXISTS swap_fill_sources(
     fill_id TEXT PRIMARY KEY REFERENCES fills(fill_id),
     bill_id TEXT NOT NULL, sub_type TEXT NOT NULL,

@@ -5,7 +5,7 @@ use crate::{
 };
 use okx_api::{AccountBill, FillHistory};
 use okx_execution::{
-    AccountSqlStatementStat, Bill, CashFlow, EntryOrderFeeLink, Fill, FinanceEntry, FundingEvent,
+    AccountSqlStatementStat, Bill, BillOrderSource, CashFlow, EntryOrderFeeLink, Fill, FinanceEntry, FundingEvent,
     IngestPage, NavPoint, SourceCursor, StoreError, StoreResult, StrategyValuationEvidence,
     SwapFillSource, UsdConversionEvidence, ValuationPosition, VenueMark, swap_fill_direction,
 };
@@ -897,6 +897,14 @@ async fn capture_bills(
                     continue;
                 }
                 let key = format!("bill:{}", b.bill_id);
+                if !b.order_id.is_empty() && b.order_id != "0" {
+                    page.bill_order_sources.push(BillOrderSource {
+                        bill_id: b.bill_id.clone(),
+                        instrument_id: b.instrument_id.clone(),
+                        exchange_order_id: b.order_id.clone(),
+                        trade_id: b.trade_id.clone(),
+                    });
+                }
                 let owner = s
                     .by_client_order_id(&b.client_order_id)?
                     .or(s.by_exchange_order_id(&b.order_id)?);

@@ -425,6 +425,17 @@ pub struct EntryOrderFeeLink {
 }
 
 
+/// The raw authenticated account-bill -> venue-order identity.
+/// Persisted before the bills source cursor advances. This does NOT assert
+/// that a bill is a fee, entry turnover, or an owned native intent.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BillOrderSource {
+    pub bill_id: String,
+    pub instrument_id: String,
+    pub exchange_order_id: String,
+    pub trade_id: String,
+}
+
 /// A raw venue SWAP fill label, retained atomically with its source cursor.
 /// It is NOT itself an event-time contract specification or USD valuation.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -459,6 +470,8 @@ pub struct IngestPage {
     #[serde(default)]
     pub swap_fill_sources: Vec<SwapFillSource>,
     pub bills: Vec<Bill>,
+    #[serde(default)]
+    pub bill_order_sources: Vec<BillOrderSource>,
     pub entry_order_fee_links: Vec<EntryOrderFeeLink>,
     pub finance: Vec<FinanceEntry>,
     pub cash_flows: Vec<CashFlow>,

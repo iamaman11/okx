@@ -3217,6 +3217,42 @@ impl AccountStore {
                 return Err(StoreError::Invalid("IMMUTABLE_BILL_CONFLICT"));
             }
         }
+        for source in &page.bill_order_sources {
+            if source.bill_id.is_empty() || source.exchange_order_id.is_empty()
+                || source.exchange_order_id == "0"
+                || source.instrument_id.is_empty()
+            {
+                return Err(StoreError::Invalid("BILL_ORDER_SOURCE_INVALID"));
+            }
+            let bill_exists: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM bills WHERE bill_id=?1)",
+                [&source.bill_id], |r| r.get(0),
+            )?;
+            if !bill_exists {
+                return Err(StoreError::Invalid("BILL_ORDER_SOURCE_WITHOUT_BILL"));
+            }
+            tx.execute(
+                "INSERT INTO bill_order_sources VALUES(?1,?2,?3,?4)
+                 ON CONFLICT(bill_id) DO NOTHING",
+                params![
+                    source.bill_id,source.instrument_id,
+                    source.exchange_order_id,source.trade_id
+                ],
+            )?;
+            let original: (String,String,String) = tx.query_row(
+                "SELECT instrument_id,exchange_order_id,trade_id
+                 FROM bill_order_sources WHERE bill_id=?1",
+                [&source.bill_id],
+                |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?)),
+            )?;
+            if original != (
+                source.instrument_id.clone(),
+                source.exchange_order_id.clone(),
+                source.trade_id.clone(),
+            ) {
+                return Err(StoreError::Invalid("IMMUTABLE_BILL_ORDER_SOURCE_CONFLICT"));
+            }
+        }
         for event in &page.funding_events {
             let completed: bool = tx.query_row(
                 "SELECT EXISTS(SELECT 1 FROM operation_receipts WHERE operation_id=?1)",

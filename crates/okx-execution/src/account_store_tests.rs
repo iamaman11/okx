@@ -170,6 +170,30 @@ fn e1_zero_fill_terminal_requires_full_money_coverage_and_replays_after_restart(
         &campaign,2,12).unwrap();
     assert_eq!(consumed,Decimal::ZERO,
         "canceled zero fill cannot consume notional or refund earlier spend");
+    // A later backfill from another independently identified order must
+    // not rewrite this terminal zero-fill receipt. Historical opening still
+    // requires separate full-cohort accounting for that other order.
+    reopened.ingest_page(&IngestPage {
+        bills: vec![Bill {
+            bill_id: "other-order-fee".into(),
+            kind: "2:0".into(),time: 8,amount: Decimal::new(-1,2),
+            currency: "USDT".into(),
+            economic_event_key: "bill:other-order-fee".into(),
+        }],
+        bill_order_sources: vec![BillOrderSource {
+            bill_id: "other-order-fee".into(),
+            instrument_id: "BTC-USDT-SWAP".into(),
+            exchange_order_id: "another-venue-order".into(),
+            trade_id: "other-trade".into(),
+        }],
+        ..Default::default()
+    }).unwrap();
+    assert_eq!(
+        reopened.bind_terminal_entry_settlement("intent",7,Decimal::ZERO,12).unwrap(),
+        zero, "other order's fee does not change our original zero charge"
+    );
+    assert!(reopened.verify_captured_campaign_continuity(2,12).is_err(),
+        "other order's actual spending still requires campaign reconciliation");
 }
 #[test]
 fn e1_zero_fill_cannot_hide_unclassified_bill_or_undurable_source() {
