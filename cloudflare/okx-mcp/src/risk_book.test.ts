@@ -212,7 +212,7 @@ check((await inspectRisk(sa,held.entry.key))?.entry.state==="POSTED","addressed 
 const terminalCensus={...census,occupied:census.occupied.map(v=>({...v,cumulative_loss_usd:v.account_key===accountKey(request)?"2":"0"})),source_digest:a,generated_at_ms:now+4,source_read_floor_ms:now+4};
 const ledgerFinal={account_uid:a,run_id:base.run_id,intent_id:request.intent_id,
  state:"FILLED",record_digest:p,cumulative_loss_usd:"2",remaining_exposure_usdt:"0",
- cumulative_entry_usd:"1.5",entry_settlement_revision:2,entry_settlement_digest:d} as const;
+ cumulative_entry_usd:"1.5",entry_settlement_revision:2,entry_settlement_digest:b} as const;
 const terminalProof=(ledger:typeof ledgerFinal)=>({
  census:terminalCensus,source_proof:{...native,source_digest:a},ledger,now_ms:now+5
 });
@@ -231,7 +231,7 @@ check(premature.status==="DENIED"&&premature.reason==="TERMINAL_ENTRY_SETTLEMENT
  "RELEASE cannot invent the final debit or change money/CAS on denial");
 const fullyBooked=await settleEntrySpend(sa,held.entry.key,p,{
  connection_generation:77,expected_book_sequence:4,cumulative_entry_usd:"1.5",
- revision:2,source_digest:d
+ revision:2,source_digest:b
 });
 check(fullyBooked.status==="UPDATED"&&fullyBooked.book_sequence===5,
  "final entry debit must first cross typed SETTLE_ENTRY exactly once");
@@ -253,13 +253,13 @@ check(finalEntry.consumed_usd==="1.5"&&finalEntry.reserved_usd==="0",
  "terminal release returns unused reserve but NEVER refunds spent entry cost");
 const terminalReplay=await settleEntrySpend(sa,held.entry.key,p,{
  connection_generation:77,expected_book_sequence:4,cumulative_entry_usd:"1.5",
- revision:2,source_digest:d
+ revision:2,source_digest:b
 });
 check(terminalReplay.status==="UPDATED",
  "lost final SETTLE_ENTRY reply remains idempotently readable after release");
 const wrongGenerationReplay=await settleEntrySpend(sa,held.entry.key,p,{
  connection_generation:76,expected_book_sequence:4,cumulative_entry_usd:"1.5",
- revision:2,source_digest:d
+ revision:2,source_digest:b
 });
 check(wrongGenerationReplay.status==="DENIED",
  "old authenticated generation cannot replay terminal settlement after recovery");
@@ -275,7 +275,7 @@ check(finalAgain.consumed_usd==="1.5"&&finalAgain.reserved_usd==="0",
  "replayed terminal settlement cannot debit twice or revive a released grant");
 const forbiddenTerminalIncrease=await settleEntrySpend(sa,held.entry.key,p,{
  connection_generation:77,expected_book_sequence:(await readRiskBook(sa))!.sequence,
- cumulative_entry_usd:"1.6",revision:3,source_digest:d
+ cumulative_entry_usd:"1.6",revision:3,source_digest:b
 });
 check(forbiddenTerminalIncrease.status==="DENIED",
  "a new revision cannot recycle the old financial source digest");
@@ -308,7 +308,7 @@ check((await settleEntrySpend(lateBook,held.entry.key,p,{
 })).status==="DENIED","late fee needs current global CAS for any new debit");
 const secondLate=await settleEntrySpend(lateBook,held.entry.key,p,{
  connection_generation:77,expected_book_sequence:releasedSeq+1,
- cumulative_entry_usd:"2.03",revision:4,source_digest:b
+ cumulative_entry_usd:"2.03",revision:4,source_digest:"e".repeat(64)
 });
 check(secondLate.status==="UPDATED"&&secondLate.reason==="BUDGET_BOUND_BREACH",
  "native bill above initial entry admission is still charged in full");
