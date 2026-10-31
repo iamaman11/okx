@@ -1772,10 +1772,42 @@ mod raw_native_session_tests {
                             "fee_bills":format!("{:?}", s.intent_fee_bill_evidence(&intent,bill_watermark))
                         }))
                     }).await;
+                // Read-only independent SQLite diagnostic: source refs and
+                // matching economic rows only, never direct account mutation.
+                let financial_links = std::fs::read_dir(root.join("accounts"))
+                    .unwrap()
+                    .filter_map(|entry| {
+                        let path = entry.ok()?.path().join("account.sqlite");
+                        let sql = rusqlite::Connection::open_with_flags(
+                            path,
+                            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+                        ).ok()?;
+                        let mut stmt = sql.prepare(
+                            "SELECT l.source_ref,e.entry_id,e.economic_event_key,e.component,e.allocation_leg,e.amount,e.currency
+                             FROM finance_source_links l
+                             JOIN finance_entries e ON e.entry_id=l.entry_id
+                             WHERE l.source_ref LIKE '%t09-entry-trade-001%'
+                                OR e.economic_event_key='bill:t09-entry-bill-001'
+                             ORDER BY l.source_ref,e.entry_id LIMIT 24",
+                        ).ok()?;
+                        let entries = stmt.query_map([], |r| {
+                            Ok((
+                                r.get::<_,String>(0)?,
+                                r.get::<_,String>(1)?,
+                                r.get::<_,String>(2)?,
+                                r.get::<_,String>(3)?,
+                                r.get::<_,String>(4)?,
+                                r.get::<_,String>(5)?,
+                                r.get::<_,String>(6)?,
+                            ))
+                        }).ok()?.filter_map(Result::ok).collect::<Vec<_>>();
+                        Some(entries)
+                    })
+                    .collect::<Vec<_>>();
                 let observed = feed.requests.lock().unwrap();
                 let recent = observed.iter().rev().take(24).cloned().collect::<Vec<_>>();
                 panic!(
-                    "T09_FILL_BILL_CAPTURE_NOT_PROVEN reason={reason:?} last_success={last_success:?} last_failure={last_failure:?} sql={cursors:?} queued_recorded_pages={} observed_requests={recent:?}",
+                    "T09_FILL_BILL_CAPTURE_NOT_PROVEN reason={reason:?} last_success={last_success:?} last_failure={last_failure:?} sql={cursors:?} finance_source_links={financial_links:?} queued_recorded_pages={} observed_requests={recent:?}",
                     feed.unconsumed_reads()
                 );
             }
