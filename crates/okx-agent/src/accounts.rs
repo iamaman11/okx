@@ -1105,7 +1105,10 @@ pub(crate) mod recorded_support {
             arg: serde_json::Value,
             frames: Vec<String>,
         ) {
-            self.public_subscriptions.lock().unwrap().push((arg, frames));
+            self.public_subscriptions
+                .lock()
+                .unwrap()
+                .push((arg, frames));
         }
 
         pub(crate) fn unconsumed_public_subscriptions(&self) -> usize {
@@ -1369,25 +1372,27 @@ mod tests {
         use serde_json::{Value, json};
         let reference = okx_observation::ReferenceRegistry::from_public(
             "2026-10-31T00:00:00Z",
-            vec![serde_json::from_value(json!({
-                "instType": "SWAP",
-                "instId": "BTC-USDT-SWAP",
-                "instFamily": "BTC-USDT",
-                "uly": "BTC-USDT",
-                "state": "live",
-                "ruleType": "normal",
-                "settleCcy": "USDT",
-                "tickSz": "0.1",
-                "lotSz": "0.01",
-                "minSz": "0.01",
-                "maxLmtSz": "1000",
-                "maxMktSz": "1000",
-                "ctType": "linear",
-                "ctVal": "0.01",
-                "ctValCcy": "BTC",
-                "lever": "20"
-            }))
-            .unwrap()],
+            vec![
+                serde_json::from_value(json!({
+                    "instType": "SWAP",
+                    "instId": "BTC-USDT-SWAP",
+                    "instFamily": "BTC-USDT",
+                    "uly": "BTC-USDT",
+                    "state": "live",
+                    "ruleType": "normal",
+                    "settleCcy": "USDT",
+                    "tickSz": "0.1",
+                    "lotSz": "0.01",
+                    "minSz": "0.01",
+                    "maxLmtSz": "1000",
+                    "maxMktSz": "1000",
+                    "ctType": "linear",
+                    "ctVal": "0.01",
+                    "ctValCcy": "BTC",
+                    "lever": "20"
+                }))
+                .unwrap(),
+            ],
         )
         .unwrap();
         let connector = Arc::new(RecordedWsConnector::default());
@@ -1395,8 +1400,16 @@ mod tests {
         let timestamp = stamp.to_string();
         let future = (stamp + 8 * 60 * 60 * 1000).to_string();
         let recordings: Vec<(Value, Option<Value>, Option<&str>)> = vec![
-            (json!({"channel":"instruments","instType":"SWAP"}), None, None),
-            (json!({"channel":"instruments","instType":"FUTURES"}), None, None),
+            (
+                json!({"channel":"instruments","instType":"SWAP"}),
+                None,
+                None,
+            ),
+            (
+                json!({"channel":"instruments","instType":"FUTURES"}),
+                None,
+                None,
+            ),
             (
                 json!({"channel":"tickers","instId":"BTC-USDT-SWAP"}),
                 Some(json!({"instType":"SWAP","instId":"BTC-USDT-SWAP",
@@ -1437,9 +1450,12 @@ mod tests {
             ),
         ];
         for (arg, data, action) in recordings {
-            let mut raw = vec![json!({
-                "event":"subscribe","arg":arg,"connId":"recorded-public"
-            }).to_string()];
+            let mut raw = vec![
+                json!({
+                    "event":"subscribe","arg":arg,"connId":"recorded-public"
+                })
+                .to_string(),
+            ];
             if let Some(data) = data {
                 let mut message = json!({"arg":arg,"data":[data]});
                 if let Some(action) = action {
@@ -1537,7 +1553,11 @@ mod tests {
         let mut wrong = request.clone();
         wrong.size = "0.40".into();
         let mismatch = trade.place_order(&wrong, &timing).await.unwrap_err();
-        assert!(mismatch.to_string().contains("TRANSCRIPT_POST_BODY_MISMATCH"));
+        assert!(
+            mismatch
+                .to_string()
+                .contains("TRANSCRIPT_POST_BODY_MISMATCH")
+        );
         assert_eq!(
             feed.unconsumed_posts(),
             1,
@@ -1597,7 +1617,9 @@ mod tests {
             .await
             .unwrap_err();
         assert!(
-            exhausted.to_string().contains("TRANSCRIPT_SOURCE_PAGE_UNEXPECTED_OR_EXHAUSTED"),
+            exhausted
+                .to_string()
+                .contains("TRANSCRIPT_SOURCE_PAGE_UNEXPECTED_OR_EXHAUSTED"),
             "unrecorded extra source pages must not become empty proof: {exhausted}"
         );
     }
