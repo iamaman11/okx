@@ -1,4 +1,71 @@
 use super::*;
+#[test]
+fn e1_raw_bill_order_source_is_atomic_idempotent_and_immutable() {
+    let mut s = store();
+    let original = IngestPage {
+        bills: vec![Bill {
+            bill_id: "bill-origin".into(), kind: "2:0".into(),
+            time: 20, amount: Decimal::new(-1, 2),
+            currency: "USDT".into(),
+            economic_event_key: "bill:bill-origin".into(),
+        }],
+        bill_order_sources: vec![BillOrderSource {
+            bill_id: "bill-origin".into(),
+            instrument_id: "BTC-USDT-SWAP".into(),
+            exchange_order_id: "other-order".into(),
+            trade_id: "trade-1".into(),
+        }],
+        cursor: Some(SourceCursor {
+            source: "bills".into(), stream_partition: "account".into(),
+            cursor: String::new(), watermark: 21, generation: 1,
+            coverage_gaps: String::new(),
+        }),
+        ..Default::default()
+    };
+    s.ingest_page(&original).unwrap();
+    s.ingest_page(&original).unwrap();
+    let count: i64 = s.connection.query_row(
+        "SELECT COUNT(*) FROM bill_order_sources WHERE bill_id='bill-origin'",
+        [], |r| r.get(0),
+    ).unwrap();
+    assert_eq!(count, 1);
+    let mut changed = original.clone();
+    changed.bill_order_sources[0].exchange_order_id = "my-order".into();
+    changed.cursor.as_mut().unwrap().watermark = 22;
+    assert!(matches!(
+        s.ingest_page(&changed),
+        Err(StoreError::Invalid("IMMUTABLE_BILL_ORDER_SOURCE_CONFLICT"))
+    ));
+    assert_eq!(
+        s.cursor("bills", "account").unwrap().unwrap().watermark, 21,
+        "rejected source identity mutation must roll back the cursor"
+    );
+    let saved: String = s.connection.query_row(
+        "SELECT exchange_order_id FROM bill_order_sources WHERE bill_id='bill-origin'",
+        [], |r| r.get(0),
+    ).unwrap();
+    assert_eq!(saved, "other-order");
+    assert!(s.connection.execute(
+        "UPDATE bill_order_sources SET exchange_order_id='my-order'", [],
+    ).is_err());
+    assert!(s.connection.execute(
+        "DELETE FROM bill_order_sources WHERE bill_id='bill-origin'", [],
+    ).is_err());
+    let missing = IngestPage {
+        bill_order_sources: vec![BillOrderSource {
+            bill_id: "unseen-bill".into(),
+            instrument_id: "BTC-USDT-SWAP".into(),
+            exchange_order_id: "unseen-order".into(),
+            trade_id: String::new(),
+        }],
+        ..Default::default()
+    };
+    assert!(matches!(
+        s.ingest_page(&missing),
+        Err(StoreError::Invalid("BILL_ORDER_SOURCE_WITHOUT_BILL"))
+    ));
+}
+
 
 #[test]
 fn e1_campaign_native_receipts_are_applied_once_with_atomic_frontier() {

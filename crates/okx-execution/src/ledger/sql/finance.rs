@@ -537,7 +537,7 @@ impl AccountStore {
     /// never the full amount again. A completed account-wide source witness
     /// is independently recomputed before this transaction; any mismatch
     /// rolls back event IDs, money and the applied frontier together.
-    fn apply_captured_campaign_deltas(
+    pub(crate) fn apply_captured_campaign_deltas(
         &self,
         campaign_id: &str,
         from_ms: i64,
