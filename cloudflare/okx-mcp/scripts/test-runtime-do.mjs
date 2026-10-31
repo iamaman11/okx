@@ -342,6 +342,15 @@ try {
       "real Rust client must prove Worker SQL summary and reservation");
     process.stdout.write(stdout);
     if (stderr) process.stderr.write(stderr);
+    const afterNativeSocket = await session(second);
+    const afterNative = await summary(afterNativeSocket, "risk_after_native_real_wss_0001");
+    assert.equal(afterNative.budget?.reserved_loss_usd, "2",
+      "native-origin second reserve must share the same central risk owner");
+    assert.equal(afterNative.budget?.entry_budget?.reserved_usd, "4",
+      "Native POST authorization must leave its own entry reserve held");
+    assert.equal(afterNative.budget?.entry_budget?.consumed_usd, "0",
+      "POST authorization is not a fabricated cash debit");
+    afterNativeSocket.ws.close();
   }
   console.log(JSON.stringify({
     suite:"runtime-session-sqlite-do",
