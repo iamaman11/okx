@@ -402,8 +402,17 @@ mod raw_native_session_tests {
         {
             let feed = Arc::new(crate::accounts::recorded_support::RecordedAccountHttp::default());
             for label in ["a", "b"] {
+                // The real private coordinator receives only recorded socket
+                // frames. It must establish login, subscription generations and
+                // independently reconcile the six financial history scopes
+                // through the production SQL owner.
+                let socket = Arc::new(
+                    crate::accounts::recorded_support::RecordedWsConnector::default(),
+                );
                 let (config, clients) =
-                    crate::accounts::recorded_support::prepared(label, feed.clone());
+                    crate::accounts::recorded_support::prepared_with_socket(
+                        label, feed.clone(), socket,
+                    );
                 accounts.connect_prepared(config, clients).await.unwrap();
             }
         }
@@ -639,6 +648,49 @@ mod raw_native_session_tests {
                 .termination_signal()
         });
         let mut stopped = futures_util::future::join_all(stopped).await;
+        // T09.0 prerequisite: on the SAME assembly that will talk to the
+        // production Worker RiskBook, both accounts must have obtained
+        // identity-bound private WS generations and completed real six-source
+        // ingestion. No source generation, cursor or portfolio fact is
+        // inserted by the test driver.
+        for alias in ["fixture-a", "fixture-b"] {
+            let resource = accounts.resolve(alias).await.unwrap();
+            tokio::time::timeout(Duration::from_secs(12), async {
+                loop {
+                    let status = resource.private_ws.status().await;
+                    let captured = resource.source_capture_health.read().await.last_success_ms;
+                    if status.logged_in
+                        && status.subscriptions_complete
+                        && status.algo_subscription_ready
+                        && status.account_data_seen
+                        && status.positions_data_seen
+                        && resource.source_identity_ready().await
+                        && captured.is_some()
+                    {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .expect("T09.0 private generation and source capture were not established");
+            let cursors = resource
+                .execution
+                .store
+                .call(std::time::Instant::now() + Duration::from_secs(3), |s| {
+                    Ok((s.cursor("fills", "SWAP")?, s.cursor("bills", "account")?))
+                })
+                .await
+                .unwrap();
+            assert_eq!(
+                cursors.0.expect("missing SWAP fill cursor").coverage_gaps, "",
+                "the production financial capture must have no SWAP history gaps"
+            );
+            assert_eq!(
+                cursors.1.expect("missing bill cursor").coverage_gaps, "",
+                "the production financial capture must have no bill history gaps"
+            );
+        }
         let mut request = url.into_client_request().unwrap();
         request.headers_mut().insert(
             AUTHORIZATION,

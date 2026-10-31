@@ -1558,7 +1558,7 @@ mod tests {
                     "ctType":"linear","ctVal":"0.01","ctValCcy":"BTC",
                     "groupId":"4","lever":"20"
                 }))
-                .unwrap()
+                .unwrap(),
             ],
         )
         .unwrap();
@@ -1608,7 +1608,10 @@ mod tests {
             .await
             .expect("production account capability capture");
         assert!(capabilities.instrument.available_to_account);
-        assert_eq!(capabilities.instrument.account_max_leverage.as_deref(), Some("20"));
+        assert_eq!(
+            capabilities.instrument.account_max_leverage.as_deref(),
+            Some("20")
+        );
         assert_eq!(capabilities.account.position_mode, "long_short_mode");
         assert_eq!(capabilities.account.api_key_permissions, vec!["read_only"]);
         assert_eq!(
