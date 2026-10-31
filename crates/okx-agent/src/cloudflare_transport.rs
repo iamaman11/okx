@@ -315,8 +315,8 @@ mod raw_native_session_tests {
     use okx_api::{OkxEnvironment, OkxPublicClient, RateBudget, Region};
     use okx_observation::ReferenceRegistry;
     use okx_protocol::risk_authority::{
-        RISK_COMMAND_SCHEMA_V1, RISK_RESULT_SCHEMA_V1, CausalPostProof, NativeRiskCensus,
-        PostAccountReadProof, RiskAccountOccupancy, RiskCommand, RiskCommandAction,
+        CausalPostProof, NativeRiskCensus, PostAccountReadProof, RISK_COMMAND_SCHEMA_V1,
+        RISK_RESULT_SCHEMA_V1, RiskAccountOccupancy, RiskCommand, RiskCommandAction,
         RiskDecisionStatus, RiskResult, UsdConversion,
     };
     use okx_runtime::PublicWsCoordinator;
@@ -759,7 +759,14 @@ mod raw_native_session_tests {
         let checked = risk.request(final_read).await.unwrap();
         assert_eq!(checked.budget.as_ref().unwrap().reserved_loss_usd, "2");
         assert_eq!(
-            checked.budget.as_ref().unwrap().entry_budget.as_ref().unwrap().reserved_usd,
+            checked
+                .budget
+                .as_ref()
+                .unwrap()
+                .entry_budget
+                .as_ref()
+                .unwrap()
+                .reserved_usd,
             "4"
         );
         shutdown_tx.send(true).unwrap();
