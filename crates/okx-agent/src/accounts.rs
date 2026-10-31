@@ -891,6 +891,8 @@ pub(crate) mod recorded_support {
                             "eqUsd": "100", "uTime": "1793460000000"
                         }]
                     }]),
+                    "/api/v5/trade/fills-history"
+                    | "/api/v5/account/bills-archive" => serde_json::json!([]),
                     "/api/v5/account/positions"
                     | "/api/v5/trade/orders-pending"
                     | "/api/v5/trade/orders-algo-pending" => {
@@ -922,7 +924,8 @@ pub(crate) mod recorded_support {
                     "/api/v5/account/balance"
                     | "/api/v5/account/positions"
                     | "/api/v5/trade/orders-pending" => 4,
-                    "/api/v5/trade/orders-algo-pending" => 1,
+                    "/api/v5/trade/orders-algo-pending" => 8,
+                    "/api/v5/trade/fills-history" | "/api/v5/account/bills-archive" => 8,
                     _ => 0,
                 };
                 let mut observed = self.requests.lock().unwrap();
@@ -942,6 +945,80 @@ pub(crate) mod recorded_support {
             })
         }
     }
+
+    /// Only raw recorded socket delivery; real PrivateWsCoordinator still
+    /// parses, authenticates and establishes source generations.
+    pub(crate) struct RecordedWsConnector {
+        pub(crate) sent: Arc<Mutex<Vec<serde_json::Value>>>,
+    }
+    impl Default for RecordedWsConnector {
+        fn default() -> Self {
+            Self { sent: Arc::new(Mutex::new(Vec::new())) }
+        }
+    }
+    struct RecordedWire {
+        inbound: std::collections::VecDeque<tokio_tungstenite::tungstenite::Message>,
+        sent: Arc<Mutex<Vec<serde_json::Value>>>,
+    }
+    impl okx_ws::wire::WsWire for RecordedWire {
+        fn send(&mut self, frame: tokio_tungstenite::tungstenite::Message)
+            -> okx_ws::wire::WsCall<'_>
+        {
+            Box::pin(async move {
+                if let tokio_tungstenite::tungstenite::Message::Text(data) = frame {
+                    self.sent.lock().unwrap().push(
+                        serde_json::from_str(data.as_str())
+                            .unwrap_or(serde_json::Value::Null)
+                    );
+                }
+                Ok(())
+            })
+        }
+        fn flush(&mut self) -> okx_ws::wire::WsCall<'_> {
+            Box::pin(async { Ok(()) })
+        }
+        fn next(&mut self) -> okx_ws::wire::WsReceive<'_> {
+            Box::pin(async move {
+                if let Some(frame) = self.inbound.pop_front() {
+                    Some(Ok(frame))
+                } else {
+                    std::future::pending().await
+                }
+            })
+        }
+        fn close(&mut self) -> okx_ws::wire::WsCall<'_> {
+            Box::pin(async { Ok(()) })
+        }
+    }
+    impl WsConnector for RecordedWsConnector {
+        fn connect(&self, url: String) -> okx_runtime::WsConnect<'_> {
+            Box::pin(async move {
+                let transcript: Vec<&str> = if url.ends_with("/business") {
+                    vec![
+                        r#"{"event":"login","code":"0","msg":"","connId":"recorded-business"}"#,
+                        r#"{"event":"subscribe","arg":{"channel":"orders-algo","instType":"ANY"},"connId":"recorded-business"}"#,
+                    ]
+                } else if url.ends_with("/private") {
+                    vec![
+                        r#"{"event":"login","code":"0","msg":"","connId":"recorded-private"}"#,
+                        r#"{"event":"subscribe","arg":{"channel":"account"},"connId":"recorded-private"}"#,
+                        r#"{"event":"subscribe","arg":{"channel":"positions","instType":"ANY"},"connId":"recorded-private"}"#,
+                        r#"{"event":"subscribe","arg":{"channel":"orders","instType":"ANY"},"connId":"recorded-private"}"#,
+                        r#"{"arg":{"channel":"account"},"data":[{"totalEq":"100","uTime":"1793460000000"}]}"#,
+                        r#"{"arg":{"channel":"positions","instType":"ANY"},"data":[]}"#,
+                    ]
+                } else {
+                    return Err(tokio_tungstenite::tungstenite::Error::ConnectionClosed);
+                };
+                let inbound = transcript.into_iter()
+                    .map(|raw| tokio_tungstenite::tungstenite::Message::Text(raw.into()))
+                    .collect();
+                Ok(Box::new(RecordedWire {
+                    inbound, sent: self.sent.clone()
+                }) as Box<dyn okx_ws::wire::WsWire>)
+            })
+        }
+    }
     pub(crate) struct OfflineSocket;
     impl WsConnector for OfflineSocket {
         fn connect(&self, _: String) -> okx_runtime::WsConnect<'_> {
@@ -954,6 +1031,14 @@ pub(crate) mod recorded_support {
     pub(crate) fn prepared(
         label: &str,
         feed: Arc<RecordedAccountHttp>,
+    ) -> (VerifiedAccountConfig, PreparedAccountClients) {
+        prepared_with_socket(label, feed, Arc::new(OfflineSocket))
+    }
+
+    pub(crate) fn prepared_with_socket(
+        label: &str,
+        feed: Arc<RecordedAccountHttp>,
+        ws_connector: Arc<dyn WsConnector>,
     ) -> (VerifiedAccountConfig, PreparedAccountClients) {
         let uid = match label {
             "a" => "account-001",
@@ -1001,7 +1086,7 @@ pub(crate) mod recorded_support {
                 observer,
                 executor,
                 observer_login: observed,
-                ws_connector: Arc::new(OfflineSocket),
+                ws_connector,
             },
         )
     }
@@ -1225,6 +1310,68 @@ mod tests {
             })
             .await
             .expect("SQL owner did not terminate");
+        }
+        std::fs::remove_dir_all(temp).unwrap();
+    }
+
+
+    /// The original public account capture, not a fixture-set "fresh" flag.
+    #[tokio::test]
+    async fn recorded_ws_login_business_ack_and_six_history_pages_capture_both_sql_accounts() {
+        use super::recorded_support::{
+            RecordedAccountHttp, RecordedWsConnector, prepared_with_socket,
+        };
+        let temp = root();
+        initialize_installation(&temp, "installation-test").unwrap();
+        let registry = AccountRuntimeRegistry::open(&temp, RateBudget::new())
+            .await.unwrap();
+        let http = Arc::new(RecordedAccountHttp::default());
+        let mut receipts = Vec::new();
+        let mut sockets = Vec::new();
+        for label in ["a", "b"] {
+            let ws = Arc::new(RecordedWsConnector::default());
+            let (config, clients) = prepared_with_socket(label, http.clone(), ws.clone());
+            registry.connect_prepared(config.clone(), clients).await.unwrap();
+            let account = registry.resolve(&config.account_key.wire()).await.unwrap();
+            receipts.push(account.execution.store.termination_signal());
+            sockets.push(ws);
+        }
+        for (label, ws) in ["a", "b"].into_iter().zip(&sockets) {
+            let account = registry.resolve(&format!("fixture-{label}")).await.unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(12), async {
+                loop {
+                    let status = account.private_ws.status().await;
+                    let completed = account.source_capture_health.read().await.last_success_ms;
+                    if status.logged_in && status.subscriptions_complete
+                        && status.algo_subscription_ready && status.account_data_seen
+                        && status.positions_data_seen
+                        && account.source_identity_ready().await
+                        && completed.is_some() {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                }
+            }).await.expect("real source capture did not converge from recorded frames");
+            let sent = ws.sent.lock().unwrap();
+            assert_eq!(sent.iter().filter(|v| v["op"] == "login").count(), 2);
+            assert_eq!(sent.iter().filter(|v| v["op"] == "subscribe").count(), 2);
+            let recorded = account.execution.store.call(
+                Instant::now() + std::time::Duration::from_secs(3),
+                |s| Ok((s.cursor("fills", "SWAP")?, s.cursor("bills", "account")?)),
+            ).await.unwrap();
+            assert!(recorded.0.is_some(), "SWAP history source not committed");
+            assert!(recorded.1.is_some(), "bills history source not committed");
+            assert_eq!(recorded.0.unwrap().coverage_gaps, "");
+            assert_eq!(recorded.1.unwrap().coverage_gaps, "");
+        }
+        registry.shutdown().await;
+        drop(registry);
+        for mut receipt in receipts {
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                while !*receipt.borrow_and_update() {
+                    receipt.changed().await.expect("SQL owner exited without receipt");
+                }
+            }).await.expect("SQL owner not closed");
         }
         std::fs::remove_dir_all(temp).unwrap();
     }
