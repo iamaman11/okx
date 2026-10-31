@@ -820,9 +820,16 @@ export async function settleEntrySpend(
     // Another valid entry may already have reserved the refunded capacity.
     // Never conceal a late over-budget charge: book it all and latch the
     // existing bound-breach gate to refuse further entries.
+    const previousAggregateOver=consumed+reserved>limit
+      ?consumed+reserved-limit:0n;
     const aggregateOver=afterConsumed+afterReserved>limit
       ?afterConsumed+afterReserved-limit:0n;
-    const breachDelta=entryBreachDelta>aggregateOver?entryBreachDelta:aggregateOver;
+    // bound_breach_usd is cumulative MONOTONIC new shortfall, not the sum
+    // of previously booked shortfalls on every subsequent fee revision.
+    const aggregateBreachDelta=aggregateOver>previousAggregateOver
+      ?aggregateOver-previousAggregateOver:0n;
+    const breachDelta=entryBreachDelta>aggregateBreachDelta
+      ?entryBreachDelta:aggregateBreachDelta;
     meta.entry_budget={...meta.entry_budget,
        consumed_usd:amount(afterConsumed),
        reserved_usd:amount(afterReserved),

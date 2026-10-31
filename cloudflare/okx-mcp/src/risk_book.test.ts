@@ -325,6 +325,41 @@ const lateDenied=await reserveRisk(lateBook,policy,lateCensus,{
 },native);
 check(lateDenied.status==="DENIED"&&lateDenied.reason==="BUDGET_BOUND_BREACH",
  "further RESERVE fails closed after late authenticated budget breach");
+// Separate accounting-only fixture: other source-verified intents consumed
+// 8.49 USD after this reservation was released. Two new late bills must
+// count only their INCREMENTS as budget breaches, not add the old breach on
+// every revised cumulative source. Zero-delta source replay charges nothing.
+const aggregateLate=new Storage();
+aggregateLate.map=structuredClone(sa.map);
+const ag0=(await readRiskBook(aggregateLate))!;
+await aggregateLate.put("risk_meta_v2",{...ag0,entry_budget:{
+ ...ag0.entry_budget!,consumed_usd:"9.99",reserved_usd:"0",
+ bound_breach_usd:"0"
+}});
+const aggOne=await settleEntrySpend(aggregateLate,held.entry.key,p,{
+ connection_generation:77,expected_book_sequence:ag0.sequence,
+ cumulative_entry_usd:"1.62",revision:3,source_digest:a
+});
+check(aggOne.status==="UPDATED"&&aggOne.reason==="BUDGET_BOUND_BREACH"&&
+ (await readRiskBook(aggregateLate))!.entry_budget?.bound_breach_usd==="0.11",
+ "first late charge records only newly exceeded campaign budget");
+const aggTwo=await settleEntrySpend(aggregateLate,held.entry.key,p,{
+ connection_generation:77,expected_book_sequence:ag0.sequence+1,
+ cumulative_entry_usd:"1.72",revision:4,source_digest:"e".repeat(64)
+});
+check(aggTwo.status==="UPDATED"&&aggTwo.reason==="BUDGET_BOUND_BREACH"&&
+ (await readRiskBook(aggregateLate))!.entry_budget?.bound_breach_usd==="0.21",
+ "second late fee must not count the old 0.11 USD breach again");
+const aggReplay=await settleEntrySpend(aggregateLate,held.entry.key,p,{
+ connection_generation:77,expected_book_sequence:ag0.sequence+2,
+ cumulative_entry_usd:"1.72",revision:5,source_digest:"f".repeat(64)
+});
+const finalAggregate=(await readRiskBook(aggregateLate))!.entry_budget!;
+check(aggReplay.status==="UPDATED"&&
+ finalAggregate.consumed_usd==="10.21"&&
+ finalAggregate.bound_breach_usd==="0.21"&&
+ finalAggregate.reserved_usd==="0",
+ "source revision without new monetary debit cannot increment existing breach");
 const reported={...census,occupied:census.occupied.map(v=>({...v,cumulative_loss_usd:v.account_key===accountKey(request)?"17":"0"}))};
 const campaign=await reserveRisk(sa,policy,reported,{...request,intent_id:"new_intent_001",loss_usdt:"4",loss_usd:"4"},native);
 check(campaign.status==="DENIED"&&campaign.reason==="CAMPAIGN_LOSS_BUDGET_EXHAUSTED","fresh losses charged before reserve even when admission denied");
