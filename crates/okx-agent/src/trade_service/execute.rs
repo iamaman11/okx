@@ -1049,8 +1049,7 @@ impl TradeService {
         .await?;
         drop(_capacity);
         match result {
-            Some(response) => {
-                match place_ack_verdict(&response, &venue.client_order_id) {
+            Some(response) => match place_ack_verdict(&response, &venue.client_order_id) {
                 PlaceAckVerdict::Accepted => {
                     let order_id = response.data[0].order_id.clone();
                     let intent_id = id.clone();
@@ -1105,8 +1104,7 @@ impl TradeService {
                         .map_err(err)?;
                     Ok(uncertain(&id, "EXCHANGE_ACK_UNVERIFIED_NO_REPOST"))
                 }
-                }
-            }
+            },
             None => Ok(uncertain(&id, "EXCHANGE_POST_OUTCOME_UNKNOWN")),
         }
     }
