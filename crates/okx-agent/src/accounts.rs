@@ -1534,6 +1534,111 @@ mod tests {
             .unwrap();
     }
 
+    /// The production AccountBootstrapper consumes venue-provided fee, leverage
+    /// and account instrument bytes through signed observer REST. No test
+    /// shortcut supplies a parsed FeeScheduleSnapshot or permission flag.
+    /// A consumed or wrong-account source must fail closed.
+    #[tokio::test]
+    async fn recorded_account_capabilities_and_fee_sources_use_real_observer_parsers() {
+        use super::recorded_support::{RecordedAccountHttp, RecordedGet, prepared};
+        use serde_json::json;
+        let feed = Arc::new(RecordedAccountHttp::default());
+        let (_config, clients) = prepared("a", feed.clone());
+        let observer = crate::account_bootstrap::AccountBootstrapper::new(clients.observer);
+        let reference = okx_observation::ReferenceRegistry::from_public(
+            "2026-10-31T00:00:00Z",
+            vec![
+                serde_json::from_value(json!({
+                    "instType":"SWAP","instId":"BTC-USDT-SWAP",
+                    "instFamily":"BTC-USDT","uly":"BTC-USDT",
+                    "state":"live","ruleType":"normal",
+                    "settleCcy":"USDT","tickSz":"0.1",
+                    "lotSz":"0.01","minSz":"0.01",
+                    "maxLmtSz":"1000","maxMktSz":"1000",
+                    "ctType":"linear","ctVal":"0.01","ctValCcy":"BTC",
+                    "groupId":"4","lever":"20"
+                }))
+                .unwrap()
+            ],
+        )
+        .unwrap();
+        let rules = reference.instrument_rules("BTC-USDT-SWAP").unwrap();
+        let stamp = chrono::Utc::now().timestamp_millis().to_string();
+        let envelope = |data: serde_json::Value| {
+            serde_json::to_vec(&json!({"code":"0","msg":"","data":data})).unwrap()
+        };
+        let observer_key = "fixture-observer-a".to_owned();
+        feed.expect_get(RecordedGet {
+            access_key: observer_key.clone(),
+            path: "/api/v5/account/instruments".into(),
+            required_query: vec![("instType".into(), "SWAP".into())],
+            raw_response: envelope(json!([{
+                "instType":"SWAP","instId":"BTC-USDT-SWAP",
+                "state":"live","lever":"20"
+            }])),
+        });
+        for _ in 0..2 {
+            feed.expect_get(RecordedGet {
+                access_key: observer_key.clone(),
+                path: "/api/v5/account/leverage-info".into(),
+                required_query: vec![
+                    ("instId".into(), "BTC-USDT-SWAP".into()),
+                    ("mgnMode".into(), "cross".into()),
+                ],
+                raw_response: envelope(json!([
+                    {"instId":"BTC-USDT-SWAP","mgnMode":"cross","posSide":"long","lever":"5"},
+                    {"instId":"BTC-USDT-SWAP","mgnMode":"cross","posSide":"short","lever":"5"}
+                ])),
+            });
+            feed.expect_get(RecordedGet {
+                access_key: observer_key.clone(),
+                path: "/api/v5/account/trade-fee".into(),
+                required_query: vec![
+                    ("instType".into(), "SWAP".into()),
+                    ("instFamily".into(), "BTC-USDT".into()),
+                ],
+                raw_response: envelope(json!([{
+                    "instType":"SWAP","level":"Lv1","ts":stamp,
+                    "feeGroup":[{"groupId":"4","maker":"0.0005","taker":"0.0005"}]
+                }])),
+            });
+        }
+        let capabilities = observer
+            .trading_capabilities(&rules, okx_api::MarginMode::Cross)
+            .await
+            .expect("production account capability capture");
+        assert!(capabilities.instrument.available_to_account);
+        assert_eq!(capabilities.instrument.account_max_leverage.as_deref(), Some("20"));
+        assert_eq!(capabilities.account.position_mode, "long_short_mode");
+        assert_eq!(capabilities.account.api_key_permissions, vec!["read_only"]);
+        assert_eq!(
+            capabilities.account.account_uid_fingerprint,
+            okx_api::account_uid_fingerprint("account-001")
+        );
+        assert_eq!(capabilities.configured_leverage.len(), 2);
+        let rate = capabilities.fee_schedule.unwrap();
+        assert_eq!(rate.maker_rate, "0.0005");
+        assert_eq!(rate.taker_rate, "0.0005");
+        assert!(rate.exact_for_instrument);
+        assert_eq!(rate.instrument_id, "BTC-USDT-SWAP");
+        let selected = observer
+            .configured_leverage("BTC-USDT-SWAP", okx_api::MarginMode::Cross, "long")
+            .await
+            .unwrap();
+        assert_eq!(selected, "5");
+        let fees = observer.fee_schedule(&rules).await.unwrap();
+        assert_eq!(fees.taker_rate, "0.0005");
+        assert_eq!(feed.unconsumed_reads(), 0);
+        // Neither cached account configuration nor a previous successful
+        // normalization permits using exhausted signed financial input.
+        assert!(observer.fee_schedule(&rules).await.is_err());
+        assert_eq!(feed.unconsumed_reads(), 0);
+        let (_other, other_clients) = prepared("b", feed.clone());
+        let other = crate::account_bootstrap::AccountBootstrapper::new(other_clients.observer);
+        assert!(other.fee_schedule(&rules).await.is_err());
+        assert!(feed.outbound_posts.lock().unwrap().is_empty());
+    }
+
     /// Exercise the actual signed OKX adapter's POST through the raw
     /// transport boundary. A mismatched request cannot consume a response,
     /// and the response is not an invented execution or a fill.
