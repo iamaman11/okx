@@ -3329,6 +3329,172 @@ fn e2_real_exchange_fee_over_admission_upper_is_not_discarded() {
     );
 }
 
+
+#[test]
+fn e1_pending_swap_fill_projects_single_canonical_bill_fee_in_both_source_orders() {
+    // Exercise the same AccountStore paths used by raw history capture and
+    // subsequent fill_projection_pending processing. No second test ledger.
+    for bill_first in [false, true] {
+        let mut s = store();
+        intent(&mut s);
+        acknowledged_entry_intent(&mut s);
+        let id = "BTC-USDT-SWAP:t09-fee-trade:venue-order";
+        let fee_amount = Decimal::new(-5, 4);
+        let bill_ref = "bill:t09-fee-bill";
+        let fill = Fill {
+            fill_id: id.into(),
+            instrument_id: "BTC-USDT-SWAP".into(),
+            trade_id: "t09-fee-trade".into(),
+            exchange_order_id: "venue-order".into(),
+            intent_id: Some("intent".into()),
+            time: 6,
+            qty: Decimal::new(1, 1),
+            price: Decimal::from(10),
+            fee: fee_amount,
+            currency: "USDT".into(),
+            side: "buy".into(),
+        };
+        let from_fill = FinanceEntry {
+            entry_id: format!("{bill_ref}:fee"),
+            economic_event_key: bill_ref.into(),
+            component: "FEE".into(),
+            allocation_leg: "account".into(),
+            amount: fee_amount,
+            currency: "USDT".into(),
+            instance_id: None,
+            source_ref: format!("fill:{id}"),
+            time: 6,
+            reverses_entry_id: None,
+        };
+        let fills_page = IngestPage {
+            fills: vec![fill.clone()],
+            swap_fill_sources: vec![SwapFillSource {
+                fill_id: id.into(),
+                bill_id: "t09-fee-bill".into(),
+                sub_type: "3".into(),
+                position_side: "long".into(),
+                direction: "OPEN".into(),
+            }],
+            finance: vec![from_fill.clone()],
+            cursor: Some(SourceCursor {
+                source: "fills".into(),
+                stream_partition: "SWAP".into(),
+                cursor: String::new(),
+                watermark: 7,
+                generation: 1,
+                coverage_gaps: String::new(),
+            }),
+            ..Default::default()
+        };
+        let bills_page = IngestPage {
+            bills: vec![Bill {
+                bill_id: "t09-fee-bill".into(),
+                kind: "2:0".into(),
+                time: 7,
+                amount: fee_amount,
+                currency: "USDT".into(),
+                economic_event_key: bill_ref.into(),
+            }],
+            bill_order_sources: vec![BillOrderSource {
+                bill_id: "t09-fee-bill".into(),
+                instrument_id: "BTC-USDT-SWAP".into(),
+                exchange_order_id: "venue-order".into(),
+                trade_id: "t09-fee-trade".into(),
+            }],
+            finance: vec![FinanceEntry {
+                source_ref: bill_ref.into(),
+                time: 7,
+                ..from_fill
+            }],
+            cursor: Some(SourceCursor {
+                source: "bills".into(),
+                stream_partition: "account".into(),
+                cursor: String::new(),
+                watermark: 7,
+                generation: 1,
+                coverage_gaps: String::new(),
+            }),
+            ..Default::default()
+        };
+        if bill_first {
+            s.ingest_page(&bills_page).unwrap();
+        }
+        s.ingest_page(&fills_page).unwrap();
+        s.ingest_attributed_fill(
+            fill.clone(),
+            FillEffect::Open {
+                side: "long".into(),
+            },
+            None,
+        )
+        .unwrap();
+        if !bill_first {
+            s.ingest_page(&bills_page).unwrap();
+        }
+        s.record_outcome(
+            "intent",
+            IntentState::Filled,
+            Some("venue-order"),
+            "terminal-order-readback",
+            7,
+        )
+        .unwrap();
+        let witness = s.intent_fee_bill_evidence("intent", 7).unwrap();
+        assert_eq!(witness.linked_bill_count, 1);
+        assert_eq!(witness.conservative_verified_fee_usdt, -fee_amount);
+        assert_eq!(witness.fill.gross_notional_usdt, Decimal::ONE);
+        let (fee_events, fill_links, bill_links): (i64, i64, i64) = s
+            .connection
+            .query_row(
+                "SELECT
+                    (SELECT COUNT(*) FROM finance_entries WHERE component='FEE'),
+                    (SELECT COUNT(*) FROM finance_source_links
+                      WHERE source_ref=?1),
+                    (SELECT COUNT(*) FROM finance_source_links
+                      WHERE source_ref=?2)",
+                rusqlite::params![format!("fill:{id}"), bill_ref],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!((fee_events, fill_links, bill_links), (1, 1, 1));
+        assert_eq!(
+            s.finance_totals(1, 9, None)
+                .unwrap()
+                .get(&("USDT".to_owned(), "FEE".to_owned())),
+            Some(&fee_amount)
+        );
+        // Conflicting later page must roll back without advancing money.
+        let mut tampered = bills_page.clone();
+        tampered.finance[0].amount = Decimal::new(-6, 4);
+        assert!(matches!(
+            s.ingest_page(&tampered),
+            Err(StoreError::Invalid("CANONICAL_ECONOMIC_EVENT_CONFLICT"))
+        ));
+        s.ingest_page(&fills_page).unwrap();
+        s.ingest_page(&bills_page).unwrap();
+        s.ingest_attributed_fill(
+            fill,
+            FillEffect::Open {
+                side: "long".into(),
+            },
+            None,
+        )
+        .unwrap();
+        let db = s.path.clone();
+        let meta = s.meta.clone();
+        drop(s);
+        let reopened =
+            AccountStore::open_existing(db, &meta.account_key, &meta.installation_id).unwrap();
+        assert_eq!(reopened.intent_fee_bill_evidence("intent", 7).unwrap(), witness);
+        let count: i64 = reopened.connection.query_row(
+            "SELECT COUNT(*) FROM finance_entries WHERE component='FEE'",
+            [],
+            |r| r.get(0),
+        ).unwrap();
+        assert_eq!(count, 1, "replay and restart must not charge the same fee again");
+    }
+}
+
 #[test]
 fn e1_fee_bill_cross_source_receipt_requires_both_immutable_sources() {
     let mut s = store();

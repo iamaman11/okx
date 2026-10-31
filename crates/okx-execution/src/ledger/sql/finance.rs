@@ -3699,6 +3699,22 @@ impl AccountStore {
             "fill:{}:{}:{}",
             fill.instrument_id, fill.trade_id, fill.exchange_order_id
         );
+        // Source capture already persisted the authenticated SWAP bill ID
+        // before this pending-fill projection. Reuse its economic fee key:
+        // projection is not a second fee (or a second owner of the key).
+        // The legacy fill key remains for sources without a bill ID; those
+        // are not final bill evidence and cannot authorize settlement.
+        let fee_event_key = self
+            .connection
+            .query_row(
+                "SELECT bill_id FROM swap_fill_sources WHERE fill_id=?1",
+                [&fill.fill_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .filter(|id| !id.is_empty())
+            .map(|id| format!("bill:{id}"))
+            .unwrap_or_else(|| key.clone());
         let mut page = IngestPage {
             cursor,
             ..Default::default()
@@ -3708,8 +3724,8 @@ impl AccountStore {
         // the canonical economic-event uniqueness prevents double charge.
         if fill.fee != Decimal::ZERO {
             page.finance.push(FinanceEntry {
-                entry_id: format!("{key}:fee"),
-                economic_event_key: key.clone(),
+                entry_id: format!("{fee_event_key}:fee"),
+                economic_event_key: fee_event_key,
                 component: "FEE".into(),
                 allocation_leg: "account".into(),
                 amount: fill.fee,
