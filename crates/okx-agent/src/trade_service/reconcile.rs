@@ -634,6 +634,20 @@ impl TradeService {
         } else {
             None
         };
+        // Count every independently captured partial fill + linked fee bill
+        // against the original frozen admission before a terminal release.
+        // A missing bill is PENDING, never zero or an invented risk refund.
+        // This uses the same SQLite owner and central SETTLE_ENTRY command.
+        let incremental_entry = if financial && i.risk_increase
+            && matches!(i.state, IntentState::PartiallyFilled | IntentState::Filled | IntentState::Cancelled)
+        {
+            match self.settle_incremental_entry(r, &i, order.as_ref()).await {
+                Ok(()) => json!({"state":"verified_or_no_change"}),
+                Err(reason) => json!({"state":"pending","reason_code":reason}),
+            }
+        } else {
+            json!({"state":"not_evaluated"})
+        };
         let central_release = if i.state.terminal() && financial {
             match self.release_terminal(r, &i, order.as_ref()).await {
                 Ok(()) => json!({"state":"verified"}),
@@ -732,6 +746,7 @@ impl TradeService {
             json!({"intent":i,"remaining_exposure":if financial{Some(exact(exposure))}else{None},
                 "entry_costs":entry_costs,
                 "entry_fill_evidence":entry_fill_evidence,
+                "incremental_entry_settlement":incremental_entry,
                 "protection":protection,"central_release":central_release,
                 "financial_error":financial_error,"financial_complete":financial,
                 "protection_incident":protection_failed,"compensation":compensation}),
@@ -855,6 +870,119 @@ impl TradeService {
         }
         Err("CENTRAL_UNSENT_RELEASE_CAS_BUSY".into())
     }
+    /// Cumulative native financial proof, independent of the terminal close
+    /// fence. A PARTIALLY_FILLED order still owns open exposure and its
+    /// unsettled entry-budget remainder; this method never releases risk.
+    async fn settle_incremental_entry(
+        &self,
+        r: &AccountResources,
+        i: &StoredIntent,
+        order: Option<&okx_api::TradeOrderDetails>,
+    ) -> Result<(), String> {
+        if r.configuration.account_key.environment != okx_protocol::accounts::Environment::Real
+            || !i.risk_increase
+        {
+            return Ok(());
+        }
+        let venue = order.ok_or("PARTIAL_ENTRY_ORDER_READBACK_UNAVAILABLE")?;
+        if !matches!(venue.state.as_str(), "partially_filled" | "filled" | "canceled" | "mmp_canceled") {
+            return Err("PARTIAL_ENTRY_ORDER_STATE_UNVERIFIED".into());
+        }
+        let filled = verified_order_readback(i, venue)?;
+        if filled <= Decimal::ZERO {
+            return Err("PARTIAL_ENTRY_ZERO_FILL_SOURCE_UNPROVEN".into());
+        }
+        let state = self.governance.read().await.clone().ok_or("AUTHORITY_UNAVAILABLE")?;
+        let id = i.intent_id.clone();
+        let (receipt, fill_cursor, bill_cursor) = r.execution.store.call(deadline(), move |s| {
+            Ok((s.central_receipt(&id)?,
+                s.cursor("fills", "SWAP")?,
+                s.cursor("bills", "account")?))
+        }).await.map_err(err)?;
+        let receipt = receipt.ok_or("PARTIAL_ENTRY_RESERVATION_UNVERIFIED")?;
+        if receipt.reservation_key.starts_with("local:") || receipt.plan_hash != i.plan_hash {
+            return Err("PARTIAL_ENTRY_RESERVATION_INVALID".into());
+        }
+        if i.exchange_order_id.as_deref() != Some(venue.order_id.as_str()) {
+            return Err("PARTIAL_ENTRY_ORDER_IDENTITY_MISMATCH".into());
+        }
+        let venue_at = terminal_order_update_time(Some(venue))?
+            .ok_or("PARTIAL_ENTRY_UPDATE_TIME_MISSING")?;
+        // A RELEASED reservation cannot accept another partial mutation.
+        // Its original terminal receipt must already be present in SQL.
+        let inspection = self.risk.request(self.risk_command(
+            &state,
+            format!("inspect_partial_pre_{}", i.client_order_id),
+            RiskCommandAction::Inspect {
+                reservation_key: receipt.reservation_key.clone(),
+                plan_sha256: i.plan_hash.clone(),
+            },
+        )).await.map_err(str::to_owned)?;
+        if inspection.reservation_state == Some(RiskReservationState::Released) {
+            let existing_id = format!("entry-settlement:{}", i.intent_id);
+            let recorded = r.execution.store.call(deadline(), move |s| {
+                s.operation(&existing_id)
+            }).await.map_err(err)?;
+            return if recorded.is_some_and(|proof| proof.kind == "ENTRY_SETTLEMENT_PROVEN") {
+                Ok(())
+            } else {
+                Err("LATE_ENTRY_SETTLEMENT_AFTER_RELEASE_REQUIRES_RECONCILIATION".into())
+            };
+        }
+        let fills = fill_cursor.ok_or("PARTIAL_ENTRY_FILLS_UNCOVERED")?;
+        let bills = bill_cursor.ok_or("PARTIAL_ENTRY_BILLS_UNCOVERED")?;
+        if !fills.cursor.is_empty() || !bills.cursor.is_empty()
+            || !fills.coverage_gaps.is_empty() || !bills.coverage_gaps.is_empty()
+            || fills.generation <= 0 || bills.generation <= 0
+        {
+            return Err("PARTIAL_ENTRY_SOURCE_PAGES_INCOMPLETE".into());
+        }
+        let through = fills.watermark.min(bills.watermark);
+        if through < venue_at {
+            return Err("PARTIAL_ENTRY_FINANCIAL_COVERAGE_PENDING".into());
+        }
+        let partial_id = i.intent_id.clone();
+        let proof = r.execution.store.call(deadline(), move |s| {
+            s.bind_partial_entry_settlement(&partial_id, venue_at, filled, through)
+        }).await.map_err(err)?;
+        if proof.reservation_key != receipt.reservation_key
+            || proof.plan_hash != i.plan_hash || proof.venue_order_id != venue.order_id
+        {
+            return Err("PARTIAL_ENTRY_SOURCE_IDENTITY_MISMATCH".into());
+        }
+        for _ in 0..3 {
+            let observed = self.risk.request(self.risk_command(
+                &state, format!("inspect_partial_{}", i.client_order_id),
+                RiskCommandAction::Inspect {
+                    reservation_key: receipt.reservation_key.clone(),
+                    plan_sha256: i.plan_hash.clone(),
+                },
+            )).await.map_err(str::to_owned)?;
+            if observed.reservation_state == Some(RiskReservationState::Released) {
+                return Err("LATE_ENTRY_SETTLEMENT_AFTER_RELEASE_REQUIRES_RECONCILIATION".into());
+            }
+            let sequence = observed.risk_book_sequence.ok_or("PARTIAL_ENTRY_RISK_SEQUENCE_MISSING")?;
+            let result = self.risk.request(self.risk_command(
+                &state, format!("settle_partial_{}_{}", i.client_order_id, proof.settlement_revision),
+                RiskCommandAction::SettleEntry {
+                    reservation_key: proof.reservation_key.clone(),
+                    plan_sha256: proof.plan_hash.clone(),
+                    expected_risk_book_sequence: sequence,
+                    cumulative_entry_usd: exact(proof.cumulative_entry_usd),
+                    settlement_revision: proof.settlement_revision,
+                    source_digest: proof.source_digest.clone(),
+                },
+            )).await.map_err(str::to_owned)?;
+            if result.status == RiskDecisionStatus::Updated { return Ok(()); }
+            if !matches!(result.reason.as_deref(),
+                Some("STALE_SESSION_OR_BOOK_SEQUENCE" | "ENTRY_SETTLEMENT_SOURCE_OR_STATE_UNPROVEN"))
+            {
+                return Err(result.reason.unwrap_or("PARTIAL_ENTRY_SETTLEMENT_DENIED".into()));
+            }
+        }
+        Err("PARTIAL_ENTRY_SETTLEMENT_CAS_BUSY".into())
+    }
+
     async fn release_terminal(
         &self,
         r: &AccountResources,

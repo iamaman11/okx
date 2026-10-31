@@ -729,6 +729,130 @@ fn k5_recovery_pages_over_100_intents_are_disjoint_and_bounded() {
     assert!(s.reconcilable_intents_page(0, 0).unwrap().is_empty());
 }
 #[test]
+fn e1_partial_and_final_entry_settlement_are_monotone_and_not_double_counted() {
+    let mut s = store();
+    let i = intent(&mut s);
+    let quote = e1_source_quote(&s, &i);
+    s.bind_entry_quote(&quote).unwrap();
+    s.bind_entry_admission(&EntryAdmissionEvidence {
+        schema: "okx.entry-admission/v2".into(),
+        account_key: s.meta.account_key.clone(),
+        installation_id: s.meta.installation_id.clone(),
+        intent_id: i.intent_id.clone(),
+        plan_hash: i.plan_hash.clone(),
+        quote_digest: format!(
+            "{:x}",
+            sha2::Sha256::digest(serde_json::to_vec(&quote).unwrap())
+        ),
+        admission_usd_per_usdt: Decimal::ONE,
+        other_entry_costs_upper_usd: Decimal::ZERO,
+        entry_upper_usd: quote.total_usd,
+        entry_proof_digest: "a".repeat(64),
+        observed_at: quote.observed_at,
+    }).unwrap();
+    acknowledged_entry_intent(&mut s);
+    let half = Decimal::new(5, 1);
+    let fee = Decimal::new(-1, 2);
+    for (id, at, qty, state) in [
+        ("first", 7_i64, half, IntentState::PartiallyFilled),
+        ("second", 9_i64, Decimal::ONE, IntentState::Filled),
+    ] {
+        let fill_at = at - 1;
+        let entry = FinanceEntry {
+            entry_id: format!("bill:{id}:FEE"),
+            economic_event_key: format!("bill:{id}"),
+            component: "FEE".into(),
+            allocation_leg: "account".into(),
+            amount: fee,
+            currency: "USDT".into(),
+            instance_id: None,
+            source_ref: format!("fill:{id}"),
+            time: fill_at,
+            reverses_entry_id: None,
+        };
+        s.ingest_page(&IngestPage {
+            fills: vec![Fill {
+                fill_id: id.into(),
+                instrument_id: "BTC-USDT-SWAP".into(),
+                trade_id: format!("trade-{id}"),
+                exchange_order_id: "venue-order".into(),
+                intent_id: Some("intent".into()),
+                time: fill_at,
+                qty: half,
+                price: Decimal::from(100),
+                fee,
+                currency: "USDT".into(),
+                side: "buy".into(),
+            }],
+            finance: vec![entry.clone()],
+            cursor: Some(SourceCursor {
+                source: "fills".into(),
+                stream_partition: "SWAP".into(),
+                cursor: String::new(),
+                watermark: at,
+                generation: 1,
+                coverage_gaps: String::new(),
+            }),
+            ..Default::default()
+        }).unwrap();
+        s.ingest_page(&IngestPage {
+            bills: vec![Bill {
+                bill_id: id.into(),
+                kind: "1:trade".into(),
+                time: at,
+                amount: fee,
+                currency: "USDT".into(),
+                economic_event_key: format!("bill:{id}"),
+            }],
+            cursor: Some(SourceCursor {
+                source: "bills".into(),
+                stream_partition: "account".into(),
+                cursor: String::new(),
+                watermark: at,
+                generation: 1,
+                coverage_gaps: String::new(),
+            }),
+            ..Default::default()
+        }).unwrap();
+        s.ingest_page(&IngestPage {
+            finance: vec![FinanceEntry {
+                source_ref: format!("bill:{id}"),
+                time: at,
+                ..entry
+            }],
+            ..Default::default()
+        }).unwrap();
+        s.record_order_readback("intent", "venue-order", state, qty, at).unwrap();
+        if at == 7 {
+            let partial = s.bind_partial_entry_settlement("intent", at, qty, at).unwrap();
+            assert_eq!(partial.schema, "okx.entry-partial-settlement/v1");
+            assert_eq!(partial.settlement_revision, 1);
+            assert_eq!(partial.cumulative_entry_usd, Decimal::new(5001, 2));
+            assert_eq!(s.bind_partial_entry_settlement("intent", at, qty, at).unwrap(), partial);
+        } else {
+            let prior = s.operation("entry-partial-head:intent").unwrap().unwrap();
+            let partial: EntrySettlementEvidence = serde_json::from_str(&prior.result_ref).unwrap();
+            assert_eq!(partial.cumulative_entry_usd, Decimal::new(5001, 2));
+            let terminal = s.bind_terminal_entry_settlement("intent", at, qty, at).unwrap();
+            assert_eq!(terminal.settlement_revision, 2);
+            assert_eq!(terminal.cumulative_entry_usd, Decimal::new(10002, 2));
+            assert_eq!(s.bind_terminal_entry_settlement("intent", at, qty, at).unwrap(), terminal);
+            assert_eq!(s.connection.query_row(
+                "SELECT COUNT(*) FROM operation_receipts WHERE kind='ENTRY_SETTLEMENT_PROVEN'",
+                [], |row| row.get::<_,i64>(0),
+            ).unwrap(), 1, "partial money cannot become a second baseline purchase");
+            let path = s.path.clone();
+            let meta = s.meta.clone();
+            drop(s);
+            let mut reopened =
+                AccountStore::open_existing(path, &meta.account_key, &meta.installation_id).unwrap();
+            assert_eq!(reopened.bind_terminal_entry_settlement("intent", at, qty, at).unwrap(), terminal);
+            return;
+        }
+    }
+}
+
+#[test]
 fn e2_real_exchange_fee_over_admission_upper_is_not_discarded() {
     let mut s = store();
     let i = intent(&mut s);

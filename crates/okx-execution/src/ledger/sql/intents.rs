@@ -250,10 +250,35 @@ impl AccountStore {
         venue_filled_quantity: Decimal,
         covered_through: i64,
     ) -> StoreResult<EntrySettlementEvidence> {
+        self.bind_cumulative_entry_settlement(id, venue_updated_at, venue_filled_quantity, covered_through, true)
+    }
+
+    /// Incremental fills and their independently linked bills are settled
+    /// BEFORE terminal release. No new journal, scheduler or funding formula:
+    /// this is the same admission FX and source ledger as terminal settlement.
+    pub fn bind_partial_entry_settlement(
+        &mut self,
+        id: &str,
+        venue_updated_at: i64,
+        venue_filled_quantity: Decimal,
+        covered_through: i64,
+    ) -> StoreResult<EntrySettlementEvidence> {
+        self.bind_cumulative_entry_settlement(id, venue_updated_at, venue_filled_quantity, covered_through, false)
+    }
+
+    fn bind_cumulative_entry_settlement(
+        &mut self,
+        id: &str,
+        venue_updated_at: i64,
+        venue_filled_quantity: Decimal,
+        covered_through: i64,
+        terminal: bool,
+    ) -> StoreResult<EntrySettlementEvidence> {
         let intent = self
             .intent(id)?
             .ok_or(StoreError::Invalid("ENTRY_SETTLEMENT_INTENT_MISSING"))?;
-        if !matches!(intent.state, IntentState::Filled | IntentState::Cancelled)
+        if (terminal && !matches!(intent.state, IntentState::Filled | IntentState::Cancelled))
+            || (!terminal && !matches!(intent.state, IntentState::PartiallyFilled | IntentState::Filled | IntentState::Cancelled))
             || venue_updated_at <= 0
             || covered_through < venue_updated_at
             || venue_filled_quantity <= Decimal::ZERO
@@ -283,17 +308,57 @@ impl AccountStore {
         // the original source digest again; no new amount or different bill
         // witness may silently inherit the previous Worker authority.
         let key = format!("entry-settlement:{id}");
-        let previous = self.operation(&key)?;
+        let terminal_receipt = self.operation(&key)?;
+        let partial_head_key = format!("entry-partial-head:{id}");
+        let partial_head = self.operation(&partial_head_key)?;
+        let previous = terminal_receipt.as_ref().or(partial_head.as_ref());
         let saved = previous
-            .as_ref()
             .map(|receipt| {
                 serde_json::from_str::<EntrySettlementEvidence>(&receipt.result_ref)
                     .map_err(|_| StoreError::Invalid("ENTRY_SETTLEMENT_RECEIPT_CORRUPT"))
             })
             .transpose()?;
-        let witness_through = saved
-            .as_ref()
-            .map_or(covered_through, |proof| proof.source_covered_through_ms);
+        if let Some(old) = saved.as_ref() {
+            if old.intent_id != id || old.plan_hash != intent.plan_hash
+                || old.account_key != self.meta.account_key
+                || old.settlement_revision == 0
+                || (terminal_receipt.is_some() && old.schema != "okx.entry-terminal-settlement/v1")
+                || (terminal_receipt.is_none() && old.schema != "okx.entry-partial-settlement/v1")
+                || previous.is_some_and(|receipt| receipt.request_hash != intent.plan_hash)
+            {
+                return Err(StoreError::Invalid("ENTRY_SETTLEMENT_PREVIOUS_INVALID"));
+            }
+            // A mutable pointer is not evidence. Every revision must also
+            // have its original immutable receipt with the identical bytes.
+            if terminal_receipt.is_none() {
+                let witness = self.operation(&format!("entry-partial:{id}:r{}", old.settlement_revision))?
+                    .ok_or(StoreError::Invalid("ENTRY_PARTIAL_RECEIPT_MISSING"))?;
+                if witness.kind != "ENTRY_PARTIAL_SETTLEMENT_PROVEN"
+                    || witness.result_ref != previous.unwrap().result_ref
+                    || witness.request_hash != old.plan_hash
+                {
+                    return Err(StoreError::Invalid("ENTRY_PARTIAL_RECEIPT_MISMATCH"));
+                }
+            }
+        }
+        // Recheck old immutable source facts at their original frontier.
+        // A later bill/fill cannot rewrite the first accepted revision.
+        if let Some(old) = saved.as_ref() {
+            let historical = self.intent_fee_bill_evidence(id, old.source_covered_through_ms)?;
+            if historical.fill.filled_quantity != old.venue_filled_quantity
+                || historical.fill.gross_notional_usdt
+                    .checked_add(historical.conservative_verified_fee_usdt)
+                    != Some(old.booked_notional_and_fee_usdt)
+                || historical.fill.exchange_order_id != old.venue_order_id
+            {
+                return Err(StoreError::Invalid("ENTRY_SETTLEMENT_PRIOR_SOURCE_CHANGED"));
+            }
+        }
+        let witness_through = if terminal_receipt.is_some() {
+            saved.as_ref().unwrap().source_covered_through_ms
+        } else {
+            covered_through
+        };
         if witness_through < venue_updated_at || witness_through > covered_through {
             return Err(StoreError::Invalid("ENTRY_SETTLEMENT_COVERAGE_REGRESSION"));
         }
@@ -335,8 +400,26 @@ impl AccountStore {
         // A genuine exchange debit above the approved quote is not permission
         // to hide it. The cumulative proof retains the full native amount;
         // RiskBook records the breach atomically and bans new entry grants.
+        let next_revision = if let Some(old) = saved.as_ref() {
+            if terminal_receipt.is_some() { old.settlement_revision }
+            else if !terminal && old.cumulative_entry_usd == usd
+                && old.venue_filled_quantity == venue_filled_quantity {
+                // A later cursor with no new economic amount is a read-only
+                // acknowledgement, not an additional debit or book revision.
+                return Ok(old.clone());
+            } else {
+                if usd < old.cumulative_entry_usd
+                    || venue_filled_quantity < old.venue_filled_quantity {
+                    return Err(StoreError::Invalid("ENTRY_SETTLEMENT_REGRESSION"));
+                }
+                old.settlement_revision.checked_add(1)
+                    .ok_or(StoreError::Invalid("ENTRY_SETTLEMENT_REVISION_OVERFLOW"))?
+            }
+        } else { 1 };
+        let schema = if terminal { "okx.entry-terminal-settlement/v1" }
+            else { "okx.entry-partial-settlement/v1" };
         let bytes = serde_json::to_vec(&(
-            "okx.entry-terminal-settlement/v1",
+            schema,
             &self.meta.account_key,
             &self.meta.installation_id,
             id,
@@ -353,7 +436,7 @@ impl AccountStore {
         ))
         .map_err(|_| StoreError::Invalid("ENTRY_SETTLEMENT_SOURCE_DIGEST_INVALID"))?;
         let settlement = EntrySettlementEvidence {
-            schema: "okx.entry-terminal-settlement/v1".into(),
+            schema: schema.into(),
             account_key: self.meta.account_key.clone(),
             intent_id: id.into(),
             plan_hash: intent.plan_hash,
@@ -364,10 +447,10 @@ impl AccountStore {
             venue_filled_quantity,
             booked_notional_and_fee_usdt: full_usdt,
             cumulative_entry_usd: usd,
-            settlement_revision: 1,
+            settlement_revision: next_revision,
             source_digest: format!("{:x}", Sha256::digest(bytes)),
         };
-        if let Some(prior) = previous {
+        if let Some(prior) = terminal_receipt {
             let saved = saved.ok_or(StoreError::Invalid("ENTRY_SETTLEMENT_RECEIPT_CORRUPT"))?;
             if prior.kind != "ENTRY_SETTLEMENT_PROVEN" || prior.request_hash != settlement.plan_hash
             {
@@ -388,7 +471,7 @@ impl AccountStore {
                 || saved.venue_filled_quantity != settlement.venue_filled_quantity
                 || saved.booked_notional_and_fee_usdt != settlement.booked_notional_and_fee_usdt
                 || saved.cumulative_entry_usd != settlement.cumulative_entry_usd
-                || saved.settlement_revision != 1
+                || saved.settlement_revision != settlement.settlement_revision
                 || saved.source_digest != settlement.source_digest
                 || prior.committed_at != saved.venue_update_ms
             {
@@ -398,16 +481,32 @@ impl AccountStore {
         }
         let encoded = serde_json::to_string(&settlement)
             .map_err(|_| StoreError::Invalid("ENTRY_SETTLEMENT_SERIALIZATION_FAILED"))?;
-        self.connection.execute(
-            "INSERT INTO operation_receipts(operation_id,kind,request_hash,result_ref,committed_at)
-             VALUES(?1,'ENTRY_SETTLEMENT_PROVEN',?2,?3,?4)",
-            params![
-                key,
-                settlement.plan_hash,
-                encoded,
-                settlement.venue_update_ms
-            ],
-        )?;
+        if terminal {
+            // The canonical terminal receipt is the ONLY amount counted by
+            // historical campaign reconstruction; earlier partial receipts
+            // never appear as extra historical entry purchases.
+            self.connection.execute(
+                "INSERT INTO operation_receipts(operation_id,kind,request_hash,result_ref,committed_at)
+                 VALUES(?1,'ENTRY_SETTLEMENT_PROVEN',?2,?3,?4)",
+                params![key, settlement.plan_hash, encoded, settlement.venue_update_ms],
+            )?;
+        } else {
+            let revision_key = format!("entry-partial:{id}:r{}", settlement.settlement_revision);
+            let tx = self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            tx.execute(
+                "INSERT INTO operation_receipts(operation_id,kind,request_hash,result_ref,committed_at)
+                 VALUES(?1,'ENTRY_PARTIAL_SETTLEMENT_PROVEN',?2,?3,?4)",
+                params![revision_key, settlement.plan_hash, encoded, settlement.venue_update_ms],
+            )?;
+            tx.execute(
+                "INSERT INTO operation_receipts(operation_id,kind,request_hash,result_ref,committed_at)
+                 VALUES(?1,'ENTRY_PARTIAL_HEAD',?2,?3,?4)
+                 ON CONFLICT(operation_id) DO UPDATE SET result_ref=excluded.result_ref,
+                    committed_at=excluded.committed_at",
+                params![partial_head_key, settlement.plan_hash, encoded, settlement.venue_update_ms],
+            )?;
+            tx.commit()?;
+        }
         Ok(settlement)
     }
 
