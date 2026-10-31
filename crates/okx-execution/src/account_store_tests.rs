@@ -570,9 +570,8 @@ fn e1_worker_finance_receipt_roundtrip_matches_native_sql_after_restart() {
     assert_eq!(worker["occupied_after_usdt"], "0");
     assert_eq!(worker["fixture_venue_posts"], 1);
     assert_eq!(entry["account_uid"], "a".repeat(64));
-    assert_eq!(
+    assert!(
         (decimal(stored_money).unwrap() + Decimal::new(4002, 3)) <= Decimal::from(10),
-        true,
         "the native second admission must still fit the actual Worker-consumed campaign budget"
     );
 }
