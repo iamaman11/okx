@@ -1369,6 +1369,64 @@ mod raw_native_session_tests {
             expires_in_ms: 30_000,
         };
         assert!(execute.valid());
+        // The recorded venue has a live public feed, not a single frozen tick.
+        // The production PublicWsCoordinator receives ONLY raw transcript
+        // frames. No market-state setter or source-freshness bypass is used.
+        // A bounded test-only publisher continues the recorded stream during
+        // rate-budget admission and after-HELD census.
+        let (feed_shutdown, mut feed_stop) = watch::channel(false);
+        let feed_connector = connector.clone();
+        let feed_rows = recorded_public.clone();
+        let public_feed = tokio::spawn(async move {
+            let mut ticks = tokio::time::interval(Duration::from_millis(750));
+            ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            let mut book_seq = 12_i64;
+            loop {
+                tokio::select! {
+                    changed = feed_stop.changed() => {
+                        if changed.is_err() || *feed_stop.borrow() {
+                            break;
+                        }
+                    }
+                    _ = ticks.tick() => {
+                        let observed_at = chrono::Utc::now().timestamp_millis();
+                        for (arg, original, action) in &feed_rows {
+                            if arg["channel"] == "instruments" && arg["instType"] == "SWAP" {
+                                feed_connector.send_public_frame(json!({
+                                    "arg": arg,
+                                    "data":[{
+                                        "instType":"SWAP","instId":"BTC-USDT-SWAP",
+                                        "instFamily":"BTC-USDT","uly":"BTC-USDT",
+                                        "state":"live","ruleType":"normal",
+                                        "settleCcy":"USDT","tickSz":"0.1",
+                                        "lotSz":"0.01","minSz":"0.01",
+                                        "maxLmtSz":"1000","maxMktSz":"1000",
+                                        "ctType":"linear","ctVal":"0.01",
+                                        "ctValCcy":"BTC","groupId":"4","lever":"20"
+                                    }]
+                                }).to_string());
+                            } else if let Some(mut value) = original.clone() {
+                                value["ts"] = observed_at.to_string().into();
+                                if value.get("fundingTime").is_some() {
+                                    value["fundingTime"] = observed_at.to_string().into();
+                                    value["nextFundingTime"] =
+                                        (observed_at + 8 * 60 * 60 * 1000).to_string().into();
+                                }
+                                if *action == Some("snapshot") {
+                                    value["seqId"] = book_seq.into();
+                                    book_seq += 1;
+                                }
+                                let mut frame = json!({"arg":arg,"data":[value]});
+                                if let Some(action) = action {
+                                    frame["action"] = (*action).into();
+                                }
+                                feed_connector.send_public_frame(frame.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        });
         let opened = trade
             .trade("fixture-a", &execute, None)
             .await
@@ -1431,6 +1489,11 @@ mod raw_native_session_tests {
             "5.0005",
             "RiskBook must physically hold prior 4 USD plus public 1.0005 USD"
         );
+        feed_shutdown.send(true).unwrap();
+        tokio::time::timeout(Duration::from_secs(3), public_feed)
+            .await
+            .expect("recorded public publisher did not terminate")
+            .unwrap();
         maintenance_shutdown.send(true).unwrap();
         tokio::time::timeout(Duration::from_secs(10), maintenance_task)
             .await
