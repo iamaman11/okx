@@ -1462,8 +1462,14 @@ mod raw_native_session_tests {
             "T09.1 public ACK without settlement must remain partial: {opened}"
         );
         assert_eq!(opened["data"]["intent"]["state"], "ACKNOWLEDGED");
-        assert_eq!(opened["data"]["intent"]["exchange_order_id"], "recorded-t09-opening-001");
-        assert_eq!(opened["data"]["entry_costs"]["entry_budget_upper_reporting"], "1.0005");
+        assert_eq!(
+            opened["data"]["intent"]["exchange_order_id"],
+            "recorded-t09-opening-001"
+        );
+        assert_eq!(
+            opened["data"]["entry_costs"]["entry_budget_upper_reporting"],
+            "1.0005"
+        );
         assert_eq!(opened["data"]["financial_complete"], false);
         assert_eq!(opened["warnings"], json!(["FINANCIAL_BACKFILL_PENDING"]));
         assert_eq!(
@@ -1498,7 +1504,10 @@ mod raw_native_session_tests {
             "idempotent replay must preserve an ACK with unsettled money: {repeated}"
         );
         assert_eq!(repeated["data"]["intent"]["state"], "ACKNOWLEDGED");
-        assert_eq!(repeated["data"]["intent"]["exchange_order_id"], "recorded-t09-opening-001");
+        assert_eq!(
+            repeated["data"]["intent"]["exchange_order_id"],
+            "recorded-t09-opening-001"
+        );
         assert_eq!(
             feed.outbound_posts.lock().unwrap().len(),
             1,

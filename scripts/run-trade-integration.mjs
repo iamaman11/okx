@@ -25,11 +25,27 @@ const failures = {
   timeout: "CASE_DEADLINE_EXCEEDED",
   invalid: "UNVERIFIED_CASE_EVIDENCE",
 };
+// Exact per-case *minimum* observed stages; T09.0 is bootstrap without a POST,
+// and denial cases must never invent a venue send or settlement.
+const requiredStagesByCase = new Map([
+  ["T09.1", mandatoryStages],
+  ["T09.2", mandatoryStages.slice(0, 4)],
+  ["T09.3", ["public_trade_entered", "fill_ingested", "protection_verified"]],
+  ["T09.4", mandatoryStages.slice(0, 6)],
+  ["T09.5", ["public_trade_entered"]],
+  ["T09.6", ["public_trade_entered", "fill_ingested", "protection_verified", "settlement_committed", "release_confirmed"]],
+  ["T09.7", ["public_trade_entered", "settlement_committed", "release_confirmed"]],
+  ["T09.8", ["public_trade_entered"]],
+  ["T09-MA", mandatoryStages.slice(0, 4)],
+  ["T09-SPEC", mandatoryStages.slice(0, 4)],
+]);
+const entryGolden = new Map([["T09.1", "1.0005"]]);
 function usage() {
   throw Error("USAGE: --list | --suite t09,t10 --artifacts DIR | --case T10-05 --artifacts DIR");
 }
 function args(input) {
   if (input.length === 1 && input[0] === "--list") return { list: true };
+  if (input.length === 1 && input[0] === "--self-test") return { selfTest: true };
   const config = {};
   for (let i = 0; i < input.length; i += 2) {
     const key = input[i], value = input[i + 1];
@@ -61,28 +77,94 @@ function verified(output, caseId) {
       || output.readbacks.sql.length === 0 || output.readbacks.risk_book.length === 0)
     throw Error(failures.invalid);
   for (const a of output.assertions) {
-    if (typeof a.id !== "string" || typeof a.expected !== "string"
+    if (typeof a.id !== "string" || a.id.length === 0
+        || typeof a.expected !== "string"
         || typeof a.actual !== "string" || a.expected !== a.actual)
       throw Error(failures.invalid);
   }
   for (const e of output.events) {
-    if (!mandatoryStages.includes(e.stage) || typeof e.owner !== "string"
+    if (typeof e.stage !== "string" || e.stage.length === 0
+        || typeof e.owner !== "string" || e.owner.length === 0
         || typeof e.source_digest !== "string" || !/^[a-f0-9]{64}$/.test(e.source_digest))
       throw Error(failures.invalid);
   }
+  // Missing or reordered execution stages must not produce a PASS just
+  // because the case returned a short set of syntactically valid events.
+  const stages = output.events.map(e => e.stage);
+  const requiredStages = requiredStagesByCase.get(caseId) ?? [];
+  let previous = -1;
+  for (const stage of requiredStages) {
+    const next = stages.findIndex((candidate, index) => index > previous && candidate === stage);
+    if (next < 0) throw Error(`${failures.invalid}:STAGE_MISSING_OR_OUT_OF_ORDER:${stage}`);
+    previous = next;
+  }
+  const golden = entryGolden.get(caseId);
+  if (golden && !output.assertions.some(a => a.id === "opening_spent_usd"
+      && a.expected === golden && a.actual === golden))
+    throw Error(`${failures.invalid}:INDEPENDENT_ENTRY_GOLDEN_MISSING`);
   for (const r of [...output.readbacks.sql, ...output.readbacks.risk_book]) {
     if (!Number.isSafeInteger(r.revision) || r.revision < 0
         || typeof r.digest !== "string" || !/^[a-f0-9]{64}$/.test(r.digest))
       throw Error(failures.invalid);
   }
+  const uniqueSends = new Set();
   for (const send of output.outbound_sends) {
-    if (typeof send.account !== "string" || typeof send.intent !== "string"
+    if (typeof send.account !== "string" || send.account.length === 0
+        || typeof send.intent !== "string" || send.intent.length === 0
+        || typeof send.operation_kind !== "string" || send.operation_kind.length === 0
         || !Number.isSafeInteger(send.count) || send.count < 0 || send.count > 1)
       throw Error(failures.invalid);
+    const key = JSON.stringify([send.account, send.intent, send.operation_kind]);
+    if (uniqueSends.has(key)) throw Error(`${failures.invalid}:DUPLICATE_SEND_KEY`);
+    uniqueSends.add(key);
   }
+  const createCount = output.outbound_sends
+    .filter(send => send.operation_kind === "create")
+    .reduce((count, send) => count + send.count, 0);
+  if (["T09.1", "T09.2", "T09.4", "T09-SPEC"].includes(caseId) && createCount === 0)
+    throw Error(`${failures.invalid}:VENUE_CREATE_NOT_OBSERVED`);
+  if (["T09.8", "T10-01", "T10-04"].includes(caseId) && createCount !== 0)
+    throw Error(`${failures.invalid}:FORBIDDEN_VENUE_CREATE`);
   return output;
 }
+function selfTest() {
+  const digest = "a".repeat(64);
+  const full = {
+    case_id: "T09.1", status: "PASS",
+    assertions: [{ id: "opening_spent_usd", expected: "1.0005", actual: "1.0005" }],
+    events: mandatoryStages.map(stage => ({ stage, owner: "test_owner", source_digest: digest })),
+    readbacks: { sql: [{ revision: 1, digest }], risk_book: [{ revision: 1, digest }] },
+    outbound_sends: [{ account: "A", intent: "I", operation_kind: "create", count: 1 }],
+  };
+  verified(full, "T09.1");
+  let negatives = 0;
+  function mustReject(change, label) {
+    const output = structuredClone(full);
+    change(output);
+    let rejected = false;
+    try { verified(output, "T09.1"); } catch { rejected = true; }
+    if (!rejected) throw Error(`SELF_TEST_FALSE_PASS:${label}`);
+    negatives++;
+  }
+  mustReject(o => { o.events.splice(5, 1); }, "missing_protection");
+  mustReject(o => { [o.events[3], o.events[4]] = [o.events[4], o.events[3]]; }, "out_of_order");
+  mustReject(o => { o.outbound_sends.push({ ...o.outbound_sends[0] }); }, "duplicate_create_tuple");
+  mustReject(o => { o.outbound_sends[0].count = 2; }, "double_create");
+  mustReject(o => { o.outbound_sends = []; }, "missing_create");
+  mustReject(o => { o.assertions[0].actual = "0"; }, "false_money");
+  mustReject(o => { o.assertions[0].id = "other"; }, "missing_goldens");
+  mustReject(o => { o.readbacks.risk_book = []; }, "missing_worker");
+  mustReject(o => { o.events[0].source_digest = "unverified"; }, "missing_digest");
+  const rejected = structuredClone(full);
+  rejected.case_id = "T09.8";
+  rejected.assertions = [{ id: "denial", expected: "denied", actual: "denied" }];
+  let forbidden = false;
+  try { verified(rejected, "T09.8"); } catch { forbidden = true; }
+  if (!forbidden) throw Error("SELF_TEST_FALSE_PASS:denial_with_create");
+  process.stdout.write(`TRADE_INTEGRATION_RUNNER_SELF_TEST_PASS negatives=${negatives + 1}\n`);
+}
 const cli = args(process.argv.slice(2));
+if (cli.selfTest) { selfTest(); process.exit(0); }
 if (cli.list) {
   process.stdout.write(JSON.stringify({
     schema: "okx.trade-integration-manifest/v1", spec_revision: "#449-r6",
