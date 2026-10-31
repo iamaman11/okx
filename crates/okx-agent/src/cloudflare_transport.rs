@@ -406,13 +406,13 @@ mod raw_native_session_tests {
                 // frames. It must establish login, subscription generations and
                 // independently reconcile the six financial history scopes
                 // through the production SQL owner.
-                let socket = Arc::new(
-                    crate::accounts::recorded_support::RecordedWsConnector::default(),
+                let socket =
+                    Arc::new(crate::accounts::recorded_support::RecordedWsConnector::default());
+                let (config, clients) = crate::accounts::recorded_support::prepared_with_socket(
+                    label,
+                    feed.clone(),
+                    socket,
                 );
-                let (config, clients) =
-                    crate::accounts::recorded_support::prepared_with_socket(
-                        label, feed.clone(), socket,
-                    );
                 accounts.connect_prepared(config, clients).await.unwrap();
             }
         }
@@ -683,11 +683,13 @@ mod raw_native_session_tests {
                 .await
                 .unwrap();
             assert_eq!(
-                cursors.0.expect("missing SWAP fill cursor").coverage_gaps, "",
+                cursors.0.expect("missing SWAP fill cursor").coverage_gaps,
+                "",
                 "the production financial capture must have no SWAP history gaps"
             );
             assert_eq!(
-                cursors.1.expect("missing bill cursor").coverage_gaps, "",
+                cursors.1.expect("missing bill cursor").coverage_gaps,
+                "",
                 "the production financial capture must have no bill history gaps"
             );
         }
@@ -721,9 +723,27 @@ mod raw_native_session_tests {
         let entry = budget.entry_budget.as_ref().unwrap();
         assert_eq!(entry.reserved_usd, "2");
         assert_eq!(entry.consumed_usd, "0");
+        // The Worker publishes its real PolicySnapshot over the same WSS.
+        // Its revision must be durably applied by the owning SQL worker
+        // before the account may claim central authority.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let capabilities = trade
+                    .trade("fixture-a", &okx_protocol::trading::TradeRequest::Capabilities {}, None)
+                    .await
+                    .unwrap();
+                if capabilities["native_sql_policy"]["matches_governance"] == true {
+                    assert_eq!(capabilities["governance"]["enabled"], true);
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("Worker PolicySnapshot was not committed by native account SQL");
         // Enter the real public TradeService on both authenticated SQL owners.
-        // Missing private WS source facts cannot become a venue POST, even with
-        // a valid Worker grant in the SAME authenticated process/session.
+        // Despite verified private input and applied A policy, no public
+        // instrument price/spec is available: no new venue POST is allowed.
         use okx_protocol::trading::{
             OrderConstraints, PositionSide, Protection, Sizing, TradeOperation, TradeRequest,
         };
