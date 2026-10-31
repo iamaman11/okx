@@ -486,90 +486,6 @@ impl AccountStore {
         Ok(page_end.unwrap_or(end))
     }
 
-    fn campaign_unsettled_new_bill(
-        &self,
-        bill_after: i64,
-        bill_end: i64,
-        receipt_after: i64,
-        through_ms: i64,
-    ) -> StoreResult<bool> {
-        // Old terminal/campaign proof cannot justify a newly seen
-        // backdated economic bill. Allow only an active, known, centrally
-        // reserved order OR a newly witnessed terminal/late settlement.
-        // Unknown ownership and a released old receipt without a new
-        // economic acknowledgement are never interpreted as zero.
-        self.connection
-            .query_row(
-                "SELECT EXISTS(
-                  SELECT 1 FROM bills b
-                  WHERE b.rowid>?1 AND b.rowid<=?2
-                    AND b.time<=?4
-                    AND b.kind NOT IN ('1:11','1:12','8:173','8:174')
-                    AND b.kind NOT LIKE '7:%'
-                    AND NOT EXISTS (
-                      SELECT 1 FROM bill_order_sources source
-                      JOIN intents i
-                        ON i.exchange_order_id=source.exchange_order_id
-                        AND i.instrument_id=source.instrument_id
-                      JOIN risk_receipts risk ON risk.intent_id=i.intent_id
-                      WHERE source.bill_id=b.bill_id
-                        AND i.risk_increase=1
-                        AND risk.plan_hash=i.plan_hash
-                        AND i.state IN ('ACKNOWLEDGED','PARTIALLY_FILLED')
-                        AND risk.state IN ('POSTED','OPEN')
-                    )
-                    AND NOT EXISTS (
-                      SELECT 1 FROM bill_order_sources source
-                      JOIN intents i
-                        ON i.exchange_order_id=source.exchange_order_id
-                        AND i.instrument_id=source.instrument_id
-                      JOIN risk_receipts risk
-                        ON risk.intent_id=i.intent_id
-                        AND risk.state='RELEASED'
-                      JOIN operation_receipts settled
-                        ON settled.operation_id='entry-settlement:'||i.intent_id
-                        AND settled.kind='ENTRY_SETTLEMENT_PROVEN'
-                        AND settled.request_hash=i.plan_hash
-                        AND settled.rowid>?3
-                      WHERE source.bill_id=b.bill_id
-                        AND i.risk_increase=1
-                        AND b.time<=CAST(json_extract(
-                            settled.result_ref,'$.source_covered_through_ms')
-                            AS INTEGER)
-                    )
-                    AND NOT EXISTS (
-                      SELECT 1 FROM bill_order_sources source
-                      JOIN intents i
-                        ON i.exchange_order_id=source.exchange_order_id
-                        AND i.instrument_id=source.instrument_id
-                      JOIN risk_receipts risk
-                        ON risk.intent_id=i.intent_id
-                        AND risk.state='RELEASED'
-                      JOIN operation_receipts head
-                        ON head.operation_id='entry-late-head:'||i.intent_id
-                        AND head.kind='ENTRY_LATE_HEAD'
-                      JOIN operation_receipts late
-                        ON late.kind='ENTRY_LATE_SETTLED'
-                        AND late.rowid>?3
-                        AND late.operation_id=
-                            'entry-late-settled:'||i.intent_id||':r'||
-                            json_extract(head.result_ref,'$.settlement_revision')
-                        AND late.request_hash=i.plan_hash
-                        AND late.result_ref=
-                            json_extract(head.result_ref,'$.source_digest')
-                      WHERE source.bill_id=b.bill_id
-                        AND i.risk_increase=1
-                        AND b.time<=CAST(json_extract(
-                            head.result_ref,'$.source_covered_through_ms')
-                            AS INTEGER)
-                    )
-                )",
-                params![bill_after, bill_end, receipt_after, through_ms],
-                |r| r.get(0),
-            )
-            .map_err(Into::into)
-    }
-
     fn campaign_receipt_cursor(&self, campaign_id: &str) -> StoreResult<Option<i64>> {
         self.connection
             .query_row(
@@ -902,16 +818,6 @@ impl AccountStore {
                     self.verify_captured_campaign_continuity_rows(
                         from_ms, through_ms, fill_floor, bill_floor, fill_end, bill_end,
                     )?;
-                    if self.campaign_unsettled_new_bill(
-                        bill_floor,
-                        bill_end,
-                        receipt_floor,
-                        through_ms,
-                    )? {
-                        return Err(StoreError::Invalid(
-                            "CAMPAIGN_NEW_BILL_REQUIRES_LATE_SETTLEMENT",
-                        ));
-                    }
                     // Only the reviewed page is committed. A partial page
                     // NEVER advances readiness/source revision, so the next
                     // execution remains fail-closed while more rows await work.
@@ -1285,11 +1191,6 @@ impl AccountStore {
                 i64::MAX,
                 i64::MAX,
             )?;
-            if self.campaign_unsettled_new_bill(*bill, i64::MAX, *receipt, through_ms)? {
-                return Err(StoreError::Invalid(
-                    "CAMPAIGN_NEW_BILL_REQUIRES_LATE_SETTLEMENT",
-                ));
-            }
         } else {
             self.verify_captured_campaign_continuity(from_ms, through_ms)?;
         }

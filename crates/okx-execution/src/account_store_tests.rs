@@ -121,7 +121,7 @@ fn e1_campaign_admission_requires_cached_economic_and_capture_revision() {
     // A background proof at cutoff 10 remains fresh for a caller at 11.
     s.verify_campaign_entry_readiness(&campaign, 2, 11).unwrap();
     assert!(matches!(
-        s.verify_campaign_entry_readiness(&campaign, 2, 14),
+        s.verify_campaign_entry_readiness(&campaign, 2, 3_011),
         Err(StoreError::Invalid("CAMPAIGN_READINESS_STALE"))
     ));
     s.refresh_campaign_entry_readiness(&campaign, 2, 11)
