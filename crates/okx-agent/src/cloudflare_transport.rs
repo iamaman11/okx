@@ -1380,7 +1380,8 @@ mod raw_native_session_tests {
         assert_eq!(
             feed.unconsumed_posts(),
             0,
-            "the ONE pre-recorded signed create response must be consumed"
+            "T09.1 must consume the one signed create response; actual public TradeService outcome: {opened}; outbound POST attempts: {:?}",
+            feed.outbound_posts.lock().unwrap()
         );
         assert_eq!(
             feed.unconsumed_public_clock(),
