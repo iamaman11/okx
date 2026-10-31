@@ -300,3 +300,210 @@ mod reserved_finance_admission_tests {
         drop(ordinary);
     }
 }
+
+
+#[cfg(test)]
+mod raw_native_session_tests {
+    use super::*;
+    use crate::{
+        accounts::{AccountRuntimeRegistry, initialize_installation},
+        analytics::AnalyticsService,
+        market_bootstrap::MarketBootstrapper,
+        risk_bridge::NativeRiskClient,
+        trade_service::TradeService,
+    };
+    use futures_util::{Sink, Stream};
+    use okx_api::{OkxEnvironment, OkxPublicClient, RateBudget, Region};
+    use okx_observation::ReferenceRegistry;
+    use okx_protocol::risk_authority::{
+        RiskCommand, RiskCommandAction, RiskDecisionStatus, RiskResult,
+        RISK_COMMAND_SCHEMA_V1, RISK_RESULT_SCHEMA_V1,
+    };
+    use okx_runtime::PublicWsCoordinator;
+    use std::{pin::Pin, task::{Context, Poll}};
+    use tokio::sync::mpsc;
+
+    /// A recorded frame delivery, not a venue, financial engine or dispatcher.
+    struct RawFrames {
+        inbound: mpsc::UnboundedReceiver<Result<Message, tokio_tungstenite::tungstenite::Error>>,
+        outbound: mpsc::UnboundedSender<Message>,
+    }
+    impl Stream for RawFrames {
+        type Item = Result<Message, tokio_tungstenite::tungstenite::Error>;
+        fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            self.inbound.poll_recv(cx)
+        }
+    }
+    impl Sink<Message> for RawFrames {
+        type Error = tokio_tungstenite::tungstenite::Error;
+        fn poll_ready(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+        fn start_send(self: Pin<&mut Self>, frame: Message) -> Result<(), Self::Error> {
+            self.outbound.send(frame)
+                .map_err(|_| tokio_tungstenite::tungstenite::Error::ConnectionClosed)
+        }
+        fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+        fn poll_close(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+    fn wire(message: F) -> Message {
+        Message::Text(serde_json::to_string(&message).unwrap().into())
+    }
+    fn parse(frame: Message) -> F {
+        serde_json::from_str(frame.to_text().unwrap()).unwrap()
+    }
+    fn test_hello() -> F {
+        F::Hello {
+            schema: SCHEMA.into(),
+            runtime_id: "windows-primary".into(),
+            connection_id: "native_0123456789abcdef0123456789abcdef".into(),
+            installation_id: "installation-test".into(),
+            contract: okx_protocol::accounts::PRODUCT_CONTRACT.into(),
+            runtime_profile: DirectRuntimeProfile::Engine,
+            agent_pid: 100,
+            agent_binary_sha256: "a".repeat(64),
+            agent_incarnation: format!("ctl_{}", "b".repeat(32)),
+        }
+    }
+    async fn test_dispatch() -> (DispatchContext, std::path::PathBuf, NativeRiskClient, mpsc::Receiver<OutboundRiskCommand>) {
+        let mut bytes = [0u8; 16];
+        getrandom::fill(&mut bytes).unwrap();
+        let root = std::env::temp_dir().join(format!(
+            "okx-raw-native-session-{:032x}", u128::from_le_bytes(bytes)
+        ));
+        initialize_installation(&root, "installation-test").unwrap();
+        let budget = RateBudget::new();
+        let accounts = Arc::new(AccountRuntimeRegistry::open(&root, budget.clone()).await.unwrap());
+        let env = OkxEnvironment::new(Region::Global, false);
+        let market = MarketBootstrapper::new(OkxPublicClient::with_rate_budget(env, budget.clone()).unwrap());
+        let reference = ReferenceRegistry::from_public("2026-10-31T00:00:00Z", vec![]).unwrap();
+        let (_public, public_ws) = PublicWsCoordinator::new_with_rate_budget(env, reference, budget);
+        let analytics = AnalyticsService::new(root.join("analytics"), market.clone()).unwrap();
+        let (risk_tx, risk_rx) = mpsc::channel(8);
+        let risk = NativeRiskClient::new(risk_tx);
+        let trade = Arc::new(TradeService::new(accounts.clone(), public_ws.clone(), risk.clone()));
+        trade.set_analytics(analytics.clone()).await;
+        let ctx = DispatchContext {accounts, analytics, public_ws, trade, market};
+        (ctx, root, risk, risk_rx)
+    }
+    fn summary(id: &str) -> RiskCommand {
+        RiskCommand {
+            schema: RISK_COMMAND_SCHEMA_V1.into(),
+            command_id: id.into(),
+            installation_id: "installation-test".into(),
+            action: RiskCommandAction::Summary {},
+        }
+    }
+    fn denied(id: &str) -> RiskResult {
+        RiskResult {
+            schema: RISK_RESULT_SCHEMA_V1.into(),
+            command_id: id.into(),
+            status: RiskDecisionStatus::Denied,
+            reason: Some("CENTRAL_REAL_AUTHORIZATION_INACTIVE".into()),
+            reservation_key: None,
+            risk_book_sequence: None,
+            policy_revision: None,
+            existing_modelled_loss_usdt: None,
+            reservation_state: None,
+            budget: None,
+            account_budget: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn actual_native_session_binds_risk_reply_to_generation_and_id() {
+        let (ctx, root, client, mut risk_rx) = test_dispatch().await;
+        let (input_tx, input_rx) = mpsc::unbounded_channel();
+        let (output_tx, mut output_rx) = mpsc::unbounded_channel();
+        let socket = RawFrames {inbound: input_rx, outbound: output_tx};
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let session = tokio::spawn(async move {
+            run_connected_session(socket, test_hello(), ctx, &mut risk_rx, shutdown_rx).await
+        });
+        let first = tokio::time::timeout(Duration::from_secs(3), output_rx.recv()).await.unwrap().unwrap();
+        assert!(matches!(parse(first), F::Hello {..}));
+        let session_id = "session_test_12345678".to_owned();
+        let generation = 9;
+        input_tx.send(Ok(wire(F::HelloAck {
+            schema: SCHEMA.into(), session_id: session_id.clone(), connection_generation: generation,
+        }))).unwrap();
+        let command = summary("risk_wire_12345");
+        let request = tokio::spawn({
+            let client = client.clone();
+            async move { client.request(command).await }
+        });
+        let seen = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                match parse(output_rx.recv().await.expect("outbound closed")) {
+                    F::RiskControl{command,..} => break command,
+                    F::Ping{..} => continue,
+                    other => panic!("unexpected native outbound: {other:?}"),
+                }
+            }
+        }).await.unwrap();
+        assert_eq!(seen.command_id, "risk_wire_12345");
+        input_tx.send(Ok(wire(F::RiskControlResult {
+            schema: SCHEMA.into(),
+            session_id,
+            connection_generation: generation,
+            result: denied(&seen.command_id),
+        }))).unwrap();
+        let answer = tokio::time::timeout(Duration::from_secs(3), request).await.unwrap().unwrap().unwrap();
+        assert_eq!(answer.status, RiskDecisionStatus::Denied);
+        assert_eq!(answer.command_id, seen.command_id);
+        shutdown_tx.send(true).unwrap();
+        assert!(tokio::time::timeout(Duration::from_secs(3), session).await.unwrap().unwrap().is_ok());
+        drop(client);
+        drop(input_tx);
+        drop(output_rx);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn stale_native_risk_reply_cannot_grant_a_different_generation() {
+        let (ctx, root, client, mut risk_rx) = test_dispatch().await;
+        let (input_tx, input_rx) = mpsc::unbounded_channel();
+        let (output_tx, mut output_rx) = mpsc::unbounded_channel();
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let session = tokio::spawn(async move {
+            run_connected_session(
+                RawFrames{inbound: input_rx, outbound: output_tx},
+                test_hello(), ctx, &mut risk_rx, shutdown_rx,
+            ).await
+        });
+        assert!(matches!(parse(output_rx.recv().await.unwrap()), F::Hello{..}));
+        let session_id = "session_test_87654321".to_owned();
+        input_tx.send(Ok(wire(F::HelloAck {
+            schema: SCHEMA.into(), session_id: session_id.clone(), connection_generation: 12,
+        }))).unwrap();
+        let command = summary("risk_wire_99999");
+        let request = tokio::spawn({
+            let client=client.clone();
+            async move {client.request(command).await}
+        });
+        let observed = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if let F::RiskControl{command,..}=parse(output_rx.recv().await.unwrap()) {
+                    break command.command_id;
+                }
+            }
+        }).await.unwrap();
+        input_tx.send(Ok(wire(F::RiskControlResult {
+            schema: SCHEMA.into(),session_id,connection_generation: 11,
+            result: denied(&observed),
+        }))).unwrap();
+        let failed = tokio::time::timeout(Duration::from_secs(3), session).await.unwrap().unwrap();
+        assert!(failed.unwrap_err().to_string().contains("SESSION_GENERATION_MISMATCH"));
+        let unresolved = tokio::time::timeout(Duration::from_secs(3), request).await.unwrap().unwrap();
+        assert_eq!(unresolved.unwrap_err(), "RISK_TRANSPORT_LOST_DO_NOT_REPLAY");
+        drop(client);
+        drop(input_tx);
+        drop(shutdown_tx);
+        drop(output_rx);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
