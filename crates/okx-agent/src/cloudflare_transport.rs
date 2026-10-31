@@ -1454,10 +1454,18 @@ mod raw_native_session_tests {
             .trade("fixture-a", &execute, None)
             .await
             .expect("T09.1 public Execute must pass complete Native/Worker admission");
+        // Venue ACK and identity-bound order readback prove the create,
+        // but no fill/fee/bill has been published. The production Engine
+        // must report financial incompleteness instead of fabricated money.
         assert_eq!(
-            opened["status"], "completed",
-            "T09.1 public operation: {opened}"
+            opened["status"], "partial",
+            "T09.1 public ACK without settlement must remain partial: {opened}"
         );
+        assert_eq!(opened["data"]["intent"]["state"], "ACKNOWLEDGED");
+        assert_eq!(opened["data"]["intent"]["exchange_order_id"], "recorded-t09-opening-001");
+        assert_eq!(opened["data"]["entry_costs"]["entry_budget_upper_reporting"], "1.0005");
+        assert_eq!(opened["data"]["financial_complete"], false);
+        assert_eq!(opened["warnings"], json!(["FINANCIAL_BACKFILL_PENDING"]));
         assert_eq!(
             feed.unconsumed_posts(),
             0,
@@ -1485,7 +1493,12 @@ mod raw_native_session_tests {
             .trade("fixture-a", &execute, None)
             .await
             .expect("T09.1 identical Execute must be idempotent");
-        assert_eq!(repeated["status"], "completed");
+        assert_eq!(
+            repeated["status"], "partial",
+            "idempotent replay must preserve an ACK with unsettled money: {repeated}"
+        );
+        assert_eq!(repeated["data"]["intent"]["state"], "ACKNOWLEDGED");
+        assert_eq!(repeated["data"]["intent"]["exchange_order_id"], "recorded-t09-opening-001");
         assert_eq!(
             feed.outbound_posts.lock().unwrap().len(),
             1,
