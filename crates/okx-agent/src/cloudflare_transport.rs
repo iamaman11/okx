@@ -1146,6 +1146,49 @@ mod raw_native_session_tests {
         // exactly one pre-recorded raw OKX POST and actual Native/Worker owners.
         // It must never be counted as full T09 until fill/close/restart are
         // independently reconciled in the same assembly.
+        // Start the actual Engine maintenance owner; admission must not
+        // race an as-yet-unreconciled campaign history. Read each account's
+        // independent SQL owner until the persisted readiness proof exists.
+        // Neither the test nor this readback writes a synthetic receipt.
+        let (maintenance_shutdown, maintenance_rx) = watch::channel(false);
+        let maintenance_trade = trade.clone();
+        let maintenance_task = tokio::spawn(async move {
+            maintenance_trade.run(maintenance_rx).await;
+        });
+        let native_origin = i64::try_from(
+            checked.budget.as_ref().unwrap().campaign_origin
+                .as_ref().unwrap().started_at_ms
+        ).unwrap();
+        let campaign_id = checked.budget.as_ref().unwrap().entry_budget
+            .as_ref().unwrap().campaign_id.clone();
+        let mut last_readiness_error = String::from("NOT_CHECKED");
+        let readiness = tokio::time::timeout(Duration::from_secs(12), async {
+            loop {
+                let through = chrono::Utc::now().timestamp_millis() - 2_000;
+                let mut both_ready = true;
+                for alias in ["fixture-a", "fixture-b"] {
+                    let owner = accounts.resolve(alias).await.unwrap();
+                    let campaign = campaign_id.clone();
+                    match owner.execution.store.call(
+                        Instant::now() + Duration::from_secs(2),
+                        move |s| s.verify_campaign_entry_readiness(
+                            &campaign, native_origin, through
+                        ),
+                    ).await {
+                        Ok(()) => {},
+                        Err(e) => {
+                            last_readiness_error = format!("{alias}: {e}");
+                            both_ready = false;
+                            break;
+                        }
+                    }
+                }
+                if both_ready { break; }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        }).await;
+        assert!(readiness.is_ok(),
+            "production maintenance must reconcile BOTH native SQL campaign frontiers: {last_readiness_error}");
         use crate::accounts::recorded_support::RecordedPost;
         let fresh_fee_at = chrono::Utc::now().timestamp_millis().to_string();
         for _ in 0..3 {
@@ -1214,11 +1257,6 @@ mod raw_native_session_tests {
             expires_in_ms: 30_000,
         };
         assert!(execute.valid());
-        let (maintenance_shutdown, maintenance_rx) = watch::channel(false);
-        let maintenance_trade = trade.clone();
-        let maintenance_task = tokio::spawn(async move {
-            maintenance_trade.run(maintenance_rx).await;
-        });
         let opened = trade
             .trade("fixture-a", &execute, None)
             .await
@@ -1237,15 +1275,18 @@ mod raw_native_session_tests {
             0,
             "production exchange-clock evidence must come from the raw response"
         );
-        let sends = feed.outbound_posts.lock().unwrap();
-        assert_eq!(
-            sends.len(),
-            1,
-            "at most one possible create POST per intent"
-        );
-        assert_eq!(sends[0].0, "fixture-executor-a");
-        assert_eq!(sends[0].1, "/api/v5/trade/order");
-        drop(sends);
+        {
+            // The synchronous transcript lock cannot live across a Rust
+            // await. The scope also proves assertions read one snapshot.
+            let sends = feed.outbound_posts.lock().unwrap();
+            assert_eq!(
+                sends.len(),
+                1,
+                "at most one possible create POST per intent"
+            );
+            assert_eq!(sends[0].0, "fixture-executor-a");
+            assert_eq!(sends[0].1, "/api/v5/trade/order");
+        }
         let repeated = trade
             .trade("fixture-a", &execute, None)
             .await
