@@ -1,22 +1,16 @@
-use futures_util::{SinkExt, StreamExt};
 use okx_api::{OkxEnvironment, RateBudget, RateOperationClass, RateThrottleEvidence};
 use thiserror::Error;
-use tokio::net::TcpStream;
-use tokio_tungstenite::{
-    MaybeTlsStream, WebSocketStream, connect_async,
-    tungstenite::{Error as TungsteniteError, Message},
-};
+use tokio_tungstenite::tungstenite::{Error as TungsteniteError, Message};
 
 use crate::protocol::{
     InboundMessage, Subscription, parse_text, subscribe_payload, unsubscribe_payload,
 };
+use crate::wire::{LiveWsConnector, WsConnector, WsWire};
 
 const MAX_SUBSCRIPTION_PAYLOAD_BYTES: usize = 64 * 1024;
 
-type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
-
 pub struct PublicWsConnection {
-    socket: Socket,
+    socket: Box<dyn WsWire>,
     rate_budget: RateBudget,
     connection_scope: String,
 }
@@ -57,7 +51,19 @@ impl PublicWsConnection {
         rate_budget: RateBudget,
         connection_scope: String,
     ) -> Result<Self, PublicWsError> {
-        let (socket, _response) = connect_async(environment.public_ws_url()).await?;
+        Self::connect_with_connector(environment, rate_budget, connection_scope, &LiveWsConnector)
+            .await
+    }
+
+    pub async fn connect_with_connector(
+        environment: OkxEnvironment,
+        rate_budget: RateBudget,
+        connection_scope: String,
+        connector: &dyn WsConnector,
+    ) -> Result<Self, PublicWsError> {
+        let socket = connector
+            .connect(environment.public_ws_url().to_owned())
+            .await?;
         Ok(Self {
             socket,
             rate_budget,
@@ -120,7 +126,7 @@ impl PublicWsConnection {
     }
 
     pub async fn close(&mut self) -> Result<(), PublicWsError> {
-        self.socket.close(None).await?;
+        self.socket.close().await?;
         Ok(())
     }
 }
@@ -141,7 +147,60 @@ fn validate_subscription_payload(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::PublicChannel;
+    use crate::{protocol::PublicChannel, wire::test_support::ScriptedConnector};
+
+    #[tokio::test]
+    async fn public_recorded_frames_use_real_subscription_and_parser() {
+        let script = ScriptedConnector::default();
+        script
+            .incoming
+            .lock()
+            .unwrap()
+            .push_back(Message::Text("pong".into()));
+        let mut connection = PublicWsConnection::connect_with_connector(
+            OkxEnvironment::new(okx_api::Region::Global, false),
+            RateBudget::new(),
+            "public-scripted".to_owned(),
+            &script,
+        )
+        .await
+        .unwrap();
+        connection
+            .subscribe(&[Subscription::instrument(
+                PublicChannel::Tickers,
+                "BTC-USDT-SWAP",
+            )])
+            .await
+            .unwrap();
+        assert!(matches!(
+            connection.next().await.unwrap(),
+            Some(InboundMessage::Pong)
+        ));
+        assert_eq!(script.sent.lock().unwrap().len(), 1);
+        assert!(script.urls.lock().unwrap()[0].starts_with("wss://"));
+    }
+
+    #[tokio::test]
+    async fn binary_frame_is_not_promoted_into_market_evidence() {
+        let script = ScriptedConnector::default();
+        script
+            .incoming
+            .lock()
+            .unwrap()
+            .push_back(Message::Binary(vec![0, 1].into()));
+        let mut connection = PublicWsConnection::connect_with_connector(
+            OkxEnvironment::new(okx_api::Region::Global, false),
+            RateBudget::new(),
+            "public-binary".into(),
+            &script,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            connection.next().await,
+            Err(PublicWsError::UnexpectedBinaryFrame)
+        ));
+    }
 
     #[test]
     fn subscription_payload_validation_is_fail_closed() {

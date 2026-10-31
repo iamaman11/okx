@@ -2,6 +2,7 @@ pub mod private;
 pub mod private_protocol;
 pub mod protocol;
 pub mod public;
+pub mod wire;
 
 pub use private::{PrivateWsConnection, PrivateWsError};
 pub use private_protocol::{
@@ -13,3 +14,4 @@ pub use protocol::{
     unsubscribe_payload,
 };
 pub use public::{PublicWsConnection, PublicWsError};
+pub use wire::{LiveWsConnector, WsConnect, WsConnector};

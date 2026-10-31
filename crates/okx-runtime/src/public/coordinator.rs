@@ -14,7 +14,8 @@ use okx_observation::{
     ReferenceRegistry,
 };
 use okx_ws::{
-    InboundMessage, PublicChannel, PublicWsConnection, PublicWsError, Subscription, WsArg,
+    InboundMessage, LiveWsConnector, PublicChannel, PublicWsConnection, PublicWsError,
+    Subscription, WsArg, WsConnector,
 };
 use tokio::{
     sync::{RwLock, mpsc, watch},
@@ -60,6 +61,7 @@ pub struct PublicWsCoordinator {
     demand_recency: VecDeque<String>,
     generation: u64,
     rate_budget: RateBudget,
+    connector: Arc<dyn WsConnector>,
 }
 
 #[derive(Debug)]
@@ -205,6 +207,21 @@ impl PublicWsCoordinator {
         reference: ReferenceRegistry,
         rate_budget: RateBudget,
     ) -> (Self, PublicWsHandle) {
+        Self::new_with_connector(
+            environment,
+            reference,
+            rate_budget,
+            Arc::new(LiveWsConnector),
+        )
+    }
+
+    /// Transport composition for the same production generation/state machine.
+    pub fn new_with_connector(
+        environment: OkxEnvironment,
+        reference: ReferenceRegistry,
+        rate_budget: RateBudget,
+        connector: Arc<dyn WsConnector>,
+    ) -> (Self, PublicWsHandle) {
         let state = Arc::new(RwLock::new(PublicRuntimeState::new(reference)));
         let (commands_tx, commands_rx) = mpsc::channel(COMMAND_CAPACITY);
         let (market_updates, _market_updates_rx) = watch::channel(PublicMarketWakeup::default());
@@ -219,6 +236,7 @@ impl PublicWsCoordinator {
                 demand_recency: VecDeque::new(),
                 generation: 0,
                 rate_budget,
+                connector,
             },
             PublicWsHandle {
                 commands: commands_tx,
@@ -246,10 +264,11 @@ impl PublicWsCoordinator {
             self.state.write().await.set_connecting();
             let connection_scope =
                 format!("public-generation-{}", self.generation.saturating_add(1));
-            let outcome = match PublicWsConnection::connect_with_rate_budget(
+            let outcome = match PublicWsConnection::connect_with_connector(
                 self.environment,
                 self.rate_budget.clone(),
                 connection_scope,
+                self.connector.as_ref(),
             )
             .await
             {

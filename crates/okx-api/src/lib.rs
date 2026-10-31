@@ -11,6 +11,7 @@ pub mod market_data;
 pub mod public_data;
 pub mod rate;
 pub mod trade;
+pub mod transport;
 
 pub use account::{
     AccountApi, AccountCapabilities, AccountConfig, AccountPositionRiskBalance,
@@ -47,6 +48,10 @@ pub use rate::{
     RATE_THROTTLE_SCHEMA_V1, RateBudget, RateBudgetSnapshot, RateDecision, RateDomainEvidence,
     RateDomainKind, RateOperationClass, RateRequestPlan, RateThrottleEvidence, RateThrottleSource,
     SUBACCOUNT_RATE_LIMIT_CODE,
+};
+
+pub use transport::{
+    HttpRequest, HttpSend, HttpStatusCode, HttpTransport, RawHttpResponse, ReqwestHttpTransport,
 };
 
 pub use trade::{

@@ -24,7 +24,17 @@ impl ExecutionRuntime {
         budget: RateBudget,
     ) -> AgentResult<Self> {
         let rest = OkxRestClient::with_rate_budget(environment, credentials, budget)?;
-        Ok(Self {
+        Ok(Self::from_client(store, rest, environment, uid))
+    }
+
+    /// One composition path; the SQL owner and execution code remain unchanged.
+    pub fn from_client(
+        store: AccountStoreHandle,
+        rest: OkxRestClient,
+        environment: OkxEnvironment,
+        uid: String,
+    ) -> Self {
+        Self {
             store,
             trade: TradeApi::new(rest.clone()),
             history: AccountHistoryApi::new(rest.clone()),
@@ -32,7 +42,7 @@ impl ExecutionRuntime {
             clock: rest,
             environment,
             uid,
-        })
+        }
     }
     pub async fn verified_uid_matches(&self, uid: &str) -> AgentResult<bool> {
         let config = self.account.config().await?;

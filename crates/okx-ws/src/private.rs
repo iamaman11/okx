@@ -1,25 +1,19 @@
-use futures_util::{SinkExt, StreamExt};
 use okx_api::{
     OkxEnvironment, RateBudget, RateOperationClass, RateThrottleEvidence, WsLoginMaterial,
 };
 use thiserror::Error;
-use tokio::net::TcpStream;
-use tokio_tungstenite::{
-    MaybeTlsStream, WebSocketStream, connect_async,
-    tungstenite::{Error as TungsteniteError, Message},
-};
+use tokio_tungstenite::tungstenite::{Error as TungsteniteError, Message};
 
 use crate::private_protocol::{
     PrivateInboundMessage, PrivateSubscription, login_payload, parse_private_text,
     private_subscribe_payload, private_unsubscribe_payload,
 };
+use crate::wire::{LiveWsConnector, WsConnector, WsWire};
 
 const MAX_SUBSCRIPTION_PAYLOAD_BYTES: usize = 64 * 1024;
 
-type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
-
 pub struct PrivateWsConnection {
-    socket: Socket,
+    socket: Box<dyn WsWire>,
     rate_budget: RateBudget,
     connection_scope: String,
 }
@@ -60,7 +54,8 @@ impl PrivateWsConnection {
         rate_budget: RateBudget,
         connection_scope: String,
     ) -> Result<Self, PrivateWsError> {
-        Self::connect_url(environment.private_ws_url(), rate_budget, connection_scope).await
+        Self::connect_with_connector(environment, rate_budget, connection_scope, &LiveWsConnector)
+            .await
     }
 
     /// A second exchange socket in the SAME private coordinator; it is not
@@ -70,15 +65,52 @@ impl PrivateWsConnection {
         rate_budget: RateBudget,
         connection_scope: String,
     ) -> Result<Self, PrivateWsError> {
-        Self::connect_url(environment.business_ws_url(), rate_budget, connection_scope).await
+        Self::connect_business_with_connector(
+            environment,
+            rate_budget,
+            connection_scope,
+            &LiveWsConnector,
+        )
+        .await
+    }
+
+    pub async fn connect_with_connector(
+        environment: OkxEnvironment,
+        rate_budget: RateBudget,
+        connection_scope: String,
+        connector: &dyn WsConnector,
+    ) -> Result<Self, PrivateWsError> {
+        Self::connect_url(
+            environment.private_ws_url(),
+            rate_budget,
+            connection_scope,
+            connector,
+        )
+        .await
+    }
+
+    pub async fn connect_business_with_connector(
+        environment: OkxEnvironment,
+        rate_budget: RateBudget,
+        connection_scope: String,
+        connector: &dyn WsConnector,
+    ) -> Result<Self, PrivateWsError> {
+        Self::connect_url(
+            environment.business_ws_url(),
+            rate_budget,
+            connection_scope,
+            connector,
+        )
+        .await
     }
 
     async fn connect_url(
         url: &str,
         rate_budget: RateBudget,
         connection_scope: String,
+        connector: &dyn WsConnector,
     ) -> Result<Self, PrivateWsError> {
-        let (socket, _response) = connect_async(url).await?;
+        let socket = connector.connect(url.to_owned()).await?;
         Ok(Self {
             socket,
             rate_budget,
@@ -150,7 +182,7 @@ impl PrivateWsConnection {
     }
 
     pub async fn close(&mut self) -> Result<(), PrivateWsError> {
-        self.socket.close(None).await?;
+        self.socket.close().await?;
         Ok(())
     }
 }
@@ -171,7 +203,64 @@ fn validate_subscription_payload(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::PrivateSubscription;
+    use crate::{PrivateSubscription, wire::test_support::ScriptedConnector};
+
+    #[tokio::test]
+    async fn private_login_and_raw_frame_decode_preserve_production_checks() {
+        let script = ScriptedConnector::default();
+        script.incoming.lock().unwrap().push_back(Message::Text(
+            r#"{"event":"login","code":"0","msg":"","connId":"c1"}"#.into(),
+        ));
+        let mut socket = PrivateWsConnection::connect_with_connector(
+            OkxEnvironment::new(okx_api::Region::Global, false),
+            RateBudget::new(),
+            "private-scripted".into(),
+            &script,
+        )
+        .await
+        .unwrap();
+        let credentials = okx_api::Credentials::new(
+            "example-key".into(),
+            "example-secret".into(),
+            "example-pass".into(),
+        )
+        .unwrap();
+        socket
+            .login(&credentials.websocket_login_material("1538054050").unwrap())
+            .await
+            .unwrap();
+        socket
+            .subscribe(&[PrivateSubscription::orders_any()])
+            .await
+            .unwrap();
+        assert!(
+            matches!(socket.next().await.unwrap(), Some(PrivateInboundMessage::Login { code, .. }) if code == "0")
+        );
+        assert_eq!(script.sent.lock().unwrap().len(), 2);
+        assert!(script.urls.lock().unwrap()[0].ends_with("/private"));
+    }
+
+    #[tokio::test]
+    async fn private_binary_frame_is_rejected_not_a_verified_snapshot() {
+        let script = ScriptedConnector::default();
+        script
+            .incoming
+            .lock()
+            .unwrap()
+            .push_back(Message::Binary(vec![0].into()));
+        let mut socket = PrivateWsConnection::connect_with_connector(
+            OkxEnvironment::new(okx_api::Region::Global, false),
+            RateBudget::new(),
+            "private-binary".into(),
+            &script,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            socket.next().await,
+            Err(PrivateWsError::UnexpectedBinaryFrame)
+        ));
+    }
 
     #[test]
     fn private_subscription_payload_validation_is_fail_closed() {

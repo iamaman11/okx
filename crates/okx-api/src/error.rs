@@ -24,6 +24,9 @@ pub enum OkxError {
     #[error("HTTP error: {0}")]
     Http(#[from] reqwest::Error),
 
+    #[error("HTTP response status {status}")]
+    HttpStatus { status: u16 },
+
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
 

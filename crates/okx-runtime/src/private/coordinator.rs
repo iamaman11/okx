@@ -3,7 +3,8 @@ use std::{sync::Arc, time::Duration};
 use chrono::Utc;
 use okx_api::{BalanceSnapshot, Credentials, OkxEnvironment, PendingOrder, Position, RateBudget};
 use okx_ws::{
-    PrivateChannel, PrivateInboundMessage, PrivateSubscription, PrivateWsConnection, PrivateWsError,
+    LiveWsConnector, PrivateChannel, PrivateInboundMessage, PrivateSubscription,
+    PrivateWsConnection, PrivateWsError, WsConnector,
 };
 use tokio::{
     sync::{RwLock, watch},
@@ -37,6 +38,7 @@ pub struct PrivateWsCoordinator {
     generation: u64,
     rate_budget: RateBudget,
     financial_source_signal: watch::Sender<u64>,
+    connector: Arc<dyn WsConnector>,
 }
 
 #[derive(Debug)]
@@ -113,6 +115,23 @@ impl PrivateWsCoordinator {
         rate_budget: RateBudget,
         generation_seed: u64,
     ) -> (Self, PrivateWsHandle) {
+        Self::new_with_connector_seed(
+            environment,
+            credentials,
+            rate_budget,
+            generation_seed,
+            Arc::new(LiveWsConnector),
+        )
+    }
+
+    /// Keep the same authenticated private/business coordinator for raw WS tests.
+    pub fn new_with_connector_seed(
+        environment: OkxEnvironment,
+        credentials: Credentials,
+        rate_budget: RateBudget,
+        generation_seed: u64,
+        connector: Arc<dyn WsConnector>,
+    ) -> (Self, PrivateWsHandle) {
         let state = Arc::new(RwLock::new(PrivateRuntimeState::new()));
         let (financial_source_signal, financial_source_receiver) = watch::channel(0);
         (
@@ -123,6 +142,7 @@ impl PrivateWsCoordinator {
                 generation: generation_seed,
                 rate_budget,
                 financial_source_signal,
+                connector,
             },
             PrivateWsHandle {
                 state,
@@ -149,10 +169,11 @@ impl PrivateWsCoordinator {
             self.state.write().await.set_connecting();
             let connection_scope =
                 format!("private-generation-{}", self.generation.saturating_add(1));
-            let outcome = match PrivateWsConnection::connect_with_rate_budget(
+            let outcome = match PrivateWsConnection::connect_with_connector(
                 self.environment,
                 self.rate_budget.clone(),
                 connection_scope,
+                self.connector.as_ref(),
             )
             .await
             {
@@ -160,10 +181,11 @@ impl PrivateWsCoordinator {
                     self.generation = self.generation.saturating_add(1);
                     self.state.write().await.begin_generation(self.generation);
 
-                    let business = PrivateWsConnection::connect_business_with_rate_budget(
+                    let business = PrivateWsConnection::connect_business_with_connector(
                         self.environment,
                         self.rate_budget.clone(),
                         format!("business-generation-{}", self.generation),
+                        self.connector.as_ref(),
                     )
                     .await;
                     let result = match business {

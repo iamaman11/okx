@@ -6,13 +6,13 @@ use crate::{
     execution_runtime::ExecutionRuntime,
     okx_credentials::{NamedAccountCredentials, load_native_account_credentials},
 };
-use okx_api::{AccountApi, OkxRestClient, RateBudget};
+use okx_api::{AccountApi, Credentials, OkxEnvironment, OkxRestClient, RateBudget};
 use okx_execution::{AccountMeta, AccountStoreHandle, OpeningSnapshot};
 use okx_protocol::{
     account_catalog_proto,
     accounts::{AccountKey, Environment, VerifiedAccountConfig, valid_reference},
 };
-use okx_runtime::{PrivateWsCoordinator, PrivateWsHandle};
+use okx_runtime::{LiveWsConnector, PrivateWsCoordinator, PrivateWsHandle, WsConnector};
 use rust_decimal::Decimal;
 use sha2::{Digest, Sha256};
 use std::{
@@ -108,6 +108,34 @@ pub struct AccountResources {
 impl Drop for AccountResources {
     fn drop(&mut self) {
         let _ = self.source_shutdown.send(true);
+    }
+}
+
+/// One verified account bootstrap, regardless of who delivers HTTP/WS bytes.
+pub(crate) struct PreparedAccountClients {
+    environment: OkxEnvironment,
+    observer: OkxRestClient,
+    executor: OkxRestClient,
+    observer_login: Credentials,
+    ws_connector: Arc<dyn WsConnector>,
+}
+
+impl PreparedAccountClients {
+    fn live(credentials: NamedAccountCredentials, budget: RateBudget) -> AgentResult<Self> {
+        let observer = OkxRestClient::with_rate_budget(
+            credentials.environment,
+            credentials.observer.clone(),
+            budget.clone(),
+        )?;
+        let executor =
+            OkxRestClient::with_rate_budget(credentials.environment, credentials.executor, budget)?;
+        Ok(Self {
+            environment: credentials.environment,
+            observer,
+            executor,
+            observer_login: credentials.observer,
+            ws_connector: Arc::new(LiveWsConnector),
+        })
     }
 }
 
@@ -387,28 +415,35 @@ impl AccountRuntimeRegistry {
         credentials: NamedAccountCredentials,
         initialize: bool,
     ) -> AgentResult<Arc<AccountResources>> {
-        let uid = verify_credentials(&credentials, self.rate_budget.clone()).await?;
+        let clients = PreparedAccountClients::live(credentials, self.rate_budget.clone())?;
+        let leases = crate::config::default_root().join("account-leases");
+        self.open_resources_with_clients(configuration, clients, initialize, &leases)
+            .await
+    }
+
+    async fn open_resources_with_clients(
+        &self,
+        configuration: VerifiedAccountConfig,
+        clients: PreparedAccountClients,
+        initialize: bool,
+        lease_root: &Path,
+    ) -> AgentResult<Arc<AccountResources>> {
+        let uid =
+            verify_client_pair(clients.environment, &clients.observer, &clients.executor).await?;
         if uid != configuration.account_key.verified_uid
-            || credentials.environment.demo
+            || clients.environment.demo
                 != (configuration.account_key.environment == Environment::Demo)
         {
             return Err(AgentError::FinancialCaptureTask(
                 "ACCOUNT_IDENTITY_MISMATCH".into(),
             ));
         }
-        let observer = AccountBootstrapper::new(OkxRestClient::with_rate_budget(
-            credentials.environment,
-            credentials.observer.clone(),
-            self.rate_budget.clone(),
-        )?);
+        let observer = AccountBootstrapper::new(clients.observer);
         let root = self
             .root
             .join("accounts")
             .join(key_hash(&configuration.account_key));
-        let identity_lease = acquire_identity_lease(
-            &crate::config::default_root().join("account-leases"),
-            &configuration.account_key,
-        )?;
+        let identity_lease = acquire_identity_lease(lease_root, &configuration.account_key)?;
         fs::create_dir_all(&root)?;
         let database = root.join("account.sqlite");
         let store = if initialize {
@@ -524,18 +559,18 @@ impl AccountRuntimeRegistry {
                 |s| s.source_generation_base(),
             )
             .await?;
-        let execution = Arc::new(ExecutionRuntime::new(
+        let execution = Arc::new(ExecutionRuntime::from_client(
             store,
-            credentials.environment,
-            credentials.executor,
+            clients.executor,
+            clients.environment,
             uid.clone(),
-            self.rate_budget.clone(),
-        )?);
-        let (coordinator, private_ws) = PrivateWsCoordinator::new_with_rate_budget_seed(
-            credentials.environment,
-            credentials.observer,
+        ));
+        let (coordinator, private_ws) = PrivateWsCoordinator::new_with_connector_seed(
+            clients.environment,
+            clients.observer_login,
             self.rate_budget.clone(),
             source_generation_seed,
+            clients.ws_connector,
         );
         let (shutdown, receiver) = watch::channel(false);
         let resources = Arc::new(AccountResources {
@@ -555,6 +590,21 @@ impl AccountRuntimeRegistry {
         });
         start_sources(&resources, coordinator, receiver);
         Ok(resources)
+    }
+
+    /// Test-only composition. No alternate bootstrap, bypass or installed route.
+    /// All identity, permission, SQL and capture checks above still execute.
+    #[cfg(test)]
+    pub(crate) async fn connect_prepared(
+        &self,
+        configuration: VerifiedAccountConfig,
+        clients: PreparedAccountClients,
+    ) -> AgentResult<()> {
+        let leases = self.root.join("account-leases");
+        let resources = self
+            .open_resources_with_clients(configuration, clients, true, &leases)
+            .await?;
+        self.publish(resources).await
     }
 
     pub async fn shutdown(&self) {
@@ -585,29 +635,35 @@ pub(crate) async fn verify_credentials(
     credentials: &NamedAccountCredentials,
     budget: RateBudget,
 ) -> AgentResult<String> {
-    let observer = AccountApi::new(OkxRestClient::with_rate_budget(
+    let observer = OkxRestClient::with_rate_budget(
         credentials.environment,
         credentials.observer.clone(),
         budget.clone(),
-    )?);
-    let executor = AccountApi::new(OkxRestClient::with_rate_budget(
+    )?;
+    let executor = OkxRestClient::with_rate_budget(
         credentials.environment,
         credentials.executor.clone(),
         budget,
-    )?);
+    )?;
+    verify_client_pair(credentials.environment, &observer, &executor).await
+}
+
+async fn verify_client_pair(
+    environment: OkxEnvironment,
+    observer: &OkxRestClient,
+    executor: &OkxRestClient,
+) -> AgentResult<String> {
+    let observer = AccountApi::new(observer.clone());
+    let executor = AccountApi::new(executor.clone());
     let (observer, executor) = tokio::try_join!(observer.config(), executor.config())?;
-    let result = if credentials.environment.demo {
+    let result = if environment.demo {
         crate::execution_preflight::evaluate_demo_executor_preflight(
-            credentials.environment,
+            environment,
             &observer,
             &executor,
         )
     } else {
-        crate::execution_preflight::evaluate_executor_preflight(
-            credentials.environment,
-            &observer,
-            &executor,
-        )
+        crate::execution_preflight::evaluate_executor_preflight(environment, &observer, &executor)
     };
     if !result.accepted {
         return Err(AgentError::FinancialCaptureTask(
@@ -801,6 +857,283 @@ mod tests {
             verified_uid: "a".repeat(64),
         }
     }
+    /// This exercises the same identity/permission bootstrap with an exhausted
+    /// raw HTTP transcript. A failed identity proof must never create SQL or
+    /// a durable account route; no real network/credential store is contacted.
+    #[tokio::test]
+    async fn prepared_account_rejects_unverified_identity_before_sql() {
+        use okx_api::{HttpSend, HttpTransport, OkxError};
+        use std::time::Instant;
+        struct NoRecordedResponse;
+        impl HttpTransport for NoRecordedResponse {
+            fn send(&self, _: okx_api::HttpRequest, _: Instant) -> HttpSend<'_> {
+                Box::pin(async { Err(OkxError::Response("HTTP_TRANSCRIPT_EXHAUSTED".into())) })
+            }
+        }
+        let root = root();
+        initialize_installation(&root, "installation-test").unwrap();
+        let registry = AccountRuntimeRegistry::open(&root, RateBudget::new())
+            .await
+            .unwrap();
+        let environment = OkxEnvironment::new(okx_api::Region::Global, false);
+        let creds = Credentials::new(
+            "fixture-key".into(),
+            "fixture-secret".into(),
+            "fixture-pass".into(),
+        )
+        .unwrap();
+        let transport: Arc<dyn HttpTransport> = Arc::new(NoRecordedResponse);
+        let observer = OkxRestClient::with_http_transport(
+            environment,
+            creds.clone(),
+            RateBudget::new(),
+            transport.clone(),
+        )
+        .unwrap();
+        let executor = OkxRestClient::with_http_transport(
+            environment,
+            creds.clone(),
+            RateBudget::new(),
+            transport,
+        )
+        .unwrap();
+        let clients = PreparedAccountClients {
+            environment,
+            observer,
+            executor,
+            observer_login: creds,
+            ws_connector: Arc::new(LiveWsConnector),
+        };
+        let config = VerifiedAccountConfig {
+            account_key: key(),
+            alias: "fixture-account".into(),
+            credential_ref: "fixture-credentials".into(),
+            connect_operation_id: "fixture-connect-00001".into(),
+            configuration_digest: "a".repeat(64),
+        };
+        assert!(registry.connect_prepared(config, clients).await.is_err());
+        assert!(registry.list().await.is_empty());
+        assert!(!root.join("accounts").exists());
+        assert!(!root.join("account-leases").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// T09 bootstrap component: independent UIDs create separate real SQL
+    /// owners from bounded raw HTTP records, not from a fake exchange state.
+    #[tokio::test]
+    async fn recorded_two_account_bootstrap_opens_independent_sql_owners() {
+        use okx_api::{
+            HttpRequest, HttpSend, HttpStatusCode, HttpTransport, OkxError, RawHttpResponse,
+        };
+        use std::time::Instant;
+
+        #[derive(Default)]
+        struct RecordedAccountHttp {
+            requests: Mutex<Vec<String>>,
+        }
+        impl HttpTransport for RecordedAccountHttp {
+            fn send(&self, request: HttpRequest, _: Instant) -> HttpSend<'_> {
+                Box::pin(async move {
+                    if request.method() != "GET" {
+                        return Err(OkxError::Response("TRANSCRIPT_METHOD_MISMATCH".into()));
+                    }
+                    let key = request
+                        .headers()
+                        .get("OK-ACCESS-KEY")
+                        .and_then(|h| h.to_str().ok())
+                        .ok_or_else(|| OkxError::Response("TRANSCRIPT_ACCOUNT_UNBOUND".into()))?;
+                    let (uid, permission) = match key {
+                        "fixture-observer-a" => ("account-001", "read_only"),
+                        "fixture-executor-a" => ("account-001", "read_only,trade"),
+                        "fixture-observer-b" => ("account-002", "read_only"),
+                        "fixture-executor-b" => ("account-002", "read_only,trade"),
+                        _ => return Err(OkxError::Response("TRANSCRIPT_ACCOUNT_UNKNOWN".into())),
+                    };
+                    let path = request.url().path();
+                    let data = match path {
+                        "/api/v5/account/config" => serde_json::json!([{
+                            "uid": uid,
+                            "mainUid": "main-account",
+                            "acctLv": "2",
+                            "posMode": "long_short_mode",
+                            "type": "1",
+                            "perm": permission,
+                            "autoLoan": false,
+                            "ip": "127.0.0.1"
+                        }]),
+                        "/api/v5/account/balance" => serde_json::json!([{
+                            "totalEq": "100",
+                            "adjEq": "100",
+                            "uTime": "1793460000000",
+                            "details": [{
+                                "ccy": "USDT", "eq": "100",
+                                "liab": "0", "availEq": "100",
+                                "eqUsd": "100", "uTime": "1793460000000"
+                            }]
+                        }]),
+                        "/api/v5/account/positions"
+                        | "/api/v5/trade/orders-pending"
+                        | "/api/v5/trade/orders-algo-pending" => {
+                            if path == "/api/v5/trade/orders-algo-pending" {
+                                let params = request.url().query_pairs().collect::<Vec<_>>();
+                                if !params.iter().any(|(k, _)| k == "ordType")
+                                    || !params.iter().any(|(k, v)| {
+                                        k == "instType" && (v == "SWAP" || v == "FUTURES")
+                                    })
+                                    || !params.iter().any(|(k, v)| k == "limit" && v == "100")
+                                {
+                                    return Err(OkxError::Response(
+                                        "TRANSCRIPT_ALGO_SCOPE_MISMATCH".into(),
+                                    ));
+                                }
+                            }
+                            serde_json::json!([])
+                        }
+                        _ => {
+                            return Err(OkxError::Response("TRANSCRIPT_UNEXPECTED_REQUEST".into()));
+                        }
+                    };
+                    // A transcript has explicitly bounded reads, not an infinite
+                    // fake account endpoint. Concurrent polls can reorder safely.
+                    let request_key =
+                        format!("{key}:{path}?{}", request.url().query().unwrap_or_default());
+                    let max_repeats = match path {
+                        "/api/v5/account/config" => 10,
+                        "/api/v5/account/balance"
+                        | "/api/v5/account/positions"
+                        | "/api/v5/trade/orders-pending" => 4,
+                        "/api/v5/trade/orders-algo-pending" => 1,
+                        _ => 0,
+                    };
+                    let mut observed = self.requests.lock().unwrap();
+                    if observed.iter().filter(|v| **v == request_key).count() >= max_repeats {
+                        return Err(OkxError::Response("TRANSCRIPT_REPEAT_EXCEEDED".into()));
+                    }
+                    observed.push(request_key);
+                    drop(observed);
+                    let body = serde_json::to_vec(&serde_json::json!({
+                        "code": "0", "msg": "", "data": data
+                    }))?;
+                    Ok(RawHttpResponse {
+                        status: HttpStatusCode::OK,
+                        headers: Default::default(),
+                        body,
+                    })
+                })
+            }
+        }
+        struct OfflineSocket;
+        impl WsConnector for OfflineSocket {
+            fn connect(&self, _: String) -> okx_runtime::WsConnect<'_> {
+                Box::pin(async { Err(tokio_tungstenite::tungstenite::Error::ConnectionClosed) })
+            }
+        }
+        let temp = root();
+        initialize_installation(&temp, "installation-test").unwrap();
+        let registry = AccountRuntimeRegistry::open(&temp, RateBudget::new())
+            .await
+            .unwrap();
+        let feed = Arc::new(RecordedAccountHttp::default());
+        let environment = OkxEnvironment::new(okx_api::Region::Global, false);
+        let mut stopped_sql_owners = Vec::new();
+
+        for (label, uid) in [("a", "account-001"), ("b", "account-002")] {
+            let observed = Credentials::new(
+                format!("fixture-observer-{label}"),
+                "observer-secret".into(),
+                "pass".into(),
+            )
+            .unwrap();
+            let executing = Credentials::new(
+                format!("fixture-executor-{label}"),
+                "executor-secret".into(),
+                "pass".into(),
+            )
+            .unwrap();
+            let observer = OkxRestClient::with_http_transport(
+                environment,
+                observed.clone(),
+                RateBudget::new(),
+                feed.clone(),
+            )
+            .unwrap();
+            let executor = OkxRestClient::with_http_transport(
+                environment,
+                executing,
+                RateBudget::new(),
+                feed.clone(),
+            )
+            .unwrap();
+            let config = VerifiedAccountConfig {
+                account_key: AccountKey {
+                    venue: "okx".into(),
+                    environment: Environment::Real,
+                    verified_uid: okx_api::account_uid_fingerprint(uid),
+                },
+                alias: format!("fixture-{label}"),
+                credential_ref: format!("fixture-creds-{label}"),
+                connect_operation_id: format!("fixture-connect-operation-{label}"),
+                configuration_digest: "a".repeat(64),
+            };
+            registry
+                .connect_prepared(
+                    config.clone(),
+                    PreparedAccountClients {
+                        environment,
+                        observer,
+                        executor,
+                        observer_login: observed,
+                        ws_connector: Arc::new(OfflineSocket),
+                    },
+                )
+                .await
+                .unwrap();
+            let owner = registry.resolve(&config.account_key.wire()).await.unwrap();
+            assert_eq!(owner.execution.uid(), config.account_key.verified_uid);
+            stopped_sql_owners.push(owner.execution.store.termination_signal());
+            assert!(
+                temp.join("accounts")
+                    .join(key_hash(&config.account_key))
+                    .join("account.sqlite")
+                    .is_file()
+            );
+        }
+
+        assert_eq!(registry.list().await.len(), 2);
+        {
+            let observed = feed.requests.lock().unwrap();
+            for label in ["a", "b"] {
+                let prefix = format!("fixture-observer-{label}:/api/v5/trade/orders-algo-pending?");
+                assert_eq!(
+                    observed
+                        .iter()
+                        .filter(|request| request.starts_with(&prefix))
+                        .count(),
+                    16,
+                    "every required derivative algo scope must be read"
+                );
+            }
+        }
+        registry.shutdown().await;
+        drop(registry);
+        // On Windows, removing an open SQLite file fails with ERROR_SHARING_VIOLATION.
+        // Wait for the real SQL owner to close its DB; no sleep or assumed timeout
+        // is used as a substitute for a termination receipt.
+        for mut stopped in stopped_sql_owners {
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                while !*stopped.borrow_and_update() {
+                    stopped
+                        .changed()
+                        .await
+                        .expect("SQL owner exited without receipt");
+                }
+            })
+            .await
+            .expect("SQL owner did not terminate");
+        }
+        std::fs::remove_dir_all(temp).unwrap();
+    }
+
     #[tokio::test]
     async fn initialize_without_any_legacy_files() {
         let root = root();
