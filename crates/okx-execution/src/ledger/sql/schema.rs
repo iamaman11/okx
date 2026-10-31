@@ -388,13 +388,15 @@ impl AccountStore {
         loop {
             match file.try_lock() {
                 Ok(()) => return Ok(file),
-                Err(e) if e.kind() == std::io::ErrorKind::Interrupted && interrupted < 3 => {
+                Err(std::fs::TryLockError::Error(e))
+                    if e.kind() == std::io::ErrorKind::Interrupted && interrupted < 3 =>
+                {
                     interrupted += 1;
                 }
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                Err(std::fs::TryLockError::WouldBlock) => {
                     return Err(StoreError::Invalid("ACCOUNT_WRITER_ALREADY_RUNNING"));
                 }
-                Err(e) => return Err(StoreError::Io(e)),
+                Err(std::fs::TryLockError::Error(e)) => return Err(StoreError::Io(e)),
             }
         }
     }
