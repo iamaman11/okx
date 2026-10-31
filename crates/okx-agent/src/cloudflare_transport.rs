@@ -394,7 +394,10 @@ mod raw_native_session_tests {
                 .await
                 .unwrap(),
         );
-        if std::env::var("OKX_NATIVE_WORKER_INTEGRATION").ok().as_deref() == Some("1")
+        if std::env::var("OKX_NATIVE_WORKER_INTEGRATION")
+            .ok()
+            .as_deref()
+            == Some("1")
             && installation == "installation_test"
         {
             let feed = Arc::new(crate::accounts::recorded_support::RecordedAccountHttp::default());
@@ -626,8 +629,15 @@ mod raw_native_session_tests {
         let (ctx, root, risk, mut risk_rx) = test_dispatch_for("installation_test").await;
         let trade = ctx.trade.clone();
         let accounts = ctx.accounts.clone();
-        let stopped = ["fixture-a","fixture-b"].iter()
-            .map(|alias| async { accounts.resolve(alias).await.unwrap().execution.store.termination_signal() });
+        let stopped = ["fixture-a", "fixture-b"].iter().map(|alias| async {
+            accounts
+                .resolve(alias)
+                .await
+                .unwrap()
+                .execution
+                .store
+                .termination_signal()
+        });
         let mut stopped = futures_util::future::join_all(stopped).await;
         let mut request = url.into_client_request().unwrap();
         request.headers_mut().insert(
@@ -671,7 +681,9 @@ mod raw_native_session_tests {
             strategy_instance: "manual".into(),
             instrument: "BTC-USDT-SWAP".into(),
             side: PositionSide::Long,
-            sizing: Sizing::Contracts { contracts: "0.10".into() },
+            sizing: Sizing::Contracts {
+                contracts: "0.10".into(),
+            },
             order: OrderConstraints {
                 order_type: "limit".into(),
                 limit_price: Some("1000".into()),
@@ -679,12 +691,17 @@ mod raw_native_session_tests {
                 max_entry_usd: Some("10".into()),
                 max_slippage_bps: 0,
             },
-            protection: Some(Protection::Price { stop_price: "900".into() }),
+            protection: Some(Protection::Price {
+                stop_price: "900".into(),
+            }),
             expires_in_ms: 2_000,
         };
         assert!(attempted.valid());
         for alias in ["fixture-a", "fixture-b"] {
-            let caps = trade.trade(alias, &TradeRequest::Capabilities {}, None).await.unwrap();
+            let caps = trade
+                .trade(alias, &TradeRequest::Capabilities {}, None)
+                .await
+                .unwrap();
             let uid = if alias == "fixture-a" {
                 okx_api::account_uid_fingerprint("account-001")
             } else {
@@ -693,16 +710,32 @@ mod raw_native_session_tests {
             assert_eq!(caps["account"], format!("okx:real:{uid}"));
             assert_eq!(caps["executor"]["state"], "verified");
             assert_eq!(caps["ready_for_post"], false);
-            let preflight = trade.trade(alias, &TradeRequest::Preflight {}, None).await.unwrap();
+            let preflight = trade
+                .trade(alias, &TradeRequest::Preflight {}, None)
+                .await
+                .unwrap();
             assert_eq!(preflight["ready_for_new_risk"], false);
             let failed = trade.trade(alias, &attempted, None).await;
-            assert!(failed.is_err(), "unverified source must not POST: {failed:?}");
+            assert!(
+                failed.is_err(),
+                "unverified source must not POST: {failed:?}"
+            );
         }
         let mut before = summary("risk_public_trade_did_not_post_001");
         before.installation_id = "installation_test".into();
         let untouched = risk.request(before).await.unwrap();
         assert_eq!(untouched.budget.as_ref().unwrap().reserved_loss_usd, "1");
-        assert_eq!(untouched.budget.as_ref().unwrap().entry_budget.as_ref().unwrap().reserved_usd, "2");
+        assert_eq!(
+            untouched
+                .budget
+                .as_ref()
+                .unwrap()
+                .entry_budget
+                .as_ref()
+                .unwrap()
+                .reserved_usd,
+            "2"
+        );
         let inspect = RiskCommand {
             schema: RISK_COMMAND_SCHEMA_V1.into(),
             command_id: "risk_native_real_workerd_inspect_001".into(),
@@ -844,9 +877,14 @@ mod raw_native_session_tests {
         for receipt in &mut stopped {
             tokio::time::timeout(Duration::from_secs(10), async {
                 while !*receipt.borrow_and_update() {
-                    receipt.changed().await.expect("SQL owner shutdown receipt missing");
+                    receipt
+                        .changed()
+                        .await
+                        .expect("SQL owner shutdown receipt missing");
                 }
-            }).await.expect("SQL owner still active");
+            })
+            .await
+            .expect("SQL owner still active");
         }
         std::fs::remove_dir_all(root).unwrap();
         println!("native_to_persisted_workerd_riskbook PASS: no venue POST");

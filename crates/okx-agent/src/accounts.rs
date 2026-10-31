@@ -980,13 +980,9 @@ pub(crate) mod recorded_support {
             feed.clone(),
         )
         .unwrap();
-        let executor = OkxRestClient::with_http_transport(
-            environment,
-            executing,
-            RateBudget::new(),
-            feed,
-        )
-        .unwrap();
+        let executor =
+            OkxRestClient::with_http_transport(environment, executing, RateBudget::new(), feed)
+                .unwrap();
         let config = VerifiedAccountConfig {
             account_key: AccountKey {
                 venue: "okx".into(),
@@ -998,13 +994,16 @@ pub(crate) mod recorded_support {
             connect_operation_id: format!("fixture-connect-operation-{label}"),
             configuration_digest: "a".repeat(64),
         };
-        (config, PreparedAccountClients {
-            environment,
-            observer,
-            executor,
-            observer_login: observed,
-            ws_connector: Arc::new(OfflineSocket),
-        })
+        (
+            config,
+            PreparedAccountClients {
+                environment,
+                observer,
+                executor,
+                observer_login: observed,
+                ws_connector: Arc::new(OfflineSocket),
+            },
+        )
     }
 }
 
