@@ -2205,6 +2205,25 @@ fn e1_fee_bill_cross_source_receipt_requires_both_immutable_sources() {
             .unwrap(),
         settled
     );
+    // A delayed authentic bill-order identity contradicting the original
+    // fill must invalidate the fee witness. Matching economic_event_key is
+    // not authority to charge a different venue order's fee to this intent.
+    reopened.ingest_page(&IngestPage {
+        bill_order_sources: vec![BillOrderSource {
+            bill_id: "fee-bill".into(),
+            instrument_id: "BTC-USDT-SWAP".into(),
+            exchange_order_id: "another-venue-order".into(),
+            trade_id: "fee-trade".into(),
+        }],
+        ..Default::default()
+    }).unwrap();
+    assert!(matches!(
+        reopened.intent_fee_bill_evidence("intent",7),
+        Err(StoreError::Invalid("ENTRY_FEE_BILL_SOURCE_MISMATCH"))
+    ));
+    assert!(reopened.bind_terminal_entry_settlement(
+        "intent",7,Decimal::ONE,7,
+    ).is_err(), "settled replay cannot ignore newly discovered venue identity conflict");
     reopened
         .connection
         .execute(

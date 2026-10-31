@@ -1443,8 +1443,13 @@ impl AccountStore {
             bill_kind: Option<String>,
             bill_currency: Option<String>,
             bill_linked: bool,
+            bill_order_id: Option<String>,
+            bill_instrument_id: Option<String>,
         }
         let fill = self.intent_fill_cost_evidence(intent_id, through)?;
+        let intent_instrument = self.intent(intent_id)?
+            .ok_or(StoreError::Invalid("ENTRY_BILL_INTENT_MISSING"))?
+            .instrument_id;
         if !finance_proof_sealed(&self.connection)? {
             return Err(StoreError::Invalid("ENTRY_FINANCE_PROVENANCE_UNSEALED"));
         }
@@ -1484,11 +1489,13 @@ impl AccountStore {
                     e.allocation_leg,e.time,e.reverses_entry_id,b.bill_id,b.time,b.kind,b.currency,
                     EXISTS(SELECT 1 FROM finance_source_links lb
                       WHERE lb.entry_id=e.entry_id
-                        AND lb.source_ref='bill:'||b.bill_id)
+                        AND lb.source_ref='bill:'||b.bill_id),
+                    origin.exchange_order_id,origin.instrument_id
              FROM finance_source_links fl
              JOIN finance_entries e ON e.entry_id=fl.entry_id AND e.component='FEE'
              LEFT JOIN bills b ON b.economic_event_key=e.economic_event_key
                               AND e.economic_event_key='bill:'||b.bill_id
+             LEFT JOIN bill_order_sources origin ON origin.bill_id=b.bill_id
              WHERE fl.source_ref=?1 ORDER BY e.entry_id LIMIT 2",
         )?;
         let mut scanned = fee_rows.query(params![intent_id, through])?;
@@ -1527,6 +1534,8 @@ impl AccountStore {
                 bill_kind: source.get(9)?,
                 bill_currency: source.get(10)?,
                 bill_linked: source.get(11)?,
+                bill_order_id: source.get(12)?,
+                bill_instrument_id: source.get(13)?,
             };
             if rows.next()?.is_some() {
                 return Err(StoreError::Invalid("ENTRY_FEE_BILL_LINK_AMBIGUOUS"));
@@ -1555,6 +1564,10 @@ impl AccountStore {
                 })
                 || proof.bill_currency.as_deref() != Some(currency.as_str())
                 || !proof.bill_linked
+                || proof.bill_order_id.as_deref().is_some_and(|v|
+                    v != fill.exchange_order_id.as_str())
+                || proof.bill_instrument_id.as_deref().is_some_and(|v|
+                    v != intent_instrument.as_str())
                 || proof.currency != currency
                 || decimal(proof.amount.clone())? != fee
             {
