@@ -1049,20 +1049,27 @@ pub(crate) mod recorded_support {
                     // request; no balances/fills/protection are invented.
                     let body = if path == "/api/v5/trade/order" {
                         let submitted = self.outbound_posts.lock().unwrap();
-                        let sent = submitted.iter().filter(|(k, route, _)| {
-                            k == key && route == "/api/v5/trade/order"
-                        }).collect::<Vec<_>>();
+                        let sent = submitted
+                            .iter()
+                            .filter(|(k, route, _)| k == key && route == "/api/v5/trade/order")
+                            .collect::<Vec<_>>();
                         if sent.len() != 1 {
                             return Err(OkxError::Response(
                                 "TRANSCRIPT_ORDER_READBACK_SEND_COUNT_MISMATCH".into(),
                             ));
                         }
-                        let client_id = sent[0].2.get("clOrdId")
+                        let client_id = sent[0]
+                            .2
+                            .get("clOrdId")
                             .and_then(serde_json::Value::as_str)
-                            .ok_or_else(|| OkxError::Response(
-                                "TRANSCRIPT_ORDER_READBACK_SEND_ID_MISSING".into()
-                            ))?;
-                        let observed_ids = request.url().query_pairs()
+                            .ok_or_else(|| {
+                                OkxError::Response(
+                                    "TRANSCRIPT_ORDER_READBACK_SEND_ID_MISSING".into(),
+                                )
+                            })?;
+                        let observed_ids = request
+                            .url()
+                            .query_pairs()
                             .filter(|(k, _)| k == "clOrdId")
                             .map(|(_, v)| v.into_owned())
                             .collect::<Vec<_>>();
