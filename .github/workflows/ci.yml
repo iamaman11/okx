@@ -334,6 +334,13 @@ jobs:
           compression-level: 9
           retention-days: 14
 
+      - name: Install locked production workerd test dependencies on Windows
+        if: github.event_name == 'pull_request'
+        shell: pwsh
+        run: |
+          npm ci --prefix cloudflare/okx-mcp --ignore-scripts --no-audit --no-fund
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Mandatory native Windows T09/T10 recorded acceptance
         if: github.event_name == 'pull_request'
         shell: pwsh

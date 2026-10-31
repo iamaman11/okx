@@ -28,11 +28,12 @@ const failures = {
 // Exact per-case *minimum* observed stages; T09.0 is bootstrap without a POST,
 // and denial cases must never invent a venue send or settlement.
 const requiredStagesByCase = new Map([
+  ["T09.0", ["native_sql_bootstrap_verified", "private_source_captured", "worker_campaign_opening_verified"]],
   ["T09.1", mandatoryStages],
   ["T09.2", mandatoryStages.slice(0, 4)],
   ["T09.3", ["public_trade_entered", "fill_ingested", "protection_verified"]],
   ["T09.4", mandatoryStages.slice(0, 6)],
-  ["T09.5", ["public_trade_entered"]],
+  ["T09.5", ["public_trade_entered", "idempotent_replay_verified"]],
   ["T09.6", ["public_trade_entered", "fill_ingested", "protection_verified", "settlement_committed", "release_confirmed"]],
   ["T09.7", ["public_trade_entered", "settlement_committed", "release_confirmed"]],
   ["T09.8", ["public_trade_entered"]],

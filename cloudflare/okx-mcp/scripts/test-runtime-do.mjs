@@ -290,6 +290,15 @@ try {
   assert.equal(opened.status,"OBSERVED","native WSS campaign source installs exactly once");
   assert.equal(opened.budget?.entry_budget?.consumed_usd,"0");
   assert.equal(opened.budget.entry_budget.opening_source_digest,opening.source_digest);
+  // Structured evidence is copied from actual SQL-backed Worker readbacks,
+  // never from a simulated RiskBook or a test-owned financial projection.
+  console.log("T09_0_WORKER_EVIDENCE_V1:" + JSON.stringify({
+    account_keys:enrolled.body.accounts.map(a => a.account_key).sort(),
+    connection_generation:socket1.hello.connection_generation,
+    before_budget:before.budget,
+    opening_budget:opened.budget,
+    opening_source_digest:opening.source_digest,
+  }));
   const observedAt = Date.now()-1000;
   const census = {
     complete:true,source_digest:"d".repeat(64),content_digest:"a".repeat(64),
@@ -398,6 +407,11 @@ try {
       "Native component reservations (4) plus public Execute (1.0005) must share one RiskBook");
     assert.equal(afterNative.budget?.entry_budget?.consumed_usd, "0",
       "POST authorization is not a fabricated cash debit");
+    console.log("T09_5_WORKER_IDEMPOTENCY_EVIDENCE_V1:" + JSON.stringify({
+      connection_generation:afterNativeSocket.hello.connection_generation,
+      budget:afterNative.budget,
+      risk_book_sequence:afterNative.risk_book_sequence,
+    }));
     afterNativeSocket.ws.close();
   }
   console.log(JSON.stringify({
