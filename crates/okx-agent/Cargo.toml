@@ -36,5 +36,3 @@ zeroize = { version = "1", features = ["derive"] }
 [target.'cfg(windows)'.dependencies]
 keyring = { version = "4.2", default-features = false, features = ["v1"] }
 
-[dev-dependencies]
-okx-ws = { path = "../okx-ws" }

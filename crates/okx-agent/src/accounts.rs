@@ -891,8 +891,9 @@ pub(crate) mod recorded_support {
                             "eqUsd": "100", "uTime": "1793460000000"
                         }]
                     }]),
-                    "/api/v5/trade/fills-history"
-                    | "/api/v5/account/bills-archive" => serde_json::json!([]),
+                    "/api/v5/trade/fills-history" | "/api/v5/account/bills-archive" => {
+                        serde_json::json!([])
+                    }
                     "/api/v5/account/positions"
                     | "/api/v5/trade/orders-pending"
                     | "/api/v5/trade/orders-algo-pending" => {
@@ -953,31 +954,33 @@ pub(crate) mod recorded_support {
     }
     impl Default for RecordedWsConnector {
         fn default() -> Self {
-            Self { sent: Arc::new(Mutex::new(Vec::new())) }
+            Self {
+                sent: Arc::new(Mutex::new(Vec::new())),
+            }
         }
     }
     struct RecordedWire {
         inbound: std::collections::VecDeque<tokio_tungstenite::tungstenite::Message>,
         sent: Arc<Mutex<Vec<serde_json::Value>>>,
     }
-    impl okx_ws::wire::WsWire for RecordedWire {
-        fn send(&mut self, frame: tokio_tungstenite::tungstenite::Message)
-            -> okx_ws::wire::WsCall<'_>
-        {
+    impl okx_runtime::WsWire for RecordedWire {
+        fn send(
+            &mut self,
+            frame: tokio_tungstenite::tungstenite::Message,
+        ) -> okx_runtime::WsCall<'_> {
             Box::pin(async move {
                 if let tokio_tungstenite::tungstenite::Message::Text(data) = frame {
                     self.sent.lock().unwrap().push(
-                        serde_json::from_str(data.as_str())
-                            .unwrap_or(serde_json::Value::Null)
+                        serde_json::from_str(data.as_str()).unwrap_or(serde_json::Value::Null),
                     );
                 }
                 Ok(())
             })
         }
-        fn flush(&mut self) -> okx_ws::wire::WsCall<'_> {
+        fn flush(&mut self) -> okx_runtime::WsCall<'_> {
             Box::pin(async { Ok(()) })
         }
-        fn next(&mut self) -> okx_ws::wire::WsReceive<'_> {
+        fn next(&mut self) -> okx_runtime::WsReceive<'_> {
             Box::pin(async move {
                 if let Some(frame) = self.inbound.pop_front() {
                     Some(Ok(frame))
@@ -986,7 +989,7 @@ pub(crate) mod recorded_support {
                 }
             })
         }
-        fn close(&mut self) -> okx_ws::wire::WsCall<'_> {
+        fn close(&mut self) -> okx_runtime::WsCall<'_> {
             Box::pin(async { Ok(()) })
         }
     }
@@ -1010,12 +1013,14 @@ pub(crate) mod recorded_support {
                 } else {
                     return Err(tokio_tungstenite::tungstenite::Error::ConnectionClosed);
                 };
-                let inbound = transcript.into_iter()
+                let inbound = transcript
+                    .into_iter()
                     .map(|raw| tokio_tungstenite::tungstenite::Message::Text(raw.into()))
                     .collect();
                 Ok(Box::new(RecordedWire {
-                    inbound, sent: self.sent.clone()
-                }) as Box<dyn okx_ws::wire::WsWire>)
+                    inbound,
+                    sent: self.sent.clone(),
+                }) as Box<dyn okx_runtime::WsWire>)
             })
         }
     }
@@ -1314,7 +1319,6 @@ mod tests {
         std::fs::remove_dir_all(temp).unwrap();
     }
 
-
     /// The original public account capture, not a fixture-set "fresh" flag.
     #[tokio::test]
     async fn recorded_ws_login_business_ack_and_six_history_pages_capture_both_sql_accounts() {
@@ -1324,14 +1328,18 @@ mod tests {
         let temp = root();
         initialize_installation(&temp, "installation-test").unwrap();
         let registry = AccountRuntimeRegistry::open(&temp, RateBudget::new())
-            .await.unwrap();
+            .await
+            .unwrap();
         let http = Arc::new(RecordedAccountHttp::default());
         let mut receipts = Vec::new();
         let mut sockets = Vec::new();
         for label in ["a", "b"] {
             let ws = Arc::new(RecordedWsConnector::default());
             let (config, clients) = prepared_with_socket(label, http.clone(), ws.clone());
-            registry.connect_prepared(config.clone(), clients).await.unwrap();
+            registry
+                .connect_prepared(config.clone(), clients)
+                .await
+                .unwrap();
             let account = registry.resolve(&config.account_key.wire()).await.unwrap();
             receipts.push(account.execution.store.termination_signal());
             sockets.push(ws);
@@ -1342,23 +1350,32 @@ mod tests {
                 loop {
                     let status = account.private_ws.status().await;
                     let completed = account.source_capture_health.read().await.last_success_ms;
-                    if status.logged_in && status.subscriptions_complete
-                        && status.algo_subscription_ready && status.account_data_seen
+                    if status.logged_in
+                        && status.subscriptions_complete
+                        && status.algo_subscription_ready
+                        && status.account_data_seen
                         && status.positions_data_seen
                         && account.source_identity_ready().await
-                        && completed.is_some() {
+                        && completed.is_some()
+                    {
                         break;
                     }
                     tokio::time::sleep(std::time::Duration::from_millis(20)).await;
                 }
-            }).await.expect("real source capture did not converge from recorded frames");
+            })
+            .await
+            .expect("real source capture did not converge from recorded frames");
             let sent = ws.sent.lock().unwrap();
             assert_eq!(sent.iter().filter(|v| v["op"] == "login").count(), 2);
             assert_eq!(sent.iter().filter(|v| v["op"] == "subscribe").count(), 2);
-            let recorded = account.execution.store.call(
-                Instant::now() + std::time::Duration::from_secs(3),
-                |s| Ok((s.cursor("fills", "SWAP")?, s.cursor("bills", "account")?)),
-            ).await.unwrap();
+            let recorded = account
+                .execution
+                .store
+                .call(Instant::now() + std::time::Duration::from_secs(3), |s| {
+                    Ok((s.cursor("fills", "SWAP")?, s.cursor("bills", "account")?))
+                })
+                .await
+                .unwrap();
             assert!(recorded.0.is_some(), "SWAP history source not committed");
             assert!(recorded.1.is_some(), "bills history source not committed");
             assert_eq!(recorded.0.unwrap().coverage_gaps, "");
@@ -1369,9 +1386,14 @@ mod tests {
         for mut receipt in receipts {
             tokio::time::timeout(std::time::Duration::from_secs(5), async {
                 while !*receipt.borrow_and_update() {
-                    receipt.changed().await.expect("SQL owner exited without receipt");
+                    receipt
+                        .changed()
+                        .await
+                        .expect("SQL owner exited without receipt");
                 }
-            }).await.expect("SQL owner not closed");
+            })
+            .await
+            .expect("SQL owner not closed");
         }
         std::fs::remove_dir_all(temp).unwrap();
     }
