@@ -1198,12 +1198,19 @@ mod raw_native_session_tests {
             strategy_instance: "manual".into(),
             instrument: "BTC-USDT-SWAP".into(),
             side: PositionSide::Long,
-            sizing: Sizing::Contracts { contracts: "0.10".into() },
-            order: OrderConstraints {
-                order_type: "limit".into(), limit_price: Some("1000".into()),
-                reference: None, max_entry_usd: Some("10".into()), max_slippage_bps: 0,
+            sizing: Sizing::Contracts {
+                contracts: "0.10".into(),
             },
-            protection: Some(Protection::Price { stop_price: "900".into() }),
+            order: OrderConstraints {
+                order_type: "limit".into(),
+                limit_price: Some("1000".into()),
+                reference: None,
+                max_entry_usd: Some("10".into()),
+                max_slippage_bps: 0,
+            },
+            protection: Some(Protection::Price {
+                stop_price: "900".into(),
+            }),
             expires_in_ms: 30_000,
         };
         assert!(execute.valid());
@@ -1212,34 +1219,69 @@ mod raw_native_session_tests {
         let maintenance_task = tokio::spawn(async move {
             maintenance_trade.run(maintenance_rx).await;
         });
-        let opened = trade.trade("fixture-a", &execute, None).await
+        let opened = trade
+            .trade("fixture-a", &execute, None)
+            .await
             .expect("T09.1 public Execute must pass complete Native/Worker admission");
-        assert_eq!(opened["status"], "completed", "T09.1 public operation: {opened}");
-        assert_eq!(feed.unconsumed_posts(), 0,
-            "the ONE pre-recorded signed create response must be consumed");
-        assert_eq!(feed.unconsumed_public_clock(), 0,
-            "production exchange-clock evidence must come from the raw response");
+        assert_eq!(
+            opened["status"], "completed",
+            "T09.1 public operation: {opened}"
+        );
+        assert_eq!(
+            feed.unconsumed_posts(),
+            0,
+            "the ONE pre-recorded signed create response must be consumed"
+        );
+        assert_eq!(
+            feed.unconsumed_public_clock(),
+            0,
+            "production exchange-clock evidence must come from the raw response"
+        );
         let sends = feed.outbound_posts.lock().unwrap();
-        assert_eq!(sends.len(), 1, "at most one possible create POST per intent");
+        assert_eq!(
+            sends.len(),
+            1,
+            "at most one possible create POST per intent"
+        );
         assert_eq!(sends[0].0, "fixture-executor-a");
         assert_eq!(sends[0].1, "/api/v5/trade/order");
         drop(sends);
-        let repeated = trade.trade("fixture-a", &execute, None).await
+        let repeated = trade
+            .trade("fixture-a", &execute, None)
+            .await
             .expect("T09.1 identical Execute must be idempotent");
         assert_eq!(repeated["status"], "completed");
-        assert_eq!(feed.outbound_posts.lock().unwrap().len(), 1,
-            "identical Execute must not post to OKX twice");
-        assert_eq!(feed.unconsumed_reads(), 0,
-            "all fee/leverage evidence must be consumed by production admission");
+        assert_eq!(
+            feed.outbound_posts.lock().unwrap().len(),
+            1,
+            "identical Execute must not post to OKX twice"
+        );
+        assert_eq!(
+            feed.unconsumed_reads(),
+            0,
+            "all fee/leverage evidence must be consumed by production admission"
+        );
         let mut after_public = summary("risk_after_public_trade_post_001");
         after_public.installation_id = "installation_test".into();
         let after = risk.request(after_public).await.unwrap();
         assert_eq!(after.status, RiskDecisionStatus::Observed);
-        assert_eq!(after.budget.as_ref().unwrap().entry_budget.as_ref().unwrap().reserved_usd, "5.0005",
-            "RiskBook must physically hold prior 4 USD plus public 1.0005 USD");
+        assert_eq!(
+            after
+                .budget
+                .as_ref()
+                .unwrap()
+                .entry_budget
+                .as_ref()
+                .unwrap()
+                .reserved_usd,
+            "5.0005",
+            "RiskBook must physically hold prior 4 USD plus public 1.0005 USD"
+        );
         maintenance_shutdown.send(true).unwrap();
         tokio::time::timeout(Duration::from_secs(10), maintenance_task)
-            .await.expect("maintenance owner did not terminate").unwrap();
+            .await
+            .expect("maintenance owner did not terminate")
+            .unwrap();
         println!("t09_public_trade_execute_open_ack_and_idempotency PASS: posts=1");
         shutdown_tx.send(true).unwrap();
         let terminated = tokio::time::timeout(Duration::from_secs(10), session)
