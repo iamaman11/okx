@@ -85,7 +85,8 @@ fn e1_campaign_admission_requires_cached_economic_and_capture_revision() {
                 coverage_gaps: String::new(),
             }),
             ..Default::default()
-        }).unwrap();
+        })
+        .unwrap();
     }
     let campaign = format!("sha256:{}", "c".repeat(64));
     assert!(matches!(
@@ -114,13 +115,15 @@ fn e1_campaign_admission_requires_cached_economic_and_capture_revision() {
                 coverage_gaps: String::new(),
             }),
             ..Default::default()
-        }).unwrap();
+        })
+        .unwrap();
     }
     assert!(matches!(
         s.verify_campaign_entry_readiness(&campaign, 2, 11),
         Err(StoreError::Invalid("CAMPAIGN_READINESS_STALE"))
     ));
-    s.refresh_campaign_entry_readiness(&campaign, 2, 11).unwrap();
+    s.refresh_campaign_entry_readiness(&campaign, 2, 11)
+        .unwrap();
     s.verify_campaign_entry_readiness(&campaign, 2, 11).unwrap();
     // A backdated non-transfer fee may not hide behind newer watermarks.
     s.ingest_page(&IngestPage {
@@ -133,12 +136,16 @@ fn e1_campaign_admission_requires_cached_economic_and_capture_revision() {
             economic_event_key: "bill:late-unclassified".into(),
         }],
         ..Default::default()
-    }).unwrap();
+    })
+    .unwrap();
     assert!(matches!(
         s.verify_campaign_entry_readiness(&campaign, 2, 11),
         Err(StoreError::Invalid("CAMPAIGN_READINESS_STALE"))
     ));
-    assert!(s.refresh_campaign_entry_readiness(&campaign, 2, 11).is_err());
+    assert!(
+        s.refresh_campaign_entry_readiness(&campaign, 2, 11)
+            .is_err()
+    );
 }
 
 #[test]
@@ -1786,27 +1793,34 @@ fn e2_known_posted_exposure_is_not_mistaken_for_unsettled_history() {
                 coverage_gaps: String::new(),
             }),
             ..Default::default()
-        }).unwrap();
+        })
+        .unwrap();
     }
     // The central risk is POSTED and the venue ACK is known, although
     // the order is not terminal. Financial readiness must not pretend that
     // a known order is an unclassified external obligation.
     s.verify_captured_campaign_continuity(2, 12).unwrap();
-    s.connection.execute(
-        "INSERT INTO position_lots VALUES(
+    s.connection
+        .execute(
+            "INSERT INTO position_lots VALUES(
           'known-lot','manual','intent',NULL,'BTC-USDT-SWAP','long','1','100',5)",
-        [],
-    ).unwrap();
+            [],
+        )
+        .unwrap();
     s.verify_captured_campaign_continuity(2, 12).unwrap();
     // Risk census, NOT campaign history, must subsequently reconcile the
     // protected position and both central reservations before any POST.
-    s.connection.execute(
-        "UPDATE intents SET state='UNKNOWN' WHERE intent_id='intent'",
-        [],
-    ).unwrap();
+    s.connection
+        .execute(
+            "UPDATE intents SET state='UNKNOWN' WHERE intent_id='intent'",
+            [],
+        )
+        .unwrap();
     assert!(matches!(
         s.verify_captured_campaign_continuity(2, 12),
-        Err(StoreError::Invalid("ENTRY_POST_OPENING_NATIVE_EXPOSURE_UNRESOLVED"))
+        Err(StoreError::Invalid(
+            "ENTRY_POST_OPENING_NATIVE_EXPOSURE_UNRESOLVED"
+        ))
     ));
 }
 
@@ -1833,16 +1847,21 @@ fn e2_active_reservation_requires_matching_central_receipt() {
                 coverage_gaps: String::new(),
             }),
             ..Default::default()
-        }).unwrap();
+        })
+        .unwrap();
     }
     s.verify_captured_campaign_continuity(2, 12).unwrap();
-    s.connection.execute(
-        "UPDATE risk_receipts SET state='UNKNOWN' WHERE intent_id='intent'",
-        [],
-    ).unwrap();
+    s.connection
+        .execute(
+            "UPDATE risk_receipts SET state='UNKNOWN' WHERE intent_id='intent'",
+            [],
+        )
+        .unwrap();
     assert!(matches!(
         s.verify_captured_campaign_continuity(2, 12),
-        Err(StoreError::Invalid("ENTRY_POST_OPENING_NATIVE_EXPOSURE_UNRESOLVED"))
+        Err(StoreError::Invalid(
+            "ENTRY_POST_OPENING_NATIVE_EXPOSURE_UNRESOLVED"
+        ))
     ));
 }
 

@@ -426,7 +426,6 @@ impl AccountStore {
             .map(|_| ())
     }
 
-
     fn campaign_source_epoch(&self) -> StoreResult<i64> {
         self.connection
             .query_row(
@@ -437,14 +436,10 @@ impl AccountStore {
             .map_err(Into::into)
     }
 
-    fn campaign_source_generations(
-        frontiers: &[(&str, &str, i64, i64)],
-    ) -> String {
+    fn campaign_source_generations(frontiers: &[(&str, &str, i64, i64)]) -> String {
         frontiers
             .iter()
-            .map(|(source, partition, generation, _)| {
-                format!("{source}/{partition}:{generation}")
-            })
+            .map(|(source, partition, generation, _)| format!("{source}/{partition}:{generation}"))
             .collect::<Vec<_>>()
             .join("|")
     }
@@ -538,8 +533,10 @@ impl AccountStore {
             )
             .optional()?;
         if let Some((origin, covered, revision, prior_generations)) = previous
-            && origin == from_ms && covered <= through_ms
-            && revision == epoch && prior_generations == generations
+            && origin == from_ms
+            && covered <= through_ms
+            && revision == epoch
+            && prior_generations == generations
         {
             // Only the six covered source watermarks advanced. No immutable
             // economic row, native obligation or settlement receipt changed.

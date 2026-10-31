@@ -194,8 +194,8 @@ impl TradeService {
             {
                 return Err("ENTRY_CAMPAIGN_ORIGIN_MISMATCH".into());
             }
-            let from = i64::try_from(origin.started_at_ms)
-                .map_err(|_| "ENTRY_CAMPAIGN_ORIGIN_INVALID")?;
+            let from =
+                i64::try_from(origin.started_at_ms).map_err(|_| "ENTRY_CAMPAIGN_ORIGIN_INVALID")?;
             let through = now().saturating_sub(2_000);
             for account in state.state.accounts.iter().filter(|a| {
                 a.environment == okx_protocol::account_governance::AccountEnvironment::Real
@@ -208,9 +208,14 @@ impl TradeService {
                     return Err("ENTRY_OPENING_IDENTITY_UNVERIFIED".into());
                 }
                 let campaign = origin.campaign_id.clone();
-                resource.execution.store.call(until, move |store| {
-                    store.refresh_campaign_entry_readiness(&campaign, from, through)
-                }).await.map_err(err)?;
+                resource
+                    .execution
+                    .store
+                    .call(until, move |store| {
+                        store.refresh_campaign_entry_readiness(&campaign, from, through)
+                    })
+                    .await
+                    .map_err(err)?;
             }
             return Ok(());
         }
