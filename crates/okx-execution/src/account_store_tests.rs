@@ -964,7 +964,7 @@ fn e1_zero_fill_cannot_hide_unclassified_bill_or_undurable_source() {
     ));
     s.connection
         .execute("DELETE FROM bills WHERE bill_id='unidentified'", [])
-        .is_err();
+        .unwrap();
 }
 
 #[test]
