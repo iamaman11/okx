@@ -1186,9 +1186,12 @@ mod raw_native_session_tests {
                     match owner
                         .execution
                         .store
-                        .call(std::time::Instant::now() + Duration::from_secs(2), move |s| {
-                            s.verify_campaign_entry_readiness(&campaign, native_origin, through)
-                        })
+                        .call(
+                            std::time::Instant::now() + Duration::from_secs(2),
+                            move |s| {
+                                s.verify_campaign_entry_readiness(&campaign, native_origin, through)
+                            },
+                        )
                         .await
                     {
                         Ok(()) => {}
