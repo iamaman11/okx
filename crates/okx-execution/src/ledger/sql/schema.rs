@@ -373,7 +373,7 @@ impl AccountStore {
             latest_capital_assignment_time: std::cell::RefCell::new(None),
         })
     }
-    pub(super) fn writer_lease(path: &Path) -> StoreResult<std::fs::File> {
+    pub(super) fn writer_lease(path: &Path) -> StoreResult<WriterLease> {
         let file = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
@@ -387,7 +387,7 @@ impl AccountStore {
         let mut interrupted = 0;
         loop {
             match file.try_lock() {
-                Ok(()) => return Ok(file),
+                Ok(()) => return Ok(WriterLease(file)),
                 Err(std::fs::TryLockError::Error(e))
                     if e.kind() == std::io::ErrorKind::Interrupted && interrupted < 3 =>
                 {

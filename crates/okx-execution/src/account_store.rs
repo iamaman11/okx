@@ -638,13 +638,27 @@ pub struct StrategyValuationReconciliation {
     pub coverage: String,
 }
 
+/// One exclusive writer lifetime. The owning AccountStore drops its SQLite
+/// connection before this field (Rust field declaration order), then explicitly
+/// unlocks before closing the lock handle. No other SQL writer may overlap.
+#[derive(Debug)]
+struct WriterLease(std::fs::File);
+
+impl Drop for WriterLease {
+    fn drop(&mut self) {
+        // Drop cannot return an I/O error. Closing the file remains the
+        // platform fallback if explicit unlock fails.
+        let _ = self.0.unlock();
+    }
+}
+
 /// Connection stays on its owning blocking worker. It is never a network transaction.
 #[derive(Debug)]
 pub struct AccountStore {
     connection: Connection,
     path: PathBuf,
     meta: AccountMeta,
-    _lease: std::fs::File,
+    _lease: WriterLease,
     maintenance_error: Option<String>,
     // Derived memory-only views. SQLite remains the sole durable source;
     // both are rebuilt after reopen and invalidated only after COMMIT.
