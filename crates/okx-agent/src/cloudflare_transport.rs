@@ -890,17 +890,32 @@ mod raw_native_session_tests {
                 .await
                 .unwrap();
             assert_eq!(
-                cursors.0.as_ref().expect("missing SWAP fill cursor").coverage_gaps,
+                cursors
+                    .0
+                    .as_ref()
+                    .expect("missing SWAP fill cursor")
+                    .coverage_gaps,
                 "",
                 "the production financial capture must have no SWAP history gaps"
             );
             assert_eq!(
-                cursors.1.as_ref().expect("missing bill cursor").coverage_gaps,
+                cursors
+                    .1
+                    .as_ref()
+                    .expect("missing bill cursor")
+                    .coverage_gaps,
                 "",
                 "the production financial capture must have no bill history gaps"
             );
-            assert!(cursors.2.is_empty(), "T09.0 bootstrap must contain no preseeded active intent");
-            let source_capture_ms = resource.source_capture_health.read().await.last_success_ms
+            assert!(
+                cursors.2.is_empty(),
+                "T09.0 bootstrap must contain no preseeded active intent"
+            );
+            let source_capture_ms = resource
+                .source_capture_health
+                .read()
+                .await
+                .last_success_ms
                 .expect("T09.0 must have captured source metadata");
             t09_bootstrap_accounts.push(json!({
                 "alias":alias,
@@ -912,23 +927,33 @@ mod raw_native_session_tests {
                 "active_intent_count":cursors.2.len(),
             }));
         }
-        let mut t09_databases = std::fs::read_dir(root.join("accounts")).unwrap()
+        let mut t09_databases = std::fs::read_dir(root.join("accounts"))
+            .unwrap()
             .map(|entry| {
                 let file = entry.unwrap().path().join("account.sqlite");
-                assert!(file.is_file(), "T09.0 requires physically distinct SQLite account files");
+                assert!(
+                    file.is_file(),
+                    "T09.0 requires physically distinct SQLite account files"
+                );
                 file.display().to_string()
             })
             .collect::<Vec<_>>();
         t09_databases.sort();
-        assert_eq!(t09_databases.len(), 2, "one independent SQLite file per account");
+        assert_eq!(
+            t09_databases.len(),
+            2,
+            "one independent SQLite file per account"
+        );
         assert_ne!(
-            t09_bootstrap_accounts[0]["verified_uid"],
-            t09_bootstrap_accounts[1]["verified_uid"],
+            t09_bootstrap_accounts[0]["verified_uid"], t09_bootstrap_accounts[1]["verified_uid"],
             "T09.0 requires two independently verified account UIDs"
         );
-        println!("T09_0_NATIVE_SQL_EVIDENCE_V1:{}", json!({
-            "accounts":t09_bootstrap_accounts,"sqlite_files":t09_databases,
-        }));
+        println!(
+            "T09_0_NATIVE_SQL_EVIDENCE_V1:{}",
+            json!({
+                "accounts":t09_bootstrap_accounts,"sqlite_files":t09_databases,
+            })
+        );
         let mut request = url.into_client_request().unwrap();
         request.headers_mut().insert(
             AUTHORIZATION,
@@ -1533,7 +1558,14 @@ mod raw_native_session_tests {
         before_repeat.installation_id = "installation_test".into();
         let before_repeat = risk.request(before_repeat).await.unwrap();
         assert_eq!(
-            before_repeat.budget.as_ref().unwrap().entry_budget.as_ref().unwrap().reserved_usd,
+            before_repeat
+                .budget
+                .as_ref()
+                .unwrap()
+                .entry_budget
+                .as_ref()
+                .unwrap()
+                .reserved_usd,
             "5.0005"
         );
         let repeated = trade
@@ -1564,31 +1596,58 @@ mod raw_native_session_tests {
         let after = risk.request(after_public).await.unwrap();
         assert_eq!(after.status, RiskDecisionStatus::Observed);
         let idempotent_intent_id = opened["data"]["intent"]["intent_id"]
-            .as_str().expect("public intent ID").to_string();
+            .as_str()
+            .expect("public intent ID")
+            .to_string();
         let saved_intent_id = idempotent_intent_id.clone();
-        let saved = accounts.resolve("fixture-a").await.unwrap().execution.store
-            .call(std::time::Instant::now() + Duration::from_secs(3), move |s| {
-                s.intent(&saved_intent_id)
-            })
-            .await.unwrap().expect("idempotent public intent must persist in native SQL");
+        let saved = accounts
+            .resolve("fixture-a")
+            .await
+            .unwrap()
+            .execution
+            .store
+            .call(
+                std::time::Instant::now() + Duration::from_secs(3),
+                move |s| s.intent(&saved_intent_id),
+            )
+            .await
+            .unwrap()
+            .expect("idempotent public intent must persist in native SQL");
         assert_eq!(saved.intent_id, idempotent_intent_id);
         assert_eq!(saved.state, okx_execution::IntentState::Acknowledged);
         assert_eq!(
-            before_repeat.budget.as_ref().unwrap().entry_budget.as_ref().unwrap().reserved_usd,
-            after.budget.as_ref().unwrap().entry_budget.as_ref().unwrap().reserved_usd,
+            before_repeat
+                .budget
+                .as_ref()
+                .unwrap()
+                .entry_budget
+                .as_ref()
+                .unwrap()
+                .reserved_usd,
+            after
+                .budget
+                .as_ref()
+                .unwrap()
+                .entry_budget
+                .as_ref()
+                .unwrap()
+                .reserved_usd,
             "replaying a public idempotency key must not reserve more central entry capacity"
         );
-        println!("T09_5_NATIVE_IDEMPOTENCY_EVIDENCE_V1:{}", json!({
-            "account_uid": accounts.resolve("fixture-a").await.unwrap().configuration.account_key.verified_uid,
-            "opened_intent_id":idempotent_intent_id,
-            "replayed_intent_id":repeated["data"]["intent"]["intent_id"],
-            "sql_intent_id":saved.intent_id,
-            "sql_revision":saved.revision,
-            "sql_state":saved.state.as_str(),
-            "created_posts":feed.outbound_posts.lock().unwrap().len(),
-            "reserved_entry_usd_before_replay": before_repeat.budget.as_ref().unwrap().entry_budget.as_ref().unwrap().reserved_usd,
-            "reserved_entry_usd_after_replay": after.budget.as_ref().unwrap().entry_budget.as_ref().unwrap().reserved_usd,
-        }));
+        println!(
+            "T09_5_NATIVE_IDEMPOTENCY_EVIDENCE_V1:{}",
+            json!({
+                "account_uid": accounts.resolve("fixture-a").await.unwrap().configuration.account_key.verified_uid,
+                "opened_intent_id":idempotent_intent_id,
+                "replayed_intent_id":repeated["data"]["intent"]["intent_id"],
+                "sql_intent_id":saved.intent_id,
+                "sql_revision":saved.revision,
+                "sql_state":saved.state.as_str(),
+                "created_posts":feed.outbound_posts.lock().unwrap().len(),
+                "reserved_entry_usd_before_replay": before_repeat.budget.as_ref().unwrap().entry_budget.as_ref().unwrap().reserved_usd,
+                "reserved_entry_usd_after_replay": after.budget.as_ref().unwrap().entry_budget.as_ref().unwrap().reserved_usd,
+            })
+        );
         assert_eq!(
             after
                 .budget
