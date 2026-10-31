@@ -1,5 +1,72 @@
 use super::*;
 #[test]
+fn e1_sealed_campaign_refuses_backdated_unapplied_terminal_receipt() {
+    let mut store = store();
+    for (source, partition) in [
+        ("fills","SPOT"),("fills","MARGIN"),("fills","SWAP"),
+        ("fills","FUTURES"),("fills","OPTION"),("bills","account"),
+    ] {
+        store.ingest_page(&IngestPage {
+            cursor: Some(SourceCursor {
+                source: source.into(),
+                stream_partition: partition.into(),
+                cursor: String::new(),
+                watermark: 10,
+                generation: 1,
+                coverage_gaps: String::new(),
+            }),
+            ..Default::default()
+        }).unwrap();
+    }
+    let campaign = format!("sha256:{}", "c".repeat(64));
+    let frozen = store.seal_captured_campaign_baseline(&campaign, 2, 10)
+        .unwrap();
+    assert_eq!(frozen.0, Decimal::ZERO);
+    // An out-of-order record may be received after the cursor advanced
+    // while retaining its actual (older) economic event timestamp. The
+    // previous empty proof must not hide this unseen monetary event.
+    store.connection.execute(
+        "INSERT INTO operation_receipts
+         (operation_id,kind,request_hash,result_ref,committed_at)
+         VALUES('entry-settlement:backfilled','ENTRY_SETTLEMENT_PROVEN',
+                'test-plan','unverified-source',8)",
+        [],
+    ).unwrap();
+    assert!(matches!(
+        store.seal_captured_campaign_baseline(&campaign, 2, 10),
+        Err(StoreError::Invalid("CAMPAIGN_FRONTIER_STALE_ECONOMIC_SOURCE"))
+    ), "same frontier may never replay a stale zero after backfill");
+    for (source, partition) in [
+        ("fills","SPOT"),("fills","MARGIN"),("fills","SWAP"),
+        ("fills","FUTURES"),("fills","OPTION"),("bills","account"),
+    ] {
+        store.ingest_page(&IngestPage {
+            cursor: Some(SourceCursor {
+                source: source.into(),
+                stream_partition: partition.into(),
+                cursor: String::new(),
+                watermark: 11,
+                generation: 1,
+                coverage_gaps: String::new(),
+            }),
+            ..Default::default()
+        }).unwrap();
+    }
+    assert!(matches!(
+        store.seal_captured_campaign_baseline(&campaign, 2, 11),
+        Err(StoreError::Invalid("ENTRY_OPENING_SETTLEMENT_CORRUPT"))
+    ), "the next frontier must validate the original source, not count it as zero");
+    let applied: (String, i64) = store.connection.query_row(
+        "SELECT consumed_usd,covered_through_ms
+         FROM campaign_entry_totals WHERE campaign_id=?1",
+        [&campaign],
+        |r| Ok((r.get(0)?,r.get(1)?)),
+    ).unwrap();
+    assert_eq!(applied,("0".into(),10),
+        "a rejected historical import cannot advance the durable money frontier");
+}
+
+#[test]
 fn e1_e2_native_real_fee_sources_baseline_and_second_admission_under_ten() {
     let mut s = store();
     let definition = s.ensure_manual_instance(1).unwrap();
