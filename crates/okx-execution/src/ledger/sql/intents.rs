@@ -363,13 +363,44 @@ impl AccountStore {
         // A later bill/fill cannot rewrite the first accepted revision.
         if let Some(old) = saved.as_ref() {
             let historical = self.intent_fee_bill_evidence(id, old.source_covered_through_ms)?;
+            let original_total = historical
+                .fill
+                .gross_notional_usdt
+                .checked_add(historical.conservative_verified_fee_usdt)
+                .ok_or(StoreError::Invalid("ENTRY_SETTLEMENT_MONEY_OVERFLOW"))?;
+            let original_usd = original_total
+                .checked_mul(admission.admission_usd_per_usdt)
+                .ok_or(StoreError::Invalid("ENTRY_SETTLEMENT_MONEY_OVERFLOW"))?
+                .round_dp_with_strategy(9, rust_decimal::RoundingStrategy::ToPositiveInfinity)
+                .checked_add(admission.other_entry_costs_upper_usd)
+                .ok_or(StoreError::Invalid("ENTRY_SETTLEMENT_MONEY_OVERFLOW"))?;
+            // Amount equality alone cannot prove immutable economic events:
+            // a replacement fill or bill could have the same total. Rebuild
+            // the exact original digest at its frozen source frontier.
+            let original_bytes = serde_json::to_vec(&(
+                old.schema.as_str(),
+                &self.meta.account_key,
+                &self.meta.installation_id,
+                id,
+                &intent.plan_hash,
+                &admission.entry_proof_digest,
+                &historical.fill.source_digest,
+                &historical.source_digest,
+                &historical.fill.reservation_key,
+                &historical.fill.exchange_order_id,
+                old.venue_update_ms,
+                old.venue_filled_quantity,
+                original_total,
+                original_usd,
+            ))
+            .map_err(|_| StoreError::Invalid("ENTRY_SETTLEMENT_SOURCE_DIGEST_INVALID"))?;
+            let original_digest = format!("{:x}", Sha256::digest(original_bytes));
             if historical.fill.filled_quantity != old.venue_filled_quantity
-                || historical
-                    .fill
-                    .gross_notional_usdt
-                    .checked_add(historical.conservative_verified_fee_usdt)
-                    != Some(old.booked_notional_and_fee_usdt)
+                || original_total != old.booked_notional_and_fee_usdt
+                || original_usd != old.cumulative_entry_usd
                 || historical.fill.exchange_order_id != old.venue_order_id
+                || historical.fill.reservation_key != old.reservation_key
+                || original_digest != old.source_digest
             {
                 return Err(StoreError::Invalid("ENTRY_SETTLEMENT_PRIOR_SOURCE_CHANGED"));
             }

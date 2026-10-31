@@ -840,6 +840,21 @@ fn e1_partial_and_final_entry_settlement_are_monotone_and_not_double_counted() {
                     .unwrap(),
                 partial
             );
+            // Even an equal-money replacement economic event is NOT
+            // idempotent: the original fill ID, trade ID and bill proof
+            // must remain byte-for-byte source equivalent.
+            s.connection.execute(
+                "UPDATE fills SET trade_id='forged-same-money' WHERE fill_id='first'",
+                [],
+            ).unwrap();
+            assert!(matches!(
+                s.bind_partial_entry_settlement("intent", at, qty, at),
+                Err(StoreError::Invalid("ENTRY_SETTLEMENT_PRIOR_SOURCE_CHANGED"))
+            ));
+            s.connection.execute(
+                "UPDATE fills SET trade_id='trade-first' WHERE fill_id='first'",
+                [],
+            ).unwrap();
         } else {
             let prior = s.operation("entry-partial-head:intent").unwrap().unwrap();
             let partial: EntrySettlementEvidence = serde_json::from_str(&prior.result_ref).unwrap();
