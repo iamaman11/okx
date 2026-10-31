@@ -481,6 +481,55 @@ impl EntryCostProof {
     }
 }
 
+/// The ONLY production source-backed assessor for a new linear USDT-SWAP
+/// entry. All instrument-specific parameters come from the authenticated
+/// venue specification. Preview, initial RESERVE and post-HELD checks call
+/// this producer; none may invent a Proven financial dimension.
+pub(super) struct EntryAssessmentSources<'a> {
+    pub(super) instrument: &'a str,
+    pub(super) order_type: &'a str,
+    pub(super) rules: &'a okx_observation::InstrumentRulesSnapshot,
+    pub(super) fees: &'a okx_observation::FeeScheduleSnapshot,
+    pub(super) account: &'a okx_api::AccountConfig,
+    pub(super) snapshot: &'a okx_observation::AccountSnapshot,
+    pub(super) conversion: &'a UsdConversion,
+    pub(super) leverage: Decimal,
+    pub(super) verified_uid: &'a str,
+    pub(super) observed_at_ms: i64,
+}
+
+pub(super) fn assess_order(
+    plan: &IntentPlan,
+    sources: EntryAssessmentSources<'_>,
+) -> Result<(EntryCostProof, Decimal), String> {
+    let (quote, fee_rate) = verified_known_entry_quote(
+        plan,
+        sources.instrument,
+        sources.rules,
+        sources.fees,
+        sources.conversion,
+        &sources.snapshot.account_uid_fingerprint,
+        sources.verified_uid,
+        sources.observed_at_ms,
+    )?;
+    let proof = EntryCostProof::source_valued_candidate(
+        quote,
+        sources.conversion,
+        sources.observed_at_ms,
+    )?
+    .attest_linear_usdt_sources(
+        plan,
+        sources.order_type,
+        sources.instrument,
+        sources.rules,
+        sources.fees,
+        sources.account,
+        sources.snapshot,
+        sources.leverage,
+    )?;
+    Ok((proof, fee_rate))
+}
+
 /// E1.3: only a fully classified, independently sourced cost proof may
 /// become a Worker RESERVE amount. The immutable SQL quote is the reference
 /// for identity and exact arithmetic; a preview price or a hand-computed fee

@@ -102,6 +102,19 @@ check(await readRiskBook(corruptedOrigin)===null,
 const native={connection_generation:77,source_digest:d,native_account_evidence_complete:true,native_order_evidence_complete:true,native_ledger_evidence_complete:true};
 const request={...base,uid:a,intent_id:"intent_12345678",loss_usdt:"6"};
 const reserve=(input= request,storage=sa)=>reserveRisk(storage,policy,census,input,native);
+// Source-proven nonzero campaign opening still permits a FOLLOW-UP entry
+// when both the remaining turnover and independent loss budgets allow it.
+const historicalFollowup=await reserveRisk(past,policy,census,{
+ ...request,intent_id:"intent_after_proven_history_002",
+ loss_usdt:"1",loss_usd:"1",entry_upper_usd:"0.5"
+},native);
+check(historicalFollowup.status==="HELD",
+ "a second entry is permitted within proved historical spend and risk limits");
+const historicalNext=(await readRiskBook(past))!.entry_budget!;
+check(historicalNext.consumed_usd==="5.01"&&
+ historicalNext.reserved_usd==="0.5"&&historicalNext.remaining_usd==="4.49",
+ "next reservation never resets prior campaign spent or double-charges an entry");
+
 check(units("1.000000001")===1000000001n&&units("1e9")===null,"decimal exact");
 const both=await Promise.all([reserve(),reserve({...request,uid:b,intent_id:"intent_23456789",loss_usdt:"5",loss_usd:"5"})]);
 check(both[0].status==="HELD"&&both[1].status==="DENIED","RISK-01 competing accounts aggregate");

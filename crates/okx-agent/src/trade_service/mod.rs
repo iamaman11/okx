@@ -626,28 +626,6 @@ impl TradeService {
                     let fees = r.observer.fee_schedule(&rules).await.map_err(err)?;
                     let source = r.observer.snapshot().await.map_err(err)?;
                     let conversion = Self::usd_conversion(&source)?;
-                    let (entry, fee_rate) = entry_budget::verified_known_entry_quote(
-                        &plan,
-                        instrument,
-                        &rules,
-                        &fees,
-                        &conversion,
-                        &source.account_uid_fingerprint,
-                        &r.configuration.account_key.verified_uid,
-                        now(),
-                    )?;
-                    let fx = dec(&conversion.usd_per_usdt)?;
-                    let entry_ceiling = entry_budget::enforced_entry_ceiling(
-                        true,
-                        c.environment == okx_protocol::account_governance::AccountEnvironment::Real,
-                        c.limits.max_entry_usd.as_deref().map(dec).transpose()?,
-                        order.max_entry_usd.as_deref().map(dec).transpose()?,
-                    )?;
-                    // Known entry fee/price is NOT an all-in cost proof. Report
-                    // exact remaining capacity for still-unproven immediate
-                    // costs, rather than treating them as zero.
-                    let unproven_headroom =
-                        entry_budget::unproven_entry_cost_headroom(entry.total_usd, entry_ceiling)?;
                     let account = r.execution.account.config().await.map_err(err)?;
                     let leverage = dec(&r
                         .observer
@@ -662,21 +640,34 @@ impl TradeService {
                         )
                         .await
                         .map_err(err)?)?;
-                    let proof = entry_budget::EntryCostProof::source_valued_candidate(
-                        entry.clone(),
-                        &conversion,
-                        now(),
-                    )?
-                    .attest_linear_usdt_sources(
+                    let (proof, fee_rate) = entry_budget::assess_order(
                         &plan,
-                        &order.order_type,
-                        instrument,
-                        &rules,
-                        &fees,
-                        &account,
-                        &source,
-                        leverage,
+                        entry_budget::EntryAssessmentSources {
+                            instrument,
+                            order_type: &order.order_type,
+                            rules: &rules,
+                            fees: &fees,
+                            account: &account,
+                            snapshot: &source,
+                            conversion: &conversion,
+                            leverage,
+                            verified_uid: &r.configuration.account_key.verified_uid,
+                            observed_at_ms: now(),
+                        },
                     )?;
+                    let entry = proof.quote.clone();
+                    let fx = dec(&conversion.usd_per_usdt)?;
+                    let entry_ceiling = entry_budget::enforced_entry_ceiling(
+                        true,
+                        c.environment == okx_protocol::account_governance::AccountEnvironment::Real,
+                        c.limits.max_entry_usd.as_deref().map(dec).transpose()?,
+                        order.max_entry_usd.as_deref().map(dec).transpose()?,
+                    )?;
+                    // Known entry fee/price is NOT an all-in cost proof. Report
+                    // exact remaining capacity for still-unproven immediate
+                    // costs, rather than treating them as zero.
+                    let unproven_headroom =
+                        entry_budget::unproven_entry_cost_headroom(entry.total_usd, entry_ceiling)?;
                     let all_in_upper = proof.proven_upper_usd()?;
                     let missing = proof.missing_reasons();
                     json!({"price_bound_usdt":exact(plan.limit_price),

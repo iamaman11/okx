@@ -520,16 +520,36 @@ impl TradeService {
             let fees = r.observer.fee_schedule(&rules).await.map_err(err)?;
             let quote_snapshot = r.observer.snapshot().await.map_err(err)?;
             let fx = Self::usd_conversion(&quote_snapshot)?;
-            let (quote, rate) = entry_budget::verified_known_entry_quote(
+            let account = r.execution.account.config().await.map_err(err)?;
+            let leverage = dec(&r
+                .observer
+                .configured_leverage(
+                    instrument,
+                    okx_api::MarginMode::Cross,
+                    if plan.position_side == "long" {
+                        "long"
+                    } else {
+                        "short"
+                    },
+                )
+                .await
+                .map_err(err)?)?;
+            let (entry_cost_proof, rate) = entry_budget::assess_order(
                 &plan,
-                instrument,
-                &rules,
-                &fees,
-                &fx,
-                &quote_snapshot.account_uid_fingerprint,
-                &r.configuration.account_key.verified_uid,
-                now(),
+                entry_budget::EntryAssessmentSources {
+                    instrument,
+                    order_type: &order.order_type,
+                    rules: &rules,
+                    fees: &fees,
+                    account: &account,
+                    snapshot: &quote_snapshot,
+                    conversion: &fx,
+                    leverage,
+                    verified_uid: &r.configuration.account_key.verified_uid,
+                    observed_at_ms: now(),
+                },
             )?;
+            let quote = entry_cost_proof.quote.clone();
             let ceiling = entry_budget::enforced_entry_ceiling(
                 true,
                 true,
@@ -582,39 +602,10 @@ impl TradeService {
                 conversion_received_at: fx.observed_at_ms as i64,
                 observed_at: now(),
             };
-            // This is the only bridge from immutable SQL pricing to
-            // central entry-spend authority. Until authenticated venue
-            // applicability and an independently bounded FX source exist,
-            // unproven_linear_quote produces no upper and no proof digest.
-            let account = r.execution.account.config().await.map_err(err)?;
-            let leverage = dec(&r
-                .observer
-                .configured_leverage(
-                    instrument,
-                    okx_api::MarginMode::Cross,
-                    if plan.position_side == "long" {
-                        "long"
-                    } else {
-                        "short"
-                    },
-                )
-                .await
-                .map_err(err)?)?;
-            let entry_cost_proof = entry_budget::EntryCostProof::source_valued_candidate(
-                quote.clone(),
-                &fx,
-                entry_receipt.observed_at,
-            )?
-            .attest_linear_usdt_sources(
-                &plan,
-                &order.order_type,
-                instrument,
-                &rules,
-                &fees,
-                &account,
-                &quote_snapshot,
-                leverage,
-            )?;
+            // The source-backed assessment above is the only bridge from
+            // authenticated venue/account sources to SQL and RiskBook.
+            // No separate sizing/fee formula or unsupported dimension is
+            // promoted into POST authority here.
             let verified_entry =
                 entry_budget::reserve_entry_evidence(&entry_cost_proof, &entry_receipt, ceiling)?;
             let cost_components = entry_cost_proof.verified_fx_and_entry_fees()?;
@@ -1150,25 +1141,21 @@ impl TradeService {
             )
             .await
             .map_err(err)?)?;
-        let current_quote = entry_budget::quote(
-            quote.quantity,
-            quote.contract_value,
-            quote.limit_price,
-            quote.fee_rate,
-            quote.usd_per_usdt,
+        let (reassessed, _) = entry_budget::assess_order(
+            &intent.plan,
+            entry_budget::EntryAssessmentSources {
+                instrument: &intent.instrument_id,
+                order_type,
+                rules: &rules,
+                fees: &fee,
+                account: &config,
+                snapshot: &snap,
+                conversion: &fx,
+                leverage,
+                verified_uid: &r.configuration.account_key.verified_uid,
+                observed_at_ms: now(),
+            },
         )?;
-        let reassessed =
-            entry_budget::EntryCostProof::source_valued_candidate(current_quote, &fx, now())?
-                .attest_linear_usdt_sources(
-                    &intent.plan,
-                    order_type,
-                    &intent.instrument_id,
-                    &rules,
-                    &fee,
-                    &config,
-                    &snap,
-                    leverage,
-                )?;
         reassessed.verify_held_entry_admission(&quote, &admission)?;
         if Instant::now() >= until {
             return Err("COMMAND_EXPIRED".into());

@@ -749,7 +749,8 @@ fn e1_partial_and_final_entry_settlement_are_monotone_and_not_double_counted() {
         entry_upper_usd: quote.total_usd,
         entry_proof_digest: "a".repeat(64),
         observed_at: quote.observed_at,
-    }).unwrap();
+    })
+    .unwrap();
     acknowledged_entry_intent(&mut s);
     let half = Decimal::new(5, 1);
     let fee = Decimal::new(-1, 2);
@@ -794,7 +795,8 @@ fn e1_partial_and_final_entry_settlement_are_monotone_and_not_double_counted() {
                 coverage_gaps: String::new(),
             }),
             ..Default::default()
-        }).unwrap();
+        })
+        .unwrap();
         s.ingest_page(&IngestPage {
             bills: vec![Bill {
                 bill_id: id.into(),
@@ -813,7 +815,8 @@ fn e1_partial_and_final_entry_settlement_are_monotone_and_not_double_counted() {
                 coverage_gaps: String::new(),
             }),
             ..Default::default()
-        }).unwrap();
+        })
+        .unwrap();
         s.ingest_page(&IngestPage {
             finance: vec![FinanceEntry {
                 source_ref: format!("bill:{id}"),
@@ -821,22 +824,36 @@ fn e1_partial_and_final_entry_settlement_are_monotone_and_not_double_counted() {
                 ..entry
             }],
             ..Default::default()
-        }).unwrap();
-        s.record_order_readback("intent", "venue-order", state, qty, at).unwrap();
+        })
+        .unwrap();
+        s.record_order_readback("intent", "venue-order", state, qty, at)
+            .unwrap();
         if at == 7 {
-            let partial = s.bind_partial_entry_settlement("intent", at, qty, at).unwrap();
+            let partial = s
+                .bind_partial_entry_settlement("intent", at, qty, at)
+                .unwrap();
             assert_eq!(partial.schema, "okx.entry-partial-settlement/v1");
             assert_eq!(partial.settlement_revision, 1);
             assert_eq!(partial.cumulative_entry_usd, Decimal::new(5001, 2));
-            assert_eq!(s.bind_partial_entry_settlement("intent", at, qty, at).unwrap(), partial);
+            assert_eq!(
+                s.bind_partial_entry_settlement("intent", at, qty, at)
+                    .unwrap(),
+                partial
+            );
         } else {
             let prior = s.operation("entry-partial-head:intent").unwrap().unwrap();
             let partial: EntrySettlementEvidence = serde_json::from_str(&prior.result_ref).unwrap();
             assert_eq!(partial.cumulative_entry_usd, Decimal::new(5001, 2));
-            let terminal = s.bind_terminal_entry_settlement("intent", at, qty, at).unwrap();
+            let terminal = s
+                .bind_terminal_entry_settlement("intent", at, qty, at)
+                .unwrap();
             assert_eq!(terminal.settlement_revision, 2);
             assert_eq!(terminal.cumulative_entry_usd, Decimal::new(10002, 2));
-            assert_eq!(s.bind_terminal_entry_settlement("intent", at, qty, at).unwrap(), terminal);
+            assert_eq!(
+                s.bind_terminal_entry_settlement("intent", at, qty, at)
+                    .unwrap(),
+                terminal
+            );
             assert_eq!(s.connection.query_row(
                 "SELECT COUNT(*) FROM operation_receipts WHERE kind='ENTRY_SETTLEMENT_PROVEN'",
                 [], |row| row.get::<_,i64>(0),
@@ -845,8 +862,14 @@ fn e1_partial_and_final_entry_settlement_are_monotone_and_not_double_counted() {
             let meta = s.meta.clone();
             drop(s);
             let mut reopened =
-                AccountStore::open_existing(path, &meta.account_key, &meta.installation_id).unwrap();
-            assert_eq!(reopened.bind_terminal_entry_settlement("intent", at, qty, at).unwrap(), terminal);
+                AccountStore::open_existing(path, &meta.account_key, &meta.installation_id)
+                    .unwrap();
+            assert_eq!(
+                reopened
+                    .bind_terminal_entry_settlement("intent", at, qty, at)
+                    .unwrap(),
+                terminal
+            );
             return;
         }
     }
