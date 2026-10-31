@@ -652,63 +652,103 @@ mod raw_native_session_tests {
         let connector = Arc::new(RecordedWsConnector::default());
         let reference = ReferenceRegistry::from_public(
             "2026-10-31T00:00:00Z",
-            vec![serde_json::from_value(json!({
-                "instType":"SWAP","instId":"BTC-USDT-SWAP",
-                "instFamily":"BTC-USDT","uly":"BTC-USDT","state":"live",
-                "ruleType":"normal","settleCcy":"USDT","tickSz":"0.1",
-                "lotSz":"0.01","minSz":"0.01","maxLmtSz":"1000",
-                "maxMktSz":"1000","ctType":"linear","ctVal":"0.01",
-                "ctValCcy":"BTC","groupId":"4","lever":"20"
-            })).unwrap()],
-        ).unwrap();
+            vec![
+                serde_json::from_value(json!({
+                    "instType":"SWAP","instId":"BTC-USDT-SWAP",
+                    "instFamily":"BTC-USDT","uly":"BTC-USDT","state":"live",
+                    "ruleType":"normal","settleCcy":"USDT","tickSz":"0.1",
+                    "lotSz":"0.01","minSz":"0.01","maxLmtSz":"1000",
+                    "maxMktSz":"1000","ctType":"linear","ctVal":"0.01",
+                    "ctValCcy":"BTC","groupId":"4","lever":"20"
+                }))
+                .unwrap(),
+            ],
+        )
+        .unwrap();
         let stamp = chrono::Utc::now().timestamp_millis();
         let timestamp = stamp.to_string();
         let funding_time = (stamp + 8 * 60 * 60 * 1000).to_string();
         let recorded_public = vec![
-            (json!({"channel":"instruments","instType":"SWAP"}), None, None),
-            (json!({"channel":"instruments","instType":"FUTURES"}), None, None),
-            (json!({"channel":"tickers","instId":"BTC-USDT-SWAP"}),
-             Some(json!({"instType":"SWAP","instId":"BTC-USDT-SWAP",
+            (
+                json!({"channel":"instruments","instType":"SWAP"}),
+                None,
+                None,
+            ),
+            (
+                json!({"channel":"instruments","instType":"FUTURES"}),
+                None,
+                None,
+            ),
+            (
+                json!({"channel":"tickers","instId":"BTC-USDT-SWAP"}),
+                Some(json!({"instType":"SWAP","instId":"BTC-USDT-SWAP",
                  "last":"1000","lastSz":"1","askPx":"1000","askSz":"10",
-                 "bidPx":"999.9","bidSz":"10","ts":timestamp})), None),
-            (json!({"channel":"mark-price","instId":"BTC-USDT-SWAP"}),
-             Some(json!({"instType":"SWAP","instId":"BTC-USDT-SWAP",
-                 "markPx":"1000","ts":timestamp})), None),
-            (json!({"channel":"index-tickers","instId":"BTC-USDT"}),
-             Some(json!({"instId":"BTC-USDT","idxPx":"1000","ts":timestamp})), None),
-            (json!({"channel":"funding-rate","instId":"BTC-USDT-SWAP"}),
-             Some(json!({"instType":"SWAP","instId":"BTC-USDT-SWAP",
+                 "bidPx":"999.9","bidSz":"10","ts":timestamp})),
+                None,
+            ),
+            (
+                json!({"channel":"mark-price","instId":"BTC-USDT-SWAP"}),
+                Some(json!({"instType":"SWAP","instId":"BTC-USDT-SWAP",
+                 "markPx":"1000","ts":timestamp})),
+                None,
+            ),
+            (
+                json!({"channel":"index-tickers","instId":"BTC-USDT"}),
+                Some(json!({"instId":"BTC-USDT","idxPx":"1000","ts":timestamp})),
+                None,
+            ),
+            (
+                json!({"channel":"funding-rate","instId":"BTC-USDT-SWAP"}),
+                Some(json!({"instType":"SWAP","instId":"BTC-USDT-SWAP",
                  "fundingRate":"0.0001","fundingTime":timestamp,
-                 "nextFundingTime":funding_time,"ts":timestamp})), None),
-            (json!({"channel":"open-interest","instId":"BTC-USDT-SWAP"}),
-             Some(json!({"instType":"SWAP","instId":"BTC-USDT-SWAP",
-                 "oi":"1000","oiCcy":"10","oiUsd":"10000","ts":timestamp})), None),
-            (json!({"channel":"books","instId":"BTC-USDT-SWAP"}),
-             Some(json!({"asks":[["1000","10","0","1"]],
+                 "nextFundingTime":funding_time,"ts":timestamp})),
+                None,
+            ),
+            (
+                json!({"channel":"open-interest","instId":"BTC-USDT-SWAP"}),
+                Some(json!({"instType":"SWAP","instId":"BTC-USDT-SWAP",
+                 "oi":"1000","oiCcy":"10","oiUsd":"10000","ts":timestamp})),
+                None,
+            ),
+            (
+                json!({"channel":"books","instId":"BTC-USDT-SWAP"}),
+                Some(json!({"asks":[["1000","10","0","1"]],
                  "bids":[["999.9","10","0","1"]],
-                 "seqId":10,"prevSeqId":-1,"ts":timestamp})), Some("snapshot"))
+                 "seqId":10,"prevSeqId":-1,"ts":timestamp})),
+                Some("snapshot"),
+            ),
         ];
         for (arg, data, action) in recorded_public {
             let ack = json!({"event":"subscribe","arg":arg,"connId":"recorded-public"}).to_string();
             let books = arg["channel"] == "books";
             let mut transcript = Vec::new();
-            if !books { transcript.push(ack.clone()); }
+            if !books {
+                transcript.push(ack.clone());
+            }
             if let Some(data) = data {
                 let mut frame = json!({"arg":arg,"data":[data]});
-                if let Some(action) = action { frame["action"] = action.into(); }
+                if let Some(action) = action {
+                    frame["action"] = action.into();
+                }
                 transcript.push(frame.to_string());
             }
-            if books { transcript.push(ack); }
+            if books {
+                transcript.push(ack);
+            }
             connector.expect_public_subscription(arg, transcript);
         }
         let (coordinator, public_ws) = PublicWsCoordinator::new_with_connector(
             OkxEnvironment::new(Region::Global, false),
-            reference, RateBudget::new(), connector.clone()
+            reference,
+            RateBudget::new(),
+            connector.clone(),
         );
         let (public_shutdown, public_receiver) = watch::channel(false);
         let public_task = tokio::spawn(coordinator.run(public_receiver));
         let public_trade = Arc::new(TradeService::new(
-            accounts.clone(), public_ws.clone(), risk.clone()
+            accounts.clone(),
+            public_ws.clone(),
+            risk.clone(),
         ));
         public_trade.set_analytics(ctx.analytics.clone()).await;
         ctx.trade = public_trade.clone();
@@ -717,32 +757,44 @@ mod raw_native_session_tests {
         public_ws.demand_instrument("BTC-USDT-SWAP").await.unwrap();
         let market = tokio::time::timeout(Duration::from_secs(5), async {
             loop {
-                if let Ok(market) = public_ws.risk_fresh_snapshot(
-                    "BTC-USDT-SWAP",
-                    chrono::Utc::now().timestamp_millis() as u64,
-                    5000,5000,chrono::Utc::now().to_rfc3339()
-                ).await { break market; }
-                market_updates.changed().await.expect("public source coordinator exited");
+                if let Ok(market) = public_ws
+                    .risk_fresh_snapshot(
+                        "BTC-USDT-SWAP",
+                        chrono::Utc::now().timestamp_millis() as u64,
+                        5000,
+                        5000,
+                        chrono::Utc::now().to_rfc3339(),
+                    )
+                    .await
+                {
+                    break market;
+                }
+                market_updates
+                    .changed()
+                    .await
+                    .expect("public source coordinator exited");
             }
-        }).await.expect("recorded market frames were not processed by production WS");
-        assert_eq!(market.market.ticker.best_ask,"1000");
-        assert_eq!(connector.unconsumed_public_subscriptions(),0);
+        })
+        .await
+        .expect("recorded market frames were not processed by production WS");
+        assert_eq!(market.market.ticker.best_ask, "1000");
+        assert_eq!(connector.unconsumed_public_subscriptions(), 0);
         // Every fee/leverage response passes through the existing signed
         // observer API parser. A second account cannot borrow A's tariff.
-        let envelope = |data:serde_json::Value| {
+        let envelope = |data: serde_json::Value| {
             serde_json::to_vec(&json!({"code":"0","msg":"","data":data})).unwrap()
         };
-        for label in ["a","b"] {
+        for label in ["a", "b"] {
             let access_key = format!("fixture-observer-{label}");
             for _ in 0..2 {
                 feed.expect_get(RecordedGet {
-                    access_key:access_key.clone(),
-                    path:"/api/v5/account/trade-fee".into(),
-                    required_query:vec![
-                        ("instType".into(),"SWAP".into()),
-                        ("instFamily".into(),"BTC-USDT".into()),
+                    access_key: access_key.clone(),
+                    path: "/api/v5/account/trade-fee".into(),
+                    required_query: vec![
+                        ("instType".into(), "SWAP".into()),
+                        ("instFamily".into(), "BTC-USDT".into()),
                     ],
-                    raw_response:envelope(json!([{
+                    raw_response: envelope(json!([{
                         "instType":"SWAP","level":"Lv1","ts":stamp.to_string(),
                         "feeGroup":[{"groupId":"4","maker":"0.0005","taker":"0.0005"}]
                     }])),
@@ -750,13 +802,13 @@ mod raw_native_session_tests {
             }
             for _ in 0..2 {
                 feed.expect_get(RecordedGet {
-                    access_key:access_key.clone(),
-                    path:"/api/v5/account/leverage-info".into(),
-                    required_query:vec![
-                        ("instId".into(),"BTC-USDT-SWAP".into()),
-                        ("mgnMode".into(),"cross".into()),
+                    access_key: access_key.clone(),
+                    path: "/api/v5/account/leverage-info".into(),
+                    required_query: vec![
+                        ("instId".into(), "BTC-USDT-SWAP".into()),
+                        ("mgnMode".into(), "cross".into()),
                     ],
-                    raw_response:envelope(json!([
+                    raw_response: envelope(json!([
                         {"instId":"BTC-USDT-SWAP","mgnMode":"cross","posSide":"long","lever":"2"},
                         {"instId":"BTC-USDT-SWAP","mgnMode":"cross","posSide":"short","lever":"2"}
                     ])),
@@ -894,31 +946,40 @@ mod raw_native_session_tests {
         };
         let preview = TradeRequest::Preview {
             operation: TradeOperation::Open,
-            strategy_instance:"manual".into(),
-            instrument:"BTC-USDT-SWAP".into(),
-            side:PositionSide::Long,
-            sizing:Sizing::Contracts { contracts:"0.10".into() },
-            order:OrderConstraints {
-                order_type:"limit".into(),
-                limit_price:Some("1000".into()),
-                reference:None,
-                max_entry_usd:Some("10".into()),
-                max_slippage_bps:0,
+            strategy_instance: "manual".into(),
+            instrument: "BTC-USDT-SWAP".into(),
+            side: PositionSide::Long,
+            sizing: Sizing::Contracts {
+                contracts: "0.10".into(),
             },
-            protection:Some(Protection::Price { stop_price:"900".into() }),
+            order: OrderConstraints {
+                order_type: "limit".into(),
+                limit_price: Some("1000".into()),
+                reference: None,
+                max_entry_usd: Some("10".into()),
+                max_slippage_bps: 0,
+            },
+            protection: Some(Protection::Price {
+                stop_price: "900".into(),
+            }),
         };
         assert!(preview.valid());
-        for alias in ["fixture-a","fixture-b"] {
-            let output = trade.trade(alias,&preview,None).await.unwrap();
-            assert_eq!(output["status"],"completed");
-            assert_eq!(output["data"]["entry_costs"]["entry_total_usd"],"1.0005");
-            assert_eq!(output["data"]["admission"],"preview_only");
-            assert_eq!(output["data"]["side_effects"],"none");
+        for alias in ["fixture-a", "fixture-b"] {
+            let output = trade.trade(alias, &preview, None).await.unwrap();
+            assert_eq!(output["status"], "completed");
+            assert_eq!(output["data"]["entry_costs"]["entry_total_usd"], "1.0005");
+            assert_eq!(output["data"]["admission"], "preview_only");
+            assert_eq!(output["data"]["side_effects"], "none");
         }
-        assert!(feed.outbound_posts.lock().unwrap().is_empty(),
-            "public preview must never invoke the production venue POST transport");
-        assert_eq!(feed.unconsumed_reads(),0,
-            "every scripted fee/leverage source must have been consumed");
+        assert!(
+            feed.outbound_posts.lock().unwrap().is_empty(),
+            "public preview must never invoke the production venue POST transport"
+        );
+        assert_eq!(
+            feed.unconsumed_reads(),
+            0,
+            "every scripted fee/leverage source must have been consumed"
+        );
         let mut before = summary("risk_public_trade_did_not_post_001");
         before.installation_id = "installation_test".into();
         let untouched = risk.request(before).await.unwrap();
@@ -1083,7 +1144,10 @@ mod raw_native_session_tests {
         );
         public_shutdown.send(true).unwrap();
         tokio::time::timeout(Duration::from_secs(5), public_task)
-            .await.expect("public WS coordinator did not stop").unwrap().unwrap();
+            .await
+            .expect("public WS coordinator did not stop")
+            .unwrap()
+            .unwrap();
         drop(trade);
         accounts.shutdown().await;
         drop(accounts);
