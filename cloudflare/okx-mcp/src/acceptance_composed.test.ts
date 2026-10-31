@@ -149,7 +149,11 @@ const handler=async(url:string,init?:RequestInit)=>{
    const existing=intentByKey.get(key);
    if(existing)return Response.json(success({intent:intents.get(existing)}));
    const at=1792890000000;
-   const intentId='intent_real_'+(intents.size+1);
+   // A source-backed CI composition must use the SAME durable native
+   // intent identity; a synthetic Agent-generated id would break RiskBook
+   // ownership even if the USD totals coincidentally match.
+   const intentId=nativeSource?String(nativeSource.intent_id):
+     'intent_real_'+(intents.size+1);
    const planHash=nativeSource?String(nativeSource.plan_hash):
      Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',
        new TextEncoder().encode(JSON.stringify({account:row.account_key,request:req}))))).
