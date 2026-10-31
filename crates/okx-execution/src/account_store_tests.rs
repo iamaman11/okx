@@ -339,7 +339,7 @@ fn e1_e2_native_real_fee_sources_baseline_and_second_admission_under_ten() {
     assert_eq!(spent, Decimal::new(50025, 4));
     assert_eq!(
         s.seal_captured_campaign_baseline(&campaign, 2, 7).unwrap(),
-        (spent, proof),
+        (spent, proof.clone()),
         "re-reading an unchanged complete campaign cannot debit twice"
     );
     assert_eq!(Decimal::from(10) - spent, Decimal::new(49975, 4));
@@ -512,8 +512,10 @@ fn e1_worker_finance_receipt_roundtrip_matches_native_sql_after_restart() {
         serde_json::from_slice(&std::fs::read(result_path).unwrap()).unwrap();
     assert_eq!(native["schema"], "okx.e1.native-sql-settlement-source/v1");
     assert_eq!(worker["schema"], "okx.e1.sql-worker-bridge-result/v1");
-    assert_eq!(worker["native_source"], native,
-        "Worker must consume the exact native SQL source, not a separately manufactured proof");
+    assert_eq!(
+        worker["native_source"], native,
+        "Worker must consume the exact native SQL source, not a separately manufactured proof"
+    );
     let account = native["account_key"].as_str().unwrap();
     let installation = native["installation_id"].as_str().unwrap();
     let intent_id = native["intent_id"].as_str().unwrap();
@@ -535,20 +537,24 @@ fn e1_worker_finance_receipt_roundtrip_matches_native_sql_after_restart() {
     let admission = sql.entry_admission(intent_id).unwrap().unwrap();
     assert_eq!(quote.total_usd.to_string(), amount);
     assert_eq!(admission.entry_upper_usd.to_string(), amount);
-    let receipt = sql.operation(&format!("entry-settlement:{intent_id}"))
-        .unwrap().unwrap();
+    let receipt = sql
+        .operation(&format!("entry-settlement:{intent_id}"))
+        .unwrap()
+        .unwrap();
     assert_eq!(receipt.kind, "ENTRY_SETTLEMENT_PROVEN");
-    let settlement: EntrySettlementEvidence =
-        serde_json::from_str(&receipt.result_ref).unwrap();
+    let settlement: EntrySettlementEvidence = serde_json::from_str(&receipt.result_ref).unwrap();
     assert_eq!(settlement.source_digest, source_digest);
     assert_eq!(settlement.settlement_revision, revision);
     assert_eq!(settlement.cumulative_entry_usd.to_string(), amount);
-    let (stored_money, stored_proof): (String, String) = sql.connection.query_row(
-        "SELECT consumed_usd,source_digest FROM campaign_entry_window_proofs
+    let (stored_money, stored_proof): (String, String) = sql
+        .connection
+        .query_row(
+            "SELECT consumed_usd,source_digest FROM campaign_entry_window_proofs
          WHERE campaign_id=?1 AND covered_through_ms=7",
-        [native["campaign_id"].as_str().unwrap()],
-        |row| Ok((row.get(0)?, row.get(1)?)),
-    ).unwrap();
+            [native["campaign_id"].as_str().unwrap()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
     assert_eq!(stored_money, native["campaign_consumed_usd"]);
     assert_eq!(stored_proof, native["campaign_source_digest"]);
 
@@ -565,8 +571,7 @@ fn e1_worker_finance_receipt_roundtrip_matches_native_sql_after_restart() {
     assert_eq!(worker["fixture_venue_posts"], 1);
     assert_eq!(entry["account_uid"], "a".repeat(64));
     assert_eq!(
-        (decimal(stored_money).unwrap() + Decimal::new(4002, 3))
-            <= Decimal::from(10),
+        (decimal(stored_money).unwrap() + Decimal::new(4002, 3)) <= Decimal::from(10),
         true,
         "the native second admission must still fit the actual Worker-consumed campaign budget"
     );
