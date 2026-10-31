@@ -575,7 +575,7 @@ impl AccountStore {
               OR EXISTS(SELECT 1 FROM operation_receipts
                   WHERE kind IN (
                     'ENTRY_SETTLEMENT_PROVEN','ENTRY_LATE_HEAD',
-                    'ENTRY_LATE_SETTLEMENT_PROVEN','ENTRY_LATE_SETTLED')
+                    'ENTRY_LATE_SETTLEMENT_PROVEN')
                     AND committed_at>?1)",
             [through_ms],
             |r| r.get(0),
