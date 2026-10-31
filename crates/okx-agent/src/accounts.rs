@@ -1494,8 +1494,25 @@ mod tests {
                 updates.changed().await.expect("market coordinator stopped");
             }
         })
-        .await
-        .expect("recorded public WS did not produce a fresh snapshot");
+        .await;
+        let verified = match verified {
+            Ok(snapshot) => snapshot,
+            Err(_) => {
+                let quality = market
+                    .risk_quality_snapshot(
+                        "BTC-USDT-SWAP",
+                        u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap(),
+                        5_000,
+                        5_000,
+                    )
+                    .await;
+                let sent = connector.sent.lock().unwrap().clone();
+                let remaining = connector.unconsumed_public_subscriptions();
+                panic!(
+                    "PUBLIC_WS_RECORDED_SOURCE_NOT_FRESH: quality={quality:?} remaining={remaining} sent={sent:?}"
+                );
+            }
+        };
         assert_eq!(verified.market.instrument_id, "BTC-USDT-SWAP");
         assert_eq!(verified.market.ticker.best_ask, "1000");
         assert_eq!(verified.order_book.seq_id, Some(10));
