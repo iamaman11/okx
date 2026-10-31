@@ -1693,6 +1693,17 @@ mod raw_native_session_tests {
         // Same immutable page can be read more than once by the 2-second
         // owner; SQL event IDs must still make money exactly-once.
         for _ in 0..12 {
+            // A strict signed history route covers ALL five instType
+            // partitions. The other four have their own explicit empty
+            // recordings; no source may fall back to an invented zero page.
+            for partition in ["SPOT", "MARGIN", "FUTURES", "OPTION"] {
+                feed.expect_get(RecordedGet {
+                    access_key: "fixture-executor-a".into(),
+                    path: "/api/v5/trade/fills-history".into(),
+                    required_query: vec![("instType".into(), partition.into())],
+                    raw_response: envelope(json!([])),
+                });
+            }
             feed.expect_get(RecordedGet {
                 access_key: "fixture-executor-a".into(),
                 path: "/api/v5/trade/fills-history".into(),
