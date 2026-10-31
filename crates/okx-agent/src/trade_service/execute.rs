@@ -3819,6 +3819,31 @@ mod tests {
                 s.record_order_readback(
                     &target,"fixture_exchange_order",state,filled,fill_at+1,
                 )?;
+                // One active protection per native intent; updating its
+                // size after the second fill is a venue-readback fixture.
+                // The SQL verifier rejects wrong side, trigger and amount.
+                let protection=okx_execution::ProtectionReceipt {
+                    intent_id:target.clone(),
+                    algo_id:format!("fixture_protection_{state:?}"),
+                    side:"sell".into(),quantity:filled,
+                    trigger_price:Decimal::from(4),
+                    trigger_basis:"mark".into(),
+                    verified_at:fill_at+1,
+                    source_digest:"f".repeat(64),
+                };
+                s.verify_protection(&protection)?;
+                let observed=s.protection(&target)?.ok_or(
+                    okx_execution::StoreError::Invalid(
+                        "FIXTURE_PROTECTION_READBACK_MISSING"
+                    )
+                )?;
+                if observed.quantity!=filled || observed.side!="sell"
+                    || observed.trigger_price!=Decimal::from(4)
+                {
+                    return Err(okx_execution::StoreError::Invalid(
+                        "FIXTURE_PROTECTION_READBACK_MISMATCH"
+                    ));
+                }
                 if state==IntentState::PartiallyFilled {
                     s.bind_partial_entry_settlement(&target,fill_at+1,filled,fill_at+1)
                 } else {
