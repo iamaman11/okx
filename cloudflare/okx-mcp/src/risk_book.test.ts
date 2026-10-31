@@ -360,6 +360,31 @@ check(aggReplay.status==="UPDATED"&&
  finalAggregate.bound_breach_usd==="0.21"&&
  finalAggregate.reserved_usd==="0",
  "source revision without new monetary debit cannot increment existing breach");
+// E2 positive next-intent admission on the SAME actual RiskBook after the
+// original POST/partial/final/terminal RELEASE. No campaign reset and no
+// test-only grant: the next intent traverses the production reserveRisk CAS.
+const successorCensus={...terminalCensus,source_digest:a,
+ source_read_floor_ms:now+7,generated_at_ms:now+7};
+const successorRequest={...request,intent_id:"successor_after_terminal_001",
+ now_ms:now+8,loss_usdt:"1",loss_usd:"1",entry_upper_usd:"0.5"};
+const successorProof={...native,source_digest:a};
+const successor=await reserveRisk(sa,policy,successorCensus,
+ successorRequest,successorProof);
+check(successor.status==="HELD",
+ "same campaign must admit the second native intent after first RELEASE");
+const successorBudget=(await readRiskBook(sa))!.entry_budget!;
+check(successorBudget.consumed_usd==="1.5"&&
+ successorBudget.reserved_usd==="0.5"&&
+ successorBudget.limit_usd==="10"&&
+ (await inspectRisk(sa,held.entry.key))?.entry.state==="RELEASED",
+ "second reserve consumes only remaining budget; no refund of first 1.5 USD");
+const successorReplay=await reserveRisk(sa,policy,successorCensus,
+ successorRequest,successorProof);
+check(successorReplay.status==="HELD"&&
+ successorReplay.entry.key===successor.entry.key&&
+ (await readRiskBook(sa))!.entry_budget?.reserved_usd==="0.5",
+ "second-intent lost reserve reply cannot allocate another 0.5 USD");
+console.log("e2_same_campaign_second_entry_after_terminal PASS");
 const reported={...census,occupied:census.occupied.map(v=>({...v,cumulative_loss_usd:v.account_key===accountKey(request)?"17":"0"}))};
 const campaign=await reserveRisk(sa,policy,reported,{...request,intent_id:"new_intent_001",loss_usdt:"4",loss_usd:"4"},native);
 check(campaign.status==="DENIED"&&campaign.reason==="CAMPAIGN_LOSS_BUDGET_EXHAUSTED","fresh losses charged before reserve even when admission denied");

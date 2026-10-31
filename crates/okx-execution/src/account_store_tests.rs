@@ -215,6 +215,69 @@ fn r4_followup_requires_terminal_native_fill_and_central_settlement() {
         (spent, baseline),
         "lost central opening ACK cannot double count an immutable entry"
     );
+    // E2 positive successor through the SAME native intent/central receipt
+    // state machine, without resetting the proven 5.01 USD campaign opening.
+    // The first entry's terminal release is durable before the second reserve.
+    let successor_decision = Decision {
+        decision_id: "decision-successor".into(),
+        instance_id: None,
+        decision_at: 81,
+        input_digest: "successor-input".into(),
+        policy_revision: 1,
+        code_version: "test".into(),
+    };
+    let successor = s
+        .prepare(
+            &successor_decision,
+            &NewIntent {
+                plan: intent.plan.clone(),
+                intent_id: "intent-successor".into(),
+                idempotency_key: "request-successor".into(),
+                request_hash: "body-successor".into(),
+                client_order_id: "stableclient-successor".into(),
+                deadline: 200,
+                plan_hash: "plan-successor".into(),
+                policy_revision: 1,
+                risk_increase: true,
+                instrument_id: "BTC-USDT-SWAP".into(),
+            },
+        )
+        .unwrap();
+    s.reserve(
+        &CentralReceipt {
+            reservation_key: "reservation-successor".into(),
+            account_key: s.meta.account_key.clone(),
+            installation_id: s.meta.installation_id.clone(),
+            instance_id: None,
+            intent_id: successor.intent_id.clone(),
+            plan_hash: successor.plan_hash.clone(),
+            policy_revision: 1,
+            receipt_hash: "central-successor".into(),
+            requested_loss_usd: Decimal::ONE,
+            conversion_digest: "usd-conversion-successor".into(),
+        },
+        82,
+    )
+    .unwrap();
+    assert_eq!(
+        s.central_receipt(&successor.intent_id)
+            .unwrap()
+            .unwrap()
+            .reservation_key,
+        "reservation-successor",
+        "the actual SQL owner accepts the next central reservation after terminal"
+    );
+    assert!(
+        s.verify_captured_campaign_continuity(from, through).is_err(),
+        "the new unfinished intent must prevent any third campaign opening"
+    );
+    assert!(
+        matches!(
+            s.seal_captured_campaign_baseline(&campaign, from, through),
+            Err(StoreError::Invalid("ENTRY_POST_OPENING_NATIVE_EXPOSURE_UNRESOLVED"))
+        ),
+        "the second intent may not silently disappear from the cohort proof"
+    );
     s.connection
         .execute(
             "INSERT INTO bills(bill_id,kind,time,amount,currency,economic_event_key)
