@@ -1361,6 +1361,135 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    /// The production PublicWsCoordinator, not the recording, must establish
+    /// an acknowledged generation, contiguous book and fresh market snapshot.
+    #[tokio::test]
+    async fn recorded_public_ws_frames_make_production_market_snapshot_fresh() {
+        use super::recorded_support::RecordedWsConnector;
+        use serde_json::{Value, json};
+        let reference = okx_observation::ReferenceRegistry::from_public(
+            "2026-10-31T00:00:00Z",
+            vec![serde_json::from_value(json!({
+                "instType": "SWAP",
+                "instId": "BTC-USDT-SWAP",
+                "instFamily": "BTC-USDT",
+                "uly": "BTC-USDT",
+                "state": "live",
+                "ruleType": "normal",
+                "settleCcy": "USDT",
+                "tickSz": "0.1",
+                "lotSz": "0.01",
+                "minSz": "0.01",
+                "maxLmtSz": "1000",
+                "maxMktSz": "1000",
+                "ctType": "linear",
+                "ctVal": "0.01",
+                "ctValCcy": "BTC",
+                "lever": "20"
+            }))
+            .unwrap()],
+        )
+        .unwrap();
+        let connector = Arc::new(RecordedWsConnector::default());
+        let stamp = chrono::Utc::now().timestamp_millis();
+        let timestamp = stamp.to_string();
+        let future = (stamp + 8 * 60 * 60 * 1000).to_string();
+        let recordings: Vec<(Value, Option<Value>, Option<&str>)> = vec![
+            (json!({"channel":"instruments","instType":"SWAP"}), None, None),
+            (json!({"channel":"instruments","instType":"FUTURES"}), None, None),
+            (
+                json!({"channel":"tickers","instId":"BTC-USDT-SWAP"}),
+                Some(json!({"instType":"SWAP","instId":"BTC-USDT-SWAP",
+                    "last":"1000","askPx":"1000","askSz":"10",
+                    "bidPx":"999.9","bidSz":"10","ts":timestamp})),
+                None,
+            ),
+            (
+                json!({"channel":"mark-price","instId":"BTC-USDT-SWAP"}),
+                Some(json!({"instType":"SWAP","instId":"BTC-USDT-SWAP",
+                    "markPx":"1000","ts":timestamp})),
+                None,
+            ),
+            (
+                json!({"channel":"index-tickers","instId":"BTC-USDT"}),
+                Some(json!({"instId":"BTC-USDT","idxPx":"1000","ts":timestamp})),
+                None,
+            ),
+            (
+                json!({"channel":"funding-rate","instId":"BTC-USDT-SWAP"}),
+                Some(json!({"instType":"SWAP","instId":"BTC-USDT-SWAP",
+                    "fundingRate":"0.0001","fundingTime":timestamp,
+                    "nextFundingTime":future,"ts":timestamp})),
+                None,
+            ),
+            (
+                json!({"channel":"open-interest","instId":"BTC-USDT-SWAP"}),
+                Some(json!({"instType":"SWAP","instId":"BTC-USDT-SWAP",
+                    "oi":"1000","oiCcy":"10","oiUsd":"10000","ts":timestamp})),
+                None,
+            ),
+            (
+                json!({"channel":"books","instId":"BTC-USDT-SWAP"}),
+                Some(json!({"asks":[["1000","10","0","1"]],
+                    "bids":[["999.9","10","0","1"]],
+                    "seqId":10,"prevSeqId":-1,"ts":timestamp})),
+                Some("snapshot"),
+            ),
+        ];
+        for (arg, data, action) in recordings {
+            let mut raw = vec![json!({
+                "event":"subscribe","arg":arg,"connId":"recorded-public"
+            }).to_string()];
+            if let Some(data) = data {
+                let mut message = json!({"arg":arg,"data":[data]});
+                if let Some(action) = action {
+                    message["action"] = action.into();
+                }
+                raw.push(message.to_string());
+            }
+            connector.expect_public_subscription(arg, raw);
+        }
+        let (coordinator, market) = okx_runtime::PublicWsCoordinator::new_with_connector(
+            OkxEnvironment::new(okx_api::Region::Global, false),
+            reference,
+            RateBudget::new(),
+            connector.clone(),
+        );
+        let (shutdown, stop) = watch::channel(false);
+        let task = tokio::spawn(coordinator.run(stop));
+        let mut updates = market.subscribe_market_updates();
+        market.demand_instrument("BTC-USDT-SWAP").await.unwrap();
+        let verified = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if let Ok(snapshot) = market
+                    .risk_fresh_snapshot(
+                        "BTC-USDT-SWAP",
+                        u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap(),
+                        5_000,
+                        5_000,
+                        chrono::Utc::now().to_rfc3339(),
+                    )
+                    .await
+                {
+                    break snapshot;
+                }
+                updates.changed().await.expect("market coordinator stopped");
+            }
+        })
+        .await
+        .expect("recorded public WS did not produce a fresh snapshot");
+        assert_eq!(verified.market.instrument_id, "BTC-USDT-SWAP");
+        assert_eq!(verified.market.ticker.best_ask, "1000");
+        assert_eq!(verified.order_book.seq_id, Some(10));
+        assert_eq!(connector.unconsumed_public_subscriptions(), 0);
+        shutdown.send(true).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), task)
+            .await
+            .expect("public coordinator did not stop")
+            .unwrap()
+            .unwrap();
+    }
+
     /// Exercise the actual signed OKX adapter's POST through the raw
     /// transport boundary. A mismatched request cannot consume a response,
     /// and the response is not an invented execution or a fill.
