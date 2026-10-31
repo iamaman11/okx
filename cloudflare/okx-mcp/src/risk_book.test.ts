@@ -111,9 +111,11 @@ const historicalFollowup=await reserveRisk(past,policy,census,{
 check(historicalFollowup.status==="HELD",
  "a second entry is permitted within proved historical spend and risk limits");
 const historicalNext=(await readRiskBook(past))!.entry_budget!;
+const historicalRemaining = units(historicalNext.limit_usd)!
+ - units(historicalNext.consumed_usd)!
+ - units(historicalNext.reserved_usd)!;
 check(historicalNext.consumed_usd==="5.01"&&
- historicalNext.reserved_usd==="0.5"&&
- units(historicalNext.limit_usd)!-units(historicalNext.consumed_usd)!-units(historicalNext.reserved_usd)!===units("4.49"),
+ historicalNext.reserved_usd==="0.5"&&historicalRemaining===units("4.49"),
  "next reservation never resets prior campaign spent or double-charges an entry");
 
 check(units("1.000000001")===1000000001n&&units("1e9")===null,"decimal exact");

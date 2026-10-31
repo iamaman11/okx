@@ -745,8 +745,8 @@ impl TradeService {
             } else {
                 json!({"state":"not_evaluated","all_in_entry_cost_proven":false})
             };
-        let settlement_pending = incremental_entry["state"] == "pending"
-            || central_release["state"] == "pending";
+        let settlement_pending =
+            incremental_entry["state"] == "pending" || central_release["state"] == "pending";
         let mut result = completed(
             json!({"intent":i,"remaining_exposure":if financial{Some(exact(exposure))}else{None},
                 "entry_costs":entry_costs,
