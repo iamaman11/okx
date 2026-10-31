@@ -1242,7 +1242,7 @@ mod raw_native_session_tests {
         // inputs into the existing connected production coordinator. There is
         // no direct market-state setter and no freshness-TTL exemption.
         let refreshed_at = chrono::Utc::now().timestamp_millis();
-        for (arg, observed, action) in recorded_public {
+        for (arg, observed, action) in recorded_public.iter().cloned() {
             if arg["channel"] == "instruments" && arg["instType"] == "SWAP" {
                 connector.send_public_frame(
                     json!({
