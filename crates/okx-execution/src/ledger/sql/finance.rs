@@ -768,31 +768,40 @@ impl AccountStore {
         let frontiers = self.captured_complete_frontiers(from_ms, through_ms)?;
         let epoch = self.campaign_source_epoch()?;
         let generations = Self::campaign_source_generations(&frontiers);
-        let previous: Option<(i64, i64, i64, String, i64, i64, i64, i64, i64, i64)> = self
-            .connection
-            .query_row(
-                "SELECT from_ms,covered_through_ms,source_revision,source_generations,
-                        reviewed_fill_rowid,reviewed_bill_rowid,reviewed_receipt_rowid,
-                        reviewed_finance_rowid,reviewed_flow_rowid,reviewed_late_epoch
-                 FROM campaign_entry_readiness WHERE campaign_id=?1",
-                [campaign_id],
-                |r| {
-                    Ok((
-                        r.get(0)?,
-                        r.get(1)?,
-                        r.get(2)?,
-                        r.get(3)?,
-                        r.get(4)?,
-                        r.get(5)?,
-                        r.get(6)?,
-                        r.get(7)?,
-                        r.get(8)?,
-                        r.get(9)?,
-                    ))
-                },
-            )
-            .optional()?;
-        if let Some((
+        // A named checkpoint keeps one owner for the ten source facts
+        // without embedding an opaque, error-prone ten-element tuple.
+        struct Ready {
+            origin: i64,
+            covered: i64,
+            revision: i64,
+            prior_generations: String,
+            fill_floor: i64,
+            bill_floor: i64,
+            receipt_floor: i64,
+            finance_floor: i64,
+            flow_floor: i64,
+            late_floor: i64,
+        }
+        let previous: Option<Ready> = self.connection.query_row(
+            "SELECT from_ms,covered_through_ms,source_revision,source_generations,
+                    reviewed_fill_rowid,reviewed_bill_rowid,reviewed_receipt_rowid,
+                    reviewed_finance_rowid,reviewed_flow_rowid,reviewed_late_epoch
+             FROM campaign_entry_readiness WHERE campaign_id=?1",
+            [campaign_id],
+            |r| Ok(Ready {
+                origin: r.get(0)?,
+                covered: r.get(1)?,
+                revision: r.get(2)?,
+                prior_generations: r.get(3)?,
+                fill_floor: r.get(4)?,
+                bill_floor: r.get(5)?,
+                receipt_floor: r.get(6)?,
+                finance_floor: r.get(7)?,
+                flow_floor: r.get(8)?,
+                late_floor: r.get(9)?,
+            }),
+        ).optional()?;
+        if let Some(Ready {
             origin,
             covered,
             revision,
@@ -800,10 +809,10 @@ impl AccountStore {
             fill_floor,
             bill_floor,
             receipt_floor,
-            _finance_floor,
-            _flow_floor,
+            finance_floor: _finance_floor,
+            flow_floor: _flow_floor,
             late_floor,
-        )) = previous
+        }) = previous
             && origin == from_ms
             && covered <= through_ms
             && prior_generations == generations
@@ -1359,7 +1368,7 @@ impl AccountStore {
             self.mark_campaign_readiness(campaign_id, from_ms, through_ms, &frontiers)?;
             return Ok((decimal(old_money)?, proof));
         }
-        let (since, mut total) = match checkpoint.as_ref() {
+        let (_since, mut total) = match checkpoint.as_ref() {
             Some((origin, cut, amount)) if *origin == from_ms && *cut <= through_ms => {
                 (*cut, decimal(amount.clone())?)
             }

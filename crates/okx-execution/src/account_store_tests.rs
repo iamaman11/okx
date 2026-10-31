@@ -497,6 +497,7 @@ fn e1_campaign_admission_and_one_delta_stay_bounded_across_history_scales() {
             vm < 100 && full == 0,
             "readiness VM steps {vm}, fullscan steps {full}, history {history}"
         );
+        drop(stmt);
         s.ingest_page(&IngestPage {
             bills: vec![Bill {
                 bill_id: format!("new-transfer-{history}"),
