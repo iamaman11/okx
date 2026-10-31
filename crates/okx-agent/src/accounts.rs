@@ -1114,6 +1114,86 @@ mod tests {
                 );
             }
         }
+        // Enter the PUBLIC production TradeService with two separately
+        // bootstrapped native SQL owners. No recorded HTTP/WS input is allowed
+        // to synthesize a source generation, Worker grant or venue POST.
+        use crate::trade_service::TradeService;
+        use okx_protocol::trading::{
+            OrderConstraints, PositionSide, Protection, Sizing, TradeOperation, TradeRequest,
+        };
+        let registry = Arc::new(registry);
+        let budget = RateBudget::new();
+        let public_environment = OkxEnvironment::new(okx_api::Region::Global, false);
+        let reference = okx_observation::ReferenceRegistry::from_public(
+            "2026-10-31T00:00:00Z",
+            vec![],
+        )
+        .unwrap();
+        let (_public_coordinator, public_ws) =
+            okx_runtime::PublicWsCoordinator::new_with_rate_budget(
+                public_environment,
+                reference,
+                budget,
+            );
+        let (risk_tx, mut risk_outbound) = tokio::sync::mpsc::channel(4);
+        let trade = TradeService::new(
+            registry.clone(),
+            public_ws,
+            crate::risk_bridge::NativeRiskClient::new(risk_tx),
+        );
+        let request = TradeRequest::Execute {
+            idempotency_key: "public_native_no_source_001".into(),
+            operation: TradeOperation::Open,
+            strategy_instance: "manual".into(),
+            instrument: "BTC-USDT-SWAP".into(),
+            side: PositionSide::Long,
+            sizing: Sizing::Contracts {
+                contracts: "0.10".into(),
+            },
+            order: OrderConstraints {
+                order_type: "limit".into(),
+                limit_price: Some("1000".into()),
+                reference: None,
+                max_entry_usd: Some("10".into()),
+                max_slippage_bps: 0,
+            },
+            protection: Some(Protection::Price {
+                stop_price: "900".into(),
+            }),
+            expires_in_ms: 2_000,
+        };
+        assert!(request.valid());
+        for label in ["a", "b"] {
+            let alias = format!("fixture-{label}");
+            let expected_uid = okx_api::account_uid_fingerprint(&format!(
+                "account-00{}",
+                if label == "a" { "1" } else { "2" }
+            ));
+            let caps = trade
+                .trade(&alias, &TradeRequest::Capabilities {}, None)
+                .await
+                .unwrap();
+            assert_eq!(
+                caps["account"],
+                format!("okx:real:{expected_uid}"),
+                "public trade routing must preserve the authenticated account owner"
+            );
+            assert_eq!(caps["executor"]["state"], "verified");
+            assert_eq!(caps["ready_for_post"], false);
+            let preflight = trade
+                .trade(&alias, &TradeRequest::Preflight {}, None)
+                .await
+                .unwrap();
+            assert_eq!(preflight["ready_for_new_risk"], false);
+            assert_eq!(preflight["state"], "blocked");
+            let rejected = trade.trade(&alias, &request, None).await.unwrap_err();
+            assert_eq!(rejected, "AUTHORITY_UNAVAILABLE");
+            assert!(
+                risk_outbound.try_recv().is_err(),
+                "an unproved public Execute must never request central risk"
+            );
+        }
+        drop(trade);
         registry.shutdown().await;
         drop(registry);
         // On Windows, removing an open SQLite file fails with ERROR_SHARING_VIOLATION.
