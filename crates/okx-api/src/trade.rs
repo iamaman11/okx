@@ -1,5 +1,8 @@
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeSet, time::{Duration, Instant}};
+use std::{
+    collections::BTreeSet,
+    time::{Duration, Instant},
+};
 
 use crate::{
     DEFAULT_SUBACCOUNT_ORDER_LIMIT_PER_2S, MutationTiming, OkxRestClient, RateOperationClass,

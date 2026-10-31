@@ -297,7 +297,8 @@ impl OkxRestClient {
     where
         T: DeserializeOwned,
     {
-        self.private_get_with_queue_budget(path, params, Some(max_wait)).await
+        self.private_get_with_queue_budget(path, params, Some(max_wait))
+            .await
     }
 
     async fn private_get_with_queue_budget<T>(

@@ -2125,7 +2125,10 @@ fn prepost_unsent_proof_reason_is_bounded_and_stably_identifiable() {
     assert!(short.starts_with("OKX rate/backpressure"));
     assert!(short.ends_with(&format!("{:x}", Sha256::digest(full.as_bytes()))));
     assert_eq!(short, bounded_unsent_reason(&full));
-    assert_eq!(bounded_unsent_reason("POST_CENSUS_STALE"), "POST_CENSUS_STALE");
+    assert_eq!(
+        bounded_unsent_reason("POST_CENSUS_STALE"),
+        "POST_CENSUS_STALE"
+    );
     let unicode = "🚨".repeat(100);
     assert!(bounded_unsent_reason(&unicode).len() <= 128);
 }
