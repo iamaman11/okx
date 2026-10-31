@@ -971,21 +971,34 @@ pub(crate) mod recorded_support {
                 // An explicitly scripted history route MUST NOT silently
                 // fall back to the old empty baseline when pages run out.
                 let guarded_route = (key.to_owned(), path.to_owned());
-                let scripted = self.strict_read_routes.lock().unwrap().contains(&guarded_route);
+                let scripted = self
+                    .strict_read_routes
+                    .lock()
+                    .unwrap()
+                    .contains(&guarded_route);
                 if scripted {
                     let mut reads = self.reads.lock().unwrap();
-                    let index = reads.iter().position(|page| {
-                        page.access_key == key
-                            && page.path == path
-                            && page.required_query.iter().all(|(name, expected)| {
-                                request.url().query_pairs().any(|(k, v)| k.as_ref() == name.as_str() && v.as_ref() == expected.as_str())
-                            })
-                    }).ok_or_else(|| OkxError::Response(
-                        "TRANSCRIPT_SOURCE_PAGE_UNEXPECTED_OR_EXHAUSTED".into(),
-                    ))?;
+                    let index = reads
+                        .iter()
+                        .position(|page| {
+                            page.access_key == key
+                                && page.path == path
+                                && page.required_query.iter().all(|(name, expected)| {
+                                    request.url().query_pairs().any(|(k, v)| {
+                                        k.as_ref() == name.as_str()
+                                            && v.as_ref() == expected.as_str()
+                                    })
+                                })
+                        })
+                        .ok_or_else(|| {
+                            OkxError::Response(
+                                "TRANSCRIPT_SOURCE_PAGE_UNEXPECTED_OR_EXHAUSTED".into(),
+                            )
+                        })?;
                     let page = reads.remove(index);
                     self.requests.lock().unwrap().push(format!(
-                        "{key}:{path}?{}", request.url().query().unwrap_or_default()
+                        "{key}:{path}?{}",
+                        request.url().query().unwrap_or_default()
                     ));
                     return Ok(RawHttpResponse {
                         status: HttpStatusCode::OK,
@@ -1074,17 +1087,35 @@ pub(crate) mod recorded_support {
     /// parses, authenticates and establishes source generations.
     pub(crate) struct RecordedWsConnector {
         pub(crate) sent: Arc<Mutex<Vec<serde_json::Value>>>,
+        /// Expected subscribe args and one-shot raw ACK/data frames. No
+        /// snapshots or readied flags are supplied to the runtime directly.
+        public_subscriptions: Arc<Mutex<Vec<(serde_json::Value, Vec<String>)>>>,
     }
     impl Default for RecordedWsConnector {
         fn default() -> Self {
             Self {
                 sent: Arc::new(Mutex::new(Vec::new())),
+                public_subscriptions: Arc::new(Mutex::new(Vec::new())),
             }
+        }
+    }
+    impl RecordedWsConnector {
+        pub(crate) fn expect_public_subscription(
+            &self,
+            arg: serde_json::Value,
+            frames: Vec<String>,
+        ) {
+            self.public_subscriptions.lock().unwrap().push((arg, frames));
+        }
+
+        pub(crate) fn unconsumed_public_subscriptions(&self) -> usize {
+            self.public_subscriptions.lock().unwrap().len()
         }
     }
     struct RecordedWire {
         inbound: std::collections::VecDeque<tokio_tungstenite::tungstenite::Message>,
         sent: Arc<Mutex<Vec<serde_json::Value>>>,
+        public_subscriptions: Option<Arc<Mutex<Vec<(serde_json::Value, Vec<String>)>>>>,
     }
     impl okx_runtime::WsWire for RecordedWire {
         fn send(
@@ -1093,9 +1124,32 @@ pub(crate) mod recorded_support {
         ) -> okx_runtime::WsCall<'_> {
             Box::pin(async move {
                 if let tokio_tungstenite::tungstenite::Message::Text(data) = frame {
-                    self.sent.lock().unwrap().push(
-                        serde_json::from_str(data.as_str()).unwrap_or(serde_json::Value::Null),
-                    );
+                    let outgoing: serde_json::Value =
+                        serde_json::from_str(data.as_str()).unwrap_or(serde_json::Value::Null);
+                    self.sent.lock().unwrap().push(outgoing.clone());
+                    if let Some(script) = &self.public_subscriptions
+                        && outgoing["op"] == "subscribe"
+                    {
+                        let Some(args) = outgoing["args"].as_array() else {
+                            return Err(tokio_tungstenite::tungstenite::Error::ConnectionClosed);
+                        };
+                        for arg in args {
+                            let frames = {
+                                let mut remaining = script.lock().unwrap();
+                                let Some(index) =
+                                    remaining.iter().position(|(expected, _)| expected == arg)
+                                else {
+                                    return Err(
+                                        tokio_tungstenite::tungstenite::Error::ConnectionClosed,
+                                    );
+                                };
+                                remaining.remove(index).1
+                            };
+                            self.inbound.extend(frames.into_iter().map(|raw| {
+                                tokio_tungstenite::tungstenite::Message::Text(raw.into())
+                            }));
+                        }
+                    }
                 }
                 Ok(())
             })
@@ -1119,7 +1173,10 @@ pub(crate) mod recorded_support {
     impl WsConnector for RecordedWsConnector {
         fn connect(&self, url: String) -> okx_runtime::WsConnect<'_> {
             Box::pin(async move {
-                let transcript: Vec<&str> = if url.ends_with("/business") {
+                let public = url.ends_with("/public");
+                let transcript: Vec<&str> = if public {
+                    vec![]
+                } else if url.ends_with("/business") {
                     vec![
                         r#"{"event":"login","code":"0","msg":"","connId":"recorded-business"}"#,
                         r#"{"event":"subscribe","arg":{"channel":"orders-algo","instType":"ANY"},"connId":"recorded-business"}"#,
@@ -1143,6 +1200,11 @@ pub(crate) mod recorded_support {
                 Ok(Box::new(RecordedWire {
                     inbound,
                     sent: self.sent.clone(),
+                    public_subscriptions: if public {
+                        Some(self.public_subscriptions.clone())
+                    } else {
+                        None
+                    },
                 }) as Box<dyn okx_runtime::WsWire>)
             })
         }
@@ -1317,13 +1379,9 @@ mod tests {
             "pass".into(),
         )
         .unwrap();
-        let client = OkxRestClient::with_http_transport(
-            env,
-            credentials,
-            RateBudget::new(),
-            feed.clone(),
-        )
-        .unwrap();
+        let client =
+            OkxRestClient::with_http_transport(env, credentials, RateBudget::new(), feed.clone())
+                .unwrap();
         let trade = TradeApi::new(client);
         let request = PlaceOrderRequest {
             instrument_id: "BTC-USDT-SWAP".into(),
@@ -1351,7 +1409,11 @@ mod tests {
         wrong.size = "0.40".into();
         let mismatch = trade.place_order(&wrong, &timing).await.unwrap_err();
         assert!(mismatch.to_string().contains("TRANSCRIPT_POST_BODY_MISMATCH"));
-        assert_eq!(feed.unconsumed_posts(), 1, "mismatch must not advance transcript");
+        assert_eq!(
+            feed.unconsumed_posts(),
+            1,
+            "mismatch must not advance transcript"
+        );
         let response = trade.place_order(&request, &timing).await.unwrap();
         assert_eq!(response.data.len(), 1);
         assert_eq!(response.data[0].order_id, "123456");
@@ -1381,19 +1443,30 @@ mod tests {
         });
         let client = OkxRestClient::with_http_transport(
             OkxEnvironment::new(okx_api::Region::Global, false),
-            Credentials::new("fixture-observer-a".into(), "observer-secret".into(), "pass".into()).unwrap(),
+            Credentials::new(
+                "fixture-observer-a".into(),
+                "observer-secret".into(),
+                "pass".into(),
+            )
+            .unwrap(),
             RateBudget::new(),
             feed.clone(),
-        ).unwrap();
+        )
+        .unwrap();
         let api = AccountHistoryApi::new(client);
         let end = chrono::Utc::now().timestamp_millis();
-        let rows = api.fills_history_page("SWAP", end - 60_000, end, None).await.unwrap();
+        let rows = api
+            .fills_history_page("SWAP", end - 60_000, end, None)
+            .await
+            .unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].fill_size, "0.12");
         assert_eq!(rows[0].fee, "-0.0006");
         assert_eq!(feed.unconsumed_reads(), 0);
-        let exhausted = api.fills_history_page("SWAP", end - 60_000, end, None)
-            .await.unwrap_err();
+        let exhausted = api
+            .fills_history_page("SWAP", end - 60_000, end, None)
+            .await
+            .unwrap_err();
         assert!(
             exhausted.to_string().contains("TRANSCRIPT_SOURCE_PAGE_UNEXPECTED_OR_EXHAUSTED"),
             "unrecorded extra source pages must not become empty proof: {exhausted}"
