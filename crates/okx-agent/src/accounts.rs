@@ -908,6 +908,14 @@ pub(crate) mod recorded_support {
         if rows.is_empty() {
             return Err(OkxError::Response("TRANSCRIPT_HISTORY_ROWS_MISSING".into()));
         }
+        // The financial history is read with OBSERVER credentials. The
+        // original create ACK came from that same account's EXECUTOR key.
+        // Never allow an observer of account B to bind account A's order.
+        let executor_key = account.strip_prefix("fixture-observer-")
+            .map(|suffix| format!("fixture-executor-{suffix}"))
+            .ok_or_else(|| OkxError::Response(
+                "TRANSCRIPT_HISTORY_OBSERVER_IDENTITY_INVALID".into()
+            ))?;
         for row in rows {
             if row["clOrdId"] != "__REQUEST_CL_ORD_ID__" {
                 return Err(OkxError::Response("TRANSCRIPT_HISTORY_CLIENT_ID_UNBOUND".into()));
@@ -916,7 +924,7 @@ pub(crate) mod recorded_support {
                 OkxError::Response("TRANSCRIPT_HISTORY_ORDER_ID_UNBOUND".into())
             })?;
             let matched = acknowledgements.iter()
-                .filter(|(key, _, id)| key == account && id == order)
+                .filter(|(key, _, id)| key == &executor_key && id == order)
                 .collect::<Vec<_>>();
             if matched.len() != 1 {
                 return Err(OkxError::Response("TRANSCRIPT_HISTORY_ACK_ID_MISMATCH".into()));
@@ -1480,9 +1488,9 @@ pub(crate) mod recorded_support {
         #[test]
         fn recorded_financial_history_binds_each_order_and_rejects_other_accounts() {
             let ack = vec![
-                ("fixture-observer-a".to_owned(), "client_A".to_owned(), "order_A".to_owned()),
-                ("fixture-observer-a".to_owned(), "client_B".to_owned(), "order_B".to_owned()),
-                ("fixture-observer-b".to_owned(), "client_C".to_owned(), "order_C".to_owned()),
+                ("fixture-executor-a".to_owned(), "client_A".to_owned(), "order_A".to_owned()),
+                ("fixture-executor-a".to_owned(), "client_B".to_owned(), "order_B".to_owned()),
+                ("fixture-executor-b".to_owned(), "client_C".to_owned(), "order_C".to_owned()),
             ];
             let bytes = serde_json::to_vec(&serde_json::json!({
                 "data":[
