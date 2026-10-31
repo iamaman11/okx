@@ -968,8 +968,14 @@ mod raw_native_session_tests {
             let output = trade.trade(alias, &preview, None).await.unwrap();
             assert_eq!(output["status"], "completed");
             assert_eq!(output["data"]["entry_costs"]["entry_total_usd"], "1.0005");
-            assert_eq!(output["data"]["entry_costs"]["all_in_entry_cost_proven"], true);
-            assert_eq!(output["data"]["entry_costs"]["entry_budget_upper_reporting"], "1.0005");
+            assert_eq!(
+                output["data"]["entry_costs"]["all_in_entry_cost_proven"],
+                true
+            );
+            assert_eq!(
+                output["data"]["entry_costs"]["entry_budget_upper_reporting"],
+                "1.0005"
+            );
             assert_eq!(output["data"]["admission"], "preview_only");
             assert_eq!(output["data"]["side_effects"], "none");
         }
