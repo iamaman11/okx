@@ -911,15 +911,13 @@ pub(crate) mod recorded_support {
         if rows.is_empty() {
             return Err(OkxError::Response("TRANSCRIPT_HISTORY_ROWS_MISSING".into()));
         }
-        // The financial history is read with OBSERVER credentials. The
-        // original create ACK came from that same account's EXECUTOR key.
-        // Never allow an observer of account B to bind account A's order.
-        let executor_key = account
-            .strip_prefix("fixture-observer-")
-            .map(|suffix| format!("fixture-executor-{suffix}"))
-            .ok_or_else(|| {
-                OkxError::Response("TRANSCRIPT_HISTORY_OBSERVER_IDENTITY_INVALID".into())
-            })?;
+        // Production financial history is read with the EXECUTOR key,
+        // identical to the signing identity that received the create ACK.
+        if !account.starts_with("fixture-executor-") {
+            return Err(OkxError::Response(
+                "TRANSCRIPT_HISTORY_EXECUTOR_IDENTITY_INVALID".into()
+            ));
+        }
         for row in rows {
             if row["clOrdId"] != "__REQUEST_CL_ORD_ID__" {
                 return Err(OkxError::Response(
@@ -931,7 +929,7 @@ pub(crate) mod recorded_support {
                 .ok_or_else(|| OkxError::Response("TRANSCRIPT_HISTORY_ORDER_ID_UNBOUND".into()))?;
             let matched = acknowledgements
                 .iter()
-                .filter(|(key, _, id)| key == &executor_key && id == order)
+                .filter(|(key, _, id)| key == account && id == order)
                 .collect::<Vec<_>>();
             if matched.len() != 1 {
                 return Err(OkxError::Response(
@@ -1628,11 +1626,11 @@ pub(crate) mod recorded_support {
             }))
             .unwrap();
             let bound =
-                bind_recorded_history_ids(&ack, "fixture-observer-a", bytes.clone()).unwrap();
+                bind_recorded_history_ids(&ack, "fixture-executor-a", bytes.clone()).unwrap();
             let parsed: serde_json::Value = serde_json::from_slice(&bound).unwrap();
             assert_eq!(parsed["data"][0]["clOrdId"], "client_B");
             assert_eq!(parsed["data"][1]["clOrdId"], "client_A");
-            assert!(bind_recorded_history_ids(&ack, "fixture-observer-b", bytes.clone()).is_err());
+            assert!(bind_recorded_history_ids(&ack, "fixture-executor-b", bytes.clone()).is_err());
             let mut duplicate = ack.clone();
             duplicate.push(ack[0].clone());
             assert!(bind_recorded_history_ids(&duplicate, "fixture-observer-a", bytes).is_err());
@@ -1640,7 +1638,7 @@ pub(crate) mod recorded_support {
                 "data":[{"ordId":"unknown","clOrdId":"__REQUEST_CL_ORD_ID__"}]
             }))
             .unwrap();
-            assert!(bind_recorded_history_ids(&ack, "fixture-observer-a", unknown).is_err());
+            assert!(bind_recorded_history_ids(&ack, "fixture-executor-a", unknown).is_err());
         }
     }
 }

@@ -1694,13 +1694,13 @@ mod raw_native_session_tests {
         // owner; SQL event IDs must still make money exactly-once.
         for _ in 0..12 {
             feed.expect_get(RecordedGet {
-                access_key: "fixture-observer-a".into(),
+                access_key: "fixture-executor-a".into(),
                 path: "/api/v5/trade/fills-history".into(),
                 required_query: vec![("instType".into(), "SWAP".into())],
                 raw_response: raw_fill.clone(),
             });
             feed.expect_get(RecordedGet {
-                access_key: "fixture-observer-a".into(),
+                access_key: "fixture-executor-a".into(),
                 path: "/api/v5/account/bills-archive".into(),
                 required_query: vec![],
                 raw_response: raw_bill.clone(),
