@@ -978,7 +978,7 @@ pub(crate) mod recorded_support {
                         page.access_key == key
                             && page.path == path
                             && page.required_query.iter().all(|(name, expected)| {
-                                request.url().query_pairs().any(|(k, v)| k == name && v == expected)
+                                request.url().query_pairs().any(|(k, v)| k.as_ref() == name.as_str() && v.as_ref() == expected.as_str())
                             })
                     }).ok_or_else(|| OkxError::Response(
                         "TRANSCRIPT_SOURCE_PAGE_UNEXPECTED_OR_EXHAUSTED".into(),
@@ -1349,14 +1349,16 @@ mod tests {
         let timing = MutationTiming::from_exchange_time_ms(timestamp, 2_000).unwrap();
         let mut wrong = request.clone();
         wrong.size = "0.40".into();
-        assert!(trade.place_order(&wrong, &timing).await.is_err());
+        let mismatch = trade.place_order(&wrong, &timing).await.unwrap_err();
+        assert!(mismatch.to_string().contains("TRANSCRIPT_POST_BODY_MISMATCH"));
         assert_eq!(feed.unconsumed_posts(), 1, "mismatch must not advance transcript");
         let response = trade.place_order(&request, &timing).await.unwrap();
         assert_eq!(response.data.len(), 1);
         assert_eq!(response.data[0].order_id, "123456");
         assert_eq!(response.data[0].client_order_id, request.client_order_id);
         assert_eq!(feed.unconsumed_posts(), 0);
-        assert!(trade.place_order(&request, &timing).await.is_err());
+        let exhausted = trade.place_order(&request, &timing).await.unwrap_err();
+        assert!(exhausted.to_string().contains("TRANSCRIPT_UNEXPECTED_POST"));
         assert_eq!(
             feed.outbound_posts.lock().unwrap().len(),
             3,
@@ -1390,9 +1392,11 @@ mod tests {
         assert_eq!(rows[0].fill_size, "0.12");
         assert_eq!(rows[0].fee, "-0.0006");
         assert_eq!(feed.unconsumed_reads(), 0);
+        let exhausted = api.fills_history_page("SWAP", end - 60_000, end, None)
+            .await.unwrap_err();
         assert!(
-            api.fills_history_page("SWAP", end - 60_000, end, None).await.is_err(),
-            "unrecorded extra source pages must not become empty proof"
+            exhausted.to_string().contains("TRANSCRIPT_SOURCE_PAGE_UNEXPECTED_OR_EXHAUSTED"),
+            "unrecorded extra source pages must not become empty proof: {exhausted}"
         );
     }
 
