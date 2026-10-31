@@ -897,7 +897,10 @@ async fn capture_bills(
                     continue;
                 }
                 let key = format!("bill:{}", b.bill_id);
-                if !b.order_id.is_empty() && b.order_id != "0" {
+                if !b.order_id.is_empty()
+                    && b.order_id != "0"
+                    && !b.instrument_id.is_empty()
+                {
                     page.bill_order_sources.push(BillOrderSource {
                         bill_id: b.bill_id.clone(),
                         instrument_id: b.instrument_id.clone(),
