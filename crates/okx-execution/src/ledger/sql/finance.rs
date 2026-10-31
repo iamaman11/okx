@@ -544,6 +544,7 @@ impl AccountStore {
         through_ms: i64,
         receipts: &[(String, String, Decimal, u64, i64)],
         witnessed_total: Decimal,
+        opening_proof: Option<&str>,
     ) -> StoreResult<()> {
         let tx = self.connection.unchecked_transaction()?;
         let prior: Option<(i64, i64, String)> = tx.query_row(
@@ -619,6 +620,46 @@ impl AccountStore {
                  consumed_usd=excluded.consumed_usd",
             params![campaign_id,from_ms,through_ms,exact(consumed)],
         )?;
+        if let Some(proof) = opening_proof {
+            if proof.len()!=64 || !proof.bytes().all(|b|b.is_ascii_hexdigit()) {
+                return Err(StoreError::Invalid("CAMPAIGN_OPENING_PROOF_INVALID"));
+            }
+            tx.execute(
+                "INSERT INTO campaign_entry_window_proofs
+                 VALUES(?1,?2,?3,?4)
+                 ON CONFLICT(campaign_id,covered_through_ms) DO NOTHING",
+                params![campaign_id,through_ms,exact(consumed),proof],
+            )?;
+            let saved:(String,String)=tx.query_row(
+                "SELECT consumed_usd,source_digest FROM campaign_entry_window_proofs
+                 WHERE campaign_id=?1 AND covered_through_ms=?2",
+                params![campaign_id,through_ms],
+                |r|Ok((r.get(0)?,r.get(1)?)),
+            )?;
+            if saved!=(exact(consumed),proof.to_owned()) {
+                return Err(StoreError::Invalid("CAMPAIGN_OPENING_PROOF_CONFLICT"));
+            }
+            let key=format!("campaign_entry_opening:{campaign_id}:{proof}");
+            tx.execute(
+                "INSERT INTO operation_receipts
+                 (operation_id,kind,request_hash,result_ref,committed_at)
+                 VALUES(?1,'CAMPAIGN_ENTRY_OPENING_SEALED',?2,?2,?3)
+                 ON CONFLICT(operation_id) DO NOTHING",
+                params![key,proof,through_ms],
+            )?;
+            let receipt:(String,String,String,i64)=tx.query_row(
+                "SELECT kind,request_hash,result_ref,committed_at
+                 FROM operation_receipts WHERE operation_id=?1",
+                [key],
+                |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)),
+            )?;
+            if receipt!=(
+                "CAMPAIGN_ENTRY_OPENING_SEALED".into(),
+                proof.to_owned(),proof.to_owned(),through_ms,
+            ) {
+                return Err(StoreError::Invalid("CAMPAIGN_OPENING_RECEIPT_CONFLICT"));
+            }
+        }
         tx.commit()?;
         Ok(())
     }
@@ -654,6 +695,35 @@ impl AccountStore {
             [campaign_id],
             |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?)),
         ).optional()?;
+        if let Some((origin,cut,amount)) = checkpoint.as_ref() {
+            if *origin==from_ms && *cut==through_ms {
+                let prior:Option<(String,String)>=self.connection.query_row(
+                    "SELECT consumed_usd,source_digest
+                     FROM campaign_entry_window_proofs
+                     WHERE campaign_id=?1 AND covered_through_ms=?2",
+                    params![campaign_id,through_ms],
+                    |r|Ok((r.get(0)?,r.get(1)?)),
+                ).optional()?;
+                let (old_money,proof)=prior.ok_or(
+                    StoreError::Invalid("CAMPAIGN_OPENING_PROOF_MISSING")
+                )?;
+                if old_money!=*amount {
+                    return Err(StoreError::Invalid("CAMPAIGN_OPENING_TOTAL_CONFLICT"));
+                }
+                let key=format!("campaign_entry_opening:{campaign_id}:{proof}");
+                let receipt=self.operation(&key)?.ok_or(
+                    StoreError::Invalid("CAMPAIGN_OPENING_RECEIPT_MISSING")
+                )?;
+                if receipt.kind!="CAMPAIGN_ENTRY_OPENING_SEALED"
+                    || receipt.request_hash!=proof
+                    || receipt.result_ref!=proof
+                    || receipt.committed_at!=through_ms
+                {
+                    return Err(StoreError::Invalid("CAMPAIGN_OPENING_RECEIPT_CONFLICT"));
+                }
+                return Ok((decimal(old_money)?,proof));
+            }
+        }
         let (since, mut total) = match checkpoint.as_ref() {
             Some((origin,cut,amount)) if *origin==from_ms && *cut<=through_ms =>
                 (*cut,decimal(amount.clone())?),
@@ -872,13 +942,11 @@ impl AccountStore {
                 campaign_id, from_ms, through_ms,
             )?;
             self.apply_captured_campaign_deltas(
-                campaign_id, from_ms, through_ms, &witnesses, Decimal::ZERO,
+                campaign_id, from_ms, through_ms, &witnesses,
+                Decimal::ZERO, Some(&zero),
             )?;
             return Ok((Decimal::ZERO, zero));
         }
-        self.apply_captured_campaign_deltas(
-            campaign_id,from_ms,through_ms,&witnesses,total,
-        )?;
         let canonical = serde_json::to_vec(&(
             "okx.campaign-source-backed-baseline/v1",
             self.meta.account_key.as_str(),
@@ -892,6 +960,9 @@ impl AccountStore {
         ))
         .map_err(|_| StoreError::Invalid("ENTRY_OPENING_SERIALIZATION_FAILED"))?;
         let proof = format!("{:x}", Sha256::digest(canonical));
+        self.apply_captured_campaign_deltas(
+            campaign_id,from_ms,through_ms,&witnesses,total,Some(&proof),
+        )?;
         self.connection.execute_batch(
             "CREATE TRIGGER IF NOT EXISTS immutable_campaign_opening_update
              BEFORE UPDATE ON operation_receipts

@@ -32,6 +32,29 @@ CREATE TABLE IF NOT EXISTS campaign_entry_totals(
     covered_through_ms INTEGER NOT NULL,
     consumed_usd TEXT NOT NULL
 ) STRICT;
+-- The same completed frontier always yields the identical immutable proof.
+-- Persist it atomically with the applied event delta and total.
+CREATE TABLE IF NOT EXISTS campaign_entry_window_proofs(
+    campaign_id TEXT NOT NULL,
+    covered_through_ms INTEGER NOT NULL,
+    consumed_usd TEXT NOT NULL,
+    source_digest TEXT NOT NULL,
+    PRIMARY KEY(campaign_id,covered_through_ms)
+) STRICT;
+CREATE TRIGGER IF NOT EXISTS immutable_campaign_entry_window_proof_update
+    BEFORE UPDATE ON campaign_entry_window_proofs
+    BEGIN SELECT RAISE(ABORT,'IMMUTABLE_CAMPAIGN_WINDOW_PROOF'); END;
+CREATE TRIGGER IF NOT EXISTS immutable_campaign_entry_window_proof_delete
+    BEFORE DELETE ON campaign_entry_window_proofs
+    BEGIN SELECT RAISE(ABORT,'IMMUTABLE_CAMPAIGN_WINDOW_PROOF'); END;
+CREATE TRIGGER IF NOT EXISTS immutable_campaign_opening_update
+    BEFORE UPDATE ON operation_receipts
+    WHEN OLD.kind='CAMPAIGN_ENTRY_OPENING_SEALED'
+    BEGIN SELECT RAISE(ABORT,'IMMUTABLE_CAMPAIGN_ENTRY_OPENING'); END;
+CREATE TRIGGER IF NOT EXISTS immutable_campaign_opening_delete
+    BEFORE DELETE ON operation_receipts
+    WHEN OLD.kind='CAMPAIGN_ENTRY_OPENING_SEALED'
+    BEGIN SELECT RAISE(ABORT,'IMMUTABLE_CAMPAIGN_ENTRY_OPENING'); END;
 CREATE TABLE IF NOT EXISTS bill_order_sources(
     bill_id TEXT PRIMARY KEY REFERENCES bills(bill_id),
     instrument_id TEXT NOT NULL,

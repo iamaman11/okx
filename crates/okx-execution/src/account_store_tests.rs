@@ -376,7 +376,7 @@ fn e1_campaign_native_receipts_are_applied_once_with_atomic_frontier() {
         s.apply_captured_campaign_deltas(
             &campaign,2,11,&[
                 ("intent".into(),zero.source_digest.clone(),Decimal::ZERO,1,7)
-            ],Decimal::ZERO,
+            ],Decimal::ZERO,None,
         ),
         Err(StoreError::Invalid("CAMPAIGN_APPLIED_FRONTIER_REGRESSION"))
     ));
@@ -384,7 +384,7 @@ fn e1_campaign_native_receipts_are_applied_once_with_atomic_frontier() {
         s.apply_captured_campaign_deltas(
             &campaign,2,12,&[
                 ("intent".into(),"b".repeat(64),Decimal::ZERO,1,7)
-            ],Decimal::ZERO,
+            ],Decimal::ZERO,None,
         ),
         Err(StoreError::Invalid("CAMPAIGN_APPLIED_SOURCE_CONFLICT"))
     ));
@@ -392,7 +392,7 @@ fn e1_campaign_native_receipts_are_applied_once_with_atomic_frontier() {
         s.apply_captured_campaign_deltas(
             &campaign,2,12,&[
                 ("intent".into(),"b".repeat(64),Decimal::ONE,2,7)
-            ],Decimal::ZERO,
+            ],Decimal::ZERO,None,
         ),
         Err(StoreError::Invalid("CAMPAIGN_APPLIED_TOTAL_DIVERGENCE"))
     ));
@@ -412,8 +412,19 @@ fn e1_campaign_native_receipts_are_applied_once_with_atomic_frontier() {
     let path=s.path.clone();let meta=s.meta.clone();drop(s);
     let reopened=AccountStore::open_existing(
         path,&meta.account_key,&meta.installation_id).unwrap();
-    assert_eq!(reopened.seal_captured_campaign_baseline(
-        &campaign,2,12).unwrap().0,Decimal::ZERO);
+    assert_eq!(
+        reopened.seal_captured_campaign_baseline(&campaign,2,12).unwrap(),
+        (sum,source), "restart must return the exact same immutable proof"
+    );
+    assert!(reopened.connection.execute(
+        "UPDATE campaign_entry_window_proofs SET consumed_usd='1'
+         WHERE campaign_id=?1",
+        [&campaign],
+    ).is_err(), "window proof cannot be modified after source attestation");
+    assert!(reopened.connection.execute(
+        "DELETE FROM campaign_entry_window_proofs WHERE campaign_id=?1",
+        [&campaign],
+    ).is_err(), "window proof cannot be deleted");
 }
 
 #[test]
