@@ -1633,7 +1633,7 @@ pub(crate) mod recorded_support {
             assert!(bind_recorded_history_ids(&ack, "fixture-executor-b", bytes.clone()).is_err());
             let mut duplicate = ack.clone();
             duplicate.push(ack[0].clone());
-            assert!(bind_recorded_history_ids(&duplicate, "fixture-observer-a", bytes).is_err());
+            assert!(bind_recorded_history_ids(&duplicate, "fixture-executor-a", bytes).is_err());
             let unknown = serde_json::to_vec(&serde_json::json!({
                 "data":[{"ordId":"unknown","clOrdId":"__REQUEST_CL_ORD_ID__"}]
             }))
