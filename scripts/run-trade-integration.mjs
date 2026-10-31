@@ -103,6 +103,10 @@ function verified(output, caseId) {
   if (golden && !output.assertions.some(a => a.id === "opening_spent_usd"
       && a.expected === golden && a.actual === golden))
     throw Error(`${failures.invalid}:INDEPENDENT_ENTRY_GOLDEN_MISSING`);
+  if (["T09.0", "T09.5"].includes(caseId)
+      && (output.provenance?.schema !== "okx.native-workerd-transcript/v1"
+      || !/^[a-f0-9]{64}$/.test(output.provenance?.sha256 ?? "")))
+    throw Error(`${failures.invalid}:PRODUCTION_TRANSCRIPT_PROVENANCE_MISSING`);
   for (const r of [...output.readbacks.sql, ...output.readbacks.risk_book]) {
     if (!Number.isSafeInteger(r.revision) || r.revision < 0
         || typeof r.digest !== "string" || !/^[a-f0-9]{64}$/.test(r.digest))
@@ -179,6 +183,7 @@ await mkdir(dir, { recursive: true });
 const events = [];
 const caseResults = [];
 const assertions = [];
+const caseReadbacks = [];
 const started = Date.now();
 for (const caseId of cli.selected) {
   const script = resolve(root, "scripts", "trade-integration", "cases", caseId + ".mjs");
@@ -203,6 +208,13 @@ for (const caseId of cli.selected) {
       ]);
       const accepted = verified(output, caseId);
       status = "PASS";
+      caseReadbacks.push({
+        case_id:caseId,
+        provenance:accepted.provenance ?? null,
+        sql:accepted.readbacks.sql,
+        risk_book:accepted.readbacks.risk_book,
+        outbound_sends:accepted.outbound_sends,
+      });
       for (const a of accepted.assertions) assertions.push({ case_id: caseId, ...a });
       for (const e of accepted.events) events.push({ case_id: caseId, ...e });
     } finally { clearTimeout(timer); }
@@ -235,6 +247,9 @@ await Promise.all([
     schema:"okx.trade-assertions/v1", assertions
   }, null, 2) + "\n"),
   writeFile(resolve(dir, "events.jsonl"), events.slice(0, 4096).map(x => JSON.stringify(x)).join("\n") + "\n"),
+  writeFile(resolve(dir, "readbacks.json"), JSON.stringify({
+    schema:"okx.trade-integration-readbacks/v1",cases:caseReadbacks,
+  }, null, 2) + "\n"),
 ]);
 process.stdout.write(JSON.stringify({
   schema: summary.schema, gate: summary.gate, pass: caseResults.filter(x=>x.status==="PASS").length,

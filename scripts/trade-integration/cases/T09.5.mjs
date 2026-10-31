@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { actualNativeWorker, hash } from "../native-workerd.mjs";
 
 export async function run({ caseId, root, signal }) {
-  const { nativeReplay: native, workerReplay: worker } =
+  const { nativeReplay: native, workerReplay: worker, transcript_sha256 } =
     await actualNativeWorker(root, signal);
   assert.equal(native.opened_intent_id, native.replayed_intent_id);
   assert.equal(native.opened_intent_id, native.sql_intent_id);
@@ -20,8 +20,12 @@ export async function run({ caseId, root, signal }) {
     "unsettled ACK must never become an invented financial debit");
   assert.ok(Number.isSafeInteger(worker.connection_generation)
     && worker.connection_generation > 0);
+  assert.ok(Number.isSafeInteger(worker.risk_book_sequence)
+    && worker.risk_book_sequence >= 0,
+    "Worker risk-book revision must come from its real SQL-backed SUMMARY");
   return {
     case_id:caseId, status:"PASS",
+    provenance:{schema:"okx.native-workerd-transcript/v1",sha256:transcript_sha256},
     assertions:[
       { id:"identical_intent_from_independent_sql_readback",
         expected:native.opened_intent_id, actual:native.sql_intent_id },
@@ -41,7 +45,7 @@ export async function run({ caseId, root, signal }) {
     ],
     readbacks:{
       sql:[{revision:native.sql_revision,digest:hash(native)}],
-      risk_book:[{revision:worker.connection_generation,digest:hash(worker.budget)}],
+      risk_book:[{revision:worker.risk_book_sequence,digest:hash(worker.budget)}],
     },
     outbound_sends:[{
       account:native.account_uid,intent:native.opened_intent_id,

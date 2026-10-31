@@ -284,6 +284,30 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+      - name: Install locked production workerd test dependencies on Windows
+        if: github.event_name == 'pull_request'
+        shell: pwsh
+        run: |
+          npm ci --prefix cloudflare/okx-mcp --ignore-scripts --no-audit --no-fund
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Mandatory native Windows T09/T10 recorded acceptance
+        if: github.event_name == 'pull_request'
+        shell: pwsh
+        run: |
+          $artifacts = Join-Path $env:RUNNER_TEMP "trade-integration"
+          node scripts/run-trade-integration.mjs --suite t09,t10 --artifacts "$artifacts"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Upload T09/T10 acceptance evidence even on failure
+        if: always() && github.event_name == 'pull_request'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: t09-t10-native-${{ github.event.pull_request.head.sha }}
+          path: ${{ runner.temp }}\trade-integration
+          if-no-files-found: warn
+          retention-days: 14
+
       - name: Build deployable Windows binaries
         if: github.event_name == 'pull_request'
         shell: pwsh
@@ -334,26 +358,3 @@ jobs:
           compression-level: 9
           retention-days: 14
 
-      - name: Install locked production workerd test dependencies on Windows
-        if: github.event_name == 'pull_request'
-        shell: pwsh
-        run: |
-          npm ci --prefix cloudflare/okx-mcp --ignore-scripts --no-audit --no-fund
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-      - name: Mandatory native Windows T09/T10 recorded acceptance
-        if: github.event_name == 'pull_request'
-        shell: pwsh
-        run: |
-          $artifacts = Join-Path $env:RUNNER_TEMP "trade-integration"
-          node scripts/run-trade-integration.mjs --suite t09,t10 --artifacts "$artifacts"
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-      - name: Upload T09/T10 acceptance evidence even on failure
-        if: always() && github.event_name == 'pull_request'
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: t09-t10-native-${{ github.event.pull_request.head.sha }}
-          path: ${{ runner.temp }}\trade-integration
-          if-no-files-found: warn
-          retention-days: 14

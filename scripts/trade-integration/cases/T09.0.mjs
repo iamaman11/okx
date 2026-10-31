@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { actualNativeWorker, hash } from "../native-workerd.mjs";
 
 export async function run({ caseId, root, signal }) {
-  const { nativeBootstrap: sql, workerBootstrap: worker } =
+  const { nativeBootstrap: sql, workerBootstrap: worker, transcript_sha256 } =
     await actualNativeWorker(root, signal);
   assert.equal(sql.accounts.length, 2);
   assert.equal(sql.sqlite_files.length, 2);
@@ -27,6 +27,9 @@ export async function run({ caseId, root, signal }) {
     worker.opening_source_digest);
   assert.ok(Number.isSafeInteger(worker.connection_generation)
     && worker.connection_generation > 0);
+  assert.ok(Number.isSafeInteger(worker.risk_book_sequence)
+    && worker.risk_book_sequence >= 0,
+    "risk-book revision must come from Worker SUMMARY, not WSS generation");
 
   const assertions = [
     { id: "distinct_native_sql_accounts", expected: "2",
@@ -42,6 +45,7 @@ export async function run({ caseId, root, signal }) {
   ];
   return {
     case_id: caseId, status: "PASS", assertions,
+    provenance: { schema:"okx.native-workerd-transcript/v1", sha256:transcript_sha256 },
     events: [
       { stage: "native_sql_bootstrap_verified", owner: "NativeAccountSQL",
         source_digest: hash(sql.sqlite_files) },
@@ -55,7 +59,7 @@ export async function run({ caseId, root, signal }) {
         revision: a.private_generation, digest: hash(a),
       })),
       risk_book: [{
-        revision: worker.connection_generation, digest: hash(worker.opening_budget),
+        revision: worker.risk_book_sequence, digest: hash(worker.opening_budget),
       }],
     },
     outbound_sends: [],

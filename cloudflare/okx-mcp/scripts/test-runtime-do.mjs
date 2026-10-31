@@ -295,6 +295,8 @@ try {
   console.log("T09_0_WORKER_EVIDENCE_V1:" + JSON.stringify({
     account_keys:enrolled.body.accounts.map(a => a.account_key).sort(),
     connection_generation:socket1.hello.connection_generation,
+    risk_book_sequence:opened.risk_book_sequence,
+    policy_revision:opened.policy_revision,
     before_budget:before.budget,
     opening_budget:opened.budget,
     opening_source_digest:opening.source_digest,
