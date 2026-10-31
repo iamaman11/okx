@@ -3047,6 +3047,44 @@ impl AccountStore {
                 return Err(StoreError::Invalid("IMMUTABLE_FILL_CONFLICT"));
             }
         }
+        // SWAP source labels and the page frontier commit atomically.
+        // Conflicting replays never advance the source cursor.
+        for source in &page.swap_fill_sources {
+            let found: Option<(String, String)> = tx.query_row(
+                "SELECT instrument_id,side FROM fills WHERE fill_id=?1",
+                [&source.fill_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            ).optional()?;
+            let (instrument, side) = found
+                .ok_or(StoreError::Invalid("SWAP_FILL_SOURCE_WITHOUT_FILL"))?;
+            if !instrument.ends_with("-SWAP")
+                || source.direction != swap_fill_direction(
+                    &source.sub_type, &side, &source.position_side,
+                )?
+            {
+                return Err(StoreError::Invalid("SWAP_FILL_SOURCE_INVALID"));
+            }
+            tx.execute(
+                "INSERT INTO swap_fill_sources VALUES(?1,?2,?3,?4,?5)
+                 ON CONFLICT(fill_id) DO NOTHING",
+                params![
+                    source.fill_id,source.bill_id,source.sub_type,
+                    source.position_side,source.direction,
+                ],
+            )?;
+            let old: (String, String, String, String) = tx.query_row(
+                "SELECT bill_id,sub_type,position_side,direction
+                 FROM swap_fill_sources WHERE fill_id=?1",
+                [&source.fill_id],
+                |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)),
+            )?;
+            if old != (
+                source.bill_id.clone(),source.sub_type.clone(),
+                source.position_side.clone(),source.direction.clone(),
+            ) {
+                return Err(StoreError::Invalid("IMMUTABLE_SWAP_FILL_SOURCE_CONFLICT"));
+            }
+        }
         for b in &page.bills {
             tx.execute(
                 "INSERT INTO bills VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(bill_id) DO NOTHING",

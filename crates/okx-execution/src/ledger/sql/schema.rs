@@ -7,6 +7,16 @@ CREATE INDEX IF NOT EXISTS idx_nav_scope_version_time ON nav_points(scope_id,sou
 CREATE INDEX IF NOT EXISTS idx_finance_source_component ON finance_entries(source_ref,component);
 CREATE INDEX IF NOT EXISTS idx_finance_links_source ON finance_source_links(source_ref,entry_id);
 CREATE INDEX IF NOT EXISTS idx_fills_intent ON fills(intent_id,fill_id);
+CREATE TABLE IF NOT EXISTS swap_fill_sources(
+    fill_id TEXT PRIMARY KEY REFERENCES fills(fill_id),
+    bill_id TEXT NOT NULL, sub_type TEXT NOT NULL,
+    position_side TEXT NOT NULL,
+    direction TEXT NOT NULL CHECK(direction IN('OPEN','CLOSE','NET_UNRESOLVED','UNCLASSIFIED'))
+) STRICT;
+CREATE TRIGGER IF NOT EXISTS immutable_swap_fill_source_update BEFORE UPDATE ON swap_fill_sources
+    BEGIN SELECT RAISE(ABORT,'IMMUTABLE_SWAP_FILL_SOURCE'); END;
+CREATE TRIGGER IF NOT EXISTS immutable_swap_fill_source_delete BEFORE DELETE ON swap_fill_sources
+    BEGIN SELECT RAISE(ABORT,'IMMUTABLE_SWAP_FILL_SOURCE'); END;
 CREATE TRIGGER IF NOT EXISTS immutable_entry_quote_update BEFORE UPDATE ON operation_receipts
     WHEN OLD.kind='ENTRY_QUOTE_UNPROVEN' BEGIN SELECT RAISE(ABORT,'IMMUTABLE_ENTRY_QUOTE'); END;
 CREATE TRIGGER IF NOT EXISTS immutable_entry_quote_delete BEFORE DELETE ON operation_receipts

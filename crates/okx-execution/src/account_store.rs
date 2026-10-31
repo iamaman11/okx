@@ -424,11 +424,40 @@ pub struct EntryOrderFeeLink {
     pub fee_usdt: Decimal,
 }
 
+
+/// A raw venue SWAP fill label, retained atomically with its source cursor.
+/// It is NOT itself an event-time contract specification or USD valuation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SwapFillSource {
+    pub fill_id: String,
+    pub bill_id: String,
+    pub sub_type: String,
+    pub position_side: String,
+    pub direction: String,
+}
+
+/// Only authenticated open/close labels can classify a hedged SWAP fill.
+/// Net-mode buys/sells and system events cannot prove opening notional alone.
+pub fn swap_fill_direction(
+    sub_type: &str, side: &str, position_side: &str,
+) -> StoreResult<&'static str> {
+    match (sub_type, side, position_side) {
+        ("3", "buy", "long") | ("4", "sell", "short") => Ok("OPEN"),
+        ("5", "sell", "long") | ("6", "buy", "short") => Ok("CLOSE"),
+        ("3" | "4" | "5" | "6", _, _) =>
+            Err(StoreError::Invalid("SWAP_FILL_DIRECTION_CONFLICT")),
+        ("1", "buy", "net") | ("2", "sell", "net") => Ok("NET_UNRESOLVED"),
+        _ => Ok("UNCLASSIFIED"),
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct IngestPage {
     pub funding_events: Vec<FundingEvent>,
     pub attributed_funding_ids: Vec<String>,
     pub fills: Vec<Fill>,
+    #[serde(default)]
+    pub swap_fill_sources: Vec<SwapFillSource>,
     pub bills: Vec<Bill>,
     pub entry_order_fee_links: Vec<EntryOrderFeeLink>,
     pub finance: Vec<FinanceEntry>,

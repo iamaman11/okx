@@ -1,4 +1,107 @@
 use super::*;
+
+#[test]
+fn e1_swap_fill_source_atomic_idempotence_and_negative_matrix() {
+    assert_eq!(swap_fill_direction("3","buy","long").unwrap(),"OPEN");
+    assert_eq!(swap_fill_direction("4","sell","short").unwrap(),"OPEN");
+    assert_eq!(swap_fill_direction("5","sell","long").unwrap(),"CLOSE");
+    assert_eq!(swap_fill_direction("6","buy","short").unwrap(),"CLOSE");
+    assert_eq!(swap_fill_direction("1","buy","net").unwrap(),"NET_UNRESOLVED");
+    assert_eq!(swap_fill_direction("2","sell","net").unwrap(),"NET_UNRESOLVED");
+    assert_eq!(swap_fill_direction("104","buy","net").unwrap(),"UNCLASSIFIED");
+    assert!(matches!(
+        swap_fill_direction("3","sell","long"),
+        Err(StoreError::Invalid("SWAP_FILL_DIRECTION_CONFLICT"))
+    ));
+    let mut s = store();
+    let original = IngestPage {
+        fills: vec![Fill {
+            fill_id: "BTC-USDT-SWAP:trade:order".into(),
+            instrument_id: "BTC-USDT-SWAP".into(),
+            trade_id: "trade".into(),
+            exchange_order_id: "order".into(),
+            intent_id: None,
+            time: 20,
+            qty: Decimal::ONE,
+            price: Decimal::new(100,0),
+            fee: Decimal::new(-1,2),
+            currency: "USDT".into(),
+            side: "buy".into(),
+        }],
+        swap_fill_sources: vec![SwapFillSource {
+            fill_id: "BTC-USDT-SWAP:trade:order".into(),
+            bill_id: "bill-1".into(),
+            sub_type: "3".into(),
+            position_side: "long".into(),
+            direction: "OPEN".into(),
+        }],
+        cursor: Some(SourceCursor {
+            source: "fills".into(),
+            stream_partition: "SWAP".into(),
+            cursor: "".into(),
+            watermark: 30,
+            generation: 1,
+            coverage_gaps: "".into(),
+        }),
+        ..Default::default()
+    };
+    s.ingest_page(&original).unwrap();
+    s.ingest_page(&original).unwrap();
+    let count: i64 = s.connection.query_row(
+        "SELECT COUNT(*) FROM swap_fill_sources", [], |r| r.get(0),
+    ).unwrap();
+    assert_eq!(count,1,"source replay may not double count venue fills");
+    let mut changed = original.clone();
+    changed.swap_fill_sources[0].bill_id = "another-bill".into();
+    changed.cursor.as_mut().unwrap().watermark = 40;
+    assert!(matches!(
+        s.ingest_page(&changed),
+        Err(StoreError::Invalid("IMMUTABLE_SWAP_FILL_SOURCE_CONFLICT"))
+    ));
+    assert_eq!(s.cursor("fills","SWAP").unwrap().unwrap().watermark,30);
+    let mut bad_direction = original.clone();
+    bad_direction.swap_fill_sources[0].direction = "CLOSE".into();
+    assert!(matches!(
+        s.ingest_page(&bad_direction),
+        Err(StoreError::Invalid("SWAP_FILL_SOURCE_INVALID"))
+    ));
+    let mut missing = IngestPage {
+        swap_fill_sources: original.swap_fill_sources.clone(),
+        ..Default::default()
+    };
+    missing.swap_fill_sources[0].fill_id = "missing".into();
+    assert!(matches!(
+        s.ingest_page(&missing),
+        Err(StoreError::Invalid("SWAP_FILL_SOURCE_WITHOUT_FILL"))
+    ));
+    let saved: String = s.connection.query_row(
+        "SELECT direction FROM swap_fill_sources WHERE fill_id=?1",
+        ["BTC-USDT-SWAP:trade:order"], |r| r.get(0),
+    ).unwrap();
+    assert_eq!(saved,"OPEN");
+    assert!(s.connection.execute(
+        "UPDATE swap_fill_sources SET direction='CLOSE'",[]
+    ).is_err());
+
+    // Source classification is not USD valuation. Even a labelled external
+    // OPEN cannot become a zero-spend campaign opening without event-time
+    // contract specification, verified FX, and full bill classification.
+    for (source, partition) in [
+        ("fills","SPOT"),("fills","MARGIN"),("fills","FUTURES"),
+        ("fills","OPTION"),("bills","account"),
+    ] {
+        s.connection.execute(
+            "INSERT INTO source_cursors(source,stream_partition,cursor,watermark,generation,coverage_gaps)
+             VALUES(?1,?2,'',40,1,'')",
+            rusqlite::params![source,partition],
+        ).unwrap();
+    }
+    let campaign = format!("sha256:{}", "c".repeat(64));
+    assert!(matches!(
+        s.seal_captured_campaign_baseline(&campaign,2,20),
+        Err(StoreError::Invalid("ENTRY_POST_OPENING_FILL_NOT_SETTLED"))
+    ));
+}
 use sha2::Digest;
 use std::sync::atomic::{AtomicU64, Ordering};
 static COUNTER: AtomicU64 = AtomicU64::new(0);

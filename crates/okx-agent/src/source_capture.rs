@@ -7,7 +7,7 @@ use okx_api::{AccountBill, FillHistory};
 use okx_execution::{
     AccountSqlStatementStat, Bill, CashFlow, EntryOrderFeeLink, Fill, FinanceEntry, FundingEvent,
     IngestPage, NavPoint, SourceCursor, StoreError, StoreResult, StrategyValuationEvidence,
-    UsdConversionEvidence, ValuationPosition, VenueMark,
+    SwapFillSource, UsdConversionEvidence, ValuationPosition, VenueMark, swap_fill_direction,
 };
 use okx_runtime::PrivateWsHandle;
 use rust_decimal::Decimal;
@@ -809,6 +809,20 @@ async fn capture_fills(
                         source_ref: format!("fill:{id}"),
                         time,
                         reverses_entry_id: None,
+                    });
+                }
+                if partition == "SWAP" {
+                    if r.instrument_type != "SWAP" {
+                        return Err(StoreError::Invalid("SWAP_FILL_SOURCE_TYPE_MISMATCH"));
+                    }
+                    let direction =
+                        swap_fill_direction(&r.sub_type, &r.side, &r.position_side)?;
+                    page.swap_fill_sources.push(SwapFillSource {
+                        fill_id: id.clone(),
+                        bill_id: r.bill_id.clone(),
+                        sub_type: r.sub_type.clone(),
+                        position_side: r.position_side.clone(),
+                        direction: direction.into(),
                     });
                 }
                 page.fills.push(Fill {
