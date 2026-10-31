@@ -1139,16 +1139,29 @@ pub(crate) mod recorded_support {
         /// Expected subscribe args and one-shot raw ACK/data frames. No
         /// snapshots or readied flags are supplied to the runtime directly.
         public_subscriptions: RecordedPublicSubscriptions,
+        public_injection: Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<String>>>,
+        public_sender: tokio::sync::mpsc::UnboundedSender<String>,
     }
     impl Default for RecordedWsConnector {
         fn default() -> Self {
+            let (public_sender, public_injection) = tokio::sync::mpsc::unbounded_channel();
             Self {
                 sent: Arc::new(Mutex::new(Vec::new())),
                 public_subscriptions: Arc::new(Mutex::new(Vec::new())),
+                public_injection: Mutex::new(Some(public_injection)),
+                public_sender,
             }
         }
     }
     impl RecordedWsConnector {
+        /// Deliver another explicitly scripted RAW venue frame on the same
+        /// connected socket. The production parser and generation rules remain
+        /// the sole authorities for source freshness and market readiness.
+        pub(crate) fn send_public_frame(&self, frame: String) {
+            self.public_sender.send(frame).expect("recorded public socket closed");
+        }
+
+
         pub(crate) fn expect_public_subscription(
             &self,
             arg: serde_json::Value,
@@ -1168,6 +1181,7 @@ pub(crate) mod recorded_support {
         inbound: std::collections::VecDeque<tokio_tungstenite::tungstenite::Message>,
         sent: Arc<Mutex<Vec<serde_json::Value>>>,
         public_subscriptions: Option<RecordedPublicSubscriptions>,
+        public_injection: Option<tokio::sync::mpsc::UnboundedReceiver<String>>,
     }
     impl okx_runtime::WsWire for RecordedWire {
         fn send(
@@ -1212,10 +1226,14 @@ pub(crate) mod recorded_support {
         fn next(&mut self) -> okx_runtime::WsReceive<'_> {
             Box::pin(async move {
                 if let Some(frame) = self.inbound.pop_front() {
-                    Some(Ok(frame))
-                } else {
-                    std::future::pending().await
+                    return Some(Ok(frame));
                 }
+                if let Some(injection) = self.public_injection.as_mut() {
+                    return injection.recv().await.map(|raw| {
+                        Ok(tokio_tungstenite::tungstenite::Message::Text(raw.into()))
+                    });
+                }
+                std::future::pending().await
             })
         }
         fn close(&mut self) -> okx_runtime::WsCall<'_> {
@@ -1254,6 +1272,11 @@ pub(crate) mod recorded_support {
                     sent: self.sent.clone(),
                     public_subscriptions: if public {
                         Some(self.public_subscriptions.clone())
+                    } else {
+                        None
+                    },
+                    public_injection: if public {
+                        self.public_injection.lock().unwrap().take()
                     } else {
                         None
                     },

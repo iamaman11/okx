@@ -741,7 +741,7 @@ mod raw_native_session_tests {
                 Some("snapshot"),
             ),
         ];
-        for (arg, data, action) in recorded_public {
+        for (arg, data, action) in recorded_public.clone() {
             let ack = json!({"event":"subscribe","arg":arg,"connId":"recorded-public"}).to_string();
             let books = arg["channel"] == "books";
             let mut transcript = Vec::new();
@@ -1237,6 +1237,58 @@ mod raw_native_session_tests {
             "production maintenance must reconcile BOTH native SQL campaign frontiers: {last_readiness_error}"
         );
         use crate::accounts::recorded_support::RecordedPost;
+        // SQL baseline recovery may take several capture slots. Refresh the
+        // market strictly by replaying a NEW, timestamped set of raw public WS
+        // inputs into the existing connected production coordinator. There is
+        // no direct market-state setter and no freshness-TTL exemption.
+        let refreshed_at = chrono::Utc::now().timestamp_millis();
+        for (arg, observed, action) in recorded_public {
+            if arg["channel"] == "instruments" && arg["instType"] == "SWAP" {
+                connector.send_public_frame(json!({
+                    "arg":arg,
+                    "data":[{
+                        "instType":"SWAP","instId":"BTC-USDT-SWAP",
+                        "instFamily":"BTC-USDT","uly":"BTC-USDT","state":"live",
+                        "ruleType":"normal","settleCcy":"USDT","tickSz":"0.1",
+                        "lotSz":"0.01","minSz":"0.01","maxLmtSz":"1000",
+                        "maxMktSz":"1000","ctType":"linear","ctVal":"0.01",
+                        "ctValCcy":"BTC","groupId":"4","lever":"20"
+                    }]
+                }).to_string());
+            } else if let Some(mut value) = observed {
+                value["ts"] = refreshed_at.to_string().into();
+                if value.get("fundingTime").is_some() {
+                    value["fundingTime"] = refreshed_at.to_string().into();
+                    value["nextFundingTime"] =
+                        (refreshed_at + 8 * 60 * 60 * 1000).to_string().into();
+                }
+                if action.as_deref() == Some("snapshot") {
+                    value["seqId"] = 11.into();
+                }
+                let mut frame = json!({"arg":arg,"data":[value]});
+                if let Some(action) = action {
+                    frame["action"] = action.into();
+                }
+                connector.send_public_frame(frame.to_string());
+            }
+        }
+        tokio::time::timeout(Duration::from_secs(4), async {
+            loop {
+                let rules = public_ws.instrument_rules("BTC-USDT-SWAP").await.unwrap();
+                let reference_ms = chrono::DateTime::parse_from_rfc3339(
+                    &rules.source_received_at
+                ).unwrap().timestamp_millis();
+                let fresh = public_ws.risk_fresh_snapshot(
+                    "BTC-USDT-SWAP",
+                    chrono::Utc::now().timestamp_millis() as u64,
+                    5_000, 5_000, chrono::Utc::now().to_rfc3339()
+                ).await.is_ok();
+                if reference_ms >= refreshed_at && fresh {
+                    break;
+                }
+                market_updates.changed().await.expect("public coordinator exited");
+            }
+        }).await.expect("refreshed recorded WS sources were not accepted by production parser");
         let fresh_fee_at = chrono::Utc::now().timestamp_millis().to_string();
         for _ in 0..3 {
             feed.expect_get(RecordedGet {
@@ -1276,7 +1328,7 @@ mod raw_native_session_tests {
                 "sz":"0.1","px":"1000",
                 "attachAlgoOrds":[{
                     "attachAlgoClOrdId":"__REQUEST_ATTACH_ALGO_ID__",
-                    "tpTriggerPxType":"mark","tpOrdPxType":"mark",
+                    "tpTriggerPxType":"mark",
                     "slTriggerPx":"900","slTriggerPxType":"mark","slOrdPx":"-1"
                 }]
             }),
