@@ -3,113 +3,162 @@ use super::*;
 fn e1_zero_opening_aggregate_and_receipt_roll_back_together_on_conflict() {
     let mut store = store();
     for (source, partition) in [
-        ("fills","SPOT"),("fills","MARGIN"),("fills","SWAP"),
-        ("fills","FUTURES"),("fills","OPTION"),("bills","account"),
+        ("fills", "SPOT"),
+        ("fills", "MARGIN"),
+        ("fills", "SWAP"),
+        ("fills", "FUTURES"),
+        ("fills", "OPTION"),
+        ("bills", "account"),
     ] {
-        store.ingest_page(&IngestPage {
-            cursor: Some(SourceCursor {
-                source: source.into(),
-                stream_partition: partition.into(),
-                cursor: String::new(),
-                watermark: 10,
-                generation: 1,
-                coverage_gaps: String::new(),
-            }),
-            ..Default::default()
-        }).unwrap();
+        store
+            .ingest_page(&IngestPage {
+                cursor: Some(SourceCursor {
+                    source: source.into(),
+                    stream_partition: partition.into(),
+                    cursor: String::new(),
+                    watermark: 10,
+                    generation: 1,
+                    coverage_gaps: String::new(),
+                }),
+                ..Default::default()
+            })
+            .unwrap();
     }
     let campaign = format!("sha256:{}", "c".repeat(64));
     // A conflicting immutable proof row must cause full transactional
     // rejection. Neither the campaign total nor an opening operation
     // receipt may be committed before that refusal.
-    store.connection.execute(
-        "INSERT INTO campaign_entry_window_proofs
+    store
+        .connection
+        .execute(
+            "INSERT INTO campaign_entry_window_proofs
          VALUES(?1,10,'0',?2)",
-        rusqlite::params![&campaign,"e".repeat(64)],
-    ).unwrap();
+            rusqlite::params![&campaign, "e".repeat(64)],
+        )
+        .unwrap();
     assert!(matches!(
-        store.seal_captured_campaign_baseline(&campaign,2,10),
+        store.seal_captured_campaign_baseline(&campaign, 2, 10),
         Err(StoreError::Invalid("CAMPAIGN_OPENING_PROOF_CONFLICT"))
     ));
-    let projection:i64=store.connection.query_row(
-        "SELECT COUNT(*) FROM campaign_entry_totals WHERE campaign_id=?1",
-        [&campaign],|r|r.get(0),
-    ).unwrap();
-    assert_eq!(projection,0,"failed proof cannot advance durable money");
-    let receipts:i64=store.connection.query_row(
-        "SELECT COUNT(*) FROM operation_receipts
+    let projection: i64 = store
+        .connection
+        .query_row(
+            "SELECT COUNT(*) FROM campaign_entry_totals WHERE campaign_id=?1",
+            [&campaign],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(projection, 0, "failed proof cannot advance durable money");
+    let receipts: i64 = store
+        .connection
+        .query_row(
+            "SELECT COUNT(*) FROM operation_receipts
          WHERE kind='CAMPAIGN_ENTRY_OPENING_SEALED'",
-        [],|r|r.get(0),
-    ).unwrap();
-    assert_eq!(receipts,0,
-        "the complete empty opening receipt must be atomic with its financial projection");
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        receipts, 0,
+        "the complete empty opening receipt must be atomic with its financial projection"
+    );
 }
 
 #[test]
 fn e1_sealed_campaign_refuses_backdated_unapplied_terminal_receipt() {
     let mut store = store();
     for (source, partition) in [
-        ("fills","SPOT"),("fills","MARGIN"),("fills","SWAP"),
-        ("fills","FUTURES"),("fills","OPTION"),("bills","account"),
+        ("fills", "SPOT"),
+        ("fills", "MARGIN"),
+        ("fills", "SWAP"),
+        ("fills", "FUTURES"),
+        ("fills", "OPTION"),
+        ("bills", "account"),
     ] {
-        store.ingest_page(&IngestPage {
-            cursor: Some(SourceCursor {
-                source: source.into(),
-                stream_partition: partition.into(),
-                cursor: String::new(),
-                watermark: 10,
-                generation: 1,
-                coverage_gaps: String::new(),
-            }),
-            ..Default::default()
-        }).unwrap();
+        store
+            .ingest_page(&IngestPage {
+                cursor: Some(SourceCursor {
+                    source: source.into(),
+                    stream_partition: partition.into(),
+                    cursor: String::new(),
+                    watermark: 10,
+                    generation: 1,
+                    coverage_gaps: String::new(),
+                }),
+                ..Default::default()
+            })
+            .unwrap();
     }
     let campaign = format!("sha256:{}", "c".repeat(64));
-    let frozen = store.seal_captured_campaign_baseline(&campaign, 2, 10)
+    let frozen = store
+        .seal_captured_campaign_baseline(&campaign, 2, 10)
         .unwrap();
     assert_eq!(frozen.0, Decimal::ZERO);
     // An out-of-order record may be received after the cursor advanced
     // while retaining its actual (older) economic event timestamp. The
     // previous empty proof must not hide this unseen monetary event.
-    store.connection.execute(
-        "INSERT INTO operation_receipts
+    store
+        .connection
+        .execute(
+            "INSERT INTO operation_receipts
          (operation_id,kind,request_hash,result_ref,committed_at)
          VALUES('entry-settlement:backfilled','ENTRY_SETTLEMENT_PROVEN',
                 'test-plan','unverified-source',8)",
-        [],
-    ).unwrap();
-    assert!(matches!(
-        store.seal_captured_campaign_baseline(&campaign, 2, 10),
-        Err(StoreError::Invalid("CAMPAIGN_FRONTIER_STALE_ECONOMIC_SOURCE"))
-    ), "same frontier may never replay a stale zero after backfill");
+            [],
+        )
+        .unwrap();
+    assert!(
+        matches!(
+            store.seal_captured_campaign_baseline(&campaign, 2, 10),
+            Err(StoreError::Invalid(
+                "CAMPAIGN_FRONTIER_STALE_ECONOMIC_SOURCE"
+            ))
+        ),
+        "same frontier may never replay a stale zero after backfill"
+    );
     for (source, partition) in [
-        ("fills","SPOT"),("fills","MARGIN"),("fills","SWAP"),
-        ("fills","FUTURES"),("fills","OPTION"),("bills","account"),
+        ("fills", "SPOT"),
+        ("fills", "MARGIN"),
+        ("fills", "SWAP"),
+        ("fills", "FUTURES"),
+        ("fills", "OPTION"),
+        ("bills", "account"),
     ] {
-        store.ingest_page(&IngestPage {
-            cursor: Some(SourceCursor {
-                source: source.into(),
-                stream_partition: partition.into(),
-                cursor: String::new(),
-                watermark: 11,
-                generation: 1,
-                coverage_gaps: String::new(),
-            }),
-            ..Default::default()
-        }).unwrap();
+        store
+            .ingest_page(&IngestPage {
+                cursor: Some(SourceCursor {
+                    source: source.into(),
+                    stream_partition: partition.into(),
+                    cursor: String::new(),
+                    watermark: 11,
+                    generation: 1,
+                    coverage_gaps: String::new(),
+                }),
+                ..Default::default()
+            })
+            .unwrap();
     }
-    assert!(matches!(
-        store.seal_captured_campaign_baseline(&campaign, 2, 11),
-        Err(StoreError::Invalid("ENTRY_OPENING_SETTLEMENT_CORRUPT"))
-    ), "the next frontier must validate the original source, not count it as zero");
-    let applied: (String, i64) = store.connection.query_row(
-        "SELECT consumed_usd,covered_through_ms
+    assert!(
+        matches!(
+            store.seal_captured_campaign_baseline(&campaign, 2, 11),
+            Err(StoreError::Invalid("ENTRY_OPENING_SETTLEMENT_CORRUPT"))
+        ),
+        "the next frontier must validate the original source, not count it as zero"
+    );
+    let applied: (String, i64) = store
+        .connection
+        .query_row(
+            "SELECT consumed_usd,covered_through_ms
          FROM campaign_entry_totals WHERE campaign_id=?1",
-        [&campaign],
-        |r| Ok((r.get(0)?,r.get(1)?)),
-    ).unwrap();
-    assert_eq!(applied,("0".into(),10),
-        "a rejected historical import cannot advance the durable money frontier");
+            [&campaign],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        applied,
+        ("0".into(), 10),
+        "a rejected historical import cannot advance the durable money frontier"
+    );
 }
 
 #[test]
@@ -142,18 +191,23 @@ fn e1_e2_native_real_fee_sources_baseline_and_second_admission_under_ten() {
         policy_revision: 1,
         code_version: "test".into(),
     };
-    let first = s.prepare(&first_decision, &NewIntent {
-        plan: plan.clone(),
-        intent_id: "intent".into(),
-        idempotency_key: "native-first".into(),
-        request_hash: "first-body".into(),
-        client_order_id: "first-client".into(),
-        deadline: 100,
-        plan_hash: "plan".into(),
-        policy_revision: 1,
-        risk_increase: true,
-        instrument_id: "BTC-USDT-SWAP".into(),
-    }).unwrap();
+    let first = s
+        .prepare(
+            &first_decision,
+            &NewIntent {
+                plan: plan.clone(),
+                intent_id: "intent".into(),
+                idempotency_key: "native-first".into(),
+                request_hash: "first-body".into(),
+                client_order_id: "first-client".into(),
+                deadline: 100,
+                plan_hash: "plan".into(),
+                policy_revision: 1,
+                risk_increase: true,
+                instrument_id: "BTC-USDT-SWAP".into(),
+            },
+        )
+        .unwrap();
     let mut first_quote = e1_source_quote(&s, &first);
     first_quote.limit_price = Decimal::from(5);
     first_quote.notional_usdt = Decimal::from(5);
@@ -167,17 +221,20 @@ fn e1_e2_native_real_fee_sources_baseline_and_second_admission_under_ten() {
         installation_id: s.meta.installation_id.clone(),
         intent_id: first.intent_id.clone(),
         plan_hash: first.plan_hash.clone(),
-        quote_digest: format!("{:x}", sha2::Sha256::digest(
-            serde_json::to_vec(&first_quote).unwrap())),
+        quote_digest: format!(
+            "{:x}",
+            sha2::Sha256::digest(serde_json::to_vec(&first_quote).unwrap())
+        ),
         admission_usd_per_usdt: Decimal::ONE,
         other_entry_costs_upper_usd: Decimal::ZERO,
         entry_upper_usd: first_quote.total_usd,
         entry_proof_digest: "a".repeat(64),
         observed_at: first_quote.observed_at,
-    }).unwrap();
+    })
+    .unwrap();
     acknowledged_entry_intent(&mut s);
 
-    let source_fee = Decimal::new(-25,4);
+    let source_fee = Decimal::new(-25, 4);
     let fee_entry = FinanceEntry {
         entry_id: "bill:entry-fee:FEE".into(),
         economic_event_key: "bill:entry-fee".into(),
@@ -197,28 +254,37 @@ fn e1_e2_native_real_fee_sources_baseline_and_second_admission_under_ten() {
             trade_id: "venue-trade-one".into(),
             exchange_order_id: "venue-order".into(),
             intent_id: Some(first.intent_id.clone()),
-            time: 6, qty: Decimal::ONE,
+            time: 6,
+            qty: Decimal::ONE,
             price: Decimal::from(5),
-            fee: source_fee, currency: "USDT".into(),
+            fee: source_fee,
+            currency: "USDT".into(),
             side: "buy".into(),
         }],
         finance: vec![fee_entry.clone()],
         cursor: Some(SourceCursor {
-            source: "fills".into(),stream_partition: "SWAP".into(),
-            cursor: String::new(),watermark: 7,generation: 1,
+            source: "fills".into(),
+            stream_partition: "SWAP".into(),
+            cursor: String::new(),
+            watermark: 7,
+            generation: 1,
             coverage_gaps: String::new(),
         }),
         ..Default::default()
-    }).unwrap();
+    })
+    .unwrap();
     s.ingest_page(&IngestPage {
         bills: vec![Bill {
             bill_id: "entry-fee".into(),
-            kind: "1:trade".into(),time: 7, amount: source_fee,
+            kind: "1:trade".into(),
+            time: 7,
+            amount: source_fee,
             currency: "USDT".into(),
             economic_event_key: "bill:entry-fee".into(),
         }],
         finance: vec![FinanceEntry {
-            source_ref: "bill:entry-fee".into(),time: 7,
+            source_ref: "bill:entry-fee".into(),
+            time: 7,
             ..fee_entry
         }],
         bill_order_sources: vec![BillOrderSource {
@@ -228,27 +294,39 @@ fn e1_e2_native_real_fee_sources_baseline_and_second_admission_under_ten() {
             trade_id: "venue-trade-one".into(),
         }],
         cursor: Some(SourceCursor {
-            source: "bills".into(),stream_partition: "account".into(),
-            cursor: String::new(),watermark: 7,generation: 1,
+            source: "bills".into(),
+            stream_partition: "account".into(),
+            cursor: String::new(),
+            watermark: 7,
+            generation: 1,
             coverage_gaps: String::new(),
         }),
         ..Default::default()
-    }).unwrap();
+    })
+    .unwrap();
     s.record_order_readback(
-        "intent","venue-order",IntentState::Filled,Decimal::ONE,7,
-    ).unwrap();
-    let settlement = s.bind_terminal_entry_settlement(
-        "intent",7,Decimal::ONE,7,
-    ).unwrap();
-    assert_eq!(settlement.cumulative_entry_usd,Decimal::new(50025,4));
-    assert_eq!(settlement.settlement_revision,1);
+        "intent",
+        "venue-order",
+        IntentState::Filled,
+        Decimal::ONE,
+        7,
+    )
+    .unwrap();
+    let settlement = s
+        .bind_terminal_entry_settlement("intent", 7, Decimal::ONE, 7)
+        .unwrap();
+    assert_eq!(settlement.cumulative_entry_usd, Decimal::new(50025, 4));
+    assert_eq!(settlement.settlement_revision, 1);
     // Central SETTLE_ENTRY and RELEASE are separately authenticated by
     // the production RiskBook tests. This receipt represents their durable
     // acknowledgement in the native account writer only.
-    s.acknowledge_central_release("central-key","central-settled").unwrap();
-    for (source,part) in [
-        ("fills","SPOT"),("fills","MARGIN"),
-        ("fills","FUTURES"),("fills","OPTION"),
+    s.acknowledge_central_release("central-key", "central-settled")
+        .unwrap();
+    for (source, part) in [
+        ("fills", "SPOT"),
+        ("fills", "MARGIN"),
+        ("fills", "FUTURES"),
+        ("fills", "OPTION"),
     ] {
         s.connection.execute(
             "INSERT INTO source_cursors(source,stream_partition,cursor,watermark,generation,coverage_gaps)
@@ -256,124 +334,156 @@ fn e1_e2_native_real_fee_sources_baseline_and_second_admission_under_ten() {
             rusqlite::params![source,part],
         ).unwrap();
     }
-    let campaign=format!("sha256:{}", "c".repeat(64));
-    let (spent,proof)=s.seal_captured_campaign_baseline(
-        &campaign,2,7,
-    ).unwrap();
-    assert_eq!(spent,Decimal::new(50025,4));
+    let campaign = format!("sha256:{}", "c".repeat(64));
+    let (spent, proof) = s.seal_captured_campaign_baseline(&campaign, 2, 7).unwrap();
+    assert_eq!(spent, Decimal::new(50025, 4));
     assert_eq!(
-        s.seal_captured_campaign_baseline(&campaign,2,7).unwrap(),
-        (spent,proof),
+        s.seal_captured_campaign_baseline(&campaign, 2, 7).unwrap(),
+        (spent, proof),
         "re-reading an unchanged complete campaign cannot debit twice"
     );
-    assert_eq!(Decimal::from(10)-spent,Decimal::new(49975,4));
+    assert_eq!(Decimal::from(10) - spent, Decimal::new(49975, 4));
     // Advancing all six completed source frontiers with no additional money
     // must be O(new events), not a full replay of terminal history.
-    for (source,part) in [
-        ("fills","SPOT"),("fills","MARGIN"),("fills","SWAP"),
-        ("fills","FUTURES"),("fills","OPTION"),("bills","account"),
+    for (source, part) in [
+        ("fills", "SPOT"),
+        ("fills", "MARGIN"),
+        ("fills", "SWAP"),
+        ("fills", "FUTURES"),
+        ("fills", "OPTION"),
+        ("bills", "account"),
     ] {
         s.ingest_page(&IngestPage {
             cursor: Some(SourceCursor {
-                source: source.into(),stream_partition: part.into(),
-                cursor: String::new(),watermark: 8,generation: 1,
+                source: source.into(),
+                stream_partition: part.into(),
+                cursor: String::new(),
+                watermark: 8,
+                generation: 1,
                 coverage_gaps: String::new(),
             }),
             ..Default::default()
-        }).unwrap();
+        })
+        .unwrap();
     }
-    let (advanced,_) = s.seal_captured_campaign_baseline(
-        &campaign,2,8,
-    ).unwrap();
-    assert_eq!(advanced,spent);
-    let (frontier,amount,events): (i64,String,i64) = s.connection.query_row(
-        "SELECT t.covered_through_ms,t.consumed_usd,
+    let (advanced, _) = s.seal_captured_campaign_baseline(&campaign, 2, 8).unwrap();
+    assert_eq!(advanced, spent);
+    let (frontier, amount, events): (i64, String, i64) = s
+        .connection
+        .query_row(
+            "SELECT t.covered_through_ms,t.consumed_usd,
                 (SELECT COUNT(*) FROM campaign_entry_applied
                  WHERE campaign_id=?1)
          FROM campaign_entry_totals t WHERE t.campaign_id=?1",
-        [&campaign],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)),
-    ).unwrap();
-    assert_eq!(frontier,8);
-    assert_eq!(Decimal::from_str_exact(&amount).unwrap(),spent);
-    assert_eq!(events,1,"advancing a covered empty page never duplicates the entry");
+            [&campaign],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(frontier, 8);
+    assert_eq!(Decimal::from_str_exact(&amount).unwrap(), spent);
+    assert_eq!(
+        events, 1,
+        "advancing a covered empty page never duplicates the entry"
+    );
 
     // The second SQL intent uses the ORIGINAL campaign money: a valid
     // 4 USDT entry still fits inside the 10 USD total budget.
-    let second_plan=IntentPlan {
+    let second_plan = IntentPlan {
         limit_price: Decimal::from(4),
         stop_price: Some(Decimal::from(3)),
         ..plan
     };
-    let successor=s.prepare(&Decision {
-        decision_id: "native-second".into(),
-        instance_id: None,decision_at: 8,
-        input_digest: "second-input".into(),
-        policy_revision: 1,code_version: "test".into(),
-    },&NewIntent {
-        plan: second_plan,
-        intent_id: "intent-second".into(),
-        idempotency_key: "native-second".into(),
-        request_hash: "second-body".into(),
-        client_order_id: "second-client".into(),
-        deadline: 100,
-        plan_hash: "second-plan".into(),
-        policy_revision: 1,
-        risk_increase: true,
-        instrument_id: "BTC-USDT-SWAP".into(),
-    }).unwrap();
-    let mut second_quote=e1_source_quote(&s,&successor);
-    second_quote.limit_price=Decimal::from(4);
-    second_quote.notional_usdt=Decimal::from(4);
-    second_quote.fee_usdt=Decimal::new(2,3);
-    second_quote.total_usdt=Decimal::new(4002,3);
-    second_quote.total_usd=Decimal::new(4002,3);
-    second_quote.fee_exchange_at=8;
-    second_quote.fee_received_at=8;
-    second_quote.conversion_received_at=8;
-    second_quote.observed_at=8;
+    let successor = s
+        .prepare(
+            &Decision {
+                decision_id: "native-second".into(),
+                instance_id: None,
+                decision_at: 8,
+                input_digest: "second-input".into(),
+                policy_revision: 1,
+                code_version: "test".into(),
+            },
+            &NewIntent {
+                plan: second_plan,
+                intent_id: "intent-second".into(),
+                idempotency_key: "native-second".into(),
+                request_hash: "second-body".into(),
+                client_order_id: "second-client".into(),
+                deadline: 100,
+                plan_hash: "second-plan".into(),
+                policy_revision: 1,
+                risk_increase: true,
+                instrument_id: "BTC-USDT-SWAP".into(),
+            },
+        )
+        .unwrap();
+    let mut second_quote = e1_source_quote(&s, &successor);
+    second_quote.limit_price = Decimal::from(4);
+    second_quote.notional_usdt = Decimal::from(4);
+    second_quote.fee_usdt = Decimal::new(2, 3);
+    second_quote.total_usdt = Decimal::new(4002, 3);
+    second_quote.total_usd = Decimal::new(4002, 3);
+    second_quote.fee_exchange_at = 8;
+    second_quote.fee_received_at = 8;
+    second_quote.conversion_received_at = 8;
+    second_quote.observed_at = 8;
     s.bind_entry_quote(&second_quote).unwrap();
-    assert!(spent+second_quote.total_usd<=Decimal::from(10));
+    assert!(spent + second_quote.total_usd <= Decimal::from(10));
     s.bind_entry_admission(&EntryAdmissionEvidence {
         schema: "okx.entry-admission/v2".into(),
         account_key: s.meta.account_key.clone(),
         installation_id: s.meta.installation_id.clone(),
         intent_id: successor.intent_id.clone(),
         plan_hash: successor.plan_hash.clone(),
-        quote_digest: format!("{:x}",sha2::Sha256::digest(
-            serde_json::to_vec(&second_quote).unwrap())),
+        quote_digest: format!(
+            "{:x}",
+            sha2::Sha256::digest(serde_json::to_vec(&second_quote).unwrap())
+        ),
         admission_usd_per_usdt: Decimal::ONE,
         other_entry_costs_upper_usd: Decimal::ZERO,
         entry_upper_usd: second_quote.total_usd,
         entry_proof_digest: "b".repeat(64),
         observed_at: second_quote.observed_at,
-    }).unwrap();
-    s.reserve(&CentralReceipt {
-        reservation_key: "second-central-reservation".into(),
-        account_key: s.meta.account_key.clone(),
-        installation_id: s.meta.installation_id.clone(),
-        instance_id: None,
-        intent_id: successor.intent_id.clone(),
-        plan_hash: successor.plan_hash.clone(),
-        policy_revision: 1,
-        receipt_hash: "second-central-receipt".into(),
-        requested_loss_usd: Decimal::ONE,
-        conversion_digest: "second-frozen-fx".into(),
-    },9).unwrap();
+    })
+    .unwrap();
+    s.reserve(
+        &CentralReceipt {
+            reservation_key: "second-central-reservation".into(),
+            account_key: s.meta.account_key.clone(),
+            installation_id: s.meta.installation_id.clone(),
+            instance_id: None,
+            intent_id: successor.intent_id.clone(),
+            plan_hash: successor.plan_hash.clone(),
+            policy_revision: 1,
+            receipt_hash: "second-central-receipt".into(),
+            requested_loss_usd: Decimal::ONE,
+            conversion_digest: "second-frozen-fx".into(),
+        },
+        9,
+    )
+    .unwrap();
     assert_eq!(
-        s.central_receipt(&successor.intent_id).unwrap().unwrap().reservation_key,
+        s.central_receipt(&successor.intent_id)
+            .unwrap()
+            .unwrap()
+            .reservation_key,
         "second-central-reservation",
         "second grant has its own durable identity, not the first order's release"
     );
-    assert!(s.verify_captured_campaign_continuity(2,7).is_err(),
-        "new unfinished order is visible to native risk census");
+    assert!(
+        s.verify_captured_campaign_continuity(2, 7).is_err(),
+        "new unfinished order is visible to native risk census"
+    );
 }
 #[test]
 fn e1_raw_bill_order_source_is_atomic_idempotent_and_immutable() {
     let mut s = store();
     let original = IngestPage {
         bills: vec![Bill {
-            bill_id: "bill-origin".into(), kind: "2:0".into(),
-            time: 20, amount: Decimal::new(-1, 2),
+            bill_id: "bill-origin".into(),
+            kind: "2:0".into(),
+            time: 20,
+            amount: Decimal::new(-1, 2),
             currency: "USDT".into(),
             economic_event_key: "bill:bill-origin".into(),
         }],
@@ -384,18 +494,25 @@ fn e1_raw_bill_order_source_is_atomic_idempotent_and_immutable() {
             trade_id: "trade-1".into(),
         }],
         cursor: Some(SourceCursor {
-            source: "bills".into(), stream_partition: "account".into(),
-            cursor: String::new(), watermark: 21, generation: 1,
+            source: "bills".into(),
+            stream_partition: "account".into(),
+            cursor: String::new(),
+            watermark: 21,
+            generation: 1,
             coverage_gaps: String::new(),
         }),
         ..Default::default()
     };
     s.ingest_page(&original).unwrap();
     s.ingest_page(&original).unwrap();
-    let count: i64 = s.connection.query_row(
-        "SELECT COUNT(*) FROM bill_order_sources WHERE bill_id='bill-origin'",
-        [], |r| r.get(0),
-    ).unwrap();
+    let count: i64 = s
+        .connection
+        .query_row(
+            "SELECT COUNT(*) FROM bill_order_sources WHERE bill_id='bill-origin'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
     assert_eq!(count, 1);
     let mut changed = original.clone();
     changed.bill_order_sources[0].exchange_order_id = "my-order".into();
@@ -405,20 +522,35 @@ fn e1_raw_bill_order_source_is_atomic_idempotent_and_immutable() {
         Err(StoreError::Invalid("IMMUTABLE_BILL_ORDER_SOURCE_CONFLICT"))
     ));
     assert_eq!(
-        s.cursor("bills", "account").unwrap().unwrap().watermark, 21,
+        s.cursor("bills", "account").unwrap().unwrap().watermark,
+        21,
         "rejected source identity mutation must roll back the cursor"
     );
-    let saved: String = s.connection.query_row(
-        "SELECT exchange_order_id FROM bill_order_sources WHERE bill_id='bill-origin'",
-        [], |r| r.get(0),
-    ).unwrap();
+    let saved: String = s
+        .connection
+        .query_row(
+            "SELECT exchange_order_id FROM bill_order_sources WHERE bill_id='bill-origin'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
     assert_eq!(saved, "other-order");
-    assert!(s.connection.execute(
-        "UPDATE bill_order_sources SET exchange_order_id='my-order'", [],
-    ).is_err());
-    assert!(s.connection.execute(
-        "DELETE FROM bill_order_sources WHERE bill_id='bill-origin'", [],
-    ).is_err());
+    assert!(
+        s.connection
+            .execute(
+                "UPDATE bill_order_sources SET exchange_order_id='my-order'",
+                [],
+            )
+            .is_err()
+    );
+    assert!(
+        s.connection
+            .execute(
+                "DELETE FROM bill_order_sources WHERE bill_id='bill-origin'",
+                [],
+            )
+            .is_err()
+    );
     let missing = IngestPage {
         bill_order_sources: vec![BillOrderSource {
             bill_id: "unseen-bill".into(),
@@ -434,110 +566,175 @@ fn e1_raw_bill_order_source_is_atomic_idempotent_and_immutable() {
     ));
 }
 
-
 #[test]
 fn e1_campaign_native_receipts_are_applied_once_with_atomic_frontier() {
-    let mut s=store();
-    let i=intent(&mut s);
-    let quote=e1_source_quote(&s,&i);
+    let mut s = store();
+    let i = intent(&mut s);
+    let quote = e1_source_quote(&s, &i);
     s.bind_entry_quote(&quote).unwrap();
     s.bind_entry_admission(&EntryAdmissionEvidence {
-        schema:"okx.entry-admission/v2".into(),
-        account_key:s.meta.account_key.clone(),
-        installation_id:s.meta.installation_id.clone(),
-        intent_id:i.intent_id.clone(),plan_hash:i.plan_hash.clone(),
-        quote_digest:format!("{:x}",sha2::Sha256::digest(
-            serde_json::to_vec(&quote).unwrap())),
-        admission_usd_per_usdt:Decimal::ONE,
-        other_entry_costs_upper_usd:Decimal::ZERO,
-        entry_upper_usd:quote.total_usd,
-        entry_proof_digest:"a".repeat(64),observed_at:quote.observed_at,
-    }).unwrap();
+        schema: "okx.entry-admission/v2".into(),
+        account_key: s.meta.account_key.clone(),
+        installation_id: s.meta.installation_id.clone(),
+        intent_id: i.intent_id.clone(),
+        plan_hash: i.plan_hash.clone(),
+        quote_digest: format!(
+            "{:x}",
+            sha2::Sha256::digest(serde_json::to_vec(&quote).unwrap())
+        ),
+        admission_usd_per_usdt: Decimal::ONE,
+        other_entry_costs_upper_usd: Decimal::ZERO,
+        entry_upper_usd: quote.total_usd,
+        entry_proof_digest: "a".repeat(64),
+        observed_at: quote.observed_at,
+    })
+    .unwrap();
     acknowledged_entry_intent(&mut s);
     s.record_order_readback(
-        "intent","venue-order",IntentState::Cancelled,Decimal::ZERO,7,
-    ).unwrap();
-    for (source,part) in [
-        ("fills","SPOT"),("fills","MARGIN"),("fills","SWAP"),
-        ("fills","FUTURES"),("fills","OPTION"),("bills","account"),
+        "intent",
+        "venue-order",
+        IntentState::Cancelled,
+        Decimal::ZERO,
+        7,
+    )
+    .unwrap();
+    for (source, part) in [
+        ("fills", "SPOT"),
+        ("fills", "MARGIN"),
+        ("fills", "SWAP"),
+        ("fills", "FUTURES"),
+        ("fills", "OPTION"),
+        ("bills", "account"),
     ] {
         s.ingest_page(&IngestPage {
-            cursor:Some(SourceCursor {
-                source:source.into(),stream_partition:part.into(),
-                cursor:String::new(),watermark:12,generation:1,
-                coverage_gaps:String::new(),
-            }),..Default::default()
-        }).unwrap();
+            cursor: Some(SourceCursor {
+                source: source.into(),
+                stream_partition: part.into(),
+                cursor: String::new(),
+                watermark: 12,
+                generation: 1,
+                coverage_gaps: String::new(),
+            }),
+            ..Default::default()
+        })
+        .unwrap();
     }
-    let zero=s.bind_terminal_entry_settlement(
-        "intent",7,Decimal::ZERO,12).unwrap();
-    s.acknowledge_central_release("central-key","central-ack").unwrap();
-    let campaign=format!("sha256:{}", "c".repeat(64));
-    let (sum,source)=s.seal_captured_campaign_baseline(
-        &campaign,2,12).unwrap();
-    assert_eq!(sum,Decimal::ZERO);
-    assert_eq!(s.seal_captured_campaign_baseline(
-        &campaign,2,12).unwrap(),(sum,source));
-    let rows:i64=s.connection.query_row(
-        "SELECT COUNT(*) FROM campaign_entry_applied",[],|r|r.get(0),
-    ).unwrap();
-    assert_eq!(rows,1,"same terminal economic event has one revision");
+    let zero = s
+        .bind_terminal_entry_settlement("intent", 7, Decimal::ZERO, 12)
+        .unwrap();
+    s.acknowledge_central_release("central-key", "central-ack")
+        .unwrap();
+    let campaign = format!("sha256:{}", "c".repeat(64));
+    let (sum, source) = s.seal_captured_campaign_baseline(&campaign, 2, 12).unwrap();
+    assert_eq!(sum, Decimal::ZERO);
+    assert_eq!(
+        s.seal_captured_campaign_baseline(&campaign, 2, 12).unwrap(),
+        (sum, source.clone())
+    );
+    let rows: i64 = s
+        .connection
+        .query_row("SELECT COUNT(*) FROM campaign_entry_applied", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(rows, 1, "same terminal economic event has one revision");
 
     // An invented late revision or moved checkpoint cannot bypass original
     // source validation and must not mutate the committed aggregate.
     assert!(matches!(
         s.apply_captured_campaign_deltas(
-            &campaign,2,11,&[
-                ("intent".into(),zero.source_digest.clone(),Decimal::ZERO,1,7)
-            ],Decimal::ZERO,None,
+            &campaign,
+            2,
+            11,
+            &[(
+                "intent".into(),
+                zero.source_digest.clone(),
+                Decimal::ZERO,
+                1,
+                7
+            )],
+            Decimal::ZERO,
+            None,
         ),
         Err(StoreError::Invalid("CAMPAIGN_APPLIED_FRONTIER_REGRESSION"))
     ));
     assert!(matches!(
         s.apply_captured_campaign_deltas(
-            &campaign,2,12,&[
-                ("intent".into(),"b".repeat(64),Decimal::ZERO,1,7)
-            ],Decimal::ZERO,None,
+            &campaign,
+            2,
+            12,
+            &[("intent".into(), "b".repeat(64), Decimal::ZERO, 1, 7)],
+            Decimal::ZERO,
+            None,
         ),
         Err(StoreError::Invalid("CAMPAIGN_APPLIED_SOURCE_CONFLICT"))
     ));
     assert!(matches!(
         s.apply_captured_campaign_deltas(
-            &campaign,2,12,&[
-                ("intent".into(),"b".repeat(64),Decimal::ONE,2,7)
-            ],Decimal::ZERO,None,
+            &campaign,
+            2,
+            12,
+            &[("intent".into(), "b".repeat(64), Decimal::ONE, 2, 7)],
+            Decimal::ZERO,
+            None,
         ),
         Err(StoreError::Invalid("CAMPAIGN_APPLIED_TOTAL_DIVERGENCE"))
     ));
-    let state:(String,i64)=s.connection.query_row(
-        "SELECT consumed_usd,covered_through_ms FROM campaign_entry_totals
+    let state: (String, i64) = s
+        .connection
+        .query_row(
+            "SELECT consumed_usd,covered_through_ms FROM campaign_entry_totals
          WHERE campaign_id=?1",
-        [&campaign],|r|Ok((r.get(0)?,r.get(1)?)),
-    ).unwrap();
-    assert_eq!(state,("0".into(),12));
-    let rows:i64=s.connection.query_row(
-        "SELECT COUNT(*) FROM campaign_entry_applied",[],|r|r.get(0),
-    ).unwrap();
-    assert_eq!(rows,1,"rejected delta rolls back its event and total");
-    assert!(s.connection.execute(
-        "UPDATE campaign_entry_applied SET cumulative_usd='1'",[],
-    ).is_err());
-    let path=s.path.clone();let meta=s.meta.clone();drop(s);
-    let reopened=AccountStore::open_existing(
-        path,&meta.account_key,&meta.installation_id).unwrap();
-    assert_eq!(
-        reopened.seal_captured_campaign_baseline(&campaign,2,12).unwrap(),
-        (sum,source), "restart must return the exact same immutable proof"
+            [&campaign],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(state, ("0".into(), 12));
+    let rows: i64 = s
+        .connection
+        .query_row("SELECT COUNT(*) FROM campaign_entry_applied", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(rows, 1, "rejected delta rolls back its event and total");
+    assert!(
+        s.connection
+            .execute("UPDATE campaign_entry_applied SET cumulative_usd='1'", [],)
+            .is_err()
     );
-    assert!(reopened.connection.execute(
-        "UPDATE campaign_entry_window_proofs SET consumed_usd='1'
+    let path = s.path.clone();
+    let meta = s.meta.clone();
+    drop(s);
+    let reopened =
+        AccountStore::open_existing(path, &meta.account_key, &meta.installation_id).unwrap();
+    assert_eq!(
+        reopened
+            .seal_captured_campaign_baseline(&campaign, 2, 12)
+            .unwrap(),
+        (sum, source),
+        "restart must return the exact same immutable proof"
+    );
+    assert!(
+        reopened
+            .connection
+            .execute(
+                "UPDATE campaign_entry_window_proofs SET consumed_usd='1'
          WHERE campaign_id=?1",
-        [&campaign],
-    ).is_err(), "window proof cannot be modified after source attestation");
-    assert!(reopened.connection.execute(
-        "DELETE FROM campaign_entry_window_proofs WHERE campaign_id=?1",
-        [&campaign],
-    ).is_err(), "window proof cannot be deleted");
+                [&campaign],
+            )
+            .is_err(),
+        "window proof cannot be modified after source attestation"
+    );
+    assert!(
+        reopened
+            .connection
+            .execute(
+                "DELETE FROM campaign_entry_window_proofs WHERE campaign_id=?1",
+                [&campaign],
+            )
+            .is_err(),
+        "window proof cannot be deleted"
+    );
 }
 
 #[test]
@@ -552,58 +749,86 @@ fn e1_zero_fill_terminal_requires_full_money_coverage_and_replays_after_restart(
         installation_id: s.meta.installation_id.clone(),
         intent_id: intent.intent_id.clone(),
         plan_hash: intent.plan_hash.clone(),
-        quote_digest: format!("{:x}",sha2::Sha256::digest(
-            serde_json::to_vec(&quote).unwrap())),
+        quote_digest: format!(
+            "{:x}",
+            sha2::Sha256::digest(serde_json::to_vec(&quote).unwrap())
+        ),
         admission_usd_per_usdt: Decimal::ONE,
         other_entry_costs_upper_usd: Decimal::ZERO,
         entry_upper_usd: quote.total_usd,
         entry_proof_digest: "a".repeat(64),
         observed_at: quote.observed_at,
-    }).unwrap();
+    })
+    .unwrap();
     acknowledged_entry_intent(&mut s);
-    s.record_order_readback("intent","venue-order",IntentState::Cancelled,
-        Decimal::ZERO,7).unwrap();
+    s.record_order_readback(
+        "intent",
+        "venue-order",
+        IntentState::Cancelled,
+        Decimal::ZERO,
+        7,
+    )
+    .unwrap();
 
     assert!(matches!(
-        s.bind_terminal_entry_settlement("intent",7,Decimal::ZERO,12),
+        s.bind_terminal_entry_settlement("intent", 7, Decimal::ZERO, 12),
         Err(StoreError::Invalid("ZERO_ENTRY_COVERAGE_UNPROVEN"))
     ));
-    for (source, partition) in [("fills","SWAP"),("bills","account")] {
+    for (source, partition) in [("fills", "SWAP"), ("bills", "account")] {
         s.ingest_page(&IngestPage {
             cursor: Some(SourceCursor {
-                source: source.into(),stream_partition: partition.into(),
-                cursor: String::new(),watermark: 12,generation: 1,
+                source: source.into(),
+                stream_partition: partition.into(),
+                cursor: String::new(),
+                watermark: 12,
+                generation: 1,
                 coverage_gaps: String::new(),
             }),
             ..Default::default()
-        }).unwrap();
+        })
+        .unwrap();
     }
-    let zero = s.bind_terminal_entry_settlement(
-        "intent",7,Decimal::ZERO,12).unwrap();
-    assert_eq!(zero.cumulative_entry_usd,Decimal::ZERO);
-    assert_eq!(zero.settlement_revision,1);
-    assert_eq!(zero.reservation_key,"central-key");
-    assert_eq!(s.bind_terminal_entry_settlement(
-        "intent",7,Decimal::ZERO,12).unwrap(),zero);
+    let zero = s
+        .bind_terminal_entry_settlement("intent", 7, Decimal::ZERO, 12)
+        .unwrap();
+    assert_eq!(zero.cumulative_entry_usd, Decimal::ZERO);
+    assert_eq!(zero.settlement_revision, 1);
+    assert_eq!(zero.reservation_key, "central-key");
     assert_eq!(
-        s.bind_terminal_entry_settlement("intent",7,Decimal::ZERO,13).unwrap(),
+        s.bind_terminal_entry_settlement("intent", 7, Decimal::ZERO, 12)
+            .unwrap(),
+        zero
+    );
+    assert_eq!(
+        s.bind_terminal_entry_settlement("intent", 7, Decimal::ZERO, 13)
+            .unwrap(),
         zero,
         "advancing coverage cannot create a second zero-charge receipt"
     );
     assert!(matches!(
-        s.bind_terminal_entry_settlement("intent",7,Decimal::ZERO,11),
+        s.bind_terminal_entry_settlement("intent", 7, Decimal::ZERO, 11),
         Err(StoreError::Invalid("ZERO_ENTRY_COVERAGE_REGRESSION"))
     ));
 
-    let path=s.path.clone();let meta=s.meta.clone();drop(s);
-    let mut reopened=AccountStore::open_existing(
-        path,&meta.account_key,&meta.installation_id).unwrap();
-    assert_eq!(reopened.bind_terminal_entry_settlement(
-        "intent",7,Decimal::ZERO,12).unwrap(),zero);
-    reopened.acknowledge_central_release("central-key","signed").unwrap();
-    for (source,partition) in [
-        ("fills","SPOT"),("fills","MARGIN"),("fills","FUTURES"),
-        ("fills","OPTION"),
+    let path = s.path.clone();
+    let meta = s.meta.clone();
+    drop(s);
+    let mut reopened =
+        AccountStore::open_existing(path, &meta.account_key, &meta.installation_id).unwrap();
+    assert_eq!(
+        reopened
+            .bind_terminal_entry_settlement("intent", 7, Decimal::ZERO, 12)
+            .unwrap(),
+        zero
+    );
+    reopened
+        .acknowledge_central_release("central-key", "signed")
+        .unwrap();
+    for (source, partition) in [
+        ("fills", "SPOT"),
+        ("fills", "MARGIN"),
+        ("fills", "FUTURES"),
+        ("fills", "OPTION"),
     ] {
         reopened.connection.execute(
             "INSERT INTO source_cursors(source,stream_partition,cursor,watermark,generation,coverage_gaps)
@@ -611,113 +836,157 @@ fn e1_zero_fill_terminal_requires_full_money_coverage_and_replays_after_restart(
             rusqlite::params![source,partition],
         ).unwrap();
     }
-    let campaign=format!("sha256:{}", "c".repeat(64));
-    let (consumed,_) = reopened.seal_captured_campaign_baseline(
-        &campaign,2,12).unwrap();
-    assert_eq!(consumed,Decimal::ZERO,
-        "canceled zero fill cannot consume notional or refund earlier spend");
+    let campaign = format!("sha256:{}", "c".repeat(64));
+    let (consumed, _) = reopened
+        .seal_captured_campaign_baseline(&campaign, 2, 12)
+        .unwrap();
+    assert_eq!(
+        consumed,
+        Decimal::ZERO,
+        "canceled zero fill cannot consume notional or refund earlier spend"
+    );
     // A later backfill from another independently identified order must
     // not rewrite this terminal zero-fill receipt. Historical opening still
     // requires separate full-cohort accounting for that other order.
-    reopened.ingest_page(&IngestPage {
-        bills: vec![Bill {
-            bill_id: "other-order-fee".into(),
-            kind: "2:0".into(),time: 8,amount: Decimal::new(-1,2),
-            currency: "USDT".into(),
-            economic_event_key: "bill:other-order-fee".into(),
-        }],
-        bill_order_sources: vec![BillOrderSource {
-            bill_id: "other-order-fee".into(),
-            instrument_id: "BTC-USDT-SWAP".into(),
-            exchange_order_id: "another-venue-order".into(),
-            trade_id: "other-trade".into(),
-        }],
-        ..Default::default()
-    }).unwrap();
+    reopened
+        .ingest_page(&IngestPage {
+            bills: vec![Bill {
+                bill_id: "other-order-fee".into(),
+                kind: "2:0".into(),
+                time: 8,
+                amount: Decimal::new(-1, 2),
+                currency: "USDT".into(),
+                economic_event_key: "bill:other-order-fee".into(),
+            }],
+            bill_order_sources: vec![BillOrderSource {
+                bill_id: "other-order-fee".into(),
+                instrument_id: "BTC-USDT-SWAP".into(),
+                exchange_order_id: "another-venue-order".into(),
+                trade_id: "other-trade".into(),
+            }],
+            ..Default::default()
+        })
+        .unwrap();
     assert_eq!(
-        reopened.bind_terminal_entry_settlement("intent",7,Decimal::ZERO,12).unwrap(),
-        zero, "other order's fee does not change our original zero charge"
+        reopened
+            .bind_terminal_entry_settlement("intent", 7, Decimal::ZERO, 12)
+            .unwrap(),
+        zero,
+        "other order's fee does not change our original zero charge"
     );
-    assert!(reopened.verify_captured_campaign_continuity(2,12).is_err(),
-        "other order's actual spending still requires campaign reconciliation");
+    assert!(
+        reopened.verify_captured_campaign_continuity(2, 12).is_err(),
+        "other order's actual spending still requires campaign reconciliation"
+    );
     // A delayed bill belonging to THIS zero-filled order invalidates the
     // original no-money assertion. It must not be erased by replaying the
     // previously accepted zero receipt, even after central release.
-    reopened.ingest_page(&IngestPage {
-        bills: vec![Bill {
-            bill_id: "my-late-fee".into(),kind: "2:0".into(),
-            time: 9,amount: Decimal::new(-1,2),
-            currency: "USDT".into(),
-            economic_event_key: "bill:my-late-fee".into(),
-        }],
-        bill_order_sources: vec![BillOrderSource {
-            bill_id: "my-late-fee".into(),
-            instrument_id: "BTC-USDT-SWAP".into(),
-            exchange_order_id: "venue-order".into(),
-            trade_id: "late-trade".into(),
-        }],
-        ..Default::default()
-    }).unwrap();
+    reopened
+        .ingest_page(&IngestPage {
+            bills: vec![Bill {
+                bill_id: "my-late-fee".into(),
+                kind: "2:0".into(),
+                time: 9,
+                amount: Decimal::new(-1, 2),
+                currency: "USDT".into(),
+                economic_event_key: "bill:my-late-fee".into(),
+            }],
+            bill_order_sources: vec![BillOrderSource {
+                bill_id: "my-late-fee".into(),
+                instrument_id: "BTC-USDT-SWAP".into(),
+                exchange_order_id: "venue-order".into(),
+                trade_id: "late-trade".into(),
+            }],
+            ..Default::default()
+        })
+        .unwrap();
     assert!(matches!(
-        reopened.bind_terminal_entry_settlement("intent",7,Decimal::ZERO,12),
+        reopened.bind_terminal_entry_settlement("intent", 7, Decimal::ZERO, 12),
         Err(StoreError::Invalid("ZERO_ENTRY_MONEY_UNRECONCILED"))
     ));
 }
 #[test]
 fn e1_zero_fill_cannot_hide_unclassified_bill_or_undurable_source() {
-    let mut s=store();
-    let i=intent(&mut s);
-    let quote=e1_source_quote(&s,&i);
+    let mut s = store();
+    let i = intent(&mut s);
+    let quote = e1_source_quote(&s, &i);
     s.bind_entry_quote(&quote).unwrap();
     s.bind_entry_admission(&EntryAdmissionEvidence {
-        schema:"okx.entry-admission/v2".into(),
-        account_key:s.meta.account_key.clone(),
-        installation_id:s.meta.installation_id.clone(),
-        intent_id:i.intent_id.clone(),plan_hash:i.plan_hash.clone(),
-        quote_digest:format!("{:x}",sha2::Sha256::digest(
-            serde_json::to_vec(&quote).unwrap())),
-        admission_usd_per_usdt:Decimal::ONE,
-        other_entry_costs_upper_usd:Decimal::ZERO,
-        entry_upper_usd:quote.total_usd,
-        entry_proof_digest:"a".repeat(64),observed_at:quote.observed_at,
-    }).unwrap();
+        schema: "okx.entry-admission/v2".into(),
+        account_key: s.meta.account_key.clone(),
+        installation_id: s.meta.installation_id.clone(),
+        intent_id: i.intent_id.clone(),
+        plan_hash: i.plan_hash.clone(),
+        quote_digest: format!(
+            "{:x}",
+            sha2::Sha256::digest(serde_json::to_vec(&quote).unwrap())
+        ),
+        admission_usd_per_usdt: Decimal::ONE,
+        other_entry_costs_upper_usd: Decimal::ZERO,
+        entry_upper_usd: quote.total_usd,
+        entry_proof_digest: "a".repeat(64),
+        observed_at: quote.observed_at,
+    })
+    .unwrap();
     acknowledged_entry_intent(&mut s);
-    s.record_order_readback("intent","venue-order",IntentState::Cancelled,
-        Decimal::ZERO,7).unwrap();
-    for (source,partition) in [("fills","SWAP"),("bills","account")] {
+    s.record_order_readback(
+        "intent",
+        "venue-order",
+        IntentState::Cancelled,
+        Decimal::ZERO,
+        7,
+    )
+    .unwrap();
+    for (source, partition) in [("fills", "SWAP"), ("bills", "account")] {
         s.ingest_page(&IngestPage {
-            cursor:Some(SourceCursor {
-                source:source.into(),stream_partition:partition.into(),
-                cursor:String::new(),watermark:12,generation:1,
-                coverage_gaps:String::new(),
-            }),..Default::default()
-        }).unwrap();
+            cursor: Some(SourceCursor {
+                source: source.into(),
+                stream_partition: partition.into(),
+                cursor: String::new(),
+                watermark: 12,
+                generation: 1,
+                coverage_gaps: String::new(),
+            }),
+            ..Default::default()
+        })
+        .unwrap();
     }
-    s.connection.execute(
-        "INSERT INTO bills(bill_id,kind,time,amount,currency,economic_event_key)
+    s.connection
+        .execute(
+            "INSERT INTO bills(bill_id,kind,time,amount,currency,economic_event_key)
          VALUES('unidentified','2:0',8,'-0.01','USDT','bill:unidentified')",
-        [],
-    ).unwrap();
+            [],
+        )
+        .unwrap();
     assert!(matches!(
-        s.bind_terminal_entry_settlement("intent",7,Decimal::ZERO,12),
+        s.bind_terminal_entry_settlement("intent", 7, Decimal::ZERO, 12),
         Err(StoreError::Invalid("ZERO_ENTRY_MONEY_UNRECONCILED"))
     ));
-    s.connection.execute(
-        "DELETE FROM bills WHERE bill_id='unidentified'",[],
-    ).is_err();
+    s.connection
+        .execute("DELETE FROM bills WHERE bill_id='unidentified'", [])
+        .is_err();
 }
 
 #[test]
 fn e1_swap_fill_source_atomic_idempotence_and_negative_matrix() {
-    assert_eq!(swap_fill_direction("3","buy","long").unwrap(),"OPEN");
-    assert_eq!(swap_fill_direction("4","sell","short").unwrap(),"OPEN");
-    assert_eq!(swap_fill_direction("5","sell","long").unwrap(),"CLOSE");
-    assert_eq!(swap_fill_direction("6","buy","short").unwrap(),"CLOSE");
-    assert_eq!(swap_fill_direction("1","buy","net").unwrap(),"NET_UNRESOLVED");
-    assert_eq!(swap_fill_direction("2","sell","net").unwrap(),"NET_UNRESOLVED");
-    assert_eq!(swap_fill_direction("104","buy","net").unwrap(),"UNCLASSIFIED");
+    assert_eq!(swap_fill_direction("3", "buy", "long").unwrap(), "OPEN");
+    assert_eq!(swap_fill_direction("4", "sell", "short").unwrap(), "OPEN");
+    assert_eq!(swap_fill_direction("5", "sell", "long").unwrap(), "CLOSE");
+    assert_eq!(swap_fill_direction("6", "buy", "short").unwrap(), "CLOSE");
+    assert_eq!(
+        swap_fill_direction("1", "buy", "net").unwrap(),
+        "NET_UNRESOLVED"
+    );
+    assert_eq!(
+        swap_fill_direction("2", "sell", "net").unwrap(),
+        "NET_UNRESOLVED"
+    );
+    assert_eq!(
+        swap_fill_direction("104", "buy", "net").unwrap(),
+        "UNCLASSIFIED"
+    );
     assert!(matches!(
-        swap_fill_direction("3","sell","long"),
+        swap_fill_direction("3", "sell", "long"),
         Err(StoreError::Invalid("SWAP_FILL_DIRECTION_CONFLICT"))
     ));
     let mut s = store();
@@ -730,8 +999,8 @@ fn e1_swap_fill_source_atomic_idempotence_and_negative_matrix() {
             intent_id: None,
             time: 20,
             qty: Decimal::ONE,
-            price: Decimal::new(100,0),
-            fee: Decimal::new(-1,2),
+            price: Decimal::new(100, 0),
+            fee: Decimal::new(-1, 2),
             currency: "USDT".into(),
             side: "buy".into(),
         }],
@@ -754,10 +1023,11 @@ fn e1_swap_fill_source_atomic_idempotence_and_negative_matrix() {
     };
     s.ingest_page(&original).unwrap();
     s.ingest_page(&original).unwrap();
-    let count: i64 = s.connection.query_row(
-        "SELECT COUNT(*) FROM swap_fill_sources", [], |r| r.get(0),
-    ).unwrap();
-    assert_eq!(count,1,"source replay may not double count venue fills");
+    let count: i64 = s
+        .connection
+        .query_row("SELECT COUNT(*) FROM swap_fill_sources", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(count, 1, "source replay may not double count venue fills");
     let mut changed = original.clone();
     changed.swap_fill_sources[0].bill_id = "another-bill".into();
     changed.cursor.as_mut().unwrap().watermark = 40;
@@ -765,7 +1035,7 @@ fn e1_swap_fill_source_atomic_idempotence_and_negative_matrix() {
         s.ingest_page(&changed),
         Err(StoreError::Invalid("IMMUTABLE_SWAP_FILL_SOURCE_CONFLICT"))
     ));
-    assert_eq!(s.cursor("fills","SWAP").unwrap().unwrap().watermark,30);
+    assert_eq!(s.cursor("fills", "SWAP").unwrap().unwrap().watermark, 30);
     let mut bad_direction = original.clone();
     bad_direction.swap_fill_sources[0].direction = "CLOSE".into();
     assert!(matches!(
@@ -781,21 +1051,30 @@ fn e1_swap_fill_source_atomic_idempotence_and_negative_matrix() {
         s.ingest_page(&missing),
         Err(StoreError::Invalid("SWAP_FILL_SOURCE_WITHOUT_FILL"))
     ));
-    let saved: String = s.connection.query_row(
-        "SELECT direction FROM swap_fill_sources WHERE fill_id=?1",
-        ["BTC-USDT-SWAP:trade:order"], |r| r.get(0),
-    ).unwrap();
-    assert_eq!(saved,"OPEN");
-    assert!(s.connection.execute(
-        "UPDATE swap_fill_sources SET direction='CLOSE'",[]
-    ).is_err());
+    let saved: String = s
+        .connection
+        .query_row(
+            "SELECT direction FROM swap_fill_sources WHERE fill_id=?1",
+            ["BTC-USDT-SWAP:trade:order"],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(saved, "OPEN");
+    assert!(
+        s.connection
+            .execute("UPDATE swap_fill_sources SET direction='CLOSE'", [])
+            .is_err()
+    );
 
     // Source classification is not USD valuation. Even a labelled external
     // OPEN cannot become a zero-spend campaign opening without event-time
     // contract specification, verified FX, and full bill classification.
     for (source, partition) in [
-        ("fills","SPOT"),("fills","MARGIN"),("fills","FUTURES"),
-        ("fills","OPTION"),("bills","account"),
+        ("fills", "SPOT"),
+        ("fills", "MARGIN"),
+        ("fills", "FUTURES"),
+        ("fills", "OPTION"),
+        ("bills", "account"),
     ] {
         s.connection.execute(
             "INSERT INTO source_cursors(source,stream_partition,cursor,watermark,generation,coverage_gaps)
@@ -805,7 +1084,7 @@ fn e1_swap_fill_source_atomic_idempotence_and_negative_matrix() {
     }
     let campaign = format!("sha256:{}", "c".repeat(64));
     assert!(matches!(
-        s.seal_captured_campaign_baseline(&campaign,2,20),
+        s.seal_captured_campaign_baseline(&campaign, 2, 20),
         Err(StoreError::Invalid("ENTRY_POST_OPENING_FILL_NOT_SETTLED"))
     ));
 }
@@ -1025,19 +1304,33 @@ fn r4_followup_requires_terminal_native_fill_and_central_settlement() {
         (spent, baseline),
         "lost central opening ACK cannot double count an immutable entry"
     );
-    let native_tally: (String,i64) = s.connection.query_row(
-        "SELECT consumed_usd,covered_through_ms FROM campaign_entry_totals
+    let native_tally: (String, i64) = s
+        .connection
+        .query_row(
+            "SELECT consumed_usd,covered_through_ms FROM campaign_entry_totals
          WHERE campaign_id=?1",
-        [&campaign], |row| Ok((row.get(0)?,row.get(1)?)),
-    ).unwrap();
-    assert_eq!(native_tally,("5.01".into(),through),
-        "historical native USD is durably applied, not recomputed as zero");
-    let revisions:i64 = s.connection.query_row(
-        "SELECT COUNT(*) FROM campaign_entry_applied
+            [&campaign],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        native_tally,
+        ("5.01".into(), through),
+        "historical native USD is durably applied, not recomputed as zero"
+    );
+    let revisions: i64 = s
+        .connection
+        .query_row(
+            "SELECT COUNT(*) FROM campaign_entry_applied
          WHERE campaign_id=?1",
-        [&campaign],|row|row.get(0),
-    ).unwrap();
-    assert_eq!(revisions,1,"replayed baseline cannot duplicate native money");
+            [&campaign],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        revisions, 1,
+        "replayed baseline cannot duplicate native money"
+    );
     // E2 positive successor through the SAME native intent/central receipt
     // state machine, without resetting the proven 5.01 USD campaign opening.
     // The first entry's terminal release is durable before the second reserve.
@@ -1784,9 +2077,11 @@ fn e1_partial_and_final_entry_settlement_are_monotone_and_not_double_counted() {
                 .unwrap();
             // First persist the ORIGINAL fully settled campaign amount,
             // then prove a later fee advances that same applied event once.
-            for (source,part) in [
-                ("fills","SPOT"),("fills","MARGIN"),
-                ("fills","FUTURES"),("fills","OPTION"),
+            for (source, part) in [
+                ("fills", "SPOT"),
+                ("fills", "MARGIN"),
+                ("fills", "FUTURES"),
+                ("fills", "OPTION"),
             ] {
                 reopened.connection.execute(
                     "INSERT INTO source_cursors(source,stream_partition,cursor,watermark,generation,coverage_gaps)
@@ -1796,9 +2091,11 @@ fn e1_partial_and_final_entry_settlement_are_monotone_and_not_double_counted() {
             }
             let campaign = format!("sha256:{}", "c".repeat(64));
             assert_eq!(
-                reopened.seal_captured_campaign_baseline(&campaign,2,9)
-                    .unwrap().0,
-                Decimal::new(10002,2)
+                reopened
+                    .seal_captured_campaign_baseline(&campaign, 2, 9)
+                    .unwrap()
+                    .0,
+                Decimal::new(10002, 2)
             );
             // The original fill-linked fee remains a single economic bill
             // even when captured again after terminal RELEASE.
@@ -1828,32 +2125,40 @@ fn e1_partial_and_final_entry_settlement_are_monotone_and_not_double_counted() {
             // is backdated into an ALREADY fully covered campaign window.
             // A previous complete frontier must not make the missed debit
             // disappear when a backfill shares that original watermark.
-            for (source,part) in [
-                ("fills","SWAP"),("bills","account"),
-            ] {
-                reopened.ingest_page(&IngestPage {
-                    cursor:Some(SourceCursor {
-                        source:source.into(),stream_partition:part.into(),
-                        cursor:String::new(),watermark:11,generation:1,
-                        coverage_gaps:String::new(),
-                    }),
-                    ..Default::default()
-                }).unwrap();
+            for (source, part) in [("fills", "SWAP"), ("bills", "account")] {
+                reopened
+                    .ingest_page(&IngestPage {
+                        cursor: Some(SourceCursor {
+                            source: source.into(),
+                            stream_partition: part.into(),
+                            cursor: String::new(),
+                            watermark: 11,
+                            generation: 1,
+                            coverage_gaps: String::new(),
+                        }),
+                        ..Default::default()
+                    })
+                    .unwrap();
             }
-            for (source,part) in [
-                ("fills","SPOT"),("fills","MARGIN"),
-                ("fills","FUTURES"),("fills","OPTION"),
+            for (source, part) in [
+                ("fills", "SPOT"),
+                ("fills", "MARGIN"),
+                ("fills", "FUTURES"),
+                ("fills", "OPTION"),
             ] {
-                reopened.connection.execute(
-                    "UPDATE source_cursors SET watermark=11
+                reopened
+                    .connection
+                    .execute(
+                        "UPDATE source_cursors SET watermark=11
                      WHERE source=?1 AND stream_partition=?2",
-                    rusqlite::params![source,part],
-                ).unwrap();
+                        rusqlite::params![source, part],
+                    )
+                    .unwrap();
             }
-            let old_frontier = reopened.seal_captured_campaign_baseline(
-                &campaign,2,11,
-            ).unwrap();
-            assert_eq!(old_frontier.0,Decimal::new(10002,2));
+            let old_frontier = reopened
+                .seal_captured_campaign_baseline(&campaign, 2, 11)
+                .unwrap();
+            assert_eq!(old_frontier.0, Decimal::new(10002, 2));
             let late_fee = Decimal::new(-1, 2);
             reopened
                 .ingest_page(&IngestPage {
@@ -1945,29 +2250,44 @@ fn e1_partial_and_final_entry_settlement_are_monotone_and_not_double_counted() {
             // The central RiskBook accepted exactly THIS monetary revision.
             reopened.acknowledge_late_entry_settlement(&late).unwrap();
             reopened.verify_captured_campaign_continuity(2, 11).unwrap();
-            assert!(matches!(
-                reopened.seal_captured_campaign_baseline(&campaign,2,11),
-                Err(StoreError::Invalid("CAMPAIGN_FRONTIER_STALE_ECONOMIC_SOURCE"))
-            ), "a late fee inside an already sealed frontier cannot replay stale USD");
-            for (source,part) in [
-                ("fills","SPOT"),("fills","MARGIN"),
-                ("fills","FUTURES"),("fills","OPTION"),
+            assert!(
+                matches!(
+                    reopened.seal_captured_campaign_baseline(&campaign, 2, 11),
+                    Err(StoreError::Invalid(
+                        "CAMPAIGN_FRONTIER_STALE_ECONOMIC_SOURCE"
+                    ))
+                ),
+                "a late fee inside an already sealed frontier cannot replay stale USD"
+            );
+            for (source, part) in [
+                ("fills", "SPOT"),
+                ("fills", "MARGIN"),
+                ("fills", "FUTURES"),
+                ("fills", "OPTION"),
             ] {
-                reopened.connection.execute(
-                    "UPDATE source_cursors SET watermark=12
+                reopened
+                    .connection
+                    .execute(
+                        "UPDATE source_cursors SET watermark=12
                      WHERE source=?1 AND stream_partition=?2",
-                    rusqlite::params![source,part],
-                ).unwrap();
+                        rusqlite::params![source, part],
+                    )
+                    .unwrap();
             }
-            for (source,part) in [("fills","SWAP"),("bills","account")] {
-                reopened.ingest_page(&IngestPage {
-                    cursor:Some(SourceCursor {
-                        source:source.into(),stream_partition:part.into(),
-                        cursor:String::new(),watermark:12,generation:1,
-                        coverage_gaps:String::new(),
-                    }),
-                    ..Default::default()
-                }).unwrap();
+            for (source, part) in [("fills", "SWAP"), ("bills", "account")] {
+                reopened
+                    .ingest_page(&IngestPage {
+                        cursor: Some(SourceCursor {
+                            source: source.into(),
+                            stream_partition: part.into(),
+                            cursor: String::new(),
+                            watermark: 12,
+                            generation: 1,
+                            coverage_gaps: String::new(),
+                        }),
+                        ..Default::default()
+                    })
+                    .unwrap();
             }
             let baseline = reopened
                 .seal_captured_campaign_baseline(&campaign, 2, 12)
@@ -1984,17 +2304,29 @@ fn e1_partial_and_final_entry_settlement_are_monotone_and_not_double_counted() {
                 baseline,
                 "lost opening ACK replays the same historical USD baseline"
             );
-            let applied:i64 = reopened.connection.query_row(
-                "SELECT COUNT(*) FROM campaign_entry_applied
-                 WHERE campaign_id=?1", [&campaign], |row| row.get(0),
-            ).unwrap();
-            assert_eq!(applied,2,
-                "the terminal and late cumulative receipts are two immutable revisions of one event");
-            let total:String = reopened.connection.query_row(
-                "SELECT consumed_usd FROM campaign_entry_totals
-                 WHERE campaign_id=?1", [&campaign], |row| row.get(0),
-            ).unwrap();
-            assert_eq!(total,"100.03");
+            let applied: i64 = reopened
+                .connection
+                .query_row(
+                    "SELECT COUNT(*) FROM campaign_entry_applied
+                 WHERE campaign_id=?1",
+                    [&campaign],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(
+                applied, 2,
+                "the terminal and late cumulative receipts are two immutable revisions of one event"
+            );
+            let total: String = reopened
+                .connection
+                .query_row(
+                    "SELECT consumed_usd FROM campaign_entry_totals
+                 WHERE campaign_id=?1",
+                    [&campaign],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(total, "100.03");
             assert!(!reopened.entry_late_pending("intent").unwrap());
             assert_eq!(
                 reopened
@@ -2375,22 +2707,27 @@ fn e1_fee_bill_cross_source_receipt_requires_both_immutable_sources() {
     // A delayed authentic bill-order identity contradicting the original
     // fill must invalidate the fee witness. Matching economic_event_key is
     // not authority to charge a different venue order's fee to this intent.
-    reopened.ingest_page(&IngestPage {
-        bill_order_sources: vec![BillOrderSource {
-            bill_id: "fee-bill".into(),
-            instrument_id: "BTC-USDT-SWAP".into(),
-            exchange_order_id: "another-venue-order".into(),
-            trade_id: "fee-trade".into(),
-        }],
-        ..Default::default()
-    }).unwrap();
+    reopened
+        .ingest_page(&IngestPage {
+            bill_order_sources: vec![BillOrderSource {
+                bill_id: "fee-bill".into(),
+                instrument_id: "BTC-USDT-SWAP".into(),
+                exchange_order_id: "another-venue-order".into(),
+                trade_id: "fee-trade".into(),
+            }],
+            ..Default::default()
+        })
+        .unwrap();
     assert!(matches!(
-        reopened.intent_fee_bill_evidence("intent",7),
+        reopened.intent_fee_bill_evidence("intent", 7),
         Err(StoreError::Invalid("ENTRY_FEE_BILL_SOURCE_MISMATCH"))
     ));
-    assert!(reopened.bind_terminal_entry_settlement(
-        "intent",7,Decimal::ONE,7,
-    ).is_err(), "settled replay cannot ignore newly discovered venue identity conflict");
+    assert!(
+        reopened
+            .bind_terminal_entry_settlement("intent", 7, Decimal::ONE, 7,)
+            .is_err(),
+        "settled replay cannot ignore newly discovered venue identity conflict"
+    );
     reopened
         .connection
         .execute(

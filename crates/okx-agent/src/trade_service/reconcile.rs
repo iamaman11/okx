@@ -653,7 +653,8 @@ impl TradeService {
             && matches!(
                 i.state,
                 IntentState::PartiallyFilled | IntentState::Filled | IntentState::Cancelled
-            ) {
+            )
+        {
             match self.settle_incremental_entry(r, &i, order.as_ref()).await {
                 Ok(()) => json!({"state":"verified_or_no_change"}),
                 Err(reason) => json!({"state":"pending","reason_code":reason}),

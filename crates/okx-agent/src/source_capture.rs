@@ -5,9 +5,10 @@ use crate::{
 };
 use okx_api::{AccountBill, FillHistory};
 use okx_execution::{
-    AccountSqlStatementStat, Bill, BillOrderSource, CashFlow, EntryOrderFeeLink, Fill, FinanceEntry, FundingEvent,
-    IngestPage, NavPoint, SourceCursor, StoreError, StoreResult, StrategyValuationEvidence,
-    SwapFillSource, UsdConversionEvidence, ValuationPosition, VenueMark, swap_fill_direction,
+    AccountSqlStatementStat, Bill, BillOrderSource, CashFlow, EntryOrderFeeLink, Fill,
+    FinanceEntry, FundingEvent, IngestPage, NavPoint, SourceCursor, StoreError, StoreResult,
+    StrategyValuationEvidence, SwapFillSource, UsdConversionEvidence, ValuationPosition, VenueMark,
+    swap_fill_direction,
 };
 use okx_runtime::PrivateWsHandle;
 use rust_decimal::Decimal;
@@ -815,8 +816,7 @@ async fn capture_fills(
                     if r.instrument_type != "SWAP" {
                         return Err(StoreError::Invalid("SWAP_FILL_SOURCE_TYPE_MISMATCH"));
                     }
-                    let direction =
-                        swap_fill_direction(&r.sub_type, &r.side, &r.position_side)?;
+                    let direction = swap_fill_direction(&r.sub_type, &r.side, &r.position_side)?;
                     page.swap_fill_sources.push(SwapFillSource {
                         fill_id: id.clone(),
                         bill_id: r.bill_id.clone(),
@@ -897,10 +897,7 @@ async fn capture_bills(
                     continue;
                 }
                 let key = format!("bill:{}", b.bill_id);
-                if !b.order_id.is_empty()
-                    && b.order_id != "0"
-                    && !b.instrument_id.is_empty()
-                {
+                if !b.order_id.is_empty() && b.order_id != "0" && !b.instrument_id.is_empty() {
                     page.bill_order_sources.push(BillOrderSource {
                         bill_id: b.bill_id.clone(),
                         instrument_id: b.instrument_id.clone(),

@@ -547,12 +547,14 @@ impl AccountStore {
         opening_proof: Option<&str>,
     ) -> StoreResult<()> {
         let tx = self.connection.unchecked_transaction()?;
-        let prior: Option<(i64, i64, String)> = tx.query_row(
-            "SELECT from_ms,covered_through_ms,consumed_usd
+        let prior: Option<(i64, i64, String)> = tx
+            .query_row(
+                "SELECT from_ms,covered_through_ms,consumed_usd
              FROM campaign_entry_totals WHERE campaign_id=?1",
-            [campaign_id],
-            |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?)),
-        ).optional()?;
+                [campaign_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?;
         let mut consumed = if let Some((first, cut, total)) = prior {
             if first != from_ms || cut > through_ms {
                 return Err(StoreError::Invalid("CAMPAIGN_APPLIED_FRONTIER_REGRESSION"));
@@ -563,7 +565,7 @@ impl AccountStore {
         };
         for (intent_id, digest, amount, revision, venue_updated_at) in receipts {
             if intent_id.is_empty()
-                || digest.len()!=64
+                || digest.len() != 64
                 || !digest.bytes().all(|b| b.is_ascii_hexdigit())
                 || *amount < Decimal::ZERO
                 || *venue_updated_at < from_ms
@@ -573,14 +575,16 @@ impl AccountStore {
             }
             let revision = i64::try_from(*revision)
                 .map_err(|_| StoreError::Invalid("CAMPAIGN_APPLIED_REVISION_INVALID"))?;
-            let earlier: Option<(i64, String, String)> = tx.query_row(
-                "SELECT settlement_revision,cumulative_usd,source_digest
+            let earlier: Option<(i64, String, String)> = tx
+                .query_row(
+                    "SELECT settlement_revision,cumulative_usd,source_digest
                  FROM campaign_entry_applied
                  WHERE campaign_id=?1 AND intent_id=?2
                  ORDER BY settlement_revision DESC LIMIT 1",
-                params![campaign_id,intent_id],
-                |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?)),
-            ).optional()?;
+                    params![campaign_id, intent_id],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .optional()?;
             let prior_money = if let Some((prior_revision, prior_amount, prior_digest)) = earlier {
                 let prior_amount = decimal(prior_amount)?;
                 if prior_revision > revision || prior_amount > *amount {
@@ -596,16 +600,22 @@ impl AccountStore {
             } else {
                 Decimal::ZERO
             };
-            let delta = amount.checked_sub(prior_money)
+            let delta = amount
+                .checked_sub(prior_money)
                 .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))?;
-            consumed = consumed.checked_add(delta)
+            consumed = consumed
+                .checked_add(delta)
                 .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))?;
             tx.execute(
                 "INSERT INTO campaign_entry_applied
                  VALUES(?1,?2,?3,?4,?5,?6)",
                 params![
-                    campaign_id,intent_id,revision,exact(*amount),
-                    digest,venue_updated_at
+                    campaign_id,
+                    intent_id,
+                    revision,
+                    exact(*amount),
+                    digest,
+                    venue_updated_at
                 ],
             )?;
         }
@@ -618,45 +628,49 @@ impl AccountStore {
              ON CONFLICT(campaign_id) DO UPDATE SET
                  covered_through_ms=excluded.covered_through_ms,
                  consumed_usd=excluded.consumed_usd",
-            params![campaign_id,from_ms,through_ms,exact(consumed)],
+            params![campaign_id, from_ms, through_ms, exact(consumed)],
         )?;
         if let Some(proof) = opening_proof {
-            if proof.len()!=64 || !proof.bytes().all(|b|b.is_ascii_hexdigit()) {
+            if proof.len() != 64 || !proof.bytes().all(|b| b.is_ascii_hexdigit()) {
                 return Err(StoreError::Invalid("CAMPAIGN_OPENING_PROOF_INVALID"));
             }
             tx.execute(
                 "INSERT INTO campaign_entry_window_proofs
                  VALUES(?1,?2,?3,?4)
                  ON CONFLICT(campaign_id,covered_through_ms) DO NOTHING",
-                params![campaign_id,through_ms,exact(consumed),proof],
+                params![campaign_id, through_ms, exact(consumed), proof],
             )?;
-            let saved:(String,String)=tx.query_row(
+            let saved: (String, String) = tx.query_row(
                 "SELECT consumed_usd,source_digest FROM campaign_entry_window_proofs
                  WHERE campaign_id=?1 AND covered_through_ms=?2",
-                params![campaign_id,through_ms],
-                |r|Ok((r.get(0)?,r.get(1)?)),
+                params![campaign_id, through_ms],
+                |r| Ok((r.get(0)?, r.get(1)?)),
             )?;
-            if saved!=(exact(consumed),proof.to_owned()) {
+            if saved != (exact(consumed), proof.to_owned()) {
                 return Err(StoreError::Invalid("CAMPAIGN_OPENING_PROOF_CONFLICT"));
             }
-            let key=format!("campaign_entry_opening:{campaign_id}:{proof}");
+            let key = format!("campaign_entry_opening:{campaign_id}:{proof}");
             tx.execute(
                 "INSERT INTO operation_receipts
                  (operation_id,kind,request_hash,result_ref,committed_at)
                  VALUES(?1,'CAMPAIGN_ENTRY_OPENING_SEALED',?2,?2,?3)
                  ON CONFLICT(operation_id) DO NOTHING",
-                params![key,proof,through_ms],
+                params![key, proof, through_ms],
             )?;
-            let receipt:(String,String,String,i64)=tx.query_row(
+            let receipt: (String, String, String, i64) = tx.query_row(
                 "SELECT kind,request_hash,result_ref,committed_at
                  FROM operation_receipts WHERE operation_id=?1",
                 [key],
-                |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
             )?;
-            if receipt!=(
-                "CAMPAIGN_ENTRY_OPENING_SEALED".into(),
-                proof.to_owned(),proof.to_owned(),through_ms,
-            ) {
+            if receipt
+                != (
+                    "CAMPAIGN_ENTRY_OPENING_SEALED".into(),
+                    proof.to_owned(),
+                    proof.to_owned(),
+                    through_ms,
+                )
+            {
                 return Err(StoreError::Invalid("CAMPAIGN_OPENING_RECEIPT_CONFLICT"));
             }
         }
@@ -689,88 +703,95 @@ impl AccountStore {
         // interval, not the whole campaign on every post-trade preview.
         // A late cumulative revision is a NEW economic delta even when its
         // original terminal order belongs to an older interval.
-        let checkpoint: Option<(i64, i64, String)> = self.connection.query_row(
-            "SELECT from_ms,covered_through_ms,consumed_usd
+        let checkpoint: Option<(i64, i64, String)> = self
+            .connection
+            .query_row(
+                "SELECT from_ms,covered_through_ms,consumed_usd
              FROM campaign_entry_totals WHERE campaign_id=?1",
-            [campaign_id],
-            |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?)),
-        ).optional()?;
-        if let Some((origin,cut,amount)) = checkpoint.as_ref() {
-            if *origin==from_ms && *cut==through_ms {
-                // A backfilled settlement or late fee can arrive with an
-                // event timestamp inside an already sealed interval. Its
-                // original cursor cut-off is NOT permission to return the
-                // previous money proof unchanged. Refuse same-frontier
-                // replay until a new fully captured interval is available.
-                let newer: bool = self.connection.query_row(
-                    "SELECT EXISTS(
-                       SELECT 1 FROM operation_receipts t
-                       WHERE t.kind='ENTRY_SETTLEMENT_PROVEN'
-                         AND t.committed_at>?2 AND t.committed_at<=?3
-                         AND (
-                           NOT EXISTS(
+                [campaign_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?;
+        if let Some((origin, cut, amount)) = checkpoint.as_ref()
+            && *origin == from_ms
+            && *cut == through_ms
+        {
+            // A backfilled settlement or late fee can arrive with an
+            // event timestamp inside an already sealed interval. Its
+            // original cursor cut-off is NOT permission to return the
+            // previous money proof unchanged. Refuse same-frontier
+            // replay until a new fully captured interval is available.
+            let newer: bool = self.connection.query_row(
+                "SELECT EXISTS(
+                   SELECT 1 FROM operation_receipts t
+                   WHERE t.kind='ENTRY_SETTLEMENT_PROVEN'
+                     AND t.committed_at>?2 AND t.committed_at<=?3
+                     AND (
+                       NOT EXISTS(
+                         SELECT 1 FROM campaign_entry_applied a
+                         WHERE a.campaign_id=?1
+                           AND a.intent_id=substr(t.operation_id,18)
+                       )
+                       OR EXISTS(
+                         SELECT 1 FROM operation_receipts late
+                         WHERE late.operation_id='entry-late-head:'||
+                               substr(t.operation_id,18)
+                           AND late.kind='ENTRY_LATE_HEAD'
+                           AND late.committed_at<=?3
+                           AND NOT EXISTS(
                              SELECT 1 FROM campaign_entry_applied a
                              WHERE a.campaign_id=?1
                                AND a.intent_id=substr(t.operation_id,18)
-                           )
-                           OR EXISTS(
-                             SELECT 1 FROM operation_receipts late
-                             WHERE late.operation_id='entry-late-head:'||
-                                   substr(t.operation_id,18)
-                               AND late.kind='ENTRY_LATE_HEAD'
-                               AND late.committed_at<=?3
-                               AND NOT EXISTS(
-                                 SELECT 1 FROM campaign_entry_applied a
-                                 WHERE a.campaign_id=?1
-                                   AND a.intent_id=substr(t.operation_id,18)
-                                   AND a.settlement_revision=CAST(
-                                     json_extract(late.result_ref,'$.settlement_revision')
-                                     AS INTEGER
-                                   )
+                               AND a.settlement_revision=CAST(
+                                 json_extract(late.result_ref,'$.settlement_revision')
+                                 AS INTEGER
                                )
                            )
-                         )
-                     )",
-                    params![campaign_id,from_ms,through_ms],
-                    |r|r.get(0),
-                )?;
-                if newer {
-                    return Err(StoreError::Invalid(
-                        "CAMPAIGN_FRONTIER_STALE_ECONOMIC_SOURCE"
-                    ));
-                }
-                let prior:Option<(String,String)>=self.connection.query_row(
-                    "SELECT consumed_usd,source_digest
-                     FROM campaign_entry_window_proofs
-                     WHERE campaign_id=?1 AND covered_through_ms=?2",
-                    params![campaign_id,through_ms],
-                    |r|Ok((r.get(0)?,r.get(1)?)),
-                ).optional()?;
-                let (old_money,proof)=prior.ok_or(
-                    StoreError::Invalid("CAMPAIGN_OPENING_PROOF_MISSING")
-                )?;
-                if old_money!=*amount {
-                    return Err(StoreError::Invalid("CAMPAIGN_OPENING_TOTAL_CONFLICT"));
-                }
-                let key=format!("campaign_entry_opening:{campaign_id}:{proof}");
-                let receipt=self.operation(&key)?.ok_or(
-                    StoreError::Invalid("CAMPAIGN_OPENING_RECEIPT_MISSING")
-                )?;
-                if receipt.kind!="CAMPAIGN_ENTRY_OPENING_SEALED"
-                    || receipt.request_hash!=proof
-                    || receipt.result_ref!=proof
-                    || receipt.committed_at!=through_ms
-                {
-                    return Err(StoreError::Invalid("CAMPAIGN_OPENING_RECEIPT_CONFLICT"));
-                }
-                return Ok((decimal(old_money)?,proof));
+                       )
+                     )
+                 )",
+                params![campaign_id, from_ms, through_ms],
+                |r| r.get(0),
+            )?;
+            if newer {
+                return Err(StoreError::Invalid(
+                    "CAMPAIGN_FRONTIER_STALE_ECONOMIC_SOURCE",
+                ));
             }
+            let prior: Option<(String, String)> = self
+                .connection
+                .query_row(
+                    "SELECT consumed_usd,source_digest
+                 FROM campaign_entry_window_proofs
+                 WHERE campaign_id=?1 AND covered_through_ms=?2",
+                    params![campaign_id, through_ms],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()?;
+            let (old_money, proof) =
+                prior.ok_or(StoreError::Invalid("CAMPAIGN_OPENING_PROOF_MISSING"))?;
+            if old_money != *amount {
+                return Err(StoreError::Invalid("CAMPAIGN_OPENING_TOTAL_CONFLICT"));
+            }
+            let key = format!("campaign_entry_opening:{campaign_id}:{proof}");
+            let receipt = self
+                .operation(&key)?
+                .ok_or(StoreError::Invalid("CAMPAIGN_OPENING_RECEIPT_MISSING"))?;
+            if receipt.kind != "CAMPAIGN_ENTRY_OPENING_SEALED"
+                || receipt.request_hash != proof
+                || receipt.result_ref != proof
+                || receipt.committed_at != through_ms
+            {
+                return Err(StoreError::Invalid("CAMPAIGN_OPENING_RECEIPT_CONFLICT"));
+            }
+            return Ok((decimal(old_money)?, proof));
         }
         let (since, mut total) = match checkpoint.as_ref() {
-            Some((origin,cut,amount)) if *origin==from_ms && *cut<=through_ms =>
-                (*cut,decimal(amount.clone())?),
+            Some((origin, cut, amount)) if *origin == from_ms && *cut <= through_ms => {
+                (*cut, decimal(amount.clone())?)
+            }
             Some(_) => return Err(StoreError::Invalid("CAMPAIGN_APPLIED_FRONTIER_REGRESSION")),
-            None => (from_ms,Decimal::ZERO),
+            None => (from_ms, Decimal::ZERO),
         };
         let mut stmt = self.connection.prepare(
             "SELECT terminal.operation_id,terminal.result_ref,terminal.committed_at
@@ -803,7 +824,7 @@ impl AccountStore {
                )
              ORDER BY terminal.operation_id LIMIT 10001",
         )?;
-        let mut rows = stmt.query(params![since,through_ms,from_ms,campaign_id])?;
+        let mut rows = stmt.query(params![since, through_ms, from_ms, campaign_id])?;
         let mut witnesses = Vec::new();
         while let Some(row) = rows.next()? {
             if witnesses.len() >= 10_000 {
@@ -951,26 +972,31 @@ impl AccountStore {
             }
             // A late source revision replaces its previous cumulative
             // amount; the campaign only consumes the positive difference.
-            let applied: Option<(i64,String,String)> = self.connection.query_row(
-                "SELECT settlement_revision,cumulative_usd,source_digest
+            let applied: Option<(i64, String, String)> = self
+                .connection
+                .query_row(
+                    "SELECT settlement_revision,cumulative_usd,source_digest
                  FROM campaign_entry_applied
                  WHERE campaign_id=?1 AND intent_id=?2
                  ORDER BY settlement_revision DESC LIMIT 1",
-                params![campaign_id,value.intent_id],
-                |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?)),
-            ).optional()?;
-            let previous = if let Some((rev,amount,digest)) = applied {
-                let amount=decimal(amount)?;
-                if rev>i64::try_from(value.settlement_revision)
-                        .map_err(|_|StoreError::Invalid("CAMPAIGN_APPLIED_REVISION_INVALID"))?
-                    || amount>value.cumulative_entry_usd
+                    params![campaign_id, value.intent_id],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .optional()?;
+            let previous = if let Some((rev, amount, digest)) = applied {
+                let amount = decimal(amount)?;
+                if rev
+                    > i64::try_from(value.settlement_revision)
+                        .map_err(|_| StoreError::Invalid("CAMPAIGN_APPLIED_REVISION_INVALID"))?
+                    || amount > value.cumulative_entry_usd
                 {
                     return Err(StoreError::Invalid("CAMPAIGN_APPLIED_MONOTONICITY_BREACH"));
                 }
-                if rev == i64::try_from(value.settlement_revision)
-                    .map_err(|_|StoreError::Invalid("CAMPAIGN_APPLIED_REVISION_INVALID"))?
+                if rev
+                    == i64::try_from(value.settlement_revision)
+                        .map_err(|_| StoreError::Invalid("CAMPAIGN_APPLIED_REVISION_INVALID"))?
                 {
-                    if amount!=value.cumulative_entry_usd || digest!=value.source_digest {
+                    if amount != value.cumulative_entry_usd || digest != value.source_digest {
                         return Err(StoreError::Invalid("CAMPAIGN_APPLIED_SOURCE_CONFLICT"));
                     }
                     continue;
@@ -979,9 +1005,12 @@ impl AccountStore {
             } else {
                 Decimal::ZERO
             };
-            let delta=value.cumulative_entry_usd.checked_sub(previous)
+            let delta = value
+                .cumulative_entry_usd
+                .checked_sub(previous)
                 .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))?;
-            total = total.checked_add(delta)
+            total = total
+                .checked_add(delta)
                 .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))?;
             witnesses.push((
                 value.intent_id,
@@ -1000,12 +1029,14 @@ impl AccountStore {
             // Compute from already verified capture facts without writing
             // an independent operation receipt ahead of the aggregate.
             // apply_captured_campaign_deltas persists both atomically.
-            let zero = self.captured_empty_campaign_proof(
-                campaign_id, from_ms, through_ms,
-            )?;
+            let zero = self.captured_empty_campaign_proof(campaign_id, from_ms, through_ms)?;
             self.apply_captured_campaign_deltas(
-                campaign_id, from_ms, through_ms, &witnesses,
-                Decimal::ZERO, Some(&zero),
+                campaign_id,
+                from_ms,
+                through_ms,
+                &witnesses,
+                Decimal::ZERO,
+                Some(&zero),
             )?;
             return Ok((Decimal::ZERO, zero));
         }
@@ -1023,7 +1054,12 @@ impl AccountStore {
         .map_err(|_| StoreError::Invalid("ENTRY_OPENING_SERIALIZATION_FAILED"))?;
         let proof = format!("{:x}", Sha256::digest(canonical));
         self.apply_captured_campaign_deltas(
-            campaign_id,from_ms,through_ms,&witnesses,total,Some(&proof),
+            campaign_id,
+            from_ms,
+            through_ms,
+            &witnesses,
+            total,
+            Some(&proof),
         )?;
         self.connection.execute_batch(
             "CREATE TRIGGER IF NOT EXISTS immutable_campaign_opening_update
@@ -1107,9 +1143,7 @@ impl AccountStore {
         from_ms: i64,
         through_ms: i64,
     ) -> StoreResult<String> {
-        let proof = self.captured_empty_campaign_proof(
-            campaign_id, from_ms, through_ms,
-        )?;
+        let proof = self.captured_empty_campaign_proof(campaign_id, from_ms, through_ms)?;
         self.connection.execute_batch(
             "CREATE TRIGGER IF NOT EXISTS immutable_campaign_opening_update
              BEFORE UPDATE ON operation_receipts
@@ -1527,7 +1561,8 @@ impl AccountStore {
             bill_instrument_id: Option<String>,
         }
         let fill = self.intent_fill_cost_evidence(intent_id, through)?;
-        let intent_instrument = self.intent(intent_id)?
+        let intent_instrument = self
+            .intent(intent_id)?
             .ok_or(StoreError::Invalid("ENTRY_BILL_INTENT_MISSING"))?
             .instrument_id;
         if !finance_proof_sealed(&self.connection)? {
@@ -1644,10 +1679,14 @@ impl AccountStore {
                 })
                 || proof.bill_currency.as_deref() != Some(currency.as_str())
                 || !proof.bill_linked
-                || proof.bill_order_id.as_deref().is_some_and(|v|
-                    v != fill.exchange_order_id.as_str())
-                || proof.bill_instrument_id.as_deref().is_some_and(|v|
-                    v != intent_instrument.as_str())
+                || proof
+                    .bill_order_id
+                    .as_deref()
+                    .is_some_and(|v| v != fill.exchange_order_id.as_str())
+                || proof
+                    .bill_instrument_id
+                    .as_deref()
+                    .is_some_and(|v| v != intent_instrument.as_str())
                 || proof.currency != currency
                 || decimal(proof.amount.clone())? != fee
             {
@@ -3375,17 +3414,18 @@ impl AccountStore {
         // SWAP source labels and the page frontier commit atomically.
         // Conflicting replays never advance the source cursor.
         for source in &page.swap_fill_sources {
-            let found: Option<(String, String)> = tx.query_row(
-                "SELECT instrument_id,side FROM fills WHERE fill_id=?1",
-                [&source.fill_id],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            ).optional()?;
-            let (instrument, side) = found
-                .ok_or(StoreError::Invalid("SWAP_FILL_SOURCE_WITHOUT_FILL"))?;
+            let found: Option<(String, String)> = tx
+                .query_row(
+                    "SELECT instrument_id,side FROM fills WHERE fill_id=?1",
+                    [&source.fill_id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()?;
+            let (instrument, side) =
+                found.ok_or(StoreError::Invalid("SWAP_FILL_SOURCE_WITHOUT_FILL"))?;
             if !instrument.ends_with("-SWAP")
-                || source.direction != swap_fill_direction(
-                    &source.sub_type, &side, &source.position_side,
-                )?
+                || source.direction
+                    != swap_fill_direction(&source.sub_type, &side, &source.position_side)?
             {
                 return Err(StoreError::Invalid("SWAP_FILL_SOURCE_INVALID"));
             }
@@ -3393,20 +3433,27 @@ impl AccountStore {
                 "INSERT INTO swap_fill_sources VALUES(?1,?2,?3,?4,?5)
                  ON CONFLICT(fill_id) DO NOTHING",
                 params![
-                    source.fill_id,source.bill_id,source.sub_type,
-                    source.position_side,source.direction,
+                    source.fill_id,
+                    source.bill_id,
+                    source.sub_type,
+                    source.position_side,
+                    source.direction,
                 ],
             )?;
             let old: (String, String, String, String) = tx.query_row(
                 "SELECT bill_id,sub_type,position_side,direction
                  FROM swap_fill_sources WHERE fill_id=?1",
                 [&source.fill_id],
-                |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
             )?;
-            if old != (
-                source.bill_id.clone(),source.sub_type.clone(),
-                source.position_side.clone(),source.direction.clone(),
-            ) {
+            if old
+                != (
+                    source.bill_id.clone(),
+                    source.sub_type.clone(),
+                    source.position_side.clone(),
+                    source.direction.clone(),
+                )
+            {
                 return Err(StoreError::Invalid("IMMUTABLE_SWAP_FILL_SOURCE_CONFLICT"));
             }
         }
@@ -3442,7 +3489,8 @@ impl AccountStore {
             }
         }
         for source in &page.bill_order_sources {
-            if source.bill_id.is_empty() || source.exchange_order_id.is_empty()
+            if source.bill_id.is_empty()
+                || source.exchange_order_id.is_empty()
                 || source.exchange_order_id == "0"
                 || source.instrument_id.is_empty()
             {
@@ -3450,7 +3498,8 @@ impl AccountStore {
             }
             let bill_exists: bool = tx.query_row(
                 "SELECT EXISTS(SELECT 1 FROM bills WHERE bill_id=?1)",
-                [&source.bill_id], |r| r.get(0),
+                [&source.bill_id],
+                |r| r.get(0),
             )?;
             if !bill_exists {
                 return Err(StoreError::Invalid("BILL_ORDER_SOURCE_WITHOUT_BILL"));
@@ -3459,21 +3508,25 @@ impl AccountStore {
                 "INSERT INTO bill_order_sources VALUES(?1,?2,?3,?4)
                  ON CONFLICT(bill_id) DO NOTHING",
                 params![
-                    source.bill_id,source.instrument_id,
-                    source.exchange_order_id,source.trade_id
+                    source.bill_id,
+                    source.instrument_id,
+                    source.exchange_order_id,
+                    source.trade_id
                 ],
             )?;
-            let original: (String,String,String) = tx.query_row(
+            let original: (String, String, String) = tx.query_row(
                 "SELECT instrument_id,exchange_order_id,trade_id
                  FROM bill_order_sources WHERE bill_id=?1",
                 [&source.bill_id],
-                |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )?;
-            if original != (
-                source.instrument_id.clone(),
-                source.exchange_order_id.clone(),
-                source.trade_id.clone(),
-            ) {
+            if original
+                != (
+                    source.instrument_id.clone(),
+                    source.exchange_order_id.clone(),
+                    source.trade_id.clone(),
+                )
+            {
                 return Err(StoreError::Invalid("IMMUTABLE_BILL_ORDER_SOURCE_CONFLICT"));
             }
         }

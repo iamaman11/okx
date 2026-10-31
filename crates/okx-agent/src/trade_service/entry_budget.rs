@@ -1151,11 +1151,9 @@ mod tests {
                 verified_uid: &uid,
                 observed_at_ms: at.timestamp_millis(),
             },
-        ).unwrap();
-        assert_eq!(
-            first_cost.proven_upper_usd().unwrap(),
-            Some(d("10.005021"))
-        );
+        )
+        .unwrap();
+        assert_eq!(first_cost.proven_upper_usd().unwrap(), Some(d("10.005021")));
         let mut alt_rules = first_rules.clone();
         alt_rules.instrument.instrument_id = "LTC-USDT-SWAP".into();
         alt_rules.instrument.base_currency = Some("LTC".into());
@@ -1164,8 +1162,8 @@ mod tests {
         alt_rules.instrument.lot_size = "0.1".into();
         alt_rules.instrument.min_size = "0.1".into();
         alt_rules.instrument.tick_size = "0.01".into();
-        let alt_fees = okx_observation::FeeScheduleSnapshot::from_input(
-            okx_observation::FeeScheduleInput {
+        let alt_fees =
+            okx_observation::FeeScheduleSnapshot::from_input(okx_observation::FeeScheduleInput {
                 instrument_id: "LTC-USDT-SWAP".into(),
                 reference_generation: "reference-1".into(),
                 source_received_at: at.to_rfc3339(),
@@ -1174,8 +1172,8 @@ mod tests {
                 maker_rate: "-0.0002".into(),
                 taker_rate: "0.0005".into(),
                 exact_for_instrument: true,
-            }
-        ).unwrap();
+            })
+            .unwrap();
         let alt_plan = IntentPlan {
             contract_value: d("0.1"),
             quantity: d("0.1"),
@@ -1196,12 +1194,12 @@ mod tests {
                 verified_uid: &uid,
                 observed_at_ms: at.timestamp_millis(),
             },
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(alt_cost.quote.notional_usdt, d("1"));
         assert_eq!(alt_cost.proven_upper_usd().unwrap(), Some(d("1.0005")));
         assert_ne!(
-            first_cost.quote.total_usdt,
-            alt_cost.quote.total_usdt,
+            first_cost.quote.total_usdt, alt_cost.quote.total_usdt,
             "contract metadata must determine sizing and fees"
         );
         assert!(
@@ -1219,7 +1217,8 @@ mod tests {
                     verified_uid: &uid,
                     observed_at_ms: at.timestamp_millis(),
                 },
-            ).is_err(),
+            )
+            .is_err(),
             "suffix matching must never silently authorize an unknown instrument"
         );
 

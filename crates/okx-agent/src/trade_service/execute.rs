@@ -2673,9 +2673,7 @@ mod tests {
         paused: bool,
         expired: bool,
     ) -> (AccountStoreHandle, StoredIntent, std::path::PathBuf) {
-        reserved_with_price(
-            label, increase, paused, expired, Decimal::from(100),
-        ).await
+        reserved_with_price(label, increase, paused, expired, Decimal::from(100)).await
     }
 
     async fn reserved_with_price(
@@ -2733,13 +2731,11 @@ mod tests {
             position_side: "long".into(),
             quantity: Decimal::ONE,
             limit_price,
-            stop_price: Some(
-                if limit_price==Decimal::from(100) {
-                    Decimal::from(99)
-                } else {
-                    limit_price-Decimal::ONE
-                }
-            ),
+            stop_price: Some(if limit_price == Decimal::from(100) {
+                Decimal::from(99)
+            } else {
+                limit_price - Decimal::ONE
+            }),
             strategy_instance: "manual".into(),
             planned_loss_usd: Decimal::ONE,
             source_generation: 1,
@@ -2796,58 +2792,69 @@ mod tests {
                     // own admitted quote; production source assessment is
                     // independently exercised in entry_budget tests.
                     let observed = now();
-                    let rate = Decimal::new(5,4);
+                    let rate = Decimal::new(5, 4);
                     let notional = saved_for_quote.plan.quantity
                         * saved_for_quote.plan.contract_value
                         * saved_for_quote.plan.limit_price;
-                    let fee = (notional*rate).round_dp_with_strategy(
-                        6,rust_decimal::RoundingStrategy::ToPositiveInfinity,
+                    let fee = (notional * rate).round_dp_with_strategy(
+                        6,
+                        rust_decimal::RoundingStrategy::ToPositiveInfinity,
                     );
-                    let total = notional+fee;
+                    let total = notional + fee;
                     let quote = okx_execution::EntryQuoteEvidence {
-                        schema:"okx.entry-known-quote/v1".into(),
-                        account_key:s.meta().account_key.clone(),
-                        installation_id:s.meta().installation_id.clone(),
-                        intent_id:saved_for_quote.intent_id.clone(),
-                        plan_hash:saved_for_quote.plan_hash.clone(),
-                        policy_revision:saved_for_quote.policy_revision,
-                        instrument_id:saved_for_quote.instrument_id.clone(),
-                        quantity:saved_for_quote.plan.quantity,
-                        limit_price:saved_for_quote.plan.limit_price,
-                        contract_value:saved_for_quote.plan.contract_value,
-                        fee_rate:rate,
-                        maker_rate:"-0.0002".into(),
-                        taker_rate:"0.0005".into(),
-                        fee_level:"Lv1".into(),
-                        fee_exchange_at:observed,
-                        usd_per_usdt:Decimal::ONE,
-                        notional_usdt:notional,fee_usdt:fee,
-                        total_usdt:total,total_usd:total,
-                        fee_generation:format!("sha256:{:x}",Sha256::digest(
-                            serde_json::to_vec(&(
-                                "BTC-USDT-SWAP","reference_fixture","Lv1",
-                                "-0.0002","0.0005",true
-                            )).unwrap()
-                        )),
-                        reference_generation:"reference_fixture".into(),
-                        fee_received_at:observed,
-                        conversion_digest:"b".repeat(64),
-                        conversion_received_at:observed,
-                        observed_at:observed,
+                        schema: "okx.entry-known-quote/v1".into(),
+                        account_key: s.meta().account_key.clone(),
+                        installation_id: s.meta().installation_id.clone(),
+                        intent_id: saved_for_quote.intent_id.clone(),
+                        plan_hash: saved_for_quote.plan_hash.clone(),
+                        policy_revision: saved_for_quote.policy_revision,
+                        instrument_id: saved_for_quote.instrument_id.clone(),
+                        quantity: saved_for_quote.plan.quantity,
+                        limit_price: saved_for_quote.plan.limit_price,
+                        contract_value: saved_for_quote.plan.contract_value,
+                        fee_rate: rate,
+                        maker_rate: "-0.0002".into(),
+                        taker_rate: "0.0005".into(),
+                        fee_level: "Lv1".into(),
+                        fee_exchange_at: observed,
+                        usd_per_usdt: Decimal::ONE,
+                        notional_usdt: notional,
+                        fee_usdt: fee,
+                        total_usdt: total,
+                        total_usd: total,
+                        fee_generation: format!(
+                            "sha256:{:x}",
+                            Sha256::digest(
+                                serde_json::to_vec(&(
+                                    "BTC-USDT-SWAP",
+                                    "reference_fixture",
+                                    "Lv1",
+                                    "-0.0002",
+                                    "0.0005",
+                                    true
+                                ))
+                                .unwrap()
+                            )
+                        ),
+                        reference_generation: "reference_fixture".into(),
+                        fee_received_at: observed,
+                        conversion_digest: "b".repeat(64),
+                        conversion_received_at: observed,
+                        observed_at: observed,
                     };
-                    let serialized=serde_json::to_vec(&quote).unwrap();
-                    let admission=okx_execution::EntryAdmissionEvidence {
-                        schema:"okx.entry-admission/v2".into(),
-                        account_key:quote.account_key.clone(),
-                        installation_id:quote.installation_id.clone(),
-                        intent_id:quote.intent_id.clone(),
-                        plan_hash:quote.plan_hash.clone(),
-                        quote_digest:format!("{:x}",Sha256::digest(serialized)),
-                        admission_usd_per_usdt:Decimal::ONE,
-                        other_entry_costs_upper_usd:Decimal::ZERO,
-                        entry_upper_usd:total,
-                        entry_proof_digest:"a".repeat(64),
-                        observed_at:observed,
+                    let serialized = serde_json::to_vec(&quote).unwrap();
+                    let admission = okx_execution::EntryAdmissionEvidence {
+                        schema: "okx.entry-admission/v2".into(),
+                        account_key: quote.account_key.clone(),
+                        installation_id: quote.installation_id.clone(),
+                        intent_id: quote.intent_id.clone(),
+                        plan_hash: quote.plan_hash.clone(),
+                        quote_digest: format!("{:x}", Sha256::digest(serialized)),
+                        admission_usd_per_usdt: Decimal::ONE,
+                        other_entry_costs_upper_usd: Decimal::ZERO,
+                        entry_upper_usd: total,
+                        entry_proof_digest: "a".repeat(64),
+                        observed_at: observed,
                     };
                     s.bind_entry_quote(&quote)?;
                     s.bind_entry_admission(&admission)?;
@@ -3715,181 +3722,234 @@ mod tests {
     /// fixture is independent; this test never claims their end-to-end proof.
     #[tokio::test]
     async fn t09_native_post_once_partial_fee_terminal_campaign_under_ten() {
-        let (store,intent,_root)=reserved_with_price(
-            "t09_native_finance",true,false,false,Decimal::from(5),
-        ).await;
-        let gateway=FixtureGateway {
-            posts:AtomicUsize::new(0),lose:false,
+        let (store, intent, _root) =
+            reserved_with_price("t09_native_finance", true, false, false, Decimal::from(5)).await;
+        let gateway = FixtureGateway {
+            posts: AtomicUsize::new(0),
+            lose: false,
         };
         assert_eq!(
-            post_once(&store,&intent,deadline(),||gateway.send()).await.unwrap(),
+            post_once(&store, &intent, deadline(), || gateway.send())
+                .await
+                .unwrap(),
             Some(1)
         );
-        assert!(post_once(&store,&intent,deadline(),||gateway.send())
-            .await.unwrap().is_none());
-        assert_eq!(gateway.posts.load(Ordering::SeqCst),1);
-        let id=intent.intent_id.clone();
-        store.call(deadline(),move |s|s.record_outcome(
-            &id,IntentState::Acknowledged,Some("fixture_exchange_order"),
-            "authenticated-fixture-venue-ack",now(),
-        )).await.unwrap();
+        assert!(
+            post_once(&store, &intent, deadline(), || gateway.send())
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(gateway.posts.load(Ordering::SeqCst), 1);
+        let id = intent.intent_id.clone();
+        store
+            .call(deadline(), move |s| {
+                s.record_outcome(
+                    &id,
+                    IntentState::Acknowledged,
+                    Some("fixture_exchange_order"),
+                    "authenticated-fixture-venue-ack",
+                    now(),
+                )
+            })
+            .await
+            .unwrap();
 
-        let at=now()+3;
-        let qty=Decimal::new(5,1);
-        let fee=Decimal::new(-125,5);
+        let at = now() + 3;
+        let qty = Decimal::new(5, 1);
+        let fee = Decimal::new(-125, 5);
         // Two real account-finance ingestion transactions: first one partial
         // fill and one matching fee bill, then the terminal completion.
         // Nothing is inserted into operation_receipts as a made-up settlement.
-        for (suffix,fill_at,filled,kind) in [
-            ("first",at,qty,IntentState::PartiallyFilled),
-            ("second",at+4,Decimal::ONE,IntentState::Filled),
+        for (suffix, fill_at, filled, kind) in [
+            ("first", at, qty, IntentState::PartiallyFilled),
+            ("second", at + 4, Decimal::ONE, IntentState::Filled),
         ] {
-            let fill_id=format!("t09-{suffix}");
-            let bill_id=format!("t09-bill-{suffix}");
-            let order_id="fixture_exchange_order";
-            let bill_key=format!("bill:{bill_id}");
-            let entry=okx_execution::FinanceEntry {
-                entry_id:format!("{bill_key}:FEE"),
-                economic_event_key:bill_key.clone(),
-                component:"FEE".into(),
-                allocation_leg:"account".into(),
-                amount:fee,
-                currency:"USDT".into(),
-                instance_id:None,
-                source_ref:format!("fill:{fill_id}"),
-                time:fill_at,
-                reverses_entry_id:None,
+            let fill_id = format!("t09-{suffix}");
+            let bill_id = format!("t09-bill-{suffix}");
+            let order_id = "fixture_exchange_order";
+            let bill_key = format!("bill:{bill_id}");
+            let entry = okx_execution::FinanceEntry {
+                entry_id: format!("{bill_key}:FEE"),
+                economic_event_key: bill_key.clone(),
+                component: "FEE".into(),
+                allocation_leg: "account".into(),
+                amount: fee,
+                currency: "USDT".into(),
+                instance_id: None,
+                source_ref: format!("fill:{fill_id}"),
+                time: fill_at,
+                reverses_entry_id: None,
             };
-            let ingest_id=intent.intent_id.clone();
-            let fill_id_ingest=fill_id.clone();
-            store.call(deadline(),move |s|s.ingest_page(
-                &okx_execution::IngestPage {
-                    fills:vec![okx_execution::Fill {
-                        fill_id:fill_id_ingest.clone(),
-                        instrument_id:"BTC-USDT-SWAP".into(),
-                        trade_id:format!("venue-{fill_id_ingest}"),
-                        exchange_order_id:order_id.into(),
-                        intent_id:Some(ingest_id),
-                        time:fill_at,
-                        qty,price:Decimal::from(5),fee,
-                        currency:"USDT".into(),side:"buy".into(),
-                    }],
-                    finance:vec![entry.clone()],
-                    cursor:Some(okx_execution::SourceCursor {
-                        source:"fills".into(),stream_partition:"SWAP".into(),
-                        cursor:String::new(),watermark:fill_at+1,
-                        generation:1,coverage_gaps:String::new(),
-                    }),
-                    ..Default::default()
-                }
-            )).await.unwrap();
-            let fill_id_for_bill=fill_id.clone();
-            store.call(deadline(),move |s|s.ingest_page(
-                &okx_execution::IngestPage {
-                    bills:vec![okx_execution::Bill {
-                        bill_id:bill_id.clone(),kind:"2:trade".into(),
-                        time:fill_at+1,amount:fee,currency:"USDT".into(),
-                        economic_event_key:bill_key.clone(),
-                    }],
-                    finance:vec![okx_execution::FinanceEntry {
-                        entry_id:format!("{bill_key}:FEE"),
-                        economic_event_key:bill_key,
-                        component:"FEE".into(),allocation_leg:"account".into(),
-                        amount:fee,currency:"USDT".into(),instance_id:None,
-                        source_ref:format!("bill:{bill_id}"),time:fill_at+1,
-                        reverses_entry_id:None,
-                    }],
-                    bill_order_sources:vec![okx_execution::BillOrderSource {
-                        bill_id,
-                        instrument_id:"BTC-USDT-SWAP".into(),
-                        exchange_order_id:"fixture_exchange_order".into(),
-                        trade_id:format!("venue-{fill_id_for_bill}"),
-                    }],
-                    cursor:Some(okx_execution::SourceCursor {
-                        source:"bills".into(),stream_partition:"account".into(),
-                        cursor:String::new(),watermark:fill_at+1,
-                        generation:1,coverage_gaps:String::new(),
-                    }),
-                    ..Default::default()
-                }
-            )).await.unwrap();
-            let target=intent.intent_id.clone();
-            let state=kind;
-            let settlement=store.call(deadline(),move |s|{
-                s.record_order_readback(
-                    &target,"fixture_exchange_order",state,filled,fill_at+1,
-                )?;
-                // One active protection per native intent; updating its
-                // size after the second fill is a venue-readback fixture.
-                // The SQL verifier rejects wrong side, trigger and amount.
-                let protection=okx_execution::ProtectionReceipt {
-                    intent_id:target.clone(),
-                    algo_id:format!("fixture_protection_{state:?}"),
-                    side:"sell".into(),quantity:filled,
-                    trigger_price:Decimal::from(4),
-                    trigger_basis:"mark".into(),
-                    verified_at:fill_at+1,
-                    source_digest:"f".repeat(64),
-                };
-                s.verify_protection(&protection)?;
-                let observed=s.protection(&target)?.ok_or(
-                    okx_execution::StoreError::Invalid(
-                        "FIXTURE_PROTECTION_READBACK_MISSING"
-                    )
-                )?;
-                if observed.quantity!=filled || observed.side!="sell"
-                    || observed.trigger_price!=Decimal::from(4)
-                {
-                    return Err(okx_execution::StoreError::Invalid(
-                        "FIXTURE_PROTECTION_READBACK_MISMATCH"
-                    ));
-                }
-                if state==IntentState::PartiallyFilled {
-                    s.bind_partial_entry_settlement(&target,fill_at+1,filled,fill_at+1)
-                } else {
-                    s.bind_terminal_entry_settlement(&target,fill_at+1,filled,fill_at+1)
-                }
-            }).await.unwrap();
+            let ingest_id = intent.intent_id.clone();
+            let fill_id_ingest = fill_id.clone();
+            store
+                .call(deadline(), move |s| {
+                    s.ingest_page(&okx_execution::IngestPage {
+                        fills: vec![okx_execution::Fill {
+                            fill_id: fill_id_ingest.clone(),
+                            instrument_id: "BTC-USDT-SWAP".into(),
+                            trade_id: format!("venue-{fill_id_ingest}"),
+                            exchange_order_id: order_id.into(),
+                            intent_id: Some(ingest_id),
+                            time: fill_at,
+                            qty,
+                            price: Decimal::from(5),
+                            fee,
+                            currency: "USDT".into(),
+                            side: "buy".into(),
+                        }],
+                        finance: vec![entry.clone()],
+                        cursor: Some(okx_execution::SourceCursor {
+                            source: "fills".into(),
+                            stream_partition: "SWAP".into(),
+                            cursor: String::new(),
+                            watermark: fill_at + 1,
+                            generation: 1,
+                            coverage_gaps: String::new(),
+                        }),
+                        ..Default::default()
+                    })
+                })
+                .await
+                .unwrap();
+            let fill_id_for_bill = fill_id.clone();
+            store
+                .call(deadline(), move |s| {
+                    s.ingest_page(&okx_execution::IngestPage {
+                        bills: vec![okx_execution::Bill {
+                            bill_id: bill_id.clone(),
+                            kind: "2:trade".into(),
+                            time: fill_at + 1,
+                            amount: fee,
+                            currency: "USDT".into(),
+                            economic_event_key: bill_key.clone(),
+                        }],
+                        finance: vec![okx_execution::FinanceEntry {
+                            entry_id: format!("{bill_key}:FEE"),
+                            economic_event_key: bill_key,
+                            component: "FEE".into(),
+                            allocation_leg: "account".into(),
+                            amount: fee,
+                            currency: "USDT".into(),
+                            instance_id: None,
+                            source_ref: format!("bill:{bill_id}"),
+                            time: fill_at + 1,
+                            reverses_entry_id: None,
+                        }],
+                        bill_order_sources: vec![okx_execution::BillOrderSource {
+                            bill_id,
+                            instrument_id: "BTC-USDT-SWAP".into(),
+                            exchange_order_id: "fixture_exchange_order".into(),
+                            trade_id: format!("venue-{fill_id_for_bill}"),
+                        }],
+                        cursor: Some(okx_execution::SourceCursor {
+                            source: "bills".into(),
+                            stream_partition: "account".into(),
+                            cursor: String::new(),
+                            watermark: fill_at + 1,
+                            generation: 1,
+                            coverage_gaps: String::new(),
+                        }),
+                        ..Default::default()
+                    })
+                })
+                .await
+                .unwrap();
+            let target = intent.intent_id.clone();
+            let state = kind;
+            let settlement = store
+                .call(deadline(), move |s| {
+                    s.record_order_readback(
+                        &target,
+                        "fixture_exchange_order",
+                        state,
+                        filled,
+                        fill_at + 1,
+                    )?;
+                    // One active protection per native intent; updating its
+                    // size after the second fill is a venue-readback fixture.
+                    // The SQL verifier rejects wrong side, trigger and amount.
+                    let protection = okx_execution::ProtectionReceipt {
+                        intent_id: target.clone(),
+                        algo_id: format!("fixture_protection_{state:?}"),
+                        side: "sell".into(),
+                        quantity: filled,
+                        trigger_price: Decimal::from(4),
+                        trigger_basis: "mark".into(),
+                        verified_at: fill_at + 1,
+                        source_digest: "f".repeat(64),
+                    };
+                    s.verify_protection(&protection)?;
+                    let observed =
+                        s.protection(&target)?
+                            .ok_or(okx_execution::StoreError::Invalid(
+                                "FIXTURE_PROTECTION_READBACK_MISSING",
+                            ))?;
+                    if observed.quantity != filled
+                        || observed.side != "sell"
+                        || observed.trigger_price != Decimal::from(4)
+                    {
+                        return Err(okx_execution::StoreError::Invalid(
+                            "FIXTURE_PROTECTION_READBACK_MISMATCH",
+                        ));
+                    }
+                    if state == IntentState::PartiallyFilled {
+                        s.bind_partial_entry_settlement(&target, fill_at + 1, filled, fill_at + 1)
+                    } else {
+                        s.bind_terminal_entry_settlement(&target, fill_at + 1, filled, fill_at + 1)
+                    }
+                })
+                .await
+                .unwrap();
             assert_eq!(
                 settlement.cumulative_entry_usd,
-                if kind==IntentState::PartiallyFilled {
-                    Decimal::new(250125,5)
+                if kind == IntentState::PartiallyFilled {
+                    Decimal::new(250125, 5)
                 } else {
-                    Decimal::new(50025,4)
+                    Decimal::new(50025, 4)
                 },
                 "source-linked native fill/bill money, no double fee"
             );
         }
-        let terminal_at=at+5;
-        let campaign=format!("sha256:{}", "c".repeat(64));
-        let (money,proof)=store.call(deadline(),move |s|{
-            s.acknowledge_central_release(
-                "fixture_reservation","fixture-central-release-evidence",
-            )?;
-            for partition in ["SPOT","MARGIN","FUTURES","OPTION"] {
-                s.ingest_page(&okx_execution::IngestPage {
-                    cursor:Some(okx_execution::SourceCursor {
-                        source:"fills".into(),stream_partition:partition.into(),
-                        cursor:String::new(),watermark:terminal_at,
-                        generation:1,coverage_gaps:String::new(),
-                    }),
-                    ..Default::default()
-                })?;
-            }
-            let from=s.meta().initialized_at+1;
-            s.seal_captured_campaign_baseline(&campaign,from,terminal_at)
-        }).await.unwrap();
-        assert_eq!(money,Decimal::new(50025,4));
-        assert!(money<Decimal::from(10));
-        let campaign_again=format!("sha256:{}", "c".repeat(64));
-        let (again,proof_again)=store.call(deadline(),move |s|{
-            let from=s.meta().initialized_at+1;
-            s.seal_captured_campaign_baseline(
-                &campaign_again,from,terminal_at,
-            )
-        }).await.unwrap();
-        assert_eq!((again,proof_again),(money,proof));
-        assert_eq!(gateway.posts.load(Ordering::SeqCst),1);
+        let terminal_at = at + 5;
+        let campaign = format!("sha256:{}", "c".repeat(64));
+        let (money, proof) = store
+            .call(deadline(), move |s| {
+                s.acknowledge_central_release(
+                    "fixture_reservation",
+                    "fixture-central-release-evidence",
+                )?;
+                for partition in ["SPOT", "MARGIN", "FUTURES", "OPTION"] {
+                    s.ingest_page(&okx_execution::IngestPage {
+                        cursor: Some(okx_execution::SourceCursor {
+                            source: "fills".into(),
+                            stream_partition: partition.into(),
+                            cursor: String::new(),
+                            watermark: terminal_at,
+                            generation: 1,
+                            coverage_gaps: String::new(),
+                        }),
+                        ..Default::default()
+                    })?;
+                }
+                let from = s.meta().initialized_at + 1;
+                s.seal_captured_campaign_baseline(&campaign, from, terminal_at)
+            })
+            .await
+            .unwrap();
+        assert_eq!(money, Decimal::new(50025, 4));
+        assert!(money < Decimal::from(10));
+        let campaign_again = format!("sha256:{}", "c".repeat(64));
+        let (again, proof_again) = store
+            .call(deadline(), move |s| {
+                let from = s.meta().initialized_at + 1;
+                s.seal_captured_campaign_baseline(&campaign_again, from, terminal_at)
+            })
+            .await
+            .unwrap();
+        assert_eq!((again, proof_again), (money, proof));
+        assert_eq!(gateway.posts.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
