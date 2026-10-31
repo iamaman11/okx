@@ -5,7 +5,7 @@ use crate::{
 };
 use okx_api::{AccountBill, FillHistory};
 use okx_execution::{
-    AccountSqlStatementStat, Bill, CashFlow, Fill, FinanceEntry, FundingEvent, IngestPage,
+    AccountSqlStatementStat, Bill, CashFlow, EntryOrderFeeLink, Fill, FinanceEntry, FundingEvent, IngestPage,
     NavPoint, SourceCursor, StoreError, StoreResult, StrategyValuationEvidence,
     UsdConversionEvidence, ValuationPosition, VenueMark,
 };
@@ -886,6 +886,25 @@ async fn capture_bills(
                 let owner = s
                     .by_client_order_id(&b.client_order_id)?
                     .or(s.by_exchange_order_id(&b.order_id)?);
+                let fee = optional_d(&b.fee)?;
+                if fee < Decimal::ZERO {
+                    if let Some(i) = owner.as_ref().filter(|i| i.risk_increase)
+                        && i.exchange_order_id.as_deref() == Some(b.order_id.as_str())
+                        && i.instrument_id == b.instrument_id
+                    {
+                        if b.ccy != "USDT" {
+                            return Err(StoreError::Invalid("ENTRY_FEE_CURRENCY_UNPROVEN"));
+                        }
+                        page.entry_order_fee_links.push(EntryOrderFeeLink {
+                            bill_id: b.bill_id.clone(),
+                            intent_id: i.intent_id.clone(),
+                            exchange_order_id: b.order_id.clone(),
+                            instrument_id: b.instrument_id.clone(),
+                            bill_at: time,
+                            fee_usdt: fee,
+                        });
+                    }
+                }
                 let instance = owner.map(|i| i.plan.strategy_instance);
                 let amount = optional_d(&b.balance_change)?;
                 let residual_component = residual_bill_component(&b.bill_type, &b.pnl, &b.fee)?;

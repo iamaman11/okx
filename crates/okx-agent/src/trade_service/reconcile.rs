@@ -937,8 +937,8 @@ impl TradeService {
         }
         let venue_at =
             terminal_order_update_time(Some(venue))?.ok_or("PARTIAL_ENTRY_UPDATE_TIME_MISSING")?;
-        // A RELEASED reservation cannot accept another partial mutation.
-        // Its original terminal receipt must already be present in SQL.
+        // Inspect before any native money mutation. Existing central RELEASE
+        // remains terminal even when a late fee requires a new debit.
         let inspection = self
             .risk
             .request(self.risk_command(
@@ -951,20 +951,6 @@ impl TradeService {
             ))
             .await
             .map_err(str::to_owned)?;
-        if inspection.reservation_state == Some(RiskReservationState::Released) {
-            let existing_id = format!("entry-settlement:{}", i.intent_id);
-            let recorded = r
-                .execution
-                .store
-                .call(deadline(), move |s| s.operation(&existing_id))
-                .await
-                .map_err(err)?;
-            return if recorded.is_some_and(|proof| proof.kind == "ENTRY_SETTLEMENT_PROVEN") {
-                Ok(())
-            } else {
-                Err("LATE_ENTRY_SETTLEMENT_AFTER_RELEASE_REQUIRES_RECONCILIATION".into())
-            };
-        }
         let fills = fill_cursor.ok_or("PARTIAL_ENTRY_FILLS_UNCOVERED")?;
         let bills = bill_cursor.ok_or("PARTIAL_ENTRY_BILLS_UNCOVERED")?;
         if !fills.cursor.is_empty()
@@ -979,6 +965,71 @@ impl TradeService {
         let through = fills.watermark.min(bills.watermark);
         if through < venue_at {
             return Err("PARTIAL_ENTRY_FINANCIAL_COVERAGE_PENDING".into());
+        }
+        if inspection.reservation_state == Some(RiskReservationState::Released) {
+            let id=i.intent_id.clone();
+            let late=r.execution.store.call(deadline(),move |s|s.entry_late_pending(&id))
+                .await.map_err(err)?;
+            if !late {
+                let existing_id=format!("entry-settlement:{}",i.intent_id);
+                let recorded=r.execution.store.call(deadline(),move |s|s.operation(&existing_id))
+                    .await.map_err(err)?;
+                return if recorded.is_some_and(|w|w.kind=="ENTRY_SETTLEMENT_PROVEN"){
+                    Ok(())
+                }else{
+                    Err("RELEASED_ENTRY_TERMINAL_SOURCE_MISSING".into())
+                };
+            }
+            if !i.state.terminal() {
+                return Err("LATE_ENTRY_ORDER_NOT_TERMINAL".into());
+            }
+            let id=i.intent_id.clone();
+            let late_proof=r.execution.store.call(deadline(),move |s|{
+                s.bind_late_entry_settlement(&id,venue_at,filled,through)
+            }).await.map_err(err)?;
+            if late_proof.schema!="okx.entry-late-settlement/v1"
+                || late_proof.reservation_key!=receipt.reservation_key
+                || late_proof.venue_order_id!=venue.order_id {
+                return Err("LATE_ENTRY_ACCOUNT_PROOF_MISSING".into());
+            }
+            for _ in 0..3 {
+                let checked=self.risk.request(self.risk_command(
+                    &state,format!("inspect_late_{}",i.client_order_id),
+                    RiskCommandAction::Inspect{
+                        reservation_key:receipt.reservation_key.clone(),
+                        plan_sha256:i.plan_hash.clone(),
+                    }
+                )).await.map_err(str::to_owned)?;
+                if checked.reservation_state!=Some(RiskReservationState::Released){
+                    return Err("LATE_ENTRY_RESERVATION_CHANGED".into());
+                }
+                let sequence=checked.risk_book_sequence
+                    .ok_or("LATE_ENTRY_RISK_SEQUENCE_MISSING")?;
+                let done=self.risk.request(self.risk_command(
+                    &state,format!("settle_late_{}_r{}",i.client_order_id,
+                        late_proof.settlement_revision),
+                    RiskCommandAction::SettleEntry{
+                        reservation_key:late_proof.reservation_key.clone(),
+                        plan_sha256:late_proof.plan_hash.clone(),
+                        expected_risk_book_sequence:sequence,
+                        cumulative_entry_usd:exact(late_proof.cumulative_entry_usd),
+                        settlement_revision:late_proof.settlement_revision,
+                        source_digest:late_proof.source_digest.clone(),
+                    }
+                )).await.map_err(str::to_owned)?;
+                if done.status==RiskDecisionStatus::Updated {
+                    r.execution.store.call(deadline(),move |s|{
+                        s.acknowledge_late_entry_settlement(&late_proof)
+                    }).await.map_err(err)?;
+                    return Ok(());
+                }
+                if !matches!(done.reason.as_deref(),
+                    Some("STALE_SESSION_OR_BOOK_SEQUENCE"|"ENTRY_SETTLEMENT_SOURCE_OR_STATE_UNPROVEN"))
+                {
+                    return Err(done.reason.unwrap_or("LATE_ENTRY_SETTLEMENT_DENIED".into()));
+                }
+            }
+            return Err("LATE_ENTRY_SETTLEMENT_CAS_BUSY".into());
         }
         let partial_id = i.intent_id.clone();
         let proof = r
@@ -1127,6 +1178,14 @@ impl TradeService {
             .await
             .map_err(str::to_owned)?;
         if observed.reservation_state == Some(RiskReservationState::Released) {
+            // A late bill may already be captured but not yet acknowledged
+            // by central SETTLE_ENTRY. Never overwrite that pending marker
+            // with the original terminal release acknowledgement.
+            let id=i.intent_id.clone();
+            if r.execution.store.call(deadline(),move |s|s.entry_late_pending(&id))
+                .await.map_err(err)? {
+                return Err("LATE_ENTRY_SETTLEMENT_PENDING".into());
+            }
             let k = receipt.reservation_key.clone();
             let e = digest(&observed)?;
             r.execution

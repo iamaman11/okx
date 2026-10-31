@@ -411,12 +411,26 @@ pub struct SourceCursor {
     pub generation: i64,
     pub coverage_gaps: String,
 }
+/// Authenticated venue bill -> exact previously POSTed order. The SQL
+/// ingester independently verifies the immutable bill, fee finance entry,
+/// order identity and owner in the SAME capture transaction.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EntryOrderFeeLink {
+    pub bill_id: String,
+    pub intent_id: String,
+    pub exchange_order_id: String,
+    pub instrument_id: String,
+    pub bill_at: i64,
+    pub fee_usdt: Decimal,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct IngestPage {
     pub funding_events: Vec<FundingEvent>,
     pub attributed_funding_ids: Vec<String>,
     pub fills: Vec<Fill>,
     pub bills: Vec<Bill>,
+    pub entry_order_fee_links: Vec<EntryOrderFeeLink>,
     pub finance: Vec<FinanceEntry>,
     pub cash_flows: Vec<CashFlow>,
     pub allocations: Vec<Allocation>,

@@ -887,6 +887,61 @@ fn e1_partial_and_final_entry_settlement_are_monotone_and_not_double_counted() {
                     .unwrap(),
                 terminal
             );
+            // A new order-linked fee bill arrives after terminal RELEASE.
+            // The first fill fee is already in the immutable terminal total;
+            // the independent late charge must never debit that fee twice.
+            reopened.acknowledge_central_release("central-key","signed-released").unwrap();
+            let late_fee=Decimal::new(-1,2);
+            reopened.ingest_page(&IngestPage {
+                bills:vec![Bill {
+                    bill_id:"late".into(),kind:"2:trade".into(),time:10,
+                    amount:late_fee,currency:"USDT".into(),
+                    economic_event_key:"bill:late".into(),
+                }],
+                finance:vec![FinanceEntry {
+                    entry_id:"bill:late:FEE".into(),economic_event_key:"bill:late".into(),
+                    component:"FEE".into(),allocation_leg:"account".into(),
+                    amount:late_fee,currency:"USDT".into(),instance_id:None,
+                    source_ref:"bill:late".into(),time:10,reverses_entry_id:None,
+                }],
+                entry_order_fee_links:vec![EntryOrderFeeLink {
+                    bill_id:"late".into(),intent_id:"intent".into(),
+                    exchange_order_id:"venue-order".into(),
+                    instrument_id:"BTC-USDT-SWAP".into(),bill_at:10,fee_usdt:late_fee,
+                }],
+                cursor:Some(SourceCursor {
+                    source:"bills".into(),stream_partition:"account".into(),
+                    cursor:String::new(),watermark:11,generation:1,
+                    coverage_gaps:String::new(),
+                }),
+                ..Default::default()
+            }).unwrap();
+            reopened.ingest_page(&IngestPage {
+                cursor:Some(SourceCursor {
+                    source:"fills".into(),stream_partition:"SWAP".into(),
+                    cursor:String::new(),watermark:11,generation:1,
+                    coverage_gaps:String::new(),
+                }),
+                ..Default::default()
+            }).unwrap();
+            assert!(reopened.entry_late_pending("intent").unwrap());
+            let late=reopened.bind_late_entry_settlement("intent",9,qty,11).unwrap();
+            assert_eq!(late.schema,"okx.entry-late-settlement/v1");
+            assert_eq!(late.settlement_revision,3);
+            assert_eq!(late.cumulative_entry_usd,Decimal::new(10003,2));
+            assert_eq!(reopened.bind_late_entry_settlement("intent",9,qty,11).unwrap(),late);
+            // The central RiskBook accepted exactly THIS monetary revision.
+            reopened.acknowledge_late_entry_settlement(&late).unwrap();
+            assert!(!reopened.entry_late_pending("intent").unwrap());
+            assert_eq!(reopened.bind_late_entry_settlement("intent",9,qty,11).unwrap(),late);
+            assert!(reopened.connection.execute(
+                "UPDATE operation_receipts SET result_ref='fake'
+                 WHERE operation_id='entry-late:intent:r3'",[]
+            ).is_err(),"append-only source-backed late receipt cannot be rewritten");
+            let terminal_again:EntrySettlementEvidence=serde_json::from_str(
+                &reopened.operation("entry-settlement:intent").unwrap().unwrap().result_ref
+            ).unwrap();
+            assert_eq!(terminal_again,terminal,"late bill cannot rewrite terminal history");
             return;
         }
     }

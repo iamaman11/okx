@@ -481,6 +481,30 @@ impl AccountStore {
                  WHERE e.economic_event_key=b.economic_event_key
                    AND e.component='FEE'
                    AND f.time>?1 AND f.time<=?2
+               )
+               AND NOT EXISTS(
+                 SELECT 1 FROM operation_receipts own
+                 JOIN risk_receipts rr
+                   ON rr.intent_id=json_extract(own.result_ref,'$.intent_id')
+                     AND rr.state='RELEASED'
+                 JOIN operation_receipts terminal
+                   ON terminal.operation_id='entry-settlement:'||rr.intent_id
+                     AND terminal.kind='ENTRY_SETTLEMENT_PROVEN'
+                 LEFT JOIN operation_receipts late
+                   ON late.operation_id='entry-late-head:'||rr.intent_id
+                     AND late.kind='ENTRY_LATE_HEAD'
+                 LEFT JOIN operation_receipts late_ack
+                   ON late_ack.operation_id='entry-late-settled:'||
+                     rr.intent_id||':r'||json_extract(late.result_ref,'$.settlement_revision')
+                     AND late_ack.kind='ENTRY_LATE_SETTLED'
+                     AND late_ack.result_ref=json_extract(late.result_ref,'$.source_digest')
+                 WHERE own.operation_id='entry-bill-owner:'||b.bill_id
+                   AND own.kind='ENTRY_ORDER_FEE_INDEX'
+                   AND own.request_hash=rr.plan_hash
+                   AND b.time<=COALESCE(
+                     json_extract(late.result_ref,'$.source_covered_through_ms'),
+                     json_extract(terminal.result_ref,'$.source_covered_through_ms'))
+                   AND (late.operation_id IS NULL OR late_ack.operation_id IS NOT NULL)
                ) LIMIT 1)",
             params![from_ms, through_ms],
             |row| row.get(0),
@@ -544,15 +568,62 @@ impl AccountStore {
             let operation_id: String = row.get(0)?;
             let encoded: String = row.get(1)?;
             let time: i64 = row.get(2)?;
-            let value: EntrySettlementEvidence = serde_json::from_str(&encoded)
+            let terminal: EntrySettlementEvidence = serde_json::from_str(&encoded)
                 .map_err(|_| StoreError::Invalid("ENTRY_OPENING_SETTLEMENT_CORRUPT"))?;
-            if operation_id != format!("entry-settlement:{}", value.intent_id)
-                || value.schema != "okx.entry-terminal-settlement/v1"
-                || value.account_key != self.meta.account_key
-                || value.venue_update_ms != time
-                || value.cumulative_entry_usd <= Decimal::ZERO
-                || value.source_digest.len() != 64
-                || !value.source_digest.bytes().all(|b| b.is_ascii_hexdigit())
+            if operation_id != format!("entry-settlement:{}", terminal.intent_id)
+                || terminal.schema != "okx.entry-terminal-settlement/v1"
+                || terminal.account_key != self.meta.account_key
+                || terminal.venue_update_ms != time
+            {
+                return Err(StoreError::Invalid("ENTRY_OPENING_SETTLEMENT_INVALID"));
+            }
+            // Additional fee bills are cumulative revisions, never a
+            // second historical entry. Only the exact central-settled latest
+            // revision may replace the terminal amount in an opening proof.
+            let latest:Option<String>=self.connection.query_row(
+                "SELECT result_ref FROM operation_receipts
+                 WHERE operation_id='entry-late-head:'||?1 AND kind='ENTRY_LATE_HEAD'",
+                [&terminal.intent_id],|r|r.get(0)
+            ).optional()?;
+            let value:EntrySettlementEvidence=if let Some(revision)=latest {
+                let late:EntrySettlementEvidence=serde_json::from_str(&revision)
+                    .map_err(|_| StoreError::Invalid("ENTRY_OPENING_LATE_CORRUPT"))?;
+                let immutable:Option<String>=self.connection.query_row(
+                    "SELECT result_ref FROM operation_receipts
+                     WHERE operation_id=?1 AND kind='ENTRY_LATE_SETTLEMENT_PROVEN'
+                       AND request_hash=?2",
+                    params![format!("entry-late:{}:r{}",late.intent_id,
+                        late.settlement_revision),late.plan_hash],
+                    |r|r.get(0)
+                ).optional()?;
+                let proof:Option<String>=self.connection.query_row(
+                    "SELECT result_ref FROM operation_receipts
+                     WHERE operation_id=?1 AND kind='ENTRY_LATE_SETTLED'
+                       AND request_hash=?2",
+                    params![format!("entry-late-settled:{}:r{}",late.intent_id,
+                        late.settlement_revision),late.plan_hash],
+                    |r|r.get(0)
+                ).optional()?;
+                if late.schema!="okx.entry-late-settlement/v1"
+                    || late.account_key!=terminal.account_key
+                    || late.intent_id!=terminal.intent_id
+                    || late.plan_hash!=terminal.plan_hash
+                    || late.reservation_key!=terminal.reservation_key
+                    || late.venue_order_id!=terminal.venue_order_id
+                    || late.venue_update_ms!=terminal.venue_update_ms
+                    || late.settlement_revision<=terminal.settlement_revision
+                    || late.cumulative_entry_usd<terminal.cumulative_entry_usd
+                    || immutable.as_deref()!=Some(revision.as_str())
+                    || proof.as_deref()!=Some(late.source_digest.as_str())
+                    || late.source_covered_through_ms>through_ms
+                {
+                    return Err(StoreError::Invalid("ENTRY_OPENING_LATE_UNSETTLED"));
+                }
+                late
+            }else{terminal};
+            if value.cumulative_entry_usd<=Decimal::ZERO
+                || value.source_digest.len()!=64
+                || !value.source_digest.bytes().all(|b|b.is_ascii_hexdigit())
             {
                 return Err(StoreError::Invalid("ENTRY_OPENING_SETTLEMENT_INVALID"));
             }
@@ -975,6 +1046,88 @@ impl AccountStore {
             conservative_fee_usdt: fees,
             source_digest: format!("{:x}", hasher.finalize()),
         })
+    }
+
+    /// Extra order-attested debit bills are distinct from the fill's first
+    /// canonical fee. Every linked invoice has independent source identity;
+    /// a newer bill never rewrites a previous receipt or returns capacity.
+    /// The existing account writer reads bounded PK-prefix rows, no archives.
+    pub fn intent_additional_entry_fee_evidence(
+        &self,
+        id: &str,
+        through: i64,
+    ) -> StoreResult<(Decimal, String)> {
+        use sha2::{Digest, Sha256};
+        let covered = self.cursor("bills", "account")?
+            .ok_or(StoreError::Invalid("ENTRY_EXTRA_BILLS_UNCOVERED"))?;
+        if covered.watermark < through || !covered.cursor.is_empty()
+            || !covered.coverage_gaps.is_empty() || covered.generation <= 0 {
+            return Err(StoreError::Invalid("ENTRY_EXTRA_BILLS_UNCOVERED"));
+        }
+        let intent = self.intent(id)?.ok_or(StoreError::Invalid("ENTRY_BILL_INTENT_MISSING"))?;
+        let prefix = format!("entry-bill:{id}:");
+        let bound = format!("{prefix}~");
+        let mut q = self.connection.prepare(
+            "SELECT operation_id,kind,request_hash,result_ref,committed_at
+             FROM operation_receipts WHERE operation_id>=?1 AND operation_id<?2
+             ORDER BY operation_id LIMIT 10001",
+        )?;
+        let mut rows = q.query(params![prefix,bound])?;
+        let mut extras = Decimal::ZERO;
+        let mut digest = Sha256::new();
+        digest.update(b"okx.intent-extra-entry-fee/v1");
+        digest.update(id.as_bytes());
+        digest.update(through.to_le_bytes());
+        let mut count=0_u64;
+        while let Some(row) = rows.next()? {
+            count+=1;
+            if count>10000 { return Err(StoreError::Invalid("ENTRY_EXTRA_BILLS_TOO_MANY")); }
+            let (key,kind,hash,encoded,at):(String,String,String,String,i64)=
+                (row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?);
+            let link: EntryOrderFeeLink=serde_json::from_str(&encoded)
+                .map_err(|_| StoreError::Invalid("ENTRY_EXTRA_BILL_RECEIPT_CORRUPT"))?;
+            if kind!="ENTRY_ORDER_FEE_PROVEN"
+                || key!=format!("entry-bill:{id}:{}",link.bill_id)
+                || hash!=intent.plan_hash || link.intent_id!=id
+                || link.instrument_id!=intent.instrument_id
+                || Some(link.exchange_order_id.as_str())!=intent.exchange_order_id.as_deref()
+                || link.bill_at!=at || link.fee_usdt>=Decimal::ZERO
+            {
+                return Err(StoreError::Invalid("ENTRY_EXTRA_BILL_IDENTITY_MISMATCH"));
+            }
+            if at>through { continue; }
+            let source: Option<(i64,String,String,String,bool)> = self.connection.query_row(
+                "SELECT b.time,b.currency,e.amount,e.entry_id,
+                    EXISTS(SELECT 1 FROM finance_source_links lf
+                        JOIN fills f ON lf.source_ref='fill:'||f.fill_id
+                        WHERE lf.entry_id=e.entry_id AND f.intent_id=?2)
+                 FROM bills b JOIN finance_entries e
+                    ON e.economic_event_key=b.economic_event_key
+                       AND e.component='FEE' AND e.allocation_leg='account'
+                 JOIN finance_source_links lb ON lb.entry_id=e.entry_id
+                       AND lb.source_ref='bill:'||b.bill_id
+                 WHERE b.bill_id=?1",
+                params![link.bill_id,id],
+                |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?)),
+            ).optional()?;
+            let (bill_at,ccy,charge,event_id,first_fee)=source
+                .ok_or(StoreError::Invalid("ENTRY_EXTRA_BILL_SOURCE_UNVERIFIED"))?;
+            if bill_at!=link.bill_at || ccy!="USDT"
+                || decimal(charge.clone())?!=link.fee_usdt {
+                return Err(StoreError::Invalid("ENTRY_EXTRA_BILL_AMOUNT_CHANGED"));
+            }
+            if !first_fee {
+                extras=extras.checked_add(entry_fee_debit(link.fee_usdt))
+                    .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))?;
+                let bytes=serde_json::to_vec(&(link,bill_at,ccy,charge,event_id))
+                    .map_err(|_| StoreError::Invalid("ENTRY_EXTRA_BILL_DIGEST_FAILED"))?;
+                digest.update((bytes.len() as u64).to_le_bytes());
+                digest.update(bytes);
+            }
+        }
+        Ok((extras,if extras>Decimal::ZERO {
+            format!("{:x}",digest.finalize())
+        } else { String::new() }))
     }
 
     /// Read-only F1/E1 source cross-check. Native fill fee and bill fee must
@@ -3112,6 +3265,115 @@ impl AccountStore {
                 .checked_add(added_loss)
                 .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))?;
             tx.execute("UPDATE account_policy SET campaign_loss=?1", [exact(total)])?;
+        }
+        // The authenticated bill/order link belongs to THIS ingestion
+        // transaction. A source cursor cannot advance without identical
+        // immutable bill, finance event, venue order and account owner.
+        if !page.entry_order_fee_links.is_empty() {
+            tx.execute_batch(
+                "CREATE TRIGGER IF NOT EXISTS immutable_entry_fee_owner_update
+                 BEFORE UPDATE ON operation_receipts
+                 WHEN OLD.kind IN ('ENTRY_ORDER_FEE_PROVEN','ENTRY_ORDER_FEE_INDEX')
+                 BEGIN SELECT RAISE(ABORT,'IMMUTABLE_ENTRY_FEE_OWNER'); END;
+                 CREATE TRIGGER IF NOT EXISTS immutable_entry_fee_owner_delete
+                 BEFORE DELETE ON operation_receipts
+                 WHEN OLD.kind IN ('ENTRY_ORDER_FEE_PROVEN','ENTRY_ORDER_FEE_INDEX')
+                 BEGIN SELECT RAISE(ABORT,'IMMUTABLE_ENTRY_FEE_OWNER'); END;"
+            )?;
+        }
+        for link in &page.entry_order_fee_links {
+            if link.bill_id.is_empty() || link.intent_id.is_empty()
+                || link.exchange_order_id.is_empty()
+                || !link.instrument_id.ends_with("-USDT-SWAP")
+                || link.fee_usdt >= Decimal::ZERO || link.bill_at <= 0
+            {
+                return Err(StoreError::Invalid("ENTRY_BILL_LINK_INVALID"));
+            }
+            let owner: Option<(String, String, i64)> = tx.query_row(
+                "SELECT i.instrument_id,i.plan_hash,i.begin_post_at FROM intents i
+                 WHERE i.intent_id=?1 AND i.exchange_order_id=?2
+                   AND i.risk_increase=1",
+                params![link.intent_id,link.exchange_order_id],
+                |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
+            ).optional()?;
+            let (instrument,plan_hash,posted_at) = owner
+                .ok_or(StoreError::Invalid("ENTRY_BILL_ORDER_UNVERIFIED"))?;
+            if instrument != link.instrument_id || posted_at <= 0
+                || posted_at > link.bill_at {
+                return Err(StoreError::Invalid("ENTRY_BILL_ORDER_UNVERIFIED"));
+            }
+            let key = format!("bill:{}", link.bill_id);
+            let canonical: Option<(i64,String,String,String)> = tx.query_row(
+                "SELECT b.time,b.currency,e.amount,e.entry_id FROM bills b
+                 JOIN finance_entries e ON e.economic_event_key=b.economic_event_key
+                  AND e.component='FEE' AND e.allocation_leg='account'
+                 JOIN finance_source_links l ON l.entry_id=e.entry_id
+                  AND l.source_ref=?2
+                 WHERE b.bill_id=?1 AND b.economic_event_key=?2",
+                params![link.bill_id,key],
+                |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)),
+            ).optional()?;
+            let (bill_at,ccy,amount,entry_id) = canonical
+                .ok_or(StoreError::Invalid("ENTRY_BILL_FINANCE_PROVENANCE_MISSING"))?;
+            if bill_at != link.bill_at || ccy != "USDT"
+                || decimal(amount)? != link.fee_usdt {
+                return Err(StoreError::Invalid("ENTRY_BILL_AMOUNT_OR_CURRENCY_MISMATCH"));
+            }
+            let operation_id = format!("entry-bill:{}:{}", link.intent_id,link.bill_id);
+            let encoded = serde_json::to_string(link)
+                .map_err(|_| StoreError::Invalid("ENTRY_BILL_LINK_SERIALIZATION_FAILED"))?;
+            let first_seen = tx.execute(
+                "INSERT INTO operation_receipts(operation_id,kind,request_hash,result_ref,committed_at)
+                 VALUES(?1,'ENTRY_ORDER_FEE_PROVEN',?2,?3,?4)
+                 ON CONFLICT(operation_id) DO NOTHING",
+                params![operation_id,plan_hash,encoded,link.bill_at],
+            )?;
+            let old:(String,String,String,i64)=tx.query_row(
+                "SELECT kind,request_hash,result_ref,committed_at
+                 FROM operation_receipts WHERE operation_id=?1",
+                [operation_id],
+                |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)),
+            )?;
+            if old != ("ENTRY_ORDER_FEE_PROVEN".into(),plan_hash.clone(),encoded.clone(),link.bill_at) {
+                return Err(StoreError::Invalid("ENTRY_BILL_LINK_IMMUTABLE_CONFLICT"));
+            }
+            // One immutable bill-id read index for historical continuity.
+            // It points to the same source bytes, not another financial
+            // debit or owner, and avoids a million-intent correlated scan.
+            let bill_index=format!("entry-bill-owner:{}",link.bill_id);
+            tx.execute(
+                "INSERT INTO operation_receipts(operation_id,kind,request_hash,result_ref,committed_at)
+                 VALUES(?1,'ENTRY_ORDER_FEE_INDEX',?2,?3,?4)
+                 ON CONFLICT(operation_id) DO NOTHING",
+                params![bill_index,plan_hash,encoded,link.bill_at],
+            )?;
+            let indexed:(String,String,String,i64)=tx.query_row(
+                "SELECT kind,request_hash,result_ref,committed_at
+                 FROM operation_receipts WHERE operation_id=?1",
+                [bill_index],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)),
+            )?;
+            if indexed!=("ENTRY_ORDER_FEE_INDEX".into(),plan_hash,encoded,link.bill_at) {
+                return Err(StoreError::Invalid("ENTRY_BILL_INDEX_CONFLICT"));
+            }
+            // A newly observed independent fee after terminal RELEASE
+            // rejoins the SAME bounded maintenance scan for central debit.
+            // Never quietly mark the account settled at an older amount.
+            if first_seen == 1 {
+                let original_fee: bool = tx.query_row(
+                    "SELECT EXISTS(
+                        SELECT 1 FROM finance_source_links src
+                        JOIN fills f ON src.source_ref='fill:'||f.fill_id
+                        WHERE src.entry_id=?1 AND f.intent_id=?2)",
+                    params![entry_id,link.intent_id],|r|r.get(0)
+                )?;
+                if !original_fee {
+                    tx.execute(
+                        "UPDATE risk_receipts SET state='LATE_SETTLEMENT_PENDING'
+                         WHERE intent_id=?1 AND state='RELEASED'",
+                        [&link.intent_id],
+                    )?;
+                }
+            }
         }
         for l in &page.lots {
             if l.remaining_qty < Decimal::ZERO

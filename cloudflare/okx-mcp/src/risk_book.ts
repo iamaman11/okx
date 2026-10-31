@@ -792,33 +792,48 @@ export async function settleEntrySpend(
         return {status:"DENIED" as const,reason:"ENTRY_SETTLEMENT_REVISION_CONFLICT"};
       return {status:"UPDATED" as const,book_sequence:meta.sequence};
     }
-    // A strictly NEW cumulative settlement requires the exact current
-    // global CAS and an active post-once intent; no terminal revival.
-    if(!["POSTED","UNKNOWN","OPEN"].includes(entry.state)||
-       meta.sequence!==native.expected_book_sequence)
+    // A new authenticated native SQL revision can be posted after RELEASE:
+    // late venue bills are actual campaign spend, not a reason to re-open a
+    // position or resurrect a consumed POST fence. Exact CAS still required.
+    const released=entry.state==="RELEASED";
+    if(!["POSTED","UNKNOWN","OPEN","RELEASED"].includes(entry.state)||
+       meta.sequence!==native.expected_book_sequence ||
+       native.source_digest===entry.entry_settlement_digest ||
+       (released && (!entry.transition_proof||!HEX.test(entry.transition_proof))))
       return {status:"DENIED" as const,reason:"ENTRY_SETTLEMENT_SOURCE_OR_STATE_UNPROVEN"};
     const delta=total-before,reserved=units(meta.entry_budget.reserved_usd);
-    // Native complete bills are money truth, even if the venue charged more
-    // than the admission upper. Move only the original unspent reservation;
-    // book EVERY excess cent as consumed and mark an irreversible breach.
+    // RELEASE refunded all unused entry capacity. Charge a late bill as new
+    // consumption but NEVER subtract a different live intent's reservation.
     const oldUnsettled=ceiling>before?ceiling-before:0n;
-    const reservedDebit=delta<oldUnsettled?delta:oldUnsettled;
-    const excess=delta-reservedDebit;
+    const reservedDebit=released?0n:(delta<oldUnsettled?delta:oldUnsettled);
     if(reserved===null||reserved<reservedDebit)
       return {status:"DENIED" as const,reason:"ENTRY_SETTLEMENT_RESERVE_CORRUPT"};
+    const previousOver=before>ceiling?before-ceiling:0n;
+    const currentOver=total>ceiling?total-ceiling:0n;
+    const entryBreachDelta=currentOver-previousOver;
     const bound=units(meta.entry_budget.bound_breach_usd??"0");
-    if(bound===null)
+    const consumed=units(meta.entry_budget.consumed_usd);
+    const limit=units(meta.entry_budget.limit_usd);
+    if(bound===null||consumed===null||limit===null)
       return {status:"DENIED" as const,reason:"ENTRY_BOUND_BREACH_STATE_CORRUPT"};
+    const afterConsumed=consumed+delta,afterReserved=reserved-reservedDebit;
+    // Another valid entry may already have reserved the refunded capacity.
+    // Never conceal a late over-budget charge: book it all and latch the
+    // existing bound-breach gate to refuse further entries.
+    const aggregateOver=afterConsumed+afterReserved>limit
+      ?afterConsumed+afterReserved-limit:0n;
+    const breachDelta=entryBreachDelta>aggregateOver?entryBreachDelta:aggregateOver;
     meta.entry_budget={...meta.entry_budget,
-       consumed_usd:amount(units(meta.entry_budget.consumed_usd)!+delta),
-       reserved_usd:amount(reserved-reservedDebit),
-       bound_breach_usd:amount(bound+excess)};
+       consumed_usd:amount(afterConsumed),
+       reserved_usd:amount(afterReserved),
+       bound_breach_usd:amount(bound+breachDelta)};
     const next=await saveEntry(tx,meta,{...entry,entry_settled_usd:amount(total),
-      entry_bound_breach_usd:amount(total>ceiling?total-ceiling:0n),
+      entry_bound_breach_usd:amount(currentOver),
       entry_settlement_revision:native.revision,entry_settlement_digest:native.source_digest,
-      transition_proof:native.source_digest},0n);
+      // Preserve the original terminal release witness and state.
+      transition_proof:released?entry.transition_proof:native.source_digest},0n);
     return {status:"UPDATED" as const,book_sequence:next.sequence,
-      reason:excess>0n?"BUDGET_BOUND_BREACH":undefined};
+      reason:breachDelta>0n?"BUDGET_BOUND_BREACH":undefined};
   });
 }
 

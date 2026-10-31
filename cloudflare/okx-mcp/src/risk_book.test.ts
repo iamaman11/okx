@@ -278,7 +278,53 @@ const forbiddenTerminalIncrease=await settleEntrySpend(sa,held.entry.key,p,{
  cumulative_entry_usd:"1.6",revision:3,source_digest:d
 });
 check(forbiddenTerminalIncrease.status==="DENIED",
- "released intent cannot accept any new settlement revision");
+ "a new revision cannot recycle the old financial source digest");
+// A source-backed fee bill arriving AFTER terminal RELEASE is economic money,
+// not a new exchange POST and not a reason to restore the old reservation.
+const lateBook=new Storage();
+lateBook.map=structuredClone(sa.map);
+const releasedSeq=(await readRiskBook(lateBook))!.sequence;
+const lateBill=await settleEntrySpend(lateBook,held.entry.key,p,{
+ connection_generation:77,expected_book_sequence:releasedSeq,
+ cumulative_entry_usd:"1.51",revision:3,source_digest:a
+});
+check(lateBill.status==="UPDATED"&&lateBill.book_sequence===releasedSeq+1,
+ "new post-RELEASE native bill is charged under the original reservation identity");
+const lateState=await inspectRisk(lateBook,held.entry.key);
+const afterLate=(await readRiskBook(lateBook))!.entry_budget!;
+check(lateState?.entry.state==="RELEASED"&&
+ afterLate.consumed_usd==="1.51"&&afterLate.reserved_usd==="0",
+ "late bill never revives exchange POST, creates loss exposure or steals reserved capacity");
+const lateReplay=await settleEntrySpend(lateBook,held.entry.key,p,{
+ connection_generation:77,expected_book_sequence:releasedSeq,
+ cumulative_entry_usd:"1.51",revision:3,source_digest:a
+});
+check(lateReplay.status==="UPDATED"&&
+ (await readRiskBook(lateBook))!.entry_budget?.consumed_usd==="1.51",
+ "post-RELEASE lost ACK exact replay charges zero additional cents");
+check((await settleEntrySpend(lateBook,held.entry.key,p,{
+ connection_generation:77,expected_book_sequence:releasedSeq,
+ cumulative_entry_usd:"1.52",revision:4,source_digest:b
+})).status==="DENIED","late fee needs current global CAS for any new debit");
+const secondLate=await settleEntrySpend(lateBook,held.entry.key,p,{
+ connection_generation:77,expected_book_sequence:releasedSeq+1,
+ cumulative_entry_usd:"2.03",revision:4,source_digest:b
+});
+check(secondLate.status==="UPDATED"&&secondLate.reason==="BUDGET_BOUND_BREACH",
+ "native bill above initial entry admission is still charged in full");
+const overLate=(await readRiskBook(lateBook))!.entry_budget!;
+check(overLate.consumed_usd==="2.03"&&overLate.reserved_usd==="0"&&
+ overLate.bound_breach_usd==="0.03","late bill over bound is a permanent new-entry STOP");
+check((await inspectRisk(lateBook,held.entry.key))?.entry.state==="RELEASED",
+ "late settlement does not reopen a resolved reservation");
+const lateCensus={...terminalCensus,source_digest:d,
+ source_read_floor_ms:now+8,generated_at_ms:now+8};
+const lateDenied=await reserveRisk(lateBook,policy,lateCensus,{
+ ...request,intent_id:"post_late_bill_new_order",now_ms:now+8,
+ loss_usdt:"1",loss_usd:"1",entry_upper_usd:"0.5"
+},native);
+check(lateDenied.status==="DENIED"&&lateDenied.reason==="BUDGET_BOUND_BREACH",
+ "further RESERVE fails closed after late authenticated budget breach");
 const reported={...census,occupied:census.occupied.map(v=>({...v,cumulative_loss_usd:v.account_key===accountKey(request)?"17":"0"}))};
 const campaign=await reserveRisk(sa,policy,reported,{...request,intent_id:"new_intent_001",loss_usdt:"4",loss_usd:"4"},native);
 check(campaign.status==="DENIED"&&campaign.reason==="CAMPAIGN_LOSS_BUDGET_EXHAUSTED","fresh losses charged before reserve even when admission denied");
