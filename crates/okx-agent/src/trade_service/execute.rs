@@ -1156,21 +1156,18 @@ impl TradeService {
             quote.fee_rate,
             quote.usd_per_usdt,
         )?;
-        let reassessed = entry_budget::EntryCostProof::source_valued_candidate(
-            current_quote,
-            &fx,
-            now(),
-        )?
-        .attest_linear_usdt_sources(
-            &intent.plan,
-            order_type,
-            &intent.instrument_id,
-            &rules,
-            &fee,
-            &config,
-            &snap,
-            leverage,
-        )?;
+        let reassessed =
+            entry_budget::EntryCostProof::source_valued_candidate(current_quote, &fx, now())?
+                .attest_linear_usdt_sources(
+                    &intent.plan,
+                    order_type,
+                    &intent.instrument_id,
+                    &rules,
+                    &fee,
+                    &config,
+                    &snap,
+                    leverage,
+                )?;
         reassessed.verify_held_entry_admission(&quote, &admission)?;
         if Instant::now() >= until {
             return Err("COMMAND_EXPIRED".into());
@@ -2194,12 +2191,9 @@ mod tests {
         .unwrap();
         // A post-HELD source check also needs fresh own collateral and
         // borrowing evidence: fee/spec/FX parity alone never grants POST.
-        let mut held = entry_budget::EntryCostProof::source_valued_candidate(
-            known.clone(),
-            &fx,
-            t + 1,
-        )
-        .unwrap();
+        let mut held =
+            entry_budget::EntryCostProof::source_valued_candidate(known.clone(), &fx, t + 1)
+                .unwrap();
         let source_digest = "c".repeat(64);
         held.extra_immediate_fees = entry_budget::EntryCostEvidence::NotApplicable {
             basis: "test-fee-source",
