@@ -1265,7 +1265,7 @@ mod raw_native_session_tests {
                     value["nextFundingTime"] =
                         (refreshed_at + 8 * 60 * 60 * 1000).to_string().into();
                 }
-                if action.as_deref() == Some("snapshot") {
+                if action == Some("snapshot") {
                     value["seqId"] = 11.into();
                 }
                 let mut frame = json!({"arg":arg,"data":[value]});
