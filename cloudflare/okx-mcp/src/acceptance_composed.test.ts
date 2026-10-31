@@ -71,6 +71,12 @@ let id=0,venuePostCount=0,transportCalls=0;
 const intents=new Map<string,{intent_id:string;state:string;plan:Record<string,unknown>;protected:boolean}>();
 const bodyHash=new Map<string,string>();
 const intentByKey=new Map<string,string>();
+// Only the synthetic Real Agent owns these fixture routing handles. The
+// actual independent RiskBook remains in the single Worker storage owner.
+const realRiskByIntent=new Map<string,{
+  reservation:string;planHash:string;sequence:number;uid:string;
+  runId:string;account:string;at:number
+}>();
 const verifiedUid='a'.repeat(64);
 const accountKey='okx:demo:'+verifiedUid;
 const success=(data:unknown)=>({schema:'okx.agent.response/v1',request_id:'fixture_native_'+(++id),
@@ -170,6 +176,11 @@ const handler=async(url:string,init?:RequestInit)=>{
      operation:req.operation,protection:req.protection,stop_price:'99',
      planned_loss_usd:'0.5'},protected:true};
    // The fixture venue can POST only AFTER central risk says POST_AUTHORIZED.
+   realRiskByIntent.set(intentId,{
+    reservation:reserve.reservation_key,planHash,
+    sequence:fence.risk_book_sequence!,uid:row.uid_fingerprint,
+    runId:'run_fixture_real_001',account:row.account_key,at
+   });
    venuePostCount++;
    intents.set(intentId,intent);bodyHash.set(key,hash);intentByKey.set(key,intentId);
    return Response.json(success({intent}));
@@ -193,6 +204,67 @@ const handler=async(url:string,init?:RequestInit)=>{
   found.state='CANCELLED';return Response.json(success({intent:found}));
  }
  if(req.action==='close'){
+  const real=realRiskByIntent.get(found.intent_id);
+  if(real){
+   // After venue fixture protection/readback and close, only the existing
+   // authenticated native-risk bridge is allowed to settle and release.
+   const session={connection_generation:generation,runtime_profile:'engine',hello:true};
+   const terminalCensus={
+    complete:true,source_digest:'f'.repeat(64),
+    content_digest:'b'.repeat(64),
+    generated_at_ms:real.at+5,source_read_floor_ms:real.at+5,
+    account_keys:[real.account],
+    occupied:[{account_key:real.account,
+      occupied_usdt:'0',cumulative_loss_usd:'0'}],
+    native_account_evidence_complete:true,
+    native_order_evidence_complete:true,
+    native_ledger_evidence_complete:true
+   };
+   const terminalLedger={
+    account_uid:real.uid,run_id:real.runId,intent_id:found.intent_id,
+    state:'FILLED',record_digest:'a'.repeat(64),
+    cumulative_loss_usd:'0',remaining_exposure_usdt:'0',
+    cumulative_entry_usd:'1',entry_settlement_revision:1,
+    entry_settlement_digest:'d'.repeat(64)
+   };
+   const releaseCommand=(commandId:string,sequence:number)=>({
+    schema:'okx.risk-command/v1',command_id:commandId,
+    installation_id:initial.installation_id,
+    action:{action:'RESOLVE',reservation_key:real.reservation,
+      plan_sha256:real.planHash,
+      expected_risk_book_sequence:sequence,
+      next_state:'RELEASED',source_proof_sha256:'e'.repeat(64),
+      terminal_census:terminalCensus,terminal_ledger:terminalLedger}
+   });
+   const premature=await handleNativeRiskCommand(
+    storage,session,
+    releaseCommand('fixture_premature_release_'+(++id),real.sequence),
+    real.at+6
+   );
+   check(premature.status==='DENIED'&&
+     premature.reason==='TERMINAL_ENTRY_SETTLEMENT_UNPROVEN',
+     'Worker must reject terminal release before exact cumulative settlement');
+   const settled=await handleNativeRiskCommand(storage,session,{
+    schema:'okx.risk-command/v1',command_id:'fixture_settle_'+(++id),
+    installation_id:initial.installation_id,
+    action:{action:'SETTLE_ENTRY',
+      reservation_key:real.reservation,plan_sha256:real.planHash,
+      expected_risk_book_sequence:real.sequence,
+      cumulative_entry_usd:'1',settlement_revision:1,
+      source_digest:terminalLedger.entry_settlement_digest}
+   },real.at+7);
+   check(settled.status==='UPDATED'&&
+     Number.isSafeInteger(settled.risk_book_sequence),
+     'only source-bound native command may consume actual entry cost');
+   const released=await handleNativeRiskCommand(
+    storage,session,
+    releaseCommand('fixture_terminal_release_'+(++id),settled.risk_book_sequence!),
+    real.at+8
+   );
+   check(released.status==='UPDATED',
+     'Worker release requires the previously settled exact money/revision');
+   realRiskByIntent.delete(found.intent_id);
+  }
   const closed={...found,intent_id:'close_'+found.intent_id,state:'FILLED',
    plan:{...found.plan,operation:'close'}};
   intents.set(closed.intent_id,closed);return Response.json(success({intent:closed}));
@@ -381,6 +453,24 @@ const realStatus=await call('trade',{action:'status',account:'fixture_real',
  reference:realOrder.data.intent.intent_id});
 check(realStatus.data.intent.state==='FILLED'&&realStatus.data.intent.protected,
  'fake venue status is visible through same MCP routing');
+const realClose=await call('trade',{action:'close',account:'fixture_real',
+ reference:realOrder.data.intent.intent_id,idempotency_key:'fixture_real_close_0001',
+ expires_in_ms:30000});
+check(realClose.status==='completed'&&
+ realClose.data.intent.plan.operation==='close',
+ 'real fake Agent closes the protected fixture position');
+const releasedRisk=await readRiskBook(storage);
+check(releasedRisk?.occupied_usd==='0'&&releasedRisk?.occupied_usdt==='0'&&
+ releasedRisk?.entry_budget?.consumed_usd==='1'&&
+ releasedRisk?.entry_budget?.reserved_usd==='0',
+ 'actual Worker settlement+release preserves spent money and frees unused reserve');
+const beforeNextPreview=venuePostCount;
+const secondRealPreview=await call('trade',{action:'preview',account:'fixture_real',...plan});
+check(secondRealPreview.status==='completed'&&
+ secondRealPreview.data.admission==='preview_only'&&
+ venuePostCount===beforeNextPreview&&
+ (await readRiskBook(storage))?.entry_budget?.consumed_usd==='1',
+ 'second preview after terminal release is read-only and retains first campaign spend');
 const latest=(await governanceRequest(storage,'GET')).body as Governance;
 const pausedReal=await call('accounts',{action:'pause',account:'fixture_real',
  expected_revision:latest.revision,idempotency_key:'fixture_real_pause_0001'});
@@ -389,6 +479,8 @@ check(pausedReal.status==='completed'&&pausedReal.data.accounts.find(
 const blockedReal=await call('trade',{...realArgs,idempotency_key:'fixture_real_blocked_0001'});
 check(blockedReal.status==='rejected'&&blockedReal.reason_code==='ACCOUNT_NEW_RISK_PAUSED'&&
  venuePostCount===beforeReal+1,'pause denies additional real risk before fixture POST');
-check((await readRiskBook(storage))?.occupied_usd==='0.5',
- 'pause cannot silently release a POSTED reservation without terminal native proof');
-console.log('mcp_riskbook_fake_venue_composed PASS real MCP route, central RESERVE/BEGIN_POST, fixture venue once, replay, pause, held risk; zero real exchange POST, no physical native SQL claim');
+check((await readRiskBook(storage))?.occupied_usd==='0',
+ 'pause cannot resurrect a terminally released reservation');
+check((await readRiskBook(storage))?.entry_budget?.consumed_usd==='1',
+ 'pause never refunds consumed campaign turnover');
+console.log('mcp_riskbook_fake_venue_composed PASS real MCP route, central RESERVE/BEGIN_POST, fixture venue once, protected fake close, native-risk SETTLE_ENTRY, denied premature RELEASE, authenticated RELEASE, second preview, pause; no physical native SQL/WSS claim');
