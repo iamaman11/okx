@@ -1415,7 +1415,7 @@ mod tests {
             (
                 json!({"channel":"tickers","instId":"BTC-USDT-SWAP"}),
                 Some(json!({"instType":"SWAP","instId":"BTC-USDT-SWAP",
-                    "last":"1000","askPx":"1000","askSz":"10",
+                    "last":"1000","lastSz":"1","askPx":"1000","askSz":"10",
                     "bidPx":"999.9","bidSz":"10","ts":timestamp})),
                 None,
             ),
