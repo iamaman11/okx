@@ -394,6 +394,16 @@ mod raw_native_session_tests {
                 .await
                 .unwrap(),
         );
+        if std::env::var("OKX_NATIVE_WORKER_INTEGRATION").ok().as_deref() == Some("1")
+            && installation == "installation_test"
+        {
+            let feed = Arc::new(crate::accounts::recorded_support::RecordedAccountHttp::default());
+            for label in ["a", "b"] {
+                let (config, clients) =
+                    crate::accounts::recorded_support::prepared(label, feed.clone());
+                accounts.connect_prepared(config, clients).await.unwrap();
+            }
+        }
         let env = OkxEnvironment::new(Region::Global, false);
         let market = MarketBootstrapper::new(
             OkxPublicClient::with_rate_budget(env, budget.clone()).unwrap(),
@@ -614,6 +624,11 @@ mod raw_native_session_tests {
         let token = std::env::var("OKX_INTEGRATION_WORKER_TOKEN").unwrap();
         let reservation_key = std::env::var("OKX_INTEGRATION_RESERVATION").unwrap();
         let (ctx, root, risk, mut risk_rx) = test_dispatch_for("installation_test").await;
+        let trade = ctx.trade.clone();
+        let accounts = ctx.accounts.clone();
+        let stopped = ["fixture-a","fixture-b"].iter()
+            .map(|alias| async { accounts.resolve(alias).await.unwrap().execution.store.termination_signal() });
+        let mut stopped = futures_util::future::join_all(stopped).await;
         let mut request = url.into_client_request().unwrap();
         request.headers_mut().insert(
             AUTHORIZATION,
@@ -644,6 +659,50 @@ mod raw_native_session_tests {
         let entry = budget.entry_budget.as_ref().unwrap();
         assert_eq!(entry.reserved_usd, "2");
         assert_eq!(entry.consumed_usd, "0");
+        // Enter the real public TradeService on both authenticated SQL owners.
+        // Missing private WS source facts cannot become a venue POST, even with
+        // a valid Worker grant in the SAME authenticated process/session.
+        use okx_protocol::trading::{
+            OrderConstraints, PositionSide, Protection, Sizing, TradeOperation, TradeRequest,
+        };
+        let attempted = TradeRequest::Execute {
+            idempotency_key: "public_native_worker_unproven_001".into(),
+            operation: TradeOperation::Open,
+            strategy_instance: "manual".into(),
+            instrument: "BTC-USDT-SWAP".into(),
+            side: PositionSide::Long,
+            sizing: Sizing::Contracts { contracts: "0.10".into() },
+            order: OrderConstraints {
+                order_type: "limit".into(),
+                limit_price: Some("1000".into()),
+                reference: None,
+                max_entry_usd: Some("10".into()),
+                max_slippage_bps: 0,
+            },
+            protection: Some(Protection::Price { stop_price: "900".into() }),
+            expires_in_ms: 2_000,
+        };
+        assert!(attempted.valid());
+        for alias in ["fixture-a", "fixture-b"] {
+            let caps = trade.trade(alias, &TradeRequest::Capabilities {}, None).await.unwrap();
+            let uid = if alias == "fixture-a" {
+                okx_api::account_uid_fingerprint("account-001")
+            } else {
+                okx_api::account_uid_fingerprint("account-002")
+            };
+            assert_eq!(caps["account"], format!("okx:real:{uid}"));
+            assert_eq!(caps["executor"]["state"], "verified");
+            assert_eq!(caps["ready_for_post"], false);
+            let preflight = trade.trade(alias, &TradeRequest::Preflight {}, None).await.unwrap();
+            assert_eq!(preflight["ready_for_new_risk"], false);
+            let failed = trade.trade(alias, &attempted, None).await;
+            assert!(failed.is_err(), "unverified source must not POST: {failed:?}");
+        }
+        let mut before = summary("risk_public_trade_did_not_post_001");
+        before.installation_id = "installation_test".into();
+        let untouched = risk.request(before).await.unwrap();
+        assert_eq!(untouched.budget.as_ref().unwrap().reserved_loss_usd, "1");
+        assert_eq!(untouched.budget.as_ref().unwrap().entry_budget.as_ref().unwrap().reserved_usd, "2");
         let inspect = RiskCommand {
             schema: RISK_COMMAND_SCHEMA_V1.into(),
             command_id: "risk_native_real_workerd_inspect_001".into(),
@@ -663,7 +722,7 @@ mod raw_native_session_tests {
         // The second intent is sent by actual Rust Native through the same
         // authenticated WSS path. Evidence values are explicitly scripted
         // boundary inputs: no venue claims and no exchange POST in this test.
-        let uid = "a".repeat(64);
+        let uid = okx_api::account_uid_fingerprint("account-001");
         let account_key = format!("okx:real:{uid}");
         let timestamp = || {
             std::time::SystemTime::now()
@@ -778,7 +837,17 @@ mod raw_native_session_tests {
             terminated.is_ok(),
             "native session should terminate cleanly: {terminated:?}"
         );
+        drop(trade);
+        accounts.shutdown().await;
+        drop(accounts);
         drop(risk);
+        for receipt in &mut stopped {
+            tokio::time::timeout(Duration::from_secs(10), async {
+                while !*receipt.borrow_and_update() {
+                    receipt.changed().await.expect("SQL owner shutdown receipt missing");
+                }
+            }).await.expect("SQL owner still active");
+        }
         std::fs::remove_dir_all(root).unwrap();
         println!("native_to_persisted_workerd_riskbook PASS: no venue POST");
     }

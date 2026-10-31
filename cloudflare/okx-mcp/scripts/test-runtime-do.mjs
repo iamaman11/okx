@@ -204,7 +204,7 @@ try {
   assert.equal(install.status, 200, "real governance/RiskBook created in one DO transaction");
   // Enrol one test account via the actual DO governance transaction.
   // UID and signed-source facts are scripted here; NOT real-exchange acceptance.
-  const uid = "a".repeat(64);
+  const uid = createHash("sha256").update("account-001").digest("hex");
   const accountKey = "okx:real:" + uid;
   const limits = {
     max_modelled_loss_usdt:"5",max_order_loss_usdt:"1",

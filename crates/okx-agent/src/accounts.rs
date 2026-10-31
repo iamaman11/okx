@@ -840,6 +840,175 @@ pub fn build_release() -> &'static str {
 }
 
 #[cfg(test)]
+pub(crate) mod recorded_support {
+    use super::*;
+    use okx_api::{
+        HttpRequest, HttpSend, HttpStatusCode, HttpTransport, OkxError, RawHttpResponse,
+    };
+    use std::time::Instant;
+
+    #[derive(Default)]
+    pub(crate) struct RecordedAccountHttp {
+        pub(crate) requests: Mutex<Vec<String>>,
+    }
+    impl HttpTransport for RecordedAccountHttp {
+        fn send(&self, request: HttpRequest, _: Instant) -> HttpSend<'_> {
+            Box::pin(async move {
+                if request.method() != "GET" {
+                    return Err(OkxError::Response("TRANSCRIPT_METHOD_MISMATCH".into()));
+                }
+                let key = request
+                    .headers()
+                    .get("OK-ACCESS-KEY")
+                    .and_then(|h| h.to_str().ok())
+                    .ok_or_else(|| OkxError::Response("TRANSCRIPT_ACCOUNT_UNBOUND".into()))?;
+                let (uid, permission) = match key {
+                    "fixture-observer-a" => ("account-001", "read_only"),
+                    "fixture-executor-a" => ("account-001", "read_only,trade"),
+                    "fixture-observer-b" => ("account-002", "read_only"),
+                    "fixture-executor-b" => ("account-002", "read_only,trade"),
+                    _ => return Err(OkxError::Response("TRANSCRIPT_ACCOUNT_UNKNOWN".into())),
+                };
+                let path = request.url().path();
+                let data = match path {
+                    "/api/v5/account/config" => serde_json::json!([{
+                        "uid": uid,
+                        "mainUid": "main-account",
+                        "acctLv": "2",
+                        "posMode": "long_short_mode",
+                        "type": "1",
+                        "perm": permission,
+                        "autoLoan": false,
+                        "ip": "127.0.0.1"
+                    }]),
+                    "/api/v5/account/balance" => serde_json::json!([{
+                        "totalEq": "100",
+                        "adjEq": "100",
+                        "uTime": "1793460000000",
+                        "details": [{
+                            "ccy": "USDT", "eq": "100",
+                            "liab": "0", "availEq": "100",
+                            "eqUsd": "100", "uTime": "1793460000000"
+                        }]
+                    }]),
+                    "/api/v5/account/positions"
+                    | "/api/v5/trade/orders-pending"
+                    | "/api/v5/trade/orders-algo-pending" => {
+                        if path == "/api/v5/trade/orders-algo-pending" {
+                            let params = request.url().query_pairs().collect::<Vec<_>>();
+                            if !params.iter().any(|(k, _)| k == "ordType")
+                                || !params.iter().any(|(k, v)| {
+                                    k == "instType" && (v == "SWAP" || v == "FUTURES")
+                                })
+                                || !params.iter().any(|(k, v)| k == "limit" && v == "100")
+                            {
+                                return Err(OkxError::Response(
+                                    "TRANSCRIPT_ALGO_SCOPE_MISMATCH".into(),
+                                ));
+                            }
+                        }
+                        serde_json::json!([])
+                    }
+                    _ => {
+                        return Err(OkxError::Response("TRANSCRIPT_UNEXPECTED_REQUEST".into()));
+                    }
+                };
+                // A transcript has explicitly bounded reads, not an infinite
+                // fake account endpoint. Concurrent polls can reorder safely.
+                let request_key =
+                    format!("{key}:{path}?{}", request.url().query().unwrap_or_default());
+                let max_repeats = match path {
+                    "/api/v5/account/config" => 10,
+                    "/api/v5/account/balance"
+                    | "/api/v5/account/positions"
+                    | "/api/v5/trade/orders-pending" => 4,
+                    "/api/v5/trade/orders-algo-pending" => 1,
+                    _ => 0,
+                };
+                let mut observed = self.requests.lock().unwrap();
+                if observed.iter().filter(|v| **v == request_key).count() >= max_repeats {
+                    return Err(OkxError::Response("TRANSCRIPT_REPEAT_EXCEEDED".into()));
+                }
+                observed.push(request_key);
+                drop(observed);
+                let body = serde_json::to_vec(&serde_json::json!({
+                    "code": "0", "msg": "", "data": data
+                }))?;
+                Ok(RawHttpResponse {
+                    status: HttpStatusCode::OK,
+                    headers: Default::default(),
+                    body,
+                })
+            })
+        }
+    }
+    pub(crate) struct OfflineSocket;
+    impl WsConnector for OfflineSocket {
+        fn connect(&self, _: String) -> okx_runtime::WsConnect<'_> {
+            Box::pin(async { Err(tokio_tungstenite::tungstenite::Error::ConnectionClosed) })
+        }
+    }
+
+    /// Exact recorded request delivery from both identity-bound API keys.
+    /// Sharing this constructor prevents a separate test account owner.
+    pub(crate) fn prepared(
+        label: &str,
+        feed: Arc<RecordedAccountHttp>,
+    ) -> (VerifiedAccountConfig, PreparedAccountClients) {
+        let uid = match label {
+            "a" => "account-001",
+            "b" => "account-002",
+            _ => panic!("unexpected recorded account"),
+        };
+        let environment = OkxEnvironment::new(okx_api::Region::Global, false);
+        let observed = Credentials::new(
+            format!("fixture-observer-{label}"),
+            "observer-secret".into(),
+            "pass".into(),
+        )
+        .unwrap();
+        let executing = Credentials::new(
+            format!("fixture-executor-{label}"),
+            "executor-secret".into(),
+            "pass".into(),
+        )
+        .unwrap();
+        let observer = OkxRestClient::with_http_transport(
+            environment,
+            observed.clone(),
+            RateBudget::new(),
+            feed.clone(),
+        )
+        .unwrap();
+        let executor = OkxRestClient::with_http_transport(
+            environment,
+            executing,
+            RateBudget::new(),
+            feed,
+        )
+        .unwrap();
+        let config = VerifiedAccountConfig {
+            account_key: AccountKey {
+                venue: "okx".into(),
+                environment: Environment::Real,
+                verified_uid: okx_api::account_uid_fingerprint(uid),
+            },
+            alias: format!("fixture-{label}"),
+            credential_ref: format!("fixture-creds-{label}"),
+            connect_operation_id: format!("fixture-connect-operation-{label}"),
+            configuration_digest: "a".repeat(64),
+        };
+        (config, PreparedAccountClients {
+            environment,
+            observer,
+            executor,
+            observer_login: observed,
+            ws_connector: Arc::new(OfflineSocket),
+        })
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     fn root() -> PathBuf {
@@ -922,112 +1091,7 @@ mod tests {
     /// owners from bounded raw HTTP records, not from a fake exchange state.
     #[tokio::test]
     async fn recorded_two_account_bootstrap_opens_independent_sql_owners() {
-        use okx_api::{
-            HttpRequest, HttpSend, HttpStatusCode, HttpTransport, OkxError, RawHttpResponse,
-        };
-        use std::time::Instant;
-
-        #[derive(Default)]
-        struct RecordedAccountHttp {
-            requests: Mutex<Vec<String>>,
-        }
-        impl HttpTransport for RecordedAccountHttp {
-            fn send(&self, request: HttpRequest, _: Instant) -> HttpSend<'_> {
-                Box::pin(async move {
-                    if request.method() != "GET" {
-                        return Err(OkxError::Response("TRANSCRIPT_METHOD_MISMATCH".into()));
-                    }
-                    let key = request
-                        .headers()
-                        .get("OK-ACCESS-KEY")
-                        .and_then(|h| h.to_str().ok())
-                        .ok_or_else(|| OkxError::Response("TRANSCRIPT_ACCOUNT_UNBOUND".into()))?;
-                    let (uid, permission) = match key {
-                        "fixture-observer-a" => ("account-001", "read_only"),
-                        "fixture-executor-a" => ("account-001", "read_only,trade"),
-                        "fixture-observer-b" => ("account-002", "read_only"),
-                        "fixture-executor-b" => ("account-002", "read_only,trade"),
-                        _ => return Err(OkxError::Response("TRANSCRIPT_ACCOUNT_UNKNOWN".into())),
-                    };
-                    let path = request.url().path();
-                    let data = match path {
-                        "/api/v5/account/config" => serde_json::json!([{
-                            "uid": uid,
-                            "mainUid": "main-account",
-                            "acctLv": "2",
-                            "posMode": "long_short_mode",
-                            "type": "1",
-                            "perm": permission,
-                            "autoLoan": false,
-                            "ip": "127.0.0.1"
-                        }]),
-                        "/api/v5/account/balance" => serde_json::json!([{
-                            "totalEq": "100",
-                            "adjEq": "100",
-                            "uTime": "1793460000000",
-                            "details": [{
-                                "ccy": "USDT", "eq": "100",
-                                "liab": "0", "availEq": "100",
-                                "eqUsd": "100", "uTime": "1793460000000"
-                            }]
-                        }]),
-                        "/api/v5/account/positions"
-                        | "/api/v5/trade/orders-pending"
-                        | "/api/v5/trade/orders-algo-pending" => {
-                            if path == "/api/v5/trade/orders-algo-pending" {
-                                let params = request.url().query_pairs().collect::<Vec<_>>();
-                                if !params.iter().any(|(k, _)| k == "ordType")
-                                    || !params.iter().any(|(k, v)| {
-                                        k == "instType" && (v == "SWAP" || v == "FUTURES")
-                                    })
-                                    || !params.iter().any(|(k, v)| k == "limit" && v == "100")
-                                {
-                                    return Err(OkxError::Response(
-                                        "TRANSCRIPT_ALGO_SCOPE_MISMATCH".into(),
-                                    ));
-                                }
-                            }
-                            serde_json::json!([])
-                        }
-                        _ => {
-                            return Err(OkxError::Response("TRANSCRIPT_UNEXPECTED_REQUEST".into()));
-                        }
-                    };
-                    // A transcript has explicitly bounded reads, not an infinite
-                    // fake account endpoint. Concurrent polls can reorder safely.
-                    let request_key =
-                        format!("{key}:{path}?{}", request.url().query().unwrap_or_default());
-                    let max_repeats = match path {
-                        "/api/v5/account/config" => 10,
-                        "/api/v5/account/balance"
-                        | "/api/v5/account/positions"
-                        | "/api/v5/trade/orders-pending" => 4,
-                        "/api/v5/trade/orders-algo-pending" => 1,
-                        _ => 0,
-                    };
-                    let mut observed = self.requests.lock().unwrap();
-                    if observed.iter().filter(|v| **v == request_key).count() >= max_repeats {
-                        return Err(OkxError::Response("TRANSCRIPT_REPEAT_EXCEEDED".into()));
-                    }
-                    observed.push(request_key);
-                    drop(observed);
-                    let body = serde_json::to_vec(&serde_json::json!({
-                        "code": "0", "msg": "", "data": data
-                    }))?;
-                    Ok(RawHttpResponse {
-                        status: HttpStatusCode::OK,
-                        headers: Default::default(),
-                        body,
-                    })
-                })
-            }
-        }
-        struct OfflineSocket;
-        impl WsConnector for OfflineSocket {
-            fn connect(&self, _: String) -> okx_runtime::WsConnect<'_> {
-                Box::pin(async { Err(tokio_tungstenite::tungstenite::Error::ConnectionClosed) })
-            }
-        }
+        use super::recorded_support::{RecordedAccountHttp, prepared};
         let temp = root();
         initialize_installation(&temp, "installation-test").unwrap();
         let registry = AccountRuntimeRegistry::open(&temp, RateBudget::new())
@@ -1037,56 +1101,10 @@ mod tests {
         let environment = OkxEnvironment::new(okx_api::Region::Global, false);
         let mut stopped_sql_owners = Vec::new();
 
-        for (label, uid) in [("a", "account-001"), ("b", "account-002")] {
-            let observed = Credentials::new(
-                format!("fixture-observer-{label}"),
-                "observer-secret".into(),
-                "pass".into(),
-            )
-            .unwrap();
-            let executing = Credentials::new(
-                format!("fixture-executor-{label}"),
-                "executor-secret".into(),
-                "pass".into(),
-            )
-            .unwrap();
-            let observer = OkxRestClient::with_http_transport(
-                environment,
-                observed.clone(),
-                RateBudget::new(),
-                feed.clone(),
-            )
-            .unwrap();
-            let executor = OkxRestClient::with_http_transport(
-                environment,
-                executing,
-                RateBudget::new(),
-                feed.clone(),
-            )
-            .unwrap();
-            let config = VerifiedAccountConfig {
-                account_key: AccountKey {
-                    venue: "okx".into(),
-                    environment: Environment::Real,
-                    verified_uid: okx_api::account_uid_fingerprint(uid),
-                },
-                alias: format!("fixture-{label}"),
-                credential_ref: format!("fixture-creds-{label}"),
-                connect_operation_id: format!("fixture-connect-operation-{label}"),
-                configuration_digest: "a".repeat(64),
-            };
+        for label in ["a", "b"] {
+            let (config, clients) = prepared(label, feed.clone());
             registry
-                .connect_prepared(
-                    config.clone(),
-                    PreparedAccountClients {
-                        environment,
-                        observer,
-                        executor,
-                        observer_login: observed,
-                        ws_connector: Arc::new(OfflineSocket),
-                    },
-                )
-                .await
+                .connect_prepared(config.clone(), clients)                .await
                 .unwrap();
             let owner = registry.resolve(&config.account_key.wire()).await.unwrap();
             assert_eq!(owner.execution.uid(), config.account_key.verified_uid);
