@@ -1023,7 +1023,7 @@ pub(crate) mod recorded_support {
                         "uTime": "1793460000000",
                         "details": [{
                             "ccy": "USDT", "eq": "100",
-                            "liab": "0", "availEq": "100",
+                            "liab": "0", "availEq": "100", "availBal": "100",
                             "eqUsd": "100", "uTime": "1793460000000"
                         }]
                     }]),
@@ -1060,7 +1060,7 @@ pub(crate) mod recorded_support {
                     "/api/v5/account/config" => 10,
                     "/api/v5/account/balance"
                     | "/api/v5/account/positions"
-                    | "/api/v5/trade/orders-pending" => 4,
+                    | "/api/v5/trade/orders-pending" => 12,
                     "/api/v5/trade/orders-algo-pending" => 8,
                     "/api/v5/trade/fills-history" | "/api/v5/account/bills-archive" => 8,
                     _ => 0,

@@ -380,6 +380,7 @@ mod raw_native_session_tests {
         std::path::PathBuf,
         NativeRiskClient,
         mpsc::Receiver<OutboundRiskCommand>,
+        Option<Arc<crate::accounts::recorded_support::RecordedAccountHttp>>,
     ) {
         let mut bytes = [0u8; 16];
         getrandom::fill(&mut bytes).unwrap();
@@ -394,6 +395,7 @@ mod raw_native_session_tests {
                 .await
                 .unwrap(),
         );
+        let mut recorded_http = None;
         if std::env::var("OKX_NATIVE_WORKER_INTEGRATION")
             .ok()
             .as_deref()
@@ -401,6 +403,7 @@ mod raw_native_session_tests {
             && installation == "installation_test"
         {
             let feed = Arc::new(crate::accounts::recorded_support::RecordedAccountHttp::default());
+            recorded_http = Some(feed.clone());
             for label in ["a", "b"] {
                 // The real private coordinator receives only recorded socket
                 // frames. It must establish login, subscription generations and
@@ -439,7 +442,7 @@ mod raw_native_session_tests {
             trade,
             market,
         };
-        (ctx, root, risk, risk_rx)
+        (ctx, root, risk, risk_rx, recorded_http)
     }
     async fn test_dispatch() -> (
         DispatchContext,
@@ -447,7 +450,8 @@ mod raw_native_session_tests {
         NativeRiskClient,
         mpsc::Receiver<OutboundRiskCommand>,
     ) {
-        test_dispatch_for("installation-test").await
+        let (ctx, root, risk, risk_rx, _) = test_dispatch_for("installation-test").await;
+        (ctx, root, risk, risk_rx)
     }
 
     fn summary(id: &str) -> RiskCommand {
@@ -635,9 +639,132 @@ mod raw_native_session_tests {
         );
         let token = std::env::var("OKX_INTEGRATION_WORKER_TOKEN").unwrap();
         let reservation_key = std::env::var("OKX_INTEGRATION_RESERVATION").unwrap();
-        let (ctx, root, risk, mut risk_rx) = test_dispatch_for("installation_test").await;
-        let trade = ctx.trade.clone();
+        let (mut ctx, root, risk, mut risk_rx, recorded_http) =
+            test_dispatch_for("installation_test").await;
         let accounts = ctx.accounts.clone();
+
+        // The same real public WS coordinator consumes recorded raw market
+        // frames. These are immutable venue observations, not a fabricated
+        // MarketSnapshot or a separate pricing/decision implementation.
+        use crate::accounts::recorded_support::{RecordedGet, RecordedWsConnector};
+        use serde_json::json;
+        let feed = recorded_http.expect("the integration run requires recorded HTTP");
+        let connector = Arc::new(RecordedWsConnector::default());
+        let reference = ReferenceRegistry::from_public(
+            "2026-10-31T00:00:00Z",
+            vec![serde_json::from_value(json!({
+                "instType":"SWAP","instId":"BTC-USDT-SWAP",
+                "instFamily":"BTC-USDT","uly":"BTC-USDT","state":"live",
+                "ruleType":"normal","settleCcy":"USDT","tickSz":"0.1",
+                "lotSz":"0.01","minSz":"0.01","maxLmtSz":"1000",
+                "maxMktSz":"1000","ctType":"linear","ctVal":"0.01",
+                "ctValCcy":"BTC","groupId":"4","lever":"20"
+            })).unwrap()],
+        ).unwrap();
+        let stamp = chrono::Utc::now().timestamp_millis();
+        let timestamp = stamp.to_string();
+        let funding_time = (stamp + 8 * 60 * 60 * 1000).to_string();
+        let recorded_public = vec![
+            (json!({"channel":"instruments","instType":"SWAP"}), None, None),
+            (json!({"channel":"instruments","instType":"FUTURES"}), None, None),
+            (json!({"channel":"tickers","instId":"BTC-USDT-SWAP"}),
+             Some(json!({"instType":"SWAP","instId":"BTC-USDT-SWAP",
+                 "last":"1000","lastSz":"1","askPx":"1000","askSz":"10",
+                 "bidPx":"999.9","bidSz":"10","ts":timestamp})), None),
+            (json!({"channel":"mark-price","instId":"BTC-USDT-SWAP"}),
+             Some(json!({"instType":"SWAP","instId":"BTC-USDT-SWAP",
+                 "markPx":"1000","ts":timestamp})), None),
+            (json!({"channel":"index-tickers","instId":"BTC-USDT"}),
+             Some(json!({"instId":"BTC-USDT","idxPx":"1000","ts":timestamp})), None),
+            (json!({"channel":"funding-rate","instId":"BTC-USDT-SWAP"}),
+             Some(json!({"instType":"SWAP","instId":"BTC-USDT-SWAP",
+                 "fundingRate":"0.0001","fundingTime":timestamp,
+                 "nextFundingTime":funding_time,"ts":timestamp})), None),
+            (json!({"channel":"open-interest","instId":"BTC-USDT-SWAP"}),
+             Some(json!({"instType":"SWAP","instId":"BTC-USDT-SWAP",
+                 "oi":"1000","oiCcy":"10","oiUsd":"10000","ts":timestamp})), None),
+            (json!({"channel":"books","instId":"BTC-USDT-SWAP"}),
+             Some(json!({"asks":[["1000","10","0","1"]],
+                 "bids":[["999.9","10","0","1"]],
+                 "seqId":10,"prevSeqId":-1,"ts":timestamp})), Some("snapshot"))
+        ];
+        for (arg, data, action) in recorded_public {
+            let ack = json!({"event":"subscribe","arg":arg,"connId":"recorded-public"}).to_string();
+            let books = arg["channel"] == "books";
+            let mut transcript = Vec::new();
+            if !books { transcript.push(ack.clone()); }
+            if let Some(data) = data {
+                let mut frame = json!({"arg":arg,"data":[data]});
+                if let Some(action) = action { frame["action"] = action.into(); }
+                transcript.push(frame.to_string());
+            }
+            if books { transcript.push(ack); }
+            connector.expect_public_subscription(arg, transcript);
+        }
+        let (coordinator, public_ws) = PublicWsCoordinator::new_with_connector(
+            OkxEnvironment::new(Region::Global, false),
+            reference, RateBudget::new(), connector.clone()
+        );
+        let (public_shutdown, public_receiver) = watch::channel(false);
+        let public_task = tokio::spawn(coordinator.run(public_receiver));
+        let public_trade = Arc::new(TradeService::new(
+            accounts.clone(), public_ws.clone(), risk.clone()
+        ));
+        public_trade.set_analytics(ctx.analytics.clone()).await;
+        ctx.trade = public_trade.clone();
+        ctx.public_ws = public_ws.clone();
+        let mut market_updates = public_ws.subscribe_market_updates();
+        public_ws.demand_instrument("BTC-USDT-SWAP").await.unwrap();
+        let market = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Ok(market) = public_ws.risk_fresh_snapshot(
+                    "BTC-USDT-SWAP",
+                    chrono::Utc::now().timestamp_millis() as u64,
+                    5000,5000,chrono::Utc::now().to_rfc3339()
+                ).await { break market; }
+                market_updates.changed().await.expect("public source coordinator exited");
+            }
+        }).await.expect("recorded market frames were not processed by production WS");
+        assert_eq!(market.market.ticker.best_ask,"1000");
+        assert_eq!(connector.unconsumed_public_subscriptions(),0);
+        // Every fee/leverage response passes through the existing signed
+        // observer API parser. A second account cannot borrow A's tariff.
+        let envelope = |data:serde_json::Value| {
+            serde_json::to_vec(&json!({"code":"0","msg":"","data":data})).unwrap()
+        };
+        for label in ["a","b"] {
+            let access_key = format!("fixture-observer-{label}");
+            for _ in 0..2 {
+                feed.expect_get(RecordedGet {
+                    access_key:access_key.clone(),
+                    path:"/api/v5/account/trade-fee".into(),
+                    required_query:vec![
+                        ("instType".into(),"SWAP".into()),
+                        ("instFamily".into(),"BTC-USDT".into()),
+                    ],
+                    raw_response:envelope(json!([{
+                        "instType":"SWAP","level":"Lv1","ts":stamp.to_string(),
+                        "feeGroup":[{"groupId":"4","maker":"0.0005","taker":"0.0005"}]
+                    }])),
+                });
+            }
+            for _ in 0..2 {
+                feed.expect_get(RecordedGet {
+                    access_key:access_key.clone(),
+                    path:"/api/v5/account/leverage-info".into(),
+                    required_query:vec![
+                        ("instId".into(),"BTC-USDT-SWAP".into()),
+                        ("mgnMode".into(),"cross".into()),
+                    ],
+                    raw_response:envelope(json!([
+                        {"instId":"BTC-USDT-SWAP","mgnMode":"cross","posSide":"long","lever":"2"},
+                        {"instId":"BTC-USDT-SWAP","mgnMode":"cross","posSide":"short","lever":"2"}
+                    ])),
+                });
+            }
+        }
+        let trade = public_trade;
+
         let stopped = ["fixture-a", "fixture-b"].iter().map(|alias| async {
             accounts
                 .resolve(alias)
@@ -758,58 +885,40 @@ mod raw_native_session_tests {
             .unwrap();
         assert_eq!(caps_b["native_sql_policy"]["matches_governance"], true);
         assert_eq!(caps_b["native_sql_policy"]["revision"], 2);
-        // Enter the real public TradeService on both authenticated SQL owners.
-        // Despite verified private input and applied A policy, no public
-        // instrument price/spec is available: no new venue POST is allowed.
+        // Positive public Preview: the production instrument parser,
+        // market coordinator, account bootstrap, fee calculator, SQL policy
+        // and final value projection all run against the same live owners.
+        // Preview must not create a reserve or send any venue POST.
         use okx_protocol::trading::{
             OrderConstraints, PositionSide, Protection, Sizing, TradeOperation, TradeRequest,
         };
-        let attempted = TradeRequest::Execute {
-            idempotency_key: "public_native_worker_unproven_001".into(),
+        let preview = TradeRequest::Preview {
             operation: TradeOperation::Open,
-            strategy_instance: "manual".into(),
-            instrument: "BTC-USDT-SWAP".into(),
-            side: PositionSide::Long,
-            sizing: Sizing::Contracts {
-                contracts: "0.10".into(),
+            strategy_instance:"manual".into(),
+            instrument:"BTC-USDT-SWAP".into(),
+            side:PositionSide::Long,
+            sizing:Sizing::Contracts { contracts:"0.10".into() },
+            order:OrderConstraints {
+                order_type:"limit".into(),
+                limit_price:Some("1000".into()),
+                reference:None,
+                max_entry_usd:Some("10".into()),
+                max_slippage_bps:0,
             },
-            order: OrderConstraints {
-                order_type: "limit".into(),
-                limit_price: Some("1000".into()),
-                reference: None,
-                max_entry_usd: Some("10".into()),
-                max_slippage_bps: 0,
-            },
-            protection: Some(Protection::Price {
-                stop_price: "900".into(),
-            }),
-            expires_in_ms: 2_000,
+            protection:Some(Protection::Price { stop_price:"900".into() }),
         };
-        assert!(attempted.valid());
-        for alias in ["fixture-a", "fixture-b"] {
-            let caps = trade
-                .trade(alias, &TradeRequest::Capabilities {}, None)
-                .await
-                .unwrap();
-            let uid = if alias == "fixture-a" {
-                okx_api::account_uid_fingerprint("account-001")
-            } else {
-                okx_api::account_uid_fingerprint("account-002")
-            };
-            assert_eq!(caps["account"], format!("okx:real:{uid}"));
-            assert_eq!(caps["executor"]["state"], "verified");
-            assert_eq!(caps["ready_for_post"], false);
-            let preflight = trade
-                .trade(alias, &TradeRequest::Preflight {}, None)
-                .await
-                .unwrap();
-            assert_eq!(preflight["ready_for_new_risk"], false);
-            let failed = trade.trade(alias, &attempted, None).await;
-            assert!(
-                failed.is_err(),
-                "unverified source must not POST: {failed:?}"
-            );
+        assert!(preview.valid());
+        for alias in ["fixture-a","fixture-b"] {
+            let output = trade.trade(alias,&preview,None).await.unwrap();
+            assert_eq!(output["status"],"completed");
+            assert_eq!(output["data"]["entry_costs"]["entry_total_usd"],"1.0005");
+            assert_eq!(output["data"]["admission"],"preview_only");
+            assert_eq!(output["data"]["side_effects"],"none");
         }
+        assert!(feed.outbound_posts.lock().unwrap().is_empty(),
+            "public preview must never invoke the production venue POST transport");
+        assert_eq!(feed.unconsumed_reads(),0,
+            "every scripted fee/leverage source must have been consumed");
         let mut before = summary("risk_public_trade_did_not_post_001");
         before.installation_id = "installation_test".into();
         let untouched = risk.request(before).await.unwrap();
@@ -972,6 +1081,9 @@ mod raw_native_session_tests {
             terminated.is_ok(),
             "native session should terminate cleanly: {terminated:?}"
         );
+        public_shutdown.send(true).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), public_task)
+            .await.expect("public WS coordinator did not stop").unwrap().unwrap();
         drop(trade);
         accounts.shutdown().await;
         drop(accounts);
