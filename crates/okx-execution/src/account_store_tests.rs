@@ -1,6 +1,122 @@
 use super::*;
 
 #[test]
+fn e1_zero_fill_terminal_requires_full_money_coverage_and_replays_after_restart() {
+    let mut s = store();
+    let intent = intent(&mut s);
+    let quote = e1_source_quote(&s, &intent);
+    s.bind_entry_quote(&quote).unwrap();
+    s.bind_entry_admission(&EntryAdmissionEvidence {
+        schema: "okx.entry-admission/v2".into(),
+        account_key: s.meta.account_key.clone(),
+        installation_id: s.meta.installation_id.clone(),
+        intent_id: intent.intent_id.clone(),
+        plan_hash: intent.plan_hash.clone(),
+        quote_digest: format!("{:x}",sha2::Sha256::digest(
+            serde_json::to_vec(&quote).unwrap())),
+        admission_usd_per_usdt: Decimal::ONE,
+        other_entry_costs_upper_usd: Decimal::ZERO,
+        entry_upper_usd: quote.total_usd,
+        entry_proof_digest: "a".repeat(64),
+        observed_at: quote.observed_at,
+    }).unwrap();
+    acknowledged_entry_intent(&mut s);
+    s.record_order_readback("intent","venue-order",IntentState::Cancelled,
+        Decimal::ZERO,7).unwrap();
+
+    assert!(matches!(
+        s.bind_terminal_entry_settlement("intent",7,Decimal::ZERO,12),
+        Err(StoreError::Invalid("ZERO_ENTRY_COVERAGE_UNPROVEN"))
+    ));
+    for (source, partition) in [("fills","SWAP"),("bills","account")] {
+        s.ingest_page(&IngestPage {
+            cursor: Some(SourceCursor {
+                source: source.into(),stream_partition: partition.into(),
+                cursor: String::new(),watermark: 12,generation: 1,
+                coverage_gaps: String::new(),
+            }),
+            ..Default::default()
+        }).unwrap();
+    }
+    let zero = s.bind_terminal_entry_settlement(
+        "intent",7,Decimal::ZERO,12).unwrap();
+    assert_eq!(zero.cumulative_entry_usd,Decimal::ZERO);
+    assert_eq!(zero.settlement_revision,1);
+    assert_eq!(zero.reservation_key,"central-key");
+    assert_eq!(s.bind_terminal_entry_settlement(
+        "intent",7,Decimal::ZERO,12).unwrap(),zero);
+    assert!(matches!(
+        s.bind_terminal_entry_settlement("intent",7,Decimal::ZERO,13),
+        Err(StoreError::Invalid("ZERO_ENTRY_COVERAGE_UNPROVEN"))
+    ));
+
+    let path=s.path.clone();let meta=s.meta.clone();drop(s);
+    let mut reopened=AccountStore::open_existing(
+        path,&meta.account_key,&meta.installation_id).unwrap();
+    assert_eq!(reopened.bind_terminal_entry_settlement(
+        "intent",7,Decimal::ZERO,12).unwrap(),zero);
+    reopened.acknowledge_central_release("central-key","signed").unwrap();
+    for (source,partition) in [
+        ("fills","SPOT"),("fills","MARGIN"),("fills","FUTURES"),
+        ("fills","OPTION"),
+    ] {
+        reopened.connection.execute(
+            "INSERT INTO source_cursors(source,stream_partition,cursor,watermark,generation,coverage_gaps)
+             VALUES(?1,?2,'',12,1,'')",
+            rusqlite::params![source,partition],
+        ).unwrap();
+    }
+    let campaign=format!("sha256:{}", "c".repeat(64));
+    let (consumed,_) = reopened.seal_captured_campaign_baseline(
+        &campaign,2,12).unwrap();
+    assert_eq!(consumed,Decimal::ZERO,
+        "canceled zero fill cannot consume notional or refund earlier spend");
+}
+#[test]
+fn e1_zero_fill_cannot_hide_unclassified_bill_or_undurable_source() {
+    let mut s=store();
+    let i=intent(&mut s);
+    let quote=e1_source_quote(&s,&i);
+    s.bind_entry_quote(&quote).unwrap();
+    s.bind_entry_admission(&EntryAdmissionEvidence {
+        schema:"okx.entry-admission/v2".into(),
+        account_key:s.meta.account_key.clone(),
+        installation_id:s.meta.installation_id.clone(),
+        intent_id:i.intent_id.clone(),plan_hash:i.plan_hash.clone(),
+        quote_digest:format!("{:x}",sha2::Sha256::digest(
+            serde_json::to_vec(&quote).unwrap())),
+        admission_usd_per_usdt:Decimal::ONE,
+        other_entry_costs_upper_usd:Decimal::ZERO,
+        entry_upper_usd:quote.total_usd,
+        entry_proof_digest:"a".repeat(64),observed_at:quote.observed_at,
+    }).unwrap();
+    acknowledged_entry_intent(&mut s);
+    s.record_order_readback("intent","venue-order",IntentState::Cancelled,
+        Decimal::ZERO,7).unwrap();
+    for (source,partition) in [("fills","SWAP"),("bills","account")] {
+        s.ingest_page(&IngestPage {
+            cursor:Some(SourceCursor {
+                source:source.into(),stream_partition:partition.into(),
+                cursor:String::new(),watermark:12,generation:1,
+                coverage_gaps:String::new(),
+            }),..Default::default()
+        }).unwrap();
+    }
+    s.connection.execute(
+        "INSERT INTO bills(bill_id,kind,time,amount,currency,economic_event_key)
+         VALUES('unidentified','2:0',8,'-0.01','USDT','bill:unidentified')",
+        [],
+    ).unwrap();
+    assert!(matches!(
+        s.bind_terminal_entry_settlement("intent",7,Decimal::ZERO,12),
+        Err(StoreError::Invalid("ZERO_ENTRY_MONEY_UNRECONCILED"))
+    ));
+    s.connection.execute(
+        "DELETE FROM bills WHERE bill_id='unidentified'",[],
+    ).is_err();
+}
+
+#[test]
 fn e1_swap_fill_source_atomic_idempotence_and_negative_matrix() {
     assert_eq!(swap_fill_direction("3","buy","long").unwrap(),"OPEN");
     assert_eq!(swap_fill_direction("4","sell","short").unwrap(),"OPEN");

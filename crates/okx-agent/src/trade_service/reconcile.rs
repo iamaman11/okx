@@ -1264,10 +1264,11 @@ impl TradeService {
             return Err("TERMINAL_ENTRY_VENUE_STATE_UNVERIFIED".into());
         }
         let filled = verified_order_readback(i, venue_order)?;
-        if filled <= Decimal::ZERO {
-            // A zero-fill release needs its own independently verified
-            // no-fee proof; do not treat absence of fills as zero debit.
-            return Err("TERMINAL_ZERO_FILL_ENTRY_FEES_UNPROVEN".into());
+        // A truly canceled zero-fill order uses the same terminal USD
+        // settlement/release path but requires separate SQL no-money proof.
+        // Any missing stream, unmatched bill, or existing partial fill denies.
+        if filled == Decimal::ZERO && i.state != IntentState::Cancelled {
+            return Err("TERMINAL_ZERO_FILL_STATE_UNVERIFIED".into());
         }
         let id = i.intent_id.clone();
         let settlement = r

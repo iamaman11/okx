@@ -237,6 +237,142 @@ impl AccountStore {
         Ok(Some(proof))
     }
 
+    /// A source-complete venue cancellation with ZERO executed quantity.
+    /// No data absence is inferred from a venue ACK: both history streams
+    /// must be fully captured beyond the terminal update and SQL must contain
+    /// no fill, order-linked fee, or unclassified bill in the causal window.
+    /// Later independently sourced fees are still charged by the normal
+    /// append-only late-settlement revision.
+    pub fn bind_zero_fill_terminal_entry_settlement(
+        &mut self,
+        id: &str,
+        venue_updated_at: i64,
+        covered_through: i64,
+    ) -> StoreResult<EntrySettlementEvidence> {
+        let intent = self
+            .intent(id)?
+            .ok_or(StoreError::Invalid("ZERO_ENTRY_INTENT_MISSING"))?;
+        if intent.state != IntentState::Cancelled || !intent.risk_increase
+            || !intent.instrument_id.ends_with("-USDT-SWAP")
+            || venue_updated_at <= 0
+            || venue_updated_at.checked_add(2_000)
+                .is_none_or(|min| covered_through < min)
+        {
+            return Err(StoreError::Invalid("ZERO_ENTRY_VENUE_TERMINAL_UNVERIFIED"));
+        }
+        let venue_id = intent.exchange_order_id.as_deref()
+            .ok_or(StoreError::Invalid("ZERO_ENTRY_ORDER_ID_MISSING"))?;
+        let post: Option<i64> = self.connection.query_row(
+            "SELECT begin_post_at FROM intents WHERE intent_id=?1",
+            [id], |r| r.get(0),
+        )?;
+        let admission = self.entry_admission(id)?
+            .ok_or(StoreError::Invalid("ZERO_ENTRY_ADMISSION_MISSING"))?;
+        let central = self.central_receipt(id)?
+            .ok_or(StoreError::Invalid("ZERO_ENTRY_RESERVATION_MISSING"))?;
+        if post.is_none_or(|t| t <= 0 || t < admission.observed_at
+            || venue_updated_at < t)
+            || admission.other_entry_costs_upper_usd != Decimal::ZERO
+            || admission.plan_hash != intent.plan_hash
+            || admission.account_key != self.meta.account_key
+            || central.plan_hash != intent.plan_hash
+            || central.account_key != self.meta.account_key
+        {
+            return Err(StoreError::Invalid("ZERO_ENTRY_CAUSAL_PROOF_INVALID"));
+        }
+        // Replays preserve the ORIGINAL covered source frontier even if
+        // ongoing capture has advanced for other orders or later bills.
+        let key = format!("entry-settlement:{id}");
+        let prior = self.operation(&key)?;
+        let proof_through = if let Some(prior) = prior.as_ref() {
+            let original: EntrySettlementEvidence =
+                serde_json::from_str(&prior.result_ref)
+                    .map_err(|_| StoreError::Invalid("ZERO_ENTRY_REPLAY_CORRUPT"))?;
+            if original.source_covered_through_ms > covered_through {
+                return Err(StoreError::Invalid("ZERO_ENTRY_COVERAGE_REGRESSION"));
+            }
+            original.source_covered_through_ms
+        } else {
+            covered_through
+        };
+        // Independently completed stream frontiers, NOT a missing page.
+        for (source, partition) in [("fills", "SWAP"), ("bills", "account")] {
+            let cursor = self.cursor(source, partition)?
+                .ok_or(StoreError::Invalid("ZERO_ENTRY_COVERAGE_UNPROVEN"))?;
+            if cursor.generation <= 0 || !cursor.cursor.is_empty()
+                || !cursor.coverage_gaps.is_empty()
+                || cursor.watermark < proof_through
+            {
+                return Err(StoreError::Invalid("ZERO_ENTRY_COVERAGE_UNPROVEN"));
+            }
+        }
+        let unexplained: i64 = self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM fills
+                 WHERE (intent_id=?1 OR exchange_order_id=?2)
+                   AND time<=?4)
+               OR EXISTS(SELECT 1 FROM bills
+                 WHERE time>=?3 AND time<=?4
+                   AND kind NOT IN ('1:11','1:12','8:173','8:174')
+                   AND kind NOT LIKE '7:%')",
+            params![id,venue_id,post.unwrap(),proof_through], |r| r.get(0),
+        )?;
+        if unexplained != 0 {
+            return Err(StoreError::Invalid("ZERO_ENTRY_MONEY_UNRECONCILED"));
+        }
+        let source = format!("{:x}", Sha256::digest(
+            serde_json::to_vec(&(
+                "okx.entry-zero-fill-terminal/v1",
+                self.meta.account_key.as_str(),
+                self.meta.installation_id.as_str(),
+                id, intent.plan_hash.as_str(), admission.entry_proof_digest.as_str(),
+                central.reservation_key.as_str(), venue_id,
+                venue_updated_at, proof_through,
+            )).map_err(|_| StoreError::Invalid("ZERO_ENTRY_DIGEST_FAILED"))?
+        ));
+        let evidence = EntrySettlementEvidence {
+            schema: "okx.entry-terminal-settlement/v1".into(),
+            account_key: self.meta.account_key.clone(),
+            intent_id: id.into(),
+            plan_hash: intent.plan_hash,
+            reservation_key: central.reservation_key,
+            venue_order_id: venue_id.into(),
+            venue_update_ms: venue_updated_at,
+            source_covered_through_ms: proof_through,
+            venue_filled_quantity: Decimal::ZERO,
+            booked_notional_and_fee_usdt: Decimal::ZERO,
+            cumulative_entry_usd: Decimal::ZERO,
+            settlement_revision: 1,
+            source_digest: source,
+        };
+        let encoded = serde_json::to_string(&evidence)
+            .map_err(|_| StoreError::Invalid("ZERO_ENTRY_SERIALIZE_FAILED"))?;
+        if let Some(saved) = prior {
+            if saved.kind != "ENTRY_SETTLEMENT_PROVEN"
+                || saved.request_hash != evidence.plan_hash
+            {
+                return Err(StoreError::Invalid("ZERO_ENTRY_REPLAY_CONFLICT"));
+            }
+            let original: EntrySettlementEvidence =
+                serde_json::from_str(&saved.result_ref)
+                    .map_err(|_| StoreError::Invalid("ZERO_ENTRY_REPLAY_CORRUPT"))?;
+            // Advancing source frontiers does not rewrite this proof. Caller
+            // replays the SAME frozen coverage snapshot after a lost ACK.
+            if original != evidence || saved.committed_at != venue_updated_at {
+                return Err(StoreError::Invalid("ZERO_ENTRY_REPLAY_CONFLICT"));
+            }
+            return Ok(original);
+        }
+        if self.operation(&format!("entry-partial-head:{id}"))?.is_some() {
+            return Err(StoreError::Invalid("ZERO_ENTRY_PRIOR_PARTIAL_CONFLICT"));
+        }
+        self.connection.execute(
+            "INSERT INTO operation_receipts(operation_id,kind,request_hash,result_ref,committed_at)
+             VALUES(?1,'ENTRY_SETTLEMENT_PROVEN',?2,?3,?4)",
+            params![key,evidence.plan_hash,encoded,venue_updated_at],
+        )?;
+        Ok(evidence)
+    }
+
     /// E1.4 final source: only a terminal, independently read-back exchange
     /// order whose complete fills and fee bills exist in the sole SQL owner
     /// can produce a cumulative USD charge. Partial/zero-fill or stale pages
@@ -250,6 +386,11 @@ impl AccountStore {
         venue_filled_quantity: Decimal,
         covered_through: i64,
     ) -> StoreResult<EntrySettlementEvidence> {
+        if venue_filled_quantity == Decimal::ZERO {
+            return self.bind_zero_fill_terminal_entry_settlement(
+                id, venue_updated_at, covered_through,
+            );
+        }
         self.bind_cumulative_entry_settlement(
             id,
             venue_updated_at,

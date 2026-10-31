@@ -643,7 +643,12 @@ impl AccountStore {
             } else {
                 terminal
             };
-            if value.cumulative_entry_usd <= Decimal::ZERO
+            if value.cumulative_entry_usd < Decimal::ZERO
+                || (value.cumulative_entry_usd == Decimal::ZERO
+                    && (value.venue_filled_quantity != Decimal::ZERO
+                        || value.booked_notional_and_fee_usdt != Decimal::ZERO
+                        || value.settlement_revision != 1
+                        || value.schema != "okx.entry-terminal-settlement/v1"))
                 || value.source_digest.len() != 64
                 || !value.source_digest.bytes().all(|b| b.is_ascii_hexdigit())
             {

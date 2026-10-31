@@ -158,6 +158,47 @@ check((await inspectRisk(postCap,held.entry.key))?.entry.state==="HELD",
  "denied POST does not consume its one-shot exchange send fence");
 const begun=await beginRiskPost(sa,held.entry.key,p,1,d,{connection_generation:77,expected_book_sequence:2,census:later,source_proof:native,causal_proof,now_ms:now+2});
 check(begun.status==="POST_AUTHORIZED","same-content fresh causal proof with -60s host skew");
+// Zero-fill CANCELED is a REAL source-backed terminal settlement amount,
+// not an assumed price or a timeout. Test the same RiskBook transaction
+// independently from the positive partial-fill path.
+const zeroBook=new Storage();
+zeroBook.map=structuredClone(sa.map); // original POSTED entry, sequence=3
+const zeroSettled=await settleEntrySpend(zeroBook,held.entry.key,p,{
+ connection_generation:77,expected_book_sequence:3,
+ cumulative_entry_usd:"0",revision:1,source_digest:a
+});
+check(zeroSettled.status==="UPDATED"&&zeroSettled.book_sequence===4,
+ "authenticated zero fill records a revision without debiting campaign spend");
+const zeroCensus={...census,source_digest:a,
+ source_read_floor_ms:now+4,generated_at_ms:now+4};
+const zeroRelease=await transitionRisk(zeroBook,held.entry.key,p,"RELEASED",b,{
+ connection_generation:77,expected_book_sequence:4,
+ terminal:{
+  census:zeroCensus,source_proof:{...native,source_digest:a},now_ms:now+5,
+  ledger:{account_uid:a,run_id:base.run_id,intent_id:request.intent_id,
+   state:"CANCELED",record_digest:p,cumulative_loss_usd:"0",
+   remaining_exposure_usdt:"0",cumulative_entry_usd:"0",
+   entry_settlement_revision:1,entry_settlement_digest:a}
+ }
+});
+check(zeroRelease.status==="UPDATED"&&
+ (await readRiskBook(zeroBook))?.entry_budget?.consumed_usd==="0"&&
+ (await readRiskBook(zeroBook))?.entry_budget?.reserved_usd==="0",
+ "proven zero canceled entry refunds reserved capacity without inventing spend");
+const zeroReplay=await settleEntrySpend(zeroBook,held.entry.key,p,{
+ connection_generation:77,expected_book_sequence:3,
+ cumulative_entry_usd:"0",revision:1,source_digest:a
+});
+check(zeroReplay.status==="UPDATED"&&
+ (await readRiskBook(zeroBook))?.entry_budget?.consumed_usd==="0",
+ "lost zero-settlement ACK after release never charges twice");
+const zeroForged=await settleEntrySpend(zeroBook,held.entry.key,p,{
+ connection_generation:77,expected_book_sequence:3,
+ cumulative_entry_usd:"0",revision:1,source_digest:b
+});
+check(zeroForged.status==="DENIED",
+ "zero expense with different source digest cannot replay after release");
+console.log("e1_zero_fill_canceled_central_settlement PASS");
 const partial=await settleEntrySpend(sa,held.entry.key,p,{
  connection_generation:77,expected_book_sequence:3,cumulative_entry_usd:"0.5",
  revision:1,source_digest:d});
