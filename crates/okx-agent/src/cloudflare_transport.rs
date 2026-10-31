@@ -4,7 +4,9 @@ use crate::{
     query::{DispatchContext, dispatch_with_governance, response},
     risk_bridge::OutboundRiskCommand,
 };
-use futures_util::{FutureExt, SinkExt, StreamExt, future::BoxFuture, stream::FuturesUnordered};
+use futures_util::{
+    FutureExt, Sink, SinkExt, Stream, StreamExt, future::BoxFuture, stream::FuturesUnordered,
+};
 use okx_protocol::{
     AgentOperation, DIRECT_TRANSPORT_FRAME_SCHEMA_V2 as SCHEMA, DIRECT_TRANSPORT_MAX_PAYLOAD_BYTES,
     DirectRuntimeProfile, DirectTransportFrame as F,
@@ -169,11 +171,8 @@ async fn run_session(
         .await
         .map_err(|_| transport("WS_CONNECT_TIMEOUT"))?
         .map_err(|_| transport("WS_CONNECT_FAILED"))?;
-    let (mut sink, mut source) = socket.split();
     let connection_id = format!("native_{:032x}", nonce());
-    send(
-        &mut sink,
-        F::Hello {
+    let hello = F::Hello {
             schema: SCHEMA.into(),
             runtime_id: config.runtime_id.clone(),
             connection_id,
@@ -184,9 +183,28 @@ async fn run_session(
             agent_binary_sha256: current_binary_sha256()?,
             agent_incarnation: std::env::var("OKX_CONTROL_AGENT_INCAR")
                 .map_err(|_| transport("CONTROL_INCARNATION_UNAVAILABLE"))?,
-        },
-    )
-    .await?;
+    };
+    run_connected_session(socket, hello, ctx, risk, shutdown).await
+}
+
+/// This is the same production session loop for live WSS and raw-frame tests.
+/// Only delivery can be substituted: identity, session generation, risk replies,
+/// authorization, dispatch, and all financial ownership remain unchanged.
+async fn run_connected_session<S>(
+    socket: S,
+    hello: F,
+    ctx: DispatchContext,
+    risk: &mut mpsc::Receiver<OutboundRiskCommand>,
+    mut shutdown: watch::Receiver<bool>,
+) -> AgentResult<()>
+where
+    S: Stream<Item = Result<Message, tokio_tungstenite::tungstenite::Error>>
+        + Sink<Message, Error = tokio_tungstenite::tungstenite::Error>
+        + Unpin
+        + Send,
+{
+    let (mut sink, mut source) = socket.split();
+    send(&mut sink, hello).await?;
     let hello = tokio::time::timeout(Duration::from_secs(5), source.next())
         .await
         .map_err(|_| transport("HELLO_TIMEOUT"))?
