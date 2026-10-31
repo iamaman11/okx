@@ -1043,6 +1043,46 @@ pub(crate) mod recorded_support {
                             )
                         })?;
                     let page = reads.remove(index);
+                    // Order readback is an independently recorded raw GET,
+                    // not a synthetic response to POST. Only its dynamic
+                    // clOrdId is bound to the one actually observed executor
+                    // request; no balances/fills/protection are invented.
+                    let body = if path == "/api/v5/trade/order" {
+                        let submitted = self.outbound_posts.lock().unwrap();
+                        let sent = submitted.iter().filter(|(k, route, _)| {
+                            k == key && route == "/api/v5/trade/order"
+                        }).collect::<Vec<_>>();
+                        if sent.len() != 1 {
+                            return Err(OkxError::Response(
+                                "TRANSCRIPT_ORDER_READBACK_SEND_COUNT_MISMATCH".into(),
+                            ));
+                        }
+                        let client_id = sent[0].2.get("clOrdId")
+                            .and_then(serde_json::Value::as_str)
+                            .ok_or_else(|| OkxError::Response(
+                                "TRANSCRIPT_ORDER_READBACK_SEND_ID_MISSING".into()
+                            ))?;
+                        let observed_ids = request.url().query_pairs()
+                            .filter(|(k, _)| k == "clOrdId")
+                            .map(|(_, v)| v.into_owned())
+                            .collect::<Vec<_>>();
+                        if observed_ids.len() != 1 || observed_ids[0] != client_id {
+                            return Err(OkxError::Response(
+                                "TRANSCRIPT_ORDER_READBACK_ID_MISMATCH".into(),
+                            ));
+                        }
+                        let raw = String::from_utf8(page.raw_response).map_err(|_| {
+                            OkxError::Response("TRANSCRIPT_ORDER_READBACK_UTF8".into())
+                        })?;
+                        if !raw.contains("__REQUEST_CL_ORD_ID__") {
+                            return Err(OkxError::Response(
+                                "TRANSCRIPT_ORDER_READBACK_BINDING_MISSING".into(),
+                            ));
+                        }
+                        raw.replace("__REQUEST_CL_ORD_ID__", client_id).into_bytes()
+                    } else {
+                        page.raw_response
+                    };
                     self.requests.lock().unwrap().push(format!(
                         "{key}:{path}?{}",
                         request.url().query().unwrap_or_default()
@@ -1050,7 +1090,7 @@ pub(crate) mod recorded_support {
                     return Ok(RawHttpResponse {
                         status: HttpStatusCode::OK,
                         headers: Default::default(),
-                        body: page.raw_response,
+                        body,
                     });
                 }
                 let data = match path {

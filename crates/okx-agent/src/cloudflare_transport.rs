@@ -1347,6 +1347,29 @@ mod raw_native_session_tests {
             }),
             raw_response: br#"{"code":"0","msg":"","data":[{"ordId":"recorded-t09-opening-001","clOrdId":"__REQUEST_CL_ORD_ID__","sCode":"0"}]}"#.to_vec(),
         });
+        // A successful create ACK is not a complete lifecycle. Production
+        // status independently queries the order by the exact submitted
+        // client ID. Record BOTH GETs (first Execute and idempotent replay).
+        // "live" with zero fills is an actual distinct test source, not
+        // a fabricated fill or settlement.
+        let raw_order = envelope(json!([{
+            "instId":"BTC-USDT-SWAP",
+            "ordId":"recorded-t09-opening-001",
+            "clOrdId":"__REQUEST_CL_ORD_ID__",
+            "side":"buy","posSide":"long","tdMode":"cross",
+            "ordType":"limit","px":"1000","sz":"0.1",
+            "accFillSz":"0","avgPx":"",
+            "state":"live",
+            "cTime":fresh_clock_at,"uTime":fresh_clock_at
+        }]));
+        for _ in 0..2 {
+            feed.expect_get(RecordedGet {
+                access_key: "fixture-executor-a".into(),
+                path: "/api/v5/trade/order".into(),
+                required_query: vec![("instId".into(), "BTC-USDT-SWAP".into())],
+                raw_response: raw_order.clone(),
+            });
+        }
         let execute = TradeRequest::Execute {
             idempotency_key: "t09_real_public_execute_0001".into(),
             operation: TradeOperation::Open,
