@@ -8,6 +8,7 @@ use okx_api::{
 struct PostFxFence<'a> {
     owner: &'a AccountResources,
     conversion: &'a UsdConversion,
+    order_type: &'a str,
 }
 impl TradeService {
     /// Native, completely classified USD-denominated spot opening spend.
@@ -771,12 +772,12 @@ impl TradeService {
                     &state,
                     &held,
                     &prepared,
-                    &order.order_type,
                     until,
                     held_received,
                     PostFxFence {
                         owner: r,
                         conversion: &conversion,
+                        order_type: &order.order_type,
                     },
                 )
                 .await
@@ -1180,7 +1181,6 @@ impl TradeService {
         state: &CentralGovernanceSnapshot,
         held: &RiskResult,
         intent: &StoredIntent,
-        order_type: &str,
         until: Instant,
         held_received: Instant,
         fx: PostFxFence<'_>,
@@ -1201,7 +1201,7 @@ impl TradeService {
             // A fresh census and a valid FX fence do not revalidate tariff or
             // contract mechanics. Bind the same immutable SQL quote against
             // actual post-HELD source data on EACH CAS attempt before POST.
-            self.revalidate_held_entry_quote(fx.owner, intent, order_type, until)
+            self.revalidate_held_entry_quote(fx.owner, intent, fx.order_type, until)
                 .await?;
             let (census, causal_proof) = self
                 .census_after_held(
