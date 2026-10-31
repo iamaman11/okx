@@ -962,9 +962,12 @@ fn e1_zero_fill_cannot_hide_unclassified_bill_or_undurable_source() {
         s.bind_terminal_entry_settlement("intent", 7, Decimal::ZERO, 12),
         Err(StoreError::Invalid("ZERO_ENTRY_MONEY_UNRECONCILED"))
     ));
-    s.connection
-        .execute("DELETE FROM bills WHERE bill_id='unidentified'", [])
-        .unwrap();
+    assert!(
+        s.connection
+            .execute("DELETE FROM bills WHERE bill_id='unidentified'", [])
+            .is_err(),
+        "captured bills are immutable; deletion cannot fabricate zero spending"
+    );
 }
 
 #[test]
