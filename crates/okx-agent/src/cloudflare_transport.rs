@@ -372,7 +372,9 @@ mod raw_native_session_tests {
             agent_incarnation: format!("ctl_{}", "b".repeat(32)),
         }
     }
-    async fn test_dispatch_for(installation: &str) -> (
+    async fn test_dispatch_for(
+        installation: &str,
+    ) -> (
         DispatchContext,
         std::path::PathBuf,
         NativeRiskClient,
@@ -616,15 +618,15 @@ mod raw_native_session_tests {
             AUTHORIZATION,
             HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
         );
-        let (socket, _) = tokio::time::timeout(
-            Duration::from_secs(10),
-            connect_async(request),
-        )
-        .await
-        .unwrap()
-        .unwrap();
+        let (socket, _) = tokio::time::timeout(Duration::from_secs(10), connect_async(request))
+            .await
+            .unwrap()
+            .unwrap();
         let mut hello = test_hello();
-        if let F::Hello { installation_id, .. } = &mut hello {
+        if let F::Hello {
+            installation_id, ..
+        } = &mut hello
+        {
             *installation_id = "installation_test".into();
         }
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
@@ -652,17 +654,22 @@ mod raw_native_session_tests {
         };
         let inspected = risk.request(inspect).await.unwrap();
         assert_eq!(inspected.status, RiskDecisionStatus::Observed);
-        assert_eq!(inspected.reservation_key.as_deref(), Some(reservation_key.as_str()));
+        assert_eq!(
+            inspected.reservation_key.as_deref(),
+            Some(reservation_key.as_str())
+        );
         assert!(inspected.reservation_state.is_some());
         shutdown_tx.send(true).unwrap();
         let terminated = tokio::time::timeout(Duration::from_secs(10), session)
             .await
             .unwrap()
             .unwrap();
-        assert!(terminated.is_ok(), "native session should terminate cleanly: {terminated:?}");
+        assert!(
+            terminated.is_ok(),
+            "native session should terminate cleanly: {terminated:?}"
+        );
         drop(risk);
         std::fs::remove_dir_all(root).unwrap();
         println!("native_to_persisted_workerd_riskbook PASS: no venue POST");
     }
-
 }
