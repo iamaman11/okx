@@ -29,13 +29,15 @@ const tokenHash = createHash("sha256").update(token).digest("hex");
 const opts = {
   resourcePersistencePath: join(root, "sqlite-do"),
   workers: [{
-    name: "okx-test-runtime",
-    modules: true,
-    scriptPath: outfile,
-    compatibilityDate: "2026-09-30",
-    compatibilityFlags: ["global_fetch_strictly_public"],
-    durableObjects: { RUNTIME: { className: "RuntimeSession", useSQLite: true } },
-    bindings: { RUNTIME_TOKEN_SHA256: tokenHash },
+    config: {
+      name: "okx-test-runtime",
+      modules: true,
+      scriptPath: outfile,
+      compatibilityDate: "2026-09-30",
+      compatibilityFlags: ["global_fetch_strictly_public"],
+      durableObjects: { RUNTIME: { className: "RuntimeSession", useSQLite: true } },
+      bindings: { RUNTIME_TOKEN_SHA256: tokenHash },
+    },
   }],
 };
 const installation = {
