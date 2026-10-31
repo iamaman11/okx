@@ -1,5 +1,196 @@
 use super::*;
 #[test]
+fn e1_e2_native_real_fee_sources_baseline_and_second_admission_under_ten() {
+    let mut s = store();
+    let definition = s.ensure_manual_instance(1).unwrap();
+    let plan = IntentPlan {
+        strategy_definition_id: definition.definition_id,
+        strategy_definition_version: definition.version,
+        strategy_parameters_digest: definition.parameters_digest,
+        contract_value: Decimal::ONE,
+        inverse: false,
+        settlement_currency: "USDT".into(),
+        position_side: "long".into(),
+        private_source_generation: 1,
+        operation: "open".into(),
+        side: "buy".into(),
+        quantity: Decimal::ONE,
+        limit_price: Decimal::from(5),
+        stop_price: Some(Decimal::from(4)),
+        strategy_instance: "manual".into(),
+        planned_loss_usd: Decimal::ONE,
+        source_generation: 1,
+    };
+    let first_decision = Decision {
+        decision_id: "native-first".into(),
+        instance_id: None,
+        decision_at: 2,
+        input_digest: "first-input".into(),
+        policy_revision: 1,
+        code_version: "test".into(),
+    };
+    let first = s.prepare(&first_decision, &NewIntent {
+        plan: plan.clone(),
+        intent_id: "intent".into(),
+        idempotency_key: "native-first".into(),
+        request_hash: "first-body".into(),
+        client_order_id: "first-client".into(),
+        deadline: 100,
+        plan_hash: "plan".into(),
+        policy_revision: 1,
+        risk_increase: true,
+        instrument_id: "BTC-USDT-SWAP".into(),
+    }).unwrap();
+    let mut first_quote = e1_source_quote(&s, &first);
+    first_quote.limit_price = Decimal::from(5);
+    first_quote.notional_usdt = Decimal::from(5);
+    first_quote.fee_usdt = Decimal::new(25, 4);
+    first_quote.total_usdt = Decimal::new(50025, 4);
+    first_quote.total_usd = Decimal::new(50025, 4);
+    s.bind_entry_quote(&first_quote).unwrap();
+    s.bind_entry_admission(&EntryAdmissionEvidence {
+        schema: "okx.entry-admission/v2".into(),
+        account_key: s.meta.account_key.clone(),
+        installation_id: s.meta.installation_id.clone(),
+        intent_id: first.intent_id.clone(),
+        plan_hash: first.plan_hash.clone(),
+        quote_digest: format!("{:x}", sha2::Sha256::digest(
+            serde_json::to_vec(&first_quote).unwrap())),
+        admission_usd_per_usdt: Decimal::ONE,
+        other_entry_costs_upper_usd: Decimal::ZERO,
+        entry_upper_usd: first_quote.total_usd,
+        entry_proof_digest: "a".repeat(64),
+        observed_at: first_quote.observed_at,
+    }).unwrap();
+    acknowledged_entry_intent(&mut s);
+
+    let source_fee = Decimal::new(-25,4);
+    let fee_entry = FinanceEntry {
+        entry_id: "bill:entry-fee:FEE".into(),
+        economic_event_key: "bill:entry-fee".into(),
+        component: "FEE".into(),
+        allocation_leg: "account".into(),
+        amount: source_fee,
+        currency: "USDT".into(),
+        instance_id: None,
+        source_ref: "fill:fill-one".into(),
+        time: 6,
+        reverses_entry_id: None,
+    };
+    s.ingest_page(&IngestPage {
+        fills: vec![Fill {
+            fill_id: "fill-one".into(),
+            instrument_id: "BTC-USDT-SWAP".into(),
+            trade_id: "venue-trade-one".into(),
+            exchange_order_id: "venue-order".into(),
+            intent_id: Some(first.intent_id.clone()),
+            time: 6, qty: Decimal::ONE,
+            price: Decimal::from(5),
+            fee: source_fee, currency: "USDT".into(),
+            side: "buy".into(),
+        }],
+        finance: vec![fee_entry.clone()],
+        cursor: Some(SourceCursor {
+            source: "fills".into(),stream_partition: "SWAP".into(),
+            cursor: String::new(),watermark: 7,generation: 1,
+            coverage_gaps: String::new(),
+        }),
+        ..Default::default()
+    }).unwrap();
+    s.ingest_page(&IngestPage {
+        bills: vec![Bill {
+            bill_id: "entry-fee".into(),
+            kind: "1:trade".into(),time: 7, amount: source_fee,
+            currency: "USDT".into(),
+            economic_event_key: "bill:entry-fee".into(),
+        }],
+        finance: vec![FinanceEntry {
+            source_ref: "bill:entry-fee".into(),time: 7,
+            ..fee_entry
+        }],
+        bill_order_sources: vec![BillOrderSource {
+            bill_id: "entry-fee".into(),
+            instrument_id: "BTC-USDT-SWAP".into(),
+            exchange_order_id: "venue-order".into(),
+            trade_id: "venue-trade-one".into(),
+        }],
+        cursor: Some(SourceCursor {
+            source: "bills".into(),stream_partition: "account".into(),
+            cursor: String::new(),watermark: 7,generation: 1,
+            coverage_gaps: String::new(),
+        }),
+        ..Default::default()
+    }).unwrap();
+    s.record_order_readback(
+        "intent","venue-order",IntentState::Filled,Decimal::ONE,7,
+    ).unwrap();
+    let settlement = s.bind_terminal_entry_settlement(
+        "intent",7,Decimal::ONE,7,
+    ).unwrap();
+    assert_eq!(settlement.cumulative_entry_usd,Decimal::new(50025,4));
+    assert_eq!(settlement.settlement_revision,1);
+    // Central SETTLE_ENTRY and RELEASE are separately authenticated by
+    // the production RiskBook tests. This receipt represents their durable
+    // acknowledgement in the native account writer only.
+    s.acknowledge_central_release("central-key","central-settled").unwrap();
+    for (source,part) in [
+        ("fills","SPOT"),("fills","MARGIN"),
+        ("fills","FUTURES"),("fills","OPTION"),
+    ] {
+        s.connection.execute(
+            "INSERT INTO source_cursors(source,stream_partition,cursor,watermark,generation,coverage_gaps)
+             VALUES(?1,?2,'',7,1,'')",
+            rusqlite::params![source,part],
+        ).unwrap();
+    }
+    let campaign=format!("sha256:{}", "c".repeat(64));
+    let (spent,proof)=s.seal_captured_campaign_baseline(
+        &campaign,2,7,
+    ).unwrap();
+    assert_eq!(spent,Decimal::new(50025,4));
+    assert_eq!(
+        s.seal_captured_campaign_baseline(&campaign,2,7).unwrap(),
+        (spent,proof),
+        "re-reading an unchanged complete campaign cannot debit twice"
+    );
+    assert_eq!(Decimal::from(10)-spent,Decimal::new(49975,4));
+
+    // The second SQL intent uses the ORIGINAL campaign money: a valid
+    // 4 USDT entry still fits inside the 10 USD total budget.
+    let second_plan=IntentPlan {
+        limit_price: Decimal::from(4),
+        stop_price: Some(Decimal::from(3)),
+        ..plan
+    };
+    let successor=s.prepare(&Decision {
+        decision_id: "native-second".into(),
+        instance_id: None,decision_at: 8,
+        input_digest: "second-input".into(),
+        policy_revision: 1,code_version: "test".into(),
+    },&NewIntent {
+        plan: second_plan,
+        intent_id: "intent-second".into(),
+        idempotency_key: "native-second".into(),
+        request_hash: "second-body".into(),
+        client_order_id: "second-client".into(),
+        deadline: 100,
+        plan_hash: "second-plan".into(),
+        policy_revision: 1,
+        risk_increase: true,
+        instrument_id: "BTC-USDT-SWAP".into(),
+    }).unwrap();
+    let mut second_quote=e1_source_quote(&s,&successor);
+    second_quote.limit_price=Decimal::from(4);
+    second_quote.notional_usdt=Decimal::from(4);
+    second_quote.fee_usdt=Decimal::new(2,3);
+    second_quote.total_usdt=Decimal::new(4002,3);
+    second_quote.total_usd=Decimal::new(4002,3);
+    s.bind_entry_quote(&second_quote).unwrap();
+    assert!(spent+second_quote.total_usd<=Decimal::from(10));
+    assert!(s.verify_captured_campaign_continuity(2,7).is_err(),
+        "new unfinished order is visible to native risk census");
+}
+#[test]
 fn e1_raw_bill_order_source_is_atomic_idempotent_and_immutable() {
     let mut s = store();
     let original = IngestPage {
