@@ -1365,9 +1365,11 @@ mod tests {
             })
             .await
             .expect("real source capture did not converge from recorded frames");
-            let sent = ws.sent.lock().unwrap();
-            assert_eq!(sent.iter().filter(|v| v["op"] == "login").count(), 2);
-            assert_eq!(sent.iter().filter(|v| v["op"] == "subscribe").count(), 2);
+            {
+                let sent = ws.sent.lock().unwrap();
+                assert_eq!(sent.iter().filter(|v| v["op"] == "login").count(), 2);
+                assert_eq!(sent.iter().filter(|v| v["op"] == "subscribe").count(), 2);
+            }
             let recorded = account
                 .execution
                 .store
