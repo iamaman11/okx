@@ -185,8 +185,43 @@ fn e1_e2_native_real_fee_sources_baseline_and_second_admission_under_ten() {
     second_quote.fee_usdt=Decimal::new(2,3);
     second_quote.total_usdt=Decimal::new(4002,3);
     second_quote.total_usd=Decimal::new(4002,3);
+    second_quote.fee_exchange_at=8;
+    second_quote.fee_received_at=8;
+    second_quote.conversion_received_at=8;
+    second_quote.observed_at=8;
     s.bind_entry_quote(&second_quote).unwrap();
     assert!(spent+second_quote.total_usd<=Decimal::from(10));
+    s.bind_entry_admission(&EntryAdmissionEvidence {
+        schema: "okx.entry-admission/v2".into(),
+        account_key: s.meta.account_key.clone(),
+        installation_id: s.meta.installation_id.clone(),
+        intent_id: successor.intent_id.clone(),
+        plan_hash: successor.plan_hash.clone(),
+        quote_digest: format!("{:x}",sha2::Sha256::digest(
+            serde_json::to_vec(&second_quote).unwrap())),
+        admission_usd_per_usdt: Decimal::ONE,
+        other_entry_costs_upper_usd: Decimal::ZERO,
+        entry_upper_usd: second_quote.total_usd,
+        entry_proof_digest: "b".repeat(64),
+        observed_at: second_quote.observed_at,
+    }).unwrap();
+    s.reserve(&CentralReceipt {
+        reservation_key: "second-central-reservation".into(),
+        account_key: s.meta.account_key.clone(),
+        installation_id: s.meta.installation_id.clone(),
+        instance_id: None,
+        intent_id: successor.intent_id.clone(),
+        plan_hash: successor.plan_hash.clone(),
+        policy_revision: 1,
+        receipt_hash: "second-central-receipt".into(),
+        requested_loss_usd: Decimal::ONE,
+        conversion_digest: "second-frozen-fx".into(),
+    },9).unwrap();
+    assert_eq!(
+        s.central_receipt(&successor.intent_id).unwrap().unwrap().reservation_key,
+        "second-central-reservation",
+        "second grant has its own durable identity, not the first order's release"
+    );
     assert!(s.verify_captured_campaign_continuity(2,7).is_err(),
         "new unfinished order is visible to native risk census");
 }
