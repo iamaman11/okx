@@ -5271,8 +5271,14 @@ fn sqlite_million_history_bounded_rss() {
     std::fs::remove_file(path).unwrap();
 }
 fn path() -> PathBuf {
+    // CI can overlap multiple cargo-test processes sharing a temp volume.
+    // PID + a process-local counter is not an identity across processes.
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("valid test clock")
+        .as_nanos();
     std::env::temp_dir().join(format!(
-        "okx-t0-{}-{}.db",
+        "okx-t0-{}-{nonce}-{}.db",
         std::process::id(),
         COUNTER.fetch_add(1, Ordering::Relaxed)
     ))

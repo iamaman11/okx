@@ -380,9 +380,23 @@ impl AccountStore {
             .create(true)
             .truncate(false)
             .open(format!("{}.writer.lock", path.display()))?;
-        file.try_lock()
-            .map_err(|_| StoreError::Invalid("ACCOUNT_WRITER_ALREADY_RUNNING"))?;
-        Ok(file)
+        // An interrupted OS lock syscall is not proof of another owner.
+        // Retry only EINTR, with a strict bound and without sleeping. A real
+        // busy writer stays fail-closed; all other I/O failures retain their
+        // actual OS error instead of masquerading as writer contention.
+        let mut interrupted = 0;
+        loop {
+            match file.try_lock() {
+                Ok(()) => return Ok(file),
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted && interrupted < 3 => {
+                    interrupted += 1;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    return Err(StoreError::Invalid("ACCOUNT_WRITER_ALREADY_RUNNING"));
+                }
+                Err(e) => return Err(StoreError::Io(e)),
+            }
+        }
     }
     pub(super) fn configure(c: &Connection) -> StoreResult<()> {
         c.busy_timeout(Duration::from_millis(250))?;
