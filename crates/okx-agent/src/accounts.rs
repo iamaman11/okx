@@ -847,14 +847,34 @@ pub(crate) mod recorded_support {
     };
     use std::time::Instant;
 
+    /// One pre-recorded response for one exact signed executor POST. This is
+    /// only a transport transcript, never an exchange/account state machine.
+    pub(crate) struct RecordedPost {
+        pub(crate) access_key: String,
+        pub(crate) path: String,
+        pub(crate) expected_body: serde_json::Value,
+        pub(crate) raw_response: Vec<u8>,
+    }
+
     #[derive(Default)]
     pub(crate) struct RecordedAccountHttp {
         pub(crate) requests: Mutex<Vec<String>>,
+        pub(crate) outbound_posts: Mutex<Vec<(String, String, serde_json::Value)>>,
+        posts: Mutex<Vec<RecordedPost>>,
+    }
+    impl RecordedAccountHttp {
+        pub(crate) fn expect_post(&self, post: RecordedPost) {
+            self.posts.lock().unwrap().push(post);
+        }
+
+        pub(crate) fn unconsumed_posts(&self) -> usize {
+            self.posts.lock().unwrap().len()
+        }
     }
     impl HttpTransport for RecordedAccountHttp {
         fn send(&self, request: HttpRequest, _: Instant) -> HttpSend<'_> {
             Box::pin(async move {
-                if request.method() != "GET" {
+                if request.method() != "GET" && request.method() != "POST" {
                     return Err(OkxError::Response("TRANSCRIPT_METHOD_MISMATCH".into()));
                 }
                 let key = request
@@ -870,6 +890,60 @@ pub(crate) mod recorded_support {
                     _ => return Err(OkxError::Response("TRANSCRIPT_ACCOUNT_UNKNOWN".into())),
                 };
                 let path = request.url().path();
+                if request.method() == "POST" {
+                    // Count every possible outbound create, even when the
+                    // transcript rejects it. Never silently replay a POST.
+                    let bytes = request
+                        .body()
+                        .and_then(|body| body.as_bytes())
+                        .ok_or_else(|| OkxError::Response("TRANSCRIPT_POST_BODY_MISSING".into()))?;
+                    let observed: serde_json::Value = serde_json::from_slice(bytes)?;
+                    self.outbound_posts.lock().unwrap().push((
+                        key.to_owned(),
+                        path.to_owned(),
+                        observed.clone(),
+                    ));
+                    if !key.starts_with("fixture-executor-") {
+                        return Err(OkxError::Response("TRANSCRIPT_POST_NOT_EXECUTOR".into()));
+                    }
+                    let mut expected = self.posts.lock().unwrap();
+                    let index = expected
+                        .iter()
+                        .position(|item| item.access_key == key && item.path == path)
+                        .ok_or_else(|| OkxError::Response("TRANSCRIPT_UNEXPECTED_POST".into()))?;
+                    let post = &expected[index];
+                    let mut body = post.expected_body.clone();
+                    let client_id = observed
+                        .get("clOrdId")
+                        .and_then(serde_json::Value::as_str)
+                        .ok_or_else(|| OkxError::Response("TRANSCRIPT_CLIENT_ID_MISSING".into()))?;
+                    if client_id.is_empty()
+                        || client_id.len() > 32
+                        || !client_id.bytes().all(|b| b.is_ascii_alphanumeric())
+                    {
+                        return Err(OkxError::Response("TRANSCRIPT_CLIENT_ID_INVALID".into()));
+                    }
+                    if body.get("clOrdId").and_then(serde_json::Value::as_str)
+                        == Some("__REQUEST_CL_ORD_ID__")
+                    {
+                        body["clOrdId"] = client_id.into();
+                    }
+                    if body != observed {
+                        return Err(OkxError::Response("TRANSCRIPT_POST_BODY_MISMATCH".into()));
+                    }
+                    let recorded = expected.remove(index);
+                    drop(expected);
+                    // Binding a dynamic client order ID to pre-recorded raw
+                    // response bytes does not generate fills, fees or balances.
+                    let response = String::from_utf8(recorded.raw_response)
+                        .map_err(|_| OkxError::Response("TRANSCRIPT_RESPONSE_UTF8".into()))?
+                        .replace("__REQUEST_CL_ORD_ID__", client_id);
+                    return Ok(RawHttpResponse {
+                        status: HttpStatusCode::OK,
+                        headers: Default::default(),
+                        body: response.into_bytes(),
+                    });
+                }
                 let data = match path {
                     "/api/v5/account/config" => serde_json::json!([{
                         "uid": uid,
@@ -1174,6 +1248,71 @@ mod tests {
         assert!(!root.join("accounts").exists());
         assert!(!root.join("account-leases").exists());
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Exercise the actual signed OKX adapter's POST through the raw
+    /// transport boundary. A mismatched request cannot consume a response,
+    /// and the response is not an invented execution or a fill.
+    #[tokio::test]
+    async fn recorded_executor_post_requires_exact_request_and_consumes_once() {
+        use super::recorded_support::{RecordedAccountHttp, RecordedPost};
+        use okx_api::{
+            ApiOrderSide, ApiOrderType, ApiPositionSide, ApiTradeMode, Credentials, MutationTiming,
+            OkxRestClient, PlaceOrderRequest, TradeApi,
+        };
+        let feed = Arc::new(RecordedAccountHttp::default());
+        let env = OkxEnvironment::new(okx_api::Region::Global, false);
+        let credentials = Credentials::new(
+            "fixture-executor-a".into(),
+            "executor-secret".into(),
+            "pass".into(),
+        )
+        .unwrap();
+        let client = OkxRestClient::with_http_transport(
+            env,
+            credentials,
+            RateBudget::new(),
+            feed.clone(),
+        )
+        .unwrap();
+        let trade = TradeApi::new(client);
+        let request = PlaceOrderRequest {
+            instrument_id: "BTC-USDT-SWAP".into(),
+            trade_mode: ApiTradeMode::Cross,
+            client_order_id: "recordedOrder123".into(),
+            side: ApiOrderSide::Buy,
+            position_side: ApiPositionSide::Long,
+            reduce_only: None,
+            order_type: ApiOrderType::Limit,
+            size: "0.30".into(),
+            price: "1000".into(),
+            attached_algo_orders: vec![],
+        };
+        let mut expected = serde_json::to_value(&request).unwrap();
+        expected["clOrdId"] = "__REQUEST_CL_ORD_ID__".into();
+        feed.expect_post(RecordedPost {
+            access_key: "fixture-executor-a".into(),
+            path: "/api/v5/trade/order".into(),
+            expected_body: expected,
+            raw_response: br#"{"code":"0","msg":"","data":[{"ordId":"123456","clOrdId":"__REQUEST_CL_ORD_ID__","sCode":"0"}]}"#.to_vec(),
+        });
+        let timestamp = u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap();
+        let timing = MutationTiming::from_exchange_time_ms(timestamp, 2_000).unwrap();
+        let mut wrong = request.clone();
+        wrong.size = "0.40".into();
+        assert!(trade.place_order(&wrong, &timing).await.is_err());
+        assert_eq!(feed.unconsumed_posts(), 1, "mismatch must not advance transcript");
+        let response = trade.place_order(&request, &timing).await.unwrap();
+        assert_eq!(response.data.len(), 1);
+        assert_eq!(response.data[0].order_id, "123456");
+        assert_eq!(response.data[0].client_order_id, request.client_order_id);
+        assert_eq!(feed.unconsumed_posts(), 0);
+        assert!(trade.place_order(&request, &timing).await.is_err());
+        assert_eq!(
+            feed.outbound_posts.lock().unwrap().len(),
+            3,
+            "all possible sends, including rejected/repeated, must be observable"
+        );
     }
 
     /// T09 bootstrap component: independent UIDs create separate real SQL
