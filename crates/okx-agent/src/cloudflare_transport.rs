@@ -1736,8 +1736,39 @@ mod raw_native_session_tests {
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }
         })
-        .await
-        .expect("recorded fill/bill source not captured by production finance owner");
+        .await;
+        let captured = match captured {
+            Ok(captured) => captured,
+            Err(_) => {
+                // Read-only diagnostics from the SAME live Native SQL owner.
+                // Do not manufacture coverage, ingest test rows or release risk.
+                let health = owner.source_capture_health.read().await;
+                let reason = health.reason_code.clone();
+                let last_success = health.last_success_ms;
+                let last_failure = health.last_failure_ms;
+                drop(health);
+                let intent = idempotent_intent_id.clone();
+                let cursors = owner.execution.store
+                    .call(std::time::Instant::now() + Duration::from_secs(3), move |s| {
+                        let fills = s.cursor("fills", "SWAP")?;
+                        let bills = s.cursor("bills", "account")?;
+                        let fill_watermark = fills.as_ref().map_or(0, |c| c.watermark);
+                        let bill_watermark = bills.as_ref().map_or(0, |c| c.watermark);
+                        Ok(json!({
+                            "fills_cursor": fills,
+                            "bills_cursor": bills,
+                            "fills":format!("{:?}", s.intent_fill_cost_evidence(&intent,fill_watermark)),
+                            "fee_bills":format!("{:?}", s.intent_fee_bill_evidence(&intent,bill_watermark))
+                        }))
+                    }).await;
+                let observed = feed.requests.lock().unwrap();
+                let recent = observed.iter().rev().take(24).cloned().collect::<Vec<_>>();
+                panic!(
+                    "T09_FILL_BILL_CAPTURE_NOT_PROVEN reason={reason:?} last_success={last_success:?} last_failure={last_failure:?} sql={cursors:?} queued_recorded_pages={} observed_requests={recent:?}",
+                    feed.unconsumed_reads()
+                );
+            }
+        };
         assert_eq!(captured.0.fill_count, 1);
         assert_eq!(captured.0.filled_quantity.to_string(), "0.1");
         assert_eq!(captured.0.gross_notional_usdt.to_string(), "1");
