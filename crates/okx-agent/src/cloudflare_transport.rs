@@ -738,6 +738,7 @@ mod raw_native_session_tests {
                     .unwrap();
                 if capabilities["native_sql_policy"]["matches_governance"] == true {
                     assert_eq!(capabilities["governance"]["enabled"], true);
+                    assert_eq!(capabilities["native_sql_policy"]["revision"], 2);
                     break;
                 }
                 tokio::time::sleep(Duration::from_millis(20)).await;
@@ -745,6 +746,18 @@ mod raw_native_session_tests {
         })
         .await
         .expect("Worker PolicySnapshot was not committed by native account SQL");
+        // Both SQL owners must have independently applied the SAME Worker
+        // revision before any shared-risk reservation is attempted.
+        let caps_b = trade
+            .trade(
+                "fixture-b",
+                &okx_protocol::trading::TradeRequest::Capabilities {},
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(caps_b["native_sql_policy"]["matches_governance"], true);
+        assert_eq!(caps_b["native_sql_policy"]["revision"], 2);
         // Enter the real public TradeService on both authenticated SQL owners.
         // Despite verified private input and applied A policy, no public
         // instrument price/spec is available: no new venue POST is allowed.
@@ -833,6 +846,13 @@ mod raw_native_session_tests {
         // boundary inputs: no venue claims and no exchange POST in this test.
         let uid = okx_api::account_uid_fingerprint("account-001");
         let account_key = format!("okx:real:{uid}");
+        let account_key_b = format!(
+            "okx:real:{}",
+            okx_api::account_uid_fingerprint("account-002")
+        );
+        let mut account_keys = vec![account_key.clone(), account_key_b];
+        account_keys.sort();
+        assert_ne!(account_keys[0], account_keys[1]);
         let timestamp = || {
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -841,12 +861,15 @@ mod raw_native_session_tests {
         };
         let captured_at = timestamp() - 300;
         let census = NativeRiskCensus {
-            account_keys: vec![account_key.clone()],
-            occupied: vec![RiskAccountOccupancy {
-                account_key: account_key.clone(),
-                occupied_usdt: "0".into(),
-                cumulative_loss_usd: "0".into(),
-            }],
+            account_keys: account_keys.clone(),
+            occupied: account_keys
+                .iter()
+                .map(|key| RiskAccountOccupancy {
+                    account_key: key.clone(),
+                    occupied_usdt: "0".into(),
+                    cumulative_loss_usd: "0".into(),
+                })
+                .collect(),
             generated_at_ms: captured_at,
             source_read_floor_ms: captured_at,
             source_digest: "c".repeat(64),
@@ -877,7 +900,7 @@ mod raw_native_session_tests {
                     source_digest: "e".repeat(64),
                     observed_at_ms: captured_at,
                 },
-                policy_revision: 1,
+                policy_revision: 2,
                 census: census.clone(),
             },
         };
@@ -897,7 +920,7 @@ mod raw_native_session_tests {
                         action: RiskCommandAction::BeginPost {
                             reservation_key: key.clone(),
                             plan_sha256: "d".repeat(64),
-                            policy_revision: 1,
+                            policy_revision: 2,
                             expected_risk_book_sequence: sequence,
                             source_proof_sha256: "f".repeat(64),
                             census: fresh,
@@ -905,14 +928,17 @@ mod raw_native_session_tests {
                                 reserve_anchor: key,
                                 native_incarnation: "a".repeat(32),
                                 elapsed_to_proof_ms: 30,
-                                account_reads: vec![PostAccountReadProof {
-                                    account_key,
-                                    private_generation: 7,
-                                    source_read_id: "b".repeat(64),
-                                    content_digest: "a".repeat(64),
-                                    started_after_held_ms: 5,
-                                    completed_after_held_ms: 20,
-                                }],
+                                account_reads: account_keys
+                                    .iter()
+                                    .map(|key| PostAccountReadProof {
+                                        account_key: key.clone(),
+                                        private_generation: 7,
+                                        source_read_id: "b".repeat(64),
+                                        content_digest: "a".repeat(64),
+                                        started_after_held_ms: 5,
+                                        completed_after_held_ms: 20,
+                                    })
+                                    .collect(),
                             },
                         },
                     })

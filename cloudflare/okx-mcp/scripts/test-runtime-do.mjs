@@ -163,7 +163,7 @@ async function summary(session, commandId) {
   assert.equal(result.budget?.campaign_limit_usd, "10");
   return result;
 }
-function fixtureOpening(campaignStartedAt, asOf, accountKey) {
+function fixtureOpening(campaignStartedAt, asOf, accountKeys) {
   const source = {
     campaign_id: configuration.campaign_id,
     limit_usd: "10",
@@ -171,8 +171,8 @@ function fixtureOpening(campaignStartedAt, asOf, accountKey) {
     source_digest: "",
     as_of_ms: asOf,
     campaign_started_at_ms: campaignStartedAt,
-    accounts: [{
-      account_key: accountKey,
+    accounts: accountKeys.map((account_key) => ({
+      account_key,
       history_from_ms: campaignStartedAt,
       history_through_ms: asOf,
       consumed_entry_usd: "0",
@@ -181,7 +181,7 @@ function fixtureOpening(campaignStartedAt, asOf, accountKey) {
       bill_history_complete: true,
       finance_provenance_sealed: true,
       source_digest: "a".repeat(64),
-    }],
+    })),
   };
   const canonical = JSON.stringify([
     "okx.campaign-entry-opening/v1",source.campaign_id,
@@ -219,11 +219,28 @@ try {
     idempotency_key:"enroll_recorded_account_001",
   });
   assert.equal(enrollment.status,200,"actual governance enrolment must commit");
+  // T09.0: the central owner must know BOTH verified accounts before the
+  // campaign source, census and reservation can be accepted. The two native
+  // SQL owners below are opened independently by the same production bootstrap.
+  const uidB = createHash("sha256").update("account-002").digest("hex");
+  const accountKeyB = "okx:real:" + uidB;
+  const enrollmentB = await request(first,"/account-governance/enroll","POST",{
+    uid_fingerprint:uidB,venue:"okx",environment:"real",
+    label:"Recorded account B",alias:"recordedB",enabled:true,
+    limits,credential_ref:"fixture-credentials-b",
+    idempotency_key:"enroll_recorded_account_002",
+  });
+  assert.equal(enrollmentB.status,200,"second account must be enrolled in the same Worker");
+  const accountKeys = [accountKey,accountKeyB].sort();
+  assert.equal(new Set(accountKeys).size,2,"two distinct verified account identities");
+  const enrolled = await request(first,"/account-governance");
+  assert.equal(enrolled.status,200);
+  assert.deepEqual(enrolled.body.accounts.map((a) => a.account_key).sort(),accountKeys);
   const socket1 = await session(first);
   const before = await summary(socket1,"risk_workerd_first_0001");
   assert.equal(before.budget?.entry_budget,null);
   const opening = fixtureOpening(
-    before.budget.campaign_origin.started_at_ms,Date.now(),accountKey
+    before.budget.campaign_origin.started_at_ms,Date.now(),accountKeys
   );
   const opened = await risk(socket1,"risk_opening_recorded_0001",{
     action:"INSTALL_ENTRY_OPENING",source:opening,
@@ -235,8 +252,10 @@ try {
   const census = {
     complete:true,source_digest:"d".repeat(64),content_digest:"a".repeat(64),
     generated_at_ms:observedAt,source_read_floor_ms:observedAt,
-    account_keys:[accountKey],
-    occupied:[{account_key:accountKey,occupied_usdt:"0",cumulative_loss_usd:"0"}],
+    account_keys:accountKeys,
+    occupied:accountKeys.map((account_key) => ({
+      account_key,occupied_usdt:"0",cumulative_loss_usd:"0"
+    })),
     native_account_evidence_complete:true,
     native_order_evidence_complete:true,
     native_ledger_evidence_complete:true,
@@ -249,7 +268,7 @@ try {
     requested_loss_usdt:"1",requested_loss_usd:"1",
     entry_upper_usd:"2",entry_proof_digest:"d".repeat(64),
     usd_conversion:{usd_per_usdt:"1",source_digest:"d".repeat(64),observed_at_ms:observedAt},
-    policy_revision:1,census,
+    policy_revision:2,census,
   };
   const held = await risk(socket1,"reserve_recorded_0001",reserveAction);
   assert.equal(held.status,"HELD","real RiskBook reservation consumes shared capacity");
@@ -263,7 +282,7 @@ try {
     action:"BEGIN_POST",
     reservation_key:held.reservation_key,
     plan_sha256:reserveAction.plan_sha256,
-    policy_revision:1,
+    policy_revision:2,
     expected_risk_book_sequence:held.risk_book_sequence,
     source_proof_sha256:"f".repeat(64),
     census:{
@@ -276,11 +295,11 @@ try {
       reserve_anchor:held.reservation_key,
       native_incarnation:"a".repeat(32),
       elapsed_to_proof_ms:30,
-      account_reads:[{
-        account_key:accountKey,private_generation:7,
+      account_reads:accountKeys.map((account_key) => ({
+        account_key,private_generation:7,
         source_read_id:"b".repeat(64),content_digest:census.content_digest,
         started_after_held_ms:5,completed_after_held_ms:20,
-      }],
+      })),
     },
   });
   assert.equal(begin.status,"POST_AUTHORIZED",
@@ -298,7 +317,8 @@ try {
   const persisted = await request(second, "/account-governance");
   assert.equal(persisted.status, 200);
   assert.equal(persisted.body.installation_id, configuration.installation_id);
-  assert.equal(persisted.body.accounts.length,1,"registered account is durable");
+  assert.deepEqual(persisted.body.accounts.map((a) => a.account_key).sort(),accountKeys,
+    "both real account enrollments persist across Worker restart");
   const socket2 = await session(second);
   assert.ok(socket2.hello.connection_generation > socket1.hello.connection_generation,
     "restarted DO retains connection generation");
