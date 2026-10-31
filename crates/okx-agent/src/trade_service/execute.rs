@@ -2443,11 +2443,11 @@ mod tests {
             certified_managed_external_exposure(["0"].into_iter(), 0, 0, 0, 1, 0),
             Err("COHORT_UNMANAGED_EXTERNAL_EXPOSURE".into())
         );
-        assert!(certified_managed_external_exposure(["unknown"].into_iter(), 0, 0, 0, 0, 0).is_err());
+        assert!(
+            certified_managed_external_exposure(["unknown"].into_iter(), 0, 0, 0, 0, 0).is_err()
+        );
         assert_eq!(
-            certified_managed_external_exposure(
-                std::iter::empty::<&str>(), 0, 0, 0, 0, 0,
-            ),
+            certified_managed_external_exposure(std::iter::empty::<&str>(), 0, 0, 0, 0, 0,),
             Ok("0")
         );
     }
@@ -2686,9 +2686,7 @@ mod tests {
                 Err("COHORT_UNMANAGED_EXTERNAL_EXPOSURE".into())
             );
         }
-        assert!(certified_managed_external_exposure(
-            ["NaN"], 0, 0, 0, 0, 0
-        ).is_err());
+        assert!(certified_managed_external_exposure(["NaN"], 0, 0, 0, 0, 0).is_err());
     }
 
     #[test]

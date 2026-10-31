@@ -444,36 +444,45 @@ impl AccountStore {
             .join("|")
     }
 
-
     fn campaign_source_rowids(&self) -> StoreResult<(i64, i64, i64, i64, i64, i64)> {
-        self.connection.query_row(
-            "SELECT
+        self.connection
+            .query_row(
+                "SELECT
                (SELECT COALESCE(MAX(rowid),0) FROM fills),
                (SELECT COALESCE(MAX(rowid),0) FROM bills),
                (SELECT COALESCE(MAX(rowid),0) FROM operation_receipts),
                (SELECT COALESCE(MAX(rowid),0) FROM finance_entries),
                (SELECT COALESCE(MAX(rowid),0) FROM cash_flows),
                (SELECT revision FROM campaign_late_head_epoch WHERE id=1)",
-            [],
-            |r| Ok((
-                r.get(0)?, r.get(1)?, r.get(2)?,
-                r.get(3)?, r.get(4)?, r.get(5)?,
-            )),
-        ).map_err(Into::into)
+                [],
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                    ))
+                },
+            )
+            .map_err(Into::into)
     }
 
-    fn campaign_bounded_next_rowid(&self, table: &str, floor: i64, end: i64)
-        -> StoreResult<i64>
-    {
+    fn campaign_bounded_next_rowid(&self, table: &str, floor: i64, end: i64) -> StoreResult<i64> {
         // Table identifiers are compile-time constants, never caller input.
         let sql = match table {
             "fills" => "SELECT rowid FROM fills WHERE rowid>?1 ORDER BY rowid LIMIT 1 OFFSET 4095",
             "bills" => "SELECT rowid FROM bills WHERE rowid>?1 ORDER BY rowid LIMIT 1 OFFSET 4095",
-            "operation_receipts" => "SELECT rowid FROM operation_receipts WHERE rowid>?1 ORDER BY rowid LIMIT 1 OFFSET 4095",
+            "operation_receipts" => {
+                "SELECT rowid FROM operation_receipts WHERE rowid>?1 ORDER BY rowid LIMIT 1 OFFSET 4095"
+            }
             _ => return Err(StoreError::Invalid("CAMPAIGN_DELTA_SOURCE_INVALID")),
         };
-        let page_end: Option<i64> =
-            self.connection.query_row(sql, [floor], |r| r.get(0)).optional()?;
+        let page_end: Option<i64> = self
+            .connection
+            .query_row(sql, [floor], |r| r.get(0))
+            .optional()?;
         Ok(page_end.unwrap_or(end))
     }
 
@@ -562,47 +571,55 @@ impl AccountStore {
     }
 
     fn campaign_receipt_cursor(&self, campaign_id: &str) -> StoreResult<Option<i64>> {
-        self.connection.query_row(
-            "SELECT reviewed_event_seq FROM campaign_receipt_cursors
+        self.connection
+            .query_row(
+                "SELECT reviewed_event_seq FROM campaign_receipt_cursors
              WHERE campaign_id=?1",
-            [campaign_id],
-            |r| r.get(0),
-        ).optional().map_err(Into::into)
+                [campaign_id],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(Into::into)
     }
 
-    fn save_campaign_receipt_cursor(
-        &self, campaign_id: &str, event_seq: i64,
-    ) -> StoreResult<()> {
+    fn save_campaign_receipt_cursor(&self, campaign_id: &str, event_seq: i64) -> StoreResult<()> {
         self.connection.execute(
             "INSERT INTO campaign_receipt_cursors VALUES(?1,?2)
              ON CONFLICT(campaign_id) DO UPDATE SET
                 reviewed_event_seq=MAX(reviewed_event_seq,excluded.reviewed_event_seq)",
-            params![campaign_id,event_seq],
+            params![campaign_id, event_seq],
         )?;
         Ok(())
     }
 
     fn latest_campaign_receipt_event(&self) -> StoreResult<i64> {
-        self.connection.query_row(
-            "SELECT COALESCE(MAX(event_seq),0) FROM campaign_receipt_events",
-            [], |r| r.get(0),
-        ).map_err(Into::into)
+        self.connection
+            .query_row(
+                "SELECT COALESCE(MAX(event_seq),0) FROM campaign_receipt_events",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(Into::into)
     }
 
     /// Only the indexed derived changes; no JOIN on historical fills/bills.
     /// The caller must validate the original terminal and latest late
     /// settlement from the immutable SQL owner before advancing this cursor.
-    fn new_campaign_receipt_events(
-        &self, after_seq: i64,
-    ) -> StoreResult<(Vec<String>, i64, bool)> {
+    fn new_campaign_receipt_events(&self, after_seq: i64) -> StoreResult<(Vec<String>, i64, bool)> {
         let mut statement = self.connection.prepare(
             "SELECT event_seq,operation_id,kind
              FROM campaign_receipt_events WHERE event_seq>?1
              ORDER BY event_seq LIMIT 4097",
         )?;
-        let rows = statement.query_map([after_seq], |r| {
-            Ok((r.get::<_,i64>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?))
-        })?.collect::<Result<Vec<_>,_>>()?;
+        let rows = statement
+            .query_map([after_seq], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
         let pending = rows.len() > 4096;
         let page = &rows[..rows.len().min(4096)];
         let new_seq = page.last().map(|r| r.0).unwrap_or(after_seq);
@@ -611,16 +628,19 @@ impl AccountStore {
             let id = match kind.as_str() {
                 "ENTRY_SETTLEMENT_PROVEN" => key.strip_prefix("entry-settlement:"),
                 "ENTRY_LATE_HEAD" => key.strip_prefix("entry-late-head:"),
-                "ENTRY_LATE_SETTLEMENT_PROVEN" => key.strip_prefix("entry-late:")
-                    .and_then(|v| v.rsplit_once(":r").map(|(id,_)|id)),
-                "ENTRY_LATE_SETTLED" => key.strip_prefix("entry-late-settled:")
-                    .and_then(|v| v.rsplit_once(":r").map(|(id,_)|id)),
+                "ENTRY_LATE_SETTLEMENT_PROVEN" => key
+                    .strip_prefix("entry-late:")
+                    .and_then(|v| v.rsplit_once(":r").map(|(id, _)| id)),
+                "ENTRY_LATE_SETTLED" => key
+                    .strip_prefix("entry-late-settled:")
+                    .and_then(|v| v.rsplit_once(":r").map(|(id, _)| id)),
                 _ => None,
-            }.filter(|v| !v.is_empty())
-             .ok_or(StoreError::Invalid("CAMPAIGN_RECEIPT_EVENT_CORRUPT"))?;
+            }
+            .filter(|v| !v.is_empty())
+            .ok_or(StoreError::Invalid("CAMPAIGN_RECEIPT_EVENT_CORRUPT"))?;
             terminal.insert(format!("entry-settlement:{id}"));
         }
-        Ok((terminal.into_iter().collect(),new_seq,pending))
+        Ok((terminal.into_iter().collect(), new_seq, pending))
     }
 
     fn mark_campaign_readiness(
@@ -652,9 +672,7 @@ impl AccountStore {
         let rows = self.campaign_source_rowids()?;
         // The economic event cursor advances only after independently
         // verified money was applied. Both writes use the sole SQL owner.
-        self.save_campaign_receipt_cursor(
-            campaign_id, self.latest_campaign_receipt_event()?,
-        )?;
+        self.save_campaign_receipt_cursor(campaign_id, self.latest_campaign_receipt_event()?)?;
         self.connection.execute(
             "INSERT INTO campaign_entry_readiness VALUES(
                 ?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)
@@ -670,8 +688,17 @@ impl AccountStore {
                  reviewed_flow_rowid=excluded.reviewed_flow_rowid,
                  reviewed_late_epoch=excluded.reviewed_late_epoch",
             params![
-                campaign_id, from_ms, through_ms, epoch, generations,
-                rows.0, rows.1, rows.2, rows.3, rows.4, rows.5
+                campaign_id,
+                from_ms,
+                through_ms,
+                epoch,
+                generations,
+                rows.0,
+                rows.1,
+                rows.2,
+                rows.3,
+                rows.4,
+                rows.5
             ],
         )?;
         Ok(())
@@ -749,16 +776,36 @@ impl AccountStore {
                         reviewed_finance_rowid,reviewed_flow_rowid,reviewed_late_epoch
                  FROM campaign_entry_readiness WHERE campaign_id=?1",
                 [campaign_id],
-                |r| Ok((
-                    r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?,
-                    r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?,
-                    r.get(8)?, r.get(9)?,
-                )),
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                        r.get(6)?,
+                        r.get(7)?,
+                        r.get(8)?,
+                        r.get(9)?,
+                    ))
+                },
             )
             .optional()?;
-        if let Some((origin, covered, revision, prior_generations, fill_floor, bill_floor,
-                     receipt_floor, _finance_floor, _flow_floor, late_floor)) = previous
-            && origin == from_ms && covered <= through_ms
+        if let Some((
+            origin,
+            covered,
+            revision,
+            prior_generations,
+            fill_floor,
+            bill_floor,
+            receipt_floor,
+            _finance_floor,
+            _flow_floor,
+            late_floor,
+        )) = previous
+            && origin == from_ms
+            && covered <= through_ms
             && prior_generations == generations
         {
             if revision == epoch {
@@ -773,12 +820,13 @@ impl AccountStore {
             let rows = self.campaign_source_rowids()?;
             let (fill_max, bill_max, receipt_max, finance_max, flow_max, late_epoch) = rows;
             if late_epoch == late_floor {
-                let fill_end =
-                    self.campaign_bounded_next_rowid("fills", fill_floor, fill_max)?;
-                let bill_end =
-                    self.campaign_bounded_next_rowid("bills", bill_floor, bill_max)?;
+                let fill_end = self.campaign_bounded_next_rowid("fills", fill_floor, fill_max)?;
+                let bill_end = self.campaign_bounded_next_rowid("bills", bill_floor, bill_max)?;
                 let receipt_end = self.campaign_bounded_next_rowid(
-                    "operation_receipts", receipt_floor, receipt_max)?;
+                    "operation_receipts",
+                    receipt_floor,
+                    receipt_max,
+                )?;
                 // A future event cannot be marked reviewed before a complete
                 // capture covers its exchange event-time.
                 let future: bool = self.connection.query_row(
@@ -838,14 +886,16 @@ impl AccountStore {
                     // purchase and must not consume the ENTRY budget.
                     let _flow_changed = flow_max > _flow_floor;
                     self.verify_captured_campaign_continuity_rows(
-                        from_ms, through_ms,
-                        fill_floor, bill_floor, fill_end, bill_end,
+                        from_ms, through_ms, fill_floor, bill_floor, fill_end, bill_end,
                     )?;
                     if self.campaign_unsettled_new_bill(
-                        bill_floor, bill_end, receipt_floor, through_ms,
+                        bill_floor,
+                        bill_end,
+                        receipt_floor,
+                        through_ms,
                     )? {
                         return Err(StoreError::Invalid(
-                            "CAMPAIGN_NEW_BILL_REQUIRES_LATE_SETTLEMENT"
+                            "CAMPAIGN_NEW_BILL_REQUIRES_LATE_SETTLEMENT",
                         ));
                     }
                     // Only the reviewed page is committed. A partial page
@@ -861,9 +911,7 @@ impl AccountStore {
                     if fill_end < fill_max || bill_end < bill_max || receipt_end < receipt_max {
                         return Err(StoreError::Invalid("CAMPAIGN_DELTA_BATCH_PENDING"));
                     }
-                    self.mark_campaign_readiness(
-                        campaign_id, from_ms, through_ms, &frontiers,
-                    )?;
+                    self.mark_campaign_readiness(campaign_id, from_ms, through_ms, &frontiers)?;
                     return Ok(());
                 }
             }
@@ -886,9 +934,7 @@ impl AccountStore {
         from_ms: i64,
         through_ms: i64,
     ) -> StoreResult<()> {
-        self.verify_captured_campaign_continuity_rows(
-            from_ms, through_ms, 0, 0, i64::MAX, i64::MAX,
-        )
+        self.verify_captured_campaign_continuity_rows(from_ms, through_ms, 0, 0, i64::MAX, i64::MAX)
     }
 
     fn verify_captured_campaign_continuity_rows(
@@ -1187,32 +1233,48 @@ impl AccountStore {
             return Err(StoreError::Invalid("ENTRY_OPENING_WINDOW_INVALID"));
         }
         let frontiers = self.captured_complete_frontiers(from_ms, through_ms)?;
-        let reviewed: Option<(i64, i64, i64, i64, i64, String, i64)> =
-            self.connection.query_row(
+        let reviewed: Option<(i64, i64, i64, i64, i64, String, i64)> = self
+            .connection
+            .query_row(
                 "SELECT from_ms,covered_through_ms,reviewed_fill_rowid,
                         reviewed_bill_rowid,reviewed_receipt_rowid,
                         source_generations,reviewed_late_epoch
                  FROM campaign_entry_readiness WHERE campaign_id=?1",
                 [campaign_id],
-                |r| Ok((
-                    r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?,
-                    r.get(4)?, r.get(5)?, r.get(6)?,
-                )),
-            ).optional()?;
-        let older_verified = reviewed.as_ref().filter(
-            |(origin, covered, _, _, _, generations, _)| {
-                *origin == from_ms && *covered <= through_ms
-                    && generations == &Self::campaign_source_generations(&frontiers)
-            }
-        );
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                        r.get(6)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let older_verified =
+            reviewed
+                .as_ref()
+                .filter(|(origin, covered, _, _, _, generations, _)| {
+                    *origin == from_ms
+                        && *covered <= through_ms
+                        && generations == &Self::campaign_source_generations(&frontiers)
+                });
         if let Some((_, _, fill, bill, receipt, _, _)) = older_verified {
             self.verify_captured_campaign_continuity_rows(
-                from_ms, through_ms, *fill, *bill, i64::MAX, i64::MAX,
+                from_ms,
+                through_ms,
+                *fill,
+                *bill,
+                i64::MAX,
+                i64::MAX,
             )?;
-            if self.campaign_unsettled_new_bill(
-                *bill, i64::MAX, *receipt, through_ms,
-            )? {
-                return Err(StoreError::Invalid("CAMPAIGN_NEW_BILL_REQUIRES_LATE_SETTLEMENT"));
+            if self.campaign_unsettled_new_bill(*bill, i64::MAX, *receipt, through_ms)? {
+                return Err(StoreError::Invalid(
+                    "CAMPAIGN_NEW_BILL_REQUIRES_LATE_SETTLEMENT",
+                ));
             }
         } else {
             self.verify_captured_campaign_continuity(from_ms, through_ms)?;
@@ -1239,7 +1301,8 @@ impl AccountStore {
                 SELECT 1 FROM campaign_entry_window_proofs
                 WHERE campaign_id=?1 AND covered_through_ms=?2
             )",
-            params![campaign_id,through_ms], |r| r.get(0),
+            params![campaign_id, through_ms],
+            |r| r.get(0),
         )?;
         if let Some((origin, cut, amount)) = checkpoint.as_ref()
             && *origin == from_ms
@@ -1307,18 +1370,14 @@ impl AccountStore {
         // indexed when committed by the same SQL owner. The derived queue is
         // only a lookup index: original immutable terminal/late/central
         // receipts remain the sole authority for USD money.
-        let (event_json, batch_seq, batch_pending) =
-            if let Some(cursor) = event_cursor {
-                let (ids, seq, pending) =
-                    self.new_campaign_receipt_events(cursor)?;
-                let json = serde_json::to_string(&ids)
-                    .map_err(|_| StoreError::Invalid(
-                        "CAMPAIGN_RECEIPT_EVENTS_SERIALIZATION"
-                    ))?;
-                (Some(json), seq, pending)
-            } else {
-                (None, 0, false)
-            };
+        let (event_json, batch_seq, batch_pending) = if let Some(cursor) = event_cursor {
+            let (ids, seq, pending) = self.new_campaign_receipt_events(cursor)?;
+            let json = serde_json::to_string(&ids)
+                .map_err(|_| StoreError::Invalid("CAMPAIGN_RECEIPT_EVENTS_SERIALIZATION"))?;
+            (Some(json), seq, pending)
+        } else {
+            (None, 0, false)
+        };
         let indexed = "SELECT t.operation_id,t.result_ref,t.committed_at
                        FROM json_each(?1) e
                        LEFT JOIN operation_receipts t ON t.operation_id=e.value
@@ -1330,13 +1389,15 @@ impl AccountStore {
                          AND terminal.committed_at>?1
                          AND terminal.committed_at<=?2
                        ORDER BY terminal.operation_id LIMIT 10001";
-        let mut stmt = self.connection.prepare(
-            if event_json.is_some() { indexed } else { initial },
-        )?;
+        let mut stmt = self.connection.prepare(if event_json.is_some() {
+            indexed
+        } else {
+            initial
+        })?;
         let mut rows = if let Some(json) = event_json.as_ref() {
             stmt.query(params![json])?
         } else {
-            stmt.query(params![from_ms,through_ms])?
+            stmt.query(params![from_ms, through_ms])?
         };
         let mut witnesses = Vec::new();
         while let Some(row) = rows.next()? {
@@ -1547,10 +1608,14 @@ impl AccountStore {
         drop(stmt);
         if batch_pending {
             self.apply_captured_campaign_deltas(
-                campaign_id, from_ms, through_ms,
-                &witnesses, total, None,
+                campaign_id,
+                from_ms,
+                through_ms,
+                &witnesses,
+                total,
+                None,
             )?;
-            self.save_campaign_receipt_cursor(campaign_id,batch_seq)?;
+            self.save_campaign_receipt_cursor(campaign_id, batch_seq)?;
             return Err(StoreError::Invalid("CAMPAIGN_RECEIPT_BATCH_PENDING"));
         }
         // The initial zero is proved before any final window can be sealed.

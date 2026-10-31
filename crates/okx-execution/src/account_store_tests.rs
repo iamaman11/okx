@@ -154,28 +154,49 @@ fn e1_campaign_admission_requires_cached_economic_and_capture_revision() {
 fn e1_campaign_readiness_epoch_ignores_known_intent_lifecycle_but_detects_new_finance() {
     let mut s = store();
     for (source, partition) in [
-        ("fills", "SPOT"), ("fills", "MARGIN"), ("fills", "SWAP"),
-        ("fills", "FUTURES"), ("fills", "OPTION"), ("bills", "account"),
+        ("fills", "SPOT"),
+        ("fills", "MARGIN"),
+        ("fills", "SWAP"),
+        ("fills", "FUTURES"),
+        ("fills", "OPTION"),
+        ("bills", "account"),
     ] {
         s.ingest_page(&IngestPage {
             cursor: Some(SourceCursor {
-                source: source.into(), stream_partition: partition.into(),
-                cursor: String::new(), watermark: 10, generation: 1,
+                source: source.into(),
+                stream_partition: partition.into(),
+                cursor: String::new(),
+                watermark: 10,
+                generation: 1,
                 coverage_gaps: String::new(),
-            }), ..Default::default()
-        }).unwrap();
+            }),
+            ..Default::default()
+        })
+        .unwrap();
     }
     let campaign = format!("sha256:{}", "c".repeat(64));
     s.seal_captured_campaign_baseline(&campaign, 2, 10).unwrap();
-    let epoch: i64 = s.connection.query_row(
-        "SELECT revision FROM campaign_source_epoch WHERE id=1",
-        [], |r| r.get(0)).unwrap();
+    let epoch: i64 = s
+        .connection
+        .query_row(
+            "SELECT revision FROM campaign_source_epoch WHERE id=1",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
     let _known_prepared = intent(&mut s);
     reserve(&mut s);
-    assert_eq!(epoch, s.connection.query_row(
-        "SELECT revision FROM campaign_source_epoch WHERE id=1",
-        [], |r| r.get::<_,i64>(0)).unwrap(),
-        "known reservation is not a new economic event");
+    assert_eq!(
+        epoch,
+        s.connection
+            .query_row(
+                "SELECT revision FROM campaign_source_epoch WHERE id=1",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+        "known reservation is not a new economic event"
+    );
     s.verify_campaign_entry_readiness(&campaign, 2, 11).unwrap();
     // Use the ordinary authenticated finance ingestion path, not a
     // direct SQL INSERT that skips the source-provenance owner.
@@ -190,7 +211,9 @@ fn e1_campaign_readiness_epoch_ignores_known_intent_lifecycle_but_detects_new_fi
     ));
     assert!(matches!(
         s.refresh_campaign_entry_readiness(&campaign, 2, 10),
-        Err(StoreError::Invalid("CAMPAIGN_NEW_FINANCE_REQUIRES_SETTLEMENT"))
+        Err(StoreError::Invalid(
+            "CAMPAIGN_NEW_FINANCE_REQUIRES_SETTLEMENT"
+        ))
     ));
     assert!(matches!(
         s.verify_campaign_entry_readiness(&campaign, 2, 11),
@@ -202,16 +225,25 @@ fn e1_campaign_readiness_epoch_ignores_known_intent_lifecycle_but_detects_new_fi
 fn e1_campaign_cash_flow_not_double_counted_as_entry() {
     let mut s = store();
     for (source, partition) in [
-        ("fills", "SPOT"), ("fills", "MARGIN"), ("fills", "SWAP"),
-        ("fills", "FUTURES"), ("fills", "OPTION"), ("bills", "account"),
+        ("fills", "SPOT"),
+        ("fills", "MARGIN"),
+        ("fills", "SWAP"),
+        ("fills", "FUTURES"),
+        ("fills", "OPTION"),
+        ("bills", "account"),
     ] {
         s.ingest_page(&IngestPage {
             cursor: Some(SourceCursor {
-                source: source.into(), stream_partition: partition.into(),
-                cursor: String::new(), watermark: 10, generation: 1,
+                source: source.into(),
+                stream_partition: partition.into(),
+                cursor: String::new(),
+                watermark: 10,
+                generation: 1,
                 coverage_gaps: String::new(),
-            }), ..Default::default()
-        }).unwrap();
+            }),
+            ..Default::default()
+        })
+        .unwrap();
     }
     let campaign = format!("sha256:{}", "c".repeat(64));
     s.seal_captured_campaign_baseline(&campaign, 2, 10).unwrap();
@@ -223,17 +255,25 @@ fn e1_campaign_cash_flow_not_double_counted_as_entry() {
             amount: Decimal::ONE,
             time: 9,
             source_ref: "authenticated-deposit-source".into(),
-        }], ..Default::default()
-    }).unwrap();
+        }],
+        ..Default::default()
+    })
+    .unwrap();
     assert!(matches!(
         s.verify_campaign_entry_readiness(&campaign, 2, 11),
         Err(StoreError::Invalid("CAMPAIGN_READINESS_STALE"))
     ));
-    s.refresh_campaign_entry_readiness(&campaign, 2, 10).unwrap();
+    s.refresh_campaign_entry_readiness(&campaign, 2, 10)
+        .unwrap();
     s.verify_campaign_entry_readiness(&campaign, 2, 11).unwrap();
-    let consumed: String = s.connection.query_row(
-        "SELECT consumed_usd FROM campaign_entry_totals WHERE campaign_id=?1",
-        [&campaign], |r| r.get(0)).unwrap();
+    let consumed: String = s
+        .connection
+        .query_row(
+            "SELECT consumed_usd FROM campaign_entry_totals WHERE campaign_id=?1",
+            [&campaign],
+            |r| r.get(0),
+        )
+        .unwrap();
     assert_eq!(consumed, "0", "a deposit is not an entry buy");
 }
 
@@ -241,32 +281,46 @@ fn e1_campaign_cash_flow_not_double_counted_as_entry() {
 fn e1_campaign_incremental_bill_review_is_bounded_and_fail_closed_until_complete() {
     let mut s = store();
     for (source, partition) in [
-        ("fills", "SPOT"), ("fills", "MARGIN"), ("fills", "SWAP"),
-        ("fills", "FUTURES"), ("fills", "OPTION"), ("bills", "account"),
+        ("fills", "SPOT"),
+        ("fills", "MARGIN"),
+        ("fills", "SWAP"),
+        ("fills", "FUTURES"),
+        ("fills", "OPTION"),
+        ("bills", "account"),
     ] {
         s.ingest_page(&IngestPage {
             cursor: Some(SourceCursor {
-                source: source.into(), stream_partition: partition.into(),
-                cursor: String::new(), watermark: 10, generation: 1,
+                source: source.into(),
+                stream_partition: partition.into(),
+                cursor: String::new(),
+                watermark: 10,
+                generation: 1,
                 coverage_gaps: String::new(),
             }),
             ..Default::default()
-        }).unwrap();
+        })
+        .unwrap();
     }
     let campaign = format!("sha256:{}", "c".repeat(64));
     s.seal_captured_campaign_baseline(&campaign, 2, 10).unwrap();
     // One ingestion transaction contains 300 independently identified
     // transfer bills. All are classified non-entry economic events, so the
     // same source-backed campaign budget remains unchanged.
-    let bills = (0..5000).map(|n| Bill {
-        bill_id: format!("campaign-transfer-{n}"),
-        kind: "1:11".into(),
-        time: 9,
-        amount: Decimal::ONE,
-        currency: "USDT".into(),
-        economic_event_key: format!("campaign-transfer-{n}"),
-    }).collect();
-    s.ingest_page(&IngestPage { bills, ..Default::default() }).unwrap();
+    let bills = (0..5000)
+        .map(|n| Bill {
+            bill_id: format!("campaign-transfer-{n}"),
+            kind: "1:11".into(),
+            time: 9,
+            amount: Decimal::ONE,
+            currency: "USDT".into(),
+            economic_event_key: format!("campaign-transfer-{n}"),
+        })
+        .collect();
+    s.ingest_page(&IngestPage {
+        bills,
+        ..Default::default()
+    })
+    .unwrap();
     assert!(matches!(
         s.refresh_campaign_entry_readiness(&campaign, 2, 10),
         Err(StoreError::Invalid("CAMPAIGN_DELTA_BATCH_PENDING"))
@@ -275,45 +329,74 @@ fn e1_campaign_incremental_bill_review_is_bounded_and_fail_closed_until_complete
         s.verify_campaign_entry_readiness(&campaign, 2, 10),
         Err(StoreError::Invalid("CAMPAIGN_READINESS_STALE"))
     ));
-    let reviewed: i64 = s.connection.query_row(
-        "SELECT reviewed_bill_rowid FROM campaign_entry_readiness
+    let reviewed: i64 = s
+        .connection
+        .query_row(
+            "SELECT reviewed_bill_rowid FROM campaign_entry_readiness
          WHERE campaign_id=?1",
-        [&campaign], |r| r.get(0)).unwrap();
-    assert_eq!(reviewed, 4096, "one maintenance turn processes at most 4096 source rows");
-    s.refresh_campaign_entry_readiness(&campaign, 2, 10).unwrap();
+            [&campaign],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        reviewed, 4096,
+        "one maintenance turn processes at most 4096 source rows"
+    );
+    s.refresh_campaign_entry_readiness(&campaign, 2, 10)
+        .unwrap();
     s.verify_campaign_entry_readiness(&campaign, 2, 10).unwrap();
-    let consumed: String = s.connection.query_row(
-        "SELECT consumed_usd FROM campaign_entry_totals WHERE campaign_id=?1",
-        [&campaign], |r| r.get(0)).unwrap();
-    assert_eq!(consumed, "0", "transfers cannot consume or mint entry money");
+    let consumed: String = s
+        .connection
+        .query_row(
+            "SELECT consumed_usd FROM campaign_entry_totals WHERE campaign_id=?1",
+            [&campaign],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        consumed, "0",
+        "transfers cannot consume or mint entry money"
+    );
 }
 
 #[test]
 fn e1_campaign_future_event_time_cannot_be_acknowledged_early() {
     let mut s = store();
     for (source, partition) in [
-        ("fills", "SPOT"), ("fills", "MARGIN"), ("fills", "SWAP"),
-        ("fills", "FUTURES"), ("fills", "OPTION"), ("bills", "account"),
+        ("fills", "SPOT"),
+        ("fills", "MARGIN"),
+        ("fills", "SWAP"),
+        ("fills", "FUTURES"),
+        ("fills", "OPTION"),
+        ("bills", "account"),
     ] {
         s.ingest_page(&IngestPage {
             cursor: Some(SourceCursor {
-                source: source.into(), stream_partition: partition.into(),
-                cursor: String::new(), watermark: 10, generation: 1,
+                source: source.into(),
+                stream_partition: partition.into(),
+                cursor: String::new(),
+                watermark: 10,
+                generation: 1,
                 coverage_gaps: String::new(),
             }),
             ..Default::default()
-        }).unwrap();
+        })
+        .unwrap();
     }
     let campaign = format!("sha256:{}", "c".repeat(64));
     s.seal_captured_campaign_baseline(&campaign, 2, 10).unwrap();
     s.ingest_page(&IngestPage {
         bills: vec![Bill {
-            bill_id: "future-campaign-transfer".into(), kind: "1:11".into(),
-            time: 12, amount: Decimal::ONE, currency: "USDT".into(),
+            bill_id: "future-campaign-transfer".into(),
+            kind: "1:11".into(),
+            time: 12,
+            amount: Decimal::ONE,
+            currency: "USDT".into(),
             economic_event_key: "future-campaign-transfer".into(),
         }],
         ..Default::default()
-    }).unwrap();
+    })
+    .unwrap();
     assert!(matches!(
         s.refresh_campaign_entry_readiness(&campaign, 2, 10),
         Err(StoreError::Invalid("CAMPAIGN_DELTA_EVENT_NOT_COVERED"))
@@ -323,19 +406,28 @@ fn e1_campaign_future_event_time_cannot_be_acknowledged_early() {
         Err(StoreError::Invalid("CAMPAIGN_READINESS_STALE"))
     ));
     for (source, partition) in [
-        ("fills", "SPOT"), ("fills", "MARGIN"), ("fills", "SWAP"),
-        ("fills", "FUTURES"), ("fills", "OPTION"), ("bills", "account"),
+        ("fills", "SPOT"),
+        ("fills", "MARGIN"),
+        ("fills", "SWAP"),
+        ("fills", "FUTURES"),
+        ("fills", "OPTION"),
+        ("bills", "account"),
     ] {
         s.ingest_page(&IngestPage {
             cursor: Some(SourceCursor {
-                source: source.into(), stream_partition: partition.into(),
-                cursor: String::new(), watermark: 12, generation: 1,
+                source: source.into(),
+                stream_partition: partition.into(),
+                cursor: String::new(),
+                watermark: 12,
+                generation: 1,
                 coverage_gaps: String::new(),
             }),
             ..Default::default()
-        }).unwrap();
+        })
+        .unwrap();
     }
-    s.refresh_campaign_entry_readiness(&campaign, 2, 12).unwrap();
+    s.refresh_campaign_entry_readiness(&campaign, 2, 12)
+        .unwrap();
     s.verify_campaign_entry_readiness(&campaign, 2, 12).unwrap();
 }
 
@@ -348,26 +440,37 @@ fn e1_campaign_admission_and_one_delta_stay_bounded_across_history_scales() {
     for history in [1_000, 100_000, 1_000_000] {
         let mut s = store();
         let campaign = format!("sha256:{}", "c".repeat(64));
-        s.connection.execute(
-            "WITH RECURSIVE n(x) AS (
+        s.connection
+            .execute(
+                "WITH RECURSIVE n(x) AS (
                 VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<?1
              )
              INSERT INTO bills(bill_id,kind,time,amount,currency,economic_event_key)
              SELECT 'imported-transfer-'||x,'1:11',9,'1','USDT',
                     'imported-transfer-'||x FROM n",
-            [history],
-        ).unwrap();
+                [history],
+            )
+            .unwrap();
         for (source, partition) in [
-            ("fills", "SPOT"), ("fills", "MARGIN"), ("fills", "SWAP"),
-            ("fills", "FUTURES"), ("fills", "OPTION"), ("bills", "account"),
+            ("fills", "SPOT"),
+            ("fills", "MARGIN"),
+            ("fills", "SWAP"),
+            ("fills", "FUTURES"),
+            ("fills", "OPTION"),
+            ("bills", "account"),
         ] {
             s.ingest_page(&IngestPage {
                 cursor: Some(SourceCursor {
-                    source: source.into(), stream_partition: partition.into(),
-                    cursor: String::new(), watermark: 10, generation: 1,
+                    source: source.into(),
+                    stream_partition: partition.into(),
+                    cursor: String::new(),
+                    watermark: 10,
+                    generation: 1,
                     coverage_gaps: String::new(),
-                }), ..Default::default()
-            }).unwrap();
+                }),
+                ..Default::default()
+            })
+            .unwrap();
         }
         s.seal_captured_campaign_baseline(&campaign, 2, 10).unwrap();
         let started = std::time::Instant::now();
@@ -375,31 +478,43 @@ fn e1_campaign_admission_and_one_delta_stay_bounded_across_history_scales() {
             s.verify_campaign_entry_readiness(&campaign, 2, 11).unwrap();
         }
         let elapsed_ms = started.elapsed().as_millis();
-        assert!(elapsed_ms < 2_000,
-                "admission must not revisit {history} history rows: {elapsed_ms}ms");
+        assert!(
+            elapsed_ms < 2_000,
+            "admission must not revisit {history} history rows: {elapsed_ms}ms"
+        );
         // The exact readiness statement is a PK lookup at all history scales.
-        let mut stmt = s.connection.prepare(
-            "SELECT source_revision FROM campaign_entry_readiness
-             WHERE campaign_id=?1"
-        ).unwrap();
+        let mut stmt = s
+            .connection
+            .prepare(
+                "SELECT source_revision FROM campaign_entry_readiness
+             WHERE campaign_id=?1",
+            )
+            .unwrap();
         let _: i64 = stmt.query_row([&campaign], |r| r.get(0)).unwrap();
         let vm = stmt.get_status(rusqlite::StatementStatus::VmStep);
         let full = stmt.get_status(rusqlite::StatementStatus::FullscanStep);
-        assert!(vm < 100 && full == 0,
-                "readiness VM steps {vm}, fullscan steps {full}, history {history}");
+        assert!(
+            vm < 100 && full == 0,
+            "readiness VM steps {vm}, fullscan steps {full}, history {history}"
+        );
         s.ingest_page(&IngestPage {
             bills: vec![Bill {
                 bill_id: format!("new-transfer-{history}"),
-                kind: "1:11".into(), time: 9, amount: Decimal::ONE,
+                kind: "1:11".into(),
+                time: 9,
+                amount: Decimal::ONE,
                 currency: "USDT".into(),
                 economic_event_key: format!("new-transfer-{history}"),
-            }], ..Default::default()
-        }).unwrap();
+            }],
+            ..Default::default()
+        })
+        .unwrap();
         assert!(matches!(
             s.verify_campaign_entry_readiness(&campaign, 2, 11),
             Err(StoreError::Invalid("CAMPAIGN_READINESS_STALE"))
         ));
-        s.refresh_campaign_entry_readiness(&campaign, 2, 10).unwrap();
+        s.refresh_campaign_entry_readiness(&campaign, 2, 10)
+            .unwrap();
         s.verify_campaign_entry_readiness(&campaign, 2, 11).unwrap();
     }
 }
@@ -407,68 +522,101 @@ fn e1_campaign_admission_and_one_delta_stay_bounded_across_history_scales() {
 #[test]
 fn e1_late_head_mutation_is_an_indexed_receipt_event() {
     let s = store();
-    s.connection.execute(
-        "INSERT INTO operation_receipts
+    s.connection
+        .execute(
+            "INSERT INTO operation_receipts
          (operation_id,kind,request_hash,result_ref,committed_at)
          VALUES('entry-late-head:known','ENTRY_LATE_HEAD','plan',
                 '{\"settlement_revision\":2}',9)",
-        [],
-    ).unwrap();
-    let first: i64 = s.connection.query_row(
-        "SELECT COALESCE(MAX(event_seq),0) FROM campaign_receipt_events",
-        [], |r| r.get(0),
-    ).unwrap();
+            [],
+        )
+        .unwrap();
+    let first: i64 = s
+        .connection
+        .query_row(
+            "SELECT COALESCE(MAX(event_seq),0) FROM campaign_receipt_events",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
     assert_eq!(first, 1);
-    s.connection.execute(
-        "UPDATE operation_receipts
+    s.connection
+        .execute(
+            "UPDATE operation_receipts
          SET result_ref='{\"settlement_revision\":3}',committed_at=9
          WHERE operation_id='entry-late-head:known'",
-        [],
-    ).unwrap();
-    let changed: (i64, i64) = s.connection.query_row(
-        "SELECT (SELECT COALESCE(MAX(event_seq),0) FROM campaign_receipt_events),
+            [],
+        )
+        .unwrap();
+    let changed: (i64, i64) = s
+        .connection
+        .query_row(
+            "SELECT (SELECT COALESCE(MAX(event_seq),0) FROM campaign_receipt_events),
                 (SELECT revision FROM campaign_late_head_epoch WHERE id=1)",
-        [], |r| Ok((r.get(0)?,r.get(1)?)),
-    ).unwrap();
-    assert_eq!(changed, (2,1),
-        "mutating an existing head cannot hide behind an unchanged rowid");
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        changed,
+        (2, 1),
+        "mutating an existing head cannot hide behind an unchanged rowid"
+    );
 }
 
 #[test]
 fn e1_terminal_event_cursor_pages_durably_without_opening_a_partial_window() {
     let mut s = store();
     for (source, partition) in [
-        ("fills","SPOT"),("fills","MARGIN"),("fills","SWAP"),
-        ("fills","FUTURES"),("fills","OPTION"),("bills","account"),
+        ("fills", "SPOT"),
+        ("fills", "MARGIN"),
+        ("fills", "SWAP"),
+        ("fills", "FUTURES"),
+        ("fills", "OPTION"),
+        ("bills", "account"),
     ] {
         s.ingest_page(&IngestPage {
             cursor: Some(SourceCursor {
-                source:source.into(), stream_partition:partition.into(),
-                cursor:String::new(),watermark:10,generation:1,
-                coverage_gaps:String::new(),
+                source: source.into(),
+                stream_partition: partition.into(),
+                cursor: String::new(),
+                watermark: 10,
+                generation: 1,
+                coverage_gaps: String::new(),
             }),
             ..Default::default()
-        }).unwrap();
+        })
+        .unwrap();
     }
-    let campaign=format!("sha256:{}", "c".repeat(64));
-    s.seal_captured_campaign_baseline(&campaign,2,10).unwrap();
+    let campaign = format!("sha256:{}", "c".repeat(64));
+    s.seal_captured_campaign_baseline(&campaign, 2, 10).unwrap();
     for (source, partition) in [
-        ("fills","SPOT"),("fills","MARGIN"),("fills","SWAP"),
-        ("fills","FUTURES"),("fills","OPTION"),("bills","account"),
+        ("fills", "SPOT"),
+        ("fills", "MARGIN"),
+        ("fills", "SWAP"),
+        ("fills", "FUTURES"),
+        ("fills", "OPTION"),
+        ("bills", "account"),
     ] {
         s.ingest_page(&IngestPage {
             cursor: Some(SourceCursor {
-                source:source.into(),stream_partition:partition.into(),
-                cursor:String::new(),watermark:11,generation:1,
-                coverage_gaps:String::new(),
-            }),..Default::default()
-        }).unwrap();
+                source: source.into(),
+                stream_partition: partition.into(),
+                cursor: String::new(),
+                watermark: 11,
+                generation: 1,
+                coverage_gaps: String::new(),
+            }),
+            ..Default::default()
+        })
+        .unwrap();
     }
     // Pre-campaign terminal records do not consume campaign capital.
     // A backlog nevertheless cannot be marked fully reconciled before
     // each queued immutable event is individually inspected.
-    s.connection.execute(
-        "WITH RECURSIVE n(x) AS (
+    s.connection
+        .execute(
+            "WITH RECURSIVE n(x) AS (
            VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<4097
          )
          INSERT INTO operation_receipts
@@ -476,29 +624,40 @@ fn e1_terminal_event_cursor_pages_durably_without_opening_a_partial_window() {
          SELECT 'entry-settlement:before-campaign-'||x,
                 'ENTRY_SETTLEMENT_PROVEN','plan','unrelated',1
            FROM n",
-        [],
-    ).unwrap();
+            [],
+        )
+        .unwrap();
     assert!(matches!(
-        s.seal_captured_campaign_baseline(&campaign,2,11),
+        s.seal_captured_campaign_baseline(&campaign, 2, 11),
         Err(StoreError::Invalid("CAMPAIGN_RECEIPT_BATCH_PENDING"))
     ));
-    let cursor: i64=s.connection.query_row(
-        "SELECT reviewed_event_seq FROM campaign_receipt_cursors
-         WHERE campaign_id=?1", [&campaign], |r|r.get(0),
-    ).unwrap();
-    assert_eq!(cursor,4096);
+    let cursor: i64 = s
+        .connection
+        .query_row(
+            "SELECT reviewed_event_seq FROM campaign_receipt_cursors
+         WHERE campaign_id=?1",
+            [&campaign],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(cursor, 4096);
     assert!(matches!(
-        s.verify_campaign_entry_readiness(&campaign,2,11),
+        s.verify_campaign_entry_readiness(&campaign, 2, 11),
         Err(StoreError::Invalid("CAMPAIGN_READINESS_STALE"))
     ));
-    let sealed=s.seal_captured_campaign_baseline(&campaign,2,11).unwrap();
-    assert_eq!(sealed.0,Decimal::ZERO);
-    s.verify_campaign_entry_readiness(&campaign,2,11).unwrap();
-    let cursor: i64=s.connection.query_row(
-        "SELECT reviewed_event_seq FROM campaign_receipt_cursors
-         WHERE campaign_id=?1", [&campaign], |r|r.get(0),
-    ).unwrap();
-    assert_eq!(cursor,4097);
+    let sealed = s.seal_captured_campaign_baseline(&campaign, 2, 11).unwrap();
+    assert_eq!(sealed.0, Decimal::ZERO);
+    s.verify_campaign_entry_readiness(&campaign, 2, 11).unwrap();
+    let cursor: i64 = s
+        .connection
+        .query_row(
+            "SELECT reviewed_event_seq FROM campaign_receipt_cursors
+         WHERE campaign_id=?1",
+            [&campaign],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(cursor, 4097);
 }
 
 #[test]
@@ -2959,14 +3118,19 @@ fn e1_partial_and_final_entry_settlement_are_monotone_and_not_double_counted() {
             reopened
                 .verify_campaign_entry_readiness(&campaign, 2, 12)
                 .unwrap();
-            let receipt_cursor: i64 = reopened.connection.query_row(
-                "SELECT reviewed_event_seq FROM campaign_receipt_cursors
+            let receipt_cursor: i64 = reopened
+                .connection
+                .query_row(
+                    "SELECT reviewed_event_seq FROM campaign_receipt_cursors
                  WHERE campaign_id=?1",
-                [&campaign],
-                |row| row.get(0),
-            ).unwrap();
-            assert!(receipt_cursor > 0,
-                "late central ACK must advance the indexed receipt frontier");
+                    [&campaign],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(
+                receipt_cursor > 0,
+                "late central ACK must advance the indexed receipt frontier"
+            );
             assert_eq!(
                 baseline.0,
                 Decimal::new(10003, 2),
