@@ -155,7 +155,7 @@ async fn run_session(
     config: &CloudflareTransportConfig,
     ctx: DispatchContext,
     risk: &mut mpsc::Receiver<OutboundRiskCommand>,
-    mut shutdown: watch::Receiver<bool>,
+    shutdown: watch::Receiver<bool>,
 ) -> AgentResult<()> {
     let mut request = config
         .ws_url
@@ -173,16 +173,16 @@ async fn run_session(
         .map_err(|_| transport("WS_CONNECT_FAILED"))?;
     let connection_id = format!("native_{:032x}", nonce());
     let hello = F::Hello {
-            schema: SCHEMA.into(),
-            runtime_id: config.runtime_id.clone(),
-            connection_id,
-            runtime_profile: DirectRuntimeProfile::Engine,
-            installation_id: ctx.accounts.installation_id().into(),
-            contract: okx_protocol::accounts::PRODUCT_CONTRACT.into(),
-            agent_pid: std::process::id(),
-            agent_binary_sha256: current_binary_sha256()?,
-            agent_incarnation: std::env::var("OKX_CONTROL_AGENT_INCAR")
-                .map_err(|_| transport("CONTROL_INCARNATION_UNAVAILABLE"))?,
+        schema: SCHEMA.into(),
+        runtime_id: config.runtime_id.clone(),
+        connection_id,
+        runtime_profile: DirectRuntimeProfile::Engine,
+        installation_id: ctx.accounts.installation_id().into(),
+        contract: okx_protocol::accounts::PRODUCT_CONTRACT.into(),
+        agent_pid: std::process::id(),
+        agent_binary_sha256: current_binary_sha256()?,
+        agent_incarnation: std::env::var("OKX_CONTROL_AGENT_INCAR")
+            .map_err(|_| transport("CONTROL_INCARNATION_UNAVAILABLE"))?,
     };
     run_connected_session(socket, hello, ctx, risk, shutdown).await
 }
@@ -301,7 +301,6 @@ mod reserved_finance_admission_tests {
     }
 }
 
-
 #[cfg(test)]
 mod raw_native_session_tests {
     use super::*;
@@ -316,11 +315,14 @@ mod raw_native_session_tests {
     use okx_api::{OkxEnvironment, OkxPublicClient, RateBudget, Region};
     use okx_observation::ReferenceRegistry;
     use okx_protocol::risk_authority::{
-        RiskCommand, RiskCommandAction, RiskDecisionStatus, RiskResult,
-        RISK_COMMAND_SCHEMA_V1, RISK_RESULT_SCHEMA_V1,
+        RISK_COMMAND_SCHEMA_V1, RISK_RESULT_SCHEMA_V1, RiskCommand, RiskCommandAction,
+        RiskDecisionStatus, RiskResult,
     };
     use okx_runtime::PublicWsCoordinator;
-    use std::{pin::Pin, task::{Context, Poll}};
+    use std::{
+        pin::Pin,
+        task::{Context, Poll},
+    };
     use tokio::sync::mpsc;
 
     /// A recorded frame delivery, not a venue, financial engine or dispatcher.
@@ -340,7 +342,8 @@ mod raw_native_session_tests {
             Poll::Ready(Ok(()))
         }
         fn start_send(self: Pin<&mut Self>, frame: Message) -> Result<(), Self::Error> {
-            self.outbound.send(frame)
+            self.outbound
+                .send(frame)
                 .map_err(|_| tokio_tungstenite::tungstenite::Error::ConnectionClosed)
         }
         fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
@@ -369,25 +372,48 @@ mod raw_native_session_tests {
             agent_incarnation: format!("ctl_{}", "b".repeat(32)),
         }
     }
-    async fn test_dispatch() -> (DispatchContext, std::path::PathBuf, NativeRiskClient, mpsc::Receiver<OutboundRiskCommand>) {
+    async fn test_dispatch() -> (
+        DispatchContext,
+        std::path::PathBuf,
+        NativeRiskClient,
+        mpsc::Receiver<OutboundRiskCommand>,
+    ) {
         let mut bytes = [0u8; 16];
         getrandom::fill(&mut bytes).unwrap();
         let root = std::env::temp_dir().join(format!(
-            "okx-raw-native-session-{:032x}", u128::from_le_bytes(bytes)
+            "okx-raw-native-session-{:032x}",
+            u128::from_le_bytes(bytes)
         ));
         initialize_installation(&root, "installation-test").unwrap();
         let budget = RateBudget::new();
-        let accounts = Arc::new(AccountRuntimeRegistry::open(&root, budget.clone()).await.unwrap());
+        let accounts = Arc::new(
+            AccountRuntimeRegistry::open(&root, budget.clone())
+                .await
+                .unwrap(),
+        );
         let env = OkxEnvironment::new(Region::Global, false);
-        let market = MarketBootstrapper::new(OkxPublicClient::with_rate_budget(env, budget.clone()).unwrap());
+        let market = MarketBootstrapper::new(
+            OkxPublicClient::with_rate_budget(env, budget.clone()).unwrap(),
+        );
         let reference = ReferenceRegistry::from_public("2026-10-31T00:00:00Z", vec![]).unwrap();
-        let (_public, public_ws) = PublicWsCoordinator::new_with_rate_budget(env, reference, budget);
+        let (_public, public_ws) =
+            PublicWsCoordinator::new_with_rate_budget(env, reference, budget);
         let analytics = AnalyticsService::new(root.join("analytics"), market.clone()).unwrap();
         let (risk_tx, risk_rx) = mpsc::channel(8);
         let risk = NativeRiskClient::new(risk_tx);
-        let trade = Arc::new(TradeService::new(accounts.clone(), public_ws.clone(), risk.clone()));
+        let trade = Arc::new(TradeService::new(
+            accounts.clone(),
+            public_ws.clone(),
+            risk.clone(),
+        ));
         trade.set_analytics(analytics.clone()).await;
-        let ctx = DispatchContext {accounts, analytics, public_ws, trade, market};
+        let ctx = DispatchContext {
+            accounts,
+            analytics,
+            public_ws,
+            trade,
+            market,
+        };
         (ctx, root, risk, risk_rx)
     }
     fn summary(id: &str) -> RiskCommand {
@@ -419,18 +445,28 @@ mod raw_native_session_tests {
         let (ctx, root, client, mut risk_rx) = test_dispatch().await;
         let (input_tx, input_rx) = mpsc::unbounded_channel();
         let (output_tx, mut output_rx) = mpsc::unbounded_channel();
-        let socket = RawFrames {inbound: input_rx, outbound: output_tx};
+        let socket = RawFrames {
+            inbound: input_rx,
+            outbound: output_tx,
+        };
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let session = tokio::spawn(async move {
             run_connected_session(socket, test_hello(), ctx, &mut risk_rx, shutdown_rx).await
         });
-        let first = tokio::time::timeout(Duration::from_secs(3), output_rx.recv()).await.unwrap().unwrap();
-        assert!(matches!(parse(first), F::Hello {..}));
+        let first = tokio::time::timeout(Duration::from_secs(3), output_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(parse(first), F::Hello { .. }));
         let session_id = "session_test_12345678".to_owned();
         let generation = 9;
-        input_tx.send(Ok(wire(F::HelloAck {
-            schema: SCHEMA.into(), session_id: session_id.clone(), connection_generation: generation,
-        }))).unwrap();
+        input_tx
+            .send(Ok(wire(F::HelloAck {
+                schema: SCHEMA.into(),
+                session_id: session_id.clone(),
+                connection_generation: generation,
+            })))
+            .unwrap();
         let command = summary("risk_wire_12345");
         let request = tokio::spawn({
             let client = client.clone();
@@ -439,24 +475,38 @@ mod raw_native_session_tests {
         let seen = tokio::time::timeout(Duration::from_secs(3), async {
             loop {
                 match parse(output_rx.recv().await.expect("outbound closed")) {
-                    F::RiskControl{command,..} => break command,
-                    F::Ping{..} => continue,
+                    F::RiskControl { command, .. } => break command,
+                    F::Ping { .. } => continue,
                     other => panic!("unexpected native outbound: {other:?}"),
                 }
             }
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
         assert_eq!(seen.command_id, "risk_wire_12345");
-        input_tx.send(Ok(wire(F::RiskControlResult {
-            schema: SCHEMA.into(),
-            session_id,
-            connection_generation: generation,
-            result: denied(&seen.command_id),
-        }))).unwrap();
-        let answer = tokio::time::timeout(Duration::from_secs(3), request).await.unwrap().unwrap().unwrap();
+        input_tx
+            .send(Ok(wire(F::RiskControlResult {
+                schema: SCHEMA.into(),
+                session_id,
+                connection_generation: generation,
+                result: denied(&seen.command_id),
+            })))
+            .unwrap();
+        let answer = tokio::time::timeout(Duration::from_secs(3), request)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
         assert_eq!(answer.status, RiskDecisionStatus::Denied);
         assert_eq!(answer.command_id, seen.command_id);
         shutdown_tx.send(true).unwrap();
-        assert!(tokio::time::timeout(Duration::from_secs(3), session).await.unwrap().unwrap().is_ok());
+        assert!(
+            tokio::time::timeout(Duration::from_secs(3), session)
+                .await
+                .unwrap()
+                .unwrap()
+                .is_ok()
+        );
         drop(client);
         drop(input_tx);
         drop(output_rx);
@@ -471,34 +521,65 @@ mod raw_native_session_tests {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let session = tokio::spawn(async move {
             run_connected_session(
-                RawFrames{inbound: input_rx, outbound: output_tx},
-                test_hello(), ctx, &mut risk_rx, shutdown_rx,
-            ).await
+                RawFrames {
+                    inbound: input_rx,
+                    outbound: output_tx,
+                },
+                test_hello(),
+                ctx,
+                &mut risk_rx,
+                shutdown_rx,
+            )
+            .await
         });
-        assert!(matches!(parse(output_rx.recv().await.unwrap()), F::Hello{..}));
+        assert!(matches!(
+            parse(output_rx.recv().await.unwrap()),
+            F::Hello { .. }
+        ));
         let session_id = "session_test_87654321".to_owned();
-        input_tx.send(Ok(wire(F::HelloAck {
-            schema: SCHEMA.into(), session_id: session_id.clone(), connection_generation: 12,
-        }))).unwrap();
+        input_tx
+            .send(Ok(wire(F::HelloAck {
+                schema: SCHEMA.into(),
+                session_id: session_id.clone(),
+                connection_generation: 12,
+            })))
+            .unwrap();
         let command = summary("risk_wire_99999");
         let request = tokio::spawn({
-            let client=client.clone();
-            async move {client.request(command).await}
+            let client = client.clone();
+            async move { client.request(command).await }
         });
         let observed = tokio::time::timeout(Duration::from_secs(3), async {
             loop {
-                if let F::RiskControl{command,..}=parse(output_rx.recv().await.unwrap()) {
+                if let F::RiskControl { command, .. } = parse(output_rx.recv().await.unwrap()) {
                     break command.command_id;
                 }
             }
-        }).await.unwrap();
-        input_tx.send(Ok(wire(F::RiskControlResult {
-            schema: SCHEMA.into(),session_id,connection_generation: 11,
-            result: denied(&observed),
-        }))).unwrap();
-        let failed = tokio::time::timeout(Duration::from_secs(3), session).await.unwrap().unwrap();
-        assert!(failed.unwrap_err().to_string().contains("SESSION_GENERATION_MISMATCH"));
-        let unresolved = tokio::time::timeout(Duration::from_secs(3), request).await.unwrap().unwrap();
+        })
+        .await
+        .unwrap();
+        input_tx
+            .send(Ok(wire(F::RiskControlResult {
+                schema: SCHEMA.into(),
+                session_id,
+                connection_generation: 11,
+                result: denied(&observed),
+            })))
+            .unwrap();
+        let failed = tokio::time::timeout(Duration::from_secs(3), session)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            failed
+                .unwrap_err()
+                .to_string()
+                .contains("SESSION_GENERATION_MISMATCH")
+        );
+        let unresolved = tokio::time::timeout(Duration::from_secs(3), request)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(unresolved.unwrap_err(), "RISK_TRANSPORT_LOST_DO_NOT_REPLAY");
         drop(client);
         drop(input_tx);
