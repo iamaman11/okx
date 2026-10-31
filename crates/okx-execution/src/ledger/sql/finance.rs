@@ -1443,7 +1443,11 @@ impl AccountStore {
             bill_kind: Option<String>,
             bill_currency: Option<String>,
             bill_linked: bool,
+            // Preserve the canonical digest of legacy authenticated
+            // fee receipts that predate raw bill order provenance capture.
+            #[serde(skip_serializing_if = "Option::is_none")]
             bill_order_id: Option<String>,
+            #[serde(skip_serializing_if = "Option::is_none")]
             bill_instrument_id: Option<String>,
         }
         let fill = self.intent_fill_cost_evidence(intent_id, through)?;
