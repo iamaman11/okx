@@ -866,10 +866,37 @@ pub(crate) mod recorded_support {
         pub(crate) raw_response: Vec<u8>,
     }
 
+    // Bind immutable external GET bytes to the order ID from a signed POST ACK.
+    // No matching, fills, order creation or money is simulated in this port.
+    fn recorded_order_source_matches(
+        acknowledged: &[(String, String, String)],
+        access_key: &str,
+        client_id: &str,
+        raw_get: &[u8],
+    ) -> bool {
+        let matched = acknowledged.iter().filter(|(key, client, _)| {
+            key == access_key && client == client_id
+        }).collect::<Vec<_>>();
+        if matched.len() != 1 {
+            return false;
+        }
+        let Ok(envelope) = serde_json::from_slice::<serde_json::Value>(raw_get) else {
+            return false;
+        };
+        let Some(data) = envelope["data"].as_array() else {
+            return false;
+        };
+        data.len() == 1
+            && data[0]["ordId"].as_str() == Some(matched[0].2.as_str())
+            && data[0]["clOrdId"].as_str() == Some("__REQUEST_CL_ORD_ID__")
+    }
+
     #[derive(Default)]
     pub(crate) struct RecordedAccountHttp {
         pub(crate) requests: Mutex<Vec<String>>,
         pub(crate) outbound_posts: Mutex<Vec<(String, String, serde_json::Value)>>,
+        /// (signed account key, exact sent clOrdId, acknowledged ordId).
+        acknowledged_creates: Mutex<Vec<(String, String, String)>>,
         posts: Mutex<Vec<RecordedPost>>,
         reads: Mutex<Vec<RecordedGet>>,
         // Raw public time responses, never a synthesized exchange clock.
@@ -1009,6 +1036,27 @@ pub(crate) mod recorded_support {
                     let response = String::from_utf8(recorded.raw_response)
                         .map_err(|_| OkxError::Response("TRANSCRIPT_RESPONSE_UTF8".into()))?
                         .replace("__REQUEST_CL_ORD_ID__", client_id);
+                    if path == "/api/v5/trade/order" {
+                        let parsed: serde_json::Value = serde_json::from_str(&response)?;
+                        let rows = parsed["data"].as_array().ok_or_else(|| {
+                            OkxError::Response("TRANSCRIPT_CREATE_ACK_UNBOUND".into())
+                        })?;
+                        if rows.len() != 1
+                            || rows[0]["clOrdId"].as_str() != Some(client_id)
+                            || rows[0]["sCode"].as_str() != Some("0")
+                        {
+                            return Err(OkxError::Response(
+                                "TRANSCRIPT_CREATE_ACK_UNBOUND".into()
+                            ));
+                        }
+                        let ord_id = rows[0]["ordId"].as_str().filter(|id| !id.is_empty())
+                            .ok_or_else(|| {
+                                OkxError::Response("TRANSCRIPT_CREATE_ORDER_ID_MISSING".into())
+                            })?;
+                        self.acknowledged_creates.lock().unwrap().push((
+                            key.to_owned(), client_id.to_owned(), ord_id.to_owned()
+                        ));
+                    }
                     return Ok(RawHttpResponse {
                         status: HttpStatusCode::OK,
                         headers: Default::default(),
@@ -1023,6 +1071,22 @@ pub(crate) mod recorded_support {
                     .lock()
                     .unwrap()
                     .contains(&guarded_route);
+                // A signed GET must select exactly its own prior POST; a
+                // different account's ACK, client ID or recorded order fails.
+                let requested_client = if path == "/api/v5/trade/order" {
+                    let ids = request.url().query_pairs()
+                        .filter(|(name, _)| name == "clOrdId")
+                        .map(|(_, value)| value.into_owned())
+                        .collect::<Vec<_>>();
+                    if ids.len() != 1 || ids[0].is_empty() {
+                        return Err(OkxError::Response(
+                            "TRANSCRIPT_ORDER_READBACK_ID_MISMATCH".into()
+                        ));
+                    }
+                    Some(ids[0].clone())
+                } else {
+                    None
+                };
                 if scripted {
                     let mut reads = self.reads.lock().unwrap();
                     let index = reads
@@ -1036,6 +1100,12 @@ pub(crate) mod recorded_support {
                                             && v.as_ref() == expected.as_str()
                                     })
                                 })
+                                && requested_client.as_ref().is_none_or(|client| {
+                                    recorded_order_source_matches(
+                                        &self.acknowledged_creates.lock().unwrap(),
+                                        key, client, &page.raw_response
+                                    )
+                                })
                         })
                         .ok_or_else(|| {
                             OkxError::Response(
@@ -1048,44 +1118,14 @@ pub(crate) mod recorded_support {
                     // clOrdId is bound to the one actually observed executor
                     // request; no balances/fills/protection are invented.
                     let body = if path == "/api/v5/trade/order" {
-                        let submitted = self.outbound_posts.lock().unwrap();
-                        let sent = submitted
-                            .iter()
-                            .filter(|(k, route, _)| k == key && route == "/api/v5/trade/order")
-                            .collect::<Vec<_>>();
-                        if sent.len() != 1 {
-                            return Err(OkxError::Response(
-                                "TRANSCRIPT_ORDER_READBACK_SEND_COUNT_MISMATCH".into(),
-                            ));
-                        }
-                        let client_id = sent[0]
-                            .2
-                            .get("clOrdId")
-                            .and_then(serde_json::Value::as_str)
-                            .ok_or_else(|| {
-                                OkxError::Response(
-                                    "TRANSCRIPT_ORDER_READBACK_SEND_ID_MISSING".into(),
-                                )
-                            })?;
-                        let observed_ids = request
-                            .url()
-                            .query_pairs()
-                            .filter(|(k, _)| k == "clOrdId")
-                            .map(|(_, v)| v.into_owned())
-                            .collect::<Vec<_>>();
-                        if observed_ids.len() != 1 || observed_ids[0] != client_id {
-                            return Err(OkxError::Response(
-                                "TRANSCRIPT_ORDER_READBACK_ID_MISMATCH".into(),
-                            ));
-                        }
+                        let client_id = requested_client.as_deref().ok_or_else(|| {
+                            OkxError::Response("TRANSCRIPT_ORDER_READBACK_ID_MISSING".into())
+                        })?;
                         let raw = String::from_utf8(page.raw_response).map_err(|_| {
                             OkxError::Response("TRANSCRIPT_ORDER_READBACK_UTF8".into())
                         })?;
-                        if !raw.contains("__REQUEST_CL_ORD_ID__") {
-                            return Err(OkxError::Response(
-                                "TRANSCRIPT_ORDER_READBACK_BINDING_MISSING".into(),
-                            ));
-                        }
+                        // Source association was checked before consumption.
+                        // Only this observed clOrdId is bound to immutable bytes.
                         raw.replace("__REQUEST_CL_ORD_ID__", client_id).into_bytes()
                     } else {
                         page.raw_response
@@ -1342,6 +1382,58 @@ pub(crate) mod recorded_support {
             })
         }
     }
+    #[cfg(test)]
+    mod recorded_order_binding_tests {
+        use super::*;
+
+        #[test]
+        fn signed_order_readback_must_match_same_account_client_and_acknowledged_order() {
+            let ack = vec![
+                ("fixture-executor-a".to_owned(), "client_A".to_owned(), "order_A".to_owned()),
+                ("fixture-executor-a".to_owned(), "client_B".to_owned(), "order_B".to_owned()),
+                ("fixture-executor-b".to_owned(), "client_B".to_owned(), "order_C".to_owned()),
+            ];
+            let raw = |order: &str, client: &str| {
+                serde_json::to_vec(&serde_json::json!({
+                    "code":"0", "msg":"", "data":[{"ordId":order,"clOrdId":client}]
+                })).unwrap()
+            };
+            assert!(recorded_order_source_matches(
+                &ack, "fixture-executor-a", "client_A",
+                &raw("order_A", "__REQUEST_CL_ORD_ID__")
+            ));
+            assert!(recorded_order_source_matches(
+                &ack, "fixture-executor-a", "client_B",
+                &raw("order_B", "__REQUEST_CL_ORD_ID__")
+            ));
+            assert!(!recorded_order_source_matches(
+                &ack, "fixture-executor-a", "client_A",
+                &raw("order_B", "__REQUEST_CL_ORD_ID__")
+            ));
+            assert!(!recorded_order_source_matches(
+                &ack, "fixture-executor-b", "client_B",
+                &raw("order_B", "__REQUEST_CL_ORD_ID__")
+            ));
+            assert!(!recorded_order_source_matches(
+                &ack, "fixture-executor-a", "unknown",
+                &raw("order_A", "__REQUEST_CL_ORD_ID__")
+            ));
+            assert!(!recorded_order_source_matches(
+                &ack, "fixture-executor-a", "client_A",
+                &raw("order_A", "different_client")
+            ));
+            let mut duplicate = ack.clone();
+            duplicate.push(ack[0].clone());
+            assert!(!recorded_order_source_matches(
+                &duplicate, "fixture-executor-a", "client_A",
+                &raw("order_A", "__REQUEST_CL_ORD_ID__")
+            ));
+            assert!(!recorded_order_source_matches(
+                &ack, "fixture-executor-a", "client_A", b"{malformed"
+            ));
+        }
+    }
+
     pub(crate) struct OfflineSocket;
     impl WsConnector for OfflineSocket {
         fn connect(&self, _: String) -> okx_runtime::WsConnect<'_> {
