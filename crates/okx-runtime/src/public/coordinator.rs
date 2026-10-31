@@ -402,9 +402,16 @@ impl PublicWsCoordinator {
                         }
                         InboundMessage::Subscribed { arg, connection_id } => {
                             let subscription = subscription_from_arg(&arg);
-                            pending.remove(&subscription);
+                            let newly_acknowledged = pending.remove(&subscription);
                             failed.remove(&subscription);
                             self.state.write().await.acknowledge(&arg, connection_id);
+                            // Market data may arrive before the final subscribe ACK.
+                            // Consumers waiting for a FRESH market must re-check
+                            // readiness once the source subscription fence opens,
+                            // even if no further data frame is emitted.
+                            if newly_acknowledged {
+                                self.publish_market_wakeup(self.generation, now_ms()?);
+                            }
                         }
                         InboundMessage::Unsubscribed {
                             arg,
@@ -655,15 +662,19 @@ impl PublicWsCoordinator {
         drop(state);
 
         if is_market_update {
-            self.market_update_sequence = self.market_update_sequence.saturating_add(1);
-            self.market_updates.send_replace(PublicMarketWakeup {
-                sequence: self.market_update_sequence,
-                generation,
-                received_at_ms,
-            });
+            self.publish_market_wakeup(generation, received_at_ms);
         }
 
         Ok(reference_changed)
+    }
+
+    fn publish_market_wakeup(&mut self, generation: u64, received_at_ms: u64) {
+        self.market_update_sequence = self.market_update_sequence.saturating_add(1);
+        self.market_updates.send_replace(PublicMarketWakeup {
+            sequence: self.market_update_sequence,
+            generation,
+            received_at_ms,
+        });
     }
 
     async fn backoff_until(
