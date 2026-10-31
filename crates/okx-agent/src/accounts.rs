@@ -1158,9 +1158,10 @@ pub(crate) mod recorded_support {
         /// connected socket. The production parser and generation rules remain
         /// the sole authorities for source freshness and market readiness.
         pub(crate) fn send_public_frame(&self, frame: String) {
-            self.public_sender.send(frame).expect("recorded public socket closed");
+            self.public_sender
+                .send(frame)
+                .expect("recorded public socket closed");
         }
-
 
         pub(crate) fn expect_public_subscription(
             &self,
@@ -1229,9 +1230,10 @@ pub(crate) mod recorded_support {
                     return Some(Ok(frame));
                 }
                 if let Some(injection) = self.public_injection.as_mut() {
-                    return injection.recv().await.map(|raw| {
-                        Ok(tokio_tungstenite::tungstenite::Message::Text(raw.into()))
-                    });
+                    return injection
+                        .recv()
+                        .await
+                        .map(|raw| Ok(tokio_tungstenite::tungstenite::Message::Text(raw.into())));
                 }
                 std::future::pending().await
             })

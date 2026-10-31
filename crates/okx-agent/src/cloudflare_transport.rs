@@ -1244,17 +1244,20 @@ mod raw_native_session_tests {
         let refreshed_at = chrono::Utc::now().timestamp_millis();
         for (arg, observed, action) in recorded_public {
             if arg["channel"] == "instruments" && arg["instType"] == "SWAP" {
-                connector.send_public_frame(json!({
-                    "arg":arg,
-                    "data":[{
-                        "instType":"SWAP","instId":"BTC-USDT-SWAP",
-                        "instFamily":"BTC-USDT","uly":"BTC-USDT","state":"live",
-                        "ruleType":"normal","settleCcy":"USDT","tickSz":"0.1",
-                        "lotSz":"0.01","minSz":"0.01","maxLmtSz":"1000",
-                        "maxMktSz":"1000","ctType":"linear","ctVal":"0.01",
-                        "ctValCcy":"BTC","groupId":"4","lever":"20"
-                    }]
-                }).to_string());
+                connector.send_public_frame(
+                    json!({
+                        "arg":arg,
+                        "data":[{
+                            "instType":"SWAP","instId":"BTC-USDT-SWAP",
+                            "instFamily":"BTC-USDT","uly":"BTC-USDT","state":"live",
+                            "ruleType":"normal","settleCcy":"USDT","tickSz":"0.1",
+                            "lotSz":"0.01","minSz":"0.01","maxLmtSz":"1000",
+                            "maxMktSz":"1000","ctType":"linear","ctVal":"0.01",
+                            "ctValCcy":"BTC","groupId":"4","lever":"20"
+                        }]
+                    })
+                    .to_string(),
+                );
             } else if let Some(mut value) = observed {
                 value["ts"] = refreshed_at.to_string().into();
                 if value.get("fundingTime").is_some() {
@@ -1275,20 +1278,30 @@ mod raw_native_session_tests {
         tokio::time::timeout(Duration::from_secs(4), async {
             loop {
                 let rules = public_ws.instrument_rules("BTC-USDT-SWAP").await.unwrap();
-                let reference_ms = chrono::DateTime::parse_from_rfc3339(
-                    &rules.source_received_at
-                ).unwrap().timestamp_millis();
-                let fresh = public_ws.risk_fresh_snapshot(
-                    "BTC-USDT-SWAP",
-                    chrono::Utc::now().timestamp_millis() as u64,
-                    5_000, 5_000, chrono::Utc::now().to_rfc3339()
-                ).await.is_ok();
+                let reference_ms = chrono::DateTime::parse_from_rfc3339(&rules.source_received_at)
+                    .unwrap()
+                    .timestamp_millis();
+                let fresh = public_ws
+                    .risk_fresh_snapshot(
+                        "BTC-USDT-SWAP",
+                        chrono::Utc::now().timestamp_millis() as u64,
+                        5_000,
+                        5_000,
+                        chrono::Utc::now().to_rfc3339(),
+                    )
+                    .await
+                    .is_ok();
                 if reference_ms >= refreshed_at && fresh {
                     break;
                 }
-                market_updates.changed().await.expect("public coordinator exited");
+                market_updates
+                    .changed()
+                    .await
+                    .expect("public coordinator exited");
             }
-        }).await.expect("refreshed recorded WS sources were not accepted by production parser");
+        })
+        .await
+        .expect("refreshed recorded WS sources were not accepted by production parser");
         let fresh_fee_at = chrono::Utc::now().timestamp_millis().to_string();
         for _ in 0..3 {
             feed.expect_get(RecordedGet {
