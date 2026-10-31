@@ -196,7 +196,7 @@ fn e1_e2_native_real_fee_sources_baseline_and_second_admission_under_ten() {
             &first_decision,
             &NewIntent {
                 plan: plan.clone(),
-                intent_id: "intent".into(),
+                intent_id: "intent_native_001".into(),
                 idempotency_key: "native-first".into(),
                 request_hash: "first-body".into(),
                 client_order_id: "first-client".into(),
@@ -232,7 +232,31 @@ fn e1_e2_native_real_fee_sources_baseline_and_second_admission_under_ten() {
         observed_at: first_quote.observed_at,
     })
     .unwrap();
-    acknowledged_entry_intent(&mut s);
+    s.reserve(
+        &CentralReceipt {
+            reservation_key: "central-key".into(),
+            account_key: s.meta.account_key.clone(),
+            installation_id: s.meta.installation_id.clone(),
+            instance_id: None,
+            intent_id: first.intent_id.clone(),
+            plan_hash: first.plan_hash.clone(),
+            policy_revision: 1,
+            receipt_hash: "central-hash".into(),
+            requested_loss_usd: Decimal::from(5),
+            conversion_digest: "usd-conversion".into(),
+        },
+        3,
+    )
+    .unwrap();
+    assert!(s.begin_post(&first.intent_id, 1, 4).unwrap());
+    s.record_outcome(
+        &first.intent_id,
+        IntentState::Acknowledged,
+        Some("venue-order"),
+        "venue-order-ack",
+        4,
+    )
+    .unwrap();
 
     let source_fee = Decimal::new(-25, 4);
     let fee_entry = FinanceEntry {
@@ -305,7 +329,7 @@ fn e1_e2_native_real_fee_sources_baseline_and_second_admission_under_ten() {
     })
     .unwrap();
     s.record_order_readback(
-        "intent",
+        "intent_native_001",
         "venue-order",
         IntentState::Filled,
         Decimal::ONE,
@@ -313,7 +337,7 @@ fn e1_e2_native_real_fee_sources_baseline_and_second_admission_under_ten() {
     )
     .unwrap();
     let settlement = s
-        .bind_terminal_entry_settlement("intent", 7, Decimal::ONE, 7)
+        .bind_terminal_entry_settlement("intent_native_001", 7, Decimal::ONE, 7)
         .unwrap();
     assert_eq!(settlement.cumulative_entry_usd, Decimal::new(50025, 4));
     assert_eq!(settlement.settlement_revision, 1);
