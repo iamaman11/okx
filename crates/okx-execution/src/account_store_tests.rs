@@ -1658,6 +1658,24 @@ fn e1_partial_and_final_entry_settlement_are_monotone_and_not_double_counted() {
             reopened
                 .acknowledge_central_release("central-key", "signed-released")
                 .unwrap();
+            // First persist the ORIGINAL fully settled campaign amount,
+            // then prove a later fee advances that same applied event once.
+            for (source,part) in [
+                ("fills","SPOT"),("fills","MARGIN"),
+                ("fills","FUTURES"),("fills","OPTION"),
+            ] {
+                reopened.connection.execute(
+                    "INSERT INTO source_cursors(source,stream_partition,cursor,watermark,generation,coverage_gaps)
+                     VALUES(?1,?2,'',9,1,'')",
+                    rusqlite::params![source,part],
+                ).unwrap();
+            }
+            let campaign = format!("sha256:{}", "c".repeat(64));
+            assert_eq!(
+                reopened.seal_captured_campaign_baseline(&campaign,2,9)
+                    .unwrap().0,
+                Decimal::new(10002,2)
+            );
             // The original fill-linked fee remains a single economic bill
             // even when captured again after terminal RELEASE.
             reopened
@@ -1760,7 +1778,9 @@ fn e1_partial_and_final_entry_settlement_are_monotone_and_not_double_counted() {
             ] {
                 reopened.connection.execute(
                     "INSERT INTO source_cursors(source,stream_partition,cursor,watermark,generation,coverage_gaps)
-                     VALUES(?1,?2,'',11,1,'')",
+                     VALUES(?1,?2,'',11,1,'')
+                     ON CONFLICT(source,stream_partition)
+                     DO UPDATE SET watermark=excluded.watermark",
                     rusqlite::params![source,part],
                 ).unwrap();
             }
@@ -1771,7 +1791,6 @@ fn e1_partial_and_final_entry_settlement_are_monotone_and_not_double_counted() {
             // The central RiskBook accepted exactly THIS monetary revision.
             reopened.acknowledge_late_entry_settlement(&late).unwrap();
             reopened.verify_captured_campaign_continuity(2, 11).unwrap();
-            let campaign = format!("sha256:{}", "c".repeat(64));
             let baseline = reopened
                 .seal_captured_campaign_baseline(&campaign, 2, 11)
                 .unwrap();
@@ -1791,8 +1810,8 @@ fn e1_partial_and_final_entry_settlement_are_monotone_and_not_double_counted() {
                 "SELECT COUNT(*) FROM campaign_entry_applied
                  WHERE campaign_id=?1", [&campaign], |row| row.get(0),
             ).unwrap();
-            assert_eq!(applied,1,
-                "the latest cumulative late-fee receipt is one event revision");
+            assert_eq!(applied,2,
+                "the terminal and late cumulative receipts are two immutable revisions of one event");
             let total:String = reopened.connection.query_row(
                 "SELECT consumed_usd FROM campaign_entry_totals
                  WHERE campaign_id=?1", [&campaign], |row| row.get(0),
