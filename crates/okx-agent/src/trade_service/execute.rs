@@ -38,6 +38,40 @@ fn post_receipt_bound(
         .is_some_and(|sequence| sequence > expected_sequence)
 }
 
+// A venue reply after POST is authoritative only for the exact submitted
+// client order. Malformed, empty or differently addressed replies remain
+// UNKNOWN until independent venue readback; none is a proved rejection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PlaceAckVerdict {
+    Accepted,
+    ExplicitRejected,
+    Unknown,
+}
+
+fn place_ack_verdict(
+    reply: &okx_api::TradeResponse<okx_api::OrderOperationAck>,
+    client_order_id: &str,
+) -> PlaceAckVerdict {
+    if !reply.top_level_success() || reply.data.len() != 1 {
+        return PlaceAckVerdict::Unknown;
+    }
+    let ack = &reply.data[0];
+    if ack.client_order_id != client_order_id {
+        return PlaceAckVerdict::Unknown;
+    }
+    if ack.accepted() {
+        if ack.order_id.is_empty() {
+            PlaceAckVerdict::Unknown
+        } else {
+            PlaceAckVerdict::Accepted
+        }
+    } else if ack.status_code.is_empty() {
+        PlaceAckVerdict::Unknown
+    } else {
+        PlaceAckVerdict::ExplicitRejected
+    }
+}
+
 struct PostFxFence<'a> {
     owner: &'a AccountResources,
     conversion: &'a UsdConversion,
@@ -1016,11 +1050,8 @@ impl TradeService {
         drop(_capacity);
         match result {
             Some(response) => {
-                if response.top_level_success()
-                    && response.data.len() == 1
-                    && response.data[0].accepted()
-                    && response.data[0].client_order_id == venue.client_order_id
-                {
+                match place_ack_verdict(&response, &venue.client_order_id) {
+                PlaceAckVerdict::Accepted => {
                     let order_id = response.data[0].order_id.clone();
                     let intent_id = id.clone();
                     r.execution
@@ -1037,7 +1068,8 @@ impl TradeService {
                         .await
                         .map_err(err)?;
                     self.status_intent(r, &id).await
-                } else {
+                }
+                PlaceAckVerdict::ExplicitRejected => {
                     let i = id.clone();
                     r.execution
                         .store
@@ -1055,6 +1087,24 @@ impl TradeService {
                     Ok(completed(
                         json!({"intent_id":id,"state":"REJECTED","exchange_code":response.code,"central_reservation":central}),
                     ))
+                }
+                PlaceAckVerdict::Unknown => {
+                    let i = id.clone();
+                    r.execution
+                        .store
+                        .call(deadline(), move |s| {
+                            s.record_outcome(
+                                &i,
+                                IntentState::Unknown,
+                                None,
+                                "exchange-ack-unverified",
+                                now(),
+                            )
+                        })
+                        .await
+                        .map_err(err)?;
+                    Ok(uncertain(&id, "EXCHANGE_ACK_UNVERIFIED_NO_REPOST"))
+                }
                 }
             }
             None => Ok(uncertain(&id, "EXCHANGE_POST_OUTCOME_UNKNOWN")),
@@ -2229,6 +2279,68 @@ mod tests {
             3,
             6,
         ));
+    }
+
+    fn venue_ack_fixture(
+        code: &str,
+        client_id: &str,
+        status_code: &str,
+        order_id: &str,
+    ) -> okx_api::TradeResponse<okx_api::OrderOperationAck> {
+        okx_api::TradeResponse {
+            code: code.into(),
+            message: String::new(),
+            data: vec![okx_api::OrderOperationAck {
+                order_id: order_id.into(),
+                client_order_id: client_id.into(),
+                request_id: String::new(),
+                timestamp_ms: String::new(),
+                status_code: status_code.into(),
+                status_message: String::new(),
+            }],
+            in_time_us: String::new(),
+            out_time_us: String::new(),
+        }
+    }
+
+    #[test]
+    fn t10_venue_post_ack_requires_exact_order_binding_and_unambiguous_result() {
+        let client = "client_order_expected";
+        let accepted = venue_ack_fixture("0", client, "0", "venue_order_1");
+        assert_eq!(
+            place_ack_verdict(&accepted, client),
+            PlaceAckVerdict::Accepted,
+        );
+        let denied = venue_ack_fixture("0", client, "51000", "");
+        assert_eq!(
+            place_ack_verdict(&denied, client),
+            PlaceAckVerdict::ExplicitRejected,
+        );
+        let ambiguous = [
+            venue_ack_fixture("0", "different_client", "0", "venue_order_1"),
+            venue_ack_fixture("0", client, "0", ""),
+            venue_ack_fixture("0", client, "", ""),
+            venue_ack_fixture("51000", client, "51000", ""),
+            venue_ack_fixture("0", "different_client", "51000", ""),
+        ];
+        for reply in ambiguous {
+            assert_eq!(
+                place_ack_verdict(&reply, client),
+                PlaceAckVerdict::Unknown,
+            );
+        }
+        let mut missing_row = accepted.clone();
+        missing_row.data.clear();
+        assert_eq!(
+            place_ack_verdict(&missing_row, client),
+            PlaceAckVerdict::Unknown,
+        );
+        let mut duplicate_row = accepted;
+        duplicate_row.data.push(duplicate_row.data[0].clone());
+        assert_eq!(
+            place_ack_verdict(&duplicate_row, client),
+            PlaceAckVerdict::Unknown,
+        );
     }
 
     #[test]
