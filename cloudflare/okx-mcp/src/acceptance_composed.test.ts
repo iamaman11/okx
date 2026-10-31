@@ -9,7 +9,7 @@ import {initial,limits} from './account_governance.test.js';
 const acceptanceEntryLimits={...limits,max_entry_usd:'10'};
 import type {Governance} from './account_governance.js';
 import {handleNativeRiskCommand} from './risk_authority.js';
-import {readRiskBook,installCampaignEntryProof,openingDigest,type CampaignEntryOpeningSource} from './risk_book.js';
+import {readRiskBook,inspectRisk,installCampaignEntryProof,openingDigest,type CampaignEntryOpeningSource} from './risk_book.js';
 
 function check(ok:unknown,message:string):asserts ok{if(!ok)throw Error(message);}
 class Storage {
@@ -73,12 +73,29 @@ const bodyHash=new Map<string,string>();
 const intentByKey=new Map<string,string>();
 // Only the synthetic Real Agent owns these fixture routing handles. The
 // actual independent RiskBook remains in the single Worker storage owner.
+const bridgeJson=(globalThis as any).process?.env?.OKX_E1_BRIDGE_SOURCE_JSON as string|undefined;
+const nativeSource=bridgeJson?JSON.parse(bridgeJson) as Record<string,unknown>:null;
 const nativeFixtureEntryUsd='5.0025'; // 1 linear contract @5, venue fee 0.0025, FX=1
 const realRiskByIntent=new Map<string,{
   reservation:string;planHash:string;sequence:number;uid:string;
   runId:string;account:string;at:number
 }>();
 const verifiedUid='a'.repeat(64);
+if(nativeSource)check(nativeSource.schema==='okx.e1.native-sql-settlement-source/v1'&&
+ nativeSource.cumulative_entry_usd===nativeFixtureEntryUsd&&
+ nativeSource.entry_upper_usd===nativeFixtureEntryUsd&&
+ nativeSource.usd_per_usdt==='1'&&
+ typeof nativeSource.usd_conversion_source_digest==='string'&&
+ /^[a-f0-9]{64}$/.test(nativeSource.usd_conversion_source_digest)&&
+ typeof nativeSource.entry_proof_digest==='string'&&
+ /^[a-f0-9]{64}$/.test(nativeSource.entry_proof_digest)&&
+ nativeSource.settlement_revision===1&&
+ nativeSource.account_key==='okx:real:'+verifiedUid&&
+ typeof nativeSource.source_digest==='string'&&
+ /^[a-f0-9]{64}$/.test(nativeSource.source_digest)&&
+ typeof nativeSource.plan_hash==='string'&&
+ /^[a-f0-9]{64}$/.test(nativeSource.plan_hash),
+ 'native money source must be directly produced by AccountStore SQL');
 const accountKey='okx:demo:'+verifiedUid;
 const success=(data:unknown)=>({schema:'okx.agent.response/v1',request_id:'fixture_native_'+(++id),
  status:'completed',quality:'FRESH',warnings:[],result:{status:'completed',as_of_ms:1792890000000,
@@ -133,9 +150,10 @@ const handler=async(url:string,init?:RequestInit)=>{
    if(existing)return Response.json(success({intent:intents.get(existing)}));
    const at=1792890000000;
    const intentId='intent_real_'+(intents.size+1);
-   const planHash=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',
-     new TextEncoder().encode(JSON.stringify({account:row.account_key,request:req}))))).
-     map(b=>b.toString(16).padStart(2,'0')).join('');
+   const planHash=nativeSource?String(nativeSource.plan_hash):
+     Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',
+       new TextEncoder().encode(JSON.stringify({account:row.account_key,request:req}))))).
+       map(b=>b.toString(16).padStart(2,'0')).join('');
    const census={complete:true,source_digest:'c'.repeat(64),
      content_digest:'b'.repeat(64),generated_at_ms:at-1,source_read_floor_ms:at-1,
      account_keys:[row.account_key],occupied:[{account_key:row.account_key,
@@ -149,8 +167,11 @@ const handler=async(url:string,init?:RequestInit)=>{
      action:{action:'RESERVE',venue:'okx',account_uid:row.uid_fingerprint,
        run_id:'run_fixture_real_001',intent_id:intentId,
        strategy_id:String(req.strategy_instance),instrument_id:String(req.instrument),
-       plan_sha256:planHash,requested_loss_usdt:'0.5',requested_loss_usd:'0.5',entry_upper_usd:nativeFixtureEntryUsd,entry_proof_digest:census.source_digest,
-       usd_conversion:{usd_per_usdt:'1',source_digest:census.source_digest,observed_at_ms:at},
+       plan_sha256:planHash,requested_loss_usdt:'0.5',requested_loss_usd:'0.5',entry_upper_usd:nativeFixtureEntryUsd,
+       entry_proof_digest:String(nativeSource?.entry_proof_digest??census.source_digest),
+       usd_conversion:{usd_per_usdt:'1',
+         source_digest:String(nativeSource?.usd_conversion_source_digest??census.source_digest),
+         observed_at_ms:at},
        policy_revision:governance.revision,census}
    },at);
    if(reserve.status!=='HELD'||!reserve.reservation_key||
@@ -225,8 +246,9 @@ const handler=async(url:string,init?:RequestInit)=>{
     account_uid:real.uid,run_id:real.runId,intent_id:found.intent_id,
     state:'FILLED',record_digest:'a'.repeat(64),
     cumulative_loss_usd:'0',remaining_exposure_usdt:'0',
-    cumulative_entry_usd:nativeFixtureEntryUsd,entry_settlement_revision:1,
-    entry_settlement_digest:'d'.repeat(64)
+    cumulative_entry_usd:nativeFixtureEntryUsd,
+    entry_settlement_revision:Number(nativeSource?.settlement_revision??1),
+    entry_settlement_digest:String(nativeSource?.source_digest??'d'.repeat(64))
    };
    const releaseCommand=(commandId:string,sequence:number)=>({
     schema:'okx.risk-command/v1',command_id:commandId,
@@ -251,7 +273,8 @@ const handler=async(url:string,init?:RequestInit)=>{
     action:{action:'SETTLE_ENTRY',
       reservation_key:real.reservation,plan_sha256:real.planHash,
       expected_risk_book_sequence:real.sequence,
-      cumulative_entry_usd:nativeFixtureEntryUsd,settlement_revision:1,
+      cumulative_entry_usd:nativeFixtureEntryUsd,
+      settlement_revision:terminalLedger.entry_settlement_revision,
       source_digest:terminalLedger.entry_settlement_digest}
    },real.at+7);
    check(settled.status==='UPDATED'&&
@@ -442,6 +465,8 @@ const realOrder=await call('trade',realArgs);
 check(realOrder.status==='completed'&&realOrder.data.intent.protected&&
  venuePostCount===beforeReal+1,'MCP route→fake native→actual RiskBook→fake venue');
 const reservedRisk=await readRiskBook(storage);
+check(reservedRisk?.entry_budget?.reserved_usd===nativeFixtureEntryUsd,
+ 'Worker RESERVE binds the exact cumulative upper from native SQL');
 check(reservedRisk?.occupied_usd==='0.5'&&reservedRisk?.occupied_usdt==='0.5',
  'fake FILLED is NOT a real terminal ledger proof: central risk remains occupied');
 const replayedReal=await call('trade',realArgs);
@@ -454,6 +479,8 @@ const realStatus=await call('trade',{action:'status',account:'fixture_real',
  reference:realOrder.data.intent.intent_id});
 check(realStatus.data.intent.state==='FILLED'&&realStatus.data.intent.protected,
  'fake venue status is visible through same MCP routing');
+const bridgeReservation=realRiskByIntent.get(realOrder.data.intent.intent_id);
+check(bridgeReservation,'fixture must preserve the original Worker RESERVE identity');
 const realClose=await call('trade',{action:'close',account:'fixture_real',
  reference:realOrder.data.intent.intent_id,idempotency_key:'fixture_real_close_0001',
  expires_in_ms:30000});
@@ -461,6 +488,12 @@ check(realClose.status==='completed'&&
  realClose.data.intent.plan.operation==='close',
  'real fake Agent closes the protected fixture position');
 const releasedRisk=await readRiskBook(storage);
+const releasedEntry=await inspectRisk(storage,bridgeReservation.reservation);
+check(releasedEntry?.entry.state==='RELEASED'&&
+ releasedEntry?.entry.entry_settlement_digest===
+ String(nativeSource?.source_digest??'d'.repeat(64))&&
+ releasedEntry?.entry.entry_settlement_revision===Number(nativeSource?.settlement_revision??1),
+ 'committed Worker financial revision is the identical SQL-source digest');
 check(releasedRisk?.occupied_usd==='0'&&releasedRisk?.occupied_usdt==='0'&&
  releasedRisk?.entry_budget?.consumed_usd===nativeFixtureEntryUsd&&
  releasedRisk?.entry_budget?.reserved_usd==='0',
@@ -484,4 +517,27 @@ check((await readRiskBook(storage))?.occupied_usd==='0',
  'pause cannot resurrect a terminally released reservation');
 check((await readRiskBook(storage))?.entry_budget?.consumed_usd===nativeFixtureEntryUsd,
  'pause never refunds consumed campaign turnover');
+if(nativeSource){
+ check(reservedRisk?.entry_budget?.reserved_usd===nativeSource.entry_upper_usd&&
+   releasedRisk?.entry_budget?.consumed_usd===nativeSource.cumulative_entry_usd,
+   'one immutable SQL admission must conserve risk money across Worker');
+ console.log('E1_SQL_WORKER_BRIDGE_TRACE_V1:'+JSON.stringify({
+   schema:'okx.e1.sql-worker-bridge-result/v1',
+   native_source:nativeSource,
+   worker_entry:{
+     account_uid:releasedEntry!.entry.uid,
+     intent_id:releasedEntry!.entry.intent_id,
+     plan_hash:releasedEntry!.entry.plan_hash,
+     reservation_key:bridgeReservation.reservation,
+     settlement_revision:releasedEntry!.entry.entry_settlement_revision,
+     source_digest:releasedEntry!.entry.entry_settlement_digest,
+     state:releasedEntry!.entry.state
+   },
+   reserved_before_usd:reservedRisk!.entry_budget!.reserved_usd,
+   reserved_after_usd:releasedRisk!.entry_budget!.reserved_usd,
+   consumed_after_usd:releasedRisk!.entry_budget!.consumed_usd,
+   occupied_after_usdt:releasedRisk!.occupied_usdt,
+   fixture_venue_posts:venuePostCount-beforeReal
+ }));
+}
 console.log('mcp_riskbook_fake_venue_composed PASS real MCP route, central RESERVE/BEGIN_POST, fixture venue once, protected fake close, native-risk SETTLE_ENTRY, denied premature RELEASE, authenticated RELEASE, second preview, pause; no physical native SQL/WSS claim');

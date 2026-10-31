@@ -163,7 +163,7 @@ fn e1_sealed_campaign_refuses_backdated_unapplied_terminal_receipt() {
 
 #[test]
 fn e1_e2_native_real_fee_sources_baseline_and_second_admission_under_ten() {
-    let mut s = store();
+    let mut s = store_with_account(&format!("okx:real:{}", "a".repeat(64)));
     let definition = s.ensure_manual_instance(1).unwrap();
     let plan = IntentPlan {
         strategy_definition_id: definition.definition_id,
@@ -201,7 +201,7 @@ fn e1_e2_native_real_fee_sources_baseline_and_second_admission_under_ten() {
                 request_hash: "first-body".into(),
                 client_order_id: "first-client".into(),
                 deadline: 100,
-                plan_hash: "plan".into(),
+                plan_hash: "c".repeat(64),
                 policy_revision: 1,
                 risk_increase: true,
                 instrument_id: "BTC-USDT-SWAP".into(),
@@ -343,6 +343,30 @@ fn e1_e2_native_real_fee_sources_baseline_and_second_admission_under_ten() {
         "re-reading an unchanged complete campaign cannot debit twice"
     );
     assert_eq!(Decimal::from(10) - spent, Decimal::new(49975, 4));
+    // CI bridges this exact immutable source into the real Worker RiskBook
+    // implementation; no fabricated monetary source digest in JavaScript.
+    if let Ok(destination) = std::env::var("OKX_E1_BRIDGE_SOURCE_PATH") {
+        let payload = serde_json::json!({
+            "schema": "okx.e1.native-sql-settlement-source/v1",
+            "account_key": s.meta.account_key,
+            "installation_id": s.meta.installation_id,
+            "intent_id": first.intent_id,
+            "plan_hash": first.plan_hash,
+            "source_digest": settlement.source_digest,
+            "settlement_revision": settlement.settlement_revision,
+            "cumulative_entry_usd": settlement.cumulative_entry_usd.to_string(),
+            "entry_upper_usd": first_quote.total_usd.to_string(),
+            "entry_proof_digest": s.entry_admission(&first.intent_id)
+                .unwrap().unwrap().entry_proof_digest,
+            "usd_conversion_source_digest": first_quote.conversion_digest,
+            "usd_per_usdt": first_quote.usd_per_usdt.to_string(),
+            "campaign_id": campaign,
+            "campaign_consumed_usd": spent.to_string(),
+            "campaign_source_digest": proof,
+            "database_path": s.path.to_string_lossy(),
+        });
+        std::fs::write(destination, serde_json::to_vec(&payload).unwrap()).unwrap();
+    }
     // Advancing all six completed source frontiers with no additional money
     // must be O(new events), not a full replay of terminal history.
     for (source, part) in [
@@ -475,6 +499,79 @@ fn e1_e2_native_real_fee_sources_baseline_and_second_admission_under_ten() {
         "new unfinished order is visible to native risk census"
     );
 }
+#[test]
+#[ignore = "requires paired native SQL and actual Worker RiskBook trace from CI"]
+fn e1_worker_finance_receipt_roundtrip_matches_native_sql_after_restart() {
+    let source_path = std::env::var("OKX_E1_BRIDGE_SOURCE_PATH")
+        .expect("CI native SQL source path must be present");
+    let result_path = std::env::var("OKX_E1_BRIDGE_RESULT_PATH")
+        .expect("CI committed Worker RiskBook trace must be present");
+    let native: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(source_path).unwrap()).unwrap();
+    let worker: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(result_path).unwrap()).unwrap();
+    assert_eq!(native["schema"], "okx.e1.native-sql-settlement-source/v1");
+    assert_eq!(worker["schema"], "okx.e1.sql-worker-bridge-result/v1");
+    assert_eq!(worker["native_source"], native,
+        "Worker must consume the exact native SQL source, not a separately manufactured proof");
+    let account = native["account_key"].as_str().unwrap();
+    let installation = native["installation_id"].as_str().unwrap();
+    let intent_id = native["intent_id"].as_str().unwrap();
+    let plan_hash = native["plan_hash"].as_str().unwrap();
+    let amount = native["cumulative_entry_usd"].as_str().unwrap();
+    let source_digest = native["source_digest"].as_str().unwrap();
+    let revision = native["settlement_revision"].as_u64().unwrap();
+    let db = native["database_path"].as_str().unwrap();
+    assert!(account.starts_with("okx:real:"));
+    assert!(source_digest.len() == 64 && source_digest.bytes().all(|b| b.is_ascii_hexdigit()));
+    assert_eq!(amount, "5.0025");
+
+    // The original SQLite database is reopened only AFTER the Worker CAS
+    // consumed its exported immutable terminal source. No second ledger.
+    let sql = AccountStore::open_existing(db, account, installation).unwrap();
+    let intent = sql.intent(intent_id).unwrap().unwrap();
+    assert_eq!(intent.plan_hash, plan_hash);
+    let quote = sql.entry_quote(intent_id).unwrap().unwrap();
+    let admission = sql.entry_admission(intent_id).unwrap().unwrap();
+    assert_eq!(quote.total_usd.to_string(), amount);
+    assert_eq!(admission.entry_upper_usd.to_string(), amount);
+    let receipt = sql.operation(&format!("entry-settlement:{intent_id}"))
+        .unwrap().unwrap();
+    assert_eq!(receipt.kind, "ENTRY_SETTLEMENT_PROVEN");
+    let settlement: EntrySettlementEvidence =
+        serde_json::from_str(&receipt.result_ref).unwrap();
+    assert_eq!(settlement.source_digest, source_digest);
+    assert_eq!(settlement.settlement_revision, revision);
+    assert_eq!(settlement.cumulative_entry_usd.to_string(), amount);
+    let (stored_money, stored_proof): (String, String) = sql.connection.query_row(
+        "SELECT consumed_usd,source_digest FROM campaign_entry_window_proofs
+         WHERE campaign_id=?1 AND covered_through_ms=7",
+        [native["campaign_id"].as_str().unwrap()],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    ).unwrap();
+    assert_eq!(stored_money, native["campaign_consumed_usd"]);
+    assert_eq!(stored_proof, native["campaign_source_digest"]);
+
+    let entry = &worker["worker_entry"];
+    assert_eq!(entry["intent_id"], intent_id);
+    assert_eq!(entry["plan_hash"], plan_hash);
+    assert_eq!(entry["source_digest"], source_digest);
+    assert_eq!(entry["settlement_revision"], revision);
+    assert_eq!(entry["state"], "RELEASED");
+    assert_eq!(worker["reserved_before_usd"], amount);
+    assert_eq!(worker["consumed_after_usd"], amount);
+    assert_eq!(worker["reserved_after_usd"], "0");
+    assert_eq!(worker["occupied_after_usdt"], "0");
+    assert_eq!(worker["fixture_venue_posts"], 1);
+    assert_eq!(entry["account_uid"], "a".repeat(64));
+    assert_eq!(
+        (decimal(stored_money).unwrap() + Decimal::new(4002, 3))
+            <= Decimal::from(10),
+        true,
+        "the native second admission must still fit the actual Worker-consumed campaign budget"
+    );
+}
+
 #[test]
 fn e1_raw_bill_order_source_is_atomic_idempotent_and_immutable() {
     let mut s = store();
@@ -4579,11 +4676,15 @@ fn d1_ingest_reports_all_transaction_outcomes_including_pre_commit_errors() {
 }
 
 fn store() -> AccountStore {
+    store_with_account("okx:real:verified")
+}
+
+fn store_with_account(account_key: &str) -> AccountStore {
     let p = path();
     let m = AccountMeta {
         initialize_operation_id: "connect-op".into(),
         release_id: "release".into(),
-        account_key: "okx:real:verified".into(),
+        account_key: account_key.into(),
         installation_id: "installation".into(),
         initialized_at: 1,
         opening_source: "authenticated-flat".into(),
@@ -4646,6 +4747,7 @@ fn intent(s: &mut AccountStore) -> StoredIntent {
     s.prepare(&d, &i).unwrap()
 }
 fn reserve(s: &mut AccountStore) {
+    let saved = s.intent("intent").unwrap().unwrap();
     s.reserve(
         &CentralReceipt {
             reservation_key: "central-key".into(),
@@ -4653,7 +4755,7 @@ fn reserve(s: &mut AccountStore) {
             installation_id: s.meta.installation_id.clone(),
             instance_id: None,
             intent_id: "intent".into(),
-            plan_hash: "plan".into(),
+            plan_hash: saved.plan_hash,
             policy_revision: 1,
             receipt_hash: "central-hash".into(),
             requested_loss_usd: Decimal::from(5),
