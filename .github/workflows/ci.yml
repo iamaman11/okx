@@ -175,6 +175,11 @@ jobs:
           OKX_A2_TRACE_PATH="$RUNNER_TEMP/a2-worker-governance.json" \
             cargo test --locked -p okx-execution --lib central_worker_cas_trace_native_sql_readback_and_restart -- --ignored --nocapture
 
+      - name: Real Rust Native WSS to persisted Worker SQLite DO (no exchange POST)
+        timeout-minutes: 8
+        working-directory: cloudflare/okx-mcp
+        run: OKX_NATIVE_WORKER_INTEGRATION=1 node scripts/test-runtime-do.mjs
+
 
   cloudflare-mcp:
     name: cloudflare-mcp

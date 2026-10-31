@@ -4,6 +4,8 @@
 // alternate RiskBook, exchange server, endpoint in production, or financial stub.
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { promisify } from "node:util";
+import { execFile } from "node:child_process";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -310,6 +312,37 @@ try {
   assert.equal(repeated.budget?.reserved_loss_usd,"1");
   assert.equal(repeated.budget?.entry_budget?.reserved_usd,"2");
   socket2.ws.close();
+  if (process.env.OKX_NATIVE_WORKER_INTEGRATION === "1") {
+    // Native cargo test is launched only by linux-rust, which already owns
+    // the Rust toolchain and dependencies. Workerd remains alive throughout.
+    const url = await second.ready;
+    assert.equal(url.hostname,"127.0.0.1","CI worker must be loopback-only");
+    const wsUrl = new URL("/runtime",url);
+    wsUrl.protocol = "ws:";
+    const { stdout, stderr } = await promisify(execFile)(
+      "cargo",
+      [
+        "test","--locked","-p","okx-agent","--lib",
+        "native_to_workerd_risk_summary_over_actual_websocket",
+        "--","--nocapture",
+      ],
+      {
+        cwd: fileURLToPath(new URL("../../../",import.meta.url)),
+        env: {
+          ...process.env,
+          OKX_INTEGRATION_WORKER_WS_URL: wsUrl.toString(),
+          OKX_INTEGRATION_WORKER_TOKEN: token,
+          OKX_INTEGRATION_RESERVATION: held.reservation_key,
+        },
+        maxBuffer: 8 * 1024 * 1024,
+        timeout: 180_000,
+      },
+    );
+    assert.match(stdout,/native_to_persisted_workerd_riskbook PASS/,
+      "real Rust client must prove Worker SQL summary and reservation");
+    process.stdout.write(stdout);
+    if (stderr) process.stderr.write(stderr);
+  }
   console.log(JSON.stringify({
     suite:"runtime-session-sqlite-do",
     status:"PASS",

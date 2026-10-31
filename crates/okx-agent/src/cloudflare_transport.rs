@@ -372,7 +372,7 @@ mod raw_native_session_tests {
             agent_incarnation: format!("ctl_{}", "b".repeat(32)),
         }
     }
-    async fn test_dispatch() -> (
+    async fn test_dispatch_for(installation: &str) -> (
         DispatchContext,
         std::path::PathBuf,
         NativeRiskClient,
@@ -384,7 +384,7 @@ mod raw_native_session_tests {
             "okx-raw-native-session-{:032x}",
             u128::from_le_bytes(bytes)
         ));
-        initialize_installation(&root, "installation-test").unwrap();
+        initialize_installation(&root, installation).unwrap();
         let budget = RateBudget::new();
         let accounts = Arc::new(
             AccountRuntimeRegistry::open(&root, budget.clone())
@@ -416,6 +416,15 @@ mod raw_native_session_tests {
         };
         (ctx, root, risk, risk_rx)
     }
+    async fn test_dispatch() -> (
+        DispatchContext,
+        std::path::PathBuf,
+        NativeRiskClient,
+        mpsc::Receiver<OutboundRiskCommand>,
+    ) {
+        test_dispatch_for("installation-test").await
+    }
+
     fn summary(id: &str) -> RiskCommand {
         RiskCommand {
             schema: RISK_COMMAND_SCHEMA_V1.into(),
@@ -587,4 +596,73 @@ mod raw_native_session_tests {
         drop(output_rx);
         std::fs::remove_dir_all(root).unwrap();
     }
+    /// Opt-in only from the pinned Linux integration job. This socket talks
+    /// directly to the real workerd RuntimeSession and its persisted SQLite DO;
+    /// there is no mock Worker/RiskBook, fixture exchange or alternate executor.
+    #[tokio::test]
+    async fn native_to_workerd_risk_summary_over_actual_websocket() {
+        let Ok(url) = std::env::var("OKX_INTEGRATION_WORKER_WS_URL") else {
+            return;
+        };
+        assert!(
+            url.starts_with("ws://127.0.0.1:"),
+            "integration socket must be a local ephemeral workerd endpoint"
+        );
+        let token = std::env::var("OKX_INTEGRATION_WORKER_TOKEN").unwrap();
+        let reservation_key = std::env::var("OKX_INTEGRATION_RESERVATION").unwrap();
+        let (ctx, root, risk, mut risk_rx) = test_dispatch_for("installation_test").await;
+        let mut request = url.into_client_request().unwrap();
+        request.headers_mut().insert(
+            AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+        );
+        let (socket, _) = tokio::time::timeout(
+            Duration::from_secs(10),
+            connect_async(request),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let mut hello = test_hello();
+        if let F::Hello { installation_id, .. } = &mut hello {
+            *installation_id = "installation_test".into();
+        }
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let session = tokio::spawn(async move {
+            run_connected_session(socket, hello, ctx, &mut risk_rx, shutdown_rx).await
+        });
+        let mut command = summary("risk_native_real_workerd_001");
+        command.installation_id = "installation_test".into();
+        let result = risk.request(command).await.unwrap();
+        assert_eq!(result.status, RiskDecisionStatus::Observed);
+        let budget = result.budget.as_ref().unwrap();
+        assert_eq!(budget.campaign_limit_usd, "10");
+        assert_eq!(budget.reserved_loss_usd, "1");
+        let entry = budget.entry_budget.as_ref().unwrap();
+        assert_eq!(entry.reserved_usd, "2");
+        assert_eq!(entry.consumed_usd, "0");
+        let inspect = RiskCommand {
+            schema: RISK_COMMAND_SCHEMA_V1.into(),
+            command_id: "risk_native_real_workerd_inspect_001".into(),
+            installation_id: "installation_test".into(),
+            action: RiskCommandAction::Inspect {
+                reservation_key: reservation_key.clone(),
+                plan_sha256: "b".repeat(64),
+            },
+        };
+        let inspected = risk.request(inspect).await.unwrap();
+        assert_eq!(inspected.status, RiskDecisionStatus::Observed);
+        assert_eq!(inspected.reservation_key.as_deref(), Some(reservation_key.as_str()));
+        assert!(inspected.reservation_state.is_some());
+        shutdown_tx.send(true).unwrap();
+        let terminated = tokio::time::timeout(Duration::from_secs(10), session)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(terminated.is_ok(), "native session should terminate cleanly: {terminated:?}");
+        drop(risk);
+        std::fs::remove_dir_all(root).unwrap();
+        println!("native_to_persisted_workerd_riskbook PASS: no venue POST");
+    }
+
 }
