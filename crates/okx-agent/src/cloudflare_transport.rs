@@ -729,7 +729,11 @@ mod raw_native_session_tests {
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 let capabilities = trade
-                    .trade("fixture-a", &okx_protocol::trading::TradeRequest::Capabilities {}, None)
+                    .trade(
+                        "fixture-a",
+                        &okx_protocol::trading::TradeRequest::Capabilities {},
+                        None,
+                    )
                     .await
                     .unwrap();
                 if capabilities["native_sql_policy"]["matches_governance"] == true {
