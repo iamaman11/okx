@@ -1126,6 +1126,103 @@ mod tests {
             .unwrap();
         assert_eq!(assessed.proven_upper_usd().unwrap(), Some(known.total_usd));
         assert_eq!(assessed.missing_reasons(), Vec::<&'static str>::new());
+        // r4 extension gate: the *production* source assessor, not a
+        // ticker-specific quote helper, accepts two authenticated linear
+        // models with different ctVal, lot, minimum and tick metadata.
+        let mut first_rules = rules.clone();
+        first_rules.source_received_at = at.to_rfc3339();
+        let current_fx = UsdConversion {
+            usd_per_usdt: "1".into(),
+            source_digest: "a".repeat(64),
+            observed_at_ms: at.timestamp_millis() as u64,
+        };
+        let uid = snap.account_uid_fingerprint.clone();
+        let (first_cost, _) = assess_order(
+            &open_plan,
+            EntryAssessmentSources {
+                instrument: "BTC-USDT-SWAP",
+                order_type: "limit",
+                rules: &first_rules,
+                fees: &live_fees,
+                account: &config,
+                snapshot: &snap,
+                conversion: &current_fx,
+                leverage: d("2"),
+                verified_uid: &uid,
+                observed_at_ms: at.timestamp_millis(),
+            },
+        ).unwrap();
+        assert_eq!(
+            first_cost.proven_upper_usd().unwrap(),
+            Some(d("10.005021"))
+        );
+        let mut alt_rules = first_rules.clone();
+        alt_rules.instrument.instrument_id = "LTC-USDT-SWAP".into();
+        alt_rules.instrument.base_currency = Some("LTC".into());
+        alt_rules.instrument.contract_value_currency = Some("LTC".into());
+        alt_rules.instrument.contract_value = Some("0.1".into());
+        alt_rules.instrument.lot_size = "0.1".into();
+        alt_rules.instrument.min_size = "0.1".into();
+        alt_rules.instrument.tick_size = "0.01".into();
+        let alt_fees = okx_observation::FeeScheduleSnapshot::from_input(
+            okx_observation::FeeScheduleInput {
+                instrument_id: "LTC-USDT-SWAP".into(),
+                reference_generation: "reference-1".into(),
+                source_received_at: at.to_rfc3339(),
+                exchange_timestamp_ms: at.timestamp_millis().to_string(),
+                level: "Lv1".into(),
+                maker_rate: "-0.0002".into(),
+                taker_rate: "0.0005".into(),
+                exact_for_instrument: true,
+            }
+        ).unwrap();
+        let alt_plan = IntentPlan {
+            contract_value: d("0.1"),
+            quantity: d("0.1"),
+            limit_price: d("100"),
+            ..open_plan.clone()
+        };
+        let (alt_cost, _) = assess_order(
+            &alt_plan,
+            EntryAssessmentSources {
+                instrument: "LTC-USDT-SWAP",
+                order_type: "limit",
+                rules: &alt_rules,
+                fees: &alt_fees,
+                account: &config,
+                snapshot: &snap,
+                conversion: &current_fx,
+                leverage: d("2"),
+                verified_uid: &uid,
+                observed_at_ms: at.timestamp_millis(),
+            },
+        ).unwrap();
+        assert_eq!(alt_cost.quote.notional_usdt, d("1"));
+        assert_eq!(alt_cost.proven_upper_usd().unwrap(), Some(d("1.0005")));
+        assert_ne!(
+            first_cost.quote.total_usdt,
+            alt_cost.quote.total_usdt,
+            "contract metadata must determine sizing and fees"
+        );
+        assert!(
+            assess_order(
+                &alt_plan,
+                EntryAssessmentSources {
+                    instrument: "UNKNOWN-USDT-SWAP",
+                    order_type: "limit",
+                    rules: &alt_rules,
+                    fees: &alt_fees,
+                    account: &config,
+                    snapshot: &snap,
+                    conversion: &current_fx,
+                    leverage: d("2"),
+                    verified_uid: &uid,
+                    observed_at_ms: at.timestamp_millis(),
+                },
+            ).is_err(),
+            "suffix matching must never silently authorize an unknown instrument"
+        );
+
         let mut auto = config.clone();
         auto.auto_loan = Some(true);
         assert_eq!(
