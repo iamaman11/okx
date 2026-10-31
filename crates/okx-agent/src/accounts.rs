@@ -1085,11 +1085,13 @@ pub(crate) mod recorded_support {
 
     /// Only raw recorded socket delivery; real PrivateWsCoordinator still
     /// parses, authenticates and establishes source generations.
+    type RecordedPublicSubscriptions = Arc<Mutex<Vec<(serde_json::Value, Vec<String>)>>>;
+
     pub(crate) struct RecordedWsConnector {
         pub(crate) sent: Arc<Mutex<Vec<serde_json::Value>>>,
         /// Expected subscribe args and one-shot raw ACK/data frames. No
         /// snapshots or readied flags are supplied to the runtime directly.
-        public_subscriptions: Arc<Mutex<Vec<(serde_json::Value, Vec<String>)>>>,
+        public_subscriptions: RecordedPublicSubscriptions,
     }
     impl Default for RecordedWsConnector {
         fn default() -> Self {
@@ -1118,7 +1120,7 @@ pub(crate) mod recorded_support {
     struct RecordedWire {
         inbound: std::collections::VecDeque<tokio_tungstenite::tungstenite::Message>,
         sent: Arc<Mutex<Vec<serde_json::Value>>>,
-        public_subscriptions: Option<Arc<Mutex<Vec<(serde_json::Value, Vec<String>)>>>>,
+        public_subscriptions: Option<RecordedPublicSubscriptions>,
     }
     impl okx_runtime::WsWire for RecordedWire {
         fn send(
