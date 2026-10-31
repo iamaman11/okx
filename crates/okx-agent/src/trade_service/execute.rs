@@ -17,7 +17,9 @@ fn risk_receipt_bound(
         && receipt.status == status
         && receipt.reservation_key.as_deref() == Some(reservation_key)
         && receipt.policy_revision == Some(policy_revision)
-        && receipt.risk_book_sequence.is_some_and(|sequence| sequence > 0)
+        && receipt
+            .risk_book_sequence
+            .is_some_and(|sequence| sequence > 0)
 }
 
 fn post_receipt_bound(
