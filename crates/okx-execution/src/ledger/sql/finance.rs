@@ -643,14 +643,38 @@ impl AccountStore {
         }
         let frontiers = self.captured_complete_frontiers(from_ms, through_ms)?;
         self.verify_captured_campaign_continuity(from_ms, through_ms)?;
+        // The campaign projection is authoritative only for the *previously
+        // completed* and already source-verified frontier. Scan the new
+        // interval, not the whole campaign on every post-trade preview.
+        // A late cumulative revision is a NEW economic delta even when its
+        // original terminal order belongs to an older interval.
+        let checkpoint: Option<(i64, i64, String)> = self.connection.query_row(
+            "SELECT from_ms,covered_through_ms,consumed_usd
+             FROM campaign_entry_totals WHERE campaign_id=?1",
+            [campaign_id],
+            |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?)),
+        ).optional()?;
+        let (since, mut total) = match checkpoint.as_ref() {
+            Some((origin,cut,amount)) if *origin==from_ms && *cut<=through_ms =>
+                (*cut,decimal(amount.clone())?),
+            Some(_) => return Err(StoreError::Invalid("CAMPAIGN_APPLIED_FRONTIER_REGRESSION")),
+            None => (from_ms,Decimal::ZERO),
+        };
         let mut stmt = self.connection.prepare(
-            "SELECT operation_id,result_ref,committed_at FROM operation_receipts
-             WHERE kind='ENTRY_SETTLEMENT_PROVEN'
-               AND committed_at>?1 AND committed_at<=?2
-             ORDER BY operation_id LIMIT 10001",
+            "SELECT terminal.operation_id,terminal.result_ref,terminal.committed_at
+             FROM operation_receipts terminal
+             WHERE terminal.kind='ENTRY_SETTLEMENT_PROVEN'
+               AND ((terminal.committed_at>?1 AND terminal.committed_at<=?2)
+                 OR EXISTS(
+                   SELECT 1 FROM operation_receipts late
+                   WHERE late.operation_id='entry-late-head:'||
+                         substr(terminal.operation_id,18)
+                     AND late.kind='ENTRY_LATE_HEAD'
+                     AND late.committed_at>?1 AND late.committed_at<=?2
+                 ))
+             ORDER BY terminal.operation_id LIMIT 10001",
         )?;
-        let mut rows = stmt.query(params![from_ms, through_ms])?;
-        let mut total = Decimal::ZERO;
+        let mut rows = stmt.query(params![since,through_ms])?;
         let mut witnesses = Vec::new();
         while let Some(row) = rows.next()? {
             if witnesses.len() >= 10_000 {
@@ -796,8 +820,39 @@ impl AccountStore {
                     "ENTRY_OPENING_BOUND_BREACH_REQUIRES_STOP",
                 ));
             }
-            total = total
-                .checked_add(value.cumulative_entry_usd)
+            // A late source revision replaces its previous cumulative
+            // amount; the campaign only consumes the positive difference.
+            let applied: Option<(i64,String,String)> = self.connection.query_row(
+                "SELECT settlement_revision,cumulative_usd,source_digest
+                 FROM campaign_entry_applied
+                 WHERE campaign_id=?1 AND intent_id=?2
+                 ORDER BY settlement_revision DESC LIMIT 1",
+                params![campaign_id,value.intent_id],
+                |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?)),
+            ).optional()?;
+            let previous = if let Some((rev,amount,digest)) = applied {
+                let amount=decimal(amount)?;
+                if rev>i64::try_from(value.settlement_revision)
+                        .map_err(|_|StoreError::Invalid("CAMPAIGN_APPLIED_REVISION_INVALID"))?
+                    || amount>value.cumulative_entry_usd
+                {
+                    return Err(StoreError::Invalid("CAMPAIGN_APPLIED_MONOTONICITY_BREACH"));
+                }
+                if rev == i64::try_from(value.settlement_revision)
+                    .map_err(|_|StoreError::Invalid("CAMPAIGN_APPLIED_REVISION_INVALID"))?
+                {
+                    if amount!=value.cumulative_entry_usd || digest!=value.source_digest {
+                        return Err(StoreError::Invalid("CAMPAIGN_APPLIED_SOURCE_CONFLICT"));
+                    }
+                    continue;
+                }
+                amount
+            } else {
+                Decimal::ZERO
+            };
+            let delta=value.cumulative_entry_usd.checked_sub(previous)
+                .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))?;
+            total = total.checked_add(delta)
                 .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))?;
             witnesses.push((
                 value.intent_id,
@@ -807,18 +862,23 @@ impl AccountStore {
                 value.venue_update_ms,
             ));
         }
-        // Finish the exact read snapshot before creating an immutable receipt
-        // on the same SQL-owner connection.
+        // Finish the exact read snapshot before mutating any campaign
+        // receipts. Initial zero is a special claim: validate it BEFORE
+        // committing an advanced applied frontier.
         drop(rows);
         drop(stmt);
+        if witnesses.is_empty() && checkpoint.is_none() {
+            let zero = self.seal_captured_empty_campaign(
+                campaign_id, from_ms, through_ms,
+            )?;
+            self.apply_captured_campaign_deltas(
+                campaign_id, from_ms, through_ms, &witnesses, Decimal::ZERO,
+            )?;
+            return Ok((Decimal::ZERO, zero));
+        }
         self.apply_captured_campaign_deltas(
             campaign_id,from_ms,through_ms,&witnesses,total,
         )?;
-        if witnesses.is_empty() {
-            return self
-                .seal_captured_empty_campaign(campaign_id, from_ms, through_ms)
-                .map(|proof| (Decimal::ZERO, proof));
-        }
         let canonical = serde_json::to_vec(&(
             "okx.campaign-source-backed-baseline/v1",
             self.meta.account_key.as_str(),

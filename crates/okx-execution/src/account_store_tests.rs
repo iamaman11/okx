@@ -154,6 +154,35 @@ fn e1_e2_native_real_fee_sources_baseline_and_second_admission_under_ten() {
         "re-reading an unchanged complete campaign cannot debit twice"
     );
     assert_eq!(Decimal::from(10)-spent,Decimal::new(49975,4));
+    // Advancing all six completed source frontiers with no additional money
+    // must be O(new events), not a full replay of terminal history.
+    for (source,part) in [
+        ("fills","SPOT"),("fills","MARGIN"),("fills","SWAP"),
+        ("fills","FUTURES"),("fills","OPTION"),("bills","account"),
+    ] {
+        s.ingest_page(&IngestPage {
+            cursor: Some(SourceCursor {
+                source: source.into(),stream_partition: part.into(),
+                cursor: String::new(),watermark: 8,generation: 1,
+                coverage_gaps: String::new(),
+            }),
+            ..Default::default()
+        }).unwrap();
+    }
+    let (advanced,_) = s.seal_captured_campaign_baseline(
+        &campaign,2,8,
+    ).unwrap();
+    assert_eq!(advanced,spent);
+    let (frontier,amount,events): (i64,String,i64) = s.connection.query_row(
+        "SELECT t.covered_through_ms,t.consumed_usd,
+                (SELECT COUNT(*) FROM campaign_entry_applied
+                 WHERE campaign_id=?1)
+         FROM campaign_entry_totals t WHERE t.campaign_id=?1",
+        [&campaign],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)),
+    ).unwrap();
+    assert_eq!(frontier,8);
+    assert_eq!(Decimal::from_str_exact(&amount).unwrap(),spent);
+    assert_eq!(events,1,"advancing a covered empty page never duplicates the entry");
 
     // The second SQL intent uses the ORIGINAL campaign money: a valid
     // 4 USDT entry still fits inside the 10 USD total budget.
