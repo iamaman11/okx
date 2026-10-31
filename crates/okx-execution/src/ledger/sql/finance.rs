@@ -1182,7 +1182,7 @@ impl AccountStore {
                         && *covered <= through_ms
                         && generations == &Self::campaign_source_generations(&frontiers)
                 });
-        if let Some((_, _, fill, bill, receipt, _, _)) = older_verified {
+        if let Some((_, _, fill, bill, _receipt, _, _)) = older_verified {
             self.verify_captured_campaign_continuity_rows(
                 from_ms,
                 through_ms,
