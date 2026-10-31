@@ -2322,10 +2322,7 @@ mod tests {
             venue_ack_fixture("0", "different_client", "51000", ""),
         ];
         for reply in ambiguous {
-            assert_eq!(
-                place_ack_verdict(&reply, client),
-                PlaceAckVerdict::Unknown,
-            );
+            assert_eq!(place_ack_verdict(&reply, client), PlaceAckVerdict::Unknown);
         }
         let mut missing_row = accepted.clone();
         missing_row.data.clear();
