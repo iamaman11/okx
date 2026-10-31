@@ -1156,11 +1156,25 @@ mod raw_native_session_tests {
             maintenance_trade.run(maintenance_rx).await;
         });
         let native_origin = i64::try_from(
-            checked.budget.as_ref().unwrap().campaign_origin
-                .as_ref().unwrap().started_at_ms
-        ).unwrap();
-        let campaign_id = checked.budget.as_ref().unwrap().entry_budget
-            .as_ref().unwrap().campaign_id.clone();
+            checked
+                .budget
+                .as_ref()
+                .unwrap()
+                .campaign_origin
+                .as_ref()
+                .unwrap()
+                .started_at_ms,
+        )
+        .unwrap();
+        let campaign_id = checked
+            .budget
+            .as_ref()
+            .unwrap()
+            .entry_budget
+            .as_ref()
+            .unwrap()
+            .campaign_id
+            .clone();
         let mut last_readiness_error = String::from("NOT_CHECKED");
         let readiness = tokio::time::timeout(Duration::from_secs(12), async {
             loop {
@@ -1169,13 +1183,15 @@ mod raw_native_session_tests {
                 for alias in ["fixture-a", "fixture-b"] {
                     let owner = accounts.resolve(alias).await.unwrap();
                     let campaign = campaign_id.clone();
-                    match owner.execution.store.call(
-                        Instant::now() + Duration::from_secs(2),
-                        move |s| s.verify_campaign_entry_readiness(
-                            &campaign, native_origin, through
-                        ),
-                    ).await {
-                        Ok(()) => {},
+                    match owner
+                        .execution
+                        .store
+                        .call(std::time::Instant::now() + Duration::from_secs(2), move |s| {
+                            s.verify_campaign_entry_readiness(&campaign, native_origin, through)
+                        })
+                        .await
+                    {
+                        Ok(()) => {}
                         Err(e) => {
                             last_readiness_error = format!("{alias}: {e}");
                             both_ready = false;
@@ -1183,12 +1199,17 @@ mod raw_native_session_tests {
                         }
                     }
                 }
-                if both_ready { break; }
+                if both_ready {
+                    break;
+                }
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }
-        }).await;
-        assert!(readiness.is_ok(),
-            "production maintenance must reconcile BOTH native SQL campaign frontiers: {last_readiness_error}");
+        })
+        .await;
+        assert!(
+            readiness.is_ok(),
+            "production maintenance must reconcile BOTH native SQL campaign frontiers: {last_readiness_error}"
+        );
         use crate::accounts::recorded_support::RecordedPost;
         let fresh_fee_at = chrono::Utc::now().timestamp_millis().to_string();
         for _ in 0..3 {
