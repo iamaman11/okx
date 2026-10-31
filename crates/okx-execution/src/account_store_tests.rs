@@ -118,8 +118,10 @@ fn e1_campaign_admission_requires_cached_economic_and_capture_revision() {
         })
         .unwrap();
     }
+    // A background proof at cutoff 10 remains fresh for a caller at 11.
+    s.verify_campaign_entry_readiness(&campaign, 2, 11).unwrap();
     assert!(matches!(
-        s.verify_campaign_entry_readiness(&campaign, 2, 11),
+        s.verify_campaign_entry_readiness(&campaign, 2, 14),
         Err(StoreError::Invalid("CAMPAIGN_READINESS_STALE"))
     ));
     s.refresh_campaign_entry_readiness(&campaign, 2, 11)
@@ -146,6 +148,213 @@ fn e1_campaign_admission_requires_cached_economic_and_capture_revision() {
         s.refresh_campaign_entry_readiness(&campaign, 2, 11)
             .is_err()
     );
+}
+
+#[test]
+fn e1_campaign_readiness_epoch_ignores_known_intent_lifecycle_but_detects_new_finance() {
+    let mut s = store();
+    for (source, partition) in [
+        ("fills", "SPOT"), ("fills", "MARGIN"), ("fills", "SWAP"),
+        ("fills", "FUTURES"), ("fills", "OPTION"), ("bills", "account"),
+    ] {
+        s.ingest_page(&IngestPage {
+            cursor: Some(SourceCursor {
+                source: source.into(), stream_partition: partition.into(),
+                cursor: String::new(), watermark: 10, generation: 1,
+                coverage_gaps: String::new(),
+            }), ..Default::default()
+        }).unwrap();
+    }
+    let campaign = format!("sha256:{}", "c".repeat(64));
+    s.seal_captured_campaign_baseline(&campaign, 2, 10).unwrap();
+    let epoch: i64 = s.connection.query_row(
+        "SELECT revision FROM campaign_source_epoch WHERE id=1",
+        [], |r| r.get(0)).unwrap();
+    let _known_prepared = intent(&mut s);
+    reserve(&mut s);
+    assert_eq!(epoch, s.connection.query_row(
+        "SELECT revision FROM campaign_source_epoch WHERE id=1",
+        [], |r| r.get::<_,i64>(0)).unwrap(),
+        "known reservation is not a new economic event");
+    s.verify_campaign_entry_readiness(&campaign, 2, 11).unwrap();
+    // Use the ordinary authenticated finance ingestion path, not a
+    // direct SQL INSERT that skips the source-provenance owner.
+    s.ingest_page(&IngestPage {
+        finance: vec![fee("epoch-new-fee", "fill")],
+        ..Default::default()
+    })
+    .unwrap();
+    assert!(matches!(
+        s.verify_campaign_entry_readiness(&campaign, 2, 11),
+        Err(StoreError::Invalid("CAMPAIGN_READINESS_STALE"))
+    ));
+}
+
+#[test]
+fn e1_campaign_incremental_bill_review_is_bounded_and_fail_closed_until_complete() {
+    let mut s = store();
+    for (source, partition) in [
+        ("fills", "SPOT"), ("fills", "MARGIN"), ("fills", "SWAP"),
+        ("fills", "FUTURES"), ("fills", "OPTION"), ("bills", "account"),
+    ] {
+        s.ingest_page(&IngestPage {
+            cursor: Some(SourceCursor {
+                source: source.into(), stream_partition: partition.into(),
+                cursor: String::new(), watermark: 10, generation: 1,
+                coverage_gaps: String::new(),
+            }),
+            ..Default::default()
+        }).unwrap();
+    }
+    let campaign = format!("sha256:{}", "c".repeat(64));
+    s.seal_captured_campaign_baseline(&campaign, 2, 10).unwrap();
+    // One ingestion transaction contains 300 independently identified
+    // transfer bills. All are classified non-entry economic events, so the
+    // same source-backed campaign budget remains unchanged.
+    let bills = (0..5000).map(|n| Bill {
+        bill_id: format!("campaign-transfer-{n}"),
+        kind: "1:11".into(),
+        time: 9,
+        amount: Decimal::ONE,
+        currency: "USDT".into(),
+        economic_event_key: format!("campaign-transfer-{n}"),
+    }).collect();
+    s.ingest_page(&IngestPage { bills, ..Default::default() }).unwrap();
+    assert!(matches!(
+        s.refresh_campaign_entry_readiness(&campaign, 2, 10),
+        Err(StoreError::Invalid("CAMPAIGN_DELTA_BATCH_PENDING"))
+    ));
+    assert!(matches!(
+        s.verify_campaign_entry_readiness(&campaign, 2, 10),
+        Err(StoreError::Invalid("CAMPAIGN_READINESS_STALE"))
+    ));
+    let reviewed: i64 = s.connection.query_row(
+        "SELECT reviewed_bill_rowid FROM campaign_entry_readiness
+         WHERE campaign_id=?1",
+        [&campaign], |r| r.get(0)).unwrap();
+    assert_eq!(reviewed, 4096, "one maintenance turn processes at most 4096 source rows");
+    s.refresh_campaign_entry_readiness(&campaign, 2, 10).unwrap();
+    s.verify_campaign_entry_readiness(&campaign, 2, 10).unwrap();
+    let consumed: String = s.connection.query_row(
+        "SELECT consumed_usd FROM campaign_entry_totals WHERE campaign_id=?1",
+        [&campaign], |r| r.get(0)).unwrap();
+    assert_eq!(consumed, "0", "transfers cannot consume or mint entry money");
+}
+
+#[test]
+fn e1_campaign_future_event_time_cannot_be_acknowledged_early() {
+    let mut s = store();
+    for (source, partition) in [
+        ("fills", "SPOT"), ("fills", "MARGIN"), ("fills", "SWAP"),
+        ("fills", "FUTURES"), ("fills", "OPTION"), ("bills", "account"),
+    ] {
+        s.ingest_page(&IngestPage {
+            cursor: Some(SourceCursor {
+                source: source.into(), stream_partition: partition.into(),
+                cursor: String::new(), watermark: 10, generation: 1,
+                coverage_gaps: String::new(),
+            }),
+            ..Default::default()
+        }).unwrap();
+    }
+    let campaign = format!("sha256:{}", "c".repeat(64));
+    s.seal_captured_campaign_baseline(&campaign, 2, 10).unwrap();
+    s.ingest_page(&IngestPage {
+        bills: vec![Bill {
+            bill_id: "future-campaign-transfer".into(), kind: "1:11".into(),
+            time: 12, amount: Decimal::ONE, currency: "USDT".into(),
+            economic_event_key: "future-campaign-transfer".into(),
+        }],
+        ..Default::default()
+    }).unwrap();
+    assert!(matches!(
+        s.refresh_campaign_entry_readiness(&campaign, 2, 10),
+        Err(StoreError::Invalid("CAMPAIGN_DELTA_EVENT_NOT_COVERED"))
+    ));
+    assert!(matches!(
+        s.verify_campaign_entry_readiness(&campaign, 2, 10),
+        Err(StoreError::Invalid("CAMPAIGN_READINESS_STALE"))
+    ));
+    for (source, partition) in [
+        ("fills", "SPOT"), ("fills", "MARGIN"), ("fills", "SWAP"),
+        ("fills", "FUTURES"), ("fills", "OPTION"), ("bills", "account"),
+    ] {
+        s.ingest_page(&IngestPage {
+            cursor: Some(SourceCursor {
+                source: source.into(), stream_partition: partition.into(),
+                cursor: String::new(), watermark: 12, generation: 1,
+                coverage_gaps: String::new(),
+            }),
+            ..Default::default()
+        }).unwrap();
+    }
+    s.refresh_campaign_entry_readiness(&campaign, 2, 12).unwrap();
+    s.verify_campaign_entry_readiness(&campaign, 2, 12).unwrap();
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn e1_campaign_admission_and_one_delta_stay_bounded_across_history_scales() {
+    // One shared production SQL owner per fixture. The historical import
+    // is deliberately large; online verification must only use indexed
+    // source/readiness revisions, never a no-match historical EXISTS.
+    for history in [1_000, 100_000, 1_000_000] {
+        let mut s = store();
+        let campaign = format!("sha256:{}", "c".repeat(64));
+        s.connection.execute(
+            "WITH RECURSIVE n(x) AS (
+                VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<?1
+             )
+             INSERT INTO bills(bill_id,kind,time,amount,currency,economic_event_key)
+             SELECT 'imported-transfer-'||x,'1:11',9,'1','USDT',
+                    'imported-transfer-'||x FROM n",
+            [history],
+        ).unwrap();
+        for (source, partition) in [
+            ("fills", "SPOT"), ("fills", "MARGIN"), ("fills", "SWAP"),
+            ("fills", "FUTURES"), ("fills", "OPTION"), ("bills", "account"),
+        ] {
+            s.ingest_page(&IngestPage {
+                cursor: Some(SourceCursor {
+                    source: source.into(), stream_partition: partition.into(),
+                    cursor: String::new(), watermark: 10, generation: 1,
+                    coverage_gaps: String::new(),
+                }), ..Default::default()
+            }).unwrap();
+        }
+        s.seal_captured_campaign_baseline(&campaign, 2, 10).unwrap();
+        let started = std::time::Instant::now();
+        for _ in 0..10 {
+            s.verify_campaign_entry_readiness(&campaign, 2, 11).unwrap();
+        }
+        let elapsed_ms = started.elapsed().as_millis();
+        assert!(elapsed_ms < 2_000,
+                "admission must not revisit {history} history rows: {elapsed_ms}ms");
+        // The exact readiness statement is a PK lookup at all history scales.
+        let mut stmt = s.connection.prepare(
+            "SELECT source_revision FROM campaign_entry_readiness
+             WHERE campaign_id=?1"
+        ).unwrap();
+        let _: i64 = stmt.query_row([&campaign], |r| r.get(0)).unwrap();
+        let vm = stmt.get_status(rusqlite::StatementStatus::VmStep);
+        let full = stmt.get_status(rusqlite::StatementStatus::FullscanStep);
+        assert!(vm < 100 && full == 0,
+                "readiness VM steps {vm}, fullscan steps {full}, history {history}");
+        s.ingest_page(&IngestPage {
+            bills: vec![Bill {
+                bill_id: format!("new-transfer-{history}"),
+                kind: "1:11".into(), time: 9, amount: Decimal::ONE,
+                currency: "USDT".into(),
+                economic_event_key: format!("new-transfer-{history}"),
+            }], ..Default::default()
+        }).unwrap();
+        assert!(matches!(
+            s.verify_campaign_entry_readiness(&campaign, 2, 11),
+            Err(StoreError::Invalid("CAMPAIGN_READINESS_STALE"))
+        ));
+        s.refresh_campaign_entry_readiness(&campaign, 2, 10).unwrap();
+        s.verify_campaign_entry_readiness(&campaign, 2, 11).unwrap();
+    }
 }
 
 #[test]

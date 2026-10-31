@@ -444,6 +444,101 @@ impl AccountStore {
             .join("|")
     }
 
+
+    fn campaign_source_rowids(&self) -> StoreResult<(i64, i64, i64, i64, i64, i64)> {
+        self.connection.query_row(
+            "SELECT
+               (SELECT COALESCE(MAX(rowid),0) FROM fills),
+               (SELECT COALESCE(MAX(rowid),0) FROM bills),
+               (SELECT COALESCE(MAX(rowid),0) FROM operation_receipts),
+               (SELECT COALESCE(MAX(rowid),0) FROM finance_entries),
+               (SELECT COALESCE(MAX(rowid),0) FROM cash_flows),
+               (SELECT revision FROM campaign_late_head_epoch WHERE id=1)",
+            [],
+            |r| Ok((
+                r.get(0)?, r.get(1)?, r.get(2)?,
+                r.get(3)?, r.get(4)?, r.get(5)?,
+            )),
+        ).map_err(Into::into)
+    }
+
+    fn campaign_bounded_next_rowid(&self, table: &str, floor: i64, end: i64)
+        -> StoreResult<i64>
+    {
+        // Table identifiers are compile-time constants, never caller input.
+        let sql = match table {
+            "fills" => "SELECT rowid FROM fills WHERE rowid>?1 ORDER BY rowid LIMIT 1 OFFSET 4095",
+            "bills" => "SELECT rowid FROM bills WHERE rowid>?1 ORDER BY rowid LIMIT 1 OFFSET 4095",
+            "operation_receipts" => "SELECT rowid FROM operation_receipts WHERE rowid>?1 ORDER BY rowid LIMIT 1 OFFSET 4095",
+            _ => return Err(StoreError::Invalid("CAMPAIGN_DELTA_SOURCE_INVALID")),
+        };
+        let page_end: Option<i64> =
+            self.connection.query_row(sql, [floor], |r| r.get(0)).optional()?;
+        Ok(page_end.unwrap_or(end))
+    }
+
+    fn campaign_unsettled_new_bill(
+        &self,
+        bill_after: i64,
+        bill_end: i64,
+        receipt_after: i64,
+        through_ms: i64,
+    ) -> StoreResult<bool> {
+        // Old terminal/campaign proof cannot justify a newly seen
+        // backdated economic bill. Allow only an active, known, centrally
+        // reserved order OR a newly witnessed terminal/late settlement.
+        // Unknown ownership and a released old receipt without a new
+        // economic acknowledgement are never interpreted as zero.
+        self.connection
+            .query_row(
+                "SELECT EXISTS(
+                  SELECT 1 FROM bills b
+                  WHERE b.rowid>?1 AND b.rowid<=?2
+                    AND b.time<=?4
+                    AND b.kind NOT IN ('1:11','1:12','8:173','8:174')
+                    AND b.kind NOT LIKE '7:%'
+                    AND NOT EXISTS (
+                      SELECT 1 FROM bill_order_sources source
+                      JOIN intents i
+                        ON i.exchange_order_id=source.exchange_order_id
+                        AND i.instrument_id=source.instrument_id
+                      JOIN risk_receipts risk ON risk.intent_id=i.intent_id
+                      WHERE source.bill_id=b.bill_id
+                        AND i.risk_increase=1
+                        AND risk.plan_hash=i.plan_hash
+                        AND i.state IN ('ACKNOWLEDGED','PARTIALLY_FILLED')
+                        AND risk.state IN ('POSTED','OPEN')
+                    )
+                    AND NOT EXISTS (
+                      SELECT 1 FROM bill_order_sources source
+                      JOIN intents i
+                        ON i.exchange_order_id=source.exchange_order_id
+                        AND i.instrument_id=source.instrument_id
+                      JOIN operation_receipts settled
+                        ON settled.operation_id='entry-settlement:'||i.intent_id
+                        AND settled.kind='ENTRY_SETTLEMENT_PROVEN'
+                        AND settled.rowid>?3
+                      WHERE source.bill_id=b.bill_id
+                    )
+                    AND NOT EXISTS (
+                      SELECT 1 FROM bill_order_sources source
+                      JOIN intents i
+                        ON i.exchange_order_id=source.exchange_order_id
+                        AND i.instrument_id=source.instrument_id
+                      JOIN operation_receipts late
+                        ON late.kind='ENTRY_LATE_SETTLED'
+                        AND late.rowid>?3
+                        AND late.operation_id LIKE
+                           'entry-late-settled:'||i.intent_id||':r%'
+                      WHERE source.bill_id=b.bill_id
+                    )
+                )",
+                params![bill_after, bill_end, receipt_after, through_ms],
+                |r| r.get(0),
+            )
+            .map_err(Into::into)
+    }
+
     fn mark_campaign_readiness(
         &self,
         campaign_id: &str,
@@ -451,16 +546,44 @@ impl AccountStore {
         through_ms: i64,
         frontiers: &[(&str, &str, i64, i64)],
     ) -> StoreResult<()> {
+        // A watermark only proves coverage through a cutoff. Never mark
+        // future event-time money as reviewed and then silently skip it
+        // when the wall clock catches up without another INSERT.
+        let future: bool = self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM fills WHERE time>?1)
+              OR EXISTS(SELECT 1 FROM bills WHERE time>?1)
+              OR EXISTS(SELECT 1 FROM operation_receipts
+                  WHERE kind IN (
+                    'ENTRY_SETTLEMENT_PROVEN','ENTRY_LATE_HEAD',
+                    'ENTRY_LATE_SETTLEMENT_PROVEN','ENTRY_LATE_SETTLED')
+                    AND committed_at>?1)",
+            [through_ms],
+            |r| r.get(0),
+        )?;
+        if future {
+            return Err(StoreError::Invalid("CAMPAIGN_DELTA_EVENT_NOT_COVERED"));
+        }
         let epoch = self.campaign_source_epoch()?;
         let generations = Self::campaign_source_generations(frontiers);
+        let rows = self.campaign_source_rowids()?;
         self.connection.execute(
-            "INSERT INTO campaign_entry_readiness VALUES(?1,?2,?3,?4,?5)
+            "INSERT INTO campaign_entry_readiness VALUES(
+                ?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)
              ON CONFLICT(campaign_id) DO UPDATE SET
                  from_ms=excluded.from_ms,
                  covered_through_ms=excluded.covered_through_ms,
                  source_revision=excluded.source_revision,
-                 source_generations=excluded.source_generations",
-            params![campaign_id, from_ms, through_ms, epoch, generations],
+                 source_generations=excluded.source_generations,
+                 reviewed_fill_rowid=excluded.reviewed_fill_rowid,
+                 reviewed_bill_rowid=excluded.reviewed_bill_rowid,
+                 reviewed_receipt_rowid=excluded.reviewed_receipt_rowid,
+                 reviewed_finance_rowid=excluded.reviewed_finance_rowid,
+                 reviewed_flow_rowid=excluded.reviewed_flow_rowid,
+                 reviewed_late_epoch=excluded.reviewed_late_epoch",
+            params![
+                campaign_id, from_ms, through_ms, epoch, generations,
+                rows.0, rows.1, rows.2, rows.3, rows.4, rows.5
+            ],
         )?;
         Ok(())
     }
@@ -475,7 +598,6 @@ impl AccountStore {
         from_ms: i64,
         through_ms: i64,
     ) -> StoreResult<()> {
-        let frontiers = self.captured_complete_frontiers(from_ms, through_ms)?;
         let ready: Option<(i64, i64, i64, String)> = self
             .connection
             .query_row(
@@ -488,8 +610,15 @@ impl AccountStore {
         let Some((origin, covered, revision, generations)) = ready else {
             return Err(StoreError::Invalid("CAMPAIGN_READINESS_NOT_RECONCILED"));
         };
+        // Execute's target is now-2000ms; an independently scheduled
+        // maintenance cycle cannot attest a future cutoff. Accept at most
+        // another 3000ms delay (total age <= ACCOUNT_MAX_AGE_MS=5000).
+        // A changed economic epoch or capture generation is still an
+        // unconditional refusal even within this freshness allowance.
+        let frontiers = self.captured_complete_frontiers(from_ms, covered)?;
         if origin != from_ms
-            || covered < through_ms
+            || covered > through_ms
+            || through_ms.saturating_sub(covered) > 3_000
             || revision != self.campaign_source_epoch()?
             || generations != Self::campaign_source_generations(&frontiers)
         {
@@ -523,30 +652,104 @@ impl AccountStore {
         let frontiers = self.captured_complete_frontiers(from_ms, through_ms)?;
         let epoch = self.campaign_source_epoch()?;
         let generations = Self::campaign_source_generations(&frontiers);
-        let previous: Option<(i64, i64, i64, String)> = self
+        let previous: Option<(i64, i64, i64, String, i64, i64, i64, i64, i64, i64)> = self
             .connection
             .query_row(
-                "SELECT from_ms,covered_through_ms,source_revision,source_generations
+                "SELECT from_ms,covered_through_ms,source_revision,source_generations,
+                        reviewed_fill_rowid,reviewed_bill_rowid,reviewed_receipt_rowid,
+                        reviewed_finance_rowid,reviewed_flow_rowid,reviewed_late_epoch
                  FROM campaign_entry_readiness WHERE campaign_id=?1",
                 [campaign_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                |r| Ok((
+                    r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?,
+                    r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?,
+                    r.get(8)?, r.get(9)?,
+                )),
             )
             .optional()?;
-        if let Some((origin, covered, revision, prior_generations)) = previous
-            && origin == from_ms
-            && covered <= through_ms
-            && revision == epoch
+        if let Some((origin, covered, revision, prior_generations, fill_floor, bill_floor,
+                     receipt_floor, _finance_floor, _flow_floor, late_floor)) = previous
+            && origin == from_ms && covered <= through_ms
             && prior_generations == generations
         {
-            // Only the six covered source watermarks advanced. No immutable
-            // economic row, native obligation or settlement receipt changed.
-            self.connection.execute(
-                "UPDATE campaign_entry_readiness SET covered_through_ms=?2
-                 WHERE campaign_id=?1 AND source_revision=?3",
-                params![campaign_id, through_ms, epoch],
-            )?;
-            return Ok(());
+            if revision == epoch {
+                // Cursor-only advance: the immutable economic input is unchanged.
+                self.connection.execute(
+                    "UPDATE campaign_entry_readiness SET covered_through_ms=?2
+                     WHERE campaign_id=?1 AND source_revision=?3",
+                    params![campaign_id, through_ms, epoch],
+                )?;
+                return Ok(());
+            }
+            let rows = self.campaign_source_rowids()?;
+            let (fill_max, bill_max, receipt_max, _, _, late_epoch) = rows;
+            if late_epoch == late_floor {
+                let fill_end =
+                    self.campaign_bounded_next_rowid("fills", fill_floor, fill_max)?;
+                let bill_end =
+                    self.campaign_bounded_next_rowid("bills", bill_floor, bill_max)?;
+                let receipt_end = self.campaign_bounded_next_rowid(
+                    "operation_receipts", receipt_floor, receipt_max)?;
+                // A future event cannot be marked reviewed before a complete
+                // capture covers its exchange event-time.
+                let future: bool = self.connection.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM fills
+                       WHERE rowid>?1 AND rowid<=?2 AND time>?5)
+                     OR EXISTS(SELECT 1 FROM bills
+                       WHERE rowid>?3 AND rowid<=?4 AND time>?5)",
+                    params![fill_floor, fill_end, bill_floor, bill_end, through_ms],
+                    |r| r.get(0),
+                )?;
+                if future {
+                    return Err(StoreError::Invalid("CAMPAIGN_DELTA_EVENT_NOT_COVERED"));
+                }
+                // Native terminal and late receipts change consumed USD; they
+                // must pass the existing full amount/source/FX verifier.
+                // Do not shortcut this with a cursor or a money guess.
+                let monetary_receipt: bool = self.connection.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM operation_receipts
+                     WHERE rowid>?1 AND rowid<=?2
+                       AND kind IN (
+                         'ENTRY_SETTLEMENT_PROVEN','ENTRY_LATE_HEAD',
+                         'ENTRY_LATE_SETTLEMENT_PROVEN','ENTRY_LATE_SETTLED')
+                    )",
+                    params![receipt_floor, receipt_end],
+                    |r| r.get(0),
+                )?;
+                if !monetary_receipt {
+                    self.verify_captured_campaign_continuity_rows(
+                        from_ms, through_ms,
+                        fill_floor, bill_floor, fill_end, bill_end,
+                    )?;
+                    if self.campaign_unsettled_new_bill(
+                        bill_floor, bill_end, receipt_floor, through_ms,
+                    )? {
+                        return Err(StoreError::Invalid(
+                            "CAMPAIGN_NEW_BILL_REQUIRES_LATE_SETTLEMENT"
+                        ));
+                    }
+                    // Only the reviewed page is committed. A partial page
+                    // NEVER advances readiness/source revision, so the next
+                    // execution remains fail-closed while more rows await work.
+                    self.connection.execute(
+                        "UPDATE campaign_entry_readiness SET
+                            reviewed_fill_rowid=?2,reviewed_bill_rowid=?3,
+                            reviewed_receipt_rowid=?4
+                         WHERE campaign_id=?1",
+                        params![campaign_id, fill_end, bill_end, receipt_end],
+                    )?;
+                    if fill_end < fill_max || bill_end < bill_max || receipt_end < receipt_max {
+                        return Err(StoreError::Invalid("CAMPAIGN_DELTA_BATCH_PENDING"));
+                    }
+                    self.mark_campaign_readiness(
+                        campaign_id, from_ms, through_ms, &frontiers,
+                    )?;
+                    return Ok(());
+                }
+            }
         }
+        // Initial, mismatched, or financially-settled source: the original
+        // monetary sealer remains the only authority for frozen-USD spend.
         self.seal_captured_campaign_baseline(campaign_id, from_ms, through_ms)?;
         Ok(())
     }
@@ -563,6 +766,20 @@ impl AccountStore {
         from_ms: i64,
         through_ms: i64,
     ) -> StoreResult<()> {
+        self.verify_captured_campaign_continuity_rows(
+            from_ms, through_ms, 0, 0, i64::MAX, i64::MAX,
+        )
+    }
+
+    fn verify_captured_campaign_continuity_rows(
+        &self,
+        from_ms: i64,
+        through_ms: i64,
+        fill_after: i64,
+        bill_after: i64,
+        fill_end: i64,
+        bill_end: i64,
+    ) -> StoreResult<()> {
         self.captured_complete_frontiers(from_ms, through_ms)?;
         let unknown_fill: i64 = self.connection.query_row(
             "SELECT EXISTS(
@@ -573,6 +790,7 @@ impl AccountStore {
                LEFT JOIN operation_receipts e
                  ON e.operation_id='entry-settlement:'||i.intent_id
                WHERE f.time>?1 AND f.time<=?2
+               AND f.rowid>?3 AND f.rowid<=?4
                AND (i.intent_id IS NULL OR p.intent_id IS NULL
                  OR i.instrument_id!=f.instrument_id
                  OR i.exchange_order_id IS NULL
@@ -600,7 +818,7 @@ impl AccountStore {
                  OR (i.risk_increase=0 AND i.state NOT IN
                      ('FILLED','CANCELLED','ACKNOWLEDGED','PARTIALLY_FILLED')))
                LIMIT 1)",
-            params![from_ms, through_ms],
+            params![from_ms, through_ms, fill_after, fill_end],
             |row| row.get(0),
         )?;
         if unknown_fill != 0 {
@@ -610,6 +828,7 @@ impl AccountStore {
             "SELECT EXISTS(
                SELECT 1 FROM bills b
                WHERE b.time>?1 AND b.time<=?2
+               AND b.rowid>?3 AND b.rowid<=?4
                AND b.kind NOT IN ('1:11','1:12','8:173','8:174')
                AND b.kind NOT LIKE '7:%'
                AND NOT EXISTS(
@@ -644,7 +863,7 @@ impl AccountStore {
                      json_extract(terminal.result_ref,'$.source_covered_through_ms'))
                    AND (late.operation_id IS NULL OR late_ack.operation_id IS NOT NULL)
                ) LIMIT 1)",
-            params![from_ms, through_ms],
+            params![from_ms, through_ms, bill_after, bill_end],
             |row| row.get(0),
         )?;
         if unknown_bill != 0 {
@@ -848,7 +1067,36 @@ impl AccountStore {
             return Err(StoreError::Invalid("ENTRY_OPENING_WINDOW_INVALID"));
         }
         let frontiers = self.captured_complete_frontiers(from_ms, through_ms)?;
-        self.verify_captured_campaign_continuity(from_ms, through_ms)?;
+        let reviewed: Option<(i64, i64, i64, i64, i64, String, i64)> =
+            self.connection.query_row(
+                "SELECT from_ms,covered_through_ms,reviewed_fill_rowid,
+                        reviewed_bill_rowid,reviewed_receipt_rowid,
+                        source_generations,reviewed_late_epoch
+                 FROM campaign_entry_readiness WHERE campaign_id=?1",
+                [campaign_id],
+                |r| Ok((
+                    r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?,
+                    r.get(4)?, r.get(5)?, r.get(6)?,
+                )),
+            ).optional()?;
+        let older_verified = reviewed.as_ref().filter(
+            |(origin, covered, _, _, _, generations, _)| {
+                *origin == from_ms && *covered <= through_ms
+                    && generations == &Self::campaign_source_generations(&frontiers)
+            }
+        );
+        if let Some((_, _, fill, bill, receipt, _, _)) = older_verified {
+            self.verify_captured_campaign_continuity_rows(
+                from_ms, through_ms, *fill, *bill, i64::MAX, i64::MAX,
+            )?;
+            if self.campaign_unsettled_new_bill(
+                *bill, i64::MAX, *receipt, through_ms,
+            )? {
+                return Err(StoreError::Invalid("CAMPAIGN_NEW_BILL_REQUIRES_LATE_SETTLEMENT"));
+            }
+        } else {
+            self.verify_captured_campaign_continuity(from_ms, through_ms)?;
+        }
         // The campaign projection is authoritative only for the *previously
         // completed* and already source-verified frontier. Scan the new
         // interval, not the whole campaign on every post-trade preview.
@@ -945,8 +1193,38 @@ impl AccountStore {
             Some(_) => return Err(StoreError::Invalid("CAMPAIGN_APPLIED_FRONTIER_REGRESSION")),
             None => (from_ms, Decimal::ZERO),
         };
-        let mut stmt = self.connection.prepare(
-            "SELECT terminal.operation_id,terminal.result_ref,terminal.committed_at
+        // Ordinary native terminal receipts are immutable. Once an earlier
+        // source frontier was fully reviewed, only newer receipt rowids can
+        // introduce a new terminal amount, including backdated event-time
+        // records. Late-head revisions require the existing stronger verifier.
+        let current_late_epoch = self.campaign_source_rowids()?.5;
+        let incremental_receipt_floor = older_verified
+            .and_then(|(_, _, _, _, receipt, _, late_epoch)| {
+                (current_late_epoch == *late_epoch).then_some(*receipt)
+            });
+        let has_late_change = if let Some(floor) = incremental_receipt_floor {
+            self.connection.query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM operation_receipts
+                    WHERE rowid>?1 AND kind IN (
+                      'ENTRY_LATE_HEAD','ENTRY_LATE_SETTLEMENT_PROVEN',
+                      'ENTRY_LATE_SETTLED')
+                )",
+                [floor], |r| r.get::<_, bool>(0),
+            )?
+        } else {
+            true
+        };
+        let incremental_receipt_floor =
+            incremental_receipt_floor.filter(|_| !has_late_change);
+        let fast = "SELECT terminal.operation_id,terminal.result_ref,terminal.committed_at
+             FROM operation_receipts terminal
+             WHERE terminal.rowid>?5
+               AND terminal.kind='ENTRY_SETTLEMENT_PROVEN'
+               AND terminal.committed_at>?3 AND terminal.committed_at<=?2
+               AND ?4!='' AND ?1<=?2
+             ORDER BY terminal.rowid LIMIT 10001";
+        let historical = "SELECT terminal.operation_id,terminal.result_ref,terminal.committed_at
              FROM operation_receipts terminal
              WHERE terminal.kind='ENTRY_SETTLEMENT_PROVEN'
                AND terminal.committed_at>?3 AND terminal.committed_at<=?2
@@ -974,9 +1252,15 @@ impl AccountStore {
                      )
                  )
                )
-             ORDER BY terminal.operation_id LIMIT 10001",
+             ORDER BY terminal.operation_id LIMIT 10001";
+        let mut stmt = self.connection.prepare(
+            if incremental_receipt_floor.is_some() { fast } else { historical }
         )?;
-        let mut rows = stmt.query(params![since, through_ms, from_ms, campaign_id])?;
+        let mut rows = if let Some(floor) = incremental_receipt_floor {
+            stmt.query(params![since, through_ms, from_ms, campaign_id, floor])?
+        } else {
+            stmt.query(params![since, through_ms, from_ms, campaign_id])?
+        };
         let mut witnesses = Vec::new();
         while let Some(row) = rows.next()? {
             if witnesses.len() >= 10_000 {

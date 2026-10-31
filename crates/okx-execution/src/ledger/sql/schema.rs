@@ -23,19 +23,34 @@ CREATE TABLE IF NOT EXISTS campaign_entry_readiness(
     from_ms INTEGER NOT NULL,
     covered_through_ms INTEGER NOT NULL,
     source_revision INTEGER NOT NULL,
-    source_generations TEXT NOT NULL
+    source_generations TEXT NOT NULL,
+    reviewed_fill_rowid INTEGER NOT NULL DEFAULT 0,
+    reviewed_bill_rowid INTEGER NOT NULL DEFAULT 0,
+    reviewed_receipt_rowid INTEGER NOT NULL DEFAULT 0,
+    reviewed_finance_rowid INTEGER NOT NULL DEFAULT 0,
+    reviewed_flow_rowid INTEGER NOT NULL DEFAULT 0,
+    reviewed_late_epoch INTEGER NOT NULL DEFAULT 0
 ) STRICT;
+-- A single scalar records mutable late-head revision updates that cannot
+-- be detected from a rowid high-water alone.
+CREATE TABLE IF NOT EXISTS campaign_late_head_epoch(
+    id INTEGER PRIMARY KEY CHECK(id=1),
+    revision INTEGER NOT NULL CHECK(revision>=0)
+) STRICT;
+INSERT OR IGNORE INTO campaign_late_head_epoch VALUES(1,0);
 CREATE TRIGGER IF NOT EXISTS campaign_fill_invalidates_ready AFTER INSERT ON fills
 BEGIN UPDATE campaign_source_epoch SET revision=revision+1 WHERE id=1; END;
 CREATE TRIGGER IF NOT EXISTS campaign_bill_invalidates_ready AFTER INSERT ON bills
 BEGIN UPDATE campaign_source_epoch SET revision=revision+1 WHERE id=1; END;
-CREATE TRIGGER IF NOT EXISTS campaign_intent_invalidates_ready AFTER UPDATE OF state,exchange_order_id ON intents
-WHEN OLD.state!=NEW.state OR OLD.exchange_order_id IS NOT NEW.exchange_order_id
+-- Reopening a database carrying an older candidate of this schema must not
+-- keep lifecycle-driven invalidation and force a historical scan after
+-- every PREPARED/HELD/POSTING transition.
+DROP TRIGGER IF EXISTS campaign_intent_invalidates_ready;
+DROP TRIGGER IF EXISTS campaign_reserve_invalidates_ready;
+DROP TRIGGER IF EXISTS campaign_risk_invalidates_ready;
+CREATE TRIGGER IF NOT EXISTS campaign_finance_invalidates_ready AFTER INSERT ON finance_entries
 BEGIN UPDATE campaign_source_epoch SET revision=revision+1 WHERE id=1; END;
-CREATE TRIGGER IF NOT EXISTS campaign_reserve_invalidates_ready AFTER INSERT ON risk_receipts
-BEGIN UPDATE campaign_source_epoch SET revision=revision+1 WHERE id=1; END;
-CREATE TRIGGER IF NOT EXISTS campaign_risk_invalidates_ready AFTER UPDATE OF state ON risk_receipts
-WHEN OLD.state!=NEW.state
+CREATE TRIGGER IF NOT EXISTS campaign_flow_invalidates_ready AFTER INSERT ON cash_flows
 BEGIN UPDATE campaign_source_epoch SET revision=revision+1 WHERE id=1; END;
 CREATE TRIGGER IF NOT EXISTS campaign_settlement_invalidates_ready AFTER INSERT ON operation_receipts
 WHEN NEW.kind IN(
@@ -43,6 +58,13 @@ WHEN NEW.kind IN(
     'ENTRY_LATE_SETTLEMENT_PROVEN','ENTRY_LATE_SETTLED',
     'ENTRY_BILL_ORDER_SOURCE','ENTRY_ORDER_FEE_INDEX')
 BEGIN UPDATE campaign_source_epoch SET revision=revision+1 WHERE id=1; END;
+CREATE TRIGGER IF NOT EXISTS campaign_late_update_invalidates_ready
+AFTER UPDATE OF result_ref ON operation_receipts
+WHEN NEW.kind='ENTRY_LATE_HEAD' AND NEW.result_ref!=OLD.result_ref
+BEGIN
+UPDATE campaign_source_epoch SET revision=revision+1 WHERE id=1;
+UPDATE campaign_late_head_epoch SET revision=revision+1 WHERE id=1;
+END;
 -- Append-only cumulative money evidence. Only the existing SQL owner
 -- advances the one campaign aggregate using independently verified receipts.
 CREATE TABLE IF NOT EXISTS campaign_entry_applied(
