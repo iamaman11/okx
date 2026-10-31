@@ -1,6 +1,100 @@
 use super::*;
 
 #[test]
+fn e1_campaign_native_receipts_are_applied_once_with_atomic_frontier() {
+    let mut s=store();
+    let i=intent(&mut s);
+    let quote=e1_source_quote(&s,&i);
+    s.bind_entry_quote(&quote).unwrap();
+    s.bind_entry_admission(&EntryAdmissionEvidence {
+        schema:"okx.entry-admission/v2".into(),
+        account_key:s.meta.account_key.clone(),
+        installation_id:s.meta.installation_id.clone(),
+        intent_id:i.intent_id.clone(),plan_hash:i.plan_hash.clone(),
+        quote_digest:format!("{:x}",sha2::Sha256::digest(
+            serde_json::to_vec(&quote).unwrap())),
+        admission_usd_per_usdt:Decimal::ONE,
+        other_entry_costs_upper_usd:Decimal::ZERO,
+        entry_upper_usd:quote.total_usd,
+        entry_proof_digest:"a".repeat(64),observed_at:quote.observed_at,
+    }).unwrap();
+    acknowledged_entry_intent(&mut s);
+    s.record_order_readback(
+        "intent","venue-order",IntentState::Cancelled,Decimal::ZERO,7,
+    ).unwrap();
+    for (source,part) in [
+        ("fills","SPOT"),("fills","MARGIN"),("fills","SWAP"),
+        ("fills","FUTURES"),("fills","OPTION"),("bills","account"),
+    ] {
+        s.ingest_page(&IngestPage {
+            cursor:Some(SourceCursor {
+                source:source.into(),stream_partition:part.into(),
+                cursor:String::new(),watermark:12,generation:1,
+                coverage_gaps:String::new(),
+            }),..Default::default()
+        }).unwrap();
+    }
+    let zero=s.bind_terminal_entry_settlement(
+        "intent",7,Decimal::ZERO,12).unwrap();
+    s.acknowledge_central_release("central-key","central-ack").unwrap();
+    let campaign=format!("sha256:{}", "c".repeat(64));
+    let (sum,source)=s.seal_captured_campaign_baseline(
+        &campaign,2,12).unwrap();
+    assert_eq!(sum,Decimal::ZERO);
+    assert_eq!(s.seal_captured_campaign_baseline(
+        &campaign,2,12).unwrap(),(sum,source));
+    let rows:i64=s.connection.query_row(
+        "SELECT COUNT(*) FROM campaign_entry_applied",[],|r|r.get(0),
+    ).unwrap();
+    assert_eq!(rows,1,"same terminal economic event has one revision");
+
+    // An invented late revision or moved checkpoint cannot bypass original
+    // source validation and must not mutate the committed aggregate.
+    assert!(matches!(
+        s.apply_captured_campaign_deltas(
+            &campaign,2,11,&[
+                ("intent".into(),zero.source_digest.clone(),Decimal::ZERO,1,7)
+            ],Decimal::ZERO,
+        ),
+        Err(StoreError::Invalid("CAMPAIGN_APPLIED_FRONTIER_REGRESSION"))
+    ));
+    assert!(matches!(
+        s.apply_captured_campaign_deltas(
+            &campaign,2,12,&[
+                ("intent".into(),"b".repeat(64),Decimal::ZERO,1,7)
+            ],Decimal::ZERO,
+        ),
+        Err(StoreError::Invalid("CAMPAIGN_APPLIED_SOURCE_CONFLICT"))
+    ));
+    assert!(matches!(
+        s.apply_captured_campaign_deltas(
+            &campaign,2,12,&[
+                ("intent".into(),"b".repeat(64),Decimal::ONE,2,7)
+            ],Decimal::ZERO,
+        ),
+        Err(StoreError::Invalid("CAMPAIGN_APPLIED_TOTAL_DIVERGENCE"))
+    ));
+    let state:(String,i64)=s.connection.query_row(
+        "SELECT consumed_usd,covered_through_ms FROM campaign_entry_totals
+         WHERE campaign_id=?1",
+        [&campaign],|r|Ok((r.get(0)?,r.get(1)?)),
+    ).unwrap();
+    assert_eq!(state,("0".into(),12));
+    let rows:i64=s.connection.query_row(
+        "SELECT COUNT(*) FROM campaign_entry_applied",[],|r|r.get(0),
+    ).unwrap();
+    assert_eq!(rows,1,"rejected delta rolls back its event and total");
+    assert!(s.connection.execute(
+        "UPDATE campaign_entry_applied SET cumulative_usd='1'",[],
+    ).is_err());
+    let path=s.path.clone();let meta=s.meta.clone();drop(s);
+    let reopened=AccountStore::open_existing(
+        path,&meta.account_key,&meta.installation_id).unwrap();
+    assert_eq!(reopened.seal_captured_campaign_baseline(
+        &campaign,2,12).unwrap().0,Decimal::ZERO);
+}
+
+#[test]
 fn e1_zero_fill_terminal_requires_full_money_coverage_and_replays_after_restart() {
     let mut s = store();
     let intent = intent(&mut s);
@@ -439,6 +533,19 @@ fn r4_followup_requires_terminal_native_fill_and_central_settlement() {
         (spent, baseline),
         "lost central opening ACK cannot double count an immutable entry"
     );
+    let native_tally: (String,i64) = s.connection.query_row(
+        "SELECT consumed_usd,covered_through_ms FROM campaign_entry_totals
+         WHERE campaign_id=?1",
+        [&campaign], |row| Ok((row.get(0)?,row.get(1)?)),
+    ).unwrap();
+    assert_eq!(native_tally,("5.01".into(),through),
+        "historical native USD is durably applied, not recomputed as zero");
+    let revisions:i64 = s.connection.query_row(
+        "SELECT COUNT(*) FROM campaign_entry_applied
+         WHERE campaign_id=?1",
+        [&campaign],|row|row.get(0),
+    ).unwrap();
+    assert_eq!(revisions,1,"replayed baseline cannot duplicate native money");
     // E2 positive successor through the SAME native intent/central receipt
     // state machine, without resetting the proven 5.01 USD campaign opening.
     // The first entry's terminal release is durable before the second reserve.
@@ -1312,6 +1419,17 @@ fn e1_partial_and_final_entry_settlement_are_monotone_and_not_double_counted() {
                 baseline,
                 "lost opening ACK replays the same historical USD baseline"
             );
+            let applied:i64 = reopened.connection.query_row(
+                "SELECT COUNT(*) FROM campaign_entry_applied
+                 WHERE campaign_id=?1", [&campaign], |row| row.get(0),
+            ).unwrap();
+            assert_eq!(applied,1,
+                "the latest cumulative late-fee receipt is one event revision");
+            let total:String = reopened.connection.query_row(
+                "SELECT consumed_usd FROM campaign_entry_totals
+                 WHERE campaign_id=?1", [&campaign], |row| row.get(0),
+            ).unwrap();
+            assert_eq!(total,"100.03");
             assert!(!reopened.entry_late_pending("intent").unwrap());
             assert_eq!(
                 reopened

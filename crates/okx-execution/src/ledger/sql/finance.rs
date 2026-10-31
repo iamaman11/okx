@@ -532,6 +532,97 @@ impl AccountStore {
         Ok(())
     }
 
+    /// The native SQL owner's monotone campaign economic-event fold.
+    /// Each new terminal or late cumulative revision adds only its delta,
+    /// never the full amount again. A completed account-wide source witness
+    /// is independently recomputed before this transaction; any mismatch
+    /// rolls back event IDs, money and the applied frontier together.
+    fn apply_captured_campaign_deltas(
+        &self,
+        campaign_id: &str,
+        from_ms: i64,
+        through_ms: i64,
+        receipts: &[(String, String, Decimal, u64, i64)],
+        witnessed_total: Decimal,
+    ) -> StoreResult<()> {
+        let tx = self.connection.unchecked_transaction()?;
+        let prior: Option<(i64, i64, String)> = tx.query_row(
+            "SELECT from_ms,covered_through_ms,consumed_usd
+             FROM campaign_entry_totals WHERE campaign_id=?1",
+            [campaign_id],
+            |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?)),
+        ).optional()?;
+        let mut consumed = if let Some((first, cut, total)) = prior {
+            if first != from_ms || cut > through_ms {
+                return Err(StoreError::Invalid("CAMPAIGN_APPLIED_FRONTIER_REGRESSION"));
+            }
+            decimal(total)?
+        } else {
+            Decimal::ZERO
+        };
+        for (intent_id, digest, amount, revision, venue_updated_at) in receipts {
+            if intent_id.is_empty()
+                || digest.len()!=64
+                || !digest.bytes().all(|b| b.is_ascii_hexdigit())
+                || *amount < Decimal::ZERO
+                || *venue_updated_at < from_ms
+                || *venue_updated_at > through_ms
+            {
+                return Err(StoreError::Invalid("CAMPAIGN_APPLIED_EVENT_INVALID"));
+            }
+            let revision = i64::try_from(*revision)
+                .map_err(|_| StoreError::Invalid("CAMPAIGN_APPLIED_REVISION_INVALID"))?;
+            let earlier: Option<(i64, String, String)> = tx.query_row(
+                "SELECT settlement_revision,cumulative_usd,source_digest
+                 FROM campaign_entry_applied
+                 WHERE campaign_id=?1 AND intent_id=?2
+                 ORDER BY settlement_revision DESC LIMIT 1",
+                params![campaign_id,intent_id],
+                |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?)),
+            ).optional()?;
+            let prior_money = if let Some((prior_revision, prior_amount, prior_digest)) = earlier {
+                let prior_amount = decimal(prior_amount)?;
+                if prior_revision > revision || prior_amount > *amount {
+                    return Err(StoreError::Invalid("CAMPAIGN_APPLIED_MONOTONICITY_BREACH"));
+                }
+                if prior_revision == revision {
+                    if prior_amount != *amount || prior_digest != *digest {
+                        return Err(StoreError::Invalid("CAMPAIGN_APPLIED_SOURCE_CONFLICT"));
+                    }
+                    continue;
+                }
+                prior_amount
+            } else {
+                Decimal::ZERO
+            };
+            let delta = amount.checked_sub(prior_money)
+                .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))?;
+            consumed = consumed.checked_add(delta)
+                .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))?;
+            tx.execute(
+                "INSERT INTO campaign_entry_applied
+                 VALUES(?1,?2,?3,?4,?5,?6)",
+                params![
+                    campaign_id,intent_id,revision,exact(*amount),
+                    digest,venue_updated_at
+                ],
+            )?;
+        }
+        if consumed != witnessed_total {
+            return Err(StoreError::Invalid("CAMPAIGN_APPLIED_TOTAL_DIVERGENCE"));
+        }
+        tx.execute(
+            "INSERT INTO campaign_entry_totals
+             VALUES(?1,?2,?3,?4)
+             ON CONFLICT(campaign_id) DO UPDATE SET
+                 covered_through_ms=excluded.covered_through_ms,
+                 consumed_usd=excluded.consumed_usd",
+            params![campaign_id,from_ms,through_ms,exact(consumed)],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
     /// One campaign source for both empty and historical OWN native entries.
     /// Previously settled linear SWAP entries carry admission-time frozen USD,
     /// complete fill/bill provenance, and central RELEASE in this SQL owner.
@@ -712,12 +803,17 @@ impl AccountStore {
                 value.intent_id,
                 value.source_digest,
                 value.cumulative_entry_usd,
+                value.settlement_revision,
+                value.venue_update_ms,
             ));
         }
         // Finish the exact read snapshot before creating an immutable receipt
         // on the same SQL-owner connection.
         drop(rows);
         drop(stmt);
+        self.apply_captured_campaign_deltas(
+            campaign_id,from_ms,through_ms,&witnesses,total,
+        )?;
         if witnesses.is_empty() {
             return self
                 .seal_captured_empty_campaign(campaign_id, from_ms, through_ms)

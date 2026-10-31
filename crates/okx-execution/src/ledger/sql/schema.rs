@@ -7,6 +7,31 @@ CREATE INDEX IF NOT EXISTS idx_nav_scope_version_time ON nav_points(scope_id,sou
 CREATE INDEX IF NOT EXISTS idx_finance_source_component ON finance_entries(source_ref,component);
 CREATE INDEX IF NOT EXISTS idx_finance_links_source ON finance_source_links(source_ref,entry_id);
 CREATE INDEX IF NOT EXISTS idx_fills_intent ON fills(intent_id,fill_id);
+CREATE INDEX IF NOT EXISTS idx_campaign_native_receipt_scan
+    ON operation_receipts(kind,committed_at,operation_id);
+-- Append-only cumulative money evidence. Only the existing SQL owner
+-- advances the one campaign aggregate using independently verified receipts.
+CREATE TABLE IF NOT EXISTS campaign_entry_applied(
+    campaign_id TEXT NOT NULL,
+    intent_id TEXT NOT NULL,
+    settlement_revision INTEGER NOT NULL CHECK(settlement_revision>0),
+    cumulative_usd TEXT NOT NULL,
+    source_digest TEXT NOT NULL,
+    venue_update_ms INTEGER NOT NULL,
+    PRIMARY KEY(campaign_id,intent_id,settlement_revision)
+) STRICT;
+CREATE TRIGGER IF NOT EXISTS immutable_campaign_entry_applied_update
+    BEFORE UPDATE ON campaign_entry_applied
+    BEGIN SELECT RAISE(ABORT,'IMMUTABLE_CAMPAIGN_ENTRY_APPLIED'); END;
+CREATE TRIGGER IF NOT EXISTS immutable_campaign_entry_applied_delete
+    BEFORE DELETE ON campaign_entry_applied
+    BEGIN SELECT RAISE(ABORT,'IMMUTABLE_CAMPAIGN_ENTRY_APPLIED'); END;
+CREATE TABLE IF NOT EXISTS campaign_entry_totals(
+    campaign_id TEXT PRIMARY KEY,
+    from_ms INTEGER NOT NULL,
+    covered_through_ms INTEGER NOT NULL,
+    consumed_usd TEXT NOT NULL
+) STRICT;
 CREATE TABLE IF NOT EXISTS swap_fill_sources(
     fill_id TEXT PRIMARY KEY REFERENCES fills(fill_id),
     bill_id TEXT NOT NULL, sub_type TEXT NOT NULL,
