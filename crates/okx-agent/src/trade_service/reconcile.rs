@@ -1,5 +1,19 @@
 use super::*;
 use okx_api::CancelOrderRequest;
+
+/// A successful source capture only proves that the API replied. It cannot
+/// complete the financial lifecycle when no identity-bound fill+bill evidence
+/// has been captured. A terminal verified zero-fill cancellation is separate:
+/// its central release must still be proven by the existing pending gate.
+fn entry_fill_finance_pending(
+    risk_increase: bool,
+    verified_zero_cancel: bool,
+    evidence: &serde_json::Value,
+) -> bool {
+    risk_increase
+        && !verified_zero_cancel
+        && evidence["state"] != "verified_native_fill_and_bill_fee_sources"
+}
 /// Bind the native immutable fill sum to an independent, exact venue
 /// readback. A cursor-covered subset is not necessarily the whole execution,
 /// especially across partial/late fills or a lost POST response. This check
@@ -756,8 +770,11 @@ impl TradeService {
             } else {
                 json!({"state":"not_evaluated","all_in_entry_cost_proven":false})
             };
-        let settlement_pending =
-            incremental_entry["state"] == "pending" || central_release["state"] == "pending";
+        let entry_fill_pending =
+            entry_fill_finance_pending(i.risk_increase, verified_zero_cancel, &entry_fill_evidence);
+        let settlement_pending = incremental_entry["state"] == "pending"
+            || central_release["state"] == "pending"
+            || entry_fill_pending;
         let mut result = completed(
             json!({"intent":i,"remaining_exposure":if financial{Some(exact(exposure))}else{None},
                 "entry_costs":entry_costs,
@@ -775,7 +792,7 @@ impl TradeService {
         });
         if !financial || settlement_pending {
             result["status"] = json!("partial");
-            result["warnings"] = json!([if !financial {
+            result["warnings"] = json!([if !financial || entry_fill_pending {
                 "FINANCIAL_BACKFILL_PENDING"
             } else {
                 "ENTRY_SETTLEMENT_PENDING"
@@ -1814,6 +1831,20 @@ impl TradeService {
 #[cfg(test)]
 mod entry_cost_status_tests {
     use super::*;
+
+    #[test]
+    fn t09_public_ack_without_fill_bill_evidence_cannot_complete_finance() {
+        let missing = json!({"state":"incomplete","reason_code":"ENTRY_FILL_EVIDENCE_EMPTY"});
+        let bill_pending = json!({"state":"native_fills_verified_bill_pending"});
+        let verified = json!({"state":"verified_native_fill_and_bill_fee_sources"});
+        assert!(entry_fill_finance_pending(true, false, &missing));
+        assert!(entry_fill_finance_pending(true, false, &bill_pending));
+        assert!(!entry_fill_finance_pending(true, false, &verified));
+        // A venue-confirmed zero-fill cancellation is a distinct terminal
+        // proof, and still needs the separate central_release pending gate.
+        assert!(!entry_fill_finance_pending(true, true, &missing));
+        assert!(!entry_fill_finance_pending(false, false, &missing));
+    }
 
     #[test]
     fn e2_terminal_cursors_never_trust_invalid_exchange_order_time() {
