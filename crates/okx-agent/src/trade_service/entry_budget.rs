@@ -512,21 +512,18 @@ pub(super) fn assess_order(
         sources.verified_uid,
         sources.observed_at_ms,
     )?;
-    let proof = EntryCostProof::source_valued_candidate(
-        quote,
-        sources.conversion,
-        sources.observed_at_ms,
-    )?
-    .attest_linear_usdt_sources(
-        plan,
-        sources.order_type,
-        sources.instrument,
-        sources.rules,
-        sources.fees,
-        sources.account,
-        sources.snapshot,
-        sources.leverage,
-    )?;
+    let proof =
+        EntryCostProof::source_valued_candidate(quote, sources.conversion, sources.observed_at_ms)?
+            .attest_linear_usdt_sources(
+                plan,
+                sources.order_type,
+                sources.instrument,
+                sources.rules,
+                sources.fees,
+                sources.account,
+                sources.snapshot,
+                sources.leverage,
+            )?;
     Ok((proof, fee_rate))
 }
 

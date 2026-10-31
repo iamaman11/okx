@@ -745,19 +745,30 @@ impl TradeService {
             } else {
                 json!({"state":"not_evaluated","all_in_entry_cost_proven":false})
             };
+        let settlement_pending = incremental_entry["state"] == "pending"
+            || central_release["state"] == "pending";
         let mut result = completed(
             json!({"intent":i,"remaining_exposure":if financial{Some(exact(exposure))}else{None},
                 "entry_costs":entry_costs,
                 "entry_fill_evidence":entry_fill_evidence,
                 "incremental_entry_settlement":incremental_entry,
                 "protection":protection,"central_release":central_release,
-                "financial_error":financial_error,"financial_complete":financial,
+                "financial_error":financial_error,"financial_complete":financial && !settlement_pending,
                 "protection_incident":protection_failed,"compensation":compensation}),
         );
-        result["quality"] = json!({"execution":"authenticated_readback","financial":if financial{"complete"}else{"incomplete"},"protection":if protection_failed{"incident"}else{"evaluated"}});
-        if !financial {
+        result["quality"] = json!({
+            "execution":"authenticated_readback",
+            "financial":if financial && !settlement_pending {"complete"}else{"incomplete"},
+            "entry_settlement":if settlement_pending {"pending"} else {"evaluated"},
+            "protection":if protection_failed{"incident"}else{"evaluated"}
+        });
+        if !financial || settlement_pending {
             result["status"] = json!("partial");
-            result["warnings"] = json!(["FINANCIAL_BACKFILL_PENDING"]);
+            result["warnings"] = json!([if !financial {
+                "FINANCIAL_BACKFILL_PENDING"
+            } else {
+                "ENTRY_SETTLEMENT_PENDING"
+            }]);
         }
         Ok(result)
     }
