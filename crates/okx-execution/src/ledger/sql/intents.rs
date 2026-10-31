@@ -856,14 +856,15 @@ impl AccountStore {
         // Source capture can add ANOTHER independent fee between the native
         // proof and central SETTLE_ENTRY response. Do not clear the account
         // maintenance marker for a newer unbooked bill or lost cursor.
-        let current = self.cursor("bills", "account")?
+        let current = self
+            .cursor("bills", "account")?
             .ok_or(StoreError::Invalid("LATE_ENTRY_BILLS_UNCOVERED"))?;
         let (accepted_fee, _) = self.intent_additional_entry_fee_evidence(
-            &settlement.intent_id, settlement.source_covered_through_ms
+            &settlement.intent_id,
+            settlement.source_covered_through_ms,
         )?;
-        let (latest_fee, _) = self.intent_additional_entry_fee_evidence(
-            &settlement.intent_id, current.watermark
-        )?;
+        let (latest_fee, _) =
+            self.intent_additional_entry_fee_evidence(&settlement.intent_id, current.watermark)?;
         if latest_fee > accepted_fee {
             return Err(StoreError::Invalid("LATE_ENTRY_NEW_BILL_PENDING"));
         }

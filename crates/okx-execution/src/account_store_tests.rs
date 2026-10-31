@@ -975,18 +975,29 @@ fn e1_partial_and_final_entry_settlement_are_monotone_and_not_double_counted() {
                     rusqlite::params![source,part],
                 ).unwrap();
             }
-            assert!(reopened.verify_captured_campaign_continuity(2,11).is_err(),
-                "unacknowledged late fee cannot grant another campaign entry");
+            assert!(
+                reopened.verify_captured_campaign_continuity(2, 11).is_err(),
+                "unacknowledged late fee cannot grant another campaign entry"
+            );
             // The central RiskBook accepted exactly THIS monetary revision.
             reopened.acknowledge_late_entry_settlement(&late).unwrap();
-            reopened.verify_captured_campaign_continuity(2,11).unwrap();
-            let campaign=format!("sha256:{}", "c".repeat(64));
-            let baseline=reopened.seal_captured_campaign_baseline(&campaign,2,11).unwrap();
-            assert_eq!(baseline.0,Decimal::new(10003,2),
-                "history contains the latest total, never terminal+late double charge");
+            reopened.verify_captured_campaign_continuity(2, 11).unwrap();
+            let campaign = format!("sha256:{}", "c".repeat(64));
+            let baseline = reopened
+                .seal_captured_campaign_baseline(&campaign, 2, 11)
+                .unwrap();
             assert_eq!(
-                reopened.seal_captured_campaign_baseline(&campaign,2,11).unwrap(),baseline,
-                "lost opening ACK replays the same historical USD baseline");
+                baseline.0,
+                Decimal::new(10003, 2),
+                "history contains the latest total, never terminal+late double charge"
+            );
+            assert_eq!(
+                reopened
+                    .seal_captured_campaign_baseline(&campaign, 2, 11)
+                    .unwrap(),
+                baseline,
+                "lost opening ACK replays the same historical USD baseline"
+            );
             assert!(!reopened.entry_late_pending("intent").unwrap());
             assert_eq!(
                 reopened
