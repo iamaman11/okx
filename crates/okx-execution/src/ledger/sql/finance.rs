@@ -556,33 +556,45 @@ impl AccountStore {
             {
                 return Err(StoreError::Invalid("ENTRY_OPENING_SETTLEMENT_INVALID"));
             }
-            let native: Option<(String, i64, String, String)> = self.connection.query_row(
-                "SELECT i.plan_hash,i.begin_post_at,r.state,r.reservation_key
+            let native: Option<(String, i64, String, String)> = self
+                .connection
+                .query_row(
+                    "SELECT i.plan_hash,i.begin_post_at,r.state,r.reservation_key
                  FROM intents i JOIN risk_receipts r ON r.intent_id=i.intent_id
                  WHERE i.intent_id=?1 AND i.exchange_order_id=?2
                    AND i.risk_increase=1 AND i.state IN ('FILLED','CANCELLED')
                    AND r.plan_hash=i.plan_hash",
-                params![value.intent_id, value.venue_order_id],
-                |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)),
-            ).optional()?;
-            if native.as_ref().is_none_or(|(hash,post,state,reservation)| {
-                hash != &value.plan_hash || *post < from_ms || state != "RELEASED"
-                    || reservation != &value.reservation_key
-            }) {
+                    params![value.intent_id, value.venue_order_id],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                )
+                .optional()?;
+            if native
+                .as_ref()
+                .is_none_or(|(hash, post, state, reservation)| {
+                    hash != &value.plan_hash
+                        || *post < from_ms
+                        || state != "RELEASED"
+                        || reservation != &value.reservation_key
+                })
+            {
                 return Err(StoreError::Invalid("ENTRY_OPENING_SETTLEMENT_NOT_RELEASED"));
             }
-            let admission: Option<String> = self.connection.query_row(
-                "SELECT result_ref FROM operation_receipts
+            let admission: Option<String> = self
+                .connection
+                .query_row(
+                    "SELECT result_ref FROM operation_receipts
                  WHERE operation_id='entry-admission:'||?1
                    AND kind='ENTRY_ADMISSION_PROVEN'",
-                [value.intent_id.as_str()],
-                |r| r.get(0),
-            ).optional()?;
+                    [value.intent_id.as_str()],
+                    |r| r.get(0),
+                )
+                .optional()?;
             let admission: EntryAdmissionEvidence = serde_json::from_str(
-                admission.as_deref().ok_or(StoreError::Invalid(
-                    "ENTRY_OPENING_ADMISSION_MISSING"
-                ))?,
-            ).map_err(|_| StoreError::Invalid("ENTRY_OPENING_ADMISSION_INVALID"))?;
+                admission
+                    .as_deref()
+                    .ok_or(StoreError::Invalid("ENTRY_OPENING_ADMISSION_MISSING"))?,
+            )
+            .map_err(|_| StoreError::Invalid("ENTRY_OPENING_ADMISSION_INVALID"))?;
             if admission.account_key != value.account_key
                 || admission.installation_id != self.meta.installation_id
                 || admission.intent_id != value.intent_id
@@ -591,27 +603,40 @@ impl AccountStore {
             {
                 // An original debit breach remains a STOP; a reconstructed
                 // opening must not erase it by replacing the central book.
-                return Err(StoreError::Invalid("ENTRY_OPENING_BOUND_BREACH_REQUIRES_STOP"));
+                return Err(StoreError::Invalid(
+                    "ENTRY_OPENING_BOUND_BREACH_REQUIRES_STOP",
+                ));
             }
-            total = total.checked_add(value.cumulative_entry_usd)
+            total = total
+                .checked_add(value.cumulative_entry_usd)
                 .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))?;
-            witnesses.push((value.intent_id, value.source_digest, value.cumulative_entry_usd));
+            witnesses.push((
+                value.intent_id,
+                value.source_digest,
+                value.cumulative_entry_usd,
+            ));
         }
         // Finish the exact read snapshot before creating an immutable receipt
         // on the same SQL-owner connection.
         drop(rows);
         drop(stmt);
         if witnesses.is_empty() {
-            return self.seal_captured_empty_campaign(campaign_id, from_ms, through_ms)
+            return self
+                .seal_captured_empty_campaign(campaign_id, from_ms, through_ms)
                 .map(|proof| (Decimal::ZERO, proof));
         }
         let canonical = serde_json::to_vec(&(
             "okx.campaign-source-backed-baseline/v1",
             self.meta.account_key.as_str(),
             self.meta.installation_id.as_str(),
-            campaign_id, from_ms, through_ms,
-            &frontiers, &witnesses, total.to_string(),
-        )).map_err(|_| StoreError::Invalid("ENTRY_OPENING_SERIALIZATION_FAILED"))?;
+            campaign_id,
+            from_ms,
+            through_ms,
+            &frontiers,
+            &witnesses,
+            total.to_string(),
+        ))
+        .map_err(|_| StoreError::Invalid("ENTRY_OPENING_SERIALIZATION_FAILED"))?;
         let proof = format!("{:x}", Sha256::digest(canonical));
         self.connection.execute_batch(
             "CREATE TRIGGER IF NOT EXISTS immutable_campaign_opening_update
@@ -628,18 +653,25 @@ impl AccountStore {
             "INSERT OR IGNORE INTO operation_receipts
              (operation_id,kind,request_hash,result_ref,committed_at)
              VALUES(?1,'CAMPAIGN_ENTRY_OPENING_SEALED',?2,?2,?3)",
-            params![key,proof,through_ms],
+            params![key, proof, through_ms],
         )?;
-        let received: (String,String,String,i64) = self.connection.query_row(
+        let received: (String, String, String, i64) = self.connection.query_row(
             "SELECT kind,request_hash,result_ref,committed_at FROM operation_receipts
              WHERE operation_id=?1",
             [key],
-            |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         )?;
-        if received != ("CAMPAIGN_ENTRY_OPENING_SEALED".into(),proof.clone(),proof.clone(),through_ms) {
+        if received
+            != (
+                "CAMPAIGN_ENTRY_OPENING_SEALED".into(),
+                proof.clone(),
+                proof.clone(),
+                through_ms,
+            )
+        {
             return Err(StoreError::Invalid("ENTRY_OPENING_SQL_RECEIPT_CONFLICT"));
         }
-        Ok((total,proof))
+        Ok((total, proof))
     }
 
     /// Source-backed zero opening from the EXISTING incremental account writer.

@@ -132,7 +132,8 @@ fn r4_followup_requires_terminal_native_fill_and_central_settlement() {
         intent_id: intent.intent_id.clone(),
         plan_hash: intent.plan_hash.clone(),
         quote_digest: format!(
-            "{:x}", sha2::Sha256::digest(serde_json::to_vec(&quote).unwrap())
+            "{:x}",
+            sha2::Sha256::digest(serde_json::to_vec(&quote).unwrap())
         ),
         admission_usd_per_usdt: Decimal::ONE,
         other_entry_costs_upper_usd: Decimal::new(95, 2),
@@ -200,10 +201,17 @@ fn r4_followup_requires_terminal_native_fill_and_central_settlement() {
         "native terminal release permits the next bounded entry"
     );
     let campaign = format!("sha256:{}", "c".repeat(64));
-    let (spent, baseline) = s.seal_captured_campaign_baseline(&campaign, from, through).unwrap();
-    assert_eq!(spent, Decimal::new(501, 2), "historical admitted SWAP USD is not a fake zero");
+    let (spent, baseline) = s
+        .seal_captured_campaign_baseline(&campaign, from, through)
+        .unwrap();
     assert_eq!(
-        s.seal_captured_campaign_baseline(&campaign, from, through).unwrap(),
+        spent,
+        Decimal::new(501, 2),
+        "historical admitted SWAP USD is not a fake zero"
+    );
+    assert_eq!(
+        s.seal_captured_campaign_baseline(&campaign, from, through)
+            .unwrap(),
         (spent, baseline),
         "lost central opening ACK cannot double count an immutable entry"
     );
