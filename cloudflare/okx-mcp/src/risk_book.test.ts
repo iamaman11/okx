@@ -65,6 +65,31 @@ const governance={
  max_total_modelled_loss_usdt:"10",accounts:[account(a),account(b)]
 };
 await sa.put("account_access_v1",governance);await sa.put("generation",77);await setupRiskBook(sa);
+// E1.1 nonzero historical USD cannot be reset to zero by reinstalling a
+// captured opening. This source is constructed from immutable native SQL
+// settlement in production; here only the typed Worker accountant is tested.
+const past=new Storage();
+await past.put("account_access_v1",governance);
+await past.put("generation",77);
+await initializeRiskBook(past,"installation_test",{
+  installation_id:"installation_test",campaign_id:governance.campaign_id,
+  started_at_ms:now-100_000
+});
+const pastProof=await openingFixture();
+pastProof.accounts[0].consumed_entry_usd="5.01";
+pastProof.consumed_usd="5.01";
+pastProof.source_digest=await openingDigest(pastProof);
+check(await installCampaignEntryProof(past,pastProof),
+  "authenticated prior SWAP settlement consumes historical campaign capacity");
+const pastBook=(await readRiskBook(past))!;
+check(pastBook.entry_budget?.consumed_usd==="5.01"&&
+  pastBook.entry_budget?.reserved_usd==="0"&&
+  pastBook.entry_budget?.limit_usd==="10",
+  "nonzero source initializes spent money, not a replenished budget");
+const falsified={...pastProof,consumed_usd:"0"};
+check(!await installCampaignEntryProof(past,falsified) &&
+      (await readRiskBook(past))?.entry_budget?.consumed_usd==="5.01",
+  "a later zero or different proof cannot overwrite historical spent USD");
 // A persisted entry budget without its original campaign inception (or
 // reattached to another campaign) is corrupt, not available capital.
 const corruptedOrigin=new Storage();
