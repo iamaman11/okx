@@ -646,7 +646,7 @@ mod raw_native_session_tests {
         // This file is a transport barrier, never a source of trading facts.
         let handoff = tokio::time::timeout(Duration::from_secs(120), async {
             loop {
-                match tokio::fs::read(&handoff_path).await {
+                match std::fs::read(&handoff_path) {
                     Ok(bytes) => break bytes,
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                         tokio::time::sleep(Duration::from_millis(25)).await;
