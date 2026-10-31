@@ -6,7 +6,8 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { promisify } from "node:util";
 import { execFile } from "node:child_process";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { setTimeout as delay } from "node:timers/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -15,6 +16,7 @@ import { Miniflare } from "miniflare";
 
 const root = await mkdtemp(join(tmpdir(), "okx-workerd-risk-"));
 const outfile = join(root, "runtime-test.mjs");
+const handoffPath = join(root, "native-handoff.json");
 const FRAME_SCHEMA = "okx.direct-transport.frame/v2";
 const configuration = {
   schema: "okx.governance/v3",
@@ -199,6 +201,46 @@ try {
     platform: "browser", target: "es2022", logLevel: "warning",
   });
   const opts = makeOptions(await readFile(outfile, "utf8"));
+  // Native must initialize the REAL account SQL owners before the actual
+  // Worker campaign is created. A fixture origin before initialized_at
+  // would correctly fail with BASELINE_RECONCILIATION_REQUIRED.
+  let nativeProcess = null;
+  if (process.env.OKX_NATIVE_WORKER_INTEGRATION === "1") {
+    nativeProcess = promisify(execFile)(
+      "cargo",
+      [
+        "test", "--locked", "-p", "okx-agent", "--lib",
+        "native_to_workerd_risk_summary_over_actual_websocket", "--", "--nocapture",
+      ],
+      {
+        cwd: fileURLToPath(new URL("../../../", import.meta.url)),
+        env: { ...process.env, OKX_INTEGRATION_HANDOFF_PATH: handoffPath },
+        maxBuffer: 8 * 1024 * 1024,
+        timeout: 180_000,
+      },
+    );
+    nativeProcess.catch(() => {});
+    const bootstrapReady = async () => {
+      const deadline = Date.now() + 120_000;
+      while (Date.now() < deadline) {
+        try {
+          await stat(handoffPath + ".native-ready");
+          return;
+        } catch (error) {
+          if (error?.code !== "ENOENT") throw error;
+        }
+        await delay(25);
+      }
+      throw new Error("NATIVE_SQL_BOOTSTRAP_DEADLINE");
+    };
+    await Promise.race([
+      bootstrapReady(),
+      nativeProcess.then(
+        () => { throw new Error("NATIVE_EXITED_BEFORE_WORKER_CAMPAIGN"); },
+        (error) => { throw error; },
+      ),
+    ]);
+  }
   first = new Miniflare(opts);
   const install = await request(first, "/installation/initialize", "POST", installation);
   assert.equal(install.status, 200, "real governance/RiskBook created in one DO transaction");
@@ -333,31 +375,17 @@ try {
   assert.equal(repeated.budget?.entry_budget?.reserved_usd,"2");
   socket2.ws.close();
   if (process.env.OKX_NATIVE_WORKER_INTEGRATION === "1") {
-    // Native cargo test is launched only by linux-rust, which already owns
-    // the Rust toolchain and dependencies. Workerd remains alive throughout.
+    // The already-running Native process opened both real SQL accounts
+    // BEFORE this Worker campaign was created. Supply only the actual
+    // workerd connection metadata, never a synthetic SQL source.
     const url = await second.ready;
     assert.equal(url.hostname,"127.0.0.1","CI worker must be loopback-only");
     const wsUrl = new URL("/runtime",url);
     wsUrl.protocol = "ws:";
-    const { stdout, stderr } = await promisify(execFile)(
-      "cargo",
-      [
-        "test","--locked","-p","okx-agent","--lib",
-        "native_to_workerd_risk_summary_over_actual_websocket",
-        "--","--nocapture",
-      ],
-      {
-        cwd: fileURLToPath(new URL("../../../",import.meta.url)),
-        env: {
-          ...process.env,
-          OKX_INTEGRATION_WORKER_WS_URL: wsUrl.toString(),
-          OKX_INTEGRATION_WORKER_TOKEN: token,
-          OKX_INTEGRATION_RESERVATION: held.reservation_key,
-        },
-        maxBuffer: 8 * 1024 * 1024,
-        timeout: 180_000,
-      },
-    );
+    await writeFile(handoffPath, JSON.stringify({
+      ws_url:wsUrl.toString(),token,reservation_key:held.reservation_key,
+    }), {mode:0o600});
+    const { stdout, stderr } = await nativeProcess;
     assert.match(stdout,/native_to_persisted_workerd_riskbook PASS/,
       "real Rust client must prove Worker SQL summary and reservation");
     process.stdout.write(stdout);

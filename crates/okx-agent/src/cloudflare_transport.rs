@@ -630,18 +630,41 @@ mod raw_native_session_tests {
     /// there is no mock Worker/RiskBook, fixture exchange or alternate executor.
     #[tokio::test]
     async fn native_to_workerd_risk_summary_over_actual_websocket() {
-        let Ok(url) = std::env::var("OKX_INTEGRATION_WORKER_WS_URL") else {
+        let Ok(handoff_path) = std::env::var("OKX_INTEGRATION_HANDOFF_PATH") else {
             return;
         };
+        // This real two-account SQL bootstrap MUST precede the Worker
+        // campaign's beginning. A later account cannot certify an earlier
+        // history; the production owner correctly refuses such a baseline.
+        let (mut ctx, root, risk, mut risk_rx, recorded_http) =
+            test_dispatch_for("installation_test").await;
+        let accounts = ctx.accounts.clone();
+        std::fs::write(format!("{handoff_path}.native-ready"), b"SQL_OWNERS_OPEN")
+            .expect("test bootstrap marker must be written after SQL initialization");
+        // The Node driver creates the actual workerd/SQLite campaign only
+        // after observing the marker, then supplies its local WSS address.
+        // This file is a transport barrier, never a source of trading facts.
+        let handoff = tokio::time::timeout(Duration::from_secs(120), async {
+            loop {
+                match tokio::fs::read(&handoff_path).await {
+                    Ok(bytes) => break bytes,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        tokio::time::sleep(Duration::from_millis(25)).await;
+                    }
+                    Err(error) => panic!("integration handoff unavailable: {error}"),
+                }
+            }
+        })
+        .await
+        .expect("workerd bootstrap handoff deadline");
+        let handoff: serde_json::Value = serde_json::from_slice(&handoff).unwrap();
+        let url = handoff["ws_url"].as_str().unwrap().to_owned();
         assert!(
             url.starts_with("ws://127.0.0.1:"),
             "integration socket must be a local ephemeral workerd endpoint"
         );
-        let token = std::env::var("OKX_INTEGRATION_WORKER_TOKEN").unwrap();
-        let reservation_key = std::env::var("OKX_INTEGRATION_RESERVATION").unwrap();
-        let (mut ctx, root, risk, mut risk_rx, recorded_http) =
-            test_dispatch_for("installation_test").await;
-        let accounts = ctx.accounts.clone();
+        let token = handoff["token"].as_str().unwrap().to_owned();
+        let reservation_key = handoff["reservation_key"].as_str().unwrap().to_owned();
 
         // The same real public WS coordinator consumes recorded raw market
         // frames. These are immutable venue observations, not a fabricated
