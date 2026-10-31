@@ -1103,18 +1103,27 @@ pub(crate) mod recorded_support {
                 // fake account endpoint. Concurrent polls can reorder safely.
                 let request_key =
                     format!("{key}:{path}?{}", request.url().query().unwrap_or_default());
+                // The production T09 assembly runs background two-second
+                // capture, multi-account census and post-HELD rereads on the
+                // same recorded account. The transcript permits a finite 64
+                // identical raw source responses per exact signed query.
+                // There is no live fallback; unknown routes still hard-fail.
                 let max_repeats = match path {
-                    "/api/v5/account/config" => 10,
-                    "/api/v5/account/balance"
+                    "/api/v5/account/config"
+                    | "/api/v5/account/balance"
                     | "/api/v5/account/positions"
-                    | "/api/v5/trade/orders-pending" => 12,
-                    "/api/v5/trade/orders-algo-pending" => 8,
-                    "/api/v5/trade/fills-history" | "/api/v5/account/bills-archive" => 8,
+                    | "/api/v5/trade/orders-pending"
+                    | "/api/v5/trade/orders-algo-pending"
+                    | "/api/v5/trade/fills-history"
+                    | "/api/v5/account/bills-archive" => 64,
                     _ => 0,
                 };
                 let mut observed = self.requests.lock().unwrap();
-                if observed.iter().filter(|v| **v == request_key).count() >= max_repeats {
-                    return Err(OkxError::Response("TRANSCRIPT_REPEAT_EXCEEDED".into()));
+                let consumed = observed.iter().filter(|v| **v == request_key).count();
+                if consumed >= max_repeats {
+                    return Err(OkxError::Response(format!(
+                        "TRANSCRIPT_REPEAT_EXCEEDED:{request_key}:count={consumed}:limit={max_repeats}"
+                    )));
                 }
                 observed.push(request_key);
                 drop(observed);
