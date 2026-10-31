@@ -697,6 +697,48 @@ impl AccountStore {
         ).optional()?;
         if let Some((origin,cut,amount)) = checkpoint.as_ref() {
             if *origin==from_ms && *cut==through_ms {
+                // A backfilled settlement or late fee can arrive with an
+                // event timestamp inside an already sealed interval. Its
+                // original cursor cut-off is NOT permission to return the
+                // previous money proof unchanged. Refuse same-frontier
+                // replay until a new fully captured interval is available.
+                let newer: bool = self.connection.query_row(
+                    "SELECT EXISTS(
+                       SELECT 1 FROM operation_receipts t
+                       WHERE t.kind='ENTRY_SETTLEMENT_PROVEN'
+                         AND t.committed_at>?2 AND t.committed_at<=?3
+                         AND (
+                           NOT EXISTS(
+                             SELECT 1 FROM campaign_entry_applied a
+                             WHERE a.campaign_id=?1
+                               AND a.intent_id=substr(t.operation_id,18)
+                           )
+                           OR EXISTS(
+                             SELECT 1 FROM operation_receipts late
+                             WHERE late.operation_id='entry-late-head:'||
+                                   substr(t.operation_id,18)
+                               AND late.kind='ENTRY_LATE_HEAD'
+                               AND late.committed_at<=?3
+                               AND NOT EXISTS(
+                                 SELECT 1 FROM campaign_entry_applied a
+                                 WHERE a.campaign_id=?1
+                                   AND a.intent_id=substr(t.operation_id,18)
+                                   AND a.settlement_revision=CAST(
+                                     json_extract(late.result_ref,'$.settlement_revision')
+                                     AS INTEGER
+                                   )
+                               )
+                           )
+                         )
+                     )",
+                    params![campaign_id,from_ms,through_ms],
+                    |r|r.get(0),
+                )?;
+                if newer {
+                    return Err(StoreError::Invalid(
+                        "CAMPAIGN_FRONTIER_STALE_ECONOMIC_SOURCE"
+                    ));
+                }
                 let prior:Option<(String,String)>=self.connection.query_row(
                     "SELECT consumed_usd,source_digest
                      FROM campaign_entry_window_proofs
@@ -734,17 +776,34 @@ impl AccountStore {
             "SELECT terminal.operation_id,terminal.result_ref,terminal.committed_at
              FROM operation_receipts terminal
              WHERE terminal.kind='ENTRY_SETTLEMENT_PROVEN'
-               AND ((terminal.committed_at>?1 AND terminal.committed_at<=?2)
+               AND terminal.committed_at>?3 AND terminal.committed_at<=?2
+               AND (
+                 terminal.committed_at>?1
+                 OR NOT EXISTS(
+                   SELECT 1 FROM campaign_entry_applied a
+                   WHERE a.campaign_id=?4
+                     AND a.intent_id=substr(terminal.operation_id,18)
+                 )
                  OR EXISTS(
                    SELECT 1 FROM operation_receipts late
                    WHERE late.operation_id='entry-late-head:'||
                          substr(terminal.operation_id,18)
                      AND late.kind='ENTRY_LATE_HEAD'
-                     AND late.committed_at>?1 AND late.committed_at<=?2
-                 ))
+                     AND late.committed_at<=?2
+                     AND NOT EXISTS(
+                       SELECT 1 FROM campaign_entry_applied a
+                       WHERE a.campaign_id=?4
+                         AND a.intent_id=substr(terminal.operation_id,18)
+                         AND a.settlement_revision=CAST(
+                           json_extract(late.result_ref,'$.settlement_revision')
+                           AS INTEGER
+                         )
+                     )
+                 )
+               )
              ORDER BY terminal.operation_id LIMIT 10001",
         )?;
-        let mut rows = stmt.query(params![since,through_ms])?;
+        let mut rows = stmt.query(params![since,through_ms,from_ms,campaign_id])?;
         let mut witnesses = Vec::new();
         while let Some(row) = rows.next()? {
             if witnesses.len() >= 10_000 {

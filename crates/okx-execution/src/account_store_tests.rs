@@ -1711,6 +1711,36 @@ fn e1_partial_and_final_entry_settlement_are_monotone_and_not_double_counted() {
                 Decimal::ZERO,
                 "original fill fee may not become a separate late debit"
             );
+            // Simulate a real late account bill whose exchange event-time
+            // is backdated into an ALREADY fully covered campaign window.
+            // A previous complete frontier must not make the missed debit
+            // disappear when a backfill shares that original watermark.
+            for (source,part) in [
+                ("fills","SWAP"),("bills","account"),
+            ] {
+                reopened.ingest_page(&IngestPage {
+                    cursor:Some(SourceCursor {
+                        source:source.into(),stream_partition:part.into(),
+                        cursor:String::new(),watermark:11,generation:1,
+                        coverage_gaps:String::new(),
+                    }),
+                    ..Default::default()
+                }).unwrap();
+            }
+            for (source,part) in [
+                ("fills","SPOT"),("fills","MARGIN"),
+                ("fills","FUTURES"),("fills","OPTION"),
+            ] {
+                reopened.connection.execute(
+                    "UPDATE source_cursors SET watermark=11
+                     WHERE source=?1 AND stream_partition=?2",
+                    rusqlite::params![source,part],
+                ).unwrap();
+            }
+            let old_frontier = reopened.seal_captured_campaign_baseline(
+                &campaign,2,11,
+            ).unwrap();
+            assert_eq!(old_frontier.0,Decimal::new(10002,2));
             let late_fee = Decimal::new(-1, 2);
             reopened
                 .ingest_page(&IngestPage {
@@ -1802,8 +1832,32 @@ fn e1_partial_and_final_entry_settlement_are_monotone_and_not_double_counted() {
             // The central RiskBook accepted exactly THIS monetary revision.
             reopened.acknowledge_late_entry_settlement(&late).unwrap();
             reopened.verify_captured_campaign_continuity(2, 11).unwrap();
+            assert!(matches!(
+                reopened.seal_captured_campaign_baseline(&campaign,2,11),
+                Err(StoreError::Invalid("CAMPAIGN_FRONTIER_STALE_ECONOMIC_SOURCE"))
+            ), "a late fee inside an already sealed frontier cannot replay stale USD");
+            for (source,part) in [
+                ("fills","SPOT"),("fills","MARGIN"),
+                ("fills","FUTURES"),("fills","OPTION"),
+            ] {
+                reopened.connection.execute(
+                    "UPDATE source_cursors SET watermark=12
+                     WHERE source=?1 AND stream_partition=?2",
+                    rusqlite::params![source,part],
+                ).unwrap();
+            }
+            for (source,part) in [("fills","SWAP"),("bills","account")] {
+                reopened.ingest_page(&IngestPage {
+                    cursor:Some(SourceCursor {
+                        source:source.into(),stream_partition:part.into(),
+                        cursor:String::new(),watermark:12,generation:1,
+                        coverage_gaps:String::new(),
+                    }),
+                    ..Default::default()
+                }).unwrap();
+            }
             let baseline = reopened
-                .seal_captured_campaign_baseline(&campaign, 2, 11)
+                .seal_captured_campaign_baseline(&campaign, 2, 12)
                 .unwrap();
             assert_eq!(
                 baseline.0,
@@ -1812,7 +1866,7 @@ fn e1_partial_and_final_entry_settlement_are_monotone_and_not_double_counted() {
             );
             assert_eq!(
                 reopened
-                    .seal_captured_campaign_baseline(&campaign, 2, 11)
+                    .seal_captured_campaign_baseline(&campaign, 2, 12)
                     .unwrap(),
                 baseline,
                 "lost opening ACK replays the same historical USD baseline"
