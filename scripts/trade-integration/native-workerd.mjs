@@ -32,7 +32,7 @@ export async function actualNativeWorker(root, signal) {
     );
     assert.match(stdout, /t09_public_trade_execute_open_ack_and_idempotency PASS: posts=1/);
     assert.match(stdout, /native_to_persisted_workerd_riskbook PASS/);
-    const terminal = [...stdout.matchAll(/\\{"suite":"runtime-session-sqlite-do","status":"PASS"[^\\r\\n]*\\}/g)];
+    const terminal = [...stdout.matchAll(/\{"suite":"runtime-session-sqlite-do","status":"PASS"[^\r\n]*\}/g)];
     assert.equal(terminal.length, 1, "production Durable Object test terminal PASS missing");
     const done = JSON.parse(terminal[0][0]);
     assert.equal(done.real_durable_object, true);

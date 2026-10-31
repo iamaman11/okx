@@ -890,11 +890,6 @@ mod raw_native_session_tests {
                 .await
                 .unwrap();
             assert_eq!(
-                cursors.0.expect("missing SWAP fill cursor").coverage_gaps,
-                "",
-                "the production financial capture must have no SWAP history gaps"
-            );
-            assert_eq!(
                 cursors.0.as_ref().expect("missing SWAP fill cursor").coverage_gaps,
                 "",
                 "the production financial capture must have no SWAP history gaps"
