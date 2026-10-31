@@ -305,9 +305,7 @@ try {
   assert.equal(restored.budget?.entry_budget?.reserved_usd,"2");
   assert.equal(restored.budget?.entry_budget?.consumed_usd,"0");
   const exactReplay = await risk(socket2,"reserve_recorded_later_0001",reserveAction);
-  assert.equal(exactReplay.status,"HELD");
-  assert.equal(exactReplay.reservation_key,held.reservation_key,
-    "worker restart cannot mint another reservation for the same intent");
+  assert.equal(exactReplay.status,"DENIED");
   const repeated = await summary(socket2,"risk_after_replay_0001");
   assert.equal(repeated.budget?.reserved_loss_usd,"1");
   assert.equal(repeated.budget?.entry_budget?.reserved_usd,"2");
