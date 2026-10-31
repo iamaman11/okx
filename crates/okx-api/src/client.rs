@@ -283,8 +283,41 @@ impl OkxRestClient {
     where
         T: DeserializeOwned,
     {
+        self.private_get_with_queue_budget(path, params, None).await
+    }
+
+    /// An opt-in rate-admitted read: wait only for local no-send capacity.
+    /// Trading POST, exchange throttles and already-sent requests are never retried.
+    pub(crate) async fn private_get_wait<T>(
+        &self,
+        path: &str,
+        params: &[(&str, String)],
+        max_wait: Duration,
+    ) -> Result<Vec<T>, OkxError>
+    where
+        T: DeserializeOwned,
+    {
+        self.private_get_with_queue_budget(path, params, Some(max_wait)).await
+    }
+
+    async fn private_get_with_queue_budget<T>(
+        &self,
+        path: &str,
+        params: &[(&str, String)],
+        max_wait: Option<Duration>,
+    ) -> Result<Vec<T>, OkxError>
+    where
+        T: DeserializeOwned,
+    {
         let plan = self.rate_budget.private_rest_plan(path, params);
-        admit(&self.rate_budget, &plan)?;
+        if let Some(wait) = max_wait {
+            self.rate_budget
+                .admit_wait(&plan, wait)
+                .await
+                .map_err(|evidence| OkxError::RateLimited { evidence })?;
+        } else {
+            admit(&self.rate_budget, &plan)?;
+        }
 
         let request_path = request_path_with_query(path, params);
 

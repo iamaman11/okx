@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, time::{Duration, Instant}};
 
 use crate::{
     DEFAULT_SUBACCOUNT_ORDER_LIMIT_PER_2S, MutationTiming, OkxRestClient, RateOperationClass,
@@ -446,15 +446,17 @@ async fn read_derivative_scope(
     client: OkxRestClient,
     kind: String,
     order_type: String,
+    admission_deadline: Instant,
 ) -> Result<ReceiptedDerivativeScope, OkxError> {
     let rows: Vec<PendingAlgoOrderDetails> = client
-        .private_get(
+        .private_get_wait(
             ALGO_PENDING_PATH,
             &[
                 ("ordType", order_type.clone()),
                 ("instType", kind.clone()),
                 ("limit", PROTECTIVE_ALGO_PAGE_LIMIT.to_string()),
             ],
+            admission_deadline.saturating_duration_since(Instant::now()),
         )
         .await?;
     Ok((
@@ -655,10 +657,21 @@ impl TradeApi {
                     .map(move |order_type| (kind, *order_type))
             })
             .collect::<Vec<_>>();
+        // One total admission budget for the entire risk inventory, not
+        // another 2.5 seconds for every parallel scope. The same signed
+        // GETs and parser are used: only local no-send defers can wait.
+        // After HELD, the central causal fence still independently limits
+        // this read and rejects it if too slow.
+        let admission_deadline = Instant::now() + Duration::from_millis(2_500);
         let calls = scopes
             .into_iter()
             .map(|(kind, order_type)| {
-                read_derivative_scope(self.client.clone(), kind.to_owned(), order_type.to_owned())
+                read_derivative_scope(
+                    self.client.clone(),
+                    kind.to_owned(),
+                    order_type.to_owned(),
+                    admission_deadline,
+                )
             })
             .collect::<Vec<_>>();
         let responses = stream::iter(calls)

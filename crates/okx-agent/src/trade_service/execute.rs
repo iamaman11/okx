@@ -2072,13 +2072,27 @@ fn validate_generation(expected: i64, observed: i64) -> Result<(), String> {
 /// A central fence denial before the SQL POST claim proves the venue was
 /// never called. Keep the first reason and the reservation pending for
 /// central release; do not confuse this with a lost exchange POST response.
+/// Central release proofs require a reason <=128 UTF-8 bytes. Preserve
+/// readable error class plus a SHA-256 of the original full diagnosis;
+/// never truncate an economic event or mutate a risk reservation to fit.
+fn bounded_unsent_reason(reason: &str) -> String {
+    if reason.len() <= 128 {
+        return reason.to_owned();
+    }
+    let prefix_end = (0..=48)
+        .rev()
+        .find(|&index| reason.is_char_boundary(index))
+        .unwrap_or(0);
+    let hash = format!("{:x}", Sha256::digest(reason.as_bytes()));
+    format!("{}:sha256:{hash}", &reason[..prefix_end])
+}
 async fn reject_prepost_denial(
     store: &AccountStoreHandle,
     intent: &StoredIntent,
     reason: &str,
 ) -> Result<Value, String> {
     let id = intent.intent_id.clone();
-    let original = reason.to_owned();
+    let original = bounded_unsent_reason(reason);
     store
         .call(deadline(), move |s| s.reject_unsent(&id, &original, now()))
         .await
@@ -2101,6 +2115,19 @@ async fn reject_prepost_denial(
         "risk_release_state":"PENDING",
         "next_action":"trade.status"
     })))
+}
+#[cfg(test)]
+#[test]
+fn prepost_unsent_proof_reason_is_bounded_and_stably_identifiable() {
+    let full = format!("OKX rate/backpressure defer: {}", "x".repeat(300));
+    let short = bounded_unsent_reason(&full);
+    assert!(short.len() <= 128);
+    assert!(short.starts_with("OKX rate/backpressure"));
+    assert!(short.ends_with(&format!("{:x}", Sha256::digest(full.as_bytes()))));
+    assert_eq!(short, bounded_unsent_reason(&full));
+    assert_eq!(bounded_unsent_reason("POST_CENSUS_STALE"), "POST_CENSUS_STALE");
+    let unicode = "🚨".repeat(100);
+    assert!(bounded_unsent_reason(&unicode).len() <= 128);
 }
 pub(super) async fn post_once<T, F, Fut>(
     store: &AccountStoreHandle,
