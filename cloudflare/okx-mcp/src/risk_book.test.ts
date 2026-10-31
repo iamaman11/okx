@@ -427,6 +427,36 @@ check(successorReplay.entry.key===successor.entry.key&&
  (await readRiskBook(sa))!.entry_budget?.reserved_usd==="0.5",
  "second-intent lost reserve reply cannot allocate another 0.5 USD");
 console.log("e2_same_campaign_second_entry_after_terminal PASS");
+// A venue position/order/protection that has been exactly linked to a
+// CURRENT central reservation is not a second independent risk occupancy.
+// Worker accounts for both outstanding grants via meta.accounts, once.
+const concurrentManagedCensus={
+ ...successorCensus,source_digest:b,source_read_floor_ms:now+9,
+ generated_at_ms:now+9,occupied:successorCensus.occupied.map(v=>({
+   ...v,occupied_usdt:"0"
+ }))
+};
+const thirdManaged=await reserveRisk(sa,policy,concurrentManagedCensus,{
+ ...request,intent_id:"next_after_known_open_exposure_001",
+ now_ms:now+10,loss_usdt:"1",loss_usd:"1",entry_upper_usd:"0.5"
+},{...native,source_digest:b});
+check(thirdManaged.status==="HELD",
+ "managed open position and already held central grant permit a second bounded entry");
+const fullyCounted=await readRiskBook(sa);
+check(fullyCounted?.entry_budget?.reserved_usd==="1"&&
+ fullyCounted.occupied_usdt==="2",
+ "two centrally held grants charge twice exactly; zero unmanaged external occupancy");
+const unpricedExternal=await reserveRisk(sa,policy,{
+ ...concurrentManagedCensus,occupied:concurrentManagedCensus.occupied.map(v=>({
+   ...v,occupied_usdt:v.account_key===accountKey(request)?"10":"0"
+ }))
+},{
+ ...request,intent_id:"foreign_open_exposure_must_block_001",
+ now_ms:now+11,loss_usdt:"1",loss_usd:"1",entry_upper_usd:"0.5"
+},{...native,source_digest:b});
+check(unpricedExternal.status==="DENIED",
+ "unmanaged external monetary occupancy still consumes independent risk");
+console.log("e2_managed_central_exposure_once_unknown_external_denied PASS");
 const reported={...census,occupied:census.occupied.map(v=>({...v,cumulative_loss_usd:v.account_key===accountKey(request)?"17":"0"}))};
 const campaign=await reserveRisk(sa,policy,reported,{...request,intent_id:"new_intent_001",loss_usdt:"4",loss_usd:"4"},native);
 check(campaign.status==="DENIED"&&campaign.reason==="CAMPAIGN_LOSS_BUDGET_EXHAUSTED","fresh losses charged before reserve even when admission denied");
