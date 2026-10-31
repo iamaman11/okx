@@ -638,7 +638,17 @@ impl TradeService {
         // against the original frozen admission before a terminal release.
         // A missing bill is PENDING, never zero or an invented risk refund.
         // This uses the same SQLite owner and central SETTLE_ENTRY command.
-        let incremental_entry = if financial
+        let verified_zero_cancel = i.state == IntentState::Cancelled
+            && order.as_ref().is_some_and(|venue| {
+                verified_terminal_order_update_time(&i, Some(venue)).is_ok()
+                    && verified_order_readback(&i, venue) == Ok(Decimal::ZERO)
+            });
+        let incremental_entry = if financial && i.risk_increase && verified_zero_cancel {
+            // The terminal zero-fee proof and central settlement are owned
+            // exclusively by release_terminal; a missing partial fill cannot
+            // be treated as an incremental settlement failure.
+            json!({"state":"not_applicable_zero_fill_terminal"})
+        } else if financial
             && i.risk_increase
             && matches!(
                 i.state,

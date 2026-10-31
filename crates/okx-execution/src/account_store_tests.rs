@@ -45,9 +45,14 @@ fn e1_zero_fill_terminal_requires_full_money_coverage_and_replays_after_restart(
     assert_eq!(zero.reservation_key,"central-key");
     assert_eq!(s.bind_terminal_entry_settlement(
         "intent",7,Decimal::ZERO,12).unwrap(),zero);
+    assert_eq!(
+        s.bind_terminal_entry_settlement("intent",7,Decimal::ZERO,13).unwrap(),
+        zero,
+        "advancing coverage cannot create a second zero-charge receipt"
+    );
     assert!(matches!(
-        s.bind_terminal_entry_settlement("intent",7,Decimal::ZERO,13),
-        Err(StoreError::Invalid("ZERO_ENTRY_COVERAGE_UNPROVEN"))
+        s.bind_terminal_entry_settlement("intent",7,Decimal::ZERO,11),
+        Err(StoreError::Invalid("ZERO_ENTRY_COVERAGE_REGRESSION"))
     ));
 
     let path=s.path.clone();let meta=s.meta.clone();drop(s);
