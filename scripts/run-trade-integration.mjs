@@ -29,6 +29,7 @@ function usage() {
   throw Error("USAGE: --list | --suite t09,t10 --artifacts DIR | --case T10-05 --artifacts DIR");
 }
 function args(input) {
+  if (input.length === 1 && input[0] === "--list") return { list: true };
   const config = {};
   for (let i = 0; i < input.length; i += 2) {
     const key = input[i], value = input[i + 1];
@@ -36,7 +37,6 @@ function args(input) {
       usage();
     config[key] = value;
   }
-  if (input.length === 1 && input[0] === "--list") return { list: true };
   if (config["--suite"] === "t09,t10" && !config["--case"] && config["--artifacts"])
     return { selected: required, artifacts: config["--artifacts"] };
   if (required.includes(config["--case"]) && !config["--suite"] && config["--artifacts"])
