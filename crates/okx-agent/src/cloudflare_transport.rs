@@ -1183,9 +1183,10 @@ mod raw_native_session_tests {
                 "instId":"BTC-USDT-SWAP","tdMode":"cross",
                 "clOrdId":"__REQUEST_CL_ORD_ID__",
                 "side":"buy","posSide":"long","ordType":"limit",
-                "sz":"0.10","px":"1000",
+                "sz":"0.1","px":"1000",
                 "attachAlgoOrds":[{
                     "attachAlgoClOrdId":"__REQUEST_ATTACH_ALGO_ID__",
+                    "tpTriggerPxType":"mark","tpOrdPxType":"mark",
                     "slTriggerPx":"900","slTriggerPxType":"mark","slOrdPx":"-1"
                 }]
             }),
