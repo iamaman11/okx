@@ -73,6 +73,7 @@ const bodyHash=new Map<string,string>();
 const intentByKey=new Map<string,string>();
 // Only the synthetic Real Agent owns these fixture routing handles. The
 // actual independent RiskBook remains in the single Worker storage owner.
+const nativeFixtureEntryUsd='5.0025'; // 1 linear contract @5, venue fee 0.0025, FX=1
 const realRiskByIntent=new Map<string,{
   reservation:string;planHash:string;sequence:number;uid:string;
   runId:string;account:string;at:number
@@ -148,7 +149,7 @@ const handler=async(url:string,init?:RequestInit)=>{
      action:{action:'RESERVE',venue:'okx',account_uid:row.uid_fingerprint,
        run_id:'run_fixture_real_001',intent_id:intentId,
        strategy_id:String(req.strategy_instance),instrument_id:String(req.instrument),
-       plan_sha256:planHash,requested_loss_usdt:'0.5',requested_loss_usd:'0.5',entry_upper_usd:'1',entry_proof_digest:census.source_digest,
+       plan_sha256:planHash,requested_loss_usdt:'0.5',requested_loss_usd:'0.5',entry_upper_usd:nativeFixtureEntryUsd,entry_proof_digest:census.source_digest,
        usd_conversion:{usd_per_usdt:'1',source_digest:census.source_digest,observed_at_ms:at},
        policy_revision:governance.revision,census}
    },at);
@@ -224,7 +225,7 @@ const handler=async(url:string,init?:RequestInit)=>{
     account_uid:real.uid,run_id:real.runId,intent_id:found.intent_id,
     state:'FILLED',record_digest:'a'.repeat(64),
     cumulative_loss_usd:'0',remaining_exposure_usdt:'0',
-    cumulative_entry_usd:'1',entry_settlement_revision:1,
+    cumulative_entry_usd:nativeFixtureEntryUsd,entry_settlement_revision:1,
     entry_settlement_digest:'d'.repeat(64)
    };
    const releaseCommand=(commandId:string,sequence:number)=>({
@@ -250,7 +251,7 @@ const handler=async(url:string,init?:RequestInit)=>{
     action:{action:'SETTLE_ENTRY',
       reservation_key:real.reservation,plan_sha256:real.planHash,
       expected_risk_book_sequence:real.sequence,
-      cumulative_entry_usd:'1',settlement_revision:1,
+      cumulative_entry_usd:nativeFixtureEntryUsd,settlement_revision:1,
       source_digest:terminalLedger.entry_settlement_digest}
    },real.at+7);
    check(settled.status==='UPDATED'&&
@@ -461,7 +462,7 @@ check(realClose.status==='completed'&&
  'real fake Agent closes the protected fixture position');
 const releasedRisk=await readRiskBook(storage);
 check(releasedRisk?.occupied_usd==='0'&&releasedRisk?.occupied_usdt==='0'&&
- releasedRisk?.entry_budget?.consumed_usd==='1'&&
+ releasedRisk?.entry_budget?.consumed_usd===nativeFixtureEntryUsd&&
  releasedRisk?.entry_budget?.reserved_usd==='0',
  'actual Worker settlement+release preserves spent money and frees unused reserve');
 const beforeNextPreview=venuePostCount;
@@ -469,7 +470,7 @@ const secondRealPreview=await call('trade',{action:'preview',account:'fixture_re
 check(secondRealPreview.status==='completed'&&
  secondRealPreview.data.admission==='preview_only'&&
  venuePostCount===beforeNextPreview&&
- (await readRiskBook(storage))?.entry_budget?.consumed_usd==='1',
+ (await readRiskBook(storage))?.entry_budget?.consumed_usd===nativeFixtureEntryUsd,
  'second preview after terminal release is read-only and retains first campaign spend');
 const latest=(await governanceRequest(storage,'GET')).body as Governance;
 const pausedReal=await call('accounts',{action:'pause',account:'fixture_real',
@@ -481,6 +482,6 @@ check(blockedReal.status==='rejected'&&blockedReal.reason_code==='ACCOUNT_NEW_RI
  venuePostCount===beforeReal+1,'pause denies additional real risk before fixture POST');
 check((await readRiskBook(storage))?.occupied_usd==='0',
  'pause cannot resurrect a terminally released reservation');
-check((await readRiskBook(storage))?.entry_budget?.consumed_usd==='1',
+check((await readRiskBook(storage))?.entry_budget?.consumed_usd===nativeFixtureEntryUsd,
  'pause never refunds consumed campaign turnover');
 console.log('mcp_riskbook_fake_venue_composed PASS real MCP route, central RESERVE/BEGIN_POST, fixture venue once, protected fake close, native-risk SETTLE_ENTRY, denied premature RELEASE, authenticated RELEASE, second preview, pause; no physical native SQL/WSS claim');
