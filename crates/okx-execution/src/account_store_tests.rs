@@ -848,7 +848,10 @@ fn e1_partial_and_final_entry_settlement_are_monotone_and_not_double_counted() {
                 "UPDATE fills SET trade_id='forged-same-money' WHERE fill_id='first'",
                 [],
             );
-            assert!(rewrite.is_err(), "IMMUTABLE_FILL must reject a same-money rewrite");
+            assert!(
+                rewrite.is_err(),
+                "IMMUTABLE_FILL must reject a same-money rewrite"
+            );
             assert_eq!(
                 s.bind_partial_entry_settlement("intent", at, qty, at)
                     .unwrap(),
