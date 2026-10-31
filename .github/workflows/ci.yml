@@ -99,6 +99,9 @@ jobs:
       - name: Verify versioned SQLite account ledger schema
         run: python3 scripts/check_ledger_sql.py
 
+      - name: Verify exact T09/T10 required-case manifest
+        run: node scripts/run-trade-integration.mjs --list
+
       - name: Verify clean Engine product contract
         run: |
           python3 scripts/check_product_contract.py --self-test
