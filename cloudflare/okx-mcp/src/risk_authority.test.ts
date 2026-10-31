@@ -224,11 +224,11 @@ check((await handleNativeRiskCommand(s,session,{schema:"okx.risk-command/v1",com
      "ENTRY_SETTLEMENT_REVISION_CONFLICT",
    "same revision cannot substitute a different source digest");
  const lateFee=await handleNativeRiskCommand(settlements,session,
-   sett(6,2,"3",sourceDigest),now+6);
+   sett(6,2,"3",freshDigest),now+6);
  check(lateFee.status==="UPDATED"&&lateFee.reason==="BUDGET_BOUND_BREACH",
    "venue late fee above the entry upper must be booked, not discarded");
  const lateReplay=await handleNativeRiskCommand(settlements,session,
-   sett(6,2,"3",sourceDigest),now+6);
+   sett(6,2,"3",freshDigest),now+6);
  check(lateReplay.status==="UPDATED",
    "lost native WSS ACK for an over-bound debit remains idempotent");
  check((await handleNativeRiskCommand(settlements,session,
