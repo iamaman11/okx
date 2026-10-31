@@ -4,7 +4,7 @@
 // alternate RiskBook, exchange server, endpoint in production, or financial stub.
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -26,20 +26,35 @@ const configuration = {
 };
 const token = "integration-only-ephemeral-token";
 const tokenHash = createHash("sha256").update(token).digest("hex");
-const opts = {
+// Miniflare 5 uses the build-output worker manifest and typed bindings.
+const makeOptions = (bundleContents) => ({
   resourcePersistencePath: join(root, "sqlite-do"),
   workers: [{
     config: {
       name: "okx-test-runtime",
-      modules: true,
-      scriptPath: outfile,
       compatibilityDate: "2026-09-30",
       compatibilityFlags: ["global_fetch_strictly_public"],
-      durableObjects: { RUNTIME: { className: "RuntimeSession", useSQLite: true } },
-      bindings: { RUNTIME_TOKEN_SHA256: tokenHash },
+      manifest: {
+        mainModule: "runtime-test.mjs",
+        modulesRoot: root,
+        modules: {
+          "runtime-test.mjs": { type: "esm", contents: bundleContents },
+        },
+      },
+      env: {
+        RUNTIME: {
+          type: "durable-object",
+          worker: "okx-test-runtime",
+          exportName: "RuntimeSession",
+        },
+        RUNTIME_TOKEN_SHA256: { type: "text", value: tokenHash },
+      },
+      exports: {
+        RuntimeSession: { type: "durable-object", storage: "sqlite" },
+      },
     },
   }],
-};
+});
 const installation = {
   contract: FRAME_SCHEMA,
   release_sha256: "f".repeat(64),
@@ -145,6 +160,7 @@ try {
     outfile, bundle: true, write: true, format: "esm",
     platform: "browser", target: "es2022", logLevel: "warning",
   });
+  const opts = makeOptions(await readFile(outfile, "utf8"));
   first = new Miniflare(opts);
   const install = await request(first, "/installation/initialize", "POST", installation);
   assert.equal(install.status, 200, "real governance/RiskBook created in one DO transaction");
