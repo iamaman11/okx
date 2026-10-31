@@ -1452,18 +1452,27 @@ mod tests {
             ),
         ];
         for (arg, data, action) in recordings {
-            let mut raw = vec![
-                json!({
-                    "event":"subscribe","arg":arg,"connId":"recorded-public"
-                })
-                .to_string(),
-            ];
+            let ack = json!({
+                "event":"subscribe","arg":arg,"connId":"recorded-public"
+            })
+            .to_string();
+            let last_ack_after_data = arg["channel"] == "books";
+            let mut raw = Vec::new();
+            if !last_ack_after_data {
+                raw.push(ack.clone());
+            }
             if let Some(data) = data {
                 let mut message = json!({"arg":arg,"data":[data]});
                 if let Some(action) = action {
                     message["action"] = action.into();
                 }
                 raw.push(message.to_string());
+            }
+            // The book data frame is processed BEFORE its final subscribe
+            // ACK. Only the real subscription readiness wakeup can complete
+            // the public market: no extra data is injected after the ACK.
+            if last_ack_after_data {
+                raw.push(ack);
             }
             connector.expect_public_subscription(arg, raw);
         }
