@@ -651,7 +651,7 @@ mod raw_native_session_tests {
         let feed = recorded_http.expect("the integration run requires recorded HTTP");
         let connector = Arc::new(RecordedWsConnector::default());
         let reference = ReferenceRegistry::from_public(
-            "2026-10-31T00:00:00Z",
+            &chrono::Utc::now().to_rfc3339(),
             vec![
                 serde_json::from_value(json!({
                     "instType":"SWAP","instId":"BTC-USDT-SWAP",
