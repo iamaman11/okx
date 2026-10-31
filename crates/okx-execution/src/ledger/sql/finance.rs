@@ -997,7 +997,10 @@ impl AccountStore {
         drop(rows);
         drop(stmt);
         if witnesses.is_empty() && checkpoint.is_none() {
-            let zero = self.seal_captured_empty_campaign(
+            // Compute from already verified capture facts without writing
+            // an independent operation receipt ahead of the aggregate.
+            // apply_captured_campaign_deltas persists both atomically.
+            let zero = self.captured_empty_campaign_proof(
                 campaign_id, from_ms, through_ms,
             )?;
             self.apply_captured_campaign_deltas(
@@ -1063,7 +1066,7 @@ impl AccountStore {
     /// missing pages, an older campaign than the initial capture, or any
     /// potentially budget-relevant event remains pending, never zero.
     /// This permits opening even after unrelated pre-campaign activity.
-    pub fn seal_captured_empty_campaign(
+    fn captured_empty_campaign_proof(
         &self,
         campaign_id: &str,
         from_ms: i64,
@@ -1092,7 +1095,21 @@ impl AccountStore {
             bills,
         ))
         .map_err(|_| StoreError::Invalid("ENTRY_OPENING_SERIALIZATION_FAILED"))?;
-        let proof = format!("{:x}", Sha256::digest(bytes));
+        Ok(format!("{:x}", Sha256::digest(bytes)))
+    }
+
+    /// Readback-compatible standalone zero opening receipt. The composed
+    /// campaign sealer uses captured_empty_campaign_proof directly so its
+    /// receipt and monetary frontier commit in one SQL transaction.
+    pub fn seal_captured_empty_campaign(
+        &self,
+        campaign_id: &str,
+        from_ms: i64,
+        through_ms: i64,
+    ) -> StoreResult<String> {
+        let proof = self.captured_empty_campaign_proof(
+            campaign_id, from_ms, through_ms,
+        )?;
         self.connection.execute_batch(
             "CREATE TRIGGER IF NOT EXISTS immutable_campaign_opening_update
              BEFORE UPDATE ON operation_receipts

@@ -1,5 +1,51 @@
 use super::*;
 #[test]
+fn e1_zero_opening_aggregate_and_receipt_roll_back_together_on_conflict() {
+    let mut store = store();
+    for (source, partition) in [
+        ("fills","SPOT"),("fills","MARGIN"),("fills","SWAP"),
+        ("fills","FUTURES"),("fills","OPTION"),("bills","account"),
+    ] {
+        store.ingest_page(&IngestPage {
+            cursor: Some(SourceCursor {
+                source: source.into(),
+                stream_partition: partition.into(),
+                cursor: String::new(),
+                watermark: 10,
+                generation: 1,
+                coverage_gaps: String::new(),
+            }),
+            ..Default::default()
+        }).unwrap();
+    }
+    let campaign = format!("sha256:{}", "c".repeat(64));
+    // A conflicting immutable proof row must cause full transactional
+    // rejection. Neither the campaign total nor an opening operation
+    // receipt may be committed before that refusal.
+    store.connection.execute(
+        "INSERT INTO campaign_entry_window_proofs
+         VALUES(?1,10,'0',?2)",
+        rusqlite::params![&campaign,"e".repeat(64)],
+    ).unwrap();
+    assert!(matches!(
+        store.seal_captured_campaign_baseline(&campaign,2,10),
+        Err(StoreError::Invalid("CAMPAIGN_OPENING_PROOF_CONFLICT"))
+    ));
+    let projection:i64=store.connection.query_row(
+        "SELECT COUNT(*) FROM campaign_entry_totals WHERE campaign_id=?1",
+        [&campaign],|r|r.get(0),
+    ).unwrap();
+    assert_eq!(projection,0,"failed proof cannot advance durable money");
+    let receipts:i64=store.connection.query_row(
+        "SELECT COUNT(*) FROM operation_receipts
+         WHERE kind='CAMPAIGN_ENTRY_OPENING_SEALED'",
+        [],|r|r.get(0),
+    ).unwrap();
+    assert_eq!(receipts,0,
+        "the complete empty opening receipt must be atomic with its financial projection");
+}
+
+#[test]
 fn e1_sealed_campaign_refuses_backdated_unapplied_terminal_receipt() {
     let mut store = store();
     for (source, partition) in [
