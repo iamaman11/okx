@@ -133,7 +133,10 @@ async function session(mf) {
   assert.equal(policy.snapshot.state.installation_id, configuration.installation_id);
   return {ws,hello};
 }
-async function summary({ws,hello}, commandId) {
+// The only test-controlled input to the production WSS parser is a raw frame.
+// RuntimeSession handles all authority, revision and financial state transitions.
+async function risk(session, command_id, action) {
+  const {ws,hello} = session;
   ws.send({
     type: "risk_control",
     schema: FRAME_SCHEMA,
@@ -141,17 +144,50 @@ async function summary({ws,hello}, commandId) {
     connection_generation: hello.connection_generation,
     command: {
       schema: "okx.risk-command/v1",
-      command_id: commandId,
+      command_id,
       installation_id: configuration.installation_id,
-      action: { action: "SUMMARY" },
+      action,
     },
   });
-  const frame = await ws.next((f) => f.type === "risk_control_result" && f.result?.command_id === commandId);
+  const frame = await ws.next((f) =>
+    f.type === "risk_control_result" && f.result?.command_id === command_id);
+  assert.equal(frame.session_id, hello.session_id);
   assert.equal(frame.connection_generation, hello.connection_generation);
-  assert.equal(frame.result.status, "OBSERVED");
-  assert.equal(frame.result.budget?.campaign_limit_usd, "10");
-  assert.equal(frame.result.budget?.entry_budget, null);
   return frame.result;
+}
+async function summary(session, commandId) {
+  const result = await risk(session, commandId, {action:"SUMMARY"});
+  assert.equal(result.status, "OBSERVED");
+  assert.equal(result.budget?.campaign_limit_usd, "10");
+  return result;
+}
+function fixtureOpening(campaignStartedAt, asOf, accountKey) {
+  const source = {
+    campaign_id: configuration.campaign_id,
+    limit_usd: "10",
+    consumed_usd: "0",
+    source_digest: "",
+    as_of_ms: asOf,
+    campaign_started_at_ms: campaignStartedAt,
+    accounts: [{
+      account_key: accountKey,
+      history_from_ms: campaignStartedAt,
+      history_through_ms: asOf,
+      consumed_entry_usd: "0",
+      order_history_complete: true,
+      fill_history_complete: true,
+      bill_history_complete: true,
+      finance_provenance_sealed: true,
+      source_digest: "a".repeat(64),
+    }],
+  };
+  const canonical = JSON.stringify([
+    "okx.campaign-entry-opening/v1",source.campaign_id,
+    source.limit_usd,source.consumed_usd,
+    source.campaign_started_at_ms,source.as_of_ms,source.accounts
+  ]);
+  source.source_digest = createHash("sha256").update(canonical).digest("hex");
+  return source;
 }
 let first, second;
 try {
@@ -164,8 +200,93 @@ try {
   first = new Miniflare(opts);
   const install = await request(first, "/installation/initialize", "POST", installation);
   assert.equal(install.status, 200, "real governance/RiskBook created in one DO transaction");
+  // Enrol one test account via the actual DO governance transaction.
+  // UID and signed-source facts are scripted here; NOT real-exchange acceptance.
+  const uid = "a".repeat(64);
+  const accountKey = "okx:real:" + uid;
+  const limits = {
+    max_modelled_loss_usdt:"5",max_order_loss_usdt:"1",
+    max_notional_usdt:"100",max_entry_usd:"10",max_leverage:"3",
+    max_daily_realized_loss_usdt:"2",max_drawdown_ratio:"0.1",
+    allowed_instruments:["BTC-USDT-SWAP"],
+  };
+  const enrollment = await request(first,"/account-governance/enroll","POST",{
+    uid_fingerprint:uid,venue:"okx",environment:"real",
+    label:"Recorded account",alias:"recordedA",enabled:true,
+    limits,credential_ref:"fixture-credentials-a",
+    idempotency_key:"enroll_recorded_account_001",
+  });
+  assert.equal(enrollment.status,200,"actual governance enrolment must commit");
   const socket1 = await session(first);
-  await summary(socket1, "risk_workerd_first_0001");
+  const before = await summary(socket1,"risk_workerd_first_0001");
+  assert.equal(before.budget?.entry_budget,null);
+  const opening = fixtureOpening(
+    before.budget.campaign_origin.started_at_ms,Date.now(),accountKey
+  );
+  const opened = await risk(socket1,"risk_opening_recorded_0001",{
+    action:"INSTALL_ENTRY_OPENING",source:opening,
+  });
+  assert.equal(opened.status,"OBSERVED","native WSS campaign source installs exactly once");
+  assert.equal(opened.budget?.entry_budget?.consumed_usd,"0");
+  assert.equal(opened.budget.entry_budget.opening_source_digest,opening.source_digest);
+  const observedAt = Date.now()-1000;
+  const census = {
+    complete:true,source_digest:"d".repeat(64),content_digest:"a".repeat(64),
+    generated_at_ms:observedAt,source_read_floor_ms:observedAt,
+    account_keys:[accountKey],
+    occupied:[{account_key:accountKey,occupied_usdt:"0",cumulative_loss_usd:"0"}],
+    native_account_evidence_complete:true,
+    native_order_evidence_complete:true,
+    native_ledger_evidence_complete:true,
+  };
+  const reserveAction = {
+    action:"RESERVE",venue:"okx",account_uid:uid,
+    run_id:"run_workerd_recorded_001",intent_id:"intent_workerd_recorded_001",
+    strategy_id:"manual",instrument_id:"BTC-USDT-SWAP",
+    plan_sha256:"b".repeat(64),
+    requested_loss_usdt:"1",requested_loss_usd:"1",
+    entry_upper_usd:"2",entry_proof_digest:"d".repeat(64),
+    usd_conversion:{usd_per_usdt:"1",source_digest:"d".repeat(64),observed_at_ms:observedAt},
+    policy_revision:1,census,
+  };
+  const held = await risk(socket1,"reserve_recorded_0001",reserveAction);
+  assert.equal(held.status,"HELD","real RiskBook reservation consumes shared capacity");
+  assert.ok(held.reservation_key);
+  const reheld = await risk(socket1,"reserve_recorded_replay_0001",reserveAction);
+  assert.equal(reheld.status,"HELD");
+  assert.equal(reheld.reservation_key,held.reservation_key,
+    "same source-bound intent does not allocate another reservation");
+  const afterHeld = Date.now();
+  const begin = await risk(socket1,"post_recorded_0001",{
+    action:"BEGIN_POST",
+    reservation_key:held.reservation_key,
+    plan_sha256:reserveAction.plan_sha256,
+    policy_revision:1,
+    expected_risk_book_sequence:held.risk_book_sequence,
+    source_proof_sha256:"f".repeat(64),
+    census:{
+      ...census,
+      source_digest:"e".repeat(64),
+      generated_at_ms:Math.max(afterHeld,observedAt+1),
+      source_read_floor_ms:Math.max(afterHeld,observedAt+1),
+    },
+    causal_proof:{
+      reserve_anchor:held.reservation_key,
+      native_incarnation:"a".repeat(32),
+      elapsed_to_proof_ms:30,
+      account_reads:[{
+        account_key:accountKey,private_generation:7,
+        source_read_id:"b".repeat(64),content_digest:census.content_digest,
+        started_after_held_ms:5,completed_after_held_ms:20,
+      }],
+    },
+  });
+  assert.equal(begin.status,"POST_AUTHORIZED",
+    "only the actual Worker CAS may fence the one possible venue POST");
+  const after = await summary(socket1,"risk_before_restart_001");
+  assert.equal(after.budget?.reserved_loss_usd,"1");
+  assert.equal(after.budget.entry_budget.reserved_usd,"2");
+  assert.equal(after.budget.entry_budget.consumed_usd,"0");
   socket1.ws.close();
   await first.dispose();
   first = null;
@@ -175,18 +296,33 @@ try {
   const persisted = await request(second, "/account-governance");
   assert.equal(persisted.status, 200);
   assert.equal(persisted.body.installation_id, configuration.installation_id);
+  assert.equal(persisted.body.accounts.length,1,"registered account is durable");
   const socket2 = await session(second);
   assert.ok(socket2.hello.connection_generation > socket1.hello.connection_generation,
     "restarted DO retains connection generation");
-  await summary(socket2, "risk_workerd_second_0002");
+  const restored = await summary(socket2, "risk_workerd_second_0002");
+  assert.equal(restored.budget?.reserved_loss_usd,"1");
+  assert.equal(restored.budget?.entry_budget?.reserved_usd,"2");
+  assert.equal(restored.budget?.entry_budget?.consumed_usd,"0");
+  const exactReplay = await risk(socket2,"reserve_recorded_later_0001",reserveAction);
+  assert.equal(exactReplay.status,"HELD");
+  assert.equal(exactReplay.reservation_key,held.reservation_key,
+    "worker restart cannot mint another reservation for the same intent");
+  const repeated = await summary(socket2,"risk_after_replay_0001");
+  assert.equal(repeated.budget?.reserved_loss_usd,"1");
+  assert.equal(repeated.budget?.entry_budget?.reserved_usd,"2");
   socket2.ws.close();
   console.log(JSON.stringify({
     suite:"runtime-session-sqlite-do",
     status:"PASS",
-    real_durable_object: true,
-    persisted_generation: true,
-    risk_book_source: "RuntimeSession.webSocketMessage",
-    risk_monetary_post_count: 0,
+    real_durable_object:true,
+    persisted_generation:true,
+    risk_book_source:"RuntimeSession.webSocketMessage",
+    authentic_reserve:true,
+    authentic_begin_post:true,
+    reserved_loss_usd:"1",
+    reserved_entry_usd:"2",
+    risk_monetary_post_count:0,
   }));
 } finally {
   if (first) await first.dispose();
