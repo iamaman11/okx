@@ -893,6 +893,30 @@ fn e1_partial_and_final_entry_settlement_are_monotone_and_not_double_counted() {
             reopened
                 .acknowledge_central_release("central-key", "signed-released")
                 .unwrap();
+            // The original fill-linked fee remains a single economic bill
+            // even when captured again after terminal RELEASE.
+            reopened
+                .ingest_page(&IngestPage {
+                    entry_order_fee_links: vec![EntryOrderFeeLink {
+                        bill_id: "first".into(),
+                        intent_id: "intent".into(),
+                        exchange_order_id: "venue-order".into(),
+                        instrument_id: "BTC-USDT-SWAP".into(),
+                        bill_at: 7,
+                        fee_usdt: Decimal::new(-1, 2),
+                    }],
+                    ..Default::default()
+                })
+                .unwrap();
+            assert!(!reopened.entry_late_pending("intent").unwrap());
+            assert_eq!(
+                reopened
+                    .intent_additional_entry_fee_evidence("intent", 9)
+                    .unwrap()
+                    .0,
+                Decimal::ZERO,
+                "original fill fee may not become a separate late debit"
+            );
             let late_fee = Decimal::new(-1, 2);
             reopened
                 .ingest_page(&IngestPage {
