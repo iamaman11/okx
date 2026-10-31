@@ -5,6 +5,37 @@ use okx_api::{
 };
 /// Immutable provenance for checking the fresh post-HELD FX rate against the
 /// exact native account that owns the central reservation.
+// A syntactically valid Worker response does not by itself grant authority
+// for this intent. Bind the actual receipt to this reservation and policy.
+fn risk_receipt_bound(
+    receipt: &RiskResult,
+    status: RiskDecisionStatus,
+    reservation_key: &str,
+    policy_revision: u64,
+) -> bool {
+    receipt.valid()
+        && receipt.status == status
+        && receipt.reservation_key.as_deref() == Some(reservation_key)
+        && receipt.policy_revision == Some(policy_revision)
+        && receipt.risk_book_sequence.is_some_and(|sequence| sequence > 0)
+}
+
+fn post_receipt_bound(
+    receipt: &RiskResult,
+    reservation_key: &str,
+    policy_revision: u64,
+    expected_sequence: u64,
+) -> bool {
+    risk_receipt_bound(
+        receipt,
+        RiskDecisionStatus::PostAuthorized,
+        reservation_key,
+        policy_revision,
+    ) && receipt
+        .risk_book_sequence
+        .is_some_and(|sequence| sequence > expected_sequence)
+}
+
 struct PostFxFence<'a> {
     owner: &'a AccountResources,
     conversion: &'a UsdConversion,
@@ -1085,9 +1116,18 @@ impl TradeService {
         r: &AccountResources,
     ) -> Result<RiskResult, (String, bool)> {
         let first = self.risk.request(command).await;
+        let expected_key = self.risk_reservation_key(r, intent);
         if let Ok(held) = &first
             && held.status == RiskDecisionStatus::Held
         {
+            if !risk_receipt_bound(
+                held,
+                RiskDecisionStatus::Held,
+                &expected_key,
+                state.state.revision,
+            ) {
+                return Err(("RESERVE_RECEIPT_BINDING_MISMATCH".into(), false));
+            }
             return Ok(held.clone());
         }
         // DENIED is not itself proof of no existing reservation: a replayed
@@ -1097,7 +1137,7 @@ impl TradeService {
             state,
             format!("inspect_{}", &intent.plan_hash[..32]),
             RiskCommandAction::Inspect {
-                reservation_key: self.risk_reservation_key(r, intent),
+                reservation_key: expected_key.clone(),
                 plan_sha256: intent.plan_hash.clone(),
             },
         );
@@ -1110,8 +1150,12 @@ impl TradeService {
         };
         match observed {
             Ok(reply)
-                if reply.status == RiskDecisionStatus::Observed
-                    && reply.reservation_state == Some(RiskReservationState::Held)
+                if risk_receipt_bound(
+                    &reply,
+                    RiskDecisionStatus::Observed,
+                    &expected_key,
+                    state.state.revision,
+                ) && reply.reservation_state == Some(RiskReservationState::Held)
                     && !central_denied =>
             {
                 // One original reservation is known; never replay stale
@@ -1259,7 +1303,12 @@ impl TradeService {
                 },
             );
             match self.risk.request(command).await {
-                Ok(v) if v.status == RiskDecisionStatus::PostAuthorized => return Ok(v),
+                Ok(v) if v.status == RiskDecisionStatus::PostAuthorized => {
+                    if !post_receipt_bound(&v, &key, state.state.revision, sequence) {
+                        return Err("POST_FENCE_RECEIPT_BINDING_MISMATCH".into());
+                    }
+                    return Ok(v);
+                }
                 Ok(v) if v.reason.as_deref() != Some("STALE_RISK_BOOK_SEQUENCE") => {
                     return Err(v.reason.unwrap_or("CENTRAL_POST_FENCE_DENIED".into()));
                 }
@@ -1276,7 +1325,13 @@ impl TradeService {
                         ))
                         .await
                         .map_err(str::to_owned)?;
-                    if inspected.reservation_state != Some(RiskReservationState::Held) {
+                    if !risk_receipt_bound(
+                        &inspected,
+                        RiskDecisionStatus::Observed,
+                        &key,
+                        state.state.revision,
+                    ) || inspected.reservation_state != Some(RiskReservationState::Held)
+                    {
                         return Err("POST_FENCE_OUTCOME_UNKNOWN_NO_POST".into());
                     }
                     sequence = inspected
@@ -2079,6 +2134,100 @@ where
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn central_binding_fixture(status: RiskDecisionStatus) -> RiskResult {
+        RiskResult {
+            schema: RISK_RESULT_SCHEMA_V1.into(),
+            command_id: "risk_receipt_fixture".into(),
+            status,
+            reason: None,
+            reservation_key: Some("reservation_expected".into()),
+            risk_book_sequence: Some(7),
+            policy_revision: Some(3),
+            existing_modelled_loss_usdt: if status == RiskDecisionStatus::PostAuthorized {
+                Some("0".into())
+            } else {
+                None
+            },
+            reservation_state: if status == RiskDecisionStatus::Observed {
+                Some(RiskReservationState::Held)
+            } else {
+                None
+            },
+            budget: None,
+            account_budget: None,
+        }
+    }
+
+    #[test]
+    fn t10_native_risk_receipt_cannot_authorize_another_reservation_or_policy() {
+        let expected_key = "reservation_expected";
+        let held = central_binding_fixture(RiskDecisionStatus::Held);
+        assert!(risk_receipt_bound(
+            &held,
+            RiskDecisionStatus::Held,
+            expected_key,
+            3,
+        ));
+        let observed = central_binding_fixture(RiskDecisionStatus::Observed);
+        assert!(risk_receipt_bound(
+            &observed,
+            RiskDecisionStatus::Observed,
+            expected_key,
+            3,
+        ));
+        for status in [RiskDecisionStatus::Held, RiskDecisionStatus::Observed] {
+            let original = central_binding_fixture(status);
+            assert!(original.valid());
+            let mut wrong_reservation = original.clone();
+            wrong_reservation.reservation_key = Some("reservation_other".into());
+            assert!(wrong_reservation.valid());
+            assert!(!risk_receipt_bound(
+                &wrong_reservation,
+                status,
+                expected_key,
+                3,
+            ));
+            let mut wrong_revision = original.clone();
+            wrong_revision.policy_revision = Some(4);
+            assert!(wrong_revision.valid());
+            assert!(!risk_receipt_bound(
+                &wrong_revision,
+                status,
+                expected_key,
+                3,
+            ));
+        }
+    }
+
+    #[test]
+    fn t10_native_post_fence_requires_matching_identity_revision_and_advanced_cas() {
+        let original = central_binding_fixture(RiskDecisionStatus::PostAuthorized);
+        assert!(original.valid());
+        assert!(post_receipt_bound(&original, "reservation_expected", 3, 6));
+        assert!(!post_receipt_bound(&original, "reservation_other", 3, 6));
+        assert!(!post_receipt_bound(&original, "reservation_expected", 4, 6));
+        assert!(!post_receipt_bound(&original, "reservation_expected", 3, 7));
+        assert!(!post_receipt_bound(&original, "reservation_expected", 3, 8));
+        let mut prior_sequence = original.clone();
+        prior_sequence.risk_book_sequence = Some(6);
+        assert!(prior_sequence.valid());
+        assert!(!post_receipt_bound(
+            &prior_sequence,
+            "reservation_expected",
+            3,
+            6,
+        ));
+        let mut malformed = original;
+        malformed.existing_modelled_loss_usdt = None;
+        assert!(!malformed.valid());
+        assert!(!post_receipt_bound(
+            &malformed,
+            "reservation_expected",
+            3,
+            6,
+        ));
+    }
 
     #[test]
     fn e1_positive_historical_usd_spot_is_classified_without_usdt_fx_guess() {
