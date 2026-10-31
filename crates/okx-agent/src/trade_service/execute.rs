@@ -112,13 +112,25 @@ impl TradeService {
         if summary.status != RiskDecisionStatus::Observed {
             return Err("ENTRY_OPENING_CENTRAL_SUMMARY_UNAVAILABLE".into());
         }
-        let entry = summary
+        let budget = summary
             .budget
-            .ok_or("ENTRY_OPENING_CENTRAL_BUDGET_MISSING")?
+            .ok_or("ENTRY_OPENING_CENTRAL_BUDGET_MISSING")?;
+        let entry = budget
             .entry_budget
             .ok_or("BASELINE_RECONCILIATION_REQUIRED")?;
+        let origin = budget
+            .campaign_origin
+            .ok_or("ENTRY_CAMPAIGN_ORIGIN_UNPROVEN")?;
+        if origin.installation_id != self.accounts.installation_id()
+            || origin.campaign_id != entry.campaign_id
+            || origin.campaign_id != state.state.campaign_id
+            || origin.started_at_ms > entry.opening_as_of_ms
+        {
+            return Err("ENTRY_CAMPAIGN_ORIGIN_MISMATCH".into());
+        }
         let from =
-            i64::try_from(entry.opening_as_of_ms).map_err(|_| "ENTRY_OPENING_CUTOFF_INVALID")?;
+            i64::try_from(origin.started_at_ms).map_err(|_| "ENTRY_OPENING_CUTOFF_INVALID")?;
+        let campaign = origin.campaign_id;
         let through = now().saturating_sub(2_000);
         if through <= from {
             return Err("ENTRY_OPENING_CAPTURE_PENDING".into());
@@ -135,11 +147,12 @@ impl TradeService {
             if !resource.source_identity_ready().await {
                 return Err("ENTRY_OPENING_IDENTITY_UNVERIFIED".into());
             }
+            let campaign = campaign.clone();
             resource
                 .execution
                 .store
                 .call(until, move |store| {
-                    store.verify_captured_campaign_continuity(from, through)
+                    store.verify_campaign_entry_readiness(&campaign, from, through)
                 })
                 .await
                 .map_err(err)?;
@@ -170,7 +183,35 @@ impl TradeService {
         let budget = summary
             .budget
             .ok_or("ENTRY_OPENING_CENTRAL_BUDGET_MISSING")?;
-        if budget.entry_budget.is_some() {
+        if let Some(entry) = budget.entry_budget {
+            let origin = budget
+                .campaign_origin
+                .ok_or("ENTRY_CAMPAIGN_ORIGIN_UNPROVEN")?;
+            if origin.installation_id != self.accounts.installation_id()
+                || origin.campaign_id != entry.campaign_id
+                || origin.campaign_id != state.state.campaign_id
+                || origin.started_at_ms > entry.opening_as_of_ms
+            {
+                return Err("ENTRY_CAMPAIGN_ORIGIN_MISMATCH".into());
+            }
+            let from = i64::try_from(origin.started_at_ms)
+                .map_err(|_| "ENTRY_CAMPAIGN_ORIGIN_INVALID")?;
+            let through = now().saturating_sub(2_000);
+            for account in state.state.accounts.iter().filter(|a| {
+                a.environment == okx_protocol::account_governance::AccountEnvironment::Real
+            }) {
+                if Instant::now() >= until {
+                    return Err("COMMAND_EXPIRED".into());
+                }
+                let resource = self.resources(&account.account_key).await?;
+                if !resource.source_identity_ready().await {
+                    return Err("ENTRY_OPENING_IDENTITY_UNVERIFIED".into());
+                }
+                let campaign = origin.campaign_id.clone();
+                resource.execution.store.call(until, move |store| {
+                    store.refresh_campaign_entry_readiness(&campaign, from, through)
+                }).await.map_err(err)?;
+            }
             return Ok(());
         }
         let origin = budget

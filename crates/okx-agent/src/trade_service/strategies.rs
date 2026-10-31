@@ -311,8 +311,22 @@ impl TradeService {
                     self.install_captured_empty_campaign_opening(&authority, until),
                 )
                 .await;
-                if let Ok(Err(reason)) = result {
-                    eprintln!("OKX_ENTRY_BASELINE_V1 state=PENDING reason={reason}");
+                match result {
+                    Ok(Ok(())) => {
+                        // A successfully reconciled source needs a fresh
+                        // cheap readiness read on the next maintenance turn.
+                        // Do not back off into 30s windows of stale admission.
+                        self.recovery_schedule.lock().await.finish(
+                            "campaign-opening",
+                            &authority.state.campaign_id,
+                        );
+                    }
+                    Ok(Err(reason)) => {
+                        eprintln!("OKX_ENTRY_BASELINE_V1 state=PENDING reason={reason}");
+                    }
+                    Err(_) => {
+                        eprintln!("OKX_ENTRY_BASELINE_V1 state=PENDING reason=TIMEOUT");
+                    }
                 }
             }
         }

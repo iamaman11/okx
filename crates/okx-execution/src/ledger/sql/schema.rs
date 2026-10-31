@@ -9,6 +9,40 @@ CREATE INDEX IF NOT EXISTS idx_finance_links_source ON finance_source_links(sour
 CREATE INDEX IF NOT EXISTS idx_fills_intent ON fills(intent_id,fill_id);
 CREATE INDEX IF NOT EXISTS idx_campaign_native_receipt_scan
     ON operation_receipts(kind,committed_at,operation_id);
+
+-- One durable invalidation fence for the existing financial SQL owner.
+-- New venue money or a changed native obligation makes admission stale;
+-- only background source reconciliation can stamp it as verified again.
+CREATE TABLE IF NOT EXISTS campaign_source_epoch(
+    id INTEGER PRIMARY KEY CHECK(id=1),
+    revision INTEGER NOT NULL CHECK(revision>=0)
+) STRICT;
+INSERT OR IGNORE INTO campaign_source_epoch VALUES(1,0);
+CREATE TABLE IF NOT EXISTS campaign_entry_readiness(
+    campaign_id TEXT PRIMARY KEY,
+    from_ms INTEGER NOT NULL,
+    covered_through_ms INTEGER NOT NULL,
+    source_revision INTEGER NOT NULL,
+    source_generations TEXT NOT NULL
+) STRICT;
+CREATE TRIGGER IF NOT EXISTS campaign_fill_invalidates_ready AFTER INSERT ON fills
+BEGIN UPDATE campaign_source_epoch SET revision=revision+1 WHERE id=1; END;
+CREATE TRIGGER IF NOT EXISTS campaign_bill_invalidates_ready AFTER INSERT ON bills
+BEGIN UPDATE campaign_source_epoch SET revision=revision+1 WHERE id=1; END;
+CREATE TRIGGER IF NOT EXISTS campaign_intent_invalidates_ready AFTER UPDATE OF state,exchange_order_id ON intents
+WHEN OLD.state!=NEW.state OR OLD.exchange_order_id IS NOT NEW.exchange_order_id
+BEGIN UPDATE campaign_source_epoch SET revision=revision+1 WHERE id=1; END;
+CREATE TRIGGER IF NOT EXISTS campaign_reserve_invalidates_ready AFTER INSERT ON risk_receipts
+BEGIN UPDATE campaign_source_epoch SET revision=revision+1 WHERE id=1; END;
+CREATE TRIGGER IF NOT EXISTS campaign_risk_invalidates_ready AFTER UPDATE OF state ON risk_receipts
+WHEN OLD.state!=NEW.state
+BEGIN UPDATE campaign_source_epoch SET revision=revision+1 WHERE id=1; END;
+CREATE TRIGGER IF NOT EXISTS campaign_settlement_invalidates_ready AFTER INSERT ON operation_receipts
+WHEN NEW.kind IN(
+    'ENTRY_SETTLEMENT_PROVEN','ENTRY_LATE_HEAD',
+    'ENTRY_LATE_SETTLEMENT_PROVEN','ENTRY_LATE_SETTLED',
+    'ENTRY_BILL_ORDER_SOURCE','ENTRY_ORDER_FEE_INDEX')
+BEGIN UPDATE campaign_source_epoch SET revision=revision+1 WHERE id=1; END;
 -- Append-only cumulative money evidence. Only the existing SQL owner
 -- advances the one campaign aggregate using independently verified receipts.
 CREATE TABLE IF NOT EXISTS campaign_entry_applied(

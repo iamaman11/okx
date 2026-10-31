@@ -426,6 +426,134 @@ impl AccountStore {
             .map(|_| ())
     }
 
+
+    fn campaign_source_epoch(&self) -> StoreResult<i64> {
+        self.connection
+            .query_row(
+                "SELECT revision FROM campaign_source_epoch WHERE id=1",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
+    }
+
+    fn campaign_source_generations(
+        frontiers: &[(&str, &str, i64, i64)],
+    ) -> String {
+        frontiers
+            .iter()
+            .map(|(source, partition, generation, _)| {
+                format!("{source}/{partition}:{generation}")
+            })
+            .collect::<Vec<_>>()
+            .join("|")
+    }
+
+    fn mark_campaign_readiness(
+        &self,
+        campaign_id: &str,
+        from_ms: i64,
+        through_ms: i64,
+        frontiers: &[(&str, &str, i64, i64)],
+    ) -> StoreResult<()> {
+        let epoch = self.campaign_source_epoch()?;
+        let generations = Self::campaign_source_generations(frontiers);
+        self.connection.execute(
+            "INSERT INTO campaign_entry_readiness VALUES(?1,?2,?3,?4,?5)
+             ON CONFLICT(campaign_id) DO UPDATE SET
+                 from_ms=excluded.from_ms,
+                 covered_through_ms=excluded.covered_through_ms,
+                 source_revision=excluded.source_revision,
+                 source_generations=excluded.source_generations",
+            params![campaign_id, from_ms, through_ms, epoch, generations],
+        )?;
+        Ok(())
+    }
+
+    /// The POST path reads only an addressable campaign receipt, a mutation
+    /// epoch and six source cursors. It NEVER joins archived fills/bills.
+    /// An unseen bill, UNKNOWN transition or recaptured source generation
+    /// invalidates this witness until maintenance reconciles it.
+    pub fn verify_campaign_entry_readiness(
+        &self,
+        campaign_id: &str,
+        from_ms: i64,
+        through_ms: i64,
+    ) -> StoreResult<()> {
+        let frontiers = self.captured_complete_frontiers(from_ms, through_ms)?;
+        let ready: Option<(i64, i64, i64, String)> = self
+            .connection
+            .query_row(
+                "SELECT from_ms,covered_through_ms,source_revision,source_generations
+                 FROM campaign_entry_readiness WHERE campaign_id=?1",
+                [campaign_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()?;
+        let Some((origin, covered, revision, generations)) = ready else {
+            return Err(StoreError::Invalid("CAMPAIGN_READINESS_NOT_RECONCILED"));
+        };
+        if origin != from_ms
+            || covered < through_ms
+            || revision != self.campaign_source_epoch()?
+            || generations != Self::campaign_source_generations(&frontiers)
+        {
+            return Err(StoreError::Invalid("CAMPAIGN_READINESS_STALE"));
+        }
+        // An attested capture with no durable economic total cannot
+        // mint a fresh RiskBook opening or authorize another admission.
+        let exists: bool = self.connection.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM campaign_entry_totals
+                WHERE campaign_id=?1 AND from_ms=?2
+                  AND covered_through_ms<=?3)",
+            params![campaign_id, from_ms, covered],
+            |row| row.get(0),
+        )?;
+        if !exists {
+            return Err(StoreError::Invalid("CAMPAIGN_APPLIED_FRONTIER_MISSING"));
+        }
+        Ok(())
+    }
+
+    /// Existing maintenance owner only; the fast path can advance source
+    /// coverage when no economic/native fact or source generation changed.
+    /// A revision change must revalidate the economic source before attesting.
+    pub fn refresh_campaign_entry_readiness(
+        &self,
+        campaign_id: &str,
+        from_ms: i64,
+        through_ms: i64,
+    ) -> StoreResult<()> {
+        let frontiers = self.captured_complete_frontiers(from_ms, through_ms)?;
+        let epoch = self.campaign_source_epoch()?;
+        let generations = Self::campaign_source_generations(&frontiers);
+        let previous: Option<(i64, i64, i64, String)> = self
+            .connection
+            .query_row(
+                "SELECT from_ms,covered_through_ms,source_revision,source_generations
+                 FROM campaign_entry_readiness WHERE campaign_id=?1",
+                [campaign_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()?;
+        if let Some((origin, covered, revision, prior_generations)) = previous
+            && origin == from_ms && covered <= through_ms
+            && revision == epoch && prior_generations == generations
+        {
+            // Only the six covered source watermarks advanced. No immutable
+            // economic row, native obligation or settlement receipt changed.
+            self.connection.execute(
+                "UPDATE campaign_entry_readiness SET covered_through_ms=?2
+                 WHERE campaign_id=?1 AND source_revision=?3",
+                params![campaign_id, through_ms, epoch],
+            )?;
+            return Ok(());
+        }
+        self.seal_captured_campaign_baseline(campaign_id, from_ms, through_ms)?;
+        Ok(())
+    }
+
     /// After a fully imported zero opening, a *completed previous* trade
     /// must not make the next risk-increasing order impossible. The only
     /// permissible post-opening monetary rows are terminal native intents
@@ -453,14 +581,27 @@ impl AccountStore {
                  OR i.exchange_order_id IS NULL
                  OR i.exchange_order_id!=f.exchange_order_id
                  OR i.begin_post_at IS NULL OR i.begin_post_at>f.time
-                 OR i.state NOT IN ('FILLED','CANCELLED')
                  OR p.side!=f.side
                  OR (i.risk_increase=1 AND
-                     (r.state IS NULL OR r.state!='RELEASED'
-                      OR r.plan_hash!=i.plan_hash
-                      OR e.kind IS NULL OR e.kind!='ENTRY_SETTLEMENT_PROVEN'
-                      OR e.request_hash!=i.plan_hash
-                      OR e.committed_at>?2)))
+                     (r.state IS NULL OR r.plan_hash!=i.plan_hash
+                      OR (
+                        i.state IN ('FILLED','CANCELLED') AND
+                        (r.state!='RELEASED'
+                         OR e.kind IS NULL OR e.kind!='ENTRY_SETTLEMENT_PROVEN'
+                         OR e.request_hash!=i.plan_hash OR e.committed_at>?2)
+                      )
+                      OR (
+                        i.state IN ('ACKNOWLEDGED','PARTIALLY_FILLED') AND
+                        (r.state!='POSTED' OR NOT EXISTS(
+                           SELECT 1 FROM operation_receipts a
+                           WHERE a.operation_id='entry-admission:'||i.intent_id
+                             AND a.kind='ENTRY_ADMISSION_PROVEN'
+                             AND a.request_hash=i.plan_hash))
+                      )
+                      OR i.state NOT IN
+                         ('FILLED','CANCELLED','ACKNOWLEDGED','PARTIALLY_FILLED')))
+                 OR (i.risk_increase=0 AND i.state NOT IN
+                     ('FILLED','CANCELLED','ACKNOWLEDGED','PARTIALLY_FILLED')))
                LIMIT 1)",
             params![from_ms, through_ms],
             |row| row.get(0),
@@ -514,17 +655,30 @@ impl AccountStore {
                 "ENTRY_POST_OPENING_BILL_NOT_RECONCILED",
             ));
         }
-        let exposures: i64 = self.connection.query_row(
+        // This is financial-source continuity, NOT a flat-account gate.
+        // Known posted/partially filled exposure remains covered by the
+        // original central reservation; the post-HELD native/venue census
+        // independently checks positions, orders, protection and total risk.
+        // PREPARED is unsent, RESERVED holds known risk. Neither is an
+        // unknown external economic event. POSTING/UNKNOWN cannot be
+        // presumed sent or not sent and block new risk until reconciliation.
+        let uncertain: i64 = self.connection.query_row(
             "SELECT EXISTS(
-               SELECT 1 FROM intents
-               WHERE state NOT IN ('REJECTED','CANCELLED','FILLED')
-             ) OR EXISTS(
-               SELECT 1 FROM position_lots WHERE remaining_qty!='0'
+               SELECT 1 FROM intents i
+               LEFT JOIN risk_receipts r ON r.intent_id=i.intent_id
+               WHERE i.state IN ('POSTING','UNKNOWN')
+                  OR (i.state='RESERVED' AND
+                      (r.state IS NULL OR r.state!='HELD'
+                       OR r.plan_hash!=i.plan_hash))
+                  OR (i.state IN ('ACKNOWLEDGED','PARTIALLY_FILLED') AND
+                      i.risk_increase=1 AND
+                      (r.state IS NULL OR r.state!='POSTED'
+                       OR r.plan_hash!=i.plan_hash))
              )",
             [],
             |row| row.get(0),
         )?;
-        if exposures != 0 {
+        if uncertain != 0 {
             return Err(StoreError::Invalid(
                 "ENTRY_POST_OPENING_NATIVE_EXPOSURE_UNRESOLVED",
             ));
@@ -784,6 +938,7 @@ impl AccountStore {
             {
                 return Err(StoreError::Invalid("CAMPAIGN_OPENING_RECEIPT_CONFLICT"));
             }
+            self.mark_campaign_readiness(campaign_id, from_ms, through_ms, &frontiers)?;
             return Ok((decimal(old_money)?, proof));
         }
         let (since, mut total) = match checkpoint.as_ref() {
@@ -1038,6 +1193,7 @@ impl AccountStore {
                 Decimal::ZERO,
                 Some(&zero),
             )?;
+            self.mark_campaign_readiness(campaign_id, from_ms, through_ms, &frontiers)?;
             return Ok((Decimal::ZERO, zero));
         }
         let canonical = serde_json::to_vec(&(
@@ -1094,6 +1250,7 @@ impl AccountStore {
         {
             return Err(StoreError::Invalid("ENTRY_OPENING_SQL_RECEIPT_CONFLICT"));
         }
+        self.mark_campaign_readiness(campaign_id, from_ms, through_ms, &frontiers)?;
         Ok((total, proof))
     }
 

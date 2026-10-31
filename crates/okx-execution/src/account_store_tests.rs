@@ -65,6 +65,83 @@ fn e1_zero_opening_aggregate_and_receipt_roll_back_together_on_conflict() {
 }
 
 #[test]
+fn e1_campaign_admission_requires_cached_economic_and_capture_revision() {
+    let mut s = store();
+    for (source, partition) in [
+        ("fills", "SPOT"),
+        ("fills", "MARGIN"),
+        ("fills", "SWAP"),
+        ("fills", "FUTURES"),
+        ("fills", "OPTION"),
+        ("bills", "account"),
+    ] {
+        s.ingest_page(&IngestPage {
+            cursor: Some(SourceCursor {
+                source: source.into(),
+                stream_partition: partition.into(),
+                cursor: String::new(),
+                watermark: 10,
+                generation: 1,
+                coverage_gaps: String::new(),
+            }),
+            ..Default::default()
+        }).unwrap();
+    }
+    let campaign = format!("sha256:{}", "c".repeat(64));
+    assert!(matches!(
+        s.verify_campaign_entry_readiness(&campaign, 2, 10),
+        Err(StoreError::Invalid("CAMPAIGN_READINESS_NOT_RECONCILED"))
+    ));
+    s.seal_captured_campaign_baseline(&campaign, 2, 10).unwrap();
+    s.verify_campaign_entry_readiness(&campaign, 2, 10).unwrap();
+    // No events changed; maintenance advances proof of source coverage in
+    // O(6) cursor reads, not by rescanning historic fills and bills.
+    for (source, partition) in [
+        ("fills", "SPOT"),
+        ("fills", "MARGIN"),
+        ("fills", "SWAP"),
+        ("fills", "FUTURES"),
+        ("fills", "OPTION"),
+        ("bills", "account"),
+    ] {
+        s.ingest_page(&IngestPage {
+            cursor: Some(SourceCursor {
+                source: source.into(),
+                stream_partition: partition.into(),
+                cursor: String::new(),
+                watermark: 11,
+                generation: 1,
+                coverage_gaps: String::new(),
+            }),
+            ..Default::default()
+        }).unwrap();
+    }
+    assert!(matches!(
+        s.verify_campaign_entry_readiness(&campaign, 2, 11),
+        Err(StoreError::Invalid("CAMPAIGN_READINESS_STALE"))
+    ));
+    s.refresh_campaign_entry_readiness(&campaign, 2, 11).unwrap();
+    s.verify_campaign_entry_readiness(&campaign, 2, 11).unwrap();
+    // A backdated non-transfer fee may not hide behind newer watermarks.
+    s.ingest_page(&IngestPage {
+        bills: vec![Bill {
+            bill_id: "late-unclassified".into(),
+            kind: "2:0".into(),
+            time: 9,
+            amount: Decimal::new(-1, 2),
+            currency: "USDT".into(),
+            economic_event_key: "bill:late-unclassified".into(),
+        }],
+        ..Default::default()
+    }).unwrap();
+    assert!(matches!(
+        s.verify_campaign_entry_readiness(&campaign, 2, 11),
+        Err(StoreError::Invalid("CAMPAIGN_READINESS_STALE"))
+    ));
+    assert!(s.refresh_campaign_entry_readiness(&campaign, 2, 11).is_err());
+}
+
+#[test]
 fn e1_sealed_campaign_refuses_backdated_unapplied_terminal_receipt() {
     let mut store = store();
     for (source, partition) in [
@@ -1684,6 +1761,89 @@ fn e1_t09_opening_rejects_cash_flows_and_nonterminal_risk() {
             .is_err(),
         "an unposted or unknown native intent never attests a flat campaign"
     );
+}
+
+#[test]
+fn e2_known_posted_exposure_is_not_mistaken_for_unsettled_history() {
+    let mut s = store();
+    let _ = intent(&mut s);
+    acknowledged_entry_intent(&mut s);
+    for (source, partition) in [
+        ("fills", "SPOT"),
+        ("fills", "MARGIN"),
+        ("fills", "SWAP"),
+        ("fills", "FUTURES"),
+        ("fills", "OPTION"),
+        ("bills", "account"),
+    ] {
+        s.ingest_page(&IngestPage {
+            cursor: Some(SourceCursor {
+                source: source.into(),
+                stream_partition: partition.into(),
+                cursor: String::new(),
+                watermark: 12,
+                generation: 1,
+                coverage_gaps: String::new(),
+            }),
+            ..Default::default()
+        }).unwrap();
+    }
+    // The central risk is POSTED and the venue ACK is known, although
+    // the order is not terminal. Financial readiness must not pretend that
+    // a known order is an unclassified external obligation.
+    s.verify_captured_campaign_continuity(2, 12).unwrap();
+    s.connection.execute(
+        "INSERT INTO position_lots VALUES(
+          'known-lot','manual','intent',NULL,'BTC-USDT-SWAP','long','1','100',5)",
+        [],
+    ).unwrap();
+    s.verify_captured_campaign_continuity(2, 12).unwrap();
+    // Risk census, NOT campaign history, must subsequently reconcile the
+    // protected position and both central reservations before any POST.
+    s.connection.execute(
+        "UPDATE intents SET state='UNKNOWN' WHERE intent_id='intent'",
+        [],
+    ).unwrap();
+    assert!(matches!(
+        s.verify_captured_campaign_continuity(2, 12),
+        Err(StoreError::Invalid("ENTRY_POST_OPENING_NATIVE_EXPOSURE_UNRESOLVED"))
+    ));
+}
+
+#[test]
+fn e2_active_reservation_requires_matching_central_receipt() {
+    let mut s = store();
+    let _ = intent(&mut s);
+    reserve(&mut s);
+    for (source, partition) in [
+        ("fills", "SPOT"),
+        ("fills", "MARGIN"),
+        ("fills", "SWAP"),
+        ("fills", "FUTURES"),
+        ("fills", "OPTION"),
+        ("bills", "account"),
+    ] {
+        s.ingest_page(&IngestPage {
+            cursor: Some(SourceCursor {
+                source: source.into(),
+                stream_partition: partition.into(),
+                cursor: String::new(),
+                watermark: 12,
+                generation: 1,
+                coverage_gaps: String::new(),
+            }),
+            ..Default::default()
+        }).unwrap();
+    }
+    s.verify_captured_campaign_continuity(2, 12).unwrap();
+    s.connection.execute(
+        "UPDATE risk_receipts SET state='UNKNOWN' WHERE intent_id='intent'",
+        [],
+    ).unwrap();
+    assert!(matches!(
+        s.verify_captured_campaign_continuity(2, 12),
+        Err(StoreError::Invalid("ENTRY_POST_OPENING_NATIVE_EXPOSURE_UNRESOLVED"))
+    ));
 }
 
 #[test]
