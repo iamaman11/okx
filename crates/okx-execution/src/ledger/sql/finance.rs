@@ -514,23 +514,45 @@ impl AccountStore {
                       JOIN intents i
                         ON i.exchange_order_id=source.exchange_order_id
                         AND i.instrument_id=source.instrument_id
+                      JOIN risk_receipts risk
+                        ON risk.intent_id=i.intent_id
+                        AND risk.state='RELEASED'
                       JOIN operation_receipts settled
                         ON settled.operation_id='entry-settlement:'||i.intent_id
                         AND settled.kind='ENTRY_SETTLEMENT_PROVEN'
+                        AND settled.request_hash=i.plan_hash
                         AND settled.rowid>?3
                       WHERE source.bill_id=b.bill_id
+                        AND i.risk_increase=1
+                        AND b.time<=CAST(json_extract(
+                            settled.result_ref,'$.source_covered_through_ms')
+                            AS INTEGER)
                     )
                     AND NOT EXISTS (
                       SELECT 1 FROM bill_order_sources source
                       JOIN intents i
                         ON i.exchange_order_id=source.exchange_order_id
                         AND i.instrument_id=source.instrument_id
+                      JOIN risk_receipts risk
+                        ON risk.intent_id=i.intent_id
+                        AND risk.state='RELEASED'
+                      JOIN operation_receipts head
+                        ON head.operation_id='entry-late-head:'||i.intent_id
+                        AND head.kind='ENTRY_LATE_HEAD'
                       JOIN operation_receipts late
                         ON late.kind='ENTRY_LATE_SETTLED'
                         AND late.rowid>?3
-                        AND late.operation_id LIKE
-                           'entry-late-settled:'||i.intent_id||':r%'
+                        AND late.operation_id=
+                            'entry-late-settled:'||i.intent_id||':r'||
+                            json_extract(head.result_ref,'$.settlement_revision')
+                        AND late.request_hash=i.plan_hash
+                        AND late.result_ref=
+                            json_extract(head.result_ref,'$.source_digest')
                       WHERE source.bill_id=b.bill_id
+                        AND i.risk_increase=1
+                        AND b.time<=CAST(json_extract(
+                            head.result_ref,'$.source_covered_through_ms')
+                            AS INTEGER)
                     )
                 )",
                 params![bill_after, bill_end, receipt_after, through_ms],
@@ -682,7 +704,7 @@ impl AccountStore {
                 return Ok(());
             }
             let rows = self.campaign_source_rowids()?;
-            let (fill_max, bill_max, receipt_max, _, _, late_epoch) = rows;
+            let (fill_max, bill_max, receipt_max, finance_max, flow_max, late_epoch) = rows;
             if late_epoch == late_floor {
                 let fill_end =
                     self.campaign_bounded_next_rowid("fills", fill_floor, fill_max)?;
@@ -717,6 +739,37 @@ impl AccountStore {
                     |r| r.get(0),
                 )?;
                 if !monetary_receipt {
+                    // Finance or cash-flow rows are durable economic facts.
+                    // A captured fill/bill cursor alone does not prove that
+                    // newly projected fees, funding or liabilities have been
+                    // reconciled to the independent central budget. The native
+                    // terminal/late settlement verifier remains mandatory
+                    // before admitting risk based on those changed sources.
+                    if finance_max > _finance_floor {
+                        // External capital transfers and realized PnL are
+                        // already owned by account NAV/loss accounting. Only
+                        // previously unpriced entry-related fees require a
+                        // terminal/late settlement receipt before the
+                        // independent ENTRY budget can be used again.
+                        let unpriced_fee: bool = self.connection.query_row(
+                            "SELECT EXISTS(
+                                SELECT 1 FROM finance_entries
+                                WHERE rowid>?1 AND rowid<=?2
+                                  AND component IN ('FEE','LIQUIDATION_COST')
+                            )",
+                            params![_finance_floor, finance_max],
+                            |r| r.get(0),
+                        )?;
+                        if unpriced_fee {
+                            return Err(StoreError::Invalid(
+                                "CAMPAIGN_NEW_FINANCE_REQUIRES_SETTLEMENT",
+                            ));
+                        }
+                    }
+                    // Cash flows change NAV and are independently checked by
+                    // the fresh account/post-HELD census. They are not another
+                    // purchase and must not consume the ENTRY budget.
+                    let _flow_changed = flow_max > _flow_floor;
                     self.verify_captured_campaign_continuity_rows(
                         from_ms, through_ms,
                         fill_floor, bill_floor, fill_end, bill_end,

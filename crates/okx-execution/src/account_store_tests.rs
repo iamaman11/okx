@@ -188,6 +188,53 @@ fn e1_campaign_readiness_epoch_ignores_known_intent_lifecycle_but_detects_new_fi
         s.verify_campaign_entry_readiness(&campaign, 2, 11),
         Err(StoreError::Invalid("CAMPAIGN_READINESS_STALE"))
     ));
+    assert!(matches!(
+        s.refresh_campaign_entry_readiness(&campaign, 2, 10),
+        Err(StoreError::Invalid("CAMPAIGN_NEW_FINANCE_REQUIRES_SETTLEMENT"))
+    ));
+    assert!(matches!(
+        s.verify_campaign_entry_readiness(&campaign, 2, 11),
+        Err(StoreError::Invalid("CAMPAIGN_READINESS_STALE"))
+    ));
+}
+
+#[test]
+fn e1_campaign_cash_flow_not_double_counted_as_entry() {
+    let mut s = store();
+    for (source, partition) in [
+        ("fills", "SPOT"), ("fills", "MARGIN"), ("fills", "SWAP"),
+        ("fills", "FUTURES"), ("fills", "OPTION"), ("bills", "account"),
+    ] {
+        s.ingest_page(&IngestPage {
+            cursor: Some(SourceCursor {
+                source: source.into(), stream_partition: partition.into(),
+                cursor: String::new(), watermark: 10, generation: 1,
+                coverage_gaps: String::new(),
+            }), ..Default::default()
+        }).unwrap();
+    }
+    let campaign = format!("sha256:{}", "c".repeat(64));
+    s.seal_captured_campaign_baseline(&campaign, 2, 10).unwrap();
+    s.ingest_page(&IngestPage {
+        cash_flows: vec![CashFlow {
+            event_id: "deposit-after-opening".into(),
+            kind: "DEPOSIT".into(),
+            currency: "USDT".into(),
+            amount: Decimal::ONE,
+            time: 9,
+            source_ref: "authenticated-deposit-source".into(),
+        }], ..Default::default()
+    }).unwrap();
+    assert!(matches!(
+        s.verify_campaign_entry_readiness(&campaign, 2, 11),
+        Err(StoreError::Invalid("CAMPAIGN_READINESS_STALE"))
+    ));
+    s.refresh_campaign_entry_readiness(&campaign, 2, 10).unwrap();
+    s.verify_campaign_entry_readiness(&campaign, 2, 11).unwrap();
+    let consumed: String = s.connection.query_row(
+        "SELECT consumed_usd FROM campaign_entry_totals WHERE campaign_id=?1",
+        [&campaign], |r| r.get(0)).unwrap();
+    assert_eq!(consumed, "0", "a deposit is not an entry buy");
 }
 
 #[test]

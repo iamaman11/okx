@@ -1381,6 +1381,7 @@ impl TradeService {
                 // if the underlying source timestamp is absent or stale.
                 let algo_source_floor = verified_algo_source_time(algos.received_at_ms, now())?;
                 let mut managed_algos = std::collections::BTreeSet::new();
+                let mut covered_position_count = 0_usize;
                 for p in &snapshot.positions {
                     let Some((position_direction, actual_qty)) =
                         super::reconcile::verified_venue_position_direction(
@@ -1390,6 +1391,7 @@ impl TradeService {
                     else {
                         continue;
                     };
+                    covered_position_count += 1;
                     let instrument = p.instrument_id.clone();
                     let lots = r
                         .execution
@@ -1447,6 +1449,7 @@ impl TradeService {
                         managed_algos.insert(protection.algo_id);
                     }
                 }
+                let mut covered_order_count = 0_usize;
                 for order in &snapshot.pending_orders {
                     let client = order
                         .client_order_id
@@ -1460,6 +1463,7 @@ impl TradeService {
                         .map_err(err)?;
                     let known = known.ok_or("UNATTRIBUTED_PENDING_ORDER")?;
                     verify_pending_order_binding(order, &known)?;
+                    covered_order_count += 1;
                 }
                 if algos
                     .samples
@@ -1535,21 +1539,23 @@ impl TradeService {
                     &financial.0.drawdown_ratio,
                     &financial.1,
                 ))?;
-                // No accepted monetary projection for independently occupied
-                // exposure exists yet. The central DO accounts for its own
-                // HELD grants separately, but a local open venue obligation
-                // must never be silently invented as "zero external risk".
-                // The first bounded acceptance supports a provably flat
-                // account; managed open exposure remains NO-GO until native
-                // position/order/stop monetary occupancy is source-proven.
-                let flat_occupied = certified_flat_external_exposure(
+                // Exactly matched native positions, venue orders and
+                // protection algos are already covered by independently held
+                // central RiskBook reservations. External occupancy is zero
+                // for this PROVEN managed set, not because the account is
+                // flat; Worker adds central charged risk separately.
+                // Any unmatched venue exposure fails closed above/below.
+                let external_occupied = certified_managed_external_exposure(
                     snapshot.positions.iter().map(|p| p.position.as_str()),
+                    covered_position_count,
                     snapshot.pending_orders.len(),
+                    covered_order_count,
                     algos.samples.len(),
+                    managed_algos.len(),
                 )?;
                 let occupancy = RiskAccountOccupancy {
                     account_key: c.account_key.clone(),
-                    occupied_usdt: flat_occupied.into(),
+                    occupied_usdt: external_occupied.into(),
                     cumulative_loss_usd: exact(financial.1),
                 };
                 let read = started
@@ -1637,23 +1643,34 @@ fn verified_algo_source_time(
     Ok(source)
 }
 
-/// E2 strict first-test boundary: a zero external occupancy witness can
-/// only be produced from a genuinely flat venue inventory. Matching SQL
-/// intent/central receipt IDs alone do not prove the monetary risk of an
-/// already-open position, active order or algo. Those require the full priced
-/// occupancy projection before allowing concurrent increases.
-fn certified_flat_external_exposure<'a>(
+/// A complete native census proves that all venue obligations are owned
+/// by currently held central risk, instead of requiring a flat account.
+/// Worker independently adds those central reservations to its risk book;
+/// returning that amount as "external" would double count the same loss.
+///
+/// Only the exact linked objects may count as managed. Unproven positions,
+/// orders or algos are rejected, never rounded down to zero.
+fn certified_managed_external_exposure<'a>(
     positions: impl IntoIterator<Item = &'a str>,
+    covered_positions: usize,
     open_orders: usize,
+    covered_orders: usize,
     conditional_orders: usize,
+    covered_algos: usize,
 ) -> Result<&'static str, String> {
-    if open_orders != 0 || conditional_orders != 0 {
-        return Err("COHORT_NONFLAT_EXPOSURE_UNPRICED".into());
-    }
+    let mut actual_positions = 0_usize;
     for amount in positions {
         if dec(amount)? != Decimal::ZERO {
-            return Err("COHORT_NONFLAT_EXPOSURE_UNPRICED".into());
+            actual_positions = actual_positions
+                .checked_add(1)
+                .ok_or("COHORT_POSITION_COUNT_OVERFLOW")?;
         }
+    }
+    if actual_positions != covered_positions
+        || open_orders != covered_orders
+        || conditional_orders != covered_algos
+    {
+        return Err("COHORT_UNMANAGED_EXTERNAL_EXPOSURE".into());
     }
     Ok("0")
 }
@@ -2409,26 +2426,28 @@ mod tests {
     }
 
     #[test]
-    fn e2_census_zero_risk_is_only_attested_for_actual_venue_flat() {
+    fn e2_census_zero_external_risk_requires_exact_managed_coverage() {
         assert_eq!(
-            certified_flat_external_exposure(["0", "0.000"].into_iter(), 0, 0),
+            certified_managed_external_exposure(["0", "0.000"].into_iter(), 0, 0, 0, 0, 0),
             Ok("0")
         );
         assert_eq!(
-            certified_flat_external_exposure(["0", "-0.01"].into_iter(), 0, 0),
-            Err("COHORT_NONFLAT_EXPOSURE_UNPRICED".into())
+            certified_managed_external_exposure(["0", "-0.01"].into_iter(), 0, 0, 0, 0, 0),
+            Err("COHORT_UNMANAGED_EXTERNAL_EXPOSURE".into())
         );
         assert_eq!(
-            certified_flat_external_exposure(["0"].into_iter(), 1, 0),
-            Err("COHORT_NONFLAT_EXPOSURE_UNPRICED".into())
+            certified_managed_external_exposure(["0"].into_iter(), 0, 1, 0, 0, 0),
+            Err("COHORT_UNMANAGED_EXTERNAL_EXPOSURE".into())
         );
         assert_eq!(
-            certified_flat_external_exposure(["0"].into_iter(), 0, 1),
-            Err("COHORT_NONFLAT_EXPOSURE_UNPRICED".into())
+            certified_managed_external_exposure(["0"].into_iter(), 0, 0, 0, 1, 0),
+            Err("COHORT_UNMANAGED_EXTERNAL_EXPOSURE".into())
         );
-        assert!(certified_flat_external_exposure(["unknown"].into_iter(), 0, 0).is_err());
+        assert!(certified_managed_external_exposure(["unknown"].into_iter(), 0, 0, 0, 0, 0).is_err());
         assert_eq!(
-            certified_flat_external_exposure(std::iter::empty::<&str>(), 0, 0),
+            certified_managed_external_exposure(
+                std::iter::empty::<&str>(), 0, 0, 0, 0, 0,
+            ),
             Ok("0")
         );
     }
@@ -2643,6 +2662,33 @@ mod tests {
         let mut terminal = intent;
         terminal.state = IntentState::Cancelled;
         assert!(verify_pending_order_binding(&order, &terminal).is_err());
+    }
+
+    #[test]
+    fn e2_managed_exposure_is_external_zero_only_after_exact_ownership_proof() {
+        assert_eq!(
+            certified_managed_external_exposure(["0", "0.5", "-1"].into_iter(), 2, 1, 1, 2, 2),
+            Ok("0")
+        );
+        assert_eq!(
+            certified_managed_external_exposure(["0"].into_iter(), 0, 0, 0, 0, 0),
+            Ok("0")
+        );
+        for (positions, managed, orders, checked, algos, protected) in [
+            (vec!["1"], 0, 0, 0, 0, 0),
+            (vec!["0"], 0, 1, 0, 0, 0),
+            (vec!["0"], 0, 0, 0, 1, 0),
+        ] {
+            assert_eq!(
+                certified_managed_external_exposure(
+                    positions, managed, orders, checked, algos, protected
+                ),
+                Err("COHORT_UNMANAGED_EXTERNAL_EXPOSURE".into())
+            );
+        }
+        assert!(certified_managed_external_exposure(
+            ["NaN"], 0, 0, 0, 0, 0
+        ).is_err());
     }
 
     #[test]
