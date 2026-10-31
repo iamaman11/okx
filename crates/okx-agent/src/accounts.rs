@@ -915,7 +915,7 @@ pub(crate) mod recorded_support {
         // identical to the signing identity that received the create ACK.
         if !account.starts_with("fixture-executor-") {
             return Err(OkxError::Response(
-                "TRANSCRIPT_HISTORY_EXECUTOR_IDENTITY_INVALID".into()
+                "TRANSCRIPT_HISTORY_EXECUTOR_IDENTITY_INVALID".into(),
             ));
         }
         for row in rows {
