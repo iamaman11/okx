@@ -1643,7 +1643,6 @@ pub(crate) mod recorded_support {
             assert!(bind_recorded_history_ids(&ack, "fixture-observer-a", unknown).is_err());
         }
     }
-
 }
 
 #[cfg(test)]
