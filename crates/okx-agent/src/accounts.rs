@@ -1098,13 +1098,13 @@ mod tests {
             .await
             .unwrap();
         let feed = Arc::new(RecordedAccountHttp::default());
-        let environment = OkxEnvironment::new(okx_api::Region::Global, false);
         let mut stopped_sql_owners = Vec::new();
 
         for label in ["a", "b"] {
             let (config, clients) = prepared(label, feed.clone());
             registry
-                .connect_prepared(config.clone(), clients)                .await
+                .connect_prepared(config.clone(), clients)
+                .await
                 .unwrap();
             let owner = registry.resolve(&config.account_key.wire()).await.unwrap();
             assert_eq!(owner.execution.uid(), config.account_key.verified_uid);
