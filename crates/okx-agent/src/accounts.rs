@@ -872,6 +872,8 @@ pub(crate) mod recorded_support {
         pub(crate) outbound_posts: Mutex<Vec<(String, String, serde_json::Value)>>,
         posts: Mutex<Vec<RecordedPost>>,
         reads: Mutex<Vec<RecordedGet>>,
+        // Raw public time responses, never a synthesized exchange clock.
+        public_clock_reads: Mutex<Vec<Vec<u8>>>,
         strict_read_routes: Mutex<std::collections::BTreeSet<(String, String)>>,
     }
     impl RecordedAccountHttp {
@@ -891,6 +893,14 @@ pub(crate) mod recorded_support {
             self.posts.lock().unwrap().push(post);
         }
 
+        pub(crate) fn expect_public_clock(&self, raw_response: Vec<u8>) {
+            self.public_clock_reads.lock().unwrap().push(raw_response);
+        }
+
+        pub(crate) fn unconsumed_public_clock(&self) -> usize {
+            self.public_clock_reads.lock().unwrap().len()
+        }
+
         pub(crate) fn unconsumed_posts(&self) -> usize {
             self.posts.lock().unwrap().len()
         }
@@ -900,6 +910,25 @@ pub(crate) mod recorded_support {
             Box::pin(async move {
                 if request.method() != "GET" && request.method() != "POST" {
                     return Err(OkxError::Response("TRANSCRIPT_METHOD_MISMATCH".into()));
+                }
+                // Public time is intentionally unsigned. One explicitly recorded
+                // raw response is consumed by the production clock parser.
+                // A missing/extra clock read is a hard transcript failure.
+                if request.method() == "GET"
+                    && request.url().path() == "/api/v5/public/time"
+                {
+                    let mut queued = self.public_clock_reads.lock().unwrap();
+                    if queued.is_empty() {
+                        return Err(OkxError::Response("TRANSCRIPT_CLOCK_EXHAUSTED".into()));
+                    }
+                    let body = queued.remove(0);
+                    drop(queued);
+                    self.requests.lock().unwrap().push("public:/api/v5/public/time".into());
+                    return Ok(RawHttpResponse {
+                        status: HttpStatusCode::OK,
+                        headers: Default::default(),
+                        body,
+                    });
                 }
                 let key = request
                     .headers()
@@ -951,6 +980,23 @@ pub(crate) mod recorded_support {
                         == Some("__REQUEST_CL_ORD_ID__")
                     {
                         body["clOrdId"] = client_id.into();
+                    }
+                    if let Some(attached) = body.get_mut("attachAlgoOrds")
+                        .and_then(serde_json::Value::as_array_mut)
+                    {
+                        for algo in attached {
+                            if algo.get("attachAlgoClOrdId")
+                                .and_then(serde_json::Value::as_str)
+                                == Some("__REQUEST_ATTACH_ALGO_ID__")
+                            {
+                                let prefix = client_id
+                                    .get(..31)
+                                    .ok_or_else(|| OkxError::Response(
+                                        "TRANSCRIPT_ATTACH_CLIENT_ID_INVALID".into()
+                                    ))?;
+                                algo["attachAlgoClOrdId"] = format!("s{prefix}").into();
+                            }
+                        }
                     }
                     if body != observed {
                         return Err(OkxError::Response("TRANSCRIPT_POST_BODY_MISMATCH".into()));

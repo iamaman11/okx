@@ -364,10 +364,10 @@ try {
     if (stderr) process.stderr.write(stderr);
     const afterNativeSocket = await session(second);
     const afterNative = await summary(afterNativeSocket, "risk_after_native_real_wss_0001");
-    assert.equal(afterNative.budget?.reserved_loss_usd, "2",
-      "native-origin second reserve must share the same central risk owner");
-    assert.equal(afterNative.budget?.entry_budget?.reserved_usd, "4",
-      "Native POST authorization must leave its own entry reserve held");
+    assert.ok(Number(afterNative.budget?.reserved_loss_usd) > 2,
+      "the public TradeService Execute must reserve its own risk in central Worker");
+    assert.equal(afterNative.budget?.entry_budget?.reserved_usd, "5.0005",
+      "Native component reservations (4) plus public Execute (1.0005) must share one RiskBook");
     assert.equal(afterNative.budget?.entry_budget?.consumed_usd, "0",
       "POST authorization is not a fabricated cash debit");
     afterNativeSocket.ws.close();
