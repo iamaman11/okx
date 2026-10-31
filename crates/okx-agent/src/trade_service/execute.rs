@@ -771,6 +771,7 @@ impl TradeService {
                     &state,
                     &held,
                     &prepared,
+                    &order.order_type,
                     until,
                     held_received,
                     PostFxFence {
@@ -1093,6 +1094,7 @@ impl TradeService {
         &self,
         r: &AccountResources,
         intent: &StoredIntent,
+        order_type: &str,
         until: Instant,
     ) -> Result<(), String> {
         let id = intent.intent_id.clone();
@@ -1103,6 +1105,14 @@ impl TradeService {
             .await
             .map_err(err)?
             .ok_or("POST_ENTRY_QUOTE_MISSING")?;
+        let admission_id = intent.intent_id.clone();
+        let admission = r
+            .execution
+            .store
+            .call(until, move |s| s.entry_admission(&admission_id))
+            .await
+            .map_err(err)?
+            .ok_or("POST_ENTRY_ADMISSION_MISSING")?;
         let rules = self
             .public_ws
             .instrument_rules(&intent.instrument_id)
@@ -1121,6 +1131,47 @@ impl TradeService {
         }
         let fx = Self::usd_conversion(&snap)?;
         verify_post_held_entry_sources(&quote, &fee, &rules.reference_generation, ct, &fx, now())?;
+        // Do not rely on the PRE-RESERVE account funds, borrowing or mode:
+        // they can change while the distributed reservation is HELD.
+        // Refuse the only possible POST unless the SAME production assessment
+        // still proves the ORIGINAL immutable USD upper and margin capacity.
+        let config = r.execution.account.config().await.map_err(err)?;
+        let leverage = dec(&r
+            .observer
+            .configured_leverage(
+                &intent.instrument_id,
+                okx_api::MarginMode::Cross,
+                if intent.plan.position_side == "long" {
+                    "long"
+                } else {
+                    "short"
+                },
+            )
+            .await
+            .map_err(err)?)?;
+        let current_quote = entry_budget::quote(
+            quote.quantity,
+            quote.contract_value,
+            quote.limit_price,
+            quote.fee_rate,
+            quote.usd_per_usdt,
+        )?;
+        let reassessed = entry_budget::EntryCostProof::source_valued_candidate(
+            current_quote,
+            &fx,
+            now(),
+        )?
+        .attest_linear_usdt_sources(
+            &intent.plan,
+            order_type,
+            &intent.instrument_id,
+            &rules,
+            &fee,
+            &config,
+            &snap,
+            leverage,
+        )?;
+        reassessed.verify_held_entry_admission(&quote, &admission)?;
         if Instant::now() >= until {
             return Err("COMMAND_EXPIRED".into());
         }
@@ -1132,6 +1183,7 @@ impl TradeService {
         state: &CentralGovernanceSnapshot,
         held: &RiskResult,
         intent: &StoredIntent,
+        order_type: &str,
         until: Instant,
         held_received: Instant,
         fx: PostFxFence<'_>,
@@ -1152,7 +1204,7 @@ impl TradeService {
             // A fresh census and a valid FX fence do not revalidate tariff or
             // contract mechanics. Bind the same immutable SQL quote against
             // actual post-HELD source data on EACH CAS attempt before POST.
-            self.revalidate_held_entry_quote(fx.owner, intent, until)
+            self.revalidate_held_entry_quote(fx.owner, intent, order_type, until)
                 .await?;
             let (census, causal_proof) = self
                 .census_after_held(
@@ -2140,6 +2192,62 @@ mod tests {
             quote.usd_per_usdt,
         )
         .unwrap();
+        // A post-HELD source check also needs fresh own collateral and
+        // borrowing evidence: fee/spec/FX parity alone never grants POST.
+        let mut held = entry_budget::EntryCostProof::source_valued_candidate(
+            known.clone(),
+            &fx,
+            t + 1,
+        )
+        .unwrap();
+        let source_digest = "c".repeat(64);
+        held.extra_immediate_fees = entry_budget::EntryCostEvidence::NotApplicable {
+            basis: "test-fee-source",
+            source_digest: source_digest.clone(),
+        };
+        held.borrowing = entry_budget::EntryCostEvidence::NotApplicable {
+            basis: "test-no-borrow",
+            source_digest: source_digest.clone(),
+        };
+        held.collateral_or_margin = entry_budget::EntryCostEvidence::Proven {
+            upper_usd: known.total_usd,
+            basis: "test-margin-source",
+            source_digest: source_digest.clone(),
+        };
+        held.available_collateral = entry_budget::EntryAvailableCollateral::Proven {
+            available_lower_usd: dec("200").unwrap(),
+            basis: "test-own-collateral",
+            source_digest,
+        };
+        let mut admission = okx_execution::EntryAdmissionEvidence {
+            schema: "okx.entry-admission/v2".into(),
+            account_key: quote.account_key.clone(),
+            installation_id: quote.installation_id.clone(),
+            intent_id: quote.intent_id.clone(),
+            plan_hash: quote.plan_hash.clone(),
+            quote_digest: "d".repeat(64),
+            admission_usd_per_usdt: Decimal::ONE,
+            other_entry_costs_upper_usd: Decimal::ZERO,
+            entry_upper_usd: known.total_usd,
+            entry_proof_digest: "e".repeat(64),
+            observed_at: t,
+        };
+        assert!(held.verify_held_entry_admission(&quote, &admission).is_ok());
+        admission.entry_upper_usd += Decimal::ONE;
+        assert_eq!(
+            held.verify_held_entry_admission(&quote, &admission),
+            Err("POST_ENTRY_ADMISSION_COST_CHANGED".into()),
+        );
+        admission.entry_upper_usd = known.total_usd;
+        held.available_collateral = entry_budget::EntryAvailableCollateral::Proven {
+            available_lower_usd: Decimal::ONE,
+            basis: "test-now-insufficient",
+            source_digest: "f".repeat(64),
+        };
+        assert_eq!(
+            held.verify_held_entry_admission(&quote, &admission),
+            Err("ENTRY_COLLATERAL_INSUFFICIENT".into()),
+        );
         let unproven = entry_budget::EntryCostProof::unproven_linear_quote(known.clone());
         assert_eq!(
             entry_budget::reserve_entry_evidence(&unproven, &quote, dec("101").unwrap()),

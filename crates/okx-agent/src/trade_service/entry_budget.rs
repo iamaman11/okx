@@ -433,6 +433,40 @@ impl EntryCostProof {
             .map(Some)
     }
 
+    /// After HELD, run the same source-backed assessment again using fresh
+    /// account, fee, product and FX reads. A new source generation is allowed
+    /// only when the previously reserved cost upper is still exactly valid.
+    /// The immutable admission is the authority; this cannot increase it.
+    pub(super) fn verify_held_entry_admission(
+        &self,
+        quote: &okx_execution::EntryQuoteEvidence,
+        admission: &okx_execution::EntryAdmissionEvidence,
+    ) -> Result<(), String> {
+        if admission.schema != "okx.entry-admission/v2"
+            || admission.account_key != quote.account_key
+            || admission.installation_id != quote.installation_id
+            || admission.intent_id != quote.intent_id
+            || admission.plan_hash != quote.plan_hash
+            || self.quote.total_usdt != quote.total_usdt
+            || self.quote.total_usd != quote.total_usd
+        {
+            return Err("POST_ENTRY_ADMISSION_IDENTITY_CHANGED".into());
+        }
+        let (rate, additional_fees) = self
+            .verified_fx_and_entry_fees()?
+            .ok_or("POST_ENTRY_FINANCIAL_SOURCES_UNPROVEN")?;
+        let current_upper = self
+            .proven_upper_usd()?
+            .ok_or("POST_ENTRY_FINANCIAL_SOURCES_UNPROVEN")?;
+        if rate != admission.admission_usd_per_usdt
+            || additional_fees != admission.other_entry_costs_upper_usd
+            || current_upper != admission.entry_upper_usd
+        {
+            return Err("POST_ENTRY_ADMISSION_COST_CHANGED".into());
+        }
+        Ok(())
+    }
+
     pub(super) fn missing_reasons(&self) -> Vec<&'static str> {
         [
             &self.extra_immediate_fees,
