@@ -782,25 +782,30 @@ impl AccountStore {
             flow_floor: i64,
             late_floor: i64,
         }
-        let previous: Option<Ready> = self.connection.query_row(
-            "SELECT from_ms,covered_through_ms,source_revision,source_generations,
+        let previous: Option<Ready> = self
+            .connection
+            .query_row(
+                "SELECT from_ms,covered_through_ms,source_revision,source_generations,
                     reviewed_fill_rowid,reviewed_bill_rowid,reviewed_receipt_rowid,
                     reviewed_finance_rowid,reviewed_flow_rowid,reviewed_late_epoch
              FROM campaign_entry_readiness WHERE campaign_id=?1",
-            [campaign_id],
-            |r| Ok(Ready {
-                origin: r.get(0)?,
-                covered: r.get(1)?,
-                revision: r.get(2)?,
-                prior_generations: r.get(3)?,
-                fill_floor: r.get(4)?,
-                bill_floor: r.get(5)?,
-                receipt_floor: r.get(6)?,
-                finance_floor: r.get(7)?,
-                flow_floor: r.get(8)?,
-                late_floor: r.get(9)?,
-            }),
-        ).optional()?;
+                [campaign_id],
+                |r| {
+                    Ok(Ready {
+                        origin: r.get(0)?,
+                        covered: r.get(1)?,
+                        revision: r.get(2)?,
+                        prior_generations: r.get(3)?,
+                        fill_floor: r.get(4)?,
+                        bill_floor: r.get(5)?,
+                        receipt_floor: r.get(6)?,
+                        finance_floor: r.get(7)?,
+                        flow_floor: r.get(8)?,
+                        late_floor: r.get(9)?,
+                    })
+                },
+            )
+            .optional()?;
         if let Some(Ready {
             origin,
             covered,
