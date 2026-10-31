@@ -372,6 +372,7 @@ const successor=await reserveRisk(sa,policy,successorCensus,
  successorRequest,successorProof);
 check(successor.status==="HELD",
  "same campaign must admit the second native intent after first RELEASE");
+if(successor.status!=="HELD")throw Error("second entry missing");
 const successorBudget=(await readRiskBook(sa))!.entry_budget!;
 check(successorBudget.consumed_usd==="1.5"&&
  successorBudget.reserved_usd==="0.5"&&
@@ -380,8 +381,8 @@ check(successorBudget.consumed_usd==="1.5"&&
  "second reserve consumes only remaining budget; no refund of first 1.5 USD");
 const successorReplay=await reserveRisk(sa,policy,successorCensus,
  successorRequest,successorProof);
-check(successorReplay.status==="HELD"&&
- successorReplay.entry.key===successor.entry.key&&
+if(successorReplay.status!=="HELD")throw Error("second reserve replay missing");
+check(successorReplay.entry.key===successor.entry.key&&
  (await readRiskBook(sa))!.entry_budget?.reserved_usd==="0.5",
  "second-intent lost reserve reply cannot allocate another 0.5 USD");
 console.log("e2_same_campaign_second_entry_after_terminal PASS");

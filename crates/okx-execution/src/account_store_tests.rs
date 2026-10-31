@@ -268,13 +268,16 @@ fn r4_followup_requires_terminal_native_fill_and_central_settlement() {
         "the actual SQL owner accepts the next central reservation after terminal"
     );
     assert!(
-        s.verify_captured_campaign_continuity(from, through).is_err(),
+        s.verify_captured_campaign_continuity(from, through)
+            .is_err(),
         "the new unfinished intent must prevent any third campaign opening"
     );
     assert!(
         matches!(
             s.seal_captured_campaign_baseline(&campaign, from, through),
-            Err(StoreError::Invalid("ENTRY_POST_OPENING_NATIVE_EXPOSURE_UNRESOLVED"))
+            Err(StoreError::Invalid(
+                "ENTRY_POST_OPENING_NATIVE_EXPOSURE_UNRESOLVED"
+            ))
         ),
         "the second intent may not silently disappear from the cohort proof"
     );
