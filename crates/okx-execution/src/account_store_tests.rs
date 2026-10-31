@@ -605,7 +605,9 @@ fn e1_e2_native_real_fee_sources_baseline_and_second_admission_under_ten() {
     s.verify_captured_campaign_continuity(2, 7).unwrap();
     let (current_risk, _) = s.risk_census_intents(100).unwrap();
     assert!(
-        current_risk.iter().any(|row| row.intent_id == successor.intent_id),
+        current_risk
+            .iter()
+            .any(|row| row.intent_id == successor.intent_id),
         "a known second central reservation stays visible to the risk census"
     );
 }
@@ -1601,7 +1603,9 @@ fn r4_followup_requires_terminal_native_fill_and_central_settlement() {
         .unwrap();
     let (current_risk, _) = s.risk_census_intents(100).unwrap();
     assert!(
-        current_risk.iter().any(|row| row.intent_id == successor.intent_id),
+        current_risk
+            .iter()
+            .any(|row| row.intent_id == successor.intent_id),
         "the known second central reservation must remain in risk census"
     );
     assert!(
