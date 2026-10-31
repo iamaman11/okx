@@ -1,11 +1,18 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use sha2::{Digest, Sha256};
 
 use crate::{OkxError, OkxRestClient, instrument::InstrumentType};
 
 const HISTORY_PAGE_LIMIT: usize = 100;
 const HISTORY_MAX_PAGES: usize = 1;
+// Campaign bootstrap is an explicit bounded operation, not a maintenance poll.
+const CAMPAIGN_ORDER_MAX_PAGES_PER_SOURCE: usize = 256;
+// Explicit bounded read footprint for one on-demand campaign reconstruction.
+const CAMPAIGN_MAX_EVIDENCE_ROWS: usize = 30_000;
+const CAMPAIGN_UNFILLED_CANCEL_RETENTION_MS: i64 = 2 * 60 * 60 * 1_000;
+const CAMPAIGN_RETENTION_SAFETY_MS: i64 = 60 * 1_000;
 const RECENT_ORDER_HISTORY_PATH: &str = "/api/v5/trade/orders-history";
 const ARCHIVE_ORDER_HISTORY_PATH: &str = "/api/v5/trade/orders-history-archive";
 
@@ -14,6 +21,44 @@ pub struct BoundedHistory<T> {
     pub rows: Vec<T>,
     pub pages: usize,
     pub complete: bool,
+}
+
+/// Source-bound result of TWO exhausted OKX order archives, not a
+/// partial 100-row sample. A valid campaign start is supplied by the
+/// existing authenticated installation authority, NEVER inferred here.
+#[derive(Debug, Clone)]
+pub struct CompleteCampaignOrderHistory {
+    pub from_ms: i64,
+    pub through_ms: i64,
+    pub instrument_type: String,
+    pub orders: Vec<HistoricalOrder>,
+    pub source_digest: String,
+}
+
+/// Complete authenticated venue *facts* for a campaign account, not a
+/// currency-converted entry expense. Only the native finance SQL owner,
+/// with verified account/cohort, campaign inception and FX sources, can
+/// turn this into an opening USD budget receipt.
+#[derive(Debug, Clone)]
+pub struct CompleteCampaignMoneyHistory {
+    pub from_ms: i64,
+    pub through_ms: i64,
+    pub fills: Vec<FillHistory>,
+    pub bills: Vec<AccountBill>,
+    pub source_digest: String,
+}
+
+/// One fixed-cut-off account-wide venue witness. Native account identity
+/// and original campaign inception MUST still be independently attested by
+/// the authenticated finance owner before any Worker budget opening.
+#[derive(Debug, Clone)]
+pub struct CompleteCampaignAccountHistory {
+    pub from_ms: i64,
+    pub through_ms: i64,
+    pub orders: Vec<HistoricalOrder>,
+    pub fills: Vec<FillHistory>,
+    pub bills: Vec<AccountBill>,
+    pub source_digest: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -210,7 +255,10 @@ impl AccountHistoryApi {
         end: i64,
         after: Option<&str>,
     ) -> Result<Vec<FillHistory>, OkxError> {
-        if !matches!(instrument_type, "SPOT" | "SWAP" | "FUTURES" | "OPTION") {
+        if !matches!(
+            instrument_type,
+            "SPOT" | "MARGIN" | "SWAP" | "FUTURES" | "OPTION"
+        ) {
             return Err(OkxError::Config("invalid history instrument type".into()));
         }
         let mut params = history_window_params(begin, end, after)?;
@@ -219,6 +267,270 @@ impl AccountHistoryApi {
             .private_get("/api/v5/trade/fills-history", &params)
             .await
     }
+    /// A complete opening campaign requires BOTH independent order sources:
+    /// recent orders include canceled/unfilled cases which the archived
+    /// endpoint may omit, while archived orders cover the longer history.
+    /// Never merge their pagination cursors or infer a gap-free result from
+    /// one bounded 100-row sample; each source must be exhausted separately.
+    pub async fn orders_history_page(
+        &self,
+        instrument_type: &str,
+        begin: i64,
+        end: i64,
+        after: Option<&str>,
+        archive: bool,
+    ) -> Result<Vec<HistoricalOrder>, OkxError> {
+        if !matches!(
+            instrument_type,
+            "SPOT" | "MARGIN" | "SWAP" | "FUTURES" | "OPTION"
+        ) {
+            return Err(OkxError::Config("invalid history instrument type".into()));
+        }
+        let mut params = history_window_params(begin, end, after)?;
+        params.push(("instType", instrument_type.into()));
+        self.client
+            .private_get(
+                if archive {
+                    ARCHIVE_ORDER_HISTORY_PATH
+                } else {
+                    RECENT_ORDER_HISTORY_PATH
+                },
+                &params,
+            )
+            .await
+    }
+
+    /// Complete monetary opening evidence for ONE authenticated account
+    /// at a fixed cut-off. Filled orders and ALL fill/bill events are
+    /// mandatory; canceled-without-fill orders outside the short recent
+    /// window are NOT part of consumed money. This is never proof of
+    /// absence of lost POSTs; recovery uses complete_campaign_orders.
+    /// Only the native SQL finance owner can classify the monetary events.
+    pub async fn complete_campaign_account_history(
+        &self,
+        started_at_ms: i64,
+        through_ms: i64,
+        observed_at_ms: i64,
+    ) -> Result<CompleteCampaignAccountHistory, OkxError> {
+        verify_campaign_money_window(started_at_ms, through_ms, observed_at_ms)?;
+        let mut orders = Vec::new();
+        for instrument_type in ["SPOT", "MARGIN", "SWAP", "FUTURES", "OPTION"] {
+            let proof = self
+                .complete_campaign_spend_orders(instrument_type, started_at_ms, through_ms)
+                .await?;
+            if orders.len().saturating_add(proof.orders.len()) > CAMPAIGN_MAX_EVIDENCE_ROWS {
+                return Err(OkxError::Response(
+                    "campaign order evidence capacity exceeded".into(),
+                ));
+            }
+            orders.extend(proof.orders);
+        }
+        let money = self
+            .complete_campaign_money_history(started_at_ms, through_ms, observed_at_ms)
+            .await?;
+        complete_campaign_account_witness(started_at_ms, through_ms, orders, money)
+    }
+
+    /// A campaign opening MUST NOT silently promote the archive's missing
+    /// canceled-without-fills orders to a zero-debit assertion. OKX retains
+    /// some incomplete canceled orders for only two hours. Use a fresh
+    /// bounded window, exhaust recent and archive separately, then bind
+    /// all returned economic identities into one content digest. Earlier
+    /// campaigns need independent archival authority, not this API.
+    pub async fn complete_campaign_orders(
+        &self,
+        instrument_type: &str,
+        campaign_started_at_ms: i64,
+        through_ms: i64,
+        observed_at_ms: i64,
+    ) -> Result<CompleteCampaignOrderHistory, OkxError> {
+        verify_campaign_order_window(campaign_started_at_ms, through_ms, observed_at_ms)?;
+        self.complete_campaign_spend_orders(instrument_type, campaign_started_at_ms, through_ms)
+            .await
+    }
+
+    /// Spend evidence can use full three-month completed-order archives.
+    /// It proves no negative result about canceled-unfilled orders and MUST
+    /// NOT be called by crash recovery or post-once admission logic.
+    async fn complete_campaign_spend_orders(
+        &self,
+        instrument_type: &str,
+        started_at_ms: i64,
+        through_ms: i64,
+    ) -> Result<CompleteCampaignOrderHistory, OkxError> {
+        let recent = self
+            .complete_order_source(instrument_type, started_at_ms, through_ms, false)
+            .await?;
+        let archive = self
+            .complete_order_source(instrument_type, started_at_ms, through_ms, true)
+            .await?;
+        complete_campaign_orders_witness(
+            instrument_type,
+            started_at_ms,
+            through_ms,
+            recent,
+            archive,
+        )
+    }
+
+    async fn complete_order_source(
+        &self,
+        instrument_type: &str,
+        begin: i64,
+        end: i64,
+        archive: bool,
+    ) -> Result<BoundedHistory<HistoricalOrder>, OkxError> {
+        let mut rows = Vec::new();
+        let mut after: Option<String> = None;
+        let mut seen_cursors = BTreeSet::new();
+        for page in 0..CAMPAIGN_ORDER_MAX_PAGES_PER_SOURCE {
+            let chunk = self
+                .orders_history_page(instrument_type, begin, end, after.as_deref(), archive)
+                .await?;
+            let count = chunk.len();
+            if count > HISTORY_PAGE_LIMIT {
+                return Err(OkxError::Response(
+                    "campaign order source returned an oversized page".into(),
+                ));
+            }
+            let next = if count == HISTORY_PAGE_LIMIT {
+                let last = chunk.last().ok_or_else(|| {
+                    OkxError::Response("campaign order source missing last row".into())
+                })?;
+                if last.order_id.is_empty()
+                    || !last.order_id.bytes().all(|b| b.is_ascii_digit())
+                    || !seen_cursors.insert(last.order_id.clone())
+                {
+                    return Err(OkxError::Response(
+                        "campaign order pagination stalled or invalid".into(),
+                    ));
+                }
+                Some(last.order_id.clone())
+            } else {
+                None
+            };
+            if rows.len().saturating_add(chunk.len()) > CAMPAIGN_MAX_EVIDENCE_ROWS {
+                return Err(OkxError::Response(
+                    "campaign order source capacity exceeded".into(),
+                ));
+            }
+            rows.extend(chunk);
+            if count < HISTORY_PAGE_LIMIT {
+                return Ok(BoundedHistory {
+                    rows,
+                    pages: page + 1,
+                    complete: true,
+                });
+            }
+            after = next;
+        }
+        Err(OkxError::Response(
+            "campaign order source exceeds bounded full-pagination capacity".into(),
+        ))
+    }
+
+    /// On-demand venue source for E1 campaign opening. Every instrument
+    /// partition and the full unfiltered bills stream are exhausted at the
+    /// SAME fixed cut-off. Partial pagination and missing fee bills fail
+    /// closed. This method DOES NOT assert a campaign inception, a USD FX
+    /// bound, or that source contents alone prove initial spending.
+    pub async fn complete_campaign_money_history(
+        &self,
+        started_at_ms: i64,
+        through_ms: i64,
+        observed_at_ms: i64,
+    ) -> Result<CompleteCampaignMoneyHistory, OkxError> {
+        verify_campaign_money_window(started_at_ms, through_ms, observed_at_ms)?;
+        let mut fills = Vec::new();
+        for instrument_type in ["SPOT", "MARGIN", "SWAP", "FUTURES", "OPTION"] {
+            let mut after: Option<String> = None;
+            let mut seen_cursors = BTreeSet::new();
+            let mut complete = false;
+            for _ in 0..CAMPAIGN_ORDER_MAX_PAGES_PER_SOURCE {
+                let rows = self
+                    .fills_history_page(
+                        instrument_type,
+                        started_at_ms,
+                        through_ms,
+                        after.as_deref(),
+                    )
+                    .await?;
+                let count = rows.len();
+                if count > HISTORY_PAGE_LIMIT {
+                    return Err(OkxError::Response("campaign fills page oversized".into()));
+                }
+                let next = if count == HISTORY_PAGE_LIMIT {
+                    let id = rows.last().map(|fill| fill.bill_id.as_str()).unwrap_or("");
+                    if !valid_campaign_cursor(id) || !seen_cursors.insert(id.to_owned()) {
+                        return Err(OkxError::Response(
+                            "campaign fills cursor invalid or stalled".into(),
+                        ));
+                    }
+                    Some(id.to_owned())
+                } else {
+                    None
+                };
+                if fills.len().saturating_add(rows.len()) > CAMPAIGN_MAX_EVIDENCE_ROWS {
+                    return Err(OkxError::Response(
+                        "campaign fill evidence capacity exceeded".into(),
+                    ));
+                }
+                fills.extend(rows);
+                if count < HISTORY_PAGE_LIMIT {
+                    complete = true;
+                    break;
+                }
+                after = next;
+            }
+            if !complete {
+                return Err(OkxError::Response(
+                    "campaign fills pagination incomplete".into(),
+                ));
+            }
+        }
+        let mut bills = Vec::new();
+        let mut after: Option<String> = None;
+        let mut seen_cursors = BTreeSet::new();
+        let mut complete = false;
+        for _ in 0..CAMPAIGN_ORDER_MAX_PAGES_PER_SOURCE {
+            let rows = self
+                .bills_history_page(started_at_ms, through_ms, after.as_deref())
+                .await?;
+            let count = rows.len();
+            if count > HISTORY_PAGE_LIMIT {
+                return Err(OkxError::Response("campaign bills page oversized".into()));
+            }
+            let next = if count == HISTORY_PAGE_LIMIT {
+                let id = rows.last().map(|bill| bill.bill_id.as_str()).unwrap_or("");
+                if !valid_campaign_cursor(id) || !seen_cursors.insert(id.to_owned()) {
+                    return Err(OkxError::Response(
+                        "campaign bills cursor invalid or stalled".into(),
+                    ));
+                }
+                Some(id.to_owned())
+            } else {
+                None
+            };
+            if bills.len().saturating_add(rows.len()) > CAMPAIGN_MAX_EVIDENCE_ROWS {
+                return Err(OkxError::Response(
+                    "campaign bill evidence capacity exceeded".into(),
+                ));
+            }
+            bills.extend(rows);
+            if count < HISTORY_PAGE_LIMIT {
+                complete = true;
+                break;
+            }
+            after = next;
+        }
+        if !complete {
+            return Err(OkxError::Response(
+                "campaign bills pagination incomplete".into(),
+            ));
+        }
+        complete_campaign_money_witness(started_at_ms, through_ms, fills, bills)
+    }
+
     pub async fn bills_history_page(
         &self,
         begin: i64,
@@ -409,6 +721,353 @@ fn history_window_params(
     Ok(params)
 }
 
+/// A monetary campaign audit does not need canceled/unfilled order
+/// history to establish entry spending. It DOES require a complete,
+/// gap-free venue fill AND bill archive from the externally proven campaign
+/// inception. Do not relax the separate two-hour lost-POST recovery proof.
+/// OKX's ordinary money archives retain the last three calendar months;
+/// reject the oldest day's ambiguous boundary rather than claiming zero.
+fn verify_campaign_money_window(
+    started_at_ms: i64,
+    through_ms: i64,
+    observed_at_ms: i64,
+) -> Result<(), OkxError> {
+    let observed = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(observed_at_ms)
+        .ok_or_else(|| OkxError::Config("campaign money observation time invalid".into()))?;
+    let floor = observed
+        .checked_sub_months(chrono::Months::new(3))
+        .ok_or_else(|| OkxError::Config("campaign money archive date invalid".into()))?
+        .timestamp_millis()
+        .checked_add(86_400_000)
+        .ok_or_else(|| OkxError::Config("campaign money archive date invalid".into()))?;
+    if started_at_ms <= 0
+        || through_ms < started_at_ms
+        || observed_at_ms < through_ms
+        || observed_at_ms - through_ms > CAMPAIGN_RETENTION_SAFETY_MS
+        || started_at_ms < floor
+    {
+        return Err(OkxError::Config(
+            "campaign fills and bills history outside provable archive".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// A venue history response contains no intrinsic campaign start. The
+/// caller must provide the immutable campaign inception, and that start
+/// must be within the weakest source's retention window. A minute of
+/// boundary headroom rejects ambiguous oldest canceled orders.
+fn verify_campaign_order_window(
+    started_at_ms: i64,
+    through_ms: i64,
+    observed_at_ms: i64,
+) -> Result<(), OkxError> {
+    if started_at_ms <= 0
+        || through_ms < started_at_ms
+        || observed_at_ms < through_ms
+        || observed_at_ms - through_ms > CAMPAIGN_RETENTION_SAFETY_MS
+        || observed_at_ms - started_at_ms
+            >= CAMPAIGN_UNFILLED_CANCEL_RETENTION_MS - CAMPAIGN_RETENTION_SAFETY_MS
+    {
+        return Err(OkxError::Config(
+            "campaign order start or cut-off outside provable venue history".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn complete_campaign_orders_witness(
+    instrument_type: &str,
+    from_ms: i64,
+    through_ms: i64,
+    recent: BoundedHistory<HistoricalOrder>,
+    archive: BoundedHistory<HistoricalOrder>,
+) -> Result<CompleteCampaignOrderHistory, OkxError> {
+    if !recent.complete || !archive.complete {
+        return Err(OkxError::Response(
+            "campaign order history pagination incomplete".into(),
+        ));
+    }
+    let merged = merge_order_histories(recent, archive)?;
+    if !merged.complete {
+        return Err(OkxError::Response(
+            "campaign order history pagination incomplete".into(),
+        ));
+    }
+    for order in &merged.rows {
+        if order.instrument_type != instrument_type
+            || order.order_id.is_empty()
+            || order
+                .creation_time_ms
+                .parse::<i64>()
+                .ok()
+                .is_none_or(|v| v < from_ms || v > through_ms)
+            || order
+                .update_time_ms
+                .parse::<i64>()
+                .ok()
+                .is_none_or(|v| v < from_ms || v > through_ms)
+        {
+            return Err(OkxError::Response(
+                "campaign order history scope or causal time invalid".into(),
+            ));
+        }
+    }
+    let canonical = serde_json::to_vec(&(
+        "okx.campaign-orders-window/v1",
+        instrument_type,
+        from_ms,
+        through_ms,
+        &merged.rows,
+    ))
+    .map_err(|_| OkxError::Response("campaign order digest serialization failed".into()))?;
+    Ok(CompleteCampaignOrderHistory {
+        from_ms,
+        through_ms,
+        instrument_type: instrument_type.into(),
+        orders: merged.rows,
+        source_digest: format!("{:x}", Sha256::digest(canonical)),
+    })
+}
+
+/// Exact joins of authenticated venue economic facts. Contract valuation,
+/// historic FX and campaign start provenance are NOT asserted here.
+fn complete_campaign_account_witness(
+    from_ms: i64,
+    through_ms: i64,
+    mut orders: Vec<HistoricalOrder>,
+    money: CompleteCampaignMoneyHistory,
+) -> Result<CompleteCampaignAccountHistory, OkxError> {
+    if from_ms <= 0
+        || through_ms < from_ms
+        || money.from_ms != from_ms
+        || money.through_ms != through_ms
+    {
+        return Err(OkxError::Response(
+            "campaign account source cut-off mismatch".into(),
+        ));
+    }
+    let mut seen = BTreeMap::new();
+    for order in &orders {
+        if order.order_id.is_empty()
+            || !matches!(
+                order.instrument_type.as_str(),
+                "SPOT" | "MARGIN" | "SWAP" | "FUTURES" | "OPTION"
+            )
+            || order
+                .creation_time_ms
+                .parse::<i64>()
+                .ok()
+                .is_none_or(|v| v < from_ms || v > through_ms)
+            || order
+                .update_time_ms
+                .parse::<i64>()
+                .ok()
+                .is_none_or(|v| v < from_ms || v > through_ms)
+            || seen.insert(order.order_id.as_str(), order).is_some()
+        {
+            return Err(OkxError::Response(
+                "campaign account order identity conflict".into(),
+            ));
+        }
+    }
+    let mut executed = BTreeMap::<&str, rust_decimal::Decimal>::new();
+    for fill in &money.fills {
+        let order = seen
+            .get(fill.order_id.as_str())
+            .ok_or_else(|| OkxError::Response("campaign fill has no proven venue order".into()))?;
+        if order.instrument_id != fill.instrument_id
+            || order.instrument_type != fill.instrument_type
+        {
+            return Err(OkxError::Response(
+                "campaign fill order instrument mismatch".into(),
+            ));
+        }
+        let size = fill
+            .fill_size
+            .parse::<rust_decimal::Decimal>()
+            .map_err(|_| OkxError::Response("campaign fill quantity invalid".into()))?;
+        let previous = executed
+            .get(fill.order_id.as_str())
+            .copied()
+            .unwrap_or(rust_decimal::Decimal::ZERO);
+        let new = previous
+            .checked_add(size)
+            .ok_or_else(|| OkxError::Response("campaign fill quantity overflow".into()))?;
+        executed.insert(fill.order_id.as_str(), new);
+    }
+    for order in &orders {
+        let order_size = order
+            .accumulated_fill_size
+            .parse::<rust_decimal::Decimal>()
+            .map_err(|_| OkxError::Response("campaign venue order filled size invalid".into()))?;
+        if order_size < rust_decimal::Decimal::ZERO
+            || executed
+                .get(order.order_id.as_str())
+                .copied()
+                .unwrap_or(rust_decimal::Decimal::ZERO)
+                != order_size
+        {
+            return Err(OkxError::Response(
+                "campaign venue order and fills disagree".into(),
+            ));
+        }
+    }
+    // A financial bill referencing an order outside the authoritative
+    // window is an unproven obligation, not an extra zero-cost row.
+    for bill in &money.bills {
+        if !bill.order_id.is_empty()
+            && bill.order_id != "0"
+            && !seen.contains_key(bill.order_id.as_str())
+        {
+            return Err(OkxError::Response(
+                "campaign bill refers to an unproven venue order".into(),
+            ));
+        }
+    }
+    // Bills without an order identifier (e.g. funding or account transfers)
+    // remain raw evidence; their economic meaning/currency must be classified
+    // by the SQL finance owner, not silently interpreted as zero entry cost.
+    orders.sort_by(|a, b| a.order_id.cmp(&b.order_id));
+    let encoded = serde_json::to_vec(&(
+        "okx.campaign-account-history/v1",
+        from_ms,
+        through_ms,
+        &orders,
+        &money.source_digest,
+    ))
+    .map_err(|_| OkxError::Response("campaign account digest invalid".into()))?;
+    Ok(CompleteCampaignAccountHistory {
+        from_ms,
+        through_ms,
+        orders,
+        fills: money.fills,
+        bills: money.bills,
+        source_digest: format!("{:x}", Sha256::digest(encoded)),
+    })
+}
+
+fn valid_campaign_cursor(value: &str) -> bool {
+    !value.is_empty() && value.len() <= 64 && value.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// Pure owner-independent source consistency, not a finance authorization.
+/// Hash source facts only after validating every native fill and fee bill.
+fn complete_campaign_money_witness(
+    from_ms: i64,
+    through_ms: i64,
+    mut fills: Vec<FillHistory>,
+    mut bills: Vec<AccountBill>,
+) -> Result<CompleteCampaignMoneyHistory, OkxError> {
+    if from_ms <= 0 || through_ms < from_ms {
+        return Err(OkxError::Response("campaign money window invalid".into()));
+    }
+    let mut fill_ids = BTreeSet::new();
+    let mut bill_ids = BTreeSet::new();
+    for fill in &fills {
+        let ts = if fill.fill_time_ms.is_empty() {
+            &fill.timestamp_ms
+        } else {
+            &fill.fill_time_ms
+        };
+        let when = ts
+            .parse::<i64>()
+            .ok()
+            .filter(|v| *v >= from_ms && *v <= through_ms);
+        if !matches!(
+            fill.instrument_type.as_str(),
+            "SPOT" | "MARGIN" | "SWAP" | "FUTURES" | "OPTION"
+        ) || when.is_none()
+            || fill.instrument_id.is_empty()
+            || !valid_campaign_cursor(&fill.bill_id)
+            || fill.trade_id.is_empty()
+            || fill.order_id.is_empty()
+            || fill.fee.is_empty()
+            || fill.fee_currency.is_empty()
+            || fill
+                .fill_price
+                .parse::<rust_decimal::Decimal>()
+                .ok()
+                .is_none_or(|v| v <= rust_decimal::Decimal::ZERO)
+            || fill
+                .fill_size
+                .parse::<rust_decimal::Decimal>()
+                .ok()
+                .is_none_or(|v| v <= rust_decimal::Decimal::ZERO)
+            || fill.fee.parse::<rust_decimal::Decimal>().is_err()
+            || !fill_ids.insert((
+                fill.instrument_id.clone(),
+                fill.trade_id.clone(),
+                fill.order_id.clone(),
+            ))
+        {
+            return Err(OkxError::Response(
+                "campaign fill identity, currency or scope unproven".into(),
+            ));
+        }
+    }
+    for bill in &bills {
+        if !valid_campaign_cursor(&bill.bill_id)
+            || bill
+                .timestamp_ms
+                .parse::<i64>()
+                .ok()
+                .is_none_or(|v| v < from_ms || v > through_ms)
+            || bill.ccy.is_empty()
+            || !bill_ids.insert(bill.bill_id.clone())
+            || (!bill.fee.is_empty() && bill.fee.parse::<rust_decimal::Decimal>().is_err())
+        {
+            return Err(OkxError::Response(
+                "campaign bill identity, currency or scope unproven".into(),
+            ));
+        }
+    }
+    // The evidence can contain thousands of fills/bills: use indexed joins
+    // rather than O(fills × bills) scans inside the single native reader.
+    let billed: BTreeMap<&str, &AccountBill> = bills
+        .iter()
+        .map(|bill| (bill.bill_id.as_str(), bill))
+        .collect();
+    for fill in &fills {
+        let bill = billed
+            .get(fill.bill_id.as_str())
+            .ok_or_else(|| OkxError::Response("campaign fill fee bill unavailable".into()))?;
+        if bill.ccy != fill.fee_currency
+            || !bill.order_id.is_empty() && bill.order_id != "0" && bill.order_id != fill.order_id
+            || !bill.trade_id.is_empty() && bill.trade_id != "0" && bill.trade_id != fill.trade_id
+            || bill.fee.parse::<rust_decimal::Decimal>().ok()
+                != fill.fee.parse::<rust_decimal::Decimal>().ok()
+        {
+            return Err(OkxError::Response(
+                "campaign fill and fee bill disagree".into(),
+            ));
+        }
+    }
+    fills.sort_by(|a, b| {
+        (&a.instrument_id, &a.trade_id, &a.order_id).cmp(&(
+            &b.instrument_id,
+            &b.trade_id,
+            &b.order_id,
+        ))
+    });
+    bills.sort_by(|a, b| a.bill_id.cmp(&b.bill_id));
+    let bytes = serde_json::to_vec(&(
+        "okx.campaign-money-window/v1",
+        from_ms,
+        through_ms,
+        &fills,
+        &bills,
+    ))
+    .map_err(|_| OkxError::Response("campaign money digest invalid".into()))?;
+    Ok(CompleteCampaignMoneyHistory {
+        from_ms,
+        through_ms,
+        fills,
+        bills,
+        source_digest: format!("{:x}", Sha256::digest(bytes)),
+    })
+}
+
 fn merge_order_histories(
     recent: BoundedHistory<HistoricalOrder>,
     archive: BoundedHistory<HistoricalOrder>,
@@ -461,6 +1120,24 @@ fn merge_order_histories(
                         "archive order history contains invalid uTime for ordId {order_id}"
                     ))
                 })?;
+                // A merge is only a choice between different snapshots in
+                // time, not permission to rewrite an economic event. Equal
+                // uTime on independently authenticated endpoints must agree
+                // on all fields that affect order accounting. Otherwise the
+                // result depends on endpoint enumeration order.
+                if timestamp == prior
+                    && (previous.state != order.state
+                        || previous.accumulated_fill_size != order.accumulated_fill_size
+                        || previous.average_fill_price != order.average_fill_price
+                        || previous.fee != order.fee
+                        || previous.fee_currency != order.fee_currency
+                        || previous.order_type != order.order_type
+                        || previous.creation_time_ms != order.creation_time_ms)
+                {
+                    return Err(OkxError::Response(format!(
+                        "recent/archive order economic conflict for ordId {order_id}"
+                    )));
+                }
                 if timestamp >= prior {
                     orders.insert(order_id.to_owned(), order);
                 }
@@ -661,6 +1338,290 @@ mod tests {
         assert_eq!(bill.bill_sub_type, "173");
         assert_eq!(bill.position_balance_change, "-0.05");
         assert_eq!(bill.timestamp_ms, "1790884800000");
+    }
+
+    #[test]
+    fn seven_day_zero_spend_source_never_claims_seven_day_lost_post_proof() {
+        let observed = chrono::DateTime::parse_from_rfc3339("2026-10-30T12:00:00Z")
+            .unwrap()
+            .timestamp_millis();
+        let beginning = observed - 7 * 86_400_000;
+        // Full authenticated empty finance windows may support later
+        // native dollar classification. They are still NOT themselves an
+        // all-cohort RiskBook opening or a lost-POST absence assertion.
+        assert!(verify_campaign_money_window(beginning, observed, observed).is_ok());
+        assert!(verify_campaign_order_window(beginning, observed, observed).is_err());
+        let money = complete_campaign_money_witness(beginning, observed, vec![], vec![]).unwrap();
+        let source = complete_campaign_account_witness(beginning, observed, vec![], money).unwrap();
+        assert!(source.orders.is_empty());
+        assert!(source.fills.is_empty());
+        assert!(source.bills.is_empty());
+        assert_eq!(source.source_digest.len(), 64);
+        // Monetary ambiguity is not suppressed by the missing canceled
+        // order history: an unexplained bill still blocks this witness.
+        let foreign: AccountBill = serde_json::from_value(serde_json::json!({
+            "billId":"123456","ordId":"unproven_order","ccy":"USDT",
+            "fee":"0","ts":(beginning+1000).to_string()
+        }))
+        .unwrap();
+        let money =
+            complete_campaign_money_witness(beginning, observed, vec![], vec![foreign]).unwrap();
+        assert!(complete_campaign_account_witness(beginning, observed, vec![], money).is_err());
+    }
+
+    #[test]
+    fn campaign_account_history_rejects_missing_order_and_fill_quantity_mismatch() {
+        let from_ms = 1_791_579_300_000i64;
+        let through_ms = from_ms + 20_000;
+        let order = canceled_demo_order("123456", &(from_ms + 1_000).to_string());
+        let empty = complete_campaign_money_witness(from_ms, through_ms, vec![], vec![]).unwrap();
+        let source = complete_campaign_account_witness(
+            from_ms,
+            through_ms,
+            vec![order.clone()],
+            empty.clone(),
+        )
+        .unwrap();
+        assert_eq!(source.orders.len(), 1);
+        assert_eq!(source.source_digest.len(), 64);
+        let mut erroneously_filled = order.clone();
+        erroneously_filled.accumulated_fill_size = "1".into();
+        assert!(
+            complete_campaign_account_witness(
+                from_ms,
+                through_ms,
+                vec![erroneously_filled],
+                empty.clone()
+            )
+            .is_err()
+        );
+        assert!(
+            complete_campaign_account_witness(
+                from_ms,
+                through_ms,
+                vec![order.clone(), order.clone()],
+                empty.clone()
+            )
+            .is_err()
+        );
+        let unrelated_bill: AccountBill = serde_json::from_value(serde_json::json!({
+            "billId":"7654321","ordId":"not_observed_order",
+            "ccy":"USDT","fee":"0","ts":(from_ms+1_000).to_string()
+        }))
+        .unwrap();
+        let unlinked =
+            complete_campaign_money_witness(from_ms, through_ms, vec![], vec![unrelated_bill])
+                .unwrap();
+        assert!(
+            complete_campaign_account_witness(from_ms, through_ms, vec![order.clone()], unlinked)
+                .is_err()
+        );
+        let other =
+            complete_campaign_money_witness(from_ms + 1, through_ms, vec![], vec![]).unwrap();
+        assert!(
+            complete_campaign_account_witness(from_ms, through_ms, vec![order], other).is_err()
+        );
+    }
+
+    #[test]
+    fn campaign_money_window_binds_immutable_order_fill_to_original_fee_bill() {
+        let begin = 1_800_000_000_000i64;
+        let end = begin + 10_000;
+        let fill: FillHistory = serde_json::from_value(serde_json::json!({
+            "instType":"SWAP","instId":"BTC-USDT-SWAP","tradeId":"trade001",
+            "ordId":"order001","billId":"123","fillPx":"100","fillSz":"1",
+            "fee":"-0.05","feeCcy":"USDT","fillTime":(begin+1_000).to_string()
+        }))
+        .unwrap();
+        let bill: AccountBill = serde_json::from_value(serde_json::json!({
+            "billId":"123","instType":"SWAP","instId":"BTC-USDT-SWAP",
+            "ordId":"order001","tradeId":"trade001","ccy":"USDT",
+            "fee":"-0.05","ts":(begin+1_001).to_string()
+        }))
+        .unwrap();
+        let source =
+            complete_campaign_money_witness(begin, end, vec![fill.clone()], vec![bill.clone()])
+                .unwrap();
+        assert_eq!(source.fills.len(), 1);
+        assert_eq!(source.bills.len(), 1);
+        assert_eq!(source.source_digest.len(), 64);
+        assert_eq!(
+            complete_campaign_money_witness(begin, end, vec![fill.clone()], vec![bill.clone()])
+                .unwrap()
+                .source_digest,
+            source.source_digest
+        );
+        assert!(complete_campaign_money_witness(begin, end, vec![fill.clone()], vec![]).is_err());
+        let mut different_currency = bill.clone();
+        different_currency.ccy = "BTC".into();
+        assert!(
+            complete_campaign_money_witness(
+                begin,
+                end,
+                vec![fill.clone()],
+                vec![different_currency]
+            )
+            .is_err()
+        );
+        let mut altered_fee = bill.clone();
+        altered_fee.fee = "-0.06".into();
+        assert!(
+            complete_campaign_money_witness(begin, end, vec![fill.clone()], vec![altered_fee])
+                .is_err()
+        );
+        assert!(
+            complete_campaign_money_witness(
+                begin,
+                end,
+                vec![fill.clone(), fill.clone()],
+                vec![bill.clone()]
+            )
+            .is_err()
+        );
+        let mut stale = fill;
+        stale.fill_time_ms = (begin - 1).to_string();
+        assert!(complete_campaign_money_witness(begin, end, vec![stale], vec![bill]).is_err());
+    }
+
+    #[test]
+    fn same_time_conflicting_archive_fills_cannot_mint_campaign_history() {
+        let mut original = canceled_demo_order("123456", "1791579301000");
+        original.accumulated_fill_size = "1".into();
+        original.fee = "-0.01".into();
+        let mut changed = original.clone();
+        changed.accumulated_fill_size = "2".into();
+        let source = BoundedHistory {
+            rows: vec![original],
+            pages: 1,
+            complete: true,
+        };
+        let archive = BoundedHistory {
+            rows: vec![changed],
+            pages: 1,
+            complete: true,
+        };
+        assert!(merge_order_histories(source, archive).is_err());
+    }
+
+    #[test]
+    fn money_archive_and_lost_post_history_have_distinct_retention_gates() {
+        let observed = chrono::DateTime::parse_from_rfc3339("2026-10-30T12:00:00Z")
+            .unwrap()
+            .timestamp_millis();
+        let from = observed - 7 * 86_400_000;
+        assert!(verify_campaign_money_window(from, observed, observed).is_ok());
+        assert!(verify_campaign_order_window(from, observed, observed).is_err());
+        let dt = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(observed).unwrap();
+        let old = dt
+            .checked_sub_months(chrono::Months::new(3))
+            .unwrap()
+            .timestamp_millis();
+        assert!(verify_campaign_money_window(old, observed, observed).is_err());
+        assert!(verify_campaign_money_window(old + 86_400_000, observed, observed).is_ok());
+        assert!(verify_campaign_money_window(from, observed, observed - 1).is_err());
+        assert!(verify_campaign_money_window(0, observed, observed).is_err());
+        // Fee bills/fills without executed orders remain separately
+        // source-classified; this guard never invents historical USD.
+    }
+
+    #[test]
+    fn campaign_order_window_requires_provable_short_retention() {
+        let now = 1_800_000_000_000_i64;
+        assert!(verify_campaign_order_window(now - 60_000, now, now).is_ok());
+        assert!(
+            verify_campaign_order_window(now - CAMPAIGN_UNFILLED_CANCEL_RETENTION_MS, now, now)
+                .is_err()
+        );
+        assert!(verify_campaign_order_window(now - 120_000, now, now - 1).is_err());
+        assert!(verify_campaign_order_window(now - 120_000, now - 120_000, now).is_err());
+        assert!(verify_campaign_order_window(0, now, now).is_err());
+    }
+
+    #[test]
+    fn campaign_order_witness_requires_exhaustion_and_causal_identity() {
+        let since = 1_800_000_000_000_i64;
+        let through = since + 20_000;
+        let order = HistoricalOrder {
+            instrument_type: "SWAP".into(),
+            instrument_id: "BTC-USDT-SWAP".into(),
+            order_id: "123456".into(),
+            client_order_id: "client".into(),
+            side: "buy".into(),
+            creation_time_ms: since.to_string(),
+            update_time_ms: (since + 1_000).to_string(),
+            ..canceled_demo_order("123456", &(since + 1_000).to_string())
+        };
+        let recent = BoundedHistory {
+            rows: vec![order.clone()],
+            pages: 1,
+            complete: true,
+        };
+        let archive = BoundedHistory {
+            rows: vec![],
+            pages: 1,
+            complete: true,
+        };
+        let proved = complete_campaign_orders_witness(
+            "SWAP",
+            since,
+            through,
+            recent.clone(),
+            archive.clone(),
+        )
+        .unwrap();
+        assert_eq!(proved.orders.len(), 1);
+        assert_eq!(proved.source_digest.len(), 64);
+        assert_eq!(proved.from_ms, since);
+        assert_eq!(proved.through_ms, through);
+        assert!(
+            complete_campaign_orders_witness(
+                "SWAP",
+                since,
+                through,
+                BoundedHistory {
+                    complete: false,
+                    ..recent.clone()
+                },
+                archive.clone()
+            )
+            .is_err()
+        );
+        let mut early = order.clone();
+        early.creation_time_ms = (since - 1).to_string();
+        assert!(
+            complete_campaign_orders_witness(
+                "SWAP",
+                since,
+                through,
+                BoundedHistory {
+                    rows: vec![early],
+                    pages: 1,
+                    complete: true
+                },
+                archive.clone()
+            )
+            .is_err()
+        );
+        let mut conflicting = order;
+        conflicting.side = "sell".into();
+        assert!(
+            complete_campaign_orders_witness(
+                "SWAP",
+                since,
+                through,
+                recent,
+                BoundedHistory {
+                    rows: vec![conflicting],
+                    pages: 1,
+                    complete: true
+                }
+            )
+            .is_err()
+        );
+        assert!(
+            complete_campaign_orders_witness("SWAP", since, through, archive.clone(), archive)
+                .is_ok()
+        );
     }
 
     #[test]

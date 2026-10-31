@@ -3,7 +3,7 @@ function yes(v:boolean,s:string){if(!v)throw Error(s);}
 export const limits:Limits={max_modelled_loss_usdt:"5",max_order_loss_usdt:"1",max_notional_usdt:"100",
  max_leverage:"3",max_daily_realized_loss_usdt:"2",max_drawdown_ratio:"0.1",allowed_instruments:["BTC-USDT-SWAP"]};
 export const initial:Governance={schema:"okx.governance/v3",revision:0,installation_id:"installation_test",
- campaign_id:"sha256:"+"c".repeat(64),campaign_loss_limit_usd:"10",max_total_modelled_loss_usdt:"5",accounts:[]};
+ campaign_id:"sha256:"+"c".repeat(64),campaign_loss_limit_usd:"10",campaign_entry_limit_usd:"10",max_total_modelled_loss_usdt:"5",accounts:[]};
 export const account:Account={id:"primary",label:"Primary",venue:"okx",environment:"real",uid_fingerprint:"a".repeat(64),
  identity_verified:true,enabled:true,explicit_pause:false,policy_revision:1,account_key:"okx:real:"+"a".repeat(64),limits,strategies:[]};
 const policy:Governance={...initial,revision:1,accounts:[account]};
@@ -25,6 +25,20 @@ const capped=reviseGovernance(policy,capChange);
 yes(capped!==null&&capped.accounts[0].limits.max_entry_usd==="10"&&capped.revision===2,"account entry cap applies through existing revision CAS");
 yes(reviseGovernance(capped!,capChange)===null,"entry cap cannot be changed by stale policy revision");
 yes(reviseGovernance(revised!,change)===null,"stale limits do not overwrite policy");
+const entryLower=reviseGovernance(policy,{...change,campaign_entry_limit_usd:"8"});
+yes(entryLower!==null&&entryLower.campaign_entry_limit_usd==="8"&&entryLower.revision===2,
+ "one CAS lowers independent campaign entry ceiling");
+yes(reviseGovernance(entryLower!,{...change,expected_revision:2,campaign_entry_limit_usd:"10"})===null,
+ "entry cap cannot increase after spending");
+yes(reviseGovernance(policy,{...change,campaign_entry_limit_usd:"0"})===null,
+ "zero entry cap cannot hide consumed spending");
+const oldPolicy:Governance={...policy};
+delete oldPolicy.campaign_entry_limit_usd;
+const firstEntry=reviseGovernance(oldPolicy,{...change,campaign_entry_limit_usd:"10"});
+yes(firstEntry?.campaign_entry_limit_usd==="10",
+ "legacy policy may configure cap but cannot fabricate opening spend");
+yes(reviseGovernance(oldPolicy,change)?.campaign_entry_limit_usd===undefined,
+ "legacy policy without CAS input stays unproven");
 yes(reviseGovernance(policy,{...change,accounts:[]})===null,"cannot remove exposure through configuration");
 yes(reviseGovernance(policy,{...change,accounts:[{...account,limits:{...limits,max_order_loss_usdt:"6"}}]})===null,"per order bounds");
 yes(reviseGovernance(policy,{...change,accounts:[{...account,limits:{...limits,max_drawdown_ratio:"1.1"}}]})===null,"ratio bounds");

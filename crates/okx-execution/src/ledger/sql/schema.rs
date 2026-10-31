@@ -1,4 +1,132 @@
 use super::super::*;
+// One derived schema for BOTH T0 creation and reopening an existing v2
+// database. The persisted schema version and original finance facts stay
+// unchanged; every future ENTRY_ADMISSION/SETTLEMENT receipt is immutable.
+const ACCOUNT_DERIVED_SCHEMA: &str = "
+CREATE INDEX IF NOT EXISTS idx_nav_scope_version_time ON nav_points(scope_id,source_version,time);
+CREATE INDEX IF NOT EXISTS idx_finance_source_component ON finance_entries(source_ref,component);
+CREATE INDEX IF NOT EXISTS idx_finance_links_source ON finance_source_links(source_ref,entry_id);
+CREATE INDEX IF NOT EXISTS idx_fills_intent ON fills(intent_id,fill_id);
+CREATE INDEX IF NOT EXISTS idx_campaign_native_receipt_scan
+    ON operation_receipts(kind,committed_at,operation_id);
+
+-- One durable invalidation fence for the existing financial SQL owner.
+-- New venue money or a changed native obligation makes admission stale;
+-- only background source reconciliation can stamp it as verified again.
+CREATE TABLE IF NOT EXISTS campaign_source_epoch(
+    id INTEGER PRIMARY KEY CHECK(id=1),
+    revision INTEGER NOT NULL CHECK(revision>=0)
+) STRICT;
+INSERT OR IGNORE INTO campaign_source_epoch VALUES(1,0);
+CREATE TABLE IF NOT EXISTS campaign_entry_readiness(
+    campaign_id TEXT PRIMARY KEY,
+    from_ms INTEGER NOT NULL,
+    covered_through_ms INTEGER NOT NULL,
+    source_revision INTEGER NOT NULL,
+    source_generations TEXT NOT NULL
+) STRICT;
+CREATE TRIGGER IF NOT EXISTS campaign_fill_invalidates_ready AFTER INSERT ON fills
+BEGIN UPDATE campaign_source_epoch SET revision=revision+1 WHERE id=1; END;
+CREATE TRIGGER IF NOT EXISTS campaign_bill_invalidates_ready AFTER INSERT ON bills
+BEGIN UPDATE campaign_source_epoch SET revision=revision+1 WHERE id=1; END;
+CREATE TRIGGER IF NOT EXISTS campaign_intent_invalidates_ready AFTER UPDATE OF state,exchange_order_id ON intents
+WHEN OLD.state!=NEW.state OR OLD.exchange_order_id IS NOT NEW.exchange_order_id
+BEGIN UPDATE campaign_source_epoch SET revision=revision+1 WHERE id=1; END;
+CREATE TRIGGER IF NOT EXISTS campaign_reserve_invalidates_ready AFTER INSERT ON risk_receipts
+BEGIN UPDATE campaign_source_epoch SET revision=revision+1 WHERE id=1; END;
+CREATE TRIGGER IF NOT EXISTS campaign_risk_invalidates_ready AFTER UPDATE OF state ON risk_receipts
+WHEN OLD.state!=NEW.state
+BEGIN UPDATE campaign_source_epoch SET revision=revision+1 WHERE id=1; END;
+CREATE TRIGGER IF NOT EXISTS campaign_settlement_invalidates_ready AFTER INSERT ON operation_receipts
+WHEN NEW.kind IN(
+    'ENTRY_SETTLEMENT_PROVEN','ENTRY_LATE_HEAD',
+    'ENTRY_LATE_SETTLEMENT_PROVEN','ENTRY_LATE_SETTLED',
+    'ENTRY_BILL_ORDER_SOURCE','ENTRY_ORDER_FEE_INDEX')
+BEGIN UPDATE campaign_source_epoch SET revision=revision+1 WHERE id=1; END;
+-- Append-only cumulative money evidence. Only the existing SQL owner
+-- advances the one campaign aggregate using independently verified receipts.
+CREATE TABLE IF NOT EXISTS campaign_entry_applied(
+    campaign_id TEXT NOT NULL,
+    intent_id TEXT NOT NULL,
+    settlement_revision INTEGER NOT NULL CHECK(settlement_revision>0),
+    cumulative_usd TEXT NOT NULL,
+    source_digest TEXT NOT NULL,
+    venue_update_ms INTEGER NOT NULL,
+    PRIMARY KEY(campaign_id,intent_id,settlement_revision)
+) STRICT;
+CREATE TRIGGER IF NOT EXISTS immutable_campaign_entry_applied_update
+    BEFORE UPDATE ON campaign_entry_applied
+    BEGIN SELECT RAISE(ABORT,'IMMUTABLE_CAMPAIGN_ENTRY_APPLIED'); END;
+CREATE TRIGGER IF NOT EXISTS immutable_campaign_entry_applied_delete
+    BEFORE DELETE ON campaign_entry_applied
+    BEGIN SELECT RAISE(ABORT,'IMMUTABLE_CAMPAIGN_ENTRY_APPLIED'); END;
+CREATE TABLE IF NOT EXISTS campaign_entry_totals(
+    campaign_id TEXT PRIMARY KEY,
+    from_ms INTEGER NOT NULL,
+    covered_through_ms INTEGER NOT NULL,
+    consumed_usd TEXT NOT NULL
+) STRICT;
+-- The same completed frontier always yields the identical immutable proof.
+-- Persist it atomically with the applied event delta and total.
+CREATE TABLE IF NOT EXISTS campaign_entry_window_proofs(
+    campaign_id TEXT NOT NULL,
+    covered_through_ms INTEGER NOT NULL,
+    consumed_usd TEXT NOT NULL,
+    source_digest TEXT NOT NULL,
+    PRIMARY KEY(campaign_id,covered_through_ms)
+) STRICT;
+CREATE TRIGGER IF NOT EXISTS immutable_campaign_entry_window_proof_update
+    BEFORE UPDATE ON campaign_entry_window_proofs
+    BEGIN SELECT RAISE(ABORT,'IMMUTABLE_CAMPAIGN_WINDOW_PROOF'); END;
+CREATE TRIGGER IF NOT EXISTS immutable_campaign_entry_window_proof_delete
+    BEFORE DELETE ON campaign_entry_window_proofs
+    BEGIN SELECT RAISE(ABORT,'IMMUTABLE_CAMPAIGN_WINDOW_PROOF'); END;
+CREATE TRIGGER IF NOT EXISTS immutable_campaign_opening_update
+    BEFORE UPDATE ON operation_receipts
+    WHEN OLD.kind='CAMPAIGN_ENTRY_OPENING_SEALED'
+    BEGIN SELECT RAISE(ABORT,'IMMUTABLE_CAMPAIGN_ENTRY_OPENING'); END;
+CREATE TRIGGER IF NOT EXISTS immutable_campaign_opening_delete
+    BEFORE DELETE ON operation_receipts
+    WHEN OLD.kind='CAMPAIGN_ENTRY_OPENING_SEALED'
+    BEGIN SELECT RAISE(ABORT,'IMMUTABLE_CAMPAIGN_ENTRY_OPENING'); END;
+CREATE TABLE IF NOT EXISTS bill_order_sources(
+    bill_id TEXT PRIMARY KEY REFERENCES bills(bill_id),
+    instrument_id TEXT NOT NULL,
+    exchange_order_id TEXT NOT NULL,
+    trade_id TEXT NOT NULL
+) STRICT;
+CREATE INDEX IF NOT EXISTS idx_bill_order_sources_order ON bill_order_sources(exchange_order_id,bill_id);
+CREATE TRIGGER IF NOT EXISTS immutable_bill_order_source_update BEFORE UPDATE ON bill_order_sources
+    BEGIN SELECT RAISE(ABORT,'IMMUTABLE_BILL_ORDER_SOURCE'); END;
+CREATE TRIGGER IF NOT EXISTS immutable_bill_order_source_delete BEFORE DELETE ON bill_order_sources
+    BEGIN SELECT RAISE(ABORT,'IMMUTABLE_BILL_ORDER_SOURCE'); END;
+CREATE TABLE IF NOT EXISTS swap_fill_sources(
+    fill_id TEXT PRIMARY KEY REFERENCES fills(fill_id),
+    bill_id TEXT NOT NULL, sub_type TEXT NOT NULL,
+    position_side TEXT NOT NULL,
+    direction TEXT NOT NULL CHECK(direction IN('OPEN','CLOSE','NET_UNRESOLVED','UNCLASSIFIED'))
+) STRICT;
+CREATE TRIGGER IF NOT EXISTS immutable_swap_fill_source_update BEFORE UPDATE ON swap_fill_sources
+    BEGIN SELECT RAISE(ABORT,'IMMUTABLE_SWAP_FILL_SOURCE'); END;
+CREATE TRIGGER IF NOT EXISTS immutable_swap_fill_source_delete BEFORE DELETE ON swap_fill_sources
+    BEGIN SELECT RAISE(ABORT,'IMMUTABLE_SWAP_FILL_SOURCE'); END;
+CREATE TRIGGER IF NOT EXISTS immutable_entry_quote_update BEFORE UPDATE ON operation_receipts
+    WHEN OLD.kind='ENTRY_QUOTE_UNPROVEN' BEGIN SELECT RAISE(ABORT,'IMMUTABLE_ENTRY_QUOTE'); END;
+CREATE TRIGGER IF NOT EXISTS immutable_entry_quote_delete BEFORE DELETE ON operation_receipts
+    WHEN OLD.kind='ENTRY_QUOTE_UNPROVEN' BEGIN SELECT RAISE(ABORT,'IMMUTABLE_ENTRY_QUOTE'); END;
+CREATE TRIGGER IF NOT EXISTS immutable_entry_admission_update BEFORE UPDATE ON operation_receipts
+    WHEN OLD.kind='ENTRY_ADMISSION_PROVEN' BEGIN SELECT RAISE(ABORT,'IMMUTABLE_ENTRY_ADMISSION'); END;
+CREATE TRIGGER IF NOT EXISTS immutable_entry_admission_delete BEFORE DELETE ON operation_receipts
+    WHEN OLD.kind='ENTRY_ADMISSION_PROVEN' BEGIN SELECT RAISE(ABORT,'IMMUTABLE_ENTRY_ADMISSION'); END;
+CREATE TRIGGER IF NOT EXISTS immutable_entry_partial_update BEFORE UPDATE ON operation_receipts
+    WHEN OLD.kind='ENTRY_PARTIAL_SETTLEMENT_PROVEN' BEGIN SELECT RAISE(ABORT,'IMMUTABLE_PARTIAL_ENTRY'); END;
+CREATE TRIGGER IF NOT EXISTS immutable_entry_partial_delete BEFORE DELETE ON operation_receipts
+    WHEN OLD.kind='ENTRY_PARTIAL_SETTLEMENT_PROVEN' BEGIN SELECT RAISE(ABORT,'IMMUTABLE_PARTIAL_ENTRY'); END;
+CREATE TRIGGER IF NOT EXISTS immutable_entry_settlement_update BEFORE UPDATE ON operation_receipts
+    WHEN OLD.kind='ENTRY_SETTLEMENT_PROVEN' BEGIN SELECT RAISE(ABORT,'IMMUTABLE_ENTRY_SETTLEMENT'); END;
+CREATE TRIGGER IF NOT EXISTS immutable_entry_settlement_delete BEFORE DELETE ON operation_receipts
+    WHEN OLD.kind='ENTRY_SETTLEMENT_PROVEN' BEGIN SELECT RAISE(ABORT,'IMMUTABLE_ENTRY_SETTLEMENT'); END;
+";
 impl AccountStore {
     pub fn initialize_or_inspect_exact(
         path: impl AsRef<Path>,
@@ -63,6 +191,7 @@ impl AccountStore {
         c.pragma_update(None, "journal_mode", "WAL")?;
         let tx = c.transaction_with_behavior(TransactionBehavior::Immediate)?;
         tx.execute_batch(include_str!("../../../schema/account-v2.sql"))?;
+        tx.execute_batch(ACCOUNT_DERIVED_SCHEMA)?;
         tx.execute(
             "INSERT INTO account_meta VALUES(1,?1,?2,2,?3,?4,?5,?6)",
             params![
@@ -173,7 +302,7 @@ impl AccountStore {
         }
         // Existing v2 databases need the same derived lookup as clean T0 databases.
         // This is an idempotent index only: no financial facts or schema version change.
-        c.execute_batch("CREATE INDEX IF NOT EXISTS idx_nav_scope_version_time ON nav_points(scope_id,source_version,time); CREATE INDEX IF NOT EXISTS idx_finance_source_component ON finance_entries(source_ref,component)")?;
+        c.execute_batch(ACCOUNT_DERIVED_SCHEMA)?;
         // Existing v2 ledger: establish an immutable-event provenance fence
         // once on open, never during the two-second NAV hot path. An invalid
         // old economic row leaves strategy valuation NOT_PROVEN, but must not

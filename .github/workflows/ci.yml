@@ -147,10 +147,26 @@ jobs:
           set -euo pipefail
           # Run in the same job/toolchain that already compiled native SQL.
           # No new runner or production transport, no additional Rust rebuild.
+          # Native SQL creates actual immutable terminal fill/bill admission
+          # and campaign source *before* the Worker financial CAS fixture.
+          # This is a single offline CI composition, no real exchange POST.
+          OKX_E1_BRIDGE_SOURCE_PATH="$RUNNER_TEMP/e1-native-sql-source.json" \
+            cargo test --locked -p okx-execution --lib \
+              e1_e2_native_real_fee_sources_baseline_and_second_admission_under_ten -- --nocapture
+          test -s "$RUNNER_TEMP/e1-native-sql-source.json"
           pushd cloudflare/okx-mcp
           npm ci --ignore-scripts --no-audit --no-fund
-          OKX_A2_TRACE=1 npm run check | tee "$RUNNER_TEMP/a2-worker-cas.log"
+          OKX_E1_BRIDGE_SOURCE_JSON="$(cat "$RUNNER_TEMP/e1-native-sql-source.json")" \
+            OKX_A2_TRACE=1 npm run check | tee "$RUNNER_TEMP/a2-worker-cas.log"
           popd
+          test "$(grep -c '^E1_SQL_WORKER_BRIDGE_TRACE_V1:' "$RUNNER_TEMP/a2-worker-cas.log")" -eq 1
+          sed -n 's/^E1_SQL_WORKER_BRIDGE_TRACE_V1://p' "$RUNNER_TEMP/a2-worker-cas.log" \
+            > "$RUNNER_TEMP/e1-worker-riskbook.json"
+          test -s "$RUNNER_TEMP/e1-worker-riskbook.json"
+          OKX_E1_BRIDGE_SOURCE_PATH="$RUNNER_TEMP/e1-native-sql-source.json" \
+            OKX_E1_BRIDGE_RESULT_PATH="$RUNNER_TEMP/e1-worker-riskbook.json" \
+            cargo test --locked -p okx-execution --lib \
+              e1_worker_finance_receipt_roundtrip_matches_native_sql_after_restart -- --ignored --nocapture
           test "$(grep -c '^A2_SQL_BRIDGE_TRACE_V1:' "$RUNNER_TEMP/a2-worker-cas.log")" -eq 1
           sed -n 's/^A2_SQL_BRIDGE_TRACE_V1://p' "$RUNNER_TEMP/a2-worker-cas.log" > "$RUNNER_TEMP/a2-worker-governance.json"
           test -s "$RUNNER_TEMP/a2-worker-governance.json"

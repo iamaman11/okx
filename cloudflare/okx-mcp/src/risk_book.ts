@@ -21,6 +21,11 @@ export interface RiskEntry {
   policy_revision: number;
   loss_usdt: string;
   loss_usd:string;
+  /** Campaign entry costs are independent of modelled loss. */
+  entry_upper_usd?:string;entry_proof_digest?:string;
+  entry_settled_usd?:string;entry_settlement_revision?:number;entry_settlement_digest?:string;
+  /** Cumulative verified expense above the original reservation, never a refund. */
+  entry_bound_breach_usd?:string;
   usd_conversion:{usd_per_usdt:string;source_digest:string;observed_at_ms:number};
   state: RiskEntryState;
   created_at_ms: number;
@@ -68,6 +73,7 @@ export interface RiskReservation {
   plan_hash: string;
   loss_usdt: string;
   loss_usd:string;
+  entry_upper_usd?:string;entry_proof_digest?:string;
   usd_conversion:{usd_per_usdt:string;source_digest:string;observed_at_ms:number};
   policy_revision: number;
   now_ms: number;
@@ -147,6 +153,19 @@ function validEntry(entry: RiskEntry): boolean {
         Number.isSafeInteger(entry.reserve_source_read_floor_ms) && entry.reserve_source_read_floor_ms > 0)
     && (entry.posted_at_ms === undefined || Number.isSafeInteger(entry.posted_at_ms)
       && entry.posted_at_ms > entry.created_at_ms)
+    && (entry.entry_upper_usd===undefined ||
+        units(entry.entry_upper_usd)!>0n && units(entry.entry_settled_usd)!==null &&
+        (entry.entry_bound_breach_usd===undefined
+          ?units(entry.entry_settled_usd)!<=units(entry.entry_upper_usd)!
+          :units(entry.entry_bound_breach_usd)!==null &&
+           units(entry.entry_bound_breach_usd)===
+           (units(entry.entry_settled_usd)!>units(entry.entry_upper_usd)!
+             ?units(entry.entry_settled_usd)!-units(entry.entry_upper_usd)!:0n)) &&
+        HEX.test(entry.entry_proof_digest??"") &&
+        Number.isSafeInteger(entry.entry_settlement_revision) &&
+        entry.entry_settlement_revision!>=0 &&
+        (entry.entry_settlement_revision===0 ||
+          HEX.test(entry.entry_settlement_digest??"")))
     && units(entry.loss_usd)!==null && !!entry.usd_conversion && units(entry.usd_conversion.usd_per_usdt)!==null && HEX.test(entry.usd_conversion.source_digest)
     && units(entry.loss_usdt) !== null && units(entry.loss_usdt)! > 0n
     && ["HELD","POSTED","UNKNOWN","OPEN","RELEASED"].includes(entry.state)
@@ -161,17 +180,177 @@ function riskKey(entry: Pick<RiskEntry, "venue"|"environment"|"uid"|"run_id"|"in
   return [entry.venue, entry.environment, entry.uid, entry.run_id, entry.intent_id]
     .map(x => x.length + ":" + x).join("");
 }
-export interface RiskMeta { source_as_of_ms:number; schema:typeof RISK_BOOK_SCHEMA; sequence:number; installation_id:string; occupied_usdt:string; occupied_usd:string; consumed_loss_usd:string; campaign_limit_usd:string; accounts:Record<string,string>; }
-function validMeta(v:any):v is RiskMeta {return !!v&&v.schema===RISK_BOOK_SCHEMA&&Number.isSafeInteger(v.source_as_of_ms)&&v.source_as_of_ms>=0&&Number.isSafeInteger(v.sequence)&&v.sequence>=0&&typeof v.installation_id==="string"&&units(v.occupied_usdt)!==null&&units(v.occupied_usd)!==null&&units(v.consumed_loss_usd)!==null&&units(v.campaign_limit_usd)!==null&&units(v.campaign_limit_usd)!>0n&&!!v.accounts&&Object.keys(v.accounts).length<=32&&Object.values(v.accounts).every(x=>units(x)!==null)&&Object.values(v.accounts).reduce<bigint>((sum,x)=>sum+units(x)!,0n)===units(v.occupied_usdt);}
-export async function initializeRiskBook(tx:any,installation_id:string):Promise<void>{
+/** Immutable campaign inception, created only in the authenticated
+ * installation transaction. It is an authority timestamp, NOT a claim
+ * that older real-account activity has been reconciled. Legacy books
+ * without this receipt remain NOT_PROVEN for entry opening.
+ */
+export interface CampaignOrigin {
+  campaign_id:string;
+  installation_id:string;
+  started_at_ms:number;
+}
+function validCampaignOrigin(v:any,installation_id:string):v is CampaignOrigin {
+  return !!v&&/^sha256:[0-9a-f]{64}$/.test(v.campaign_id)&&
+    v.installation_id===installation_id&&
+    Number.isSafeInteger(v.started_at_ms)&&v.started_at_ms>0;
+}
+export interface CampaignEntryBudget {
+  campaign_id:string;limit_usd:string;consumed_usd:string;reserved_usd:string;
+  /** Monotonic native over-reserve debit, not reusable budget headroom. */
+  bound_breach_usd?:string;
+  opening_source_digest:string;opening_as_of_ms:number;
+  /** Immutable all-managed-real-account opening scope. New enrolled accounts
+   * cannot silently inherit a historical campaign balance. */
+  opening_account_keys:string[];
+}
+function validEntryBudget(v:any):v is CampaignEntryBudget{
+  return !!v&&/^sha256:[0-9a-f]{64}$/.test(v.campaign_id)&&
+    units(v.limit_usd)!>0n&&units(v.consumed_usd)!==null&&
+    units(v.reserved_usd)!==null&&units(v.bound_breach_usd??"0")!==null&&
+    units(v.consumed_usd)!+units(v.reserved_usd)!
+      <=units(v.limit_usd)!+units(v.bound_breach_usd??"0")!&&
+    HEX.test(v.opening_source_digest)&&
+    Array.isArray(v.opening_account_keys)&&v.opening_account_keys.length>0&&
+    v.opening_account_keys.length<=32&&
+    v.opening_account_keys.every((k:string,i:number)=>
+      /^okx:real:[0-9a-f]{64}$/.test(k)&&
+      (i===0||v.opening_account_keys[i-1]<k))&&
+    Number.isSafeInteger(v.opening_as_of_ms)&&v.opening_as_of_ms>0;
+}
+function openingCoversManagedCohort(
+  budget:CampaignEntryBudget,accounts:{account_key:string;environment:string}[]
+):boolean{
+  const registered=accounts.filter(a=>a.environment==="real")
+    .map(a=>a.account_key).sort();
+  return registered.length===budget.opening_account_keys.length&&
+    registered.every((key,i)=>key===budget.opening_account_keys[i]);
+}
+/** E1.1 history is a single full-cohort fact, not an unexplained
+ * initial zero. Each managed real account must supply immutable native
+ * finance provenance, complete order/fill/bill history through the same
+ * cut-off, and an explicit cost total. An empty list is never zero spend. */
+export interface CampaignEntryOpeningAccount {
+  account_key:string;
+  history_from_ms:number;
+  history_through_ms:number;
+  consumed_entry_usd:string;
+  order_history_complete:true;
+  fill_history_complete:true;
+  bill_history_complete:true;
+  finance_provenance_sealed:true;
+  source_digest:string;
+}
+export interface CampaignEntryOpeningSource {
+  campaign_id:string;limit_usd:string;consumed_usd:string;
+  source_digest:string;as_of_ms:number;campaign_started_at_ms:number;
+  accounts:CampaignEntryOpeningAccount[];
+}
+export async function openingDigest(source:CampaignEntryOpeningSource):Promise<string>{
+  const payload=JSON.stringify([
+    "okx.campaign-entry-opening/v1",
+    source.campaign_id,source.limit_usd,source.consumed_usd,
+    source.campaign_started_at_ms,source.as_of_ms,source.accounts
+  ]);
+  const bytes=new TextEncoder().encode(payload);
+  const hash=await crypto.subtle.digest("SHA-256",bytes);
+  return Array.from(new Uint8Array(hash),v=>v.toString(16).padStart(2,"0")).join("");
+}
+/** No public, MCP or WSS route. The future native importer must bind each
+ * account row to independently authenticated venue history and the actual
+ * campaign inception. A syntactically valid hash by itself is NOT such an
+ * attestation. No production importer is connected until that exists.
+ */
+export async function installCampaignEntryProof(tx:any,source:CampaignEntryOpeningSource):Promise<boolean>{
+  const meta:RiskMeta=await tx.get(KEY);
+  const governance:unknown=await tx.get(GOVERNANCE_STORAGE_KEY);
+  if(!validMeta(meta)||!validGovernance(governance)||
+     meta.entry_budget!==undefined||meta.installation_id!==governance.installation_id||
+     !validCampaignOrigin(meta.campaign_origin,meta.installation_id)||
+     meta.campaign_origin.campaign_id!==governance.campaign_id||
+     source.campaign_started_at_ms!==meta.campaign_origin.started_at_ms||
+     meta.occupied_usdt!=="0"||meta.occupied_usd!=="0"||
+     source.campaign_id!==governance.campaign_id||
+     units(governance.campaign_entry_limit_usd)===null||
+     units(governance.campaign_entry_limit_usd)!<=0n||
+     units(source.limit_usd)!==units(governance.campaign_entry_limit_usd)||
+     !HEX.test(source.source_digest)||!Number.isSafeInteger(source.as_of_ms)||
+     source.as_of_ms<=0||!Number.isSafeInteger(source.campaign_started_at_ms)||
+     source.campaign_started_at_ms<=0||source.campaign_started_at_ms>source.as_of_ms||
+     units(source.limit_usd)!<=0n||units(source.consumed_usd)===null||
+     units(source.consumed_usd)!>units(source.limit_usd)!||
+     !Array.isArray(source.accounts))return false;
+  const managed=governance.accounts
+    .filter(a=>a.environment==="real")
+    .map(a=>a.account_key).sort();
+  if(managed.length===0||managed.length!==source.accounts.length)return false;
+  let witnessed=0n;
+  for(let i=0;i<managed.length;i++){
+    const row=source.accounts[i];
+    const cost=units(row?.consumed_entry_usd);
+    if(!row||row.account_key!==managed[i]||
+       !HEX.test(row.source_digest)||
+       row.order_history_complete!==true||
+       row.fill_history_complete!==true||
+       row.bill_history_complete!==true||
+       row.finance_provenance_sealed!==true||
+       !Number.isSafeInteger(row.history_from_ms)||
+       row.history_from_ms!==source.campaign_started_at_ms||
+       !Number.isSafeInteger(row.history_through_ms)||
+       row.history_through_ms!==source.as_of_ms||
+       cost===null)return false;
+    witnessed+=cost;
+  }
+  if(witnessed!==units(source.consumed_usd)||
+     await openingDigest(source)!==source.source_digest)return false;
+  await tx.put(KEY,{...meta,entry_budget:{
+    campaign_id:source.campaign_id,limit_usd:source.limit_usd,
+    consumed_usd:source.consumed_usd,reserved_usd:"0",bound_breach_usd:"0",
+    opening_source_digest:source.source_digest,opening_as_of_ms:source.as_of_ms,
+    opening_account_keys:managed,
+  },sequence:meta.sequence+1});
+  return true;
+}
+export interface RiskMeta { entry_budget?:CampaignEntryBudget; campaign_origin?:CampaignOrigin; source_as_of_ms:number; schema:typeof RISK_BOOK_SCHEMA; sequence:number; installation_id:string; occupied_usdt:string; occupied_usd:string; consumed_loss_usd:string; campaign_limit_usd:string; accounts:Record<string,string>; }
+function validMeta(v:any):v is RiskMeta {return !!v&&v.schema===RISK_BOOK_SCHEMA&&Number.isSafeInteger(v.source_as_of_ms)&&v.source_as_of_ms>=0&&Number.isSafeInteger(v.sequence)&&v.sequence>=0&&typeof v.installation_id==="string"&&(v.entry_budget===undefined||validEntryBudget(v.entry_budget))&&(v.campaign_origin===undefined||validCampaignOrigin(v.campaign_origin,v.installation_id))&&(v.entry_budget===undefined||validCampaignOrigin(v.campaign_origin,v.installation_id)&&v.entry_budget.campaign_id===v.campaign_origin.campaign_id&&v.entry_budget.opening_as_of_ms>=v.campaign_origin.started_at_ms)&&units(v.occupied_usdt)!==null&&units(v.occupied_usd)!==null&&units(v.consumed_loss_usd)!==null&&units(v.campaign_limit_usd)!==null&&units(v.campaign_limit_usd)!>0n&&!!v.accounts&&Object.keys(v.accounts).length<=32&&Object.values(v.accounts).every(x=>units(x)!==null)&&Object.values(v.accounts).reduce<bigint>((sum,x)=>sum+units(x)!,0n)===units(v.occupied_usdt);}
+export async function initializeRiskBook(
+ tx:any,installation_id:string,campaign_origin?:CampaignOrigin
+):Promise<void>{
  if(await tx.get(KEY)!==undefined)throw Error("RISK_ALREADY_INITIALIZED");
- await tx.put(KEY,{schema:RISK_BOOK_SCHEMA,source_as_of_ms:0,sequence:0,installation_id,occupied_usdt:"0",occupied_usd:"0",consumed_loss_usd:"0",campaign_limit_usd:"10",accounts:{}} satisfies RiskMeta);
+ if(campaign_origin!==undefined&&!validCampaignOrigin(campaign_origin,installation_id))
+   throw Error("CAMPAIGN_ORIGIN_INVALID");
+ await tx.put(KEY,{schema:RISK_BOOK_SCHEMA,source_as_of_ms:0,sequence:0,installation_id,
+   ...(campaign_origin===undefined?{}:{campaign_origin}),
+   occupied_usdt:"0",occupied_usd:"0",consumed_loss_usd:"0",
+   campaign_limit_usd:"10",accounts:{}} satisfies RiskMeta);
 }
 /** A campaign ceiling may only be lowered. Existing loss and held risk remain charged. */
 export async function lowerRiskBookLimit(tx:any,limit:string):Promise<boolean>{
  const meta=await tx.get(KEY),next=units(limit);
  if(!validMeta(meta)||next===null||next<=0n||next>=units(meta.campaign_limit_usd)!||next<units(meta.consumed_loss_usd)!+units(meta.occupied_usd)!)return false;
  await tx.put(KEY,{...meta,campaign_limit_usd:limit,sequence:meta.sequence+1});return true;
+}
+/** Same owner / same transaction as governance CAS. A lowered campaign
+ * entry cap never refunds existing consumed spend or drops HELD reservations.
+ * A missing imported opening balance remains missing, not zero.
+ */
+export async function lowerCampaignEntryLimit(
+  tx:any,previousCap:string|undefined,nextCap:string|undefined
+):Promise<boolean>{
+  const meta:RiskMeta=await tx.get(KEY);
+  if(!validMeta(meta)||!nextCap||units(nextCap)===null||units(nextCap)!<=0n||
+     (previousCap!==undefined &&
+       (units(previousCap)===null||units(nextCap)!>units(previousCap)!)))
+    return false;
+  const budget=meta.entry_budget;
+  if(!budget)return true; // Proof is still uninstalled, hence NO E1 admissions.
+  if(previousCap===undefined||units(budget.limit_usd)!==units(previousCap))
+    return false;
+  if(units(nextCap)!<units(budget.consumed_usd)!+units(budget.reserved_usd)!)
+    return false;
+  if(units(nextCap)===units(budget.limit_usd))return true;
+  await tx.put(KEY,{...meta,entry_budget:{...budget,limit_usd:nextCap},sequence:meta.sequence+1});
+  return true;
 }
 const entryKey=(key:string)=>"risk_entry_v2:"+key;
 const noReserveKey=(key:string)=>"risk_no_reserve_v1:"+key;
@@ -219,6 +398,16 @@ async function saveEntry(tx:any,meta:RiskMeta,entry:RiskEntry,delta:bigint){
  const usd=units(aggregate.occupied_usd)!+(delta===0n?0n:delta>0n?units(entry.loss_usd)!:-units(entry.loss_usd)!);
  if(count<0||usd<0n)throw Error("RISK_ACCOUNT_AGGREGATE_CORRUPT");
  await tx.put(aggregateKey,{active_reservations:count,occupied_usd:amount(usd),occupied_usdt:amount(units(aggregate.occupied_usdt)!+delta),latest_activity_ms:Date.now()});
+ if(delta<0n && entry.entry_upper_usd!==undefined){
+   const ceiling=units(entry.entry_upper_usd),settled=units(entry.entry_settled_usd);
+   const reserved=units(meta.entry_budget?.reserved_usd);
+   const refundable=ceiling!==null&&settled!==null&&ceiling>settled
+     ?ceiling-settled:0n;
+   if(!meta.entry_budget||ceiling===null||settled===null||reserved===null||
+      reserved<refundable)
+     throw Error("ENTRY_BUDGET_SETTLEMENT_CORRUPT");
+   meta.entry_budget={...meta.entry_budget,reserved_usd:amount(reserved-refundable)};
+ }
  const next={...meta,sequence:meta.sequence+1,occupied_usdt:amount(units(meta.occupied_usdt)!+delta),occupied_usd:amount(units(meta.occupied_usd)!+(delta===0n?0n:delta>0n?units(entry.loss_usd)!:-units(entry.loss_usd)!)),accounts:{...meta.accounts,[a]:amount(units(meta.accounts[a]??"0")!+delta)}};
  await tx.put(s,amount(strategy+delta));
  await tx.put(entryKey(entry.key),entry);await tx.put(KEY,next);return next;
@@ -332,9 +521,27 @@ export async function reserveRisk(
     if(!await applyCensusLoss(tx,meta,census))return {status:"DENIED",reason:"CUMULATIVE_LOSS_SOURCE_REGRESSION"};
     const prior:RiskEntry|undefined=await tx.get(entryKey(key));
     if(prior){
-      if(!validEntry(prior)||prior.plan_hash!==input.plan_hash||prior.loss_usdt!==input.loss_usdt||prior.loss_usd!==input.loss_usd||JSON.stringify(prior.usd_conversion)!==JSON.stringify(input.usd_conversion)||prior.policy_revision!==input.policy_revision||prior.strategy_id!==input.strategy_id||prior.instrument_id!==input.instrument_id)return {status:"DENIED",reason:"IDEMPOTENCY_CONFLICT"};
+      if(!meta.entry_budget||prior.entry_upper_usd===undefined)
+        return {status:"DENIED",reason:"ENTRY_RESERVATION_NOT_PROVEN"};
+      if(!validEntry(prior)||prior.plan_hash!==input.plan_hash||prior.loss_usdt!==input.loss_usdt||prior.loss_usd!==input.loss_usd||prior.entry_upper_usd!==input.entry_upper_usd||prior.entry_proof_digest!==input.entry_proof_digest||JSON.stringify(prior.usd_conversion)!==JSON.stringify(input.usd_conversion)||prior.policy_revision!==input.policy_revision||prior.strategy_id!==input.strategy_id||prior.instrument_id!==input.instrument_id)return {status:"DENIED",reason:"IDEMPOTENCY_CONFLICT"};
       return prior.state==="HELD"?{status:"HELD",entry:prior,book_sequence:meta.sequence,occupied_global_usdt:meta.occupied_usdt}:{status:"DENIED",reason:"INTENT_ALREADY_POSTED_OR_RESOLVED"};
     }
+    // E1: source-unproven opening spend is NEVER zero; the same transaction
+    // must reserve the independent entry cost and the existing loss budget.
+    const entryBudget=meta.entry_budget;
+    const proposed=units(input.entry_upper_usd);
+    if(!entryBudget || entryBudget.campaign_id!==governance.campaign_id||
+       units(entryBudget.limit_usd)!==units(governance.campaign_entry_limit_usd))
+      return {status:"DENIED",reason:"CAMPAIGN_ENTRY_BASELINE_NOT_PROVEN"};
+    if(!openingCoversManagedCohort(entryBudget,governance.accounts))
+      return {status:"DENIED",reason:"CAMPAIGN_OPENING_COHORT_CHANGED"};
+    if(proposed===null||proposed<=0n||!HEX.test(input.entry_proof_digest??""))
+      return {status:"DENIED",reason:"ENTRY_COST_PROOF_UNAVAILABLE"};
+    if(units(entryBudget.bound_breach_usd??"0")!>0n)
+      return {status:"DENIED",reason:"BUDGET_BOUND_BREACH"};
+    if(units(entryBudget.consumed_usd)!+units(entryBudget.reserved_usd)!+proposed>
+       units(entryBudget.limit_usd)!)
+      return {status:"DENIED",reason:"CAMPAIGN_ENTRY_BUDGET_EXHAUSTED"};
     if(units(meta.consumed_loss_usd)!+units(meta.occupied_usd)!+usd>units(meta.campaign_limit_usd)!)return {status:"DENIED",reason:"CAMPAIGN_LOSS_BUDGET_EXHAUSTED"};
     const account=governance.accounts.find(a=>
       a.venue===input.venue && a.environment==="real" && a.uid_fingerprint===input.uid &&
@@ -343,6 +550,13 @@ export async function reserveRisk(
     if(!account)return {status:"DENIED",reason:"ACCOUNT_NOT_ACTIVE"};
     if(!account.limits.allowed_instruments.includes(input.instrument_id))
       return {status:"DENIED",reason:"INSTRUMENT_NOT_ALLOWED_BY_ACCOUNT"};
+    // An account-level entry cap is independent of the campaign entry
+    // ceiling and the loss model. Missing saved cap is NOT unlimited.
+    const accountEntryCap=units(account.limits.max_entry_usd);
+    if(accountEntryCap===null||accountEntryCap<=0n)
+      return {status:"DENIED",reason:"ACCOUNT_ENTRY_LIMIT_UNPROVEN"};
+    if(proposed>accountEntryCap)
+      return {status:"DENIED",reason:"ACCOUNT_ENTRY_LIMIT_EXCEEDED"};
     const maxOrder=units(account.limits.max_order_loss_usdt);
     const maxStrategy=units(strategy?.max_modelled_loss_usdt??account.limits.max_modelled_loss_usdt);
     if(maxOrder===null||maxStrategy===null||requested>maxOrder||requested>maxStrategy)
@@ -366,13 +580,18 @@ export async function reserveRisk(
       key, venue:input.venue, environment:"real", uid:input.uid,
       run_id:input.run_id, strategy_id:input.strategy_id, instrument_id:input.instrument_id,
       intent_id:input.intent_id, plan_hash:input.plan_hash,
-      policy_revision:input.policy_revision, loss_usdt:input.loss_usdt,loss_usd:input.loss_usd,usd_conversion:input.usd_conversion,
+      policy_revision:input.policy_revision, loss_usdt:input.loss_usdt,loss_usd:input.loss_usd,
+      entry_upper_usd:input.entry_upper_usd,entry_settled_usd:"0",
+      entry_proof_digest:input.entry_proof_digest,entry_settlement_revision:0,entry_settlement_digest:undefined,
+      usd_conversion:input.usd_conversion,
       state:"HELD", created_at_ms:input.now_ms,
       reserve_source_digest:census.source_digest,
       reserve_source_read_floor_ms:census.source_read_floor_ms,
       transition_proof:null,
     };
     const next=await saveEntry(tx,meta,entry,requested);
+    await tx.put(KEY,{...next,entry_budget:{...entryBudget,
+      reserved_usd:amount(units(entryBudget.reserved_usd)!+proposed)}});
     return {status:"HELD",entry,book_sequence:next.sequence,occupied_global_usdt:amount(total+requested)};
   });
 }
@@ -383,6 +602,8 @@ export async function reserveRisk(
 export interface TerminalRiskLedgerProof {
   account_uid:string;run_id:string;intent_id:string;
   state:"FILLED"|"CANCELED"|"REJECTED";record_digest:string;cumulative_loss_usd:string;remaining_exposure_usdt:string;
+  /** Cumulative actual entry spend, source attested by native account ledger. */
+  cumulative_entry_usd?:string;entry_settlement_revision?:number;entry_settlement_digest?:string;
 }
 export interface TerminalRiskReleaseProof {
   census:CompleteRiskCensus;source_proof:NativeSessionRiskProof;
@@ -491,9 +712,36 @@ export async function transitionRisk(
       const governance:unknown=await tx.get(GOVERNANCE_STORAGE_KEY);
       const policy=validGovernance(governance)?projectRiskPolicy(governance):null;
       const occupied=policy?censusRisk(proof.census,policy,proof.now_ms):null;
-      if(!occupied||!await applyCensusLoss(tx,meta,proof.census))
+      if(!occupied)
         return {status:"DENIED" as const,reason:"TERMINAL_ACCOUNT_EXPOSURE_NOT_FLAT"};
     }
+    if(to==="RELEASED" && entry.entry_upper_usd!==undefined){
+      const ledger=native.terminal!.ledger;
+      const cumulative=units(ledger.cumulative_entry_usd);
+      const before=units(entry.entry_settled_usd);
+      const ceiling=units(entry.entry_upper_usd);
+      const budget=meta.entry_budget;
+      const recordedBreach=units(entry.entry_bound_breach_usd??"0");
+      // Terminal RELEASE is NOT a second way to debit the campaign.
+      // Every actual USD charge must have crossed SETTLE_ENTRY first.
+      // Only the already-booked cumulative amount/revision/source digest
+      // may release unused reserved capacity. saveEntry owns that one
+      // reserved-capacity refund in the SAME RiskBook transaction.
+      if(!budget||cumulative===null||before===null||ceiling===null||
+        cumulative!==before||recordedBreach===null||
+        recordedBreach!==(cumulative>ceiling?cumulative-ceiling:0n)||
+        !Number.isSafeInteger(ledger.entry_settlement_revision)||
+        entry.entry_settlement_revision!<1||
+        ledger.entry_settlement_revision!==entry.entry_settlement_revision||
+        !HEX.test(ledger.entry_settlement_digest??"")||
+        ledger.entry_settlement_digest!==entry.entry_settlement_digest)
+        return {status:"DENIED" as const,reason:"TERMINAL_ENTRY_SETTLEMENT_UNPROVEN"};
+    }
+    // Commit source-proven loss changes only AFTER validating the entire
+    // terminal entry proof. A DENIED RELEASE must not mutate either campaign
+    // budget or advance the global RiskBook CAS sequence.
+    if(to==="RELEASED" && !await applyCensusLoss(tx,meta,native.terminal!.census))
+      return {status:"DENIED" as const,reason:"TERMINAL_ACCOUNT_EXPOSURE_NOT_FLAT"};
     if(to==="RELEASED"){
       const seenKey="risk_loss_v2:"+accountKey(entry),previous=units(await tx.get(seenKey)??"0")!,current=units(native.terminal!.ledger.cumulative_loss_usd)!;
       if(current<previous)return {status:"DENIED" as const,reason:"CUMULATIVE_LOSS_REGRESSION"};
@@ -501,6 +749,98 @@ export async function transitionRisk(
     }
     await saveEntry(tx,meta,{...entry,state:to,transition_proof:exact_native_proof_digest},to==="RELEASED"?-units(entry.loss_usdt)!:0n);
     return {status:"UPDATED" as const};
+  });
+}
+
+
+/** Idempotent cumulative partial settlement; called ONLY by an authenticated
+ * native source-verified fill/bill handler once its typed binding is complete.
+ * A lost reply never doubles consumed entry money. No public MCP path.
+ */
+export async function settleEntrySpend(
+  storage:any,key:string,plan_hash:string,native:{
+    connection_generation:number;expected_book_sequence:number;
+    cumulative_entry_usd:string;revision:number;source_digest:string;
+  }
+):Promise<{status:"UPDATED"|"DENIED";reason?:string;book_sequence?:number}>{
+  const total=units(native.cumulative_entry_usd);
+  if(!HEX.test(plan_hash)||!HEX.test(native.source_digest)||
+     total===null||!Number.isSafeInteger(native.revision)||native.revision<1||
+     !Number.isSafeInteger(native.expected_book_sequence)||native.expected_book_sequence<1||
+     !Number.isSafeInteger(native.connection_generation)||native.connection_generation<1)
+    return {status:"DENIED",reason:"ENTRY_SETTLEMENT_INVALID"};
+  return storage.transaction(async(tx:any)=>{
+    const meta:RiskMeta=await tx.get(KEY);
+    const entry:RiskEntry|undefined=await tx.get(entryKey(key));
+    if(!validMeta(meta)||!meta.entry_budget||!entry||!validEntry(entry)||
+       entry.plan_hash!==plan_hash||
+       await tx.get("generation")!==native.connection_generation)
+      return {status:"DENIED" as const,reason:"ENTRY_SETTLEMENT_SOURCE_OR_STATE_UNPROVEN"};
+    const before=units(entry.entry_settled_usd),ceiling=units(entry.entry_upper_usd);
+    if(before===null||ceiling===null||total<before||
+       native.revision<entry.entry_settlement_revision!)
+      return {status:"DENIED" as const,reason:"ENTRY_SETTLEMENT_REGRESSION"};
+    if(native.revision===entry.entry_settlement_revision){
+      // An ACK can be lost after the transaction committed; meanwhile the
+      // RiskBook sequence may advance for another account or a terminal
+      // release. Replaying the EXACT cumulative amount/revision/digest is
+      // read-only even with the original now-stale CAS, and must not debit
+      // entry spend twice. Never accept a future or unknown CAS sequence.
+      if(native.expected_book_sequence>meta.sequence ||
+         !["POSTED","UNKNOWN","OPEN","RELEASED"].includes(entry.state)||
+         total!==before||entry.entry_settlement_digest!==native.source_digest)
+        return {status:"DENIED" as const,reason:"ENTRY_SETTLEMENT_REVISION_CONFLICT"};
+      return {status:"UPDATED" as const,book_sequence:meta.sequence};
+    }
+    // A new authenticated native SQL revision can be posted after RELEASE:
+    // late venue bills are actual campaign spend, not a reason to re-open a
+    // position or resurrect a consumed POST fence. Exact CAS still required.
+    const released=entry.state==="RELEASED";
+    if(!["POSTED","UNKNOWN","OPEN","RELEASED"].includes(entry.state)||
+       meta.sequence!==native.expected_book_sequence ||
+       native.source_digest===entry.entry_settlement_digest ||
+       (released && (!entry.transition_proof||!HEX.test(entry.transition_proof))))
+      return {status:"DENIED" as const,reason:"ENTRY_SETTLEMENT_SOURCE_OR_STATE_UNPROVEN"};
+    const delta=total-before,reserved=units(meta.entry_budget.reserved_usd);
+    // RELEASE refunded all unused entry capacity. Charge a late bill as new
+    // consumption but NEVER subtract a different live intent's reservation.
+    const oldUnsettled=ceiling>before?ceiling-before:0n;
+    const reservedDebit=released?0n:(delta<oldUnsettled?delta:oldUnsettled);
+    if(reserved===null||reserved<reservedDebit)
+      return {status:"DENIED" as const,reason:"ENTRY_SETTLEMENT_RESERVE_CORRUPT"};
+    const previousOver=before>ceiling?before-ceiling:0n;
+    const currentOver=total>ceiling?total-ceiling:0n;
+    const entryBreachDelta=currentOver-previousOver;
+    const bound=units(meta.entry_budget.bound_breach_usd??"0");
+    const consumed=units(meta.entry_budget.consumed_usd);
+    const limit=units(meta.entry_budget.limit_usd);
+    if(bound===null||consumed===null||limit===null)
+      return {status:"DENIED" as const,reason:"ENTRY_BOUND_BREACH_STATE_CORRUPT"};
+    const afterConsumed=consumed+delta,afterReserved=reserved-reservedDebit;
+    // Another valid entry may already have reserved the refunded capacity.
+    // Never conceal a late over-budget charge: book it all and latch the
+    // existing bound-breach gate to refuse further entries.
+    const previousAggregateOver=consumed+reserved>limit
+      ?consumed+reserved-limit:0n;
+    const aggregateOver=afterConsumed+afterReserved>limit
+      ?afterConsumed+afterReserved-limit:0n;
+    // bound_breach_usd is cumulative MONOTONIC new shortfall, not the sum
+    // of previously booked shortfalls on every subsequent fee revision.
+    const aggregateBreachDelta=aggregateOver>previousAggregateOver
+      ?aggregateOver-previousAggregateOver:0n;
+    const breachDelta=entryBreachDelta>aggregateBreachDelta
+      ?entryBreachDelta:aggregateBreachDelta;
+    meta.entry_budget={...meta.entry_budget,
+       consumed_usd:amount(afterConsumed),
+       reserved_usd:amount(afterReserved),
+       bound_breach_usd:amount(bound+breachDelta)};
+    const next=await saveEntry(tx,meta,{...entry,entry_settled_usd:amount(total),
+      entry_bound_breach_usd:amount(currentOver),
+      entry_settlement_revision:native.revision,entry_settlement_digest:native.source_digest,
+      // Preserve the original terminal release witness and state.
+      transition_proof:released?entry.transition_proof:native.source_digest},0n);
+    return {status:"UPDATED" as const,book_sequence:next.sequence,
+      reason:breachDelta>0n?"BUDGET_BOUND_BREACH":undefined};
   });
 }
 
@@ -553,6 +893,14 @@ export async function beginRiskPost(
     if(stored.sequence!==native.expected_book_sequence)return {status:"DENIED" as const,reason:"STALE_RISK_BOOK_SEQUENCE"};
     const entry:RiskEntry|undefined=await tx.get(entryKey(key));
     if(!entry||!validEntry(entry)||entry.plan_hash!==plan_hash||entry.state!=="HELD"||entry.policy_revision!==policy_revision)return {status:"DENIED" as const,reason:"INTENT_NOT_HELD_EXACTLY_ONCE"};
+    if(units(stored.entry_budget?.bound_breach_usd??"0")!>0n)
+      return {status:"DENIED" as const,reason:"BUDGET_BOUND_BREACH"};
+    if(!stored.entry_budget||entry.entry_upper_usd===undefined||
+       stored.entry_budget.campaign_id!==governance.campaign_id||
+       units(stored.entry_budget.limit_usd)!==units(governance.campaign_entry_limit_usd)||
+       !openingCoversManagedCohort(stored.entry_budget,governance.accounts)||
+       !HEX.test(entry.entry_proof_digest??""))
+      return {status:"DENIED" as const,reason:"ENTRY_RESERVATION_NOT_PROVEN"};
     // The anchor lives in Worker storage and uses Worker time only; the
     // authenticated native evidence uses elapsed ticks since HELD instead.
     if(native.now_ms<entry.created_at_ms||
@@ -568,6 +916,11 @@ export async function beginRiskPost(
       &&accessEnabled(a));
     if(!account||!account.limits.allowed_instruments.includes(entry.instrument_id))
       return {status:"DENIED" as const,reason:"ACCOUNT_OR_INSTRUMENT_REVOKED"};
+    const freshAccountCap=units(account.limits.max_entry_usd);
+    const reservedEntryUpper=units(entry.entry_upper_usd);
+    if(freshAccountCap===null||freshAccountCap<=0n||reservedEntryUpper===null||
+       reservedEntryUpper>freshAccountCap)
+      return {status:"DENIED" as const,reason:"POST_ACCOUNT_ENTRY_LIMIT_UNPROVEN_OR_EXCEEDED"};
     for(const [owner,value] of Object.entries(stored.accounts)){
       if(!occupied.has(owner)&&units(value)!>0n)return {status:"DENIED" as const,reason:"POST_OCCUPANCY_COHORT_MISMATCH"};
       occupied.set(owner,(occupied.get(owner)??0n)+units(value)!);

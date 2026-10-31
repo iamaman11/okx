@@ -4,6 +4,15 @@ use super::super::*;
  * immutable finance journal for every two-second NAV. The existing cursor
  * table stores the highest fully verified finance rowid; a missing/stale
  * cursor is NOT evidence of financial completeness. */
+/// Signed fee: debit (<0) consumes entry, rebate (>0) does not free cap.
+fn entry_fee_debit(fee: Decimal) -> Decimal {
+    if fee < Decimal::ZERO {
+        -fee
+    } else {
+        Decimal::ZERO
+    }
+}
+
 type StrategyReversalSource = (String, String, String, Option<String>, Option<String>);
 
 fn verify_strategy_finance_source(db: &Connection, e: &FinanceEntry) -> StoreResult<()> {
@@ -203,6 +212,1660 @@ fn upsert_source_cursor(tx: &rusqlite::Transaction<'_>, c: &SourceCursor) -> Sto
     Ok(())
 }
 impl AccountStore {
+    /// Seal an externally classified USD-denominated campaign monetary
+    /// window. Only the native authenticated adapter can call this after
+    /// exhausting venue orders, fills and bills and classifying every item.
+    /// The SQL writer refuses local-ledger divergence (including unposted
+    /// risks) and stores an immutable account-scoped receipt. UNKNOWN money
+    /// cannot be imported as zero.
+    /// A SQL receipt is immutable and scoped to this installation/account.
+    // This immutable SQL witness carries the complete source scope as distinct
+    // attested dimensions; preserve the existing call sites and wire semantics.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "source-proven campaign opening dimensions"
+    )]
+    pub fn seal_campaign_entry_opening(
+        &self,
+        campaign_id: &str,
+        from_ms: i64,
+        through_ms: i64,
+        venue_source_digest: &str,
+        venue_fill_count: usize,
+        venue_bill_count: usize,
+        consumed_entry_usd: Decimal,
+    ) -> StoreResult<String> {
+        use sha2::{Digest, Sha256};
+        if !campaign_id.starts_with("sha256:")
+            || campaign_id.len() != 71
+            || !campaign_id[7..].bytes().all(|b| b.is_ascii_hexdigit())
+            || venue_source_digest.len() != 64
+            || !venue_source_digest.bytes().all(|b| b.is_ascii_hexdigit())
+            || from_ms <= 0
+            || through_ms < from_ms
+            || venue_fill_count != venue_bill_count
+            || consumed_entry_usd < Decimal::ZERO
+            || (venue_fill_count == 0 && consumed_entry_usd != Decimal::ZERO)
+            || (venue_fill_count > 0 && consumed_entry_usd <= Decimal::ZERO)
+        {
+            return Err(StoreError::Invalid("ENTRY_OPENING_NONEMPTY_OR_INVALID"));
+        }
+        if !finance_proof_sealed(&self.connection)? {
+            return Err(StoreError::Invalid(
+                "ENTRY_OPENING_FINANCE_PROVENANCE_UNSEALED",
+            ));
+        }
+        // Current native ledger must still be at its authenticated flat
+        // opening. The venue may report historical activity before native
+        // initialization; duplicate post-initialization money is not
+        // automatically reconciled or counted twice. Any divergence blocks.
+        let (fills, bills, finance, cash_debits, unresolved, lots): (i64, i64, i64, i64, i64, i64) =
+            self.connection.query_row(
+                "SELECT (SELECT COUNT(*) FROM fills),
+                        (SELECT COUNT(*) FROM bills),
+                        (SELECT COUNT(*) FROM finance_entries),
+                        (SELECT COUNT(*) FROM cash_flows WHERE kind!='OPENING'),
+                        (SELECT COUNT(*) FROM intents
+                          WHERE state NOT IN ('REJECTED','CANCELLED','FILLED')),
+                        (SELECT COUNT(*) FROM position_lots WHERE remaining_qty!='0')",
+                [],
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                    ))
+                },
+            )?;
+        if fills != 0 || bills != 0 || finance != 0 || cash_debits != 0 {
+            return Err(StoreError::Invalid("ENTRY_OPENING_LOCAL_LEDGER_NOT_EMPTY"));
+        }
+        if unresolved != 0 || lots != 0 {
+            return Err(StoreError::Invalid(
+                "ENTRY_OPENING_UNRESOLVED_NATIVE_EXPOSURE",
+            ));
+        }
+        let canonical = serde_json::to_vec(&(
+            "okx.campaign-entry-opening-sql/v2",
+            self.meta.account_key.as_str(),
+            self.meta.installation_id.as_str(),
+            campaign_id,
+            from_ms,
+            through_ms,
+            venue_source_digest,
+            venue_fill_count,
+            venue_bill_count,
+            consumed_entry_usd.to_string(),
+        ))
+        .map_err(|_| StoreError::Invalid("ENTRY_OPENING_SERIALIZATION_FAILED"))?;
+        let proof = format!("{:x}", Sha256::digest(canonical));
+        // Install the immutable receipt guards even for a database created
+        // before this release. These are the existing single SQL owner and
+        // operation_receipts table, not a second financial ledger.
+        self.connection.execute_batch(
+            "CREATE TRIGGER IF NOT EXISTS immutable_campaign_opening_update
+             BEFORE UPDATE ON operation_receipts
+             WHEN OLD.kind='CAMPAIGN_ENTRY_OPENING_SEALED'
+             BEGIN SELECT RAISE(ABORT,'IMMUTABLE_CAMPAIGN_ENTRY_OPENING'); END;
+             CREATE TRIGGER IF NOT EXISTS immutable_campaign_opening_delete
+             BEFORE DELETE ON operation_receipts
+             WHEN OLD.kind='CAMPAIGN_ENTRY_OPENING_SEALED'
+             BEGIN SELECT RAISE(ABORT,'IMMUTABLE_CAMPAIGN_ENTRY_OPENING'); END;",
+        )?;
+        // Only RiskBook owns the FINAL campaign balance. SQL owns immutable
+        // per-attempt witnesses: a lost WSS reply or expired freshness window
+        // must not permanently pin the account to a superseded cut-off.
+        // Each fully verified retry gets its own immutable receipt, while an
+        // identical source/cut-off is an idempotent readback.
+        let key = format!("campaign_entry_opening:{campaign_id}:{proof}");
+        self.connection.execute(
+            "INSERT OR IGNORE INTO operation_receipts
+             (operation_id,kind,request_hash,result_ref,committed_at)
+             VALUES(?1,'CAMPAIGN_ENTRY_OPENING_SEALED',?2,?2,?3)",
+            params![key, proof, through_ms],
+        )?;
+        let stored: (String, String, String, i64) = self.connection.query_row(
+            "SELECT kind,request_hash,result_ref,committed_at
+             FROM operation_receipts WHERE operation_id=?1",
+            [key],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )?;
+        if stored.0 != "CAMPAIGN_ENTRY_OPENING_SEALED"
+            || stored.1 != proof
+            || stored.2 != proof
+            || stored.3 != through_ms
+        {
+            return Err(StoreError::Invalid("ENTRY_OPENING_SQL_RECEIPT_CONFLICT"));
+        }
+        Ok(proof)
+    }
+
+    /// Read-only, source-cursor-backed absence witness. Used both during
+    /// bootstrap and immediately before a new risk admission. No archive
+    /// request, ledger mutation or fake gap-free state is performed here.
+    fn captured_complete_frontiers(
+        &self,
+        from_ms: i64,
+        through_ms: i64,
+    ) -> StoreResult<Vec<(&'static str, &'static str, i64, i64)>> {
+        if from_ms <= 0 || through_ms <= from_ms {
+            return Err(StoreError::Invalid("ENTRY_OPENING_WINDOW_INVALID"));
+        }
+        if from_ms < self.meta.initialized_at {
+            return Err(StoreError::Invalid("BASELINE_RECONCILIATION_REQUIRED"));
+        }
+        let mut frontiers = Vec::new();
+        for (source, partition) in [
+            ("fills", "SPOT"),
+            ("fills", "MARGIN"),
+            ("fills", "SWAP"),
+            ("fills", "FUTURES"),
+            ("fills", "OPTION"),
+            ("bills", "account"),
+        ] {
+            let cursor = self
+                .cursor(source, partition)?
+                .ok_or(StoreError::Invalid("ENTRY_BASELINE_CAPTURE_PENDING"))?;
+            if cursor.generation <= 0
+                || !cursor.cursor.is_empty()
+                || !cursor.coverage_gaps.is_empty()
+                || cursor.watermark < through_ms
+            {
+                return Err(StoreError::Invalid("ENTRY_BASELINE_CAPTURE_PENDING"));
+            }
+            frontiers.push((source, partition, cursor.generation, cursor.watermark));
+        }
+        if !finance_proof_sealed(&self.connection)? {
+            return Err(StoreError::Invalid(
+                "ENTRY_OPENING_FINANCE_PROVENANCE_UNSEALED",
+            ));
+        }
+        Ok(frontiers)
+    }
+
+    fn captured_empty_frontiers(
+        &self,
+        from_ms: i64,
+        through_ms: i64,
+    ) -> StoreResult<Vec<(&'static str, &'static str, i64, i64)>> {
+        let frontiers = self.captured_complete_frontiers(from_ms, through_ms)?;
+        let (fills, bills, unresolved, lots): (i64, i64, i64, i64) = self.connection.query_row(
+            "SELECT (SELECT COUNT(*) FROM fills WHERE time>?1 AND time<=?2),
+                        (SELECT COUNT(*) FROM bills
+                         WHERE time>?1 AND time<=?2
+                           AND kind NOT IN ('1:11','1:12','8:173','8:174')
+                           AND kind NOT LIKE '7:%'),
+                        (SELECT COUNT(*) FROM intents
+                         WHERE state NOT IN ('REJECTED','CANCELLED','FILLED')),
+                        (SELECT COUNT(*) FROM position_lots WHERE remaining_qty!='0')",
+            params![from_ms, through_ms],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )?;
+        if fills != 0 || bills != 0 {
+            // Recognized transfer/funding/interest bills were already
+            // classified and ingested by the existing finance owner. They
+            // do not constitute opening turnover. Any other bill, including
+            // an unknown category, remains budget-relevant until classified.
+            // Nonempty sources require the historical linear-contract,
+            // opening/closing classification and event-time FX policy.
+            return Err(StoreError::Invalid("BASELINE_RECONCILIATION_REQUIRED"));
+        }
+        if unresolved != 0 || lots != 0 {
+            return Err(StoreError::Invalid(
+                "ENTRY_OPENING_UNRESOLVED_NATIVE_EXPOSURE",
+            ));
+        }
+        Ok(frontiers)
+    }
+
+    pub fn verify_captured_empty_window(&self, from_ms: i64, through_ms: i64) -> StoreResult<()> {
+        self.captured_empty_frontiers(from_ms, through_ms)
+            .map(|_| ())
+    }
+
+    fn campaign_source_epoch(&self) -> StoreResult<i64> {
+        self.connection
+            .query_row(
+                "SELECT revision FROM campaign_source_epoch WHERE id=1",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
+    }
+
+    fn campaign_source_generations(frontiers: &[(&str, &str, i64, i64)]) -> String {
+        frontiers
+            .iter()
+            .map(|(source, partition, generation, _)| format!("{source}/{partition}:{generation}"))
+            .collect::<Vec<_>>()
+            .join("|")
+    }
+
+    fn mark_campaign_readiness(
+        &self,
+        campaign_id: &str,
+        from_ms: i64,
+        through_ms: i64,
+        frontiers: &[(&str, &str, i64, i64)],
+    ) -> StoreResult<()> {
+        let epoch = self.campaign_source_epoch()?;
+        let generations = Self::campaign_source_generations(frontiers);
+        self.connection.execute(
+            "INSERT INTO campaign_entry_readiness VALUES(?1,?2,?3,?4,?5)
+             ON CONFLICT(campaign_id) DO UPDATE SET
+                 from_ms=excluded.from_ms,
+                 covered_through_ms=excluded.covered_through_ms,
+                 source_revision=excluded.source_revision,
+                 source_generations=excluded.source_generations",
+            params![campaign_id, from_ms, through_ms, epoch, generations],
+        )?;
+        Ok(())
+    }
+
+    /// The POST path reads only an addressable campaign receipt, a mutation
+    /// epoch and six source cursors. It NEVER joins archived fills/bills.
+    /// An unseen bill, UNKNOWN transition or recaptured source generation
+    /// invalidates this witness until maintenance reconciles it.
+    pub fn verify_campaign_entry_readiness(
+        &self,
+        campaign_id: &str,
+        from_ms: i64,
+        through_ms: i64,
+    ) -> StoreResult<()> {
+        let frontiers = self.captured_complete_frontiers(from_ms, through_ms)?;
+        let ready: Option<(i64, i64, i64, String)> = self
+            .connection
+            .query_row(
+                "SELECT from_ms,covered_through_ms,source_revision,source_generations
+                 FROM campaign_entry_readiness WHERE campaign_id=?1",
+                [campaign_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()?;
+        let Some((origin, covered, revision, generations)) = ready else {
+            return Err(StoreError::Invalid("CAMPAIGN_READINESS_NOT_RECONCILED"));
+        };
+        if origin != from_ms
+            || covered < through_ms
+            || revision != self.campaign_source_epoch()?
+            || generations != Self::campaign_source_generations(&frontiers)
+        {
+            return Err(StoreError::Invalid("CAMPAIGN_READINESS_STALE"));
+        }
+        // An attested capture with no durable economic total cannot
+        // mint a fresh RiskBook opening or authorize another admission.
+        let exists: bool = self.connection.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM campaign_entry_totals
+                WHERE campaign_id=?1 AND from_ms=?2
+                  AND covered_through_ms<=?3)",
+            params![campaign_id, from_ms, covered],
+            |row| row.get(0),
+        )?;
+        if !exists {
+            return Err(StoreError::Invalid("CAMPAIGN_APPLIED_FRONTIER_MISSING"));
+        }
+        Ok(())
+    }
+
+    /// Existing maintenance owner only; the fast path can advance source
+    /// coverage when no economic/native fact or source generation changed.
+    /// A revision change must revalidate the economic source before attesting.
+    pub fn refresh_campaign_entry_readiness(
+        &self,
+        campaign_id: &str,
+        from_ms: i64,
+        through_ms: i64,
+    ) -> StoreResult<()> {
+        let frontiers = self.captured_complete_frontiers(from_ms, through_ms)?;
+        let epoch = self.campaign_source_epoch()?;
+        let generations = Self::campaign_source_generations(&frontiers);
+        let previous: Option<(i64, i64, i64, String)> = self
+            .connection
+            .query_row(
+                "SELECT from_ms,covered_through_ms,source_revision,source_generations
+                 FROM campaign_entry_readiness WHERE campaign_id=?1",
+                [campaign_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()?;
+        if let Some((origin, covered, revision, prior_generations)) = previous
+            && origin == from_ms
+            && covered <= through_ms
+            && revision == epoch
+            && prior_generations == generations
+        {
+            // Only the six covered source watermarks advanced. No immutable
+            // economic row, native obligation or settlement receipt changed.
+            self.connection.execute(
+                "UPDATE campaign_entry_readiness SET covered_through_ms=?2
+                 WHERE campaign_id=?1 AND source_revision=?3",
+                params![campaign_id, through_ms, epoch],
+            )?;
+            return Ok(());
+        }
+        self.seal_captured_campaign_baseline(campaign_id, from_ms, through_ms)?;
+        Ok(())
+    }
+
+    /// After a fully imported zero opening, a *completed previous* trade
+    /// must not make the next risk-increasing order impossible. The only
+    /// permissible post-opening monetary rows are terminal native intents
+    /// with exact exchange identity and (for entries) durable all-in native
+    /// settlement AND central release readback. Unknown/external fills and
+    /// unlinked fee bills remain fail-closed, without a hot-path archive scan.
+    /// This is an indexed SQL read; RiskBook remains the owner of spent money.
+    pub fn verify_captured_campaign_continuity(
+        &self,
+        from_ms: i64,
+        through_ms: i64,
+    ) -> StoreResult<()> {
+        self.captured_complete_frontiers(from_ms, through_ms)?;
+        let unknown_fill: i64 = self.connection.query_row(
+            "SELECT EXISTS(
+               SELECT 1 FROM fills f
+               LEFT JOIN intents i ON i.intent_id=f.intent_id
+               LEFT JOIN intent_plans p ON p.intent_id=i.intent_id
+               LEFT JOIN risk_receipts r ON r.intent_id=i.intent_id
+               LEFT JOIN operation_receipts e
+                 ON e.operation_id='entry-settlement:'||i.intent_id
+               WHERE f.time>?1 AND f.time<=?2
+               AND (i.intent_id IS NULL OR p.intent_id IS NULL
+                 OR i.instrument_id!=f.instrument_id
+                 OR i.exchange_order_id IS NULL
+                 OR i.exchange_order_id!=f.exchange_order_id
+                 OR i.begin_post_at IS NULL OR i.begin_post_at>f.time
+                 OR p.side!=f.side
+                 OR (i.risk_increase=1 AND
+                     (r.state IS NULL OR r.plan_hash!=i.plan_hash
+                      OR (
+                        i.state IN ('FILLED','CANCELLED') AND
+                        (r.state!='RELEASED'
+                         OR e.kind IS NULL OR e.kind!='ENTRY_SETTLEMENT_PROVEN'
+                         OR e.request_hash!=i.plan_hash OR e.committed_at>?2)
+                      )
+                      OR (
+                        i.state IN ('ACKNOWLEDGED','PARTIALLY_FILLED') AND
+                        (r.state NOT IN ('POSTED','OPEN') OR NOT EXISTS(
+                           SELECT 1 FROM operation_receipts a
+                           WHERE a.operation_id='entry-admission:'||i.intent_id
+                             AND a.kind='ENTRY_ADMISSION_PROVEN'
+                             AND a.request_hash=i.plan_hash))
+                      )
+                      OR i.state NOT IN
+                         ('FILLED','CANCELLED','ACKNOWLEDGED','PARTIALLY_FILLED')))
+                 OR (i.risk_increase=0 AND i.state NOT IN
+                     ('FILLED','CANCELLED','ACKNOWLEDGED','PARTIALLY_FILLED')))
+               LIMIT 1)",
+            params![from_ms, through_ms],
+            |row| row.get(0),
+        )?;
+        if unknown_fill != 0 {
+            return Err(StoreError::Invalid("ENTRY_POST_OPENING_FILL_NOT_SETTLED"));
+        }
+        let unknown_bill: i64 = self.connection.query_row(
+            "SELECT EXISTS(
+               SELECT 1 FROM bills b
+               WHERE b.time>?1 AND b.time<=?2
+               AND b.kind NOT IN ('1:11','1:12','8:173','8:174')
+               AND b.kind NOT LIKE '7:%'
+               AND NOT EXISTS(
+                 SELECT 1 FROM finance_entries e
+                 JOIN finance_source_links l ON l.entry_id=e.entry_id
+                 JOIN fills f ON l.source_ref='fill:'||f.fill_id
+                 WHERE e.economic_event_key=b.economic_event_key
+                   AND e.component='FEE'
+                   AND f.time>?1 AND f.time<=?2
+               )
+               AND NOT EXISTS(
+                 SELECT 1 FROM operation_receipts own
+                 JOIN risk_receipts rr
+                   ON rr.intent_id=json_extract(own.result_ref,'$.intent_id')
+                     AND rr.state='RELEASED'
+                 JOIN operation_receipts terminal
+                   ON terminal.operation_id='entry-settlement:'||rr.intent_id
+                     AND terminal.kind='ENTRY_SETTLEMENT_PROVEN'
+                 LEFT JOIN operation_receipts late
+                   ON late.operation_id='entry-late-head:'||rr.intent_id
+                     AND late.kind='ENTRY_LATE_HEAD'
+                 LEFT JOIN operation_receipts late_ack
+                   ON late_ack.operation_id='entry-late-settled:'||
+                     rr.intent_id||':r'||json_extract(late.result_ref,'$.settlement_revision')
+                     AND late_ack.kind='ENTRY_LATE_SETTLED'
+                     AND late_ack.result_ref=json_extract(late.result_ref,'$.source_digest')
+                 WHERE own.operation_id='entry-bill-owner:'||b.bill_id
+                   AND own.kind='ENTRY_ORDER_FEE_INDEX'
+                   AND own.request_hash=rr.plan_hash
+                   AND b.time<=COALESCE(
+                     json_extract(late.result_ref,'$.source_covered_through_ms'),
+                     json_extract(terminal.result_ref,'$.source_covered_through_ms'))
+                   AND (late.operation_id IS NULL OR late_ack.operation_id IS NOT NULL)
+               ) LIMIT 1)",
+            params![from_ms, through_ms],
+            |row| row.get(0),
+        )?;
+        if unknown_bill != 0 {
+            return Err(StoreError::Invalid(
+                "ENTRY_POST_OPENING_BILL_NOT_RECONCILED",
+            ));
+        }
+        // This is financial-source continuity, NOT a flat-account gate.
+        // Known posted/partially filled exposure remains covered by the
+        // original central reservation; the post-HELD native/venue census
+        // independently checks positions, orders, protection and total risk.
+        // PREPARED is unsent, RESERVED holds known risk. Neither is an
+        // unknown external economic event. POSTING/UNKNOWN cannot be
+        // presumed sent or not sent and block new risk until reconciliation.
+        let uncertain: i64 = self.connection.query_row(
+            "SELECT EXISTS(
+               SELECT 1 FROM intents i
+               LEFT JOIN risk_receipts r ON r.intent_id=i.intent_id
+               WHERE i.state IN ('POSTING','UNKNOWN')
+                  OR (i.state='RESERVED' AND
+                      (r.state IS NULL OR r.state!='HELD'
+                       OR r.plan_hash!=i.plan_hash))
+                  OR (i.state IN ('ACKNOWLEDGED','PARTIALLY_FILLED') AND
+                      i.risk_increase=1 AND
+                      (r.state IS NULL OR r.state NOT IN ('POSTED','OPEN')
+                       OR r.plan_hash!=i.plan_hash))
+             )",
+            [],
+            |row| row.get(0),
+        )?;
+        if uncertain != 0 {
+            return Err(StoreError::Invalid(
+                "ENTRY_POST_OPENING_NATIVE_EXPOSURE_UNRESOLVED",
+            ));
+        }
+        Ok(())
+    }
+
+    /// The native SQL owner's monotone campaign economic-event fold.
+    /// Each new terminal or late cumulative revision adds only its delta,
+    /// never the full amount again. A completed account-wide source witness
+    /// is independently recomputed before this transaction; any mismatch
+    /// rolls back event IDs, money and the applied frontier together.
+    pub(crate) fn apply_captured_campaign_deltas(
+        &self,
+        campaign_id: &str,
+        from_ms: i64,
+        through_ms: i64,
+        receipts: &[(String, String, Decimal, u64, i64)],
+        witnessed_total: Decimal,
+        opening_proof: Option<&str>,
+    ) -> StoreResult<()> {
+        let tx = self.connection.unchecked_transaction()?;
+        let prior: Option<(i64, i64, String)> = tx
+            .query_row(
+                "SELECT from_ms,covered_through_ms,consumed_usd
+             FROM campaign_entry_totals WHERE campaign_id=?1",
+                [campaign_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?;
+        let mut consumed = if let Some((first, cut, total)) = prior {
+            if first != from_ms || cut > through_ms {
+                return Err(StoreError::Invalid("CAMPAIGN_APPLIED_FRONTIER_REGRESSION"));
+            }
+            decimal(total)?
+        } else {
+            Decimal::ZERO
+        };
+        for (intent_id, digest, amount, revision, venue_updated_at) in receipts {
+            if intent_id.is_empty()
+                || digest.len() != 64
+                || !digest.bytes().all(|b| b.is_ascii_hexdigit())
+                || *amount < Decimal::ZERO
+                || *venue_updated_at < from_ms
+                || *venue_updated_at > through_ms
+            {
+                return Err(StoreError::Invalid("CAMPAIGN_APPLIED_EVENT_INVALID"));
+            }
+            let revision = i64::try_from(*revision)
+                .map_err(|_| StoreError::Invalid("CAMPAIGN_APPLIED_REVISION_INVALID"))?;
+            let earlier: Option<(i64, String, String)> = tx
+                .query_row(
+                    "SELECT settlement_revision,cumulative_usd,source_digest
+                 FROM campaign_entry_applied
+                 WHERE campaign_id=?1 AND intent_id=?2
+                 ORDER BY settlement_revision DESC LIMIT 1",
+                    params![campaign_id, intent_id],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .optional()?;
+            let prior_money = if let Some((prior_revision, prior_amount, prior_digest)) = earlier {
+                let prior_amount = decimal(prior_amount)?;
+                if prior_revision > revision || prior_amount > *amount {
+                    return Err(StoreError::Invalid("CAMPAIGN_APPLIED_MONOTONICITY_BREACH"));
+                }
+                if prior_revision == revision {
+                    if prior_amount != *amount || prior_digest != *digest {
+                        return Err(StoreError::Invalid("CAMPAIGN_APPLIED_SOURCE_CONFLICT"));
+                    }
+                    continue;
+                }
+                prior_amount
+            } else {
+                Decimal::ZERO
+            };
+            let delta = amount
+                .checked_sub(prior_money)
+                .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))?;
+            consumed = consumed
+                .checked_add(delta)
+                .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))?;
+            tx.execute(
+                "INSERT INTO campaign_entry_applied
+                 VALUES(?1,?2,?3,?4,?5,?6)",
+                params![
+                    campaign_id,
+                    intent_id,
+                    revision,
+                    exact(*amount),
+                    digest,
+                    venue_updated_at
+                ],
+            )?;
+        }
+        if consumed != witnessed_total {
+            return Err(StoreError::Invalid("CAMPAIGN_APPLIED_TOTAL_DIVERGENCE"));
+        }
+        tx.execute(
+            "INSERT INTO campaign_entry_totals
+             VALUES(?1,?2,?3,?4)
+             ON CONFLICT(campaign_id) DO UPDATE SET
+                 covered_through_ms=excluded.covered_through_ms,
+                 consumed_usd=excluded.consumed_usd",
+            params![campaign_id, from_ms, through_ms, exact(consumed)],
+        )?;
+        if let Some(proof) = opening_proof {
+            if proof.len() != 64 || !proof.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return Err(StoreError::Invalid("CAMPAIGN_OPENING_PROOF_INVALID"));
+            }
+            tx.execute(
+                "INSERT INTO campaign_entry_window_proofs
+                 VALUES(?1,?2,?3,?4)
+                 ON CONFLICT(campaign_id,covered_through_ms) DO NOTHING",
+                params![campaign_id, through_ms, exact(consumed), proof],
+            )?;
+            let saved: (String, String) = tx.query_row(
+                "SELECT consumed_usd,source_digest FROM campaign_entry_window_proofs
+                 WHERE campaign_id=?1 AND covered_through_ms=?2",
+                params![campaign_id, through_ms],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?;
+            if saved != (exact(consumed), proof.to_owned()) {
+                return Err(StoreError::Invalid("CAMPAIGN_OPENING_PROOF_CONFLICT"));
+            }
+            let key = format!("campaign_entry_opening:{campaign_id}:{proof}");
+            tx.execute(
+                "INSERT INTO operation_receipts
+                 (operation_id,kind,request_hash,result_ref,committed_at)
+                 VALUES(?1,'CAMPAIGN_ENTRY_OPENING_SEALED',?2,?2,?3)
+                 ON CONFLICT(operation_id) DO NOTHING",
+                params![key, proof, through_ms],
+            )?;
+            let receipt: (String, String, String, i64) = tx.query_row(
+                "SELECT kind,request_hash,result_ref,committed_at
+                 FROM operation_receipts WHERE operation_id=?1",
+                [key],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )?;
+            if receipt
+                != (
+                    "CAMPAIGN_ENTRY_OPENING_SEALED".into(),
+                    proof.to_owned(),
+                    proof.to_owned(),
+                    through_ms,
+                )
+            {
+                return Err(StoreError::Invalid("CAMPAIGN_OPENING_RECEIPT_CONFLICT"));
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// One campaign source for both empty and historical OWN native entries.
+    /// Previously settled linear SWAP entries carry admission-time frozen USD,
+    /// complete fill/bill provenance, and central RELEASE in this SQL owner.
+    /// They are counted once per immutable settlement, not at today's FX.
+    /// Foreign, unreconciled or breached historical money cannot be reset to zero.
+    pub fn seal_captured_campaign_baseline(
+        &self,
+        campaign_id: &str,
+        from_ms: i64,
+        through_ms: i64,
+    ) -> StoreResult<(Decimal, String)> {
+        use sha2::{Digest, Sha256};
+        if !campaign_id.starts_with("sha256:")
+            || campaign_id.len() != 71
+            || !campaign_id[7..].bytes().all(|b| b.is_ascii_hexdigit())
+        {
+            return Err(StoreError::Invalid("ENTRY_OPENING_WINDOW_INVALID"));
+        }
+        let frontiers = self.captured_complete_frontiers(from_ms, through_ms)?;
+        self.verify_captured_campaign_continuity(from_ms, through_ms)?;
+        // The campaign projection is authoritative only for the *previously
+        // completed* and already source-verified frontier. Scan the new
+        // interval, not the whole campaign on every post-trade preview.
+        // A late cumulative revision is a NEW economic delta even when its
+        // original terminal order belongs to an older interval.
+        let checkpoint: Option<(i64, i64, String)> = self
+            .connection
+            .query_row(
+                "SELECT from_ms,covered_through_ms,consumed_usd
+             FROM campaign_entry_totals WHERE campaign_id=?1",
+                [campaign_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?;
+        if let Some((origin, cut, amount)) = checkpoint.as_ref()
+            && *origin == from_ms
+            && *cut == through_ms
+        {
+            // A backfilled settlement or late fee can arrive with an
+            // event timestamp inside an already sealed interval. Its
+            // original cursor cut-off is NOT permission to return the
+            // previous money proof unchanged. Refuse same-frontier
+            // replay until a new fully captured interval is available.
+            let newer: bool = self.connection.query_row(
+                "SELECT EXISTS(
+                   SELECT 1 FROM operation_receipts t
+                   WHERE t.kind='ENTRY_SETTLEMENT_PROVEN'
+                     AND t.committed_at>?2 AND t.committed_at<=?3
+                     AND (
+                       NOT EXISTS(
+                         SELECT 1 FROM campaign_entry_applied a
+                         WHERE a.campaign_id=?1
+                           AND a.intent_id=substr(t.operation_id,18)
+                       )
+                       OR EXISTS(
+                         SELECT 1 FROM operation_receipts late
+                         WHERE late.operation_id='entry-late-head:'||
+                               substr(t.operation_id,18)
+                           AND late.kind='ENTRY_LATE_HEAD'
+                           AND late.committed_at<=?3
+                           AND NOT EXISTS(
+                             SELECT 1 FROM campaign_entry_applied a
+                             WHERE a.campaign_id=?1
+                               AND a.intent_id=substr(t.operation_id,18)
+                               AND a.settlement_revision=CAST(
+                                 json_extract(late.result_ref,'$.settlement_revision')
+                                 AS INTEGER
+                               )
+                           )
+                       )
+                     )
+                 )",
+                params![campaign_id, from_ms, through_ms],
+                |r| r.get(0),
+            )?;
+            if newer {
+                return Err(StoreError::Invalid(
+                    "CAMPAIGN_FRONTIER_STALE_ECONOMIC_SOURCE",
+                ));
+            }
+            let prior: Option<(String, String)> = self
+                .connection
+                .query_row(
+                    "SELECT consumed_usd,source_digest
+                 FROM campaign_entry_window_proofs
+                 WHERE campaign_id=?1 AND covered_through_ms=?2",
+                    params![campaign_id, through_ms],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()?;
+            let (old_money, proof) =
+                prior.ok_or(StoreError::Invalid("CAMPAIGN_OPENING_PROOF_MISSING"))?;
+            if old_money != *amount {
+                return Err(StoreError::Invalid("CAMPAIGN_OPENING_TOTAL_CONFLICT"));
+            }
+            let key = format!("campaign_entry_opening:{campaign_id}:{proof}");
+            let receipt = self
+                .operation(&key)?
+                .ok_or(StoreError::Invalid("CAMPAIGN_OPENING_RECEIPT_MISSING"))?;
+            if receipt.kind != "CAMPAIGN_ENTRY_OPENING_SEALED"
+                || receipt.request_hash != proof
+                || receipt.result_ref != proof
+                || receipt.committed_at != through_ms
+            {
+                return Err(StoreError::Invalid("CAMPAIGN_OPENING_RECEIPT_CONFLICT"));
+            }
+            self.mark_campaign_readiness(campaign_id, from_ms, through_ms, &frontiers)?;
+            return Ok((decimal(old_money)?, proof));
+        }
+        let (since, mut total) = match checkpoint.as_ref() {
+            Some((origin, cut, amount)) if *origin == from_ms && *cut <= through_ms => {
+                (*cut, decimal(amount.clone())?)
+            }
+            Some(_) => return Err(StoreError::Invalid("CAMPAIGN_APPLIED_FRONTIER_REGRESSION")),
+            None => (from_ms, Decimal::ZERO),
+        };
+        let mut stmt = self.connection.prepare(
+            "SELECT terminal.operation_id,terminal.result_ref,terminal.committed_at
+             FROM operation_receipts terminal
+             WHERE terminal.kind='ENTRY_SETTLEMENT_PROVEN'
+               AND terminal.committed_at>?3 AND terminal.committed_at<=?2
+               AND (
+                 terminal.committed_at>?1
+                 OR NOT EXISTS(
+                   SELECT 1 FROM campaign_entry_applied a
+                   WHERE a.campaign_id=?4
+                     AND a.intent_id=substr(terminal.operation_id,18)
+                 )
+                 OR EXISTS(
+                   SELECT 1 FROM operation_receipts late
+                   WHERE late.operation_id='entry-late-head:'||
+                         substr(terminal.operation_id,18)
+                     AND late.kind='ENTRY_LATE_HEAD'
+                     AND late.committed_at<=?2
+                     AND NOT EXISTS(
+                       SELECT 1 FROM campaign_entry_applied a
+                       WHERE a.campaign_id=?4
+                         AND a.intent_id=substr(terminal.operation_id,18)
+                         AND a.settlement_revision=CAST(
+                           json_extract(late.result_ref,'$.settlement_revision')
+                           AS INTEGER
+                         )
+                     )
+                 )
+               )
+             ORDER BY terminal.operation_id LIMIT 10001",
+        )?;
+        let mut rows = stmt.query(params![since, through_ms, from_ms, campaign_id])?;
+        let mut witnesses = Vec::new();
+        while let Some(row) = rows.next()? {
+            if witnesses.len() >= 10_000 {
+                return Err(StoreError::Invalid("ENTRY_OPENING_HISTORY_TOO_LARGE"));
+            }
+            let operation_id: String = row.get(0)?;
+            let encoded: String = row.get(1)?;
+            let time: i64 = row.get(2)?;
+            let terminal: EntrySettlementEvidence = serde_json::from_str(&encoded)
+                .map_err(|_| StoreError::Invalid("ENTRY_OPENING_SETTLEMENT_CORRUPT"))?;
+            if operation_id != format!("entry-settlement:{}", terminal.intent_id)
+                || terminal.schema != "okx.entry-terminal-settlement/v1"
+                || terminal.account_key != self.meta.account_key
+                || terminal.venue_update_ms != time
+            {
+                return Err(StoreError::Invalid("ENTRY_OPENING_SETTLEMENT_INVALID"));
+            }
+            // Additional fee bills are cumulative revisions, never a
+            // second historical entry. Only the exact central-settled latest
+            // revision may replace the terminal amount in an opening proof.
+            let latest: Option<String> = self
+                .connection
+                .query_row(
+                    "SELECT result_ref FROM operation_receipts
+                 WHERE operation_id='entry-late-head:'||?1 AND kind='ENTRY_LATE_HEAD'",
+                    [&terminal.intent_id],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            let value: EntrySettlementEvidence = if let Some(revision) = latest {
+                let late: EntrySettlementEvidence = serde_json::from_str(&revision)
+                    .map_err(|_| StoreError::Invalid("ENTRY_OPENING_LATE_CORRUPT"))?;
+                let immutable: Option<String> = self
+                    .connection
+                    .query_row(
+                        "SELECT result_ref FROM operation_receipts
+                     WHERE operation_id=?1 AND kind='ENTRY_LATE_SETTLEMENT_PROVEN'
+                       AND request_hash=?2",
+                        params![
+                            format!(
+                                "entry-late:{}:r{}",
+                                late.intent_id, late.settlement_revision
+                            ),
+                            late.plan_hash
+                        ],
+                        |r| r.get(0),
+                    )
+                    .optional()?;
+                let proof: Option<String> = self
+                    .connection
+                    .query_row(
+                        "SELECT result_ref FROM operation_receipts
+                     WHERE operation_id=?1 AND kind='ENTRY_LATE_SETTLED'
+                       AND request_hash=?2",
+                        params![
+                            format!(
+                                "entry-late-settled:{}:r{}",
+                                late.intent_id, late.settlement_revision
+                            ),
+                            late.plan_hash
+                        ],
+                        |r| r.get(0),
+                    )
+                    .optional()?;
+                if late.schema != "okx.entry-late-settlement/v1"
+                    || late.account_key != terminal.account_key
+                    || late.intent_id != terminal.intent_id
+                    || late.plan_hash != terminal.plan_hash
+                    || late.reservation_key != terminal.reservation_key
+                    || late.venue_order_id != terminal.venue_order_id
+                    || late.venue_update_ms != terminal.venue_update_ms
+                    || late.settlement_revision <= terminal.settlement_revision
+                    || late.cumulative_entry_usd < terminal.cumulative_entry_usd
+                    || immutable.as_deref() != Some(revision.as_str())
+                    || proof.as_deref() != Some(late.source_digest.as_str())
+                    || late.source_covered_through_ms > through_ms
+                {
+                    return Err(StoreError::Invalid("ENTRY_OPENING_LATE_UNSETTLED"));
+                }
+                late
+            } else {
+                terminal
+            };
+            if value.cumulative_entry_usd < Decimal::ZERO
+                || (value.cumulative_entry_usd == Decimal::ZERO
+                    && (value.venue_filled_quantity != Decimal::ZERO
+                        || value.booked_notional_and_fee_usdt != Decimal::ZERO
+                        || value.settlement_revision != 1
+                        || value.schema != "okx.entry-terminal-settlement/v1"))
+                || value.source_digest.len() != 64
+                || !value.source_digest.bytes().all(|b| b.is_ascii_hexdigit())
+            {
+                return Err(StoreError::Invalid("ENTRY_OPENING_SETTLEMENT_INVALID"));
+            }
+            let native: Option<(String, i64, String, String)> = self
+                .connection
+                .query_row(
+                    "SELECT i.plan_hash,i.begin_post_at,r.state,r.reservation_key
+                 FROM intents i JOIN risk_receipts r ON r.intent_id=i.intent_id
+                 WHERE i.intent_id=?1 AND i.exchange_order_id=?2
+                   AND i.risk_increase=1 AND i.state IN ('FILLED','CANCELLED')
+                   AND r.plan_hash=i.plan_hash",
+                    params![value.intent_id, value.venue_order_id],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                )
+                .optional()?;
+            if native
+                .as_ref()
+                .is_none_or(|(hash, post, state, reservation)| {
+                    hash != &value.plan_hash
+                        || *post < from_ms
+                        || state != "RELEASED"
+                        || reservation != &value.reservation_key
+                })
+            {
+                return Err(StoreError::Invalid("ENTRY_OPENING_SETTLEMENT_NOT_RELEASED"));
+            }
+            let admission: Option<String> = self
+                .connection
+                .query_row(
+                    "SELECT result_ref FROM operation_receipts
+                 WHERE operation_id='entry-admission:'||?1
+                   AND kind='ENTRY_ADMISSION_PROVEN'",
+                    [value.intent_id.as_str()],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            let admission: EntryAdmissionEvidence = serde_json::from_str(
+                admission
+                    .as_deref()
+                    .ok_or(StoreError::Invalid("ENTRY_OPENING_ADMISSION_MISSING"))?,
+            )
+            .map_err(|_| StoreError::Invalid("ENTRY_OPENING_ADMISSION_INVALID"))?;
+            if admission.account_key != value.account_key
+                || admission.installation_id != self.meta.installation_id
+                || admission.intent_id != value.intent_id
+                || admission.plan_hash != value.plan_hash
+                || value.cumulative_entry_usd > admission.entry_upper_usd
+            {
+                // An original debit breach remains a STOP; a reconstructed
+                // opening must not erase it by replacing the central book.
+                return Err(StoreError::Invalid(
+                    "ENTRY_OPENING_BOUND_BREACH_REQUIRES_STOP",
+                ));
+            }
+            // A late source revision replaces its previous cumulative
+            // amount; the campaign only consumes the positive difference.
+            let applied: Option<(i64, String, String)> = self
+                .connection
+                .query_row(
+                    "SELECT settlement_revision,cumulative_usd,source_digest
+                 FROM campaign_entry_applied
+                 WHERE campaign_id=?1 AND intent_id=?2
+                 ORDER BY settlement_revision DESC LIMIT 1",
+                    params![campaign_id, value.intent_id],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .optional()?;
+            let previous = if let Some((rev, amount, digest)) = applied {
+                let amount = decimal(amount)?;
+                if rev
+                    > i64::try_from(value.settlement_revision)
+                        .map_err(|_| StoreError::Invalid("CAMPAIGN_APPLIED_REVISION_INVALID"))?
+                    || amount > value.cumulative_entry_usd
+                {
+                    return Err(StoreError::Invalid("CAMPAIGN_APPLIED_MONOTONICITY_BREACH"));
+                }
+                if rev
+                    == i64::try_from(value.settlement_revision)
+                        .map_err(|_| StoreError::Invalid("CAMPAIGN_APPLIED_REVISION_INVALID"))?
+                {
+                    if amount != value.cumulative_entry_usd || digest != value.source_digest {
+                        return Err(StoreError::Invalid("CAMPAIGN_APPLIED_SOURCE_CONFLICT"));
+                    }
+                    continue;
+                }
+                amount
+            } else {
+                Decimal::ZERO
+            };
+            let delta = value
+                .cumulative_entry_usd
+                .checked_sub(previous)
+                .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))?;
+            total = total
+                .checked_add(delta)
+                .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))?;
+            witnesses.push((
+                value.intent_id,
+                value.source_digest,
+                value.cumulative_entry_usd,
+                value.settlement_revision,
+                value.venue_update_ms,
+            ));
+        }
+        // Finish the exact read snapshot before mutating any campaign
+        // receipts. Initial zero is a special claim: validate it BEFORE
+        // committing an advanced applied frontier.
+        drop(rows);
+        drop(stmt);
+        if witnesses.is_empty() && checkpoint.is_none() {
+            // Compute from already verified capture facts without writing
+            // an independent operation receipt ahead of the aggregate.
+            // apply_captured_campaign_deltas persists both atomically.
+            let zero = self.captured_empty_campaign_proof(campaign_id, from_ms, through_ms)?;
+            self.apply_captured_campaign_deltas(
+                campaign_id,
+                from_ms,
+                through_ms,
+                &witnesses,
+                Decimal::ZERO,
+                Some(&zero),
+            )?;
+            self.mark_campaign_readiness(campaign_id, from_ms, through_ms, &frontiers)?;
+            return Ok((Decimal::ZERO, zero));
+        }
+        let canonical = serde_json::to_vec(&(
+            "okx.campaign-source-backed-baseline/v1",
+            self.meta.account_key.as_str(),
+            self.meta.installation_id.as_str(),
+            campaign_id,
+            from_ms,
+            through_ms,
+            &frontiers,
+            &witnesses,
+            total.to_string(),
+        ))
+        .map_err(|_| StoreError::Invalid("ENTRY_OPENING_SERIALIZATION_FAILED"))?;
+        let proof = format!("{:x}", Sha256::digest(canonical));
+        self.apply_captured_campaign_deltas(
+            campaign_id,
+            from_ms,
+            through_ms,
+            &witnesses,
+            total,
+            Some(&proof),
+        )?;
+        self.connection.execute_batch(
+            "CREATE TRIGGER IF NOT EXISTS immutable_campaign_opening_update
+             BEFORE UPDATE ON operation_receipts
+             WHEN OLD.kind='CAMPAIGN_ENTRY_OPENING_SEALED'
+             BEGIN SELECT RAISE(ABORT,'IMMUTABLE_CAMPAIGN_ENTRY_OPENING'); END;
+             CREATE TRIGGER IF NOT EXISTS immutable_campaign_opening_delete
+             BEFORE DELETE ON operation_receipts
+             WHEN OLD.kind='CAMPAIGN_ENTRY_OPENING_SEALED'
+             BEGIN SELECT RAISE(ABORT,'IMMUTABLE_CAMPAIGN_ENTRY_OPENING'); END;",
+        )?;
+        let key = format!("campaign_entry_opening:{campaign_id}:{proof}");
+        self.connection.execute(
+            "INSERT OR IGNORE INTO operation_receipts
+             (operation_id,kind,request_hash,result_ref,committed_at)
+             VALUES(?1,'CAMPAIGN_ENTRY_OPENING_SEALED',?2,?2,?3)",
+            params![key, proof, through_ms],
+        )?;
+        let received: (String, String, String, i64) = self.connection.query_row(
+            "SELECT kind,request_hash,result_ref,committed_at FROM operation_receipts
+             WHERE operation_id=?1",
+            [key],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )?;
+        if received
+            != (
+                "CAMPAIGN_ENTRY_OPENING_SEALED".into(),
+                proof.clone(),
+                proof.clone(),
+                through_ms,
+            )
+        {
+            return Err(StoreError::Invalid("ENTRY_OPENING_SQL_RECEIPT_CONFLICT"));
+        }
+        self.mark_campaign_readiness(campaign_id, from_ms, through_ms, &frontiers)?;
+        Ok((total, proof))
+    }
+
+    /// Source-backed zero opening from the EXISTING incremental account writer.
+    /// A complete source cursor is required for every venue money stream;
+    /// missing pages, an older campaign than the initial capture, or any
+    /// potentially budget-relevant event remains pending, never zero.
+    /// This permits opening even after unrelated pre-campaign activity.
+    fn captured_empty_campaign_proof(
+        &self,
+        campaign_id: &str,
+        from_ms: i64,
+        through_ms: i64,
+    ) -> StoreResult<String> {
+        use sha2::{Digest, Sha256};
+        if !campaign_id.starts_with("sha256:")
+            || campaign_id.len() != 71
+            || !campaign_id[7..].bytes().all(|b| b.is_ascii_hexdigit())
+            || from_ms <= 0
+            || through_ms <= from_ms
+        {
+            return Err(StoreError::Invalid("ENTRY_OPENING_WINDOW_INVALID"));
+        }
+        let frontiers = self.captured_empty_frontiers(from_ms, through_ms)?;
+        let (fills, bills) = (0_i64, 0_i64);
+        let bytes = serde_json::to_vec(&(
+            "okx.campaign-captured-zero/v1",
+            self.meta.account_key.as_str(),
+            self.meta.installation_id.as_str(),
+            campaign_id,
+            from_ms,
+            through_ms,
+            &frontiers,
+            fills,
+            bills,
+        ))
+        .map_err(|_| StoreError::Invalid("ENTRY_OPENING_SERIALIZATION_FAILED"))?;
+        Ok(format!("{:x}", Sha256::digest(bytes)))
+    }
+
+    /// Readback-compatible standalone zero opening receipt. The composed
+    /// campaign sealer uses captured_empty_campaign_proof directly so its
+    /// receipt and monetary frontier commit in one SQL transaction.
+    pub fn seal_captured_empty_campaign(
+        &self,
+        campaign_id: &str,
+        from_ms: i64,
+        through_ms: i64,
+    ) -> StoreResult<String> {
+        let proof = self.captured_empty_campaign_proof(campaign_id, from_ms, through_ms)?;
+        self.connection.execute_batch(
+            "CREATE TRIGGER IF NOT EXISTS immutable_campaign_opening_update
+             BEFORE UPDATE ON operation_receipts
+             WHEN OLD.kind='CAMPAIGN_ENTRY_OPENING_SEALED'
+             BEGIN SELECT RAISE(ABORT,'IMMUTABLE_CAMPAIGN_ENTRY_OPENING'); END;
+             CREATE TRIGGER IF NOT EXISTS immutable_campaign_opening_delete
+             BEFORE DELETE ON operation_receipts
+             WHEN OLD.kind='CAMPAIGN_ENTRY_OPENING_SEALED'
+             BEGIN SELECT RAISE(ABORT,'IMMUTABLE_CAMPAIGN_ENTRY_OPENING'); END;",
+        )?;
+        let key = format!("campaign_entry_opening:{campaign_id}:{proof}");
+        self.connection.execute(
+            "INSERT OR IGNORE INTO operation_receipts
+             (operation_id,kind,request_hash,result_ref,committed_at)
+             VALUES(?1,'CAMPAIGN_ENTRY_OPENING_SEALED',?2,?2,?3)",
+            params![key, proof, through_ms],
+        )?;
+        let saved: (String, String, String, i64) = self.connection.query_row(
+            "SELECT kind,request_hash,result_ref,committed_at
+             FROM operation_receipts WHERE operation_id=?1",
+            [key],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )?;
+        if saved
+            != (
+                "CAMPAIGN_ENTRY_OPENING_SEALED".into(),
+                proof.clone(),
+                proof.clone(),
+                through_ms,
+            )
+        {
+            return Err(StoreError::Invalid("ENTRY_OPENING_SQL_RECEIPT_CONFLICT"));
+        }
+        Ok(proof)
+    }
+
+    /// Read bounded native fill evidence for one persisted risk-increasing
+    /// intent. The source coverage cursor is mandatory: a partial page is
+    /// NOT an absence-of-fills proof. This does not price margin, non-USDT
+    /// fees, borrowing or FX and cannot authorize a reserve or venue POST.
+    pub fn intent_fill_cost_evidence(
+        &self,
+        intent_id: &str,
+        through: i64,
+    ) -> StoreResult<IntentFillCostEvidence> {
+        use sha2::{Digest, Sha256};
+        if through < self.meta.initialized_at {
+            return Err(StoreError::Invalid("ENTRY_FILL_WINDOW_INVALID"));
+        }
+        let cursor = self
+            .cursor("fills", "SWAP")?
+            .ok_or(StoreError::Invalid("ENTRY_FILL_COVERAGE_UNPROVEN"))?;
+        if !cursor.cursor.is_empty()
+            || !cursor.coverage_gaps.is_empty()
+            || cursor.generation <= 0
+            || cursor.watermark < through
+        {
+            return Err(StoreError::Invalid("ENTRY_FILL_COVERAGE_UNPROVEN"));
+        }
+        let (
+            plan_hash,
+            instrument,
+            contract_value,
+            inverse,
+            currency,
+            increase,
+            side,
+            planned_quantity,
+            bound_price,
+        ): (
+            String,
+            String,
+            String,
+            bool,
+            String,
+            bool,
+            String,
+            String,
+            String,
+        ) = self
+            .connection
+            .query_row(
+                "SELECT i.plan_hash,i.instrument_id,p.contract_value,p.inverse,
+                        p.settlement_currency,i.risk_increase,p.side,p.quantity,p.limit_price
+                 FROM intents i JOIN intent_plans p ON p.intent_id=i.intent_id
+                 WHERE i.intent_id=?1",
+                [intent_id],
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                        r.get(6)?,
+                        r.get(7)?,
+                        r.get(8)?,
+                    ))
+                },
+            )
+            .optional()?
+            .ok_or(StoreError::Invalid("ENTRY_FILL_INTENT_NOT_FOUND"))?;
+        // Addressable PK-backed read of the only authorized SQL order and
+        // central receipt, separate from the immutable contract mechanics.
+        let (exchange_order_id, begin_post_at, reservation_key): (
+            Option<String>,
+            Option<i64>,
+            Option<String>,
+        ) = self.connection.query_row(
+            "SELECT i.exchange_order_id,i.begin_post_at,r.reservation_key
+                 FROM intents i LEFT JOIN risk_receipts r
+                  ON r.intent_id=i.intent_id AND r.plan_hash=i.plan_hash
+                   AND r.account_key=?2 AND r.installation_id=?3
+                 WHERE i.intent_id=?1",
+            params![intent_id, self.meta.account_key, self.meta.installation_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )?;
+        if !increase || inverse || !instrument.ends_with("-USDT-SWAP") || currency != "USDT" {
+            return Err(StoreError::Invalid("ENTRY_FILL_INSTRUMENT_UNSUPPORTED"));
+        }
+        // A fill row's intent_id is attribution, not proof that the exchange
+        // actually accepted *this* order. Resolve the durable POST fence,
+        // central reservation and exact order ID before monetary evaluation.
+        let (Some(exchange_order_id), Some(posted_at), Some(reservation_key)) =
+            (exchange_order_id, begin_post_at, reservation_key)
+        else {
+            return Err(StoreError::Invalid("ENTRY_FILL_ORDER_UNVERIFIED"));
+        };
+        if exchange_order_id.is_empty() || reservation_key.is_empty() || posted_at <= 0 {
+            return Err(StoreError::Invalid("ENTRY_FILL_ORDER_UNVERIFIED"));
+        }
+        let ct = decimal(contract_value.clone())?;
+        let planned_qty = decimal(planned_quantity.clone())?;
+        let price_bound = decimal(bound_price.clone())?;
+        if !matches!(side.as_str(), "buy" | "sell")
+            || planned_qty <= Decimal::ZERO
+            || price_bound <= Decimal::ZERO
+        {
+            return Err(StoreError::Invalid("ENTRY_FILL_PLAN_INVALID"));
+        }
+        if ct <= Decimal::ZERO {
+            return Err(StoreError::Invalid("ENTRY_FILL_CONTRACT_INVALID"));
+        }
+        // A cursor watermark or private generation can advance after an
+        // immutable venue event. Check source coverage above on EVERY read,
+        // but hash only the chosen covered-through cut-off and economic facts.
+        // Otherwise a lost Worker ACK changes digest on ordinary recapture.
+        let mut hasher = Sha256::new();
+        let header = serde_json::to_vec(&(
+            "okx.intent-fill-cost-evidence/v1",
+            self.meta.account_key.as_str(),
+            self.meta.installation_id.as_str(),
+            intent_id,
+            plan_hash.as_str(),
+            instrument.as_str(),
+            contract_value.as_str(),
+            side.as_str(),
+            planned_quantity.as_str(),
+            bound_price.as_str(),
+            exchange_order_id.as_str(),
+            reservation_key.as_str(),
+            posted_at,
+            through,
+        ))
+        .map_err(|_| StoreError::Invalid("ENTRY_FILL_DIGEST_INVALID"))?;
+        hasher.update(&header);
+        let mut statement = self.connection.prepare(
+            "SELECT fill_id,instrument_id,trade_id,exchange_order_id,time,qty,price,fee,currency,side
+             FROM fills WHERE intent_id=?1 AND time<=?2 ORDER BY fill_id LIMIT 10001",
+        )?;
+        let mut rows = statement.query(params![intent_id, through])?;
+        let mut count = 0u64;
+        let mut notional = Decimal::ZERO;
+        let mut fees = Decimal::ZERO;
+        let mut filled_qty = Decimal::ZERO;
+        while let Some(row) = rows.next()? {
+            count += 1;
+            if count > 10000 {
+                return Err(StoreError::Invalid("ENTRY_FILL_HISTORY_TOO_LARGE"));
+            }
+            let source: (
+                String,
+                String,
+                String,
+                String,
+                i64,
+                String,
+                String,
+                String,
+                String,
+                String,
+            ) = (
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+                row.get(5)?,
+                row.get(6)?,
+                row.get(7)?,
+                row.get(8)?,
+                row.get(9)?,
+            );
+            if source.1 != instrument
+                || source.4 < self.meta.initialized_at
+                || source.4 < posted_at
+                || source.8 != "USDT"
+                || source.9 != side
+                || source.0.is_empty()
+                || source.2.is_empty()
+                || source.3.is_empty()
+            {
+                return Err(StoreError::Invalid("ENTRY_FILL_SOURCE_INVALID"));
+            }
+            if source.3 != exchange_order_id {
+                return Err(StoreError::Invalid("ENTRY_FILL_EXCHANGE_ORDER_MISMATCH"));
+            }
+            let qty = decimal(source.5.clone())?;
+            let price = decimal(source.6.clone())?;
+            let fee = decimal(source.7.clone())?;
+            if qty <= Decimal::ZERO || price <= Decimal::ZERO {
+                return Err(StoreError::Invalid("ENTRY_FILL_SOURCE_INVALID"));
+            }
+            // A fill attributed to an intent is not enough: prove that it
+            // could have resulted from the exact persisted bounded order.
+            if (side == "buy" && price > price_bound) || (side == "sell" && price < price_bound) {
+                return Err(StoreError::Invalid("ENTRY_FILL_PRICE_BOUND_VIOLATED"));
+            }
+            filled_qty = filled_qty
+                .checked_add(qty)
+                .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))?;
+            if filled_qty > planned_qty {
+                return Err(StoreError::Invalid("ENTRY_FILL_QUANTITY_EXCEEDED"));
+            }
+            let gross = qty
+                .checked_mul(ct)
+                .and_then(|v| v.checked_mul(price))
+                .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))?;
+            notional = notional
+                .checked_add(gross)
+                .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))?;
+            fees = fees
+                .checked_add(entry_fee_debit(fee))
+                .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))?;
+            // Length-delimited immutable venue row; independent of ingestion order.
+            let bytes = serde_json::to_vec(&source)
+                .map_err(|_| StoreError::Invalid("ENTRY_FILL_DIGEST_INVALID"))?;
+            hasher.update((bytes.len() as u64).to_le_bytes());
+            hasher.update(bytes);
+        }
+        if count == 0 {
+            return Err(StoreError::Invalid("ENTRY_FILL_EVIDENCE_EMPTY"));
+        }
+        Ok(IntentFillCostEvidence {
+            intent_id: intent_id.to_owned(),
+            plan_hash,
+            exchange_order_id,
+            reservation_key,
+            fill_count: count,
+            filled_quantity: filled_qty,
+            covered_through: through,
+            gross_notional_usdt: notional,
+            conservative_fee_usdt: fees,
+            source_digest: format!("{:x}", hasher.finalize()),
+        })
+    }
+
+    /// Extra order-attested debit bills are distinct from the fill's first
+    /// canonical fee. Every linked invoice has independent source identity;
+    /// a newer bill never rewrites a previous receipt or returns capacity.
+    /// The existing account writer reads bounded PK-prefix rows, no archives.
+    pub fn intent_additional_entry_fee_evidence(
+        &self,
+        id: &str,
+        through: i64,
+    ) -> StoreResult<(Decimal, String)> {
+        use sha2::{Digest, Sha256};
+        let covered = self
+            .cursor("bills", "account")?
+            .ok_or(StoreError::Invalid("ENTRY_EXTRA_BILLS_UNCOVERED"))?;
+        if covered.watermark < through
+            || !covered.cursor.is_empty()
+            || !covered.coverage_gaps.is_empty()
+            || covered.generation <= 0
+        {
+            return Err(StoreError::Invalid("ENTRY_EXTRA_BILLS_UNCOVERED"));
+        }
+        let intent = self
+            .intent(id)?
+            .ok_or(StoreError::Invalid("ENTRY_BILL_INTENT_MISSING"))?;
+        let prefix = format!("entry-bill:{id}:");
+        let bound = format!("{prefix}~");
+        let mut q = self.connection.prepare(
+            "SELECT operation_id,kind,request_hash,result_ref,committed_at
+             FROM operation_receipts WHERE operation_id>=?1 AND operation_id<?2
+             ORDER BY operation_id LIMIT 10001",
+        )?;
+        let mut rows = q.query(params![prefix, bound])?;
+        let mut extras = Decimal::ZERO;
+        let mut digest = Sha256::new();
+        digest.update(b"okx.intent-extra-entry-fee/v1");
+        digest.update(id.as_bytes());
+        digest.update(through.to_le_bytes());
+        let mut count = 0_u64;
+        while let Some(row) = rows.next()? {
+            count += 1;
+            if count > 10000 {
+                return Err(StoreError::Invalid("ENTRY_EXTRA_BILLS_TOO_MANY"));
+            }
+            let (key, kind, hash, encoded, at): (String, String, String, String, i64) = (
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+            );
+            let link: EntryOrderFeeLink = serde_json::from_str(&encoded)
+                .map_err(|_| StoreError::Invalid("ENTRY_EXTRA_BILL_RECEIPT_CORRUPT"))?;
+            if kind != "ENTRY_ORDER_FEE_PROVEN"
+                || key != format!("entry-bill:{id}:{}", link.bill_id)
+                || hash != intent.plan_hash
+                || link.intent_id != id
+                || link.instrument_id != intent.instrument_id
+                || Some(link.exchange_order_id.as_str()) != intent.exchange_order_id.as_deref()
+                || link.bill_at != at
+                || link.fee_usdt >= Decimal::ZERO
+            {
+                return Err(StoreError::Invalid("ENTRY_EXTRA_BILL_IDENTITY_MISMATCH"));
+            }
+            if at > through {
+                continue;
+            }
+            let source: Option<(i64, String, String, String, bool)> = self
+                .connection
+                .query_row(
+                    "SELECT b.time,b.currency,e.amount,e.entry_id,
+                    EXISTS(SELECT 1 FROM finance_source_links lf
+                        JOIN fills f ON lf.source_ref='fill:'||f.fill_id
+                        WHERE lf.entry_id=e.entry_id AND f.intent_id=?2)
+                 FROM bills b JOIN finance_entries e
+                    ON e.economic_event_key=b.economic_event_key
+                       AND e.component='FEE' AND e.allocation_leg='account'
+                 JOIN finance_source_links lb ON lb.entry_id=e.entry_id
+                       AND lb.source_ref='bill:'||b.bill_id
+                 WHERE b.bill_id=?1",
+                    params![link.bill_id, id],
+                    |row| {
+                        Ok((
+                            row.get(0)?,
+                            row.get(1)?,
+                            row.get(2)?,
+                            row.get(3)?,
+                            row.get(4)?,
+                        ))
+                    },
+                )
+                .optional()?;
+            let (bill_at, ccy, charge, event_id, first_fee) =
+                source.ok_or(StoreError::Invalid("ENTRY_EXTRA_BILL_SOURCE_UNVERIFIED"))?;
+            if bill_at != link.bill_at || ccy != "USDT" || decimal(charge.clone())? != link.fee_usdt
+            {
+                return Err(StoreError::Invalid("ENTRY_EXTRA_BILL_AMOUNT_CHANGED"));
+            }
+            if !first_fee {
+                extras = extras
+                    .checked_add(entry_fee_debit(link.fee_usdt))
+                    .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))?;
+                let bytes = serde_json::to_vec(&(link, bill_at, ccy, charge, event_id))
+                    .map_err(|_| StoreError::Invalid("ENTRY_EXTRA_BILL_DIGEST_FAILED"))?;
+                digest.update((bytes.len() as u64).to_le_bytes());
+                digest.update(bytes);
+            }
+        }
+        Ok((
+            extras,
+            if extras > Decimal::ZERO {
+                format!("{:x}", digest.finalize())
+            } else {
+                String::new()
+            },
+        ))
+    }
+
+    /// Read-only F1/E1 source cross-check. Native fill fee and bill fee must
+    /// resolve to the SAME existing finance event; the account bill stream
+    /// must be covered through the requested time. Missing bill linkage is
+    /// UNKNOWN, not a made-up zero fee or release permission. This is run on
+    /// the sole SQL owner, off the NAV hot path.
+    pub fn intent_fee_bill_evidence(
+        &self,
+        intent_id: &str,
+        through: i64,
+    ) -> StoreResult<IntentFeeBillEvidence> {
+        use sha2::{Digest, Sha256};
+        #[derive(serde::Serialize)]
+        struct FeeBillSource {
+            entry_id: String,
+            economic_event_key: String,
+            amount: String,
+            currency: String,
+            allocation_leg: String,
+            finance_time: i64,
+            reversal: Option<String>,
+            bill_id: Option<String>,
+            bill_time: Option<i64>,
+            bill_kind: Option<String>,
+            bill_currency: Option<String>,
+            bill_linked: bool,
+            // Preserve the canonical digest of legacy authenticated
+            // fee receipts that predate raw bill order provenance capture.
+            #[serde(skip_serializing_if = "Option::is_none")]
+            bill_order_id: Option<String>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            bill_instrument_id: Option<String>,
+        }
+        let fill = self.intent_fill_cost_evidence(intent_id, through)?;
+        let intent_instrument = self
+            .intent(intent_id)?
+            .ok_or(StoreError::Invalid("ENTRY_BILL_INTENT_MISSING"))?
+            .instrument_id;
+        if !finance_proof_sealed(&self.connection)? {
+            return Err(StoreError::Invalid("ENTRY_FINANCE_PROVENANCE_UNSEALED"));
+        }
+        let bills = self
+            .cursor("bills", "account")?
+            .ok_or(StoreError::Invalid("ENTRY_BILLS_COVERAGE_UNPROVEN"))?;
+        if !bills.cursor.is_empty()
+            || !bills.coverage_gaps.is_empty()
+            || bills.generation <= 0
+            || bills.watermark < through
+        {
+            return Err(StoreError::Invalid("ENTRY_BILLS_COVERAGE_UNPROVEN"));
+        }
+        // A later source generation/watermark cannot change the source
+        // digest of the same fixed through-window and immutable fee bills.
+        let mut hasher = Sha256::new();
+        hasher.update(
+            serde_json::to_vec(&(
+                "okx.intent-fee-bill-evidence/v1",
+                self.meta.account_key.as_str(),
+                self.meta.installation_id.as_str(),
+                intent_id,
+                fill.source_digest.as_str(),
+                through,
+            ))
+            .map_err(|_| StoreError::Invalid("ENTRY_FEE_BILL_DIGEST_INVALID"))?,
+        );
+        let mut fee_rows = self.connection.prepare(
+            "SELECT fill_id,fee,currency,time FROM fills
+             WHERE intent_id=?1 AND time<=?2 ORDER BY fill_id LIMIT 10001",
+        )?;
+        // Source-ref first index makes each immutable fee lookup addressable.
+        // The canonical finance entry may have first arrived from bill history
+        // or from fills. Its source_links must include BOTH original sources.
+        let mut linked = self.connection.prepare(
+            "SELECT e.entry_id,e.economic_event_key,e.amount,e.currency,
+                    e.allocation_leg,e.time,e.reverses_entry_id,b.bill_id,b.time,b.kind,b.currency,
+                    EXISTS(SELECT 1 FROM finance_source_links lb
+                      WHERE lb.entry_id=e.entry_id
+                        AND lb.source_ref='bill:'||b.bill_id),
+                    origin.exchange_order_id,origin.instrument_id
+             FROM finance_source_links fl
+             JOIN finance_entries e ON e.entry_id=fl.entry_id AND e.component='FEE'
+             LEFT JOIN bills b ON b.economic_event_key=e.economic_event_key
+                              AND e.economic_event_key='bill:'||b.bill_id
+             LEFT JOIN bill_order_sources origin ON origin.bill_id=b.bill_id
+             WHERE fl.source_ref=?1 ORDER BY e.entry_id LIMIT 2",
+        )?;
+        let mut scanned = fee_rows.query(params![intent_id, through])?;
+        let mut count = 0_u64;
+        let mut total = Decimal::ZERO;
+        while let Some(row) = scanned.next()? {
+            count += 1;
+            if count > 10000 {
+                return Err(StoreError::Invalid("ENTRY_FILL_HISTORY_TOO_LARGE"));
+            }
+            let id: String = row.get(0)?;
+            let fee: String = row.get(1)?;
+            let currency: String = row.get(2)?;
+            let fill_time: i64 = row.get(3)?;
+            let fee = decimal(fee)?;
+            if fee == Decimal::ZERO {
+                // No finance fee event exists for an actual zero-fee fill.
+                // A zero amount in fills alone does NOT prove the final bill.
+                return Err(StoreError::Invalid("ENTRY_ZERO_FEE_BILL_UNPROVEN"));
+            }
+            let fee_source = format!("fill:{id}");
+            let mut rows = linked.query([fee_source.as_str()])?;
+            let Some(source) = rows.next()? else {
+                return Err(StoreError::Invalid("ENTRY_FEE_BILL_LINK_MISSING"));
+            };
+            let proof = FeeBillSource {
+                entry_id: source.get(0)?,
+                economic_event_key: source.get(1)?,
+                amount: source.get(2)?,
+                currency: source.get(3)?,
+                allocation_leg: source.get(4)?,
+                finance_time: source.get(5)?,
+                reversal: source.get(6)?,
+                bill_id: source.get(7)?,
+                bill_time: source.get(8)?,
+                bill_kind: source.get(9)?,
+                bill_currency: source.get(10)?,
+                bill_linked: source.get(11)?,
+                bill_order_id: source.get(12)?,
+                bill_instrument_id: source.get(13)?,
+            };
+            if rows.next()?.is_some() {
+                return Err(StoreError::Invalid("ENTRY_FEE_BILL_LINK_AMBIGUOUS"));
+            }
+            // A linked fee still cannot settle an entry if the bill
+            // predates the fill, the finance event is outside the
+            // claimed covered window, or the link belongs to a non-account
+            // allocation. Do not equate a source-link match with money proof.
+            if proof.reversal.is_some()
+                || proof.allocation_leg != "account"
+                || fill_time <= 0
+                || proof.finance_time < fill_time
+                || proof.finance_time > through
+                || !proof.economic_event_key.starts_with("bill:")
+                || proof.bill_id.as_deref() != proof.economic_event_key.strip_prefix("bill:")
+                || proof
+                    .bill_time
+                    .is_none_or(|t| t < fill_time || t > through || t > bills.watermark)
+                || proof.bill_kind.as_deref().is_none_or(|kind| {
+                    kind.is_empty()
+                        || kind.starts_with("7:")
+                        || kind == "1:11"
+                        || kind == "1:12"
+                        || kind.ends_with(":173")
+                        || kind.ends_with(":174")
+                })
+                || proof.bill_currency.as_deref() != Some(currency.as_str())
+                || !proof.bill_linked
+                || proof
+                    .bill_order_id
+                    .as_deref()
+                    .is_some_and(|v| v != fill.exchange_order_id.as_str())
+                || proof
+                    .bill_instrument_id
+                    .as_deref()
+                    .is_some_and(|v| v != intent_instrument.as_str())
+                || proof.currency != currency
+                || decimal(proof.amount.clone())? != fee
+            {
+                return Err(StoreError::Invalid("ENTRY_FEE_BILL_SOURCE_MISMATCH"));
+            }
+            total = total
+                .checked_add(entry_fee_debit(fee))
+                .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))?;
+            let data = serde_json::to_vec(&(id, fee_source, currency, fill_time, proof))
+                .map_err(|_| StoreError::Invalid("ENTRY_FEE_BILL_DIGEST_INVALID"))?;
+            hasher.update((data.len() as u64).to_le_bytes());
+            hasher.update(data);
+        }
+        if count != fill.fill_count || count == 0 || total != fill.conservative_fee_usdt {
+            return Err(StoreError::Invalid("ENTRY_FEE_BILL_TOTAL_MISMATCH"));
+        }
+        Ok(IntentFeeBillEvidence {
+            fill,
+            linked_bill_count: count,
+            bills_covered_through: bills.watermark,
+            conservative_verified_fee_usdt: total,
+            source_digest: format!("{:x}", hasher.finalize()),
+        })
+    }
+
     /// Account-backed principal, never PnL or independently priced strategy NAV.
     /// All returned balances are exact USD decimals within this AccountStore.
     pub fn capital_state(&self, now: i64) -> StoreResult<AccountCapitalState> {
@@ -1902,6 +3565,52 @@ impl AccountStore {
                 return Err(StoreError::Invalid("IMMUTABLE_FILL_CONFLICT"));
             }
         }
+        // SWAP source labels and the page frontier commit atomically.
+        // Conflicting replays never advance the source cursor.
+        for source in &page.swap_fill_sources {
+            let found: Option<(String, String)> = tx
+                .query_row(
+                    "SELECT instrument_id,side FROM fills WHERE fill_id=?1",
+                    [&source.fill_id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()?;
+            let (instrument, side) =
+                found.ok_or(StoreError::Invalid("SWAP_FILL_SOURCE_WITHOUT_FILL"))?;
+            if !instrument.ends_with("-SWAP")
+                || source.direction
+                    != swap_fill_direction(&source.sub_type, &side, &source.position_side)?
+            {
+                return Err(StoreError::Invalid("SWAP_FILL_SOURCE_INVALID"));
+            }
+            tx.execute(
+                "INSERT INTO swap_fill_sources VALUES(?1,?2,?3,?4,?5)
+                 ON CONFLICT(fill_id) DO NOTHING",
+                params![
+                    source.fill_id,
+                    source.bill_id,
+                    source.sub_type,
+                    source.position_side,
+                    source.direction,
+                ],
+            )?;
+            let old: (String, String, String, String) = tx.query_row(
+                "SELECT bill_id,sub_type,position_side,direction
+                 FROM swap_fill_sources WHERE fill_id=?1",
+                [&source.fill_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )?;
+            if old
+                != (
+                    source.bill_id.clone(),
+                    source.sub_type.clone(),
+                    source.position_side.clone(),
+                    source.direction.clone(),
+                )
+            {
+                return Err(StoreError::Invalid("IMMUTABLE_SWAP_FILL_SOURCE_CONFLICT"));
+            }
+        }
         for b in &page.bills {
             tx.execute(
                 "INSERT INTO bills VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(bill_id) DO NOTHING",
@@ -1931,6 +3640,48 @@ impl AccountStore {
                 )
             {
                 return Err(StoreError::Invalid("IMMUTABLE_BILL_CONFLICT"));
+            }
+        }
+        for source in &page.bill_order_sources {
+            if source.bill_id.is_empty()
+                || source.exchange_order_id.is_empty()
+                || source.exchange_order_id == "0"
+                || source.instrument_id.is_empty()
+            {
+                return Err(StoreError::Invalid("BILL_ORDER_SOURCE_INVALID"));
+            }
+            let bill_exists: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM bills WHERE bill_id=?1)",
+                [&source.bill_id],
+                |r| r.get(0),
+            )?;
+            if !bill_exists {
+                return Err(StoreError::Invalid("BILL_ORDER_SOURCE_WITHOUT_BILL"));
+            }
+            tx.execute(
+                "INSERT INTO bill_order_sources VALUES(?1,?2,?3,?4)
+                 ON CONFLICT(bill_id) DO NOTHING",
+                params![
+                    source.bill_id,
+                    source.instrument_id,
+                    source.exchange_order_id,
+                    source.trade_id
+                ],
+            )?;
+            let original: (String, String, String) = tx.query_row(
+                "SELECT instrument_id,exchange_order_id,trade_id
+                 FROM bill_order_sources WHERE bill_id=?1",
+                [&source.bill_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )?;
+            if original
+                != (
+                    source.instrument_id.clone(),
+                    source.exchange_order_id.clone(),
+                    source.trade_id.clone(),
+                )
+            {
+                return Err(StoreError::Invalid("IMMUTABLE_BILL_ORDER_SOURCE_CONFLICT"));
             }
         }
         for event in &page.funding_events {
@@ -2176,6 +3927,137 @@ impl AccountStore {
                 .checked_add(added_loss)
                 .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))?;
             tx.execute("UPDATE account_policy SET campaign_loss=?1", [exact(total)])?;
+        }
+        // The authenticated bill/order link belongs to THIS ingestion
+        // transaction. A source cursor cannot advance without identical
+        // immutable bill, finance event, venue order and account owner.
+        if !page.entry_order_fee_links.is_empty() {
+            tx.execute_batch(
+                "CREATE TRIGGER IF NOT EXISTS immutable_entry_fee_owner_update
+                 BEFORE UPDATE ON operation_receipts
+                 WHEN OLD.kind IN ('ENTRY_ORDER_FEE_PROVEN','ENTRY_ORDER_FEE_INDEX')
+                 BEGIN SELECT RAISE(ABORT,'IMMUTABLE_ENTRY_FEE_OWNER'); END;
+                 CREATE TRIGGER IF NOT EXISTS immutable_entry_fee_owner_delete
+                 BEFORE DELETE ON operation_receipts
+                 WHEN OLD.kind IN ('ENTRY_ORDER_FEE_PROVEN','ENTRY_ORDER_FEE_INDEX')
+                 BEGIN SELECT RAISE(ABORT,'IMMUTABLE_ENTRY_FEE_OWNER'); END;",
+            )?;
+        }
+        for link in &page.entry_order_fee_links {
+            if link.bill_id.is_empty()
+                || link.intent_id.is_empty()
+                || link.exchange_order_id.is_empty()
+                || !link.instrument_id.ends_with("-USDT-SWAP")
+                || link.fee_usdt >= Decimal::ZERO
+                || link.bill_at <= 0
+            {
+                return Err(StoreError::Invalid("ENTRY_BILL_LINK_INVALID"));
+            }
+            let owner: Option<(String, String, i64)> = tx
+                .query_row(
+                    "SELECT i.instrument_id,i.plan_hash,i.begin_post_at FROM intents i
+                 WHERE i.intent_id=?1 AND i.exchange_order_id=?2
+                   AND i.risk_increase=1",
+                    params![link.intent_id, link.exchange_order_id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .optional()?;
+            let (instrument, plan_hash, posted_at) =
+                owner.ok_or(StoreError::Invalid("ENTRY_BILL_ORDER_UNVERIFIED"))?;
+            if instrument != link.instrument_id || posted_at <= 0 || posted_at > link.bill_at {
+                return Err(StoreError::Invalid("ENTRY_BILL_ORDER_UNVERIFIED"));
+            }
+            let key = format!("bill:{}", link.bill_id);
+            let canonical: Option<(i64, String, String, String)> = tx
+                .query_row(
+                    "SELECT b.time,b.currency,e.amount,e.entry_id FROM bills b
+                 JOIN finance_entries e ON e.economic_event_key=b.economic_event_key
+                  AND e.component='FEE' AND e.allocation_leg='account'
+                 JOIN finance_source_links l ON l.entry_id=e.entry_id
+                  AND l.source_ref=?2
+                 WHERE b.bill_id=?1 AND b.economic_event_key=?2",
+                    params![link.bill_id, key],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+                .optional()?;
+            let (bill_at, ccy, amount, entry_id) =
+                canonical.ok_or(StoreError::Invalid("ENTRY_BILL_FINANCE_PROVENANCE_MISSING"))?;
+            if bill_at != link.bill_at || ccy != "USDT" || decimal(amount)? != link.fee_usdt {
+                return Err(StoreError::Invalid(
+                    "ENTRY_BILL_AMOUNT_OR_CURRENCY_MISMATCH",
+                ));
+            }
+            let operation_id = format!("entry-bill:{}:{}", link.intent_id, link.bill_id);
+            let encoded = serde_json::to_string(link)
+                .map_err(|_| StoreError::Invalid("ENTRY_BILL_LINK_SERIALIZATION_FAILED"))?;
+            let first_seen = tx.execute(
+                "INSERT INTO operation_receipts(operation_id,kind,request_hash,result_ref,committed_at)
+                 VALUES(?1,'ENTRY_ORDER_FEE_PROVEN',?2,?3,?4)
+                 ON CONFLICT(operation_id) DO NOTHING",
+                params![operation_id,plan_hash,encoded,link.bill_at],
+            )?;
+            let old: (String, String, String, i64) = tx.query_row(
+                "SELECT kind,request_hash,result_ref,committed_at
+                 FROM operation_receipts WHERE operation_id=?1",
+                [operation_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )?;
+            if old
+                != (
+                    "ENTRY_ORDER_FEE_PROVEN".into(),
+                    plan_hash.clone(),
+                    encoded.clone(),
+                    link.bill_at,
+                )
+            {
+                return Err(StoreError::Invalid("ENTRY_BILL_LINK_IMMUTABLE_CONFLICT"));
+            }
+            // One immutable bill-id read index for historical continuity.
+            // It points to the same source bytes, not another financial
+            // debit or owner, and avoids a million-intent correlated scan.
+            let bill_index = format!("entry-bill-owner:{}", link.bill_id);
+            tx.execute(
+                "INSERT INTO operation_receipts(operation_id,kind,request_hash,result_ref,committed_at)
+                 VALUES(?1,'ENTRY_ORDER_FEE_INDEX',?2,?3,?4)
+                 ON CONFLICT(operation_id) DO NOTHING",
+                params![bill_index,plan_hash,encoded,link.bill_at],
+            )?;
+            let indexed: (String, String, String, i64) = tx.query_row(
+                "SELECT kind,request_hash,result_ref,committed_at
+                 FROM operation_receipts WHERE operation_id=?1",
+                [bill_index],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )?;
+            if indexed
+                != (
+                    "ENTRY_ORDER_FEE_INDEX".into(),
+                    plan_hash,
+                    encoded,
+                    link.bill_at,
+                )
+            {
+                return Err(StoreError::Invalid("ENTRY_BILL_INDEX_CONFLICT"));
+            }
+            // A newly observed independent fee after terminal RELEASE
+            // rejoins the SAME bounded maintenance scan for central debit.
+            // Never quietly mark the account settled at an older amount.
+            if first_seen == 1 {
+                let original_fee: bool = tx.query_row(
+                    "SELECT EXISTS(
+                        SELECT 1 FROM finance_source_links src
+                        JOIN fills f ON src.source_ref='fill:'||f.fill_id
+                        WHERE src.entry_id=?1 AND f.intent_id=?2)",
+                    params![entry_id, link.intent_id],
+                    |r| r.get(0),
+                )?;
+                if !original_fee {
+                    tx.execute(
+                        "UPDATE risk_receipts SET state='LATE_SETTLEMENT_PENDING'
+                         WHERE intent_id=?1 AND state='RELEASED'",
+                        [&link.intent_id],
+                    )?;
+                }
+            }
         }
         for l in &page.lots {
             if l.remaining_qty < Decimal::ZERO

@@ -51,8 +51,9 @@ pub struct AccountConfig {
     pub account_type: String,
     #[serde(rename = "acctStpMode", default)]
     pub account_stp_mode: String,
+    /// Missing source field means unknown, never verified disabled borrowing.
     #[serde(rename = "autoLoan", default)]
-    pub auto_loan: bool,
+    pub auto_loan: Option<bool>,
     #[serde(rename = "greeksType", default)]
     pub greeks_type: String,
     #[serde(rename = "feeType", default)]
@@ -430,7 +431,7 @@ pub struct AccountCapabilities {
     pub account_uid_fingerprint: String,
     pub account_type: String,
     pub account_stp_mode: String,
-    pub auto_loan: bool,
+    pub auto_loan: Option<bool>,
     pub greeks_type: String,
     pub fee_type: String,
     pub api_key_label: String,

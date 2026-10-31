@@ -185,6 +185,87 @@ pub struct CentralReceipt {
     pub requested_loss_usd: Decimal,
     pub conversion_digest: String,
 }
+/// A durable *known* price-bound fee/notional quote. This does NOT prove
+/// all-in margin, borrow, FX upper bound or the opening campaign balance.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct EntryQuoteEvidence {
+    pub schema: String,
+    pub account_key: String,
+    pub installation_id: String,
+    pub intent_id: String,
+    pub plan_hash: String,
+    pub policy_revision: i64,
+    pub instrument_id: String,
+    pub quantity: Decimal,
+    pub limit_price: Decimal,
+    pub contract_value: Decimal,
+    pub fee_rate: Decimal,
+    /// Raw authenticated tariff components, required to recompute the
+    /// reference-bound fee_generation on the sole SQL owner.
+    /// Preserve the venue strings verbatim; normalized Decimal formatting
+    /// can change the authenticated canonical fee_generation bytes.
+    pub maker_rate: String,
+    pub taker_rate: String,
+    pub fee_level: String,
+    pub fee_exchange_at: i64,
+    pub usd_per_usdt: Decimal,
+    pub notional_usdt: Decimal,
+    pub fee_usdt: Decimal,
+    pub total_usdt: Decimal,
+    pub total_usd: Decimal,
+    pub fee_generation: String,
+    pub reference_generation: String,
+    pub fee_received_at: i64,
+    pub conversion_digest: String,
+    pub conversion_received_at: i64,
+    pub observed_at: i64,
+}
+
+/// Durable native-to-Worker entry authorization envelope. The Rust Engine
+/// creates this ONLY after its independently sourced EntryCostProof verifies
+/// the immutable SQL quote and all mandatory costs. This is stored in the
+/// existing operation_receipts journal, not a second financial ledger.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct EntryAdmissionEvidence {
+    pub schema: String,
+    pub account_key: String,
+    pub installation_id: String,
+    pub intent_id: String,
+    pub plan_hash: String,
+    pub quote_digest: String,
+    /// Frozen USD per USDT rate at final admission; not a future rate maximum.
+    pub admission_usd_per_usdt: Decimal,
+    /// All independently classified extra entry debit outside quote USDT.
+    pub other_entry_costs_upper_usd: Decimal,
+    pub entry_upper_usd: Decimal,
+    pub entry_proof_digest: String,
+    pub observed_at: i64,
+}
+
+/// Native single-owner terminal financial witness. This is conservative
+/// USD ENTRY consumption, not an account NAV or an arbitrary MCP input.
+/// An immutable operation receipt makes lost Worker replies replayable.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct EntrySettlementEvidence {
+    pub schema: String,
+    pub account_key: String,
+    pub intent_id: String,
+    pub plan_hash: String,
+    pub reservation_key: String,
+    pub venue_order_id: String,
+    pub venue_update_ms: i64,
+    /// Original SQL cursor cut-off for deterministic receipt replay.
+    pub source_covered_through_ms: i64,
+    pub venue_filled_quantity: Decimal,
+    pub booked_notional_and_fee_usdt: Decimal,
+    pub cumulative_entry_usd: Decimal,
+    pub settlement_revision: u64,
+    pub source_digest: String,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct IntentPlan {
     pub strategy_definition_id: String,
@@ -280,6 +361,38 @@ pub struct Fill {
     pub fee: Decimal,
     pub currency: String,
 }
+/// Bounded, immutable per-intent evidence derived from authenticated venue
+/// fills. NOT an all-in USD entry cost, campaign opening balance, or POST grant.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct IntentFillCostEvidence {
+    pub intent_id: String,
+    pub plan_hash: String,
+    /// Physical exchange order and central reservation must both be durable
+    /// before any cumulative native settlement evidence is available.
+    pub exchange_order_id: String,
+    pub reservation_key: String,
+    pub fill_count: u64,
+    /// Exact sum of immutable native fill quantities for the bound venue order.
+    /// The independent venue readback must match before this can be labelled
+    /// covered; a valid SQL fills cursor alone cannot prove complete execution.
+    pub filled_quantity: Decimal,
+    pub covered_through: i64,
+    pub gross_notional_usdt: Decimal,
+    /// Rebates are counted as nonnegative costs, never credited as capacity.
+    pub conservative_fee_usdt: Decimal,
+    pub source_digest: String,
+}
+/// Authenticated immutable fill fee cross-checked against an actual venue
+/// bill and the existing canonical finance event. This is not proof of
+/// final margin debit, future bills, FX upper bound, or a central settlement.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct IntentFeeBillEvidence {
+    pub fill: IntentFillCostEvidence,
+    pub linked_bill_count: u64,
+    pub bills_covered_through: i64,
+    pub conservative_verified_fee_usdt: Decimal,
+    pub source_digest: String,
+}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Bill {
     pub bill_id: String,
@@ -298,12 +411,68 @@ pub struct SourceCursor {
     pub generation: i64,
     pub coverage_gaps: String,
 }
+/// Authenticated venue bill -> exact previously POSTed order. The SQL
+/// ingester independently verifies the immutable bill, fee finance entry,
+/// order identity and owner in the SAME capture transaction.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EntryOrderFeeLink {
+    pub bill_id: String,
+    pub intent_id: String,
+    pub exchange_order_id: String,
+    pub instrument_id: String,
+    pub bill_at: i64,
+    pub fee_usdt: Decimal,
+}
+
+/// The raw authenticated account-bill -> venue-order identity.
+/// Persisted before the bills source cursor advances. This does NOT assert
+/// that a bill is a fee, entry turnover, or an owned native intent.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BillOrderSource {
+    pub bill_id: String,
+    pub instrument_id: String,
+    pub exchange_order_id: String,
+    pub trade_id: String,
+}
+
+/// A raw venue SWAP fill label, retained atomically with its source cursor.
+/// It is NOT itself an event-time contract specification or USD valuation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SwapFillSource {
+    pub fill_id: String,
+    pub bill_id: String,
+    pub sub_type: String,
+    pub position_side: String,
+    pub direction: String,
+}
+
+/// Only authenticated open/close labels can classify a hedged SWAP fill.
+/// Net-mode buys/sells and system events cannot prove opening notional alone.
+pub fn swap_fill_direction(
+    sub_type: &str,
+    side: &str,
+    position_side: &str,
+) -> StoreResult<&'static str> {
+    match (sub_type, side, position_side) {
+        ("3", "buy", "long") | ("4", "sell", "short") => Ok("OPEN"),
+        ("5", "sell", "long") | ("6", "buy", "short") => Ok("CLOSE"),
+        ("3" | "4" | "5" | "6", _, _) => Err(StoreError::Invalid("SWAP_FILL_DIRECTION_CONFLICT")),
+        ("1", "buy", "net") | ("2", "sell", "net") => Ok("NET_UNRESOLVED"),
+        _ => Ok("UNCLASSIFIED"),
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct IngestPage {
     pub funding_events: Vec<FundingEvent>,
     pub attributed_funding_ids: Vec<String>,
     pub fills: Vec<Fill>,
+    #[serde(default)]
+    pub swap_fill_sources: Vec<SwapFillSource>,
     pub bills: Vec<Bill>,
+    #[serde(default)]
+    pub bill_order_sources: Vec<BillOrderSource>,
+    pub entry_order_fee_links: Vec<EntryOrderFeeLink>,
     pub finance: Vec<FinanceEntry>,
     pub cash_flows: Vec<CashFlow>,
     pub allocations: Vec<Allocation>,

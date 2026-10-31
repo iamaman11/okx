@@ -48,12 +48,17 @@ export type Account = TradingAccess & {
 export type Governance = {
   schema:typeof GOVERNANCE_SCHEMA;
   revision:number;installation_id:string;campaign_id:string;campaign_loss_limit_usd:string;
+  /** E1 spend budget, never the campaign modeled/realized loss limit.
+   * Absent on pre-E1 policies: opening consumption must be imported first. */
+  campaign_entry_limit_usd?:string;
   max_total_modelled_loss_usdt:string;
   accounts:Account[];
 };
 export type AccountUpdate = {id:string;label:string;enabled:boolean;explicit_pause:boolean;limits:Limits;strategies:StrategyLimits[]};
 export type GovernanceUpdate = {
   expected_revision:number;
+  /** Optional CAS reduction / first configuration, never a reset of spend. */
+  campaign_entry_limit_usd?:string;
   max_total_modelled_loss_usdt:string;accounts:AccountUpdate[];
 };
 const SHA=/^[0-9a-f]{64}$/;
@@ -108,11 +113,14 @@ function validAccount(a:unknown):a is Account{
 export function validGovernance(value:unknown):value is Governance{
   if(!record(value))return false;
   const fields=["schema","revision","installation_id","campaign_id","campaign_loss_limit_usd","max_total_modelled_loss_usdt","accounts"];
+  if("campaign_entry_limit_usd" in value)fields.push("campaign_entry_limit_usd");
   if(Object.keys(value).sort().join("|")!==fields.sort().join("|"))return false;
   if(value.schema!==GOVERNANCE_SCHEMA||!Number.isSafeInteger(value.revision)||(value.revision as number)<0
     ||typeof value.installation_id!=="string"||value.installation_id.length<8||!ID.test(value.installation_id)
     ||typeof value.campaign_id!=="string"||!/^sha256:[0-9a-f]{64}$/.test(value.campaign_id)
-    ||!positive(value.campaign_loss_limit_usd)||!positive(value.max_total_modelled_loss_usdt)
+    ||!positive(value.campaign_loss_limit_usd)||
+    !(!("campaign_entry_limit_usd" in value)||positive(value.campaign_entry_limit_usd))||
+    !positive(value.max_total_modelled_loss_usdt)
     ||!Array.isArray(value.accounts)||value.accounts.length>32||!value.accounts.every(validAccount))return false;
   const accounts=value.accounts as Account[];
   return new Set(accounts.map(a=>a.account_key)).size===accounts.length
@@ -126,6 +134,10 @@ export function reviseGovernance(previous:Governance,change:GovernanceUpdate):Go
     ||change.expected_revision!==previous.revision
     ||!Number.isSafeInteger(previous.revision+1)
     ||!positive(change.max_total_modelled_loss_usdt)
+    ||(change.campaign_entry_limit_usd!==undefined &&
+       (!positive(change.campaign_entry_limit_usd) ||
+        (previous.campaign_entry_limit_usd!==undefined &&
+         units(change.campaign_entry_limit_usd)!>units(previous.campaign_entry_limit_usd)!)))
     ||!Array.isArray(change.accounts)||change.accounts.length!==previous.accounts.length)return null;
   const remaining=new Map(previous.accounts.map(a=>[a.id,a]));
   const accounts:Account[]=[];
@@ -140,6 +152,8 @@ export function reviseGovernance(previous:Governance,change:GovernanceUpdate):Go
   }
   if(remaining.size!==0)return null;
   const next:Governance={...previous,revision:previous.revision+1,
+    ...(change.campaign_entry_limit_usd===undefined?{}:
+       {campaign_entry_limit_usd:change.campaign_entry_limit_usd}),
     max_total_modelled_loss_usdt:change.max_total_modelled_loss_usdt,accounts};
   return validGovernance(next)?next:null;
 }

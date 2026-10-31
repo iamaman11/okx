@@ -152,6 +152,8 @@ mod tests {
                 plan_sha256: "b".repeat(64),
                 requested_loss_usdt: "1".to_owned(),
                 requested_loss_usd: "1.001".into(),
+                entry_upper_usd: Some("2".into()),
+                entry_proof_digest: Some("d".repeat(64)),
                 usd_conversion: okx_protocol::risk_authority::UsdConversion {
                     usd_per_usdt: "1.001".into(),
                     source_digest: "f".repeat(64),

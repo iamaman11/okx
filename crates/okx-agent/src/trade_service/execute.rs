@@ -8,8 +8,337 @@ use okx_api::{
 struct PostFxFence<'a> {
     owner: &'a AccountResources,
     conversion: &'a UsdConversion,
+    order_type: &'a str,
 }
 impl TradeService {
+    /// Native, completely classified USD-denominated spot opening spend.
+    /// An opening buy consumes gross USD notional and its fee. Exit fees
+    /// remain cashflow/risk costs, not new entry turnover.
+    /// No other instrument, conversion, bill type or currency is guessed.
+    /// Completeness and fill↔order↔bill identity must already be established
+    /// by AccountHistoryApi's authenticated campaign witness.
+    #[cfg(test)]
+    fn historical_usd_spot_entry(
+        history: &okx_api::CompleteCampaignAccountHistory,
+    ) -> Result<Decimal, String> {
+        use rust_decimal::RoundingStrategy;
+        let orders = history
+            .orders
+            .iter()
+            .map(|o| (o.order_id.as_str(), o))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let bills = history
+            .bills
+            .iter()
+            .map(|b| (b.bill_id.as_str(), b))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        if orders.len() != history.orders.len() || bills.len() != history.bills.len() {
+            return Err("ENTRY_OPENING_DUPLICATE_VENUE_ID".into());
+        }
+        let mut observed_bills = std::collections::BTreeSet::new();
+        let mut total = Decimal::ZERO;
+        for fill in &history.fills {
+            let order = orders
+                .get(fill.order_id.as_str())
+                .ok_or("ENTRY_OPENING_ORDER_UNPROVEN")?;
+            let bill = bills
+                .get(fill.bill_id.as_str())
+                .ok_or("ENTRY_OPENING_BILL_UNPROVEN")?;
+            if fill.instrument_type != "SPOT"
+                || !fill.instrument_id.ends_with("-USD")
+                || fill.fee_currency != "USD"
+                || bill.ccy != "USD"
+                || bill.bill_type != "2"
+                || bill.instrument_id != fill.instrument_id
+                || bill.order_id != fill.order_id
+                || bill.trade_id != fill.trade_id
+                || order.instrument_type != "SPOT"
+                || order.instrument_id != fill.instrument_id
+                || !matches!(fill.side.as_str(), "buy" | "sell")
+                || order.side != fill.side
+                || bill.fee != fill.fee
+                || !observed_bills.insert(fill.bill_id.as_str())
+            {
+                return Err("ENTRY_OPENING_UNSUPPORTED_OR_UNCLASSIFIED_MONEY".into());
+            }
+            let qty = dec(&fill.fill_size)?;
+            let price = dec(&fill.fill_price)?;
+            let fee = dec(&fill.fee)?;
+            if qty <= Decimal::ZERO || price <= Decimal::ZERO {
+                return Err("ENTRY_OPENING_INVALID_FILL".into());
+            }
+            // Only a negative venue fee is a debit; a positive rebate is
+            // neither an entry cost nor a refund of already consumed budget.
+            // Sell proceeds never refund entry.
+            let debit = if fill.side == "buy" {
+                qty.checked_mul(price).ok_or("MONEY_OVERFLOW")?
+            } else {
+                Decimal::ZERO
+            };
+            let fee_debit = if fill.side == "buy" && fee < Decimal::ZERO {
+                -fee
+            } else {
+                Decimal::ZERO
+            };
+            let debit = debit.checked_add(fee_debit).ok_or("MONEY_OVERFLOW")?;
+            total = total.checked_add(debit).ok_or("MONEY_OVERFLOW")?;
+        }
+        if observed_bills.len() != history.bills.len() {
+            return Err("ENTRY_OPENING_STANDALONE_BILL_UNCLASSIFIED".into());
+        }
+        Ok(total.round_dp_with_strategy(9, RoundingStrategy::ToPositiveInfinity))
+    }
+
+    /// Opening may be installed once for the entire authenticated cohort.
+    /// Unknown venue events never imply zero. Non-USD historical instruments
+    /// remain unsupported until a historical contract+FX source exists.
+    /// No historical network pagination is permitted on the POST command
+    /// path. Background capture owns source cursors; only the SQL owner can
+    /// certify an absence of *unaccounted* campaign events in a fresh window.
+    async fn ensure_campaign_opening(
+        &self,
+        state: &CentralGovernanceSnapshot,
+        until: Instant,
+    ) -> Result<(), String> {
+        let summary = self
+            .risk
+            .request(self.risk_command(
+                state,
+                format!("opening_status_{}", now()),
+                RiskCommandAction::Summary {},
+            ))
+            .await
+            .map_err(str::to_owned)?;
+        if summary.status != RiskDecisionStatus::Observed {
+            return Err("ENTRY_OPENING_CENTRAL_SUMMARY_UNAVAILABLE".into());
+        }
+        let budget = summary
+            .budget
+            .ok_or("ENTRY_OPENING_CENTRAL_BUDGET_MISSING")?;
+        let entry = budget
+            .entry_budget
+            .ok_or("BASELINE_RECONCILIATION_REQUIRED")?;
+        let origin = budget
+            .campaign_origin
+            .ok_or("ENTRY_CAMPAIGN_ORIGIN_UNPROVEN")?;
+        if origin.installation_id != self.accounts.installation_id()
+            || origin.campaign_id != entry.campaign_id
+            || origin.campaign_id != state.state.campaign_id
+            || origin.started_at_ms > entry.opening_as_of_ms
+        {
+            return Err("ENTRY_CAMPAIGN_ORIGIN_MISMATCH".into());
+        }
+        let from =
+            i64::try_from(origin.started_at_ms).map_err(|_| "ENTRY_OPENING_CUTOFF_INVALID")?;
+        let campaign = origin.campaign_id;
+        let through = now().saturating_sub(2_000);
+        if through <= from {
+            return Err("ENTRY_OPENING_CAPTURE_PENDING".into());
+        }
+        for account in
+            state.state.accounts.iter().filter(|a| {
+                a.environment == okx_protocol::account_governance::AccountEnvironment::Real
+            })
+        {
+            if Instant::now() >= until {
+                return Err("COMMAND_EXPIRED".into());
+            }
+            let resource = self.resources(&account.account_key).await?;
+            if !resource.source_identity_ready().await {
+                return Err("ENTRY_OPENING_IDENTITY_UNVERIFIED".into());
+            }
+            let campaign = campaign.clone();
+            resource
+                .execution
+                .store
+                .call(until, move |store| {
+                    store.verify_campaign_entry_readiness(&campaign, from, through)
+                })
+                .await
+                .map_err(err)?;
+        }
+        Ok(())
+    }
+
+    /// The existing maintenance owner installs one complete cohort opening,
+    /// including independently settled historical native entry USD. External
+    /// or unsettled history remains pending, never inferred as zero.
+    pub(super) async fn install_captured_empty_campaign_opening(
+        &self,
+        state: &CentralGovernanceSnapshot,
+        until: Instant,
+    ) -> Result<(), String> {
+        let summary = self
+            .risk
+            .request(self.risk_command(
+                state,
+                format!("opening_summary_{}", now()),
+                RiskCommandAction::Summary {},
+            ))
+            .await
+            .map_err(str::to_owned)?;
+        if summary.status != RiskDecisionStatus::Observed {
+            return Err("ENTRY_OPENING_CENTRAL_SUMMARY_UNAVAILABLE".into());
+        }
+        let budget = summary
+            .budget
+            .ok_or("ENTRY_OPENING_CENTRAL_BUDGET_MISSING")?;
+        if let Some(entry) = budget.entry_budget {
+            let origin = budget
+                .campaign_origin
+                .ok_or("ENTRY_CAMPAIGN_ORIGIN_UNPROVEN")?;
+            if origin.installation_id != self.accounts.installation_id()
+                || origin.campaign_id != entry.campaign_id
+                || origin.campaign_id != state.state.campaign_id
+                || origin.started_at_ms > entry.opening_as_of_ms
+            {
+                return Err("ENTRY_CAMPAIGN_ORIGIN_MISMATCH".into());
+            }
+            let from =
+                i64::try_from(origin.started_at_ms).map_err(|_| "ENTRY_CAMPAIGN_ORIGIN_INVALID")?;
+            let through = now().saturating_sub(2_000);
+            for account in state.state.accounts.iter().filter(|a| {
+                a.environment == okx_protocol::account_governance::AccountEnvironment::Real
+            }) {
+                if Instant::now() >= until {
+                    return Err("COMMAND_EXPIRED".into());
+                }
+                let resource = self.resources(&account.account_key).await?;
+                if !resource.source_identity_ready().await {
+                    return Err("ENTRY_OPENING_IDENTITY_UNVERIFIED".into());
+                }
+                let campaign = origin.campaign_id.clone();
+                resource
+                    .execution
+                    .store
+                    .call(until, move |store| {
+                        store.refresh_campaign_entry_readiness(&campaign, from, through)
+                    })
+                    .await
+                    .map_err(err)?;
+            }
+            return Ok(());
+        }
+        let origin = budget
+            .campaign_origin
+            .ok_or("ENTRY_CAMPAIGN_ORIGIN_UNPROVEN")?;
+        if origin.installation_id != self.accounts.installation_id()
+            || origin.campaign_id != state.state.campaign_id
+        {
+            return Err("ENTRY_CAMPAIGN_ORIGIN_MISMATCH".into());
+        }
+        let from =
+            i64::try_from(origin.started_at_ms).map_err(|_| "ENTRY_CAMPAIGN_ORIGIN_INVALID")?;
+        let mut rows = Vec::new();
+        let cohort = state
+            .state
+            .accounts
+            .iter()
+            .filter(|account| {
+                account.environment == okx_protocol::account_governance::AccountEnvironment::Real
+            })
+            .collect::<Vec<_>>();
+        if cohort.is_empty() || cohort.len() > 32 {
+            return Err("ENTRY_OPENING_COHORT_INVALID".into());
+        }
+        if !self.accounts.failures().await.is_empty() {
+            return Err("ENTRY_OPENING_COHORT_UNAVAILABLE".into());
+        }
+        let through = now().saturating_sub(2_000);
+        for account in cohort {
+            if Instant::now() >= until {
+                return Err("COMMAND_EXPIRED".into());
+            }
+            let resource = self.resources(&account.account_key).await?;
+            if !resource.source_identity_ready().await {
+                return Err("ENTRY_OPENING_IDENTITY_UNVERIFIED".into());
+            }
+            let campaign = origin.campaign_id.clone();
+            let (spent, source_digest) = resource
+                .execution
+                .store
+                .call(until, move |store| {
+                    store.seal_captured_campaign_baseline(&campaign, from, through)
+                })
+                .await
+                .map_err(err)?;
+            rows.push(CampaignOpeningAccount {
+                account_key: account.account_key.clone(),
+                history_from_ms: origin.started_at_ms,
+                history_through_ms: u64::try_from(through)
+                    .map_err(|_| "ENTRY_OPENING_TIME_INVALID")?,
+                consumed_entry_usd: exact(spent),
+                order_history_complete: true,
+                fill_history_complete: true,
+                bill_history_complete: true,
+                finance_provenance_sealed: true,
+                source_digest,
+            });
+        }
+        rows.sort_by(|a, b| a.account_key.cmp(&b.account_key));
+        let consumed = rows.iter().try_fold(Decimal::ZERO, |sum, account| {
+            sum.checked_add(dec(&account.consumed_entry_usd)?)
+                .ok_or_else(|| "MONEY_OVERFLOW".to_owned())
+        })?;
+        let limit_usd = state
+            .state
+            .campaign_entry_limit_usd
+            .clone()
+            .ok_or("ENTRY_CAMPAIGN_LIMIT_MISSING")?;
+        let mut source = CampaignOpeningSource {
+            campaign_id: origin.campaign_id,
+            limit_usd,
+            consumed_usd: exact(consumed),
+            source_digest: String::new(),
+            as_of_ms: u64::try_from(through).map_err(|_| "ENTRY_OPENING_TIME_INVALID")?,
+            campaign_started_at_ms: origin.started_at_ms,
+            accounts: rows,
+        };
+        source.source_digest = digest(&(
+            "okx.campaign-entry-opening/v1",
+            &source.campaign_id,
+            &source.limit_usd,
+            &source.consumed_usd,
+            source.campaign_started_at_ms,
+            source.as_of_ms,
+            &source.accounts,
+        ))?;
+        if !source.valid() || Instant::now() >= until {
+            return Err("ENTRY_OPENING_SOURCE_INVALID".into());
+        }
+        // Completed monetary source pages alone do not prove absence of
+        // live pending orders, unprotected positions or UNKNOWN obligations.
+        // The same authenticated whole-cohort census used for RESERVE must
+        // pass before an opening can be installed.
+        let census = self.census(state).await?;
+        if !census.complete {
+            return Err("ENTRY_OPENING_LIVE_CENSUS_INCOMPLETE".into());
+        }
+        let result = self
+            .risk
+            .request(self.risk_command(
+                state,
+                format!("install_opening_{}", now()),
+                RiskCommandAction::InstallEntryOpening {
+                    source: source.clone(),
+                },
+            ))
+            .await
+            .map_err(str::to_owned)?;
+        if result.status != RiskDecisionStatus::Observed
+            || result
+                .budget
+                .as_ref()
+                .and_then(|budget| budget.entry_budget.as_ref())
+                .is_none_or(|opened| opened.opening_source_digest != source.source_digest)
+        {
+            return Err(result
+                .reason
+                .unwrap_or("ENTRY_OPENING_INSTALL_UNPROVEN".into()));
+        }
+        Ok(())
+    }
+
     pub(super) async fn execute(
         &self,
         r: &Arc<AccountResources>,
@@ -97,6 +426,11 @@ impl TradeService {
             operation,
             TradeOperation::Open | TradeOperation::Add | TradeOperation::Replace
         );
+        if increase
+            && r.configuration.account_key.environment == okx_protocol::accounts::Environment::Real
+        {
+            self.ensure_campaign_opening(&state, until).await?;
+        }
         let plan = loop {
             match self
                 .plan(
@@ -221,6 +555,162 @@ impl TradeService {
         if increase
             && r.configuration.account_key.environment == okx_protocol::accounts::Environment::Real
         {
+            // E1 staging: persist exactly what the live venue price, fee and
+            // conversion sources can prove before requesting central risk.
+            // The receipt says UNPROVEN; it cannot authorize the exchange.
+            let rules = self
+                .public_ws
+                .instrument_rules(instrument)
+                .await
+                .ok_or("ENTRY_INSTRUMENT_RULES_UNAVAILABLE")?;
+            let fees = r.observer.fee_schedule(&rules).await.map_err(err)?;
+            let quote_snapshot = r.observer.snapshot().await.map_err(err)?;
+            let fx = Self::usd_conversion(&quote_snapshot)?;
+            let account = r.execution.account.config().await.map_err(err)?;
+            let leverage = dec(&r
+                .observer
+                .configured_leverage(
+                    instrument,
+                    okx_api::MarginMode::Cross,
+                    if plan.position_side == "long" {
+                        "long"
+                    } else {
+                        "short"
+                    },
+                )
+                .await
+                .map_err(err)?)?;
+            let (entry_cost_proof, rate) = entry_budget::assess_order(
+                &plan,
+                entry_budget::EntryAssessmentSources {
+                    instrument,
+                    order_type: &order.order_type,
+                    rules: &rules,
+                    fees: &fees,
+                    account: &account,
+                    snapshot: &quote_snapshot,
+                    conversion: &fx,
+                    leverage,
+                    verified_uid: &r.configuration.account_key.verified_uid,
+                    observed_at_ms: now(),
+                },
+            )?;
+            let quote = entry_cost_proof.quote.clone();
+            let ceiling = entry_budget::enforced_entry_ceiling(
+                true,
+                true,
+                control
+                    .limits
+                    .max_entry_usd
+                    .as_deref()
+                    .map(dec)
+                    .transpose()?,
+                order.max_entry_usd.as_deref().map(dec).transpose()?,
+            )?
+            .ok_or("ENTRY_ACCOUNT_CAP_MISSING")?;
+            if quote.total_usd > ceiling {
+                return Err("ENTRY_QUOTE_EXCEEDS_ACCOUNT_CAP".into());
+            }
+            if Instant::now() >= until {
+                return Err("COMMAND_EXPIRED".into());
+            }
+            let fee_received_at = chrono::DateTime::parse_from_rfc3339(&fees.source_received_at)
+                .map_err(err)?
+                .timestamp_millis();
+            let entry_receipt = okx_execution::EntryQuoteEvidence {
+                schema: "okx.entry-known-quote/v1".into(),
+                account_key: r.configuration.account_key.wire(),
+                installation_id: self.accounts.installation_id().into(),
+                intent_id: prepared.intent_id.clone(),
+                plan_hash: prepared.plan_hash.clone(),
+                policy_revision: prepared.policy_revision,
+                instrument_id: instrument.clone(),
+                quantity: plan.quantity,
+                limit_price: plan.limit_price,
+                contract_value: plan.contract_value,
+                fee_rate: rate,
+                maker_rate: fees.maker_rate.clone(),
+                taker_rate: fees.taker_rate.clone(),
+                fee_level: fees.level.clone(),
+                fee_exchange_at: fees
+                    .exchange_timestamp_ms
+                    .parse::<i64>()
+                    .map_err(|_| "ENTRY_FEE_EXCHANGE_TIME_INVALID")?,
+                usd_per_usdt: dec(&fx.usd_per_usdt)?,
+                notional_usdt: quote.notional_usdt,
+                fee_usdt: quote.fee_usdt,
+                total_usdt: quote.total_usdt,
+                total_usd: quote.total_usd,
+                fee_generation: fees.fee_generation.clone(),
+                reference_generation: rules.reference_generation.clone(),
+                fee_received_at,
+                conversion_digest: fx.source_digest.clone(),
+                conversion_received_at: fx.observed_at_ms as i64,
+                observed_at: now(),
+            };
+            // The source-backed assessment above is the only bridge from
+            // authenticated venue/account sources to SQL and RiskBook.
+            // No separate sizing/fee formula or unsupported dimension is
+            // promoted into POST authority here.
+            let verified_entry =
+                entry_budget::reserve_entry_evidence(&entry_cost_proof, &entry_receipt, ceiling)?;
+            let cost_components = entry_cost_proof.verified_fx_and_entry_fees()?;
+            if verified_entry.is_some() != cost_components.is_some() {
+                return Err("ENTRY_PROOF_COMPONENTS_UNVERIFIED".into());
+            }
+            // The native source attestation and its Worker RESERVE upper
+            // must survive a crash together with the same immutable quote.
+            // No admission operation receipt exists for an Unknown cost.
+            let entry_admission = verified_entry
+                .as_ref()
+                .zip(cost_components)
+                .map(|((upper, source_digest), (fx_upper, fixed_upper))| {
+                    let serialized = serde_json::to_vec(&entry_receipt)
+                        .map_err(|_| "ENTRY_ADMISSION_QUOTE_SERIALIZATION_FAILED")?;
+                    Ok::<okx_execution::EntryAdmissionEvidence, String>(
+                        okx_execution::EntryAdmissionEvidence {
+                            schema: "okx.entry-admission/v2".into(),
+                            account_key: entry_receipt.account_key.clone(),
+                            installation_id: entry_receipt.installation_id.clone(),
+                            intent_id: entry_receipt.intent_id.clone(),
+                            plan_hash: entry_receipt.plan_hash.clone(),
+                            quote_digest: format!("{:x}", Sha256::digest(serialized)),
+                            admission_usd_per_usdt: fx_upper,
+                            other_entry_costs_upper_usd: fixed_upper,
+                            entry_upper_usd: *upper,
+                            entry_proof_digest: source_digest.clone(),
+                            observed_at: entry_receipt.observed_at,
+                        },
+                    )
+                })
+                .transpose()?;
+            r.execution
+                .store
+                .call(until, move |s| {
+                    s.bind_entry_quote(&entry_receipt)?;
+                    if let Some(proof) = entry_admission {
+                        s.bind_entry_admission(&proof)?;
+                    }
+                    Ok(())
+                })
+                .await
+                .map_err(err)?;
+            // An absent all-in proof is a native decision, not a reason to
+            // create a fictitious central RESERVE attempt and send a WSS
+            // request with null money. Finish the SQL intent as unsent,
+            // preserving the immutable known quote for trader inspection.
+            if verified_entry.is_none() {
+                let rejected = prepared.intent_id.clone();
+                r.execution
+                    .store
+                    .call(until, move |s| {
+                        s.reject_unsent(&rejected, "ENTRY_ALL_IN_COST_UNPROVEN", now())?;
+                        Ok(())
+                    })
+                    .await
+                    .map_err(err)?;
+                return Err("ENTRY_ALL_IN_COST_UNPROVEN".into());
+            }
             let census = self.census(&state).await?;
             let snapshot = r.observer.snapshot().await.map_err(err)?;
             let conversion = Self::usd_conversion(&snapshot)?;
@@ -241,6 +731,13 @@ impl TradeService {
                     plan_sha256: prepared.plan_hash.clone(),
                     requested_loss_usdt: exact(usdt),
                     requested_loss_usd: exact(usd),
+                    // Only the exact SQL-quote-bound ALL-IN proof may
+                    // authorize the independent entry-spend budget. An
+                    // Unknown dimension never substitutes zero or a quote.
+                    entry_upper_usd: verified_entry.as_ref().map(|(upper, _)| exact(*upper)),
+                    entry_proof_digest: verified_entry
+                        .as_ref()
+                        .map(|(_, proof_digest)| proof_digest.clone()),
                     usd_conversion: conversion.clone(),
                     policy_revision: state.state.revision,
                     census,
@@ -317,6 +814,7 @@ impl TradeService {
                     PostFxFence {
                         owner: r,
                         conversion: &conversion,
+                        order_type: &order.order_type,
                     },
                 )
                 .await
@@ -418,6 +916,18 @@ impl TradeService {
             })
             .into_iter()
             .collect();
+        let post_account = r.execution.account.config().await.map_err(err)?;
+        let post_snapshot = r.observer.snapshot().await.map_err(err)?;
+        if post_account.position_mode != post_snapshot.position_mode
+            || post_snapshot.account_uid_fingerprint != r.configuration.account_key.verified_uid
+            || !matches!(
+                post_snapshot.position_mode.as_str(),
+                "net_mode" | "long_short_mode"
+            )
+        {
+            return Err("POST_ACCOUNT_POSITION_MODE_UNVERIFIED".into());
+        }
+        let net_mode = post_snapshot.position_mode == "net_mode";
         let venue = PlaceOrderRequest {
             instrument_id: instrument.clone(),
             trade_mode: ApiTradeMode::Cross,
@@ -427,10 +937,17 @@ impl TradeService {
             } else {
                 ApiOrderSide::Sell
             },
-            position_side: if *side == PositionSide::Long {
+            position_side: if net_mode {
+                ApiPositionSide::Net
+            } else if *side == PositionSide::Long {
                 ApiPositionSide::Long
             } else {
                 ApiPositionSide::Short
+            },
+            reduce_only: if net_mode && !increase {
+                Some(true)
+            } else {
+                None
             },
             order_type: match order.order_type.as_str() {
                 "limit" => ApiOrderType::Limit,
@@ -611,6 +1128,87 @@ impl TradeService {
             _ => Err((reason, false)),
         }
     }
+    async fn revalidate_held_entry_quote(
+        &self,
+        r: &AccountResources,
+        intent: &StoredIntent,
+        order_type: &str,
+        until: Instant,
+    ) -> Result<(), String> {
+        let id = intent.intent_id.clone();
+        let quote = r
+            .execution
+            .store
+            .call(until, move |s| s.entry_quote(&id))
+            .await
+            .map_err(err)?
+            .ok_or("POST_ENTRY_QUOTE_MISSING")?;
+        let admission_id = intent.intent_id.clone();
+        let admission = r
+            .execution
+            .store
+            .call(until, move |s| s.entry_admission(&admission_id))
+            .await
+            .map_err(err)?
+            .ok_or("POST_ENTRY_ADMISSION_MISSING")?;
+        let rules = self
+            .public_ws
+            .instrument_rules(&intent.instrument_id)
+            .await
+            .ok_or("POST_ENTRY_RULES_UNAVAILABLE")?;
+        plan::verify_entry_rules_match(&rules, &intent.instrument_id, &intent.plan)?;
+        let ct = dec(rules
+            .instrument
+            .contract_value
+            .as_deref()
+            .ok_or("POST_ENTRY_CONTRACT_VALUE_MISSING")?)?;
+        let fee = r.observer.fee_schedule(&rules).await.map_err(err)?;
+        let snap = r.observer.snapshot_after_held().await.map_err(err)?;
+        if snap.account_uid_fingerprint != r.configuration.account_key.verified_uid {
+            return Err("POST_ENTRY_ACCOUNT_CHANGED".into());
+        }
+        let fx = Self::usd_conversion(&snap)?;
+        verify_post_held_entry_sources(&quote, &fee, &rules.reference_generation, ct, &fx, now())?;
+        // Do not rely on the PRE-RESERVE account funds, borrowing or mode:
+        // they can change while the distributed reservation is HELD.
+        // Refuse the only possible POST unless the SAME production assessment
+        // still proves the ORIGINAL immutable USD upper and margin capacity.
+        let config = r.execution.account.config().await.map_err(err)?;
+        let leverage = dec(&r
+            .observer
+            .configured_leverage(
+                &intent.instrument_id,
+                okx_api::MarginMode::Cross,
+                if intent.plan.position_side == "long" {
+                    "long"
+                } else {
+                    "short"
+                },
+            )
+            .await
+            .map_err(err)?)?;
+        let (reassessed, _) = entry_budget::assess_order(
+            &intent.plan,
+            entry_budget::EntryAssessmentSources {
+                instrument: &intent.instrument_id,
+                order_type,
+                rules: &rules,
+                fees: &fee,
+                account: &config,
+                snapshot: &snap,
+                conversion: &fx,
+                leverage,
+                verified_uid: &r.configuration.account_key.verified_uid,
+                observed_at_ms: now(),
+            },
+        )?;
+        reassessed.verify_held_entry_admission(&quote, &admission)?;
+        if Instant::now() >= until {
+            return Err("COMMAND_EXPIRED".into());
+        }
+        Ok(())
+    }
+
     async fn fence_inspect_retry(
         &self,
         state: &CentralGovernanceSnapshot,
@@ -627,10 +1225,17 @@ impl TradeService {
         let mut sequence = held
             .risk_book_sequence
             .ok_or("RESERVATION_SEQUENCE_MISSING")?;
-        for _ in 0..4 {
+        // One original attempt plus at most two bounded CAS retries.
+        // Every attempt shares the original after-HELD five-second window.
+        for _ in 0..3 {
             if Instant::now() >= until {
                 return Err("COMMAND_EXPIRED".into());
             }
+            // A fresh census and a valid FX fence do not revalidate tariff or
+            // contract mechanics. Bind the same immutable SQL quote against
+            // actual post-HELD source data on EACH CAS attempt before POST.
+            self.revalidate_held_entry_quote(fx.owner, intent, fx.order_type, until)
+                .await?;
             let (census, causal_proof) = self
                 .census_after_held(
                     state,
@@ -729,7 +1334,7 @@ impl TradeService {
         let mut occupied = Vec::new();
         let mut evidence = Vec::new();
         let mut post_reads = Vec::new();
-        let floor = now();
+        let started_at = now();
         use futures_util::{StreamExt, TryStreamExt, stream};
         let cohort = state
             .state
@@ -771,12 +1376,20 @@ impl TradeService {
                 {
                     return Err("COHORT_EVIDENCE_INCOMPLETE".into());
                 }
+                // This is the earliest REST response across every pending
+                // derivative-algo scope. Complete coverage is insufficient
+                // if the underlying source timestamp is absent or stale.
+                let algo_source_floor = verified_algo_source_time(algos.received_at_ms, now())?;
                 let mut managed_algos = std::collections::BTreeSet::new();
                 for p in &snapshot.positions {
-                    let actual_qty = dec(&p.position)?;
-                    if actual_qty == Decimal::ZERO {
+                    let Some((position_direction, actual_qty)) =
+                        super::reconcile::verified_venue_position_direction(
+                            &p.position_side,
+                            &p.position,
+                        )?
+                    else {
                         continue;
-                    }
+                    };
                     let instrument = p.instrument_id.clone();
                     let lots = r
                         .execution
@@ -786,19 +1399,26 @@ impl TradeService {
                         .map_err(err)?;
                     let covered = lots
                         .iter()
-                        .filter(|l| l.side == p.position_side)
-                        .fold(Decimal::ZERO, |s, l| s + l.remaining_qty);
-                    if covered != dec(&p.position)?.abs() {
-                        return Err("UNATTRIBUTED_EXCHANGE_POSITION".into());
+                        .filter(|l| l.side == position_direction)
+                        .try_fold(Decimal::ZERO, |total, lot| {
+                            if lot.remaining_qty <= Decimal::ZERO {
+                                return Err("UNATTRIBUTED_EXCHANGE_POSITION".to_owned());
+                            }
+                            total
+                                .checked_add(lot.remaining_qty)
+                                .ok_or_else(|| "COHORT_POSITION_QUANTITY_OVERFLOW".to_owned())
+                        })?;
+                    if covered != actual_qty {
+                        return Err("UNATTRIBUTED_EXCHANGE_POSITION".to_owned());
                     }
-                    for lot in lots.iter().filter(|l| l.side == p.position_side) {
+                    for lot in lots.iter().filter(|l| l.side == position_direction) {
                         let id = lot.intent_id.clone().ok_or("UNATTRIBUTED_POSITION_LOT")?;
                         let owner_id = id.clone();
                         let (protection, receipt) = r
                             .execution
                             .store
                             .call(deadline(), move |s| {
-                                Ok((s.protection(&id)?, s.central_receipt(&id)?))
+                                Ok((s.protection(&id)?, s.active_central_receipt(&id)?))
                             })
                             .await
                             .map_err(err)?;
@@ -806,8 +1426,18 @@ impl TradeService {
                         let receipt = receipt.ok_or("CENTRAL_RESERVATION_UNVERIFIED")?;
                         let owned_qty = lots
                             .iter()
-                            .filter(|l| l.intent_id.as_deref() == Some(&owner_id))
-                            .fold(Decimal::ZERO, |n, l| n + l.remaining_qty);
+                            .filter(|l| {
+                                l.side == position_direction
+                                    && l.intent_id.as_deref() == Some(&owner_id)
+                            })
+                            .try_fold(Decimal::ZERO, |total, lot| {
+                                if lot.remaining_qty <= Decimal::ZERO {
+                                    return Err("COHORT_POSITION_LOT_QUANTITY_INVALID".to_owned());
+                                }
+                                total
+                                    .checked_add(lot.remaining_qty)
+                                    .ok_or_else(|| "COHORT_POSITION_QUANTITY_OVERFLOW".to_owned())
+                            })?;
                         if protection.quantity < owned_qty
                             || receipt.plan_hash.is_empty()
                             || receipt.reservation_key.starts_with("local:")
@@ -828,9 +1458,8 @@ impl TradeService {
                         .call(deadline(), move |s| s.by_client_order_id(&client))
                         .await
                         .map_err(err)?;
-                    if known.is_none() {
-                        return Err("UNATTRIBUTED_PENDING_ORDER".into());
-                    }
+                    let known = known.ok_or("UNATTRIBUTED_PENDING_ORDER")?;
+                    verify_pending_order_binding(order, &known)?;
                 }
                 if algos
                     .samples
@@ -841,6 +1470,30 @@ impl TradeService {
                 {
                     return Err("UNATTRIBUTED_CONDITIONAL_ORDER".into());
                 }
+                // Active SQL intents are obligations too. A fresh venue
+                // snapshot can omit a still-UNKNOWN POST, and a pending order
+                // cannot be considered managed without its central receipt.
+                // The 100th row is a positive truncation signal: never
+                // misreport a bounded local scan as complete.
+                let local_intents = r
+                    .execution
+                    .store
+                    .call(deadline(), |s| {
+                        let (intents, pending) = s.risk_census_intents(100)?;
+                        let covered = intents
+                            .into_iter()
+                            .map(|intent| {
+                                let central = s.active_central_receipt(&intent.intent_id)?;
+                                Ok((intent, central))
+                            })
+                            .collect::<okx_execution::StoreResult<Vec<_>>>()?;
+                        Ok((covered, pending))
+                    })
+                    .await
+                    .map_err(err)?;
+                let (local_intents, pending_central) = local_intents;
+                let local_intent_digest =
+                    verify_local_intent_coverage(&local_intents, &pending_central, &c.account_key)?;
                 if r.private_ws.status().await.connection_generation != generation
                     || !r.source_identity_ready().await
                     || !r
@@ -851,7 +1504,6 @@ impl TradeService {
                 {
                     return Err("COHORT_SOURCE_GENERATION_CHANGED".into());
                 }
-                let data = digest(&(snapshot, algos))?;
                 let financial = r
                     .execution
                     .store
@@ -860,12 +1512,44 @@ impl TradeService {
                     })
                     .await
                     .map_err(err)?;
-                if !financial.0.nav_complete {
-                    return Err("COHORT_FINANCIAL_SOURCE_INCOMPLETE".into());
-                }
+                // A freshly constructed census is not proof that its underlying
+                // account or ledger sources were fresh. Keep the actual oldest
+                // source timestamp, not just the time at which we read it.
+                let source_floor = census_source_floor(
+                    &snapshot.source_received_at,
+                    &snapshot.account_uid_fingerprint,
+                    &c.uid_fingerprint,
+                    financial.0.nav_complete,
+                    financial.0.source_as_of,
+                    now(),
+                )?
+                .min(algo_source_floor);
+                // Bind SQL source quality and financial state to the same
+                // content proof as the account and conditional-order reads.
+                let data = digest(&(
+                    &snapshot,
+                    &algos,
+                    &local_intent_digest,
+                    financial.0.source_as_of,
+                    &financial.0.daily_loss_usd,
+                    &financial.0.drawdown_ratio,
+                    &financial.1,
+                ))?;
+                // No accepted monetary projection for independently occupied
+                // exposure exists yet. The central DO accounts for its own
+                // HELD grants separately, but a local open venue obligation
+                // must never be silently invented as "zero external risk".
+                // The first bounded acceptance supports a provably flat
+                // account; managed open exposure remains NO-GO until native
+                // position/order/stop monetary occupancy is source-proven.
+                let flat_occupied = certified_flat_external_exposure(
+                    snapshot.positions.iter().map(|p| p.position.as_str()),
+                    snapshot.pending_orders.len(),
+                    algos.samples.len(),
+                )?;
                 let occupancy = RiskAccountOccupancy {
                     account_key: c.account_key.clone(),
-                    occupied_usdt: "0".into(),
+                    occupied_usdt: flat_occupied.into(),
                     cumulative_loss_usd: exact(financial.1),
                 };
                 let read = started
@@ -888,15 +1572,17 @@ impl TradeService {
                         })
                     })
                     .transpose()?;
-                Ok::<_, String>((c.account_key, occupancy, data, read))
+                Ok::<_, String>((c.account_key, occupancy, data, read, source_floor))
             })
             .buffer_unordered(8)
             .try_collect::<Vec<_>>()
             .await?;
-        for (key, row, proof, read) in pages {
+        let mut source_floor = started_at;
+        for (key, row, proof, read, account_floor) in pages {
+            source_floor = source_floor.min(account_floor);
+            evidence.push((key.clone(), proof));
             keys.push(key);
             occupied.push(row);
-            evidence.push(proof);
             if let Some(read) = read {
                 post_reads.push(read);
             }
@@ -906,18 +1592,24 @@ impl TradeService {
         keys.sort();
         occupied.sort_by(|a, b| a.account_key.cmp(&b.account_key));
         let generated = now();
-        if !crate::config::evidence_fresh(floor, generated, crate::config::ACCOUNT_MAX_AGE_MS) {
+        if source_floor > generated
+            || !crate::config::evidence_fresh(
+                source_floor,
+                generated,
+                crate::config::ACCOUNT_MAX_AGE_MS,
+            )
+        {
             return Err("COHORT_EVIDENCE_STALE".into());
         }
-        let content = digest(&evidence)?;
+        let content = canonical_census_content(evidence, &keys)?;
         Ok((
             NativeRiskCensus {
                 account_keys: keys,
                 occupied,
                 generated_at_ms: generated as u64,
-                source_digest: digest(&(content.clone(), floor, generated))?,
+                source_digest: digest(&(content.clone(), source_floor, generated))?,
                 content_digest: content,
-                source_read_floor_ms: floor as u64,
+                source_read_floor_ms: source_floor as u64,
                 complete: true,
                 native_account_evidence_complete: true,
                 native_order_evidence_complete: true,
@@ -927,6 +1619,275 @@ impl TradeService {
         ))
     }
 }
+/// The pending derivative-algo census covers multiple private REST scopes.
+/// A successful query or empty array without a fresh source timestamp is not
+/// independently sufficient evidence that no unprotected order exists.
+fn verified_algo_source_time(
+    source_received_at_ms: u64,
+    observed_at_ms: i64,
+) -> Result<i64, String> {
+    let source =
+        i64::try_from(source_received_at_ms).map_err(|_| "COHORT_ALGO_SOURCE_TIME_INVALID")?;
+    if source <= 0
+        || source > observed_at_ms
+        || !crate::config::evidence_fresh(source, observed_at_ms, crate::config::ACCOUNT_MAX_AGE_MS)
+    {
+        return Err("COHORT_ALGO_SOURCE_STALE".into());
+    }
+    Ok(source)
+}
+
+/// E2 strict first-test boundary: a zero external occupancy witness can
+/// only be produced from a genuinely flat venue inventory. Matching SQL
+/// intent/central receipt IDs alone do not prove the monetary risk of an
+/// already-open position, active order or algo. Those require the full priced
+/// occupancy projection before allowing concurrent increases.
+fn certified_flat_external_exposure<'a>(
+    positions: impl IntoIterator<Item = &'a str>,
+    open_orders: usize,
+    conditional_orders: usize,
+) -> Result<&'static str, String> {
+    if open_orders != 0 || conditional_orders != 0 {
+        return Err("COHORT_NONFLAT_EXPOSURE_UNPRICED".into());
+    }
+    for amount in positions {
+        if dec(amount)? != Decimal::ZERO {
+            return Err("COHORT_NONFLAT_EXPOSURE_UNPRICED".into());
+        }
+    }
+    Ok("0")
+}
+
+/// The reserved known quote is source-bound but NOT an all-in debit proof.
+/// If any source changes after HELD, do not reuse the prior risk grant. Fail
+/// rather than silently refresh the amount/cost or issue a second venue POST.
+fn verify_post_held_entry_sources(
+    quote: &okx_execution::EntryQuoteEvidence,
+    fee: &okx_observation::FeeScheduleSnapshot,
+    reference_generation: &str,
+    contract_value: Decimal,
+    fx: &UsdConversion,
+    observed_at_ms: i64,
+) -> Result<(), String> {
+    let current_fee = entry_budget::verified_entry_fee_rate(
+        fee,
+        &quote.instrument_id,
+        reference_generation,
+        observed_at_ms,
+    )?;
+    if quote.contract_value != contract_value
+        || quote.reference_generation != reference_generation
+        || quote.fee_generation != fee.fee_generation
+        || quote.maker_rate != fee.maker_rate
+        || quote.taker_rate != fee.taker_rate
+        || quote.fee_level != fee.level
+        || quote.fee_rate != current_fee
+    {
+        return Err("POST_ENTRY_FEE_OR_SPEC_CHANGED".into());
+    }
+    if !crate::config::evidence_fresh(
+        quote.observed_at,
+        observed_at_ms,
+        crate::config::ACCOUNT_MAX_AGE_MS,
+    ) {
+        return Err("POST_ENTRY_QUOTE_EXPIRED".into());
+    }
+    if !fx.valid() {
+        return Err("POST_ENTRY_FX_SOURCE_INVALID".into());
+    }
+    let fx_timestamp =
+        i64::try_from(fx.observed_at_ms).map_err(|_| "POST_ENTRY_FX_TIMESTAMP_INVALID")?;
+    if !crate::config::evidence_fresh(
+        fx_timestamp,
+        observed_at_ms,
+        crate::config::ACCOUNT_MAX_AGE_MS,
+    ) {
+        return Err("POST_ENTRY_FX_STALE".into());
+    }
+    if quote.usd_per_usdt != dec(&fx.usd_per_usdt)? {
+        return Err("POST_ENTRY_FX_CHANGED".into());
+    }
+    // The historical quote keeps its original source digest in SQL.
+    // The authenticated post-HELD read can legitimately have a new account
+    // generation: its FX source must be valid/fresh and its exact observed
+    // conversion must still match the originally reserved rate.
+    Ok(())
+}
+
+/// The SQL owner is the authority for the local send state. A missing venue
+/// row does not prove no-send after POSTING/UNKNOWN; preserve those obligations
+/// and deny further account risk until a terminal readback is reconciled.
+fn verify_local_intent_coverage(
+    active: &[(StoredIntent, Option<CentralReceipt>)],
+    unresolved: &[String],
+    account_key: &str,
+) -> Result<String, String> {
+    const PAGE_LIMIT: usize = 100;
+    if active.len() >= PAGE_LIMIT {
+        return Err("COHORT_LOCAL_INTENTS_TRUNCATED".into());
+    }
+    let mut ids = std::collections::BTreeSet::new();
+    if unresolved.windows(2).any(|pair| pair[0] >= pair[1]) {
+        return Err("COHORT_UNRESOLVED_INTENT_SCOPE_INVALID".into());
+    }
+    for (intent, receipt) in active {
+        if !ids.insert(intent.intent_id.as_str())
+            || intent.plan_hash.is_empty()
+            || intent.plan.quantity <= Decimal::ZERO
+        {
+            return Err("COHORT_LOCAL_INTENT_CORRUPT".into());
+        }
+        if matches!(intent.state, IntentState::Posting | IntentState::Unknown) {
+            return Err("COHORT_UNRESOLVED_POST_OUTCOME".into());
+        }
+        let central_pending = unresolved.binary_search(&intent.intent_id).is_ok();
+        if intent.state.terminal() && central_pending {
+            return Err("COHORT_TERMINAL_RISK_RELEASE_PENDING".into());
+        }
+        if intent.state == IntentState::Prepared && central_pending {
+            return Err("COHORT_UNRESOLVED_RESERVE_ATTEMPT".into());
+        }
+        if matches!(
+            intent.state,
+            IntentState::Acknowledged | IntentState::PartiallyFilled
+        ) && intent
+            .exchange_order_id
+            .as_ref()
+            .is_none_or(String::is_empty)
+        {
+            return Err("COHORT_EXCHANGE_ORDER_ID_UNPROVEN".into());
+        }
+        if intent.risk_increase {
+            if intent.state != IntentState::Prepared && receipt.is_none() {
+                return Err("COHORT_CENTRAL_RESERVATION_MISSING".into());
+            }
+            if let Some(receipt) = receipt
+                && (receipt.account_key != account_key
+                    || receipt.intent_id != intent.intent_id
+                    || receipt.plan_hash != intent.plan_hash
+                    || receipt.reservation_key.starts_with("local:")
+                    || receipt.reservation_key.is_empty()
+                    || receipt.policy_revision != intent.policy_revision)
+            {
+                return Err("COHORT_CENTRAL_RESERVATION_MISMATCH".into());
+            }
+        }
+    }
+    if unresolved.iter().any(|id| !ids.contains(id.as_str())) {
+        return Err("COHORT_UNRESOLVED_INTENT_SCOPE_INVALID".into());
+    }
+    digest(&(active, unresolved))
+}
+
+/// Concurrent account reads must produce one deterministic, complete cohort
+/// digest regardless of completion order. Duplicated/missing keys fail closed.
+fn canonical_census_content(
+    mut evidence: Vec<(String, String)>,
+    expected_keys: &[String],
+) -> Result<String, String> {
+    evidence.sort_by(|a, b| a.0.cmp(&b.0));
+    if evidence.len() != expected_keys.len()
+        || !expected_keys.windows(2).all(|pair| pair[0] < pair[1])
+        || evidence
+            .iter()
+            .zip(expected_keys)
+            .any(|((key, _), expected)| key != expected)
+    {
+        return Err("COHORT_EVIDENCE_SCOPE_MISMATCH".into());
+    }
+    digest(&evidence)
+}
+
+/// A matching client ID alone does not prove that a live venue obligation
+/// belongs to this durable intent. Compare the actual order and saved plan.
+fn verify_pending_order_binding(
+    order: &okx_observation::PendingOrderState,
+    intent: &StoredIntent,
+) -> Result<(), String> {
+    if order.client_order_id.as_deref() != Some(intent.client_order_id.as_str())
+        || order.order_id.is_empty()
+        || intent.exchange_order_id.as_deref() != Some(order.order_id.as_str())
+        || order.instrument_id != intent.instrument_id
+        || order.side != intent.plan.side
+        || !matches!(
+            order.position_side.as_deref(),
+            Some("net") | Some("long") | Some("short")
+        )
+        || (order.position_side.as_deref() != Some("net")
+            && order.position_side.as_deref() != Some(intent.plan.position_side.as_str()))
+        || (order.position_side.as_deref() == Some("net")
+            && ((intent.risk_increase && order.reduce_only == Some(true))
+                || (!intent.risk_increase && order.reduce_only != Some(true))))
+        || !matches!(order.state.as_str(), "live" | "partially_filled")
+        || intent.state.terminal()
+    {
+        return Err("PENDING_ORDER_INTENT_MISMATCH".into());
+    }
+    let qty = dec(&order.size)?;
+    let filled = dec(&order.accumulated_fill_size)?;
+    if qty <= Decimal::ZERO || qty != intent.plan.quantity || filled < Decimal::ZERO || filled > qty
+    {
+        return Err("PENDING_ORDER_QUANTITY_MISMATCH".into());
+    }
+    if intent.risk_increase {
+        let price = dec(order
+            .price
+            .as_deref()
+            .ok_or("PENDING_ORDER_PRICE_UNPROVEN")?)?;
+        if price <= Decimal::ZERO
+            || intent.plan.limit_price <= Decimal::ZERO
+            || (intent.plan.side == "buy" && price > intent.plan.limit_price)
+            || (intent.plan.side == "sell" && price < intent.plan.limit_price)
+        {
+            return Err("PENDING_ORDER_PRICE_BOUND_MISMATCH".into());
+        }
+    }
+    Ok(())
+}
+
+/// Validate actual source time, not the timestamp at which a new census is
+/// assembled. Both the venue account read and SQLite financial projection
+/// must be current before a complete native risk witness may be issued.
+fn census_source_floor(
+    account_received_at: &str,
+    observed_uid: &str,
+    expected_uid: &str,
+    nav_complete: bool,
+    financial_as_of: i64,
+    observed_at: i64,
+) -> Result<i64, String> {
+    if observed_uid != expected_uid {
+        return Err("COHORT_IDENTITY_MISMATCH".into());
+    }
+    let account_as_of = chrono::DateTime::parse_from_rfc3339(account_received_at)
+        .map_err(|_| "COHORT_ACCOUNT_SOURCE_TIME_INVALID")?
+        .timestamp_millis();
+    if account_as_of <= 0
+        || account_as_of > observed_at
+        || !crate::config::evidence_fresh(
+            account_as_of,
+            observed_at,
+            crate::config::ACCOUNT_MAX_AGE_MS,
+        )
+    {
+        return Err("COHORT_ACCOUNT_SOURCE_STALE".into());
+    }
+    if !nav_complete {
+        return Err("COHORT_FINANCIAL_SOURCE_INCOMPLETE".into());
+    }
+    if financial_as_of <= 0
+        || financial_as_of > observed_at
+        || !crate::config::evidence_fresh(
+            financial_as_of,
+            observed_at,
+            crate::config::ACCOUNT_MAX_AGE_MS,
+        )
+    {
+        return Err("COHORT_FINANCIAL_SOURCE_STALE".into());
+    }
+    Ok(account_as_of.min(financial_as_of))
+}
+
 /// Compare exact 9-decimal USD/USDT conversion values on native fresh
 /// post-HELD snapshot; content equality is allowed only after a new read.
 fn verify_post_held_fx(reserved: &str, observed: &str) -> Result<(), String> {
@@ -1103,6 +2064,313 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
+    fn e1_positive_historical_usd_spot_is_classified_without_usdt_fx_guess() {
+        let order: okx_api::HistoricalOrder = serde_json::from_value(serde_json::json!({
+            "instType":"SPOT","instId":"BTC-USD","ordId":"123","side":"buy"
+        }))
+        .unwrap();
+        let fill: okx_api::FillHistory = serde_json::from_value(serde_json::json!({
+            "instType":"SPOT","instId":"BTC-USD","tradeId":"11","ordId":"123",
+            "billId":"111","side":"buy","fillPx":"100","fillSz":"0.05",
+            "fee":"-0.01","feeCcy":"USD"
+        }))
+        .unwrap();
+        let bill: okx_api::AccountBill = serde_json::from_value(serde_json::json!({
+            "billId":"111","instType":"SPOT","instId":"BTC-USD","ordId":"123",
+            "tradeId":"11","ccy":"USD","fee":"-0.01","type":"2"
+        }))
+        .unwrap();
+        let mut history = okx_api::CompleteCampaignAccountHistory {
+            from_ms: 1,
+            through_ms: 100,
+            orders: vec![order],
+            fills: vec![fill],
+            bills: vec![bill],
+            source_digest: "f".repeat(64),
+        };
+        assert_eq!(
+            TradeService::historical_usd_spot_entry(&history).unwrap(),
+            dec("5.01").unwrap()
+        );
+        history.fills[0].fee = "0.03".into();
+        history.bills[0].fee = "0.03".into();
+        assert_eq!(
+            TradeService::historical_usd_spot_entry(&history).unwrap(),
+            dec("5").unwrap(),
+            "rebate neither increases nor refunds campaign entry spend"
+        );
+        history.fills[0].side = "sell".into();
+        history.orders[0].side = "sell".into();
+        history.fills[0].fee = "-0.1".into();
+        history.bills[0].fee = "-0.1".into();
+        assert_eq!(
+            TradeService::historical_usd_spot_entry(&history).unwrap(),
+            Decimal::ZERO,
+            "closing notional/fee must not be charged as an opening"
+        );
+        history.fills[0].side = "buy".into();
+        history.orders[0].side = "buy".into();
+        history.fills[0].fee = "0.03".into();
+        history.bills[0].fee = "0.03".into();
+        history.fills[0].instrument_type = "SWAP".into();
+        assert!(
+            TradeService::historical_usd_spot_entry(&history).is_err(),
+            "SWAP cannot be priced without historical contract unit"
+        );
+        history.fills[0].instrument_type = "SPOT".into();
+        history.fills[0].fee_currency = "USDT".into();
+        assert!(
+            TradeService::historical_usd_spot_entry(&history).is_err(),
+            "no observed USD/USDT rate may be promoted into a guaranteed source"
+        );
+        history.fills[0].fee_currency = "USD".into();
+        history.bills.push(
+            serde_json::from_value(serde_json::json!({
+                "billId":"112","instType":"SPOT","instId":"BTC-USD",
+                "ccy":"USD","fee":"-1","type":"7"
+            }))
+            .unwrap(),
+        );
+        assert!(
+            TradeService::historical_usd_spot_entry(&history).is_err(),
+            "standalone bills and borrow costs cannot be treated as zero"
+        );
+    }
+
+    #[test]
+    fn e1_empty_history_is_zero_but_unclassified_bill_never_is() {
+        let mut history = okx_api::CompleteCampaignAccountHistory {
+            from_ms: 1,
+            through_ms: 100,
+            orders: vec![],
+            fills: vec![],
+            bills: vec![],
+            source_digest: "f".repeat(64),
+        };
+        assert_eq!(
+            TradeService::historical_usd_spot_entry(&history).unwrap(),
+            Decimal::ZERO
+        );
+        history.bills.push(
+            serde_json::from_value(serde_json::json!({
+                "billId":"999","ccy":"USD","fee":"-1","type":"2"
+            }))
+            .unwrap(),
+        );
+        assert_eq!(
+            TradeService::historical_usd_spot_entry(&history),
+            Err("ENTRY_OPENING_STANDALONE_BILL_UNCLASSIFIED".into())
+        );
+    }
+
+    #[test]
+    fn e1_held_entry_sources_reject_tampering_and_stale_tariffs() {
+        use okx_observation::{FeeScheduleInput, FeeScheduleSnapshot};
+        let stamp = "2026-10-30T00:00:00Z";
+        let t = chrono::DateTime::parse_from_rfc3339(stamp)
+            .unwrap()
+            .timestamp_millis();
+        let fee = FeeScheduleSnapshot::from_input(FeeScheduleInput {
+            instrument_id: "BTC-USDT-SWAP".into(),
+            reference_generation: "reference-1".into(),
+            source_received_at: stamp.into(),
+            exchange_timestamp_ms: t.to_string(),
+            level: "Lv1".into(),
+            maker_rate: "-0.0002".into(),
+            taker_rate: "0.0005".into(),
+            exact_for_instrument: true,
+        })
+        .unwrap();
+        let mut quote = okx_execution::EntryQuoteEvidence {
+            schema: "okx.entry-known-quote/v1".into(),
+            account_key: "okx:real:test".into(),
+            installation_id: "test".into(),
+            intent_id: "intent".into(),
+            plan_hash: "a".repeat(64),
+            policy_revision: 1,
+            instrument_id: "BTC-USDT-SWAP".into(),
+            quantity: dec("1").unwrap(),
+            limit_price: dec("100").unwrap(),
+            contract_value: dec("1").unwrap(),
+            fee_rate: dec("0.0005").unwrap(),
+            maker_rate: fee.maker_rate.clone(),
+            taker_rate: fee.taker_rate.clone(),
+            fee_level: fee.level.clone(),
+            fee_exchange_at: t,
+            usd_per_usdt: Decimal::ONE,
+            notional_usdt: dec("100").unwrap(),
+            fee_usdt: dec("0.05").unwrap(),
+            total_usdt: dec("100.05").unwrap(),
+            total_usd: dec("100.05").unwrap(),
+            fee_generation: fee.fee_generation.clone(),
+            reference_generation: fee.reference_generation.clone(),
+            fee_received_at: t,
+            conversion_digest: "b".repeat(64),
+            conversion_received_at: t,
+            observed_at: t,
+        };
+        let fx = UsdConversion {
+            usd_per_usdt: "1".into(),
+            source_digest: "b".repeat(64),
+            observed_at_ms: t as u64,
+        };
+        let known = entry_budget::quote(
+            quote.quantity,
+            quote.contract_value,
+            quote.limit_price,
+            quote.fee_rate,
+            quote.usd_per_usdt,
+        )
+        .unwrap();
+        // A post-HELD source check also needs fresh own collateral and
+        // borrowing evidence: fee/spec/FX parity alone never grants POST.
+        let mut held =
+            entry_budget::EntryCostProof::source_valued_candidate(known.clone(), &fx, t + 1)
+                .unwrap();
+        let source_digest = "c".repeat(64);
+        held.extra_immediate_fees = entry_budget::EntryCostEvidence::NotApplicable {
+            basis: "test-fee-source",
+            source_digest: source_digest.clone(),
+        };
+        held.borrowing = entry_budget::EntryCostEvidence::NotApplicable {
+            basis: "test-no-borrow",
+            source_digest: source_digest.clone(),
+        };
+        held.collateral_or_margin = entry_budget::EntryCostEvidence::Proven {
+            upper_usd: known.total_usd,
+            basis: "test-margin-source",
+            source_digest: source_digest.clone(),
+        };
+        held.available_collateral = entry_budget::EntryAvailableCollateral::Proven {
+            available_lower_usd: dec("200").unwrap(),
+            basis: "test-own-collateral",
+            source_digest,
+        };
+        let mut admission = okx_execution::EntryAdmissionEvidence {
+            schema: "okx.entry-admission/v2".into(),
+            account_key: quote.account_key.clone(),
+            installation_id: quote.installation_id.clone(),
+            intent_id: quote.intent_id.clone(),
+            plan_hash: quote.plan_hash.clone(),
+            quote_digest: "d".repeat(64),
+            admission_usd_per_usdt: Decimal::ONE,
+            other_entry_costs_upper_usd: Decimal::ZERO,
+            entry_upper_usd: known.total_usd,
+            entry_proof_digest: "e".repeat(64),
+            observed_at: t,
+        };
+        assert!(held.verify_held_entry_admission(&quote, &admission).is_ok());
+        admission.entry_upper_usd += Decimal::ONE;
+        assert_eq!(
+            held.verify_held_entry_admission(&quote, &admission),
+            Err("POST_ENTRY_ADMISSION_COST_CHANGED".into()),
+        );
+        admission.entry_upper_usd = known.total_usd;
+        held.available_collateral = entry_budget::EntryAvailableCollateral::Proven {
+            available_lower_usd: Decimal::ONE,
+            basis: "test-now-insufficient",
+            source_digest: "f".repeat(64),
+        };
+        assert_eq!(
+            held.verify_held_entry_admission(&quote, &admission),
+            Err("ENTRY_COLLATERAL_INSUFFICIENT".into()),
+        );
+        let unproven = entry_budget::EntryCostProof::unproven_linear_quote(known.clone());
+        assert_eq!(
+            entry_budget::reserve_entry_evidence(&unproven, &quote, dec("101").unwrap()),
+            Ok(None),
+            "a correctly priced SQL quote cannot invent margin, fees, borrowing or bounded FX"
+        );
+        let mut tampered = unproven;
+        tampered.quote.total_usd += Decimal::ONE;
+        assert_eq!(
+            entry_budget::reserve_entry_evidence(&tampered, &quote, dec("101").unwrap()),
+            Err("ENTRY_RESERVE_QUOTE_BINDING_MISMATCH".into())
+        );
+        assert!(
+            verify_post_held_entry_sources(&quote, &fee, "reference-1", Decimal::ONE, &fx, t + 1)
+                .is_ok()
+        );
+        assert_eq!(
+            verify_post_held_entry_sources(&quote, &fee, "reference-2", Decimal::ONE, &fx, t + 1),
+            Err("ENTRY_FEE_SOURCE_SCOPE_MISMATCH".into())
+        );
+        assert_eq!(
+            verify_post_held_entry_sources(
+                &quote,
+                &fee,
+                "reference-1",
+                dec("2").unwrap(),
+                &fx,
+                t + 1
+            ),
+            Err("POST_ENTRY_FEE_OR_SPEC_CHANGED".into())
+        );
+        quote.fee_generation = "tampered".into();
+        assert!(
+            verify_post_held_entry_sources(&quote, &fee, "reference-1", Decimal::ONE, &fx, t + 1)
+                .is_err()
+        );
+        quote.fee_generation = fee.fee_generation.clone();
+        assert_eq!(
+            verify_post_held_entry_sources(
+                &quote,
+                &fee,
+                "reference-1",
+                Decimal::ONE,
+                &fx,
+                t + crate::config::ACCOUNT_MAX_AGE_MS + 1
+            ),
+            Err("ENTRY_FEE_SOURCE_STALE".into())
+        );
+        let invalid_provenance = UsdConversion {
+            source_digest: "invalid".into(),
+            ..fx.clone()
+        };
+        assert_eq!(
+            verify_post_held_entry_sources(
+                &quote,
+                &fee,
+                "reference-1",
+                Decimal::ONE,
+                &invalid_provenance,
+                t + 1
+            ),
+            Err("POST_ENTRY_FX_SOURCE_INVALID".into())
+        );
+        let refreshed_same_rate = UsdConversion {
+            source_digest: "c".repeat(64),
+            ..fx.clone()
+        };
+        assert!(
+            verify_post_held_entry_sources(
+                &quote,
+                &fee,
+                "reference-1",
+                Decimal::ONE,
+                &refreshed_same_rate,
+                t + 1
+            )
+            .is_ok()
+        );
+        let modified_fx = UsdConversion {
+            usd_per_usdt: "1.01".into(),
+            ..fx
+        };
+        assert_eq!(
+            verify_post_held_entry_sources(
+                &quote,
+                &fee,
+                "reference-1",
+                Decimal::ONE,
+                &modified_fx,
+                t + 1
+            ),
+            Err("POST_ENTRY_FX_CHANGED".into())
+        );
+    }
+
+    #[test]
     fn k4_post_held_fx_same_rate_or_changed_rate() {
         assert!(verify_post_held_fx("0.999000000", "0.999").is_ok());
         assert_eq!(
@@ -1115,6 +2383,322 @@ mod tests {
         );
         assert!(verify_post_held_fx("1", "invalid").is_err());
     }
+    #[test]
+    fn e2_algo_census_source_age_is_part_of_cohort_proof() {
+        let now_ms = 1_798_758_000_000_i64;
+        assert_eq!(verified_algo_source_time(now_ms as u64, now_ms), Ok(now_ms));
+        assert_eq!(
+            verified_algo_source_time(0, now_ms),
+            Err("COHORT_ALGO_SOURCE_STALE".into())
+        );
+        assert_eq!(
+            verified_algo_source_time((now_ms + 1) as u64, now_ms),
+            Err("COHORT_ALGO_SOURCE_STALE".into())
+        );
+        assert_eq!(
+            verified_algo_source_time(
+                (now_ms - crate::config::ACCOUNT_MAX_AGE_MS - 1) as u64,
+                now_ms,
+            ),
+            Err("COHORT_ALGO_SOURCE_STALE".into())
+        );
+        assert_eq!(
+            verified_algo_source_time(u64::MAX, now_ms),
+            Err("COHORT_ALGO_SOURCE_TIME_INVALID".into())
+        );
+    }
+
+    #[test]
+    fn e2_census_zero_risk_is_only_attested_for_actual_venue_flat() {
+        assert_eq!(
+            certified_flat_external_exposure(["0", "0.000"].into_iter(), 0, 0),
+            Ok("0")
+        );
+        assert_eq!(
+            certified_flat_external_exposure(["0", "-0.01"].into_iter(), 0, 0),
+            Err("COHORT_NONFLAT_EXPOSURE_UNPRICED".into())
+        );
+        assert_eq!(
+            certified_flat_external_exposure(["0"].into_iter(), 1, 0),
+            Err("COHORT_NONFLAT_EXPOSURE_UNPRICED".into())
+        );
+        assert_eq!(
+            certified_flat_external_exposure(["0"].into_iter(), 0, 1),
+            Err("COHORT_NONFLAT_EXPOSURE_UNPRICED".into())
+        );
+        assert!(certified_flat_external_exposure(["unknown"].into_iter(), 0, 0).is_err());
+        assert_eq!(
+            certified_flat_external_exposure(std::iter::empty::<&str>(), 0, 0),
+            Ok("0")
+        );
+    }
+
+    #[test]
+    fn e2_census_canonical_digest_rejects_missing_duplicate_and_order_variation() {
+        let keys = vec!["a".to_owned(), "b".to_owned()];
+        let rows = vec![
+            ("a".to_owned(), "proof_a".to_owned()),
+            ("b".to_owned(), "proof_b".to_owned()),
+        ];
+        assert_eq!(
+            canonical_census_content(rows.clone(), &keys),
+            canonical_census_content(rows.iter().rev().cloned().collect(), &keys)
+        );
+        assert!(canonical_census_content(vec![rows[0].clone()], &keys).is_err());
+        assert!(canonical_census_content(vec![rows[0].clone(), rows[0].clone()], &keys).is_err());
+    }
+
+    #[test]
+    fn e2_active_real_intents_have_complete_bounded_central_coverage() {
+        let plan = IntentPlan {
+            side: "buy".into(),
+            position_side: "long".into(),
+            quantity: dec("1").unwrap(),
+            limit_price: dec("100").unwrap(),
+            ..IntentPlan::default()
+        };
+        let mut intent = StoredIntent {
+            plan,
+            intent_id: "intent_123".into(),
+            idempotency_key: "key_123".into(),
+            request_hash: "a".repeat(64),
+            client_order_id: "client_123".into(),
+            state: IntentState::Prepared,
+            revision: 1,
+            deadline: 123,
+            plan_hash: "b".repeat(64),
+            policy_revision: 3,
+            risk_increase: true,
+            instrument_id: "BTC-USDT-SWAP".into(),
+            exchange_order_id: None,
+            incident: None,
+        };
+        let account = format!("okx:real:{}", "a".repeat(64));
+        let receipt = CentralReceipt {
+            reservation_key: "central:receipt_123".into(),
+            account_key: account.clone(),
+            installation_id: "install".into(),
+            instance_id: Some("manual".into()),
+            intent_id: intent.intent_id.clone(),
+            plan_hash: intent.plan_hash.clone(),
+            policy_revision: 3,
+            receipt_hash: "c".repeat(64),
+            requested_loss_usd: dec("1").unwrap(),
+            conversion_digest: "d".repeat(64),
+        };
+        assert!(verify_local_intent_coverage(&[(intent.clone(), None)], &[], &account).is_ok());
+        intent.state = IntentState::Reserved;
+        assert_eq!(
+            verify_local_intent_coverage(&[(intent.clone(), None)], &[], &account),
+            Err("COHORT_CENTRAL_RESERVATION_MISSING".into())
+        );
+        assert!(
+            verify_local_intent_coverage(&[(intent.clone(), Some(receipt.clone()))], &[], &account)
+                .is_ok()
+        );
+        let mut wrong = receipt.clone();
+        wrong.account_key = "other".into();
+        assert_eq!(
+            verify_local_intent_coverage(&[(intent.clone(), Some(wrong))], &[], &account),
+            Err("COHORT_CENTRAL_RESERVATION_MISMATCH".into())
+        );
+        intent.state = IntentState::Posting;
+        assert_eq!(
+            verify_local_intent_coverage(&[(intent.clone(), Some(receipt.clone()))], &[], &account),
+            Err("COHORT_UNRESOLVED_POST_OUTCOME".into())
+        );
+        intent.state = IntentState::Unknown;
+        assert!(
+            verify_local_intent_coverage(&[(intent.clone(), Some(receipt.clone()))], &[], &account)
+                .is_err()
+        );
+        intent.state = IntentState::Acknowledged;
+        assert_eq!(
+            verify_local_intent_coverage(&[(intent.clone(), Some(receipt.clone()))], &[], &account),
+            Err("COHORT_EXCHANGE_ORDER_ID_UNPROVEN".into())
+        );
+        intent.exchange_order_id = Some("venue_abc".into());
+        assert!(
+            verify_local_intent_coverage(&[(intent.clone(), Some(receipt.clone()))], &[], &account)
+                .is_ok()
+        );
+        let unresolved = vec![intent.intent_id.clone()];
+        assert!(
+            verify_local_intent_coverage(
+                &[(intent.clone(), Some(receipt.clone()))],
+                &unresolved,
+                &account
+            )
+            .is_ok()
+        );
+        let mut terminal = intent.clone();
+        terminal.state = IntentState::Filled;
+        assert_eq!(
+            verify_local_intent_coverage(
+                &[(terminal, Some(receipt.clone()))],
+                &unresolved,
+                &account
+            ),
+            Err("COHORT_TERMINAL_RISK_RELEASE_PENDING".into())
+        );
+        let mut attempted = intent.clone();
+        attempted.state = IntentState::Prepared;
+        attempted.exchange_order_id = None;
+        assert_eq!(
+            verify_local_intent_coverage(&[(attempted, None)], &unresolved, &account),
+            Err("COHORT_UNRESOLVED_RESERVE_ATTEMPT".into())
+        );
+        assert_eq!(
+            verify_local_intent_coverage(
+                &[
+                    (intent.clone(), Some(receipt.clone())),
+                    (intent.clone(), Some(receipt.clone()))
+                ],
+                &[],
+                &account
+            ),
+            Err("COHORT_LOCAL_INTENT_CORRUPT".into())
+        );
+        let many = vec![(intent, Some(receipt)); 100];
+        assert_eq!(
+            verify_local_intent_coverage(&many, &[], &account),
+            Err("COHORT_LOCAL_INTENTS_TRUNCATED".into())
+        );
+    }
+
+    #[test]
+    fn e2_pending_venue_order_cannot_steal_matching_client_id() {
+        let plan = IntentPlan {
+            side: "buy".into(),
+            position_side: "long".into(),
+            quantity: dec("2").unwrap(),
+            limit_price: dec("100").unwrap(),
+            ..IntentPlan::default()
+        };
+        let intent = StoredIntent {
+            plan,
+            intent_id: "intent_test".into(),
+            idempotency_key: "test_id".into(),
+            request_hash: "a".repeat(64),
+            client_order_id: "client_test".into(),
+            state: IntentState::Acknowledged,
+            revision: 1,
+            deadline: 123,
+            plan_hash: "b".repeat(64),
+            policy_revision: 1,
+            risk_increase: true,
+            instrument_id: "BTC-USDT-SWAP".into(),
+            exchange_order_id: Some("exchange_test".into()),
+            incident: None,
+        };
+        let order = okx_observation::PendingOrderState {
+            order_id: "exchange_test".into(),
+            client_order_id: Some("client_test".into()),
+            instrument_type: "SWAP".into(),
+            instrument_id: "BTC-USDT-SWAP".into(),
+            side: "buy".into(),
+            position_side: Some("long".into()),
+            trade_mode: "cross".into(),
+            order_type: "limit".into(),
+            price: Some("99".into()),
+            size: "2".into(),
+            accumulated_fill_size: "0.5".into(),
+            average_fill_price: None,
+            state: "partially_filled".into(),
+            reduce_only: Some(false),
+            creation_time_ms: "1".into(),
+            update_time_ms: "2".into(),
+        };
+        assert!(verify_pending_order_binding(&order, &intent).is_ok());
+        let mut foreign = order.clone();
+        foreign.order_id = "foreign_exchange_order".into();
+        assert_eq!(
+            verify_pending_order_binding(&foreign, &intent),
+            Err("PENDING_ORDER_INTENT_MISMATCH".into())
+        );
+        let mut changed = order.clone();
+        changed.side = "sell".into();
+        assert!(verify_pending_order_binding(&changed, &intent).is_err());
+        changed = order.clone();
+        changed.size = "3".into();
+        assert_eq!(
+            verify_pending_order_binding(&changed, &intent),
+            Err("PENDING_ORDER_QUANTITY_MISMATCH".into())
+        );
+        changed = order.clone();
+        changed.accumulated_fill_size = "2.1".into();
+        assert!(verify_pending_order_binding(&changed, &intent).is_err());
+        changed = order.clone();
+        changed.price = Some("101".into());
+        assert_eq!(
+            verify_pending_order_binding(&changed, &intent),
+            Err("PENDING_ORDER_PRICE_BOUND_MISMATCH".into())
+        );
+        changed = order.clone();
+        changed.price = None;
+        assert_eq!(
+            verify_pending_order_binding(&changed, &intent),
+            Err("PENDING_ORDER_PRICE_UNPROVEN".into())
+        );
+        let mut terminal = intent;
+        terminal.state = IntentState::Cancelled;
+        assert!(verify_pending_order_binding(&order, &terminal).is_err());
+    }
+
+    #[test]
+    fn e2_census_uses_oldest_verified_account_and_financial_source() {
+        let received = "2026-10-30T00:00:00Z";
+        let t = chrono::DateTime::parse_from_rfc3339(received)
+            .unwrap()
+            .timestamp_millis();
+        assert_eq!(
+            census_source_floor(received, "uid", "uid", true, t - 120, t + 300),
+            Ok(t - 120)
+        );
+        assert_eq!(
+            census_source_floor(received, "uid", "other", true, t, t),
+            Err("COHORT_IDENTITY_MISMATCH".into())
+        );
+        assert_eq!(
+            census_source_floor("invalid", "uid", "uid", true, t, t),
+            Err("COHORT_ACCOUNT_SOURCE_TIME_INVALID".into())
+        );
+        assert_eq!(
+            census_source_floor(received, "uid", "uid", true, t, t - 1),
+            Err("COHORT_ACCOUNT_SOURCE_STALE".into())
+        );
+        assert_eq!(
+            census_source_floor(
+                received,
+                "uid",
+                "uid",
+                true,
+                t,
+                t + crate::config::ACCOUNT_MAX_AGE_MS + 1,
+            ),
+            Err("COHORT_ACCOUNT_SOURCE_STALE".into())
+        );
+        assert_eq!(
+            census_source_floor(received, "uid", "uid", false, t, t),
+            Err("COHORT_FINANCIAL_SOURCE_INCOMPLETE".into())
+        );
+        assert_eq!(
+            census_source_floor(
+                received,
+                "uid",
+                "uid",
+                true,
+                t - crate::config::ACCOUNT_MAX_AGE_MS - 1,
+                t,
+            ),
+            Err("COHORT_FINANCIAL_SOURCE_STALE".into())
+        );
+        assert_eq!(
+            census_source_floor(received, "uid", "uid", true, t + 1, t),
+            Err("COHORT_FINANCIAL_SOURCE_STALE".into())
+        );
+    }
+
     struct FixtureGateway {
         posts: AtomicUsize,
         lose: bool,
@@ -1134,6 +2718,16 @@ mod tests {
         increase: bool,
         paused: bool,
         expired: bool,
+    ) -> (AccountStoreHandle, StoredIntent, std::path::PathBuf) {
+        reserved_with_price(label, increase, paused, expired, Decimal::from(100)).await
+    }
+
+    async fn reserved_with_price(
+        label: &str,
+        increase: bool,
+        paused: bool,
+        expired: bool,
+        limit_price: Decimal,
     ) -> (AccountStoreHandle, StoredIntent, std::path::PathBuf) {
         let root = std::env::temp_dir().join(format!(
             "okx-native-orchestration-{label}-{}-{}",
@@ -1182,8 +2776,12 @@ mod tests {
             side: "buy".into(),
             position_side: "long".into(),
             quantity: Decimal::ONE,
-            limit_price: Decimal::from(100),
-            stop_price: Some(Decimal::from(99)),
+            limit_price,
+            stop_price: Some(if limit_price == Decimal::from(100) {
+                Decimal::from(99)
+            } else {
+                limit_price - Decimal::ONE
+            }),
             strategy_instance: "manual".into(),
             planned_loss_usd: Decimal::ONE,
             source_generation: 1,
@@ -1231,8 +2829,84 @@ mod tests {
             requested_loss_usd: Decimal::ONE,
             conversion_digest: "e".repeat(64),
         };
+        let priced = limit_price != Decimal::from(100);
+        let saved_for_quote = saved.clone();
         store
-            .call(deadline(), move |s| s.reserve(&receipt, now()))
+            .call(deadline(), move |s| {
+                if priced {
+                    // Only the narrow native SQL+POST fixture creates its
+                    // own admitted quote; production source assessment is
+                    // independently exercised in entry_budget tests.
+                    let observed = now();
+                    let rate = Decimal::new(5, 4);
+                    let notional = saved_for_quote.plan.quantity
+                        * saved_for_quote.plan.contract_value
+                        * saved_for_quote.plan.limit_price;
+                    let fee = (notional * rate).round_dp_with_strategy(
+                        6,
+                        rust_decimal::RoundingStrategy::ToPositiveInfinity,
+                    );
+                    let total = notional + fee;
+                    let quote = okx_execution::EntryQuoteEvidence {
+                        schema: "okx.entry-known-quote/v1".into(),
+                        account_key: s.meta().account_key.clone(),
+                        installation_id: s.meta().installation_id.clone(),
+                        intent_id: saved_for_quote.intent_id.clone(),
+                        plan_hash: saved_for_quote.plan_hash.clone(),
+                        policy_revision: saved_for_quote.policy_revision,
+                        instrument_id: saved_for_quote.instrument_id.clone(),
+                        quantity: saved_for_quote.plan.quantity,
+                        limit_price: saved_for_quote.plan.limit_price,
+                        contract_value: saved_for_quote.plan.contract_value,
+                        fee_rate: rate,
+                        maker_rate: "-0.0002".into(),
+                        taker_rate: "0.0005".into(),
+                        fee_level: "Lv1".into(),
+                        fee_exchange_at: observed,
+                        usd_per_usdt: Decimal::ONE,
+                        notional_usdt: notional,
+                        fee_usdt: fee,
+                        total_usdt: total,
+                        total_usd: total,
+                        fee_generation: format!(
+                            "sha256:{:x}",
+                            Sha256::digest(
+                                serde_json::to_vec(&(
+                                    "BTC-USDT-SWAP",
+                                    "reference_fixture",
+                                    "Lv1",
+                                    "-0.0002",
+                                    "0.0005",
+                                    true
+                                ))
+                                .unwrap()
+                            )
+                        ),
+                        reference_generation: "reference_fixture".into(),
+                        fee_received_at: observed,
+                        conversion_digest: "b".repeat(64),
+                        conversion_received_at: observed,
+                        observed_at: observed,
+                    };
+                    let serialized = serde_json::to_vec(&quote).unwrap();
+                    let admission = okx_execution::EntryAdmissionEvidence {
+                        schema: "okx.entry-admission/v2".into(),
+                        account_key: quote.account_key.clone(),
+                        installation_id: quote.installation_id.clone(),
+                        intent_id: quote.intent_id.clone(),
+                        plan_hash: quote.plan_hash.clone(),
+                        quote_digest: format!("{:x}", Sha256::digest(serialized)),
+                        admission_usd_per_usdt: Decimal::ONE,
+                        other_entry_costs_upper_usd: Decimal::ZERO,
+                        entry_upper_usd: total,
+                        entry_proof_digest: "a".repeat(64),
+                        observed_at: observed,
+                    };
+                    s.bind_entry_quote(&quote)?;
+                    s.bind_entry_admission(&admission)?;
+                }
+                s.reserve(&receipt, now())
+            })
             .await
             .unwrap();
         (store, saved, root)
@@ -2087,6 +3761,241 @@ mod tests {
             gateway.posts.load(Ordering::SeqCst) + lost.posts.load(Ordering::SeqCst),
             3
         );
+    }
+
+    /// One Rust-native pipeline, deliberately using the production POST-once
+    /// gate and the existing account SQL owner. The Worker CAS/protection
+    /// fixture is independent; this test never claims their end-to-end proof.
+    #[tokio::test]
+    async fn t09_native_post_once_partial_fee_terminal_campaign_under_ten() {
+        let (store, intent, _root) =
+            reserved_with_price("t09_native_finance", true, false, false, Decimal::from(5)).await;
+        let gateway = FixtureGateway {
+            posts: AtomicUsize::new(0),
+            lose: false,
+        };
+        assert_eq!(
+            post_once(&store, &intent, deadline(), || gateway.send())
+                .await
+                .unwrap(),
+            Some(1)
+        );
+        assert!(
+            post_once(&store, &intent, deadline(), || gateway.send())
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(gateway.posts.load(Ordering::SeqCst), 1);
+        let id = intent.intent_id.clone();
+        store
+            .call(deadline(), move |s| {
+                s.record_outcome(
+                    &id,
+                    IntentState::Acknowledged,
+                    Some("fixture_exchange_order"),
+                    "authenticated-fixture-venue-ack",
+                    now(),
+                )
+            })
+            .await
+            .unwrap();
+
+        let at = now() + 3;
+        let qty = Decimal::new(5, 1);
+        let fee = Decimal::new(-125, 5);
+        // Two real account-finance ingestion transactions: first one partial
+        // fill and one matching fee bill, then the terminal completion.
+        // Nothing is inserted into operation_receipts as a made-up settlement.
+        for (suffix, fill_at, filled, kind) in [
+            ("first", at, qty, IntentState::PartiallyFilled),
+            ("second", at + 4, Decimal::ONE, IntentState::Filled),
+        ] {
+            let fill_id = format!("t09-{suffix}");
+            let bill_id = format!("t09-bill-{suffix}");
+            let order_id = "fixture_exchange_order";
+            let bill_key = format!("bill:{bill_id}");
+            let entry = okx_execution::FinanceEntry {
+                entry_id: format!("{bill_key}:FEE"),
+                economic_event_key: bill_key.clone(),
+                component: "FEE".into(),
+                allocation_leg: "account".into(),
+                amount: fee,
+                currency: "USDT".into(),
+                instance_id: None,
+                source_ref: format!("fill:{fill_id}"),
+                time: fill_at,
+                reverses_entry_id: None,
+            };
+            let ingest_id = intent.intent_id.clone();
+            let fill_id_ingest = fill_id.clone();
+            store
+                .call(deadline(), move |s| {
+                    s.ingest_page(&okx_execution::IngestPage {
+                        fills: vec![okx_execution::Fill {
+                            fill_id: fill_id_ingest.clone(),
+                            instrument_id: "BTC-USDT-SWAP".into(),
+                            trade_id: format!("venue-{fill_id_ingest}"),
+                            exchange_order_id: order_id.into(),
+                            intent_id: Some(ingest_id),
+                            time: fill_at,
+                            qty,
+                            price: Decimal::from(5),
+                            fee,
+                            currency: "USDT".into(),
+                            side: "buy".into(),
+                        }],
+                        finance: vec![entry.clone()],
+                        cursor: Some(okx_execution::SourceCursor {
+                            source: "fills".into(),
+                            stream_partition: "SWAP".into(),
+                            cursor: String::new(),
+                            watermark: fill_at + 1,
+                            generation: 1,
+                            coverage_gaps: String::new(),
+                        }),
+                        ..Default::default()
+                    })
+                })
+                .await
+                .unwrap();
+            let fill_id_for_bill = fill_id.clone();
+            store
+                .call(deadline(), move |s| {
+                    s.ingest_page(&okx_execution::IngestPage {
+                        bills: vec![okx_execution::Bill {
+                            bill_id: bill_id.clone(),
+                            kind: "2:trade".into(),
+                            time: fill_at + 1,
+                            amount: fee,
+                            currency: "USDT".into(),
+                            economic_event_key: bill_key.clone(),
+                        }],
+                        finance: vec![okx_execution::FinanceEntry {
+                            entry_id: format!("{bill_key}:FEE"),
+                            economic_event_key: bill_key,
+                            component: "FEE".into(),
+                            allocation_leg: "account".into(),
+                            amount: fee,
+                            currency: "USDT".into(),
+                            instance_id: None,
+                            source_ref: format!("bill:{bill_id}"),
+                            time: fill_at + 1,
+                            reverses_entry_id: None,
+                        }],
+                        bill_order_sources: vec![okx_execution::BillOrderSource {
+                            bill_id,
+                            instrument_id: "BTC-USDT-SWAP".into(),
+                            exchange_order_id: "fixture_exchange_order".into(),
+                            trade_id: format!("venue-{fill_id_for_bill}"),
+                        }],
+                        cursor: Some(okx_execution::SourceCursor {
+                            source: "bills".into(),
+                            stream_partition: "account".into(),
+                            cursor: String::new(),
+                            watermark: fill_at + 1,
+                            generation: 1,
+                            coverage_gaps: String::new(),
+                        }),
+                        ..Default::default()
+                    })
+                })
+                .await
+                .unwrap();
+            let target = intent.intent_id.clone();
+            let state = kind;
+            let settlement = store
+                .call(deadline(), move |s| {
+                    s.record_order_readback(
+                        &target,
+                        "fixture_exchange_order",
+                        state,
+                        filled,
+                        fill_at + 1,
+                    )?;
+                    // One active protection per native intent; updating its
+                    // size after the second fill is a venue-readback fixture.
+                    // The SQL verifier rejects wrong side, trigger and amount.
+                    let protection = okx_execution::ProtectionReceipt {
+                        intent_id: target.clone(),
+                        algo_id: format!("fixture_protection_{state:?}"),
+                        side: "sell".into(),
+                        quantity: filled,
+                        trigger_price: Decimal::from(4),
+                        trigger_basis: "mark".into(),
+                        verified_at: fill_at + 1,
+                        source_digest: "f".repeat(64),
+                    };
+                    s.verify_protection(&protection)?;
+                    let observed =
+                        s.protection(&target)?
+                            .ok_or(okx_execution::StoreError::Invalid(
+                                "FIXTURE_PROTECTION_READBACK_MISSING",
+                            ))?;
+                    if observed.quantity != filled
+                        || observed.side != "sell"
+                        || observed.trigger_price != Decimal::from(4)
+                    {
+                        return Err(okx_execution::StoreError::Invalid(
+                            "FIXTURE_PROTECTION_READBACK_MISMATCH",
+                        ));
+                    }
+                    if state == IntentState::PartiallyFilled {
+                        s.bind_partial_entry_settlement(&target, fill_at + 1, filled, fill_at + 1)
+                    } else {
+                        s.bind_terminal_entry_settlement(&target, fill_at + 1, filled, fill_at + 1)
+                    }
+                })
+                .await
+                .unwrap();
+            assert_eq!(
+                settlement.cumulative_entry_usd,
+                if kind == IntentState::PartiallyFilled {
+                    Decimal::new(250125, 5)
+                } else {
+                    Decimal::new(50025, 4)
+                },
+                "source-linked native fill/bill money, no double fee"
+            );
+        }
+        let terminal_at = at + 5;
+        let campaign = format!("sha256:{}", "c".repeat(64));
+        let (money, proof) = store
+            .call(deadline(), move |s| {
+                s.acknowledge_central_release(
+                    "fixture_reservation",
+                    "fixture-central-release-evidence",
+                )?;
+                for partition in ["SPOT", "MARGIN", "FUTURES", "OPTION"] {
+                    s.ingest_page(&okx_execution::IngestPage {
+                        cursor: Some(okx_execution::SourceCursor {
+                            source: "fills".into(),
+                            stream_partition: partition.into(),
+                            cursor: String::new(),
+                            watermark: terminal_at,
+                            generation: 1,
+                            coverage_gaps: String::new(),
+                        }),
+                        ..Default::default()
+                    })?;
+                }
+                let from = s.meta().initialized_at + 1;
+                s.seal_captured_campaign_baseline(&campaign, from, terminal_at)
+            })
+            .await
+            .unwrap();
+        assert_eq!(money, Decimal::new(50025, 4));
+        assert!(money < Decimal::from(10));
+        let campaign_again = format!("sha256:{}", "c".repeat(64));
+        let (again, proof_again) = store
+            .call(deadline(), move |s| {
+                let from = s.meta().initialized_at + 1;
+                s.seal_captured_campaign_baseline(&campaign_again, from, terminal_at)
+            })
+            .await
+            .unwrap();
+        assert_eq!((again, proof_again), (money, proof));
+        assert_eq!(gateway.posts.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

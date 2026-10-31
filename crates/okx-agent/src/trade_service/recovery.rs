@@ -1,5 +1,31 @@
 use super::*;
 
+// Conservative bound for OKX's short-lived canceled/unfilled order
+// history. An expired archive cannot establish absence of lost POSTs.
+fn verify_recovery_order_history_window(backup: i64, observed: i64) -> Result<(), String> {
+    if backup <= 0 || observed < backup || observed - backup >= 119 * 60_000 {
+        return Err("STORAGE_RECOVERY_ORDER_HISTORY_NOT_PROVEN".into());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod recovery_history_tests {
+    use super::verify_recovery_order_history_window;
+
+    #[test]
+    fn crash_history_window_never_certifies_expired_or_future_backup() {
+        let observed = 1_800_000_000_000;
+        assert!(verify_recovery_order_history_window(observed - 60_000, observed).is_ok());
+        assert!(verify_recovery_order_history_window(observed - 119 * 60_000, observed).is_err());
+        assert!(
+            verify_recovery_order_history_window(observed - 89 * 86_400_000, observed).is_err()
+        );
+        assert!(verify_recovery_order_history_window(observed + 1, observed).is_err());
+        assert!(verify_recovery_order_history_window(0, observed).is_err());
+    }
+}
+
 fn recovery_matches(
     local: &okx_execution::RecoverySnapshot,
     central: &RiskAccountBudget,
@@ -139,55 +165,52 @@ impl TradeService {
         }
         let backup = local.backup_at.ok_or("STORAGE_RECOVERY_BACKUP_MISSING")?;
         let started = now();
-        // The venue archive has a bounded retention horizon. Older or truncated
-        // histories cannot establish absence of a lost POST.
-        if started < backup || started - backup > 89 * 86_400_000 {
-            return Err("STORAGE_RECOVERY_HISTORY_UNAVAILABLE".into());
-        }
+        // A post-crash audit cannot claim coverage from the last 100
+        // completed orders: OKX also drops some canceled/unfilled orders
+        // after two hours. Full recent+archive history must be exhaustively
+        // paginated since the backup. Older recovery needs an independent
+        // retained source and stays blocked instead of treating missing
+        // orders as evidence of absence.
+        verify_recovery_order_history_window(backup, started)?;
         if !r.source_identity_ready().await {
             return Err("STORAGE_RECOVERY_SOURCE_UNVERIFIED".into());
         }
         let generation = r.private_ws.status().await.connection_generation;
         let (state, _) = self.authority(r, None).await?;
-        let mut history_proofs = Vec::new();
-        for kind in [
-            okx_api::InstrumentType::Swap,
-            okx_api::InstrumentType::Futures,
-        ] {
-            let history = r
+        // One native account-wide source, one cutoff, and one content hash.
+        // It exhausts both order endpoints for every instrument class,
+        // all fills and every account bill. Source joins establish complete
+        // economic identities without inventing an opening USD cost.
+        let history = r
+            .execution
+            .history
+            .complete_campaign_account_history(
+                backup,
+                started,
+                chrono::Utc::now().timestamp_millis(),
+            )
+            .await
+            .map_err(|_| "STORAGE_RECOVERY_ACCOUNT_HISTORY_NOT_PROVEN")?;
+        if history.from_ms != backup || history.through_ms != started {
+            return Err("STORAGE_RECOVERY_ACCOUNT_HISTORY_SCOPE_MISMATCH".into());
+        }
+        let history_proofs = vec![history.source_digest];
+        for order in history.orders {
+            let client = order.client_order_id.clone();
+            let known = r
                 .execution
-                .history
-                .orders_history(kind)
+                .store
+                .call(deadline(), move |s| s.by_client_order_id(&client))
                 .await
-                .map_err(err)?;
-            if !history.complete {
-                return Err("STORAGE_RECOVERY_ORDER_HISTORY_PARTIAL".into());
-            }
-            history_proofs.push(digest(&history.rows)?);
-            for order in history.rows {
-                let updated = order
-                    .update_time_ms
-                    .parse::<i64>()
-                    .map_err(|_| "STORAGE_RECOVERY_ORDER_TIME_INVALID")?;
-                if updated < backup {
-                    continue;
-                }
-                let client = order.client_order_id.clone();
-                let known = r
-                    .execution
-                    .store
-                    .call(deadline(), move |s| s.by_client_order_id(&client))
-                    .await
-                    .map_err(err)?
-                    .ok_or("STORAGE_RECOVERY_LOST_ORDER_FACT")?;
-                if known.instrument_id != order.instrument_id
-                    || known
-                        .exchange_order_id
-                        .as_ref()
-                        .is_some_and(|id| id != &order.order_id)
-                {
-                    return Err("STORAGE_RECOVERY_ORDER_IDENTITY_MISMATCH".into());
-                }
+                .map_err(err)?
+                .ok_or("STORAGE_RECOVERY_LOST_ORDER_FACT")?;
+            if known.instrument_id != order.instrument_id
+                || known
+                    .exchange_order_id
+                    .as_ref()
+                    .is_some_and(|id| id != &order.order_id)
+            {
+                return Err("STORAGE_RECOVERY_ORDER_IDENTITY_MISMATCH".into());
             }
         }
         let snapshot = crate::source_capture::capture_account_sources(
@@ -207,10 +230,13 @@ impl TradeService {
         }
         let mut managed = std::collections::BTreeSet::new();
         for position in &snapshot.positions {
-            let qty = dec(&position.position)?.abs();
-            if qty == Decimal::ZERO {
+            let Some((direction, qty)) = super::reconcile::verified_venue_position_direction(
+                &position.position_side,
+                &position.position,
+            )?
+            else {
                 continue;
-            }
+            };
             let instrument = position.instrument_id.clone();
             let lots = r
                 .execution
@@ -220,25 +246,70 @@ impl TradeService {
                 .map_err(err)?;
             let owned = lots
                 .iter()
-                .filter(|l| l.side == position.position_side)
+                .filter(|l| l.side == direction)
                 .collect::<Vec<_>>();
-            if owned.iter().map(|l| l.remaining_qty).sum::<Decimal>() != qty {
+            let total = owned.iter().try_fold(Decimal::ZERO, |total, lot| {
+                if lot.remaining_qty <= Decimal::ZERO {
+                    return Err("STORAGE_RECOVERY_LOT_QUANTITY_INVALID".to_owned());
+                }
+                total
+                    .checked_add(lot.remaining_qty)
+                    .ok_or("STORAGE_RECOVERY_LOT_QUANTITY_OVERFLOW".to_owned())
+            })?;
+            if total != qty {
                 return Err("STORAGE_RECOVERY_UNATTRIBUTED_POSITION".into());
             }
-            for lot in owned {
+            let mut seen_intents = std::collections::BTreeSet::new();
+            for lot in &owned {
                 let id = lot
                     .intent_id
                     .clone()
                     .ok_or("STORAGE_RECOVERY_LOT_OWNER_MISSING")?;
-                let protection = r
+                if !seen_intents.insert(id.clone()) {
+                    continue;
+                }
+                let owned_intent_qty = owned
+                    .iter()
+                    .filter(|entry| entry.intent_id.as_deref() == Some(id.as_str()))
+                    .try_fold(Decimal::ZERO, |total, entry| {
+                        if entry.remaining_qty <= Decimal::ZERO {
+                            return Err("STORAGE_RECOVERY_LOT_QUANTITY_INVALID".to_owned());
+                        }
+                        total
+                            .checked_add(entry.remaining_qty)
+                            .ok_or("STORAGE_RECOVERY_LOT_QUANTITY_OVERFLOW".to_owned())
+                    })?;
+                let (protection, intent) = r
                     .execution
                     .store
-                    .call(deadline(), move |s| s.protection(&id))
+                    .call(deadline(), move |s| {
+                        Ok((s.protection(&id)?, s.intent(&id)?))
+                    })
                     .await
-                    .map_err(err)?
-                    .ok_or("STORAGE_RECOVERY_PROTECTION_MISSING")?;
-                if protection.quantity < lot.remaining_qty {
+                    .map_err(err)?;
+                let protection = protection.ok_or("STORAGE_RECOVERY_PROTECTION_MISSING")?;
+                let intent = intent.ok_or("STORAGE_RECOVERY_PROTECTION_INTENT_MISSING")?;
+                if protection.quantity < owned_intent_qty || intent.plan.position_side != lot.side {
                     return Err("STORAGE_RECOVERY_PROTECTION_INCOMPLETE".into());
+                }
+                // Inventory proves only that an algo ID exists. It cannot
+                // attest a live trigger, correct side or current quantity.
+                // Use the same exact venue-source gate as trade.status.
+                let client = intent
+                    .client_order_id
+                    .get(..31)
+                    .map(|v| format!("s{v}"))
+                    .ok_or("STORAGE_RECOVERY_PROTECTION_CLIENT_INVALID")?;
+                let algo = r
+                    .execution
+                    .trade
+                    .algo_order_by_client_id(&client)
+                    .await
+                    .map_err(|_| "STORAGE_RECOVERY_PROTECTION_READBACK_UNAVAILABLE")?;
+                super::reconcile::verified_live_protection(&intent, owned_intent_qty, &algo)
+                    .map_err(|_| "STORAGE_RECOVERY_PROTECTION_LIVE_UNVERIFIED")?;
+                if algo.algo_order_id != protection.algo_id {
+                    return Err("STORAGE_RECOVERY_PROTECTION_IDENTITY_MISMATCH".into());
                 }
                 managed.insert(protection.algo_id);
             }

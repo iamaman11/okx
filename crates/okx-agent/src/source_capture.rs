@@ -5,9 +5,10 @@ use crate::{
 };
 use okx_api::{AccountBill, FillHistory};
 use okx_execution::{
-    AccountSqlStatementStat, Bill, CashFlow, Fill, FinanceEntry, FundingEvent, IngestPage,
-    NavPoint, SourceCursor, StoreError, StoreResult, StrategyValuationEvidence,
-    UsdConversionEvidence, ValuationPosition, VenueMark,
+    AccountSqlStatementStat, Bill, BillOrderSource, CashFlow, EntryOrderFeeLink, Fill,
+    FinanceEntry, FundingEvent, IngestPage, NavPoint, SourceCursor, StoreError, StoreResult,
+    StrategyValuationEvidence, SwapFillSource, UsdConversionEvidence, ValuationPosition, VenueMark,
+    swap_fill_direction,
 };
 use okx_runtime::PrivateWsHandle;
 use rust_decimal::Decimal;
@@ -94,6 +95,7 @@ pub struct CaptureCompleted {
 
 struct CaptureCursors {
     spot: Option<SourceCursor>,
+    margin: Option<SourceCursor>,
     swap: Option<SourceCursor>,
     futures: Option<SourceCursor>,
     options: Option<SourceCursor>,
@@ -193,6 +195,29 @@ fn strategy_cursor_refresh_needed(
     !no_strategy_capital
         || !gap.is_empty()
         || previous.is_none_or(|c| c.generation != generation || !c.coverage_gaps.is_empty())
+}
+
+/// The ordinary OKX fills-history and bills-archive endpoints are limited
+/// to the last three calendar months. Do not silently certify empty history
+/// when a first capture or a resumed page starts outside that venue window.
+/// A one-day safety margin avoids claiming the ambiguous boundary as proven.
+/// Older campaign history requires an independently verified archival source.
+fn verify_history_retrieval_window(begin: i64, now: i64) -> AgentResult<()> {
+    let current = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(now)
+        .ok_or_else(|| invalid("HISTORY_WINDOW_TIME_INVALID"))?;
+    let retention_floor = current
+        .checked_sub_months(chrono::Months::new(3))
+        .ok_or_else(|| invalid("HISTORY_WINDOW_TIME_INVALID"))?
+        .timestamp_millis()
+        .checked_add(86_400_000)
+        .ok_or_else(|| invalid("HISTORY_WINDOW_TIME_INVALID"))?;
+    if begin <= 0 || begin > now {
+        return Err(invalid("HISTORY_WINDOW_TIME_INVALID"));
+    }
+    if begin < retention_floor {
+        return Err(invalid("HISTORY_OUTSIDE_EXCHANGE_RETENTION_NOT_PROVEN"));
+    }
+    Ok(())
 }
 
 #[derive(Clone)]
@@ -295,7 +320,7 @@ pub(crate) async fn capture_account_sources_traced(
     if let Some((store, id)) = trace.as_ref() {
         store.phase_started(*id, "observer_and_cursors");
     }
-    // Read all five history cursors and the opening time in ONE existing
+    // Read all six monetary history cursors and the opening time in ONE existing
     // AccountStore job, concurrently with the authenticated venue snapshot.
     // No cursor is advanced here; the individual page ingests still own
     // the durable source coverage and failure/replay semantics.
@@ -314,6 +339,7 @@ pub(crate) async fn capture_account_sources_traced(
                         s.meta().initialized_at,
                         CaptureCursors {
                             spot: s.cursor("fills", "SPOT")?,
+                            margin: s.cursor("fills", "MARGIN")?,
                             swap: s.cursor("fills", "SWAP")?,
                             futures: s.cursor("fills", "FUTURES")?,
                             options: s.cursor("fills", "OPTION")?,
@@ -387,6 +413,18 @@ pub(crate) async fn capture_account_sources_traced(
             execution,
             private_ws,
             FillHistorySource {
+                partition: "MARGIN",
+                cursor: cursors.margin,
+            },
+            t0,
+            now,
+            generation,
+            &fx
+        ),
+        capture_fills(
+            execution,
+            private_ws,
+            FillHistorySource {
                 partition: "SWAP",
                 cursor: cursors.swap,
             },
@@ -437,12 +475,12 @@ pub(crate) async fn capture_account_sources_traced(
             history_result.is_ok(),
         );
     }
-    let (spot, swap, futures, options, bills) = history_result?;
+    let (spot, margin, swap, futures, options, bills) = history_result?;
     let history_and_ingest_ms = phase_elapsed_ms(history_started);
     if private_ws.status().await.connection_generation != initial.connection_generation {
         return Err(invalid("SOURCE_GENERATION_CHANGED"));
     }
-    let complete = spot && swap && futures && options && bills;
+    let complete = spot && margin && swap && futures && options && bills;
     let balances = snapshot.balance.details.clone();
     let usd_equity = d(&snapshot.balance.total_equity_usd)?;
     // Validate all supplied marks even though no unproven strategy capital
@@ -700,6 +738,7 @@ async fn capture_fills(
     let fx = fx.clone();
     let partition = source.partition;
     let window = Window::resume(source.cursor.as_ref(), t0, now)?;
+    verify_history_retrieval_window(window.begin, now)?;
     let rows: Vec<FillHistory> = execution
         .history
         .fills_history_page(
@@ -716,6 +755,7 @@ async fn capture_fills(
         .map_err(|_| {
             invalid(match partition {
                 "SPOT" => "SPOT_FILLS_SOURCE_UNAVAILABLE",
+                "MARGIN" => "MARGIN_FILLS_SOURCE_UNAVAILABLE",
                 "SWAP" => "SWAP_FILLS_SOURCE_UNAVAILABLE",
                 "FUTURES" => "FUTURES_FILLS_SOURCE_UNAVAILABLE",
                 "OPTION" => "OPTION_FILLS_SOURCE_UNAVAILABLE",
@@ -772,6 +812,19 @@ async fn capture_fills(
                         reverses_entry_id: None,
                     });
                 }
+                if partition == "SWAP" {
+                    if r.instrument_type != "SWAP" {
+                        return Err(StoreError::Invalid("SWAP_FILL_SOURCE_TYPE_MISMATCH"));
+                    }
+                    let direction = swap_fill_direction(&r.sub_type, &r.side, &r.position_side)?;
+                    page.swap_fill_sources.push(SwapFillSource {
+                        fill_id: id.clone(),
+                        bill_id: r.bill_id.clone(),
+                        sub_type: r.sub_type.clone(),
+                        position_side: r.position_side.clone(),
+                        direction: direction.into(),
+                    });
+                }
                 page.fills.push(Fill {
                     fill_id: id,
                     instrument_id: r.instrument_id,
@@ -806,6 +859,7 @@ async fn capture_bills(
 ) -> AgentResult<bool> {
     let fx = fx.clone();
     let window = Window::resume(cursor.as_ref(), t0, now)?;
+    verify_history_retrieval_window(window.begin, now)?;
     let rows: Vec<AccountBill> = execution
         .history
         .bills_history_page(
@@ -843,9 +897,35 @@ async fn capture_bills(
                     continue;
                 }
                 let key = format!("bill:{}", b.bill_id);
+                if !b.order_id.is_empty() && b.order_id != "0" && !b.instrument_id.is_empty() {
+                    page.bill_order_sources.push(BillOrderSource {
+                        bill_id: b.bill_id.clone(),
+                        instrument_id: b.instrument_id.clone(),
+                        exchange_order_id: b.order_id.clone(),
+                        trade_id: b.trade_id.clone(),
+                    });
+                }
                 let owner = s
                     .by_client_order_id(&b.client_order_id)?
                     .or(s.by_exchange_order_id(&b.order_id)?);
+                let fee = optional_d(&b.fee)?;
+                if fee < Decimal::ZERO
+                    && let Some(i) = owner.as_ref().filter(|i| i.risk_increase)
+                    && i.exchange_order_id.as_deref() == Some(b.order_id.as_str())
+                    && i.instrument_id == b.instrument_id
+                {
+                    if b.ccy != "USDT" {
+                        return Err(StoreError::Invalid("ENTRY_FEE_CURRENCY_UNPROVEN"));
+                    }
+                    page.entry_order_fee_links.push(EntryOrderFeeLink {
+                        bill_id: b.bill_id.clone(),
+                        intent_id: i.intent_id.clone(),
+                        exchange_order_id: b.order_id.clone(),
+                        instrument_id: b.instrument_id.clone(),
+                        bill_at: time,
+                        fee_usdt: fee,
+                    });
+                }
                 let instance = owner.map(|i| i.plan.strategy_instance);
                 let amount = optional_d(&b.balance_change)?;
                 let residual_component = residual_bill_component(&b.bill_type, &b.pnl, &b.fee)?;
@@ -980,6 +1060,7 @@ mod tests {
         .unwrap();
         let cursors = CaptureCursors {
             spot: None,
+            margin: None,
             swap: None,
             futures: Some(future_page),
             options: None,
@@ -1007,6 +1088,40 @@ mod tests {
             coverage_gaps: "BACKFILL_PENDING".into(),
         };
         assert!(Window::resume(Some(&corrupt), 1, 200).is_err());
+    }
+
+    #[test]
+    fn campaign_history_cannot_be_inferred_from_expired_okx_fills_or_bills_window() {
+        // A calendar boundary, not an arbitrary 90-day threshold, protects
+        // E1.1 when data retention differs across months/leap years.
+        let now = chrono::DateTime::parse_from_rfc3339("2026-10-30T12:00:00Z")
+            .unwrap()
+            .timestamp_millis();
+        let now_dt = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(now).unwrap();
+        let three_months_ago = now_dt
+            .checked_sub_months(chrono::Months::new(3))
+            .unwrap()
+            .timestamp_millis();
+        assert!(verify_history_retrieval_window(now - 86_400_000, now).is_ok());
+        assert!(verify_history_retrieval_window(three_months_ago + 86_400_000, now).is_ok());
+        assert!(verify_history_retrieval_window(three_months_ago, now).is_err());
+        assert!(verify_history_retrieval_window(three_months_ago - 1, now).is_err());
+        assert!(verify_history_retrieval_window(now + 1, now).is_err());
+        assert!(verify_history_retrieval_window(0, now).is_err());
+
+        // A seemingly gap-free but still uncompleted history page is NOT
+        // safe merely because the cursor is well-formed.
+        let old = SourceCursor {
+            source: "fills".into(),
+            stream_partition: "SWAP".into(),
+            cursor: format!("{}|{}|cursor-id", three_months_ago, now),
+            watermark: three_months_ago,
+            generation: 1,
+            coverage_gaps: "BACKFILL_PENDING".into(),
+        };
+        let resumed = Window::resume(Some(&old), three_months_ago, now).unwrap();
+        assert_eq!(resumed.begin, three_months_ago);
+        assert!(verify_history_retrieval_window(resumed.begin, now).is_err());
     }
 
     #[test]
