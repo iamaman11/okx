@@ -1694,16 +1694,16 @@ mod raw_native_session_tests {
         // owner; SQL event IDs must still make money exactly-once.
         for _ in 0..12 {
             feed.expect_get(RecordedGet {
-                access_key:"fixture-observer-a".into(),
-                path:"/api/v5/trade/fills-history".into(),
-                required_query:vec![("instType".into(),"SWAP".into())],
-                raw_response:raw_fill.clone(),
+                access_key: "fixture-observer-a".into(),
+                path: "/api/v5/trade/fills-history".into(),
+                required_query: vec![("instType".into(), "SWAP".into())],
+                raw_response: raw_fill.clone(),
             });
             feed.expect_get(RecordedGet {
-                access_key:"fixture-observer-a".into(),
-                path:"/api/v5/account/bills-archive".into(),
-                required_query:vec![],
-                raw_response:raw_bill.clone(),
+                access_key: "fixture-observer-a".into(),
+                path: "/api/v5/account/bills-archive".into(),
+                required_query: vec![],
+                raw_response: raw_bill.clone(),
             });
         }
         let owner = accounts.resolve("fixture-a").await.unwrap();
@@ -1711,36 +1711,52 @@ mod raw_native_session_tests {
         let captured = tokio::time::timeout(Duration::from_secs(12), async {
             loop {
                 let intent = id.clone();
-                let readback = owner.execution.store
-                    .call(std::time::Instant::now() + Duration::from_secs(3), move |s| {
-                        let fills=s.cursor("fills","SWAP")?.ok_or(
-                            okx_execution::StoreError::Invalid("T09_FILL_CURSOR_MISSING")
-                        )?;
-                        let bills=s.cursor("bills","account")?.ok_or(
-                            okx_execution::StoreError::Invalid("T09_BILL_CURSOR_MISSING")
-                        )?;
-                        Ok((
-                            s.intent_fill_cost_evidence(&intent,fills.watermark),
-                            s.intent_fee_bill_evidence(&intent,bills.watermark)
-                        ))
-                    }).await;
-                if let Ok((Ok(fill),Ok(bill)))=readback { break (fill,bill); }
+                let readback = owner
+                    .execution
+                    .store
+                    .call(
+                        std::time::Instant::now() + Duration::from_secs(3),
+                        move |s| {
+                            let fills = s.cursor("fills", "SWAP")?.ok_or(
+                                okx_execution::StoreError::Invalid("T09_FILL_CURSOR_MISSING"),
+                            )?;
+                            let bills = s.cursor("bills", "account")?.ok_or(
+                                okx_execution::StoreError::Invalid("T09_BILL_CURSOR_MISSING"),
+                            )?;
+                            Ok((
+                                s.intent_fill_cost_evidence(&intent, fills.watermark),
+                                s.intent_fee_bill_evidence(&intent, bills.watermark),
+                            ))
+                        },
+                    )
+                    .await;
+                if let Ok((Ok(fill), Ok(bill))) = readback {
+                    break (fill, bill);
+                }
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }
-        }).await.expect("recorded fill/bill source not captured by production finance owner");
-        assert_eq!(captured.0.fill_count,1);
-        assert_eq!(captured.0.filled_quantity.to_string(),"0.1");
-        assert_eq!(captured.0.gross_notional_usdt.to_string(),"1");
-        assert_eq!(captured.1.linked_bill_count,1);
-        assert_eq!(captured.1.conservative_verified_fee_usdt.to_string(),"0.0005");
-        println!("T09_1_NATIVE_FILL_BILL_EVIDENCE_V1:{}",json!({
-            "intent_id":idempotent_intent_id,
-            "fills":captured.0.fill_count,"bills":captured.1.linked_bill_count,
-            "notional_usdt":captured.0.gross_notional_usdt.to_string(),
-            "fee_usdt":captured.1.conservative_verified_fee_usdt.to_string(),
-            "source_digest":captured.1.source_digest,
-            "state":"FILL_AND_BILL_VERIFIED_CLOSE_RELEASE_PENDING"
-        }));
+        })
+        .await
+        .expect("recorded fill/bill source not captured by production finance owner");
+        assert_eq!(captured.0.fill_count, 1);
+        assert_eq!(captured.0.filled_quantity.to_string(), "0.1");
+        assert_eq!(captured.0.gross_notional_usdt.to_string(), "1");
+        assert_eq!(captured.1.linked_bill_count, 1);
+        assert_eq!(
+            captured.1.conservative_verified_fee_usdt.to_string(),
+            "0.0005"
+        );
+        println!(
+            "T09_1_NATIVE_FILL_BILL_EVIDENCE_V1:{}",
+            json!({
+                "intent_id":idempotent_intent_id,
+                "fills":captured.0.fill_count,"bills":captured.1.linked_bill_count,
+                "notional_usdt":captured.0.gross_notional_usdt.to_string(),
+                "fee_usdt":captured.1.conservative_verified_fee_usdt.to_string(),
+                "source_digest":captured.1.source_digest,
+                "state":"FILL_AND_BILL_VERIFIED_CLOSE_RELEASE_PENDING"
+            })
+        );
         println!("t09_public_trade_execute_open_ack_and_idempotency PASS: posts=1");
         shutdown_tx.send(true).unwrap();
         let terminated = tokio::time::timeout(Duration::from_secs(10), session)
