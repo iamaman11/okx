@@ -65,6 +65,33 @@ BEGIN
 UPDATE campaign_source_epoch SET revision=revision+1 WHERE id=1;
 UPDATE campaign_late_head_epoch SET revision=revision+1 WHERE id=1;
 END;
+-- Bounded source-owned change cursor. Original receipts remain the ONLY
+-- money authority; this derived queue identifies native terminal/late proofs
+-- changed after the last sealed campaign checkpoint.
+CREATE TABLE IF NOT EXISTS campaign_receipt_events(
+    event_seq INTEGER PRIMARY KEY AUTOINCREMENT,
+    operation_id TEXT NOT NULL,
+    kind TEXT NOT NULL
+) STRICT;
+CREATE TABLE IF NOT EXISTS campaign_receipt_cursors(
+    campaign_id TEXT PRIMARY KEY,
+    reviewed_event_seq INTEGER NOT NULL CHECK(reviewed_event_seq>=0)
+) STRICT;
+CREATE TRIGGER IF NOT EXISTS campaign_receipt_event_insert
+AFTER INSERT ON operation_receipts
+WHEN NEW.kind IN ('ENTRY_SETTLEMENT_PROVEN','ENTRY_LATE_HEAD',
+                  'ENTRY_LATE_SETTLEMENT_PROVEN','ENTRY_LATE_SETTLED')
+BEGIN
+    INSERT INTO campaign_receipt_events(operation_id,kind)
+    VALUES(NEW.operation_id,NEW.kind);
+END;
+CREATE TRIGGER IF NOT EXISTS campaign_receipt_event_head_change
+AFTER UPDATE OF result_ref ON operation_receipts
+WHEN NEW.kind='ENTRY_LATE_HEAD' AND OLD.result_ref!=NEW.result_ref
+BEGIN
+    INSERT INTO campaign_receipt_events(operation_id,kind)
+    VALUES(NEW.operation_id,NEW.kind);
+END;
 -- Append-only cumulative money evidence. Only the existing SQL owner
 -- advances the one campaign aggregate using independently verified receipts.
 CREATE TABLE IF NOT EXISTS campaign_entry_applied(

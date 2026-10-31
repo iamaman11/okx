@@ -561,6 +561,68 @@ impl AccountStore {
             .map_err(Into::into)
     }
 
+    fn campaign_receipt_cursor(&self, campaign_id: &str) -> StoreResult<Option<i64>> {
+        self.connection.query_row(
+            "SELECT reviewed_event_seq FROM campaign_receipt_cursors
+             WHERE campaign_id=?1",
+            [campaign_id],
+            |r| r.get(0),
+        ).optional().map_err(Into::into)
+    }
+
+    fn save_campaign_receipt_cursor(
+        &self, campaign_id: &str, event_seq: i64,
+    ) -> StoreResult<()> {
+        self.connection.execute(
+            "INSERT INTO campaign_receipt_cursors VALUES(?1,?2)
+             ON CONFLICT(campaign_id) DO UPDATE SET
+                reviewed_event_seq=MAX(reviewed_event_seq,excluded.reviewed_event_seq)",
+            params![campaign_id,event_seq],
+        )?;
+        Ok(())
+    }
+
+    fn latest_campaign_receipt_event(&self) -> StoreResult<i64> {
+        self.connection.query_row(
+            "SELECT COALESCE(MAX(event_seq),0) FROM campaign_receipt_events",
+            [], |r| r.get(0),
+        ).map_err(Into::into)
+    }
+
+    /// Only the indexed derived changes; no JOIN on historical fills/bills.
+    /// The caller must validate the original terminal and latest late
+    /// settlement from the immutable SQL owner before advancing this cursor.
+    fn new_campaign_receipt_events(
+        &self, after_seq: i64,
+    ) -> StoreResult<(Vec<String>, i64, bool)> {
+        let mut statement = self.connection.prepare(
+            "SELECT event_seq,operation_id,kind
+             FROM campaign_receipt_events WHERE event_seq>?1
+             ORDER BY event_seq LIMIT 4097",
+        )?;
+        let rows = statement.query_map([after_seq], |r| {
+            Ok((r.get::<_,i64>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?))
+        })?.collect::<Result<Vec<_>,_>>()?;
+        let pending = rows.len() > 4096;
+        let page = &rows[..rows.len().min(4096)];
+        let new_seq = page.last().map(|r| r.0).unwrap_or(after_seq);
+        let mut terminal = std::collections::BTreeSet::new();
+        for (_, key, kind) in page {
+            let id = match kind.as_str() {
+                "ENTRY_SETTLEMENT_PROVEN" => key.strip_prefix("entry-settlement:"),
+                "ENTRY_LATE_HEAD" => key.strip_prefix("entry-late-head:"),
+                "ENTRY_LATE_SETTLEMENT_PROVEN" => key.strip_prefix("entry-late:")
+                    .and_then(|v| v.rsplit_once(":r").map(|(id,_)|id)),
+                "ENTRY_LATE_SETTLED" => key.strip_prefix("entry-late-settled:")
+                    .and_then(|v| v.rsplit_once(":r").map(|(id,_)|id)),
+                _ => None,
+            }.filter(|v| !v.is_empty())
+             .ok_or(StoreError::Invalid("CAMPAIGN_RECEIPT_EVENT_CORRUPT"))?;
+            terminal.insert(format!("entry-settlement:{id}"));
+        }
+        Ok((terminal.into_iter().collect(),new_seq,pending))
+    }
+
     fn mark_campaign_readiness(
         &self,
         campaign_id: &str,
@@ -588,6 +650,11 @@ impl AccountStore {
         let epoch = self.campaign_source_epoch()?;
         let generations = Self::campaign_source_generations(frontiers);
         let rows = self.campaign_source_rowids()?;
+        // The economic event cursor advances only after independently
+        // verified money was applied. Both writes use the sole SQL owner.
+        self.save_campaign_receipt_cursor(
+            campaign_id, self.latest_campaign_receipt_event()?,
+        )?;
         self.connection.execute(
             "INSERT INTO campaign_entry_readiness VALUES(
                 ?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)
@@ -1164,47 +1231,37 @@ impl AccountStore {
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .optional()?;
+        let event_cursor = self.campaign_receipt_cursor(campaign_id)?;
+        // An earlier partial batch can have durable monetary deltas but
+        // deliberately NO completed immutable window proof yet.
+        let window_sealed: bool = self.connection.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM campaign_entry_window_proofs
+                WHERE campaign_id=?1 AND covered_through_ms=?2
+            )",
+            params![campaign_id,through_ms], |r| r.get(0),
+        )?;
         if let Some((origin, cut, amount)) = checkpoint.as_ref()
             && *origin == from_ms
             && *cut == through_ms
+            && window_sealed
         {
             // A backfilled settlement or late fee can arrive with an
             // event timestamp inside an already sealed interval. Its
             // original cursor cut-off is NOT permission to return the
             // previous money proof unchanged. Refuse same-frontier
             // replay until a new fully captured interval is available.
-            let newer: bool = self.connection.query_row(
-                "SELECT EXISTS(
-                   SELECT 1 FROM operation_receipts t
-                   WHERE t.kind='ENTRY_SETTLEMENT_PROVEN'
-                     AND t.committed_at>?2 AND t.committed_at<=?3
-                     AND (
-                       NOT EXISTS(
-                         SELECT 1 FROM campaign_entry_applied a
-                         WHERE a.campaign_id=?1
-                           AND a.intent_id=substr(t.operation_id,18)
-                       )
-                       OR EXISTS(
-                         SELECT 1 FROM operation_receipts late
-                         WHERE late.operation_id='entry-late-head:'||
-                               substr(t.operation_id,18)
-                           AND late.kind='ENTRY_LATE_HEAD'
-                           AND late.committed_at<=?3
-                           AND NOT EXISTS(
-                             SELECT 1 FROM campaign_entry_applied a
-                             WHERE a.campaign_id=?1
-                               AND a.intent_id=substr(t.operation_id,18)
-                               AND a.settlement_revision=CAST(
-                                 json_extract(late.result_ref,'$.settlement_revision')
-                                 AS INTEGER
-                               )
-                           )
-                       )
-                     )
-                 )",
-                params![campaign_id, from_ms, through_ms],
-                |r| r.get(0),
-            )?;
+            let newer: bool = if let Some(cursor) = event_cursor {
+                // Durable event sequence catches both fresh terminals and
+                // in-place late-head updates, even at an old exchange time.
+                self.latest_campaign_receipt_event()? > cursor
+            } else {
+                // An existing ledger with a completed old-version money
+                // checkpoint but no indexed migration cursor must re-import
+                // at a NEW source frontier. It cannot replay the old proof
+                // after a pre-migration late-head update.
+                true
+            };
             if newer {
                 return Err(StoreError::Invalid(
                     "CAMPAIGN_FRONTIER_STALE_ECONOMIC_SOURCE",
@@ -1246,73 +1303,40 @@ impl AccountStore {
             Some(_) => return Err(StoreError::Invalid("CAMPAIGN_APPLIED_FRONTIER_REGRESSION")),
             None => (from_ms, Decimal::ZERO),
         };
-        // Ordinary native terminal receipts are immutable. Once an earlier
-        // source frontier was fully reviewed, only newer receipt rowids can
-        // introduce a new terminal amount, including backdated event-time
-        // records. Late-head revisions require the existing stronger verifier.
-        let current_late_epoch = self.campaign_source_rowids()?.5;
-        let incremental_receipt_floor = older_verified
-            .and_then(|(_, _, _, _, receipt, _, late_epoch)| {
-                (current_late_epoch == *late_epoch).then_some(*receipt)
-            });
-        let has_late_change = if let Some(floor) = incremental_receipt_floor {
-            self.connection.query_row(
-                "SELECT EXISTS(
-                    SELECT 1 FROM operation_receipts
-                    WHERE rowid>?1 AND kind IN (
-                      'ENTRY_LATE_HEAD','ENTRY_LATE_SETTLEMENT_PROVEN',
-                      'ENTRY_LATE_SETTLED')
-                )",
-                [floor], |r| r.get::<_, bool>(0),
-            )?
-        } else {
-            true
-        };
-        let incremental_receipt_floor =
-            incremental_receipt_floor.filter(|_| !has_late_change);
-        let fast = "SELECT terminal.operation_id,terminal.result_ref,terminal.committed_at
-             FROM operation_receipts terminal
-             WHERE terminal.rowid>?5
-               AND terminal.kind='ENTRY_SETTLEMENT_PROVEN'
-               AND terminal.committed_at>?3 AND terminal.committed_at<=?2
-               AND ?4!='' AND ?1<=?2
-             ORDER BY terminal.rowid LIMIT 10001";
-        let historical = "SELECT terminal.operation_id,terminal.result_ref,terminal.committed_at
-             FROM operation_receipts terminal
-             WHERE terminal.kind='ENTRY_SETTLEMENT_PROVEN'
-               AND terminal.committed_at>?3 AND terminal.committed_at<=?2
-               AND (
-                 terminal.committed_at>?1
-                 OR NOT EXISTS(
-                   SELECT 1 FROM campaign_entry_applied a
-                   WHERE a.campaign_id=?4
-                     AND a.intent_id=substr(terminal.operation_id,18)
-                 )
-                 OR EXISTS(
-                   SELECT 1 FROM operation_receipts late
-                   WHERE late.operation_id='entry-late-head:'||
-                         substr(terminal.operation_id,18)
-                     AND late.kind='ENTRY_LATE_HEAD'
-                     AND late.committed_at<=?2
-                     AND NOT EXISTS(
-                       SELECT 1 FROM campaign_entry_applied a
-                       WHERE a.campaign_id=?4
-                         AND a.intent_id=substr(terminal.operation_id,18)
-                         AND a.settlement_revision=CAST(
-                           json_extract(late.result_ref,'$.settlement_revision')
-                           AS INTEGER
-                         )
-                     )
-                 )
-               )
-             ORDER BY terminal.operation_id LIMIT 10001";
+        // Each change to terminal settlement OR mutable late-head is
+        // indexed when committed by the same SQL owner. The derived queue is
+        // only a lookup index: original immutable terminal/late/central
+        // receipts remain the sole authority for USD money.
+        let (event_json, batch_seq, batch_pending) =
+            if let Some(cursor) = event_cursor {
+                let (ids, seq, pending) =
+                    self.new_campaign_receipt_events(cursor)?;
+                let json = serde_json::to_string(&ids)
+                    .map_err(|_| StoreError::Invalid(
+                        "CAMPAIGN_RECEIPT_EVENTS_SERIALIZATION"
+                    ))?;
+                (Some(json), seq, pending)
+            } else {
+                (None, 0, false)
+            };
+        let indexed = "SELECT t.operation_id,t.result_ref,t.committed_at
+                       FROM json_each(?1) e
+                       LEFT JOIN operation_receipts t ON t.operation_id=e.value
+                       ORDER BY t.operation_id";
+        let initial = "SELECT terminal.operation_id,terminal.result_ref,
+                              terminal.committed_at
+                       FROM operation_receipts terminal
+                       WHERE terminal.kind='ENTRY_SETTLEMENT_PROVEN'
+                         AND terminal.committed_at>?1
+                         AND terminal.committed_at<=?2
+                       ORDER BY terminal.operation_id LIMIT 10001";
         let mut stmt = self.connection.prepare(
-            if incremental_receipt_floor.is_some() { fast } else { historical }
+            if event_json.is_some() { indexed } else { initial },
         )?;
-        let mut rows = if let Some(floor) = incremental_receipt_floor {
-            stmt.query(params![since, through_ms, from_ms, campaign_id, floor])?
+        let mut rows = if let Some(json) = event_json.as_ref() {
+            stmt.query(params![json])?
         } else {
-            stmt.query(params![since, through_ms, from_ms, campaign_id])?
+            stmt.query(params![from_ms,through_ms])?
         };
         let mut witnesses = Vec::new();
         while let Some(row) = rows.next()? {
@@ -1322,6 +1346,12 @@ impl AccountStore {
             let operation_id: String = row.get(0)?;
             let encoded: String = row.get(1)?;
             let time: i64 = row.get(2)?;
+            if time > through_ms {
+                return Err(StoreError::Invalid("CAMPAIGN_RECEIPT_EVENT_NOT_COVERED"));
+            }
+            if time <= from_ms {
+                continue;
+            }
             let terminal: EntrySettlementEvidence = serde_json::from_str(&encoded)
                 .map_err(|_| StoreError::Invalid("ENTRY_OPENING_SETTLEMENT_CORRUPT"))?;
             if operation_id != format!("entry-settlement:{}", terminal.intent_id)
@@ -1509,11 +1539,21 @@ impl AccountStore {
                 value.venue_update_ms,
             ));
         }
-        // Finish the exact read snapshot before mutating any campaign
-        // receipts. Initial zero is a special claim: validate it BEFORE
-        // committing an advanced applied frontier.
+        // A partial source page applies validated cumulative money but
+        // never seals the campaign window or allows a new order. The cursor
+        // moves forward only AFTER the existing SQL owner persisted the
+        // checked source-backed monetary deltas.
         drop(rows);
         drop(stmt);
+        if batch_pending {
+            self.apply_captured_campaign_deltas(
+                campaign_id, from_ms, through_ms,
+                &witnesses, total, None,
+            )?;
+            self.save_campaign_receipt_cursor(campaign_id,batch_seq)?;
+            return Err(StoreError::Invalid("CAMPAIGN_RECEIPT_BATCH_PENDING"));
+        }
+        // The initial zero is proved before any final window can be sealed.
         if witnesses.is_empty() && checkpoint.is_none() {
             // Compute from already verified capture facts without writing
             // an independent operation receipt ahead of the aggregate.
