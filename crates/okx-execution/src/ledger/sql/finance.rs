@@ -597,6 +597,10 @@ impl AccountStore {
                 .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))?;
             witnesses.push((value.intent_id, value.source_digest, value.cumulative_entry_usd));
         }
+        // Finish the exact read snapshot before creating an immutable receipt
+        // on the same SQL-owner connection.
+        drop(rows);
+        drop(stmt);
         if witnesses.is_empty() {
             return self.seal_captured_empty_campaign(campaign_id, from_ms, through_ms)
                 .map(|proof| (Decimal::ZERO, proof));
