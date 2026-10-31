@@ -891,6 +891,41 @@ pub(crate) mod recorded_support {
             && data[0]["clOrdId"].as_str() == Some("__REQUEST_CL_ORD_ID__")
     }
 
+    // Bind history rows only to the already-observed signed POST ACK.
+    fn bind_recorded_history_ids(
+        acknowledgements: &[(String, String, String)],
+        account: &str,
+        raw: Vec<u8>,
+    ) -> Result<Vec<u8>, OkxError> {
+        if !raw.windows("__REQUEST_CL_ORD_ID__".len())
+            .any(|bytes| bytes == b"__REQUEST_CL_ORD_ID__") {
+            return Ok(raw);
+        }
+        let mut envelope: serde_json::Value = serde_json::from_slice(&raw)?;
+        let rows = envelope["data"].as_array_mut().ok_or_else(|| {
+            OkxError::Response("TRANSCRIPT_HISTORY_ROWS_MISSING".into())
+        })?;
+        if rows.is_empty() {
+            return Err(OkxError::Response("TRANSCRIPT_HISTORY_ROWS_MISSING".into()));
+        }
+        for row in rows {
+            if row["clOrdId"] != "__REQUEST_CL_ORD_ID__" {
+                return Err(OkxError::Response("TRANSCRIPT_HISTORY_CLIENT_ID_UNBOUND".into()));
+            }
+            let order = row["ordId"].as_str().ok_or_else(|| {
+                OkxError::Response("TRANSCRIPT_HISTORY_ORDER_ID_UNBOUND".into())
+            })?;
+            let matched = acknowledgements.iter()
+                .filter(|(key, _, id)| key == account && id == order)
+                .collect::<Vec<_>>();
+            if matched.len() != 1 {
+                return Err(OkxError::Response("TRANSCRIPT_HISTORY_ACK_ID_MISMATCH".into()));
+            }
+            row["clOrdId"] = matched[0].1.clone().into();
+        }
+        serde_json::to_vec(&envelope).map_err(Into::into)
+    }
+
     #[derive(Default)]
     pub(crate) struct RecordedAccountHttp {
         pub(crate) requests: Mutex<Vec<String>>,
@@ -1127,6 +1162,15 @@ pub(crate) mod recorded_support {
                         // Source association was checked before consumption.
                         // Only this observed clOrdId is bound to immutable bytes.
                         raw.replace("__REQUEST_CL_ORD_ID__", client_id).into_bytes()
+                    } else if matches!(
+                        path,
+                        "/api/v5/trade/fills-history" | "/api/v5/account/bills-archive"
+                    ) {
+                        bind_recorded_history_ids(
+                            &self.acknowledged_creates.lock().unwrap(),
+                            key,
+                            page.raw_response,
+                        )?
                     } else {
                         page.raw_response
                     };
@@ -1431,6 +1475,33 @@ pub(crate) mod recorded_support {
             assert!(!recorded_order_source_matches(
                 &ack, "fixture-executor-a", "client_A", b"{malformed"
             ));
+        }
+
+        #[test]
+        fn recorded_financial_history_binds_each_order_and_rejects_other_accounts() {
+            let ack = vec![
+                ("fixture-observer-a".to_owned(), "client_A".to_owned(), "order_A".to_owned()),
+                ("fixture-observer-a".to_owned(), "client_B".to_owned(), "order_B".to_owned()),
+                ("fixture-observer-b".to_owned(), "client_C".to_owned(), "order_C".to_owned()),
+            ];
+            let bytes = serde_json::to_vec(&serde_json::json!({
+                "data":[
+                    {"ordId":"order_B","clOrdId":"__REQUEST_CL_ORD_ID__"},
+                    {"ordId":"order_A","clOrdId":"__REQUEST_CL_ORD_ID__"}
+                ]
+            })).unwrap();
+            let bound = bind_recorded_history_ids(&ack,"fixture-observer-a",bytes.clone()).unwrap();
+            let parsed:serde_json::Value=serde_json::from_slice(&bound).unwrap();
+            assert_eq!(parsed["data"][0]["clOrdId"],"client_B");
+            assert_eq!(parsed["data"][1]["clOrdId"],"client_A");
+            assert!(bind_recorded_history_ids(&ack,"fixture-observer-b",bytes.clone()).is_err());
+            let mut duplicate=ack.clone();
+            duplicate.push(ack[0].clone());
+            assert!(bind_recorded_history_ids(&duplicate,"fixture-observer-a",bytes).is_err());
+            let unknown=serde_json::to_vec(&serde_json::json!({
+                "data":[{"ordId":"unknown","clOrdId":"__REQUEST_CL_ORD_ID__"}]
+            })).unwrap();
+            assert!(bind_recorded_history_ids(&ack,"fixture-observer-a",unknown).is_err());
         }
     }
 

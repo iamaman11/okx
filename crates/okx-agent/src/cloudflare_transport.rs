@@ -1670,6 +1670,77 @@ mod raw_native_session_tests {
             .await
             .expect("maintenance owner did not terminate")
             .unwrap();
+        // One recorded real-format fill and one linked fee bill through the
+        // EXISTING account source cycle, never a direct test SQL ingest.
+        // This probes T09.1 financial sources; Close/release remain unaccepted.
+        let financial_time = chrono::Utc::now().timestamp_millis().to_string();
+        let raw_fill = envelope(json!([{
+            "instType":"SWAP","instId":"BTC-USDT-SWAP",
+            "tradeId":"t09-entry-trade-001","ordId":"recorded-t09-opening-001",
+            "clOrdId":"__REQUEST_CL_ORD_ID__","billId":"t09-entry-bill-001",
+            "subType":"3","side":"buy","posSide":"long",
+            "fillPx":"1000","fillSz":"0.1","fillPnl":"0",
+            "fee":"-0.0005","feeCcy":"USDT",
+            "ts":financial_time,"fillTime":financial_time
+        }]));
+        let raw_bill = envelope(json!([{
+            "billId":"t09-entry-bill-001","instType":"SWAP",
+            "instId":"BTC-USDT-SWAP","ordId":"recorded-t09-opening-001",
+            "tradeId":"t09-entry-trade-001","clOrdId":"__REQUEST_CL_ORD_ID__",
+            "ccy":"USDT","type":"2","subType":"3",
+            "balChg":"-0.0005","fee":"-0.0005","pnl":"0","ts":financial_time
+        }]));
+        // Same immutable page can be read more than once by the 2-second
+        // owner; SQL event IDs must still make money exactly-once.
+        for _ in 0..12 {
+            feed.expect_get(RecordedGet {
+                access_key:"fixture-observer-a".into(),
+                path:"/api/v5/trade/fills-history".into(),
+                required_query:vec![("instType".into(),"SWAP".into())],
+                raw_response:raw_fill.clone(),
+            });
+            feed.expect_get(RecordedGet {
+                access_key:"fixture-observer-a".into(),
+                path:"/api/v5/account/bills-archive".into(),
+                required_query:vec![],
+                raw_response:raw_bill.clone(),
+            });
+        }
+        let owner = accounts.resolve("fixture-a").await.unwrap();
+        let id = idempotent_intent_id.clone();
+        let captured = tokio::time::timeout(Duration::from_secs(12), async {
+            loop {
+                let intent = id.clone();
+                let readback = owner.execution.store
+                    .call(std::time::Instant::now() + Duration::from_secs(3), move |s| {
+                        let fills=s.cursor("fills","SWAP")?.ok_or(
+                            okx_execution::StoreError::Invalid("T09_FILL_CURSOR_MISSING")
+                        )?;
+                        let bills=s.cursor("bills","account")?.ok_or(
+                            okx_execution::StoreError::Invalid("T09_BILL_CURSOR_MISSING")
+                        )?;
+                        Ok((
+                            s.intent_fill_cost_evidence(&intent,fills.watermark),
+                            s.intent_fee_bill_evidence(&intent,bills.watermark)
+                        ))
+                    }).await;
+                if let Ok((Ok(fill),Ok(bill)))=readback { break (fill,bill); }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        }).await.expect("recorded fill/bill source not captured by production finance owner");
+        assert_eq!(captured.0.fill_count,1);
+        assert_eq!(captured.0.filled_quantity.to_string(),"0.1");
+        assert_eq!(captured.0.gross_notional_usdt.to_string(),"1");
+        assert_eq!(captured.1.linked_bill_count,1);
+        assert_eq!(captured.1.conservative_verified_fee_usdt.to_string(),"0.0005");
+        println!("T09_1_NATIVE_FILL_BILL_EVIDENCE_V1:{}",json!({
+            "intent_id":idempotent_intent_id,
+            "fills":captured.0.fill_count,"bills":captured.1.linked_bill_count,
+            "notional_usdt":captured.0.gross_notional_usdt.to_string(),
+            "fee_usdt":captured.1.conservative_verified_fee_usdt.to_string(),
+            "source_digest":captured.1.source_digest,
+            "state":"FILL_AND_BILL_VERIFIED_CLOSE_RELEASE_PENDING"
+        }));
         println!("t09_public_trade_execute_open_ack_and_idempotency PASS: posts=1");
         shutdown_tx.send(true).unwrap();
         let terminated = tokio::time::timeout(Duration::from_secs(10), session)
