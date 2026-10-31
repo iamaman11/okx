@@ -602,9 +602,11 @@ fn e1_e2_native_real_fee_sources_baseline_and_second_admission_under_ten() {
         "second-central-reservation",
         "second grant has its own durable identity, not the first order's release"
     );
+    s.verify_captured_campaign_continuity(2, 7).unwrap();
+    let (current_risk, _) = s.risk_census_intents(100).unwrap();
     assert!(
-        s.verify_captured_campaign_continuity(2, 7).is_err(),
-        "new unfinished order is visible to native risk census"
+        current_risk.iter().any(|row| row.intent_id == successor.intent_id),
+        "a known second central reservation stays visible to the risk census"
     );
 }
 #[test]
@@ -1595,19 +1597,17 @@ fn r4_followup_requires_terminal_native_fill_and_central_settlement() {
         "reservation-successor",
         "the actual SQL owner accepts the next central reservation after terminal"
     );
+    s.verify_captured_campaign_continuity(from, through)
+        .unwrap();
+    let (current_risk, _) = s.risk_census_intents(100).unwrap();
     assert!(
-        s.verify_captured_campaign_continuity(from, through)
-            .is_err(),
-        "the new unfinished intent must prevent any third campaign opening"
+        current_risk.iter().any(|row| row.intent_id == successor.intent_id),
+        "the known second central reservation must remain in risk census"
     );
     assert!(
-        matches!(
-            s.seal_captured_campaign_baseline(&campaign, from, through),
-            Err(StoreError::Invalid(
-                "ENTRY_POST_OPENING_NATIVE_EXPOSURE_UNRESOLVED"
-            ))
-        ),
-        "the second intent may not silently disappear from the cohort proof"
+        s.seal_captured_campaign_baseline(&campaign, from, through)
+            .is_ok(),
+        "known reserved exposure is covered by risk, not new historical entry"
     );
     s.connection
         .execute(

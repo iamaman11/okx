@@ -589,7 +589,7 @@ impl AccountStore {
                       )
                       OR (
                         i.state IN ('ACKNOWLEDGED','PARTIALLY_FILLED') AND
-                        (r.state!='POSTED' OR NOT EXISTS(
+                        (r.state NOT IN ('POSTED','OPEN') OR NOT EXISTS(
                            SELECT 1 FROM operation_receipts a
                            WHERE a.operation_id='entry-admission:'||i.intent_id
                              AND a.kind='ENTRY_ADMISSION_PROVEN'
@@ -669,7 +669,7 @@ impl AccountStore {
                        OR r.plan_hash!=i.plan_hash))
                   OR (i.state IN ('ACKNOWLEDGED','PARTIALLY_FILLED') AND
                       i.risk_increase=1 AND
-                      (r.state IS NULL OR r.state!='POSTED'
+                      (r.state IS NULL OR r.state NOT IN ('POSTED','OPEN')
                        OR r.plan_hash!=i.plan_hash))
              )",
             [],
