@@ -130,6 +130,74 @@ fn verify_post_held_selected(
     Ok(())
 }
 
+#[cfg(test)]
+#[test]
+fn post_held_witness_rejects_identity_generation_mode_and_stale_sources() {
+    use serde_json::json;
+    let uid = "recorded-uid";
+    let fingerprint = okx_api::account_uid_fingerprint(uid);
+    let snapshot: okx_observation::AccountSnapshot = serde_json::from_value(json!({
+        "schema": "okx.account-snapshot/v2",
+        "source": "okx_private_rest_bootstrap",
+        "source_received_at": Utc::now().to_rfc3339(),
+        "account_generation": "test",
+        "quality_reason": "test",
+        "private_ws_connected": true,
+        "account_level": "2",
+        "position_mode": "net_mode",
+        "account_type": "1",
+        "account_uid_fingerprint": fingerprint,
+        "api_key_permissions": ["read_only"],
+        "balance": {
+            "total_equity_usd": "100",
+            "adjusted_equity_usd": null,
+            "isolated_equity_usd": null,
+            "initial_margin_requirement_usd": null,
+            "maintenance_margin_requirement_usd": null,
+            "margin_ratio": null,
+            "notional_usd": null,
+            "update_time_ms": null,
+            "details": []
+        },
+        "positions": [],
+        "pending_orders": []
+    }))
+    .unwrap();
+    let config: okx_api::AccountConfig =
+        serde_json::from_value(json!({"uid":uid,"posMode":"net_mode"})).unwrap();
+    let mut proof = PostHeldSelected {
+        account_key: "okx:real:test".into(),
+        snapshot,
+        executor_config: config,
+        private_generation: 9,
+        started_after_held_ms: 1,
+        completed_after_held_ms: 2,
+    };
+    let check = |proof: &PostHeldSelected| {
+        verify_post_held_selected(proof, "okx:real:test", &fingerprint, 9, now())
+    };
+    assert!(check(&proof).is_ok());
+    assert_eq!(
+        verify_post_held_selected(&proof, "okx:real:other", &fingerprint, 9, now()),
+        Err("POST_HELD_ACCOUNT_IDENTITY_CHANGED".into())
+    );
+    assert_eq!(
+        verify_post_held_selected(&proof, "okx:real:test", &fingerprint, 10, now()),
+        Err("POST_HELD_SOURCE_GENERATION_CHANGED".into())
+    );
+    proof.executor_config.uid = "different".into();
+    assert_eq!(check(&proof), Err("POST_HELD_ACCOUNT_IDENTITY_CHANGED".into()));
+    proof.executor_config.uid = uid.into();
+    proof.executor_config.position_mode = "long_short_mode".into();
+    assert_eq!(check(&proof), Err("POST_ACCOUNT_POSITION_MODE_UNVERIFIED".into()));
+    proof.executor_config.position_mode = "net_mode".into();
+    proof.started_after_held_ms = 4;
+    assert_eq!(check(&proof), Err("POST_HELD_CAUSAL_TIME_INVALID".into()));
+    proof.started_after_held_ms = 1;
+    proof.snapshot.source_received_at = (Utc::now() - chrono::Duration::minutes(10)).to_rfc3339();
+    assert_eq!(check(&proof), Err("POST_HELD_ACCOUNT_EVIDENCE_STALE".into()));
+}
+
 impl TradeService {
     /// Native, completely classified USD-denominated spot opening spend.
     /// An opening buy consumes gross USD notional and its fee. Exit fees
@@ -1044,7 +1112,9 @@ impl TradeService {
         // observer snapshot after HELD. Reusing exactly the selected witness
         // removes two redundant private GET sequences; no pre-HELD snapshot
         // or cache may cross the distributed reservation boundary.
-        let (post_account, post_snapshot) = if increase {
+        let (post_account, post_snapshot) = if increase
+            && r.configuration.account_key.environment == okx_protocol::accounts::Environment::Real
+        {
             let witness = post_held_selected
                 .as_ref()
                 .ok_or("POST_HELD_SELECTED_WITNESS_MISSING")?;
