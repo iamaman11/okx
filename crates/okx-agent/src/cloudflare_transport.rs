@@ -2313,7 +2313,9 @@ mod raw_native_session_tests {
                     expected_body: json!([{
                         "instId":"BTC-USDT-SWAP","algoId":"900000001"
                     }]),
-                    raw_response: br#"{"code":"0","msg":"","data":[{"algoId":"900000001","sCode":"0"}]}"#.to_vec(),
+                    raw_response:
+                        br#"{"code":"0","msg":"","data":[{"algoId":"900000001","sCode":"0"}]}"#
+                            .to_vec(),
                 });
                 let resource = accounts.resolve("fixture-a").await.unwrap();
                 let terminal_capture = crate::source_capture::capture_account_sources(
