@@ -446,6 +446,7 @@ impl TradeService {
             json!(null)
         };
         let mut protection_failed = false;
+        let mut venue_flat_verified = false;
         if matches!(i.state, IntentState::Prepared | IntentState::Reserved) {
             if now() >= i.deadline {
                 let id = i.intent_id.clone();
@@ -585,6 +586,15 @@ impl TradeService {
                     .map(|p| (p.position_side.as_str(), p.position.as_str())),
             )?;
             let exposed = position_qty > Decimal::ZERO;
+            // A reduction's local terminal marker is not discharged by an
+            // order ACK. Require an authenticated flat-instrument readback.
+            venue_flat_verified = verify_instrument_is_flat(
+                &i.instrument_id,
+                snapshot.positions.iter().map(|p| {
+                    (p.instrument_id.as_str(), p.position.as_str())
+                }),
+            )
+            .is_ok();
             if !exposed && i.risk_increase {
                 self.cleanup_flat_protection(r, &i).await?;
             }
@@ -684,7 +694,7 @@ impl TradeService {
             json!({"state":"not_evaluated"})
         };
         let central_release = if i.state.terminal() && financial {
-            match self.release_terminal(r, &i, order.as_ref()).await {
+            match self.release_terminal(r, &i, order.as_ref(), venue_flat_verified).await {
                 Ok(()) => json!({"state":"verified"}),
                 Err(reason) => {
                     json!({"state":"pending","reason_code":reason,"scope":"intent","next_action":"trade.status"})
@@ -1176,6 +1186,7 @@ impl TradeService {
         r: &AccountResources,
         i: &StoredIntent,
         order: Option<&okx_api::TradeOrderDetails>,
+        venue_flat_verified: bool,
     ) -> Result<(), String> {
         if r.configuration.account_key.environment != okx_protocol::accounts::Environment::Real {
             return Ok(());
@@ -1204,9 +1215,7 @@ impl TradeService {
                 Ok(())
             };
         };
-        if receipt.reservation_key.starts_with("local:") {
-            return Ok(());
-        }
+        let local_reduction = receipt.reservation_key.starts_with("local:");
         let instrument = i.instrument_id.clone();
         let lots = r
             .execution
@@ -1215,7 +1224,8 @@ impl TradeService {
             .await
             .map_err(err)?;
         if lots.iter().any(|l| {
-            l.intent_id.as_deref() == Some(&i.intent_id) && l.remaining_qty > Decimal::ZERO
+            (l.intent_id.as_deref() == Some(&i.intent_id) || local_reduction)
+                && l.remaining_qty > Decimal::ZERO
         }) {
             return Err("INTENT_EXPOSURE_REMAINS".into());
         }
@@ -1234,6 +1244,43 @@ impl TradeService {
         let venue_updated_at = verified_terminal_order_update_time(i, order)?;
         if !complete.coverage_gaps.is_empty() || complete.watermark < venue_updated_at {
             return Err("FILL_COVERAGE_INCOMPLETE".into());
+        }
+        if local_reduction {
+            let bills = r.execution.store.call(deadline(), |s| {
+                s.cursor("bills", "account")
+            }).await.map_err(err)?.ok_or("BILLS_COVERAGE_MISSING")?;
+            if bills.generation <= 0 || !bills.cursor.is_empty()
+                || !bills.coverage_gaps.is_empty()
+                || bills.watermark < venue_updated_at
+            {
+                return Err("FINANCIAL_COVERAGE_INCOMPLETE".into());
+            }
+            // Reduce-only has NO central RiskBook grant. Its SQL receipt must
+            // nevertheless be completed after its own terminal venue/fill/bill
+            // readback. Leaving it TERMINAL_PENDING_CENTRAL causes the next
+            // full cohort census to block the opening intent's legitimate
+            // central RELEASE forever.
+            if i.risk_increase || !venue_flat_verified {
+                return Err("LOCAL_CLOSE_FLAT_POSITION_UNPROVEN".into());
+            }
+            let venue = order.ok_or("LOCAL_CLOSE_ORDER_READBACK_MISSING")?;
+            if !matches!(venue.state.as_str(), "filled" | "canceled" | "mmp_canceled") {
+                return Err("LOCAL_CLOSE_VENUE_NOT_TERMINAL".into());
+            }
+            let filled = verified_order_readback(i, venue)?;
+            if filled <= Decimal::ZERO || filled != i.plan.quantity {
+                return Err("LOCAL_CLOSE_FILL_QUANTITY_UNPROVEN".into());
+            }
+            let id = i.intent_id.clone();
+            let order_id = venue.order_id.clone();
+            r.execution
+                .store
+                .call(deadline(), move |s| {
+                    s.acknowledge_local_terminal_close(&id, &order_id, filled, venue_updated_at)
+                })
+                .await
+                .map_err(err)?;
+            return Ok(());
         }
         let observed = self
             .risk

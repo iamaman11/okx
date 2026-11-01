@@ -2417,6 +2417,20 @@ mod raw_native_session_tests {
                     .as_str()
                     .expect("close must have its own intent")
                     .to_owned();
+                let close_receipt_id = format!("local-terminal-release:{closing_intent_id}");
+                let close_receipt_probe = close_receipt_id.clone();
+                let premature_local_release = resource
+                    .execution
+                    .store
+                    .call(std::time::Instant::now() + Duration::from_secs(3), move |s| {
+                        Ok(s.operation(&close_receipt_probe)?.is_some())
+                    })
+                    .await
+                    .expect("T09.1 must inspect the durable local close receipt");
+                assert!(
+                    !premature_local_release,
+                    "Close ACK/captured pages alone cannot release a local terminal marker"
+                );
                 let closing_intent_read = closing_intent_id.clone();
                 let opening_intent_read = idempotent_intent_id.clone();
                 let ledger_after_close = resource
@@ -2459,6 +2473,27 @@ mod raw_native_session_tests {
                     )
                     .await
                     .expect("signed terminal close readback must reach public trade.status");
+                // Closing terminal readback must discharge its own local SQL
+                // marker. Otherwise opening RELEASE is permanently blocked
+                // by an unrelated local: terminal receipt in cohort census.
+                let close_pending_probe = closing_intent_id.clone();
+                let local_receipt_probe = close_receipt_id.clone();
+                let (close_still_pending, local_receipt_written) = resource
+                    .execution
+                    .store
+                    .call(std::time::Instant::now() + Duration::from_secs(3), move |s| {
+                        let (_, pending) = s.risk_census_intents(100)?;
+                        Ok((
+                            pending.contains(&close_pending_probe),
+                            s.operation(&local_receipt_probe)?.is_some(),
+                        ))
+                    })
+                    .await
+                    .expect("T09.1 must read the actual SQL owner after close status");
+                assert!(
+                    local_receipt_written && !close_still_pending,
+                    "T09.1_CLOSE_LOCAL_TERMINAL_UNRESOLVED: receipt={local_receipt_written}, pending={close_still_pending}"
+                );
                 let opening_verified = trade
                     .trade(
                         "fixture-a",

@@ -1234,6 +1234,152 @@ impl AccountStore {
         tx.commit()?;
         Ok(())
     }
+
+    /// A real reduce-only Close holds a local SQL lifecycle marker, not a
+    /// Worker reservation. Terminal venue evidence alone is insufficient:
+    /// its exact fill quantity and independently captured linked fee bill
+    /// must be durable before this marker can leave the cohort census.
+    /// The caller additionally proves a fresh flat venue position and
+    /// absence of remaining attributed lots; this method validates the
+    /// immutable native finance sources under the sole AccountStore owner.
+    pub fn acknowledge_local_terminal_close(
+        &mut self,
+        id: &str,
+        order_id: &str,
+        venue_filled: Decimal,
+        venue_updated_at: i64,
+    ) -> StoreResult<()> {
+        let intent = self.intent(id)?
+            .ok_or(StoreError::Invalid("LOCAL_CLOSE_INTENT_MISSING"))?;
+        if intent.risk_increase
+            || !intent.state.terminal()
+            || intent.exchange_order_id.as_deref() != Some(order_id)
+            || intent.plan.quantity != venue_filled
+            || venue_filled <= Decimal::ZERO
+            || venue_updated_at <= 0
+            || !intent.instrument_id.ends_with("-USDT-SWAP")
+        {
+            return Err(StoreError::Invalid("LOCAL_CLOSE_TERMINAL_PROOF_INVALID"));
+        }
+        let receipt = self.central_receipt(id)?
+            .ok_or(StoreError::Invalid("LOCAL_CLOSE_RECEIPT_MISSING"))?;
+        let local_key = format!("local:{id}");
+        if receipt.reservation_key != local_key
+            || receipt.account_key != self.meta.account_key
+            || receipt.plan_hash != intent.plan_hash
+        {
+            return Err(StoreError::Invalid("LOCAL_CLOSE_RECEIPT_MISMATCH"));
+        }
+        for (source, partition) in [("fills", "SWAP"), ("bills", "account")] {
+            let cursor = self.cursor(source, partition)?
+                .ok_or(StoreError::Invalid("LOCAL_CLOSE_SOURCE_MISSING"))?;
+            if cursor.generation <= 0
+                || !cursor.cursor.is_empty()
+                || !cursor.coverage_gaps.is_empty()
+                || cursor.watermark < venue_updated_at
+            {
+                return Err(StoreError::Invalid("LOCAL_CLOSE_SOURCE_INCOMPLETE"));
+            }
+        }
+        // Read each attributed close fill (including unmatched records) so
+        // an INNER JOIN cannot silently conceal an unpaid or unlinked fee.
+        let mut total = Decimal::ZERO;
+        let mut proof_rows = Vec::new();
+        {
+            let mut q = self.connection.prepare(
+                "SELECT f.fill_id,f.qty,f.fee,f.currency,f.trade_id,
+                        s.bill_id,s.direction
+                 FROM fills f LEFT JOIN swap_fill_sources s ON s.fill_id=f.fill_id
+                 WHERE f.intent_id=?1 AND f.exchange_order_id=?2
+                 ORDER BY f.fill_id LIMIT 1001"
+            )?;
+            let mut rows = q.query(params![id, order_id])?;
+            while let Some(row) = rows.next()? {
+                if proof_rows.len() >= 1000 {
+                    return Err(StoreError::Invalid("LOCAL_CLOSE_FILLS_UNBOUNDED"));
+                }
+                let fill_id: String = row.get(0)?;
+                let qty = decimal(row.get::<_, String>(1)?)?;
+                let fee = decimal(row.get::<_, String>(2)?)?;
+                let currency: String = row.get(3)?;
+                let trade: String = row.get(4)?;
+                let bill: Option<String> = row.get(5)?;
+                let direction: Option<String> = row.get(6)?;
+                if qty <= Decimal::ZERO
+                    || direction.as_deref() != Some("CLOSE")
+                    || bill.as_deref().is_none_or(str::is_empty)
+                    || trade.is_empty()
+                {
+                    return Err(StoreError::Invalid("LOCAL_CLOSE_FILL_OR_BILL_UNVERIFIED"));
+                }
+                let bill = bill.unwrap();
+                // Verify the separate bill's exact trade/order provenance and
+                // canonical fee entry; two candidate bills never count as one.
+                let mut evidence = self.connection.prepare(
+                    "SELECT e.amount,e.currency FROM bill_order_sources o
+                     JOIN bills b ON b.bill_id=o.bill_id
+                     JOIN finance_entries e ON e.economic_event_key=b.economic_event_key
+                       AND e.component='FEE' AND e.allocation_leg='account'
+                     WHERE o.bill_id=?1 AND o.instrument_id=?2
+                       AND o.exchange_order_id=?3 AND o.trade_id=?4
+                     LIMIT 2"
+                )?;
+                let matched = evidence.query_map(
+                    params![&bill, &intent.instrument_id, order_id, &trade],
+                    |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+                )?.collect::<Result<Vec<_>, _>>()?;
+                if matched.len() != 1
+                    || decimal(matched[0].0.clone())? != fee
+                    || matched[0].1 != currency
+                {
+                    return Err(StoreError::Invalid("LOCAL_CLOSE_FEE_BILL_UNVERIFIED"));
+                }
+                total = total.checked_add(qty)
+                    .ok_or(StoreError::Invalid("LOCAL_CLOSE_QUANTITY_OVERFLOW"))?;
+                proof_rows.push((fill_id, trade, bill, qty.to_string(), fee.to_string(), currency));
+            }
+        }
+        if proof_rows.is_empty() || total != venue_filled {
+            return Err(StoreError::Invalid("LOCAL_CLOSE_FILL_SUM_MISMATCH"));
+        }
+        let proof = format!("{:x}", Sha256::digest(
+            serde_json::to_vec(&(
+                "okx.local-terminal-close/v1",
+                self.meta.account_key.as_str(),
+                self.meta.installation_id.as_str(),
+                id, order_id, intent.plan_hash.as_str(),
+                venue_filled.to_string(), proof_rows
+            )).map_err(|_| StoreError::Invalid("LOCAL_CLOSE_PROOF_SERIALIZATION"))?
+        ));
+        let key = format!("local-terminal-release:{id}");
+        let tx = self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let existing: Option<(String, String)> = tx.query_row(
+            "SELECT request_hash,result_ref FROM operation_receipts WHERE operation_id=?1",
+            [&key],
+            |r| Ok((r.get(0)?, r.get(1)?))
+        ).optional()?;
+        if existing.as_ref().is_some_and(|(hash, source)| {
+            hash != &intent.request_hash || source != &proof
+        }) {
+            return Err(StoreError::Invalid("LOCAL_CLOSE_PROOF_CONFLICT"));
+        }
+        let changed = tx.execute(
+            "UPDATE risk_receipts SET state='RELEASED'
+             WHERE intent_id=?1 AND reservation_key=?2
+               AND state IN('TERMINAL_PENDING_CENTRAL','RELEASED')",
+            params![id, &local_key]
+        )?;
+        if changed != 1 {
+            return Err(StoreError::Invalid("LOCAL_CLOSE_STATE_NOT_TERMINAL"));
+        }
+        tx.execute(
+            "INSERT INTO operation_receipts VALUES(?1,'LOCAL_TERMINAL_RELEASE',?2,?3,?4)
+             ON CONFLICT(operation_id) DO NOTHING",
+            params![key, intent.request_hash, proof, wall_time_ms()]
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
     pub fn reject_unsent(&mut self, id: &str, reason: &str, now: i64) -> StoreResult<bool> {
         self.reject_unsent_inner(id, reason, now, false)
     }
