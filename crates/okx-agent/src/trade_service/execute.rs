@@ -77,6 +77,59 @@ struct PostFxFence<'a> {
     conversion: &'a UsdConversion,
     order_type: &'a str,
 }
+
+/// One selected-account production source assessment, captured strictly after
+/// the central HELD receipt. The same authenticated bytes serve the immutable
+/// entry/margin assessment, the selected-account census and the final mode
+/// check. CAS retry constructs another witness; no process-wide or stale cache.
+struct PostHeldSelected {
+    account_key: String,
+    snapshot: okx_observation::AccountSnapshot,
+    executor_config: okx_api::AccountConfig,
+    private_generation: u64,
+    started_after_held_ms: u64,
+    completed_after_held_ms: u64,
+}
+
+fn verify_post_held_selected(
+    witness: &PostHeldSelected,
+    account_key: &str,
+    verified_uid: &str,
+    generation: u64,
+    now_ms: i64,
+) -> Result<(), String> {
+    if witness.account_key != account_key
+        || witness.snapshot.account_uid_fingerprint != verified_uid
+        || okx_api::account_uid_fingerprint(&witness.executor_config.uid) != verified_uid
+    {
+        return Err("POST_HELD_ACCOUNT_IDENTITY_CHANGED".into());
+    }
+    if generation == 0 || witness.private_generation != generation {
+        return Err("POST_HELD_SOURCE_GENERATION_CHANGED".into());
+    }
+    if witness.completed_after_held_ms < witness.started_after_held_ms {
+        return Err("POST_HELD_CAUSAL_TIME_INVALID".into());
+    }
+    let received = chrono::DateTime::parse_from_rfc3339(&witness.snapshot.source_received_at)
+        .map_err(|_| "POST_HELD_SOURCE_TIME_INVALID")?
+        .timestamp_millis();
+    if received > now_ms
+        || !crate::config::evidence_fresh(
+            received,
+            now_ms,
+            crate::config::ACCOUNT_MAX_AGE_MS,
+        )
+    {
+        return Err("POST_HELD_ACCOUNT_EVIDENCE_STALE".into());
+    }
+    if witness.executor_config.position_mode != witness.snapshot.position_mode
+        || !matches!(witness.snapshot.position_mode.as_str(), "net_mode" | "long_short_mode")
+    {
+        return Err("POST_ACCOUNT_POSITION_MODE_UNVERIFIED".into());
+    }
+    Ok(())
+}
+
 impl TradeService {
     /// Native, completely classified USD-denominated spot opening spend.
     /// An opening buy consumes gross USD notional and its fee. Exit fees
@@ -619,6 +672,7 @@ impl TradeService {
             return Err("COMMAND_EXPIRED".into());
         }
         let mut central = None;
+        let mut post_held_selected = None;
         if increase
             && r.configuration.account_key.environment == okx_protocol::accounts::Environment::Real
         {
@@ -886,7 +940,10 @@ impl TradeService {
                 )
                 .await
             {
-                Ok(v) => central = Some(v),
+                Ok((v, witness)) => {
+                    central = Some(v);
+                    post_held_selected = Some(witness);
+                }
                 Err(reason) => {
                     // BEGIN_POST failed before any native post claim or venue call.
                     // Preserve the central first cause in SQL, not a fabricated
@@ -983,24 +1040,37 @@ impl TradeService {
             })
             .into_iter()
             .collect();
-        let post_account = if increase {
-            r.execution.account.config().await
+        // Real risk increases already obtained fresh Executor config and
+        // observer snapshot after HELD. Reusing exactly the selected witness
+        // removes two redundant private GET sequences; no pre-HELD snapshot
+        // or cache may cross the distributed reservation boundary.
+        let (post_account, post_snapshot) = if increase {
+            let witness = post_held_selected
+                .as_ref()
+                .ok_or("POST_HELD_SELECTED_WITNESS_MISSING")?;
+            verify_post_held_selected(
+                witness,
+                &r.configuration.account_key.wire(),
+                &r.configuration.account_key.verified_uid,
+                r.private_ws.status().await.connection_generation,
+                now(),
+            )?;
+            if Instant::now() >= until {
+                return Err("COMMAND_EXPIRED_BEFORE_SEND".into());
+            }
+            (witness.executor_config.clone(), witness.snapshot.clone())
         } else {
-            // The reduction has no central HELD entry budget to refresh, but
-            // still requires a fresh Executor account-mode witness. Share
-            // the existing local RateBudget and the same command deadline.
-            r.execution
+            // Reduction has no central HELD and remains independently
+            // fail-closed on fresh Executor and Observer signed responses.
+            let config = r
+                .execution
                 .account
                 .config_wait(until.saturating_duration_since(Instant::now()))
                 .await
-        }
-        .map_err(err)?;
-        let post_snapshot = if increase {
-            r.observer.snapshot().await
-        } else {
-            r.observer.snapshot_until(until).await
-        }
-        .map_err(err)?;
+                .map_err(err)?;
+            let snapshot = r.observer.snapshot_until(until).await.map_err(err)?;
+            (config, snapshot)
+        };
         if post_account.position_mode != post_snapshot.position_mode
             || post_snapshot.account_uid_fingerprint != r.configuration.account_key.verified_uid
             || !matches!(
@@ -1244,7 +1314,15 @@ impl TradeService {
         intent: &StoredIntent,
         order_type: &str,
         until: Instant,
-    ) -> Result<(), String> {
+        held_received: Instant,
+    ) -> Result<PostHeldSelected, String> {
+        // Begin before the first request, never synthesize an after-HELD
+        // timestamp from the completion of an earlier cached observation.
+        let started_after_held_ms = held_received.elapsed().as_millis() as u64;
+        let generation = r.private_ws.status().await.connection_generation;
+        if generation == 0 || !r.source_identity_ready().await {
+            return Err("POST_HELD_SOURCE_GENERATION_UNVERIFIED".into());
+        }
         let id = intent.intent_id.clone();
         let quote = r
             .execution
@@ -1272,14 +1350,18 @@ impl TradeService {
             .contract_value
             .as_deref()
             .ok_or("POST_ENTRY_CONTRACT_VALUE_MISSING")?)?;
-        let fee = r
-            .observer
-            .fee_schedule_until(&rules, until)
-            .await
-            .map_err(err)?;
+        // Snapshot first: its forced authenticated config read populates
+        // the same per-account observer cache for the immediately following
+        // fee source. Otherwise fee_schedule_until reads config, then the
+        // required fresh snapshot invalidates it and reads config again.
         let snap = r
             .observer
             .snapshot_after_held_until(until)
+            .await
+            .map_err(err)?;
+        let fee = r
+            .observer
+            .fee_schedule_until(&rules, until)
             .await
             .map_err(err)?;
         if snap.account_uid_fingerprint != r.configuration.account_key.verified_uid {
@@ -1329,7 +1411,22 @@ impl TradeService {
         if Instant::now() >= until {
             return Err("COMMAND_EXPIRED".into());
         }
-        Ok(())
+        let witness = PostHeldSelected {
+            account_key: r.configuration.account_key.wire(),
+            snapshot: snap,
+            executor_config: config,
+            private_generation: generation,
+            started_after_held_ms,
+            completed_after_held_ms: held_received.elapsed().as_millis() as u64,
+        };
+        verify_post_held_selected(
+            &witness,
+            &r.configuration.account_key.wire(),
+            &r.configuration.account_key.verified_uid,
+            r.private_ws.status().await.connection_generation,
+            now(),
+        )?;
+        Ok(witness)
     }
 
     async fn fence_inspect_retry(
@@ -1340,7 +1437,7 @@ impl TradeService {
         until: Instant,
         held_received: Instant,
         fx: PostFxFence<'_>,
-    ) -> Result<RiskResult, String> {
+    ) -> Result<(RiskResult, PostHeldSelected), String> {
         let key = held
             .reservation_key
             .clone()
@@ -1357,7 +1454,14 @@ impl TradeService {
             // A fresh census and a valid FX fence do not revalidate tariff or
             // contract mechanics. Bind the same immutable SQL quote against
             // actual post-HELD source data on EACH CAS attempt before POST.
-            self.revalidate_held_entry_quote(fx.owner, intent, fx.order_type, until)
+            let selected = self
+                .revalidate_held_entry_quote(
+                    fx.owner,
+                    intent,
+                    fx.order_type,
+                    until,
+                    held_received,
+                )
                 .await?;
             let (census, causal_proof) = self
                 .census_after_held(
@@ -1367,6 +1471,7 @@ impl TradeService {
                     &key,
                     &fx.owner.configuration.account_key.wire(),
                     &fx.conversion.usd_per_usdt,
+                    &selected,
                 )
                 .await?;
             let command = self.risk_command(
@@ -1387,7 +1492,7 @@ impl TradeService {
                     if !post_receipt_bound(&v, &key, state.state.revision, sequence) {
                         return Err("POST_FENCE_RECEIPT_BINDING_MISMATCH".into());
                     }
-                    return Ok(v);
+                    return Ok((v, selected));
                 }
                 Ok(v) if v.reason.as_deref() != Some("STALE_RISK_BOOK_SEQUENCE") => {
                     return Err(v.reason.unwrap_or("CENTRAL_POST_FENCE_DENIED".into()));
@@ -1426,7 +1531,7 @@ impl TradeService {
         &self,
         state: &CentralGovernanceSnapshot,
     ) -> Result<NativeRiskCensus, String> {
-        self.census_with_reads(state, None, None, None)
+        self.census_with_reads(state, None, None, None, None)
             .await
             .map(|v| v.0)
     }
@@ -1439,6 +1544,7 @@ impl TradeService {
         reservation: &str,
         selected_account: &str,
         reserved_usd_per_usdt: &str,
+        selected: &PostHeldSelected,
     ) -> Result<(NativeRiskCensus, CausalPostProof), String> {
         let (census, account_reads) = self
             .census_with_reads(
@@ -1446,6 +1552,7 @@ impl TradeService {
                 Some(held_received),
                 Some((selected_account, reserved_usd_per_usdt)),
                 Some(until),
+                Some(selected),
             )
             .await?;
         let proof = CausalPostProof {
@@ -1466,6 +1573,7 @@ impl TradeService {
         held_received: Option<Instant>,
         fx_rate_check: Option<(&str, &str)>,
         until: Option<Instant>,
+        selected: Option<&PostHeldSelected>,
     ) -> Result<(NativeRiskCensus, Vec<PostAccountReadProof>), String> {
         if !self.accounts.failures().await.is_empty() {
             return Err("ACCOUNT_COHORT_UNAVAILABLE".into());
@@ -1486,13 +1594,27 @@ impl TradeService {
         let pages = stream::iter(cohort)
             .map(|c| async move {
                 // The timer starts before fetching any account/private/venue facts.
-                let started = held_received.map(|tick| tick.elapsed().as_millis() as u64);
+                let selected = selected.filter(|w| w.account_key == c.account_key);
+                let started = selected
+                    .map(|w| w.started_after_held_ms)
+                    .or_else(|| held_received.map(|tick| tick.elapsed().as_millis() as u64));
                 let r = self.resources(&c.account_key).await?;
                 if !r.source_identity_ready().await {
                     return Err("COHORT_SOURCE_GENERATION_UNVERIFIED".into());
                 }
                 let generation = r.private_ws.status().await.connection_generation;
-                let snapshot = if held_received.is_some() {
+                let snapshot = if let Some(witness) = selected {
+                    verify_post_held_selected(
+                        witness,
+                        &c.account_key,
+                        &c.uid_fingerprint,
+                        generation,
+                        now(),
+                    )?;
+                    // The signed selected-account GET occurred on this very
+                    // CAS attempt, after HELD; other accounts are read anew.
+                    witness.snapshot.clone()
+                } else if held_received.is_some() {
                     r.observer
                         .snapshot_after_held_until(until.ok_or("POST_DEADLINE_MISSING")?)
                         .await
