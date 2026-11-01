@@ -1090,10 +1090,10 @@ pub(crate) mod recorded_support {
                     if !key.starts_with("fixture-executor-") {
                         return Err(OkxError::Response("TRANSCRIPT_POST_NOT_EXECUTOR".into()));
                     }
-                    if path != "/api/v5/trade/order"
-                        && path != "/api/v5/trade/cancel-algos"
-                    {
-                        return Err(OkxError::Response("TRANSCRIPT_POST_ROUTE_UNRECOGNIZED".into()));
+                    if path != "/api/v5/trade/order" && path != "/api/v5/trade/cancel-algos" {
+                        return Err(OkxError::Response(
+                            "TRANSCRIPT_POST_ROUTE_UNRECOGNIZED".into(),
+                        ));
                     }
                     let mut expected = self.posts.lock().unwrap();
                     let index = expected
@@ -1175,10 +1175,9 @@ pub(crate) mod recorded_support {
                             })?;
                         self.acknowledged_creates.lock().unwrap().push((
                             key.to_owned(),
-                            client_id
-                                .ok_or_else(|| {
-                                    OkxError::Response("TRANSCRIPT_CLIENT_ID_MISSING".into())
-                                })?,
+                            client_id.ok_or_else(|| {
+                                OkxError::Response("TRANSCRIPT_CLIENT_ID_MISSING".into())
+                            })?,
                             ord_id.to_owned(),
                         ));
                     }
