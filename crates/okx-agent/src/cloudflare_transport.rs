@@ -498,8 +498,25 @@ mod raw_native_session_tests {
     // future; it must not synthesize state in AccountStore or RiskBook.
     fn recorded_flat_derivative_inventory_after_close(
         feed: &crate::accounts::recorded_support::RecordedAccountHttp,
-    ) -> usize {
+    ) -> (usize, usize) {
         use crate::accounts::recorded_support::RecordedGet;
+        // The completed T09.1 terminal source proved a flat position.
+        // A later admission still requires NEW signed source pages, not
+        // silent defaults after the prior transcript has been consumed.
+        let raw_empty = serde_json::to_vec(&serde_json::json!({"code":"0","msg":"","data":[]}))
+            .expect("T09.2 signed raw empty source");
+        let retired_positions = feed.advance_recorded_route(
+            "fixture-observer-a",
+            "/api/v5/account/positions",
+            (0..48)
+                .map(|_| RecordedGet {
+                    access_key: "fixture-observer-a".into(),
+                    path: "/api/v5/account/positions".into(),
+                    required_query: vec![],
+                    raw_response: raw_empty.clone(),
+                })
+                .collect(),
+        );
         let kinds = [
             "conditional",
             "oco",
@@ -510,8 +527,6 @@ mod raw_native_session_tests {
             "twap",
             "smart_iceberg",
         ];
-        let raw_empty = serde_json::to_vec(&serde_json::json!({"code":"0","msg":"","data":[]}))
-            .expect("T09.2 recorded raw empty derivative source");
         let mut pages = Vec::with_capacity(5 * 2 * kinds.len());
         for _ in 0..5 {
             for inst_type in ["SWAP", "FUTURES"] {
@@ -529,11 +544,12 @@ mod raw_native_session_tests {
                 }
             }
         }
-        feed.advance_recorded_route(
+        let retired_algos = feed.advance_recorded_route(
             "fixture-observer-a",
             "/api/v5/trade/orders-algo-pending",
             pages,
-        )
+        );
+        (retired_positions, retired_algos)
     }
 
     #[test]
@@ -3017,13 +3033,15 @@ mod raw_native_session_tests {
                     // Only a complete fresh recorded external inventory may
                     // prove that the previously cancelled attached stop is gone.
                     eprintln!("T09_2_PHASE_V1:BEFORE_ALGO_INVENTORY");
-                    let retired_terminal_algo_pages =
+                    let (retired_terminal_position_pages, retired_terminal_algo_pages) =
                         recorded_flat_derivative_inventory_after_close(&feed);
                     eprintln!("T09_2_PHASE_V1:AFTER_ALGO_INVENTORY");
                     println!(
                         "T09_2_ALGO_INVENTORY_TRANSCRIPT_V1:{}",
                         json!({
                             "terminal_pages_retired":retired_terminal_algo_pages,
+                            "terminal_position_pages_retired":retired_terminal_position_pages,
+                            "new_position_read_pages":48,
                             "fresh_signed_scopes":16,
                             "max_reads_per_scope":5,
                             "prior_close_release":"verified"
