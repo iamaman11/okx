@@ -979,19 +979,49 @@ impl TradeApi {
         instrument_id: &str,
         client_order_id: &str,
     ) -> Result<TradeOrderDetails, OkxError> {
+        self.order_by_client_id_with_deadline(instrument_id, client_order_id, None)
+            .await
+    }
+
+    /// Status/reconciliation is read-only. It may wait for a LOCAL no-send
+    /// GET quota, but never resends an order, retries a sent HTTP response,
+    /// uses cached venue state or extends the caller's monotonic deadline.
+    pub async fn order_by_client_id_until(
+        &self,
+        instrument_id: &str,
+        client_order_id: &str,
+        until: Instant,
+    ) -> Result<TradeOrderDetails, OkxError> {
+        self.order_by_client_id_with_deadline(instrument_id, client_order_id, Some(until))
+            .await
+    }
+
+    async fn order_by_client_id_with_deadline(
+        &self,
+        instrument_id: &str,
+        client_order_id: &str,
+        until: Option<Instant>,
+    ) -> Result<TradeOrderDetails, OkxError> {
         validate_instrument_id(instrument_id)?;
         validate_client_id("clOrdId", client_order_id)?;
-
-        let mut orders: Vec<TradeOrderDetails> = self
-            .client
-            .private_get(
-                ORDER_DETAILS_PATH,
-                &[
-                    ("instId", instrument_id.to_owned()),
-                    ("clOrdId", client_order_id.to_owned()),
-                ],
+        let params = [
+            ("instId", instrument_id.to_owned()),
+            ("clOrdId", client_order_id.to_owned()),
+        ];
+        let mut orders: Vec<TradeOrderDetails> = if let Some(until) = until {
+            tokio::time::timeout_at(
+                until.into(),
+                self.client.private_get_wait(
+                    ORDER_DETAILS_PATH,
+                    &params,
+                    until.saturating_duration_since(Instant::now()),
+                ),
             )
-            .await?;
+            .await
+            .map_err(|_| OkxError::Response("ORDER_READBACK_DEADLINE_EXCEEDED".into()))??
+        } else {
+            self.client.private_get(ORDER_DETAILS_PATH, &params).await?
+        };
 
         if orders.len() != 1 {
             return Err(OkxError::Response(format!(
