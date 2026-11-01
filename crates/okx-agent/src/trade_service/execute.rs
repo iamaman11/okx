@@ -2170,7 +2170,14 @@ fn verify_local_intent_coverage_scoped(
                     })
             });
             if !matching_release {
-                return Err("COHORT_TERMINAL_RISK_RELEASE_PENDING".into());
+                return Err(match terminal_release {
+                    Some(scope) if scope.intent_id == intent.intent_id => {
+                        "COHORT_TERMINAL_RELEASE_RECEIPT_MISMATCH"
+                    }
+                    Some(_) => "COHORT_OTHER_TERMINAL_RISK_RELEASE_PENDING",
+                    None => "COHORT_TERMINAL_RISK_RELEASE_PENDING",
+                }
+                .into());
             }
             release_scope_matched = true;
         }
@@ -3183,15 +3190,11 @@ mod tests {
                 &account,
                 Some(scope),
             ),
-            Err("COHORT_TERMINAL_RISK_RELEASE_PENDING".into())
+            Err("COHORT_TERMINAL_RELEASE_RECEIPT_MISMATCH".into())
         );
         for wrong in [
             TerminalReleaseCensusScope {
                 account_key: "wrong",
-                ..scope
-            },
-            TerminalReleaseCensusScope {
-                intent_id: "wrong",
                 ..scope
             },
             TerminalReleaseCensusScope {
@@ -3210,9 +3213,21 @@ mod tests {
                     &account,
                     Some(wrong),
                 ),
-                Err("COHORT_TERMINAL_RISK_RELEASE_PENDING".into())
+                Err("COHORT_TERMINAL_RELEASE_RECEIPT_MISMATCH".into())
             );
         }
+        assert_eq!(
+            verify_local_intent_coverage_scoped(
+                &[(terminal.clone(), Some(receipt.clone()))],
+                &unresolved,
+                &account,
+                Some(TerminalReleaseCensusScope {
+                    intent_id: "wrong",
+                    ..scope
+                }),
+            ),
+            Err("COHORT_OTHER_TERMINAL_RISK_RELEASE_PENDING".into())
+        );
         assert_eq!(
             verify_local_intent_coverage_scoped(
                 &[(intent.clone(), Some(receipt.clone()))],
@@ -3238,7 +3253,7 @@ mod tests {
                 &account,
                 Some(scope),
             ),
-            Err("COHORT_TERMINAL_RISK_RELEASE_PENDING".into())
+            Err("COHORT_OTHER_TERMINAL_RISK_RELEASE_PENDING".into())
         );
         let mut attempted = intent.clone();
         attempted.state = IntentState::Prepared;
