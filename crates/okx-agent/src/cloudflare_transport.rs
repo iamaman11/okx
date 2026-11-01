@@ -1955,15 +1955,18 @@ mod raw_native_session_tests {
                     "cTime":close_time,"uTime":close_time
                 }])),
             });
-            let close = trade.trade(
-                "fixture-a",
-                &okx_protocol::trading::TradeRequest::Close {
-                    idempotency_key: "t09_real_public_close_0001".into(),
-                    reference: idempotent_intent_id.clone(),
-                    expires_in_ms: 30_000,
-                },
-                None,
-            ).await.expect("T09.1 Close must use production TradeService");
+            let close = trade
+                .trade(
+                    "fixture-a",
+                    &okx_protocol::trading::TradeRequest::Close {
+                        idempotency_key: "t09_real_public_close_0001".into(),
+                        reference: idempotent_intent_id.clone(),
+                        expires_in_ms: 30_000,
+                    },
+                    None,
+                )
+                .await
+                .expect("T09.1 Close must use production TradeService");
             assert_eq!(
                 feed.outbound_posts.lock().unwrap().len(),
                 2,
@@ -1973,10 +1976,7 @@ mod raw_native_session_tests {
                 close["data"]["intent"]["exchange_order_id"],
                 "recorded-t09-close-001"
             );
-            assert_ne!(
-                close["data"]["intent"]["intent_id"],
-                idempotent_intent_id
-            );
+            assert_ne!(close["data"]["intent"]["intent_id"], idempotent_intent_id);
             println!(
                 "T09_1_NATIVE_CLOSE_ACK_V1:{}",
                 json!({
