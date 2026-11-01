@@ -2547,6 +2547,60 @@ mod raw_native_session_tests {
             // substituted. Both SQL and Worker remain production owners.
             if std::env::var("OKX_T09_2_ADMISSION_PROBE").as_deref() == Ok("1") {
                 use crate::accounts::recorded_support::{RecordedGet, RecordedPost};
+                // The first financial owner was stopped before the terminal
+                // T09.1 source phase. The next public entry requires its own
+                // fresh source frontier from the SAME production maintenance
+                // lifecycle, not an ignored readiness error or extra Engine.
+                let (second_shutdown, second_rx) = watch::channel(false);
+                let second_trade = trade.clone();
+                let second_maintenance = tokio::spawn(async move {
+                    second_trade.run(second_rx).await;
+                });
+                let mut last_readiness = String::from("NOT_OBSERVED");
+                tokio::time::timeout(Duration::from_secs(15), async {
+                    loop {
+                        let through = chrono::Utc::now().timestamp_millis() - 2_000;
+                        let mut all_ready = true;
+                        for alias in ["fixture-a", "fixture-b"] {
+                            let owner = accounts.resolve(alias).await.unwrap();
+                            let campaign = campaign_id.clone();
+                            match owner
+                                .execution
+                                .store
+                                .call(
+                                    std::time::Instant::now() + Duration::from_secs(2),
+                                    move |s| {
+                                        s.verify_campaign_entry_readiness(
+                                            &campaign,
+                                            native_origin,
+                                            through,
+                                        )
+                                    },
+                                )
+                                .await
+                            {
+                                Ok(()) => {}
+                                Err(error) => {
+                                    last_readiness = format!("{alias}: {error}");
+                                    all_ready = false;
+                                    break;
+                                }
+                            }
+                        }
+                        if all_ready {
+                            break;
+                        }
+                        // Only bounded read-only campaign-source polling.
+                        // The venue POST remains one-shot after proof.
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                    }
+                })
+                .await
+                .unwrap_or_else(|_| {
+                    panic!(
+                        "T09.2 production campaign source frontier not refreshed: {last_readiness}"
+                    )
+                });
                 let mut before_cmd = summary("risk_t09_2_before_preview");
                 before_cmd.installation_id = "installation_test".into();
                 let before = risk.request(before_cmd).await.unwrap();
@@ -2820,6 +2874,11 @@ mod raw_native_session_tests {
                         "post_ack_financial_complete":accepted["data"]["financial_complete"]
                     })
                 );
+                second_shutdown.send(true).unwrap();
+                tokio::time::timeout(Duration::from_secs(10), second_maintenance)
+                    .await
+                    .expect("T09.2 financial maintenance did not terminate")
+                    .unwrap();
             }
             feed_shutdown.send(true).unwrap();
         }
