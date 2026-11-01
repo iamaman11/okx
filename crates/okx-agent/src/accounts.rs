@@ -978,6 +978,43 @@ pub(crate) mod recorded_support {
             self.optional_reads.lock().unwrap().push(page);
         }
 
+        /// At an explicitly verified venue transition (such as the CLOSE
+        /// ACK), retire the previous finite raw source pages and register the
+        /// next immutable HTTP responses. This operates ONLY on the recorded
+        /// transport and cannot touch SQLite, Worker state or live trading.
+        /// A missing route or a response for another account is an error.
+        pub(crate) fn advance_recorded_route(
+            &self,
+            access_key: &str,
+            path: &str,
+            pages: Vec<RecordedGet>,
+        ) -> usize {
+            assert!(!pages.is_empty(), "TRANSCRIPT_PHASE_WITHOUT_SOURCE");
+            assert!(
+                self.strict_read_routes
+                    .lock()
+                    .unwrap()
+                    .contains(&(access_key.to_owned(), path.to_owned())),
+                "TRANSCRIPT_PHASE_UNREGISTERED_ROUTE:{access_key}:{path}"
+            );
+            assert!(
+                pages
+                    .iter()
+                    .all(|page| page.access_key == access_key && page.path == path),
+                "TRANSCRIPT_PHASE_CROSS_ACCOUNT_OR_ROUTE"
+            );
+            let mut required = self.reads.lock().unwrap();
+            let retired = required
+                .iter()
+                .filter(|page| page.access_key == access_key && page.path == path)
+                .count();
+            required.retain(|page| page.access_key != access_key || page.path != path);
+            let mut optional = self.optional_reads.lock().unwrap();
+            optional.retain(|page| page.access_key != access_key || page.path != path);
+            required.extend(pages);
+            retired
+        }
+
         pub(crate) fn unconsumed_reads(&self) -> usize {
             self.reads.lock().unwrap().len()
         }
@@ -1053,6 +1090,11 @@ pub(crate) mod recorded_support {
                     if !key.starts_with("fixture-executor-") {
                         return Err(OkxError::Response("TRANSCRIPT_POST_NOT_EXECUTOR".into()));
                     }
+                    if path != "/api/v5/trade/order"
+                        && path != "/api/v5/trade/cancel-algos"
+                    {
+                        return Err(OkxError::Response("TRANSCRIPT_POST_ROUTE_UNRECOGNIZED".into()));
+                    }
                     let mut expected = self.posts.lock().unwrap();
                     let index = expected
                         .iter()
@@ -1060,37 +1102,45 @@ pub(crate) mod recorded_support {
                         .ok_or_else(|| OkxError::Response("TRANSCRIPT_UNEXPECTED_POST".into()))?;
                     let post = &expected[index];
                     let mut body = post.expected_body.clone();
-                    let client_id = observed
-                        .get("clOrdId")
-                        .and_then(serde_json::Value::as_str)
-                        .ok_or_else(|| OkxError::Response("TRANSCRIPT_CLIENT_ID_MISSING".into()))?;
-                    if client_id.is_empty()
-                        || client_id.len() > 32
-                        || !client_id.bytes().all(|b| b.is_ascii_alphanumeric())
-                    {
-                        return Err(OkxError::Response("TRANSCRIPT_CLIENT_ID_INVALID".into()));
-                    }
-                    if body.get("clOrdId").and_then(serde_json::Value::as_str)
-                        == Some("__REQUEST_CL_ORD_ID__")
-                    {
-                        body["clOrdId"] = client_id.into();
-                    }
-                    if let Some(attached) = body
-                        .get_mut("attachAlgoOrds")
-                        .and_then(serde_json::Value::as_array_mut)
-                    {
-                        for algo in attached {
-                            if algo
-                                .get("attachAlgoClOrdId")
-                                .and_then(serde_json::Value::as_str)
-                                == Some("__REQUEST_ATTACH_ALGO_ID__")
-                            {
-                                let prefix = client_id.get(..31).ok_or_else(|| {
-                                    OkxError::Response("TRANSCRIPT_ATTACH_CLIENT_ID_INVALID".into())
-                                })?;
-                                algo["attachAlgoClOrdId"] = format!("s{prefix}").into();
+                    let mut client_id = None;
+                    if path == "/api/v5/trade/order" {
+                        let id = observed
+                            .get("clOrdId")
+                            .and_then(serde_json::Value::as_str)
+                            .ok_or_else(|| {
+                                OkxError::Response("TRANSCRIPT_CLIENT_ID_MISSING".into())
+                            })?;
+                        if id.is_empty()
+                            || id.len() > 32
+                            || !id.bytes().all(|b| b.is_ascii_alphanumeric())
+                        {
+                            return Err(OkxError::Response("TRANSCRIPT_CLIENT_ID_INVALID".into()));
+                        }
+                        if body.get("clOrdId").and_then(serde_json::Value::as_str)
+                            == Some("__REQUEST_CL_ORD_ID__")
+                        {
+                            body["clOrdId"] = id.into();
+                        }
+                        if let Some(attached) = body
+                            .get_mut("attachAlgoOrds")
+                            .and_then(serde_json::Value::as_array_mut)
+                        {
+                            for algo in attached {
+                                if algo
+                                    .get("attachAlgoClOrdId")
+                                    .and_then(serde_json::Value::as_str)
+                                    == Some("__REQUEST_ATTACH_ALGO_ID__")
+                                {
+                                    let prefix = id.get(..31).ok_or_else(|| {
+                                        OkxError::Response(
+                                            "TRANSCRIPT_ATTACH_CLIENT_ID_INVALID".into(),
+                                        )
+                                    })?;
+                                    algo["attachAlgoClOrdId"] = format!("s{prefix}").into();
+                                }
                             }
                         }
+                        client_id = Some(id.to_owned());
                     }
                     if body != observed {
                         return Err(OkxError::Response("TRANSCRIPT_POST_BODY_MISMATCH".into()));
@@ -1100,15 +1150,19 @@ pub(crate) mod recorded_support {
                     // Binding a dynamic client order ID to pre-recorded raw
                     // response bytes does not generate fills, fees or balances.
                     let response = String::from_utf8(recorded.raw_response)
-                        .map_err(|_| OkxError::Response("TRANSCRIPT_RESPONSE_UTF8".into()))?
-                        .replace("__REQUEST_CL_ORD_ID__", client_id);
+                        .map_err(|_| OkxError::Response("TRANSCRIPT_RESPONSE_UTF8".into()))?;
+                    let response = if let Some(client_id) = client_id.as_deref() {
+                        response.replace("__REQUEST_CL_ORD_ID__", client_id)
+                    } else {
+                        response
+                    };
                     if path == "/api/v5/trade/order" {
                         let parsed: serde_json::Value = serde_json::from_str(&response)?;
                         let rows = parsed["data"].as_array().ok_or_else(|| {
                             OkxError::Response("TRANSCRIPT_CREATE_ACK_UNBOUND".into())
                         })?;
                         if rows.len() != 1
-                            || rows[0]["clOrdId"].as_str() != Some(client_id)
+                            || rows[0]["clOrdId"].as_str() != client_id.as_deref()
                             || rows[0]["sCode"].as_str() != Some("0")
                         {
                             return Err(OkxError::Response("TRANSCRIPT_CREATE_ACK_UNBOUND".into()));
@@ -1121,7 +1175,10 @@ pub(crate) mod recorded_support {
                             })?;
                         self.acknowledged_creates.lock().unwrap().push((
                             key.to_owned(),
-                            client_id.to_owned(),
+                            client_id
+                                .ok_or_else(|| {
+                                    OkxError::Response("TRANSCRIPT_CLIENT_ID_MISSING".into())
+                                })?,
                             ord_id.to_owned(),
                         ));
                     }
