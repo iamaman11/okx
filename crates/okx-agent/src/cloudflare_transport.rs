@@ -1715,10 +1715,16 @@ mod raw_native_session_tests {
             1,
             "identical Execute must not post to OKX twice"
         );
-        assert_eq!(
-            feed.unconsumed_reads(),
-            usize::from(replay_readback_unknown),
-            "all admission sources must be consumed; an unsent order GET may remain only after explicit UNKNOWN"
+        // A read-only replay may return UNKNOWN even after transport has
+        // consumed the raw GET: a deadline or decode/readback failure does
+        // not turn the observation into a verified outcome. Only an
+        // *unattempted* read leaves exactly one queued transcript reply.
+        // Both cases must remain no-resubmit and subsequently reconcile.
+        let replay_remaining = feed.unconsumed_reads();
+        assert!(
+            replay_remaining == 0 || (replay_readback_unknown && replay_remaining == 1),
+            "T09_5_REPLAY_TRANSCRIPT_INVALID: status={}, remaining={replay_remaining}",
+            repeated["status"]
         );
         let mut after_public = summary("risk_after_public_trade_post_001");
         after_public.installation_id = "installation_test".into();
