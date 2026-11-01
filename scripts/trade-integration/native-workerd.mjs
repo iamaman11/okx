@@ -50,6 +50,10 @@ export async function actualNativeWorker(root, signal, { statusProbe = false } =
           reason_code: String(source.reason_code).slice(0, 1200),
           source_reason_code: source.source_reason_code ?? null,
           outbound_posts: source.outbound_posts,
+          unconsumed_recorded_posts: source.unconsumed_recorded_posts ?? null,
+          last_outbound_post: source.last_outbound_post ?? null,
+          close_status: source.close_result?.status ?? null,
+          close_reason_code: source.close_result?.reason_code ?? null,
         };
         process.stderr.write("T09_1_CLOSE_DENIAL_EVIDENCE_V1:" +
           JSON.stringify(detail) + "\n");
