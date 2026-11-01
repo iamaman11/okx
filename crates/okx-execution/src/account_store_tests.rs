@@ -3665,9 +3665,26 @@ fn e1_missing_swap_bill_id_reconciles_once_from_original_sql_sources() {
             .unwrap();
         assert_eq!(count, 1, "restart may not charge the bill again");
 
-        // A later competing bill must invalidate the *previously successful*
-        // witness even though the existing immutable source link remains.
-        // The new bill is a real distinct source fact: do not discard its fee.
+        let mut reopened = reopened;
+        // A later bill outside the fixed readback window must not rewrite
+        // an already authenticated immutable through=7 witness.
+        let mut future = bills_page.clone();
+        let future_id = "late-fee-future";
+        let future_key = format!("bill:{future_id}");
+        future.bills[0].bill_id = future_id.into();
+        future.bills[0].economic_event_key = future_key.clone();
+        future.bills[0].time = 8;
+        future.bill_order_sources[0].bill_id = future_id.into();
+        future.finance[0].entry_id = format!("{future_key}:fee");
+        future.finance[0].economic_event_key = future_key.clone();
+        future.finance[0].source_ref = future_key;
+        future.finance[0].time = 8;
+        future.cursor = None;
+        reopened.ingest_page(&future).unwrap();
+        assert_eq!(reopened.intent_fee_bill_evidence("intent", 7).unwrap(), witness);
+
+        // A competing bill INSIDE the fixed window invalidates the
+        // previously valid witness. Preserve all immutable source charges.
         let mut competing = bills_page.clone();
         let second_id = "late-fee-second";
         let second_key = format!("bill:{second_id}");
@@ -3678,7 +3695,6 @@ fn e1_missing_swap_bill_id_reconciles_once_from_original_sql_sources() {
         competing.finance[0].economic_event_key = second_key.clone();
         competing.finance[0].source_ref = second_key;
         competing.cursor = None;
-        let mut reopened = reopened;
         reopened.ingest_page(&competing).unwrap();
         assert!(matches!(
             reopened.intent_fee_bill_evidence("intent", 7),
@@ -3692,7 +3708,7 @@ fn e1_missing_swap_bill_id_reconciles_once_from_original_sql_sources() {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(fee_count, 2, "do not silently drop a distinct bill");
+        assert_eq!(fee_count, 3, "do not silently drop distinct fee bills");
         let db = reopened.path.clone();
         drop(reopened);
         let again =

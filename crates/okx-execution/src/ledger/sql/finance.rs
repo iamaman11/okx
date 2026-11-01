@@ -2273,9 +2273,10 @@ impl AccountStore {
                      JOIN bills b ON b.bill_id=o.bill_id
                      JOIN finance_entries e ON e.economic_event_key=b.economic_event_key
                        AND e.component='FEE' AND e.allocation_leg='account'
-                     WHERE f.fill_id=?1 ORDER BY b.bill_id LIMIT 65",
+                     WHERE f.fill_id=?1 AND b.time<=?2
+                     ORDER BY b.bill_id LIMIT 65",
                 )?;
-                let mut bill_rows = candidates.query([&id])?;
+                let mut bill_rows = candidates.query(params![&id, through])?;
                 let mut scanned = 0_u32;
                 let mut matched: Option<String> = None;
                 while let Some(bill_row) = bill_rows.next()? {
