@@ -952,6 +952,11 @@ pub(crate) mod recorded_support {
         acknowledged_creates: Mutex<Vec<(String, String, String)>>,
         posts: Mutex<Vec<RecordedPost>>,
         reads: Mutex<Vec<RecordedGet>>,
+        // Bounded extra recorded GET bytes for read-only Preview retries
+        // after a proven LOCAL no-send rate defer. Required fixture pages
+        // remain mandatory and are consumed first; extras are never a
+        // fallback for missing routes or an unbounded exchange simulator.
+        optional_reads: Mutex<Vec<RecordedGet>>,
         // Raw public time responses, never a synthesized exchange clock.
         public_clock_reads: Mutex<Vec<Vec<u8>>>,
         strict_read_routes: Mutex<std::collections::BTreeSet<(String, String)>>,
@@ -963,6 +968,14 @@ pub(crate) mod recorded_support {
                 .unwrap()
                 .insert((page.access_key.clone(), page.path.clone()));
             self.reads.lock().unwrap().push(page);
+        }
+
+        pub(crate) fn expect_optional_get(&self, page: RecordedGet) {
+            self.strict_read_routes
+                .lock()
+                .unwrap()
+                .insert((page.access_key.clone(), page.path.clone()));
+            self.optional_reads.lock().unwrap().push(page);
         }
 
         pub(crate) fn unconsumed_reads(&self) -> usize {
@@ -1145,33 +1158,37 @@ pub(crate) mod recorded_support {
                     None
                 };
                 if scripted {
-                    let mut reads = self.reads.lock().unwrap();
-                    let index = reads
-                        .iter()
-                        .position(|page| {
-                            page.access_key == key
-                                && page.path == path
-                                && page.required_query.iter().all(|(name, expected)| {
-                                    request.url().query_pairs().any(|(k, v)| {
-                                        k.as_ref() == name.as_str()
-                                            && v.as_ref() == expected.as_str()
-                                    })
+                    let matches_page = |page: &RecordedGet| {
+                        page.access_key == key
+                            && page.path == path
+                            && page.required_query.iter().all(|(name, expected)| {
+                                request.url().query_pairs().any(|(k, v)| {
+                                    k.as_ref() == name.as_str()
+                                        && v.as_ref() == expected.as_str()
                                 })
-                                && requested_client.as_ref().is_none_or(|client| {
-                                    recorded_order_source_matches(
-                                        &self.acknowledged_creates.lock().unwrap(),
-                                        key,
-                                        client,
-                                        &page.raw_response,
-                                    )
-                                })
-                        })
-                        .ok_or_else(|| {
-                            OkxError::Response(
-                                "TRANSCRIPT_SOURCE_PAGE_UNEXPECTED_OR_EXHAUSTED".into(),
-                            )
+                            })
+                            && requested_client.as_ref().is_none_or(|client| {
+                                recorded_order_source_matches(
+                                    &self.acknowledged_creates.lock().unwrap(),
+                                    key,
+                                    client,
+                                    &page.raw_response,
+                                )
+                            })
+                    };
+                    let mut required = self.reads.lock().unwrap();
+                    let page = if let Some(index) = required.iter().position(&matches_page) {
+                        required.remove(index)
+                    } else {
+                        drop(required);
+                        let mut optional = self.optional_reads.lock().unwrap();
+                        let index = optional.iter().position(&matches_page).ok_or_else(|| {
+                            OkxError::Response(format!(
+                                "TRANSCRIPT_SOURCE_PAGE_UNEXPECTED_OR_EXHAUSTED:{key}:{path}"
+                            ))
                         })?;
-                    let page = reads.remove(index);
+                        optional.remove(index)
+                    };
                     // Order readback is an independently recorded raw GET,
                     // not a synthetic response to POST. Only its dynamic
                     // clOrdId is bound to the one actually observed executor
