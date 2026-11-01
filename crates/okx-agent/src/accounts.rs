@@ -415,7 +415,10 @@ impl AccountRuntimeRegistry {
         credentials: NamedAccountCredentials,
         initialize: bool,
     ) -> AgentResult<Arc<AccountResources>> {
-        let clients = PreparedAccountClients::live(credentials, self.rate_budget.clone())?;
+        let budget = self
+            .rate_budget
+            .for_authenticated_user(&configuration.account_key.verified_uid);
+        let clients = PreparedAccountClients::live(credentials, budget)?;
         let leases = crate::config::default_root().join("account-leases");
         self.open_resources_with_clients(configuration, clients, initialize, &leases)
             .await
@@ -1476,6 +1479,7 @@ pub(crate) mod recorded_support {
             _ => panic!("unexpected recorded account"),
         };
         let environment = OkxEnvironment::new(okx_api::Region::Global, false);
+        let budget = budget.for_authenticated_user(uid);
         let observed = Credentials::new(
             format!("fixture-observer-{label}"),
             "observer-secret".into(),
@@ -1534,20 +1538,30 @@ pub(crate) mod recorded_support {
             let (_, a) =
                 prepared_with_socket("a", feed.clone(), Arc::new(OfflineSocket), budget.clone());
             let (_, b) = prepared_with_socket("b", feed, Arc::new(OfflineSocket), budget.clone());
-            let plan = budget.private_rest_plan("/api/v5/account/config", &[]);
+            let plan = a
+                .observer
+                .rate_budget()
+                .private_rest_plan("/api/v5/account/config", &[]);
             for _ in 0..5 {
                 a.observer.rate_budget().admit(&plan).unwrap();
             }
-            for identity in [
-                a.executor.rate_budget(),
-                b.observer.rate_budget(),
-                b.executor.rate_budget(),
-            ] {
-                let denial = identity.admit(&plan).unwrap_err();
-                assert!(!denial.request_sent, "local throttle must not send HTTP");
-                assert_eq!(denial.domain.local_max_requests, 5);
-                assert!(denial.local_defer_ms > 0);
+            let a_plan = a
+                .executor
+                .rate_budget()
+                .private_rest_plan("/api/v5/account/config", &[]);
+            let a_denied = a.executor.rate_budget().admit(&a_plan).unwrap_err();
+            assert!(!a_denied.request_sent, "same-user identities share quota");
+            assert_eq!(a_denied.domain.local_max_requests, 5);
+            let b_plan = b
+                .observer
+                .rate_budget()
+                .private_rest_plan("/api/v5/account/config", &[]);
+            for _ in 0..5 {
+                b.observer.rate_budget().admit(&b_plan).unwrap();
             }
+            let b_denied = b.executor.rate_budget().admit(&b_plan).unwrap_err();
+            assert!(!b_denied.request_sent, "second account has its own bound");
+            assert_ne!(a_denied.domain.scope, b_denied.domain.scope);
         }
 
         #[test]

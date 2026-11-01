@@ -753,6 +753,78 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn concurrent_signed_reads_cannot_exceed_shared_user_http_budget() {
+        // Observer and Executor use different API keys but one native user
+        // RateBudget. Each admitted request crosses the real signed REST path.
+        let budget = RateBudget::new();
+        let wire = Arc::new(ScriptedDelivery::default());
+        for _ in 0..10 {
+            wire.responses.lock().unwrap().push_back((
+                "/api/v5/account/balance",
+                reply(
+                    StatusCode::OK,
+                    br#"{"code":"0","msg":"","data":[{"details":[]}]}"#,
+                ),
+            ));
+        }
+        let environment = OkxEnvironment::new(crate::config::Region::Global, false);
+        let observer = OkxRestClient::with_http_transport(
+            environment,
+            Credentials::new("observer-key".into(), "secret".into(), "pass".into()).unwrap(),
+            budget.clone(),
+            wire.clone(),
+        )
+        .unwrap();
+        let executor = OkxRestClient::with_http_transport(
+            environment,
+            Credentials::new("executor-key".into(), "secret".into(), "pass".into()).unwrap(),
+            budget,
+            wire.clone(),
+        )
+        .unwrap();
+
+        let mut tasks = tokio::task::JoinSet::new();
+        for index in 0..100 {
+            let client = if index % 2 == 0 {
+                observer.clone()
+            } else {
+                executor.clone()
+            };
+            tasks.spawn(async move {
+                client
+                    .private_get::<serde_json::Value>("/api/v5/account/balance", &[])
+                    .await
+            });
+        }
+        let mut admitted = 0;
+        let mut locally_denied = 0;
+        while let Some(joined) = tasks.join_next().await {
+            match joined.unwrap() {
+                Ok(rows) => {
+                    assert_eq!(rows.len(), 1);
+                    admitted += 1;
+                }
+                Err(OkxError::RateLimited { evidence })
+                    if !evidence.request_sent
+                        && evidence.domain.local_max_requests == 10
+                        && evidence.domain.local_window_ms == 2_000 =>
+                {
+                    locally_denied += 1;
+                }
+                other => panic!("unexpected signed read result: {other:?}"),
+            }
+        }
+        assert_eq!(admitted, 10, "identities share ten requests per 2s");
+        assert_eq!(locally_denied, 90, "no extra HTTP attempts");
+        let sends = wire.requests.lock().unwrap();
+        assert_eq!(sends.len(), 10);
+        assert!(sends.iter().all(|(_, headers)| {
+            headers.contains_key("OK-ACCESS-SIGN") && headers.contains_key("OK-ACCESS-KEY")
+        }));
+        assert_eq!(wire.responses.lock().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
     async fn bounded_private_balance_read_waits_only_before_http_and_fails_closed() {
         let rate = RateBudget::new();
         let plan = rate.private_rest_plan("/api/v5/account/balance", &[]);
