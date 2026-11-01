@@ -871,8 +871,12 @@ mod raw_native_session_tests {
         };
         for label in ["a", "b"] {
             let access_key = format!("fixture-observer-{label}");
-            for _ in 0..2 {
-                feed.expect_get(RecordedGet {
+            // Two mandatory reads per account prove both fee/leveraged plan
+            // paths. Four finite additional raw replies permit a read-only
+            // Preview to resume after a rate defer without a fixture server,
+            // a live fallback, or weakening required-page completion.
+            for attempt in 0..6 {
+                let page = RecordedGet {
                     access_key: access_key.clone(),
                     path: "/api/v5/account/trade-fee".into(),
                     required_query: vec![
@@ -883,10 +887,15 @@ mod raw_native_session_tests {
                         "instType":"SWAP","level":"Lv1","ts":stamp.to_string(),
                         "feeGroup":[{"groupId":"4","maker":"0.0005","taker":"0.0005"}]
                     }])),
-                });
+                };
+                if attempt < 2 {
+                    feed.expect_get(page);
+                } else {
+                    feed.expect_optional_get(page);
+                }
             }
-            for _ in 0..2 {
-                feed.expect_get(RecordedGet {
+            for attempt in 0..6 {
+                let page = RecordedGet {
                     access_key: access_key.clone(),
                     path: "/api/v5/account/leverage-info".into(),
                     required_query: vec![
@@ -897,7 +906,12 @@ mod raw_native_session_tests {
                         {"instId":"BTC-USDT-SWAP","mgnMode":"cross","posSide":"long","lever":"2"},
                         {"instId":"BTC-USDT-SWAP","mgnMode":"cross","posSide":"short","lever":"2"}
                     ])),
-                });
+                };
+                if attempt < 2 {
+                    feed.expect_get(page);
+                } else {
+                    feed.expect_optional_get(page);
+                }
             }
         }
         let trade = public_trade;
