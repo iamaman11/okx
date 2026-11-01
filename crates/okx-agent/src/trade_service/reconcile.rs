@@ -1516,7 +1516,11 @@ impl TradeService {
         {
             return Ok(());
         }
-        let snapshot = r.observer.snapshot().await.map_err(err)?;
+        // A local no-send read throttle must not strand an already-flat
+        // position with a live protective order. This fresh authenticated
+        // snapshot is still required before cancel-algos; only read admission
+        // may wait, bounded by the existing command deadline.
+        let snapshot = r.observer.snapshot_until(deadline()).await.map_err(err)?;
         verify_instrument_is_flat(
             &i.instrument_id,
             snapshot
