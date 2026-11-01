@@ -2335,17 +2335,18 @@ mod raw_native_session_tests {
                         Ok(snapshot) => break snapshot,
                         Err(error) => {
                             let reason = error.to_string();
-                            let remaining = capture_until
-                                .saturating_duration_since(std::time::Instant::now());
-                            let delay = reason
-                                .find("OKX rate/backpressure defer: ")
-                                .and_then(|index| {
-                                    recorded_preview_local_defer(
-                                        &reason[index..],
-                                        &rate_budget,
-                                        remaining,
-                                    )
-                                });
+                            let remaining =
+                                capture_until.saturating_duration_since(std::time::Instant::now());
+                            let delay =
+                                reason
+                                    .find("OKX rate/backpressure defer: ")
+                                    .and_then(|index| {
+                                        recorded_preview_local_defer(
+                                            &reason[index..],
+                                            &rate_budget,
+                                            remaining,
+                                        )
+                                    });
                             if let Some(delay) = delay {
                                 local_read_deferrals += 1;
                                 tokio::time::timeout_at(
@@ -2357,7 +2358,8 @@ mod raw_native_session_tests {
                                 continue;
                             }
                             let requests = feed.requests.lock().unwrap();
-                            let recent = requests.iter().rev().take(18).cloned().collect::<Vec<_>>();
+                            let recent =
+                                requests.iter().rev().take(18).cloned().collect::<Vec<_>>();
                             eprintln!(
                                 "T09_1_TERMINAL_CAPTURE_FAILURE_V1:{}",
                                 json!({
