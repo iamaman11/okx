@@ -409,10 +409,26 @@ try {
         process.stderr.write("T09_1_CLOSE_ERROR_FROM_RUST_V1:" +
           matches.at(-1)[1] + "\n");
       } else {
-        const cause = String(error.stderr ?? "").split(/\r?\n/)
-          .findLast(line => /panicked|error:|FAILED/.test(line)) ?? "";
-        process.stderr.write("T09_1_NATIVE_CHILD_EXCEPTION_V1:" +
-          cause.slice(-180) + "\n");
+        // Rust's test harness can put a final panic in stdout, while cargo
+        // reports only "test failed" on stderr. Inspect BOTH channels, then
+        // forward the precise, bounded assertion instead of a generic child
+        // process failure or the complete (potentially sensitive) transcript.
+        const lines = [String(error.stdout ?? ""), String(error.stderr ?? "")]
+          .flatMap(channel => channel.split(/\r?\n/))
+          .map(line => line.replace(/\x1b\[[0-9;]*m/g, "").trim());
+        const panic = lines.findLastIndex(line =>
+          /thread '.+' panicked at|panicked at .*:[0-9]+:[0-9]+:/.test(line));
+        const detail = panic >= 0
+          ? lines.slice(panic, panic + 7)
+          : lines.filter(line => /assertion|error: test failed|FAILED/.test(line)).slice(-5);
+        const cause = detail.map(line => line.slice(0, 800)).join(" | ");
+        process.stderr.write("T09_1_NATIVE_CHILD_FAILURE_V2:" + JSON.stringify({
+          schema:"okx.t09-native-child-failure/v2",
+          exit_code:String(error.code ?? "UNKNOWN").slice(0, 40),
+          rust_assertion:cause.slice(0, 1900) || "RUST_CHILD_EXIT_WITHOUT_ASSERTION",
+          restart_reached:recorded.includes("T09_1_NATIVE_SQL_RESTART_V1:"),
+          terminal_reached:recorded.includes("T09_1_NATIVE_TERMINAL_CLOSE_V1:"),
+        }) + "\n");
       }
       throw error;
     }
@@ -422,18 +438,34 @@ try {
     if (stderr) process.stderr.write(stderr);
     const afterNativeSocket = await session(second);
     const afterNative = await summary(afterNativeSocket, "risk_after_native_real_wss_0001");
-    assert.ok(Number(afterNative.budget?.reserved_loss_usd) > 2,
-      "the public TradeService Execute must reserve its own risk in central Worker");
     if (process.env.OKX_T09_1_STATUS_PROBE === "1") {
-      // Read the actual persistent Worker after Rust TradeService.status has
-      // performed its financial reconciliation. Do not fabricate settlement
-      // by sending a test-owned SETTLE_ENTRY or RELEASE command here.
+      // T09.1 has already closed the exact public order and released its
+      // reservation. Requiring reserved_loss > 2 here would incorrectly
+      // demand that a settled RELEASE remain HELD. Compare two independent
+      // actual WSS RiskBook reads across the Native process termination,
+      // never a synthetic test-owned SETTLE_ENTRY or RELEASE.
+      const nativeTerminal = receipt(stdout, "T09_1_NATIVE_TERMINAL_CLOSE_V1");
+      const nativeRestart = receipt(stdout, "T09_1_NATIVE_SQL_RESTART_V1");
+      assert.equal(nativeTerminal.opening_status?.data?.central_release?.state,
+        "verified", "Native must prove opening central RELEASE");
+      assert.equal(nativeTerminal.close_status?.data?.central_release?.state,
+        "verified", "Native must prove terminal local Close");
+      assert.equal(nativeTerminal.created_posts, 2,
+        "one opening and one closing venue POST only");
+      assert.equal(nativeRestart.active_central_receipt, false,
+        "Native SQL restart must not resurrect a released central reservation");
+      assert.equal(nativeRestart.remaining_lot_count, 0,
+        "Native SQL restart must retain zero open lots");
+      assert.deepEqual(afterNative.budget, nativeTerminal.worker_budget,
+        "reconnected persisted RiskBook must match terminal Native WSS budget");
       console.log("T09_1_WORKER_POST_FILL_EVIDENCE_V1:" + JSON.stringify({
         connection_generation:afterNativeSocket.hello.connection_generation,
         budget:afterNative.budget,
         risk_book_sequence:afterNative.risk_book_sequence,
       }));
     } else {
+      assert.ok(Number(afterNative.budget?.reserved_loss_usd) > 2,
+        "T09.5 public Execute must reserve its own risk in central Worker");
       assert.equal(afterNative.budget?.entry_budget?.reserved_usd, "5.0005",
         "Native component reservations (4) plus public Execute (1.0005) must share one RiskBook");
       assert.equal(afterNative.budget?.entry_budget?.consumed_usd, "0",

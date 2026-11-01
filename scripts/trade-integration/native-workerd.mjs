@@ -70,6 +70,17 @@ export async function actualNativeWorker(root, signal, { statusProbe = false } =
         throw Error("T09_1_TERMINAL_CAPTURE_FAILED:" +
           String(detail.source_reason).slice(0, 110));
       }
+      // The nested workerd script has access to cargo's stdout AND stderr.
+      // Preserve its bounded last Rust assertion instead of re-wrapping the
+      // unhelpful Node "Command failed" prefix. No raw HTTP bodies or secrets.
+      const childFailure = stderr.match(/T09_1_NATIVE_CHILD_FAILURE_V2:(\{[^\r\n]+\})/);
+      if (childFailure) {
+        const detail = JSON.parse(childFailure[1]);
+        process.stderr.write("T09_1_NATIVE_CHILD_FAILURE_V2:" +
+          JSON.stringify(detail) + "\n");
+        throw Error("NATIVE_RUST_ASSERTION:" +
+          String(detail.rust_assertion).slice(0, 1200));
+      }
       // Preserve deterministic Native phase markers and the complete final
       // Rust assertion in the CI job log. The short summary reason alone
       // previously reduced typed no-send evidence to "max_requests: 10".
