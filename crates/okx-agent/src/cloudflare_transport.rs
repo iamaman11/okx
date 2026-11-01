@@ -939,6 +939,7 @@ mod raw_native_session_tests {
                     connector.send_public_frame(frame.to_string());
                 }
             }
+            refreshed_at
         };
 
         let stopped = ["fixture-a", "fixture-b"].iter().map(|alias| async {
@@ -1428,7 +1429,7 @@ mod raw_native_session_tests {
         // market strictly by replaying a NEW, timestamped set of raw public WS
         // inputs into the existing connected production coordinator. There is
         // no direct market-state setter and no freshness-TTL exemption.
-        refresh_recorded_market();
+        let refreshed_at = refresh_recorded_market();
         tokio::time::timeout(Duration::from_secs(4), async {
             loop {
                 let rules = public_ws.instrument_rules("BTC-USDT-SWAP").await.unwrap();
