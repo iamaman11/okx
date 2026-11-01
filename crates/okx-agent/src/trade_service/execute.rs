@@ -1602,7 +1602,28 @@ impl TradeService {
         &self,
         state: &CentralGovernanceSnapshot,
     ) -> Result<NativeRiskCensus, String> {
-        self.census_with_reads(state, None, None, None, None)
+        self.census_with_reads(state, None, None, None, None, None)
+            .await
+            .map(|v| v.0)
+    }
+
+    /// Only the settlement-confirmed terminal-release path may supply this
+    /// exact one-reservation exception. No alternate or cached census owner.
+    pub(super) async fn census_for_terminal_release(
+        &self,
+        state: &CentralGovernanceSnapshot,
+        account_key: &str,
+        intent_id: &str,
+        reservation_key: &str,
+        plan_hash: &str,
+    ) -> Result<NativeRiskCensus, String> {
+        let scope = TerminalReleaseCensusScope {
+            account_key,
+            intent_id,
+            reservation_key,
+            plan_hash,
+        };
+        self.census_with_reads(state, None, None, None, None, Some(scope))
             .await
             .map(|v| v.0)
     }
@@ -1623,6 +1644,7 @@ impl TradeService {
                 Some((&selected.account_key, reserved_usd_per_usdt)),
                 Some(until),
                 Some(selected),
+                None,
             )
             .await?;
         let proof = CausalPostProof {
@@ -1644,6 +1666,7 @@ impl TradeService {
         fx_rate_check: Option<(&str, &str)>,
         until: Option<Instant>,
         selected: Option<&PostHeldSelected>,
+        terminal_release: Option<TerminalReleaseCensusScope<'_>>,
     ) -> Result<(NativeRiskCensus, Vec<PostAccountReadProof>), String> {
         if !self.accounts.failures().await.is_empty() {
             return Err("ACCOUNT_COHORT_UNAVAILABLE".into());
@@ -1665,6 +1688,7 @@ impl TradeService {
             .map(|c| async move {
                 // The timer starts before fetching any account/private/venue facts.
                 let selected = selected.filter(|w| w.account_key == c.account_key);
+                let release_scope = terminal_release.filter(|scope| scope.account_key == c.account_key);
                 let started = selected
                     .map(|w| w.started_after_held_ms)
                     .or_else(|| held_received.map(|tick| tick.elapsed().as_millis() as u64));
@@ -1689,6 +1713,10 @@ impl TradeService {
                         .snapshot_after_held_until(until.ok_or("POST_DEADLINE_MISSING")?)
                         .await
                         .map_err(err)?
+                } else if terminal_release.is_some() {
+                    // Terminal release needs the same fresh private GETs as
+                    // the regular census, with bounded LOCAL no-send admission.
+                    r.observer.snapshot_until(deadline()).await.map_err(err)?
                 } else {
                     r.observer.snapshot().await.map_err(err)?
                 };
@@ -1831,8 +1859,16 @@ impl TradeService {
                     .await
                     .map_err(err)?;
                 let (local_intents, pending_central) = local_intents;
-                let local_intent_digest =
-                    verify_local_intent_coverage(&local_intents, &pending_central, &c.account_key)?;
+                let local_intent_digest = if let Some(scope) = release_scope {
+                    verify_local_intent_coverage_scoped(
+                        &local_intents,
+                        &pending_central,
+                        &c.account_key,
+                        Some(scope),
+                    )?
+                } else {
+                    verify_local_intent_coverage(&local_intents, &pending_central, &c.account_key)?
+                };
                 if r.private_ws.status().await.connection_generation != generation
                     || !r.source_identity_ready().await
                     || !r
@@ -2066,6 +2102,19 @@ fn verify_post_held_entry_sources(
     Ok(())
 }
 
+/// A terminal release may gather a cohort census while precisely ONE
+/// SQL-backed reservation is still pending its central RELEASE. The caller
+/// must already have validated the terminal order, fill and bill coverage,
+/// zero attributed exposure, and a successful central SETTLE_ENTRY. This
+/// scope authorizes no other unresolved, POSTING or UNKNOWN intent.
+#[derive(Clone, Copy)]
+struct TerminalReleaseCensusScope<'a> {
+    account_key: &'a str,
+    intent_id: &'a str,
+    reservation_key: &'a str,
+    plan_hash: &'a str,
+}
+
 /// The SQL owner is the authority for the local send state. A missing venue
 /// row does not prove no-send after POSTING/UNKNOWN; preserve those obligations
 /// and deny further account risk until a terminal readback is reconciled.
@@ -2074,11 +2123,25 @@ fn verify_local_intent_coverage(
     unresolved: &[String],
     account_key: &str,
 ) -> Result<String, String> {
+    verify_local_intent_coverage_scoped(active, unresolved, account_key, None)
+}
+
+/// The only exception to terminal-pending denial is the exact intent whose
+/// central RELEASE is about to be constructed from a settled SQL proof.
+/// The pending reservation remains included in the content digest and all
+/// unrelated intents retain the normal fail-closed semantics.
+fn verify_local_intent_coverage_scoped(
+    active: &[(StoredIntent, Option<CentralReceipt>)],
+    unresolved: &[String],
+    account_key: &str,
+    terminal_release: Option<TerminalReleaseCensusScope<'_>>,
+) -> Result<String, String> {
     const PAGE_LIMIT: usize = 100;
     if active.len() >= PAGE_LIMIT {
         return Err("COHORT_LOCAL_INTENTS_TRUNCATED".into());
     }
     let mut ids = std::collections::BTreeSet::new();
+    let mut release_scope_matched = false;
     if unresolved.windows(2).any(|pair| pair[0] >= pair[1]) {
         return Err("COHORT_UNRESOLVED_INTENT_SCOPE_INVALID".into());
     }
@@ -2094,7 +2157,21 @@ fn verify_local_intent_coverage(
         }
         let central_pending = unresolved.binary_search(&intent.intent_id).is_ok();
         if intent.state.terminal() && central_pending {
-            return Err("COHORT_TERMINAL_RISK_RELEASE_PENDING".into());
+            let matching_release = terminal_release.is_some_and(|scope| {
+                scope.account_key == account_key
+                    && scope.intent_id == intent.intent_id
+                    && scope.plan_hash == intent.plan_hash
+                    && receipt.as_ref().is_some_and(|r| {
+                        r.account_key == scope.account_key
+                            && r.intent_id == scope.intent_id
+                            && r.plan_hash == scope.plan_hash
+                            && r.reservation_key == scope.reservation_key
+                    })
+            });
+            if !matching_release {
+                return Err("COHORT_TERMINAL_RISK_RELEASE_PENDING".into());
+            }
+            release_scope_matched = true;
         }
         if intent.state == IntentState::Prepared && central_pending {
             return Err("COHORT_UNRESOLVED_RESERVE_ATTEMPT".into());
@@ -2127,6 +2204,9 @@ fn verify_local_intent_coverage(
     }
     if unresolved.iter().any(|id| !ids.contains(id.as_str())) {
         return Err("COHORT_UNRESOLVED_INTENT_SCOPE_INVALID".into());
+    }
+    if terminal_release.is_some() && !release_scope_matched {
+        return Err("COHORT_TERMINAL_RELEASE_SCOPE_UNPROVEN".into());
     }
     digest(&(active, unresolved))
 }
