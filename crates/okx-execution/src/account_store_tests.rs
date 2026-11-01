@@ -3681,7 +3681,10 @@ fn e1_missing_swap_bill_id_reconciles_once_from_original_sql_sources() {
         future.finance[0].time = 8;
         future.cursor = None;
         reopened.ingest_page(&future).unwrap();
-        assert_eq!(reopened.intent_fee_bill_evidence("intent", 7).unwrap(), witness);
+        assert_eq!(
+            reopened.intent_fee_bill_evidence("intent", 7).unwrap(),
+            witness
+        );
 
         // A competing bill INSIDE the fixed window invalidates the
         // previously valid witness. Preserve all immutable source charges.
