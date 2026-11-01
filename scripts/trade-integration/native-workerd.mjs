@@ -70,11 +70,25 @@ export async function actualNativeWorker(root, signal, { statusProbe = false } =
         throw Error("T09_1_TERMINAL_CAPTURE_FAILED:" +
           String(detail.source_reason).slice(0, 110));
       }
+      // Preserve deterministic Native phase markers and the complete final
+      // Rust assertion in the CI job log. The short summary reason alone
+      // previously reduced typed no-send evidence to "max_requests: 10".
+      // Do not include raw HTTP bodies, signed headers, or environment data.
+      const stdout = String(error.stdout ?? "");
+      const phaseMarkers = [...stdout.matchAll(
+        /(T09_1_(?:NATIVE_[A-Z0-9_]+|TERMINAL_[A-Z0-9_]+|RECORDED_[A-Z0-9_]+))_V1:/g,
+      )].map(m => m[1]).slice(-15);
       const lines = stderr.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
-      const detail = lines.findLast(line => /T09_1_NATIVE_CHILD_EXCEPTION_V1:/.test(line))
-        ?? lines.findLast(line => /panicked|Error:|error:|FAILED/.test(line))
-        ?? error.message;
-      throw Error("NATIVE_WORKER_CHILD_FAILED:" + String(detail).slice(-168));
+      const panic = lines.findLastIndex(line => /panicked at|thread '.+' panicked/.test(line));
+      const failure = panic >= 0
+        ? lines.slice(panic, panic + 5).join(" ")
+        : lines.findLast(line => /T09_1_NATIVE_CHILD_EXCEPTION_V1:|Error:|error:|FAILED/.test(line))
+          ?? error.message;
+      process.stderr.write("T09_1_NATIVE_FAILURE_PHASE_V1:" + JSON.stringify({
+        phases: phaseMarkers,
+        cause: String(failure).slice(0, 2000),
+      }) + "\n");
+      throw Error("NATIVE_WORKER_CHILD_FAILED:" + String(failure).slice(0, 135));
     });
     assert.match(stdout, /t09_public_trade_execute_open_ack_and_idempotency PASS: posts=1/);
     assert.match(stdout, /native_to_persisted_workerd_riskbook PASS/);
