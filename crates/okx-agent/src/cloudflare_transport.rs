@@ -2531,70 +2531,86 @@ mod raw_native_session_tests {
                             .to_vec(),
                 });
                 let resource = accounts.resolve("fixture-a").await.unwrap();
-                // Reconciliation may hit the same authenticated private
-                // GET limiter as the concurrent financial owners. A LOCAL
-                // no-send receipt permits only a bounded read-only replay.
-                // It never retries an exchange POST or extends source TTL.
-                let capture_until = std::time::Instant::now() + Duration::from_secs(15);
-                let mut local_read_deferrals = 0_u32;
-                let terminal_capture = loop {
-                    let answer = crate::source_capture::capture_account_sources(
-                        &resource.observer,
-                        &resource.private_ws,
-                        &resource.execution,
-                    )
-                    .await;
-                    match answer {
-                        Ok(snapshot) => break snapshot,
-                        Err(error) => {
-                            let reason = error.to_string();
-                            let remaining =
-                                capture_until.saturating_duration_since(std::time::Instant::now());
-                            let delay =
-                                reason
-                                    .find("OKX rate/backpressure defer: ")
-                                    .and_then(|index| {
-                                        recorded_preview_local_defer(
-                                            &reason[index..],
-                                            &rate_budget,
-                                            remaining,
-                                        )
-                                    });
-                            if let Some(delay) = delay {
-                                local_read_deferrals += 1;
-                                tokio::time::timeout_at(
-                                    capture_until.into(),
-                                    tokio::time::sleep(delay),
-                                )
-                                .await
-                                .expect("T09.1 no-send finance read exceeded finite bound");
-                                continue;
-                            }
-                            let requests = feed.requests.lock().unwrap();
-                            let recent =
-                                requests.iter().rev().take(18).cloned().collect::<Vec<_>>();
-                            eprintln!(
-                                "T09_1_TERMINAL_CAPTURE_FAILURE_V1:{}",
-                                json!({
-                                    "source_reason":reason,
-                                    "local_read_deferrals":local_read_deferrals,
-                                    "unconsumed_required_pages":feed.unconsumed_reads(),
-                                    "recent_authenticated_gets":recent,
-                                    "outbound_post_count":feed.outbound_posts.lock().unwrap().len(),
-                                })
+                // AccountResources already owns one two-second financial source
+                // capture loop. Starting another capture here can read the same
+                // old cursor and race that owner to a later SQL upsert, causing
+                // SOURCE_CURSOR_REGRESSION. Observe the existing production
+                // source owner instead: its authenticated snapshot plus BOTH
+                // independently committed, monotonic fills/bills cursors.
+                // Nothing here writes a cursor, infers an empty source page,
+                // increases TTL or creates an additional financial owner.
+                let closed_ms: i64 = closing_at
+                    .parse()
+                    .expect("T09.1 terminal close exchange timestamp");
+                let mut last_capture_witness = json!(null);
+                let terminal_capture = tokio::time::timeout(Duration::from_secs(15), async {
+                    loop {
+                        let health = resource.source_capture_health.read().await.clone();
+                        let snapshot = resource.latest_snapshot.read().await.clone();
+                        let (fills, bills) = resource
+                            .execution
+                            .store
+                            .call(std::time::Instant::now() + Duration::from_secs(3), |s| {
+                                Ok((s.cursor("fills", "SWAP")?, s.cursor("bills", "account")?))
+                            })
+                            .await
+                            .expect("T09.1 read-only production finance owner readback");
+                        let source_ms = snapshot.as_ref().and_then(|s| {
+                            chrono::DateTime::parse_from_rfc3339(&s.source_received_at)
+                                .ok()
+                                .map(|t| t.timestamp_millis())
+                        });
+                        let fill_ready = fills.as_ref().is_some_and(|c| {
+                            c.generation > 0 && c.cursor.is_empty()
+                                && c.coverage_gaps.is_empty() && c.watermark >= closed_ms
+                        });
+                        let bill_ready = bills.as_ref().is_some_and(|c| {
+                            c.generation > 0 && c.cursor.is_empty()
+                                && c.coverage_gaps.is_empty() && c.watermark >= closed_ms
+                        });
+                        let source_ready = health.last_success_ms.is_some_and(|t| t >= closed_ms)
+                            && source_ms.is_some_and(|t| t >= closed_ms);
+                        last_capture_witness = json!({
+                            "capture_success_ms": health.last_success_ms,
+                            "capture_failure": health.reason_code,
+                            "snapshot_received_ms": source_ms,
+                            "source_ready": source_ready,
+                            "fill_ready": fill_ready,
+                            "bill_ready": bill_ready,
+                            "fills": fills,
+                            "bills": bills
+                        });
+                        if source_ready && fill_ready && bill_ready {
+                            let snapshot = snapshot
+                                .expect("T09.1 proven production source snapshot");
+                            assert!(
+                                snapshot.positions.is_empty(),
+                                "T09.1 signed post-close positions GET must prove flat"
                             );
-                            panic!("T09_1_TERMINAL_CAPTURE_FAILED:{error}");
+                            break snapshot;
                         }
+                        // Condition-driven read-only polling; the sole account
+                        // finance owner continues on its existing cadence.
+                        tokio::time::sleep(Duration::from_millis(50)).await;
                     }
-                };
+                })
+                .await
+                .unwrap_or_else(|_| {
+                    panic!(
+                        "T09_1_TERMINAL_SOURCE_OWNER_NOT_COHERENT:{last_capture_witness}"
+                    )
+                });
                 println!(
                     "T09_1_TERMINAL_CAPTURE_ADMISSION_V1:{}",
-                    json!({"local_no_send_private_get_deferrals":local_read_deferrals,
-                        "total_bound_ms":15000})
+                    json!({
+                        "owner":"existing_account_finance_cycle",
+                        "read_only_witness":last_capture_witness,
+                        "total_bound_ms":15000
+                    })
                 );
                 assert!(
                     terminal_capture.positions.is_empty(),
-                    "final position must come from empty authenticated positions GET"
+                    "final position must come from the authenticated financial owner"
                 );
                 let closing_intent_id = close["data"]["intent"]["intent_id"]
                     .as_str()
