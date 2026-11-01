@@ -326,8 +326,13 @@ pub(crate) async fn capture_account_sources_traced(
     // the durable source coverage and failure/replay semantics.
     let observer_result = tokio::try_join!(
         async {
+            // The financial source owner must not treat a LOCAL no-send
+            // RateBudget defer as missing account data. Use the same fresh
+            // authenticated REST snapshot with finite per-cycle admission;
+            // never retry a sent request, fall back to stale state, or change
+            // financial SQL/cursor ownership.
             observer
-                .snapshot()
+                .snapshot_until(deadline())
                 .await
                 .map_err(|_| invalid("ACCOUNT_SOURCE_UNAVAILABLE"))
         },
