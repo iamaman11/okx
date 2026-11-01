@@ -1619,10 +1619,127 @@ mod raw_native_session_tests {
                 }
             }
         });
-        let opened = trade
-            .trade("fixture-a", &execute, None)
-            .await
-            .expect("T09.1 public Execute must pass complete Native/Worker admission");
+        // An admission can be deferred by the SHARED production RateBudget
+        // while maintenance consumes the same authenticated private-GET
+        // domain. Retry is permitted here ONLY after a proven LOCAL,
+        // NOT_STARTED, RELEASED intent with zero venue POST attempts. Every
+        // subsequent request is a new explicit intent; an UNKNOWN/potentially
+        // sent mutation must NEVER be retried.
+        let mut execute = execute;
+        let opened = Box::pin(async {
+            let admission_deadline = std::time::Instant::now() + Duration::from_secs(16);
+            for attempt in 0..4 {
+                let admission = trade
+                    .trade("fixture-a", &execute, None)
+                    .await
+                    .expect("T09.1 public Execute must return its typed admission");
+                if admission["status"] == "partial" {
+                    return admission;
+                }
+                assert_eq!(
+                    admission["status"], "completed",
+                    "T09.1 cannot retry UNKNOWN or partial execution: {admission}"
+                );
+                assert_eq!(
+                    admission["data"]["state"], "REJECTED",
+                    "only definitive local rejection may permit a new intent: {admission}"
+                );
+                assert_eq!(
+                    admission["data"]["rejection_origin"], "LOCAL",
+                    "venue-side or unverified rejection cannot authorize retry: {admission}"
+                );
+                assert_eq!(
+                    admission["data"]["send_state"], "NOT_STARTED",
+                    "potentially sent POST must remain UNKNOWN/no-resubmit: {admission}"
+                );
+                assert_eq!(
+                    admission["data"]["risk_release_state"], "RELEASED",
+                    "risk must be released after definitive local rejection: {admission}"
+                );
+                assert_eq!(
+                    feed.outbound_posts.lock().unwrap().len(),
+                    0,
+                    "local rate denial must occur before ANY venue create attempt"
+                );
+                let reason = admission["data"]["primary_reason"]
+                    .as_str()
+                    .expect("T09.1 local denial must provide a reason");
+                let local_reason = reason.strip_prefix("OKX API error: ").unwrap_or(reason);
+                let remaining =
+                    admission_deadline.saturating_duration_since(std::time::Instant::now());
+                let delay = recorded_preview_local_defer(local_reason, &rate_budget, remaining)
+                    .unwrap_or_else(|| {
+                        panic!("T09.1 non-private-GET/nonlocal denial cannot retry: {admission}; rate={:?}",
+                            rate_budget.snapshot().last_throttle)
+                    });
+                assert!(attempt < 3, "T09.1 bounded local no-send recovery exhausted");
+                let mut audit = summary(&format!("risk_t09_1_local_no_send_{attempt}"));
+                audit.installation_id = "installation_test".into();
+                let after_denial = risk.request(audit).await.unwrap();
+                assert_eq!(
+                    after_denial.budget.as_ref().unwrap()
+                        .entry_budget.as_ref().unwrap().reserved_usd,
+                    "4",
+                    "a denied unsent opening must not retain central entry budget"
+                );
+                println!(
+                    "T09_1_LOCAL_NO_SEND_RATE_RECOVERY_V1:{}",
+                    json!({
+                        "attempt":attempt,
+                        "reason":reason,
+                        "delay_ms":delay.as_millis(),
+                        "outbound_posts":0,
+                        "reserved_entry_usd":"4",
+                    })
+                );
+                tokio::time::timeout_at(
+                    admission_deadline.into(),
+                    tokio::time::sleep(delay),
+                ).await.expect("T09.1 bounded local private GET defer expired");
+                refresh_recorded_market();
+                // Refresh signed external fee/leverage responses as RAW GETs;
+                // previous attempts' pages cannot be promoted to new venue time.
+                let retry_fee_at = chrono::Utc::now().timestamp_millis().to_string();
+                feed.advance_recorded_route(
+                    "fixture-observer-a",
+                    "/api/v5/account/trade-fee",
+                    (0..3).map(|_| RecordedGet {
+                        access_key: "fixture-observer-a".into(),
+                        path: "/api/v5/account/trade-fee".into(),
+                        required_query: vec![
+                            ("instType".into(), "SWAP".into()),
+                            ("instFamily".into(), "BTC-USDT".into()),
+                        ],
+                        raw_response: envelope(json!([{
+                            "instType":"SWAP","level":"Lv1","ts":retry_fee_at,
+                            "feeGroup":[{"groupId":"4","maker":"0.0005","taker":"0.0005"}]
+                        }])),
+                    }).collect(),
+                );
+                feed.advance_recorded_route(
+                    "fixture-observer-a",
+                    "/api/v5/account/leverage-info",
+                    (0..3).map(|_| RecordedGet {
+                        access_key: "fixture-observer-a".into(),
+                        path: "/api/v5/account/leverage-info".into(),
+                        required_query: vec![
+                            ("instId".into(), "BTC-USDT-SWAP".into()),
+                            ("mgnMode".into(), "cross".into()),
+                        ],
+                        raw_response: envelope(json!([
+                            {"instId":"BTC-USDT-SWAP","mgnMode":"cross","posSide":"long","lever":"2"},
+                            {"instId":"BTC-USDT-SWAP","mgnMode":"cross","posSide":"short","lever":"2"}
+                        ])),
+                    }).collect(),
+                );
+                let retry_clock = chrono::Utc::now().timestamp_millis().to_string();
+                feed.advance_recorded_public_clock(envelope(json!([{"ts":retry_clock}])));
+                if let TradeRequest::Execute { idempotency_key, .. } = &mut execute {
+                    *idempotency_key = format!("t09_real_public_execute_0001_rate_{attempt}");
+                }
+            }
+            panic!("T09.1 exhausted definitive local no-send admission attempts");
+        }).await;
         // Venue ACK and identity-bound order readback prove the create,
         // but no fill/fee/bill has been published. The production Engine
         // must report financial incompleteness instead of fabricated money.

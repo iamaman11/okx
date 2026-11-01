@@ -1030,6 +1030,17 @@ pub(crate) mod recorded_support {
             self.public_clock_reads.lock().unwrap().push(raw_response);
         }
 
+        /// At a proven LOCAL/NOT_STARTED admission denial, retire an unused
+        /// recorded exchange-clock reply and install new raw venue bytes.
+        /// This changes only the test HTTP boundary, not ClockEvidence.
+        pub(crate) fn advance_recorded_public_clock(&self, raw_response: Vec<u8>) -> usize {
+            let mut pending = self.public_clock_reads.lock().unwrap();
+            let retired = pending.len();
+            pending.clear();
+            pending.push(raw_response);
+            retired
+        }
+
         pub(crate) fn unconsumed_public_clock(&self) -> usize {
             self.public_clock_reads.lock().unwrap().len()
         }
