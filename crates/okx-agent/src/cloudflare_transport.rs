@@ -2135,6 +2135,7 @@ mod raw_native_session_tests {
                     "status":close["status"]
                 })
             );
+            Box::pin(async {
             // Explicitly transition only the RECORDED venue transport from
             // the still-open position to the authenticated terminal close.
             // The Native source-capture SQL owner itself is unchanged.
@@ -2398,6 +2399,8 @@ mod raw_native_session_tests {
                     "worker_risk_book_sequence":worker_terminal.risk_book_sequence
                 })
             );
+            })
+            .await;
             feed_shutdown.send(true).unwrap();
         }
         tokio::time::timeout(Duration::from_secs(3), public_feed)
