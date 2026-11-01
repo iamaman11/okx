@@ -951,6 +951,8 @@ pub(crate) mod recorded_support {
         /// Actual signed fee GETs delivered by this test transport:
         /// (account API key, exchange ts, local delivery timestamp).
         pub(crate) delivered_fees: Mutex<Vec<(String, String, i64)>>,
+        /// Strict test transcript GET denial paths only: no headers or secrets.
+        pub(crate) denied_routes: Mutex<Vec<String>>,
         /// (signed account key, exact sent clOrdId, acknowledged ordId).
         acknowledged_creates: Mutex<Vec<(String, String, String)>>,
         posts: Mutex<Vec<RecordedPost>>,
@@ -1061,6 +1063,7 @@ pub(crate) mod recorded_support {
                 if request.method() == "GET" && request.url().path() == "/api/v5/public/time" {
                     let mut queued = self.public_clock_reads.lock().unwrap();
                     if queued.is_empty() {
+                        self.denied_routes.lock().unwrap().push("TRANSCRIPT_CLOCK_EXHAUSTED".into());
                         return Err(OkxError::Response("TRANSCRIPT_CLOCK_EXHAUSTED".into()));
                     }
                     let body = queued.remove(0);
@@ -1252,9 +1255,11 @@ pub(crate) mod recorded_support {
                         drop(required);
                         let mut optional = self.optional_reads.lock().unwrap();
                         let index = optional.iter().position(&matches_page).ok_or_else(|| {
-                            OkxError::Response(format!(
+                            let missing = format!(
                                 "TRANSCRIPT_SOURCE_PAGE_UNEXPECTED_OR_EXHAUSTED:{key}:{path}"
-                            ))
+                            );
+                            self.denied_routes.lock().unwrap().push(missing.clone());
+                            OkxError::Response(missing)
                         })?;
                         optional.remove(index)
                     };
@@ -1348,6 +1353,7 @@ pub(crate) mod recorded_support {
                         serde_json::json!([])
                     }
                     _ => {
+                        self.denied_routes.lock().unwrap().push(format!("TRANSCRIPT_UNEXPECTED_REQUEST:{key}:{path}"));
                         return Err(OkxError::Response("TRANSCRIPT_UNEXPECTED_REQUEST".into()));
                     }
                 };

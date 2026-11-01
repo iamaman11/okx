@@ -2951,8 +2951,27 @@ mod raw_native_session_tests {
                         retired_stale_fees, 0,
                         "negative Execute must consume the lone stale signed fee reply"
                     );
+                    // Preview and the explicit negative Execute may already
+                    // consume all leverage-info pages. Bind the NEW signed
+                    // leverage observation to the positive admission phase.
+                    feed.advance_recorded_route(
+                        "fixture-observer-a",
+                        "/api/v5/account/leverage-info",
+                        (0..4).map(|_| RecordedGet {
+                            access_key: "fixture-observer-a".into(),
+                            path: "/api/v5/account/leverage-info".into(),
+                            required_query: vec![
+                                ("instId".into(), "BTC-USDT-SWAP".into()),
+                                ("mgnMode".into(), "cross".into()),
+                            ],
+                            raw_response: envelope(json!([
+                                {"instId":"BTC-USDT-SWAP","mgnMode":"cross","posSide":"long","lever":"2"},
+                                {"instId":"BTC-USDT-SWAP","mgnMode":"cross","posSide":"short","lever":"2"}
+                            ])),
+                        }).collect(),
+                    );
                     let new_clock = chrono::Utc::now().timestamp_millis().to_string();
-                    feed.expect_public_clock(envelope(json!([{"ts":new_clock}])));
+                    feed.advance_recorded_public_clock(envelope(json!([{"ts":new_clock}])));
                     feed.expect_post(RecordedPost {
                         access_key: "fixture-executor-a".into(),
                         path: "/api/v5/trade/order".into(),
@@ -3014,6 +3033,20 @@ mod raw_native_session_tests {
                         .trade("fixture-a", &second, None)
                         .await
                         .expect("T09.2 public TradeService must admit second 0.30 order");
+                    if accepted["status"] != "partial" {
+                        eprintln!(
+                            "T09_2_SIGNED_GET_DENIAL_V1:{}",
+                            json!({
+                                "outcome":accepted,
+                                "denied_routes":feed.denied_routes.lock().unwrap().clone(),
+                                "successful_gets":feed.requests.lock().unwrap().iter().rev().take(16).cloned().collect::<Vec<_>>(),
+                                "fee_source_timestamps":feed.delivered_fees.lock().unwrap().iter().rev().take(6).cloned().collect::<Vec<_>>(),
+                                "outbound_posts":feed.outbound_posts.lock().unwrap().len(),
+                                "unconsumed_required_gets":feed.unconsumed_reads(),
+                                "unconsumed_public_clock":feed.unconsumed_public_clock(),
+                            })
+                        );
+                    }
                     assert_eq!(
                         accepted["status"], "partial",
                         "T09.2 ACK-only is not financial settlement: {accepted}"

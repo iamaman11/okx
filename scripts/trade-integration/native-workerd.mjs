@@ -41,6 +41,12 @@ export async function actualNativeWorker(root, signal, { statusProbe = false, se
       // forwarding "Command failed: node ..." discards the actual blocker.
       // Prefer the final production assertion, then a Rust panic line.
       const stderr = String(error.stderr ?? "");
+      const signedGetDenial = stderr.match(/T09_2_SIGNED_GET_DENIAL_V1:(\{[^\r\n]+\})/);
+      if (signedGetDenial) {
+        const diagnostic = JSON.parse(signedGetDenial[1]);
+        process.stderr.write("T09_2_SIGNED_GET_DENIAL_V1:" +
+          JSON.stringify(diagnostic) + "\n");
+      }
       const recorded = stderr.match(/T09_1_CLOSE_ERROR_FROM_RUST_V1:(\{[^\r\n]+\})/);
       if (recorded) {
         const source = JSON.parse(recorded[1]);
