@@ -2615,7 +2615,7 @@ mod raw_native_session_tests {
                     .expect("T09.1 must read the actual SQL owner after close status");
                 assert!(
                     local_receipt_written && !close_still_pending,
-                    "T09.1_CLOSE_LOCAL_TERMINAL_UNRESOLVED: receipt={local_receipt_written}, pending={close_still_pending}"
+                    "T09.1_CLOSE_LOCAL_TERMINAL_UNRESOLVED: receipt={local_receipt_written}, pending={close_still_pending}, close_status={close_verified}"
                 );
                 let opening_verified = trade
                     .trade(
@@ -2969,6 +2969,54 @@ mod raw_native_session_tests {
                                 {"instId":"BTC-USDT-SWAP","mgnMode":"cross","posSide":"short","lever":"2"}
                             ])),
                         }).collect(),
+                    );
+                    // CLOSE has independently cancelled the old attached stop.
+                    // The next positive admission must receive NEW signed,
+                    // exhaustive derivatives-inventory GET pages. T09.1's
+                    // earlier finite transcript may have been consumed by
+                    // terminal reconciliation; missing scopes never mean zero.
+                    // These are raw HTTP boundary replies only; production
+                    // census, freshness and central risk checks remain active.
+                    let algo_kinds = [
+                        "conditional",
+                        "oco",
+                        "trigger",
+                        "move_order_stop",
+                        "chase",
+                        "iceberg",
+                        "twap",
+                        "smart_iceberg",
+                    ];
+                    let new_algo_pages = (0..5)
+                        .flat_map(|_| {
+                            ["SWAP", "FUTURES"].into_iter().flat_map(|inst_type| {
+                                algo_kinds.into_iter().map(move |kind| (inst_type, kind))
+                            })
+                        })
+                        .map(|(inst_type, kind)| RecordedGet {
+                            access_key: "fixture-observer-a".into(),
+                            path: "/api/v5/trade/orders-algo-pending".into(),
+                            required_query: vec![
+                                ("instType".into(), inst_type.into()),
+                                ("ordType".into(), kind.into()),
+                                ("limit".into(), "100".into()),
+                            ],
+                            raw_response: envelope(json!([])),
+                        })
+                        .collect();
+                    let retired_terminal_algo_pages = feed.advance_recorded_route(
+                        "fixture-observer-a",
+                        "/api/v5/trade/orders-algo-pending",
+                        new_algo_pages,
+                    );
+                    println!(
+                        "T09_2_ALGO_INVENTORY_TRANSCRIPT_V1:{}",
+                        json!({
+                            "terminal_pages_retired":retired_terminal_algo_pages,
+                            "fresh_signed_scopes":16,
+                            "max_reads_per_scope":5,
+                            "prior_close_release":"verified"
+                        })
                     );
                     let new_clock = chrono::Utc::now().timestamp_millis().to_string();
                     feed.advance_recorded_public_clock(envelope(json!([{"ts":new_clock}])));
