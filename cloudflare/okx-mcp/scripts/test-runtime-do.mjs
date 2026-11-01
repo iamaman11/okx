@@ -405,15 +405,26 @@ try {
     const afterNative = await summary(afterNativeSocket, "risk_after_native_real_wss_0001");
     assert.ok(Number(afterNative.budget?.reserved_loss_usd) > 2,
       "the public TradeService Execute must reserve its own risk in central Worker");
-    assert.equal(afterNative.budget?.entry_budget?.reserved_usd, "5.0005",
-      "Native component reservations (4) plus public Execute (1.0005) must share one RiskBook");
-    assert.equal(afterNative.budget?.entry_budget?.consumed_usd, "0",
-      "POST authorization is not a fabricated cash debit");
-    console.log("T09_5_WORKER_IDEMPOTENCY_EVIDENCE_V1:" + JSON.stringify({
-      connection_generation:afterNativeSocket.hello.connection_generation,
-      budget:afterNative.budget,
-      risk_book_sequence:afterNative.risk_book_sequence,
-    }));
+    if (process.env.OKX_T09_1_STATUS_PROBE === "1") {
+      // Read the actual persistent Worker after Rust TradeService.status has
+      // performed its financial reconciliation. Do not fabricate settlement
+      // by sending a test-owned SETTLE_ENTRY or RELEASE command here.
+      console.log("T09_1_WORKER_POST_FILL_EVIDENCE_V1:" + JSON.stringify({
+        connection_generation:afterNativeSocket.hello.connection_generation,
+        budget:afterNative.budget,
+        risk_book_sequence:afterNative.risk_book_sequence,
+      }));
+    } else {
+      assert.equal(afterNative.budget?.entry_budget?.reserved_usd, "5.0005",
+        "Native component reservations (4) plus public Execute (1.0005) must share one RiskBook");
+      assert.equal(afterNative.budget?.entry_budget?.consumed_usd, "0",
+        "POST authorization is not a fabricated cash debit");
+      console.log("T09_5_WORKER_IDEMPOTENCY_EVIDENCE_V1:" + JSON.stringify({
+        connection_generation:afterNativeSocket.hello.connection_generation,
+        budget:afterNative.budget,
+        risk_book_sequence:afterNative.risk_book_sequence,
+      }));
+    }
     afterNativeSocket.ws.close();
   }
   console.log(JSON.stringify({

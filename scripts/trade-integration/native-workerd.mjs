@@ -10,20 +10,24 @@ import { resolve } from "node:path";
 
 const exec = promisify(execFile);
 const hash = value => createHash("sha256").update(JSON.stringify(value)).digest("hex");
-let memo;
+const memo = new Map();
 function receipt(stdout, prefix) {
   const matches = [...stdout.matchAll(new RegExp(prefix + ":(\\{[^\\r\\n]+\\})", "g"))];
   assert.equal(matches.length, 1, prefix + " must have one authentic child readback");
   return JSON.parse(matches[0][1]);
 }
-export async function actualNativeWorker(root, signal) {
-  if (!memo) memo = (async () => {
+export async function actualNativeWorker(root, signal, { statusProbe = false } = {}) {
+  const key = statusProbe ? "post-fill-status" : "baseline";
+  if (!memo.has(key)) memo.set(key, (async () => {
     const { stdout, stderr } = await exec(
       process.execPath,
       [resolve(root, "cloudflare", "okx-mcp", "scripts", "test-runtime-do.mjs")],
       {
         cwd: root,
-        env: { ...process.env, OKX_NATIVE_WORKER_INTEGRATION: "1" },
+        env: {
+          ...process.env, OKX_NATIVE_WORKER_INTEGRATION: "1",
+          OKX_T09_1_STATUS_PROBE: statusProbe ? "1" : "0",
+        },
         signal,
         timeout: 115_000,
         maxBuffer: 12 * 1024 * 1024,
@@ -42,10 +46,15 @@ export async function actualNativeWorker(root, signal) {
       workerBootstrap: receipt(stdout, "T09_0_WORKER_EVIDENCE_V1"),
       nativeReplay: receipt(stdout, "T09_5_NATIVE_IDEMPOTENCY_EVIDENCE_V1"),
       nativeFinancial: receipt(stdout, "T09_1_NATIVE_FILL_BILL_EVIDENCE_V1"),
-      workerReplay: receipt(stdout, "T09_5_WORKER_IDEMPOTENCY_EVIDENCE_V1"),
+      ...(statusProbe
+        ? {
+          nativePostFill: receipt(stdout, "T09_1_NATIVE_POST_FILL_STATUS_V1"),
+          workerPostFill: receipt(stdout, "T09_1_WORKER_POST_FILL_EVIDENCE_V1"),
+        }
+        : { workerReplay: receipt(stdout, "T09_5_WORKER_IDEMPOTENCY_EVIDENCE_V1") }),
       transcript_sha256: createHash("sha256").update(stdout + stderr).digest("hex"),
     };
-  })();
-  return memo;
+  })());
+  return memo.get(key);
 }
 export { hash };

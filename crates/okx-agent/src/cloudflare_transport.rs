@@ -1836,6 +1836,92 @@ mod raw_native_session_tests {
                 "state":"FILL_AND_BILL_VERIFIED_CLOSE_RELEASE_PENDING"
             })
         );
+        // Optional independent T09.1 continuation. This uses the very same
+        // live TradeService, signed Executor GET, account SQL owner and central
+        // workerd RiskBook, but never changes the accepted T09.0/T09.5 run.
+        if std::env::var("OKX_T09_1_STATUS_PROBE").as_deref() == Ok("1") {
+            let after_fill_order = envelope(json!([{
+                "instId":"BTC-USDT-SWAP",
+                "ordId":"recorded-t09-opening-001",
+                "clOrdId":"__REQUEST_CL_ORD_ID__",
+                "side":"buy","posSide":"long","tdMode":"cross",
+                "ordType":"limit","px":"1000","sz":"0.1",
+                "accFillSz":"0.1","avgPx":"1000",
+                "state":"filled",
+                "cTime":financial_time,"uTime":financial_time
+            }]));
+            feed.expect_get(RecordedGet {
+                access_key: "fixture-executor-a".into(),
+                path: "/api/v5/trade/order".into(),
+                required_query: vec![("instId".into(), "BTC-USDT-SWAP".into())],
+                raw_response: after_fill_order,
+            });
+            let position = envelope(json!([{
+                "instType":"SWAP","instId":"BTC-USDT-SWAP",
+                "posSide":"long","pos":"0.1","mgnMode":"cross",
+                "avgPx":"1000","markPx":"1000","uTime":financial_time
+            }]));
+            for _ in 0..16 {
+                feed.expect_get(RecordedGet {
+                    access_key: "fixture-observer-a".into(),
+                    path: "/api/v5/account/positions".into(),
+                    required_query: vec![],
+                    raw_response: position.clone(),
+                });
+            }
+            let client = saved
+                .client_order_id
+                .get(..31)
+                .expect("native client ID is at least 31 bytes");
+            let stop_client = format!("s{client}");
+            feed.expect_get(RecordedGet {
+                access_key: "fixture-executor-a".into(),
+                path: "/api/v5/trade/order-algo".into(),
+                required_query: vec![("algoClOrdId".into(), stop_client.clone())],
+                raw_response: envelope(json!([{
+                    "instId":"BTC-USDT-SWAP",
+                    "algoId":"recorded-t09-stop-001",
+                    "algoClOrdId":stop_client,
+                    "state":"live","sz":"0.1","side":"sell",
+                    "posSide":"long","tdMode":"cross","ordType":"conditional",
+                    "slTriggerPx":"900","slTriggerPxType":"mark","slOrdPx":"-1"
+                }])),
+            });
+            let actual = trade
+                .trade(
+                    "fixture-a",
+                    &okx_protocol::trading::TradeRequest::Status {
+                        reference: idempotent_intent_id.clone(),
+                    },
+                    None,
+                )
+                .await
+                .expect("production trade.status must return its real evidence");
+            assert_eq!(
+                feed.outbound_posts.lock().unwrap().len(),
+                1,
+                "trade.status after a fill must never replay an exchange create"
+            );
+            let mut after_status = summary("risk_t09_1_after_public_status_001");
+            after_status.installation_id = "installation_test".into();
+            let observed = risk.request(after_status).await.unwrap();
+            println!(
+                "T09_1_NATIVE_POST_FILL_STATUS_V1:{}",
+                json!({
+                    "intent_id":idempotent_intent_id,
+                    "state":actual["data"]["intent"]["state"],
+                    "status":actual["status"],
+                    "entry_fill_evidence":actual["data"]["entry_fill_evidence"],
+                    "incremental_entry_settlement":actual["data"]["incremental_entry_settlement"],
+                    "protection":actual["data"]["protection"],
+                    "central_release":actual["data"]["central_release"],
+                    "financial_complete":actual["data"]["financial_complete"],
+                    "worker_budget":observed.budget,
+                    "risk_book_sequence":observed.risk_book_sequence,
+                    "created_posts":feed.outbound_posts.lock().unwrap().len()
+                })
+            );
+        }
         println!("t09_public_trade_execute_open_ack_and_idempotency PASS: posts=1");
         shutdown_tx.send(true).unwrap();
         let terminated = tokio::time::timeout(Duration::from_secs(10), session)
