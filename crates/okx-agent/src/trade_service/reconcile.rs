@@ -590,9 +590,10 @@ impl TradeService {
             // order ACK. Require an authenticated flat-instrument readback.
             venue_flat_verified = verify_instrument_is_flat(
                 &i.instrument_id,
-                snapshot.positions.iter().map(|p| {
-                    (p.instrument_id.as_str(), p.position.as_str())
-                }),
+                snapshot
+                    .positions
+                    .iter()
+                    .map(|p| (p.instrument_id.as_str(), p.position.as_str())),
             )
             .is_ok();
             if !exposed && i.risk_increase {
@@ -694,7 +695,10 @@ impl TradeService {
             json!({"state":"not_evaluated"})
         };
         let central_release = if i.state.terminal() && financial {
-            match self.release_terminal(r, &i, order.as_ref(), venue_flat_verified).await {
+            match self
+                .release_terminal(r, &i, order.as_ref(), venue_flat_verified)
+                .await
+            {
                 Ok(()) => json!({"state":"verified"}),
                 Err(reason) => {
                     json!({"state":"pending","reason_code":reason,"scope":"intent","next_action":"trade.status"})
@@ -1246,10 +1250,15 @@ impl TradeService {
             return Err("FILL_COVERAGE_INCOMPLETE".into());
         }
         if local_reduction {
-            let bills = r.execution.store.call(deadline(), |s| {
-                s.cursor("bills", "account")
-            }).await.map_err(err)?.ok_or("BILLS_COVERAGE_MISSING")?;
-            if bills.generation <= 0 || !bills.cursor.is_empty()
+            let bills = r
+                .execution
+                .store
+                .call(deadline(), |s| s.cursor("bills", "account"))
+                .await
+                .map_err(err)?
+                .ok_or("BILLS_COVERAGE_MISSING")?;
+            if bills.generation <= 0
+                || !bills.cursor.is_empty()
                 || !bills.coverage_gaps.is_empty()
                 || bills.watermark < venue_updated_at
             {

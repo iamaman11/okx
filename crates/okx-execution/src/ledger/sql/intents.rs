@@ -1249,7 +1249,8 @@ impl AccountStore {
         venue_filled: Decimal,
         venue_updated_at: i64,
     ) -> StoreResult<()> {
-        let intent = self.intent(id)?
+        let intent = self
+            .intent(id)?
             .ok_or(StoreError::Invalid("LOCAL_CLOSE_INTENT_MISSING"))?;
         if intent.risk_increase
             || !intent.state.terminal()
@@ -1261,7 +1262,8 @@ impl AccountStore {
         {
             return Err(StoreError::Invalid("LOCAL_CLOSE_TERMINAL_PROOF_INVALID"));
         }
-        let receipt = self.central_receipt(id)?
+        let receipt = self
+            .central_receipt(id)?
             .ok_or(StoreError::Invalid("LOCAL_CLOSE_RECEIPT_MISSING"))?;
         let local_key = format!("local:{id}");
         if receipt.reservation_key != local_key
@@ -1271,7 +1273,8 @@ impl AccountStore {
             return Err(StoreError::Invalid("LOCAL_CLOSE_RECEIPT_MISMATCH"));
         }
         for (source, partition) in [("fills", "SWAP"), ("bills", "account")] {
-            let cursor = self.cursor(source, partition)?
+            let cursor = self
+                .cursor(source, partition)?
                 .ok_or(StoreError::Invalid("LOCAL_CLOSE_SOURCE_MISSING"))?;
             if cursor.generation <= 0
                 || !cursor.cursor.is_empty()
@@ -1291,7 +1294,7 @@ impl AccountStore {
                         s.bill_id,s.direction
                  FROM fills f LEFT JOIN swap_fill_sources s ON s.fill_id=f.fill_id
                  WHERE f.intent_id=?1 AND f.exchange_order_id=?2
-                 ORDER BY f.fill_id LIMIT 1001"
+                 ORDER BY f.fill_id LIMIT 1001",
             )?;
             let mut rows = q.query(params![id, order_id])?;
             while let Some(row) = rows.next()? {
@@ -1322,52 +1325,74 @@ impl AccountStore {
                        AND e.component='FEE' AND e.allocation_leg='account'
                      WHERE o.bill_id=?1 AND o.instrument_id=?2
                        AND o.exchange_order_id=?3 AND o.trade_id=?4
-                     LIMIT 2"
+                     LIMIT 2",
                 )?;
-                let matched = evidence.query_map(
-                    params![&bill, &intent.instrument_id, order_id, &trade],
-                    |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-                )?.collect::<Result<Vec<_>, _>>()?;
+                let matched = evidence
+                    .query_map(
+                        params![&bill, &intent.instrument_id, order_id, &trade],
+                        |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+                    )?
+                    .collect::<Result<Vec<_>, _>>()?;
                 if matched.len() != 1
                     || decimal(matched[0].0.clone())? != fee
                     || matched[0].1 != currency
                 {
                     return Err(StoreError::Invalid("LOCAL_CLOSE_FEE_BILL_UNVERIFIED"));
                 }
-                total = total.checked_add(qty)
+                total = total
+                    .checked_add(qty)
                     .ok_or(StoreError::Invalid("LOCAL_CLOSE_QUANTITY_OVERFLOW"))?;
-                proof_rows.push((fill_id, trade, bill, qty.to_string(), fee.to_string(), currency));
+                proof_rows.push((
+                    fill_id,
+                    trade,
+                    bill,
+                    qty.to_string(),
+                    fee.to_string(),
+                    currency,
+                ));
             }
         }
         if proof_rows.is_empty() || total != venue_filled {
             return Err(StoreError::Invalid("LOCAL_CLOSE_FILL_SUM_MISMATCH"));
         }
-        let proof = format!("{:x}", Sha256::digest(
-            serde_json::to_vec(&(
-                "okx.local-terminal-close/v1",
-                self.meta.account_key.as_str(),
-                self.meta.installation_id.as_str(),
-                id, order_id, intent.plan_hash.as_str(),
-                venue_filled.to_string(), proof_rows
-            )).map_err(|_| StoreError::Invalid("LOCAL_CLOSE_PROOF_SERIALIZATION"))?
-        ));
+        let proof = format!(
+            "{:x}",
+            Sha256::digest(
+                serde_json::to_vec(&(
+                    "okx.local-terminal-close/v1",
+                    self.meta.account_key.as_str(),
+                    self.meta.installation_id.as_str(),
+                    id,
+                    order_id,
+                    intent.plan_hash.as_str(),
+                    venue_filled.to_string(),
+                    proof_rows
+                ))
+                .map_err(|_| StoreError::Invalid("LOCAL_CLOSE_PROOF_SERIALIZATION"))?
+            )
+        );
         let key = format!("local-terminal-release:{id}");
-        let tx = self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let existing: Option<(String, String)> = tx.query_row(
-            "SELECT request_hash,result_ref FROM operation_receipts WHERE operation_id=?1",
-            [&key],
-            |r| Ok((r.get(0)?, r.get(1)?))
-        ).optional()?;
-        if existing.as_ref().is_some_and(|(hash, source)| {
-            hash != &intent.request_hash || source != &proof
-        }) {
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let existing: Option<(String, String)> = tx
+            .query_row(
+                "SELECT request_hash,result_ref FROM operation_receipts WHERE operation_id=?1",
+                [&key],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        if existing
+            .as_ref()
+            .is_some_and(|(hash, source)| hash != &intent.request_hash || source != &proof)
+        {
             return Err(StoreError::Invalid("LOCAL_CLOSE_PROOF_CONFLICT"));
         }
         let changed = tx.execute(
             "UPDATE risk_receipts SET state='RELEASED'
              WHERE intent_id=?1 AND reservation_key=?2
                AND state IN('TERMINAL_PENDING_CENTRAL','RELEASED')",
-            params![id, &local_key]
+            params![id, &local_key],
         )?;
         if changed != 1 {
             return Err(StoreError::Invalid("LOCAL_CLOSE_STATE_NOT_TERMINAL"));
@@ -1375,7 +1400,7 @@ impl AccountStore {
         tx.execute(
             "INSERT INTO operation_receipts VALUES(?1,'LOCAL_TERMINAL_RELEASE',?2,?3,?4)
              ON CONFLICT(operation_id) DO NOTHING",
-            params![key, intent.request_hash, proof, wall_time_ms()]
+            params![key, intent.request_hash, proof, wall_time_ms()],
         )?;
         tx.commit()?;
         Ok(())
