@@ -2719,8 +2719,7 @@ mod raw_native_session_tests {
                 // Retire prior Preview bytes ONLY at the recorded transport
                 // boundary and prove a full public Execute fails closed.
                 refresh_recorded_market();
-                let stale_fee_at =
-                    (chrono::Utc::now().timestamp_millis() - 60_000).to_string();
+                let stale_fee_at = (chrono::Utc::now().timestamp_millis() - 60_000).to_string();
                 let retired_preview_fees = feed.advance_recorded_route(
                     "fixture-observer-a",
                     "/api/v5/account/trade-fee",
@@ -2763,8 +2762,7 @@ mod raw_native_session_tests {
                     .await
                     .expect("T09.2 stale signed fee must reach public Execute");
                 assert_eq!(
-                    stale_rejected["data"]["primary_reason"],
-                    "ENTRY_FEE_EXCHANGE_TIME_STALE",
+                    stale_rejected["data"]["primary_reason"], "ENTRY_FEE_EXCHANGE_TIME_STALE",
                     "stale fee must be rejected specifically by production exchange-time gate: {stale_rejected}"
                 );
                 assert_eq!(stale_rejected["data"]["state"], "REJECTED");
@@ -2800,8 +2798,12 @@ mod raw_native_session_tests {
                 let after_stale = risk.request(after_stale_cmd).await.unwrap();
                 assert_eq!(
                     after_stale
-                        .budget.as_ref().unwrap()
-                        .entry_budget.as_ref().unwrap()
+                        .budget
+                        .as_ref()
+                        .unwrap()
+                        .entry_budget
+                        .as_ref()
+                        .unwrap()
                         .reserved_usd,
                     "4",
                     "stale rejection must not retain a new central entry reservation"
