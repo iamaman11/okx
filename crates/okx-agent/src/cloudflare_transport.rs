@@ -1937,7 +1937,7 @@ mod raw_native_session_tests {
                     "instId":"BTC-USDT-SWAP","tdMode":"cross",
                     "clOrdId":"__REQUEST_CL_ORD_ID__",
                     "side":"sell","posSide":"long","ordType":"ioc",
-                    "sz":"0.1","px":"999.0"
+                    "sz":"0.1","px":"999"
                 }),
                 raw_response: br#"{"code":"0","msg":"","data":[{"ordId":"recorded-t09-close-001","clOrdId":"__REQUEST_CL_ORD_ID__","sCode":"0"}]}"#.to_vec(),
             });

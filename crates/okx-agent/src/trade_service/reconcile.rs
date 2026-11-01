@@ -568,7 +568,15 @@ impl TradeService {
                     .map_err(err)?;
             }
             i = self.find_intent(r, &i.intent_id).await?;
-            let snapshot = r.observer.snapshot().await.map_err(err)?;
+            // A reduction ACK must be reconciled with fresh account facts,
+            // even when a local GET window is exhausted. Wait only for
+            // unsent read admission, bounded by the existing status deadline.
+            let snapshot = if i.risk_increase {
+                r.observer.snapshot().await
+            } else {
+                r.observer.snapshot_until(deadline()).await
+            }
+            .map_err(err)?;
             let position_qty = verified_intent_position_quantity(
                 &i.plan.position_side,
                 snapshot
