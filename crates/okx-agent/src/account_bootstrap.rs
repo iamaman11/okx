@@ -439,7 +439,8 @@ impl AccountBootstrapper {
 
     pub async fn snapshot(&self) -> Result<AccountSnapshot, AccountBootstrapError> {
         let (config, config_received_at) = self.observer_config().await?;
-        self.snapshot_from_config(config, config_received_at, None).await
+        self.snapshot_from_config(config, config_received_at, None)
+            .await
     }
 
     /// Reduction-only assessment: preserve the same authenticated REST facts
@@ -455,7 +456,8 @@ impl AccountBootstrapper {
         }
         tokio::time::timeout_at(until.into(), async {
             let (config, config_received_at) = self.observer_config().await?;
-            self.snapshot_from_config(config, config_received_at, Some(until)).await
+            self.snapshot_from_config(config, config_received_at, Some(until))
+                .await
         })
         .await
         .map_err(|_| AccountBootstrapError::SourceDeadline)?
@@ -465,7 +467,8 @@ impl AccountBootstrapper {
     /// balance/positions/orders; any failure blocks BEGIN_POST.
     pub async fn snapshot_after_held(&self) -> Result<AccountSnapshot, AccountBootstrapError> {
         let (config, config_received_at) = self.fresh_observer_config().await?;
-        self.snapshot_from_config(config, config_received_at, None).await
+        self.snapshot_from_config(config, config_received_at, None)
+            .await
     }
 
     async fn snapshot_from_config(
@@ -481,8 +484,10 @@ impl AccountBootstrapper {
 
         let (balance, positions, pending_orders) = if let Some(until) = until {
             tokio::try_join!(
-                self.api.balance_wait(until.saturating_duration_since(Instant::now())),
-                self.api.positions_wait(until.saturating_duration_since(Instant::now())),
+                self.api
+                    .balance_wait(until.saturating_duration_since(Instant::now())),
+                self.api
+                    .positions_wait(until.saturating_duration_since(Instant::now())),
                 self.api.pending_orders_until(until),
             )?
         } else {

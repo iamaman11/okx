@@ -1,4 +1,7 @@
-use std::{fmt, time::{Duration, Instant}};
+use std::{
+    fmt,
+    time::{Duration, Instant},
+};
 
 use crate::auth::timestamp_now;
 

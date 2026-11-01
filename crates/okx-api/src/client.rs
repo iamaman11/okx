@@ -779,11 +779,7 @@ mod tests {
         // Exhausted admission + expired caller deadline must not call the
         // HTTP transport. The scripted reply must remain untouched.
         let denied = api
-            .private_get_wait::<serde_json::Value>(
-                "/api/v5/account/balance",
-                &[],
-                Duration::ZERO,
-            )
+            .private_get_wait::<serde_json::Value>("/api/v5/account/balance", &[], Duration::ZERO)
             .await
             .unwrap_err();
         assert!(matches!(
@@ -804,7 +800,11 @@ mod tests {
         assert!(started.elapsed() >= Duration::from_millis(1500));
         assert_eq!(rows.len(), 1);
         assert_eq!(wire.requests.lock().unwrap().len(), 1);
-        assert!(wire.requests.lock().unwrap()[0].1.contains_key("OK-ACCESS-SIGN"));
+        assert!(
+            wire.requests.lock().unwrap()[0]
+                .1
+                .contains_key("OK-ACCESS-SIGN")
+        );
         assert!(wire.responses.lock().unwrap().is_empty());
     }
 
@@ -813,7 +813,10 @@ mod tests {
         let wire = Arc::new(ScriptedDelivery::default());
         wire.responses.lock().unwrap().push_back((
             "/api/v5/account/balance",
-            reply(StatusCode::TOO_MANY_REQUESTS, br#"{"code":"50011","data":[]}"#),
+            reply(
+                StatusCode::TOO_MANY_REQUESTS,
+                br#"{"code":"50011","data":[]}"#,
+            ),
         ));
         let api = OkxRestClient::with_http_transport(
             OkxEnvironment::new(crate::config::Region::Global, false),
