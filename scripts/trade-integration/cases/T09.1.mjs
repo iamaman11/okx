@@ -5,7 +5,7 @@ import { actualNativeWorker } from "../native-workerd.mjs";
 
 export async function run({root, signal}) {
   const {nativeFinancial: money, nativeReplay: executed,
-    nativePostFill: status, workerPostFill: central} =
+    nativePostFill: status, nativeClose: close, workerPostFill: central} =
     await actualNativeWorker(root, signal, {statusProbe:true});
   assert.equal(money.intent_id, executed.opened_intent_id);
   assert.equal(status.intent_id, executed.opened_intent_id);
@@ -28,7 +28,12 @@ export async function run({root, signal}) {
     central.budget?.entry_budget?.consumed_usd);
   assert.equal(status.worker_budget?.entry_budget?.reserved_usd,
     central.budget?.entry_budget?.reserved_usd);
-  // The test must not claim a complete T09.1 while a live position has not
-  // been closed, its protection removed and central risk RELEASED.
-  throw Error("T09_1_CLOSE_RELEASE_RESTART_UNPROVEN");
+  // Close must itself be a separate one-shot production venue order.
+  assert.equal(close.opening_intent_id, executed.opened_intent_id);
+  assert.notEqual(close.close_intent_id, executed.opened_intent_id);
+  assert.equal(close.close_order_id, "recorded-t09-close-001");
+  assert.equal(close.created_posts, 2, "one opening and one close POST");
+  // A Close ACK without its independent fills, flat venue position, stop
+  // cleanup and central RELEASE is NOT a completed terminal lifecycle.
+  throw Error("T09_1_CLOSE_FILL_PROTECTION_RELEASE_RESTART_UNPROVEN");
 }

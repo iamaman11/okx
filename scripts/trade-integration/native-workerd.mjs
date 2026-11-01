@@ -49,6 +49,7 @@ export async function actualNativeWorker(root, signal, { statusProbe = false } =
       ...(statusProbe
         ? {
           nativePostFill: receipt(stdout, "T09_1_NATIVE_POST_FILL_STATUS_V1"),
+          nativeClose: receipt(stdout, "T09_1_NATIVE_CLOSE_ACK_V1"),
           workerPostFill: receipt(stdout, "T09_1_WORKER_POST_FILL_EVIDENCE_V1"),
         }
         : { workerReplay: receipt(stdout, "T09_5_WORKER_IDEMPOTENCY_EVIDENCE_V1") }),

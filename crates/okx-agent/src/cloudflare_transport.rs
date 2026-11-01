@@ -1661,11 +1661,12 @@ mod raw_native_session_tests {
             "5.0005",
             "RiskBook must physically hold prior 4 USD plus public 1.0005 USD"
         );
-        feed_shutdown.send(true).unwrap();
-        tokio::time::timeout(Duration::from_secs(3), public_feed)
-            .await
-            .expect("recorded public publisher did not terminate")
-            .unwrap();
+        // The Close probe needs a fresh raw public price after financial
+        // reconciliation. Baseline T09.0/T09.5 still stops the publisher here.
+        let status_probe = std::env::var("OKX_T09_1_STATUS_PROBE").as_deref() == Ok("1");
+        if !status_probe {
+            feed_shutdown.send(true).unwrap();
+        }
         maintenance_shutdown.send(true).unwrap();
         tokio::time::timeout(Duration::from_secs(10), maintenance_task)
             .await
@@ -1839,7 +1840,7 @@ mod raw_native_session_tests {
         // Optional independent T09.1 continuation. This uses the very same
         // live TradeService, signed Executor GET, account SQL owner and central
         // workerd RiskBook, but never changes the accepted T09.0/T09.5 run.
-        if std::env::var("OKX_T09_1_STATUS_PROBE").as_deref() == Ok("1") {
+        if status_probe {
             let after_fill_order = envelope(json!([{
                 "instId":"BTC-USDT-SWAP",
                 "ordId":"recorded-t09-opening-001",
@@ -1921,7 +1922,79 @@ mod raw_native_session_tests {
                     "created_posts":feed.outbound_posts.lock().unwrap().len()
                 })
             );
+            // T09.1 next boundary: a user-facing Close is routed through the
+            // same TradeService/SQL owner. The only synthetic input is the
+            // independently recorded signed OKX create ACK and order GET.
+            // It may not claim a flat position until close fills and the
+            // protection inventory are independently captured.
+            use crate::accounts::recorded_support::RecordedPost;
+            let close_time = chrono::Utc::now().timestamp_millis().to_string();
+            feed.expect_public_clock(envelope(json!([{"ts":close_time}])));
+            feed.expect_post(RecordedPost {
+                access_key: "fixture-executor-a".into(),
+                path: "/api/v5/trade/order".into(),
+                expected_body: json!({
+                    "instId":"BTC-USDT-SWAP","tdMode":"cross",
+                    "clOrdId":"__REQUEST_CL_ORD_ID__",
+                    "side":"sell","posSide":"long","ordType":"ioc",
+                    "sz":"0.1","px":"999.0"
+                }),
+                raw_response: br#"{"code":"0","msg":"","data":[{"ordId":"recorded-t09-close-001","clOrdId":"__REQUEST_CL_ORD_ID__","sCode":"0"}]}"#.to_vec(),
+            });
+            feed.expect_get(RecordedGet {
+                access_key: "fixture-executor-a".into(),
+                path: "/api/v5/trade/order".into(),
+                required_query: vec![("instId".into(), "BTC-USDT-SWAP".into())],
+                raw_response: envelope(json!([{
+                    "instId":"BTC-USDT-SWAP",
+                    "ordId":"recorded-t09-close-001",
+                    "clOrdId":"__REQUEST_CL_ORD_ID__",
+                    "side":"sell","posSide":"long","tdMode":"cross",
+                    "ordType":"ioc","px":"999.0","sz":"0.1",
+                    "accFillSz":"0","avgPx":"","state":"live",
+                    "cTime":close_time,"uTime":close_time
+                }])),
+            });
+            let close = trade.trade(
+                "fixture-a",
+                &okx_protocol::trading::TradeRequest::Close {
+                    idempotency_key: "t09_real_public_close_0001".into(),
+                    reference: idempotent_intent_id.clone(),
+                    expires_in_ms: 30_000,
+                },
+                None,
+            ).await.expect("T09.1 Close must use production TradeService");
+            assert_eq!(
+                feed.outbound_posts.lock().unwrap().len(),
+                2,
+                "open + close must issue exactly one venue create each"
+            );
+            assert_eq!(
+                close["data"]["intent"]["exchange_order_id"],
+                "recorded-t09-close-001"
+            );
+            assert_ne!(
+                close["data"]["intent"]["intent_id"],
+                idempotent_intent_id
+            );
+            println!(
+                "T09_1_NATIVE_CLOSE_ACK_V1:{}",
+                json!({
+                    "opening_intent_id":idempotent_intent_id,
+                    "close_intent_id":close["data"]["intent"]["intent_id"],
+                    "close_state":close["data"]["intent"]["state"],
+                    "close_order_id":close["data"]["intent"]["exchange_order_id"],
+                    "created_posts":feed.outbound_posts.lock().unwrap().len(),
+                    "financial_complete":close["data"]["financial_complete"],
+                    "status":close["status"]
+                })
+            );
+            feed_shutdown.send(true).unwrap();
         }
+        tokio::time::timeout(Duration::from_secs(3), public_feed)
+            .await
+            .expect("recorded public publisher did not terminate")
+            .unwrap();
         println!("t09_public_trade_execute_open_ack_and_idempotency PASS: posts=1");
         shutdown_tx.send(true).unwrap();
         let terminated = tokio::time::timeout(Duration::from_secs(10), session)
