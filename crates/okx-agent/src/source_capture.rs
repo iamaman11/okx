@@ -288,6 +288,16 @@ impl Window {
         })
     }
 }
+/// One fixed capture turn. The same authenticated source window, generation
+/// and monotonic no-send deadline must be used by all six monetary streams.
+#[derive(Clone, Copy)]
+struct CaptureTurn {
+    t0: i64,
+    now: i64,
+    generation: i64,
+    until: Instant,
+}
+
 /// Stable account-snapshot contract also used by trade recovery.
 pub async fn capture_account_sources(
     observer: &AccountBootstrapper,
@@ -405,82 +415,73 @@ pub(crate) async fn capture_account_sources_traced(
     if let Some((store, id)) = trace.as_ref() {
         store.phase_started(*id, "history_and_ingest");
     }
+    let turn = CaptureTurn {
+        t0,
+        now,
+        generation,
+        until: capture_until,
+    };
+    // Each production stream runs on the same Tokio runtime, but its large
+    // finance/SQL async frame lives on the heap. Six inlined frames previously
+    // bloated the parent TradeService task and overflowed Rust's test stack.
     let history_result = tokio::try_join!(
-        capture_fills(
+        Box::pin(capture_fills(
             execution,
             private_ws,
             FillHistorySource {
                 partition: "SPOT",
                 cursor: cursors.spot,
             },
-            t0,
-            now,
-            generation,
+            turn,
             &fx,
-            capture_until,
-        ),
-        capture_fills(
+        )),
+        Box::pin(capture_fills(
             execution,
             private_ws,
             FillHistorySource {
                 partition: "MARGIN",
                 cursor: cursors.margin,
             },
-            t0,
-            now,
-            generation,
+            turn,
             &fx,
-            capture_until,
-        ),
-        capture_fills(
+        )),
+        Box::pin(capture_fills(
             execution,
             private_ws,
             FillHistorySource {
                 partition: "SWAP",
                 cursor: cursors.swap,
             },
-            t0,
-            now,
-            generation,
+            turn,
             &fx,
-            capture_until,
-        ),
-        capture_fills(
+        )),
+        Box::pin(capture_fills(
             execution,
             private_ws,
             FillHistorySource {
                 partition: "FUTURES",
                 cursor: cursors.futures,
             },
-            t0,
-            now,
-            generation,
+            turn,
             &fx,
-            capture_until,
-        ),
-        capture_fills(
+        )),
+        Box::pin(capture_fills(
             execution,
             private_ws,
             FillHistorySource {
                 partition: "OPTION",
                 cursor: cursors.options,
             },
-            t0,
-            now,
-            generation,
+            turn,
             &fx,
-            capture_until,
-        ),
-        capture_bills(
+        )),
+        Box::pin(capture_bills(
             execution,
             private_ws,
             cursors.bills,
-            t0,
-            now,
-            generation,
+            turn,
             &fx,
-            capture_until,
-        )
+        ))
     );
     if let Some((store, id)) = trace.as_ref() {
         store.phase_finished(
@@ -745,12 +746,15 @@ async fn capture_fills(
     execution: &ExecutionRuntime,
     ws: &PrivateWsHandle,
     source: FillHistorySource,
-    t0: i64,
-    now: i64,
-    generation: i64,
+    turn: CaptureTurn,
     fx: &UsdConversionEvidence,
-    until: Instant,
 ) -> AgentResult<bool> {
+    let CaptureTurn {
+        t0,
+        now,
+        generation,
+        until,
+    } = turn;
     let fx = fx.clone();
     let partition = source.partition;
     let window = Window::resume(source.cursor.as_ref(), t0, now)?;
@@ -871,12 +875,15 @@ async fn capture_bills(
     execution: &ExecutionRuntime,
     ws: &PrivateWsHandle,
     cursor: Option<SourceCursor>,
-    t0: i64,
-    now: i64,
-    generation: i64,
+    turn: CaptureTurn,
     fx: &UsdConversionEvidence,
-    until: Instant,
 ) -> AgentResult<bool> {
+    let CaptureTurn {
+        t0,
+        now,
+        generation,
+        until,
+    } = turn;
     let fx = fx.clone();
     let window = Window::resume(cursor.as_ref(), t0, now)?;
     verify_history_retrieval_window(window.begin, now)?;
