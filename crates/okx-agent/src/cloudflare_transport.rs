@@ -2715,7 +2715,125 @@ mod raw_native_session_tests {
                     "4",
                     "T09.2 preview must not reserve entry capacity"
                 );
+                // A current HTTP receipt cannot refresh an old exchange fee ts.
+                // Retire prior Preview bytes ONLY at the recorded transport
+                // boundary and prove a full public Execute fails closed.
                 refresh_recorded_market();
+                let stale_fee_at =
+                    (chrono::Utc::now().timestamp_millis() - 60_000).to_string();
+                let retired_preview_fees = feed.advance_recorded_route(
+                    "fixture-observer-a",
+                    "/api/v5/account/trade-fee",
+                    vec![RecordedGet {
+                        access_key: "fixture-observer-a".into(),
+                        path: "/api/v5/account/trade-fee".into(),
+                        required_query: vec![
+                            ("instType".into(), "SWAP".into()),
+                            ("instFamily".into(), "BTC-USDT".into()),
+                        ],
+                        raw_response: envelope(json!([{
+                            "instType":"SWAP","level":"Lv1","ts":stale_fee_at,
+                            "feeGroup":[{"groupId":"4","maker":"0.0005","taker":"0.0005"}]
+                        }])),
+                    }],
+                );
+                let stale_request = TradeRequest::Execute {
+                    idempotency_key: "t09_stale_exchange_fee_denied_0001".into(),
+                    operation: TradeOperation::Open,
+                    strategy_instance: "manual".into(),
+                    instrument: "BTC-USDT-SWAP".into(),
+                    side: PositionSide::Long,
+                    sizing: Sizing::Contracts {
+                        contracts: "0.30".into(),
+                    },
+                    order: OrderConstraints {
+                        order_type: "limit".into(),
+                        limit_price: Some("1000".into()),
+                        reference: None,
+                        max_entry_usd: Some("10".into()),
+                        max_slippage_bps: 0,
+                    },
+                    protection: Some(Protection::Price {
+                        stop_price: "900".into(),
+                    }),
+                    expires_in_ms: 30_000,
+                };
+                let stale_rejected = trade
+                    .trade("fixture-a", &stale_request, None)
+                    .await
+                    .expect("T09.2 stale signed fee must reach public Execute");
+                assert_eq!(
+                    stale_rejected["data"]["primary_reason"],
+                    "ENTRY_FEE_EXCHANGE_TIME_STALE",
+                    "stale fee must be rejected specifically by production exchange-time gate: {stale_rejected}"
+                );
+                assert_eq!(stale_rejected["data"]["state"], "REJECTED");
+                assert_eq!(stale_rejected["data"]["rejection_origin"], "LOCAL");
+                assert_eq!(stale_rejected["data"]["send_state"], "NOT_STARTED");
+                assert_eq!(
+                    feed.outbound_posts.lock().unwrap().len(),
+                    3,
+                    "stale exchange fee must result in ZERO additional signed POSTs"
+                );
+                let stale_delivery = feed
+                    .delivered_fees
+                    .lock()
+                    .unwrap()
+                    .last()
+                    .cloned()
+                    .expect("stale execution must consume an actual recorded fee GET");
+                assert_eq!(stale_delivery.0, "fixture-observer-a");
+                assert_eq!(stale_delivery.1, stale_fee_at);
+                println!(
+                    "T09_2_STALE_FEE_DENIAL_V1:{}",
+                    json!({
+                        "exchange_ts":stale_delivery.1,
+                        "http_delivered_at_ms":stale_delivery.2,
+                        "retired_preview_fee_pages":retired_preview_fees,
+                        "reason":stale_rejected["data"]["primary_reason"],
+                        "send_state":stale_rejected["data"]["send_state"],
+                        "outbound_posts":feed.outbound_posts.lock().unwrap().len(),
+                    })
+                );
+                let mut after_stale_cmd = summary("risk_t09_2_after_stale_no_send");
+                after_stale_cmd.installation_id = "installation_test".into();
+                let after_stale = risk.request(after_stale_cmd).await.unwrap();
+                assert_eq!(
+                    after_stale
+                        .budget.as_ref().unwrap()
+                        .entry_budget.as_ref().unwrap()
+                        .reserved_usd,
+                    "4",
+                    "stale rejection must not retain a new central entry reservation"
+                );
+
+                // A NEW authentic-shaped signed GET transcript immediately
+                // precedes positive Execute; the production freshness gate,
+                // fee generation and reference generation remain unchanged.
+                refresh_recorded_market();
+                let execute_fee_at = chrono::Utc::now().timestamp_millis().to_string();
+                let retired_stale_fees = feed.advance_recorded_route(
+                    "fixture-observer-a",
+                    "/api/v5/account/trade-fee",
+                    (0..4)
+                        .map(|_| RecordedGet {
+                            access_key: "fixture-observer-a".into(),
+                            path: "/api/v5/account/trade-fee".into(),
+                            required_query: vec![
+                                ("instType".into(), "SWAP".into()),
+                                ("instFamily".into(), "BTC-USDT".into()),
+                            ],
+                            raw_response: envelope(json!([{
+                                "instType":"SWAP","level":"Lv1","ts":execute_fee_at,
+                                "feeGroup":[{"groupId":"4","maker":"0.0005","taker":"0.0005"}]
+                            }])),
+                        })
+                        .collect(),
+                );
+                assert_eq!(
+                    retired_stale_fees, 0,
+                    "negative Execute must consume the lone stale signed fee reply"
+                );
                 let new_clock = chrono::Utc::now().timestamp_millis().to_string();
                 feed.expect_public_clock(envelope(json!([{"ts":new_clock}])));
                 feed.expect_post(RecordedPost {
@@ -2789,6 +2907,20 @@ mod raw_native_session_tests {
                     "recorded-t09-second-001"
                 );
                 assert_eq!(accepted["data"]["financial_complete"], false);
+                let positive_fee_deliveries = feed.delivered_fees.lock().unwrap().clone();
+                assert!(
+                    positive_fee_deliveries
+                        .iter()
+                        .any(|(key, ts, _)| key == "fixture-observer-a" && ts == &execute_fee_at),
+                    "positive Execute must consume its newly recorded fee GET: {positive_fee_deliveries:?}"
+                );
+                println!(
+                    "T09_2_FEE_TRANSCRIPT_V1:{}",
+                    json!({
+                        "positive_exchange_ts":execute_fee_at,
+                        "last_fee_deliveries":positive_fee_deliveries.iter().rev().take(5).collect::<Vec<_>>(),
+                    })
+                );
                 assert_eq!(
                     feed.outbound_posts.lock().unwrap().len(),
                     4,

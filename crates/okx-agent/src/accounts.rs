@@ -948,6 +948,9 @@ pub(crate) mod recorded_support {
     pub(crate) struct RecordedAccountHttp {
         pub(crate) requests: Mutex<Vec<String>>,
         pub(crate) outbound_posts: Mutex<Vec<(String, String, serde_json::Value)>>,
+        /// Actual signed fee GETs delivered by this test transport:
+        /// (account API key, exchange ts, local delivery timestamp).
+        pub(crate) delivered_fees: Mutex<Vec<(String, String, i64)>>,
         /// (signed account key, exact sent clOrdId, acknowledged ordId).
         acknowledged_creates: Mutex<Vec<(String, String, String)>>,
         posts: Mutex<Vec<RecordedPost>>,
@@ -1270,6 +1273,17 @@ pub(crate) mod recorded_support {
                     } else {
                         page.raw_response
                     };
+                    if path == "/api/v5/account/trade-fee" {
+                        let raw: serde_json::Value = serde_json::from_slice(&body)?;
+                        let exchange_ts = raw["data"][0]["ts"].as_str().ok_or_else(|| {
+                            OkxError::Response("TRANSCRIPT_FEE_EXCHANGE_TS_MISSING".into())
+                        })?;
+                        self.delivered_fees.lock().unwrap().push((
+                            key.to_owned(),
+                            exchange_ts.to_owned(),
+                            chrono::Utc::now().timestamp_millis(),
+                        ));
+                    }
                     self.requests.lock().unwrap().push(format!(
                         "{key}:{path}?{}",
                         request.url().query().unwrap_or_default()
