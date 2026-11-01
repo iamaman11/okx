@@ -3503,7 +3503,6 @@ fn e1_pending_swap_fill_projects_single_canonical_bill_fee_in_both_source_orders
     }
 }
 
-
 #[test]
 fn e1_missing_swap_bill_id_reconciles_once_from_original_sql_sources() {
     for bill_first in [false, true] {
@@ -3601,9 +3600,16 @@ fn e1_missing_swap_bill_id_reconciles_once_from_original_sql_sources() {
             ));
             let count: i64 = s
                 .connection
-                .query_row("SELECT COUNT(*) FROM finance_entries WHERE component='FEE'", [], |r| r.get(0))
+                .query_row(
+                    "SELECT COUNT(*) FROM finance_entries WHERE component='FEE'",
+                    [],
+                    |r| r.get(0),
+                )
                 .unwrap();
-            assert_eq!(count, 0, "unknown bill identity must not book a second charge");
+            assert_eq!(
+                count, 0,
+                "unknown bill identity must not book a second charge"
+            );
             s.ingest_page(&bills_page).unwrap();
         }
         s.record_outcome(
@@ -3645,10 +3651,17 @@ fn e1_missing_swap_bill_id_reconciles_once_from_original_sql_sources() {
         drop(s);
         let reopened =
             AccountStore::open_existing(db, &meta.account_key, &meta.installation_id).unwrap();
-        assert_eq!(reopened.intent_fee_bill_evidence("intent", 7).unwrap(), witness);
+        assert_eq!(
+            reopened.intent_fee_bill_evidence("intent", 7).unwrap(),
+            witness
+        );
         let count: i64 = reopened
             .connection
-            .query_row("SELECT COUNT(*) FROM finance_entries WHERE component='FEE'", [], |r| r.get(0))
+            .query_row(
+                "SELECT COUNT(*) FROM finance_entries WHERE component='FEE'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(count, 1, "restart may not charge the bill again");
     }

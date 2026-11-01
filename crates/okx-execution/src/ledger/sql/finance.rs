@@ -109,7 +109,6 @@ fn verify_strategy_finance_source(db: &Connection, e: &FinanceEntry) -> StoreRes
     Ok(())
 }
 
-
 // Late SWAP fills may not carry billId. Resolve this only from the existing
 // immutable fill and bill-order source records of this ONE account SQL owner.
 // An ambiguous or mismatched source stays unlinked (and cannot settle).
