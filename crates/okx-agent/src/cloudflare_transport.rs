@@ -2758,17 +2758,14 @@ mod raw_native_session_tests {
                         }),
                         expires_in_ms: 30_000,
                     };
-                    let stale_rejected = trade
+                    let stale_reason = trade
                         .trade("fixture-a", &stale_request, None)
                         .await
-                        .expect("T09.2 stale signed fee must reach public Execute");
+                        .expect_err("stale signed fee must fail before Native admission/POST");
                     assert_eq!(
-                        stale_rejected["data"]["primary_reason"], "ENTRY_FEE_EXCHANGE_TIME_STALE",
-                        "stale fee must be rejected specifically by production exchange-time gate: {stale_rejected}"
+                        stale_reason, "ENTRY_FEE_EXCHANGE_TIME_STALE",
+                        "production exchange-time source gate must reject the exact stale fee"
                     );
-                    assert_eq!(stale_rejected["data"]["state"], "REJECTED");
-                    assert_eq!(stale_rejected["data"]["rejection_origin"], "LOCAL");
-                    assert_eq!(stale_rejected["data"]["send_state"], "NOT_STARTED");
                     assert_eq!(
                         feed.outbound_posts.lock().unwrap().len(),
                         3,
@@ -2789,8 +2786,8 @@ mod raw_native_session_tests {
                             "exchange_ts":stale_delivery.1,
                             "http_delivered_at_ms":stale_delivery.2,
                             "retired_preview_fee_pages":retired_preview_fees,
-                            "reason":stale_rejected["data"]["primary_reason"],
-                            "send_state":stale_rejected["data"]["send_state"],
+                            "reason":stale_reason,
+                            "public_execute_outcome":"ERR_BEFORE_POST",
                             "outbound_posts":feed.outbound_posts.lock().unwrap().len(),
                         })
                     );
