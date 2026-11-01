@@ -52,7 +52,7 @@ export async function run({root, signal}) {
     "verified", "terminal Worker RELEASE must follow Native settlement");
   assert.equal(terminal.opening_status?.data?.remaining_exposure, "0");
   assert.match(String(terminal.worker_budget?.entry_budget?.consumed_usd),
-    /^1\\.00050*$/, "terminal Worker entry spend must equal the recorded bill");
+    /^1\.00050*$/, "terminal Worker entry spend must equal the recorded bill");
   assert.equal(terminal.worker_budget?.entry_budget?.reserved_usd, "4",
     "central terminal release must retain only prior independent reservations");
   assert.equal(terminal.created_posts, 3,

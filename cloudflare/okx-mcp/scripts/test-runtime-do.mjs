@@ -450,8 +450,8 @@ try {
         "verified", "Native must prove opening central RELEASE");
       assert.equal(nativeTerminal.close_status?.data?.central_release?.state,
         "verified", "Native must prove terminal local Close");
-      assert.equal(nativeTerminal.created_posts, 2,
-        "one opening and one closing venue POST only");
+      assert.equal(nativeTerminal.created_posts, 3,
+        "one opening POST, one closing POST and one attached-protection cancel");
       assert.equal(nativeRestart.active_central_receipt, false,
         "Native SQL restart must not resurrect a released central reservation");
       assert.equal(nativeRestart.remaining_lot_count, 0,
