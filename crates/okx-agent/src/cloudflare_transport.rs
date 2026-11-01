@@ -2318,29 +2318,65 @@ mod raw_native_session_tests {
                             .to_vec(),
                 });
                 let resource = accounts.resolve("fixture-a").await.unwrap();
-                let terminal_capture = match crate::source_capture::capture_account_sources(
-                    &resource.observer,
-                    &resource.private_ws,
-                    &resource.execution,
-                )
-                .await
-                {
-                    Ok(snapshot) => snapshot,
-                    Err(error) => {
-                        let requests = feed.requests.lock().unwrap();
-                        let recent = requests.iter().rev().take(18).cloned().collect::<Vec<_>>();
-                        eprintln!(
-                            "T09_1_TERMINAL_CAPTURE_FAILURE_V1:{}",
-                            json!({
-                                "source_reason":error.to_string(),
-                                "unconsumed_required_pages":feed.unconsumed_reads(),
-                                "recent_authenticated_gets":recent,
-                                "outbound_post_count":feed.outbound_posts.lock().unwrap().len(),
-                            })
-                        );
-                        panic!("T09_1_TERMINAL_CAPTURE_FAILED:{error}");
+                // Reconciliation may hit the same authenticated private
+                // GET limiter as the concurrent financial owners. A LOCAL
+                // no-send receipt permits only a bounded read-only replay.
+                // It never retries an exchange POST or extends source TTL.
+                let capture_until = std::time::Instant::now() + Duration::from_secs(15);
+                let mut local_read_deferrals = 0_u32;
+                let terminal_capture = loop {
+                    let answer = crate::source_capture::capture_account_sources(
+                        &resource.observer,
+                        &resource.private_ws,
+                        &resource.execution,
+                    )
+                    .await;
+                    match answer {
+                        Ok(snapshot) => break snapshot,
+                        Err(error) => {
+                            let reason = error.to_string();
+                            let remaining = capture_until
+                                .saturating_duration_since(std::time::Instant::now());
+                            let delay = reason
+                                .find("OKX rate/backpressure defer: ")
+                                .and_then(|index| {
+                                    recorded_preview_local_defer(
+                                        &reason[index..],
+                                        &rate_budget,
+                                        remaining,
+                                    )
+                                });
+                            if let Some(delay) = delay {
+                                local_read_deferrals += 1;
+                                tokio::time::timeout_at(
+                                    capture_until.into(),
+                                    tokio::time::sleep(delay),
+                                )
+                                .await
+                                .expect("T09.1 no-send finance read exceeded finite bound");
+                                continue;
+                            }
+                            let requests = feed.requests.lock().unwrap();
+                            let recent = requests.iter().rev().take(18).cloned().collect::<Vec<_>>();
+                            eprintln!(
+                                "T09_1_TERMINAL_CAPTURE_FAILURE_V1:{}",
+                                json!({
+                                    "source_reason":reason,
+                                    "local_read_deferrals":local_read_deferrals,
+                                    "unconsumed_required_pages":feed.unconsumed_reads(),
+                                    "recent_authenticated_gets":recent,
+                                    "outbound_post_count":feed.outbound_posts.lock().unwrap().len(),
+                                })
+                            );
+                            panic!("T09_1_TERMINAL_CAPTURE_FAILED:{error}");
+                        }
                     }
                 };
+                println!(
+                    "T09_1_TERMINAL_CAPTURE_ADMISSION_V1:{}",
+                    json!({"local_no_send_private_get_deferrals":local_read_deferrals,
+                        "total_bound_ms":15000})
+                );
                 assert!(
                     terminal_capture.positions.is_empty(),
                     "final position must come from empty authenticated positions GET"
