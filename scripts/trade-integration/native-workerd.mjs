@@ -41,6 +41,7 @@ export async function actualNativeWorker(root, signal) {
       nativeBootstrap: receipt(stdout, "T09_0_NATIVE_SQL_EVIDENCE_V1"),
       workerBootstrap: receipt(stdout, "T09_0_WORKER_EVIDENCE_V1"),
       nativeReplay: receipt(stdout, "T09_5_NATIVE_IDEMPOTENCY_EVIDENCE_V1"),
+      nativeFinancial: receipt(stdout, "T09_1_NATIVE_FILL_BILL_EVIDENCE_V1"),
       workerReplay: receipt(stdout, "T09_5_WORKER_IDEMPOTENCY_EVIDENCE_V1"),
       transcript_sha256: createHash("sha256").update(stdout + stderr).digest("hex"),
     };
