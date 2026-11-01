@@ -38,10 +38,17 @@ export async function actualNativeWorker(root, signal, { statusProbe = false } =
       // integration runner retains only 200 chars of an error reason, so
       // forwarding "Command failed: node ..." discards the actual blocker.
       // Prefer the final production assertion, then a Rust panic line.
-      const lines = [error.stderr, error.stdout].filter(Boolean)
-        .join("\n").split(/\r?\n/).map(line => line.trim()).filter(Boolean);
-      const detail =
-        lines.findLast(line => /T09\.1 Close must|TRANSCRIPT_|PANIC_|PROTECTION_|SOURCE_|_UNVERIFIED|_MISMATCH|_PENDING/.test(line))
+      const stderr = String(error.stderr ?? "");
+      const recorded = stderr.match(/T09_1_CLOSE_ERROR_FROM_RUST_V1:(\{[^\r\n]+\})/);
+      if (recorded) {
+        const source = JSON.parse(recorded[1]);
+        throw Error("T09_1_PRODUCTION_CLOSE_DENIED:" +
+          String(source.reason_code).slice(0, 90) +
+          ":posts=" + source.outbound_posts +
+          ":capture=" + String(source.source_reason_code ?? "NONE").slice(0, 45));
+      }
+      const lines = stderr.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+      const detail = lines.findLast(line => /T09_1_NATIVE_CHILD_EXCEPTION_V1:/.test(line))
         ?? lines.findLast(line => /panicked|Error:|error:|FAILED/.test(line))
         ?? error.message;
       throw Error("NATIVE_WORKER_CHILD_FAILED:" + String(detail).slice(-168));

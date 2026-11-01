@@ -26,6 +26,10 @@ export async function run({root, signal}) {
     "verified_or_no_change");
   assert.equal(status.worker_budget?.entry_budget?.consumed_usd,
     central.budget?.entry_budget?.consumed_usd);
+  // A successfully returned settlement is not enough: the real Worker
+  // budget must have consumed exactly opening nominal + immutable bill fee.
+  assert.match(String(central.budget?.entry_budget?.consumed_usd),
+    /^1\.00050*$/, "the Worker must debit exactly 1.0005 USD");
   assert.equal(status.worker_budget?.entry_budget?.reserved_usd,
     central.budget?.entry_budget?.reserved_usd);
   // Close must itself be a separate one-shot production venue order.

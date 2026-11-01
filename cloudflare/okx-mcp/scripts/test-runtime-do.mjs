@@ -396,7 +396,26 @@ try {
     await writeFile(handoffPath, JSON.stringify({
       ws_url:wsUrl.toString(),token,reservation_key:held.reservation_key,
     }), {mode:0o600});
-    const { stdout, stderr } = await nativeProcess;
+    let stdout, stderr;
+    try {
+      ({stdout,stderr} = await nativeProcess);
+    } catch (error) {
+      // cargo test --nocapture holds the original Native failure in stdout.
+      // Emit only the bounded structured production denial; the outer test
+      // runner's 200-char reason must never hide it behind a Node stack.
+      const recorded = String(error.stdout ?? "");
+      const matches = [...recorded.matchAll(/T09_1_NATIVE_CLOSE_FAILURE_V1:(\{[^\r\n]+\})/g)];
+      if (matches.length) {
+        process.stderr.write("T09_1_CLOSE_ERROR_FROM_RUST_V1:" +
+          matches.at(-1)[1] + "\n");
+      } else {
+        const cause = String(error.stderr ?? "").split(/\r?\n/)
+          .findLast(line => /panicked|error:|FAILED/.test(line)) ?? "";
+        process.stderr.write("T09_1_NATIVE_CHILD_EXCEPTION_V1:" +
+          cause.slice(-180) + "\n");
+      }
+      throw error;
+    }
     assert.match(stdout,/native_to_persisted_workerd_riskbook PASS/,
       "real Rust client must prove Worker SQL summary and reservation");
     process.stdout.write(stdout);

@@ -1955,7 +1955,7 @@ mod raw_native_session_tests {
                     "cTime":close_time,"uTime":close_time
                 }])),
             });
-            let close = trade
+            let close_result = trade
                 .trade(
                     "fixture-a",
                     &okx_protocol::trading::TradeRequest::Close {
@@ -1965,8 +1965,26 @@ mod raw_native_session_tests {
                     },
                     None,
                 )
-                .await
-                .expect("T09.1 Close must use production TradeService");
+                .await;
+            if let Err(reason) = &close_result {
+                // The Node runner must show this exact public production
+                // denial instead of truncating a nested cargo panic stack.
+                let resource = accounts.resolve("fixture-a").await.unwrap();
+                let health = resource.source_capture_health.read().await;
+                let source_reason = health.reason_code.clone();
+                let source_success = health.last_success_ms;
+                drop(health);
+                println!(
+                    "T09_1_NATIVE_CLOSE_FAILURE_V1:{}",
+                    json!({
+                        "reason_code":reason,
+                        "source_reason_code":source_reason,
+                        "last_source_success_ms":source_success,
+                        "outbound_posts":feed.outbound_posts.lock().unwrap().len()
+                    })
+                );
+            }
+            let close = close_result.expect("T09.1 Close must use production TradeService");
             assert_eq!(
                 feed.outbound_posts.lock().unwrap().len(),
                 2,
