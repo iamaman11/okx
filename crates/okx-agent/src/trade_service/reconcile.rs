@@ -1246,7 +1246,11 @@ impl TradeService {
             .map_err(err)?
             .ok_or("FILL_COVERAGE_MISSING")?;
         let venue_updated_at = verified_terminal_order_update_time(i, order)?;
-        if !complete.coverage_gaps.is_empty() || complete.watermark < venue_updated_at {
+        if complete.generation <= 0
+            || !complete.cursor.is_empty()
+            || !complete.coverage_gaps.is_empty()
+            || complete.watermark < venue_updated_at
+        {
             return Err("FILL_COVERAGE_INCOMPLETE".into());
         }
         if local_reduction {
@@ -1337,10 +1341,21 @@ impl TradeService {
             })
             .await
             .map_err(err)?;
-        if !through.cursor.is_empty()
+        if through.generation <= 0
+            || !through.cursor.is_empty()
             || !through.coverage_gaps.is_empty()
             || through.watermark < venue_updated_at
         {
+            return Err("FINANCIAL_COVERAGE_INCOMPLETE".into());
+        }
+        // The account-wide fills and bills cursors can advance independently
+        // because their native SQL page ingests are separate atomic writes.
+        // A newer bill watermark is NOT itself proof that fills have advanced
+        // equally far. Use their common proven frontier, exactly as the
+        // incremental SETTLE_ENTRY path already does, without downgrading
+        // either source's completeness or the venue uTime requirement.
+        let financial_through = complete.watermark.min(through.watermark);
+        if financial_through < venue_updated_at {
             return Err("FINANCIAL_COVERAGE_INCOMPLETE".into());
         }
         // A terminal POST may free entry capacity only after the independent
@@ -1366,7 +1381,7 @@ impl TradeService {
             .execution
             .store
             .call(deadline(), move |s| {
-                s.bind_terminal_entry_settlement(&id, venue_updated_at, filled, through.watermark)
+                s.bind_terminal_entry_settlement(&id, venue_updated_at, filled, financial_through)
             })
             .await
             .map_err(err)?;
