@@ -208,10 +208,20 @@ impl AccountBootstrapper {
             .await
     }
 
-    async fn fresh_observer_config(
+    async fn fresh_observer_config_until(
         &self,
+        until: Instant,
     ) -> Result<(AccountConfig, chrono::DateTime<Utc>), OkxError> {
-        self.config_cache.read_fresh(|| self.api.config()).await
+        // K4: still forces a *new* after-HELD signed config observation.
+        // Waiting here admits only a LOCAL no-send private GET in the
+        // existing native rate domain. No exchange/POST retry or stale cache.
+        self.config_cache
+            .read_fresh(|| async {
+                self.api
+                    .config_wait(until.saturating_duration_since(Instant::now()))
+                    .await
+            })
+            .await
     }
 
     pub async fn fee_schedule(
@@ -219,6 +229,20 @@ impl AccountBootstrapper {
         rules: &InstrumentRulesSnapshot,
     ) -> Result<FeeScheduleSnapshot, FeeScheduleBootstrapError> {
         let (config, _) = self.observer_config().await?;
+        strict_read_only_permissions(&config.perm)
+            .map_err(|_| FeeScheduleBootstrapError::PermissionRejected)?;
+        self.fee_schedule_authorized(rules).await
+    }
+
+    /// An after-HELD tariff source cannot be refreshed through an invented
+    /// cache timestamp. Local no-send GET capacity may be awaited only inside
+    /// the original command deadline; the fee bytes still come from OKX.
+    pub async fn fee_schedule_until(
+        &self,
+        rules: &InstrumentRulesSnapshot,
+        until: Instant,
+    ) -> Result<FeeScheduleSnapshot, FeeScheduleBootstrapError> {
+        let (config, _) = self.observer_config_until(until).await?;
         strict_read_only_permissions(&config.perm)
             .map_err(|_| FeeScheduleBootstrapError::PermissionRejected)?;
         self.fee_schedule_authorized(rules).await
@@ -478,10 +502,20 @@ impl AccountBootstrapper {
 
     /// Used only after HELD: a fresh OKX config call, followed by fresh
     /// balance/positions/orders; any failure blocks BEGIN_POST.
-    pub async fn snapshot_after_held(&self) -> Result<AccountSnapshot, AccountBootstrapError> {
-        let (config, config_received_at) = self.fresh_observer_config().await?;
-        self.snapshot_from_config(config, config_received_at, None)
-            .await
+    pub async fn snapshot_after_held_until(
+        &self,
+        until: Instant,
+    ) -> Result<AccountSnapshot, AccountBootstrapError> {
+        if Instant::now() >= until {
+            return Err(AccountBootstrapError::SourceDeadline);
+        }
+        tokio::time::timeout_at(until.into(), async {
+            let (config, config_received_at) = self.fresh_observer_config_until(until).await?;
+            self.snapshot_from_config(config, config_received_at, Some(until))
+                .await
+        })
+        .await
+        .map_err(|_| AccountBootstrapError::SourceDeadline)?
     }
 
     async fn snapshot_from_config(

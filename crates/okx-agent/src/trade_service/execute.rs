@@ -1272,8 +1272,16 @@ impl TradeService {
             .contract_value
             .as_deref()
             .ok_or("POST_ENTRY_CONTRACT_VALUE_MISSING")?)?;
-        let fee = r.observer.fee_schedule(&rules).await.map_err(err)?;
-        let snap = r.observer.snapshot_after_held().await.map_err(err)?;
+        let fee = r
+            .observer
+            .fee_schedule_until(&rules, until)
+            .await
+            .map_err(err)?;
+        let snap = r
+            .observer
+            .snapshot_after_held_until(until)
+            .await
+            .map_err(err)?;
         if snap.account_uid_fingerprint != r.configuration.account_key.verified_uid {
             return Err("POST_ENTRY_ACCOUNT_CHANGED".into());
         }
@@ -1283,7 +1291,12 @@ impl TradeService {
         // they can change while the distributed reservation is HELD.
         // Refuse the only possible POST unless the SAME production assessment
         // still proves the ORIGINAL immutable USD upper and margin capacity.
-        let config = r.execution.account.config().await.map_err(err)?;
+        let config = r
+            .execution
+            .account
+            .config_wait(until.saturating_duration_since(Instant::now()))
+            .await
+            .map_err(err)?;
         let leverage = dec(&r
             .observer
             .configured_leverage(
@@ -1350,6 +1363,7 @@ impl TradeService {
                 .census_after_held(
                     state,
                     held_received,
+                    until,
                     &key,
                     &fx.owner.configuration.account_key.wire(),
                     &fx.conversion.usd_per_usdt,
@@ -1412,13 +1426,16 @@ impl TradeService {
         &self,
         state: &CentralGovernanceSnapshot,
     ) -> Result<NativeRiskCensus, String> {
-        self.census_with_reads(state, None, None).await.map(|v| v.0)
+        self.census_with_reads(state, None, None, None)
+            .await
+            .map(|v| v.0)
     }
 
     async fn census_after_held(
         &self,
         state: &CentralGovernanceSnapshot,
         held_received: Instant,
+        until: Instant,
         reservation: &str,
         selected_account: &str,
         reserved_usd_per_usdt: &str,
@@ -1428,6 +1445,7 @@ impl TradeService {
                 state,
                 Some(held_received),
                 Some((selected_account, reserved_usd_per_usdt)),
+                Some(until),
             )
             .await?;
         let proof = CausalPostProof {
@@ -1447,6 +1465,7 @@ impl TradeService {
         state: &CentralGovernanceSnapshot,
         held_received: Option<Instant>,
         fx_rate_check: Option<(&str, &str)>,
+        until: Option<Instant>,
     ) -> Result<(NativeRiskCensus, Vec<PostAccountReadProof>), String> {
         if !self.accounts.failures().await.is_empty() {
             return Err("ACCOUNT_COHORT_UNAVAILABLE".into());
@@ -1474,7 +1493,10 @@ impl TradeService {
                 }
                 let generation = r.private_ws.status().await.connection_generation;
                 let snapshot = if held_received.is_some() {
-                    r.observer.snapshot_after_held().await.map_err(err)?
+                    r.observer
+                        .snapshot_after_held_until(until.ok_or("POST_DEADLINE_MISSING")?)
+                        .await
+                        .map_err(err)?
                 } else {
                     r.observer.snapshot().await.map_err(err)?
                 };
