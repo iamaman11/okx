@@ -2546,279 +2546,78 @@ mod raw_native_session_tests {
             // terminal RELEASE. Only explicit, recorded signed OKX I/O is
             // substituted. Both SQL and Worker remain production owners.
             if std::env::var("OKX_T09_2_ADMISSION_PROBE").as_deref() == Ok("1") {
-                use crate::accounts::recorded_support::{RecordedGet, RecordedPost};
-                // The first financial owner was stopped before the terminal
-                // T09.1 source phase. The next public entry requires its own
-                // fresh source frontier from the SAME production maintenance
-                // lifecycle, not an ignored readiness error or extra Engine.
-                let (second_shutdown, second_rx) = watch::channel(false);
-                let second_trade = trade.clone();
-                let second_maintenance = tokio::spawn(async move {
-                    second_trade.run(second_rx).await;
-                });
-                let mut last_readiness = String::from("NOT_OBSERVED");
-                tokio::time::timeout(Duration::from_secs(15), async {
-                    loop {
-                        let through = chrono::Utc::now().timestamp_millis() - 2_000;
-                        let mut all_ready = true;
-                        for alias in ["fixture-a", "fixture-b"] {
-                            let owner = accounts.resolve(alias).await.unwrap();
-                            let campaign = campaign_id.clone();
-                            match owner
-                                .execution
-                                .store
-                                .call(
-                                    std::time::Instant::now() + Duration::from_secs(2),
-                                    move |s| {
-                                        s.verify_campaign_entry_readiness(
-                                            &campaign,
-                                            native_origin,
-                                            through,
-                                        )
-                                    },
-                                )
-                                .await
-                            {
-                                Ok(()) => {}
-                                Err(error) => {
-                                    last_readiness = format!("{alias}: {error}");
-                                    all_ready = false;
-                                    break;
+                Box::pin(async {
+                    use crate::accounts::recorded_support::{RecordedGet, RecordedPost};
+                    // The first financial owner was stopped before the terminal
+                    // T09.1 source phase. The next public entry requires its own
+                    // fresh source frontier from the SAME production maintenance
+                    // lifecycle, not an ignored readiness error or extra Engine.
+                    let (second_shutdown, second_rx) = watch::channel(false);
+                    let second_trade = trade.clone();
+                    let second_maintenance = tokio::spawn(async move {
+                        second_trade.run(second_rx).await;
+                    });
+                    let mut last_readiness = String::from("NOT_OBSERVED");
+                    tokio::time::timeout(Duration::from_secs(15), async {
+                        loop {
+                            let through = chrono::Utc::now().timestamp_millis() - 2_000;
+                            let mut all_ready = true;
+                            for alias in ["fixture-a", "fixture-b"] {
+                                let owner = accounts.resolve(alias).await.unwrap();
+                                let campaign = campaign_id.clone();
+                                match owner
+                                    .execution
+                                    .store
+                                    .call(
+                                        std::time::Instant::now() + Duration::from_secs(2),
+                                        move |s| {
+                                            s.verify_campaign_entry_readiness(
+                                                &campaign,
+                                                native_origin,
+                                                through,
+                                            )
+                                        },
+                                    )
+                                    .await
+                                {
+                                    Ok(()) => {}
+                                    Err(error) => {
+                                        last_readiness = format!("{alias}: {error}");
+                                        all_ready = false;
+                                        break;
+                                    }
                                 }
                             }
+                            if all_ready {
+                                break;
+                            }
+                            // Only bounded read-only campaign-source polling.
+                            // The venue POST remains one-shot after proof.
+                            tokio::time::sleep(Duration::from_millis(50)).await;
                         }
-                        if all_ready {
-                            break;
-                        }
-                        // Only bounded read-only campaign-source polling.
-                        // The venue POST remains one-shot after proof.
-                        tokio::time::sleep(Duration::from_millis(50)).await;
-                    }
-                })
-                .await
-                .unwrap_or_else(|_| {
-                    panic!(
-                        "T09.2 production campaign source frontier not refreshed: {last_readiness}"
-                    )
-                });
-                let mut before_cmd = summary("risk_t09_2_before_preview");
-                before_cmd.installation_id = "installation_test".into();
-                let before = risk.request(before_cmd).await.unwrap();
-                let prior_entry = before
-                    .budget
-                    .as_ref()
-                    .unwrap()
-                    .entry_budget
-                    .as_ref()
-                    .unwrap();
-                assert_eq!(prior_entry.consumed_usd, "1.0005");
-                assert_eq!(prior_entry.reserved_usd, "4");
-                refresh_recorded_market();
-                let fee_clock = chrono::Utc::now().timestamp_millis().to_string();
-                for _ in 0..4 {
-                    feed.expect_get(RecordedGet {
-                        access_key: "fixture-observer-a".into(),
-                        path: "/api/v5/account/trade-fee".into(),
-                        required_query: vec![
-                            ("instType".into(), "SWAP".into()),
-                            ("instFamily".into(), "BTC-USDT".into()),
-                        ],
-                        raw_response: envelope(json!([{
-                            "instType":"SWAP","level":"Lv1","ts":fee_clock,
-                            "feeGroup":[{"groupId":"4","maker":"0.0005","taker":"0.0005"}]
-                        }])),
-                    });
-                    feed.expect_get(RecordedGet {
-                        access_key: "fixture-observer-a".into(),
-                        path: "/api/v5/account/leverage-info".into(),
-                        required_query: vec![
-                            ("instId".into(), "BTC-USDT-SWAP".into()),
-                            ("mgnMode".into(), "cross".into()),
-                        ],
-                        raw_response: envelope(json!([
-                            {"instId":"BTC-USDT-SWAP","mgnMode":"cross","posSide":"long","lever":"2"},
-                            {"instId":"BTC-USDT-SWAP","mgnMode":"cross","posSide":"short","lever":"2"}
-                        ])),
-                    });
-                }
-                let second_preview = TradeRequest::Preview {
-                    operation: TradeOperation::Open,
-                    strategy_instance: "manual".into(),
-                    instrument: "BTC-USDT-SWAP".into(),
-                    side: PositionSide::Long,
-                    sizing: Sizing::Contracts {
-                        contracts: "0.30".into(),
-                    },
-                    order: OrderConstraints {
-                        order_type: "limit".into(),
-                        limit_price: Some("1000".into()),
-                        reference: None,
-                        max_entry_usd: Some("10".into()),
-                        max_slippage_bps: 0,
-                    },
-                    protection: Some(Protection::Price {
-                        stop_price: "900".into(),
-                    }),
-                };
-                let preview_until = std::time::Instant::now() + Duration::from_secs(12);
-                let preview_out = loop {
-                    let response = tokio::time::timeout_at(
-                        preview_until.into(),
-                        trade.trade("fixture-a", &second_preview, None),
-                    )
-                    .await
-                    .expect("T09.2 bounded preview admission");
-                    match response {
-                        Ok(value) => break value,
-                        Err(reason) => {
-                            let remaining =
-                                preview_until.saturating_duration_since(std::time::Instant::now());
-                            let delay =
-                                recorded_preview_local_defer(&reason, &rate_budget, remaining)
-                                    .unwrap_or_else(|| {
-                                        panic!("T09.2 non-local Preview error: {reason}")
-                                    });
-                            tokio::time::timeout_at(
-                                preview_until.into(),
-                                tokio::time::sleep(delay),
-                            )
-                            .await
-                            .expect("T09.2 local Preview defer expired");
-                            refresh_recorded_market();
-                        }
-                    }
-                };
-                assert_eq!(preview_out["status"], "completed");
-                assert_eq!(
-                    preview_out["data"]["entry_costs"]["entry_total_usd"],
-                    "3.0015"
-                );
-                assert_eq!(preview_out["data"]["admission"], "preview_only");
-                assert_eq!(preview_out["data"]["side_effects"], "none");
-                assert_eq!(
-                    feed.outbound_posts.lock().unwrap().len(),
-                    3,
-                    "T09.2 Preview may never send a new venue create"
-                );
-                let mut before_execute = summary("risk_t09_2_after_preview_no_reserve");
-                before_execute.installation_id = "installation_test".into();
-                let unchanged = risk.request(before_execute).await.unwrap();
-                assert_eq!(
-                    unchanged
-                        .budget
-                        .as_ref()
-                        .unwrap()
-                        .entry_budget
-                        .as_ref()
-                        .unwrap()
-                        .reserved_usd,
-                    "4",
-                    "T09.2 preview must not reserve entry capacity"
-                );
-                // A current HTTP receipt cannot refresh an old exchange fee ts.
-                // Retire prior Preview bytes ONLY at the recorded transport
-                // boundary and prove a full public Execute fails closed.
-                refresh_recorded_market();
-                let stale_fee_at = (chrono::Utc::now().timestamp_millis() - 60_000).to_string();
-                let retired_preview_fees = feed.advance_recorded_route(
-                    "fixture-observer-a",
-                    "/api/v5/account/trade-fee",
-                    vec![RecordedGet {
-                        access_key: "fixture-observer-a".into(),
-                        path: "/api/v5/account/trade-fee".into(),
-                        required_query: vec![
-                            ("instType".into(), "SWAP".into()),
-                            ("instFamily".into(), "BTC-USDT".into()),
-                        ],
-                        raw_response: envelope(json!([{
-                            "instType":"SWAP","level":"Lv1","ts":stale_fee_at,
-                            "feeGroup":[{"groupId":"4","maker":"0.0005","taker":"0.0005"}]
-                        }])),
-                    }],
-                );
-                let stale_request = TradeRequest::Execute {
-                    idempotency_key: "t09_stale_exchange_fee_denied_0001".into(),
-                    operation: TradeOperation::Open,
-                    strategy_instance: "manual".into(),
-                    instrument: "BTC-USDT-SWAP".into(),
-                    side: PositionSide::Long,
-                    sizing: Sizing::Contracts {
-                        contracts: "0.30".into(),
-                    },
-                    order: OrderConstraints {
-                        order_type: "limit".into(),
-                        limit_price: Some("1000".into()),
-                        reference: None,
-                        max_entry_usd: Some("10".into()),
-                        max_slippage_bps: 0,
-                    },
-                    protection: Some(Protection::Price {
-                        stop_price: "900".into(),
-                    }),
-                    expires_in_ms: 30_000,
-                };
-                let stale_rejected = trade
-                    .trade("fixture-a", &stale_request, None)
-                    .await
-                    .expect("T09.2 stale signed fee must reach public Execute");
-                assert_eq!(
-                    stale_rejected["data"]["primary_reason"], "ENTRY_FEE_EXCHANGE_TIME_STALE",
-                    "stale fee must be rejected specifically by production exchange-time gate: {stale_rejected}"
-                );
-                assert_eq!(stale_rejected["data"]["state"], "REJECTED");
-                assert_eq!(stale_rejected["data"]["rejection_origin"], "LOCAL");
-                assert_eq!(stale_rejected["data"]["send_state"], "NOT_STARTED");
-                assert_eq!(
-                    feed.outbound_posts.lock().unwrap().len(),
-                    3,
-                    "stale exchange fee must result in ZERO additional signed POSTs"
-                );
-                let stale_delivery = feed
-                    .delivered_fees
-                    .lock()
-                    .unwrap()
-                    .last()
-                    .cloned()
-                    .expect("stale execution must consume an actual recorded fee GET");
-                assert_eq!(stale_delivery.0, "fixture-observer-a");
-                assert_eq!(stale_delivery.1, stale_fee_at);
-                println!(
-                    "T09_2_STALE_FEE_DENIAL_V1:{}",
-                    json!({
-                        "exchange_ts":stale_delivery.1,
-                        "http_delivered_at_ms":stale_delivery.2,
-                        "retired_preview_fee_pages":retired_preview_fees,
-                        "reason":stale_rejected["data"]["primary_reason"],
-                        "send_state":stale_rejected["data"]["send_state"],
-                        "outbound_posts":feed.outbound_posts.lock().unwrap().len(),
                     })
-                );
-                let mut after_stale_cmd = summary("risk_t09_2_after_stale_no_send");
-                after_stale_cmd.installation_id = "installation_test".into();
-                let after_stale = risk.request(after_stale_cmd).await.unwrap();
-                assert_eq!(
-                    after_stale
+                    .await
+                    .unwrap_or_else(|_| {
+                        panic!(
+                            "T09.2 production campaign source frontier not refreshed: {last_readiness}"
+                        )
+                    });
+                    let mut before_cmd = summary("risk_t09_2_before_preview");
+                    before_cmd.installation_id = "installation_test".into();
+                    let before = risk.request(before_cmd).await.unwrap();
+                    let prior_entry = before
                         .budget
                         .as_ref()
                         .unwrap()
                         .entry_budget
                         .as_ref()
-                        .unwrap()
-                        .reserved_usd,
-                    "4",
-                    "stale rejection must not retain a new central entry reservation"
-                );
-
-                // A NEW authentic-shaped signed GET transcript immediately
-                // precedes positive Execute; the production freshness gate,
-                // fee generation and reference generation remain unchanged.
-                refresh_recorded_market();
-                let execute_fee_at = chrono::Utc::now().timestamp_millis().to_string();
-                let retired_stale_fees = feed.advance_recorded_route(
-                    "fixture-observer-a",
-                    "/api/v5/account/trade-fee",
-                    (0..4)
-                        .map(|_| RecordedGet {
+                        .unwrap();
+                    assert_eq!(prior_entry.consumed_usd, "1.0005");
+                    assert_eq!(prior_entry.reserved_usd, "4");
+                    refresh_recorded_market();
+                    let fee_clock = chrono::Utc::now().timestamp_millis().to_string();
+                    for _ in 0..4 {
+                        feed.expect_get(RecordedGet {
                             access_key: "fixture-observer-a".into(),
                             path: "/api/v5/account/trade-fee".into(),
                             required_query: vec![
@@ -2826,193 +2625,397 @@ mod raw_native_session_tests {
                                 ("instFamily".into(), "BTC-USDT".into()),
                             ],
                             raw_response: envelope(json!([{
-                                "instType":"SWAP","level":"Lv1","ts":execute_fee_at,
+                                "instType":"SWAP","level":"Lv1","ts":fee_clock,
                                 "feeGroup":[{"groupId":"4","maker":"0.0005","taker":"0.0005"}]
                             }])),
-                        })
-                        .collect(),
-                );
-                assert_eq!(
-                    retired_stale_fees, 0,
-                    "negative Execute must consume the lone stale signed fee reply"
-                );
-                let new_clock = chrono::Utc::now().timestamp_millis().to_string();
-                feed.expect_public_clock(envelope(json!([{"ts":new_clock}])));
-                feed.expect_post(RecordedPost {
-                    access_key: "fixture-executor-a".into(),
-                    path: "/api/v5/trade/order".into(),
-                    expected_body: json!({
-                        "instId":"BTC-USDT-SWAP","tdMode":"cross",
-                        "clOrdId":"__REQUEST_CL_ORD_ID__",
-                        "side":"buy","posSide":"long","ordType":"limit",
-                        "sz":"0.3","px":"1000",
-                        "attachAlgoOrds":[{
-                            "attachAlgoClOrdId":"__REQUEST_ATTACH_ALGO_ID__",
-                            "tpTriggerPxType":"mark",
-                            "slTriggerPx":"900","slTriggerPxType":"mark","slOrdPx":"-1"
-                        }]
-                    }),
-                    raw_response: br#"{"code":"0","msg":"","data":[{"ordId":"recorded-t09-second-001","clOrdId":"__REQUEST_CL_ORD_ID__","sCode":"0"}]}"#.to_vec(),
-                });
-                feed.advance_recorded_route(
-                    "fixture-executor-a",
-                    "/api/v5/trade/order",
-                    (0..2)
-                        .map(|_| RecordedGet {
-                            access_key: "fixture-executor-a".into(),
-                            path: "/api/v5/trade/order".into(),
-                            required_query: vec![("instId".into(), "BTC-USDT-SWAP".into())],
-                            raw_response: envelope(json!([{
-                                "instId":"BTC-USDT-SWAP",
-                                "ordId":"recorded-t09-second-001",
-                                "clOrdId":"__REQUEST_CL_ORD_ID__",
-                                "side":"buy","posSide":"long","tdMode":"cross",
-                                "ordType":"limit","px":"1000","sz":"0.3",
-                                "accFillSz":"0","avgPx":"","state":"live",
-                                "cTime":new_clock,"uTime":new_clock
-                            }])),
-                        })
-                        .collect(),
-                );
-                let second = TradeRequest::Execute {
-                    idempotency_key: "t09_real_public_execute_0002".into(),
-                    operation: TradeOperation::Open,
-                    strategy_instance: "manual".into(),
-                    instrument: "BTC-USDT-SWAP".into(),
-                    side: PositionSide::Long,
-                    sizing: Sizing::Contracts {
-                        contracts: "0.30".into(),
-                    },
-                    order: OrderConstraints {
-                        order_type: "limit".into(),
-                        limit_price: Some("1000".into()),
-                        reference: None,
-                        max_entry_usd: Some("10".into()),
-                        max_slippage_bps: 0,
-                    },
-                    protection: Some(Protection::Price {
-                        stop_price: "900".into(),
-                    }),
-                    expires_in_ms: 30_000,
-                };
-                let accepted = trade
-                    .trade("fixture-a", &second, None)
-                    .await
-                    .expect("T09.2 public TradeService must admit second 0.30 order");
-                assert_eq!(
-                    accepted["status"], "partial",
-                    "T09.2 ACK-only is not financial settlement: {accepted}"
-                );
-                assert_eq!(accepted["data"]["intent"]["state"], "ACKNOWLEDGED");
-                assert_eq!(
-                    accepted["data"]["intent"]["exchange_order_id"],
-                    "recorded-t09-second-001"
-                );
-                assert_eq!(accepted["data"]["financial_complete"], false);
-                let positive_fee_deliveries = feed.delivered_fees.lock().unwrap().clone();
-                assert!(
-                    positive_fee_deliveries
-                        .iter()
-                        .any(|(key, ts, _)| key == "fixture-observer-a" && ts == &execute_fee_at),
-                    "positive Execute must consume its newly recorded fee GET: {positive_fee_deliveries:?}"
-                );
-                println!(
-                    "T09_2_FEE_TRANSCRIPT_V1:{}",
-                    json!({
-                        "positive_exchange_ts":execute_fee_at,
-                        "last_fee_deliveries":positive_fee_deliveries.iter().rev().take(5).collect::<Vec<_>>(),
-                    })
-                );
-                assert_eq!(
-                    feed.outbound_posts.lock().unwrap().len(),
-                    4,
-                    "T09.2 must add exactly ONE create after T09.1 open/close/cancel"
-                );
-                assert_eq!(
-                    feed.unconsumed_posts(),
-                    0,
-                    "T09.2 must consume the single exact signed create response"
-                );
-                let new_intent_id = accepted["data"]["intent"]["intent_id"]
-                    .as_str()
-                    .expect("T09.2 Native intent id")
-                    .to_string();
-                let sql_id = new_intent_id.clone();
-                let resource = accounts.resolve("fixture-a").await.unwrap();
-                let (persisted, receipt, (post_fence_ms, post_fence_state)) = resource
-                    .execution
-                    .store
-                    .call(
-                        std::time::Instant::now() + Duration::from_secs(3),
-                        move |s| {
-                            Ok((
-                                s.intent(&sql_id)?
-                                    .ok_or(okx_execution::StoreError::Invalid(
-                                        "T09_2_SQL_INTENT_MISSING",
-                                    ))?,
-                                s.central_receipt(&sql_id)?.ok_or(
-                                    okx_execution::StoreError::Invalid("T09_2_SQL_RESERVE_MISSING"),
-                                )?,
-                                s.post_fence_evidence(&sql_id)?,
-                            ))
+                        });
+                        feed.expect_get(RecordedGet {
+                            access_key: "fixture-observer-a".into(),
+                            path: "/api/v5/account/leverage-info".into(),
+                            required_query: vec![
+                                ("instId".into(), "BTC-USDT-SWAP".into()),
+                                ("mgnMode".into(), "cross".into()),
+                            ],
+                            raw_response: envelope(json!([
+                                {"instId":"BTC-USDT-SWAP","mgnMode":"cross","posSide":"long","lever":"2"},
+                                {"instId":"BTC-USDT-SWAP","mgnMode":"cross","posSide":"short","lever":"2"}
+                            ])),
+                        });
+                    }
+                    let second_preview = TradeRequest::Preview {
+                        operation: TradeOperation::Open,
+                        strategy_instance: "manual".into(),
+                        instrument: "BTC-USDT-SWAP".into(),
+                        side: PositionSide::Long,
+                        sizing: Sizing::Contracts {
+                            contracts: "0.30".into(),
                         },
-                    )
-                    .await
-                    .expect(
-                        "T09.2 SQL, POST fence and central reserve must be independently durable",
+                        order: OrderConstraints {
+                            order_type: "limit".into(),
+                            limit_price: Some("1000".into()),
+                            reference: None,
+                            max_entry_usd: Some("10".into()),
+                            max_slippage_bps: 0,
+                        },
+                        protection: Some(Protection::Price {
+                            stop_price: "900".into(),
+                        }),
+                    };
+                    let preview_until = std::time::Instant::now() + Duration::from_secs(12);
+                    let preview_out = loop {
+                        let response = tokio::time::timeout_at(
+                            preview_until.into(),
+                            trade.trade("fixture-a", &second_preview, None),
+                        )
+                        .await
+                        .expect("T09.2 bounded preview admission");
+                        match response {
+                            Ok(value) => break value,
+                            Err(reason) => {
+                                let remaining =
+                                    preview_until.saturating_duration_since(std::time::Instant::now());
+                                let delay =
+                                    recorded_preview_local_defer(&reason, &rate_budget, remaining)
+                                        .unwrap_or_else(|| {
+                                            panic!("T09.2 non-local Preview error: {reason}")
+                                        });
+                                tokio::time::timeout_at(
+                                    preview_until.into(),
+                                    tokio::time::sleep(delay),
+                                )
+                                .await
+                                .expect("T09.2 local Preview defer expired");
+                                refresh_recorded_market();
+                            }
+                        }
+                    };
+                    assert_eq!(preview_out["status"], "completed");
+                    assert_eq!(
+                        preview_out["data"]["entry_costs"]["entry_total_usd"],
+                        "3.0015"
                     );
-                assert!(post_fence_ms > 0);
-                assert_eq!(post_fence_state, "POSTED");
-                assert_eq!(persisted.state, okx_execution::IntentState::Acknowledged);
-                assert_eq!(
-                    persisted.exchange_order_id.as_deref(),
-                    Some("recorded-t09-second-001")
-                );
-                assert_eq!(persisted.plan.quantity, Decimal::new(3, 1));
-                assert_eq!(receipt.plan_hash, persisted.plan_hash);
-                assert!(
-                    !receipt.reservation_key.starts_with("local:"),
-                    "new opening risk must own a real central RiskBook reservation"
-                );
-                let mut after_cmd = summary("risk_t09_2_after_real_create");
-                after_cmd.installation_id = "installation_test".into();
-                let after = risk.request(after_cmd).await.unwrap();
-                let b = after
-                    .budget
-                    .as_ref()
-                    .unwrap()
-                    .entry_budget
-                    .as_ref()
-                    .unwrap();
-                assert_eq!(b.consumed_usd, "1.0005");
-                assert_eq!(b.reserved_usd, "7.0015");
-                println!(
-                    "T09_2_NATIVE_ADMISSION_V1:{}",
-                    json!({
-                        "intent_id":persisted.intent_id,
-                        "account_uid":resource.configuration.account_key.verified_uid,
-                        "client_order_id":persisted.client_order_id,
-                        "state":persisted.state.as_str(),
-                        "sql_revision":persisted.revision,
-                        "sql_begin_post_at_ms":post_fence_ms,
-                        "sql_post_reservation_state":post_fence_state,
-                        "sql_exchange_order_id":persisted.exchange_order_id,
-                        "central_reservation_key":receipt.reservation_key,
-                        "central_receipt_hash":receipt.receipt_hash,
-                        "plan_hash":persisted.plan_hash,
-                        "quote_entry_usd":preview_out["data"]["entry_costs"]["entry_total_usd"],
-                        "create_posts_total":feed.outbound_posts.lock().unwrap().len(),
-                        "preview_reserved_entry_usd":unchanged.budget.as_ref().unwrap().entry_budget.as_ref().unwrap().reserved_usd,
-                        "after_worker_budget":after.budget,
-                        "after_risk_book_sequence":after.risk_book_sequence,
-                        "post_ack_financial_complete":accepted["data"]["financial_complete"]
-                    })
-                );
-                second_shutdown.send(true).unwrap();
-                tokio::time::timeout(Duration::from_secs(10), second_maintenance)
-                    .await
-                    .expect("T09.2 financial maintenance did not terminate")
-                    .unwrap();
+                    assert_eq!(preview_out["data"]["admission"], "preview_only");
+                    assert_eq!(preview_out["data"]["side_effects"], "none");
+                    assert_eq!(
+                        feed.outbound_posts.lock().unwrap().len(),
+                        3,
+                        "T09.2 Preview may never send a new venue create"
+                    );
+                    let mut before_execute = summary("risk_t09_2_after_preview_no_reserve");
+                    before_execute.installation_id = "installation_test".into();
+                    let unchanged = risk.request(before_execute).await.unwrap();
+                    assert_eq!(
+                        unchanged
+                            .budget
+                            .as_ref()
+                            .unwrap()
+                            .entry_budget
+                            .as_ref()
+                            .unwrap()
+                            .reserved_usd,
+                        "4",
+                        "T09.2 preview must not reserve entry capacity"
+                    );
+                    // A current HTTP receipt cannot refresh an old exchange fee ts.
+                    // Retire prior Preview bytes ONLY at the recorded transport
+                    // boundary and prove a full public Execute fails closed.
+                    refresh_recorded_market();
+                    let stale_fee_at = (chrono::Utc::now().timestamp_millis() - 60_000).to_string();
+                    let retired_preview_fees = feed.advance_recorded_route(
+                        "fixture-observer-a",
+                        "/api/v5/account/trade-fee",
+                        vec![RecordedGet {
+                            access_key: "fixture-observer-a".into(),
+                            path: "/api/v5/account/trade-fee".into(),
+                            required_query: vec![
+                                ("instType".into(), "SWAP".into()),
+                                ("instFamily".into(), "BTC-USDT".into()),
+                            ],
+                            raw_response: envelope(json!([{
+                                "instType":"SWAP","level":"Lv1","ts":stale_fee_at,
+                                "feeGroup":[{"groupId":"4","maker":"0.0005","taker":"0.0005"}]
+                            }])),
+                        }],
+                    );
+                    let stale_request = TradeRequest::Execute {
+                        idempotency_key: "t09_stale_exchange_fee_denied_0001".into(),
+                        operation: TradeOperation::Open,
+                        strategy_instance: "manual".into(),
+                        instrument: "BTC-USDT-SWAP".into(),
+                        side: PositionSide::Long,
+                        sizing: Sizing::Contracts {
+                            contracts: "0.30".into(),
+                        },
+                        order: OrderConstraints {
+                            order_type: "limit".into(),
+                            limit_price: Some("1000".into()),
+                            reference: None,
+                            max_entry_usd: Some("10".into()),
+                            max_slippage_bps: 0,
+                        },
+                        protection: Some(Protection::Price {
+                            stop_price: "900".into(),
+                        }),
+                        expires_in_ms: 30_000,
+                    };
+                    let stale_rejected = trade
+                        .trade("fixture-a", &stale_request, None)
+                        .await
+                        .expect("T09.2 stale signed fee must reach public Execute");
+                    assert_eq!(
+                        stale_rejected["data"]["primary_reason"], "ENTRY_FEE_EXCHANGE_TIME_STALE",
+                        "stale fee must be rejected specifically by production exchange-time gate: {stale_rejected}"
+                    );
+                    assert_eq!(stale_rejected["data"]["state"], "REJECTED");
+                    assert_eq!(stale_rejected["data"]["rejection_origin"], "LOCAL");
+                    assert_eq!(stale_rejected["data"]["send_state"], "NOT_STARTED");
+                    assert_eq!(
+                        feed.outbound_posts.lock().unwrap().len(),
+                        3,
+                        "stale exchange fee must result in ZERO additional signed POSTs"
+                    );
+                    let stale_delivery = feed
+                        .delivered_fees
+                        .lock()
+                        .unwrap()
+                        .last()
+                        .cloned()
+                        .expect("stale execution must consume an actual recorded fee GET");
+                    assert_eq!(stale_delivery.0, "fixture-observer-a");
+                    assert_eq!(stale_delivery.1, stale_fee_at);
+                    println!(
+                        "T09_2_STALE_FEE_DENIAL_V1:{}",
+                        json!({
+                            "exchange_ts":stale_delivery.1,
+                            "http_delivered_at_ms":stale_delivery.2,
+                            "retired_preview_fee_pages":retired_preview_fees,
+                            "reason":stale_rejected["data"]["primary_reason"],
+                            "send_state":stale_rejected["data"]["send_state"],
+                            "outbound_posts":feed.outbound_posts.lock().unwrap().len(),
+                        })
+                    );
+                    let mut after_stale_cmd = summary("risk_t09_2_after_stale_no_send");
+                    after_stale_cmd.installation_id = "installation_test".into();
+                    let after_stale = risk.request(after_stale_cmd).await.unwrap();
+                    assert_eq!(
+                        after_stale
+                            .budget
+                            .as_ref()
+                            .unwrap()
+                            .entry_budget
+                            .as_ref()
+                            .unwrap()
+                            .reserved_usd,
+                        "4",
+                        "stale rejection must not retain a new central entry reservation"
+                    );
+
+                    // A NEW authentic-shaped signed GET transcript immediately
+                    // precedes positive Execute; the production freshness gate,
+                    // fee generation and reference generation remain unchanged.
+                    refresh_recorded_market();
+                    let execute_fee_at = chrono::Utc::now().timestamp_millis().to_string();
+                    let retired_stale_fees = feed.advance_recorded_route(
+                        "fixture-observer-a",
+                        "/api/v5/account/trade-fee",
+                        (0..4)
+                            .map(|_| RecordedGet {
+                                access_key: "fixture-observer-a".into(),
+                                path: "/api/v5/account/trade-fee".into(),
+                                required_query: vec![
+                                    ("instType".into(), "SWAP".into()),
+                                    ("instFamily".into(), "BTC-USDT".into()),
+                                ],
+                                raw_response: envelope(json!([{
+                                    "instType":"SWAP","level":"Lv1","ts":execute_fee_at,
+                                    "feeGroup":[{"groupId":"4","maker":"0.0005","taker":"0.0005"}]
+                                }])),
+                            })
+                            .collect(),
+                    );
+                    assert_eq!(
+                        retired_stale_fees, 0,
+                        "negative Execute must consume the lone stale signed fee reply"
+                    );
+                    let new_clock = chrono::Utc::now().timestamp_millis().to_string();
+                    feed.expect_public_clock(envelope(json!([{"ts":new_clock}])));
+                    feed.expect_post(RecordedPost {
+                        access_key: "fixture-executor-a".into(),
+                        path: "/api/v5/trade/order".into(),
+                        expected_body: json!({
+                            "instId":"BTC-USDT-SWAP","tdMode":"cross",
+                            "clOrdId":"__REQUEST_CL_ORD_ID__",
+                            "side":"buy","posSide":"long","ordType":"limit",
+                            "sz":"0.3","px":"1000",
+                            "attachAlgoOrds":[{
+                                "attachAlgoClOrdId":"__REQUEST_ATTACH_ALGO_ID__",
+                                "tpTriggerPxType":"mark",
+                                "slTriggerPx":"900","slTriggerPxType":"mark","slOrdPx":"-1"
+                            }]
+                        }),
+                        raw_response: br#"{"code":"0","msg":"","data":[{"ordId":"recorded-t09-second-001","clOrdId":"__REQUEST_CL_ORD_ID__","sCode":"0"}]}"#.to_vec(),
+                    });
+                    feed.advance_recorded_route(
+                        "fixture-executor-a",
+                        "/api/v5/trade/order",
+                        (0..2)
+                            .map(|_| RecordedGet {
+                                access_key: "fixture-executor-a".into(),
+                                path: "/api/v5/trade/order".into(),
+                                required_query: vec![("instId".into(), "BTC-USDT-SWAP".into())],
+                                raw_response: envelope(json!([{
+                                    "instId":"BTC-USDT-SWAP",
+                                    "ordId":"recorded-t09-second-001",
+                                    "clOrdId":"__REQUEST_CL_ORD_ID__",
+                                    "side":"buy","posSide":"long","tdMode":"cross",
+                                    "ordType":"limit","px":"1000","sz":"0.3",
+                                    "accFillSz":"0","avgPx":"","state":"live",
+                                    "cTime":new_clock,"uTime":new_clock
+                                }])),
+                            })
+                            .collect(),
+                    );
+                    let second = TradeRequest::Execute {
+                        idempotency_key: "t09_real_public_execute_0002".into(),
+                        operation: TradeOperation::Open,
+                        strategy_instance: "manual".into(),
+                        instrument: "BTC-USDT-SWAP".into(),
+                        side: PositionSide::Long,
+                        sizing: Sizing::Contracts {
+                            contracts: "0.30".into(),
+                        },
+                        order: OrderConstraints {
+                            order_type: "limit".into(),
+                            limit_price: Some("1000".into()),
+                            reference: None,
+                            max_entry_usd: Some("10".into()),
+                            max_slippage_bps: 0,
+                        },
+                        protection: Some(Protection::Price {
+                            stop_price: "900".into(),
+                        }),
+                        expires_in_ms: 30_000,
+                    };
+                    let accepted = trade
+                        .trade("fixture-a", &second, None)
+                        .await
+                        .expect("T09.2 public TradeService must admit second 0.30 order");
+                    assert_eq!(
+                        accepted["status"], "partial",
+                        "T09.2 ACK-only is not financial settlement: {accepted}"
+                    );
+                    assert_eq!(accepted["data"]["intent"]["state"], "ACKNOWLEDGED");
+                    assert_eq!(
+                        accepted["data"]["intent"]["exchange_order_id"],
+                        "recorded-t09-second-001"
+                    );
+                    assert_eq!(accepted["data"]["financial_complete"], false);
+                    let positive_fee_deliveries = feed.delivered_fees.lock().unwrap().clone();
+                    assert!(
+                        positive_fee_deliveries
+                            .iter()
+                            .any(|(key, ts, _)| key == "fixture-observer-a" && ts == &execute_fee_at),
+                        "positive Execute must consume its newly recorded fee GET: {positive_fee_deliveries:?}"
+                    );
+                    println!(
+                        "T09_2_FEE_TRANSCRIPT_V1:{}",
+                        json!({
+                            "positive_exchange_ts":execute_fee_at,
+                            "last_fee_deliveries":positive_fee_deliveries.iter().rev().take(5).collect::<Vec<_>>(),
+                        })
+                    );
+                    assert_eq!(
+                        feed.outbound_posts.lock().unwrap().len(),
+                        4,
+                        "T09.2 must add exactly ONE create after T09.1 open/close/cancel"
+                    );
+                    assert_eq!(
+                        feed.unconsumed_posts(),
+                        0,
+                        "T09.2 must consume the single exact signed create response"
+                    );
+                    let new_intent_id = accepted["data"]["intent"]["intent_id"]
+                        .as_str()
+                        .expect("T09.2 Native intent id")
+                        .to_string();
+                    let sql_id = new_intent_id.clone();
+                    let resource = accounts.resolve("fixture-a").await.unwrap();
+                    let (persisted, receipt, (post_fence_ms, post_fence_state)) = resource
+                        .execution
+                        .store
+                        .call(
+                            std::time::Instant::now() + Duration::from_secs(3),
+                            move |s| {
+                                Ok((
+                                    s.intent(&sql_id)?
+                                        .ok_or(okx_execution::StoreError::Invalid(
+                                            "T09_2_SQL_INTENT_MISSING",
+                                        ))?,
+                                    s.central_receipt(&sql_id)?.ok_or(
+                                        okx_execution::StoreError::Invalid("T09_2_SQL_RESERVE_MISSING"),
+                                    )?,
+                                    s.post_fence_evidence(&sql_id)?,
+                                ))
+                            },
+                        )
+                        .await
+                        .expect(
+                            "T09.2 SQL, POST fence and central reserve must be independently durable",
+                        );
+                    assert!(post_fence_ms > 0);
+                    assert_eq!(post_fence_state, "POSTED");
+                    assert_eq!(persisted.state, okx_execution::IntentState::Acknowledged);
+                    assert_eq!(
+                        persisted.exchange_order_id.as_deref(),
+                        Some("recorded-t09-second-001")
+                    );
+                    assert_eq!(persisted.plan.quantity, Decimal::new(3, 1));
+                    assert_eq!(receipt.plan_hash, persisted.plan_hash);
+                    assert!(
+                        !receipt.reservation_key.starts_with("local:"),
+                        "new opening risk must own a real central RiskBook reservation"
+                    );
+                    let mut after_cmd = summary("risk_t09_2_after_real_create");
+                    after_cmd.installation_id = "installation_test".into();
+                    let after = risk.request(after_cmd).await.unwrap();
+                    let b = after
+                        .budget
+                        .as_ref()
+                        .unwrap()
+                        .entry_budget
+                        .as_ref()
+                        .unwrap();
+                    assert_eq!(b.consumed_usd, "1.0005");
+                    assert_eq!(b.reserved_usd, "7.0015");
+                    println!(
+                        "T09_2_NATIVE_ADMISSION_V1:{}",
+                        json!({
+                            "intent_id":persisted.intent_id,
+                            "account_uid":resource.configuration.account_key.verified_uid,
+                            "client_order_id":persisted.client_order_id,
+                            "state":persisted.state.as_str(),
+                            "sql_revision":persisted.revision,
+                            "sql_begin_post_at_ms":post_fence_ms,
+                            "sql_post_reservation_state":post_fence_state,
+                            "sql_exchange_order_id":persisted.exchange_order_id,
+                            "central_reservation_key":receipt.reservation_key,
+                            "central_receipt_hash":receipt.receipt_hash,
+                            "plan_hash":persisted.plan_hash,
+                            "quote_entry_usd":preview_out["data"]["entry_costs"]["entry_total_usd"],
+                            "create_posts_total":feed.outbound_posts.lock().unwrap().len(),
+                            "preview_reserved_entry_usd":unchanged.budget.as_ref().unwrap().entry_budget.as_ref().unwrap().reserved_usd,
+                            "after_worker_budget":after.budget,
+                            "after_risk_book_sequence":after.risk_book_sequence,
+                            "post_ack_financial_complete":accepted["data"]["financial_complete"]
+                        })
+                    );
+                    second_shutdown.send(true).unwrap();
+                    tokio::time::timeout(Duration::from_secs(10), second_maintenance)
+                        .await
+                        .expect("T09.2 financial maintenance did not terminate")
+                        .unwrap();
+                })
+                .await;
             }
             feed_shutdown.send(true).unwrap();
         }
