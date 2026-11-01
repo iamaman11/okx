@@ -798,7 +798,9 @@ async fn capture_fills(
                     format!("bill:{}", r.bill_id)
                 };
                 let id = format!("{}:{}:{}", r.instrument_id, r.trade_id, r.order_id);
-                if fee != Decimal::ZERO {
+                // The raw fill retains the fee, but without billId there
+                // is no final canonical fee event for a SWAP yet.
+                if fee != Decimal::ZERO && !(partition == "SWAP" && r.bill_id.is_empty()) {
                     page.finance.push(FinanceEntry {
                         entry_id: format!("{key}:fee"),
                         economic_event_key: key,

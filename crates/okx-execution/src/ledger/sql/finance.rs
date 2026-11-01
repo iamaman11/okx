@@ -109,6 +109,93 @@ fn verify_strategy_finance_source(db: &Connection, e: &FinanceEntry) -> StoreRes
     Ok(())
 }
 
+
+// Late SWAP fills may not carry billId. Resolve this only from the existing
+// immutable fill and bill-order source records of this ONE account SQL owner.
+// An ambiguous or mismatched source stays unlinked (and cannot settle).
+fn link_late_swap_fee(tx: &rusqlite::Transaction<'_>, fill_id: &str) -> StoreResult<()> {
+    let raw: Option<(String, String, String, String, String, i64, String)> = tx
+        .query_row(
+            "SELECT f.instrument_id,f.trade_id,f.exchange_order_id,f.fee,
+                    f.currency,f.time,s.bill_id
+             FROM fills f JOIN swap_fill_sources s ON s.fill_id=f.fill_id
+             WHERE f.fill_id=?1",
+            [fill_id],
+            |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                    r.get(6)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((instrument, trade, order, raw_fee, raw_currency, fill_time, fill_bill_id)) = raw
+    else {
+        return Err(StoreError::Invalid("LATE_SWAP_FEE_FILL_SOURCE_MISSING"));
+    };
+    if !fill_bill_id.is_empty() || trade.is_empty() || order.is_empty() {
+        return Ok(());
+    }
+    let raw_fee = decimal(raw_fee)?;
+    let mut q = tx.prepare(
+        "SELECT e.entry_id,e.amount,e.currency,b.time
+         FROM bill_order_sources origin
+         JOIN bills b ON b.bill_id=origin.bill_id
+         JOIN finance_entries e ON e.economic_event_key=b.economic_event_key
+             AND e.component='FEE' AND e.allocation_leg='account'
+         WHERE origin.instrument_id=?1 AND origin.exchange_order_id=?2
+           AND origin.trade_id=?3
+         ORDER BY b.bill_id LIMIT 65",
+    )?;
+    let mut rows = q.query(params![instrument, order, trade])?;
+    let mut matched: Option<String> = None;
+    let mut candidates = 0;
+    while let Some(row) = rows.next()? {
+        candidates += 1;
+        if candidates > 64 {
+            return Err(StoreError::Invalid("LATE_SWAP_FEE_BILLS_UNBOUNDED"));
+        }
+        let entry_id: String = row.get(0)?;
+        let fee: String = row.get(1)?;
+        let currency: String = row.get(2)?;
+        let bill_time: i64 = row.get(3)?;
+        if decimal(fee)? != raw_fee || currency != raw_currency || bill_time < fill_time {
+            continue;
+        }
+        if matched.is_some() {
+            // Two matching invoices cannot each acquire this fill's fee.
+            return Ok(());
+        }
+        matched = Some(entry_id);
+    }
+    let Some(entry_id) = matched else {
+        return Ok(());
+    };
+    let fill_source = format!("fill:{fill_id}");
+    let conflicting: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM finance_source_links l
+         JOIN finance_entries e ON e.entry_id=l.entry_id
+         WHERE l.source_ref=?1 AND e.component='FEE'
+           AND l.entry_id<>?2 AND e.reverses_entry_id IS NULL)",
+        params![fill_source, entry_id],
+        |r| r.get(0),
+    )?;
+    if conflicting {
+        return Err(StoreError::Invalid("LATE_SWAP_FEE_SOURCE_ALREADY_BOOKED"));
+    }
+    tx.execute(
+        "INSERT INTO finance_source_links(entry_id,source_ref) VALUES(?1,?2)
+         ON CONFLICT DO NOTHING",
+        params![entry_id, fill_source],
+    )?;
+    Ok(())
+}
+
 fn finance_rowid(db: &Connection) -> StoreResult<i64> {
     Ok(db.query_row(
         "SELECT COALESCE(MAX(rowid),0) FROM finance_entries",
@@ -3704,7 +3791,7 @@ impl AccountStore {
         // projection is not a second fee (or a second owner of the key).
         // The legacy fill key remains for sources without a bill ID; those
         // are not final bill evidence and cannot authorize settlement.
-        let fee_event_key = self
+        let fee_event_key = match self
             .connection
             .query_row(
                 "SELECT bill_id FROM swap_fill_sources WHERE fill_id=?1",
@@ -3712,9 +3799,11 @@ impl AccountStore {
                 |row| row.get::<_, String>(0),
             )
             .optional()?
-            .filter(|id| !id.is_empty())
-            .map(|id| format!("bill:{id}"))
-            .unwrap_or_else(|| key.clone());
+        {
+            Some(id) if id.is_empty() => None,
+            Some(id) => Some(format!("bill:{id}")),
+            None => Some(key.clone()),
+        };
         let mut page = IngestPage {
             cursor,
             ..Default::default()
@@ -3722,7 +3811,9 @@ impl AccountStore {
         // F7: a raw fill may have committed with fill_projection_pending
         // before its fee/position projection. Rebuild the fee on replay;
         // the canonical economic-event uniqueness prevents double charge.
-        if fill.fee != Decimal::ZERO {
+        if fill.fee != Decimal::ZERO
+            && let Some(fee_event_key) = fee_event_key
+        {
             page.finance.push(FinanceEntry {
                 entry_id: format!("{fee_event_key}:fee"),
                 economic_event_key: fee_event_key,
@@ -4291,6 +4382,36 @@ impl AccountStore {
                         .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))?;
                     tx.execute("INSERT INTO daily_losses VALUES(?1,?2,?3) ON CONFLICT(scope_id,utc_day) DO UPDATE SET loss_usd=excluded.loss_usd",params![scope,day,exact(total)])?;
                 }
+            }
+        }
+        // Bounded delta linking: a missing fill-side billId is recovered
+        // from the immutable authenticated bill->order->trade identity.
+        // No historical scans, duplicate ledger or alternate financial owner.
+        for source in &page.swap_fill_sources {
+            if source.bill_id.is_empty() {
+                link_late_swap_fee(&tx, &source.fill_id)?;
+            }
+        }
+        for source in &page.bill_order_sources {
+            if source.trade_id.is_empty() {
+                continue;
+            }
+            let fill_id: Option<String> = tx
+                .query_row(
+                    "SELECT f.fill_id FROM fills f
+                     JOIN swap_fill_sources s ON s.fill_id=f.fill_id
+                     WHERE f.instrument_id=?1 AND f.exchange_order_id=?2
+                       AND f.trade_id=?3 AND s.bill_id=''",
+                    params![
+                        source.instrument_id,
+                        source.exchange_order_id,
+                        source.trade_id
+                    ],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if let Some(fill_id) = fill_id {
+                link_late_swap_fee(&tx, &fill_id)?;
             }
         }
         if added_loss > Decimal::ZERO {
