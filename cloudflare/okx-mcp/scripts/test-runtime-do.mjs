@@ -432,9 +432,17 @@ try {
           ? lines.slice(panic, panic + 7)
           : lines.filter(line => /assertion|error: test failed|FAILED/.test(line)).slice(-5);
         const cause = detail.map(line => line.slice(0, 800)).join(" | ");
+        const exitCode = String(error.code ?? "UNKNOWN").slice(0, 40);
+        const phases = [...[String(error.stdout ?? ""), String(error.stderr ?? "")]
+          .flatMap(channel => [...channel.matchAll(/T09_2_PHASE_V1:([A-Z_]+)/g)])
+          .map(match => match[1])];
         process.stderr.write("T09_1_NATIVE_CHILD_FAILURE_V2:" + JSON.stringify({
           schema:"okx.t09-native-child-failure/v2",
-          exit_code:String(error.code ?? "UNKNOWN").slice(0, 40),
+          exit_code:exitCode,
+          windows_stack_overflow:exitCode === "3221225725"
+            || lines.some(line => /stack overflow|has overflowed its stack/i.test(line)),
+          t09_2_last_phase:phases.at(-1) ?? null,
+          t09_2_phases:phases.slice(-10),
           rust_assertion:cause.slice(0, 1900) || "RUST_CHILD_EXIT_WITHOUT_ASSERTION",
           restart_reached:recorded.includes("T09_1_NATIVE_SQL_RESTART_V1:"),
           terminal_reached:recorded.includes("T09_1_NATIVE_TERMINAL_CLOSE_V1:"),

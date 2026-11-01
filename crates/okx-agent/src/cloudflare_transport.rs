@@ -492,6 +492,50 @@ mod raw_native_session_tests {
         (delay <= remaining).then_some(delay)
     }
 
+    // An explicitly recorded *new* all-scopes inventory after T09.1 has
+    // verified cancellation of its attached protection. Keep the finite
+    // transcript builder synchronous, outside the large Native async test
+    // future; it must not synthesize state in AccountStore or RiskBook.
+    fn recorded_flat_derivative_inventory_after_close(
+        feed: &crate::accounts::recorded_support::RecordedAccountHttp,
+    ) -> usize {
+        use crate::accounts::recorded_support::RecordedGet;
+        let kinds = [
+            "conditional",
+            "oco",
+            "trigger",
+            "move_order_stop",
+            "chase",
+            "iceberg",
+            "twap",
+            "smart_iceberg",
+        ];
+        let raw_empty = serde_json::to_vec(&json!({"code":"0","msg":"","data":[]}))
+            .expect("T09.2 recorded raw empty derivative source");
+        let mut pages = Vec::with_capacity(5 * 2 * kinds.len());
+        for _ in 0..5 {
+            for inst_type in ["SWAP", "FUTURES"] {
+                for kind in kinds {
+                    pages.push(RecordedGet {
+                        access_key: "fixture-observer-a".into(),
+                        path: "/api/v5/trade/orders-algo-pending".into(),
+                        required_query: vec![
+                            ("instType".into(), inst_type.into()),
+                            ("ordType".into(), kind.into()),
+                            ("limit".into(), "100".into()),
+                        ],
+                        raw_response: raw_empty.clone(),
+                    });
+                }
+            }
+        }
+        feed.advance_recorded_route(
+            "fixture-observer-a",
+            "/api/v5/trade/orders-algo-pending",
+            pages,
+        )
+    }
+
     #[test]
     fn recorded_preview_retry_requires_local_no_send_private_get() {
         let budget = RateBudget::new().for_authenticated_user("account-001");
@@ -2970,45 +3014,12 @@ mod raw_native_session_tests {
                             ])),
                         }).collect(),
                     );
-                    // CLOSE has independently cancelled the old attached stop.
-                    // The next positive admission must receive NEW signed,
-                    // exhaustive derivatives-inventory GET pages. T09.1's
-                    // earlier finite transcript may have been consumed by
-                    // terminal reconciliation; missing scopes never mean zero.
-                    // These are raw HTTP boundary replies only; production
-                    // census, freshness and central risk checks remain active.
-                    let algo_kinds = [
-                        "conditional",
-                        "oco",
-                        "trigger",
-                        "move_order_stop",
-                        "chase",
-                        "iceberg",
-                        "twap",
-                        "smart_iceberg",
-                    ];
-                    let new_algo_pages = (0..5)
-                        .flat_map(|_| {
-                            ["SWAP", "FUTURES"].into_iter().flat_map(|inst_type| {
-                                algo_kinds.into_iter().map(move |kind| (inst_type, kind))
-                            })
-                        })
-                        .map(|(inst_type, kind)| RecordedGet {
-                            access_key: "fixture-observer-a".into(),
-                            path: "/api/v5/trade/orders-algo-pending".into(),
-                            required_query: vec![
-                                ("instType".into(), inst_type.into()),
-                                ("ordType".into(), kind.into()),
-                                ("limit".into(), "100".into()),
-                            ],
-                            raw_response: envelope(json!([])),
-                        })
-                        .collect();
-                    let retired_terminal_algo_pages = feed.advance_recorded_route(
-                        "fixture-observer-a",
-                        "/api/v5/trade/orders-algo-pending",
-                        new_algo_pages,
-                    );
+                    // Only a complete fresh recorded external inventory may
+                    // prove that the previously cancelled attached stop is gone.
+                    eprintln!("T09_2_PHASE_V1:BEFORE_ALGO_INVENTORY");
+                    let retired_terminal_algo_pages =
+                        recorded_flat_derivative_inventory_after_close(&feed);
+                    eprintln!("T09_2_PHASE_V1:AFTER_ALGO_INVENTORY");
                     println!(
                         "T09_2_ALGO_INVENTORY_TRANSCRIPT_V1:{}",
                         json!({
@@ -3077,10 +3088,12 @@ mod raw_native_session_tests {
                         }),
                         expires_in_ms: 30_000,
                     };
+                    eprintln!("T09_2_PHASE_V1:BEFORE_POSITIVE_EXECUTE");
                     let accepted = trade
                         .trade("fixture-a", &second, None)
                         .await
                         .expect("T09.2 public TradeService must admit second 0.30 order");
+                    eprintln!("T09_2_PHASE_V1:AFTER_POSITIVE_EXECUTE");
                     if accepted["status"] != "partial" {
                         eprintln!(
                             "T09_2_SIGNED_GET_DENIAL_V1:{}",
@@ -3157,6 +3170,7 @@ mod raw_native_session_tests {
                         .expect(
                             "T09.2 SQL, POST fence and central reserve must be independently durable",
                         );
+                    eprintln!("T09_2_PHASE_V1:AFTER_SQL_READBACK");
                     assert!(post_fence_ms > 0);
                     assert_eq!(post_fence_state, "POSTED");
                     assert_eq!(persisted.state, okx_execution::IntentState::Acknowledged);
@@ -3180,6 +3194,7 @@ mod raw_native_session_tests {
                         .entry_budget
                         .as_ref()
                         .unwrap();
+                    eprintln!("T09_2_PHASE_V1:AFTER_WORKER_READBACK");
                     assert_eq!(b.consumed_usd, "1.0005");
                     assert_eq!(b.reserved_usd, "7.0015");
                     println!(
