@@ -1813,6 +1813,10 @@ mod raw_native_session_tests {
                 );
             }
         };
+        // The readback's account runtime is a separate Arc cloned from the
+        // registry. Drop it explicitly so the SQL owner can shut down after
+        // the session and registry owners are released.
+        drop(owner);
         assert_eq!(captured.0.fill_count, 1);
         assert_eq!(captured.0.filled_quantity, Decimal::new(1, 1));
         assert_eq!(captured.0.gross_notional_usdt, Decimal::ONE);
@@ -1849,10 +1853,6 @@ mod raw_native_session_tests {
             .unwrap()
             .unwrap();
         drop(trade);
-        // The integration DispatchContext also holds a cloned TradeService,
-        // which in turn owns the account SQL handles. Release that last
-        // application owner before expecting the account actors to exit.
-        drop(ctx);
         accounts.shutdown().await;
         drop(accounts);
         drop(risk);
