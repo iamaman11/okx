@@ -1990,7 +1990,7 @@ mod raw_native_session_tests {
                 required_query: vec![("algoClOrdId".into(), stop_client.clone())],
                 raw_response: envelope(json!([{
                     "instId":"BTC-USDT-SWAP",
-                    "algoId":"recorded-t09-stop-001",
+                    "algoId":"900000001",
                     "algoClOrdId":stop_client,
                     "state":"live","sz":"0.1","side":"sell",
                     "posSide":"long","tdMode":"cross","ordType":"conditional",
@@ -2135,6 +2135,258 @@ mod raw_native_session_tests {
                     "status":close["status"]
                 })
             );
+            // Explicitly transition only the RECORDED venue transport from
+            // the still-open position to the authenticated terminal close.
+            // The Native source-capture SQL owner itself is unchanged.
+            // An external CLOSE ACK alone was insufficient in earlier T09.1.
+            let closing_at = chrono::Utc::now().timestamp_millis().to_string();
+            let raw_close_fill = envelope(json!([
+                {
+                    "instType":"SWAP","instId":"BTC-USDT-SWAP",
+                    "tradeId":"t09-entry-trade-001",
+                    "ordId":"recorded-t09-opening-001",
+                    "clOrdId":"__REQUEST_CL_ORD_ID__",
+                    "billId":"t09-entry-bill-001",
+                    "subType":"3","side":"buy","posSide":"long",
+                    "fillPx":"1000","fillSz":"0.1","fillPnl":"0",
+                    "fee":"-0.0005","feeCcy":"USDT",
+                    "ts":financial_time,"fillTime":financial_time
+                },
+                {
+                    "instType":"SWAP","instId":"BTC-USDT-SWAP",
+                    "tradeId":"t09-close-trade-001",
+                    "ordId":"recorded-t09-close-001",
+                    "clOrdId":"__REQUEST_CL_ORD_ID__",
+                    "billId":"t09-close-bill-001",
+                    "subType":"5","side":"sell","posSide":"long",
+                    "fillPx":"999","fillSz":"0.1","fillPnl":"-0.001",
+                    "fee":"-0.0005","feeCcy":"USDT",
+                    "ts":closing_at,"fillTime":closing_at
+                }
+            ]));
+            let raw_close_bill = envelope(json!([
+                {
+                    "billId":"t09-entry-bill-001","instType":"SWAP",
+                    "instId":"BTC-USDT-SWAP","ordId":"recorded-t09-opening-001",
+                    "tradeId":"t09-entry-trade-001","clOrdId":"__REQUEST_CL_ORD_ID__",
+                    "ccy":"USDT","type":"2","subType":"3",
+                    "balChg":"-0.0005","fee":"-0.0005","pnl":"0","ts":financial_time
+                },
+                {
+                    "billId":"t09-close-bill-001","instType":"SWAP",
+                    "instId":"BTC-USDT-SWAP","ordId":"recorded-t09-close-001",
+                    "tradeId":"t09-close-trade-001","clOrdId":"__REQUEST_CL_ORD_ID__",
+                    "ccy":"USDT","type":"2","subType":"5",
+                    "balChg":"-0.0015","fee":"-0.0005","pnl":"-0.001",
+                    "ts":closing_at
+                }
+            ]));
+            // All six history partitions remain strictly scripted; old
+            // entry-only repetitions are retired at the acknowledged venue
+            // transition so the first terminal source read sees BOTH trades.
+            // Independent signed POST ACKs bind the dynamic client IDs.
+            for partition in ["SPOT", "MARGIN", "SWAP", "FUTURES", "OPTION"] {
+                let page = if partition == "SWAP" {
+                    raw_close_fill.clone()
+                } else {
+                    envelope(json!([]))
+                };
+                let pages = (0..12)
+                    .map(|_| RecordedGet {
+                        access_key: "fixture-executor-a".into(),
+                        path: "/api/v5/trade/fills-history".into(),
+                        required_query: vec![("instType".into(), partition.into())],
+                        raw_response: page.clone(),
+                    })
+                    .collect::<Vec<_>>();
+                // The route is shared by the five partitions, therefore
+                // install each partition together below, never separately.
+                if partition == "SPOT" {
+                    // No source mutations here; assembled below.
+                    let _ = pages;
+                }
+            }
+            let mut final_fills = Vec::new();
+            for _ in 0..12 {
+                for partition in ["SPOT", "MARGIN", "SWAP", "FUTURES", "OPTION"] {
+                    final_fills.push(RecordedGet {
+                        access_key: "fixture-executor-a".into(),
+                        path: "/api/v5/trade/fills-history".into(),
+                        required_query: vec![("instType".into(), partition.into())],
+                        raw_response: if partition == "SWAP" {
+                            raw_close_fill.clone()
+                        } else {
+                            envelope(json!([]))
+                        },
+                    });
+                }
+            }
+            let retired_fill_pages = feed.advance_recorded_route(
+                "fixture-executor-a",
+                "/api/v5/trade/fills-history",
+                final_fills,
+            );
+            let retired_bill_pages = feed.advance_recorded_route(
+                "fixture-executor-a",
+                "/api/v5/account/bills-archive",
+                (0..12)
+                    .map(|_| RecordedGet {
+                        access_key: "fixture-executor-a".into(),
+                        path: "/api/v5/account/bills-archive".into(),
+                        required_query: vec![],
+                        raw_response: raw_close_bill.clone(),
+                    })
+                    .collect(),
+            );
+            let retired_position_pages = feed.advance_recorded_route(
+                "fixture-observer-a",
+                "/api/v5/account/positions",
+                (0..24)
+                    .map(|_| RecordedGet {
+                        access_key: "fixture-observer-a".into(),
+                        path: "/api/v5/account/positions".into(),
+                        required_query: vec![],
+                        raw_response: envelope(json!([])),
+                    })
+                    .collect(),
+            );
+            println!(
+                "T09_1_RECORDED_TERMINAL_SOURCE_PHASE_V1:{}",
+                json!({
+                    "retired_entry_only_fill_pages":retired_fill_pages,
+                    "retired_entry_only_bill_pages":retired_bill_pages,
+                    "retired_open_position_pages":retired_position_pages,
+                    "close_order_id":"recorded-t09-close-001",
+                    "independent_close_fill_id":"t09-close-trade-001",
+                    "independent_close_bill_id":"t09-close-bill-001"
+                })
+            );
+            // The filled close and the separately completed opening order are
+            // both independently fetched from their actual signed clOrdId.
+            for (order_id, side, time, px) in [
+                ("recorded-t09-close-001", "sell", closing_at.as_str(), "999"),
+                ("recorded-t09-opening-001", "buy", financial_time.as_str(), "1000"),
+            ] {
+                feed.expect_get(RecordedGet {
+                    access_key: "fixture-executor-a".into(),
+                    path: "/api/v5/trade/order".into(),
+                    required_query: vec![("instId".into(), "BTC-USDT-SWAP".into())],
+                    raw_response: envelope(json!([{
+                        "instId":"BTC-USDT-SWAP","ordId":order_id,
+                        "clOrdId":"__REQUEST_CL_ORD_ID__",
+                        "side":side,"posSide":"long","tdMode":"cross",
+                        "ordType":if side == "sell" {"ioc"}else{"limit"},
+                        "px":px,"sz":"0.1","accFillSz":"0.1","avgPx":px,
+                        "state":"filled","cTime":time,"uTime":time
+                    }])),
+                });
+            }
+            // The original attached stop remains LIVE after close, so the
+            // production flat-protection owner must cancel that exact algoId.
+            // Subsequent source inventories are explicitly empty, only after
+            // a signed cancel ACK; 16 derivative scopes per query remain real.
+            let derivative_kinds = [
+                "conditional", "oco", "trigger", "move_order_stop",
+                "chase", "iceberg", "twap", "smart_iceberg",
+            ];
+            for turn in 0..5 {
+                for inst_type in ["SWAP", "FUTURES"] {
+                    for kind in derivative_kinds {
+                        let live = turn == 0 && inst_type == "SWAP" && kind == "conditional";
+                        feed.expect_get(RecordedGet {
+                            access_key: "fixture-observer-a".into(),
+                            path: "/api/v5/trade/orders-algo-pending".into(),
+                            required_query: vec![
+                                ("instType".into(), inst_type.into()),
+                                ("ordType".into(), kind.into()),
+                                ("limit".into(), "100".into()),
+                            ],
+                            raw_response: if live {
+                                envelope(json!([{
+                                    "instType":"SWAP","instId":"BTC-USDT-SWAP",
+                                    "ordType":"conditional","state":"live",
+                                    "algoId":"900000001",
+                                    "algoClOrdId":format!("s{}", &saved.client_order_id[..31])
+                                }]))
+                            } else {
+                                envelope(json!([]))
+                            },
+                        });
+                    }
+                }
+            }
+            feed.expect_public_clock(envelope(json!([{"ts":closing_at}])));
+            feed.expect_post(RecordedPost {
+                access_key: "fixture-executor-a".into(),
+                path: "/api/v5/trade/cancel-algos".into(),
+                expected_body: json!([{
+                    "instId":"BTC-USDT-SWAP","algoId":"900000001"
+                }]),
+                raw_response: br#"{"code":"0","msg":"","data":[{"algoId":"900000001","sCode":"0"}]}"#.to_vec(),
+            });
+            let resource = accounts.resolve("fixture-a").await.unwrap();
+            let terminal_capture = crate::source_capture::capture_account_sources(
+                &resource.observer, &resource.private_ws, &resource.execution,
+            )
+            .await
+            .expect("T09.1 real source owner must ingest signed terminal close fill and bill");
+            assert!(terminal_capture.positions.is_empty(),
+                "final position must come from empty authenticated positions GET");
+            let closing_intent_id = close["data"]["intent"]["intent_id"]
+                .as_str()
+                .expect("close must have its own intent")
+                .to_owned();
+            let closing_intent_read = closing_intent_id.clone();
+            let opening_intent_read = idempotent_intent_id.clone();
+            let ledger_after_close = resource
+                .execution
+                .store
+                .call(
+                    std::time::Instant::now() + Duration::from_secs(3),
+                    move |s| {
+                        let close_intent = s.intent(&closing_intent_read)?
+                            .ok_or(okx_execution::StoreError::Invalid("T09_CLOSE_INTENT_MISSING"))?;
+                        let open_intent = s.intent(&opening_intent_read)?
+                            .ok_or(okx_execution::StoreError::Invalid("T09_OPEN_INTENT_MISSING"))?;
+                        let lots = s.active_lots("BTC-USDT-SWAP")?;
+                        Ok(json!({
+                            "close_intent":close_intent.intent_id,
+                            "opening_intent":open_intent.intent_id,
+                            "remaining_lots":lots.iter()
+                                .filter(|lot| lot.remaining_qty > Decimal::ZERO)
+                                .count(),
+                            "fill_cursor":s.cursor("fills","SWAP")?,
+                            "bill_cursor":s.cursor("bills","account")?
+                        }))
+                    },
+                )
+                .await
+                .expect("separate persisted SQL owner must confirm close fill projection");
+            assert_eq!(ledger_after_close["remaining_lots"], 0,
+                "Native SQL must close attributed exposure using the venue close fill");
+            let close_verified = trade.trade(
+                "fixture-a",
+                &TradeRequest::Status {reference: closing_intent_id.clone()},
+                None,
+            ).await.expect("signed terminal close readback must reach public trade.status");
+            let opening_verified = trade.trade(
+                "fixture-a",
+                &TradeRequest::Status {reference: idempotent_intent_id.clone()},
+                None,
+            ).await.expect("opening status must release central risk from real terminal proof");
+            let mut final_summary = summary("risk_t09_1_terminal_close_release");
+            final_summary.installation_id = "installation_test".into();
+            let worker_terminal = risk.request(final_summary).await.unwrap();
+            println!("T09_1_NATIVE_TERMINAL_CLOSE_V1:{}", json!({
+                "opening_intent_id":idempotent_intent_id,
+                "close_intent_id":closing_intent_id,
+                "close_status":close_verified,
+                "opening_status":opening_verified,
+                "ledger":ledger_after_close,
+                "created_posts":feed.outbound_posts.lock().unwrap().len(),
+                "worker_budget":worker_terminal.budget,
+                "worker_risk_book_sequence":worker_terminal.risk_book_sequence
+            }));
             feed_shutdown.send(true).unwrap();
         }
         tokio::time::timeout(Duration::from_secs(3), public_feed)
