@@ -1688,7 +1688,8 @@ impl TradeService {
             .map(|c| async move {
                 // The timer starts before fetching any account/private/venue facts.
                 let selected = selected.filter(|w| w.account_key == c.account_key);
-                let release_scope = terminal_release.filter(|scope| scope.account_key == c.account_key);
+                let release_scope =
+                    terminal_release.filter(|scope| scope.account_key == c.account_key);
                 let started = selected
                     .map(|w| w.started_after_held_ms)
                     .or_else(|| held_received.map(|tick| tick.elapsed().as_millis() as u64));
