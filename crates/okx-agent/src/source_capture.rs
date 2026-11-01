@@ -316,6 +316,10 @@ pub(crate) async fn capture_account_sources_traced(
     if !initial.logged_in || initial.connection_generation == 0 {
         return Err(invalid("PRIVATE_SOURCE_NOT_READY"));
     }
+    // One monotonic bound for authenticated snapshot plus six financial
+    // history pages. Waiting admits only LOCAL no-send GET capacity; no
+    // venue retry, incomplete page acceptance or source-time extension.
+    let capture_until = Instant::now() + Duration::from_secs(10);
     let observer_and_cursors_started = Instant::now();
     if let Some((store, id)) = trace.as_ref() {
         store.phase_started(*id, "observer_and_cursors");
@@ -332,7 +336,7 @@ pub(crate) async fn capture_account_sources_traced(
             // never retry a sent request, fall back to stale state, or change
             // financial SQL/cursor ownership.
             observer
-                .snapshot_until(deadline())
+                .snapshot_until(capture_until)
                 .await
                 .map_err(|_| invalid("ACCOUNT_SOURCE_UNAVAILABLE"))
         },
@@ -412,7 +416,8 @@ pub(crate) async fn capture_account_sources_traced(
             t0,
             now,
             generation,
-            &fx
+            &fx,
+            capture_until,
         ),
         capture_fills(
             execution,
@@ -424,7 +429,8 @@ pub(crate) async fn capture_account_sources_traced(
             t0,
             now,
             generation,
-            &fx
+            &fx,
+            capture_until,
         ),
         capture_fills(
             execution,
@@ -436,7 +442,8 @@ pub(crate) async fn capture_account_sources_traced(
             t0,
             now,
             generation,
-            &fx
+            &fx,
+            capture_until,
         ),
         capture_fills(
             execution,
@@ -448,7 +455,8 @@ pub(crate) async fn capture_account_sources_traced(
             t0,
             now,
             generation,
-            &fx
+            &fx,
+            capture_until,
         ),
         capture_fills(
             execution,
@@ -460,7 +468,8 @@ pub(crate) async fn capture_account_sources_traced(
             t0,
             now,
             generation,
-            &fx
+            &fx,
+            capture_until,
         ),
         capture_bills(
             execution,
@@ -469,7 +478,8 @@ pub(crate) async fn capture_account_sources_traced(
             t0,
             now,
             generation,
-            &fx
+            &fx,
+            capture_until,
         )
     );
     if let Some((store, id)) = trace.as_ref() {
@@ -739,6 +749,7 @@ async fn capture_fills(
     now: i64,
     generation: i64,
     fx: &UsdConversionEvidence,
+    until: Instant,
 ) -> AgentResult<bool> {
     let fx = fx.clone();
     let partition = source.partition;
@@ -746,7 +757,7 @@ async fn capture_fills(
     verify_history_retrieval_window(window.begin, now)?;
     let rows: Vec<FillHistory> = execution
         .history
-        .fills_history_page(
+        .fills_history_page_until(
             partition,
             window.begin,
             window.end,
@@ -755,6 +766,7 @@ async fn capture_fills(
             } else {
                 Some(&window.after)
             },
+            until,
         )
         .await
         .map_err(|_| {
@@ -863,13 +875,14 @@ async fn capture_bills(
     now: i64,
     generation: i64,
     fx: &UsdConversionEvidence,
+    until: Instant,
 ) -> AgentResult<bool> {
     let fx = fx.clone();
     let window = Window::resume(cursor.as_ref(), t0, now)?;
     verify_history_retrieval_window(window.begin, now)?;
     let rows: Vec<AccountBill> = execution
         .history
-        .bills_history_page(
+        .bills_history_page_until(
             window.begin,
             window.end,
             if window.after.is_empty() {
@@ -877,6 +890,7 @@ async fn capture_bills(
             } else {
                 Some(&window.after)
             },
+            until,
         )
         .await
         .map_err(|_| invalid("BILLS_SOURCE_UNAVAILABLE"))?;

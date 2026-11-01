@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::time::Instant;
 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
@@ -255,6 +256,33 @@ impl AccountHistoryApi {
         end: i64,
         after: Option<&str>,
     ) -> Result<Vec<FillHistory>, OkxError> {
+        self.fills_history_page_bound(instrument_type, begin, end, after, None)
+            .await
+    }
+
+    /// Financial capture waits only for an authenticated user's LOCAL
+    /// no-send GET capacity. No exchange retry, cached page or new cursor
+    /// owner; every page still traverses the production signed REST parser.
+    pub async fn fills_history_page_until(
+        &self,
+        instrument_type: &str,
+        begin: i64,
+        end: i64,
+        after: Option<&str>,
+        until: Instant,
+    ) -> Result<Vec<FillHistory>, OkxError> {
+        self.fills_history_page_bound(instrument_type, begin, end, after, Some(until))
+            .await
+    }
+
+    async fn fills_history_page_bound(
+        &self,
+        instrument_type: &str,
+        begin: i64,
+        end: i64,
+        after: Option<&str>,
+        until: Option<Instant>,
+    ) -> Result<Vec<FillHistory>, OkxError> {
         if !matches!(
             instrument_type,
             "SPOT" | "MARGIN" | "SWAP" | "FUTURES" | "OPTION"
@@ -263,9 +291,24 @@ impl AccountHistoryApi {
         }
         let mut params = history_window_params(begin, end, after)?;
         params.push(("instType", instrument_type.into()));
-        self.client
-            .private_get("/api/v5/trade/fills-history", &params)
-            .await
+        match until {
+            Some(until) => {
+                if Instant::now() >= until {
+                    return Err(OkxError::Response("HISTORY_READ_DEADLINE_EXCEEDED".into()));
+                }
+                tokio::time::timeout_at(
+                    until.into(),
+                    self.client.private_get_wait(
+                        "/api/v5/trade/fills-history",
+                        &params,
+                        until.saturating_duration_since(Instant::now()),
+                    ),
+                )
+                .await
+                .map_err(|_| OkxError::Response("HISTORY_READ_DEADLINE_EXCEEDED".into()))?
+            }
+            None => self.client.private_get("/api/v5/trade/fills-history", &params).await,
+        }
     }
     /// A complete opening campaign requires BOTH independent order sources:
     /// recent orders include canceled/unfilled cases which the archived
@@ -537,12 +580,46 @@ impl AccountHistoryApi {
         end: i64,
         after: Option<&str>,
     ) -> Result<Vec<AccountBill>, OkxError> {
-        self.client
-            .private_get(
-                "/api/v5/account/bills-archive",
-                &history_window_params(begin, end, after)?,
-            )
+        self.bills_history_page_bound(begin, end, after, None).await
+    }
+
+    pub async fn bills_history_page_until(
+        &self,
+        begin: i64,
+        end: i64,
+        after: Option<&str>,
+        until: Instant,
+    ) -> Result<Vec<AccountBill>, OkxError> {
+        self.bills_history_page_bound(begin, end, after, Some(until))
             .await
+    }
+
+    async fn bills_history_page_bound(
+        &self,
+        begin: i64,
+        end: i64,
+        after: Option<&str>,
+        until: Option<Instant>,
+    ) -> Result<Vec<AccountBill>, OkxError> {
+        let params = history_window_params(begin, end, after)?;
+        match until {
+            Some(until) => {
+                if Instant::now() >= until {
+                    return Err(OkxError::Response("HISTORY_READ_DEADLINE_EXCEEDED".into()));
+                }
+                tokio::time::timeout_at(
+                    until.into(),
+                    self.client.private_get_wait(
+                        "/api/v5/account/bills-archive",
+                        &params,
+                        until.saturating_duration_since(Instant::now()),
+                    ),
+                )
+                .await
+                .map_err(|_| OkxError::Response("HISTORY_READ_DEADLINE_EXCEEDED".into()))?
+            }
+            None => self.client.private_get("/api/v5/account/bills-archive", &params).await,
+        }
     }
     pub fn new(client: OkxRestClient) -> Self {
         Self { client }
@@ -1159,6 +1236,34 @@ fn merge_order_histories(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn terminal_history_wait_expired_never_sends_a_private_get() {
+        let client = OkxRestClient::with_rate_budget(
+            crate::OkxEnvironment::new(crate::Region::Global, false),
+            crate::Credentials::new("key".into(), "secret".into(), "pass".into()).unwrap(),
+            crate::RateBudget::new(),
+        )
+        .unwrap();
+        let history = AccountHistoryApi::new(client);
+        let expired = Instant::now() - std::time::Duration::from_millis(1);
+        for result in [
+            history
+                .fills_history_page_until("SWAP", 100, 200, None, expired)
+                .await
+                .map(|_| ()),
+            history
+                .bills_history_page_until(100, 200, None, expired)
+                .await
+                .map(|_| ()),
+        ] {
+            assert!(
+                matches!(result, Err(OkxError::Response(message))
+                    if message == "HISTORY_READ_DEADLINE_EXCEEDED"),
+                "expired terminal page must fail before authenticated HTTP send"
+            );
+        }
+    }
 
     fn canceled_demo_order(id: &str, update_time_ms: &str) -> HistoricalOrder {
         serde_json::from_value(serde_json::json!({
