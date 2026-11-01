@@ -416,6 +416,7 @@ mod raw_native_session_tests {
                     label,
                     feed.clone(),
                     socket,
+                    budget.clone(),
                 );
                 accounts.connect_prepared(config, clients).await.unwrap();
             }

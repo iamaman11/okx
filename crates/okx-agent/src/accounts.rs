@@ -1459,14 +1459,16 @@ pub(crate) mod recorded_support {
     pub(crate) fn prepared(
         label: &str,
         feed: Arc<RecordedAccountHttp>,
+        budget: RateBudget,
     ) -> (VerifiedAccountConfig, PreparedAccountClients) {
-        prepared_with_socket(label, feed, Arc::new(OfflineSocket))
+        prepared_with_socket(label, feed, Arc::new(OfflineSocket), budget)
     }
 
     pub(crate) fn prepared_with_socket(
         label: &str,
         feed: Arc<RecordedAccountHttp>,
         ws_connector: Arc<dyn WsConnector>,
+        budget: RateBudget,
     ) -> (VerifiedAccountConfig, PreparedAccountClients) {
         let uid = match label {
             "a" => "account-001",
@@ -1489,12 +1491,12 @@ pub(crate) mod recorded_support {
         let observer = OkxRestClient::with_http_transport(
             environment,
             observed.clone(),
-            RateBudget::new(),
+            budget.clone(),
             feed.clone(),
         )
         .unwrap();
         let executor =
-            OkxRestClient::with_http_transport(environment, executing, RateBudget::new(), feed)
+            OkxRestClient::with_http_transport(environment, executing, budget, feed)
                 .unwrap();
         let config = VerifiedAccountConfig {
             account_key: AccountKey {
@@ -1521,6 +1523,36 @@ pub(crate) mod recorded_support {
     #[cfg(test)]
     mod recorded_order_binding_tests {
         use super::*;
+
+        #[test]
+        fn recorded_clients_use_one_native_rate_budget_across_api_identities() {
+            // A scripted transport must not gain independent admission windows
+            // merely because Observer and Executor use different API keys.
+            // The identical shared budget is also passed to the Registry and
+            // public WS owner by the integrated Native/Worker assembly.
+            let budget = RateBudget::new();
+            let feed = Arc::new(RecordedAccountHttp::default());
+            let (_, a) = prepared_with_socket(
+                "a", feed.clone(), Arc::new(OfflineSocket), budget.clone(),
+            );
+            let (_, b) = prepared_with_socket(
+                "b", feed, Arc::new(OfflineSocket), budget.clone(),
+            );
+            let plan = budget.private_rest_plan("/api/v5/account/config", &[]);
+            for _ in 0..5 {
+                a.observer.rate_budget().admit(&plan).unwrap();
+            }
+            for identity in [
+                a.executor.rate_budget(),
+                b.observer.rate_budget(),
+                b.executor.rate_budget(),
+            ] {
+                let denial = identity.admit(&plan).unwrap_err();
+                assert!(!denial.request_sent, "local throttle must not send HTTP");
+                assert_eq!(denial.domain.local_max_requests, 5);
+                assert!(denial.local_defer_ms > 0);
+            }
+        }
 
         #[test]
         fn signed_order_readback_must_match_same_account_client_and_acknowledged_order() {
@@ -2123,14 +2155,15 @@ mod tests {
         use super::recorded_support::{RecordedAccountHttp, prepared};
         let temp = root();
         initialize_installation(&temp, "installation-test").unwrap();
-        let registry = AccountRuntimeRegistry::open(&temp, RateBudget::new())
+        let budget = RateBudget::new();
+        let registry = AccountRuntimeRegistry::open(&temp, budget.clone())
             .await
             .unwrap();
         let feed = Arc::new(RecordedAccountHttp::default());
         let mut stopped_sql_owners = Vec::new();
 
         for label in ["a", "b"] {
-            let (config, clients) = prepared(label, feed.clone());
+            let (config, clients) = prepared(label, feed.clone(), budget.clone());
             registry
                 .connect_prepared(config.clone(), clients)
                 .await
@@ -2169,7 +2202,6 @@ mod tests {
             OrderConstraints, PositionSide, Protection, Sizing, TradeOperation, TradeRequest,
         };
         let registry = Arc::new(registry);
-        let budget = RateBudget::new();
         let public_environment = OkxEnvironment::new(okx_api::Region::Global, false);
         let reference =
             okx_observation::ReferenceRegistry::from_public("2026-10-31T00:00:00Z", vec![])
@@ -2267,7 +2299,8 @@ mod tests {
         };
         let temp = root();
         initialize_installation(&temp, "installation-test").unwrap();
-        let registry = AccountRuntimeRegistry::open(&temp, RateBudget::new())
+        let budget = RateBudget::new();
+        let registry = AccountRuntimeRegistry::open(&temp, budget.clone())
             .await
             .unwrap();
         let http = Arc::new(RecordedAccountHttp::default());
@@ -2275,7 +2308,7 @@ mod tests {
         let mut sockets = Vec::new();
         for label in ["a", "b"] {
             let ws = Arc::new(RecordedWsConnector::default());
-            let (config, clients) = prepared_with_socket(label, http.clone(), ws.clone());
+            let (config, clients) = prepared_with_socket(label, http.clone(), ws.clone(), budget.clone());
             registry
                 .connect_prepared(config.clone(), clients)
                 .await
