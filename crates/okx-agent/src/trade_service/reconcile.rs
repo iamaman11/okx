@@ -535,7 +535,7 @@ impl TradeService {
             match r
                 .execution
                 .trade
-                .order_by_client_id(&i.instrument_id, &i.client_order_id)
+                .order_by_client_id_until(&i.instrument_id, &i.client_order_id, deadline())
                 .await
             {
                 Ok(o) => Some(o),
