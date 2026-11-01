@@ -1541,7 +1541,6 @@ impl TradeService {
                     held_received,
                     until,
                     &key,
-                    &fx.owner.configuration.account_key.wire(),
                     &fx.conversion.usd_per_usdt,
                     &selected,
                 )
@@ -1614,7 +1613,6 @@ impl TradeService {
         held_received: Instant,
         until: Instant,
         reservation: &str,
-        selected_account: &str,
         reserved_usd_per_usdt: &str,
         selected: &PostHeldSelected,
     ) -> Result<(NativeRiskCensus, CausalPostProof), String> {
@@ -1622,7 +1620,7 @@ impl TradeService {
             .census_with_reads(
                 state,
                 Some(held_received),
-                Some((selected_account, reserved_usd_per_usdt)),
+                Some((&selected.account_key, reserved_usd_per_usdt)),
                 Some(until),
                 Some(selected),
             )
