@@ -1,4 +1,4 @@
-use std::fmt;
+use std::{fmt, time::{Duration, Instant}};
 
 use crate::auth::timestamp_now;
 
@@ -619,9 +619,26 @@ impl AccountApi {
             .ok_or_else(|| OkxError::Config("OKX returned no account balance snapshot".to_owned()))
     }
 
+    /// An opt-in bounded read for a deadline-owned trade assessment.
+    /// Only local rate admission waits; neither sent HTTP nor exchange errors retry.
+    pub async fn balance_wait(&self, max_wait: Duration) -> Result<BalanceSnapshot, OkxError> {
+        self.client
+            .private_get_wait::<BalanceSnapshot>("/api/v5/account/balance", &[], max_wait)
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| OkxError::Config("OKX returned no account balance snapshot".to_owned()))
+    }
+
     pub async fn positions(&self) -> Result<Vec<Position>, OkxError> {
         self.client
             .private_get("/api/v5/account/positions", &[])
+            .await
+    }
+
+    pub async fn positions_wait(&self, max_wait: Duration) -> Result<Vec<Position>, OkxError> {
+        self.client
+            .private_get_wait("/api/v5/account/positions", &[], max_wait)
             .await
     }
 
@@ -657,6 +674,21 @@ impl AccountApi {
     }
 
     pub async fn pending_orders(&self) -> Result<Vec<PendingOrder>, OkxError> {
+        self.pending_orders_inner(None).await
+    }
+
+    /// Every page shares the caller's monotonic deadline, not a fresh retry window.
+    pub async fn pending_orders_until(
+        &self,
+        until: Instant,
+    ) -> Result<Vec<PendingOrder>, OkxError> {
+        self.pending_orders_inner(Some(until)).await
+    }
+
+    async fn pending_orders_inner(
+        &self,
+        until: Option<Instant>,
+    ) -> Result<Vec<PendingOrder>, OkxError> {
         const PAGE_LIMIT: usize = 100;
         const MAX_PAGES: usize = 10;
 
@@ -669,10 +701,19 @@ impl AccountApi {
                 params.push(("after", after.clone()));
             }
 
-            let page: Vec<PendingOrder> = self
-                .client
-                .private_get("/api/v5/trade/orders-pending", &params)
-                .await?;
+            let page: Vec<PendingOrder> = if let Some(until) = until {
+                self.client
+                    .private_get_wait(
+                        "/api/v5/trade/orders-pending",
+                        &params,
+                        until.saturating_duration_since(Instant::now()),
+                    )
+                    .await?
+            } else {
+                self.client
+                    .private_get("/api/v5/trade/orders-pending", &params)
+                    .await?
+            };
             let page_len = page.len();
 
             if page_len == 0 {

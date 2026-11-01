@@ -29,6 +29,9 @@ pub enum AccountBootstrapError {
 
     #[error("account normalization error: {0}")]
     Normalize(#[from] AccountError),
+
+    #[error("ACCOUNT_SOURCE_DEADLINE_EXCEEDED")]
+    SourceDeadline,
 }
 
 #[derive(Debug, Error)]
@@ -436,31 +439,59 @@ impl AccountBootstrapper {
 
     pub async fn snapshot(&self) -> Result<AccountSnapshot, AccountBootstrapError> {
         let (config, config_received_at) = self.observer_config().await?;
-        self.snapshot_from_config(config, config_received_at).await
+        self.snapshot_from_config(config, config_received_at, None).await
+    }
+
+    /// Reduction-only assessment: preserve the same authenticated REST facts
+    /// but permit a bounded wait for local no-send read capacity. The caller's
+    /// monotonic deadline covers config, every paginated read and normalization.
+    /// No stale-cache fallback, exchange retry, or trading POST occurs here.
+    pub async fn snapshot_until(
+        &self,
+        until: Instant,
+    ) -> Result<AccountSnapshot, AccountBootstrapError> {
+        if Instant::now() >= until {
+            return Err(AccountBootstrapError::SourceDeadline);
+        }
+        tokio::time::timeout_at(until.into(), async {
+            let (config, config_received_at) = self.observer_config().await?;
+            self.snapshot_from_config(config, config_received_at, Some(until)).await
+        })
+        .await
+        .map_err(|_| AccountBootstrapError::SourceDeadline)?
     }
 
     /// Used only after HELD: a fresh OKX config call, followed by fresh
     /// balance/positions/orders; any failure blocks BEGIN_POST.
     pub async fn snapshot_after_held(&self) -> Result<AccountSnapshot, AccountBootstrapError> {
         let (config, config_received_at) = self.fresh_observer_config().await?;
-        self.snapshot_from_config(config, config_received_at).await
+        self.snapshot_from_config(config, config_received_at, None).await
     }
 
     async fn snapshot_from_config(
         &self,
         config: AccountConfig,
         config_received_at: chrono::DateTime<Utc>,
+        until: Option<Instant>,
     ) -> Result<AccountSnapshot, AccountBootstrapError> {
         // Use the authenticated config observation time, not a cache-hit time.
         // Balance/positions/orders are read afterward; no falsely fresh source receipt.
         let source_received_at = config_received_at.to_rfc3339_opts(SecondsFormat::Millis, true);
         let permissions = strict_read_only_permissions(&config.perm)?;
 
-        let (balance, positions, pending_orders) = tokio::try_join!(
-            self.api.balance(),
-            self.api.positions(),
-            self.api.pending_orders(),
-        )?;
+        let (balance, positions, pending_orders) = if let Some(until) = until {
+            tokio::try_join!(
+                self.api.balance_wait(until.saturating_duration_since(Instant::now())),
+                self.api.positions_wait(until.saturating_duration_since(Instant::now())),
+                self.api.pending_orders_until(until),
+            )?
+        } else {
+            tokio::try_join!(
+                self.api.balance(),
+                self.api.positions(),
+                self.api.pending_orders(),
+            )?
+        };
         Ok(AccountSnapshot::from_rest_bootstrap(
             source_received_at,
             config,

@@ -984,7 +984,12 @@ impl TradeService {
             .into_iter()
             .collect();
         let post_account = r.execution.account.config().await.map_err(err)?;
-        let post_snapshot = r.observer.snapshot().await.map_err(err)?;
+        let post_snapshot = if increase {
+            r.observer.snapshot().await
+        } else {
+            r.observer.snapshot_until(until).await
+        }
+        .map_err(err)?;
         if post_account.position_mode != post_snapshot.position_mode
             || post_snapshot.account_uid_fingerprint != r.configuration.account_key.verified_uid
             || !matches!(

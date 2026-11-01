@@ -236,7 +236,12 @@ impl TradeService {
             return Err("ACCOUNT_SOURCE_GENERATION_UNVERIFIED".into());
         }
         let private_generation = r.private_ws.status().await.connection_generation;
-        let snap = r.observer.snapshot().await.map_err(err)?;
+        let snap = if increase {
+            r.observer.snapshot().await
+        } else {
+            r.observer.snapshot_until(until).await
+        }
+        .map_err(err)?;
         let received = chrono::DateTime::parse_from_rfc3339(&snap.source_received_at)
             .map_err(err)?
             .timestamp_millis();

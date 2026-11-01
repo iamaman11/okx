@@ -753,6 +753,93 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn bounded_private_balance_read_waits_only_before_http_and_fails_closed() {
+        let rate = RateBudget::new();
+        let plan = rate.private_rest_plan("/api/v5/account/balance", &[]);
+        for _ in 0..10 {
+            rate.admit(&plan).expect("within documented balance budget");
+        }
+        let wire = Arc::new(ScriptedDelivery::default());
+        wire.responses.lock().unwrap().push_back((
+            "/api/v5/account/balance",
+            reply(
+                StatusCode::OK,
+                br#"{"code":"0","msg":"","data":[{"details":[]}]}"#,
+            ),
+        ));
+        let creds = Credentials::new("key".into(), "secret".into(), "pass".into()).unwrap();
+        let api = OkxRestClient::with_http_transport(
+            OkxEnvironment::new(crate::config::Region::Global, false),
+            creds,
+            rate,
+            wire.clone(),
+        )
+        .unwrap();
+
+        // Exhausted admission + expired caller deadline must not call the
+        // HTTP transport. The scripted reply must remain untouched.
+        let denied = api
+            .private_get_wait::<serde_json::Value>(
+                "/api/v5/account/balance",
+                &[],
+                Duration::ZERO,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            denied,
+            OkxError::RateLimited { evidence }
+                if !evidence.request_sent && evidence.local_defer_ms > 0
+        ));
+        assert!(wire.requests.lock().unwrap().is_empty());
+        assert_eq!(wire.responses.lock().unwrap().len(), 1);
+
+        // The same typed budget releases its real admission window and sends
+        // exactly one authenticated GET; there is no HTTP retry or fake data.
+        let started = Instant::now();
+        let rows: Vec<serde_json::Value> = api
+            .private_get_wait("/api/v5/account/balance", &[], Duration::from_secs(3))
+            .await
+            .expect("local wait then one recorded HTTP response");
+        assert!(started.elapsed() >= Duration::from_millis(1500));
+        assert_eq!(rows.len(), 1);
+        assert_eq!(wire.requests.lock().unwrap().len(), 1);
+        assert!(wire.requests.lock().unwrap()[0].1.contains_key("OK-ACCESS-SIGN"));
+        assert!(wire.responses.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn bounded_private_balance_does_not_retry_exchange_throttle() {
+        let wire = Arc::new(ScriptedDelivery::default());
+        wire.responses.lock().unwrap().push_back((
+            "/api/v5/account/balance",
+            reply(StatusCode::TOO_MANY_REQUESTS, br#"{"code":"50011","data":[]}"#),
+        ));
+        let api = OkxRestClient::with_http_transport(
+            OkxEnvironment::new(crate::config::Region::Global, false),
+            Credentials::new("key".into(), "secret".into(), "pass".into()).unwrap(),
+            RateBudget::new(),
+            wire.clone(),
+        )
+        .unwrap();
+        let denied = api
+            .private_get_wait::<serde_json::Value>(
+                "/api/v5/account/balance",
+                &[],
+                Duration::from_secs(3),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            denied,
+            OkxError::RateLimited { evidence }
+                if evidence.request_sent && evidence.exchange_code.as_deref() == Some("50011")
+        ));
+        assert_eq!(wire.requests.lock().unwrap().len(), 1);
+        assert!(wire.responses.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
     async fn raw_http_throttle_auth_and_status_are_typed_without_live_calls() {
         for (status, body) in [
             (
