@@ -2439,6 +2439,20 @@ mod raw_native_session_tests {
                     )
                     .await
                     .expect("opening status must release central risk from real terminal proof");
+                assert_eq!(
+                    opening_verified["data"]["central_release"]["state"],
+                    "verified",
+                    "T09_1_CENTRAL_RELEASE_PENDING:{}",
+                    json!({
+                        "release":opening_verified["data"]["central_release"],
+                        "financial_error":opening_verified["data"]["financial_error"],
+                        "incremental_entry_settlement":
+                            opening_verified["data"]["incremental_entry_settlement"],
+                        "entry_fill_evidence_state":
+                            opening_verified["data"]["entry_fill_evidence"]["state"],
+                        "quality":opening_verified["quality"],
+                    })
+                );
                 let mut final_summary = summary("risk_t09_1_terminal_close_release");
                 final_summary.installation_id = "installation_test".into();
                 let worker_terminal = risk.request(final_summary).await.unwrap();
