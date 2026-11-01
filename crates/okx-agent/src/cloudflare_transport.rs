@@ -2318,13 +2318,29 @@ mod raw_native_session_tests {
                             .to_vec(),
                 });
                 let resource = accounts.resolve("fixture-a").await.unwrap();
-                let terminal_capture = crate::source_capture::capture_account_sources(
+                let terminal_capture = match crate::source_capture::capture_account_sources(
                     &resource.observer,
                     &resource.private_ws,
                     &resource.execution,
                 )
                 .await
-                .expect("T09.1 real source owner must ingest signed terminal close fill and bill");
+                {
+                    Ok(snapshot) => snapshot,
+                    Err(error) => {
+                        let requests = feed.requests.lock().unwrap();
+                        let recent = requests.iter().rev().take(18).cloned().collect::<Vec<_>>();
+                        eprintln!(
+                            "T09_1_TERMINAL_CAPTURE_FAILURE_V1:{}",
+                            json!({
+                                "source_reason":error.to_string(),
+                                "unconsumed_required_pages":feed.unconsumed_reads(),
+                                "recent_authenticated_gets":recent,
+                                "outbound_post_count":feed.outbound_posts.lock().unwrap().len(),
+                            })
+                        );
+                        panic!("T09_1_TERMINAL_CAPTURE_FAILED:{error}");
+                    }
+                };
                 assert!(
                     terminal_capture.positions.is_empty(),
                     "final position must come from empty authenticated positions GET"
