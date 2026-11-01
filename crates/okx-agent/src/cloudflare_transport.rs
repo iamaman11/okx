@@ -2244,7 +2244,12 @@ mod raw_native_session_tests {
             // both independently fetched from their actual signed clOrdId.
             for (order_id, side, time, px) in [
                 ("recorded-t09-close-001", "sell", closing_at.as_str(), "999"),
-                ("recorded-t09-opening-001", "buy", financial_time.as_str(), "1000"),
+                (
+                    "recorded-t09-opening-001",
+                    "buy",
+                    financial_time.as_str(),
+                    "1000",
+                ),
             ] {
                 feed.expect_get(RecordedGet {
                     access_key: "fixture-executor-a".into(),
@@ -2265,8 +2270,14 @@ mod raw_native_session_tests {
             // Subsequent source inventories are explicitly empty, only after
             // a signed cancel ACK; 16 derivative scopes per query remain real.
             let derivative_kinds = [
-                "conditional", "oco", "trigger", "move_order_stop",
-                "chase", "iceberg", "twap", "smart_iceberg",
+                "conditional",
+                "oco",
+                "trigger",
+                "move_order_stop",
+                "chase",
+                "iceberg",
+                "twap",
+                "smart_iceberg",
             ];
             for turn in 0..5 {
                 for inst_type in ["SWAP", "FUTURES"] {
@@ -2305,12 +2316,16 @@ mod raw_native_session_tests {
             });
             let resource = accounts.resolve("fixture-a").await.unwrap();
             let terminal_capture = crate::source_capture::capture_account_sources(
-                &resource.observer, &resource.private_ws, &resource.execution,
+                &resource.observer,
+                &resource.private_ws,
+                &resource.execution,
             )
             .await
             .expect("T09.1 real source owner must ingest signed terminal close fill and bill");
-            assert!(terminal_capture.positions.is_empty(),
-                "final position must come from empty authenticated positions GET");
+            assert!(
+                terminal_capture.positions.is_empty(),
+                "final position must come from empty authenticated positions GET"
+            );
             let closing_intent_id = close["data"]["intent"]["intent_id"]
                 .as_str()
                 .expect("close must have its own intent")
@@ -2323,10 +2338,12 @@ mod raw_native_session_tests {
                 .call(
                     std::time::Instant::now() + Duration::from_secs(3),
                     move |s| {
-                        let close_intent = s.intent(&closing_intent_read)?
-                            .ok_or(okx_execution::StoreError::Invalid("T09_CLOSE_INTENT_MISSING"))?;
-                        let open_intent = s.intent(&opening_intent_read)?
-                            .ok_or(okx_execution::StoreError::Invalid("T09_OPEN_INTENT_MISSING"))?;
+                        let close_intent = s.intent(&closing_intent_read)?.ok_or(
+                            okx_execution::StoreError::Invalid("T09_CLOSE_INTENT_MISSING"),
+                        )?;
+                        let open_intent = s.intent(&opening_intent_read)?.ok_or(
+                            okx_execution::StoreError::Invalid("T09_OPEN_INTENT_MISSING"),
+                        )?;
                         let lots = s.active_lots("BTC-USDT-SWAP")?;
                         Ok(json!({
                             "close_intent":close_intent.intent_id,
@@ -2341,31 +2358,46 @@ mod raw_native_session_tests {
                 )
                 .await
                 .expect("separate persisted SQL owner must confirm close fill projection");
-            assert_eq!(ledger_after_close["remaining_lots"], 0,
-                "Native SQL must close attributed exposure using the venue close fill");
-            let close_verified = trade.trade(
-                "fixture-a",
-                &TradeRequest::Status {reference: closing_intent_id.clone()},
-                None,
-            ).await.expect("signed terminal close readback must reach public trade.status");
-            let opening_verified = trade.trade(
-                "fixture-a",
-                &TradeRequest::Status {reference: idempotent_intent_id.clone()},
-                None,
-            ).await.expect("opening status must release central risk from real terminal proof");
+            assert_eq!(
+                ledger_after_close["remaining_lots"], 0,
+                "Native SQL must close attributed exposure using the venue close fill"
+            );
+            let close_verified = trade
+                .trade(
+                    "fixture-a",
+                    &TradeRequest::Status {
+                        reference: closing_intent_id.clone(),
+                    },
+                    None,
+                )
+                .await
+                .expect("signed terminal close readback must reach public trade.status");
+            let opening_verified = trade
+                .trade(
+                    "fixture-a",
+                    &TradeRequest::Status {
+                        reference: idempotent_intent_id.clone(),
+                    },
+                    None,
+                )
+                .await
+                .expect("opening status must release central risk from real terminal proof");
             let mut final_summary = summary("risk_t09_1_terminal_close_release");
             final_summary.installation_id = "installation_test".into();
             let worker_terminal = risk.request(final_summary).await.unwrap();
-            println!("T09_1_NATIVE_TERMINAL_CLOSE_V1:{}", json!({
-                "opening_intent_id":idempotent_intent_id,
-                "close_intent_id":closing_intent_id,
-                "close_status":close_verified,
-                "opening_status":opening_verified,
-                "ledger":ledger_after_close,
-                "created_posts":feed.outbound_posts.lock().unwrap().len(),
-                "worker_budget":worker_terminal.budget,
-                "worker_risk_book_sequence":worker_terminal.risk_book_sequence
-            }));
+            println!(
+                "T09_1_NATIVE_TERMINAL_CLOSE_V1:{}",
+                json!({
+                    "opening_intent_id":idempotent_intent_id,
+                    "close_intent_id":closing_intent_id,
+                    "close_status":close_verified,
+                    "opening_status":opening_verified,
+                    "ledger":ledger_after_close,
+                    "created_posts":feed.outbound_posts.lock().unwrap().len(),
+                    "worker_budget":worker_terminal.budget,
+                    "worker_risk_book_sequence":worker_terminal.risk_book_sequence
+                })
+            );
             feed_shutdown.send(true).unwrap();
         }
         tokio::time::timeout(Duration::from_secs(3), public_feed)
@@ -2427,16 +2459,20 @@ mod raw_native_session_tests {
                 .join(crate::accounts::key_hash(&account))
                 .join("account.sqlite");
             let restored = okx_execution::AccountStoreHandle::open_existing(
-                path, key, "installation_test".into(),
+                path,
+                key,
+                "installation_test".into(),
             )
             .await
             .expect("T09.1 must restart the persisted native SQL owner");
             let readback = restored
                 .call(std::time::Instant::now() + Duration::from_secs(5), |s| {
-                    let opening = s.by_idempotency("t09_real_public_execute_0001")?
-                        .ok_or(okx_execution::StoreError::Invalid("T09_RESTART_OPEN_MISSING"))?;
-                    let close = s.by_idempotency("t09_real_public_close_0001")?
-                        .ok_or(okx_execution::StoreError::Invalid("T09_RESTART_CLOSE_MISSING"))?;
+                    let opening = s.by_idempotency("t09_real_public_execute_0001")?.ok_or(
+                        okx_execution::StoreError::Invalid("T09_RESTART_OPEN_MISSING"),
+                    )?;
+                    let close = s.by_idempotency("t09_real_public_close_0001")?.ok_or(
+                        okx_execution::StoreError::Invalid("T09_RESTART_CLOSE_MISSING"),
+                    )?;
                     let active_central = s.active_central_receipt(&opening.intent_id)?;
                     let lots = s.active_lots("BTC-USDT-SWAP")?;
                     Ok(json!({
