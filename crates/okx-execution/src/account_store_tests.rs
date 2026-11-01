@@ -3664,6 +3664,43 @@ fn e1_missing_swap_bill_id_reconciles_once_from_original_sql_sources() {
             )
             .unwrap();
         assert_eq!(count, 1, "restart may not charge the bill again");
+
+        // A later competing bill must invalidate the *previously successful*
+        // witness even though the existing immutable source link remains.
+        // The new bill is a real distinct source fact: do not discard its fee.
+        let mut competing = bills_page.clone();
+        let second_id = "late-fee-second";
+        let second_key = format!("bill:{second_id}");
+        competing.bills[0].bill_id = second_id.into();
+        competing.bills[0].economic_event_key = second_key.clone();
+        competing.bill_order_sources[0].bill_id = second_id.into();
+        competing.finance[0].entry_id = format!("{second_key}:fee");
+        competing.finance[0].economic_event_key = second_key.clone();
+        competing.finance[0].source_ref = second_key;
+        competing.cursor = None;
+        let mut reopened = reopened;
+        reopened.ingest_page(&competing).unwrap();
+        assert!(matches!(
+            reopened.intent_fee_bill_evidence("intent", 7),
+            Err(StoreError::Invalid("ENTRY_FEE_BILL_LINK_AMBIGUOUS"))
+        ));
+        let fee_count: i64 = reopened
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM finance_entries WHERE component='FEE'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(fee_count, 2, "do not silently drop a distinct bill");
+        let db = reopened.path.clone();
+        drop(reopened);
+        let again =
+            AccountStore::open_existing(db, &meta.account_key, &meta.installation_id).unwrap();
+        assert!(matches!(
+            again.intent_fee_bill_evidence("intent", 7),
+            Err(StoreError::Invalid("ENTRY_FEE_BILL_LINK_AMBIGUOUS"))
+        ));
     }
 }
 #[test]

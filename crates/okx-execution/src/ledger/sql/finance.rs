@@ -2252,6 +2252,55 @@ impl AccountStore {
             if rows.next()?.is_some() {
                 return Err(StoreError::Invalid("ENTRY_FEE_BILL_LINK_AMBIGUOUS"));
             }
+            // A fill without billId can acquire a fee link from bill-history
+            // later. If another matching bill arrives AFTER the first link,
+            // checking just finance_source_links would falsely retain success.
+            // Use the original per-account SQL facts, not a second ledger.
+            let late_swap: bool = self.connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM swap_fill_sources
+                 WHERE fill_id=?1 AND bill_id='')",
+                [&id],
+                |r| r.get(0),
+            )?;
+            if late_swap {
+                let mut candidates = self.connection.prepare(
+                    "SELECT b.bill_id,e.amount,e.currency,b.time
+                     FROM fills f
+                     JOIN bill_order_sources o
+                       ON o.instrument_id=f.instrument_id
+                      AND o.exchange_order_id=f.exchange_order_id
+                      AND o.trade_id=f.trade_id
+                     JOIN bills b ON b.bill_id=o.bill_id
+                     JOIN finance_entries e ON e.economic_event_key=b.economic_event_key
+                       AND e.component='FEE' AND e.allocation_leg='account'
+                     WHERE f.fill_id=?1 ORDER BY b.bill_id LIMIT 65",
+                )?;
+                let mut bill_rows = candidates.query([&id])?;
+                let mut scanned = 0_u32;
+                let mut matched: Option<String> = None;
+                while let Some(bill_row) = bill_rows.next()? {
+                    scanned += 1;
+                    if scanned > 64 {
+                        return Err(StoreError::Invalid("LATE_SWAP_FEE_BILLS_UNBOUNDED"));
+                    }
+                    let bill_amount: String = bill_row.get(1)?;
+                    let bill_currency: String = bill_row.get(2)?;
+                    let bill_time: i64 = bill_row.get(3)?;
+                    if decimal(bill_amount)? != fee
+                        || bill_currency != currency
+                        || bill_time < fill_time
+                    {
+                        continue;
+                    }
+                    if matched.is_some() {
+                        return Err(StoreError::Invalid("ENTRY_FEE_BILL_LINK_AMBIGUOUS"));
+                    }
+                    matched = Some(bill_row.get(0)?);
+                }
+                if matched.as_deref() != proof.bill_id.as_deref() {
+                    return Err(StoreError::Invalid("ENTRY_FEE_BILL_SOURCE_MISMATCH"));
+                }
+            }
             // A linked fee still cannot settle an entry if the bill
             // predates the fill, the finance event is outside the
             // claimed covered window, or the link belongs to a non-account
