@@ -1345,7 +1345,21 @@ impl TradeService {
         let settlement_sequence = settled
             .risk_book_sequence
             .ok_or("ENTRY_SETTLEMENT_SEQUENCE_MISSING")?;
-        let census = self.census(&state).await?;
+        // The central SETTLE_ENTRY is now confirmed, but SQL must retain
+        // the terminal intent's pending reservation until this RELEASE is
+        // durably acknowledged. Construct a fresh full-cohort census with
+        // exactly this settled reservation scoped for terminal resolution.
+        // Every other terminal-pending / unknown intent still denies release.
+        let account_key = r.configuration.account_key.wire();
+        let census = self
+            .census_for_terminal_release(
+                &state,
+                &account_key,
+                &i.intent_id,
+                &receipt.reservation_key,
+                &i.plan_hash,
+            )
+            .await?;
         let proof = TerminalRiskLedgerProof {
             account_uid: r.configuration.account_key.verified_uid.clone(),
             run_id: "continuous_engine".into(),
