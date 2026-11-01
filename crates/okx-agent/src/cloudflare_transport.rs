@@ -1682,15 +1682,34 @@ mod raw_native_session_tests {
             .trade("fixture-a", &execute, None)
             .await
             .expect("T09.1 identical Execute must be idempotent");
-        assert_eq!(
-            repeated["status"], "partial",
-            "idempotent replay must preserve an ACK with unsettled money: {repeated}"
-        );
-        assert_eq!(repeated["data"]["intent"]["state"], "ACKNOWLEDGED");
-        assert_eq!(
-            repeated["data"]["intent"]["exchange_order_id"],
-            "recorded-t09-opening-001"
-        );
+        // An unchanged idempotency key must never send another POST. When
+        // the read-only order GET is locally deferred, UNKNOWN with the exact
+        // no-resubmit reason is the safe production answer; it is not an
+        // alternative proof of a fill, ACK or financial settlement.
+        let replay_readback_unknown = repeated["status"] == "unknown";
+        let opened_intent_id = opened["data"]["intent"]["intent_id"]
+            .as_str()
+            .expect("public intent ID")
+            .to_string();
+        if replay_readback_unknown {
+            assert_eq!(
+                repeated["reason_code"],
+                "ORDER_READBACK_INCOMPLETE_NO_RESUBMIT"
+            );
+            assert_eq!(repeated["retryable"], false);
+            assert_eq!(repeated["intent_id"], opened_intent_id);
+        } else {
+            assert_eq!(
+                repeated["status"], "partial",
+                "unexpected idempotent replay outcome: {repeated}"
+            );
+            assert_eq!(repeated["data"]["intent"]["state"], "ACKNOWLEDGED");
+            assert_eq!(
+                repeated["data"]["intent"]["exchange_order_id"],
+                "recorded-t09-opening-001"
+            );
+            assert_eq!(repeated["data"]["intent"]["intent_id"], opened_intent_id);
+        }
         assert_eq!(
             feed.outbound_posts.lock().unwrap().len(),
             1,
@@ -1698,17 +1717,14 @@ mod raw_native_session_tests {
         );
         assert_eq!(
             feed.unconsumed_reads(),
-            0,
-            "all fee/leverage evidence must be consumed by production admission"
+            usize::from(replay_readback_unknown),
+            "all admission sources must be consumed; an unsent order GET may remain only after explicit UNKNOWN"
         );
         let mut after_public = summary("risk_after_public_trade_post_001");
         after_public.installation_id = "installation_test".into();
         let after = risk.request(after_public).await.unwrap();
         assert_eq!(after.status, RiskDecisionStatus::Observed);
-        let idempotent_intent_id = opened["data"]["intent"]["intent_id"]
-            .as_str()
-            .expect("public intent ID")
-            .to_string();
+        let idempotent_intent_id = opened_intent_id;
         let saved_intent_id = idempotent_intent_id.clone();
         let saved = accounts
             .resolve("fixture-a")
@@ -1749,7 +1765,12 @@ mod raw_native_session_tests {
             json!({
                 "account_uid": accounts.resolve("fixture-a").await.unwrap().configuration.account_key.verified_uid,
                 "opened_intent_id":idempotent_intent_id,
-                "replayed_intent_id":repeated["data"]["intent"]["intent_id"],
+                "replayed_intent_id":if replay_readback_unknown {
+                    repeated["intent_id"].clone()
+                } else {
+                    repeated["data"]["intent"]["intent_id"].clone()
+                },
+                "replay_readback_unknown_no_resubmit":replay_readback_unknown,
                 "sql_intent_id":saved.intent_id,
                 "sql_revision":saved.revision,
                 "sql_state":saved.state.as_str(),
@@ -2243,6 +2264,7 @@ mod raw_native_session_tests {
                 );
                 // The filled close and the separately completed opening order are
                 // both independently fetched from their actual signed clOrdId.
+                let mut terminal_orders = Vec::new();
                 for (order_id, side, time, px) in [
                     ("recorded-t09-close-001", "sell", closing_at.as_str(), "999"),
                     (
@@ -2252,7 +2274,7 @@ mod raw_native_session_tests {
                         "1000",
                     ),
                 ] {
-                    feed.expect_get(RecordedGet {
+                    terminal_orders.push(RecordedGet {
                         access_key: "fixture-executor-a".into(),
                         path: "/api/v5/trade/order".into(),
                         required_query: vec![("instId".into(), "BTC-USDT-SWAP".into())],
@@ -2266,6 +2288,14 @@ mod raw_native_session_tests {
                         }])),
                     });
                 }
+                // A previously rate-deferred live-order GET may remain
+                // unconsumed. The confirmed CLOSE ACK is the phase boundary:
+                // retire those old recorded bytes before terminal readbacks.
+                feed.advance_recorded_route(
+                    "fixture-executor-a",
+                    "/api/v5/trade/order",
+                    terminal_orders,
+                );
                 // The original attached stop remains LIVE after close, so the
                 // production flat-protection owner must cancel that exact algoId.
                 // Subsequent source inventories are explicitly empty, only after
