@@ -42,6 +42,17 @@ export async function actualNativeWorker(root, signal, { statusProbe = false } =
       const recorded = stderr.match(/T09_1_CLOSE_ERROR_FROM_RUST_V1:(\{[^\r\n]+\})/);
       if (recorded) {
         const source = JSON.parse(recorded[1]);
+        // Preserve the exact typed rate domain, local defer and request-sent
+        // fields in the CI log. They decide whether a SOURCE GET or venue
+        // ORDER was throttled; a 90-byte reason hid this distinction.
+        const detail = {
+          schema: "okx.t09-close-denial/v1",
+          reason_code: String(source.reason_code).slice(0, 1200),
+          source_reason_code: source.source_reason_code ?? null,
+          outbound_posts: source.outbound_posts,
+        };
+        process.stderr.write("T09_1_CLOSE_DENIAL_EVIDENCE_V1:" +
+          JSON.stringify(detail) + "\n");
         throw Error("T09_1_PRODUCTION_CLOSE_DENIED:" +
           String(source.reason_code).slice(0, 90) +
           ":posts=" + source.outbound_posts +
