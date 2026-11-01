@@ -2388,6 +2388,19 @@ mod raw_native_session_tests {
             .expect("public WS coordinator did not stop")
             .unwrap()
             .unwrap();
+        let restart_account = if status_probe {
+            Some(
+                accounts
+                    .resolve("fixture-a")
+                    .await
+                    .unwrap()
+                    .configuration
+                    .account_key
+                    .clone(),
+            )
+        } else {
+            None
+        };
         drop(trade);
         accounts.shutdown().await;
         drop(accounts);
@@ -2403,6 +2416,58 @@ mod raw_native_session_tests {
             })
             .await
             .expect("SQL owner still active");
+        }
+        if let Some(account) = restart_account {
+            // Reopen the SAME verified Native AccountStore through its normal
+            // SQLite owner constructor after the old worker has terminated.
+            // No test-only SQL mutation, copy or projection is permitted.
+            let key = account.wire();
+            let path = root
+                .join("accounts")
+                .join(crate::accounts::key_hash(&account))
+                .join("account.sqlite");
+            let restored = okx_execution::AccountStoreHandle::open_existing(
+                path, key, "installation_test".into(),
+            )
+            .await
+            .expect("T09.1 must restart the persisted native SQL owner");
+            let readback = restored
+                .call(std::time::Instant::now() + Duration::from_secs(5), |s| {
+                    let opening = s.by_idempotency("t09_real_public_execute_0001")?
+                        .ok_or(okx_execution::StoreError::Invalid("T09_RESTART_OPEN_MISSING"))?;
+                    let close = s.by_idempotency("t09_real_public_close_0001")?
+                        .ok_or(okx_execution::StoreError::Invalid("T09_RESTART_CLOSE_MISSING"))?;
+                    let active_central = s.active_central_receipt(&opening.intent_id)?;
+                    let lots = s.active_lots("BTC-USDT-SWAP")?;
+                    Ok(json!({
+                        "opening_intent_id":opening.intent_id,
+                        "opening_state":opening.state.as_str(),
+                        "close_intent_id":close.intent_id,
+                        "close_state":close.state.as_str(),
+                        "active_central_receipt":active_central.is_some(),
+                        "remaining_lot_count":lots.iter()
+                            .filter(|lot| lot.remaining_qty > Decimal::ZERO)
+                            .count(),
+                        "fills_cursor":s.cursor("fills", "SWAP")?,
+                        "bills_cursor":s.cursor("bills", "account")?
+                    }))
+                })
+                .await
+                .expect("native restarted SQL owner must read its durable state");
+            println!("T09_1_NATIVE_SQL_RESTART_V1:{readback}");
+            assert_eq!(readback["opening_state"], "FILLED");
+            assert_eq!(readback["close_state"], "FILLED");
+            assert_eq!(readback["remaining_lot_count"], 0);
+            assert_eq!(readback["active_central_receipt"], false);
+            let mut finished = restored.termination_signal();
+            drop(restored);
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while !*finished.borrow_and_update() {
+                    finished.changed().await.expect("restarted SQL owner died");
+                }
+            })
+            .await
+            .expect("restarted SQL owner did not close");
         }
         std::fs::remove_dir_all(root).unwrap();
         println!("native_to_persisted_workerd_riskbook PASS: no venue POST");
