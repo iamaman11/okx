@@ -114,16 +114,15 @@ fn verify_post_held_selected(
         .map_err(|_| "POST_HELD_SOURCE_TIME_INVALID")?
         .timestamp_millis();
     if received > now_ms
-        || !crate::config::evidence_fresh(
-            received,
-            now_ms,
-            crate::config::ACCOUNT_MAX_AGE_MS,
-        )
+        || !crate::config::evidence_fresh(received, now_ms, crate::config::ACCOUNT_MAX_AGE_MS)
     {
         return Err("POST_HELD_ACCOUNT_EVIDENCE_STALE".into());
     }
     if witness.executor_config.position_mode != witness.snapshot.position_mode
-        || !matches!(witness.snapshot.position_mode.as_str(), "net_mode" | "long_short_mode")
+        || !matches!(
+            witness.snapshot.position_mode.as_str(),
+            "net_mode" | "long_short_mode"
+        )
     {
         return Err("POST_ACCOUNT_POSITION_MODE_UNVERIFIED".into());
     }
@@ -186,16 +185,25 @@ fn post_held_witness_rejects_identity_generation_mode_and_stale_sources() {
         Err("POST_HELD_SOURCE_GENERATION_CHANGED".into())
     );
     proof.executor_config.uid = "different".into();
-    assert_eq!(check(&proof), Err("POST_HELD_ACCOUNT_IDENTITY_CHANGED".into()));
+    assert_eq!(
+        check(&proof),
+        Err("POST_HELD_ACCOUNT_IDENTITY_CHANGED".into())
+    );
     proof.executor_config.uid = uid.into();
     proof.executor_config.position_mode = "long_short_mode".into();
-    assert_eq!(check(&proof), Err("POST_ACCOUNT_POSITION_MODE_UNVERIFIED".into()));
+    assert_eq!(
+        check(&proof),
+        Err("POST_ACCOUNT_POSITION_MODE_UNVERIFIED".into())
+    );
     proof.executor_config.position_mode = "net_mode".into();
     proof.started_after_held_ms = 4;
     assert_eq!(check(&proof), Err("POST_HELD_CAUSAL_TIME_INVALID".into()));
     proof.started_after_held_ms = 1;
     proof.snapshot.source_received_at = (Utc::now() - chrono::Duration::minutes(10)).to_rfc3339();
-    assert_eq!(check(&proof), Err("POST_HELD_ACCOUNT_EVIDENCE_STALE".into()));
+    assert_eq!(
+        check(&proof),
+        Err("POST_HELD_ACCOUNT_EVIDENCE_STALE".into())
+    );
 }
 
 impl TradeService {
@@ -1525,13 +1533,7 @@ impl TradeService {
             // contract mechanics. Bind the same immutable SQL quote against
             // actual post-HELD source data on EACH CAS attempt before POST.
             let selected = self
-                .revalidate_held_entry_quote(
-                    fx.owner,
-                    intent,
-                    fx.order_type,
-                    until,
-                    held_received,
-                )
+                .revalidate_held_entry_quote(fx.owner, intent, fx.order_type, until, held_received)
                 .await?;
             let (census, causal_proof) = self
                 .census_after_held(
