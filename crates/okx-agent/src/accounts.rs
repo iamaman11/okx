@@ -1163,8 +1163,7 @@ pub(crate) mod recorded_support {
                             && page.path == path
                             && page.required_query.iter().all(|(name, expected)| {
                                 request.url().query_pairs().any(|(k, v)| {
-                                    k.as_ref() == name.as_str()
-                                        && v.as_ref() == expected.as_str()
+                                    k.as_ref() == name.as_str() && v.as_ref() == expected.as_str()
                                 })
                             })
                             && requested_client.as_ref().is_none_or(|client| {
