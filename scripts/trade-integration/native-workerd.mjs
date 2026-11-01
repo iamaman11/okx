@@ -62,6 +62,14 @@ export async function actualNativeWorker(root, signal, { statusProbe = false } =
           ":posts=" + source.outbound_posts +
           ":capture=" + String(source.source_reason_code ?? "NONE").slice(0, 45));
       }
+      const terminal = stderr.match(/T09_1_TERMINAL_CAPTURE_FAILURE_V1:(\{[^\r\n]+\})/);
+      if (terminal) {
+        const detail = JSON.parse(terminal[1]);
+        process.stderr.write("T09_1_TERMINAL_CAPTURE_DENIAL_V1:" +
+          JSON.stringify(detail) + "\n");
+        throw Error("T09_1_TERMINAL_CAPTURE_FAILED:" +
+          String(detail.source_reason).slice(0, 110));
+      }
       const lines = stderr.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
       const detail = lines.findLast(line => /T09_1_NATIVE_CHILD_EXCEPTION_V1:/.test(line))
         ?? lines.findLast(line => /panicked|Error:|error:|FAILED/.test(line))
