@@ -307,7 +307,11 @@ impl AccountHistoryApi {
                 .await
                 .map_err(|_| OkxError::Response("HISTORY_READ_DEADLINE_EXCEEDED".into()))?
             }
-            None => self.client.private_get("/api/v5/trade/fills-history", &params).await,
+            None => {
+                self.client
+                    .private_get("/api/v5/trade/fills-history", &params)
+                    .await
+            }
         }
     }
     /// A complete opening campaign requires BOTH independent order sources:
@@ -618,7 +622,11 @@ impl AccountHistoryApi {
                 .await
                 .map_err(|_| OkxError::Response("HISTORY_READ_DEADLINE_EXCEEDED".into()))?
             }
-            None => self.client.private_get("/api/v5/account/bills-archive", &params).await,
+            None => {
+                self.client
+                    .private_get("/api/v5/account/bills-archive", &params)
+                    .await
+            }
         }
     }
     pub fn new(client: OkxRestClient) -> Self {
