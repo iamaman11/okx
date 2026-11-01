@@ -33,7 +33,19 @@ export async function actualNativeWorker(root, signal, { statusProbe = false } =
         maxBuffer: 12 * 1024 * 1024,
         windowsHide: true,
       },
-    );
+    ).catch(error => {
+      // The Rust child prints its exact failing assertion to stderr. The
+      // integration runner retains only 200 chars of an error reason, so
+      // forwarding "Command failed: node ..." discards the actual blocker.
+      // Prefer the final production assertion, then a Rust panic line.
+      const lines = [error.stderr, error.stdout].filter(Boolean)
+        .join("\n").split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+      const detail =
+        lines.findLast(line => /T09\.1 Close must|TRANSCRIPT_|PANIC_|PROTECTION_|SOURCE_|_UNVERIFIED|_MISMATCH|_PENDING/.test(line))
+        ?? lines.findLast(line => /panicked|Error:|error:|FAILED/.test(line))
+        ?? error.message;
+      throw Error("NATIVE_WORKER_CHILD_FAILED:" + String(detail).slice(-168));
+    });
     assert.match(stdout, /t09_public_trade_execute_open_ack_and_idempotency PASS: posts=1/);
     assert.match(stdout, /native_to_persisted_workerd_riskbook PASS/);
     const terminal = [...stdout.matchAll(/\{"suite":"runtime-session-sqlite-do","status":"PASS"[^\r\n]*\}/g)];
