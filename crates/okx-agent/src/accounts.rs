@@ -1496,8 +1496,7 @@ pub(crate) mod recorded_support {
         )
         .unwrap();
         let executor =
-            OkxRestClient::with_http_transport(environment, executing, budget, feed)
-                .unwrap();
+            OkxRestClient::with_http_transport(environment, executing, budget, feed).unwrap();
         let config = VerifiedAccountConfig {
             account_key: AccountKey {
                 venue: "okx".into(),
@@ -1532,12 +1531,9 @@ pub(crate) mod recorded_support {
             // public WS owner by the integrated Native/Worker assembly.
             let budget = RateBudget::new();
             let feed = Arc::new(RecordedAccountHttp::default());
-            let (_, a) = prepared_with_socket(
-                "a", feed.clone(), Arc::new(OfflineSocket), budget.clone(),
-            );
-            let (_, b) = prepared_with_socket(
-                "b", feed, Arc::new(OfflineSocket), budget.clone(),
-            );
+            let (_, a) =
+                prepared_with_socket("a", feed.clone(), Arc::new(OfflineSocket), budget.clone());
+            let (_, b) = prepared_with_socket("b", feed, Arc::new(OfflineSocket), budget.clone());
             let plan = budget.private_rest_plan("/api/v5/account/config", &[]);
             for _ in 0..5 {
                 a.observer.rate_budget().admit(&plan).unwrap();
@@ -1931,7 +1927,8 @@ mod tests {
         use super::recorded_support::{RecordedAccountHttp, RecordedGet, prepared};
         use serde_json::json;
         let feed = Arc::new(RecordedAccountHttp::default());
-        let (_config, clients) = prepared("a", feed.clone());
+        let budget = RateBudget::new();
+        let (_config, clients) = prepared("a", feed.clone(), budget.clone());
         let observer = crate::account_bootstrap::AccountBootstrapper::new(clients.observer);
         let reference = okx_observation::ReferenceRegistry::from_public(
             "2026-10-31T00:00:00Z",
@@ -2024,7 +2021,7 @@ mod tests {
         // normalization permits using exhausted signed financial input.
         assert!(observer.fee_schedule(&rules).await.is_err());
         assert_eq!(feed.unconsumed_reads(), 0);
-        let (_other, other_clients) = prepared("b", feed.clone());
+        let (_other, other_clients) = prepared("b", feed.clone(), budget);
         let other = crate::account_bootstrap::AccountBootstrapper::new(other_clients.observer);
         assert!(other.fee_schedule(&rules).await.is_err());
         assert!(feed.outbound_posts.lock().unwrap().is_empty());
@@ -2308,7 +2305,8 @@ mod tests {
         let mut sockets = Vec::new();
         for label in ["a", "b"] {
             let ws = Arc::new(RecordedWsConnector::default());
-            let (config, clients) = prepared_with_socket(label, http.clone(), ws.clone(), budget.clone());
+            let (config, clients) =
+                prepared_with_socket(label, http.clone(), ws.clone(), budget.clone());
             registry
                 .connect_prepared(config.clone(), clients)
                 .await
