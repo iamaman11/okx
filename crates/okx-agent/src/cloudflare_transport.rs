@@ -312,7 +312,9 @@ mod raw_native_session_tests {
         trade_service::TradeService,
     };
     use futures_util::{Sink, Stream};
-    use okx_api::{OkxEnvironment, OkxPublicClient, RateBudget, Region};
+    use okx_api::{
+        OkxEnvironment, OkxPublicClient, RateBudget, RateOperationClass, RateThrottleSource, Region,
+    };
     use okx_observation::ReferenceRegistry;
     use okx_protocol::risk_authority::{
         CausalPostProof, NativeRiskCensus, PostAccountReadProof, RISK_COMMAND_SCHEMA_V1,
@@ -382,6 +384,7 @@ mod raw_native_session_tests {
         NativeRiskClient,
         mpsc::Receiver<OutboundRiskCommand>,
         Option<Arc<crate::accounts::recorded_support::RecordedAccountHttp>>,
+        RateBudget,
     ) {
         let mut bytes = [0u8; 16];
         getrandom::fill(&mut bytes).unwrap();
@@ -427,7 +430,7 @@ mod raw_native_session_tests {
         );
         let reference = ReferenceRegistry::from_public("2026-10-31T00:00:00Z", vec![]).unwrap();
         let (_public, public_ws) =
-            PublicWsCoordinator::new_with_rate_budget(env, reference, budget);
+            PublicWsCoordinator::new_with_rate_budget(env, reference, budget.clone());
         let analytics = AnalyticsService::new(root.join("analytics"), market.clone()).unwrap();
         let (risk_tx, risk_rx) = mpsc::channel(8);
         let risk = NativeRiskClient::new(risk_tx);
@@ -444,7 +447,7 @@ mod raw_native_session_tests {
             trade,
             market,
         };
-        (ctx, root, risk, risk_rx, recorded_http)
+        (ctx, root, risk, risk_rx, recorded_http, budget)
     }
     async fn test_dispatch() -> (
         DispatchContext,
@@ -452,7 +455,7 @@ mod raw_native_session_tests {
         NativeRiskClient,
         mpsc::Receiver<OutboundRiskCommand>,
     ) {
-        let (ctx, root, risk, risk_rx, _) = test_dispatch_for("installation-test").await;
+        let (ctx, root, risk, risk_rx, _, _) = test_dispatch_for("installation-test").await;
         (ctx, root, risk, risk_rx)
     }
 
@@ -464,6 +467,61 @@ mod raw_native_session_tests {
             action: RiskCommandAction::Summary {},
         }
     }
+    /// Retry permission is test-only and limited to an explicitly read-only
+    /// Preview that failed at the *local* request-admission boundary. The
+    /// production RateBudget supplies the exact no-send defer: no fixed sleep,
+    /// disabled limiter, exchange retry, or inferred POST safety.
+    fn recorded_preview_local_defer(
+        reason: &str,
+        budget: &RateBudget,
+        remaining: Duration,
+    ) -> Option<Duration> {
+        if !reason.starts_with("OKX rate/backpressure defer: ") {
+            return None;
+        }
+        let throttle = budget.snapshot().last_throttle?;
+        if throttle.source != RateThrottleSource::LocalBudget
+            || throttle.operation != RateOperationClass::PrivateRestRead
+            || throttle.request_sent
+            || !throttle.retryable
+            || throttle.local_defer_ms == 0
+        {
+            return None;
+        }
+        let delay = Duration::from_millis(throttle.local_defer_ms);
+        (delay <= remaining).then_some(delay)
+    }
+
+    #[test]
+    fn recorded_preview_retry_requires_local_no_send_private_get() {
+        let budget = RateBudget::new().for_authenticated_user("account-001");
+        let plan = budget.private_rest_plan("/api/v5/account/config", &[]);
+        for _ in 0..5 {
+            budget.admit(&plan).unwrap();
+        }
+        let denied = budget.admit(&plan).unwrap_err();
+        assert!(!denied.request_sent);
+        assert_eq!(denied.source, RateThrottleSource::LocalBudget);
+        assert!(recorded_preview_local_defer(
+            "OKX rate/backpressure defer: RateThrottleEvidence { ... }",
+            &budget,
+            Duration::from_secs(3),
+        )
+        .is_some());
+        assert!(recorded_preview_local_defer(
+            "VENUE_ACK_MISSING",
+            &budget,
+            Duration::from_secs(3),
+        )
+        .is_none());
+        assert!(recorded_preview_local_defer(
+            "OKX rate/backpressure defer: RateThrottleEvidence { ... }",
+            &budget,
+            Duration::ZERO,
+        )
+        .is_none());
+    }
+
     fn denied(id: &str) -> RiskResult {
         RiskResult {
             schema: RISK_RESULT_SCHEMA_V1.into(),
@@ -638,7 +696,7 @@ mod raw_native_session_tests {
         // This real two-account SQL bootstrap MUST precede the Worker
         // campaign's beginning. A later account cannot certify an earlier
         // history; the production owner correctly refuses such a baseline.
-        let (mut ctx, root, risk, mut risk_rx, recorded_http) =
+        let (mut ctx, root, risk, mut risk_rx, recorded_http, rate_budget) =
             test_dispatch_for("installation_test").await;
         let accounts = ctx.accounts.clone();
         std::fs::write(format!("{handoff_path}.native-ready"), b"SQL_OWNERS_OPEN")
@@ -841,6 +899,45 @@ mod raw_native_session_tests {
             }
         }
         let trade = public_trade;
+        // Replay a newly timestamped RAW public frame only after a bounded
+        // local no-send defer. The production WS parser and freshness checks
+        // remain the only authority; no direct market-state setter is used.
+        let refresh_recorded_market = || {
+            let refreshed_at = chrono::Utc::now().timestamp_millis();
+            for (arg, observed, action) in recorded_public.iter().cloned() {
+                if arg["channel"] == "instruments" && arg["instType"] == "SWAP" {
+                    connector.send_public_frame(
+                        json!({
+                            "arg":arg,
+                            "data":[{
+                                "instType":"SWAP","instId":"BTC-USDT-SWAP",
+                                "instFamily":"BTC-USDT","uly":"BTC-USDT","state":"live",
+                                "ruleType":"normal","settleCcy":"USDT","tickSz":"0.1",
+                                "lotSz":"0.01","minSz":"0.01","maxLmtSz":"1000",
+                                "maxMktSz":"1000","ctType":"linear","ctVal":"0.01",
+                                "ctValCcy":"BTC","groupId":"4","lever":"20"
+                            }]
+                        })
+                        .to_string(),
+                    );
+                } else if let Some(mut value) = observed {
+                    value["ts"] = refreshed_at.to_string().into();
+                    if value.get("fundingTime").is_some() {
+                        value["fundingTime"] = refreshed_at.to_string().into();
+                        value["nextFundingTime"] =
+                            (refreshed_at + 8 * 60 * 60 * 1000).to_string().into();
+                    }
+                    if action == Some("snapshot") {
+                        value["seqId"] = 11.into();
+                    }
+                    let mut frame = json!({"arg":arg,"data":[value]});
+                    if let Some(action) = action {
+                        frame["action"] = action.into();
+                    }
+                    connector.send_public_frame(frame.to_string());
+                }
+            }
+        };
 
         let stopped = ["fixture-a", "fixture-b"].iter().map(|alias| async {
             accounts
@@ -1049,7 +1146,35 @@ mod raw_native_session_tests {
         };
         assert!(preview.valid());
         for alias in ["fixture-a", "fixture-b"] {
-            let output = trade.trade(alias, &preview, None).await.unwrap();
+            // Two background financial owners and capability reads share the
+            // genuine five-per-two-second OKX config budget per UID. A LOCAL
+            // no-send defer may happen before Preview reaches any venue API.
+            // Preview has no POST/reservation; use the *typed* RateBudget
+            // evidence to retry it, with a fixed overall test deadline.
+            let until = std::time::Instant::now() + Duration::from_secs(15);
+            let output = loop {
+                let answer = tokio::time::timeout_at(
+                    until.into(),
+                    trade.trade(alias, &preview, None),
+                )
+                .await
+                .expect("T09 preview bounded rate-admission deadline");
+                match answer {
+                    Ok(value) => break value,
+                    Err(reason) => {
+                        let remaining = until.saturating_duration_since(std::time::Instant::now());
+                        let delay = recorded_preview_local_defer(
+                            &reason, &rate_budget, remaining,
+                        ).unwrap_or_else(|| panic!("T09 preview non-retryable failure: {reason}"));
+                        tokio::time::timeout_at(until.into(), tokio::time::sleep(delay))
+                            .await
+                            .expect("T09 local no-send rate deferral exceeded preview budget");
+                        // New raw market observation is necessary after a defer:
+                        // reusing a time-expired quote would be a false PASS.
+                        refresh_recorded_market();
+                    }
+                }
+            };
             assert_eq!(output["status"], "completed");
             assert_eq!(output["data"]["entry_costs"]["entry_total_usd"], "1.0005");
             assert_eq!(
@@ -1302,40 +1427,7 @@ mod raw_native_session_tests {
         // market strictly by replaying a NEW, timestamped set of raw public WS
         // inputs into the existing connected production coordinator. There is
         // no direct market-state setter and no freshness-TTL exemption.
-        let refreshed_at = chrono::Utc::now().timestamp_millis();
-        for (arg, observed, action) in recorded_public.iter().cloned() {
-            if arg["channel"] == "instruments" && arg["instType"] == "SWAP" {
-                connector.send_public_frame(
-                    json!({
-                        "arg":arg,
-                        "data":[{
-                            "instType":"SWAP","instId":"BTC-USDT-SWAP",
-                            "instFamily":"BTC-USDT","uly":"BTC-USDT","state":"live",
-                            "ruleType":"normal","settleCcy":"USDT","tickSz":"0.1",
-                            "lotSz":"0.01","minSz":"0.01","maxLmtSz":"1000",
-                            "maxMktSz":"1000","ctType":"linear","ctVal":"0.01",
-                            "ctValCcy":"BTC","groupId":"4","lever":"20"
-                        }]
-                    })
-                    .to_string(),
-                );
-            } else if let Some(mut value) = observed {
-                value["ts"] = refreshed_at.to_string().into();
-                if value.get("fundingTime").is_some() {
-                    value["fundingTime"] = refreshed_at.to_string().into();
-                    value["nextFundingTime"] =
-                        (refreshed_at + 8 * 60 * 60 * 1000).to_string().into();
-                }
-                if action == Some("snapshot") {
-                    value["seqId"] = 11.into();
-                }
-                let mut frame = json!({"arg":arg,"data":[value]});
-                if let Some(action) = action {
-                    frame["action"] = action.into();
-                }
-                connector.send_public_frame(frame.to_string());
-            }
-        }
+        refresh_recorded_market();
         tokio::time::timeout(Duration::from_secs(4), async {
             loop {
                 let rules = public_ws.instrument_rules("BTC-USDT-SWAP").await.unwrap();
