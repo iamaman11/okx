@@ -983,7 +983,18 @@ impl TradeService {
             })
             .into_iter()
             .collect();
-        let post_account = r.execution.account.config().await.map_err(err)?;
+        let post_account = if increase {
+            r.execution.account.config().await
+        } else {
+            // The reduction has no central HELD entry budget to refresh, but
+            // still requires a fresh Executor account-mode witness. Share
+            // the existing local RateBudget and the same command deadline.
+            r.execution
+                .account
+                .config_wait(until.saturating_duration_since(Instant::now()))
+                .await
+        }
+        .map_err(err)?;
         let post_snapshot = if increase {
             r.observer.snapshot().await
         } else {
