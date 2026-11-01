@@ -195,6 +195,19 @@ impl AccountBootstrapper {
         self.config_cache.read(|| self.api.config()).await
     }
 
+    async fn observer_config_until(
+        &self,
+        until: Instant,
+    ) -> Result<(AccountConfig, chrono::DateTime<Utc>), OkxError> {
+        self.config_cache
+            .read(|| async {
+                self.api
+                    .config_wait(until.saturating_duration_since(Instant::now()))
+                    .await
+            })
+            .await
+    }
+
     async fn fresh_observer_config(
         &self,
     ) -> Result<(AccountConfig, chrono::DateTime<Utc>), OkxError> {
@@ -455,7 +468,7 @@ impl AccountBootstrapper {
             return Err(AccountBootstrapError::SourceDeadline);
         }
         tokio::time::timeout_at(until.into(), async {
-            let (config, config_received_at) = self.observer_config().await?;
+            let (config, config_received_at) = self.observer_config_until(until).await?;
             self.snapshot_from_config(config, config_received_at, Some(until))
                 .await
         })

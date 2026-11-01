@@ -471,6 +471,15 @@ impl AccountApi {
             .ok_or_else(|| OkxError::Config("OKX returned no account configuration".to_owned()))
     }
 
+    pub async fn config_wait(&self, max_wait: Duration) -> Result<AccountConfig, OkxError> {
+        self.client
+            .private_get_wait::<AccountConfig>("/api/v5/account/config", &[], max_wait)
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| OkxError::Config("OKX returned no account configuration".to_owned()))
+    }
+
     pub async fn instruments(
         &self,
         instrument_type: InstrumentType,

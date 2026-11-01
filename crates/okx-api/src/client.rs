@@ -809,6 +809,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn bounded_config_read_never_sends_when_local_deadline_is_exhausted() {
+        let rate = RateBudget::new();
+        let plan = rate.private_rest_plan("/api/v5/account/config", &[]);
+        for _ in 0..5 {
+            rate.admit(&plan).unwrap();
+        }
+        let wire = Arc::new(ScriptedDelivery::default());
+        let api = OkxRestClient::with_http_transport(
+            OkxEnvironment::new(crate::config::Region::Global, false),
+            Credentials::new("key".into(), "secret".into(), "pass".into()).unwrap(),
+            rate,
+            wire.clone(),
+        )
+        .unwrap();
+        let denied = api
+            .private_get_wait::<serde_json::Value>("/api/v5/account/config", &[], Duration::ZERO)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            denied,
+            OkxError::RateLimited { evidence }
+                if !evidence.request_sent
+                    && evidence.local_defer_ms > 0
+                    && evidence.domain.endpoint.as_deref() == Some("/api/v5/account/config")
+        ));
+        assert!(wire.requests.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
     async fn bounded_private_balance_does_not_retry_exchange_throttle() {
         let wire = Arc::new(ScriptedDelivery::default());
         wire.responses.lock().unwrap().push_back((
