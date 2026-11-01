@@ -3152,9 +3152,90 @@ mod tests {
         terminal.state = IntentState::Filled;
         assert_eq!(
             verify_local_intent_coverage(
-                &[(terminal, Some(receipt.clone()))],
+                &[(terminal.clone(), Some(receipt.clone()))],
                 &unresolved,
                 &account
+            ),
+            Err("COHORT_TERMINAL_RISK_RELEASE_PENDING".into())
+        );
+        let scope = TerminalReleaseCensusScope {
+            account_key: &account,
+            intent_id: &terminal.intent_id,
+            reservation_key: &receipt.reservation_key,
+            plan_hash: &terminal.plan_hash,
+        };
+        // The pending terminal receipt is allowed ONLY in its own release
+        // census; ordinary admission/readiness still denies it.
+        assert!(
+            verify_local_intent_coverage_scoped(
+                &[(terminal.clone(), Some(receipt.clone()))],
+                &unresolved,
+                &account,
+                Some(scope),
+            )
+            .is_ok()
+        );
+        assert_eq!(
+            verify_local_intent_coverage_scoped(
+                &[(terminal.clone(), None)],
+                &unresolved,
+                &account,
+                Some(scope),
+            ),
+            Err("COHORT_TERMINAL_RISK_RELEASE_PENDING".into())
+        );
+        for wrong in [
+            TerminalReleaseCensusScope {
+                account_key: "wrong",
+                ..scope
+            },
+            TerminalReleaseCensusScope {
+                intent_id: "wrong",
+                ..scope
+            },
+            TerminalReleaseCensusScope {
+                reservation_key: "wrong",
+                ..scope
+            },
+            TerminalReleaseCensusScope {
+                plan_hash: "wrong",
+                ..scope
+            },
+        ] {
+            assert_eq!(
+                verify_local_intent_coverage_scoped(
+                    &[(terminal.clone(), Some(receipt.clone()))],
+                    &unresolved,
+                    &account,
+                    Some(wrong),
+                ),
+                Err("COHORT_TERMINAL_RISK_RELEASE_PENDING".into())
+            );
+        }
+        assert_eq!(
+            verify_local_intent_coverage_scoped(
+                &[(intent.clone(), Some(receipt.clone()))],
+                &unresolved,
+                &account,
+                Some(scope),
+            ),
+            Err("COHORT_TERMINAL_RELEASE_SCOPE_UNPROVEN".into())
+        );
+        // Even with a correctly scoped pending release, a second unrelated
+        // terminal obligation cannot be hidden in the cohort proof.
+        let mut other_terminal = terminal.clone();
+        other_terminal.intent_id = "intent_999".into();
+        let mut other_receipt = receipt.clone();
+        other_receipt.intent_id = other_terminal.intent_id.clone();
+        assert_eq!(
+            verify_local_intent_coverage_scoped(
+                &[
+                    (terminal.clone(), Some(receipt.clone())),
+                    (other_terminal.clone(), Some(other_receipt)),
+                ],
+                &[terminal.intent_id.clone(), other_terminal.intent_id.clone()],
+                &account,
+                Some(scope),
             ),
             Err("COHORT_TERMINAL_RISK_RELEASE_PENDING".into())
         );
