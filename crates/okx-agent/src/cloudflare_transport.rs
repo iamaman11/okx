@@ -1849,6 +1849,10 @@ mod raw_native_session_tests {
             .unwrap()
             .unwrap();
         drop(trade);
+        // The integration DispatchContext also holds a cloned TradeService,
+        // which in turn owns the account SQL handles. Release that last
+        // application owner before expecting the account actors to exit.
+        drop(ctx);
         accounts.shutdown().await;
         drop(accounts);
         drop(risk);
