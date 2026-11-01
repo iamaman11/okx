@@ -1063,7 +1063,10 @@ pub(crate) mod recorded_support {
                 if request.method() == "GET" && request.url().path() == "/api/v5/public/time" {
                     let mut queued = self.public_clock_reads.lock().unwrap();
                     if queued.is_empty() {
-                        self.denied_routes.lock().unwrap().push("TRANSCRIPT_CLOCK_EXHAUSTED".into());
+                        self.denied_routes
+                            .lock()
+                            .unwrap()
+                            .push("TRANSCRIPT_CLOCK_EXHAUSTED".into());
                         return Err(OkxError::Response("TRANSCRIPT_CLOCK_EXHAUSTED".into()));
                     }
                     let body = queued.remove(0);
@@ -1353,7 +1356,10 @@ pub(crate) mod recorded_support {
                         serde_json::json!([])
                     }
                     _ => {
-                        self.denied_routes.lock().unwrap().push(format!("TRANSCRIPT_UNEXPECTED_REQUEST:{key}:{path}"));
+                        self.denied_routes
+                            .lock()
+                            .unwrap()
+                            .push(format!("TRANSCRIPT_UNEXPECTED_REQUEST:{key}:{path}"));
                         return Err(OkxError::Response("TRANSCRIPT_UNEXPECTED_REQUEST".into()));
                     }
                 };
