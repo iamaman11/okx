@@ -502,24 +502,26 @@ mod raw_native_session_tests {
         let denied = budget.admit(&plan).unwrap_err();
         assert!(!denied.request_sent);
         assert_eq!(denied.source, RateThrottleSource::LocalBudget);
-        assert!(recorded_preview_local_defer(
-            "OKX rate/backpressure defer: RateThrottleEvidence { ... }",
-            &budget,
-            Duration::from_secs(3),
-        )
-        .is_some());
-        assert!(recorded_preview_local_defer(
-            "VENUE_ACK_MISSING",
-            &budget,
-            Duration::from_secs(3),
-        )
-        .is_none());
-        assert!(recorded_preview_local_defer(
-            "OKX rate/backpressure defer: RateThrottleEvidence { ... }",
-            &budget,
-            Duration::ZERO,
-        )
-        .is_none());
+        assert!(
+            recorded_preview_local_defer(
+                "OKX rate/backpressure defer: RateThrottleEvidence { ... }",
+                &budget,
+                Duration::from_secs(3),
+            )
+            .is_some()
+        );
+        assert!(
+            recorded_preview_local_defer("VENUE_ACK_MISSING", &budget, Duration::from_secs(3),)
+                .is_none()
+        );
+        assert!(
+            recorded_preview_local_defer(
+                "OKX rate/backpressure defer: RateThrottleEvidence { ... }",
+                &budget,
+                Duration::ZERO,
+            )
+            .is_none()
+        );
     }
 
     fn denied(id: &str) -> RiskResult {
@@ -1153,19 +1155,18 @@ mod raw_native_session_tests {
             // evidence to retry it, with a fixed overall test deadline.
             let until = std::time::Instant::now() + Duration::from_secs(15);
             let output = loop {
-                let answer = tokio::time::timeout_at(
-                    until.into(),
-                    trade.trade(alias, &preview, None),
-                )
-                .await
-                .expect("T09 preview bounded rate-admission deadline");
+                let answer =
+                    tokio::time::timeout_at(until.into(), trade.trade(alias, &preview, None))
+                        .await
+                        .expect("T09 preview bounded rate-admission deadline");
                 match answer {
                     Ok(value) => break value,
                     Err(reason) => {
                         let remaining = until.saturating_duration_since(std::time::Instant::now());
-                        let delay = recorded_preview_local_defer(
-                            &reason, &rate_budget, remaining,
-                        ).unwrap_or_else(|| panic!("T09 preview non-retryable failure: {reason}"));
+                        let delay = recorded_preview_local_defer(&reason, &rate_budget, remaining)
+                            .unwrap_or_else(|| {
+                                panic!("T09 preview non-retryable failure: {reason}")
+                            });
                         tokio::time::timeout_at(until.into(), tokio::time::sleep(delay))
                             .await
                             .expect("T09 local no-send rate deferral exceeded preview budget");
