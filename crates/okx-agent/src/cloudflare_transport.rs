@@ -510,7 +510,7 @@ mod raw_native_session_tests {
             "twap",
             "smart_iceberg",
         ];
-        let raw_empty = serde_json::to_vec(&json!({"code":"0","msg":"","data":[]}))
+        let raw_empty = serde_json::to_vec(&serde_json::json!({"code":"0","msg":"","data":[]}))
             .expect("T09.2 recorded raw empty derivative source");
         let mut pages = Vec::with_capacity(5 * 2 * kinds.len());
         for _ in 0..5 {
