@@ -17,6 +17,16 @@ import { Miniflare } from "miniflare";
 const root = await mkdtemp(join(tmpdir(), "okx-workerd-risk-"));
 const outfile = join(root, "runtime-test.mjs");
 const handoffPath = join(root, "native-handoff.json");
+// Only a uniquely emitted production Rust receipt can certify terminal
+// settlement across the child-process boundary. Never fabricate a receipt
+// from the scripted test input or a missing marker.
+function receipt(stdout, prefix) {
+  const marker = prefix + ":";
+  const matches = stdout.split(/\r?\n/)
+    .filter(line => line.startsWith(marker));
+  assert.equal(matches.length, 1, prefix + " must have one authentic Native readback");
+  return JSON.parse(matches[0].slice(marker.length));
+}
 const FRAME_SCHEMA = "okx.direct-transport.frame/v2";
 const configuration = {
   schema: "okx.governance/v3",
