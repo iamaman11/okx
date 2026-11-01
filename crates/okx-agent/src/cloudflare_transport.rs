@@ -1985,8 +1985,27 @@ mod raw_native_session_tests {
                 );
             }
             let close = close_result.expect("T09.1 Close must use production TradeService");
+            let attempted_posts = feed.outbound_posts.lock().unwrap().len();
+            if attempted_posts != 2 {
+                // The production command can return Ok(unknown/partial)
+                // without posting. Preserve the exact public response before
+                // asserting on the transport-side count: this is NOT an ACK.
+                println!(
+                    "T09_1_NATIVE_CLOSE_FAILURE_V1:{}",
+                    json!({
+                        "reason_code":format!(
+                            "CLOSE_WITHOUT_POST:status={}:reason={}:intent_state={}:send_state={}",
+                            close["status"],close["reason_code"],
+                            close["data"]["intent"]["state"],close["data"]["send_state"]
+                        ),
+                        "outbound_posts":attempted_posts,
+                        "source_reason_code":null,
+                        "close_result":close
+                    })
+                );
+            }
             assert_eq!(
-                feed.outbound_posts.lock().unwrap().len(),
+                attempted_posts,
                 2,
                 "open + close must issue exactly one venue create each"
             );
