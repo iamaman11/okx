@@ -2185,27 +2185,6 @@ mod raw_native_session_tests {
             // entry-only repetitions are retired at the acknowledged venue
             // transition so the first terminal source read sees BOTH trades.
             // Independent signed POST ACKs bind the dynamic client IDs.
-            for partition in ["SPOT", "MARGIN", "SWAP", "FUTURES", "OPTION"] {
-                let page = if partition == "SWAP" {
-                    raw_close_fill.clone()
-                } else {
-                    envelope(json!([]))
-                };
-                let pages = (0..12)
-                    .map(|_| RecordedGet {
-                        access_key: "fixture-executor-a".into(),
-                        path: "/api/v5/trade/fills-history".into(),
-                        required_query: vec![("instType".into(), partition.into())],
-                        raw_response: page.clone(),
-                    })
-                    .collect::<Vec<_>>();
-                // The route is shared by the five partitions, therefore
-                // install each partition together below, never separately.
-                if partition == "SPOT" {
-                    // No source mutations here; assembled below.
-                    let _ = pages;
-                }
-            }
             let mut final_fills = Vec::new();
             for _ in 0..12 {
                 for partition in ["SPOT", "MARGIN", "SWAP", "FUTURES", "OPTION"] {
