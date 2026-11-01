@@ -320,6 +320,7 @@ mod raw_native_session_tests {
         RiskDecisionStatus, RiskResult, UsdConversion,
     };
     use okx_runtime::PublicWsCoordinator;
+    use rust_decimal::Decimal;
     use std::{
         pin::Pin,
         task::{Context, Poll},
@@ -1813,12 +1814,12 @@ mod raw_native_session_tests {
             }
         };
         assert_eq!(captured.0.fill_count, 1);
-        assert_eq!(captured.0.filled_quantity.to_string(), "0.1");
-        assert_eq!(captured.0.gross_notional_usdt.to_string(), "1");
+        assert_eq!(captured.0.filled_quantity, Decimal::new(1, 1));
+        assert_eq!(captured.0.gross_notional_usdt, Decimal::ONE);
         assert_eq!(captured.1.linked_bill_count, 1);
         assert_eq!(
-            captured.1.conservative_verified_fee_usdt.to_string(),
-            "0.0005"
+            captured.1.conservative_verified_fee_usdt,
+            Decimal::new(5, 4)
         );
         println!(
             "T09_1_NATIVE_FILL_BILL_EVIDENCE_V1:{}",
