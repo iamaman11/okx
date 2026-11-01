@@ -449,6 +449,7 @@ try {
     const afterNativeSocket = await session(second);
     const afterNative = await summary(afterNativeSocket, "risk_after_native_real_wss_0001");
     if (process.env.OKX_T09_1_STATUS_PROBE === "1") {
+      const secondAdmission = process.env.OKX_T09_2_ADMISSION_PROBE === "1";
       // T09.1 has already closed the exact public order and released its
       // reservation. Requiring reserved_loss > 2 here would incorrectly
       // demand that a settled RELEASE remain HELD. Compare two independent
@@ -466,13 +467,34 @@ try {
         "Native SQL restart must not resurrect a released central reservation");
       assert.equal(nativeRestart.remaining_lot_count, 0,
         "Native SQL restart must retain zero open lots");
-      assert.deepEqual(afterNative.budget, nativeTerminal.worker_budget,
-        "reconnected persisted RiskBook must match terminal Native WSS budget");
-      console.log("T09_1_WORKER_POST_FILL_EVIDENCE_V1:" + JSON.stringify({
-        connection_generation:afterNativeSocket.hello.connection_generation,
-        budget:afterNative.budget,
-        risk_book_sequence:afterNative.risk_book_sequence,
-      }));
+      if (secondAdmission) {
+        // This separate mode makes a new production Execute after terminal
+        // release. Match the new post-ACK Worker budget, never the earlier
+        // T09.1 terminal budget. The fresh read comes from persisted DO WSS.
+        const admitted = receipt(stdout, "T09_2_NATIVE_ADMISSION_V1");
+        assert.equal(admitted.state, "ACKNOWLEDGED");
+        assert.equal(admitted.post_ack_financial_complete, false);
+        assert.equal(admitted.create_posts_total, 4);
+        assert.equal(admitted.quote_entry_usd, "3.0015");
+        assert.equal(admitted.preview_reserved_entry_usd, "4");
+        assert.equal(afterNative.budget?.entry_budget?.reserved_usd, "7.0015");
+        assert.equal(afterNative.budget?.entry_budget?.consumed_usd, "1.0005");
+        assert.deepEqual(afterNative.budget, admitted.after_worker_budget,
+          "T09.2 persisted RiskBook readback must equal Native production summary");
+        console.log("T09_2_WORKER_AFTER_RECONNECT_V1:" + JSON.stringify({
+          connection_generation:afterNativeSocket.hello.connection_generation,
+          budget:afterNative.budget,
+          risk_book_sequence:afterNative.risk_book_sequence,
+        }));
+      } else {
+        assert.deepEqual(afterNative.budget, nativeTerminal.worker_budget,
+          "reconnected persisted RiskBook must match terminal Native WSS budget");
+        console.log("T09_1_WORKER_POST_FILL_EVIDENCE_V1:" + JSON.stringify({
+          connection_generation:afterNativeSocket.hello.connection_generation,
+          budget:afterNative.budget,
+          risk_book_sequence:afterNative.risk_book_sequence,
+        }));
+      }
     } else {
       assert.ok(Number(afterNative.budget?.reserved_loss_usd) > 2,
         "T09.5 public Execute must reserve its own risk in central Worker");

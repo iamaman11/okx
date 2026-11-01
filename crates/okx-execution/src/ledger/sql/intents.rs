@@ -1814,6 +1814,27 @@ impl AccountStore {
         tx.commit()?;
         Ok(())
     }
+    /// Read-only proof that the existing single SQL owner durably committed
+    /// the posting fence. ACK alone is not used as a substitute for this
+    /// independent SQL timestamp and posted central-reservation state.
+    pub fn post_fence_evidence(&self, id: &str) -> StoreResult<(i64, String)> {
+        let recorded: Option<(Option<i64>, Option<String>)> = self
+            .connection
+            .query_row(
+                "SELECT i.begin_post_at,r.state
+                 FROM intents i JOIN risk_receipts r
+                   ON r.intent_id=i.intent_id AND r.plan_hash=i.plan_hash
+                  AND r.account_key=?2 AND r.installation_id=?3
+                 WHERE i.intent_id=?1 AND i.risk_increase=1",
+                params![id, self.meta.account_key, self.meta.installation_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        match recorded {
+            Some((Some(at), Some(state))) if at > 0 && state == "POSTED" => Ok((at, state)),
+            _ => Err(StoreError::Invalid("POST_FENCE_NOT_DURABLY_COMMITTED")),
+        }
+    }
     // Returns true exactly once. The caller must never POST when this returns false/error.
     pub fn begin_post(&mut self, id: &str, policy_revision: i64, now: i64) -> StoreResult<bool> {
         let tx = self
