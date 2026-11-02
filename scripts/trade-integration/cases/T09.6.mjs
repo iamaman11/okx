@@ -43,8 +43,8 @@ export async function run({root,signal}) {
   for (const bill of observedBills) {
     assert.equal(bill.amount_usdt,billDebits.get(bill.economic_event_key),
       "no fabricated, missing or duplicated fee bill amount");
-    assert.ok(Number.isSafeInteger(bill.legs) && bill.legs>0,
-      "fee must be proven by immutable economic source");
+    assert.equal(bill.legs,1,
+      "each bill must contribute exactly one immutable economic fee debit");
     assert.ok(billDebits.delete(bill.economic_event_key),
       "unexpected or repeated economic fee source");
   }
