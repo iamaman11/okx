@@ -10,7 +10,32 @@ export async function run({ root, signal }) {
   });
   const admission = evidence.nativeSecondAdmission;
   const worker = evidence.workerSecondAdmission;
+  const cross = evidence.nativeCrossUidDenial;
   assert.ok(admission && worker, "T09.2 requires both authentic Native and Worker receipts");
+  // Slice B prerequisite: exact public Status and Cancel requests against
+  // the wrong account's independent SQLite owner must fail before any venue
+  // mutation. This does NOT accept T09-MA's two-strategy concurrency test.
+  assert.ok(cross, "real cross-UID SQL/TradeService/RiskBook receipt required");
+  assert.match(cross.owner_uid, /^[a-f0-9]{64}$/);
+  assert.match(cross.foreign_uid, /^[a-f0-9]{64}$/);
+  assert.notEqual(cross.owner_uid, cross.foreign_uid);
+  assert.equal(cross.owner_uid, admission.account_uid);
+  assert.equal(cross.owner_intent_id, admission.intent_id);
+  assert.equal(cross.foreign_sql_intent_absent, true);
+  assert.equal(cross.foreign_sql_idempotency_absent, true);
+  assert.equal(cross.status_reason, "INTENT_NOT_FOUND");
+  assert.equal(cross.cancel_reason, "INTENT_NOT_FOUND");
+  assert.equal(cross.outbound_posts_before, 4);
+  assert.equal(cross.outbound_posts_after, 4,
+    "wrong-account cancel cannot reach authenticated venue POST");
+  assert.equal(cross.worker_budget.entry_budget.reserved_usd,
+    admission.after_worker_budget.entry_budget.reserved_usd,
+    "wrong-account request cannot change central reserved money");
+  assert.equal(cross.worker_budget.entry_budget.consumed_usd,
+    admission.after_worker_budget.entry_budget.consumed_usd,
+    "wrong-account request cannot change campaign spent");
+  assert.equal(cross.worker_budget.reserved_loss_usd,
+    admission.after_worker_budget.reserved_loss_usd);
   assert.match(admission.intent_id, /^.+$/);
   assert.match(admission.account_uid, /^[a-f0-9]{64}$/);
   assert.match(admission.client_order_id, /^.+$/);
@@ -61,6 +86,12 @@ export async function run({ root, signal }) {
         actual: String(worker.budget.entry_budget.reserved_usd) },
       { id: "financial_unsettled_until_fills", expected: "false",
         actual: String(admission.post_ack_financial_complete) },
+      { id: "cross_uid_status_denied", expected: "INTENT_NOT_FOUND",
+        actual: cross.status_reason },
+      { id: "cross_uid_cancel_denied", expected: "INTENT_NOT_FOUND",
+        actual: cross.cancel_reason },
+      { id: "cross_uid_no_extra_post", expected: "4",
+        actual: String(cross.outbound_posts_after) },
     ],
     events: [
       { stage: "public_trade_entered", owner: "TradeService",
@@ -74,13 +105,19 @@ export async function run({ root, signal }) {
       { stage: "transport_send_observed", owner: "OKXRecordedHttpBoundary",
         source_digest: hash([admission.sql_exchange_order_id,
           admission.create_posts_total, admission.client_order_id]) },
+      { stage: "cross_uid_mutation_denied", owner: "TradeService+AccountStore+RiskBook",
+        source_digest: hash([cross.owner_uid,cross.foreign_uid,cross.status_reason,
+          cross.cancel_reason,cross.foreign_sql_intent_absent,
+          cross.worker_budget.entry_budget]) },
     ],
     readbacks: {
       sql: [{ revision: admission.sql_revision,
         digest: hash([admission.sql_begin_post_at_ms, admission.sql_post_reservation_state,
           admission.sql_exchange_order_id, admission.plan_hash]) }],
-      risk_book: [{ revision: worker.risk_book_sequence,
-        digest: hash(worker.budget) }],
+      risk_book: [
+        { revision: worker.risk_book_sequence, digest: hash(worker.budget) },
+        { revision: cross.risk_book_sequence, digest: hash(cross.worker_budget) },
+      ],
     },
     outbound_sends: [{
       account: admission.account_uid,
