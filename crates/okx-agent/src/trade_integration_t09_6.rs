@@ -199,8 +199,12 @@ fn t09_6_cleanup_recorded_transport(
     feed: &crate::accounts::recorded_support::RecordedAccountHttp,
     cancel_id: &str,
     other_stop_live: bool,
+    second_client_id: &str,
+    add_client_id: &str,
 ) {
     use crate::accounts::recorded_support::{RecordedGet,RecordedPost};
+    assert!(second_client_id.len() >= 31 && add_client_id.len() >= 31,
+        "T09.6 must use durable native client order identities");
     let wrap=|v|serde_json::to_vec(&serde_json::json!({
         "code":"0","msg":"","data":v
     })).expect("T09.6 signed algo fixture bytes");
@@ -216,18 +220,25 @@ fn t09_6_cleanup_recorded_transport(
             ] {
                 let mut present=Vec::new();
                 if inst_type=="SWAP" && kind=="conditional" {
-                    if phase==0 {
-                        present.push(serde_json::json!({
-                            "instType":"SWAP","instId":"BTC-USDT-SWAP","ordType":"conditional",
-                            "algoId":cancel_id,"state":"live"
-                        }));
-                    }
-                    if other_stop_live {
-                        present.push(serde_json::json!({
-                            "instType":"SWAP","instId":"BTC-USDT-SWAP","ordType":"conditional",
-                            "algoId":if cancel_id=="900000002" {"900000003"} else {"900000002"},
-                            "state":"live"
-                        }));
+                    // An algoId without the attached client-order identity,
+                    // signed mechanics and exact quantity is UNATTRIBUTED,
+                    // never evidence of an owned managed stop or safe RELEASE.
+                    for (algo, client_id, sz) in [
+                        ("900000002",second_client_id,"0.3"),
+                        ("900000003",add_client_id,"0.2"),
+                    ] {
+                        if (phase == 0 && algo == cancel_id)
+                            || (other_stop_live && algo != cancel_id)
+                        {
+                            present.push(serde_json::json!({
+                                "instType":"SWAP","instId":"BTC-USDT-SWAP",
+                                "ordType":"conditional","algoId":algo,
+                                "algoClOrdId":format!("s{}",&client_id[..31]),
+                                "state":"live","side":"sell","posSide":"long",
+                                "sz":sz,"tdMode":"cross","slTriggerPx":"900",
+                                "slTriggerPxType":"mark","slOrdPx":"-1",
+                            }));
+                        }
                     }
                 }
                 pages.push(RecordedGet {
@@ -376,12 +387,25 @@ async fn t09_6_source_backed_close_release(
             "financial_complete":status["data"]["financial_complete"],
         }));
     }
+    let owner=accounts.resolve("fixture-a").await.expect("T09.6 Native SQL owner");
+    let (second_client_id,add_client_id)=owner.execution.store.call(
+        std::time::Instant::now()+Duration::from_secs(3),
+        |s| {
+            let second=s.intent(second_entry_id)?
+                .ok_or(okx_execution::StoreError::Invalid("T09_6_SECOND_INTENT_MISSING"))?;
+            let add=s.intent(add_entry_id)?
+                .ok_or(okx_execution::StoreError::Invalid("T09_6_ADD_INTENT_MISSING"))?;
+            Ok((second.client_order_id,add.client_order_id))
+        }
+    ).await.expect("T09.6 stop attribution from persisted account owner");
     let mut entry_results=Vec::new();
     for (intent,cancel_algo,other_stop_live) in [
         (second_entry_id,"900000002",true),
         (add_entry_id,"900000003",false),
     ] {
-        t09_6_cleanup_recorded_transport(feed,cancel_algo,other_stop_live);
+        t09_6_cleanup_recorded_transport(
+            feed,cancel_algo,other_stop_live,&second_client_id,&add_client_id
+        );
         let status=t09_6_status_after_local_read_defer(
             trade,rate_budget,feed,intent,1
         ).await;
