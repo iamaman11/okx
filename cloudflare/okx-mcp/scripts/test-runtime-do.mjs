@@ -561,6 +561,47 @@ try {
       }));
     }
     afterNativeSocket.ws.close();
+    if (process.env.OKX_T09_6_CLOSE_PROBE === "1") {
+      // Actual persisted DO is destroyed and reconstructed AFTER the Native
+      // close/release and Native SQL-owner reopen. No test-owned budget is
+      // installed during recovery; the owner must read its same SQLite.
+      const firstGeneration=afterNativeSocket.hello.connection_generation;
+      const terminalBudget=afterNative.budget;
+      const terminalSequence=afterNative.risk_book_sequence;
+      await second.dispose();
+      second=null;
+      second=new Miniflare(opts);
+      const initialization=await request(second,"/installation/initialize","POST",installation);
+      assert.equal(initialization.status,200,
+        "T09.7 persisted DO installation is idempotent after terminal release");
+      const persistedSocket=await session(second);
+      assert.ok(persistedSocket.hello.connection_generation>firstGeneration,
+        "T09.7 DO connection generation must advance after real Worker restart");
+      const persisted=await summary(persistedSocket,"risk_t09_7_after_terminal_restart");
+      assert.deepEqual(persisted.budget,terminalBudget,
+        "T09.7 Worker must reload exact source-backed settled budget");
+      assert.ok(persisted.risk_book_sequence>=terminalSequence,
+        "T09.7 must not roll back central RiskBook sequence");
+      assert.equal(persisted.budget.entry_budget.consumed_usd,"6.003");
+      assert.equal(persisted.budget.entry_budget.reserved_usd,"0");
+      assert.equal(persisted.budget.reserved_loss_usd,"0");
+      const sqlReopen=receipt(stdout,"T09_1_NATIVE_SQL_RESTART_V1");
+      assert.equal(sqlReopen.remaining_lot_quantity,"0");
+      assert.equal(sqlReopen.managed_add.active_central_receipt,false);
+      assert.equal(sqlReopen.second_active_central_receipt,false);
+      console.log("T09_7_WORKER_TERMINAL_RESTART_V1:"+JSON.stringify({
+        worker_budget:persisted.budget,
+        worker_risk_book_sequence:persisted.risk_book_sequence,
+        previous_risk_book_sequence:terminalSequence,
+        prior_connection_generation:firstGeneration,
+        connection_generation:persistedSocket.hello.connection_generation,
+        native_sql_reopened:true,
+        native_remaining_lot_quantity:sqlReopen.remaining_lot_quantity,
+        native_second_risk_held:sqlReopen.second_active_central_receipt,
+        native_add_risk_held:sqlReopen.managed_add.active_central_receipt,
+      }));
+      persistedSocket.ws.close();
+    }
   }
   console.log(JSON.stringify({
     suite:"runtime-session-sqlite-do",
