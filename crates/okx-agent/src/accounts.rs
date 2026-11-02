@@ -1464,6 +1464,15 @@ pub(crate) mod recorded_support {
         ) -> okx_runtime::WsCall<'_> {
             Box::pin(async move {
                 if let tokio_tungstenite::tungstenite::Message::Text(data) = frame {
+                    // OKX application-level idle heartbeat is real production
+                    // behavior (20s ping, 10s pong deadline). Script only
+                    // the raw venue pong; never bypass the generation guard.
+                    if data.as_str() == "ping" {
+                        self.inbound.push_back(
+                            tokio_tungstenite::tungstenite::Message::Text("pong".into())
+                        );
+                        return Ok(());
+                    }
                     let outgoing: serde_json::Value =
                         serde_json::from_str(data.as_str()).unwrap_or(serde_json::Value::Null);
                     self.sent.lock().unwrap().push(outgoing.clone());
