@@ -1860,9 +1860,10 @@ impl TradeService {
                 let venue_empty_for_terminal_peers = release_scope.is_some()
                     && algos.samples.is_empty()
                     && snapshot.pending_orders.is_empty()
-                    && snapshot.positions.iter().all(|p| {
-                        dec(&p.position).is_ok_and(|quantity| quantity == Decimal::ZERO)
-                    });
+                    && snapshot
+                        .positions
+                        .iter()
+                        .all(|p| dec(&p.position).is_ok_and(|quantity| quantity == Decimal::ZERO));
                 let releasing_id = release_scope.map(|scope| scope.intent_id.to_owned());
                 let (local_intents, pending_central, verified_terminal_peers) = r
                     .execution
@@ -1880,9 +1881,8 @@ impl TradeService {
                                 {
                                     continue;
                                 }
-                                let saved = s.operation(&format!(
-                                    "entry-settlement:{}", intent.intent_id
-                                ))?;
+                                let saved =
+                                    s.operation(&format!("entry-settlement:{}", intent.intent_id))?;
                                 let Some(saved) = saved.filter(|receipt| {
                                     receipt.kind == "ENTRY_SETTLEMENT_PROVEN"
                                         && receipt.request_hash == intent.plan_hash
@@ -2373,7 +2373,12 @@ fn verify_local_intent_coverage_with_managed(
     if terminal_release.is_some() && !release_scope_matched {
         return Err("COHORT_TERMINAL_RELEASE_SCOPE_UNPROVEN".into());
     }
-    digest(&(active, unresolved, verified_live_intents, verified_terminal_peers))
+    digest(&(
+        active,
+        unresolved,
+        verified_live_intents,
+        verified_terminal_peers,
+    ))
 }
 
 /// Concurrent account reads must produce one deterministic, complete cohort
@@ -3425,8 +3430,14 @@ mod tests {
         let validated_peer = std::collections::BTreeSet::from([other.intent_id.clone()]);
         assert!(
             verify_local_intent_coverage_with_managed(
-                &both, &pending_both, &account, Some(scope), &empty, &validated_peer,
-            ).is_ok(),
+                &both,
+                &pending_both,
+                &account,
+                Some(scope),
+                &empty,
+                &validated_peer,
+            )
+            .is_ok(),
             "a separately source-verified peer may remain HELD while only the selected intent releases"
         );
         let mut wrong_peer = other_receipt.clone();
@@ -3437,14 +3448,23 @@ mod tests {
                     (terminal.clone(), Some(receipt.clone())),
                     (other.clone(), Some(wrong_peer))
                 ],
-                &pending_both, &account, Some(scope), &empty, &validated_peer,
+                &pending_both,
+                &account,
+                Some(scope),
+                &empty,
+                &validated_peer,
             ),
             Err("COHORT_OTHER_TERMINAL_RISK_RELEASE_PENDING".into()),
             "a cross-account or mismatched peer receipt cannot receive the flat peer exception"
         );
         assert_eq!(
             verify_local_intent_coverage_with_managed(
-                &both, &pending_both, &account, None, &empty, &validated_peer,
+                &both,
+                &pending_both,
+                &account,
+                None,
+                &empty,
+                &validated_peer,
             ),
             Err("COHORT_TERMINAL_RISK_RELEASE_PENDING".into()),
             "normal admission/readiness must never use terminal peer evidence"
