@@ -113,6 +113,27 @@
                 required_query:vec![],raw_response:source_position.clone(),
             }).collect()
         );
+        // Finance maintenance still observes the previously FILLED opening
+        // until its complete source frontier is committed. Serve that exact
+        // old venue order during readiness; only after the frontier is proven
+        // may the recorded transport switch to the distinct Add order ID.
+        let previous_order = wrap(serde_json::json!([{
+            "instId":"BTC-USDT-SWAP","ordId":"recorded-t09-second-001",
+            "clOrdId":"__REQUEST_CL_ORD_ID__","side":"buy",
+            "posSide":"long","tdMode":"cross","ordType":"limit",
+            "px":"1000","sz":"0.3","accFillSz":"0.3","avgPx":"1000",
+            "state":"filled","cTime":terminal_fill_at_ms.to_string(),
+            "uTime":terminal_fill_at_ms.to_string()
+        }]));
+        feed.advance_recorded_route(
+            "fixture-executor-a","/api/v5/trade/order",
+            (0..48).map(|_| RecordedGet {
+                access_key:"fixture-executor-a".into(),
+                path:"/api/v5/trade/order".into(),
+                required_query:vec![("instId".into(),"BTC-USDT-SWAP".into())],
+                raw_response:previous_order.clone(),
+            }).collect()
+        );
         let mut last_readiness=String::from("NOT_OBSERVED");
         tokio::time::timeout(Duration::from_secs(16),async {
             loop {
