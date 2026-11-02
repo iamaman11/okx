@@ -1607,6 +1607,24 @@ impl TradeService {
             .map(|v| v.0)
     }
 
+    /// Only the protection reconciliation of an existing managed position
+    /// may wait for LOCAL/NO-SEND private reads. The same complete cohort
+    /// proof and freshness rules apply; failure remains fail-closed within
+    /// the original bounded status deadline.
+    pub(super) async fn census_for_managed_protection_until(
+        &self,
+        state: &CentralGovernanceSnapshot,
+        until: Instant,
+    ) -> Result<NativeRiskCensus, String> {
+        tokio::time::timeout_at(
+            until.into(),
+            self.census_with_reads(state, None, None, Some(until), None, None),
+        )
+        .await
+        .map_err(|_| "MANAGED_CENSUS_SOURCE_DEADLINE".to_owned())?
+        .map(|v| v.0)
+    }
+
     /// Only the settlement-confirmed terminal-release path may supply this
     /// exact one-reservation exception. No alternate or cached census owner.
     pub(super) async fn census_for_terminal_release(
@@ -1702,11 +1720,24 @@ impl TradeService {
                 // authenticated account snapshot AFTER inventory so source
                 // freshness is checked at the final census proof, not before
                 // a potentially rate-admitted sequence of algo GETs.
-                let algos = r
-                    .observer
-                    .pending_derivative_risk_algos()
-                    .await
-                    .map_err(err)?;
+                let algos = if held_received.is_none() {
+                    if let Some(until) = until {
+                        r.observer
+                            .pending_derivative_risk_algos_until(until)
+                            .await
+                            .map_err(err)?
+                    } else {
+                        r.observer
+                            .pending_derivative_risk_algos()
+                            .await
+                            .map_err(err)?
+                    }
+                } else {
+                    r.observer
+                        .pending_derivative_risk_algos()
+                        .await
+                        .map_err(err)?
+                };
                 let snapshot = if let Some(witness) = selected {
                     verify_post_held_selected(
                         witness,
@@ -1727,6 +1758,11 @@ impl TradeService {
                     // Terminal release needs the same fresh private GETs as
                     // the regular census, with bounded LOCAL no-send admission.
                     r.observer.snapshot_until(deadline()).await.map_err(err)?
+                } else if let Some(until) = until {
+                    // The managed-protection census retries only authenticated
+                    // LOCAL/NO-SEND read admission, bounded by its deadline.
+                    // It still requires the complete current cohort evidence.
+                    r.observer.snapshot_until(until).await.map_err(err)?
                 } else {
                     r.observer.snapshot().await.map_err(err)?
                 };

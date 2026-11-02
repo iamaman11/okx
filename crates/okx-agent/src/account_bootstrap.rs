@@ -39,6 +39,9 @@ pub enum AccountLedgerBootstrapError {
     #[error("OKX observer API key is not strictly read-only")]
     PermissionRejected,
 
+    #[error("ACCOUNT_LEDGER_SOURCE_DEADLINE_EXCEEDED")]
+    SourceDeadline,
+
     #[error("OKX private API error: {0}")]
     Api(#[from] OkxError),
 
@@ -422,6 +425,26 @@ impl AccountBootstrapper {
         strict_read_only_permissions(&config.perm)
             .map_err(|_| AccountLedgerBootstrapError::PermissionRejected)?;
         Ok(self.trade.pending_derivative_risk_algos().await?)
+    }
+
+    /// A managed-position protection read must never treat a LOCAL/NO-SEND
+    /// private config rate defer as proof that a live stop is missing. Only
+    /// the authenticated read can proceed, within the caller's finite
+    /// deadline. No cached algo coverage or substitute risk authority.
+    pub async fn pending_derivative_risk_algos_until(
+        &self,
+        until: Instant,
+    ) -> Result<PendingDerivativeAlgoRiskInventory, AccountLedgerBootstrapError> {
+        if Instant::now() >= until {
+            return Err(AccountLedgerBootstrapError::SourceDeadline);
+        }
+        let (config, _) = self.observer_config_until(until).await?;
+        strict_read_only_permissions(&config.perm)
+            .map_err(|_| AccountLedgerBootstrapError::PermissionRejected)?;
+        tokio::time::timeout_at(until.into(), self.trade.pending_derivative_risk_algos())
+            .await
+            .map_err(|_| AccountLedgerBootstrapError::SourceDeadline)?
+            .map_err(AccountLedgerBootstrapError::from)
     }
 
     pub async fn ledger_facts(
