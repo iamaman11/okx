@@ -47,6 +47,8 @@ const terminalGolden = new Map([
   ["T09.6", new Map([
     ["remaining_exposure", "0"], ["orphan_algo_orders", "0"],
     ["outstanding_reserve_usd", "0"], ["campaign_consumed_usd", "6.003"],
+    ["entry_fees_usdt", "-0.003"], ["exit_fees_usdt", "-0.003"],
+    ["verified_fee_bill_count", "7"],
   ])],
   ["T09.7", new Map([
     ["equity_a_usd", "99.994"], ["campaign_consumed_usd", "6.003"],
