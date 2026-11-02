@@ -577,8 +577,12 @@ async fn t09_8_excess_entry_denied(
     };
     assert!(request.valid());
     let denied=trade.trade("fixture-a",&request,None).await
-        .expect_err("T09.8 over-budget real public Execute must DENY before POST");
-    assert_eq!(denied,"CAMPAIGN_ENTRY_BUDGET_EXHAUSTED",
+        .expect("T09.8 must return a structured CENTRAL rejection receipt");
+    assert_eq!(denied["data"]["state"],"REJECTED",
+        "T09.8 public Execute must refuse the venue create");
+    assert_eq!(denied["data"]["rejection_origin"],"CENTRAL");
+    assert_eq!(denied["data"]["send_state"],"NOT_STARTED");
+    assert_eq!(denied["data"]["primary_reason"],"CAMPAIGN_ENTRY_BUDGET_EXHAUSTED",
         "T09.8 must prove central budget rejection, not stale input or local rate denial");
     let after_posts=feed.outbound_posts.lock().unwrap().len();
     assert_eq!(after_posts,before_posts,
@@ -612,7 +616,9 @@ async fn t09_8_excess_entry_denied(
     assert_eq!(after.budget,before.budget,
         "T09.8 over-budget denial must not spend, hold, release or reset any money");
     serde_json::json!({
-        "denial_reason":denied,
+        "denial_reason":denied["data"]["primary_reason"],
+        "denial_origin":denied["data"]["rejection_origin"],
+        "send_state":denied["data"]["send_state"],
         "requested_entry_upper_usd":admission_upper.normalize().to_string(),
         "sql_entry_quote_usd":quote_upper.normalize().to_string(),
         "remaining_entry_budget_usd":available.normalize().to_string(),
