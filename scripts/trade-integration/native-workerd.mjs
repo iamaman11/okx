@@ -140,6 +140,10 @@ export async function actualNativeWorker(root, signal, { statusProbe = false, se
             ...(managedAdd ? { nativeManagedAdd: receipt(stdout, "T09_4_NATIVE_MANAGED_ADD_V1") } : {}),
             ...(closeMode ? { nativeCloseAck: receipt(stdout, "T09_6_NATIVE_CLOSE_ACK_V1") } : {}),
             ...(closeMode ? { nativeCloseTerminal: receipt(stdout, "T09_6_NATIVE_TERMINAL_V1"), nativeCloseFinancialSources:receipt(stdout,"T09_6_NATIVE_FINANCIAL_SOURCES_V1"), workerCloseReconciled:receipt(stdout,"T09_6_WORKER_CLOSE_RECONCILED_V1") } : {}),
+            ...(closeMode ? {
+              nativeProcessRestart:receipt(stdout,"T09_7_NATIVE_PROCESS_RESTART_V1"),
+              workerTerminalRestart:receipt(stdout,"T09_7_WORKER_TERMINAL_RESTART_V1"),
+            } : {}),
           } : { workerPostFill: receipt(stdout, "T09_1_WORKER_POST_FILL_EVIDENCE_V1") }),
         }
         : { workerReplay: receipt(stdout, "T09_5_WORKER_IDEMPOTENCY_EVIDENCE_V1") }),
