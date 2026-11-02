@@ -586,16 +586,25 @@ async fn t09_8_excess_entry_denied(
     assert_eq!(feed.unconsumed_posts(),0,
         "T09.8 cannot append a fake successful exchange outcome");
     let owner=accounts.resolve("fixture-a").await.expect("T09.8 account A");
-    let (state,held)=owner.execution.store.call(
+    let (state,held,quote_upper,admission_upper)=owner.execution.store.call(
         std::time::Instant::now()+Duration::from_secs(3),
         |s| {
             let denied=s.by_idempotency("t09_excess_campaign_budget_denied_0001")?
                 .ok_or(okx_execution::StoreError::Invalid("T09_8_INTENT_MISSING"))?;
             let held=s.active_central_receipt(&denied.intent_id)?.is_some();
-            Ok((denied.state.as_str().to_owned(),held))
+            let quote=s.entry_quote(&denied.intent_id)?
+                .ok_or(okx_execution::StoreError::Invalid("T09_8_NATIVE_QUOTE_MISSING"))?;
+            let admission=s.entry_admission(&denied.intent_id)?
+                .ok_or(okx_execution::StoreError::Invalid("T09_8_NATIVE_COST_PROOF_MISSING"))?;
+            Ok((denied.state.as_str().to_owned(),held,quote.total_usd,admission.entry_upper_usd))
         },
     ).await.expect("T09.8 original native owner SQL after refusal");
     assert_eq!(state,"REJECTED");
+    assert_eq!(quote_upper.normalize().to_string(),"4.002",
+        "T09.8 independently persisted source-bound fee-inclusive SQL quote");
+    assert_eq!(admission_upper.normalize().to_string(),"4.002",
+        "T09.8 Worker RESERVE upper must match immutable native proof");
+    assert!(admission_upper>available,"T09.8 exact financial over-budget witness");
     assert!(!held,"T09.8 cannot leave an active Worker reserve");
     let mut after_command=summary("risk_t09_8_after_excess");
     after_command.installation_id="installation_test".into();
@@ -604,7 +613,8 @@ async fn t09_8_excess_entry_denied(
         "T09.8 over-budget denial must not spend, hold, release or reset any money");
     serde_json::json!({
         "denial_reason":denied,
-        "requested_entry_upper_usd":"4.002",
+        "requested_entry_upper_usd":admission_upper.normalize().to_string(),
+        "sql_entry_quote_usd":quote_upper.normalize().to_string(),
         "remaining_entry_budget_usd":available.normalize().to_string(),
         "campaign_consumed_usd":entry.consumed_usd,
         "sql_intent_state":state,"sql_risk_held":held,
