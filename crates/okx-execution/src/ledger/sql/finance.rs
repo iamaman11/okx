@@ -769,6 +769,46 @@ impl AccountStore {
         Ok(())
     }
 
+    /// Read-only breakdown of the campaign gate in debug test builds. This
+    /// grants no readiness, advances no cursor and discloses no account keys.
+    #[cfg(debug_assertions)]
+    pub fn campaign_readiness_diagnostic(
+        &self,
+        campaign_id: &str,
+        from_ms: i64,
+        through_ms: i64,
+    ) -> StoreResult<String> {
+        let saved: Option<(i64, i64, i64, String)> = self
+            .connection
+            .query_row(
+                "SELECT from_ms,covered_through_ms,source_revision,source_generations
+                 FROM campaign_entry_readiness WHERE campaign_id=?1",
+                [campaign_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .optional()?;
+        let Some((origin, covered, revision, generations)) = saved else {
+            return Ok("readiness=NOT_RECONCILED".into());
+        };
+        let epoch = self.campaign_source_epoch()?;
+        let frontiers = self.captured_complete_frontiers(from_ms, covered);
+        let source = match frontiers {
+            Ok(frontiers) => format!(
+                "frontiers=COMPLETE,generations_match={}",
+                generations == Self::campaign_source_generations(&frontiers)
+            ),
+            Err(reason) => format!("frontiers={reason}"),
+        };
+        Ok(format!(
+            "origin_match={},age_ms={},covered_ahead={},epoch_match={},{}",
+            origin == from_ms,
+            through_ms.saturating_sub(covered),
+            covered > through_ms,
+            revision == epoch,
+            source
+        ))
+    }
+
     /// Existing maintenance owner only; the fast path can advance source
     /// coverage when no economic/native fact or source generation changed.
     /// A revision change must revalidate the economic source before attesting.
