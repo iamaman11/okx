@@ -468,6 +468,7 @@ mod raw_native_session_tests {
         }
     }
     include!("trade_integration_t09_3.rs");
+    include!("trade_integration_t09_4.rs");
 
     /// Retry permission is test-only and limited to an explicitly read-only
     /// Preview that failed at the *local* request-admission boundary. The
@@ -788,7 +789,8 @@ mod raw_native_session_tests {
             "integration socket must be a local ephemeral workerd endpoint"
         );
         let token = handoff["token"].as_str().unwrap().to_owned();
-        let reservation_key = handoff["reservation_key"].as_str().unwrap().to_owned();
+        let reservation_key = handoff["reservation_key"].as_str().unwrap_or("").to_owned();
+        let add_mode = std::env::var("OKX_T09_4_MANAGED_ADD_PROBE").as_deref() == Ok("1");
 
         // The same real public WS coordinator consumes recorded raw market
         // frames. These are immutable venue observations, not a fabricated
@@ -1158,9 +1160,9 @@ mod raw_native_session_tests {
         assert_eq!(result.status, RiskDecisionStatus::Observed);
         let budget = result.budget.as_ref().unwrap();
         assert_eq!(budget.campaign_limit_usd, "10");
-        assert_eq!(budget.reserved_loss_usd, "1");
+        assert_eq!(budget.reserved_loss_usd, if add_mode { "0" } else { "1" });
         let entry = budget.entry_budget.as_ref().unwrap();
-        assert_eq!(entry.reserved_usd, "2");
+        assert_eq!(entry.reserved_usd, if add_mode { "0" } else { "2" });
         assert_eq!(entry.consumed_usd, "0");
         // The Worker publishes its real PolicySnapshot over the same WSS.
         // Its revision must be durably applied by the owning SQL worker
@@ -1278,7 +1280,10 @@ mod raw_native_session_tests {
         let mut before = summary("risk_public_trade_did_not_post_001");
         before.installation_id = "installation_test".into();
         let untouched = risk.request(before).await.unwrap();
-        assert_eq!(untouched.budget.as_ref().unwrap().reserved_loss_usd, "1");
+        assert_eq!(
+            untouched.budget.as_ref().unwrap().reserved_loss_usd,
+            if add_mode { "0" } else { "1" }
+        );
         assert_eq!(
             untouched
                 .budget
@@ -1288,146 +1293,155 @@ mod raw_native_session_tests {
                 .as_ref()
                 .unwrap()
                 .reserved_usd,
-            "2"
+            if add_mode { "0" } else { "2" }
         );
-        let inspect = RiskCommand {
-            schema: RISK_COMMAND_SCHEMA_V1.into(),
-            command_id: "risk_native_real_workerd_inspect_001".into(),
-            installation_id: "installation_test".into(),
-            action: RiskCommandAction::Inspect {
-                reservation_key: reservation_key.clone(),
-                plan_sha256: "b".repeat(64),
-            },
-        };
-        let inspected = risk.request(inspect).await.unwrap();
-        assert_eq!(inspected.status, RiskDecisionStatus::Observed);
-        assert_eq!(
-            inspected.reservation_key.as_deref(),
-            Some(reservation_key.as_str())
-        );
-        assert!(inspected.reservation_state.is_some());
+        if !add_mode {
+            let inspect = RiskCommand {
+                schema: RISK_COMMAND_SCHEMA_V1.into(),
+                command_id: "risk_native_real_workerd_inspect_001".into(),
+                installation_id: "installation_test".into(),
+                action: RiskCommandAction::Inspect {
+                    reservation_key: reservation_key.clone(),
+                    plan_sha256: "b".repeat(64),
+                },
+            };
+            let inspected = risk.request(inspect).await.unwrap();
+            assert_eq!(inspected.status, RiskDecisionStatus::Observed);
+            assert_eq!(
+                inspected.reservation_key.as_deref(),
+                Some(reservation_key.as_str())
+            );
+            assert!(inspected.reservation_state.is_some());
+        }
         // The second intent is sent by actual Rust Native through the same
         // authenticated WSS path. Evidence values are explicitly scripted
         // boundary inputs: no venue claims and no exchange POST in this test.
-        let uid = okx_api::account_uid_fingerprint("account-001");
-        let account_key = format!("okx:real:{uid}");
-        let account_key_b = format!(
-            "okx:real:{}",
-            okx_api::account_uid_fingerprint("account-002")
-        );
-        let mut account_keys = vec![account_key.clone(), account_key_b];
-        account_keys.sort();
-        assert_ne!(account_keys[0], account_keys[1]);
-        let timestamp = || {
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_millis() as u64
-        };
-        let captured_at = timestamp() - 300;
-        let census = NativeRiskCensus {
-            account_keys: account_keys.clone(),
-            occupied: account_keys
-                .iter()
-                .map(|key| RiskAccountOccupancy {
-                    account_key: key.clone(),
-                    occupied_usdt: "0".into(),
-                    cumulative_loss_usd: "0".into(),
-                })
-                .collect(),
-            generated_at_ms: captured_at,
-            source_read_floor_ms: captured_at,
-            source_digest: "c".repeat(64),
-            content_digest: "a".repeat(64),
-            complete: true,
-            native_account_evidence_complete: true,
-            native_order_evidence_complete: true,
-            native_ledger_evidence_complete: true,
-        };
-        let reserve = RiskCommand {
-            schema: RISK_COMMAND_SCHEMA_V1.into(),
-            command_id: "risk_native_reserve_workerd_001".into(),
-            installation_id: "installation_test".into(),
-            action: RiskCommandAction::Reserve {
-                venue: "okx".into(),
-                account_uid: uid,
-                run_id: "run_native_workerd_001".into(),
-                intent_id: "intent_native_workerd_001".into(),
-                strategy_id: "manual".into(),
-                instrument_id: "BTC-USDT-SWAP".into(),
-                plan_sha256: "d".repeat(64),
-                requested_loss_usdt: "1".into(),
-                requested_loss_usd: "1".into(),
-                entry_upper_usd: Some("2".into()),
-                entry_proof_digest: Some("e".repeat(64)),
-                usd_conversion: UsdConversion {
-                    usd_per_usdt: "1".into(),
-                    source_digest: "e".repeat(64),
-                    observed_at_ms: captured_at,
-                },
-                policy_revision: 2,
-                census: census.clone(),
-            },
-        };
-        let granted = risk
-            .reserve_then_fence(reserve, |held| {
-                let key = held.reservation_key.clone().unwrap();
-                let sequence = held.risk_book_sequence.unwrap();
-                let mut fresh = census;
-                fresh.generated_at_ms = timestamp();
-                fresh.source_read_floor_ms = fresh.generated_at_ms;
-                fresh.source_digest = "f".repeat(64);
-                async move {
-                    Ok(RiskCommand {
-                        schema: RISK_COMMAND_SCHEMA_V1.into(),
-                        command_id: "risk_native_post_workerd_001".into(),
-                        installation_id: "installation_test".into(),
-                        action: RiskCommandAction::BeginPost {
-                            reservation_key: key.clone(),
-                            plan_sha256: "d".repeat(64),
-                            policy_revision: 2,
-                            expected_risk_book_sequence: sequence,
-                            source_proof_sha256: "f".repeat(64),
-                            census: fresh,
-                            causal_proof: CausalPostProof {
-                                reserve_anchor: key,
-                                native_incarnation: "a".repeat(32),
-                                elapsed_to_proof_ms: 30,
-                                account_reads: account_keys
-                                    .iter()
-                                    .map(|key| PostAccountReadProof {
-                                        account_key: key.clone(),
-                                        private_generation: 7,
-                                        source_read_id: "b".repeat(64),
-                                        content_digest: "a".repeat(64),
-                                        started_after_held_ms: 5,
-                                        completed_after_held_ms: 20,
-                                    })
-                                    .collect(),
-                            },
-                        },
+        let checked = if add_mode {
+            let mut cmd = summary("risk_t09_4_clean_native");
+            cmd.installation_id = "installation_test".into();
+            risk.request(cmd).await.unwrap()
+        } else {
+            let uid = okx_api::account_uid_fingerprint("account-001");
+            let account_key = format!("okx:real:{uid}");
+            let account_key_b = format!(
+                "okx:real:{}",
+                okx_api::account_uid_fingerprint("account-002")
+            );
+            let mut account_keys = vec![account_key.clone(), account_key_b];
+            account_keys.sort();
+            assert_ne!(account_keys[0], account_keys[1]);
+            let timestamp = || {
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis() as u64
+            };
+            let captured_at = timestamp() - 300;
+            let census = NativeRiskCensus {
+                account_keys: account_keys.clone(),
+                occupied: account_keys
+                    .iter()
+                    .map(|key| RiskAccountOccupancy {
+                        account_key: key.clone(),
+                        occupied_usdt: "0".into(),
+                        cumulative_loss_usd: "0".into(),
                     })
-                }
-            })
-            .await
-            .unwrap();
-        assert_eq!(granted.status, RiskDecisionStatus::PostAuthorized);
-        assert_eq!(granted.existing_modelled_loss_usdt.as_deref(), Some("1"));
-        let mut final_read = summary("risk_native_after_second_fence_001");
-        final_read.installation_id = "installation_test".into();
-        let checked = risk.request(final_read).await.unwrap();
-        assert_eq!(checked.budget.as_ref().unwrap().reserved_loss_usd, "2");
-        assert_eq!(
+                    .collect(),
+                generated_at_ms: captured_at,
+                source_read_floor_ms: captured_at,
+                source_digest: "c".repeat(64),
+                content_digest: "a".repeat(64),
+                complete: true,
+                native_account_evidence_complete: true,
+                native_order_evidence_complete: true,
+                native_ledger_evidence_complete: true,
+            };
+            let reserve = RiskCommand {
+                schema: RISK_COMMAND_SCHEMA_V1.into(),
+                command_id: "risk_native_reserve_workerd_001".into(),
+                installation_id: "installation_test".into(),
+                action: RiskCommandAction::Reserve {
+                    venue: "okx".into(),
+                    account_uid: uid,
+                    run_id: "run_native_workerd_001".into(),
+                    intent_id: "intent_native_workerd_001".into(),
+                    strategy_id: "manual".into(),
+                    instrument_id: "BTC-USDT-SWAP".into(),
+                    plan_sha256: "d".repeat(64),
+                    requested_loss_usdt: "1".into(),
+                    requested_loss_usd: "1".into(),
+                    entry_upper_usd: Some("2".into()),
+                    entry_proof_digest: Some("e".repeat(64)),
+                    usd_conversion: UsdConversion {
+                        usd_per_usdt: "1".into(),
+                        source_digest: "e".repeat(64),
+                        observed_at_ms: captured_at,
+                    },
+                    policy_revision: 2,
+                    census: census.clone(),
+                },
+            };
+            let granted = risk
+                .reserve_then_fence(reserve, |held| {
+                    let key = held.reservation_key.clone().unwrap();
+                    let sequence = held.risk_book_sequence.unwrap();
+                    let mut fresh = census;
+                    fresh.generated_at_ms = timestamp();
+                    fresh.source_read_floor_ms = fresh.generated_at_ms;
+                    fresh.source_digest = "f".repeat(64);
+                    async move {
+                        Ok(RiskCommand {
+                            schema: RISK_COMMAND_SCHEMA_V1.into(),
+                            command_id: "risk_native_post_workerd_001".into(),
+                            installation_id: "installation_test".into(),
+                            action: RiskCommandAction::BeginPost {
+                                reservation_key: key.clone(),
+                                plan_sha256: "d".repeat(64),
+                                policy_revision: 2,
+                                expected_risk_book_sequence: sequence,
+                                source_proof_sha256: "f".repeat(64),
+                                census: fresh,
+                                causal_proof: CausalPostProof {
+                                    reserve_anchor: key,
+                                    native_incarnation: "a".repeat(32),
+                                    elapsed_to_proof_ms: 30,
+                                    account_reads: account_keys
+                                        .iter()
+                                        .map(|key| PostAccountReadProof {
+                                            account_key: key.clone(),
+                                            private_generation: 7,
+                                            source_read_id: "b".repeat(64),
+                                            content_digest: "a".repeat(64),
+                                            started_after_held_ms: 5,
+                                            completed_after_held_ms: 20,
+                                        })
+                                        .collect(),
+                                },
+                            },
+                        })
+                    }
+                })
+                .await
+                .unwrap();
+            assert_eq!(granted.status, RiskDecisionStatus::PostAuthorized);
+            assert_eq!(granted.existing_modelled_loss_usdt.as_deref(), Some("1"));
+            let mut final_read = summary("risk_native_after_second_fence_001");
+            final_read.installation_id = "installation_test".into();
+            let checked = risk.request(final_read).await.unwrap();
+            assert_eq!(checked.budget.as_ref().unwrap().reserved_loss_usd, "2");
+            assert_eq!(
+                checked
+                    .budget
+                    .as_ref()
+                    .unwrap()
+                    .entry_budget
+                    .as_ref()
+                    .unwrap()
+                    .reserved_usd,
+                "4"
+            );
             checked
-                .budget
-                .as_ref()
-                .unwrap()
-                .entry_budget
-                .as_ref()
-                .unwrap()
-                .reserved_usd,
-            "4"
-        );
+        };
         // T09.1 production admission probe. Unlike the preceding component
         // risk commands this executes the PUBLIC TradeService command, using
         // exactly one pre-recorded raw OKX POST and actual Native/Worker owners.
@@ -1741,7 +1755,7 @@ mod raw_native_session_tests {
                 assert_eq!(
                     after_denial.budget.as_ref().unwrap()
                         .entry_budget.as_ref().unwrap().reserved_usd,
-                    "4",
+                    if add_mode {"0"} else {"4"},
                     "a denied unsent opening must not retain central entry budget"
                 );
                 println!(
@@ -1751,7 +1765,7 @@ mod raw_native_session_tests {
                         "reason":reason,
                         "delay_ms":delay.as_millis(),
                         "outbound_posts":0,
-                        "reserved_entry_usd":"4",
+                        "reserved_entry_usd":if add_mode {"0"} else {"4"},
                     })
                 );
                 tokio::time::timeout_at(
@@ -1855,7 +1869,7 @@ mod raw_native_session_tests {
                 .as_ref()
                 .unwrap()
                 .reserved_usd,
-            "5.0005"
+            if add_mode { "1.0005" } else { "5.0005" }
         );
         let repeated = trade
             .trade("fixture-a", &execute, None)
@@ -1973,8 +1987,8 @@ mod raw_native_session_tests {
                 .as_ref()
                 .unwrap()
                 .reserved_usd,
-            "5.0005",
-            "RiskBook must physically hold prior 4 USD plus public 1.0005 USD"
+            if add_mode { "1.0005" } else { "5.0005" },
+            "RiskBook holds the public entry without duplicate reservations"
         );
         // The Close probe needs a fresh raw public price after financial
         // reconciliation. Baseline T09.0/T09.5 still stops the publisher here.
@@ -2155,6 +2169,7 @@ mod raw_native_session_tests {
         // Optional independent T09.1 continuation. This uses the very same
         // live TradeService, signed Executor GET, account SQL owner and central
         // workerd RiskBook, but never changes the accepted T09.0/T09.5 run.
+        let mut managed_add_proof: Option<serde_json::Value> = None;
         if status_probe {
             let after_fill_order = envelope(json!([{
                 "instId":"BTC-USDT-SWAP",
@@ -2808,7 +2823,7 @@ mod raw_native_session_tests {
                         .as_ref()
                         .unwrap();
                     assert_eq!(prior_entry.consumed_usd, "1.0005");
-                    assert_eq!(prior_entry.reserved_usd, "4");
+                    assert_eq!(prior_entry.reserved_usd, if add_mode {"0"} else {"4"});
                     refresh_recorded_market();
                     let fee_clock = chrono::Utc::now().timestamp_millis().to_string();
                     for _ in 0..4 {
@@ -2908,7 +2923,7 @@ mod raw_native_session_tests {
                             .as_ref()
                             .unwrap()
                             .reserved_usd,
-                        "4",
+                        if add_mode {"0"} else {"4"},
                         "T09.2 preview must not reserve entry capacity"
                     );
                     // A current HTTP receipt cannot refresh an old exchange fee ts.
@@ -2998,7 +3013,7 @@ mod raw_native_session_tests {
                             .as_ref()
                             .unwrap()
                             .reserved_usd,
-                        "4",
+                        if add_mode {"0"} else {"4"},
                         "stale rejection must not retain a new central entry reservation"
                     );
 
@@ -3246,7 +3261,7 @@ mod raw_native_session_tests {
                         .unwrap();
                     eprintln!("T09_2_PHASE_V1:AFTER_WORKER_READBACK");
                     assert_eq!(b.consumed_usd, "1.0005");
-                    assert_eq!(b.reserved_usd, "7.0015");
+                    assert_eq!(b.reserved_usd, if add_mode {"3.0015"} else {"7.0015"});
                     println!(
                         "T09_2_NATIVE_ADMISSION_V1:{}",
                         json!({
@@ -3269,6 +3284,7 @@ mod raw_native_session_tests {
                             "post_ack_financial_complete":accepted["data"]["financial_complete"]
                         })
                     );
+                    let mut captured_signed_times=None;
                     if std::env::var("OKX_T09_3_PARTIAL_PROBE").as_deref() == Ok("1") {
                         let (first, ts) = tokio::spawn(t09_3_phase(
                             accounts.clone(),trade.clone(),feed.clone(),
@@ -3278,6 +3294,7 @@ mod raw_native_session_tests {
                             accounts.clone(),trade.clone(),feed.clone(),
                             new_intent_id.clone(),persisted.client_order_id.clone(),Some(ts),
                         )).await.expect("T09.3 terminal native task");
+                        captured_signed_times=Some((first["raw_history_event_at_ms"].as_i64().unwrap(),terminal["raw_history_event_at_ms"].as_i64().unwrap()));
                         let mut summary_cmd=summary("risk_t09_3_after_terminal");
                         summary_cmd.installation_id="installation_test".into();
                         let after=risk.request(summary_cmd).await.unwrap();
@@ -3290,6 +3307,30 @@ mod raw_native_session_tests {
                                 "outbound_posts":feed.outbound_posts.lock().unwrap().len()
                             })
                         );
+                    }
+                    if add_mode {
+                        let (frontier_tx,frontier_rx)=tokio::sync::oneshot::channel();
+                        let (market_tx,market_rx)=tokio::sync::oneshot::channel();
+                        let (first_event_ms,last_event_ms)=captured_signed_times.expect("T09.4 requires T09.3 signed event times");
+                        let task = tokio::spawn(t09_4_managed_add(T09_4Context {
+                            accounts: accounts.clone(),
+                            trade: trade.clone(),
+                            risk: risk.clone(),
+                            feed: feed.clone(),
+                            prior_client_id: persisted.client_order_id.clone(),
+                            campaign_id: campaign_id.clone(),
+                            native_origin,
+                            first_fill_at_ms: first_event_ms,
+                            terminal_fill_at_ms: last_event_ms,
+                            need_new_market: frontier_tx,
+                            fresh_market_ready: market_rx,
+                        }));
+                        frontier_rx.await.expect("T09.4 financial readiness handoff failed");
+                        refresh_recorded_market();
+                        market_tx.send(()).expect("T09.4 signed market reply handoff failed");
+                        let add=task.await.expect("T09.4 managed Add native task");
+                        println!("T09_4_NATIVE_ADD_BOUND_V1:{add}");
+                        managed_add_proof = Some(add);
                     }
                     second_shutdown.send(true).unwrap();
                     tokio::time::timeout(Duration::from_secs(10), second_maintenance)
@@ -3367,7 +3408,7 @@ mod raw_native_session_tests {
             .await
             .expect("T09.1 must restart the persisted native SQL owner");
             let readback = restored
-                .call(std::time::Instant::now() + Duration::from_secs(5), |s| {
+                .call(std::time::Instant::now() + Duration::from_secs(5), move |s| {
                     let opening = s.by_idempotency("t09_real_public_execute_0001")?.ok_or(
                         okx_execution::StoreError::Invalid("T09_RESTART_OPEN_MISSING"),
                     )?;
@@ -3381,6 +3422,42 @@ mod raw_native_session_tests {
                         Some(i) => s.active_central_receipt(&i.intent_id)?.is_some(),
                         None => false,
                     };
+                    // A complete T09.4 proof must survive reopening this
+                    // exact production AccountStore, not a test-owned ledger.
+                    let managed_add = if add_mode {
+                        let add=s.by_idempotency("t09_real_public_add_0001")?
+                            .ok_or(okx_execution::StoreError::Invalid("T09_4_RESTART_ADD_MISSING"))?;
+                        let protection=s.protection(&add.intent_id)?
+                            .ok_or(okx_execution::StoreError::Invalid("T09_4_RESTART_PROTECTION_MISSING"))?;
+                        let fills=s.cursor("fills","SWAP")?
+                            .ok_or(okx_execution::StoreError::Invalid("T09_4_RESTART_FILLS_CURSOR_MISSING"))?;
+                        let bills=s.cursor("bills","account")?
+                            .ok_or(okx_execution::StoreError::Invalid("T09_4_RESTART_BILLS_CURSOR_MISSING"))?;
+                        let fill=s.intent_fill_cost_evidence(&add.intent_id,fills.watermark)?;
+                        let billed=s.intent_fee_bill_evidence(&add.intent_id,bills.watermark)?;
+                        let own_lots:Vec<_>=lots.iter()
+                            .filter(|l|l.intent_id.as_deref()==Some(add.intent_id.as_str())
+                                && l.remaining_qty>Decimal::ZERO)
+                            .collect();
+                        let own_qty=own_lots.iter().fold(Decimal::ZERO,|q,l|q+l.remaining_qty);
+                        let central=s.active_central_receipt(&add.intent_id)?;
+                        Some(json!({
+                            "intent_id":add.intent_id,"state":add.state.as_str(),
+                            "venue_order_id":add.exchange_order_id,
+                            "sql_revision":add.revision,
+                            "active_central_receipt":central.is_some(),
+                            "lot_count":own_lots.len(),
+                            "lot_quantity":own_qty.normalize().to_string(),
+                            "protection":protection,
+                            "protected_quantity":protection.quantity.normalize().to_string(),
+                            "filled_quantity":fill.filled_quantity.normalize().to_string(),
+                            "gross_notional_usdt":fill.gross_notional_usdt.normalize().to_string(),
+                            "linked_bill_count":billed.linked_bill_count,
+                            "linked_bill_fee_usdt":billed.conservative_verified_fee_usdt.normalize().to_string(),
+                            "linked_bill_source_digest":billed.source_digest,
+                            "entry_total_usdt":(fill.gross_notional_usdt+billed.conservative_verified_fee_usdt).normalize().to_string()
+                        }))
+                    } else {None};
                     Ok(json!({
                         "opening_intent_id":opening.intent_id,
                         "opening_state":opening.state.as_str(),
@@ -3392,6 +3469,7 @@ mod raw_native_session_tests {
                             .count(),
                         "second_intent_state":second.as_ref().map(|i|i.state.as_str()),
                         "second_active_central_receipt":second_central,
+                        "managed_add":managed_add,
                         "remaining_lot_quantity":lots.iter().fold(Decimal::ZERO,|q,lot|q+lot.remaining_qty).normalize().to_string(),
                         "fills_cursor":s.cursor("fills", "SWAP")?,
                         "bills_cursor":s.cursor("bills", "account")?
@@ -3402,7 +3480,30 @@ mod raw_native_session_tests {
             println!("T09_1_NATIVE_SQL_RESTART_V1:{readback}");
             assert_eq!(readback["opening_state"], "FILLED");
             assert_eq!(readback["close_state"], "FILLED");
-            if std::env::var("OKX_T09_3_PARTIAL_PROBE").as_deref() == Ok("1") {
+            if add_mode {
+                let add = &readback["managed_add"];
+                assert_eq!(
+                    readback["remaining_lot_count"], 3,
+                    "T09.4 must persist 3 independent real-fill lots"
+                );
+                assert_eq!(readback["remaining_lot_quantity"], "0.5");
+                assert_eq!(add["state"], "FILLED");
+                assert_eq!(add["venue_order_id"], "recorded-t09-add-001");
+                assert_eq!(
+                    add["active_central_receipt"], true,
+                    "live managed risk must remain held"
+                );
+                assert_eq!(add["lot_count"], 1);
+                assert_eq!(add["lot_quantity"], "0.2");
+                assert_eq!(add["protected_quantity"], "0.2");
+                assert_eq!(add["filled_quantity"], "0.2");
+                assert_eq!(add["gross_notional_usdt"], "2");
+                assert_eq!(add["linked_bill_count"], 1);
+                assert_eq!(add["linked_bill_fee_usdt"], "0.001");
+                assert_eq!(add["entry_total_usdt"], "2.001");
+                assert_eq!(readback["second_intent_state"], "FILLED");
+                assert_eq!(readback["second_active_central_receipt"], true);
+            } else if std::env::var("OKX_T09_3_PARTIAL_PROBE").as_deref() == Ok("1") {
                 assert_eq!(readback["remaining_lot_count"], 2);
                 assert_eq!(readback["remaining_lot_quantity"], "0.3");
                 assert_eq!(readback["second_intent_state"], "FILLED");
@@ -3411,6 +3512,57 @@ mod raw_native_session_tests {
                 assert_eq!(readback["remaining_lot_count"], 0);
             }
             assert_eq!(readback["active_central_receipt"], false);
+            if add_mode {
+                let add = managed_add_proof
+                    .as_ref()
+                    .expect("T09.4 settled Add must precede restart");
+                let settled = &add["settlement"];
+                let budget = &settled["worker_budget"];
+                assert_eq!(budget["entry_budget"]["consumed_usd"], "6.003");
+                assert_eq!(budget["entry_budget"]["reserved_usd"], "0");
+                assert_eq!(readback["managed_add"]["intent_id"], add["intent_id"]);
+                // Each source witness binds its OWN immutable cursor
+                // frontier. Exact source IDs, venue order, filled amount,
+                // bill count and fee agree; changing the coverage frontier
+                // legitimately changes a source witness digest.
+                assert_eq!(
+                    readback["managed_add"]["linked_bill_source_digest"]
+                        .as_str()
+                        .map(str::len),
+                    Some(64)
+                );
+                assert_eq!(
+                    settled["filled"]["linked_bill_source_digest"]
+                        .as_str()
+                        .map(str::len),
+                    Some(64)
+                );
+                assert_eq!(settled["filled"]["fee_usdt"], "0.001");
+                assert_eq!(settled["filled"]["quantity"], "0.2");
+                println!(
+                    "T09_4_NATIVE_MANAGED_ADD_V1:{}",
+                    json!({
+                        "operation":"add",
+                        "instrument":"BTC-USDT-SWAP",
+                        "intent_id":add["intent_id"],
+                        "account_uid":add["account_uid"],
+                        "central_receipt_hash":add["central_receipt_hash"],
+                        "venue_order_id":add["venue_order_id"],
+                        "sql_begin_post_at_ms":add["sql_begin_post_at_ms"],
+                        "sql_revision":readback["managed_add"]["sql_revision"],
+                        "risk_book_sequence":settled["risk_book_sequence"],
+                        "added_quantity":readback["managed_add"]["lot_quantity"],
+                        "add_entry_usd":readback["managed_add"]["entry_total_usdt"],
+                        "linked_bill_fee_usdt":readback["managed_add"]["linked_bill_fee_usdt"],
+                        "linked_bill_source_digest":readback["managed_add"]["linked_bill_source_digest"],
+                        "cumulative_spent_usd":budget["entry_budget"]["consumed_usd"],
+                        "worker_budget":settled["worker_budget"],
+                        "outbound_posts":5,
+                        "sql_restart_managed_exposure":readback["remaining_lot_quantity"],
+                        "protection":readback["managed_add"]["protection"]
+                    })
+                );
+            }
             let mut finished = restored.termination_signal();
             drop(restored);
             tokio::time::timeout(Duration::from_secs(5), async {

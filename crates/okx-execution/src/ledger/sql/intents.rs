@@ -783,6 +783,101 @@ impl AccountStore {
         Ok(settlement)
     }
 
+    /// The sole Native SQL owner records the exact cumulative revision only
+    /// AFTER the persisted Worker RiskBook has accepted SETTLE_ENTRY.  This
+    /// is an ACK of the original immutable venue/bill/FX witness, not a second
+    /// monetary producer. Crashes before ACK remain fail closed and replayable.
+    pub fn acknowledge_partial_entry_settlement(
+        &mut self,
+        accepted: &EntrySettlementEvidence,
+    ) -> StoreResult<()> {
+        if accepted.schema != "okx.entry-partial-settlement/v1"
+            || accepted.settlement_revision == 0
+            || accepted.account_key != self.meta.account_key
+            || accepted.source_digest.len() != 64
+            || !accepted
+                .source_digest
+                .bytes()
+                .all(|b| b.is_ascii_hexdigit())
+        {
+            return Err(StoreError::Invalid("PARTIAL_ENTRY_ACK_IDENTITY_INVALID"));
+        }
+        let revision_key = format!(
+            "entry-partial:{}:r{}",
+            accepted.intent_id, accepted.settlement_revision
+        );
+        let immutable = self
+            .operation(&revision_key)?
+            .ok_or(StoreError::Invalid("PARTIAL_ENTRY_ACK_SOURCE_MISSING"))?;
+        let saved: EntrySettlementEvidence = serde_json::from_str(&immutable.result_ref)
+            .map_err(|_| StoreError::Invalid("PARTIAL_ENTRY_ACK_SOURCE_CORRUPT"))?;
+        let i = self
+            .intent(&accepted.intent_id)?
+            .ok_or(StoreError::Invalid("PARTIAL_ENTRY_ACK_INTENT_MISSING"))?;
+        let r = self
+            .central_receipt(&accepted.intent_id)?
+            .ok_or(StoreError::Invalid("PARTIAL_ENTRY_ACK_RESERVATION_MISSING"))?;
+        let receipt_state: String = self
+            .connection
+            .query_row(
+                "SELECT state FROM risk_receipts WHERE intent_id=?1 AND plan_hash=?2",
+                params![accepted.intent_id, accepted.plan_hash],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or(StoreError::Invalid(
+                "PARTIAL_ENTRY_ACK_RESERVATION_STATE_MISSING",
+            ))?;
+        if saved != *accepted
+            || immutable.kind != "ENTRY_PARTIAL_SETTLEMENT_PROVEN"
+            || immutable.request_hash != accepted.plan_hash
+            || i.plan_hash != accepted.plan_hash
+            || i.exchange_order_id.as_deref() != Some(accepted.venue_order_id.as_str())
+            || r.plan_hash != accepted.plan_hash
+            || r.reservation_key != accepted.reservation_key
+            || r.reservation_key.starts_with("local:")
+            || !matches!(receipt_state.as_str(), "OPEN" | "POSTED")
+        {
+            return Err(StoreError::Invalid("PARTIAL_ENTRY_ACK_SOURCE_MISMATCH"));
+        }
+        let key = format!(
+            "entry-partial-settled:{}:r{}",
+            accepted.intent_id, accepted.settlement_revision
+        );
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.execute(
+            "INSERT INTO operation_receipts
+                (operation_id,kind,request_hash,result_ref,committed_at)
+             VALUES(?1,'ENTRY_PARTIAL_SETTLED',?2,?3,?4)
+             ON CONFLICT(operation_id) DO NOTHING",
+            params![
+                key,
+                accepted.plan_hash,
+                accepted.source_digest,
+                wall_time_ms()
+            ],
+        )?;
+        let verified: (String, String, String) = tx.query_row(
+            "SELECT kind,request_hash,result_ref FROM operation_receipts
+             WHERE operation_id=?1",
+            [key],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        if verified
+            != (
+                "ENTRY_PARTIAL_SETTLED".into(),
+                accepted.plan_hash.clone(),
+                accepted.source_digest.clone(),
+            )
+        {
+            return Err(StoreError::Invalid("PARTIAL_ENTRY_ACK_CONFLICT"));
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     /// One additional authenticated order-fee bill after terminal RELEASE.
     /// The first terminal receipt is immutable; every later fee grows an
     /// independent append-only cumulative revision under the SAME reserve.

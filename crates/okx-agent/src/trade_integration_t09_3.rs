@@ -138,13 +138,26 @@
         let status=trade.trade("fixture-a",&okx_protocol::trading::TradeRequest::Status{reference:id},None)
             .await.expect("T09.3 real TradeService status");
         if !terminal {
-            assert_ne!(status["data"]["financial_complete"],true,
-                "partial fill must never claim fully settled order");
+            assert_eq!(status["data"]["intent"]["state"],"PARTIALLY_FILLED",
+                "a covered partial bill never proves the remaining quantity executed");
+        }
+        // SQL above independently proved exact fills and linked fees.
+        // A fresh status GET may lack a NEW financial capture. Its safe
+        // result is not_evaluated with financial_complete=false, never a
+        // fabricated completed settlement.
+        let entry_state=&status["data"]["entry_fill_evidence"]["state"];
+        if entry_state=="not_evaluated" {
+            assert_eq!(status["data"]["financial_complete"],false);
+            assert!(status["data"]["financial_error"].is_string());
+        } else {
+            assert_eq!(entry_state,"verified_native_fill_and_bill_fee_sources");
         }
         (serde_json::json!({
             "phase":if terminal {"terminal"} else {"partial"},
+            "raw_history_event_at_ms":now_ms,
             "sql":sql,"status":status["status"],
             "intent_state":status["data"]["intent"]["state"],
+            "entry_fill_evidence_state":status["data"]["entry_fill_evidence"]["state"],
             "financial_complete":status["data"]["financial_complete"],
             "protection":status["data"]["protection"],
         }),first)

@@ -16,7 +16,9 @@ export async function run({root,signal}) {
     assert.match(phase.sql.source_digest,/^[a-f0-9]{64}$/);
   }
   assert.equal(partial.phase,"partial");
-  assert.notEqual(partial.financial_complete,true);
+  assert.ok(["verified_native_fill_and_bill_fee_sources","not_evaluated"].includes(partial.entry_fill_evidence_state));
+  if (partial.entry_fill_evidence_state==="not_evaluated")
+    assert.equal(partial.financial_complete,false,"missing fresh status evidence must fail closed");
   assert.equal(terminal.phase,"terminal");
   assert.equal(terminal.sql.notional_usdt,"3");
   assert.equal(partial.intent_state,"PARTIALLY_FILLED");

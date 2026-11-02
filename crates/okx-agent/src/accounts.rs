@@ -1379,7 +1379,16 @@ pub(crate) mod recorded_support {
                     | "/api/v5/trade/orders-pending"
                     | "/api/v5/trade/orders-algo-pending"
                     | "/api/v5/trade/fills-history"
-                    | "/api/v5/account/bills-archive" => 64,
+                    | "/api/v5/account/bills-archive" => {
+                        // Only the explicitly opt-in long integration chain
+                        // has extra finite raw observations. This is NOT an
+                        // exchange rate-limit override or a live HTTP fallback.
+                        if std::env::var("OKX_T09_4_MANAGED_ADD_PROBE").as_deref() == Ok("1") {
+                            192
+                        } else {
+                            64
+                        }
+                    }
                     _ => 0,
                 };
                 let mut observed = self.requests.lock().unwrap();
@@ -1464,6 +1473,16 @@ pub(crate) mod recorded_support {
         ) -> okx_runtime::WsCall<'_> {
             Box::pin(async move {
                 if let tokio_tungstenite::tungstenite::Message::Text(data) = frame {
+                    // OKX application-level idle heartbeat is real production
+                    // behavior (20s ping, 10s pong deadline). Script only
+                    // the raw venue pong; never bypass the generation guard.
+                    if data.as_str() == "ping" {
+                        self.inbound
+                            .push_back(tokio_tungstenite::tungstenite::Message::Text(
+                                "pong".into(),
+                            ));
+                        return Ok(());
+                    }
                     let outgoing: serde_json::Value =
                         serde_json::from_str(data.as_str()).unwrap_or(serde_json::Value::Null);
                     self.sent.lock().unwrap().push(outgoing.clone());

@@ -1,3 +1,121 @@
+#[test]
+fn e1_cumulative_partial_terminal_add_campaign_debits_only_each_verified_delta() {
+    // This is the SAME production SQL accumulation method used by campaign
+    // reconciliation, not an alternative money ledger. The independent
+    // source-and-Worker proof is validated before the caller supplies rows.
+    let s = store();
+    let campaign = format!("sha256:{}", "c".repeat(64));
+    let first = (
+        "entry-a".to_owned(),
+        "a".repeat(64),
+        Decimal::new(10005, 4),
+        1,
+        4,
+    );
+    let partial = (
+        "entry-b".to_owned(),
+        "b".repeat(64),
+        Decimal::new(12006, 4),
+        1,
+        5,
+    );
+    let terminal = (
+        "entry-b".to_owned(),
+        "d".repeat(64),
+        Decimal::new(30015, 4),
+        2,
+        6,
+    );
+    // Multiple revisions for entry-b arrive in ONE source window.
+    s.apply_captured_campaign_deltas(
+        &campaign,
+        2,
+        10,
+        &[first.clone(), partial.clone(), terminal.clone()],
+        Decimal::new(40020, 4),
+        None,
+    )
+    .unwrap();
+    let read_money = || -> Decimal {
+        let v: String = s
+            .connection
+            .query_row(
+                "SELECT consumed_usd FROM campaign_entry_totals WHERE campaign_id=?1",
+                [&campaign],
+                |r| r.get(0),
+            )
+            .unwrap();
+        Decimal::from_str_exact(&v).unwrap()
+    };
+    assert_eq!(read_money(), Decimal::new(40020, 4));
+    // Repeated immutable receipts do not double-charge old revisions.
+    s.apply_captured_campaign_deltas(
+        &campaign,
+        2,
+        11,
+        &[first, partial, terminal],
+        Decimal::new(40020, 4),
+        None,
+    )
+    .unwrap();
+    assert_eq!(read_money(), Decimal::new(40020, 4));
+    // Managed Add0.20 has its own independent proof and costs 2.001 USD.
+    s.apply_captured_campaign_deltas(
+        &campaign,
+        2,
+        12,
+        &[(
+            "entry-add".into(),
+            "e".repeat(64),
+            Decimal::new(20010, 4),
+            1,
+            8,
+        )],
+        Decimal::new(60030, 4),
+        None,
+    )
+    .unwrap();
+    assert_eq!(read_money(), Decimal::new(60030, 4));
+    // Same revision with altered money/digest must never rewrite history.
+    assert!(matches!(
+        s.apply_captured_campaign_deltas(
+            &campaign,
+            2,
+            13,
+            &[(
+                "entry-add".into(),
+                "f".repeat(64),
+                Decimal::new(20020, 4),
+                1,
+                8
+            )],
+            Decimal::new(60040, 4),
+            None,
+        ),
+        Err(StoreError::Invalid("CAMPAIGN_APPLIED_SOURCE_CONFLICT"))
+    ));
+    assert_eq!(read_money(), Decimal::new(60030, 4));
+    // Even a newer revision may not lower previously accepted cumulative money.
+    assert!(matches!(
+        s.apply_captured_campaign_deltas(
+            &campaign,
+            2,
+            13,
+            &[(
+                "entry-add".into(),
+                "f".repeat(64),
+                Decimal::new(19000, 4),
+                2,
+                9
+            )],
+            Decimal::new(59020, 4),
+            None,
+        ),
+        Err(StoreError::Invalid("CAMPAIGN_APPLIED_MONOTONICITY_BREACH"))
+    ));
+    assert_eq!(read_money(), Decimal::new(60030, 4));
+}
+
 use super::*;
 #[test]
 fn e1_zero_opening_aggregate_and_receipt_roll_back_together_on_conflict() {

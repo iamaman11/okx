@@ -16,10 +16,11 @@ function receipt(stdout, prefix) {
   assert.equal(matches.length, 1, prefix + " must have one authentic child readback");
   return JSON.parse(matches[0][1]);
 }
-export async function actualNativeWorker(root, signal, { statusProbe = false, secondAdmission = false, partialFills = false } = {}) {
+export async function actualNativeWorker(root, signal, { statusProbe = false, secondAdmission = false, partialFills = false, managedAdd = false } = {}) {
   assert.ok(!secondAdmission || statusProbe, "T09.2 needs the completed terminal T09.1 readback");
   if (partialFills && !secondAdmission) throw Error("T09.3_REQUIRES_T09.2");
-  const key = partialFills ? "partial-fills" : secondAdmission ? "second-admission" : statusProbe ? "post-fill-status" : "baseline";
+  if (managedAdd && !partialFills) throw Error("T09.4_REQUIRES_T09.3");
+  const key = managedAdd ? "managed-add" : partialFills ? "partial-fills" : secondAdmission ? "second-admission" : statusProbe ? "post-fill-status" : "baseline";
   if (!memo.has(key)) memo.set(key, (async () => {
     const { stdout, stderr } = await exec(
       process.execPath,
@@ -31,6 +32,7 @@ export async function actualNativeWorker(root, signal, { statusProbe = false, se
           OKX_T09_1_STATUS_PROBE: statusProbe ? "1" : "0",
           OKX_T09_2_ADMISSION_PROBE: secondAdmission ? "1" : "0",
           OKX_T09_3_PARTIAL_PROBE: partialFills ? "1" : "0",
+          OKX_T09_4_MANAGED_ADD_PROBE: managedAdd ? "1" : "0",
         },
         signal,
         timeout: 115_000,
@@ -133,6 +135,7 @@ export async function actualNativeWorker(root, signal, { statusProbe = false, se
             nativeSecondAdmission: receipt(stdout, "T09_2_NATIVE_ADMISSION_V1"),
             workerSecondAdmission: receipt(stdout, "T09_2_WORKER_AFTER_RECONNECT_V1"),
             ...(partialFills ? { nativePartialFills: receipt(stdout, "T09_3_NATIVE_PARTIAL_TERMINAL_V1") } : {}),
+            ...(managedAdd ? { nativeManagedAdd: receipt(stdout, "T09_4_NATIVE_MANAGED_ADD_V1") } : {}),
           } : { workerPostFill: receipt(stdout, "T09_1_WORKER_POST_FILL_EVIDENCE_V1") }),
         }
         : { workerReplay: receipt(stdout, "T09_5_WORKER_IDEMPOTENCY_EVIDENCE_V1") }),
