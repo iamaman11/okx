@@ -466,8 +466,8 @@ async fn t09_6_source_backed_close_release(
     ].iter().enumerate() {
         assert_eq!(fee_sources[index]["amount_usdt"], *expected,
             "T09.6 exact signed bill debit must appear once in economic money");
-        assert!(fee_sources[index]["legs"].as_u64().unwrap_or(0) > 0,
-            "T09.6 missing immutable financial source for fee bill");
+        assert_eq!(fee_sources[index]["legs"], 1,
+            "T09.6 each economic fee bill must have exactly one immutable account debit");
     }
     assert_eq!(entry_fee.normalize().to_string(), "-0.003",
         "T09.6 independently summed entry fees");
