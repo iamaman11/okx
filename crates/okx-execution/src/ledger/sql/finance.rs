@@ -1508,13 +1508,15 @@ impl AccountStore {
                     .ok_or(StoreError::Invalid("CAMPAIGN_PARTIAL_IMMUTABLE_MISSING"))?;
                 let encoded = serde_json::to_string(&terminal)
                     .map_err(|_| StoreError::Invalid("CAMPAIGN_PARTIAL_SERIALIZATION"))?;
+                if terminal.source_covered_through_ms > through_ms {
+                    return Err(StoreError::Invalid("CAMPAIGN_DELTA_EVENT_NOT_COVERED"));
+                }
                 if ack.kind != "ENTRY_PARTIAL_SETTLED"
                     || ack.request_hash != terminal.plan_hash
                     || ack.result_ref != terminal.source_digest
                     || immutable.kind != "ENTRY_PARTIAL_SETTLEMENT_PROVEN"
                     || immutable.request_hash != terminal.plan_hash
                     || immutable.result_ref != encoded
-                    || terminal.source_covered_through_ms > through_ms
                 {
                     return Err(StoreError::Invalid("CAMPAIGN_PARTIAL_ACK_INVALID"));
                 }
