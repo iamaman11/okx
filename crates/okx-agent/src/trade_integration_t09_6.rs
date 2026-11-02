@@ -599,7 +599,12 @@ async fn t09_8_excess_entry_denied(
         .expect("T09.8 campaign origin fits source time");
     let campaign=entry.campaign_id.clone();
     let mut last_readiness=String::from("NOT_OBSERVED");
-    tokio::time::timeout(Duration::from_secs(20), async {
+    // Production maintenance has a bounded 1/2/4/8/16/30s backoff
+    // after unready financial pages. A 20s test-side observation window
+    // can expire before the *next* legal reconciliation attempt. Give
+    // that owner one maximum backoff cycle without changing any source TTL,
+    // admission deadline or economic authority.
+    tokio::time::timeout(Duration::from_secs(45), async {
         loop {
             let through=chrono::Utc::now().timestamp_millis()-2_000;
             let mut both_ready=true;
