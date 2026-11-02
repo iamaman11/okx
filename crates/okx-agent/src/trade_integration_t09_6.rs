@@ -488,3 +488,129 @@ async fn t09_6_source_backed_close_release(
         "outbound_posts":feed.outbound_posts.lock().unwrap().len(),
     })
 }
+
+
+// T09.8: after fully source-proven flat T09.6, the same production
+// Execute path must be denied by the persisted campaign RiskBook BEFORE
+// any new venue POST. 0.40 * 0.01 * 1000 + 0.05% fee = 4.002 USD,
+// which exceeds the authentic remaining 10 - 6.003 = 3.997 USD.
+async fn t09_8_excess_entry_denied(
+    accounts: &Arc<AccountRuntimeRegistry>,
+    trade: &Arc<TradeService>,
+    risk: &NativeRiskClient,
+    feed: &Arc<crate::accounts::recorded_support::RecordedAccountHttp>,
+) -> serde_json::Value {
+    use crate::accounts::recorded_support::RecordedGet;
+    use okx_protocol::trading::{
+        OrderConstraints, PositionSide, Protection, Sizing, TradeOperation, TradeRequest,
+    };
+    let mut before_command=summary("risk_t09_8_before_excess");
+    before_command.installation_id="installation_test".into();
+    let before=risk.request(before_command).await.expect("T09.8 Worker budget before");
+    let budget=before.budget.as_ref().expect("T09.8 risk budget");
+    let entry=budget.entry_budget.as_ref().expect("T09.8 entry limit");
+    assert_eq!(entry.consumed_usd,"6.003");
+    assert_eq!(entry.reserved_usd,"0");
+    assert_eq!(entry.limit_usd,"10");
+    let available=Decimal::from_str_exact(&entry.limit_usd).unwrap()
+        -Decimal::from_str_exact(&entry.consumed_usd).unwrap()
+        -Decimal::from_str_exact(&entry.reserved_usd).unwrap();
+    assert_eq!(available.normalize().to_string(),"3.997");
+    let before_posts=feed.outbound_posts.lock().unwrap().len();
+    assert_eq!(before_posts,9,"T09.8 starts strictly after two flat closes and cancels");
+    // Provide newly recorded, authenticated venue replies only at the
+    // existing REST boundary; no exchange emulator, alternate risk owner
+    // or unauthorized order outcome is fabricated.
+    let at=chrono::Utc::now().timestamp_millis().to_string();
+    let raw=|v|serde_json::to_vec(&serde_json::json!({
+        "code":"0","msg":"","data":v
+    })).expect("T09.8 recorded signed HTTP envelope");
+    feed.advance_recorded_route(
+        "fixture-observer-a","/api/v5/account/trade-fee",
+        (0..12).map(|_|RecordedGet {
+            access_key:"fixture-observer-a".into(),
+            path:"/api/v5/account/trade-fee".into(),
+            required_query:vec![
+                ("instType".into(),"SWAP".into()),
+                ("instFamily".into(),"BTC-USDT".into()),
+            ],
+            raw_response:raw(serde_json::json!([{
+                "instType":"SWAP","level":"Lv1","ts":at,
+                "feeGroup":[{"groupId":"4","maker":"0.0005","taker":"0.0005"}]
+            }])),
+        }).collect(),
+    );
+    feed.advance_recorded_route(
+        "fixture-observer-a","/api/v5/account/leverage-info",
+        (0..12).map(|_|RecordedGet {
+            access_key:"fixture-observer-a".into(),
+            path:"/api/v5/account/leverage-info".into(),
+            required_query:vec![
+                ("instId".into(),"BTC-USDT-SWAP".into()),
+                ("mgnMode".into(),"cross".into()),
+            ],
+            raw_response:raw(serde_json::json!([
+                {"instId":"BTC-USDT-SWAP","mgnMode":"cross","posSide":"long","lever":"2"},
+                {"instId":"BTC-USDT-SWAP","mgnMode":"cross","posSide":"short","lever":"2"}
+            ])),
+        }).collect(),
+    );
+    feed.advance_recorded_public_clock(raw(serde_json::json!([{"ts":at}])));
+    for _ in 0..12 {
+        feed.expect_public_clock(raw(serde_json::json!([{"ts":at}])));
+    }
+    recorded_flat_derivative_inventory_after_close(feed);
+    let request=TradeRequest::Execute {
+        idempotency_key:"t09_excess_campaign_budget_denied_0001".into(),
+        operation:TradeOperation::Open,
+        strategy_instance:"manual".into(),
+        instrument:"BTC-USDT-SWAP".into(),
+        side:PositionSide::Long,
+        sizing:Sizing::Contracts{contracts:"0.40".into()},
+        order:OrderConstraints {
+            order_type:"limit".into(),limit_price:Some("1000".into()),
+            reference:None,max_entry_usd:Some("10".into()),
+            max_slippage_bps:0,
+        },
+        protection:Some(Protection::Price{stop_price:"900".into()}),
+        expires_in_ms:30_000,
+    };
+    assert!(request.valid());
+    let denied=trade.trade("fixture-a",&request,None).await
+        .expect_err("T09.8 over-budget real public Execute must DENY before POST");
+    assert_eq!(denied,"CAMPAIGN_ENTRY_BUDGET_EXHAUSTED",
+        "T09.8 must prove central budget rejection, not stale input or local rate denial");
+    let after_posts=feed.outbound_posts.lock().unwrap().len();
+    assert_eq!(after_posts,before_posts,
+        "T09.8 Worker denial cannot send a new venue create");
+    assert_eq!(feed.unconsumed_posts(),0,
+        "T09.8 cannot append a fake successful exchange outcome");
+    let owner=accounts.resolve("fixture-a").await.expect("T09.8 account A");
+    let (state,held)=owner.execution.store.call(
+        std::time::Instant::now()+Duration::from_secs(3),
+        |s| {
+            let denied=s.by_idempotency("t09_excess_campaign_budget_denied_0001")?
+                .ok_or(okx_execution::StoreError::Invalid("T09_8_INTENT_MISSING"))?;
+            let held=s.active_central_receipt(&denied.intent_id)?.is_some();
+            Ok((denied.state.as_str().to_owned(),held))
+        },
+    ).await.expect("T09.8 original native owner SQL after refusal");
+    assert_eq!(state,"REJECTED");
+    assert!(!held,"T09.8 cannot leave an active Worker reserve");
+    let mut after_command=summary("risk_t09_8_after_excess");
+    after_command.installation_id="installation_test".into();
+    let after=risk.request(after_command).await.expect("T09.8 Worker after rejection");
+    assert_eq!(after.budget,before.budget,
+        "T09.8 over-budget denial must not spend, hold, release or reset any money");
+    serde_json::json!({
+        "denial_reason":denied,
+        "requested_entry_upper_usd":"4.002",
+        "remaining_entry_budget_usd":available.normalize().to_string(),
+        "campaign_consumed_usd":entry.consumed_usd,
+        "sql_intent_state":state,"sql_risk_held":held,
+        "outbound_posts_before":before_posts,"outbound_posts_after":after_posts,
+        "new_exchange_posts":after_posts-before_posts,
+        "risk_book_sequence_after":after.risk_book_sequence,
+        "worker_budget_after":after.budget,
+    })
+}
