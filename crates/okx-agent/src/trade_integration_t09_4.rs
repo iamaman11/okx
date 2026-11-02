@@ -16,6 +16,264 @@
         fresh_market_ready: tokio::sync::oneshot::Receiver<()>,
     }
 
+
+    struct T09_4FillContext {
+        accounts: Arc<AccountRuntimeRegistry>,
+        trade: Arc<TradeService>,
+        risk: NativeRiskClient,
+        feed: Arc<crate::accounts::recorded_support::RecordedAccountHttp>,
+        intent_id: String,
+        client_id: String,
+        old_client_id: String,
+        first_fill_at_ms: i64,
+        terminal_fill_at_ms: i64,
+    }
+
+    // The only injected material is the venue's raw signed GET history,
+    // position, protective algo and order details. The same production
+    // account capture, SQL lot owner, TradeService and Worker settle them.
+    async fn t09_4_fill_phase(input: T09_4FillContext) -> serde_json::Value {
+        use crate::accounts::recorded_support::RecordedGet;
+        let T09_4FillContext {
+            accounts, trade, risk, feed, intent_id, client_id,
+            old_client_id, first_fill_at_ms, terminal_fill_at_ms,
+        } = input;
+        let envelope=|v|serde_json::to_vec(&serde_json::json!({
+            "code":"0","msg":"","data":v
+        })).unwrap();
+        let filled_at=chrono::Utc::now().timestamp_millis();
+        let old_stop=format!("s{}",&old_client_id[..31]);
+        let new_stop=format!("s{}",&client_id[..31]);
+        let mut fills=Vec::new();
+        let mut bills=Vec::new();
+        for (event,order,size,charge,ts) in [
+            ("t09-second-001","recorded-t09-second-001","0.12","-0.0006",first_fill_at_ms),
+            ("t09-second-002","recorded-t09-second-001","0.18","-0.0009",terminal_fill_at_ms),
+            ("t09-managed-add-001","recorded-t09-add-001","0.2","-0.001",filled_at),
+        ] {
+            fills.push(serde_json::json!({
+                "instType":"SWAP","instId":"BTC-USDT-SWAP",
+                "tradeId":format!("{event}-trade"),"ordId":order,
+                "clOrdId":"__REQUEST_CL_ORD_ID__",
+                "billId":format!("{event}-bill"),
+                "subType":"3","side":"buy","posSide":"long",
+                "fillPx":"1000","fillSz":size,"fillPnl":"0",
+                "fee":charge,"feeCcy":"USDT",
+                "ts":ts.to_string(),"fillTime":ts.to_string()
+            }));
+            bills.push(serde_json::json!({
+                "billId":format!("{event}-bill"),"instType":"SWAP",
+                "instId":"BTC-USDT-SWAP","ordId":order,
+                "tradeId":format!("{event}-trade"),
+                "clOrdId":"__REQUEST_CL_ORD_ID__",
+                "ccy":"USDT","type":"2","subType":"3",
+                "balChg":charge,"fee":charge,"pnl":"0",
+                "ts":ts.to_string()
+            }));
+        }
+        let mut history=Vec::new();
+        for _ in 0..40 {
+            for part in ["SPOT","MARGIN","SWAP","FUTURES","OPTION"] {
+                history.push(RecordedGet {
+                    access_key:"fixture-executor-a".into(),
+                    path:"/api/v5/trade/fills-history".into(),
+                    required_query:vec![("instType".into(),part.into())],
+                    raw_response:if part=="SWAP" {
+                        envelope(serde_json::json!(fills))
+                    } else {envelope(serde_json::json!([]))},
+                });
+            }
+        }
+        feed.advance_recorded_route(
+            "fixture-executor-a","/api/v5/trade/fills-history",history
+        );
+        feed.advance_recorded_route(
+            "fixture-executor-a","/api/v5/account/bills-archive",
+            (0..40).map(|_|RecordedGet {
+                access_key:"fixture-executor-a".into(),
+                path:"/api/v5/account/bills-archive".into(),
+                required_query:vec![],
+                raw_response:envelope(serde_json::json!(bills)),
+            }).collect()
+        );
+        let positions=envelope(serde_json::json!([{
+            "instType":"SWAP","instId":"BTC-USDT-SWAP",
+            "posSide":"long","pos":"0.5","mgnMode":"cross",
+            "avgPx":"1000","markPx":"1000","uTime":filled_at.to_string()
+        }]));
+        feed.advance_recorded_route(
+            "fixture-observer-a","/api/v5/account/positions",
+            (0..64).map(|_|RecordedGet {
+                access_key:"fixture-observer-a".into(),
+                path:"/api/v5/account/positions".into(),
+                required_query:vec![],raw_response:positions.clone(),
+            }).collect()
+        );
+        let mut signed_orders=Vec::new();
+        for _ in 0..24 {
+            for (order,quantity,at) in [
+                ("recorded-t09-second-001","0.3",terminal_fill_at_ms),
+                ("recorded-t09-add-001","0.2",filled_at)
+            ] {
+                signed_orders.push(RecordedGet {
+                    access_key:"fixture-executor-a".into(),
+                    path:"/api/v5/trade/order".into(),
+                    required_query:vec![
+                        ("instId".into(),"BTC-USDT-SWAP".into()),
+                        ("ordId".into(),order.into()),
+                    ],
+                    raw_response:envelope(serde_json::json!([{
+                        "instId":"BTC-USDT-SWAP","ordId":order,
+                        "clOrdId":"__REQUEST_CL_ORD_ID__",
+                        "side":"buy","posSide":"long","tdMode":"cross",
+                        "ordType":"limit","px":"1000","sz":quantity,
+                        "accFillSz":quantity,"avgPx":"1000","state":"filled",
+                        "cTime":at.to_string(),"uTime":at.to_string()
+                    }])),
+                });
+            }
+        }
+        feed.advance_recorded_route(
+            "fixture-executor-a","/api/v5/trade/order",signed_orders
+        );
+        let mut signed_algos=Vec::new();
+        for _ in 0..16 {
+            for (stop,algo,quantity) in [
+                (&old_stop,"900000002","0.3"),
+                (&new_stop,"900000003","0.2"),
+            ] {
+                signed_algos.push(RecordedGet {
+                    access_key:"fixture-executor-a".into(),
+                    path:"/api/v5/trade/order-algo".into(),
+                    required_query:vec![("algoClOrdId".into(),stop.clone())],
+                    raw_response:envelope(serde_json::json!([{
+                        "instId":"BTC-USDT-SWAP","algoId":algo,
+                        "algoClOrdId":stop,"state":"live","sz":quantity,
+                        "side":"sell","posSide":"long","tdMode":"cross",
+                        "ordType":"conditional","slTriggerPx":"900",
+                        "slTriggerPxType":"mark","slOrdPx":"-1"
+                    }])),
+                });
+            }
+        }
+        feed.advance_recorded_route(
+            "fixture-executor-a","/api/v5/trade/order-algo",signed_algos
+        );
+        let mut pending=Vec::new();
+        for _ in 0..12 {
+            for inst in ["SWAP","FUTURES"] {
+                for kind in [
+                    "conditional","oco","trigger","move_order_stop",
+                    "chase","iceberg","twap","smart_iceberg"
+                ] {
+                    let list=if inst=="SWAP" && kind=="conditional" {
+                        serde_json::json!([
+                            {
+                                "instType":"SWAP","instId":"BTC-USDT-SWAP",
+                                "ordType":"conditional","algoId":"900000002",
+                                "algoClOrdId":old_stop,"state":"live",
+                                "side":"sell","posSide":"long","sz":"0.3",
+                                "tdMode":"cross","slTriggerPx":"900",
+                                "slTriggerPxType":"mark","slOrdPx":"-1"
+                            },
+                            {
+                                "instType":"SWAP","instId":"BTC-USDT-SWAP",
+                                "ordType":"conditional","algoId":"900000003",
+                                "algoClOrdId":new_stop,"state":"live",
+                                "side":"sell","posSide":"long","sz":"0.2",
+                                "tdMode":"cross","slTriggerPx":"900",
+                                "slTriggerPxType":"mark","slOrdPx":"-1"
+                            }
+                        ])
+                    } else {serde_json::json!([])};
+                    pending.push(RecordedGet {
+                        access_key:"fixture-observer-a".into(),
+                        path:"/api/v5/trade/orders-algo-pending".into(),
+                        required_query:vec![
+                            ("instType".into(),inst.into()),
+                            ("ordType".into(),kind.into()),
+                            ("limit".into(),"100".into())
+                        ],
+                        raw_response:envelope(list),
+                    });
+                }
+            }
+        }
+        feed.advance_recorded_route(
+            "fixture-observer-a","/api/v5/trade/orders-algo-pending",pending
+        );
+        let owner=accounts.resolve("fixture-a").await.unwrap();
+        let mut latest=String::from("NOT_OBSERVED");
+        let sql=tokio::time::timeout(Duration::from_secs(16),async {
+            loop {
+                let id=intent_id.clone();
+                let observed=owner.execution.store.call(
+                    std::time::Instant::now()+Duration::from_secs(3),
+                    move |s| {
+                        let f=s.cursor("fills","SWAP")?
+                            .ok_or(okx_execution::StoreError::Invalid("T09_4_FILL_CURSOR_MISSING"))?;
+                        let b=s.cursor("bills","account")?
+                            .ok_or(okx_execution::StoreError::Invalid("T09_4_BILL_CURSOR_MISSING"))?;
+                        Ok((
+                            s.intent_fill_cost_evidence(&id,f.watermark),
+                            s.intent_fee_bill_evidence(&id,b.watermark),
+                            f.watermark,b.watermark,f.coverage_gaps,b.coverage_gaps
+                        ))
+                    }
+                ).await;
+                match observed {
+                    Ok((Ok(f),Ok(b),fw,bw,fg,bg)) => {
+                        latest=format!("fill={f:?} bill={b:?} fw={fw} bw={bw}");
+                        if f.filled_quantity==Decimal::new(2,1)
+                            && f.fill_count==1
+                            && b.linked_bill_count==1
+                            && b.conservative_verified_fee_usdt==Decimal::new(1,3)
+                            && fw>=filled_at && bw>=filled_at
+                            && fg.is_empty() && bg.is_empty()
+                        {
+                            break serde_json::json!({
+                                "fill_count":f.fill_count,
+                                "quantity":f.filled_quantity.normalize().to_string(),
+                                "fee_usdt":b.conservative_verified_fee_usdt.normalize().to_string(),
+                                "bill_count":b.linked_bill_count,
+                                "linked_bill_source_digest":b.source_digest,
+                                "fill_watermark":fw,"bill_watermark":bw
+                            });
+                        }
+                    }
+                    o => latest=format!("capture={o:?}"),
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        }).await.unwrap_or_else(|_|panic!("T09_4_CAPTURE_UNPROVEN:{latest}"));
+        let status=trade.trade(
+            "fixture-a",
+            &okx_protocol::trading::TradeRequest::Status {
+                reference:intent_id.clone()
+            },None
+        ).await.expect("T09.4 production TradeService status after raw fill");
+        assert_eq!(status["data"]["intent"]["state"],"FILLED");
+        assert_ne!(status["data"]["protection_incident"],true,
+            "T09.4 must never pass a safety protection incident");
+        let mut command=summary("risk_t09_4_after_linked_fill");
+        command.installation_id="installation_test".into();
+        let worker=risk.request(command).await.unwrap();
+        let budget=worker.budget.as_ref().unwrap().entry_budget.as_ref().unwrap();
+        assert_eq!(budget.consumed_usd,"6.003",
+            "Native settled Add must debit exactly 2.001 additional USD");
+        assert_eq!(budget.reserved_usd,"0",
+            "Worker must retain no unspent Add reservation after full fill");
+        assert_eq!(feed.outbound_posts.lock().unwrap().len(),5,
+            "fill and bill capture can NEVER submit another venue POST");
+        serde_json::json!({
+            "intent_id":intent_id,
+            "filled":sql,
+            "trade_status":status,
+            "worker_budget":worker.budget,
+            "risk_book_sequence":worker.risk_book_sequence,
+        })
+    }
+
     async fn t09_4_managed_add(context: T09_4Context) -> serde_json::Value {
         let T09_4Context {
             accounts,
@@ -323,5 +581,20 @@
             "worker_budget":worker.budget,"financial_complete":response["data"]["financial_complete"],
             "post_count":feed.outbound_posts.lock().unwrap().len()
         }));
-        serde_json::json!({"intent_id":id,"client_order_id":intent.client_order_id})
+        let settlement=t09_4_fill_phase(T09_4FillContext {
+            accounts:accounts.clone(),trade:trade.clone(),risk:risk.clone(),
+            feed:feed.clone(),intent_id:id.clone(),
+            client_id:intent.client_order_id.clone(),
+            old_client_id:prior_client_id.clone(),
+            first_fill_at_ms,terminal_fill_at_ms,
+        }).await;
+        println!("T09_4_NATIVE_ADD_SETTLEMENT_V1:{settlement}");
+        serde_json::json!({
+            "intent_id":id,"client_order_id":intent.client_order_id,
+            "central_receipt_hash":reserve.receipt_hash,
+            "sql_begin_post_at_ms":post.0,
+            "venue_order_id":"recorded-t09-add-001",
+            "account_uid":owner.configuration.account_key.verified_uid,
+            "settlement":settlement
+        })
     }
