@@ -4,6 +4,26 @@ import { actualNativeWorker, hash } from "../native-workerd.mjs";
 export async function run({root,signal}) {
   const source=await actualNativeWorker(root,signal,{statusProbe:true,secondAdmission:true,partialFills:true});
   const proof=source.nativePartialFills;
+  const cross=source.nativeCrossUidDenial;
+  const admitted=source.nativeSecondAdmission;
+  assert.ok(cross&&admitted,"independent cross-UID Native/Worker checkpoint required");
+  assert.match(cross.owner_uid,/^[a-f0-9]{64}$/);
+  assert.match(cross.foreign_uid,/^[a-f0-9]{64}$/);
+  assert.notEqual(cross.owner_uid,cross.foreign_uid);
+  assert.equal(cross.owner_uid,admitted.account_uid);
+  assert.equal(cross.owner_intent_id,admitted.intent_id);
+  assert.equal(cross.status_reason,"INTENT_NOT_FOUND");
+  assert.equal(cross.cancel_reason,"INTENT_NOT_FOUND");
+  assert.equal(cross.foreign_sql_intent_absent,true);
+  assert.equal(cross.foreign_sql_idempotency_absent,true);
+  assert.equal(cross.outbound_posts_before,4);
+  assert.equal(cross.outbound_posts_after,4);
+  assert.equal(cross.worker_budget.entry_budget.consumed_usd,
+    admitted.after_worker_budget.entry_budget.consumed_usd);
+  assert.equal(cross.worker_budget.entry_budget.reserved_usd,
+    admitted.after_worker_budget.entry_budget.reserved_usd);
+  assert.equal(cross.worker_budget.reserved_loss_usd,
+    admitted.after_worker_budget.reserved_loss_usd);
   assert.ok(proof && proof.phases.length===2,"Native account capture evidence required");
   const [partial,terminal]=proof.phases;
   for (const [phase,quantity,fee,fillCount] of [
@@ -45,7 +65,12 @@ export async function run({root,signal}) {
       {id:"partial_fee",expected:"0.0006",actual:partial.sql.fee_usdt},
       {id:"terminal_qty",expected:"0.3",actual:terminal.sql.quantity},
       {id:"terminal_fee",expected:"0.0015",actual:terminal.sql.fee_usdt},
-      {id:"cumulative_spent",expected:"4.002",actual:proof.worker_budget.entry_budget.consumed_usd}
+      {id:"cumulative_spent",expected:"4.002",actual:proof.worker_budget.entry_budget.consumed_usd},
+      {id:"foreign_uid_status_no_read",expected:"INTENT_NOT_FOUND",actual:cross.status_reason},
+      {id:"foreign_uid_cancel_no_mutation",expected:"INTENT_NOT_FOUND",actual:cross.cancel_reason},
+      {id:"foreign_uid_no_exchange_post",expected:"4",actual:String(cross.outbound_posts_after)},
+      {id:"foreign_uid_has_no_sql_intent",expected:"true",actual:String(cross.foreign_sql_intent_absent)},
+      {id:"foreign_uid_has_no_sql_key",expected:"true",actual:String(cross.foreign_sql_idempotency_absent)}
     ],
     events:[
       {stage:"public_trade_entered",owner:"TradeService",source_digest:hash(source.nativeSecondAdmission.intent_id)},
@@ -55,11 +80,17 @@ export async function run({root,signal}) {
       {stage:"fill_ingested",owner:"NativeAccountSQL",source_digest:hash([partial.sql,terminal.sql])},
       {stage:"protection_verified",owner:"TradeService",source_digest:hash([partial.protection,terminal.protection])},
       {stage:"settlement_committed",owner:"RuntimeSession/SQLiteDO",source_digest:hash(proof.worker_budget)},
-      {stage:"release_confirmed",owner:"RuntimeSession/SQLiteDO",source_digest:hash(source.nativeTerminal.opening_status.data.central_release)}
+      {stage:"release_confirmed",owner:"RuntimeSession/SQLiteDO",source_digest:hash(source.nativeTerminal.opening_status.data.central_release)},
+      {stage:"cross_uid_denial_verified",owner:"TradeService+AccountStore+RiskBook",
+        source_digest:hash([cross.owner_uid,cross.foreign_uid,cross.status_reason,
+          cross.cancel_reason,cross.foreign_sql_intent_absent,cross.worker_budget])}
     ],
     readbacks:{
       sql:[{revision:terminal.sql.fill_watermark,digest:hash([partial.sql,terminal.sql])}],
-      risk_book:[{revision:proof.risk_book_sequence,digest:hash(proof.worker_budget)}]
+      risk_book:[
+        {revision:proof.risk_book_sequence,digest:hash(proof.worker_budget)},
+        {revision:cross.risk_book_sequence,digest:hash(cross.worker_budget)}
+      ]
     },
     outbound_sends:[{account:source.nativeSecondAdmission.account_uid,intent:proof.intent_id,operation_kind:"create",count:1}]
   };
