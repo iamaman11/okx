@@ -587,6 +587,44 @@ async fn t09_8_excess_entry_denied(
     assert_eq!(available.normalize().to_string(),"3.997");
     let before_posts=feed.outbound_posts.lock().unwrap().len();
     assert_eq!(before_posts,9,"T09.8 starts strictly after two flat closes and cancels");
+    // T09.6 has just added real source-backed fills, bills and terminal
+    // settlement receipts to the existing Native SQL owners. The original
+    // production maintenance loop must review that changed campaign epoch
+    // before a new risk-increasing Execute can produce a budget denial.
+    // This is read-only waiting for the SAME two SQL owners, not a test
+    // shortcut to mark coverage complete or loosen its 5s freshness gate.
+    let origin=before.budget.as_ref().expect("T09.8 campaign budget")
+        .campaign_origin.as_ref().expect("T09.8 persisted campaign origin");
+    let from=i64::try_from(origin.started_at_ms)
+        .expect("T09.8 campaign origin fits source time");
+    let campaign=entry.campaign_id.clone();
+    let mut last_readiness=String::from("NOT_OBSERVED");
+    tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            let through=chrono::Utc::now().timestamp_millis()-2_000;
+            let mut both_ready=true;
+            for alias in ["fixture-a","fixture-b"] {
+                let owner=accounts.resolve(alias).await
+                    .expect("T09.8 existing SQL account owner");
+                let id=campaign.clone();
+                match owner.execution.store.call(
+                    std::time::Instant::now()+Duration::from_secs(2),
+                    move |s|s.verify_campaign_entry_readiness(&id,from,through)
+                ).await {
+                    Ok(())=>{},
+                    Err(reason)=>{
+                        last_readiness=format!("{alias}: {reason}");
+                        both_ready=false;
+                        break;
+                    }
+                }
+            }
+            if both_ready {break;}
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }).await.unwrap_or_else(|_|panic!(
+        "T09_8_SOURCE_READINESS_NOT_RECONCILED:{last_readiness}"
+    ));
     // Provide newly recorded, authenticated venue replies only at the
     // existing REST boundary; no exchange emulator, alternate risk owner
     // or unauthorized order outcome is fabricated.
