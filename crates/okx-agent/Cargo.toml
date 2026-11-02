@@ -33,6 +33,11 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "syn
 tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
 zeroize = { version = "1", features = ["derive"] }
 
+# The T09.7 acceptance child is a real OS process launched by a Rust test.
+# Keep Tokio process support test-only; production Agent features are unchanged.
+[dev-dependencies]
+tokio = { version = "1", features = ["process"] }
+
 [target.'cfg(windows)'.dependencies]
 keyring = { version = "4.2", default-features = false, features = ["v1"] }
 
