@@ -18,6 +18,11 @@ export async function run({root,signal}) {
   assert.equal(ack.closes.length,2,"separate 0.30 and 0.20 Close required");
   assert.deepEqual(ack.closes.map(c=>c.quantity),["0.3","0.2"]);
   assert.deepEqual(ack.closes.map(c=>c.post_count),[6,7]);
+  assert.deepEqual(
+    ack.closes.map(c=>c.source_intent_id),
+    [transcript.nativeSecondAdmission.intent_id,transcript.nativeManagedAdd.intent_id],
+    "two signed closes must reference their own distinct persisted Native entry intents"
+  );
   assert.equal(terminal.closes.length,2);
   assert.equal(terminal.entries.length,2);
   for (const c of terminal.closes) {
