@@ -339,16 +339,25 @@ async fn t09_6_status_after_local_read_defer(
     }
 }
 
+// A typed read-only test context keeps one owner for each financial
+// boundary and avoids an expanding eight-argument terminal helper.
+struct T09_6FinalizeContext<'a> {
+    accounts: &'a Arc<AccountRuntimeRegistry>,
+    trade: &'a Arc<TradeService>,
+    risk: &'a NativeRiskClient,
+    rate_budget: &'a RateBudget,
+    feed: &'a Arc<crate::accounts::recorded_support::RecordedAccountHttp>,
+    second_entry_id: &'a str,
+    add_entry_id: &'a str,
+    closes: &'a [serde_json::Value],
+}
 async fn t09_6_source_backed_close_release(
-    accounts: &Arc<AccountRuntimeRegistry>,
-    trade: &Arc<TradeService>,
-    risk: &NativeRiskClient,
-    rate_budget: &RateBudget,
-    feed: &Arc<crate::accounts::recorded_support::RecordedAccountHttp>,
-    second_entry_id: &str,
-    add_entry_id: &str,
-    closes: &[serde_json::Value],
+    ctx: T09_6FinalizeContext<'_>,
 ) -> serde_json::Value {
+    let T09_6FinalizeContext {
+        accounts, trade, risk, rate_budget, feed, second_entry_id,
+        add_entry_id, closes,
+    } = ctx;
     let mut close_results=Vec::new();    for close in closes {
         let intent=close["close_intent_id"].as_str()
             .expect("T09.6 real close intent");
