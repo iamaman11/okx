@@ -143,7 +143,7 @@
                 ] {
                     let data=if inst=="SWAP" && kind=="conditional" {
                         serde_json::json!([{
-                            "instId":"BTC-USDT-SWAP","ordType":"conditional",
+                            "instType":"SWAP","instId":"BTC-USDT-SWAP","ordType":"conditional",
                             "algoId":"900000002","algoClOrdId":old_stop,
                             "state":"live","side":"sell","posSide":"long","sz":"0.3",
                             "tdMode":"cross","slTriggerPx":"900",
