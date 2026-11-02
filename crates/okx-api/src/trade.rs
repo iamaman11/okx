@@ -665,7 +665,7 @@ impl TradeApi {
         // GETs and parser are used: only local no-send defers can wait.
         // After HELD, the central causal fence still independently limits
         // this read and rejects it if too slow.
-        let admission_deadline = Instant::now() + Duration::from_millis(2_500);
+        let admission_deadline = Instant::now() + Duration::from_millis(5_000);
         let calls = scopes
             .into_iter()
             .map(|(kind, order_type)| {

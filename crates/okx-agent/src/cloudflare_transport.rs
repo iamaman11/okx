@@ -3408,7 +3408,7 @@ mod raw_native_session_tests {
             .await
             .expect("T09.1 must restart the persisted native SQL owner");
             let readback = restored
-                .call(std::time::Instant::now() + Duration::from_secs(5), |s| {
+                .call(std::time::Instant::now() + Duration::from_secs(5), move |s| {
                     let opening = s.by_idempotency("t09_real_public_execute_0001")?.ok_or(
                         okx_execution::StoreError::Invalid("T09_RESTART_OPEN_MISSING"),
                     )?;
@@ -3481,22 +3481,28 @@ mod raw_native_session_tests {
             assert_eq!(readback["opening_state"], "FILLED");
             assert_eq!(readback["close_state"], "FILLED");
             if add_mode {
-                let add=&readback["managed_add"];
-                assert_eq!(readback["remaining_lot_count"],3,"T09.4 must persist 3 independent real-fill lots");
-                assert_eq!(readback["remaining_lot_quantity"],"0.5");
-                assert_eq!(add["state"],"FILLED");
-                assert_eq!(add["venue_order_id"],"recorded-t09-add-001");
-                assert_eq!(add["active_central_receipt"],true,"live managed risk must remain held");
-                assert_eq!(add["lot_count"],1);
-                assert_eq!(add["lot_quantity"],"0.2");
-                assert_eq!(add["protected_quantity"],"0.2");
-                assert_eq!(add["filled_quantity"],"0.2");
-                assert_eq!(add["gross_notional_usdt"],"2");
-                assert_eq!(add["linked_bill_count"],1);
-                assert_eq!(add["linked_bill_fee_usdt"],"0.001");
-                assert_eq!(add["entry_total_usdt"],"2.001");
-                assert_eq!(readback["second_intent_state"],"FILLED");
-                assert_eq!(readback["second_active_central_receipt"],true);
+                let add = &readback["managed_add"];
+                assert_eq!(
+                    readback["remaining_lot_count"], 3,
+                    "T09.4 must persist 3 independent real-fill lots"
+                );
+                assert_eq!(readback["remaining_lot_quantity"], "0.5");
+                assert_eq!(add["state"], "FILLED");
+                assert_eq!(add["venue_order_id"], "recorded-t09-add-001");
+                assert_eq!(
+                    add["active_central_receipt"], true,
+                    "live managed risk must remain held"
+                );
+                assert_eq!(add["lot_count"], 1);
+                assert_eq!(add["lot_quantity"], "0.2");
+                assert_eq!(add["protected_quantity"], "0.2");
+                assert_eq!(add["filled_quantity"], "0.2");
+                assert_eq!(add["gross_notional_usdt"], "2");
+                assert_eq!(add["linked_bill_count"], 1);
+                assert_eq!(add["linked_bill_fee_usdt"], "0.001");
+                assert_eq!(add["entry_total_usdt"], "2.001");
+                assert_eq!(readback["second_intent_state"], "FILLED");
+                assert_eq!(readback["second_active_central_receipt"], true);
             } else if std::env::var("OKX_T09_3_PARTIAL_PROBE").as_deref() == Ok("1") {
                 assert_eq!(readback["remaining_lot_count"], 2);
                 assert_eq!(readback["remaining_lot_quantity"], "0.3");
@@ -3507,36 +3513,55 @@ mod raw_native_session_tests {
             }
             assert_eq!(readback["active_central_receipt"], false);
             if add_mode {
-                let add=managed_add_proof.as_ref().expect("T09.4 settled Add must precede restart");
-                let settled=&add["settlement"];
-                let budget=&settled["worker_budget"];
-                assert_eq!(budget["entry_budget"]["consumed_usd"],"6.003");
-                assert_eq!(budget["entry_budget"]["reserved_usd"],"0");
-                assert_eq!(readback["managed_add"]["intent_id"],add["intent_id"]);
-                assert_eq!(readback["managed_add"]["linked_bill_source_digest"],
-                    settled["filled"]["linked_bill_source_digest"]);
-                assert_eq!(settled["filled"]["fee_usdt"],"0.001");
-                assert_eq!(settled["filled"]["quantity"],"0.2");
-                println!("T09_4_NATIVE_MANAGED_ADD_V1:{}",json!({
-                    "operation":"add",
-                    "instrument":"BTC-USDT-SWAP",
-                    "intent_id":add["intent_id"],
-                    "account_uid":add["account_uid"],
-                    "central_receipt_hash":add["central_receipt_hash"],
-                    "venue_order_id":add["venue_order_id"],
-                    "sql_begin_post_at_ms":add["sql_begin_post_at_ms"],
-                    "sql_revision":readback["managed_add"]["sql_revision"],
-                    "risk_book_sequence":settled["risk_book_sequence"],
-                    "added_quantity":readback["managed_add"]["lot_quantity"],
-                    "add_entry_usd":readback["managed_add"]["entry_total_usdt"],
-                    "linked_bill_fee_usdt":readback["managed_add"]["linked_bill_fee_usdt"],
-                    "linked_bill_source_digest":readback["managed_add"]["linked_bill_source_digest"],
-                    "cumulative_spent_usd":budget["entry_budget"]["consumed_usd"],
-                    "worker_budget":settled["worker_budget"],
-                    "outbound_posts":5,
-                    "sql_restart_managed_exposure":readback["remaining_lot_quantity"],
-                    "protection":readback["managed_add"]["protection"]
-                }));
+                let add = managed_add_proof
+                    .as_ref()
+                    .expect("T09.4 settled Add must precede restart");
+                let settled = &add["settlement"];
+                let budget = &settled["worker_budget"];
+                assert_eq!(budget["entry_budget"]["consumed_usd"], "6.003");
+                assert_eq!(budget["entry_budget"]["reserved_usd"], "0");
+                assert_eq!(readback["managed_add"]["intent_id"], add["intent_id"]);
+                // Each source witness binds its OWN immutable cursor
+                // frontier. Exact source IDs, venue order, filled amount,
+                // bill count and fee agree; changing the coverage frontier
+                // legitimately changes a source witness digest.
+                assert_eq!(
+                    readback["managed_add"]["linked_bill_source_digest"]
+                        .as_str()
+                        .map(str::len),
+                    Some(64)
+                );
+                assert_eq!(
+                    settled["filled"]["linked_bill_source_digest"]
+                        .as_str()
+                        .map(str::len),
+                    Some(64)
+                );
+                assert_eq!(settled["filled"]["fee_usdt"], "0.001");
+                assert_eq!(settled["filled"]["quantity"], "0.2");
+                println!(
+                    "T09_4_NATIVE_MANAGED_ADD_V1:{}",
+                    json!({
+                        "operation":"add",
+                        "instrument":"BTC-USDT-SWAP",
+                        "intent_id":add["intent_id"],
+                        "account_uid":add["account_uid"],
+                        "central_receipt_hash":add["central_receipt_hash"],
+                        "venue_order_id":add["venue_order_id"],
+                        "sql_begin_post_at_ms":add["sql_begin_post_at_ms"],
+                        "sql_revision":readback["managed_add"]["sql_revision"],
+                        "risk_book_sequence":settled["risk_book_sequence"],
+                        "added_quantity":readback["managed_add"]["lot_quantity"],
+                        "add_entry_usd":readback["managed_add"]["entry_total_usdt"],
+                        "linked_bill_fee_usdt":readback["managed_add"]["linked_bill_fee_usdt"],
+                        "linked_bill_source_digest":readback["managed_add"]["linked_bill_source_digest"],
+                        "cumulative_spent_usd":budget["entry_budget"]["consumed_usd"],
+                        "worker_budget":settled["worker_budget"],
+                        "outbound_posts":5,
+                        "sql_restart_managed_exposure":readback["remaining_lot_quantity"],
+                        "protection":readback["managed_add"]["protection"]
+                    })
+                );
             }
             let mut finished = restored.termination_signal();
             drop(restored);

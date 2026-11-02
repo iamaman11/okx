@@ -673,11 +673,11 @@ impl TradeService {
                         // RiskBook reservation. Reuse the sole full-cohort
                         // signed census, never simply subtract the old qty.
                         if position_qty > filled {
-                            let aggregate_result=match self.governance.read().await.clone() {
-                                Some(state)=>self.census(&state).await.map(|_|()),
-                                None=>Err("AUTHORITY_UNAVAILABLE".into()),
+                            let aggregate_result = match self.governance.read().await.clone() {
+                                Some(state) => self.census(&state).await.map(|_| ()),
+                                None => Err("AUTHORITY_UNAVAILABLE".into()),
                             };
-                            if let Err(reason)=aggregate_result {
+                            if let Err(reason) = aggregate_result {
                                 eprintln!("MANAGED_AGGREGATE_CENSUS_DENIAL_V1:{reason}");
 
                                 protection_failed = true;
@@ -2199,15 +2199,31 @@ mod entry_cost_status_tests {
     fn t09_4_add_attached_stop_must_cover_exact_increment_not_old_position() {
         let add = dec("0.2").unwrap();
         let net = dec("0.5").unwrap();
-        assert!(protection_covers_managed_increment("buy", "sell", add, net, "0.2"));
-        assert!(!protection_covers_managed_increment("buy", "sell", add, net, "0.5"));
-        assert!(!protection_covers_managed_increment("buy", "sell", add, net, "0.19"));
-        assert!(!protection_covers_managed_increment("buy", "buy", add, net, "0.2"));
-        assert!(!protection_covers_managed_increment(
-            "buy", "sell", Decimal::ZERO, net, "0.2"
+        assert!(protection_covers_managed_increment(
+            "buy", "sell", add, net, "0.2"
         ));
         assert!(!protection_covers_managed_increment(
-            "buy", "sell", dec("0.6").unwrap(), net, "0.6"
+            "buy", "sell", add, net, "0.5"
+        ));
+        assert!(!protection_covers_managed_increment(
+            "buy", "sell", add, net, "0.19"
+        ));
+        assert!(!protection_covers_managed_increment(
+            "buy", "buy", add, net, "0.2"
+        ));
+        assert!(!protection_covers_managed_increment(
+            "buy",
+            "sell",
+            Decimal::ZERO,
+            net,
+            "0.2"
+        ));
+        assert!(!protection_covers_managed_increment(
+            "buy",
+            "sell",
+            dec("0.6").unwrap(),
+            net,
+            "0.6"
         ));
     }
 
