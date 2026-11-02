@@ -765,6 +765,11 @@ mod tests {
         }
         let local = store.recovery_snapshot(now()).unwrap();
         assert!(local.coverage_complete, "recovery test requires fresh source cursors");
+        let expired = store.recovery_snapshot(fresh_observation + 5_001).unwrap();
+        assert!(
+            !expired.coverage_complete,
+            "the same recovery evidence must fail closed once its 5s source TTL expires"
+        );
         assert_eq!(local.cumulative_loss_usd, Decimal::ONE);
         commit_recovery(
             &mut store,
