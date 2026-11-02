@@ -604,7 +604,7 @@ async fn t09_8_excess_entry_denied(
     // can expire before the *next* legal reconciliation attempt. Give
     // that owner one maximum backoff cycle without changing any source TTL,
     // admission deadline or economic authority.
-    tokio::time::timeout(Duration::from_secs(45), async {
+    let readiness=tokio::time::timeout(Duration::from_secs(45), async {
         loop {
             let through=chrono::Utc::now().timestamp_millis()-2_000;
             let mut both_ready=true;
@@ -627,9 +627,25 @@ async fn t09_8_excess_entry_denied(
             if both_ready {break;}
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
-    }).await.unwrap_or_else(|_|panic!(
-        "T09_8_SOURCE_READINESS_NOT_RECONCILED:{last_readiness}"
-    ));
+    }).await;
+    if readiness.is_err() {
+        let through=chrono::Utc::now().timestamp_millis()-2_000;
+        let mut diagnostics=Vec::new();
+        for alias in ["fixture-a","fixture-b"] {
+            let owner=accounts.resolve(alias).await
+                .expect("T09.8 diagnostic account owner");
+            let id=campaign.clone();
+            let source=owner.execution.store.call(
+                std::time::Instant::now()+Duration::from_secs(2),
+                move |s|s.campaign_readiness_diagnostic(&id,from,through)
+            ).await;
+            diagnostics.push(format!("{alias}:{source:?}"));
+        }
+        panic!(
+            "T09_8_SOURCE_READINESS_NOT_RECONCILED:{last_readiness}:{}",
+            diagnostics.join("|")
+        );
+    }
     // Provide newly recorded, authenticated venue replies only at the
     // existing REST boundary; no exchange emulator, alternate risk owner
     // or unauthorized order outcome is fabricated.
