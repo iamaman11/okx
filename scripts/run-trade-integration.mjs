@@ -41,6 +41,22 @@ const requiredStagesByCase = new Map([
   ["T09-SPEC", mandatoryStages.slice(0, 4)],
 ]);
 const entryGolden = new Map([["T09.1", "1.0005"]]);
+// Independent immutable acceptance constants from #449 §4, never calculated
+// from the same production finance function under test.
+const terminalGolden = new Map([
+  ["T09.6", new Map([
+    ["remaining_exposure", "0"], ["orphan_algo_orders", "0"],
+    ["outstanding_reserve_usd", "0"], ["campaign_consumed_usd", "6.003"],
+  ])],
+  ["T09.7", new Map([
+    ["equity_a_usd", "99.994"], ["campaign_consumed_usd", "6.003"],
+    ["duplicate_posts", "0"],
+  ])],
+  ["T09.8", new Map([
+    ["campaign_consumed_usd", "6.003"], ["remaining_entry_budget_usd", "3.997"],
+    ["denial_reason", "ENTRY_BUDGET_EXCEEDED"],
+  ])],
+]);
 function usage() {
   throw Error("USAGE: --list | --suite t09,t10 --artifacts DIR | --case T10-05 --artifacts DIR");
 }
@@ -103,6 +119,14 @@ function verified(output, caseId) {
   if (golden && !output.assertions.some(a => a.id === "opening_spent_usd"
       && a.expected === golden && a.actual === golden))
     throw Error(`${failures.invalid}:INDEPENDENT_ENTRY_GOLDEN_MISSING`);
+  const terminal = terminalGolden.get(caseId);
+  if (terminal) {
+    for (const [id, expected] of terminal) {
+      if (!output.assertions.some(a => a.id === id
+          && a.expected === expected && a.actual === expected))
+        throw Error(`${failures.invalid}:INDEPENDENT_TERMINAL_GOLDEN_MISSING:${id}`);
+    }
+  }
   if (["T09.0", "T09.5"].includes(caseId)
       && (output.provenance?.schema !== "okx.native-workerd-transcript/v1"
       || !/^[a-f0-9]{64}$/.test(output.provenance?.sha256 ?? "")))
@@ -128,6 +152,13 @@ function verified(output, caseId) {
     .reduce((count, send) => count + send.count, 0);
   if (["T09.1", "T09.2", "T09.4", "T09-SPEC"].includes(caseId) && createCount === 0)
     throw Error(`${failures.invalid}:VENUE_CREATE_NOT_OBSERVED`);
+  // The two separately owned lots need two real, distinct, reduce-only
+  // close operations; accounting readback alone is not a venue Close proof.
+  if (caseId === "T09.6" && createCount !== 2)
+    throw Error(`${failures.invalid}:MANAGED_CLOSE_SENDS_MISSING`);
+  // Recovery is not a license to replay an already-sent order.
+  if (caseId === "T09.7" && createCount !== 0)
+    throw Error(`${failures.invalid}:RESTART_REPOST_OBSERVED`);
   if (["T09.8", "T10-01", "T10-04"].includes(caseId) && createCount !== 0)
     throw Error(`${failures.invalid}:FORBIDDEN_VENUE_CREATE`);
   return output;
@@ -166,7 +197,46 @@ function selfTest() {
   let forbidden = false;
   try { verified(rejected, "T09.8"); } catch { forbidden = true; }
   if (!forbidden) throw Error("SELF_TEST_FALSE_PASS:denial_with_create");
-  process.stdout.write(`TRADE_INTEGRATION_RUNNER_SELF_TEST_PASS negatives=${negatives + 1}\n`);
+  // The next three scenarios cannot pass with a generic "all green"
+  // object or with only one of the two managed closes performed.
+  const terminalCase = structuredClone(full);
+  terminalCase.case_id = "T09.6";
+  terminalCase.assertions = [...terminalGolden.get("T09.6")].map(
+    ([id, value]) => ({ id, expected: value, actual: value }));
+  terminalCase.outbound_sends = [
+    { account: "A", intent: "close-030", operation_kind: "create", count: 1 },
+    { account: "A", intent: "close-020", operation_kind: "create", count: 1 },
+  ];
+  verified(terminalCase, "T09.6");
+  function rejectTerminal(candidate, id, reason) {
+    let blocked = false;
+    try { verified(candidate, id); } catch { blocked = true; }
+    if (!blocked) throw Error("SELF_TEST_FALSE_PASS:" + reason);
+  }
+  const missingClose = structuredClone(terminalCase);
+  missingClose.outbound_sends.pop();
+  rejectTerminal(missingClose, "T09.6", "missing_close");
+  const missingMoney = structuredClone(terminalCase);
+  missingMoney.assertions.pop();
+  rejectTerminal(missingMoney, "T09.6", "missing_money");
+
+  const restart = structuredClone(terminalCase);
+  restart.case_id = "T09.7";
+  restart.assertions = [...terminalGolden.get("T09.7")].map(
+    ([id, value]) => ({ id, expected: value, actual: value }));
+  restart.outbound_sends = [];
+  verified(restart, "T09.7");
+  restart.outbound_sends = terminalCase.outbound_sends;
+  rejectTerminal(restart, "T09.7", "restart_repost");
+  const budget = structuredClone(terminalCase);
+  budget.case_id = "T09.8";
+  budget.assertions = [...terminalGolden.get("T09.8")].map(
+    ([id, value]) => ({ id, expected: value, actual: value }));
+  budget.outbound_sends = [];
+  verified(budget, "T09.8");
+  budget.assertions[2].actual = "STALE_SOURCE";
+  rejectTerminal(budget, "T09.8", "wrong_denial");
+  process.stdout.write(`TRADE_INTEGRATION_RUNNER_SELF_TEST_PASS negatives=${negatives + 5}\n`);
 }
 const cli = args(process.argv.slice(2));
 if (cli.selfTest) { selfTest(); process.exit(0); }

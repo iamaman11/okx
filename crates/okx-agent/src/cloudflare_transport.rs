@@ -469,6 +469,7 @@ mod raw_native_session_tests {
     }
     include!("trade_integration_t09_3.rs");
     include!("trade_integration_t09_4.rs");
+    include!("trade_integration_t09_6.rs");
 
     /// Retry permission is test-only and limited to an explicitly read-only
     /// Preview that failed at the *local* request-admission boundary. The
@@ -790,7 +791,9 @@ mod raw_native_session_tests {
         );
         let token = handoff["token"].as_str().unwrap().to_owned();
         let reservation_key = handoff["reservation_key"].as_str().unwrap_or("").to_owned();
-        let add_mode = std::env::var("OKX_T09_4_MANAGED_ADD_PROBE").as_deref() == Ok("1");
+        let close_mode = std::env::var("OKX_T09_6_CLOSE_PROBE").as_deref() == Ok("1");
+        let add_mode =
+            close_mode || std::env::var("OKX_T09_4_MANAGED_ADD_PROBE").as_deref() == Ok("1");
 
         // The same real public WS coordinator consumes recorded raw market
         // frames. These are immutable venue observations, not a fabricated
@@ -3330,6 +3333,25 @@ mod raw_native_session_tests {
                         market_tx.send(()).expect("T09.4 signed market reply handoff failed");
                         let add=task.await.expect("T09.4 managed Add native task");
                         println!("T09_4_NATIVE_ADD_BOUND_V1:{add}");
+                        if close_mode {
+                            let add_id=add["intent_id"].as_str().expect("T09.6 add intent id").to_owned();
+                            let mut closes=Vec::new();
+                            for (opening_intent_id,operation_key,quantity,order_id,post_count) in [
+                                (new_intent_id.clone(),"t09_real_public_close_030_0001","0.3","recorded-t09-close-030",6),
+                                (add_id,"t09_real_public_close_020_0001","0.2","recorded-t09-close-020",7),
+                            ] {
+                                refresh_recorded_market();
+                                closes.push(t09_6_close_owned_lot(T09_6CloseContext {
+                                    trade:trade.clone(),feed:feed.clone(),opening_intent_id,
+                                    operation_key:operation_key.into(),quantity,
+                                    venue_order_id:order_id,expected_post_count:post_count,
+                                }).await);
+                            }
+                            println!("T09_6_NATIVE_CLOSE_ACK_V1:{}",serde_json::json!({
+                                "closes":closes,"created_posts":feed.outbound_posts.lock().unwrap().len(),
+                                "terminal_proven":false
+                            }));
+                        }
                         managed_add_proof = Some(add);
                     }
                     second_shutdown.send(true).unwrap();
