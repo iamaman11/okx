@@ -1833,12 +1833,7 @@ impl AccountStore {
             .optional()?;
         match recorded {
             Some((Some(at), state, intent_state, order_id))
-                if verified_durable_post_fence(
-                    at,
-                    &state,
-                    &intent_state,
-                    order_id.as_deref(),
-                ) =>
+                if verified_durable_post_fence(at, &state, &intent_state, order_id.as_deref()) =>
             {
                 Ok((at, state))
             }
