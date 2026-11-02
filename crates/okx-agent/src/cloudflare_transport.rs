@@ -3280,6 +3280,7 @@ mod raw_native_session_tests {
                             "post_ack_financial_complete":accepted["data"]["financial_complete"]
                         })
                     );
+                    let mut captured_signed_times=None;
                     if std::env::var("OKX_T09_3_PARTIAL_PROBE").as_deref() == Ok("1") {
                         let (first, ts) = tokio::spawn(t09_3_phase(
                             accounts.clone(),trade.clone(),feed.clone(),
@@ -3289,6 +3290,7 @@ mod raw_native_session_tests {
                             accounts.clone(),trade.clone(),feed.clone(),
                             new_intent_id.clone(),persisted.client_order_id.clone(),Some(ts),
                         )).await.expect("T09.3 terminal native task");
+                        captured_signed_times=Some((first["raw_history_event_at_ms"].as_i64().unwrap(),terminal["raw_history_event_at_ms"].as_i64().unwrap()));
                         let mut summary_cmd=summary("risk_t09_3_after_terminal");
                         summary_cmd.installation_id="installation_test".into();
                         let after=risk.request(summary_cmd).await.unwrap();
@@ -3304,12 +3306,12 @@ mod raw_native_session_tests {
                     }
                     if add_mode {
                         refresh_recorded_market();
+                        let (first_event_ms,last_event_ms)=captured_signed_times.expect("T09.4 requires T09.3 signed event times");
                         let task=tokio::spawn(t09_4_managed_add(
                             accounts.clone(),trade.clone(),risk.clone(),feed.clone(),
                             persisted.client_order_id.clone(),
                             campaign_id.clone(),native_origin,
-                            first["raw_history_event_at_ms"].as_i64().unwrap(),
-                            terminal["raw_history_event_at_ms"].as_i64().unwrap(),
+                            first_event_ms,last_event_ms,
                         ));
                         let add=task.await.expect("T09.4 managed Add native task");
                         println!("T09_4_NATIVE_ADD_BOUND_V1:{add}");
