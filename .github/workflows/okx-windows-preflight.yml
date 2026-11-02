@@ -130,6 +130,20 @@ jobs:
           npm ci --prefix cloudflare/okx-mcp --ignore-scripts --no-audit --no-fund
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      # Component-only source: genuine persisted Workerd DO, concurrently
+      # processing A/B RESERVE. This is not full Native T10-07 acceptance.
+      - name: Verify persisted two-account central campaign cap
+        if: steps.request.outputs.case == 'T09.3' || steps.request.outputs.case == 'ALL26'
+        shell: pwsh
+        run: |
+          $artifacts = Join-Path $env:RUNNER_TEMP "trade-integration"
+          New-Item -ItemType Directory -Force -Path $artifacts | Out-Null
+          $evidence = Join-Path $artifacts "t10-07-worker-component.log"
+          node scripts/trade-integration/worker-shared-cap.mjs *> $evidence
+          $status = $LASTEXITCODE
+          Get-Content -Path $evidence
+          if ($status -ne 0) { exit $status }
+
       - name: Run approved recorded Native and Worker scenario
         shell: pwsh
         env:
