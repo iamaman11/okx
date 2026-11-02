@@ -116,8 +116,8 @@
                 match observed {
                     Ok((Ok(f),Ok(b),fw,bw,fg,bg)) => {
                         last=format!("fill={f:?} bill={b:?} fw={fw} bw={bw}");
-                        if f.filled_quantity==qty && f.fill_count==fills_count
-                            && b.linked_bill_count==fills_count
+                        if f.filled_quantity==qty && f.fill_count==fills_count as u64
+                            && b.linked_bill_count==fills_count as u64
                             && b.conservative_verified_fee_usdt==fee
                             && fw>=now_ms && bw>=now_ms && fg.is_empty() && bg.is_empty() {
                             break serde_json::json!({
@@ -135,7 +135,7 @@
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }
         }).await.unwrap_or_else(|_|panic!("T09_3_CAPTURE_UNPROVEN terminal={terminal}: {last}"));
-        let status=trade.trade("fixture-a",&TradeRequest::Status{reference:id},None)
+        let status=trade.trade("fixture-a",&okx_protocol::trading::TradeRequest::Status{reference:id},None)
             .await.expect("T09.3 real TradeService status");
         if !terminal {
             assert_ne!(status["data"]["financial_complete"],true,
