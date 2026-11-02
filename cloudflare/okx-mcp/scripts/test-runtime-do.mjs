@@ -464,6 +464,7 @@ try {
           t09_2_last_phase:phases.at(-1) ?? null,
           t09_2_phases:phases.slice(-10),
           rust_assertion:cause.slice(0, 1900) || "RUST_CHILD_EXIT_WITHOUT_ASSERTION",
+          maintenance_errors:lines.filter(line => line.includes("OKX_ENTRY_BASELINE_V1")).slice(-12).map(line => line.slice(0, 240)),
           restart_reached:recorded.includes("T09_1_NATIVE_SQL_RESTART_V1:"),
           terminal_reached:recorded.includes("T09_1_NATIVE_TERMINAL_CLOSE_V1:"),
         }) + "\n");
