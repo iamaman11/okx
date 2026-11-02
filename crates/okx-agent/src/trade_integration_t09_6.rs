@@ -306,7 +306,9 @@ async fn t09_6_source_backed_close_release(
         assert_eq!(status["data"]["intent"]["state"],"FILLED",
             "T09.6 close must be terminal from signed venue GET");
         assert_eq!(status["data"]["central_release"]["state"],"verified",
-            "T09.6 reducing Close must discharge its native terminal receipt");
+            "T09.6 reducing Close must discharge its native terminal receipt; financial_error={}, financial_complete={}, release={}, protection_incident={}",
+            status["data"]["financial_error"],status["data"]["financial_complete"],
+            status["data"]["central_release"],status["data"]["protection_incident"]);
         close_results.push(serde_json::json!({
             "intent_id":intent,"state":status["data"]["intent"]["state"],
             "release":status["data"]["central_release"],
