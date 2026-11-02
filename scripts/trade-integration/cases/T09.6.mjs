@@ -26,6 +26,31 @@ export async function run({root,signal}) {
   }
   for (const e of terminal.entries)
     assert.equal(e.release.state,"verified");
+  // Seven independent immutable source bills: four entry + three exit.
+  // Close ACK/flat venue state alone cannot establish this money proof.
+  const billDebits=new Map([
+    ["bill:t09-entry-bill-001","-0.0005"],
+    ["bill:t09-second-001-bill","-0.0006"],
+    ["bill:t09-second-002-bill","-0.0009"],
+    ["bill:t09-managed-add-001-bill","-0.001"],
+    ["bill:t09-close-bill-001","-0.0005"],
+    ["bill:t09-managed-close-030-bill","-0.0015"],
+    ["bill:t09-managed-close-020-bill","-0.001"],
+  ]);
+  const observedBills=terminal.fee_bill_evidence;
+  assert.ok(Array.isArray(observedBills));
+  assert.equal(observedBills.length,billDebits.size);
+  for (const bill of observedBills) {
+    assert.equal(bill.amount_usdt,billDebits.get(bill.economic_event_key),
+      "no fabricated, missing or duplicated fee bill amount");
+    assert.ok(Number.isSafeInteger(bill.legs) && bill.legs>0,
+      "fee must be proven by immutable economic source");
+    assert.ok(billDebits.delete(bill.economic_event_key),
+      "unexpected or repeated economic fee source");
+  }
+  assert.equal(billDebits.size,0);
+  assert.equal(terminal.entry_fees_usdt,"-0.003");
+  assert.equal(terminal.exit_fees_usdt,"-0.003");
   assert.equal(sources.flat,true);
   assert.equal(sources.capture_reason,null,"financial owner must report no source error");
   assert.equal(terminal.remaining_lots,0);
@@ -56,6 +81,9 @@ export async function run({root,signal}) {
         actual:terminal.worker_budget.entry_budget.consumed_usd},
       {id:"central_reserved_loss_usd",expected:"0",
         actual:terminal.worker_budget.reserved_loss_usd},
+      {id:"entry_fees_usdt",expected:"-0.003",actual:terminal.entry_fees_usdt},
+      {id:"exit_fees_usdt",expected:"-0.003",actual:terminal.exit_fees_usdt},
+      {id:"verified_fee_bill_count",expected:"7",actual:String(observedBills.length)},
       {id:"total_mutation_posts",expected:"9",actual:String(terminal.outbound_posts)},
     ],
     events:[
