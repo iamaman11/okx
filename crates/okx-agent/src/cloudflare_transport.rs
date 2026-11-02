@@ -467,6 +467,8 @@ mod raw_native_session_tests {
             action: RiskCommandAction::Summary {},
         }
     }
+    include!("trade_integration_t09_3.rs");
+
     /// Retry permission is test-only and limited to an explicitly read-only
     /// Preview that failed at the *local* request-admission boundary. The
     /// production RateBudget supplies the exact no-send defer: no fixed sleep,
@@ -3267,6 +3269,28 @@ mod raw_native_session_tests {
                             "post_ack_financial_complete":accepted["data"]["financial_complete"]
                         })
                     );
+                    if std::env::var("OKX_T09_3_PARTIAL_PROBE").as_deref() == Ok("1") {
+                        let (first, ts) = tokio::spawn(t09_3_phase(
+                            accounts.clone(),trade.clone(),feed.clone(),
+                            new_intent_id.clone(),persisted.client_order_id.clone(),None,
+                        )).await.expect("T09.3 partial native task");
+                        let (terminal, _) = tokio::spawn(t09_3_phase(
+                            accounts.clone(),trade.clone(),feed.clone(),
+                            new_intent_id.clone(),persisted.client_order_id.clone(),Some(ts),
+                        )).await.expect("T09.3 terminal native task");
+                        let mut summary_cmd=summary("risk_t09_3_after_terminal");
+                        summary_cmd.installation_id="installation_test".into();
+                        let after=risk.request(summary_cmd).await.unwrap();
+                        println!("T09_3_NATIVE_PARTIAL_TERMINAL_V1:{}",
+                            serde_json::json!({
+                                "intent_id":new_intent_id,
+                                "phases":[first,terminal],
+                                "worker_budget":after.budget,
+                                "risk_book_sequence":after.risk_book_sequence,
+                                "outbound_posts":feed.outbound_posts.lock().unwrap().len()
+                            })
+                        );
+                    }
                     second_shutdown.send(true).unwrap();
                     tokio::time::timeout(Duration::from_secs(10), second_maintenance)
                         .await

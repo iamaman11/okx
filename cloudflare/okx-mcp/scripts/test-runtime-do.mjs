@@ -458,6 +458,7 @@ try {
     const afterNative = await summary(afterNativeSocket, "risk_after_native_real_wss_0001");
     if (process.env.OKX_T09_1_STATUS_PROBE === "1") {
       const secondAdmission = process.env.OKX_T09_2_ADMISSION_PROBE === "1";
+      const partialFills = process.env.OKX_T09_3_PARTIAL_PROBE === "1";
       // T09.1 has already closed the exact public order and released its
       // reservation. Requiring reserved_loss > 2 here would incorrectly
       // demand that a settled RELEASE remain HELD. Compare two independent
@@ -485,9 +486,11 @@ try {
         assert.equal(admitted.create_posts_total, 4);
         assert.equal(admitted.quote_entry_usd, "3.0015");
         assert.equal(admitted.preview_reserved_entry_usd, "4");
-        assert.equal(afterNative.budget?.entry_budget?.reserved_usd, "7.0015");
-        assert.equal(afterNative.budget?.entry_budget?.consumed_usd, "1.0005");
-        assert.deepEqual(afterNative.budget, admitted.after_worker_budget,
+        assert.equal(afterNative.budget?.entry_budget?.reserved_usd, partialFills ? "4" : "7.0015");
+        assert.equal(afterNative.budget?.entry_budget?.consumed_usd, partialFills ? "4.002" : "1.0005");
+        assert.deepEqual(afterNative.budget, partialFills
+          ? receipt(stdout, "T09_3_NATIVE_PARTIAL_TERMINAL_V1").worker_budget
+          : admitted.after_worker_budget,
           "T09.2 persisted RiskBook readback must equal Native production summary");
         console.log("T09_2_WORKER_AFTER_RECONNECT_V1:" + JSON.stringify({
           connection_generation:afterNativeSocket.hello.connection_generation,
