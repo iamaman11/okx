@@ -227,7 +227,7 @@ try {
         cwd: fileURLToPath(new URL("../../../", import.meta.url)),
         env: { ...process.env, OKX_INTEGRATION_HANDOFF_PATH: handoffPath },
         maxBuffer: 8 * 1024 * 1024,
-        timeout: 180_000,
+        timeout: process.env.OKX_T09_6_CLOSE_PROBE === "1" ? 220_000 : 180_000,
       },
     );
     nativeProcess.catch(() => {});
