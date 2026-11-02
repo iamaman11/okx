@@ -3308,6 +3308,8 @@ mod raw_native_session_tests {
                             accounts.clone(),trade.clone(),risk.clone(),feed.clone(),
                             persisted.client_order_id.clone(),
                             campaign_id.clone(),native_origin,
+                            first["raw_history_event_at_ms"].as_i64().unwrap(),
+                            terminal["raw_history_event_at_ms"].as_i64().unwrap(),
                         ));
                         let add=task.await.expect("T09.4 managed Add native task");
                         println!("T09_4_NATIVE_ADD_BOUND_V1:{add}");

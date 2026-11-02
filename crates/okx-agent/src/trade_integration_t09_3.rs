@@ -143,6 +143,7 @@
         }
         (serde_json::json!({
             "phase":if terminal {"terminal"} else {"partial"},
+            "raw_history_event_at_ms":now_ms,
             "sql":sql,"status":status["status"],
             "intent_state":status["data"]["intent"]["state"],
             "financial_complete":status["data"]["financial_complete"],

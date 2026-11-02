@@ -10,6 +10,8 @@
         prior_client_id: String,
         campaign_id: String,
         native_origin: i64,
+        first_fill_at_ms: i64,
+        terminal_fill_at_ms: i64,
     ) -> serde_json::Value {
         use crate::accounts::recorded_support::{RecordedGet, RecordedPost};
         use okx_protocol::trading::{
@@ -18,6 +20,63 @@
         // The sole existing financial owner must commit both source frontiers
         // before an increase. Never infer freshness from the T09.3 status
         // response or add an independent importer.
+
+        // Repeated signed history observations may contain the SAME immutable
+        // fill/bill IDs. Their true event times never change; the existing
+        // financial owner may capture them again to certify a fresh frontier.
+        let raw_history=|v|serde_json::to_vec(&serde_json::json!({
+            "code":"0","msg":"","data":v
+        })).unwrap();
+        let mut known_fills=Vec::new();
+        let mut known_bills=Vec::new();
+        for (idx,size,fee,event_ms) in [
+            (1,"0.12","-0.0006",first_fill_at_ms),
+            (2,"0.18","-0.0009",terminal_fill_at_ms)
+        ] {
+            let event=format!("t09-second-{idx:03}");
+            known_fills.push(serde_json::json!({
+                "instType":"SWAP","instId":"BTC-USDT-SWAP",
+                "tradeId":format!("{event}-trade"),
+                "ordId":"recorded-t09-second-001",
+                "clOrdId":"__REQUEST_CL_ORD_ID__",
+                "billId":format!("{event}-bill"),
+                "subType":"3","side":"buy","posSide":"long",
+                "fillPx":"1000","fillSz":size,"fillPnl":"0",
+                "fee":fee,"feeCcy":"USDT",
+                "ts":event_ms.to_string(),"fillTime":event_ms.to_string()
+            }));
+            known_bills.push(serde_json::json!({
+                "billId":format!("{event}-bill"),
+                "instType":"SWAP","instId":"BTC-USDT-SWAP",
+                "ordId":"recorded-t09-second-001",
+                "tradeId":format!("{event}-trade"),
+                "clOrdId":"__REQUEST_CL_ORD_ID__",
+                "ccy":"USDT","type":"2","subType":"3",
+                "balChg":fee,"fee":fee,"pnl":"0","ts":event_ms.to_string()
+            }));
+        }
+        let mut pages=Vec::new();
+        for _ in 0..48 {
+            for part in ["SPOT","MARGIN","SWAP","FUTURES","OPTION"] {
+                pages.push(RecordedGet{
+                    access_key:"fixture-executor-a".into(),
+                    path:"/api/v5/trade/fills-history".into(),
+                    required_query:vec![("instType".into(),part.into())],
+                    raw_response:if part=="SWAP" {
+                        raw_history(serde_json::json!(known_fills))
+                    } else {raw_history(serde_json::json!([]))}
+                });
+            }
+        }
+        feed.advance_recorded_route("fixture-executor-a","/api/v5/trade/fills-history",pages);
+        feed.advance_recorded_route("fixture-executor-a","/api/v5/account/bills-archive",
+            (0..48).map(|_|RecordedGet{
+                access_key:"fixture-executor-a".into(),
+                path:"/api/v5/account/bills-archive".into(),
+                required_query:vec![],
+                raw_response:raw_history(serde_json::json!(known_bills))
+            }).collect()
+        );
         let mut last_readiness=String::from("NOT_OBSERVED");
         tokio::time::timeout(Duration::from_secs(16),async {
             loop {
