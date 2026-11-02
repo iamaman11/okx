@@ -1709,17 +1709,35 @@ impl AccountStore {
             };
             let previous = if let Some((rev, amount, digest)) = applied {
                 let amount = decimal(amount)?;
-                if rev
-                    > i64::try_from(value.settlement_revision)
-                        .map_err(|_| StoreError::Invalid("CAMPAIGN_APPLIED_REVISION_INVALID"))?
-                    || amount > value.cumulative_entry_usd
-                {
+                let revision = i64::try_from(value.settlement_revision)
+                    .map_err(|_| StoreError::Invalid("CAMPAIGN_APPLIED_REVISION_INVALID"))?;
+                if rev > revision {
+                    // The same bounded source scan may revisit an older
+                    // Worker-ACKed immutable revision after a newer one was
+                    // durably applied. Only the exact historical money AND
+                    // digest may replay; it contributes no new campaign debit.
+                    let historical: Option<(String, String)> = self
+                        .connection
+                        .query_row(
+                            "SELECT cumulative_usd,source_digest FROM campaign_entry_applied
+                         WHERE campaign_id=?1 AND intent_id=?2
+                           AND settlement_revision=?3",
+                            params![campaign_id, value.intent_id, revision],
+                            |row| Ok((row.get(0)?, row.get(1)?)),
+                        )
+                        .optional()?;
+                    if historical.as_ref().is_some_and(|(money, hash)| {
+                        decimal(money.clone()).ok() == Some(value.cumulative_entry_usd)
+                            && hash == &value.source_digest
+                    }) {
+                        continue;
+                    }
                     return Err(StoreError::Invalid("CAMPAIGN_APPLIED_MONOTONICITY_BREACH"));
                 }
-                if rev
-                    == i64::try_from(value.settlement_revision)
-                        .map_err(|_| StoreError::Invalid("CAMPAIGN_APPLIED_REVISION_INVALID"))?
-                {
+                if amount > value.cumulative_entry_usd {
+                    return Err(StoreError::Invalid("CAMPAIGN_APPLIED_MONOTONICITY_BREACH"));
+                }
+                if rev == revision {
                     if amount != value.cumulative_entry_usd || digest != value.source_digest {
                         return Err(StoreError::Invalid("CAMPAIGN_APPLIED_SOURCE_CONFLICT"));
                     }

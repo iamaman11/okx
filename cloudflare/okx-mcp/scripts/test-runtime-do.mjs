@@ -507,7 +507,8 @@ try {
         assert.equal(admitted.post_ack_financial_complete, false);
         assert.equal(admitted.create_posts_total, 4);
         assert.equal(admitted.quote_entry_usd, "3.0015");
-        assert.equal(admitted.preview_reserved_entry_usd, "4");
+        assert.equal(admitted.preview_reserved_entry_usd, managedAdd ? "0" : "4",
+          "clean managed-Add acceptance cohort excludes T09.0 component reservations");
         assert.equal(afterNative.budget?.entry_budget?.reserved_usd,managedAdd?"0":partialFills?"4":"7.0015");
         assert.equal(afterNative.budget?.entry_budget?.consumed_usd,managedAdd?"6.003":partialFills?"4.002":"1.0005");
         assert.deepEqual(afterNative.budget,
