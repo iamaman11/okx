@@ -1875,7 +1875,7 @@ impl TradeService {
                                 if !intent.risk_increase
                                     || intent.state != IntentState::Filled
                                     || !intent.instrument_id.ends_with("-USDT-SWAP")
-                                    || releasing_id.as_deref() == Some(&intent.intent_id)
+                                    || releasing_id.as_deref() == Some(intent.intent_id.as_str())
                                     || pending.binary_search(&intent.intent_id).is_err()
                                 {
                                     continue;
@@ -3401,6 +3401,53 @@ mod tests {
                 Some(scope),
             ),
             Err("COHORT_TERMINAL_RELEASE_RECEIPT_MISMATCH".into())
+        );
+        // A terminal peer is never a blanket flat-position exception: the
+        // production caller may mark it only after replay-verifying its own
+        // immutable account fill/bill proof and zero remaining native lots.
+        let mut other = terminal.clone();
+        other.intent_id = format!("{}_other", terminal.intent_id);
+        let mut other_receipt = receipt.clone();
+        other_receipt.intent_id = other.intent_id.clone();
+        other_receipt.reservation_key = format!("{}_other", receipt.reservation_key);
+        let both = vec![
+            (terminal.clone(), Some(receipt.clone())),
+            (other.clone(), Some(other_receipt.clone())),
+        ];
+        let mut pending_both = vec![terminal.intent_id.clone(), other.intent_id.clone()];
+        pending_both.sort();
+        assert_eq!(
+            verify_local_intent_coverage_scoped(&both, &pending_both, &account, Some(scope)),
+            Err("COHORT_OTHER_TERMINAL_RISK_RELEASE_PENDING".into()),
+            "an unproven peer must still deny a scoped terminal RELEASE"
+        );
+        let empty = std::collections::BTreeSet::new();
+        let validated_peer = std::collections::BTreeSet::from([other.intent_id.clone()]);
+        assert!(
+            verify_local_intent_coverage_with_managed(
+                &both, &pending_both, &account, Some(scope), &empty, &validated_peer,
+            ).is_ok(),
+            "a separately source-verified peer may remain HELD while only the selected intent releases"
+        );
+        let mut wrong_peer = other_receipt.clone();
+        wrong_peer.account_key = "different-account".into();
+        assert_eq!(
+            verify_local_intent_coverage_with_managed(
+                &[
+                    (terminal.clone(), Some(receipt.clone())),
+                    (other.clone(), Some(wrong_peer))
+                ],
+                &pending_both, &account, Some(scope), &empty, &validated_peer,
+            ),
+            Err("COHORT_OTHER_TERMINAL_RISK_RELEASE_PENDING".into()),
+            "a cross-account or mismatched peer receipt cannot receive the flat peer exception"
+        );
+        assert_eq!(
+            verify_local_intent_coverage_with_managed(
+                &both, &pending_both, &account, None, &empty, &validated_peer,
+            ),
+            Err("COHORT_TERMINAL_RISK_RELEASE_PENDING".into()),
+            "normal admission/readiness must never use terminal peer evidence"
         );
         for wrong in [
             TerminalReleaseCensusScope {
