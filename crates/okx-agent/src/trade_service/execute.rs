@@ -1852,11 +1852,97 @@ impl TradeService {
                 // cannot be considered managed without its central receipt.
                 // The 100th row is a positive truncation signal: never
                 // misreport a bounded local scan as complete.
-                let local_intents = r
+                // This proof is specific to terminal RELEASE, never normal
+                // entry admission. A second terminal entry may still hold its
+                // central reservation: verify its own immutable finance proof
+                // in the SAME SQL owner before allowing the first to RELEASE.
+                // A stale/unknown lot, live algo or pending order never qualifies.
+                let venue_empty_for_terminal_peers = release_scope.is_some()
+                    && algos.samples.is_empty()
+                    && snapshot.pending_orders.is_empty()
+                    && snapshot.positions.iter().all(|p| {
+                        dec(&p.position).is_ok_and(|quantity| quantity == Decimal::ZERO)
+                    });
+                let releasing_id = release_scope.map(|scope| scope.intent_id.to_owned());
+                let (local_intents, pending_central, verified_terminal_peers) = r
                     .execution
                     .store
-                    .call(deadline(), |s| {
+                    .call(deadline(), move |s| {
                         let (intents, pending) = s.risk_census_intents(100)?;
+                        let mut peers = std::collections::BTreeSet::new();
+                        if venue_empty_for_terminal_peers {
+                            for intent in &intents {
+                                if !intent.risk_increase
+                                    || intent.state != IntentState::Filled
+                                    || !intent.instrument_id.ends_with("-USDT-SWAP")
+                                    || releasing_id.as_deref() == Some(&intent.intent_id)
+                                    || pending.binary_search(&intent.intent_id).is_err()
+                                {
+                                    continue;
+                                }
+                                let saved = s.operation(&format!(
+                                    "entry-settlement:{}", intent.intent_id
+                                ))?;
+                                let Some(saved) = saved.filter(|receipt| {
+                                    receipt.kind == "ENTRY_SETTLEMENT_PROVEN"
+                                        && receipt.request_hash == intent.plan_hash
+                                }) else {
+                                    continue;
+                                };
+                                let proof: okx_execution::EntrySettlementEvidence =
+                                    serde_json::from_str(&saved.result_ref).map_err(|_| {
+                                        okx_execution::StoreError::Invalid(
+                                            "COHORT_TERMINAL_PEER_PROOF_CORRUPT",
+                                        )
+                                    })?;
+                                if proof.schema != "okx.entry-terminal-settlement/v1"
+                                    || proof.intent_id != intent.intent_id
+                                    || proof.plan_hash != intent.plan_hash
+                                    || s.entry_late_pending(&intent.intent_id)?
+                                {
+                                    continue;
+                                }
+                                let fills = s.cursor("fills", "SWAP")?;
+                                let bills = s.cursor("bills", "account")?;
+                                let (Some(fills), Some(bills)) = (fills, bills) else {
+                                    continue;
+                                };
+                                if fills.generation <= 0
+                                    || bills.generation <= 0
+                                    || !fills.cursor.is_empty()
+                                    || !bills.cursor.is_empty()
+                                    || !fills.coverage_gaps.is_empty()
+                                    || !bills.coverage_gaps.is_empty()
+                                {
+                                    continue;
+                                }
+                                let frontier = fills.watermark.min(bills.watermark);
+                                if frontier < proof.venue_update_ms
+                                    || frontier < proof.source_covered_through_ms
+                                    || s.active_lots(&intent.instrument_id)?.iter().any(|lot| {
+                                        lot.intent_id.as_deref() == Some(&intent.intent_id)
+                                            && lot.remaining_qty > Decimal::ZERO
+                                    })
+                                {
+                                    continue;
+                                }
+                                // Existing receipt means this is a read-only
+                                // replay; the SQL source owner rechecks every
+                                // original immutable bill, fill and digest.
+                                let original = s.bind_terminal_entry_settlement(
+                                    &intent.intent_id,
+                                    proof.venue_update_ms,
+                                    proof.venue_filled_quantity,
+                                    frontier,
+                                )?;
+                                if original != proof {
+                                    return Err(okx_execution::StoreError::Invalid(
+                                        "COHORT_TERMINAL_PEER_SOURCE_CHANGED",
+                                    ));
+                                }
+                                peers.insert(intent.intent_id.clone());
+                            }
+                        }
                         let covered = intents
                             .into_iter()
                             .map(|intent| {
@@ -1864,17 +1950,17 @@ impl TradeService {
                                 Ok((intent, central))
                             })
                             .collect::<okx_execution::StoreResult<Vec<_>>>()?;
-                        Ok((covered, pending))
+                        Ok((covered, pending, peers))
                     })
                     .await
                     .map_err(err)?;
-                let (local_intents, pending_central) = local_intents;
                 let local_intent_digest = verify_local_intent_coverage_with_managed(
                     &local_intents,
                     &pending_central,
                     &c.account_key,
                     release_scope,
                     &verified_live_intents,
+                    &verified_terminal_peers,
                 )?;
                 if r.private_ws.status().await.connection_generation != generation
                     || !r.source_identity_ready().await
@@ -2151,6 +2237,7 @@ fn verify_local_intent_coverage_scoped(
         account_key,
         terminal_release,
         &std::collections::BTreeSet::new(),
+        &std::collections::BTreeSet::new(),
     )
 }
 
@@ -2164,6 +2251,7 @@ fn verify_local_intent_coverage_with_managed(
     account_key: &str,
     terminal_release: Option<TerminalReleaseCensusScope<'_>>,
     verified_live_intents: &std::collections::BTreeSet<String>,
+    verified_terminal_peers: &std::collections::BTreeSet<String>,
 ) -> Result<String, String> {
     const PAGE_LIMIT: usize = 100;
     if active.len() >= PAGE_LIMIT {
@@ -2211,7 +2299,25 @@ fn verify_local_intent_coverage_with_managed(
                             && r.reservation_key == scope.reservation_key
                     })
             });
-            if !matching_release && !managed_open_entry {
+            // Only the actual terminal release census can recognize a
+            // separately source-proven flat terminal peer. That peer's
+            // RiskBook receipt remains held; this releases ONLY the selected
+            // reservation, never the peer or a new entry grant.
+            let proved_flat_peer = terminal_release.is_some_and(|scope| {
+                scope.account_key == account_key
+                    && scope.intent_id != intent.intent_id
+                    && intent.risk_increase
+                    && intent.state == IntentState::Filled
+                    && verified_terminal_peers.contains(&intent.intent_id)
+                    && receipt.as_ref().is_some_and(|r| {
+                        r.account_key == account_key
+                            && r.intent_id == intent.intent_id
+                            && r.plan_hash == intent.plan_hash
+                            && !r.reservation_key.starts_with("local:")
+                            && !r.reservation_key.is_empty()
+                    })
+            });
+            if !matching_release && !managed_open_entry && !proved_flat_peer {
                 return Err(match terminal_release {
                     Some(scope) if scope.intent_id == intent.intent_id => {
                         "COHORT_TERMINAL_RELEASE_RECEIPT_MISMATCH"
@@ -2258,13 +2364,16 @@ fn verify_local_intent_coverage_with_managed(
         || verified_live_intents
             .iter()
             .any(|id| !ids.contains(id.as_str()))
+        || verified_terminal_peers
+            .iter()
+            .any(|id| !ids.contains(id.as_str()))
     {
         return Err("COHORT_UNRESOLVED_INTENT_SCOPE_INVALID".into());
     }
     if terminal_release.is_some() && !release_scope_matched {
         return Err("COHORT_TERMINAL_RELEASE_SCOPE_UNPROVEN".into());
     }
-    digest(&(active, unresolved, verified_live_intents))
+    digest(&(active, unresolved, verified_live_intents, verified_terminal_peers))
 }
 
 /// Concurrent account reads must produce one deterministic, complete cohort
@@ -3222,6 +3331,7 @@ mod tests {
                 &account,
                 None,
                 &confirmed_live,
+                &std::collections::BTreeSet::new(),
             )
             .is_ok(),
             "FILLED with signed live lots/protection and matched central risk is managed"
@@ -3233,6 +3343,7 @@ mod tests {
                 &account,
                 None,
                 &confirmed_live,
+                &std::collections::BTreeSet::new(),
             ),
             Err("COHORT_TERMINAL_RISK_RELEASE_PENDING".into()),
             "missing central reservation must not become managed"
@@ -3246,6 +3357,7 @@ mod tests {
                 &account,
                 None,
                 &confirmed_live,
+                &std::collections::BTreeSet::new(),
             ),
             Err("COHORT_TERMINAL_RISK_RELEASE_PENDING".into()),
             "CANCELLED cannot acquire the FILLED live-position exception"
@@ -3259,6 +3371,7 @@ mod tests {
                 &account,
                 None,
                 &confirmed_live,
+                &std::collections::BTreeSet::new(),
             ),
             Err("COHORT_TERMINAL_RISK_RELEASE_PENDING".into()),
             "mismatched central plan is never managed"
