@@ -322,6 +322,9 @@ pub(crate) async fn capture_account_sources_traced(
     execution: &ExecutionRuntime,
     trace: Option<(Arc<crate::finance_trace::FinanceTrace>, u64)>,
 ) -> AgentResult<CaptureCompleted> {
+    // The periodic financial cycle, TradeService Status and recovery use this
+    // same account-local capture admission; only one owns a cursor window.
+    let _capture_owner = execution.source_capture_serial.lock().await;
     let initial = private_ws.status().await;
     if !initial.logged_in || initial.connection_generation == 0 {
         return Err(invalid("PRIVATE_SOURCE_NOT_READY"));

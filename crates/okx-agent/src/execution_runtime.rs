@@ -13,6 +13,9 @@ pub struct ExecutionRuntime {
     pub account: AccountApi,
     pub clock: OkxRestClient,
     pub environment: OkxEnvironment,
+    // Serialize finance source windows per account before reading SQL cursors.
+    // No second capture may replay an older watermark after another commits.
+    pub(crate) source_capture_serial: tokio::sync::Mutex<()>,
     uid: String,
 }
 impl ExecutionRuntime {
@@ -41,6 +44,7 @@ impl ExecutionRuntime {
             account: AccountApi::new(rest.clone()),
             clock: rest,
             environment,
+            source_capture_serial: tokio::sync::Mutex::new(()),
             uid,
         }
     }

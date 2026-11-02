@@ -205,7 +205,10 @@ fn t09_6_cleanup_recorded_transport(
         "code":"0","msg":"","data":v
     })).expect("T09.6 signed algo fixture bytes");
     let mut pages=Vec::new();
-    for phase in 0..2 {
+    // Pre-cancel, post-cancel verification, then independently signed
+    // post-cancel census reads for the terminal central RELEASE. Keep finite
+    // immutable pages: missing unexpected scans still fail closed.
+    for phase in 0..4 {
         for inst_type in ["SWAP","FUTURES"] {
             for kind in [
                 "conditional","oco","trigger","move_order_stop",
@@ -290,8 +293,10 @@ async fn t09_6_status_after_local_read_defer(
     rate_budget: &RateBudget,
     feed: &Arc<crate::accounts::recorded_support::RecordedAccountHttp>,
     intent: &str,
+    allowed_new_cancel_posts: usize,
 ) -> serde_json::Value {
     use okx_protocol::trading::TradeRequest;
+    assert!(allowed_new_cancel_posts <= 1, "one protective cancel per Status");
     let until = std::time::Instant::now() + Duration::from_secs(15);
     let posts_before = feed.outbound_posts.lock().unwrap().len();
     loop {
@@ -305,10 +310,10 @@ async fn t09_6_status_after_local_read_defer(
         )
         .await
         .expect("T09.6 bounded source-backed status");
-        assert_eq!(
-            feed.outbound_posts.lock().unwrap().len(),
-            posts_before,
-            "T09.6 Status must not create or repeat a venue POST"
+        let posts_now = feed.outbound_posts.lock().unwrap().len();
+        assert!(
+            posts_now >= posts_before && posts_now <= posts_before + allowed_new_cancel_posts,
+            "T09.6 Status must not create or repeat an unrelated venue POST: before={posts_before} now={posts_now} allowed_cancel={allowed_new_cancel_posts}"
         );
         let local_reason = match &result {
             Ok(status) => status["data"]["financial_error"]
@@ -325,9 +330,12 @@ async fn t09_6_status_after_local_read_defer(
                 .expect("T09.6 authorized read defer expired");
             continue;
         }
-        return result.unwrap_or_else(|reason| {
+        let status = result.unwrap_or_else(|reason| {
             panic!("T09_6_STATUS_NONLOCAL_ERROR:{intent}:{reason}")
         });
+        assert_eq!(posts_now, posts_before + allowed_new_cancel_posts,
+            "T09.6 confirmed exactly one cancel POST when cleanup is due, or zero for close readback");
+        return status;
     }
 }
 
@@ -345,7 +353,7 @@ async fn t09_6_source_backed_close_release(
         let intent=close["close_intent_id"].as_str()
             .expect("T09.6 real close intent");
         let status=t09_6_status_after_local_read_defer(
-            trade,rate_budget,feed,intent
+            trade,rate_budget,feed,intent,0
         ).await;
         assert_eq!(status["data"]["intent"]["state"],"FILLED",
             "T09.6 close must be terminal from signed venue GET");
@@ -366,12 +374,15 @@ async fn t09_6_source_backed_close_release(
     ] {
         t09_6_cleanup_recorded_transport(feed,cancel_algo,other_stop_live);
         let status=t09_6_status_after_local_read_defer(
-            trade,rate_budget,feed,intent
+            trade,rate_budget,feed,intent,1
         ).await;
         assert_eq!(status["data"]["intent"]["state"],"FILLED",
             "T09.6 original entry must remain FILLED after close");
         assert_eq!(status["data"]["central_release"]["state"],"verified",
-            "T09.6 flat position must discharge its central risk");
+            "T09.6 flat position must discharge central risk: release={}, incremental={}, entry_fill={}, financial_error={}, remaining={}, protection={}",
+            status["data"]["central_release"],status["data"]["incremental_entry_settlement"],
+            status["data"]["entry_fill_evidence"],status["data"]["financial_error"],
+            status["data"]["remaining_exposure"],status["data"]["protection"]);
         assert_eq!(status["data"]["protection_incident"],false,
             "T09.6 post-close risk must not hide a protection incident");
         entry_results.push(serde_json::json!({

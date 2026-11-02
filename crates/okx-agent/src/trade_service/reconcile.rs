@@ -1679,6 +1679,25 @@ impl TradeService {
                 .iter()
                 .map(|position| (position.instrument_id.as_str(), position.position.as_str())),
         )?;
+        // Local no-send admission precedes durable BEGIN. Once BEGIN is
+        // persisted, an unknown cancel outcome must never be re-posted.
+        let request = okx_api::CancelAlgoOrderRequest {
+            instrument_id: i.instrument_id.clone(),
+            algo_order_id: saved.algo_id.clone(),
+        };
+        let timing = r
+            .execution
+            .clock
+            .clock_evidence()
+            .await
+            .map_err(err)?
+            .mutation_timing(5000)
+            .map_err(err)?;
+        let rate = r
+            .execution
+            .trade
+            .admit_cancel_algo_order(&request)
+            .map_err(err)?;
         let key = format!("cleanup_{}", &i.client_order_id);
         let hash = digest(&(
             i.intent_id.clone(),
@@ -1698,23 +1717,6 @@ impl TradeService {
         if !fresh {
             return Err("PROTECTION_CANCEL_OUTCOME_UNKNOWN_INSPECT".into());
         }
-        let request = okx_api::CancelAlgoOrderRequest {
-            instrument_id: i.instrument_id.clone(),
-            algo_order_id: saved.algo_id.clone(),
-        };
-        let timing = r
-            .execution
-            .clock
-            .clock_evidence()
-            .await
-            .map_err(err)?
-            .mutation_timing(5000)
-            .map_err(err)?;
-        let rate = r
-            .execution
-            .trade
-            .admit_cancel_algo_order(&request)
-            .map_err(err)?;
         let response = r
             .execution
             .trade

@@ -1698,6 +1698,15 @@ impl TradeService {
                     return Err("COHORT_SOURCE_GENERATION_UNVERIFIED".into());
                 }
                 let generation = r.private_ws.status().await.connection_generation;
+                // Inventory can span several bounded REST scopes. Read the
+                // authenticated account snapshot AFTER inventory so source
+                // freshness is checked at the final census proof, not before
+                // a potentially rate-admitted sequence of algo GETs.
+                let algos = r
+                    .observer
+                    .pending_derivative_risk_algos()
+                    .await
+                    .map_err(err)?;
                 let snapshot = if let Some(witness) = selected {
                     verify_post_held_selected(
                         witness,
@@ -1730,11 +1739,6 @@ impl TradeService {
                     let fresh_rate = Self::usd_conversion(&snapshot)?.usd_per_usdt;
                     verify_post_held_fx(original_rate, &fresh_rate)?;
                 }
-                let algos = r
-                    .observer
-                    .pending_derivative_risk_algos()
-                    .await
-                    .map_err(err)?;
                 if !algos.complete_within_bound
                     || snapshot.account_uid_fingerprint != c.uid_fingerprint
                 {
