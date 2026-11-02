@@ -56,7 +56,8 @@ const terminalGolden = new Map([
   ])],
   ["T09.8", new Map([
     ["campaign_consumed_usd", "6.003"], ["remaining_entry_budget_usd", "3.997"],
-    ["denial_reason", "ENTRY_BUDGET_EXCEEDED"],
+    ["denial_reason", "CAMPAIGN_ENTRY_BUDGET_EXHAUSTED"],
+    ["requested_entry_upper_usd", "4.002"], ["new_exchange_posts", "0"],
   ])],
 ]);
 function usage() {
