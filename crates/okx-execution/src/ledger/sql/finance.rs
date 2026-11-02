@@ -1461,6 +1461,13 @@ impl AccountStore {
             stmt.query(params![from_ms, through_ms])?
         };
         let mut witnesses = Vec::new();
+        // A single capture batch may include multiple cumulative revisions
+        // for the SAME intent (partial r1, partial r2, terminal r3).
+        // Read the prior SQL checkpoint once, then advance this in-memory
+        // cursor without writing any extra ledger or double counting money.
+        let mut in_batch = std::collections::BTreeMap::<
+            String, (i64, Decimal, String)
+        >::new();
         while let Some(row) = rows.next()? {
             if witnesses.len() >= 10_000 {
                 return Err(StoreError::Invalid("ENTRY_OPENING_HISTORY_TOO_LARGE"));
@@ -1656,6 +1663,11 @@ impl AccountStore {
                     |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
                 )
                 .optional()?;
+            let applied = if let Some((revision, amount, source)) = in_batch.get(&value.intent_id) {
+                Some((*revision, amount.to_string(), source.clone()))
+            } else {
+                applied
+            };
             let previous = if let Some((rev, amount, digest)) = applied {
                 let amount = decimal(amount)?;
                 if rev
@@ -1685,6 +1697,15 @@ impl AccountStore {
             total = total
                 .checked_add(delta)
                 .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))?;
+            in_batch.insert(
+                value.intent_id.clone(),
+                (
+                    i64::try_from(value.settlement_revision)
+                        .map_err(|_| StoreError::Invalid("CAMPAIGN_APPLIED_REVISION_INVALID"))?,
+                    value.cumulative_entry_usd,
+                    value.source_digest.clone(),
+                ),
+            );
             witnesses.push((
                 value.intent_id,
                 value.source_digest,
