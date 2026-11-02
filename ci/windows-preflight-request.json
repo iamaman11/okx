@@ -1,0 +1,6 @@
+{
+  "schema": "okx.windows-preflight-request/v1",
+  "request_id": "t096-gh-5d248ec-001",
+  "case": "T09.6",
+  "target_sha": "5d248ece06fe2bb37d0743a894f329b8cdc49ff1"
+}
