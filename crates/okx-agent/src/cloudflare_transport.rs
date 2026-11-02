@@ -3407,6 +3407,105 @@ mod raw_native_session_tests {
                     eprintln!("T09_2_PHASE_V1:AFTER_WORKER_READBACK");
                     assert_eq!(b.consumed_usd, "1.0005");
                     assert_eq!(b.reserved_usd, if add_mode {"3.0015"} else {"7.0015"});
+
+                    // Slice B negative regression through the *real* public API:
+                    // account B must not resolve, inspect or cancel A's durable
+                    // intent, even if the caller knows its exact reference.
+                    // The venue boundary and central economic state must remain
+                    // unchanged. This is only one prerequisite of T09-MA, not
+                    // an acceptance of its multi-strategy/concurrency contract.
+                    let other = accounts.resolve("fixture-b").await.unwrap();
+                    assert_ne!(
+                        other.configuration.account_key.verified_uid,
+                        resource.configuration.account_key.verified_uid,
+                        "two aliases must not silently share a verified UID"
+                    );
+                    let foreign_id = new_intent_id.clone();
+                    let before_foreign = other
+                        .execution
+                        .store
+                        .call(std::time::Instant::now() + Duration::from_secs(3), move |s| {
+                            Ok((
+                                s.intent(&foreign_id)?.is_none(),
+                                s.by_idempotency("t09_real_public_execute_0002")?.is_none(),
+                            ))
+                        })
+                        .await
+                        .expect("independent B SQL owner must answer");
+                    assert_eq!(before_foreign, (true, true), "A obligation leaked into B SQL");
+                    let sends_before_foreign = feed.outbound_posts.lock().unwrap().len();
+                    let foreign_status = trade
+                        .trade(
+                            "fixture-b",
+                            &TradeRequest::Status {
+                                reference: new_intent_id.clone(),
+                            },
+                            None,
+                        )
+                        .await;
+                    assert_eq!(foreign_status.as_ref().err().map(String::as_str),
+                        Some("INTENT_NOT_FOUND"), "B cannot read A's intent by identifier");
+                    let foreign_cancel = trade
+                        .trade(
+                            "fixture-b",
+                            &TradeRequest::Cancel {
+                                idempotency_key: "t09_cross_uid_cancel_denied_0001".into(),
+                                reference: new_intent_id.clone(),
+                            },
+                            None,
+                        )
+                        .await;
+                    assert_eq!(foreign_cancel.as_ref().err().map(String::as_str),
+                        Some("INTENT_NOT_FOUND"), "B cannot cancel A's order");
+                    let foreign_id = new_intent_id.clone();
+                    let after_foreign = other
+                        .execution
+                        .store
+                        .call(std::time::Instant::now() + Duration::from_secs(3), move |s| {
+                            Ok((
+                                s.intent(&foreign_id)?.is_none(),
+                                s.by_idempotency("t09_real_public_execute_0002")?.is_none(),
+                            ))
+                        })
+                        .await
+                        .expect("B SQL readback after denied cross-account requests");
+                    assert_eq!(after_foreign, (true, true), "B must remain financially isolated");
+                    let sends_after_foreign = feed.outbound_posts.lock().unwrap().len();
+                    assert_eq!(sends_after_foreign, sends_before_foreign,
+                        "cross-account Status/Cancel must not send an exchange POST");
+                    let mut foreign_budget_cmd = summary("risk_t09_2_after_cross_uid_denial");
+                    foreign_budget_cmd.installation_id = "installation_test".into();
+                    let foreign_budget = risk.request(foreign_budget_cmd).await.unwrap();
+                    let original_budget = after.budget.as_ref().unwrap();
+                    let cross_budget = foreign_budget.budget.as_ref().unwrap();
+                    assert_eq!(
+                        cross_budget.entry_budget.as_ref().unwrap().consumed_usd,
+                        original_budget.entry_budget.as_ref().unwrap().consumed_usd,
+                        "foreign request cannot debit shared entry campaign"
+                    );
+                    assert_eq!(
+                        cross_budget.entry_budget.as_ref().unwrap().reserved_usd,
+                        original_budget.entry_budget.as_ref().unwrap().reserved_usd,
+                        "foreign request cannot change shared entry reservations"
+                    );
+                    assert_eq!(cross_budget.reserved_loss_usd, original_budget.reserved_loss_usd,
+                        "foreign request cannot change central loss reservation");
+                    println!(
+                        "T09_MA_CROSS_UID_DENIAL_V1:{}",
+                        json!({
+                            "owner_uid":resource.configuration.account_key.verified_uid,
+                            "foreign_uid":other.configuration.account_key.verified_uid,
+                            "owner_intent_id":new_intent_id,
+                            "foreign_sql_intent_absent":after_foreign.0,
+                            "foreign_sql_idempotency_absent":after_foreign.1,
+                            "status_reason":foreign_status.err(),
+                            "cancel_reason":foreign_cancel.err(),
+                            "outbound_posts_before":sends_before_foreign,
+                            "outbound_posts_after":sends_after_foreign,
+                            "worker_budget":cross_budget,
+                            "risk_book_sequence":foreign_budget.risk_book_sequence,
+                        })
+                    );
                     println!(
                         "T09_2_NATIVE_ADMISSION_V1:{}",
                         json!({
