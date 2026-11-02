@@ -1745,6 +1745,10 @@ impl TradeService {
                 // if the underlying source timestamp is absent or stale.
                 let algo_source_floor = verified_algo_source_time(algos.received_at_ms, now())?;
                 let mut managed_algos = std::collections::BTreeSet::new();
+                // Identifiers here are populated ONLY after the independently
+                // observed venue position, SQL lots, central reserve and
+                // verified protective algo have been matched.
+                let mut verified_live_intents = std::collections::BTreeSet::new();
                 let mut covered_position_count = 0_usize;
                 for p in &snapshot.positions {
                     let Some((position_direction, actual_qty)) =
@@ -1811,6 +1815,7 @@ impl TradeService {
                             return Err("PROTECTION_OR_RESERVATION_COVERAGE_INCOMPLETE".into());
                         }
                         managed_algos.insert(protection.algo_id);
+                        verified_live_intents.insert(owner_id.clone());
                     }
                 }
                 let mut covered_order_count = 0_usize;
@@ -1860,16 +1865,13 @@ impl TradeService {
                     .await
                     .map_err(err)?;
                 let (local_intents, pending_central) = local_intents;
-                let local_intent_digest = if let Some(scope) = release_scope {
-                    verify_local_intent_coverage_scoped(
-                        &local_intents,
-                        &pending_central,
-                        &c.account_key,
-                        Some(scope),
-                    )?
-                } else {
-                    verify_local_intent_coverage(&local_intents, &pending_central, &c.account_key)?
-                };
+                let local_intent_digest = verify_local_intent_coverage_with_managed(
+                    &local_intents,
+                    &pending_central,
+                    &c.account_key,
+                    release_scope,
+                    &verified_live_intents,
+                )?;
                 if r.private_ws.status().await.connection_generation != generation
                     || !r.source_identity_ready().await
                     || !r
@@ -2137,6 +2139,26 @@ fn verify_local_intent_coverage_scoped(
     account_key: &str,
     terminal_release: Option<TerminalReleaseCensusScope<'_>>,
 ) -> Result<String, String> {
+    verify_local_intent_coverage_with_managed(
+        active,
+        unresolved,
+        account_key,
+        terminal_release,
+        &std::collections::BTreeSet::new(),
+    )
+}
+
+/// A fully FILLED entry can still own LIVE managed exposure. Its central
+/// reservation must remain OPEN, not be released as though the position were
+/// flat. Only the existing source-bound venue-position/SQL-lot/protective-algo
+/// check populates this set. The ordinary scoped release proof remains strict.
+fn verify_local_intent_coverage_with_managed(
+    active: &[(StoredIntent, Option<CentralReceipt>)],
+    unresolved: &[String],
+    account_key: &str,
+    terminal_release: Option<TerminalReleaseCensusScope<'_>>,
+    verified_live_intents: &std::collections::BTreeSet<String>,
+) -> Result<String, String> {
     const PAGE_LIMIT: usize = 100;
     if active.len() >= PAGE_LIMIT {
         return Err("COHORT_LOCAL_INTENTS_TRUNCATED".into());
@@ -2158,6 +2180,20 @@ fn verify_local_intent_coverage_scoped(
         }
         let central_pending = unresolved.binary_search(&intent.intent_id).is_ok();
         if intent.state.terminal() && central_pending {
+            // FILLED is terminal for this ORDER, not necessarily for the
+            // owned POSITION. This is only safe when the same census has
+            // already proved the venue quantity == local lots, matched the
+            // live stop and independently held central reservation.
+            let managed_open_entry = intent.state == IntentState::Filled
+                && intent.risk_increase
+                && verified_live_intents.contains(&intent.intent_id)
+                && receipt.as_ref().is_some_and(|r| {
+                    r.account_key == account_key
+                        && r.intent_id == intent.intent_id
+                        && r.plan_hash == intent.plan_hash
+                        && !r.reservation_key.starts_with("local:")
+                        && !r.reservation_key.is_empty()
+                });
             let matching_release = terminal_release.is_some_and(|scope| {
                 scope.account_key == account_key
                     && scope.intent_id == intent.intent_id
@@ -2169,7 +2205,7 @@ fn verify_local_intent_coverage_scoped(
                             && r.reservation_key == scope.reservation_key
                     })
             });
-            if !matching_release {
+            if !matching_release && !managed_open_entry {
                 return Err(match terminal_release {
                     Some(scope) if scope.intent_id == intent.intent_id => {
                         "COHORT_TERMINAL_RELEASE_RECEIPT_MISMATCH"
@@ -2179,7 +2215,9 @@ fn verify_local_intent_coverage_scoped(
                 }
                 .into());
             }
-            release_scope_matched = true;
+            if matching_release {
+                release_scope_matched = true;
+            }
         }
         if intent.state == IntentState::Prepared && central_pending {
             return Err("COHORT_UNRESOLVED_RESERVE_ATTEMPT".into());
@@ -2210,13 +2248,15 @@ fn verify_local_intent_coverage_scoped(
             }
         }
     }
-    if unresolved.iter().any(|id| !ids.contains(id.as_str())) {
+    if unresolved.iter().any(|id| !ids.contains(id.as_str()))
+        || verified_live_intents.iter().any(|id| !ids.contains(id.as_str()))
+    {
         return Err("COHORT_UNRESOLVED_INTENT_SCOPE_INVALID".into());
     }
     if terminal_release.is_some() && !release_scope_matched {
         return Err("COHORT_TERMINAL_RELEASE_SCOPE_UNPROVEN".into());
     }
-    digest(&(active, unresolved))
+    digest(&(active, unresolved, verified_live_intents))
 }
 
 /// Concurrent account reads must produce one deterministic, complete cohort
@@ -3165,6 +3205,55 @@ mod tests {
                 &account
             ),
             Err("COHORT_TERMINAL_RISK_RELEASE_PENDING".into())
+        );
+        let confirmed_live = std::collections::BTreeSet::from([terminal.intent_id.clone()]);
+        assert!(
+            verify_local_intent_coverage_with_managed(
+                &[(terminal.clone(), Some(receipt.clone()))],
+                &unresolved,
+                &account,
+                None,
+                &confirmed_live,
+            )
+            .is_ok(),
+            "FILLED with signed live lots/protection and matched central risk is managed"
+        );
+        assert_eq!(
+            verify_local_intent_coverage_with_managed(
+                &[(terminal.clone(), None)],
+                &unresolved,
+                &account,
+                None,
+                &confirmed_live,
+            ),
+            Err("COHORT_TERMINAL_RISK_RELEASE_PENDING".into()),
+            "missing central reservation must not become managed"
+        );
+        let mut cancelled = terminal.clone();
+        cancelled.state = IntentState::Cancelled;
+        assert_eq!(
+            verify_local_intent_coverage_with_managed(
+                &[(cancelled, Some(receipt.clone()))],
+                &unresolved,
+                &account,
+                None,
+                &confirmed_live,
+            ),
+            Err("COHORT_TERMINAL_RISK_RELEASE_PENDING".into()),
+            "CANCELLED cannot acquire the FILLED live-position exception"
+        );
+        let mut invalid = receipt.clone();
+        invalid.plan_hash = "different".into();
+        assert_eq!(
+            verify_local_intent_coverage_with_managed(
+                &[(terminal.clone(), Some(invalid))],
+                &unresolved,
+                &account,
+                None,
+                &confirmed_live,
+            ),
+            Err("COHORT_TERMINAL_RISK_RELEASE_PENDING".into()),
+            "mismatched central plan is never managed"
         );
         let scope = TerminalReleaseCensusScope {
             account_key: &account,
