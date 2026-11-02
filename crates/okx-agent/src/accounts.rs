@@ -1379,7 +1379,16 @@ pub(crate) mod recorded_support {
                     | "/api/v5/trade/orders-pending"
                     | "/api/v5/trade/orders-algo-pending"
                     | "/api/v5/trade/fills-history"
-                    | "/api/v5/account/bills-archive" => 64,
+                    | "/api/v5/account/bills-archive" => {
+                        // Only the explicitly opt-in long integration chain
+                        // has extra finite raw observations. This is NOT an
+                        // exchange rate-limit override or a live HTTP fallback.
+                        if std::env::var("OKX_T09_4_MANAGED_ADD_PROBE").as_deref() == Ok("1") {
+                            192
+                        } else {
+                            64
+                        }
+                    },
                     _ => 0,
                 };
                 let mut observed = self.requests.lock().unwrap();
