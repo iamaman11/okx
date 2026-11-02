@@ -512,14 +512,15 @@ mod raw_native_session_tests {
                     .copied().unwrap_or(Decimal::ZERO);
                 let pnl=finance.get(&("USDT".into(),"REALIZED_PNL".into()))
                     .copied().unwrap_or(Decimal::ZERO);
-                let equity=Decimal::from(100)+fee+pnl;
+                let opening=s.opening_equity_usd()?;
+                let equity=opening+fee+pnl;
                 Ok(serde_json::json!({
                     "remaining_lots":lots.iter().filter(|lot|lot.remaining_qty>Decimal::ZERO).count(),
                     "active_reserve_second":held_second,
                     "active_reserve_add":held_add,
                     "close_030_state":close_030.state.as_str(),
                     "close_020_state":close_020.state.as_str(),
-                    "account_opening_equity_usd":"100",
+                    "account_opening_equity_usd":opening.normalize().to_string(),
                     "total_fees_usdt":fee.normalize().to_string(),
                     "realized_pnl_usdt":pnl.normalize().to_string(),
                     "equity_a_usd":equity.normalize().to_string(),
@@ -530,6 +531,7 @@ mod raw_native_session_tests {
         assert_eq!(account_a["remaining_lots"],0);
         assert_eq!(account_a["active_reserve_second"],false);
         assert_eq!(account_a["active_reserve_add"],false);
+        assert_eq!(account_a["account_opening_equity_usd"],"100");
         assert_eq!(account_a["total_fees_usdt"],"-0.006");
         assert_eq!(account_a["realized_pnl_usdt"],"0");
         assert_eq!(account_a["equity_a_usd"],"99.994");
@@ -541,16 +543,18 @@ mod raw_native_session_tests {
             |s| {
                 let lots=s.active_lots("BTC-USDT-SWAP")?;
                 let finance=s.finance_totals(0,i64::MAX,None)?;
+                let opening=s.opening_equity_usd()?;
                 Ok(serde_json::json!({
                     "remaining_lots":lots.len(),
                     "finance_totals":finance.len(),
-                    "equity_b_usd":"100",
+                    "equity_b_usd":opening.normalize().to_string(),
                     "finance_revision":s.finance_revision()?,
                 }))
             }
         ).await.expect("T09.7 child independent B readback");
         assert_eq!(account_b["remaining_lots"],0);
         assert_eq!(account_b["finance_totals"],0);
+        assert_eq!(account_b["equity_b_usd"],"100");
         println!("T09_7_NATIVE_PROCESS_RESTART_V1:{}",serde_json::json!({
             "new_os_process":true,
             "account_a":account_a,
