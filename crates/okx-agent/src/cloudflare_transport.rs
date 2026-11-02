@@ -3123,8 +3123,13 @@ mod raw_native_session_tests {
                         expires_in_ms: 30_000,
                     };
                     eprintln!("T09_2_PHASE_V1:BEFORE_POSITIVE_EXECUTE");
-                    let accepted = trade
-                        .trade("fixture-a", &second, None)
+                    // TradeService remains the ONLY production admission path.
+                    // Box its large async future instead of embedding it in
+                    // this already large native integration test frame.
+                    // Never increase the Windows thread stack or stub a gate.
+                    let positive_future = Box::pin(trade.trade("fixture-a", &second, None));
+                    eprintln!("T09_2_PHASE_V1:POSITIVE_FUTURE_BOXED");
+                    let accepted = positive_future
                         .await
                         .expect("T09.2 public TradeService must admit second 0.30 order");
                     eprintln!("T09_2_PHASE_V1:AFTER_POSITIVE_EXECUTE");
