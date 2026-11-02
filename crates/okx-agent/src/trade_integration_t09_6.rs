@@ -55,6 +55,15 @@ async fn t09_6_close_owned_lot(input: T09_6CloseContext) -> serde_json::Value {
         feed.outbound_posts.lock().unwrap().len()
     ));
     let intent=&close["data"]["intent"];
+    // The recorded fill/bill event is observed AFTER the production Close
+    // has durably passed BEGIN_POST and returned its venue ACK. Previously
+    // close_at_ms was captured before trade.trade, creating impossible
+    // fill.time < begin_post_at and permanently blocking campaign continuity.
+    // Do not weaken the SQL causal fence or advance financial readiness here.
+    let close_fill_at_ms=chrono::Utc::now().timestamp_millis();
+    let prepared_at_ms=at.parse::<i64>().expect("T09.6 signed request clock");
+    assert!(close_fill_at_ms>=prepared_at_ms,
+        "T09.6 source clock must not run backwards across production Close");
     assert_eq!(intent["exchange_order_id"],venue_order_id,
         "T09.6 requires exact authenticated venue order ACK");
     assert_eq!(intent["plan"]["quantity"],quantity,
@@ -71,7 +80,7 @@ async fn t09_6_close_owned_lot(input: T09_6CloseContext) -> serde_json::Value {
         "quantity":quantity,
         "post_count":sends,
         "client_order_id":intent["client_order_id"],
-        "close_at_ms":at,
+        "close_at_ms":close_fill_at_ms.to_string(),
         "status":close["status"],
         "financial_complete":close["data"]["financial_complete"],
     })
