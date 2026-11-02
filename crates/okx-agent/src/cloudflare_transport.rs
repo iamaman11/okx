@@ -3518,6 +3518,14 @@ mod raw_native_session_tests {
                                 &closes,
                             ).await;
                             println!("T09_6_NATIVE_TERMINAL_V1:{terminal}");
+                            // The same signed public market is refreshed by the
+                            // recorded production boundary, never a test exchange.
+                            refresh_recorded_market();
+                            let denial=t09_8_excess_entry_denied(
+                                &accounts,&trade,&risk,&feed
+                            ).await;
+                            println!("T09_8_NATIVE_CAMPAIGN_DENIAL_V1:{denial}");
+
                             println!("T09_6_NATIVE_CLOSE_ACK_V1:{}",serde_json::json!({
                                 "closes":closes,"created_posts":feed.outbound_posts.lock().unwrap().len(),
                                 "terminal_proven":false
