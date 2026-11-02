@@ -3123,14 +3123,21 @@ mod raw_native_session_tests {
                         expires_in_ms: 30_000,
                     };
                     eprintln!("T09_2_PHASE_V1:BEFORE_POSITIVE_EXECUTE");
-                    // TradeService remains the ONLY production admission path.
-                    // Box its large async future instead of embedding it in
-                    // this already large native integration test frame.
-                    // Never increase the Windows thread stack or stub a gate.
-                    let positive_future = Box::pin(trade.trade("fixture-a", &second, None));
-                    eprintln!("T09_2_PHASE_V1:POSITIVE_FUTURE_BOXED");
-                    let accepted = positive_future
+                    // The production Execute future must not be polled inside
+                    // the large T09.2 integration task's call stack. Schedule
+                    // it independently on the SAME Tokio runtime and retain
+                    // the unchanged TradeService, SQL and Worker owners.
+                    let execute_trade = trade.clone();
+                    let execute_task = tokio::spawn(async move {
+                        eprintln!("T09_2_PHASE_V1:EXECUTE_TASK_STARTED");
+                        let result = execute_trade.trade("fixture-a", &second, None).await;
+                        eprintln!("T09_2_PHASE_V1:EXECUTE_TASK_RETURNED");
+                        result
+                    });
+                    eprintln!("T09_2_PHASE_V1:EXECUTE_TASK_SPAWNED");
+                    let accepted = execute_task
                         .await
+                        .expect("T09.2 production Execute Tokio task must complete")
                         .expect("T09.2 public TradeService must admit second 0.30 order");
                     eprintln!("T09_2_PHASE_V1:AFTER_POSITIVE_EXECUTE");
                     if accepted["status"] != "partial" {
