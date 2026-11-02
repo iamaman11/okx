@@ -16,12 +16,15 @@ function receipt(stdout, prefix) {
   assert.equal(matches.length, 1, prefix + " must have one authentic child readback");
   return JSON.parse(matches[0][1]);
 }
-export async function actualNativeWorker(root, signal, { statusProbe = false, secondAdmission = false, partialFills = false, managedAdd = false, closeMode = false } = {}) {
+export async function actualNativeWorker(root, signal, { statusProbe = false, secondAdmission = false, partialFills = false, managedAdd = false, closeMode = false, budgetDenial = false } = {}) {
   assert.ok(!secondAdmission || statusProbe, "T09.2 needs the completed terminal T09.1 readback");
   if (partialFills && !secondAdmission) throw Error("T09.3_REQUIRES_T09.2");
   if (managedAdd && !partialFills) throw Error("T09.4_REQUIRES_T09.3");
   if (closeMode && !managedAdd) throw Error("T09.6_REQUIRES_T09.4");
-  const key = closeMode ? "managed-close" : managedAdd ? "managed-add" : partialFills ? "partial-fills" : secondAdmission ? "second-admission" : statusProbe ? "post-fill-status" : "baseline";
+  if (budgetDenial && !closeMode) throw Error("T09.8_REQUIRES_T09.6");
+  // A failing T09.8 must not invalidate independently completed T09.6/7
+  // receipts. Both modes still execute the complete Native+Worker cohort.
+  const key = closeMode ? (budgetDenial ? "managed-close-denial" : "managed-close") : managedAdd ? "managed-add" : partialFills ? "partial-fills" : secondAdmission ? "second-admission" : statusProbe ? "post-fill-status" : "baseline";
   if (!memo.has(key)) memo.set(key, (async () => {
     const { stdout, stderr } = await exec(
       process.execPath,
@@ -35,6 +38,7 @@ export async function actualNativeWorker(root, signal, { statusProbe = false, se
           OKX_T09_3_PARTIAL_PROBE: partialFills ? "1" : "0",
           OKX_T09_4_MANAGED_ADD_PROBE: managedAdd ? "1" : "0",
           OKX_T09_6_CLOSE_PROBE: closeMode ? "1" : "0",
+          OKX_T09_8_DENIAL_PROBE: budgetDenial ? "1" : "0",
         },
         signal,
         timeout: closeMode ? 240_000 : 115_000,
@@ -142,7 +146,9 @@ export async function actualNativeWorker(root, signal, { statusProbe = false, se
             ...(closeMode ? { nativeCloseTerminal: receipt(stdout, "T09_6_NATIVE_TERMINAL_V1"), nativeCloseFinancialSources:receipt(stdout,"T09_6_NATIVE_FINANCIAL_SOURCES_V1"), workerCloseReconciled:receipt(stdout,"T09_6_WORKER_CLOSE_RECONCILED_V1") } : {}),
             ...(closeMode ? {
               nativeProcessRestart:receipt(stdout,"T09_7_NATIVE_PROCESS_RESTART_V1"),
-              nativeBudgetDenial:receipt(stdout,"T09_8_NATIVE_CAMPAIGN_DENIAL_V1"),
+              ...(budgetDenial ? {
+                nativeBudgetDenial:receipt(stdout,"T09_8_NATIVE_CAMPAIGN_DENIAL_V1"),
+              } : {}),
               workerTerminalRestart:receipt(stdout,"T09_7_WORKER_TERMINAL_RESTART_V1"),
             } : {}),
           } : { workerPostFill: receipt(stdout, "T09_1_WORKER_POST_FILL_EVIDENCE_V1") }),

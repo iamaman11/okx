@@ -3534,13 +3534,24 @@ mod raw_native_session_tests {
                                 },
                             ).await;
                             println!("T09_6_NATIVE_TERMINAL_V1:{terminal}");
-                            // The same signed public market is refreshed by the
-                            // recorded production boundary, never a test exchange.
-                            refresh_recorded_market();
-                            let denial=t09_8_excess_entry_denied(
-                                &accounts,&trade,&risk,&feed
-                            ).await;
-                            println!("T09_8_NATIVE_CAMPAIGN_DENIAL_V1:{denial}");
+                            // T09.6/T09.7 must produce independently checkable close
+                            // and restart receipts even when T09.8 is still
+                            // blocked. The T09.8 run must exercise the SAME
+                            // production TradeService with the complete
+                            // recorded financial cohort and fail if the
+                            // budget denial is not source-proven.
+                            if std::env::var("OKX_T09_8_DENIAL_PROBE")
+                                .is_ok_and(|value| value == "1")
+                            {
+                                // The same signed public market is refreshed by
+                                // the recorded production boundary, never a test
+                                // exchange or financial shortcut.
+                                refresh_recorded_market();
+                                let denial=t09_8_excess_entry_denied(
+                                    &accounts,&trade,&risk,&feed
+                                ).await;
+                                println!("T09_8_NATIVE_CAMPAIGN_DENIAL_V1:{denial}");
+                            }
 
                             println!("T09_6_NATIVE_CLOSE_ACK_V1:{}",serde_json::json!({
                                 "closes":closes,"created_posts":feed.outbound_posts.lock().unwrap().len(),

@@ -7,6 +7,7 @@ import {actualNativeWorker,hash} from "../native-workerd.mjs";
 export async function run({root,signal}) {
   const transcript=await actualNativeWorker(root,signal,{
     statusProbe:true,secondAdmission:true,partialFills:true,managedAdd:true,closeMode:true,
+    budgetDenial:true,
   });
   const denied=transcript.nativeBudgetDenial;
   const terminal=transcript.nativeCloseTerminal;
