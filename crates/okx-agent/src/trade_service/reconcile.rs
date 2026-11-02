@@ -599,7 +599,15 @@ impl TradeService {
             if !exposed && i.risk_increase {
                 self.cleanup_flat_protection(r, &i).await?;
             }
-            if i.risk_increase && exposed {
+            // An Add ACK with zero executed contracts does NOT own the
+            // previously protected position observed on this net-mode
+            // instrument. The pre-POST signed full-cohort census verified
+            // that earlier exposure and its live stops. An unfilled Add
+            // must retain its central reservation, but its attached stop
+            // is not yet an active stop against the old lots. Never
+            // emergency-cancel an unrelated managed position because a
+            // new limit order has not filled.
+            if i.risk_increase && exposed && filled > Decimal::ZERO {
                 let algo_client = i
                     .client_order_id
                     .get(..31)
