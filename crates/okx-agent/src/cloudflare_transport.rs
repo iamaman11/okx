@@ -3325,6 +3325,7 @@ mod raw_native_session_tests {
                             accounts: accounts.clone(),
                             trade: trade.clone(),
                             risk: risk.clone(),
+                            rate_budget: rate_budget.clone(),
                             feed: feed.clone(),
                             prior_client_id: persisted.client_order_id.clone(),
                             campaign_id: campaign_id.clone(),
