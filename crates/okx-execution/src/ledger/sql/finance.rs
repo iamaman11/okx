@@ -876,7 +876,8 @@ impl AccountStore {
                            AND head.request_hash=i.plan_hash
                            AND head.result_ref=operation_receipts.result_ref
                            AND operation_receipts.request_hash=i.plan_hash
-                           AND i.state='FILLED' AND r.state='OPEN'
+                           AND i.state IN ('FILLED','PARTIALLY_FILLED')
+                           AND r.state='OPEN'
                            AND r.plan_hash=i.plan_hash
                            AND json_extract(head.result_ref,'$.schema')
                              ='okx.entry-partial-settlement/v1'
