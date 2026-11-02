@@ -468,6 +468,7 @@ mod raw_native_session_tests {
         }
     }
     include!("trade_integration_t09_3.rs");
+    include!("trade_integration_t09_4.rs");
 
     /// Retry permission is test-only and limited to an explicitly read-only
     /// Preview that failed at the *local* request-admission boundary. The
@@ -3300,6 +3301,15 @@ mod raw_native_session_tests {
                                 "outbound_posts":feed.outbound_posts.lock().unwrap().len()
                             })
                         );
+                    }
+                    if add_mode {
+                        refresh_recorded_market();
+                        let task=tokio::spawn(t09_4_managed_add(
+                            accounts.clone(),trade.clone(),risk.clone(),feed.clone(),
+                            persisted.client_order_id.clone(),
+                        ));
+                        let add=task.await.expect("T09.4 managed Add native task");
+                        println!("T09_4_NATIVE_ADD_BOUND_V1:{add}");
                     }
                     second_shutdown.send(true).unwrap();
                     tokio::time::timeout(Duration::from_secs(10), second_maintenance)
