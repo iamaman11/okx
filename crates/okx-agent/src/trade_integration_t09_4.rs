@@ -12,6 +12,8 @@
         native_origin: i64,
         first_fill_at_ms: i64,
         terminal_fill_at_ms: i64,
+        need_new_market: tokio::sync::oneshot::Sender<()>,
+        fresh_market_ready: tokio::sync::oneshot::Receiver<()>,
     ) -> serde_json::Value {
         use crate::accounts::recorded_support::{RecordedGet, RecordedPost};
         use okx_protocol::trading::{
@@ -123,6 +125,11 @@
             feed.denied_routes.lock().unwrap().iter().rev().take(5).collect::<Vec<_>>()
         ));
 
+        // The producer must publish NEW signed public quotes only AFTER
+        // the slower financial frontier is proven, before a single Execute.
+        need_new_market.send(()).expect("T09.4 market request channel");
+        fresh_market_ready.await.expect("T09.4 recorded market refresh missing");
+        let signed_now=chrono::Utc::now().timestamp_millis().to_string();
         // 16 independently queried derivative conditional scopes, all
         // returned by signed Observer GET. Only the one previously owned,
         // live stop is present; an unknown algo would block Add.
@@ -170,7 +177,7 @@
                     ("instFamily".into(),"BTC-USDT".into()),
                 ],
                 raw_response:wrap(serde_json::json!([{
-                    "instType":"SWAP","level":"Lv1","ts":ts,
+                    "instType":"SWAP","level":"Lv1","ts":signed_now,
                     "feeGroup":[{"groupId":"4","maker":"0.0005","taker":"0.0005"}]
                 }])),
             });
@@ -187,7 +194,7 @@
                 ])),
             });
         }
-        feed.advance_recorded_public_clock(wrap(serde_json::json!([{"ts":ts}])));
+        feed.advance_recorded_public_clock(wrap(serde_json::json!([{"ts":signed_now}])));
         feed.expect_post(RecordedPost {
             access_key:"fixture-executor-a".into(),
             path:"/api/v5/trade/order".into(),
@@ -215,7 +222,7 @@
                     "clOrdId":"__REQUEST_CL_ORD_ID__","side":"buy",
                     "posSide":"long","tdMode":"cross","ordType":"limit",
                     "px":"1000","sz":"0.2","accFillSz":"0","avgPx":"",
-                    "state":"live","cTime":ts,"uTime":ts
+                    "state":"live","cTime":signed_now,"uTime":signed_now
                 }])),
             }).collect(),
         );

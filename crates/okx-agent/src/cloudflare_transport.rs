@@ -3305,14 +3305,18 @@ mod raw_native_session_tests {
                         );
                     }
                     if add_mode {
-                        refresh_recorded_market();
+                        let (frontier_tx,frontier_rx)=tokio::sync::oneshot::channel();
+                        let (market_tx,market_rx)=tokio::sync::oneshot::channel();
                         let (first_event_ms,last_event_ms)=captured_signed_times.expect("T09.4 requires T09.3 signed event times");
                         let task=tokio::spawn(t09_4_managed_add(
                             accounts.clone(),trade.clone(),risk.clone(),feed.clone(),
                             persisted.client_order_id.clone(),
                             campaign_id.clone(),native_origin,
-                            first_event_ms,last_event_ms,
+                            first_event_ms,last_event_ms,frontier_tx,market_rx,
                         ));
+                        frontier_rx.await.expect("T09.4 financial readiness handoff failed");
+                        refresh_recorded_market();
+                        market_tx.send(()).expect("T09.4 signed market reply handoff failed");
                         let add=task.await.expect("T09.4 managed Add native task");
                         println!("T09_4_NATIVE_ADD_BOUND_V1:{add}");
                     }
