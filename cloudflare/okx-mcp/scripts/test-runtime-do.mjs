@@ -496,7 +496,7 @@ try {
         "one opening POST, one closing POST and one attached-protection cancel");
       assert.equal(nativeRestart.active_central_receipt, false,
         "Native SQL restart must not resurrect a released central reservation");
-      assert.equal(nativeRestart.remaining_lot_count, partialFills ? 2 : 0,
+      assert.equal(nativeRestart.remaining_lot_count, managedAdd ? 3 : partialFills ? 2 : 0,
         "Native SQL restart must retain first close and optional second exposure");
       if (secondAdmission) {
         // This separate mode makes a new production Execute after terminal
