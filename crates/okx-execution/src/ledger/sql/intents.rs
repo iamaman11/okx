@@ -1814,24 +1814,34 @@ impl AccountStore {
         tx.commit()?;
         Ok(())
     }
-    /// Read-only proof that the existing single SQL owner durably committed
-    /// the posting fence. ACK alone is not used as a substitute for this
-    /// independent SQL timestamp and posted central-reservation state.
+    /// Read-only proof of the durable BEGIN_POST fence and its coherent
+    /// SQL state. A venue ACK moves the reservation from POSTED to OPEN;
+    /// requiring POSTED *after* that transition would reject a real ACK.
+    /// Neither ACK nor OPEN by itself proves that BEGIN_POST was committed.
     pub fn post_fence_evidence(&self, id: &str) -> StoreResult<(i64, String)> {
-        let recorded: Option<(Option<i64>, Option<String>)> = self
+        let recorded: Option<(Option<i64>, String, String, Option<String>)> = self
             .connection
             .query_row(
-                "SELECT i.begin_post_at,r.state
+                "SELECT i.begin_post_at,r.state,i.state,i.exchange_order_id
                  FROM intents i JOIN risk_receipts r
                    ON r.intent_id=i.intent_id AND r.plan_hash=i.plan_hash
                   AND r.account_key=?2 AND r.installation_id=?3
                  WHERE i.intent_id=?1 AND i.risk_increase=1",
                 params![id, self.meta.account_key, self.meta.installation_id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
             .optional()?;
         match recorded {
-            Some((Some(at), Some(state))) if at > 0 && state == "POSTED" => Ok((at, state)),
+            Some((Some(at), state, intent_state, order_id))
+                if verified_durable_post_fence(
+                    at,
+                    &state,
+                    &intent_state,
+                    order_id.as_deref(),
+                ) =>
+            {
+                Ok((at, state))
+            }
             _ => Err(StoreError::Invalid("POST_FENCE_NOT_DURABLY_COMMITTED")),
         }
     }
@@ -2024,6 +2034,24 @@ impl AccountStore {
     // Cache an already-authorized revision. This grants no new financial authority.
 }
 
+// A transient POSTED receipt is superseded by OPEN after authenticated ACK.
+// Both states are admissible ONLY with an earlier persisted BEGIN_POST.
+fn verified_durable_post_fence(
+    begin_post_at: i64,
+    receipt_state: &str,
+    intent_state: &str,
+    exchange_order_id: Option<&str>,
+) -> bool {
+    if begin_post_at <= 0 {
+        return false;
+    }
+    match (receipt_state, intent_state) {
+        ("POSTED", "POSTING") => exchange_order_id.is_none(),
+        ("OPEN", "ACKNOWLEDGED") => exchange_order_id.is_some_and(|id| !id.is_empty()),
+        _ => false,
+    }
+}
+
 /// SQL risk receipt state is read under the existing single AccountStore owner.
 fn risk_receipt_covers_exposure(state: &str) -> bool {
     matches!(
@@ -2035,6 +2063,33 @@ fn risk_receipt_covers_exposure(state: &str) -> bool {
 #[cfg(test)]
 mod active_receipt_tests {
     use super::*;
+
+    #[test]
+    fn post_fence_proof_requires_durable_timestamp_and_coherent_ack_transition() {
+        assert!(verified_durable_post_fence(42, "POSTED", "POSTING", None));
+        assert!(verified_durable_post_fence(
+            42,
+            "OPEN",
+            "ACKNOWLEDGED",
+            Some("recorded-venue-order")
+        ));
+        for (at, receipt, intent, order) in [
+            (0, "POSTED", "POSTING", None),
+            (0, "OPEN", "ACKNOWLEDGED", Some("venue")),
+            (42, "OPEN", "ACKNOWLEDGED", None),
+            (42, "OPEN", "ACKNOWLEDGED", Some("")),
+            (42, "HELD", "ACKNOWLEDGED", Some("venue")),
+            (42, "POSTED", "ACKNOWLEDGED", Some("venue")),
+            (42, "OPEN", "POSTING", None),
+            (42, "RELEASED", "ACKNOWLEDGED", Some("venue")),
+            (42, "UNKNOWN", "UNKNOWN", Some("venue")),
+        ] {
+            assert!(
+                !verified_durable_post_fence(at, receipt, intent, order),
+                "false BEGIN_POST proof: {at}/{receipt}/{intent}/{order:?}"
+            );
+        }
+    }
 
     #[test]
     fn released_or_no_send_receipt_never_covers_open_exposure() {

@@ -19,7 +19,8 @@ export async function run({ root, signal }) {
   assert.match(admission.plan_hash, /^[0-9a-f]{64}$/);
   assert.equal(admission.state, "ACKNOWLEDGED");
   assert.equal(admission.sql_exchange_order_id, "recorded-t09-second-001");
-  assert.equal(admission.sql_post_reservation_state, "POSTED");
+  assert.equal(admission.sql_post_reservation_state, "OPEN",
+    "ACK advances the durably fenced risk receipt from POSTED to OPEN");
   assert.ok(Number.isSafeInteger(admission.sql_begin_post_at_ms)
     && admission.sql_begin_post_at_ms > 0,
     "BEGIN_POST must have its own durable SQL timestamp");
@@ -50,7 +51,7 @@ export async function run({ root, signal }) {
         actual: String(admission.preview_reserved_entry_usd) },
       { id: "separate_entry_upper_usd", expected: "3.0015",
         actual: String(admission.quote_entry_usd) },
-      { id: "durable_post_fence", expected: "POSTED",
+      { id: "durable_post_fence_after_ack", expected: "OPEN",
         actual: String(admission.sql_post_reservation_state) },
       { id: "second_venue_order_id", expected: "recorded-t09-second-001",
         actual: String(admission.sql_exchange_order_id) },

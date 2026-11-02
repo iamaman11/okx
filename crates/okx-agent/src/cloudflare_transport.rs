@@ -3218,7 +3218,9 @@ mod raw_native_session_tests {
                         );
                     eprintln!("T09_2_PHASE_V1:AFTER_SQL_READBACK");
                     assert!(post_fence_ms > 0);
-                    assert_eq!(post_fence_state, "POSTED");
+                    // begin_post_at remains durable; authenticated ACK
+                    // advances the same SQL receipt from POSTED to OPEN.
+                    assert_eq!(post_fence_state, "OPEN");
                     assert_eq!(persisted.state, okx_execution::IntentState::Acknowledged);
                     assert_eq!(
                         persisted.exchange_order_id.as_deref(),
