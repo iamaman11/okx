@@ -476,18 +476,19 @@ mod raw_native_session_tests {
             return;
         }
         let path = std::path::PathBuf::from(
-            std::env::var_os("OKX_T09_7_ACCOUNT_A_SQL").expect("T09.7 A SQL file")
+            std::env::var_os("OKX_T09_7_ACCOUNT_A_SQL").expect("T09.7 A SQL file"),
         );
         let key = std::env::var("OKX_T09_7_ACCOUNT_A_KEY").expect("T09.7 A UID");
         let other_path = std::path::PathBuf::from(
-            std::env::var_os("OKX_T09_7_ACCOUNT_B_SQL").expect("T09.7 B SQL file")
+            std::env::var_os("OKX_T09_7_ACCOUNT_B_SQL").expect("T09.7 B SQL file"),
         );
         let other_key = std::env::var("OKX_T09_7_ACCOUNT_B_KEY").expect("T09.7 B UID");
-        assert_ne!(path,other_path,"T09.7 two separate SQL owners");
-        assert_ne!(key,other_key,"T09.7 two distinct UIDs");
-        let owner = okx_execution::AccountStoreHandle::open_existing(
-            path,key,"installation_test".into()
-        ).await.expect("T09.7 child process must reopen A SQL");
+        assert_ne!(path, other_path, "T09.7 two separate SQL owners");
+        assert_ne!(key, other_key, "T09.7 two distinct UIDs");
+        let owner =
+            okx_execution::AccountStoreHandle::open_existing(path, key, "installation_test".into())
+                .await
+                .expect("T09.7 child process must reopen A SQL");
         let account_a = owner.call(
             std::time::Instant::now()+Duration::from_secs(5),
             |s| {
@@ -528,39 +529,46 @@ mod raw_native_session_tests {
                 }))
             }
         ).await.expect("T09.7 child independent A finance readback");
-        assert_eq!(account_a["remaining_lots"],0);
-        assert_eq!(account_a["active_reserve_second"],false);
-        assert_eq!(account_a["active_reserve_add"],false);
-        assert_eq!(account_a["account_opening_equity_usd"],"100");
-        assert_eq!(account_a["total_fees_usdt"],"-0.006");
-        assert_eq!(account_a["realized_pnl_usdt"],"0");
-        assert_eq!(account_a["equity_a_usd"],"99.994");
+        assert_eq!(account_a["remaining_lots"], 0);
+        assert_eq!(account_a["active_reserve_second"], false);
+        assert_eq!(account_a["active_reserve_add"], false);
+        assert_eq!(account_a["account_opening_equity_usd"], "100");
+        assert_eq!(account_a["total_fees_usdt"], "-0.006");
+        assert_eq!(account_a["realized_pnl_usdt"], "0");
+        assert_eq!(account_a["equity_a_usd"], "99.994");
         let other = okx_execution::AccountStoreHandle::open_existing(
-            other_path,other_key,"installation_test".into()
-        ).await.expect("T09.7 child process must reopen B SQL");
-        let account_b=other.call(
-            std::time::Instant::now()+Duration::from_secs(5),
-            |s| {
-                let lots=s.active_lots("BTC-USDT-SWAP")?;
-                let finance=s.finance_totals(0,i64::MAX,None)?;
-                let opening=s.opening_equity_usd()?;
+            other_path,
+            other_key,
+            "installation_test".into(),
+        )
+        .await
+        .expect("T09.7 child process must reopen B SQL");
+        let account_b = other
+            .call(std::time::Instant::now() + Duration::from_secs(5), |s| {
+                let lots = s.active_lots("BTC-USDT-SWAP")?;
+                let finance = s.finance_totals(0, i64::MAX, None)?;
+                let opening = s.opening_equity_usd()?;
                 Ok(serde_json::json!({
                     "remaining_lots":lots.len(),
                     "finance_totals":finance.len(),
                     "equity_b_usd":opening.normalize().to_string(),
                     "finance_revision":s.finance_revision()?,
                 }))
-            }
-        ).await.expect("T09.7 child independent B readback");
-        assert_eq!(account_b["remaining_lots"],0);
-        assert_eq!(account_b["finance_totals"],0);
-        assert_eq!(account_b["equity_b_usd"],"100");
-        println!("T09_7_NATIVE_PROCESS_RESTART_V1:{}",serde_json::json!({
-            "new_os_process":true,
-            "account_a":account_a,
-            "account_b":account_b,
-            "new_exchange_posts":0,
-        }));
+            })
+            .await
+            .expect("T09.7 child independent B readback");
+        assert_eq!(account_b["remaining_lots"], 0);
+        assert_eq!(account_b["finance_totals"], 0);
+        assert_eq!(account_b["equity_b_usd"], "100");
+        println!(
+            "T09_7_NATIVE_PROCESS_RESTART_V1:{}",
+            serde_json::json!({
+                "new_os_process":true,
+                "account_a":account_a,
+                "account_b":account_b,
+                "new_exchange_posts":0,
+            })
+        );
         drop(owner);
         drop(other);
     }
@@ -3564,9 +3572,18 @@ mod raw_native_session_tests {
             .unwrap()
             .unwrap();
         let restart_b_account = if close_mode {
-            Some(accounts.resolve("fixture-b").await.unwrap()
-                .configuration.account_key.clone())
-        } else {None};
+            Some(
+                accounts
+                    .resolve("fixture-b")
+                    .await
+                    .unwrap()
+                    .configuration
+                    .account_key
+                    .clone(),
+            )
+        } else {
+            None
+        };
         let restart_account = if status_probe {
             Some(
                 accounts
@@ -3601,12 +3618,12 @@ mod raw_native_session_tests {
             // SQLite owner constructor after the old worker has terminated.
             // No test-only SQL mutation, copy or projection is permitted.
             let key = account.wire();
-            let child_a_key=key.clone();
+            let child_a_key = key.clone();
             let path = root
                 .join("accounts")
                 .join(crate::accounts::key_hash(&account))
                 .join("account.sqlite");
-            let child_a_path=path.clone();
+            let child_a_path = path.clone();
             let restored = okx_execution::AccountStoreHandle::open_existing(
                 path,
                 key,
@@ -3784,8 +3801,9 @@ mod raw_native_session_tests {
             .await
             .expect("restarted SQL owner did not close");
             if close_mode {
-                let other=restart_b_account.as_ref().expect("T09.7 B account UID");
-                let child_b_path=root.join("accounts")
+                let other = restart_b_account.as_ref().expect("T09.7 B account UID");
+                let child_b_path = root
+                    .join("accounts")
                     .join(crate::accounts::key_hash(other))
                     .join("account.sqlite");
                 let output=tokio::time::timeout(Duration::from_secs(20),
@@ -3802,22 +3820,25 @@ mod raw_native_session_tests {
                         .output()
                 ).await.expect("T09.7 independent Native process timed out")
                  .expect("T09.7 failed to launch Native process");
-                let stdout=String::from_utf8(output.stdout)
-                    .expect("T09.7 child output encoding");
-                assert!(output.status.success(),
+                let stdout = String::from_utf8(output.stdout).expect("T09.7 child output encoding");
+                assert!(
+                    output.status.success(),
                     "T09.7 Native process crash/reopen failed: {}",
-                    stdout.chars().take(1000).collect::<String>());
-                let receipt=stdout.lines().find_map(|line|
-                    line.split_once("T09_7_NATIVE_PROCESS_RESTART_V1:")
-                        .map(|(_,json)|json.to_owned())
-                ).expect("T09.7 real child process SQL receipt missing");
-                let proof:serde_json::Value=serde_json::from_str(&receipt)
-                    .expect("T09.7 child Native receipt invalid");
-                assert_eq!(proof["new_os_process"],true);
-                assert_eq!(proof["new_exchange_posts"],0);
+                    stdout.chars().take(1000).collect::<String>()
+                );
+                let receipt = stdout
+                    .lines()
+                    .find_map(|line| {
+                        line.split_once("T09_7_NATIVE_PROCESS_RESTART_V1:")
+                            .map(|(_, json)| json.to_owned())
+                    })
+                    .expect("T09.7 real child process SQL receipt missing");
+                let proof: serde_json::Value =
+                    serde_json::from_str(&receipt).expect("T09.7 child Native receipt invalid");
+                assert_eq!(proof["new_os_process"], true);
+                assert_eq!(proof["new_exchange_posts"], 0);
                 println!("T09_7_NATIVE_PROCESS_RESTART_V1:{proof}");
             }
-
         }
         std::fs::remove_dir_all(root).unwrap();
         println!("native_to_persisted_workerd_riskbook PASS: no venue POST");
