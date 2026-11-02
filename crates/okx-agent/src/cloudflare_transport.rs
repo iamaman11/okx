@@ -3521,9 +3521,17 @@ mod raw_native_session_tests {
                             ));
                             println!("T09_6_NATIVE_FINANCIAL_SOURCES_V1:{witness}");
                             let terminal=t09_6_source_backed_close_release(
-                                &accounts,&trade,&risk,&rate_budget,&feed,&new_intent_id,
-                                add["intent_id"].as_str().expect("T09.6 Add source"),
-                                &closes,
+                                T09_6FinalizeContext {
+                                    accounts: &accounts,
+                                    trade: &trade,
+                                    risk: &risk,
+                                    rate_budget: &rate_budget,
+                                    feed: &feed,
+                                    second_entry_id: &new_intent_id,
+                                    add_entry_id: add["intent_id"].as_str()
+                                        .expect("T09.6 Add source"),
+                                    closes: &closes,
+                                },
                             ).await;
                             println!("T09_6_NATIVE_TERMINAL_V1:{terminal}");
                             // The same signed public market is refreshed by the
