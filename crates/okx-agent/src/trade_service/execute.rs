@@ -2121,6 +2121,7 @@ struct TerminalReleaseCensusScope<'a> {
 /// The SQL owner is the authority for the local send state. A missing venue
 /// row does not prove no-send after POSTING/UNKNOWN; preserve those obligations
 /// and deny further account risk until a terminal readback is reconciled.
+#[cfg(test)]
 fn verify_local_intent_coverage(
     active: &[(StoredIntent, Option<CentralReceipt>)],
     unresolved: &[String],
@@ -2133,6 +2134,7 @@ fn verify_local_intent_coverage(
 /// central RELEASE is about to be constructed from a settled SQL proof.
 /// The pending reservation remains included in the content digest and all
 /// unrelated intents retain the normal fail-closed semantics.
+#[cfg(test)]
 fn verify_local_intent_coverage_scoped(
     active: &[(StoredIntent, Option<CentralReceipt>)],
     unresolved: &[String],
