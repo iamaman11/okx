@@ -1,0 +1,125 @@
+name: OKX Windows preflight (GitHub controlled)
+
+# Only a narrowly scoped request-file commit on the isolated CI-control
+# branch can launch this job. The PR branch and main are never modified
+# by this workflow; all tests use recorded venue HTTP/WS fixture boundaries.
+on:
+  push:
+    branches:
+      - ci/okx-windows-preflight
+    paths:
+      - ci/windows-preflight-request.json
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: okx-windows-preflight
+  cancel-in-progress: false
+
+jobs:
+  windows-preflight:
+    name: Windows recorded T09 preflight
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - name: Fetch the trusted CI-control request
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Validate fixed request and independently read exact PR HEAD
+        id: request
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          if ($env:GITHUB_REPOSITORY -ne "iamaman11/okx") { throw "WRONG_REPOSITORY" }
+          if ($env:GITHUB_REF -ne "refs/heads/ci/okx-windows-preflight") { throw "WRONG_CONTROL_REF" }
+          $file = "ci/windows-preflight-request.json"
+          if (-not (Test-Path -LiteralPath $file)) { throw "REQUEST_MISSING" }
+          $request = Get-Content -Raw -LiteralPath $file | ConvertFrom-Json
+          if ($request.schema -ne "okx.windows-preflight-request/v1") { throw "REQUEST_SCHEMA_INVALID" }
+          if ($request.target_sha -cnotmatch '^[0-9a-f]{40}$') { throw "TARGET_SHA_INVALID" }
+          if ($request.case -cnotin @("T09.1","T09.3","T09.4","T09.6","T09.7","T09.8","ALL26")) {
+            throw "TARGET_CASE_NOT_ALLOWED"
+          }
+          if ($request.request_id -cnotmatch '^[A-Za-z0-9._-]{8,80}$') { throw "REQUEST_ID_INVALID" }
+          $prRaw = gh api "/repos/iamaman11/okx/pulls/493"
+          if ($LASTEXITCODE -ne 0) { throw "PR_HEAD_READ_FAILED" }
+          $pr = $prRaw | ConvertFrom-Json
+          if ($pr.head.repo.id -ne 1388071566 -or $pr.head.ref -ne "feat/p02-e1-e2-entry-admission") {
+            throw "TARGET_PR_IDENTITY_CHANGED"
+          }
+          if ($pr.base.ref -ne "main" -or $pr.state -ne "open") {
+            throw "TARGET_PR_NOT_OPEN"
+          }
+          if ($pr.head.sha -cne $request.target_sha) {
+            throw "STALE_TARGET_HEAD: requested=$($request.target_sha) observed=$($pr.head.sha)"
+          }
+          "target_sha=$($request.target_sha)" >> $env:GITHUB_OUTPUT
+          "case=$($request.case)" >> $env:GITHUB_OUTPUT
+          "request_id=$($request.request_id)" >> $env:GITHUB_OUTPUT
+          Write-Host "OKX_PREFLIGHT_REQUEST_ACCEPTED:$($request.request_id)"
+          Write-Host "OKX_PREFLIGHT_EXACT_HEAD:$($request.target_sha)"
+          Write-Host "OKX_PREFLIGHT_CASE:$($request.case)"
+          Write-Host "OKX_PREFLIGHT_NOT_PRODUCTION_ACCEPTANCE"
+
+      - name: Checkout exact immutable PR commit
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ steps.request.outputs.target_sha }}
+          persist-credentials: false
+
+      - name: Verify checked-out source commit
+        shell: pwsh
+        env:
+          EXPECTED_SHA: ${{ steps.request.outputs.target_sha }}
+        run: |
+          $head = (git rev-parse HEAD).Trim()
+          if ($head -cne $env:EXPECTED_SHA) { throw "CHECKOUT_HEAD_MISMATCH" }
+          Write-Host "OKX_PREFLIGHT_EXECUTING_SHA=$head"
+
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # 2026-09-29
+        with:
+          toolchain: 1.95.0
+          components: rustfmt
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      - name: Check Rust format
+        run: cargo fmt --all -- --check
+
+      - name: Install locked recorded Workerd dependencies
+        shell: pwsh
+        run: |
+          npm ci --prefix cloudflare/okx-mcp --ignore-scripts --no-audit --no-fund
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Run approved recorded Native and Worker scenario
+        shell: pwsh
+        env:
+          OKX_PREFLIGHT_CASE: ${{ steps.request.outputs.case }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $artifacts = Join-Path $env:RUNNER_TEMP "trade-integration"
+          if ($env:OKX_PREFLIGHT_CASE -eq "ALL26") {
+            node scripts/run-trade-integration.mjs --suite t09,t10 --artifacts "$artifacts"
+          } elseif ($env:OKX_PREFLIGHT_CASE -cin @("T09.1","T09.3","T09.4","T09.6","T09.7","T09.8")) {
+            node scripts/run-trade-integration.mjs --case $env:OKX_PREFLIGHT_CASE --artifacts "$artifacts"
+          } else {
+            throw "TARGET_CASE_NOT_ALLOWED"
+          }
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Preserve bounded evidence on success or failure
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: okx-windows-preflight-${{ github.run_id }}
+          path: ${{ runner.temp }}\trade-integration
+          if-no-files-found: warn
+          retention-days: 14
