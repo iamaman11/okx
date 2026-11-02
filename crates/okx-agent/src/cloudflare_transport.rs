@@ -480,6 +480,10 @@ mod raw_native_session_tests {
         budget: &RateBudget,
         remaining: Duration,
     ) -> Option<Duration> {
+        // Account-facing TradeService may wrap the same typed local no-send
+        // refusal as "OKX API error: ...". Strip only this exact envelope;
+        // the shared RateBudget witness still decides whether waiting is safe.
+        let reason = reason.strip_prefix("OKX API error: ").unwrap_or(reason);
         if !reason.starts_with("OKX rate/backpressure defer: ") {
             return None;
         }
@@ -573,6 +577,23 @@ mod raw_native_session_tests {
                 Duration::from_secs(3),
             )
             .is_some()
+        );
+        assert!(
+            recorded_preview_local_defer(
+                "OKX API error: OKX rate/backpressure defer: RateThrottleEvidence { ... }",
+                &budget,
+                Duration::from_secs(3),
+            )
+            .is_some(),
+            "TradeService wrapper must preserve only typed LOCAL/NO-SEND read retry"
+        );
+        assert!(
+            recorded_preview_local_defer(
+                "OKX API error: VENUE_ACK_MISSING",
+                &budget,
+                Duration::from_secs(3),
+            )
+            .is_none()
         );
         assert!(
             recorded_preview_local_defer("VENUE_ACK_MISSING", &budget, Duration::from_secs(3),)
