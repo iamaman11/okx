@@ -481,6 +481,7 @@ try {
       const secondAdmission = process.env.OKX_T09_2_ADMISSION_PROBE === "1";
       const partialFills = process.env.OKX_T09_3_PARTIAL_PROBE === "1";
       const managedAdd = process.env.OKX_T09_4_MANAGED_ADD_PROBE === "1";
+      const managedClose = process.env.OKX_T09_6_CLOSE_PROBE === "1";
       // T09.1 has already closed the exact public order and released its
       // reservation. Requiring reserved_loss > 2 here would incorrectly
       // demand that a settled RELEASE remain HELD. Compare two independent
@@ -496,8 +497,24 @@ try {
         "one opening POST, one closing POST and one attached-protection cancel");
       assert.equal(nativeRestart.active_central_receipt, false,
         "Native SQL restart must not resurrect a released central reservation");
-      assert.equal(nativeRestart.remaining_lot_count, managedAdd ? 3 : partialFills ? 2 : 0,
+      assert.equal(nativeRestart.remaining_lot_count, managedClose ? 0 : managedAdd ? 3 : partialFills ? 2 : 0,
         "Native SQL restart must retain first close and optional second exposure");
+      if (managedClose) {
+        const terminal=receipt(stdout,"T09_6_NATIVE_TERMINAL_V1");
+        assert.equal(terminal.remaining_lots,0);
+        assert.equal(terminal.orphan_algos,0);
+        assert.equal(terminal.worker_budget.entry_budget.consumed_usd,"6.003");
+        assert.equal(terminal.worker_budget.entry_budget.reserved_usd,"0");
+        assert.equal(terminal.worker_budget.reserved_loss_usd,"0");
+        assert.equal(terminal.outbound_posts,9);
+        console.log("T09_6_WORKER_CLOSE_RECONCILED_V1:"+JSON.stringify({
+          native_close_proof:terminal.worker_risk_book_sequence,
+          worker_after_native_sequence:afterNative.risk_book_sequence,
+          native_budget:terminal.worker_budget,
+          worker_budget:afterNative.budget,
+          connection_generation:afterNativeSocket.hello.connection_generation,
+        }));
+      }
       if (secondAdmission) {
         // This separate mode makes a new production Execute after terminal
         // release. Match the new post-ACK Worker budget, never the earlier

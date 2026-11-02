@@ -267,6 +267,7 @@
         assert_eq!(feed.outbound_posts.lock().unwrap().len(),5,
             "fill and bill capture can NEVER submit another venue POST");
         serde_json::json!({
+            "add_fill_at_ms":filled_at,
             "intent_id":intent_id,
             "filled":sql,
             "trade_status":status,

@@ -2173,6 +2173,7 @@ mod raw_native_session_tests {
         // live TradeService, signed Executor GET, account SQL owner and central
         // workerd RiskBook, but never changes the accepted T09.0/T09.5 run.
         let mut managed_add_proof: Option<serde_json::Value> = None;
+        let mut first_close_at: Option<String> = None;
         if status_probe {
             let after_fill_order = envelope(json!([{
                 "instId":"BTC-USDT-SWAP",
@@ -2365,6 +2366,11 @@ mod raw_native_session_tests {
                 // The Native source-capture SQL owner itself is unchanged.
                 // An external CLOSE ACK alone was insufficient in earlier T09.1.
                 let closing_at = chrono::Utc::now().timestamp_millis().to_string();
+                first_close_at = Some(closing_at.clone());
+                // For T09.7 the venue fills the old IOC at 1000 (price improvement).
+                // T09.1 alone retains its accepted 999 venue fixture.
+                let accepted_close_price = if close_mode { "1000" } else { "999" };
+                let accepted_close_pnl = if close_mode { "0" } else { "-0.001" };
                 let raw_close_fill = envelope(json!([
                     {
                         "instType":"SWAP","instId":"BTC-USDT-SWAP",
@@ -2384,7 +2390,7 @@ mod raw_native_session_tests {
                         "clOrdId":"__REQUEST_CL_ORD_ID__",
                         "billId":"t09-close-bill-001",
                         "subType":"5","side":"sell","posSide":"long",
-                        "fillPx":"999","fillSz":"0.1","fillPnl":"-0.001",
+                        "fillPx":accepted_close_price,"fillSz":"0.1","fillPnl":accepted_close_pnl,
                         "fee":"-0.0005","feeCcy":"USDT",
                         "ts":closing_at,"fillTime":closing_at
                     }
@@ -2402,7 +2408,7 @@ mod raw_native_session_tests {
                         "instId":"BTC-USDT-SWAP","ordId":"recorded-t09-close-001",
                         "tradeId":"t09-close-trade-001","clOrdId":"__REQUEST_CL_ORD_ID__",
                         "ccy":"USDT","type":"2","subType":"5",
-                        "balChg":"-0.0015","fee":"-0.0005","pnl":"-0.001",
+                        "balChg":if close_mode { "-0.0005" } else { "-0.0015" },"fee":"-0.0005","pnl":accepted_close_pnl,
                         "ts":closing_at
                     }
                 ]));
@@ -2486,7 +2492,7 @@ mod raw_native_session_tests {
                             "clOrdId":"__REQUEST_CL_ORD_ID__",
                             "side":side,"posSide":"long","tdMode":"cross",
                             "ordType":if side == "sell" {"ioc"}else{"limit"},
-                            "px":px,"sz":"0.1","accFillSz":"0.1","avgPx":px,
+                            "px":px,"sz":"0.1","accFillSz":"0.1","avgPx":if side == "sell" { accepted_close_price } else { px },
                             "state":"filled","cTime":time,"uTime":time
                         }])),
                     });
@@ -3347,6 +3353,52 @@ mod raw_native_session_tests {
                                     venue_order_id:order_id,expected_post_count:post_count,
                                 }).await);
                             }
+                            let close_frontier=t09_6_publish_terminal_sources(T09_6TerminalSources {
+                                feed:feed.clone(),
+                                first_open_at_ms:financial_time.clone(),
+                                first_close_at_ms:first_close_at.clone()
+                                    .expect("T09.6 T09.1 terminal close timestamp"),
+                                second_first_at_ms:first_event_ms,
+                                second_last_at_ms:last_event_ms,
+                                add_fill_at_ms:add["settlement"]["add_fill_at_ms"].as_i64()
+                                    .expect("T09.6 immutable Add fill timestamp"),
+                                closes:closes.clone(),
+                            });
+                            let owner=accounts.resolve("fixture-a").await.unwrap();
+                            let mut witness=serde_json::json!(null);
+                            tokio::time::timeout(Duration::from_secs(20),async {
+                                loop {
+                                    let (fills,bills)=owner.execution.store.call(
+                                        std::time::Instant::now()+Duration::from_secs(3),
+                                        |s|Ok((s.cursor("fills","SWAP")?,s.cursor("bills","account")?))
+                                    ).await.expect("T09.6 source cursors from native SQL");
+                                    let health=owner.source_capture_health.read().await.clone();
+                                    let snapshot=owner.latest_snapshot.read().await.clone();
+                                    let ready_f=fills.as_ref().is_some_and(|c|
+                                        c.watermark>=close_frontier && c.coverage_gaps.is_empty());
+                                    let ready_b=bills.as_ref().is_some_and(|c|
+                                        c.watermark>=close_frontier && c.coverage_gaps.is_empty());
+                                    let flat=snapshot.as_ref().is_some_and(|s|s.positions.is_empty()
+                                        && chrono::DateTime::parse_from_rfc3339(&s.source_received_at)
+                                            .ok().is_some_and(|t|t.timestamp_millis()>=close_frontier));
+                                    witness=serde_json::json!({
+                                        "fills":fills,"bills":bills,"flat":flat,
+                                        "capture_reason":health.reason_code,
+                                        "capture_success_ms":health.last_success_ms,
+                                    });
+                                    if ready_f && ready_b && flat { break }
+                                    tokio::time::sleep(Duration::from_millis(50)).await;
+                                }
+                            }).await.unwrap_or_else(|_|panic!(
+                                "T09_6_SIGNED_TERMINAL_CAPTURE_UNPROVEN:{witness}"
+                            ));
+                            println!("T09_6_NATIVE_FINANCIAL_SOURCES_V1:{witness}");
+                            let terminal=t09_6_source_backed_close_release(
+                                &accounts,&trade,&risk,&feed,&new_intent_id,
+                                add["intent_id"].as_str().expect("T09.6 Add source"),
+                                &closes,
+                            ).await;
+                            println!("T09_6_NATIVE_TERMINAL_V1:{terminal}");
                             println!("T09_6_NATIVE_CLOSE_ACK_V1:{}",serde_json::json!({
                                 "closes":closes,"created_posts":feed.outbound_posts.lock().unwrap().len(),
                                 "terminal_proven":false
@@ -3505,18 +3557,22 @@ mod raw_native_session_tests {
             if add_mode {
                 let add = &readback["managed_add"];
                 assert_eq!(
-                    readback["remaining_lot_count"], 3,
-                    "T09.4 must persist 3 independent real-fill lots"
+                    readback["remaining_lot_count"],
+                    if close_mode { 0 } else { 3 },
+                    "T09.4/T09.6 must persist exact closed vs live lots"
                 );
-                assert_eq!(readback["remaining_lot_quantity"], "0.5");
+                assert_eq!(
+                    readback["remaining_lot_quantity"],
+                    if close_mode { "0" } else { "0.5" }
+                );
                 assert_eq!(add["state"], "FILLED");
                 assert_eq!(add["venue_order_id"], "recorded-t09-add-001");
                 assert_eq!(
-                    add["active_central_receipt"], true,
+                    add["active_central_receipt"], !close_mode,
                     "live managed risk must remain held"
                 );
-                assert_eq!(add["lot_count"], 1);
-                assert_eq!(add["lot_quantity"], "0.2");
+                assert_eq!(add["lot_count"], if close_mode { 0 } else { 1 });
+                assert_eq!(add["lot_quantity"], if close_mode { "0" } else { "0.2" });
                 assert_eq!(add["protected_quantity"], "0.2");
                 assert_eq!(add["filled_quantity"], "0.2");
                 assert_eq!(add["gross_notional_usdt"], "2");
@@ -3524,12 +3580,12 @@ mod raw_native_session_tests {
                 assert_eq!(add["linked_bill_fee_usdt"], "0.001");
                 assert_eq!(add["entry_total_usdt"], "2.001");
                 assert_eq!(readback["second_intent_state"], "FILLED");
-                assert_eq!(readback["second_active_central_receipt"], true);
+                assert_eq!(readback["second_active_central_receipt"], !close_mode);
             } else if std::env::var("OKX_T09_3_PARTIAL_PROBE").as_deref() == Ok("1") {
                 assert_eq!(readback["remaining_lot_count"], 2);
                 assert_eq!(readback["remaining_lot_quantity"], "0.3");
                 assert_eq!(readback["second_intent_state"], "FILLED");
-                assert_eq!(readback["second_active_central_receipt"], true);
+                assert_eq!(readback["second_active_central_receipt"], !close_mode);
             } else {
                 assert_eq!(readback["remaining_lot_count"], 0);
             }
@@ -3573,7 +3629,7 @@ mod raw_native_session_tests {
                         "sql_begin_post_at_ms":add["sql_begin_post_at_ms"],
                         "sql_revision":readback["managed_add"]["sql_revision"],
                         "risk_book_sequence":settled["risk_book_sequence"],
-                        "added_quantity":readback["managed_add"]["lot_quantity"],
+                        "added_quantity":settled["filled"]["quantity"],
                         "add_entry_usd":readback["managed_add"]["entry_total_usdt"],
                         "linked_bill_fee_usdt":readback["managed_add"]["linked_bill_fee_usdt"],
                         "linked_bill_source_digest":readback["managed_add"]["linked_bill_source_digest"],
