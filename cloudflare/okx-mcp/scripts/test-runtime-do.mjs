@@ -40,6 +40,9 @@ const configuration = {
   accounts: [],
 };
 const addMode=process.env.OKX_T09_4_MANAGED_ADD_PROBE==="1";
+const sharedCapMode=process.env.OKX_T10_7_SHARED_CAP_PROBE==="1";
+if (sharedCapMode && (addMode || process.env.OKX_NATIVE_WORKER_INTEGRATION==="1"))
+  throw Error("SHARED_CAP_WORKER_PROBE_MUST_BE_ISOLATED_FROM_NATIVE_FINANCIAL_SCENARIO");
 const token = "integration-only-ephemeral-token";
 const tokenHash = createHash("sha256").update(token).digest("hex");
 // Miniflare 5 uses the build-output worker manifest and typed bindings.
@@ -323,7 +326,115 @@ try {
     opening_source_digest:opening.source_digest,
   }));
   let held;
-  if (!addMode) {
+  if (sharedCapMode) {
+    // Dedicated component of #449 T10-07 on the ACTUAL persisted
+    // RuntimeSession/SQLite DO, not a JS RiskBook replica. A full T10-07
+    // still additionally requires public Native Execute and SQL/venue proof.
+    const observedAt=Date.now()-500;
+    const census={
+      complete:true,source_digest:"d".repeat(64),
+      content_digest:"a".repeat(64),
+      generated_at_ms:observedAt,source_read_floor_ms:observedAt,
+      account_keys:accountKeys,
+      occupied:accountKeys.map(account_key=>({
+        account_key,occupied_usdt:"0",cumulative_loss_usd:"0"
+      })),
+      native_account_evidence_complete:true,
+      native_order_evidence_complete:true,
+      native_ledger_evidence_complete:true,
+    };
+    const requested=(accountUid,strategy,intentSuffix,planDigest)=>({
+      action:"RESERVE",venue:"okx",account_uid:accountUid,
+      run_id:"run_central_cap_0001",
+      intent_id:"intent_central_cap_"+intentSuffix,
+      strategy_id:strategy,instrument_id:"BTC-USDT-SWAP",
+      plan_sha256:planDigest.repeat(64),
+      requested_loss_usdt:"1",requested_loss_usd:"1",
+      entry_upper_usd:"4",entry_proof_digest:"e".repeat(64),
+      usd_conversion:{usd_per_usdt:"1",
+        source_digest:"e".repeat(64),observed_at_ms:observedAt},
+      policy_revision:2,census
+    });
+    const firstRequest=requested(uid,"manual","a_0001","a");
+    const secondRequest=requested(uidB,"manual","b_0001","b");
+    const thirdRequest=requested(uid,"manual","a_0002","c");
+    // Both accounts genuinely contend over one SQLite RiskBook owner.
+    // Distinct command IDs mean concurrent WSS results cannot be confused.
+    const [firstReserve,secondReserve]=await Promise.all([
+      risk(socket1,"reserve_concurrent_a_0001",firstRequest),
+      risk(socket1,"reserve_concurrent_b_0001",secondRequest),
+    ]);
+    assert.equal(firstReserve.status,"HELD","account A must receive real held risk");
+    assert.equal(secondReserve.status,"HELD","account B must receive real held risk");
+    assert.notEqual(firstReserve.reservation_key,secondReserve.reservation_key);
+    const beforeDenied=await summary(socket1,"summary_before_third_cap_0001");
+    assert.equal(beforeDenied.budget.entry_budget.reserved_usd,"8");
+    assert.equal(beforeDenied.budget.entry_budget.remaining_usd,"2");
+    const denied=await risk(socket1,"reserve_third_over_cap_0001",thirdRequest);
+    assert.equal(denied.status,"DENIED");
+    assert.equal(denied.reason,"CAMPAIGN_ENTRY_BUDGET_EXHAUSTED");
+    const repeated=await risk(socket1,"reserve_duplicate_a_0001",firstRequest);
+    assert.equal(repeated.status,"HELD");
+    assert.equal(repeated.reservation_key,firstReserve.reservation_key,
+      "replaying A's same intent never creates a third reservation");
+    const budgetBeforeRestart=await summary(socket1,"summary_after_denied_cap_0001");
+    assert.equal(budgetBeforeRestart.budget.entry_budget.limit_usd,"10");
+    assert.equal(budgetBeforeRestart.budget.entry_budget.consumed_usd,"0");
+    assert.equal(budgetBeforeRestart.budget.entry_budget.reserved_usd,"8");
+    assert.equal(budgetBeforeRestart.budget.entry_budget.remaining_usd,"2");
+    assert.equal(budgetBeforeRestart.budget.reserved_loss_usd,"2");
+    assert.equal(budgetBeforeRestart.budget.remaining_loss_usd,"8");
+    socket1.ws.close();
+    await first.dispose();
+    first=null;
+    second=new Miniflare(opts);
+    const installationReplay=await request(second,"/installation/initialize","POST",installation);
+    assert.equal(installationReplay.status,200);
+    const restarted=await session(second);
+    const persisted=await summary(restarted,"summary_shared_cap_restart_0001");
+    assert.ok(restarted.hello.connection_generation>socket1.hello.connection_generation);
+    assert.equal(persisted.budget.entry_budget.consumed_usd,"0");
+    assert.equal(persisted.budget.entry_budget.reserved_usd,"8");
+    assert.equal(persisted.budget.entry_budget.remaining_usd,"2");
+    assert.equal(persisted.budget.reserved_loss_usd,"2");
+    assert.equal(persisted.budget.remaining_loss_usd,"8");
+    assert.ok(persisted.risk_book_sequence>=budgetBeforeRestart.risk_book_sequence);
+    const inspectA=await risk(restarted,"inspect_shared_cap_a_0001",{
+      action:"INSPECT",reservation_key:firstReserve.reservation_key,
+      plan_sha256:firstRequest.plan_sha256
+    });
+    const inspectB=await risk(restarted,"inspect_shared_cap_b_0001",{
+      action:"INSPECT",reservation_key:secondReserve.reservation_key,
+      plan_sha256:secondRequest.plan_sha256
+    });
+    assert.equal(inspectA.status,"OBSERVED");
+    assert.equal(inspectB.status,"OBSERVED");
+    assert.equal(inspectA.reservation_state,"HELD");
+    assert.equal(inspectB.reservation_state,"HELD");
+    // No fabricated SQL REJECTED_UNSENT receipt is supplied to release money.
+    console.log("T10_7_WORKER_SHARED_CAP_V1:"+JSON.stringify({
+      schema:"okx.t10-shared-worker-cap/v1",
+      account_a:accountKey,account_b:accountKeyB,
+      a_strategy:firstRequest.strategy_id,
+      b_strategy:secondRequest.strategy_id,
+      instrument_id:firstRequest.instrument_id,
+      first_status:firstReserve.status,
+      second_status:secondReserve.status,
+      third_status:denied.status,
+      third_reason:denied.reason,
+      replay_status:repeated.status,
+      replay_reservation_identical:repeated.reservation_key===firstReserve.reservation_key,
+      persisted_a_state:inspectA.reservation_state,
+      persisted_b_state:inspectB.reservation_state,
+      before_budget:budgetBeforeRestart.budget,
+      after_budget:persisted.budget,
+      before_sequence:budgetBeforeRestart.risk_book_sequence,
+      after_sequence:persisted.risk_book_sequence,
+      connection_generation_before:socket1.hello.connection_generation,
+      connection_generation_after:restarted.hello.connection_generation
+    }));
+    restarted.ws.close();
+  } else if (!addMode) {
   const observedAt = Date.now()-1000;
   const census = {
     complete:true,source_digest:"d".repeat(64),content_digest:"a".repeat(64),
