@@ -19,6 +19,9 @@ export async function run({root,signal}) {
   assert.notEqual(partial.financial_complete,true);
   assert.equal(terminal.phase,"terminal");
   assert.equal(terminal.sql.notional_usdt,"3");
+  assert.equal(source.nativeRestart.second_intent_state,"FILLED");
+  assert.equal(source.nativeRestart.second_active_central_receipt,true);
+  assert.equal(source.nativeRestart.remaining_lot_quantity,"0.3");
   assert.equal(proof.outbound_posts,4,"no new POST for incoming venue fills");
   assert.equal(proof.worker_budget.entry_budget.consumed_usd,"4.002");
   assert.equal(proof.worker_budget.entry_budget.reserved_usd,"4");

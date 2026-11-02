@@ -3376,6 +3376,11 @@ mod raw_native_session_tests {
                     )?;
                     let active_central = s.active_central_receipt(&opening.intent_id)?;
                     let lots = s.active_lots("BTC-USDT-SWAP")?;
+                    let second = s.by_idempotency("t09_real_public_execute_0002")?;
+                    let second_central = match second.as_ref() {
+                        Some(i) => s.active_central_receipt(&i.intent_id)?.is_some(),
+                        None => false,
+                    };
                     Ok(json!({
                         "opening_intent_id":opening.intent_id,
                         "opening_state":opening.state.as_str(),
@@ -3385,6 +3390,9 @@ mod raw_native_session_tests {
                         "remaining_lot_count":lots.iter()
                             .filter(|lot| lot.remaining_qty > Decimal::ZERO)
                             .count(),
+                        "second_intent_state":second.as_ref().map(|i|i.state.as_str()),
+                        "second_active_central_receipt":second_central,
+                        "remaining_lot_quantity":lots.iter().fold(Decimal::ZERO,|q,lot|q+lot.remaining_qty).normalize().to_string(),
                         "fills_cursor":s.cursor("fills", "SWAP")?,
                         "bills_cursor":s.cursor("bills", "account")?
                     }))
@@ -3394,7 +3402,14 @@ mod raw_native_session_tests {
             println!("T09_1_NATIVE_SQL_RESTART_V1:{readback}");
             assert_eq!(readback["opening_state"], "FILLED");
             assert_eq!(readback["close_state"], "FILLED");
-            assert_eq!(readback["remaining_lot_count"], 0);
+            if std::env::var("OKX_T09_3_PARTIAL_PROBE").as_deref() == Ok("1") {
+                assert_eq!(readback["remaining_lot_count"], 2);
+                assert_eq!(readback["remaining_lot_quantity"], "0.3");
+                assert_eq!(readback["second_intent_state"], "FILLED");
+                assert_eq!(readback["second_active_central_receipt"], true);
+            } else {
+                assert_eq!(readback["remaining_lot_count"], 0);
+            }
             assert_eq!(readback["active_central_receipt"], false);
             let mut finished = restored.termination_signal();
             drop(restored);
