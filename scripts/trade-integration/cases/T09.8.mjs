@@ -32,6 +32,8 @@ export async function run({root,signal}) {
     "Worker restart must not erase the denied budget witness");
   assert.equal(restart.worker_budget.entry_budget.consumed_usd,"6.003");
   assert.equal(restart.worker_budget.entry_budget.reserved_usd,"0");
+  assert.equal(restart.worker_budget.reserved_loss_usd,"0",
+    "over-budget entry must not resurrect loss reserve after Worker restart");
 
   return {
     case_id:"T09.8",status:"PASS",
