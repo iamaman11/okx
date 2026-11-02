@@ -19,6 +19,15 @@ export async function run({root,signal}) {
   assert.notEqual(partial.financial_complete,true);
   assert.equal(terminal.phase,"terminal");
   assert.equal(terminal.sql.notional_usdt,"3");
+  assert.equal(partial.intent_state,"PARTIALLY_FILLED");
+  assert.equal(terminal.intent_state,"FILLED");
+  for (const phase of [partial,terminal]) {
+    assert.equal(phase.protection?.trigger_basis,"mark");
+    assert.equal(String(phase.protection?.trigger_price),"900");
+    assert.match(String(phase.protection?.source_digest),/^[a-f0-9]{64}$/);
+    assert.ok(Number(phase.protection?.quantity)>=Number(phase.sql.quantity),
+      "signed stop coverage must include confirmed actual fill");
+  }
   assert.equal(source.nativeRestart.second_intent_state,"FILLED");
   assert.equal(source.nativeRestart.second_active_central_receipt,true);
   assert.equal(source.nativeRestart.remaining_lot_quantity,"0.3");

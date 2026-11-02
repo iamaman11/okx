@@ -92,7 +92,7 @@
                 required_query:vec![("algoClOrdId".into(),stop_id.clone())],
                 raw_response:raw(serde_json::json!([{
                     "instId":"BTC-USDT-SWAP","algoId":"900000002",
-                    "algoClOrdId":stop_id,"state":"live","sz":"0.3",
+                    "algoClOrdId":stop_id,"state":"live","sz":qty.to_string(),
                     "side":"sell","posSide":"long","tdMode":"cross",
                     "ordType":"conditional","slTriggerPx":"900",
                     "slTriggerPxType":"mark","slOrdPx":"-1"
