@@ -246,12 +246,31 @@
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }
         }).await.unwrap_or_else(|_|panic!("T09_4_CAPTURE_UNPROVEN:{latest}"));
-        let status=trade.trade(
-            "fixture-a",
-            &okx_protocol::trading::TradeRequest::Status {
-                reference:intent_id.clone()
-            },None
-        ).await.expect("T09.4 production TradeService status after raw fill");
+        // The production LocalBudget may defer this READ-ONLY status even
+        // after immutable fill/bill capture succeeded. An unsent read can
+        // safely wait for its bounded local rate window; never retry POST.
+        let status= {
+            let deadline=std::time::Instant::now()+Duration::from_secs(3);
+            loop {
+                match trade.trade(
+                    "fixture-a",
+                    &okx_protocol::trading::TradeRequest::Status {
+                        reference:intent_id.clone()
+                    },None
+                ).await {
+                    Ok(status)=>break status,
+                    Err(reason) if reason.contains("source: LocalBudget")
+                        && reason.contains("request_sent: false")
+                        && std::time::Instant::now()<deadline =>
+                    {
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    }
+                    Err(reason)=>panic!(
+                        "T09.4 production TradeService status after raw fill: {reason}"
+                    ),
+                }
+            }
+        };
         assert_eq!(status["data"]["intent"]["state"],"FILLED",
             "T09_4_SOURCE_BACKED_STATUS_NOT_FILLED:{status}");
         assert_ne!(status["data"]["protection_incident"],true,
