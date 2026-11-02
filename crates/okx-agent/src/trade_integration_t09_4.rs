@@ -168,8 +168,9 @@
         );
         // The actual exchange fee generation and leverage are reread for
         // this new order; the T09.2 admission proof cannot be reused.
+        let mut refreshed_fee_pages=Vec::new();
         for _ in 0..8 {
-            feed.expect_get(RecordedGet {
+            refreshed_fee_pages.push(RecordedGet {
                 access_key:"fixture-observer-a".into(),
                 path:"/api/v5/account/trade-fee".into(),
                 required_query:vec![
@@ -194,6 +195,12 @@
                 ])),
             });
         }
+        // A fresh exchange fee generation supersedes unused older signed
+        // pages from T09.2. The production GET must never consume stale
+        // leftover fixture bytes ahead of this new admission.
+        feed.advance_recorded_route(
+            "fixture-observer-a","/api/v5/account/trade-fee",refreshed_fee_pages
+        );
         feed.advance_recorded_public_clock(wrap(serde_json::json!([{"ts":signed_now}])));
         feed.expect_post(RecordedPost {
             access_key:"fixture-executor-a".into(),
