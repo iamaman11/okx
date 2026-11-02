@@ -673,11 +673,13 @@ impl TradeService {
                         // RiskBook reservation. Reuse the sole full-cohort
                         // signed census, never simply subtract the old qty.
                         if position_qty > filled {
-                            let aggregate_proven = match self.governance.read().await.clone() {
-                                Some(state) => self.census(&state).await.is_ok(),
-                                None => false,
+                            let aggregate_result=match self.governance.read().await.clone() {
+                                Some(state)=>self.census(&state).await.map(|_|()),
+                                None=>Err("AUTHORITY_UNAVAILABLE".into()),
                             };
-                            if !aggregate_proven {
+                            if let Err(reason)=aggregate_result {
+                                eprintln!("MANAGED_AGGREGATE_CENSUS_DENIAL_V1:{reason}");
+
                                 protection_failed = true;
                                 let id = i.intent_id.clone();
                                 r.execution
