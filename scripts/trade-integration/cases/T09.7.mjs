@@ -17,7 +17,11 @@ export async function run({root,signal}) {
     "T09.7 requires real independent Native/Worker restart receipts");
   assert.equal(native.new_os_process,true);
   assert.equal(native.new_exchange_posts,0,
-    "reopened Native process must not possess exchange POST transport");
+    "restarted Native must issue zero new recorded exchange POSTs");
+  assert.equal(native.recorded_transport_posts_before,9,
+    "T09.7 baseline must include both terminal closes and protection cancels");
+  assert.equal(native.recorded_transport_posts_after,9,
+    "reopening Native SQL must not replay a previously sent exchange request");
   assert.equal(native.account_a.account_opening_equity_usd,"100",
     "opening NAV must come from the retained original source-backed SQL account");
   assert.equal(terminal.entry_fees_usdt,"-0.003",
