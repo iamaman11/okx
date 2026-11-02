@@ -118,7 +118,10 @@
                 if ready {break}
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }
-        }).await.unwrap_or_else(|_|panic!("T09_4_SOURCE_FRONTIER_INCOMPLETE:{last_readiness}"));
+        }).await.unwrap_or_else(|_|panic!(
+            "T09_4_SOURCE_FRONTIER_INCOMPLETE:{last_readiness}; strict_source_denials={:?}",
+            feed.denied_routes.lock().unwrap().iter().rev().take(5).collect::<Vec<_>>()
+        ));
 
         // 16 independently queried derivative conditional scopes, all
         // returned by signed Observer GET. Only the one previously owned,
