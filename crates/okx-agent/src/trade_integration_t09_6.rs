@@ -409,6 +409,61 @@ async fn t09_6_source_backed_close_release(
         "T09.6 no source-backed lots may remain");
     assert!(risk_census.is_empty(),
         "T09.6 central/local intent census must contain no unresolved risk");
+    // Independently read immutable finance entries from the same SQL owner.
+    // A signed close ACK and a flat lot census do not prove exit fees.
+    // This is test-only evidence: neither the fixture nor Worker owns money.
+    let (fee_sources, entry_fee, exit_fee) = owner.execution.store.call(
+        std::time::Instant::now() + Duration::from_secs(5),
+        |s| {
+            let finance = s.finance_history(0, i64::MAX, 0, "", 200)?;
+            let expected = [
+                ("bill:t09-entry-bill-001", "entry"),
+                ("bill:t09-second-001-bill", "entry"),
+                ("bill:t09-second-002-bill", "entry"),
+                ("bill:t09-managed-add-001-bill", "entry"),
+                ("bill:t09-close-bill-001", "exit"),
+                ("bill:t09-managed-close-030-bill", "exit"),
+                ("bill:t09-managed-close-020-bill", "exit"),
+            ];
+            let mut sources = Vec::new();
+            let mut entry_fee = Decimal::ZERO;
+            let mut exit_fee = Decimal::ZERO;
+            for (key, kind) in expected {
+                let rows: Vec<_> = finance.iter().filter(|e| {
+                    e.economic_event_key == key
+                        && e.component == "FEE"
+                        && e.currency == "USDT"
+                        && e.reverses_entry_id.is_none()
+                }).collect();
+                let total = rows.iter().fold(Decimal::ZERO, |sum, row| sum + row.amount);
+                if kind == "entry" {
+                    entry_fee += total;
+                } else {
+                    exit_fee += total;
+                }
+                sources.push(serde_json::json!({
+                    "economic_event_key": key,
+                    "kind": kind,
+                    "amount_usdt": total.normalize().to_string(),
+                    "legs": rows.len(),
+                }));
+            }
+            Ok((sources, entry_fee, exit_fee))
+        },
+    ).await.expect("T09.6 immutable fee entries from native SQL owner");
+    for (index, expected) in [
+        "-0.0005", "-0.0006", "-0.0009", "-0.001",
+        "-0.0005", "-0.0015", "-0.001",
+    ].iter().enumerate() {
+        assert_eq!(fee_sources[index]["amount_usdt"], *expected,
+            "T09.6 exact signed bill debit must appear once in economic money");
+        assert!(fee_sources[index]["legs"].as_u64().unwrap_or(0) > 0,
+            "T09.6 missing immutable financial source for fee bill");
+    }
+    assert_eq!(entry_fee.normalize().to_string(), "-0.003",
+        "T09.6 independently summed entry fees");
+    assert_eq!(exit_fee.normalize().to_string(), "-0.003",
+        "T09.6 independently summed exit fees");
     let mut command=summary("risk_t09_6_after_all_closes");
     command.installation_id="installation_test".into();
     let observed=risk.request(command).await.expect("T09.6 real Worker risk");
@@ -425,6 +480,9 @@ async fn t09_6_source_backed_close_release(
         "remaining_lots":lots.iter().filter(|lot|!lot.remaining_qty.is_zero()).count(),
         "unresolved_census":risk_census.len(),
         "orphan_algos":final_algos.samples.len(),
+        "fee_bill_evidence": fee_sources,
+        "entry_fees_usdt": entry_fee.normalize().to_string(),
+        "exit_fees_usdt": exit_fee.normalize().to_string(),
         "worker_budget":observed.budget,
         "worker_risk_book_sequence":observed.risk_book_sequence,
         "outbound_posts":feed.outbound_posts.lock().unwrap().len(),
