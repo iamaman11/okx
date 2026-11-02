@@ -743,7 +743,28 @@ mod tests {
                 },
             )
             .unwrap();
+        // Finance ingest on a contended Windows runner can exceed the
+        // production 5s recovery freshness window. The test must provide
+        // fresh source cursors before asserting that recovery is permitted,
+        // never weaken the fail-closed production TTL.
+        let fresh_observation = now();
+        for source in ["orders", "account_snapshot"] {
+            store
+                .ingest_page(&okx_execution::IngestPage {
+                    cursor: Some(okx_execution::SourceCursor {
+                        source: source.into(),
+                        stream_partition: "account".into(),
+                        cursor: String::new(),
+                        watermark: fresh_observation,
+                        generation: 1,
+                        coverage_gaps: String::new(),
+                    }),
+                    ..Default::default()
+                })
+                .unwrap();
+        }
         let local = store.recovery_snapshot(now()).unwrap();
+        assert!(local.coverage_complete, "recovery test requires fresh source cursors");
         assert_eq!(local.cumulative_loss_usd, Decimal::ONE);
         commit_recovery(
             &mut store,
