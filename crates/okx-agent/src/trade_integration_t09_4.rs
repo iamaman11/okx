@@ -111,16 +111,16 @@
         );
         let mut signed_orders=Vec::new();
         for _ in 0..24 {
-            for (order,quantity,at) in [
-                ("recorded-t09-second-001","0.3",terminal_fill_at_ms),
-                ("recorded-t09-add-001","0.2",filled_at)
+            for (order,quantity,at,client) in [
+                ("recorded-t09-second-001","0.3",terminal_fill_at_ms,&old_client_id),
+                ("recorded-t09-add-001","0.2",filled_at,&client_id)
             ] {
                 signed_orders.push(RecordedGet {
                     access_key:"fixture-executor-a".into(),
                     path:"/api/v5/trade/order".into(),
                     required_query:vec![
                         ("instId".into(),"BTC-USDT-SWAP".into()),
-                        ("ordId".into(),order.into()),
+                        ("clOrdId".into(),client.clone()),
                     ],
                     raw_response:envelope(serde_json::json!([{
                         "instId":"BTC-USDT-SWAP","ordId":order,
@@ -252,7 +252,8 @@
                 reference:intent_id.clone()
             },None
         ).await.expect("T09.4 production TradeService status after raw fill");
-        assert_eq!(status["data"]["intent"]["state"],"FILLED");
+        assert_eq!(status["data"]["intent"]["state"],"FILLED",
+            "T09_4_SOURCE_BACKED_STATUS_NOT_FILLED:{status}");
         assert_ne!(status["data"]["protection_incident"],true,
             "T09.4 must never pass a safety protection incident");
         let mut command=summary("risk_t09_4_after_linked_fill");
