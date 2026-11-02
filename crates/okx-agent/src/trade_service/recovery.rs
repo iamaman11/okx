@@ -773,6 +773,11 @@ mod tests {
             !expired.coverage_complete,
             "the same recovery evidence must fail closed once its 5s source TTL expires"
         );
+        assert_eq!(
+            recovery_matches(&expired, &flat()).unwrap_err(),
+            "STORAGE_RECOVERY_INCOMPLETE",
+            "production recovery authorization must refuse expired source evidence"
+        );
         assert_eq!(local.cumulative_loss_usd, Decimal::ONE);
         commit_recovery(
             &mut store,
