@@ -23,6 +23,8 @@ export async function run({root,signal}) {
     [transcript.nativeSecondAdmission.intent_id,transcript.nativeManagedAdd.intent_id],
     "two signed closes must reference their own distinct persisted Native entry intents"
   );
+  assert.equal(new Set(ack.closes.map(c=>c.source_intent_id)).size,2,
+    "each managed Close must belong to a different signed entry intent");
   assert.equal(terminal.closes.length,2);
   assert.equal(terminal.entries.length,2);
   for (const c of terminal.closes) {
