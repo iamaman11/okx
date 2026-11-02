@@ -865,8 +865,28 @@ impl AccountStore {
                        AND kind IN (
                          'ENTRY_SETTLEMENT_PROVEN','ENTRY_LATE_HEAD',
                          'ENTRY_LATE_SETTLEMENT_PROVEN','ENTRY_LATE_SETTLED')
+                     OR (kind='ENTRY_PARTIAL_SETTLEMENT_PROVEN'
+                       AND EXISTS (
+                         SELECT 1 FROM operation_receipts head
+                         JOIN intents i
+                           ON i.intent_id=json_extract(head.result_ref,'$.intent_id')
+                         JOIN risk_receipts r ON r.intent_id=i.intent_id
+                         WHERE head.operation_id='entry-partial-head:'||i.intent_id
+                           AND head.kind='ENTRY_PARTIAL_HEAD'
+                           AND head.request_hash=i.plan_hash
+                           AND head.result_ref=operation_receipts.result_ref
+                           AND operation_receipts.request_hash=i.plan_hash
+                           AND i.state='FILLED' AND r.state='OPEN'
+                           AND r.plan_hash=i.plan_hash
+                           AND json_extract(head.result_ref,'$.schema')
+                             ='okx.entry-partial-settlement/v1'
+                           AND json_extract(head.result_ref,'$.venue_order_id')=i.exchange_order_id
+                           AND json_extract(head.result_ref,'$.reservation_key')=r.reservation_key
+                           AND json_extract(head.result_ref,'$.source_covered_through_ms')<=?3
+                           AND operation_receipts.committed_at<=?3
+                       ))
                     )",
-                    params![receipt_floor, receipt_end],
+                    params![receipt_floor, receipt_end, through_ms],
                     |r| r.get(0),
                 )?;
                 if !monetary_receipt {
@@ -976,6 +996,32 @@ impl AccountStore {
                         (r.state!='RELEASED'
                          OR e.kind IS NULL OR e.kind!='ENTRY_SETTLEMENT_PROVEN'
                          OR e.request_hash!=i.plan_hash OR e.committed_at>?2)
+                        AND NOT (
+                          i.state='FILLED' AND r.state='OPEN'
+                          AND EXISTS (
+                            SELECT 1
+                            FROM operation_receipts head
+                            JOIN operation_receipts partial
+                              ON partial.operation_id='entry-partial:'||
+                                i.intent_id||':r'||json_extract(
+                                  head.result_ref,'$.settlement_revision')
+                             AND partial.kind='ENTRY_PARTIAL_SETTLEMENT_PROVEN'
+                             AND partial.request_hash=i.plan_hash
+                             AND partial.result_ref=head.result_ref
+                            WHERE head.operation_id='entry-partial-head:'||i.intent_id
+                              AND head.kind='ENTRY_PARTIAL_HEAD'
+                              AND head.request_hash=i.plan_hash
+                              AND json_extract(head.result_ref,'$.schema')
+                                ='okx.entry-partial-settlement/v1'
+                              AND json_extract(head.result_ref,'$.account_key')=?5
+                              AND json_extract(head.result_ref,'$.intent_id')=i.intent_id
+                              AND json_extract(head.result_ref,'$.plan_hash')=i.plan_hash
+                              AND json_extract(head.result_ref,'$.reservation_key')=r.reservation_key
+                              AND json_extract(head.result_ref,'$.venue_order_id')=i.exchange_order_id
+                              AND json_extract(head.result_ref,'$.source_covered_through_ms')>=f.time
+                              AND partial.committed_at<=?2
+                          )
+                        )
                       )
                       OR (
                         i.state IN ('ACKNOWLEDGED','PARTIALLY_FILLED') AND
@@ -990,7 +1036,7 @@ impl AccountStore {
                  OR (i.risk_increase=0 AND i.state NOT IN
                      ('FILLED','CANCELLED','ACKNOWLEDGED','PARTIALLY_FILLED')))
                LIMIT 1)",
-            params![from_ms, through_ms, fill_after, fill_end],
+            params![from_ms, through_ms, fill_after, fill_end, self.meta.account_key],
             |row| row.get(0),
         )?;
         if unknown_fill != 0 {
