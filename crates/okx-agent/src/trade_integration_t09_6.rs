@@ -750,7 +750,17 @@ async fn t09_8_excess_entry_denied(
     let mut after_command=summary("risk_t09_8_after_excess");
     after_command.installation_id="installation_test".into();
     let after=risk.request(after_command).await.expect("T09.8 Worker after rejection");
-    assert_eq!(after.budget,before.budget,
+    let previous_budget=before.budget.as_ref().expect("T09.8 source-proven prior budget");
+    let observed_budget=after.budget.as_ref().expect("T09.8 source-proven post-denial budget");
+    assert!(previous_budget.source_as_of_ms.is_some()
+        && observed_budget.source_as_of_ms>=previous_budget.source_as_of_ms,
+        "T09.8 must preserve a non-regressing, authenticated source observation");
+    // A fresh source capture may advance source_as_of_ms while the over-cap
+    // RESERVE rejects. Compare EVERY other budget field, including campaign
+    // identity and entry spend/reserve, to prove zero economic mutation.
+    let mut expected_economics=previous_budget.clone();
+    expected_economics.source_as_of_ms=observed_budget.source_as_of_ms;
+    assert_eq!(observed_budget,&expected_economics,
         "T09.8 over-budget denial must not spend, hold, release or reset any money");
     serde_json::json!({
         "denial_reason":denied["data"]["primary_reason"],

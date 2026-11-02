@@ -3,6 +3,7 @@
 // Worker rejects a source-proven 4.002 USD upper against 3.997 available.
 import assert from "node:assert/strict";
 import {actualNativeWorker,hash} from "../native-workerd.mjs";
+import {assertBudgetEconomicsUnchanged} from "../budget-evidence.mjs";
 
 export async function run({root,signal}) {
   const transcript=await actualNativeWorker(root,signal,{
@@ -27,10 +28,10 @@ export async function run({root,signal}) {
   assert.equal(denied.new_exchange_posts,0);
   assert.equal(denied.outbound_posts_before,9);
   assert.equal(denied.outbound_posts_after,9);
-  assert.deepEqual(denied.worker_budget_after,terminal.worker_budget,
-    "budget exhaustion cannot consume or free another reservation");
-  assert.deepEqual(restart.worker_budget,denied.worker_budget_after,
-    "Worker restart must not erase the denied budget witness");
+  assertBudgetEconomicsUnchanged(terminal.worker_budget,denied.worker_budget_after,
+    "T09.8 budget exhaustion");
+  assertBudgetEconomicsUnchanged(denied.worker_budget_after,restart.worker_budget,
+    "T09.8 persisted Worker restart");
   assert.equal(restart.worker_budget.entry_budget.consumed_usd,"6.003");
   assert.equal(restart.worker_budget.entry_budget.reserved_usd,"0");
   assert.equal(restart.worker_budget.reserved_loss_usd,"0",
