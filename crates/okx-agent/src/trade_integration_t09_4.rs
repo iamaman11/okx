@@ -77,6 +77,25 @@
                 raw_response:raw_history(serde_json::json!(known_bills))
             }).collect()
         );
+        // The existing Native finance owner must have fresh signed positions
+        // WHILE refreshing campaign source cursors, not only after it is ready.
+        // It continues to observe the exact 0.30 filled, protected exposure.
+        let wrap = |v|serde_json::to_vec(&serde_json::json!({
+            "code":"0","msg":"","data":v
+        })).unwrap();
+        let ts=chrono::Utc::now().timestamp_millis().to_string();
+        let source_position=wrap(serde_json::json!([{
+            "instType":"SWAP","instId":"BTC-USDT-SWAP","posSide":"long",
+            "pos":"0.3","mgnMode":"cross","avgPx":"1000","markPx":"1000","uTime":ts
+        }]));
+        feed.advance_recorded_route(
+            "fixture-observer-a","/api/v5/account/positions",
+            (0..64).map(|_|RecordedGet {
+                access_key:"fixture-observer-a".into(),
+                path:"/api/v5/account/positions".into(),
+                required_query:vec![],raw_response:source_position.clone(),
+            }).collect()
+        );
         let mut last_readiness=String::from("NOT_OBSERVED");
         tokio::time::timeout(Duration::from_secs(16),async {
             loop {
@@ -100,22 +119,7 @@
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }
         }).await.unwrap_or_else(|_|panic!("T09_4_SOURCE_FRONTIER_INCOMPLETE:{last_readiness}"));
-        let wrap = |v|serde_json::to_vec(&serde_json::json!({
-            "code":"0","msg":"","data":v
-        })).unwrap();
-        let ts=chrono::Utc::now().timestamp_millis().to_string();
-        let source_position=wrap(serde_json::json!([{
-            "instType":"SWAP","instId":"BTC-USDT-SWAP","posSide":"long",
-            "pos":"0.3","mgnMode":"cross","avgPx":"1000","markPx":"1000","uTime":ts
-        }]));
-        feed.advance_recorded_route(
-            "fixture-observer-a","/api/v5/account/positions",
-            (0..64).map(|_|RecordedGet {
-                access_key:"fixture-observer-a".into(),
-                path:"/api/v5/account/positions".into(),
-                required_query:vec![],raw_response:source_position.clone(),
-            }).collect()
-        );
+
         // 16 independently queried derivative conditional scopes, all
         // returned by signed Observer GET. Only the one previously owned,
         // live stop is present; an unknown algo would block Add.
