@@ -1173,6 +1173,42 @@ impl TradeService {
             }
             return Err("LATE_ENTRY_SETTLEMENT_CAS_BUSY".into());
         }
+        // A terminal settlement may already have been bound during an earlier
+        // Status which could not RELEASE because another terminal reservation
+        // was still pending. Re-verify that same immutable terminal source
+        // witness; never attempt a PARTIAL settlement against its receipt
+        // (a different schema/revision) or silently accept changed fills/fees.
+        // The normal release_terminal path below still owns Worker SETTLE_ENTRY
+        // and central RELEASE; this read-only replay grants no new capacity.
+        if i.state.terminal() {
+            let id = i.intent_id.clone();
+            let existing = r
+                .execution
+                .store
+                .call(deadline(), move |s| {
+                    if s.operation(&format!("entry-settlement:{id}"))?.is_none() {
+                        return Ok(None);
+                    }
+                    if s.entry_late_pending(&id)? {
+                        return Err(okx_execution::StoreError::Invalid(
+                            "TERMINAL_ENTRY_LATE_BILL_PENDING",
+                        ));
+                    }
+                    s.bind_terminal_entry_settlement(&id, venue_at, filled, through)
+                        .map(Some)
+                })
+                .await
+                .map_err(err)?;
+            if let Some(proof) = existing {
+                if proof.plan_hash != i.plan_hash
+                    || proof.venue_order_id != venue.order_id
+                    || proof.venue_filled_quantity != filled
+                {
+                    return Err("TERMINAL_ENTRY_REPLAY_IDENTITY_MISMATCH".into());
+                }
+                return Ok(());
+            }
+        }
         let partial_id = i.intent_id.clone();
         let proof = r
             .execution
