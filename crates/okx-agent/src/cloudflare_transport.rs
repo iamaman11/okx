@@ -3307,6 +3307,7 @@ mod raw_native_session_tests {
                         let task=tokio::spawn(t09_4_managed_add(
                             accounts.clone(),trade.clone(),risk.clone(),feed.clone(),
                             persisted.client_order_id.clone(),
+                            campaign_id.clone(),native_origin,
                         ));
                         let add=task.await.expect("T09.4 managed Add native task");
                         println!("T09_4_NATIVE_ADD_BOUND_V1:{add}");

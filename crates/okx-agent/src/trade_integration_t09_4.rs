@@ -8,11 +8,39 @@
         risk: NativeRiskClient,
         feed: Arc<crate::accounts::recorded_support::RecordedAccountHttp>,
         prior_client_id: String,
+        campaign_id: String,
+        native_origin: i64,
     ) -> serde_json::Value {
         use crate::accounts::recorded_support::{RecordedGet, RecordedPost};
         use okx_protocol::trading::{
             OrderConstraints, PositionSide, Protection, Sizing, TradeOperation, TradeRequest,
         };
+        // The sole existing financial owner must commit both source frontiers
+        // before an increase. Never infer freshness from the T09.3 status
+        // response or add an independent importer.
+        let mut last_readiness=String::from("NOT_OBSERVED");
+        tokio::time::timeout(Duration::from_secs(16),async {
+            loop {
+                let through=chrono::Utc::now().timestamp_millis()-2_000;
+                let mut ready=true;
+                for alias in ["fixture-a","fixture-b"] {
+                    let owner=accounts.resolve(alias).await.unwrap();
+                    let campaign=campaign_id.clone();
+                    match owner.execution.store.call(
+                        std::time::Instant::now()+Duration::from_secs(3),
+                        move |s|s.verify_campaign_entry_readiness(&campaign,native_origin,through)
+                    ).await {
+                        Ok(())=>{},
+                        Err(reason)=>{
+                            last_readiness=format!("{alias}:{reason}");
+                            ready=false;break;
+                        }
+                    }
+                }
+                if ready {break}
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        }).await.unwrap_or_else(|_|panic!("T09_4_SOURCE_FRONTIER_INCOMPLETE:{last_readiness}"));
         let wrap = |v|serde_json::to_vec(&serde_json::json!({
             "code":"0","msg":"","data":v
         })).unwrap();
