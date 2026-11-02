@@ -93,6 +93,19 @@ jobs:
       - name: Check Rust format
         run: cargo fmt --all -- --check
 
+      # The recorded integration script starts cargo test inside a strict
+      # 120s Native SQL bootstrap readiness window. Cold Windows crates have
+      # no usable Rust cache on this isolated control branch; compiling them
+      # inside that observation window causes NATIVE_SQL_BOOTSTRAP_DEADLINE
+      # before the production T09 scenario is exercised. Compile *before*
+      # entering the real Native/Worker handoff, never extend financial TTLs.
+      - name: Compile native Rust test executable before readiness clock
+        shell: pwsh
+        run: |
+          cargo test --locked -p okx-agent --lib --no-run
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Write-Host "OKX_NATIVE_TEST_BINARY_COMPILED_BEFORE_BOOTSTRAP=PASS"
+
       - name: Install locked recorded Workerd dependencies
         shell: pwsh
         run: |
