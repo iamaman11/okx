@@ -37,7 +37,7 @@ export async function actualNativeWorker(root, signal, { statusProbe = false, se
           OKX_T09_6_CLOSE_PROBE: closeMode ? "1" : "0",
         },
         signal,
-        timeout: 115_000,
+        timeout: closeMode ? 240_000 : 115_000,
         maxBuffer: 12 * 1024 * 1024,
         windowsHide: true,
       },
