@@ -38,6 +38,7 @@ const configuration = {
   max_total_modelled_loss_usdt: "5",
   accounts: [],
 };
+const addMode=process.env.OKX_T09_4_MANAGED_ADD_PROBE==="1";
 const token = "integration-only-ephemeral-token";
 const tokenHash = createHash("sha256").update(token).digest("hex");
 // Miniflare 5 uses the build-output worker manifest and typed bindings.
@@ -311,6 +312,8 @@ try {
     opening_budget:opened.budget,
     opening_source_digest:opening.source_digest,
   }));
+  let held;
+  if (!addMode) {
   const observedAt = Date.now()-1000;
   const census = {
     complete:true,source_digest:"d".repeat(64),content_digest:"a".repeat(64),
@@ -333,7 +336,7 @@ try {
     usd_conversion:{usd_per_usdt:"1",source_digest:"d".repeat(64),observed_at_ms:observedAt},
     policy_revision:2,census,
   };
-  const held = await risk(socket1,"reserve_recorded_0001",reserveAction);
+  held = await risk(socket1,"reserve_recorded_0001",reserveAction);
   assert.equal(held.status,"HELD","real RiskBook reservation consumes shared capacity");
   assert.ok(held.reservation_key);
   const reheld = await risk(socket1,"reserve_recorded_replay_0001",reserveAction);
@@ -395,6 +398,23 @@ try {
   assert.equal(repeated.budget?.reserved_loss_usd,"1");
   assert.equal(repeated.budget?.entry_budget?.reserved_usd,"2");
   socket2.ws.close();
+  } else {
+    // Independent T09.4 campaign: do not create component-test reserves.
+    // Real DO SQLite persistence, accounts, authority and 10 USD cap remain.
+    socket1.ws.close();
+    await first.dispose();
+    first=null;
+    second=new Miniflare(opts);
+    const replay=await request(second,"/installation/initialize","POST",installation);
+    assert.equal(replay.status,200);
+    const saved=await request(second,"/account-governance");
+    assert.deepEqual(saved.body.accounts.map(a=>a.account_key).sort(),accountKeys);
+    const socket=await session(second);
+    const clean=await summary(socket,"risk_t09_4_pristine");
+    assert.equal(clean.budget.entry_budget.reserved_usd,"0");
+    assert.equal(clean.budget.entry_budget.consumed_usd,"0");
+    socket.ws.close();
+  }
   if (process.env.OKX_NATIVE_WORKER_INTEGRATION === "1") {
     // The already-running Native process opened both real SQL accounts
     // BEFORE this Worker campaign was created. Supply only the actual
@@ -404,7 +424,7 @@ try {
     const wsUrl = new URL("/runtime",url);
     wsUrl.protocol = "ws:";
     await writeFile(handoffPath, JSON.stringify({
-      ws_url:wsUrl.toString(),token,reservation_key:held.reservation_key,
+      ws_url:wsUrl.toString(),token,reservation_key:addMode ? null : held.reservation_key,
     }), {mode:0o600});
     let stdout, stderr;
     try {
@@ -459,6 +479,7 @@ try {
     if (process.env.OKX_T09_1_STATUS_PROBE === "1") {
       const secondAdmission = process.env.OKX_T09_2_ADMISSION_PROBE === "1";
       const partialFills = process.env.OKX_T09_3_PARTIAL_PROBE === "1";
+      const managedAdd = process.env.OKX_T09_4_MANAGED_ADD_PROBE === "1";
       // T09.1 has already closed the exact public order and released its
       // reservation. Requiring reserved_loss > 2 here would incorrectly
       // demand that a settled RELEASE remain HELD. Compare two independent
@@ -486,10 +507,11 @@ try {
         assert.equal(admitted.create_posts_total, 4);
         assert.equal(admitted.quote_entry_usd, "3.0015");
         assert.equal(admitted.preview_reserved_entry_usd, "4");
-        assert.equal(afterNative.budget?.entry_budget?.reserved_usd, partialFills ? "4" : "7.0015");
-        assert.equal(afterNative.budget?.entry_budget?.consumed_usd, partialFills ? "4.002" : "1.0005");
-        assert.deepEqual(afterNative.budget, partialFills
-          ? receipt(stdout, "T09_3_NATIVE_PARTIAL_TERMINAL_V1").worker_budget
+        assert.equal(afterNative.budget?.entry_budget?.reserved_usd,managedAdd?"0":partialFills?"4":"7.0015");
+        assert.equal(afterNative.budget?.entry_budget?.consumed_usd,managedAdd?"6.003":partialFills?"4.002":"1.0005");
+        assert.deepEqual(afterNative.budget,
+          managedAdd ? receipt(stdout,"T09_4_NATIVE_MANAGED_ADD_V1").worker_budget
+          : partialFills ? receipt(stdout,"T09_3_NATIVE_PARTIAL_TERMINAL_V1").worker_budget
           : admitted.after_worker_budget,
           "T09.2 persisted RiskBook readback must equal Native production summary");
         console.log("T09_2_WORKER_AFTER_RECONNECT_V1:" + JSON.stringify({

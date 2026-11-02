@@ -788,7 +788,8 @@ mod raw_native_session_tests {
             "integration socket must be a local ephemeral workerd endpoint"
         );
         let token = handoff["token"].as_str().unwrap().to_owned();
-        let reservation_key = handoff["reservation_key"].as_str().unwrap().to_owned();
+        let reservation_key = handoff["reservation_key"].as_str().unwrap_or("").to_owned();
+        let add_mode=std::env::var("OKX_T09_4_MANAGED_ADD_PROBE").as_deref()==Ok("1");
 
         // The same real public WS coordinator consumes recorded raw market
         // frames. These are immutable venue observations, not a fabricated
@@ -1158,9 +1159,9 @@ mod raw_native_session_tests {
         assert_eq!(result.status, RiskDecisionStatus::Observed);
         let budget = result.budget.as_ref().unwrap();
         assert_eq!(budget.campaign_limit_usd, "10");
-        assert_eq!(budget.reserved_loss_usd, "1");
+        assert_eq!(budget.reserved_loss_usd, if add_mode {"0"} else {"1"});
         let entry = budget.entry_budget.as_ref().unwrap();
-        assert_eq!(entry.reserved_usd, "2");
+        assert_eq!(entry.reserved_usd, if add_mode {"0"} else {"2"});
         assert_eq!(entry.consumed_usd, "0");
         // The Worker publishes its real PolicySnapshot over the same WSS.
         // Its revision must be durably applied by the owning SQL worker
@@ -1278,7 +1279,7 @@ mod raw_native_session_tests {
         let mut before = summary("risk_public_trade_did_not_post_001");
         before.installation_id = "installation_test".into();
         let untouched = risk.request(before).await.unwrap();
-        assert_eq!(untouched.budget.as_ref().unwrap().reserved_loss_usd, "1");
+        assert_eq!(untouched.budget.as_ref().unwrap().reserved_loss_usd, if add_mode {"0"} else {"1"});
         assert_eq!(
             untouched
                 .budget
@@ -1288,8 +1289,9 @@ mod raw_native_session_tests {
                 .as_ref()
                 .unwrap()
                 .reserved_usd,
-            "2"
+            if add_mode {"0"} else {"2"}
         );
+        if !add_mode {
         let inspect = RiskCommand {
             schema: RISK_COMMAND_SCHEMA_V1.into(),
             command_id: "risk_native_real_workerd_inspect_001".into(),
@@ -1306,9 +1308,15 @@ mod raw_native_session_tests {
             Some(reservation_key.as_str())
         );
         assert!(inspected.reservation_state.is_some());
+        }
         // The second intent is sent by actual Rust Native through the same
         // authenticated WSS path. Evidence values are explicitly scripted
         // boundary inputs: no venue claims and no exchange POST in this test.
+        let checked=if add_mode {
+            let mut cmd=summary("risk_t09_4_clean_native");
+            cmd.installation_id="installation_test".into();
+            risk.request(cmd).await.unwrap()
+        } else {
         let uid = okx_api::account_uid_fingerprint("account-001");
         let account_key = format!("okx:real:{uid}");
         let account_key_b = format!(
@@ -1428,6 +1436,8 @@ mod raw_native_session_tests {
                 .reserved_usd,
             "4"
         );
+        checked
+        };
         // T09.1 production admission probe. Unlike the preceding component
         // risk commands this executes the PUBLIC TradeService command, using
         // exactly one pre-recorded raw OKX POST and actual Native/Worker owners.
@@ -1741,7 +1751,7 @@ mod raw_native_session_tests {
                 assert_eq!(
                     after_denial.budget.as_ref().unwrap()
                         .entry_budget.as_ref().unwrap().reserved_usd,
-                    "4",
+                    if add_mode {"0"} else {"4"},
                     "a denied unsent opening must not retain central entry budget"
                 );
                 println!(
@@ -1751,7 +1761,7 @@ mod raw_native_session_tests {
                         "reason":reason,
                         "delay_ms":delay.as_millis(),
                         "outbound_posts":0,
-                        "reserved_entry_usd":"4",
+                        "reserved_entry_usd":if add_mode {"0"} else {"4"},
                     })
                 );
                 tokio::time::timeout_at(
@@ -1855,7 +1865,7 @@ mod raw_native_session_tests {
                 .as_ref()
                 .unwrap()
                 .reserved_usd,
-            "5.0005"
+            if add_mode {"1.0005"} else {"5.0005"}
         );
         let repeated = trade
             .trade("fixture-a", &execute, None)
@@ -1973,8 +1983,8 @@ mod raw_native_session_tests {
                 .as_ref()
                 .unwrap()
                 .reserved_usd,
-            "5.0005",
-            "RiskBook must physically hold prior 4 USD plus public 1.0005 USD"
+            if add_mode {"1.0005"} else {"5.0005"},
+            "RiskBook holds the public entry without duplicate reservations"
         );
         // The Close probe needs a fresh raw public price after financial
         // reconciliation. Baseline T09.0/T09.5 still stops the publisher here.
@@ -2808,7 +2818,7 @@ mod raw_native_session_tests {
                         .as_ref()
                         .unwrap();
                     assert_eq!(prior_entry.consumed_usd, "1.0005");
-                    assert_eq!(prior_entry.reserved_usd, "4");
+                    assert_eq!(prior_entry.reserved_usd, if add_mode {"0"} else {"4"});
                     refresh_recorded_market();
                     let fee_clock = chrono::Utc::now().timestamp_millis().to_string();
                     for _ in 0..4 {
@@ -2908,7 +2918,7 @@ mod raw_native_session_tests {
                             .as_ref()
                             .unwrap()
                             .reserved_usd,
-                        "4",
+                        if add_mode {"0"} else {"4"},
                         "T09.2 preview must not reserve entry capacity"
                     );
                     // A current HTTP receipt cannot refresh an old exchange fee ts.
@@ -2998,7 +3008,7 @@ mod raw_native_session_tests {
                             .as_ref()
                             .unwrap()
                             .reserved_usd,
-                        "4",
+                        if add_mode {"0"} else {"4"},
                         "stale rejection must not retain a new central entry reservation"
                     );
 
@@ -3246,7 +3256,7 @@ mod raw_native_session_tests {
                         .unwrap();
                     eprintln!("T09_2_PHASE_V1:AFTER_WORKER_READBACK");
                     assert_eq!(b.consumed_usd, "1.0005");
-                    assert_eq!(b.reserved_usd, "7.0015");
+                    assert_eq!(b.reserved_usd, if add_mode {"3.0015"} else {"7.0015"});
                     println!(
                         "T09_2_NATIVE_ADMISSION_V1:{}",
                         json!({
