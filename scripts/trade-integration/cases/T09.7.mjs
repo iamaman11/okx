@@ -20,6 +20,10 @@ export async function run({root,signal}) {
     "reopened Native process must not possess exchange POST transport");
   assert.equal(native.account_a.account_opening_equity_usd,"100",
     "opening NAV must come from the retained original source-backed SQL account");
+  assert.equal(terminal.entry_fees_usdt,"-0.003",
+    "restarted finance must retain immutable signed entry bills");
+  assert.equal(terminal.exit_fees_usdt,"-0.003",
+    "restarted finance must retain immutable signed exit bills");
   assert.equal(native.account_a.total_fees_usdt,"-0.006",
     "opening/closing fees must be read from immutable SQLite finance entries");
   assert.equal(native.account_a.realized_pnl_usdt,"0");
