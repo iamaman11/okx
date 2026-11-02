@@ -2169,6 +2169,7 @@ mod raw_native_session_tests {
         // Optional independent T09.1 continuation. This uses the very same
         // live TradeService, signed Executor GET, account SQL owner and central
         // workerd RiskBook, but never changes the accepted T09.0/T09.5 run.
+        let mut managed_add_proof: Option<serde_json::Value> = None;
         if status_probe {
             let after_fill_order = envelope(json!([{
                 "instId":"BTC-USDT-SWAP",
@@ -3329,6 +3330,7 @@ mod raw_native_session_tests {
                         market_tx.send(()).expect("T09.4 signed market reply handoff failed");
                         let add=task.await.expect("T09.4 managed Add native task");
                         println!("T09_4_NATIVE_ADD_BOUND_V1:{add}");
+                        managed_add_proof = Some(add);
                     }
                     second_shutdown.send(true).unwrap();
                     tokio::time::timeout(Duration::from_secs(10), second_maintenance)
@@ -3420,6 +3422,42 @@ mod raw_native_session_tests {
                         Some(i) => s.active_central_receipt(&i.intent_id)?.is_some(),
                         None => false,
                     };
+                    // A complete T09.4 proof must survive reopening this
+                    // exact production AccountStore, not a test-owned ledger.
+                    let managed_add = if add_mode {
+                        let add=s.by_idempotency("t09_real_public_add_0001")?
+                            .ok_or(okx_execution::StoreError::Invalid("T09_4_RESTART_ADD_MISSING"))?;
+                        let protection=s.protection(&add.intent_id)?
+                            .ok_or(okx_execution::StoreError::Invalid("T09_4_RESTART_PROTECTION_MISSING"))?;
+                        let fills=s.cursor("fills","SWAP")?
+                            .ok_or(okx_execution::StoreError::Invalid("T09_4_RESTART_FILLS_CURSOR_MISSING"))?;
+                        let bills=s.cursor("bills","account")?
+                            .ok_or(okx_execution::StoreError::Invalid("T09_4_RESTART_BILLS_CURSOR_MISSING"))?;
+                        let fill=s.intent_fill_cost_evidence(&add.intent_id,fills.watermark)?;
+                        let billed=s.intent_fee_bill_evidence(&add.intent_id,bills.watermark)?;
+                        let own_lots:Vec<_>=lots.iter()
+                            .filter(|l|l.intent_id.as_deref()==Some(add.intent_id.as_str())
+                                && l.remaining_qty>Decimal::ZERO)
+                            .collect();
+                        let own_qty=own_lots.iter().fold(Decimal::ZERO,|q,l|q+l.remaining_qty);
+                        let central=s.active_central_receipt(&add.intent_id)?;
+                        Some(json!({
+                            "intent_id":add.intent_id,"state":add.state.as_str(),
+                            "venue_order_id":add.exchange_order_id,
+                            "sql_revision":add.revision,
+                            "active_central_receipt":central.is_some(),
+                            "lot_count":own_lots.len(),
+                            "lot_quantity":own_qty.normalize().to_string(),
+                            "protection":protection,
+                            "protected_quantity":protection.quantity.normalize().to_string(),
+                            "filled_quantity":fill.filled_quantity.normalize().to_string(),
+                            "gross_notional_usdt":fill.gross_notional_usdt.normalize().to_string(),
+                            "linked_bill_count":billed.linked_bill_count,
+                            "linked_bill_fee_usdt":billed.conservative_verified_fee_usdt.normalize().to_string(),
+                            "linked_bill_source_digest":billed.source_digest,
+                            "entry_total_usdt":(fill.gross_notional_usdt+billed.conservative_verified_fee_usdt).normalize().to_string()
+                        }))
+                    } else {None};
                     Ok(json!({
                         "opening_intent_id":opening.intent_id,
                         "opening_state":opening.state.as_str(),
@@ -3431,6 +3469,7 @@ mod raw_native_session_tests {
                             .count(),
                         "second_intent_state":second.as_ref().map(|i|i.state.as_str()),
                         "second_active_central_receipt":second_central,
+                        "managed_add":managed_add,
                         "remaining_lot_quantity":lots.iter().fold(Decimal::ZERO,|q,lot|q+lot.remaining_qty).normalize().to_string(),
                         "fills_cursor":s.cursor("fills", "SWAP")?,
                         "bills_cursor":s.cursor("bills", "account")?
@@ -3441,7 +3480,24 @@ mod raw_native_session_tests {
             println!("T09_1_NATIVE_SQL_RESTART_V1:{readback}");
             assert_eq!(readback["opening_state"], "FILLED");
             assert_eq!(readback["close_state"], "FILLED");
-            if std::env::var("OKX_T09_3_PARTIAL_PROBE").as_deref() == Ok("1") {
+            if add_mode {
+                let add=&readback["managed_add"];
+                assert_eq!(readback["remaining_lot_count"],3,"T09.4 must persist 3 independent real-fill lots");
+                assert_eq!(readback["remaining_lot_quantity"],"0.5");
+                assert_eq!(add["state"],"FILLED");
+                assert_eq!(add["venue_order_id"],"recorded-t09-add-001");
+                assert_eq!(add["active_central_receipt"],true,"live managed risk must remain held");
+                assert_eq!(add["lot_count"],1);
+                assert_eq!(add["lot_quantity"],"0.2");
+                assert_eq!(add["protected_quantity"],"0.2");
+                assert_eq!(add["filled_quantity"],"0.2");
+                assert_eq!(add["gross_notional_usdt"],"2");
+                assert_eq!(add["linked_bill_count"],1);
+                assert_eq!(add["linked_bill_fee_usdt"],"0.001");
+                assert_eq!(add["entry_total_usdt"],"2.001");
+                assert_eq!(readback["second_intent_state"],"FILLED");
+                assert_eq!(readback["second_active_central_receipt"],true);
+            } else if std::env::var("OKX_T09_3_PARTIAL_PROBE").as_deref() == Ok("1") {
                 assert_eq!(readback["remaining_lot_count"], 2);
                 assert_eq!(readback["remaining_lot_quantity"], "0.3");
                 assert_eq!(readback["second_intent_state"], "FILLED");
@@ -3450,6 +3506,38 @@ mod raw_native_session_tests {
                 assert_eq!(readback["remaining_lot_count"], 0);
             }
             assert_eq!(readback["active_central_receipt"], false);
+            if add_mode {
+                let add=managed_add_proof.as_ref().expect("T09.4 settled Add must precede restart");
+                let settled=&add["settlement"];
+                let budget=&settled["worker_budget"];
+                assert_eq!(budget["entry_budget"]["consumed_usd"],"6.003");
+                assert_eq!(budget["entry_budget"]["reserved_usd"],"0");
+                assert_eq!(readback["managed_add"]["intent_id"],add["intent_id"]);
+                assert_eq!(readback["managed_add"]["linked_bill_source_digest"],
+                    settled["filled"]["linked_bill_source_digest"]);
+                assert_eq!(settled["filled"]["fee_usdt"],"0.001");
+                assert_eq!(settled["filled"]["quantity"],"0.2");
+                println!("T09_4_NATIVE_MANAGED_ADD_V1:{}",json!({
+                    "operation":"add",
+                    "instrument":"BTC-USDT-SWAP",
+                    "intent_id":add["intent_id"],
+                    "account_uid":add["account_uid"],
+                    "central_receipt_hash":add["central_receipt_hash"],
+                    "venue_order_id":add["venue_order_id"],
+                    "sql_begin_post_at_ms":add["sql_begin_post_at_ms"],
+                    "sql_revision":readback["managed_add"]["sql_revision"],
+                    "risk_book_sequence":settled["risk_book_sequence"],
+                    "added_quantity":readback["managed_add"]["lot_quantity"],
+                    "add_entry_usd":readback["managed_add"]["entry_total_usdt"],
+                    "linked_bill_fee_usdt":readback["managed_add"]["linked_bill_fee_usdt"],
+                    "linked_bill_source_digest":readback["managed_add"]["linked_bill_source_digest"],
+                    "cumulative_spent_usd":budget["entry_budget"]["consumed_usd"],
+                    "worker_budget":settled["worker_budget"],
+                    "outbound_posts":5,
+                    "sql_restart_managed_exposure":readback["remaining_lot_quantity"],
+                    "protection":readback["managed_add"]["protection"]
+                }));
+            }
             let mut finished = restored.termination_signal();
             drop(restored);
             tokio::time::timeout(Duration::from_secs(5), async {
