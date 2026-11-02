@@ -2671,7 +2671,10 @@ mod raw_native_session_tests {
                         }
                     }
                 }
-                feed.expect_public_clock(envelope(json!([{"ts":closing_at}])));
+                // The cancel-algo mutation clock must be sampled close to the
+                // actual protection reconciliation, not before a potentially
+                // 15-second source-capture observation. Queue it at the public
+                // Status boundary below; preserve the production 5s clock gate.
                 feed.expect_post(RecordedPost {
                     access_key: "fixture-executor-a".into(),
                     path: "/api/v5/trade/cancel-algos".into(),
@@ -2845,6 +2848,13 @@ mod raw_native_session_tests {
                     local_receipt_written && !close_still_pending,
                     "T09.1_CLOSE_LOCAL_TERMINAL_UNRESOLVED: receipt={local_receipt_written}, pending={close_still_pending}, close_status={close_verified}"
                 );
+                // Previous Windows T09.1 intermittently reused the recorded
+                // pre-capture clock at opening Status (offset ~-5.1s).
+                // The signed raw /public/time reply now represents the time
+                // of the pending production protection cancellation. No
+                // clock tolerance, SQL state, or risk authority is changed.
+                let terminal_cancel_clock = chrono::Utc::now().timestamp_millis().to_string();
+                feed.expect_public_clock(envelope(json!([{"ts":terminal_cancel_clock}])));
                 let opening_verified = trade
                     .trade(
                         "fixture-a",
