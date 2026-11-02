@@ -6,6 +6,7 @@
         accounts: Arc<AccountRuntimeRegistry>,
         trade: Arc<TradeService>,
         risk: NativeRiskClient,
+        rate_budget: RateBudget,
         feed: Arc<crate::accounts::recorded_support::RecordedAccountHttp>,
         prior_client_id: String,
         campaign_id: String,
@@ -21,6 +22,7 @@
         accounts: Arc<AccountRuntimeRegistry>,
         trade: Arc<TradeService>,
         risk: NativeRiskClient,
+        rate_budget: RateBudget,
         feed: Arc<crate::accounts::recorded_support::RecordedAccountHttp>,
         intent_id: String,
         client_id: String,
@@ -35,7 +37,7 @@
     async fn t09_4_fill_phase(input: T09_4FillContext) -> serde_json::Value {
         use crate::accounts::recorded_support::RecordedGet;
         let T09_4FillContext {
-            accounts, trade, risk, feed, intent_id, client_id,
+            accounts, trade, risk, rate_budget, feed, intent_id, client_id,
             old_client_id, first_fill_at_ms, terminal_fill_at_ms,
         } = input;
         let envelope=|v|serde_json::to_vec(&serde_json::json!({
@@ -250,24 +252,26 @@
         // after immutable fill/bill capture succeeded. An unsent read can
         // safely wait for its bounded local rate window; never retry POST.
         let status= {
-            let deadline=std::time::Instant::now()+Duration::from_secs(3);
+            let deadline=std::time::Instant::now()+Duration::from_secs(15);
             loop {
-                match trade.trade(
+                let answer=tokio::time::timeout_at(deadline.into(),trade.trade(
                     "fixture-a",
                     &okx_protocol::trading::TradeRequest::Status {
                         reference:intent_id.clone()
                     },None
-                ).await {
+                )).await.expect("T09.4 signed status read deadline");
+                match answer {
                     Ok(status)=>break status,
-                    Err(reason) if reason.contains("source: LocalBudget")
-                        && reason.contains("request_sent: false")
-                        && std::time::Instant::now()<deadline =>
-                    {
-                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    Err(reason)=>{
+                        let remaining=deadline.saturating_duration_since(
+                            std::time::Instant::now());
+                        let delay=recorded_preview_local_defer(
+                            &reason,&rate_budget,remaining).unwrap_or_else(||panic!(
+                                "T09.4 non-local status read failure: {reason}"
+                            ));
+                        tokio::time::timeout_at(deadline.into(),tokio::time::sleep(delay))
+                            .await.expect("T09.4 source-authorized rate defer expired");
                     }
-                    Err(reason)=>panic!(
-                        "T09.4 production TradeService status after raw fill: {reason}"
-                    ),
                 }
             }
         };
@@ -300,6 +304,7 @@
             accounts,
             trade,
             risk,
+            rate_budget,
             feed,
             prior_client_id,
             campaign_id,
@@ -604,7 +609,7 @@
         }));
         let settlement=t09_4_fill_phase(T09_4FillContext {
             accounts:accounts.clone(),trade:trade.clone(),risk:risk.clone(),
-            feed:feed.clone(),intent_id:id.clone(),
+            rate_budget,feed:feed.clone(),intent_id:id.clone(),
             client_id:intent.client_order_id.clone(),
             old_client_id:prior_client_id.clone(),
             first_fill_at_ms,terminal_fill_at_ms,
