@@ -14,6 +14,8 @@ export async function run({root,signal}) {
   assert.ok(denied&&terminal&&restart,"T09.8 needs both real Native and Worker receipts");
   assert.equal(denied.denial_reason,"CAMPAIGN_ENTRY_BUDGET_EXHAUSTED",
     "deny by true central campaign cap rather than stale fee/source/transport");
+  assert.equal(denied.denial_origin,"CENTRAL");
+  assert.equal(denied.send_state,"NOT_STARTED");
   assert.equal(denied.requested_entry_upper_usd,"4.002");
   assert.equal(denied.sql_entry_quote_usd,"4.002",
     "immutable SQL quote must match the proven Worker RESERVE upper");
