@@ -277,20 +277,25 @@ fn t09_6_publish_final_empty_algos(
         "code":"0","msg":"","data":[]
     })).expect("T09.6 empty venue inventory raw JSON");
     let mut pages=Vec::new();
-    for inst in ["SWAP","FUTURES"] {
-        for kind in [
-            "conditional","oco","trigger","move_order_stop",
-            "chase","iceberg","twap","smart_iceberg"
-        ] {
-            pages.push(RecordedGet {
-                access_key:"fixture-observer-a".into(),
-                path:"/api/v5/trade/orders-algo-pending".into(),
-                required_query:vec![
-                    ("instType".into(),inst.into()),("ordType".into(),kind.into()),
-                    ("limit".into(),"100".into()),
-                ],
-                raw_response:empty.clone(),
-            });
+    // Every public Status independently scans all 16 signed derivative
+    // scopes, as does the final orphan check. These are finite raw GETs,
+    // not a second account owner or a risk-census shortcut.
+    for _ in 0..12 {
+        for inst in ["SWAP","FUTURES"] {
+            for kind in [
+                "conditional","oco","trigger","move_order_stop",
+                "chase","iceberg","twap","smart_iceberg"
+            ] {
+                pages.push(RecordedGet {
+                    access_key:"fixture-observer-a".into(),
+                    path:"/api/v5/trade/orders-algo-pending".into(),
+                    required_query:vec![
+                        ("instType".into(),inst.into()),("ordType".into(),kind.into()),
+                        ("limit".into(),"100".into()),
+                    ],
+                    raw_response:empty.clone(),
+                });
+            }
         }
     }
     feed.advance_recorded_route("fixture-observer-a",
@@ -413,19 +418,48 @@ async fn t09_6_source_backed_close_release(
         ).await;
         assert_eq!(status["data"]["intent"]["state"],"FILLED",
             "T09.6 original entry must remain FILLED after close");
-        assert_eq!(status["data"]["central_release"]["state"],"verified",
-            "T09.6 flat position must discharge central risk: release={}, incremental={}, entry_fill={}, financial_error={}, remaining={}, protection={}",
-            status["data"]["central_release"],status["data"]["incremental_entry_settlement"],
-            status["data"]["entry_fill_evidence"],status["data"]["financial_error"],
-            status["data"]["remaining_exposure"],status["data"]["protection"]);
+        // A full-cohort census must not RELEASE the first flat entry
+        // while the other attached conditional stop is still live.
+        // The second stop is cancelled through the same public Status path,
+        // never by a fixture-owned mutation or a risk-policy exemption.
+        if other_stop_live {
+            assert_eq!(status["data"]["central_release"]["state"],"pending",
+                "T09.6 first stop cancel must not release risk while another stop is live");
+            assert_eq!(
+                status["data"]["central_release"]["reason_code"],
+                "UNATTRIBUTED_CONDITIONAL_ORDER",
+                "T09.6 the independent cohort census must block the orphan live stop"
+            );
+        }
         assert_eq!(status["data"]["protection_incident"],false,
             "T09.6 post-close risk must not hide a protection incident");
         entry_results.push(serde_json::json!({
-            "intent_id":intent,"release":status["data"]["central_release"],
+            "intent_id":intent,
+            "cancel_phase_release":status["data"]["central_release"],
             "financial_complete":status["data"]["financial_complete"],
         }));
     }
+    // Only after BOTH real cancel-algos ACKs may a fresh signed all-scope
+    // empty inventory authorize either central RELEASE. The first Status
+    // need not be repeated as a mutation: it was a one-shot cancel.
     t09_6_publish_final_empty_algos(feed);
+    for entry in &mut entry_results {
+        let intent=entry["intent_id"].as_str().expect("T09.6 persisted entry id");
+        let status=t09_6_status_after_local_read_defer(
+            trade,rate_budget,feed,intent,0
+        ).await;
+        assert_eq!(status["data"]["intent"]["state"],"FILLED",
+            "T09.6 the original order remains terminal after both stop cancels");
+        assert_eq!(status["data"]["central_release"]["state"],"verified",
+            "T09.6 release after BOTH stop cancels must be verified: intent={}, release={}, incremental={}, entry_fill={}, financial_error={}, remaining={}, protection={}",
+            intent,status["data"]["central_release"],status["data"]["incremental_entry_settlement"],
+            status["data"]["entry_fill_evidence"],status["data"]["financial_error"],
+            status["data"]["remaining_exposure"],status["data"]["protection"]);
+        assert_eq!(status["data"]["protection_incident"],false,
+            "T09.6 final release must not hide a protection incident");
+        entry["release"]=status["data"]["central_release"].clone();
+        entry["financial_complete"]=status["data"]["financial_complete"].clone();
+    }
     let owner=accounts.resolve("fixture-a").await.expect("T09.6 native account");
     let final_algos=owner.observer.pending_derivative_risk_algos().await
         .expect("T09.6 final signed derivative inventory");
