@@ -217,6 +217,12 @@
             "fixture-observer-a","/api/v5/account/trade-fee",refreshed_fee_pages
         );
         feed.advance_recorded_public_clock(wrap(serde_json::json!([{"ts":signed_now}])));
+        // The same production Add admission reads exchange time before POST
+        // and again after the central reserve. Provide finite recorded venue
+        // replies, never a simulated wall-clock or live HTTP fallback.
+        for _ in 0..8 {
+            feed.expect_public_clock(wrap(serde_json::json!([{"ts":signed_now}])));
+        }
         feed.expect_post(RecordedPost {
             access_key:"fixture-executor-a".into(),
             path:"/api/v5/trade/order".into(),
