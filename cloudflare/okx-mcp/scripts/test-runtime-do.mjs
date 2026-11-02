@@ -225,7 +225,16 @@ try {
       ],
       {
         cwd: fileURLToPath(new URL("../../../", import.meta.url)),
-        env: { ...process.env, OKX_INTEGRATION_HANDOFF_PATH: handoffPath },
+        // This subprocess runs the single large T09.0..8 native async
+        // acceptance future on a Windows Rust test-harness thread. The default
+        // 2 MiB test stack overflows (0xC00000FD) BEFORE T09.2; no venue
+        // operation is implicated. Bound only the CHILD's test-thread stack.
+        // Production Agent/Worker settings and per-request limits are unchanged.
+        env: {
+          ...process.env,
+          RUST_MIN_STACK: "16777216",
+          OKX_INTEGRATION_HANDOFF_PATH: handoffPath,
+        },
         maxBuffer: 8 * 1024 * 1024,
         timeout: process.env.OKX_T09_6_CLOSE_PROBE === "1" ? 220_000 : 180_000,
       },
