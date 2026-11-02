@@ -815,6 +815,11 @@ impl AccountStore {
         let r = self
             .central_receipt(&accepted.intent_id)?
             .ok_or(StoreError::Invalid("PARTIAL_ENTRY_ACK_RESERVATION_MISSING"))?;
+        let receipt_state: String = self.connection.query_row(
+            "SELECT state FROM risk_receipts WHERE intent_id=?1 AND plan_hash=?2",
+            params![accepted.intent_id,accepted.plan_hash],
+            |row|row.get(0),
+        ).optional()?.ok_or(StoreError::Invalid("PARTIAL_ENTRY_ACK_RESERVATION_STATE_MISSING"))?;
         if saved != *accepted
             || immutable.kind != "ENTRY_PARTIAL_SETTLEMENT_PROVEN"
             || immutable.request_hash != accepted.plan_hash
@@ -823,7 +828,7 @@ impl AccountStore {
             || r.plan_hash != accepted.plan_hash
             || r.reservation_key != accepted.reservation_key
             || r.reservation_key.starts_with("local:")
-            || !matches!(r.state.as_str(), "OPEN" | "POSTED")
+            || !matches!(receipt_state.as_str(), "OPEN" | "POSTED")
         {
             return Err(StoreError::Invalid("PARTIAL_ENTRY_ACK_SOURCE_MISMATCH"));
         }
