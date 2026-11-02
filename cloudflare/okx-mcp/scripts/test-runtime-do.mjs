@@ -518,6 +518,13 @@ try {
         assert.equal(terminal.worker_budget.entry_budget.reserved_usd,"0");
         assert.equal(terminal.worker_budget.reserved_loss_usd,"0");
         assert.equal(terminal.outbound_posts,9);
+        // The fresh persisted Worker WSS read must match the final Native
+        // close+release proof, not the earlier T09.4 managed-Add snapshot.
+        // Never accept a stale/partially reserved budget as fully released.
+        assert.deepEqual(afterNative.budget, terminal.worker_budget,
+          "T09.6 persisted Worker budget must equal terminal Native close/release");
+        assert.ok(afterNative.risk_book_sequence>=terminal.worker_risk_book_sequence,
+          "T09.6 persisted Worker cannot roll back Native close/release revision");
         console.log("T09_6_WORKER_CLOSE_RECONCILED_V1:"+JSON.stringify({
           native_close_proof:terminal.worker_risk_book_sequence,
           worker_after_native_sequence:afterNative.risk_book_sequence,
@@ -540,10 +547,13 @@ try {
         assert.equal(afterNative.budget?.entry_budget?.reserved_usd,managedAdd?"0":partialFills?"4":"7.0015");
         assert.equal(afterNative.budget?.entry_budget?.consumed_usd,managedAdd?"6.003":partialFills?"4.002":"1.0005");
         assert.deepEqual(afterNative.budget,
-          managedAdd ? receipt(stdout,"T09_4_NATIVE_MANAGED_ADD_V1").worker_budget
+          // T09.6 may include T09.2/3/4 earlier in its historical cohort,
+          // but the authoritative readback is the *last* terminal state.
+          managedClose ? receipt(stdout,"T09_6_NATIVE_TERMINAL_V1").worker_budget
+          : managedAdd ? receipt(stdout,"T09_4_NATIVE_MANAGED_ADD_V1").worker_budget
           : partialFills ? receipt(stdout,"T09_3_NATIVE_PARTIAL_TERMINAL_V1").worker_budget
           : admitted.after_worker_budget,
-          "T09.2 persisted RiskBook readback must equal Native production summary");
+          "T09.2/T09.6 persisted RiskBook must match latest Native production proof");
         console.log("T09_2_WORKER_AFTER_RECONNECT_V1:" + JSON.stringify({
           connection_generation:afterNativeSocket.hello.connection_generation,
           budget:afterNative.budget,
