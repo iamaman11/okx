@@ -229,6 +229,28 @@ fn protection_covers_live_position(
         && dec(protection_size).ok() == Some(venue_position)
 }
 
+/// An attached Add stop covers this intent's actually executed increment,
+/// NOT the whole net-mode venue position already covered by older verified
+/// stops. All older lots, stops and reservations are rechecked by the native
+/// full-cohort census before this compound protection can be certified.
+fn protection_covers_managed_increment(
+    opening_side: &str,
+    protection_side: &str,
+    cumulative_fill: Decimal,
+    venue_position: Decimal,
+    protection_size: &str,
+) -> bool {
+    cumulative_fill > Decimal::ZERO
+        && venue_position >= cumulative_fill
+        && protection_covers_live_position(
+            opening_side,
+            protection_side,
+            cumulative_fill,
+            cumulative_fill,
+            protection_size,
+        )
+}
+
 /// Every venue readback must refer to this durable intent before it can
 /// change local state, protection requirements, or exchange-order identity.
 /// An exchange lookup by client ID alone is a lookup, not an identity proof.
@@ -620,8 +642,8 @@ impl TradeService {
                     .await;
                 match p {
                     Ok(p)
-                        if verified_live_protection(&i, position_qty, &p).is_ok()
-                            && protection_covers_live_position(
+                        if verified_live_protection(&i, filled, &p).is_ok()
+                            && protection_covers_managed_increment(
                                 &i.plan.side,
                                 &p.side,
                                 filled,
@@ -634,7 +656,7 @@ impl TradeService {
                             intent_id: i.intent_id.clone(),
                             algo_id: p.algo_order_id,
                             side: p.side,
-                            quantity: position_qty,
+                            quantity: filled,
                             trigger_price: i.plan.stop_price.ok_or("STOP_PRICE_MISSING")?,
                             trigger_basis: "mark".into(),
                             verified_at: now(),
@@ -645,6 +667,32 @@ impl TradeService {
                             .call(deadline(), move |s| s.verify_protection(&protection))
                             .await
                             .map_err(err)?;
+                        // If the live venue quantity exceeds this intent's
+                        // fill, the previous position MUST still be covered by
+                        // its own SQL lots, distinct venue stop(s) and active
+                        // RiskBook reservation. Reuse the sole full-cohort
+                        // signed census, never simply subtract the old qty.
+                        if position_qty > filled {
+                            let aggregate_proven = match self.governance.read().await.clone() {
+                                Some(state) => self.census(&state).await.is_ok(),
+                                None => false,
+                            };
+                            if !aggregate_proven {
+                                protection_failed = true;
+                                let id = i.intent_id.clone();
+                                r.execution
+                                    .store
+                                    .call(deadline(), move |s| {
+                                        s.protection_incident(
+                                            &id,
+                                            "MANAGED_AGGREGATE_PROTECTION_UNVERIFIED",
+                                            now(),
+                                        )
+                                    })
+                                    .await
+                                    .map_err(err)?;
+                            }
+                        }
                     }
                     _ => {
                         protection_failed = true;
@@ -2142,6 +2190,22 @@ mod entry_cost_status_tests {
             Decimal::ZERO,
             one,
             "1"
+        ));
+    }
+
+    #[test]
+    fn t09_4_add_attached_stop_must_cover_exact_increment_not_old_position() {
+        let add = dec("0.2").unwrap();
+        let net = dec("0.5").unwrap();
+        assert!(protection_covers_managed_increment("buy", "sell", add, net, "0.2"));
+        assert!(!protection_covers_managed_increment("buy", "sell", add, net, "0.5"));
+        assert!(!protection_covers_managed_increment("buy", "sell", add, net, "0.19"));
+        assert!(!protection_covers_managed_increment("buy", "buy", add, net, "0.2"));
+        assert!(!protection_covers_managed_increment(
+            "buy", "sell", Decimal::ZERO, net, "0.2"
+        ));
+        assert!(!protection_covers_managed_increment(
+            "buy", "sell", dec("0.6").unwrap(), net, "0.6"
         ));
     }
 
