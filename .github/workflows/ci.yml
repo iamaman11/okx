@@ -7,6 +7,19 @@ on:
     branches:
       - main
   workflow_dispatch:
+    inputs:
+      target_case:
+        description: 'Targeted recorded Windows T09 preflight (not full 26/26 acceptance)'
+        type: choice
+        required: false
+        default: T09.6
+        options:
+          - T09.1
+          - T09.3
+          - T09.4
+          - T09.6
+          - T09.7
+          - T09.8
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -20,6 +33,7 @@ permissions:
 jobs:
   classify:
     name: classify
+    if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
     outputs:
       build_required: ${{ steps.classify.outputs.build_required }}
@@ -222,7 +236,7 @@ jobs:
   linux:
     name: linux-core
     needs: [classify, architecture, linux-rust, cloudflare-mcp]
-    if: always()
+    if: always() && github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - name: Aggregate required Linux, architecture and Cloudflare gates
@@ -358,3 +372,68 @@ jobs:
           compression-level: 9
           retention-days: 14
 
+  # Manually dispatched from the existing CI workflow on the selected PR
+  # branch. No deployment, no exchange network and no relaxation of the
+  # mandatory 26-case pull_request gate.
+  windows-t09-preflight:
+    name: windows-t09-targeted
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: windows-latest
+    timeout-minutes: 35
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Bind exact source SHA and restrict target scenario
+        shell: pwsh
+        env:
+          OKX_TARGET_CASE: ${{ inputs.target_case || 'T09.6' }}
+        run: |
+          $head = (git rev-parse HEAD).Trim()
+          if ($head -ne $env:GITHUB_SHA) { throw "PREFLIGHT_HEAD_MISMATCH" }
+          if ($env:OKX_TARGET_CASE -notin @('T09.1','T09.3','T09.4','T09.6','T09.7','T09.8')) {
+            throw "PREFLIGHT_CASE_NOT_ALLOWED"
+          }
+          Write-Host "PREFLIGHT_HEAD=$head"
+          Write-Host "PREFLIGHT_CASE=$env:OKX_TARGET_CASE"
+          Write-Host "PREFLIGHT_SCOPE=TARGETED_ONLY_NOT_26_CASE_ACCEPTANCE"
+
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master snapshot 2026-09-29
+        with:
+          toolchain: 1.95.0
+          components: rustfmt
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      - name: Check Rust format without changing source
+        run: cargo fmt --all -- --check
+
+      - name: Install locked workerd test dependencies
+        shell: pwsh
+        run: |
+          npm ci --prefix cloudflare/okx-mcp --ignore-scripts --no-audit --no-fund
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Execute exactly one recorded Native and Worker T09 case
+        shell: pwsh
+        env:
+          OKX_TARGET_CASE: ${{ inputs.target_case || 'T09.6' }}
+        run: |
+          if ($env:OKX_TARGET_CASE -notin @('T09.1','T09.3','T09.4','T09.6','T09.7','T09.8')) {
+            throw "PREFLIGHT_CASE_NOT_ALLOWED"
+          }
+          $artifacts = Join-Path $env:RUNNER_TEMP "trade-integration"
+          node scripts/run-trade-integration.mjs --case $env:OKX_TARGET_CASE --artifacts "$artifacts"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Preserve targeted evidence even on failure
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: t09-targeted-${{ inputs.target_case || 'T09.6' }}-${{ github.sha }}
+          path: ${{ runner.temp }}\trade-integration
+          if-no-files-found: warn
+          retention-days: 14
