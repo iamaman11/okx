@@ -13,6 +13,24 @@
         let raw = |v| serde_json::to_vec(&serde_json::json!({"code":"0","msg":"","data":v})).unwrap();
         let now_ms=chrono::Utc::now().timestamp_millis();
         let terminal=first_ts.is_some();
+        // Test-only finite-source accounting: stage boundaries, not signed
+        // credentials, bodies, exchange responses or unrestricted request logs.
+        let trace_source_reads = |stage: &str| {
+            let requests = feed.requests.lock().unwrap();
+            let count = |route: &str| requests.iter()
+                .filter(|entry| entry.starts_with(route)).count();
+            eprintln!(
+                "T09_3_SOURCE_READS_V1 stage={stage} terminal={terminal} observer_balance={} observer_positions={} observer_orders={} observer_algos={} executor_fills={} executor_bills={} total={}",
+                count("fixture-observer-a:/api/v5/account/balance?"),
+                count("fixture-observer-a:/api/v5/account/positions?"),
+                count("fixture-observer-a:/api/v5/trade/orders-pending?"),
+                count("fixture-observer-a:/api/v5/trade/orders-algo-pending?"),
+                count("fixture-executor-a:/api/v5/trade/fills-history?"),
+                count("fixture-executor-a:/api/v5/account/bills-archive?"),
+                requests.len(),
+            );
+        };
+        trace_source_reads("phase_start");
         let first=first_ts.unwrap_or(now_ms);
         let (qty, fee, fills_count)=if terminal {
             (Decimal::new(30,2),Decimal::new(15,4),2usize)
@@ -135,8 +153,11 @@
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }
         }).await.unwrap_or_else(|_|panic!("T09_3_CAPTURE_UNPROVEN terminal={terminal}: {last}"));
-        let status=trade.trade("fixture-a",&okx_protocol::trading::TradeRequest::Status{reference:id},None)
-            .await.expect("T09.3 real TradeService status");
+        trace_source_reads("before_status");
+        let status_result=trade.trade("fixture-a",&okx_protocol::trading::TradeRequest::Status{reference:id},None)
+            .await;
+        trace_source_reads("after_status");
+        let status=status_result.expect("T09.3 real TradeService status");
         if !terminal {
             assert_eq!(status["data"]["intent"]["state"],"PARTIALLY_FILLED",
                 "a covered partial bill never proves the remaining quantity executed");
