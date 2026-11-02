@@ -5,10 +5,12 @@ import { summarizeNativeWorkerdFailure } from "./native-failure.mjs";
 test("nested assertion survives generic Command failed envelope", () => {
   const x = summarizeNativeWorkerdFailure({code:1,
     stdout:'T09_1_NATIVE_SQL_RESTART_V1:{"state":"ok"}',
-    stderr:"Command failed: node test-runtime-do.mjs\nAssertionError [ERR_ASSERTION]: T09.7 Worker must reload exact settled budget\n    at file:///script.mjs:608:14"});
+    stderr:"Command failed: node test-runtime-do.mjs\nAssertionError [ERR_ASSERTION]: T09.7 Worker must reload exact settled budget\n    at file:///C:/sensitive/private/test-runtime-do.mjs:608:14"});
   assert.equal(x.error_class, "NODE_ASSERTION");
   assert.match(x.first_visible_error, /T09.7 Worker must reload/);
   assert.equal(x.phase, "T09_1_NATIVE_SQL_RESTART_V1");
+  assert.equal(x.workerd_test_line, 608);
+  assert.ok(!JSON.stringify(x).includes("sensitive/private"));
   assert.equal(x.outer_exit_code, "1");
 });
 test("secret and source-bearing diagnostic lines must not be emitted", () => {
@@ -21,6 +23,7 @@ test("secret and source-bearing diagnostic lines must not be emitted", () => {
   assert.equal(x.phase,"T09_6_NATIVE_TERMINAL_V1");
   assert.ok(!JSON.stringify(x).includes(sentinel));
   assert.ok(!JSON.stringify(x).includes("Authorization"));
+  assert.equal(x.workerd_test_line, null);
   assert.match(x.output_sha256,/^[a-f0-9]{64}$/);
 });
 test("a wrapper-only exit is not mistaken for a Rust failure", () => {

@@ -22,6 +22,10 @@ export function summarizeNativeWorkerdFailure(error) {
   const phases = [...combined.matchAll(/\b(T09_(?:[0-9]+_)?[A-Z0-9_]+_V1):/g)]
     .map(m => m[1]).slice(-12);
   const assertion = relevant.at(-1) ?? "INNER_CHILD_EXIT_WITHOUT_SAFE_ASSERTION";
+  // Only reveal a numeric line from our fixed, known test module. Never
+  // echo the OS path, Node stack, source bytes, signed URL or credentials.
+  const localFrame = combined.match(/test-runtime-do\.mjs:(\d{1,5}):\d{1,5}/);
+  const workerd_test_line = localFrame ? Number(localFrame[1]) : null;
   const exit = String(error?.code ?? "UNKNOWN");
   return {
     schema: "okx.t09-nested-failure/v1",
@@ -30,6 +34,7 @@ export function summarizeNativeWorkerdFailure(error) {
       : assertion.includes("panicked at") ? "RUST_PANIC"
       : assertion === "INNER_CHILD_EXIT_WITHOUT_SAFE_ASSERTION" ? "UNCLASSIFIED" : "NESTED_ERROR",
     first_visible_error: assertion,
+    workerd_test_line,
     error_count: relevant.length,
     outer_exit_code: /^[0-9]{1,8}$/.test(exit) ? exit : "UNKNOWN",
     stdout_bytes: stdout.length,
