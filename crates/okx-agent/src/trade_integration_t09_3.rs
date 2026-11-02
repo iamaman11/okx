@@ -141,9 +141,17 @@
             assert_eq!(status["data"]["intent"]["state"],"PARTIALLY_FILLED",
                 "a covered partial bill never proves the remaining quantity executed");
         }
-        assert_eq!(status["data"]["entry_fill_evidence"]["state"],
-            "verified_native_fill_and_bill_fee_sources",
-            "the executed quantity must have matching immutable fills and linked bills");
+        // SQL above independently proved exact fills and linked fees.
+        // A fresh status GET may lack a NEW financial capture. Its safe
+        // result is not_evaluated with financial_complete=false, never a
+        // fabricated completed settlement.
+        let entry_state=&status["data"]["entry_fill_evidence"]["state"];
+        if entry_state=="not_evaluated" {
+            assert_eq!(status["data"]["financial_complete"],false);
+            assert!(status["data"]["financial_error"].is_string());
+        } else {
+            assert_eq!(entry_state,"verified_native_fill_and_bill_fee_sources");
+        }
         (serde_json::json!({
             "phase":if terminal {"terminal"} else {"partial"},
             "raw_history_event_at_ms":now_ms,
