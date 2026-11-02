@@ -2249,7 +2249,9 @@ fn verify_local_intent_coverage_with_managed(
         }
     }
     if unresolved.iter().any(|id| !ids.contains(id.as_str()))
-        || verified_live_intents.iter().any(|id| !ids.contains(id.as_str()))
+        || verified_live_intents
+            .iter()
+            .any(|id| !ids.contains(id.as_str()))
     {
         return Err("COHORT_UNRESOLVED_INTENT_SCOPE_INVALID".into());
     }
