@@ -7,6 +7,7 @@ import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { resolve } from "node:path";
+import { summarizeNativeWorkerdFailure } from "./native-failure.mjs";
 
 const exec = promisify(execFile);
 const hash = value => createHash("sha256").update(JSON.stringify(value)).digest("hex");
@@ -99,25 +100,13 @@ export async function actualNativeWorker(root, signal, { statusProbe = false, se
         throw Error("NATIVE_RUST_ASSERTION:" +
           String(detail.rust_assertion).slice(0, 1200));
       }
-      // Preserve deterministic Native phase markers and the complete final
-      // Rust assertion in the CI job log. The short summary reason alone
-      // previously reduced typed no-send evidence to "max_requests: 10".
-      // Do not include raw HTTP bodies, signed headers, or environment data.
-      const stdout = String(error.stdout ?? "");
-      const phaseMarkers = [...stdout.matchAll(
-        /(T09_1_(?:NATIVE_[A-Z0-9_]+|TERMINAL_[A-Z0-9_]+|RECORDED_[A-Z0-9_]+))_V1:/g,
-      )].map(m => m[1]).slice(-15);
-      const lines = stderr.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
-      const panic = lines.findLastIndex(line => /panicked at|thread '.+' panicked/.test(line));
-      const failure = panic >= 0
-        ? lines.slice(panic, panic + 5).join(" ")
-        : lines.findLast(line => /T09_1_NATIVE_CHILD_EXCEPTION_V1:|Error:|error:|FAILED/.test(line))
-          ?? error.message;
-      process.stderr.write("T09_1_NATIVE_FAILURE_PHASE_V1:" + JSON.stringify({
-        phases: phaseMarkers,
-        cause: String(failure).slice(0, 2000),
-      }) + "\n");
-      throw Error("NATIVE_WORKER_CHILD_FAILED:" + String(failure).slice(0, 135));
+      // Preserve only bounded, secret-free evidence from the nested child.
+      // The previous fallback hid its assertion behind "Command failed".
+      const evidence = summarizeNativeWorkerdFailure(error);
+      process.stderr.write("T09_NATIVE_NESTED_FAILURE_V1:" +
+        JSON.stringify(evidence) + "\n");
+      throw Error("NATIVE_WORKER_CHILD_FAILED:" + evidence.error_class +
+        ":" + evidence.phase + ":" + evidence.first_visible_error.slice(0, 70));
     });
     assert.match(stdout, /t09_public_trade_execute_open_ack_and_idempotency PASS: posts=1/);
     assert.match(stdout, /native_to_persisted_workerd_riskbook PASS/);
