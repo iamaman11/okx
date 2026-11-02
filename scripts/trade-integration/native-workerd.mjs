@@ -128,6 +128,7 @@ export async function actualNativeWorker(root, signal, { statusProbe = false, se
           nativeRestart: receipt(stdout, "T09_1_NATIVE_SQL_RESTART_V1"),
           ...(secondAdmission ? {
             nativeSecondAdmission: receipt(stdout, "T09_2_NATIVE_ADMISSION_V1"),
+            nativeCrossUidDenial: receipt(stdout, "T09_MA_CROSS_UID_DENIAL_V1"),
             workerSecondAdmission: receipt(stdout, "T09_2_WORKER_AFTER_RECONNECT_V1"),
             ...(partialFills ? { nativePartialFills: receipt(stdout, "T09_3_NATIVE_PARTIAL_TERMINAL_V1") } : {}),
             ...(managedAdd ? { nativeManagedAdd: receipt(stdout, "T09_4_NATIVE_MANAGED_ADD_V1") } : {}),
