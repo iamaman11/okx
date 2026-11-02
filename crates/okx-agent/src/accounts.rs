@@ -1388,7 +1388,7 @@ pub(crate) mod recorded_support {
                         } else {
                             64
                         }
-                    },
+                    }
                     _ => 0,
                 };
                 let mut observed = self.requests.lock().unwrap();
@@ -1477,9 +1477,10 @@ pub(crate) mod recorded_support {
                     // behavior (20s ping, 10s pong deadline). Script only
                     // the raw venue pong; never bypass the generation guard.
                     if data.as_str() == "ping" {
-                        self.inbound.push_back(
-                            tokio_tungstenite::tungstenite::Message::Text("pong".into())
-                        );
+                        self.inbound
+                            .push_back(tokio_tungstenite::tungstenite::Message::Text(
+                                "pong".into(),
+                            ));
                         return Ok(());
                     }
                     let outgoing: serde_json::Value =

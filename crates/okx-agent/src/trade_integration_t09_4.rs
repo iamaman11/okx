@@ -2,7 +2,7 @@
     // T09.4: a distinct, provenance-bound Add order is admitted ONLY through
     // the existing TradeService and a fully sourced managed-position census.
     // All venue responses are immutable raw transport inputs, not SQL writes.
-    async fn t09_4_managed_add(
+    struct T09_4Context {
         accounts: Arc<AccountRuntimeRegistry>,
         trade: Arc<TradeService>,
         risk: NativeRiskClient,
@@ -14,7 +14,22 @@
         terminal_fill_at_ms: i64,
         need_new_market: tokio::sync::oneshot::Sender<()>,
         fresh_market_ready: tokio::sync::oneshot::Receiver<()>,
-    ) -> serde_json::Value {
+    }
+
+    async fn t09_4_managed_add(context: T09_4Context) -> serde_json::Value {
+        let T09_4Context {
+            accounts,
+            trade,
+            risk,
+            feed,
+            prior_client_id,
+            campaign_id,
+            native_origin,
+            first_fill_at_ms,
+            terminal_fill_at_ms,
+            need_new_market,
+            fresh_market_ready,
+        } = context;
         use crate::accounts::recorded_support::{RecordedGet, RecordedPost};
         use okx_protocol::trading::{
             OrderConstraints, PositionSide, Protection, Sizing, TradeOperation, TradeRequest,

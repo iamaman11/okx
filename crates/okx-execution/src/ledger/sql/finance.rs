@@ -639,7 +639,7 @@ impl AccountStore {
                     }
                     terminal.insert(key.clone());
                     continue;
-                },
+                }
                 "ENTRY_LATE_HEAD" => key.strip_prefix("entry-late-head:"),
                 "ENTRY_LATE_SETTLEMENT_PROVEN" => key
                     .strip_prefix("entry-late:")
@@ -1186,17 +1186,19 @@ impl AccountStore {
                     // revision. It is not a new purchase or a regression if,
                     // and only if, its own append-only historical row matches
                     // BOTH the exact money and source hash.
-                    let historical: Option<(String, String)> = tx.query_row(
-                        "SELECT cumulative_usd,source_digest
+                    let historical: Option<(String, String)> = tx
+                        .query_row(
+                            "SELECT cumulative_usd,source_digest
                            FROM campaign_entry_applied
                           WHERE campaign_id=?1 AND intent_id=?2
                             AND settlement_revision=?3",
-                        params![campaign_id,intent_id,revision],
-                        |row|Ok((row.get(0)?,row.get(1)?)),
-                    ).optional()?;
-                    if historical.as_ref().is_some_and(|(money, hash)|
-                        decimal(money.clone()).ok()==Some(*amount) && hash==digest
-                    ) {
+                            params![campaign_id, intent_id, revision],
+                            |row| Ok((row.get(0)?, row.get(1)?)),
+                        )
+                        .optional()?;
+                    if historical.as_ref().is_some_and(|(money, hash)| {
+                        decimal(money.clone()).ok() == Some(*amount) && hash == digest
+                    }) {
                         continue;
                     }
                     return Err(StoreError::Invalid("CAMPAIGN_APPLIED_MONOTONICITY_BREACH"));
@@ -1485,9 +1487,7 @@ impl AccountStore {
         // for the SAME intent (partial r1, partial r2, terminal r3).
         // Read the prior SQL checkpoint once, then advance this in-memory
         // cursor without writing any extra ledger or double counting money.
-        let mut in_batch = std::collections::BTreeMap::<
-            String, (i64, Decimal, String)
-        >::new();
+        let mut in_batch = std::collections::BTreeMap::<String, (i64, Decimal, String)>::new();
         while let Some(row) = rows.next()? {
             if witnesses.len() >= 10_000 {
                 return Err(StoreError::Invalid("ENTRY_OPENING_HISTORY_TOO_LARGE"));
@@ -1505,8 +1505,11 @@ impl AccountStore {
                 .map_err(|_| StoreError::Invalid("ENTRY_OPENING_SETTLEMENT_CORRUPT"))?;
             let partial = operation_id.starts_with("entry-partial-settled:");
             if (partial
-                && (operation_id != format!(
-                      "entry-partial-settled:{}:r{}",terminal.intent_id,terminal.settlement_revision)
+                && (operation_id
+                    != format!(
+                        "entry-partial-settled:{}:r{}",
+                        terminal.intent_id, terminal.settlement_revision
+                    )
                     || terminal.schema != "okx.entry-partial-settlement/v1"))
                 || (!partial
                     && (operation_id != format!("entry-settlement:{}", terminal.intent_id)
@@ -1520,11 +1523,14 @@ impl AccountStore {
             // second historical entry. Only the exact central-settled latest
             // revision may replace the terminal amount in an opening proof.
             if partial {
-                let ack = self.operation(&operation_id)?
+                let ack = self
+                    .operation(&operation_id)?
                     .ok_or(StoreError::Invalid("CAMPAIGN_PARTIAL_ACK_MISSING"))?;
-                let immutable = self.operation(
-                    &format!("entry-partial:{}:r{}",
-                      terminal.intent_id,terminal.settlement_revision))?
+                let immutable = self
+                    .operation(&format!(
+                        "entry-partial:{}:r{}",
+                        terminal.intent_id, terminal.settlement_revision
+                    ))?
                     .ok_or(StoreError::Invalid("CAMPAIGN_PARTIAL_IMMUTABLE_MISSING"))?;
                 let encoded = serde_json::to_string(&terminal)
                     .map_err(|_| StoreError::Invalid("CAMPAIGN_PARTIAL_SERIALIZATION"))?;
@@ -1541,13 +1547,17 @@ impl AccountStore {
                     return Err(StoreError::Invalid("CAMPAIGN_PARTIAL_ACK_INVALID"));
                 }
             }
-            let latest: Option<String> = if partial { None } else {
-                self.connection.query_row(
-                    "SELECT result_ref FROM operation_receipts
+            let latest: Option<String> = if partial {
+                None
+            } else {
+                self.connection
+                    .query_row(
+                        "SELECT result_ref FROM operation_receipts
                  WHERE operation_id='entry-late-head:'||?1 AND kind='ENTRY_LATE_HEAD'",
-                    [&terminal.intent_id],
-                    |r| r.get(0),
-                ).optional()?
+                        [&terminal.intent_id],
+                        |r| r.get(0),
+                    )
+                    .optional()?
             };
             let value: EntrySettlementEvidence = if let Some(revision) = latest {
                 let late: EntrySettlementEvidence = serde_json::from_str(&revision)
@@ -1633,12 +1643,19 @@ impl AccountStore {
                     hash != &value.plan_hash
                         || *post < from_ms
                         || (if partial {
-                              state != "OPEN" && !(state == "RELEASED"
-                                && self.operation(&format!("entry-settlement:{}", value.intent_id))
-                                  .ok().flatten().is_some_and(|x|
-                                    x.kind=="ENTRY_SETTLEMENT_PROVEN"
-                                    && x.request_hash==value.plan_hash))
-                            } else { state != "RELEASED" })
+                            state != "OPEN"
+                                && !(state == "RELEASED"
+                                    && self
+                                        .operation(&format!("entry-settlement:{}", value.intent_id))
+                                        .ok()
+                                        .flatten()
+                                        .is_some_and(|x| {
+                                            x.kind == "ENTRY_SETTLEMENT_PROVEN"
+                                                && x.request_hash == value.plan_hash
+                                        }))
+                        } else {
+                            state != "RELEASED"
+                        })
                         || reservation != &value.reservation_key
                 })
             {
