@@ -13,6 +13,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
 import { Miniflare } from "miniflare";
+import { assertBudgetEconomicsUnchanged } from "../../../scripts/trade-integration/budget-evidence.mjs";
 
 const root = await mkdtemp(join(tmpdir(), "okx-workerd-risk-"));
 const outfile = join(root, "runtime-test.mjs");
@@ -518,11 +519,11 @@ try {
         assert.equal(terminal.worker_budget.entry_budget.reserved_usd,"0");
         assert.equal(terminal.worker_budget.reserved_loss_usd,"0");
         assert.equal(terminal.outbound_posts,9);
-        // The fresh persisted Worker WSS read must match the final Native
-        // close+release proof, not the earlier T09.4 managed-Add snapshot.
-        // Never accept a stale/partially reserved budget as fully released.
-        assert.deepEqual(afterNative.budget, terminal.worker_budget,
-          "T09.6 persisted Worker budget must equal terminal Native close/release");
+        // T09.8 may refresh authenticated RiskBook source_as_of_ms AFTER
+        // the terminal close. A newer observation is not a money mutation.
+        // Preserve full campaign/loss/entry equality and time monotonicity.
+        assertBudgetEconomicsUnchanged(terminal.worker_budget,afterNative.budget,
+          "T09.6 persisted Worker budget versus Native terminal close/release");
         assert.ok(afterNative.risk_book_sequence>=terminal.worker_risk_book_sequence,
           "T09.6 persisted Worker cannot roll back Native close/release revision");
         console.log("T09_6_WORKER_CLOSE_RECONCILED_V1:"+JSON.stringify({
@@ -546,14 +547,21 @@ try {
           "clean managed-Add acceptance cohort excludes T09.0 component reservations");
         assert.equal(afterNative.budget?.entry_budget?.reserved_usd,managedAdd?"0":partialFills?"4":"7.0015");
         assert.equal(afterNative.budget?.entry_budget?.consumed_usd,managedAdd?"6.003":partialFills?"4.002":"1.0005");
-        assert.deepEqual(afterNative.budget,
-          // T09.6 may include T09.2/3/4 earlier in its historical cohort,
-          // but the authoritative readback is the *last* terminal state.
+        // Select the latest source-backed checkpoint, never T09.4 once
+        // the two managed Close releases have happened. A follow-up T09.8
+        // can advance source time, but every economic field must match.
+        const latestNativeBudget =
           managedClose ? receipt(stdout,"T09_6_NATIVE_TERMINAL_V1").worker_budget
           : managedAdd ? receipt(stdout,"T09_4_NATIVE_MANAGED_ADD_V1").worker_budget
           : partialFills ? receipt(stdout,"T09_3_NATIVE_PARTIAL_TERMINAL_V1").worker_budget
-          : admitted.after_worker_budget,
-          "T09.2/T09.6 persisted RiskBook must match latest Native production proof");
+          : admitted.after_worker_budget;
+        if (managedClose) {
+          assertBudgetEconomicsUnchanged(latestNativeBudget,afterNative.budget,
+            "T09.2/T09.6 persisted Worker versus latest Native terminal budget");
+        } else {
+          assert.deepEqual(afterNative.budget,latestNativeBudget,
+            "T09.2 persisted Worker must equal Native pre-close budget");
+        }
         console.log("T09_2_WORKER_AFTER_RECONNECT_V1:" + JSON.stringify({
           connection_generation:afterNativeSocket.hello.connection_generation,
           budget:afterNative.budget,
@@ -599,8 +607,8 @@ try {
       assert.ok(persistedSocket.hello.connection_generation>firstGeneration,
         "T09.7 DO connection generation must advance after real Worker restart");
       const persisted=await summary(persistedSocket,"risk_t09_7_after_terminal_restart");
-      assert.deepEqual(persisted.budget,terminalBudget,
-        "T09.7 Worker must reload exact source-backed settled budget");
+      assertBudgetEconomicsUnchanged(terminalBudget,persisted.budget,
+        "T09.7 persisted Worker restart must preserve settled campaign money");
       assert.ok(persisted.risk_book_sequence>=terminalSequence,
         "T09.7 must not roll back central RiskBook sequence");
       assert.equal(persisted.budget.entry_budget.consumed_usd,"6.003");
