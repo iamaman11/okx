@@ -3812,8 +3812,8 @@ mod raw_native_session_tests {
                 // The child is a real process with no exchange transport.
                 // Compare the parent recorded HTTP boundary before and after
                 // its lifetime; never claim zero repost from a literal alone.
-                let posts_before_child=feed.outbound_posts.lock().unwrap().len();
-                assert_eq!(posts_before_child,9,"T09.7 terminal transport baseline");
+                let posts_before_child = feed.outbound_posts.lock().unwrap().len();
+                assert_eq!(posts_before_child, 9, "T09.7 terminal transport baseline");
                 let other = restart_b_account.as_ref().expect("T09.7 B account UID");
                 let child_b_path = root
                     .join("accounts")
@@ -3850,13 +3850,15 @@ mod raw_native_session_tests {
                     serde_json::from_str(&receipt).expect("T09.7 child Native receipt invalid");
                 assert_eq!(proof["new_os_process"], true);
                 assert_eq!(proof["new_exchange_posts"], 0);
-                let posts_after_child=feed.outbound_posts.lock().unwrap().len();
-                assert_eq!(posts_after_child,posts_before_child,
-                    "T09.7 independent native restart must not repost a venue operation");
-                let mut proof=proof;
-                proof["recorded_transport_posts_before"]=json!(posts_before_child);
-                proof["recorded_transport_posts_after"]=json!(posts_after_child);
-                proof["new_exchange_posts"]=json!(posts_after_child-posts_before_child);
+                let posts_after_child = feed.outbound_posts.lock().unwrap().len();
+                assert_eq!(
+                    posts_after_child, posts_before_child,
+                    "T09.7 independent native restart must not repost a venue operation"
+                );
+                let mut proof = proof;
+                proof["recorded_transport_posts_before"] = json!(posts_before_child);
+                proof["recorded_transport_posts_after"] = json!(posts_after_child);
+                proof["new_exchange_posts"] = json!(posts_after_child - posts_before_child);
                 println!("T09_7_NATIVE_PROCESS_RESTART_V1:{proof}");
             }
         }
