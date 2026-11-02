@@ -1181,7 +1181,27 @@ impl AccountStore {
                 .optional()?;
             let prior_money = if let Some((prior_revision, prior_amount, prior_digest)) = earlier {
                 let prior_amount = decimal(prior_amount)?;
-                if prior_revision > revision || prior_amount > *amount {
+                if prior_revision > revision {
+                    // A reread may contain an OLD already-applied immutable
+                    // revision. It is not a new purchase or a regression if,
+                    // and only if, its own append-only historical row matches
+                    // BOTH the exact money and source hash.
+                    let historical: Option<(String, String)> = tx.query_row(
+                        "SELECT cumulative_usd,source_digest
+                           FROM campaign_entry_applied
+                          WHERE campaign_id=?1 AND intent_id=?2
+                            AND settlement_revision=?3",
+                        params![campaign_id,intent_id,revision],
+                        |row|Ok((row.get(0)?,row.get(1)?)),
+                    ).optional()?;
+                    if historical.as_ref().is_some_and(|(money, hash)|
+                        decimal(money.clone()).ok()==Some(*amount) && hash==digest
+                    ) {
+                        continue;
+                    }
+                    return Err(StoreError::Invalid("CAMPAIGN_APPLIED_MONOTONICITY_BREACH"));
+                }
+                if prior_amount > *amount {
                     return Err(StoreError::Invalid("CAMPAIGN_APPLIED_MONOTONICITY_BREACH"));
                 }
                 if prior_revision == revision {
