@@ -764,7 +764,10 @@ mod tests {
                 .unwrap();
         }
         let local = store.recovery_snapshot(now()).unwrap();
-        assert!(local.coverage_complete, "recovery test requires fresh source cursors");
+        assert!(
+            local.coverage_complete,
+            "recovery test requires fresh source cursors"
+        );
         let expired = store.recovery_snapshot(fresh_observation + 5_001).unwrap();
         assert!(
             !expired.coverage_complete,
