@@ -388,12 +388,14 @@ async fn t09_6_source_backed_close_release(
         }));
     }
     let owner=accounts.resolve("fixture-a").await.expect("T09.6 Native SQL owner");
+    let second_sql_id = second_entry_id.to_owned();
+    let add_sql_id = add_entry_id.to_owned();
     let (second_client_id,add_client_id)=owner.execution.store.call(
         std::time::Instant::now()+Duration::from_secs(3),
-        |s| {
-            let second=s.intent(second_entry_id)?
+        move |s| {
+            let second=s.intent(&second_sql_id)?
                 .ok_or(okx_execution::StoreError::Invalid("T09_6_SECOND_INTENT_MISSING"))?;
-            let add=s.intent(add_entry_id)?
+            let add=s.intent(&add_sql_id)?
                 .ok_or(okx_execution::StoreError::Invalid("T09_6_ADD_INTENT_MISSING"))?;
             Ok((second.client_order_id,add.client_order_id))
         }
