@@ -629,6 +629,17 @@ impl AccountStore {
         for (_, key, kind) in page {
             let id = match kind.as_str() {
                 "ENTRY_SETTLEMENT_PROVEN" => key.strip_prefix("entry-settlement:"),
+                "ENTRY_PARTIAL_SETTLED" => {
+                    // Unlike a mutable HEAD, the Worker accepted one exact
+                    // immutable revision and this event is append-only.
+                    let raw = key.strip_prefix("entry-partial-settled:");
+                    let id = raw.and_then(|s| s.rsplit_once(":r").map(|(i, _)| i));
+                    if id.is_none() {
+                        return Err(StoreError::Invalid("CAMPAIGN_PARTIAL_EVENT_INVALID"));
+                    }
+                    terminal.insert(key.clone());
+                    continue;
+                },
                 "ENTRY_LATE_HEAD" => key.strip_prefix("entry-late-head:"),
                 "ENTRY_LATE_SETTLEMENT_PROVEN" => key
                     .strip_prefix("entry-late:")
@@ -661,7 +672,7 @@ impl AccountStore {
               OR EXISTS(SELECT 1 FROM operation_receipts
                   WHERE kind IN (
                     'ENTRY_SETTLEMENT_PROVEN','ENTRY_LATE_HEAD',
-                    'ENTRY_LATE_SETTLEMENT_PROVEN')
+                    'ENTRY_LATE_SETTLEMENT_PROVEN','ENTRY_PARTIAL_SETTLED')
                     AND committed_at>?1)",
             [through_ms],
             |r| r.get(0),
@@ -865,27 +876,21 @@ impl AccountStore {
                        AND kind IN (
                          'ENTRY_SETTLEMENT_PROVEN','ENTRY_LATE_HEAD',
                          'ENTRY_LATE_SETTLEMENT_PROVEN','ENTRY_LATE_SETTLED')
-                     OR (kind='ENTRY_PARTIAL_SETTLEMENT_PROVEN'
-                       AND EXISTS (
-                         SELECT 1 FROM operation_receipts head
-                         JOIN intents i
-                           ON i.intent_id=json_extract(head.result_ref,'$.intent_id')
-                         JOIN risk_receipts r ON r.intent_id=i.intent_id
-                         WHERE head.operation_id='entry-partial-head:'||i.intent_id
-                           AND head.kind='ENTRY_PARTIAL_HEAD'
-                           AND head.request_hash=i.plan_hash
-                           AND head.result_ref=operation_receipts.result_ref
-                           AND operation_receipts.request_hash=i.plan_hash
-                           AND i.state IN ('FILLED','PARTIALLY_FILLED')
-                           AND r.state='OPEN'
-                           AND r.plan_hash=i.plan_hash
-                           AND json_extract(head.result_ref,'$.schema')
-                             ='okx.entry-partial-settlement/v1'
-                           AND json_extract(head.result_ref,'$.venue_order_id')=i.exchange_order_id
-                           AND json_extract(head.result_ref,'$.reservation_key')=r.reservation_key
-                           AND json_extract(head.result_ref,'$.source_covered_through_ms')<=?3
-                           AND operation_receipts.committed_at<=?3
-                       ))
+                     OR (kind='ENTRY_PARTIAL_SETTLED' AND EXISTS (
+                       SELECT 1 FROM operation_receipts partial
+                       JOIN intents i ON i.intent_id=json_extract(partial.result_ref,'$.intent_id')
+                       JOIN risk_receipts r ON r.intent_id=i.intent_id
+                       WHERE partial.operation_id=replace(operation_receipts.operation_id,
+                                 'entry-partial-settled:','entry-partial:')
+                         AND partial.kind='ENTRY_PARTIAL_SETTLEMENT_PROVEN'
+                         AND partial.request_hash=operation_receipts.request_hash
+                         AND json_extract(partial.result_ref,'$.source_digest')=operation_receipts.result_ref
+                         AND json_extract(partial.result_ref,'$.plan_hash')=i.plan_hash
+                         AND json_extract(partial.result_ref,'$.reservation_key')=r.reservation_key
+                         AND json_extract(partial.result_ref,'$.venue_order_id')=i.exchange_order_id
+                         AND r.plan_hash=i.plan_hash AND r.state IN ('OPEN','RELEASED')
+                         AND operation_receipts.committed_at<=?3
+                     ))
                     )",
                     params![receipt_floor, receipt_end, through_ms],
                     |r| r.get(0),
@@ -1426,17 +1431,25 @@ impl AccountStore {
         } else {
             (None, 0, false)
         };
-        let indexed = "SELECT t.operation_id,t.result_ref,t.committed_at
+        let indexed = "SELECT t.operation_id,
+                       CASE WHEN t.kind='ENTRY_PARTIAL_SETTLED' THEN p.result_ref ELSE t.result_ref END,
+                       CASE WHEN t.kind='ENTRY_PARTIAL_SETTLED' THEN p.committed_at ELSE t.committed_at END
                        FROM json_each(?1) e
                        LEFT JOIN operation_receipts t ON t.operation_id=e.value
+                       LEFT JOIN operation_receipts p ON p.operation_id=
+                         replace(t.operation_id,'entry-partial-settled:','entry-partial:')
+                          AND p.kind='ENTRY_PARTIAL_SETTLEMENT_PROVEN'
                        ORDER BY t.operation_id";
-        let initial = "SELECT terminal.operation_id,terminal.result_ref,
-                              terminal.committed_at
-                       FROM operation_receipts terminal
-                       WHERE terminal.kind='ENTRY_SETTLEMENT_PROVEN'
-                         AND terminal.committed_at>?1
-                         AND terminal.committed_at<=?2
-                       ORDER BY terminal.operation_id LIMIT 10001";
+        let initial = "SELECT t.operation_id,
+                       CASE WHEN t.kind='ENTRY_PARTIAL_SETTLED' THEN p.result_ref ELSE t.result_ref END,
+                       CASE WHEN t.kind='ENTRY_PARTIAL_SETTLED' THEN p.committed_at ELSE t.committed_at END
+                       FROM operation_receipts t
+                       LEFT JOIN operation_receipts p ON p.operation_id=
+                         replace(t.operation_id,'entry-partial-settled:','entry-partial:')
+                         AND p.kind='ENTRY_PARTIAL_SETTLEMENT_PROVEN'
+                       WHERE t.kind IN ('ENTRY_SETTLEMENT_PROVEN','ENTRY_PARTIAL_SETTLED')
+                         AND t.committed_at>?1 AND t.committed_at<=?2
+                       ORDER BY t.operation_id LIMIT 10001";
         let mut stmt = self.connection.prepare(if event_json.is_some() {
             indexed
         } else {
@@ -1463,8 +1476,14 @@ impl AccountStore {
             }
             let terminal: EntrySettlementEvidence = serde_json::from_str(&encoded)
                 .map_err(|_| StoreError::Invalid("ENTRY_OPENING_SETTLEMENT_CORRUPT"))?;
-            if operation_id != format!("entry-settlement:{}", terminal.intent_id)
-                || terminal.schema != "okx.entry-terminal-settlement/v1"
+            let partial = operation_id.starts_with("entry-partial-settled:");
+            if (partial
+                && (operation_id != format!(
+                      "entry-partial-settled:{}:r{}",terminal.intent_id,terminal.settlement_revision)
+                    || terminal.schema != "okx.entry-partial-settlement/v1"))
+                || (!partial
+                    && (operation_id != format!("entry-settlement:{}", terminal.intent_id)
+                        || terminal.schema != "okx.entry-terminal-settlement/v1"))
                 || terminal.account_key != self.meta.account_key
                 || terminal.venue_update_ms != time
             {
@@ -1473,15 +1492,34 @@ impl AccountStore {
             // Additional fee bills are cumulative revisions, never a
             // second historical entry. Only the exact central-settled latest
             // revision may replace the terminal amount in an opening proof.
-            let latest: Option<String> = self
-                .connection
-                .query_row(
+            if partial {
+                let ack = self.operation(&operation_id)?
+                    .ok_or(StoreError::Invalid("CAMPAIGN_PARTIAL_ACK_MISSING"))?;
+                let immutable = self.operation(
+                    &format!("entry-partial:{}:r{}",
+                      terminal.intent_id,terminal.settlement_revision))?
+                    .ok_or(StoreError::Invalid("CAMPAIGN_PARTIAL_IMMUTABLE_MISSING"))?;
+                let encoded = serde_json::to_string(&terminal)
+                    .map_err(|_| StoreError::Invalid("CAMPAIGN_PARTIAL_SERIALIZATION"))?;
+                if ack.kind != "ENTRY_PARTIAL_SETTLED"
+                    || ack.request_hash != terminal.plan_hash
+                    || ack.result_ref != terminal.source_digest
+                    || immutable.kind != "ENTRY_PARTIAL_SETTLEMENT_PROVEN"
+                    || immutable.request_hash != terminal.plan_hash
+                    || immutable.result_ref != encoded
+                    || terminal.source_covered_through_ms > through_ms
+                {
+                    return Err(StoreError::Invalid("CAMPAIGN_PARTIAL_ACK_INVALID"));
+                }
+            }
+            let latest: Option<String> = if partial { None } else {
+                self.connection.query_row(
                     "SELECT result_ref FROM operation_receipts
                  WHERE operation_id='entry-late-head:'||?1 AND kind='ENTRY_LATE_HEAD'",
                     [&terminal.intent_id],
                     |r| r.get(0),
-                )
-                .optional()?;
+                ).optional()?
+            };
             let value: EntrySettlementEvidence = if let Some(revision) = latest {
                 let late: EntrySettlementEvidence = serde_json::from_str(&revision)
                     .map_err(|_| StoreError::Invalid("ENTRY_OPENING_LATE_CORRUPT"))?;
@@ -1553,7 +1591,8 @@ impl AccountStore {
                     "SELECT i.plan_hash,i.begin_post_at,r.state,r.reservation_key
                  FROM intents i JOIN risk_receipts r ON r.intent_id=i.intent_id
                  WHERE i.intent_id=?1 AND i.exchange_order_id=?2
-                   AND i.risk_increase=1 AND i.state IN ('FILLED','CANCELLED')
+                   AND i.risk_increase=1
+                   AND i.state IN ('FILLED','CANCELLED','PARTIALLY_FILLED')
                    AND r.plan_hash=i.plan_hash",
                     params![value.intent_id, value.venue_order_id],
                     |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
@@ -1564,7 +1603,13 @@ impl AccountStore {
                 .is_none_or(|(hash, post, state, reservation)| {
                     hash != &value.plan_hash
                         || *post < from_ms
-                        || state != "RELEASED"
+                        || (if partial {
+                              state != "OPEN" && !(state == "RELEASED"
+                                && self.operation(&format!("entry-settlement:{}", value.intent_id))
+                                  .ok().flatten().is_some_and(|x|
+                                    x.kind=="ENTRY_SETTLEMENT_PROVEN"
+                                    && x.request_hash==value.plan_hash))
+                            } else { state != "RELEASED" })
                         || reservation != &value.reservation_key
                 })
             {

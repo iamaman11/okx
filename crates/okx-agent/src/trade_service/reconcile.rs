@@ -1169,6 +1169,10 @@ impl TradeService {
                 .await
                 .map_err(str::to_owned)?;
             if result.status == RiskDecisionStatus::Updated {
+                let committed = proof.clone();
+                r.execution.store.call(deadline(), move |s| {
+                    s.acknowledge_partial_entry_settlement(&committed)
+                }).await.map_err(err)?;
                 return Ok(());
             }
             if !matches!(
