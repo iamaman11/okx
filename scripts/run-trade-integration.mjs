@@ -267,7 +267,9 @@ for (const caseId of cli.selected) {
     const { run } = await import(pathToFileURL(script).href);
     if (typeof run !== "function") throw Error(failures.invalid);
     const controller = new AbortController();
-    const deadline = 120_000;
+    // Managed close + native OS process and persisted DO restart are the
+    // same bounded full financial replay, not a short isolated unit case.
+    const deadline = ["T09.6", "T09.7", "T09.8"].includes(caseId) ? 260_000 : 120_000;
     let timer;
     try {
       const output = await Promise.race([
