@@ -3395,7 +3395,7 @@ mod raw_native_session_tests {
                             ));
                             println!("T09_6_NATIVE_FINANCIAL_SOURCES_V1:{witness}");
                             let terminal=t09_6_source_backed_close_release(
-                                &accounts,&trade,&risk,&feed,&new_intent_id,
+                                &accounts,&trade,&risk,&rate_budget,&feed,&new_intent_id,
                                 add["intent_id"].as_str().expect("T09.6 Add source"),
                                 &closes,
                             ).await;

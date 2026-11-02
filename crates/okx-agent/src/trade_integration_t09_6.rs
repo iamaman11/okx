@@ -22,7 +22,7 @@ async fn t09_6_close_owned_lot(input: T09_6CloseContext) -> serde_json::Value {
     let raw=|v|serde_json::to_vec(&serde_json::json!({
         "code":"0","msg":"","data":v
     })).expect("signed test HTTP envelope");
-    feed.expect_public_clock(raw(serde_json::json!([{"ts":at}])));
+    feed.advance_recorded_public_clock(raw(serde_json::json!([{"ts":at}])));
     feed.expect_post(RecordedPost {
         access_key:"fixture-executor-a".into(),
         path:"/api/v5/trade/order".into(),
@@ -242,9 +242,7 @@ fn t09_6_cleanup_recorded_transport(
     }
     feed.advance_recorded_route("fixture-observer-a",
         "/api/v5/trade/orders-algo-pending",pages);
-    feed.expect_public_clock(wrap(serde_json::json!([{
-        "ts":chrono::Utc::now().timestamp_millis().to_string()
-    }])));
+    feed.advance_recorded_public_clock(wrap(serde_json::json!([{"ts":chrono::Utc::now().timestamp_millis().to_string()}])));
     feed.expect_post(RecordedPost {
         access_key:"fixture-executor-a".into(),
         path:"/api/v5/trade/cancel-algos".into(),
@@ -284,25 +282,71 @@ fn t09_6_publish_final_empty_algos(
     feed.advance_recorded_route("fixture-observer-a",
         "/api/v5/trade/orders-algo-pending",pages);
 }
+// Repeat a public read-only Status only when the shared production
+// RateBudget proves a LOCAL, NO-SEND private GET defer. The same captured
+// financial sources and the same release owner remain authoritative.
+async fn t09_6_status_after_local_read_defer(
+    trade: &Arc<TradeService>,
+    rate_budget: &RateBudget,
+    feed: &Arc<crate::accounts::recorded_support::RecordedAccountHttp>,
+    intent: &str,
+) -> serde_json::Value {
+    use okx_protocol::trading::TradeRequest;
+    let until = std::time::Instant::now() + Duration::from_secs(15);
+    let posts_before = feed.outbound_posts.lock().unwrap().len();
+    loop {
+        let result = tokio::time::timeout_at(
+            until.into(),
+            trade.trade(
+                "fixture-a",
+                &TradeRequest::Status { reference: intent.to_owned() },
+                None,
+            ),
+        )
+        .await
+        .expect("T09.6 bounded source-backed status");
+        assert_eq!(
+            feed.outbound_posts.lock().unwrap().len(),
+            posts_before,
+            "T09.6 Status must not create or repeat a venue POST"
+        );
+        let local_reason = match &result {
+            Ok(status) => status["data"]["financial_error"]
+                .as_str()
+                .and_then(|e| e.strip_prefix("OKX API error: ")),
+            Err(reason) => Some(reason.as_str()),
+        };
+        let remaining = until.saturating_duration_since(std::time::Instant::now());
+        if let Some(delay) = local_reason.and_then(|reason| {
+            recorded_preview_local_defer(reason, rate_budget, remaining)
+        }) {
+            tokio::time::timeout_at(until.into(), tokio::time::sleep(delay))
+                .await
+                .expect("T09.6 authorized read defer expired");
+            continue;
+        }
+        return result.unwrap_or_else(|reason| {
+            panic!("T09_6_STATUS_NONLOCAL_ERROR:{intent}:{reason}")
+        });
+    }
+}
+
 async fn t09_6_source_backed_close_release(
     accounts: &Arc<AccountRuntimeRegistry>,
     trade: &Arc<TradeService>,
     risk: &NativeRiskClient,
+    rate_budget: &RateBudget,
     feed: &Arc<crate::accounts::recorded_support::RecordedAccountHttp>,
     second_entry_id: &str,
     add_entry_id: &str,
     closes: &[serde_json::Value],
 ) -> serde_json::Value {
-    use okx_protocol::trading::TradeRequest;
-    let mut close_results=Vec::new();
-    for close in closes {
+    let mut close_results=Vec::new();    for close in closes {
         let intent=close["close_intent_id"].as_str()
             .expect("T09.6 real close intent");
-        let status=trade.trade("fixture-a",&TradeRequest::Status {
-            reference:intent.to_owned()
-        },None).await.unwrap_or_else(|e|panic!(
-            "T09_6_CLOSE_TERMINAL_STATUS_ERROR:{intent}:{e}"
-        ));
+        let status=t09_6_status_after_local_read_defer(
+            trade,rate_budget,feed,intent
+        ).await;
         assert_eq!(status["data"]["intent"]["state"],"FILLED",
             "T09.6 close must be terminal from signed venue GET");
         assert_eq!(status["data"]["central_release"]["state"],"verified",
@@ -321,11 +365,9 @@ async fn t09_6_source_backed_close_release(
         (add_entry_id,"900000003",false),
     ] {
         t09_6_cleanup_recorded_transport(feed,cancel_algo,other_stop_live);
-        let status=trade.trade("fixture-a",&TradeRequest::Status {
-            reference:intent.to_owned()
-        },None).await.unwrap_or_else(|e|panic!(
-            "T09_6_ENTRY_RELEASE_DENIED:{intent}:algo={cancel_algo}:{e}"
-        ));
+        let status=t09_6_status_after_local_read_defer(
+            trade,rate_budget,feed,intent
+        ).await;
         assert_eq!(status["data"]["intent"]["state"],"FILLED",
             "T09.6 original entry must remain FILLED after close");
         assert_eq!(status["data"]["central_release"]["state"],"verified",

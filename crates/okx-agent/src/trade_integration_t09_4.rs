@@ -278,7 +278,14 @@
         assert_eq!(status["data"]["intent"]["state"],"FILLED",
             "T09_4_SOURCE_BACKED_STATUS_NOT_FILLED:{status}");
         assert_ne!(status["data"]["protection_incident"],true,
-            "T09.4 must never pass a safety protection incident");
+            "T09_4_PROTECTION_INCIDENT_EVIDENCE_V1:{}",serde_json::json!({
+                "intent_state":status["data"]["intent"]["state"],
+                "intent_incident":status["data"]["intent"]["incident"],
+                "protection":status["data"]["protection"],
+                "financial_error":status["data"]["financial_error"],
+                "central_release":status["data"]["central_release"],
+                "quality":status["quality"]
+            }));
         let mut command=summary("risk_t09_4_after_linked_fill");
         command.installation_id="installation_test".into();
         let worker=risk.request(command).await.unwrap();
