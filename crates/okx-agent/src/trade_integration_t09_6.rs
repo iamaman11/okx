@@ -322,105 +322,81 @@ fn t09_6_cleanup_recorded_transport(
     second_client_id: &str,
     add_client_id: &str,
 ) {
-    use crate::accounts::recorded_support::{RecordedGet,RecordedPost};
-    assert!(second_client_id.len() >= 31 && add_client_id.len() >= 31,
-        "T09.6 must use durable native client order identities");
-    let wrap=|v|serde_json::to_vec(&serde_json::json!({
-        "code":"0","msg":"","data":v
-    })).expect("T09.6 signed algo fixture bytes");
-    let mut pages=Vec::new();
-    // Pre-cancel, post-cancel verification, then independently signed
-    // post-cancel census reads for the terminal central RELEASE. Keep finite
-    // immutable pages: missing unexpected scans still fail closed.
-    for phase in 0..4 {
-        for inst_type in ["SWAP","FUTURES"] {
+    use crate::accounts::recorded_support::{RecordedGet, RecordedPost};
+    assert!(
+        second_client_id.len() >= 31 && add_client_id.len() >= 31,
+        "T09.6 must use durable native client order identities"
+    );
+    let wrap = |v| {
+        serde_json::to_vec(&serde_json::json!({
+            "code": "0", "msg": "", "data": v
+        }))
+        .expect("T09.6 signed algo fixture bytes")
+    };
+    let mut before = Vec::new();
+    let mut after = Vec::new();
+    // These are two distinct immutable venue observations, not successive
+    // GET pages. Only the matching cancel-algos ACK changes which is served.
+    for stage in 0..2 {
+        for inst_type in ["SWAP", "FUTURES"] {
             for kind in [
-                "conditional","oco","trigger","move_order_stop",
-                "chase","iceberg","twap","smart_iceberg"
+                "conditional", "oco", "trigger", "move_order_stop",
+                "chase", "iceberg", "twap", "smart_iceberg",
             ] {
-                let mut present=Vec::new();
-                if inst_type=="SWAP" && kind=="conditional" {
-                    // An algoId without the attached client-order identity,
-                    // signed mechanics and exact quantity is UNATTRIBUTED,
-                    // never evidence of an owned managed stop or safe RELEASE.
+                let mut present = Vec::new();
+                if inst_type == "SWAP" && kind == "conditional" {
                     for (algo, client_id, sz) in [
-                        ("900000002",second_client_id,"0.3"),
-                        ("900000003",add_client_id,"0.2"),
+                        ("900000002", second_client_id, "0.3"),
+                        ("900000003", add_client_id, "0.2"),
                     ] {
-                        if (phase == 0 && algo == cancel_id)
+                        if (stage == 0 && algo == cancel_id)
                             || (other_stop_live && algo != cancel_id)
                         {
                             present.push(serde_json::json!({
-                                "instType":"SWAP","instId":"BTC-USDT-SWAP",
-                                "ordType":"conditional","algoId":algo,
-                                "algoClOrdId":format!("s{}",&client_id[..31]),
-                                "state":"live","side":"sell","posSide":"long",
-                                "sz":sz,"tdMode":"cross","slTriggerPx":"900",
-                                "slTriggerPxType":"mark","slOrdPx":"-1",
+                                "instType": "SWAP", "instId": "BTC-USDT-SWAP",
+                                "ordType": "conditional", "algoId": algo,
+                                "algoClOrdId": format!("s{}", &client_id[..31]),
+                                "state": "live", "side": "sell", "posSide": "long",
+                                "sz": sz, "tdMode": "cross", "slTriggerPx": "900",
+                                "slTriggerPxType": "mark", "slOrdPx": "-1",
                             }));
                         }
                     }
                 }
-                pages.push(RecordedGet {
-                    access_key:"fixture-observer-a".into(),
-                    path:"/api/v5/trade/orders-algo-pending".into(),
-                    required_query:vec![
-                        ("instType".into(),inst_type.into()),
-                        ("ordType".into(),kind.into()),
-                        ("limit".into(),"100".into()),
+                let page = RecordedGet {
+                    access_key: "fixture-observer-a".into(),
+                    path: "/api/v5/trade/orders-algo-pending".into(),
+                    required_query: vec![
+                        ("instType".into(), inst_type.into()),
+                        ("ordType".into(), kind.into()),
+                        ("limit".into(), "100".into()),
                     ],
-                    raw_response:wrap(serde_json::json!(present)),
-                });
+                    raw_response: wrap(serde_json::json!(present)),
+                };
+                if stage == 0 {
+                    before.push(page);
+                } else {
+                    after.push(page);
+                }
             }
         }
     }
-    feed.advance_recorded_route("fixture-observer-a",
-        "/api/v5/trade/orders-algo-pending",pages);
-    feed.advance_recorded_public_clock(wrap(serde_json::json!([{"ts":chrono::Utc::now().timestamp_millis().to_string()}])));
+    feed.expect_causal_algo_inventory(cancel_id, before, after);
+    feed.advance_recorded_public_clock(wrap(serde_json::json!([{
+        "ts": chrono::Utc::now().timestamp_millis().to_string()
+    }])));
     feed.expect_post(RecordedPost {
-        access_key:"fixture-executor-a".into(),
-        path:"/api/v5/trade/cancel-algos".into(),
-        expected_body:serde_json::json!([{
-            "instId":"BTC-USDT-SWAP","algoId":cancel_id
+        access_key: "fixture-executor-a".into(),
+        path: "/api/v5/trade/cancel-algos".into(),
+        expected_body: serde_json::json!([{
+            "instId": "BTC-USDT-SWAP", "algoId": cancel_id
         }]),
-        raw_response:wrap(serde_json::json!([{
-            "algoId":cancel_id,"sCode":"0"
+        raw_response: wrap(serde_json::json!([{
+            "algoId": cancel_id, "sCode": "0"
         }])),
     });
 }
 
-fn t09_6_publish_final_empty_algos(
-    feed: &crate::accounts::recorded_support::RecordedAccountHttp
-) {
-    use crate::accounts::recorded_support::RecordedGet;
-    let empty=serde_json::to_vec(&serde_json::json!({
-        "code":"0","msg":"","data":[]
-    })).expect("T09.6 empty venue inventory raw JSON");
-    let mut pages=Vec::new();
-    // Every public Status independently scans all 16 signed derivative
-    // scopes, as does the final orphan check. These are finite raw GETs,
-    // not a second account owner or a risk-census shortcut.
-    for _ in 0..12 {
-        for inst in ["SWAP","FUTURES"] {
-            for kind in [
-                "conditional","oco","trigger","move_order_stop",
-                "chase","iceberg","twap","smart_iceberg"
-            ] {
-                pages.push(RecordedGet {
-                    access_key:"fixture-observer-a".into(),
-                    path:"/api/v5/trade/orders-algo-pending".into(),
-                    required_query:vec![
-                        ("instType".into(),inst.into()),("ordType".into(),kind.into()),
-                        ("limit".into(),"100".into()),
-                    ],
-                    raw_response:empty.clone(),
-                });
-            }
-        }
-    }
-    feed.advance_recorded_route("fixture-observer-a",
-        "/api/v5/trade/orders-algo-pending",pages);
-}
 // Repeat a public read-only Status only when the shared production
 // RateBudget proves a LOCAL, NO-SEND private GET defer. The same captured
 // financial sources and the same release owner remain authoritative.
@@ -565,7 +541,7 @@ async fn t09_6_source_backed_close_release(
     // yet remain HELD until the second has its OWN source-verified proof.
     // Exercise exactly this two-peer schedule, not an unbounded retry or
     // a fabricated central receipt. No Status may create a venue order.
-    t09_6_publish_final_empty_algos(feed);
+    // The second signed ACK already selected the immutable empty inventory.
     let mut pending_release_indices=Vec::new();
     for (index, entry) in entry_results.iter_mut().enumerate() {
         let intent=entry["intent_id"].as_str().expect("T09.6 persisted entry id");

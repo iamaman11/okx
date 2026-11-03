@@ -944,6 +944,34 @@ pub(crate) mod recorded_support {
         serde_json::to_vec(&envelope).map_err(Into::into)
     }
 
+    // Immutable external snapshots selected by an actual matching cancel ACK,
+    // never by the number or order of maintenance/Status GETs.
+    struct CausalAlgoScope {
+        query: Vec<(String, String)>,
+        before_ack: Vec<u8>,
+        after_ack: Vec<u8>,
+        before_reads: usize,
+        after_reads: usize,
+    }
+
+    struct CausalAlgoReadGate {
+        entered: Arc<tokio::sync::Notify>,
+        resume: Arc<tokio::sync::Notify>,
+    }
+
+    struct CausalAlgoScenario {
+        account: String,
+        cancel_id: String,
+        acked: bool,
+        scopes: Vec<CausalAlgoScope>,
+        held_read: Option<CausalAlgoReadGate>,
+    }
+
+    // Each of 16 scopes has a predeclared budget for Status, post-ACK
+    // verification, source capture and maintenance. A missing scope, extra
+    // POST or exhausted bound fails closed, not as a financial denial.
+    const CAUSAL_ALGO_READS_PER_SCOPE_AND_PHASE: usize = 12;
+
     #[derive(Default)]
     pub(crate) struct RecordedAccountHttp {
         pub(crate) requests: Mutex<Vec<String>>,
@@ -969,6 +997,8 @@ pub(crate) mod recorded_support {
         // exactly-once consumption by the real production OKX clock parser.
         public_clock_deliveries: AtomicU64,
         strict_read_routes: Mutex<std::collections::BTreeSet<(String, String)>>,
+        causal_algos: Mutex<Option<CausalAlgoScenario>>,
+        pub(crate) causal_algo_trace: Mutex<Vec<String>>,
     }
     impl RecordedAccountHttp {
         pub(crate) fn expect_get(&self, page: RecordedGet) {
@@ -1022,6 +1052,91 @@ pub(crate) mod recorded_support {
             optional.retain(|page| page.access_key != access_key || page.path != path);
             required.extend(pages);
             retired
+        }
+
+        /// Script the two immutable signed inventories for exactly one cancel.
+        /// The ACK in the real HTTP send path changes their visibility.
+        /// Replacing an unacknowledged transition is forbidden.
+        pub(crate) fn expect_causal_algo_inventory(
+            &self,
+            cancel_id: &str,
+            before: Vec<RecordedGet>,
+            after: Vec<RecordedGet>,
+        ) {
+            let path = "/api/v5/trade/orders-algo-pending";
+            assert_eq!(before.len(), 16, "TRANSCRIPT_ALGO_PRE_SCOPE_COUNT");
+            assert_eq!(after.len(), 16, "TRANSCRIPT_ALGO_POST_SCOPE_COUNT");
+            let account = "fixture-observer-a";
+            let mut scopes = Vec::with_capacity(16);
+            let mut seen = std::collections::BTreeSet::new();
+            for page in before {
+                assert_eq!(page.access_key, account, "TRANSCRIPT_ALGO_ACCOUNT");
+                assert_eq!(page.path, path, "TRANSCRIPT_ALGO_ROUTE");
+                let mut query = page.required_query;
+                query.sort();
+                assert_eq!(query.len(), 3, "TRANSCRIPT_ALGO_QUERY_SHAPE");
+                assert!(seen.insert(query.clone()), "TRANSCRIPT_ALGO_DUPLICATE_SCOPE");
+                let matching = after
+                    .iter()
+                    .filter(|other| {
+                        let mut other_query = other.required_query.clone();
+                        other_query.sort();
+                        other.access_key == account
+                            && other.path == path
+                            && other_query == query
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(matching.len(), 1, "TRANSCRIPT_ALGO_POST_SCOPE_MISMATCH");
+                scopes.push(CausalAlgoScope {
+                    query,
+                    before_ack: page.raw_response,
+                    after_ack: matching[0].raw_response.clone(),
+                    before_reads: 0,
+                    after_reads: 0,
+                });
+            }
+            let mut phase = self.causal_algos.lock().unwrap();
+            assert!(
+                phase.as_ref().is_none_or(|previous| previous.acked),
+                "TRANSCRIPT_ALGO_UNACKNOWLEDGED_PHASE"
+            );
+            self.strict_read_routes
+                .lock()
+                .unwrap()
+                .insert((account.into(), path.into()));
+            self.reads.lock().unwrap().retain(|page| {
+                page.access_key != account || page.path != path
+            });
+            self.optional_reads.lock().unwrap().retain(|page| {
+                page.access_key != account || page.path != path
+            });
+            *phase = Some(CausalAlgoScenario {
+                account: account.into(),
+                cancel_id: cancel_id.into(),
+                acked: false,
+                scopes,
+                held_read: None,
+            });
+            self.causal_algo_trace.lock().unwrap().push(format!(
+                "event=INVENTORY_ARMED account={account} cancel_id={cancel_id} scopes=16"
+            ));
+        }
+
+        /// Optional deterministic I/O barrier. A GET that starts before ACK
+        /// keeps its old raw response even if released after ACK.
+        pub(crate) fn hold_next_causal_algo_get(
+            &self,
+        ) -> (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>) {
+            let entered = Arc::new(tokio::sync::Notify::new());
+            let resume = Arc::new(tokio::sync::Notify::new());
+            let mut phase = self.causal_algos.lock().unwrap();
+            let scenario = phase.as_mut().expect("TRANSCRIPT_ALGO_PHASE_REQUIRED");
+            assert!(scenario.held_read.is_none(), "TRANSCRIPT_ALGO_BARRIER_ALREADY_ARMED");
+            scenario.held_read = Some(CausalAlgoReadGate {
+                entered: entered.clone(),
+                resume: resume.clone(),
+            });
+            (entered, resume)
         }
 
         pub(crate) fn unconsumed_reads(&self) -> usize {
@@ -1080,7 +1195,7 @@ pub(crate) mod recorded_support {
         }
     }
     impl HttpTransport for RecordedAccountHttp {
-        fn send(&self, request: HttpRequest, _: Instant) -> HttpSend<'_> {
+        fn send(&self, request: HttpRequest, deadline: Instant) -> HttpSend<'_> {
             Box::pin(async move {
                 if request.method() != "GET" && request.method() != "POST" {
                     return Err(OkxError::Response("TRANSCRIPT_METHOD_MISMATCH".into()));
@@ -1205,6 +1320,35 @@ pub(crate) mod recorded_support {
                     } else {
                         response
                     };
+                    if path == "/api/v5/trade/cancel-algos" {
+                        let parsed: serde_json::Value = serde_json::from_str(&response)?;
+                        let observed_id = observed
+                            .get(0)
+                            .and_then(|row| row.get("algoId"))
+                            .and_then(serde_json::Value::as_str)
+                            .ok_or_else(|| OkxError::Response(
+                                "TRANSCRIPT_CANCEL_ID_MISSING".into()
+                            ))?;
+                        if parsed["data"][0]["sCode"] != "0"
+                            || parsed["data"][0]["algoId"] != observed_id
+                        {
+                            return Err(OkxError::Response(
+                                "TRANSCRIPT_CANCEL_ACK_MISMATCH".into()
+                            ));
+                        }
+                        let mut phase = self.causal_algos.lock().unwrap();
+                        if let Some(scenario) = phase.as_mut() {
+                            if scenario.cancel_id != observed_id || scenario.acked {
+                                return Err(OkxError::Response(
+                                    "TRANSCRIPT_ALGO_CANCEL_EVENT_MISMATCH".into()
+                                ));
+                            }
+                            scenario.acked = true;
+                            self.causal_algo_trace.lock().unwrap().push(format!(
+                                "event=CANCEL_ACK account=fixture-executor-a route={path} cancel_id={observed_id}"
+                            ));
+                        }
+                    }
                     if path == "/api/v5/trade/order" {
                         let parsed: serde_json::Value = serde_json::from_str(&response)?;
                         let rows = parsed["data"].as_array().ok_or_else(|| {
@@ -1262,6 +1406,82 @@ pub(crate) mod recorded_support {
                 } else {
                     None
                 };
+                // Unlike ordered one-shot pages, a causal inventory returns
+                // the immutable phase snapshot to every authorized competing
+                // GET. Its phase switches only at the signed cancel ACK.
+                if path == "/api/v5/trade/orders-algo-pending" {
+                    let selected = {
+                        let mut phase = self.causal_algos.lock().unwrap();
+                        if let Some(scenario) = phase.as_mut() {
+                            let mut query = request
+                                .url()
+                                .query_pairs()
+                                .map(|(k, v)| (k.into_owned(), v.into_owned()))
+                                .collect::<Vec<_>>();
+                            query.sort();
+                            if key != scenario.account {
+                                return Err(OkxError::Response(
+                                    "TRANSCRIPT_ALGO_ACCOUNT_MISMATCH".into()
+                                ));
+                            }
+                            let scope = scenario
+                                .scopes
+                                .iter_mut()
+                                .find(|scope| scope.query == query)
+                                .ok_or_else(|| OkxError::Response(
+                                    "TRANSCRIPT_ALGO_QUERY_MISMATCH".into()
+                                ))?;
+                            let acked = scenario.acked;
+                            let count = if acked {
+                                &mut scope.after_reads
+                            } else {
+                                &mut scope.before_reads
+                            };
+                            if *count >= CAUSAL_ALGO_READS_PER_SCOPE_AND_PHASE {
+                                return Err(OkxError::Response(
+                                    "TRANSCRIPT_ALGO_PHASE_READ_BUDGET_EXCEEDED".into()
+                                ));
+                            }
+                            *count += 1;
+                            let raw = if acked {
+                                scope.after_ack.clone()
+                            } else {
+                                scope.before_ack.clone()
+                            };
+                            let stage = if acked { "AFTER_ACK" } else { "BEFORE_ACK" };
+                            let digest = format!("{:x}", Sha256::digest(&raw));
+                            self.causal_algo_trace.lock().unwrap().push(format!(
+                                "event=GET_STARTED account={key} route={path} query={query:?} stage={stage} read={} digest={digest}",
+                                *count
+                            ));
+                            Some((raw, scenario.held_read.take()))
+                        } else {
+                            None
+                        }
+                    };
+                    if let Some((body, held)) = selected {
+                        if let Some(gate) = held {
+                            gate.entered.notify_one();
+                            tokio::time::timeout_at(
+                                tokio::time::Instant::from_std(deadline),
+                                gate.resume.notified(),
+                            )
+                            .await
+                            .map_err(|_| OkxError::Response(
+                                "TRANSCRIPT_ALGO_HELD_READ_TIMEOUT".into()
+                            ))?;
+                        }
+                        self.requests.lock().unwrap().push(format!(
+                            "{key}:{path}?{}",
+                            request.url().query().unwrap_or_default()
+                        ));
+                        return Ok(RawHttpResponse {
+                            status: HttpStatusCode::OK,
+                            headers: Default::default(),
+                            body,
+                        });
+                    }
+                }
                 if scripted {
                     let matches_page = |page: &RecordedGet| {
                         page.access_key == key
