@@ -632,8 +632,7 @@ impl TradeService {
             .await
             .map_err(err)?;
         if let Some(i) = prior {
-            if !existing_request_hash_matches(&i.request_hash, &body_hash, &historical_raw_hash)
-            {
+            if !existing_request_hash_matches(&i.request_hash, &body_hash, &historical_raw_hash) {
                 return Err("IDEMPOTENCY_CONFLICT".into());
             }
             drop(_capacity);
@@ -5216,7 +5215,10 @@ mod tests {
         let equivalent_semantic = format!(
             "{:x}",
             Sha256::digest(
-                equivalent.canonical_semantic_json(&account).unwrap().as_bytes()
+                equivalent
+                    .canonical_semantic_json(&account)
+                    .unwrap()
+                    .as_bytes()
             )
         );
         assert_eq!(equivalent_semantic, semantic);
