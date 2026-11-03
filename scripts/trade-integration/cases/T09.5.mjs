@@ -9,6 +9,10 @@ export async function run({ caseId, root, signal }) {
   assert.equal(native.opened_intent_id, native.replayed_intent_id);
   assert.equal(native.opened_intent_id, native.sql_intent_id);
   assert.equal(native.sql_state, "ACKNOWLEDGED");
+  assert.match(native.sql_request_hash,/^[0-9a-f]{64}$/);
+  assert.match(native.sql_plan_hash,/^[0-9a-f]{64}$/);
+  assert.ok(Number.isSafeInteger(native.sql_deadline_ms)&&native.sql_deadline_ms>0);
+  assert.ok(Number.isSafeInteger(native.sql_policy_revision)&&native.sql_policy_revision>0);
   assert.ok(Number.isSafeInteger(native.sql_revision) && native.sql_revision > 0);
   assert.equal(native.created_posts, 1);
   assert.equal(native.semantic_decimal_equivalent_replay, true,
