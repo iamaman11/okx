@@ -965,6 +965,20 @@ pub(crate) mod recorded_support {
         acked: bool,
         scopes: Vec<CausalAlgoScope>,
         held_read: Option<CausalAlgoReadGate>,
+        source_received_at_ms: i64,
+    }
+
+    // The two signed API identities are different actors of the same verified
+    // OKX UID. A scripted venue inventory belongs to the UID, never the key.
+    fn verified_fixture_uid(actor: &str) -> Option<&'static str> {
+        let label = actor
+            .strip_prefix("fixture-observer-")
+            .or_else(|| actor.strip_prefix("fixture-executor-"))?;
+        match label {
+            "a" => Some("account-001"),
+            "b" => Some("account-002"),
+            _ => None,
+        }
     }
 
     // Each of 16 scopes has a predeclared budget for Status, post-ACK
@@ -1119,9 +1133,10 @@ pub(crate) mod recorded_support {
                 acked: false,
                 scopes,
                 held_read: None,
+                source_received_at_ms: chrono::Utc::now().timestamp_millis(),
             });
             self.causal_algo_trace.lock().unwrap().push(format!(
-                "event=INVENTORY_ARMED account={account} cancel_id={cancel_id} scopes=16"
+                "event=INVENTORY_ARMED uid=account-001 actor={account} cancel_id={cancel_id} scopes=16"
             ));
         }
 
@@ -1351,7 +1366,8 @@ pub(crate) mod recorded_support {
                             }
                             scenario.acked = true;
                             self.causal_algo_trace.lock().unwrap().push(format!(
-                                "event=CANCEL_ACK account=fixture-executor-a route={path} cancel_id={observed_id}"
+                                "event=CANCEL_ACK uid=account-001 actor={key} route={path} cancel_id={observed_id} at_ms={}",
+                                chrono::Utc::now().timestamp_millis()
                             ));
                         }
                     }
@@ -1418,8 +1434,11 @@ pub(crate) mod recorded_support {
                 if path == "/api/v5/trade/orders-algo-pending" {
                     let selected = {
                         let mut phase = self.causal_algos.lock().unwrap();
-                        if let Some(scenario) =
-                            phase.as_mut().filter(|scenario| key == scenario.account)
+                        if let Some(scenario) = phase.as_mut().filter(|scenario| {
+                            verified_fixture_uid(key.as_str()).is_some_and(|uid| {
+                                verified_fixture_uid(scenario.account.as_str()) == Some(uid)
+                            })
+                        })
                         {
                             let mut query = request
                                 .url()
@@ -1454,8 +1473,8 @@ pub(crate) mod recorded_support {
                             let stage = if acked { "AFTER_ACK" } else { "BEFORE_ACK" };
                             let digest = format!("{:x}", Sha256::digest(&raw));
                             self.causal_algo_trace.lock().unwrap().push(format!(
-                                "event=GET_STARTED account={key} route={path} query={query:?} stage={stage} read={} digest={digest}",
-                                *count
+                                "event=GET_STARTED uid=account-001 actor={key} route={path} query={query:?} stage={stage} source_received_at_ms={} read={} digest={digest}",
+                                scenario.source_received_at_ms, *count
                             ));
                             Some((raw, scenario.held_read.take()))
                         } else {
@@ -2026,7 +2045,7 @@ pub(crate) mod recorded_support {
                 .unwrap();
             assert_eq!(before["data"].as_array().unwrap().len(), 2);
             deliver_causal(&feed, causal_cancel()).await.unwrap();
-            let after = deliver_causal(&feed, causal_get("fixture-observer-a", "100"))
+            let after = deliver_causal(&feed, causal_get("fixture-executor-a", "100"))
                 .await
                 .unwrap();
             assert_eq!(after["data"].as_array().unwrap().len(), 1);
@@ -2052,7 +2071,7 @@ pub(crate) mod recorded_support {
             resume.notify_one();
             let old = in_flight.await.unwrap().unwrap();
             assert_eq!(old["data"].as_array().unwrap().len(), 2);
-            let fresh = deliver_causal(&feed, causal_get("fixture-observer-a", "100"))
+            let fresh = deliver_causal(&feed, causal_get("fixture-executor-a", "100"))
                 .await
                 .unwrap();
             assert_eq!(fresh["data"].as_array().unwrap().len(), 1);
@@ -2061,6 +2080,32 @@ pub(crate) mod recorded_support {
             let duplicate = deliver_causal(&feed, causal_cancel()).await.unwrap_err();
             assert!(duplicate.to_string().contains("TRANSCRIPT_UNEXPECTED_POST"));
             assert_eq!(feed.outbound_posts.lock().unwrap().len(), 2);
+        }
+
+        #[tokio::test]
+        async fn s1_04_executor_and_observer_share_one_verified_uid_inventory() {
+            let feed = causal_algo_fixture();
+            let executor = deliver_causal(&feed, causal_get("fixture-executor-a", "100"))
+                .await
+                .unwrap();
+            assert_eq!(executor["data"].as_array().unwrap().len(), 2);
+            let observer = deliver_causal(&feed, causal_get("fixture-observer-a", "100"))
+                .await
+                .unwrap();
+            assert_eq!(observer["data"].as_array().unwrap().len(), 2);
+            deliver_causal(&feed, causal_cancel()).await.unwrap();
+            for actor in ["fixture-observer-a", "fixture-executor-a"] {
+                let fresh = deliver_causal(&feed, causal_get(actor, "100"))
+                    .await
+                    .unwrap();
+                assert_eq!(fresh["data"].as_array().unwrap().len(), 1);
+                assert_eq!(fresh["data"][0]["algoId"], "900000003");
+            }
+            let trace = feed.causal_algo_trace.lock().unwrap().join("\n");
+            assert!(trace.contains("actor=fixture-executor-a"));
+            assert!(trace.contains("actor=fixture-observer-a"));
+            assert!(trace.contains("event=CANCEL_ACK"));
+            assert_eq!(feed.outbound_posts.lock().unwrap().len(), 1);
         }
 
         #[tokio::test]
