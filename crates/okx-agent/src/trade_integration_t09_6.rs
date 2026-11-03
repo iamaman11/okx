@@ -167,6 +167,33 @@ fn t09_6_publish_terminal_sources(input: T09_6TerminalSources) -> i64 {
             raw_response:wrap(serde_json::json!(bills)),
         }).collect()
     );
+    // T09.6 signed close is a distinct immutable financial source frontier.
+    // T09.3 and T09.4 each consumed their own recorded balance snapshots.
+    // The authenticated production observer must see NEW finite external
+    // balance bytes while it reconciles both venue Close fills, exit bills,
+    // and central RELEASE. Never rewind/raise the 64-read baseline bound.
+    let observed_at = chrono::Utc::now().timestamp_millis().to_string();
+    let balance = wrap(serde_json::json!([{
+        "totalEq":"100","adjEq":"100","uTime":observed_at,
+        "details":[{
+            "ccy":"USDT","eq":"100","liab":"0",
+            "availEq":"100","availBal":"100","eqUsd":"100",
+            "uTime":observed_at
+        }]
+    }]));
+    let retired_balance = feed.advance_recorded_route(
+        "fixture-observer-a",
+        "/api/v5/account/balance",
+        (0..48).map(|_|RecordedGet {
+            access_key:"fixture-observer-a".into(),
+            path:"/api/v5/account/balance".into(),
+            required_query:vec![],
+            raw_response:balance.clone(),
+        }).collect()
+    );
+    eprintln!(
+        "T09_6_BALANCE_FRONTIER_V1 retired={retired_balance} new_pages=48"
+    );
     feed.advance_recorded_route("fixture-observer-a","/api/v5/account/positions",
         (0..80).map(|_|RecordedGet {
             access_key:"fixture-observer-a".into(),
