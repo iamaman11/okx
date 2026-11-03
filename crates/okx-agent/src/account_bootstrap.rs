@@ -234,7 +234,7 @@ impl AccountBootstrapper {
         let (config, _) = self.observer_config().await?;
         strict_read_only_permissions(&config.perm)
             .map_err(|_| FeeScheduleBootstrapError::PermissionRejected)?;
-        self.fee_schedule_authorized(rules).await
+        self.fee_schedule_authorized(rules, None).await
     }
 
     /// An after-HELD tariff source cannot be refreshed through an invented
@@ -248,12 +248,13 @@ impl AccountBootstrapper {
         let (config, _) = self.observer_config_until(until).await?;
         strict_read_only_permissions(&config.perm)
             .map_err(|_| FeeScheduleBootstrapError::PermissionRejected)?;
-        self.fee_schedule_authorized(rules).await
+        self.fee_schedule_authorized(rules, Some(until)).await
     }
 
     async fn fee_schedule_authorized(
         &self,
         rules: &InstrumentRulesSnapshot,
+        until: Option<Instant>,
     ) -> Result<FeeScheduleSnapshot, FeeScheduleBootstrapError> {
         let instrument = &rules.instrument;
         let family = instrument
@@ -267,10 +268,22 @@ impl AccountBootstrapper {
             .filter(|value| !value.trim().is_empty())
             .ok_or(FeeScheduleBootstrapError::ReferenceIncomplete("groupId"))?;
 
-        let rows = self
-            .api
-            .fee_rates_for_family(instrument.instrument_type, family)
-            .await?;
+        // Both paths use the identical signed fee-family GET. The bounded
+        // variant only waits for LOCAL, NOT-SENT read admission in the same
+        // original command deadline; it does not refresh a sent request.
+        let rows = if let Some(until) = until {
+            self.api
+                .fee_rates_for_family_wait(
+                    instrument.instrument_type,
+                    family,
+                    until.saturating_duration_since(Instant::now()),
+                )
+                .await?
+        } else {
+            self.api
+                .fee_rates_for_family(instrument.instrument_type, family)
+                .await?
+        };
         let source_received_at = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
         normalize_fee_schedule(
             &instrument.instrument_id,
@@ -358,6 +371,35 @@ impl AccountBootstrapper {
             .map_err(|_| ConfiguredLeverageBootstrapError::PermissionRejected)?;
 
         let rows = self.api.leverage(instrument_id, margin_mode).await?;
+        select_configured_leverage(
+            &rows,
+            instrument_id,
+            &margin_mode.to_string(),
+            position_side,
+        )
+    }
+
+    /// Deadline-owned source check used by the original Native Execute,
+    /// before any venue POST. Rejects ambiguous/absent/mismatched leverage
+    /// exactly as configured_leverage does.
+    pub async fn configured_leverage_until(
+        &self,
+        instrument_id: &str,
+        margin_mode: MarginMode,
+        position_side: &str,
+        until: Instant,
+    ) -> Result<String, ConfiguredLeverageBootstrapError> {
+        let (config, _) = self.observer_config_until(until).await?;
+        strict_read_only_permissions(&config.perm)
+            .map_err(|_| ConfiguredLeverageBootstrapError::PermissionRejected)?;
+
+        let rows = self.api
+            .leverage_wait(
+                instrument_id,
+                margin_mode,
+                until.saturating_duration_since(Instant::now()),
+            )
+            .await?;
         select_configured_leverage(
             &rows,
             instrument_id,
