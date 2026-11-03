@@ -1,6 +1,6 @@
 {
   "schema": "okx.windows-preflight-request/v1",
-  "request_id": "green-cross-strategy-63712c5-020",
+  "request_id": "t093-source-counters-2955d96-021",
   "case": "T09.3",
-  "target_sha": "63712c59b2fae9fb2ba98e0b91a1cc6ee6b8d4d5"
+  "target_sha": "2955d967357bf2aa5d96c4b65a31fb6f438cadda"
 }
