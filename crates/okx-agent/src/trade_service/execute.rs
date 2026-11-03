@@ -636,6 +636,14 @@ impl TradeService {
             operation,
             TradeOperation::Open | TradeOperation::Add | TradeOperation::Replace
         );
+        // S2-05: only a NEW request reaches this point. A real Worker
+        // policy pause must deny new risk before a potentially stale
+        // campaign-source read; an accepted old key was already resolved
+        // above without re-authorizing, re-reserving or re-sending it.
+        // The existing plan also enforces this gate (defense in depth).
+        if increase && !control.access_enabled() {
+            return Err("ACCOUNT_NEW_RISK_PAUSED".into());
+        }
         if increase
             && r.configuration.account_key.environment == okx_protocol::accounts::Environment::Real
         {
