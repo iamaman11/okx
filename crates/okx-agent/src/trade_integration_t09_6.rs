@@ -172,12 +172,21 @@ fn t09_6_publish_terminal_sources(input: T09_6TerminalSources) -> i64 {
     // The authenticated production observer must see NEW finite external
     // balance bytes while it reconciles both venue Close fills, exit bills,
     // and central RELEASE. Never rewind/raise the 64-read baseline bound.
-    let observed_at = chrono::Utc::now().timestamp_millis().to_string();
+    // These authenticated exchange bytes are a post-fee terminal snapshot,
+    // not the immutable opening NAV. Both Close fills precede this observation;
+    // seven distinct entry/exit bills debit 0.006 USDT at zero realized PnL.
+    // Therefore 100 opening equity yields exactly 99.994 current equity.
+    let observed_at_ms = chrono::Utc::now().timestamp_millis();
+    assert!(
+        observed_at_ms >= final_at,
+        "T09.6 post-fee balance cannot predate either terminal Close fill"
+    );
+    let observed_at = observed_at_ms.to_string();
     let balance = wrap(serde_json::json!([{
-        "totalEq":"100","adjEq":"100","uTime":observed_at,
+        "totalEq":"99.994","adjEq":"99.994","uTime":observed_at,
         "details":[{
-            "ccy":"USDT","eq":"100","liab":"0",
-            "availEq":"100","availBal":"100","eqUsd":"100",
+            "ccy":"USDT","eq":"99.994","liab":"0",
+            "availEq":"99.994","availBal":"99.994","eqUsd":"99.994",
             "uTime":observed_at
         }]
     }]));
