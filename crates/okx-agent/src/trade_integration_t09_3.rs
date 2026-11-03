@@ -13,6 +13,43 @@
         let raw = |v| serde_json::to_vec(&serde_json::json!({"code":"0","msg":"","data":v})).unwrap();
         let now_ms=chrono::Utc::now().timestamp_millis();
         let terminal=first_ts.is_some();
+        // Recorded finite *external* balance observations for each financial
+        // frontier. The baseline implicit GET boundary remains capped at
+        // exactly 64: never raise it or rewind its consumed count. A newly
+        // published fill/bill frontier also has its own explicitly signed
+        // account balance pages. These bytes only enter the ordinary
+        // authenticated observer parser; no SQL or Worker finance is written.
+        let raw_balance = raw(serde_json::json!([{
+            "totalEq":"100","adjEq":"100","uTime":now_ms.to_string(),
+            "details":[{
+                "ccy":"USDT","eq":"100","liab":"0",
+                "availEq":"100","availBal":"100","eqUsd":"100",
+                "uTime":now_ms.to_string()
+            }]
+        }]));
+        let balance_pages = (0..if terminal { 12 } else { 8 })
+            .map(|_| RecordedGet {
+                access_key: "fixture-observer-a".into(),
+                path: "/api/v5/account/balance".into(),
+                required_query: vec![],
+                raw_response: raw_balance.clone(),
+            })
+            .collect::<Vec<_>>();
+        if terminal {
+            let previous = feed.advance_recorded_route(
+                "fixture-observer-a",
+                "/api/v5/account/balance",
+                balance_pages,
+            );
+            eprintln!(
+                "T09_3_BALANCE_FRONTIER_V1 phase=terminal retired={previous} new_pages=12"
+            );
+        } else {
+            for page in balance_pages {
+                feed.expect_get(page);
+            }
+            eprintln!("T09_3_BALANCE_FRONTIER_V1 phase=partial new_pages=8");
+        }
         // Test-only finite-source accounting: stage boundaries, not signed
         // credentials, bodies, exchange responses or unrestricted request logs.
         let trace_source_reads = |stage: &str| {
