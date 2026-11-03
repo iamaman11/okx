@@ -4210,10 +4210,12 @@ mod raw_native_session_tests {
                                 }),
                                 raw_response: br#"{"code":"0","msg":"","data":[{"ordId":"recorded-b1-b-001","clOrdId":"__REQUEST_CL_ORD_ID__","sCode":"0"}]}"#.to_vec(),
                             });
-                            feed.advance_recorded_route(
-                                "fixture-executor-b",
-                                "/api/v5/trade/order",
-                                (0..2).map(|_| RecordedGet {
+                            // First B executor order read on this
+                            // account: register bounded, optional raw venue
+                            // GETs rather than advancing an unregistered
+                            // phase. ACK comes only from the exact POST below.
+                            for _ in 0..2 {
+                                feed.expect_optional_get(RecordedGet {
                                     access_key: "fixture-executor-b".into(),
                                     path: "/api/v5/trade/order".into(),
                                     required_query: vec![("instId".into(), "BTC-USDT-SWAP".into())],
@@ -4226,8 +4228,8 @@ mod raw_native_session_tests {
                                         "state": "live", "cTime": b_positive_clock,
                                         "uTime": b_positive_clock
                                     }])),
-                                }).collect(),
-                            );
+                                });
+                            }
                             let b_positive_request = TradeRequest::Execute {
                                 idempotency_key: "b1_b_positive_after_shared_denial_001".into(),
                                 operation: TradeOperation::Open,
