@@ -100,6 +100,18 @@ export async function actualNativeWorker(root, signal, { statusProbe = false, se
         throw Error("NATIVE_RUST_ASSERTION:" +
           String(detail.rust_assertion).slice(0, 1200));
       }
+      const moneyMismatch = stderr.match(
+        /T09_2_POST_NATIVE_BUDGET_MISMATCH_V1:(\\{[^\\r\\n]+\\})/
+      );
+      if (moneyMismatch) {
+        const evidence = JSON.parse(moneyMismatch[1]);
+        process.stderr.write("T09_2_POST_NATIVE_BUDGET_MISMATCH_V1:" +
+          JSON.stringify(evidence) + "\n");
+        throw Error("T09_2_POST_NATIVE_BUDGET_MISMATCH:" +
+          String(evidence.actual_reserved_usd) + ":expected=" +
+          String(evidence.expected_reserved_usd) + ":spent=" +
+          String(evidence.actual_spent_usd));
+      }
       // Preserve only bounded, secret-free evidence from the nested child.
       // The previous fallback hid its assertion behind "Command failed".
       const evidence = summarizeNativeWorkerdFailure(error);
