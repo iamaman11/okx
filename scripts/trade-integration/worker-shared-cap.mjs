@@ -50,6 +50,9 @@ assert.equal(evidence.saved_strategy_ids[evidence.account_b],evidence.b_strategy
 assert.equal(evidence.first_status, "HELD");
 assert.equal(evidence.second_status, "HELD");
 assert.equal(evidence.third_status, "DENIED");
+assert.equal(evidence.foreign_strategy_status,"DENIED");
+assert.equal(evidence.foreign_strategy_reason,"STRATEGY_NOT_ENABLED_FOR_ACCOUNT");
+assert.equal(evidence.foreign_strategy_no_budget_reserved,true);
 assert.equal(evidence.third_reason, "CAMPAIGN_ENTRY_BUDGET_EXHAUSTED");
 assert.equal(evidence.replay_status, "HELD");
 assert.equal(evidence.replay_reservation_identical, true);
