@@ -227,6 +227,21 @@ jobs:
       - name: Accept production RuntimeSession backed by persisted workerd SQLite
         run: node scripts/test-runtime-do.mjs
 
+      # B1/#449 T10-07: real SQLite-backed Worker shared-cap prerequisite.
+      # This is NOT Native/SQL T10-07 acceptance; mandatory 26-case gate stays blocked.
+      - name: B1 Worker two-account shared-cap regression (component only)
+        working-directory: .
+        run: |
+          node scripts/trade-integration/worker-shared-cap.mjs --self-test
+          node scripts/trade-integration/worker-shared-cap.mjs --artifacts "${{ runner.temp }}/b1-worker-cap"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: b1-worker-only-${{ github.sha }}
+          path: ${{ runner.temp }}/b1-worker-cap
+          retention-days: 7
+          if-no-files-found: warn
+
       - name: Reject drift in generated MCP public contracts
         working-directory: cloudflare/okx-mcp
         run: git diff --exit-code -- contracts/tools.schema.json contracts/action-fixtures.json

@@ -1,79 +1,120 @@
 #!/usr/bin/env node
-// #449 T10-07 central-only regression: actual RuntimeSession + persisted
-// SQLite DO with two authenticated account identities competing on one
-// campaign. Does NOT certify public TradeService, native venue sources,
-// signed SQL release receipts, or the full mandatory T09-MA/T10-07 case.
+// B1 / #449 T10-07: independently exercised WORKER component prerequisite.
+// This is NOT a T10-07 required-case PASS: Native public Execute, SQL owner,
+// venue send/no-send and source-backed RELEASE still need the same campaign.
+// The only monetary authority used here is production RuntimeSession/SQLite DO.
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { resolve } from "node:path";
+import { writeFile, mkdir } from "node:fs/promises";
 
-const run = promisify(execFile);
-const root = fileURLToPath(new URL("../../", import.meta.url));
-let stdout;
-try {
-  ({ stdout } = await run(process.execPath, [
-    resolve(root, "cloudflare", "okx-mcp", "scripts", "test-runtime-do.mjs"),
-  ], {
-    cwd: root,
-    env: { ...process.env,
-      OKX_NATIVE_WORKER_INTEGRATION: "0",
-      OKX_T09_4_MANAGED_ADD_PROBE: "0",
-      OKX_T10_7_SHARED_CAP_PROBE: "1",
-    },
-    timeout: 120_000,
-    maxBuffer: 8 * 1024 * 1024,
-    windowsHide: true,
-  }));
-} catch (error) {
-  const cause = String(error.stderr ?? error.message ?? "SHARED_CAP_CHILD_FAILED");
-  throw Error("T10_7_WORKER_PROBE_FAILED:" + cause.slice(-900));
-}
+const exec = promisify(execFile);
+const repo = fileURLToPath(new URL("../../", import.meta.url));
+const test = resolve(repo, "cloudflare/okx-mcp/scripts/test-runtime-do.mjs");
 const marker = "T10_7_WORKER_SHARED_CAP_V1:";
-const matches = stdout.split(/\r?\n/).filter(line=>line.startsWith(marker));
-assert.equal(matches.length, 1, "exactly one authentic Workerd cap receipt required");
-assert.match(stdout, /"suite":"runtime-session-sqlite-do","status":"PASS"/);
-const evidence = JSON.parse(matches[0].slice(marker.length));
-assert.equal(evidence.schema, "okx.t10-shared-worker-cap/v1");
-assert.match(evidence.account_a, /^okx:real:[a-f0-9]{64}$/);
-assert.match(evidence.account_b, /^okx:real:[a-f0-9]{64}$/);
-assert.notEqual(evidence.account_a, evidence.account_b);
-assert.equal(evidence.instrument_id, "BTC-USDT-SWAP");
-assert.equal(evidence.a_strategy,"native_alpha");
-assert.equal(evidence.b_strategy,"native_beta");
-assert.notEqual(evidence.a_strategy,evidence.b_strategy);
-assert.ok(Number.isSafeInteger(evidence.policy_revision) && evidence.policy_revision > 2);
-assert.equal(evidence.saved_strategy_ids[evidence.account_a],evidence.a_strategy);
-assert.equal(evidence.saved_strategy_ids[evidence.account_b],evidence.b_strategy);
-assert.equal(evidence.first_status, "HELD");
-assert.equal(evidence.second_status, "HELD");
-assert.equal(evidence.third_status, "DENIED");
-assert.equal(evidence.foreign_strategy_status,"DENIED");
-assert.equal(evidence.foreign_strategy_reason,"STRATEGY_NOT_ENABLED_FOR_ACCOUNT");
-assert.equal(evidence.foreign_strategy_no_budget_reserved,true);
-assert.equal(evidence.third_reason, "CAMPAIGN_ENTRY_BUDGET_EXHAUSTED");
-assert.equal(evidence.replay_status, "HELD");
-assert.equal(evidence.replay_reservation_identical, true);
-assert.equal(evidence.persisted_a_state, "HELD");
-assert.equal(evidence.persisted_b_state, "HELD");
-for (const budget of [evidence.before_budget, evidence.after_budget]) {
-  assert.equal(budget.entry_budget.limit_usd, "10");
-  assert.equal(budget.entry_budget.reserved_usd, "8");
-  assert.equal(budget.entry_budget.remaining_usd, "2");
-  assert.equal(budget.entry_budget.consumed_usd, "0");
-  assert.equal(budget.reserved_loss_usd, "2");
-  assert.equal(budget.remaining_loss_usd, "8");
+const terminalMarker = '{"suite":"runtime-session-sqlite-do","status":"PASS"';
+
+function singleLine(stdout, prefix) {
+  const matches = stdout.split(/\r?\n/).filter(s => s.startsWith(prefix));
+  assert.equal(matches.length, 1, "one authenticated worker receipt required: " + prefix);
+  return JSON.parse(matches[0].slice(prefix.length));
 }
-assert.ok(evidence.after_sequence >= evidence.before_sequence);
-assert.ok(evidence.connection_generation_after > evidence.connection_generation_before);
-console.log("T10_7_WORKER_SHARED_CAP_COMPONENT_PASS:" + JSON.stringify({
-  schema: evidence.schema, subject: "real_sqlite_do_concurrent_reserve_only",
-  account_count: 2, simultaneous_held: 2,
-  third_denied_reason: evidence.third_reason,
-  reserved_usd: evidence.after_budget.entry_budget.reserved_usd,
-  remaining_usd: evidence.after_budget.entry_budget.remaining_usd,
-  retained_on_restart: true, native_trade_acceptance: "NOT_RUN",
-  transcript_sha256: createHash("sha256").update(stdout).digest("hex"),
-}));
+function prove(e) {
+  assert.equal(e.schema, "okx.t10-shared-worker-cap/v1");
+  assert.match(e.account_a, /^okx:real:[a-f0-9]{64}$/);
+  assert.match(e.account_b, /^okx:real:[a-f0-9]{64}$/);
+  assert.notEqual(e.account_a, e.account_b);
+  assert.equal(e.instrument_id, "BTC-USDT-SWAP");
+  assert.equal(e.a_strategy, "native_alpha");
+  assert.equal(e.b_strategy, "native_beta");
+  assert.notEqual(e.a_strategy, e.b_strategy);
+  assert.equal(e.saved_strategy_ids[e.account_a], e.a_strategy);
+  assert.equal(e.saved_strategy_ids[e.account_b], e.b_strategy);
+  assert.ok(Number.isSafeInteger(e.policy_revision) && e.policy_revision > 2);
+  assert.equal(e.same_intent_id_cross_account, true,
+    "same intent ID must remain valid across two different verified accounts");
+  assert.equal(e.independent_account_scope, true);
+  assert.equal(e.distinct_reservation_keys, true,
+    "central RiskBook must never reuse a different account's reservation");
+  assert.equal(e.first_status, "HELD");
+  assert.equal(e.second_status, "HELD");
+  assert.equal(e.third_status, "DENIED");
+  assert.equal(e.third_reason, "CAMPAIGN_ENTRY_BUDGET_EXHAUSTED");
+  assert.equal(e.foreign_strategy_status, "DENIED");
+  assert.equal(e.foreign_strategy_reason, "STRATEGY_NOT_ENABLED_FOR_ACCOUNT");
+  assert.equal(e.foreign_strategy_no_budget_reserved, true);
+  assert.equal(e.replay_status, "HELD");
+  assert.equal(e.replay_reservation_identical, true);
+  assert.equal(e.persisted_a_state, "HELD");
+  assert.equal(e.persisted_b_state, "HELD");
+  assert.equal(e.before_budget.campaign_limit_usd, "10");
+  assert.equal(e.before_budget.entry_budget.limit_usd, "10");
+  assert.equal(e.after_budget.entry_budget.limit_usd, "10");
+  for (const b of [e.before_budget, e.after_budget]) {
+    assert.equal(b.entry_budget.consumed_usd, "0");
+    assert.equal(b.entry_budget.reserved_usd, "8");
+    assert.equal(b.entry_budget.remaining_usd, "2");
+    assert.equal(b.reserved_loss_usd, "2");
+    assert.equal(b.remaining_loss_usd, "8");
+  }
+  assert.ok(Number.isSafeInteger(e.before_sequence) && e.before_sequence > 0);
+  assert.ok(Number.isSafeInteger(e.after_sequence) && e.after_sequence >= e.before_sequence);
+  assert.ok(Number.isSafeInteger(e.connection_generation_before));
+  assert.ok(e.connection_generation_after > e.connection_generation_before);
+}
+// Self-test MUST reject an incorrect budget; never substitute synthetic
+// evidence for the actual Worker run.
+if (process.argv.includes("--self-test")) {
+  const bad = { schema: "okx.t10-shared-worker-cap/v1", before_budget: {
+    campaign_limit_usd: "10", entry_budget: { reserved_usd: "12" } } };
+  assert.throws(() => prove(bad));
+  process.stdout.write("B1_WORKER_ORACLE_SELF_TEST_PASS\n");
+} else {
+  const { stdout, stderr } = await exec(process.execPath, [test], {
+    cwd: resolve(repo, "cloudflare/okx-mcp"),
+    env: { ...process.env, OKX_T10_7_SHARED_CAP_PROBE: "1",
+      OKX_NATIVE_WORKER_INTEGRATION: "0", OKX_T09_4_MANAGED_ADD_PROBE: "0" },
+    timeout: 120_000, maxBuffer: 4 * 1024 * 1024,
+  });
+  const result = singleLine(stdout, marker);
+  prove(result);
+  const terminalLines = stdout.split(/\r?\n/).filter(x => x.startsWith(terminalMarker));
+  assert.equal(terminalLines.length, 1,
+    "production RuntimeSession terminal assertion is mandatory");
+  const terminal = JSON.parse(terminalLines[0]);
+  assert.equal(terminal.real_durable_object, true);
+  assert.equal(terminal.persisted_generation, true);
+  assert.equal(terminal.authentic_reserve, true);
+  assert.equal(terminal.authentic_begin_post, false,
+    "isolated cap probe must never claim a Native BeginPost");
+  assert.equal(terminal.reserved_loss_usd, "2");
+  assert.equal(terminal.reserved_entry_usd, "8");
+  assert.equal(terminal.risk_monetary_post_count, 0);
+  const evidence = {
+    schema: "okx.b1-worker-cap-component/v1",
+    status: "PASS", requirement: "#449:T10-07:WORKER_ONLY",
+    full_t10_07_accepted: false, native_trade_exercised: false,
+    source: "RuntimeSession/SQLiteDO",
+    worker: result,
+    limitations: ["Native public Execute + SQL owner not exercised",
+      "No source-backed Native RELEASE proof: reservations stay HELD"],
+  };
+  const outputIndex = process.argv.indexOf("--artifacts");
+  if (outputIndex !== -1) {
+    const target = process.argv[outputIndex + 1];
+    assert.ok(target, "--artifacts requires an output directory");
+    await mkdir(target, { recursive: true });
+    await writeFile(resolve(target, "b1-worker-shared-cap.json"),
+      JSON.stringify(evidence, null, 2) + "\n");
+  }
+  process.stdout.write(JSON.stringify({
+    schema: evidence.schema, status: "PASS", full_t10_07_accepted: false,
+    entry_reserved_usd: result.after_budget.entry_budget.reserved_usd,
+    entry_remaining_usd: result.after_budget.entry_budget.remaining_usd,
+    first: result.first_status, second: result.second_status,
+    third: result.third_reason, worker_restart: "PASS",
+  }) + "\n");
+  if (stderr.trim()) process.stderr.write(stderr.slice(-3000) + "\n");
+}
