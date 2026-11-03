@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { tmpdir } from "node:os";
@@ -21,6 +22,54 @@ try {
     });
     executed++;
   }
+  // The very same immutable inputs, canonical JSON and literal SHA256
+  // are consumed by Rust protocol tests through include_str!.
+  const fixture=JSON.parse(readFileSync(resolve(
+    "../../contracts/trade-semantic-golden.json"),"utf8"));
+  const risk=await import(pathToFileURL(join(output,"risk_book.js")));
+  const semantic=await import(pathToFileURL(join(output,"execution_tools.js")));
+  for(const [input,expected] of fixture.numeric.positive){
+    const result=risk.normalizeDecimal(input);
+    assert.equal(result.canonical,expected,"S2 positive canonical "+input);
+    assert.equal(risk.amount(risk.units(input)),expected,"S2 Worker exact roundtrip");
+  }
+  for(const [input,expected] of fixture.numeric.signed){
+    assert.equal(risk.normalizeDecimal(input,true,false).canonical,expected,
+      "S2 signed canonical "+input);
+  }
+  for(const [input,expected] of fixture.numeric.rejected){
+    assert.equal(risk.normalizeDecimal(input).error_code,expected,
+      "S2 strict negative "+input);
+  }
+  const [lhs,rhs,sum]=fixture.numeric.sum;
+  assert.equal(risk.amount(risk.units(lhs)+risk.units(rhs)),sum,
+    "S2 exact Worker tenth-decimal addition");
+  for(const variant of fixture.trade.variants){
+    assert.equal(semantic.canonicalTradeSemantic(fixture.trade.account_key,variant),
+      fixture.trade.canonical_utf8_json,"S2 shared semantic canonical JSON");
+    assert.equal(await semantic.tradeSemanticSha256(fixture.trade.account_key,variant),
+      fixture.trade.sha256,"S2 shared literal semantic SHA256");
+  }
+  const tradeFromGolden=structuredClone(fixture.trade.variants[0]);
+  tradeFromGolden.account="fixture-a";
+  delete tradeFromGolden.order.reference; // absent optional, not explicit null in MCP
+  assert.equal(semantic.validTool("trade",tradeFromGolden),true,
+    "S2 public Worker trade schema accepts canonical decimal");
+  tradeFromGolden.sizing.max_loss_usd="0.0000000001";
+  assert.equal(semantic.validTool("trade",tradeFromGolden),true,
+    "S2 public Worker trade schema accepts tenth fractional digit");
+  tradeFromGolden.sizing.max_loss_usd="99999999999999999999999999999";
+  assert.equal(semantic.validTool("trade",tradeFromGolden),false,
+    "S2 public Worker trade schema rejects 29-digit input");
+  tradeFromGolden.sizing.max_loss_usd="0";
+  assert.equal(semantic.validTool("trade",tradeFromGolden),false,
+    "S2 public Worker trade schema rejects zero risk");
+  const changed=structuredClone(fixture.trade.variants[0]);
+  changed.sizing.max_loss_usd="5.01";
+  assert.notEqual(await semantic.tradeSemanticSha256(
+      fixture.trade.account_key,changed),fixture.trade.sha256,
+    "S2 changed amount requires a different semantic hash");
+  console.log("S2 shared Rust/Worker golden numeric and semantic fixture PASS");
   const {PUBLIC_TOOLS}=await import(pathToFileURL(join(output,"execution_tools.js")));
   const {payloadFixtures}=await import(pathToFileURL(join(output,"execution_tools.test.js")));
   mkdirSync("contracts",{recursive:true});

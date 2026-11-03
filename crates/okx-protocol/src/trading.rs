@@ -1,5 +1,6 @@
 //! Strict public trading, strategy and portfolio commands. Native owners classify risk.
 use serde::{Deserialize, Serialize};
+use crate::numeric::{positive_decimal, DecimalInputError};
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum TradeRequest {
@@ -260,20 +261,93 @@ fn name(v: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-' || b == b':')
 }
 fn decimal(v: &str) -> bool {
-    let Some((a, b)) = v
-        .split_once('.')
-        .map(|(a, b)| (a, Some(b)))
-        .or(Some((v, None)))
-    else {
-        return false;
-    };
-    !a.is_empty()
-        && a.len() <= 15
-        && (a.len() == 1 || !a.starts_with('0'))
-        && a.bytes().all(|c| c.is_ascii_digit())
-        && b.is_none_or(|b| !b.is_empty() && b.len() <= 9 && b.bytes().all(|c| c.is_ascii_digit()))
-        && v.bytes().any(|c| matches!(c, b'1'..=b'9'))
+    positive_decimal(v).is_ok()
 }
+fn stable_semantic_json(value: &serde_json::Value, output: &mut String) {
+    match value {
+        serde_json::Value::Null => output.push_str("null"),
+        serde_json::Value::Bool(value) => output.push_str(if *value { "true" } else { "false" }),
+        serde_json::Value::Number(value) => output.push_str(&value.to_string()),
+        serde_json::Value::String(value) => {
+            output.push_str(&serde_json::to_string(value).expect("valid JSON string"));
+        }
+        serde_json::Value::Array(values) => {
+            output.push('[');
+            for (index, value) in values.iter().enumerate() {
+                if index != 0 {
+                    output.push(',');
+                }
+                stable_semantic_json(value, output);
+            }
+            output.push(']');
+        }
+        serde_json::Value::Object(values) => {
+            output.push('{');
+            let mut ordered = values.iter().collect::<Vec<_>>();
+            ordered.sort_by(|(left, _), (right, _)| left.cmp(right));
+            for (index, (key, value)) in ordered.iter().enumerate() {
+                if index != 0 {
+                    output.push(',');
+                }
+                output.push_str(&serde_json::to_string(key).expect("valid JSON key"));
+                output.push(':');
+                stable_semantic_json(value, output);
+            }
+            output.push('}');
+        }
+    }
+}
+
+impl TradeRequest {
+    /// The request's immutable semantic fields, independent of policy,
+    /// freshness, request IDs and the current resolved strategy revision.
+    /// Typed deserialization has already applied the declared optional defaults.
+    pub fn canonical_semantic(&self) -> Result<Self, DecimalInputError> {
+        let mut request = self.clone();
+        if let Self::Execute {
+            sizing,
+            order,
+            protection,
+            ..
+        } = &mut request
+        {
+            let size = match sizing {
+                Sizing::Contracts { contracts } => contracts,
+                Sizing::MaxLossUsd { max_loss_usd } => max_loss_usd,
+                Sizing::EntryBudgetUsd { entry_budget_usd } => entry_budget_usd,
+            };
+            *size = positive_decimal(size)?;
+            if let Some(limit) = &mut order.limit_price {
+                *limit = positive_decimal(limit)?;
+            }
+            if let Some(upper) = &mut order.max_entry_usd {
+                *upper = positive_decimal(upper)?;
+            }
+            if let Some(Protection::Price { stop_price }) = protection {
+                *stop_price = positive_decimal(stop_price)?;
+            }
+        }
+        Ok(request)
+    }
+
+    /// Canonical UTF-8 preimage for SHA256 of the semantic trade request.
+    /// This deliberately excludes resolved policy and source revisions.
+    pub fn canonical_semantic_json(
+        &self,
+        account_key: &str,
+    ) -> Result<String, DecimalInputError> {
+        let normalized = self.canonical_semantic()?;
+        let envelope = serde_json::json!({
+            "schema": "okx.trade.semantic/v1",
+            "account_key": account_key,
+            "request": normalized
+        });
+        let mut output = String::new();
+        stable_semantic_json(&envelope, &mut output);
+        Ok(output)
+    }
+}
+
 impl Sizing {
     pub fn valid(&self) -> bool {
         match self {
@@ -402,6 +476,46 @@ impl StrategyConfigurationV1 {
 #[cfg(test)]
 mod typed_strategy_parameters_tests {
     use super::*;
+    #[test]
+    fn s2_06_same_golden_preimage_and_sha256_for_reordered_semantics() {
+        use sha2::{Digest, Sha256};
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../contracts/trade-semantic-golden.json"
+        ))
+        .unwrap();
+        let account = fixture["trade"]["account_key"].as_str().unwrap();
+        let expected_json = fixture["trade"]["canonical_utf8_json"].as_str().unwrap();
+        let expected_hash = fixture["trade"]["sha256"].as_str().unwrap();
+        for input in fixture["trade"]["variants"].as_array().unwrap() {
+            let request: TradeRequest = serde_json::from_value(input.clone()).unwrap();
+            let canonical = request.canonical_semantic_json(account).unwrap();
+            assert_eq!(canonical, expected_json);
+            let sha = format!("{:x}", Sha256::digest(canonical.as_bytes()));
+            assert_eq!(sha, expected_hash);
+        }
+    }
+
+    #[test]
+    fn s2_01_execute_semantic_decimal_equivalence() {
+        let raw = r#"{"action":"execute","idempotency_key":"numeric_semantic_01","operation":"open","strategy_instance":"manual","instrument":"BTC-USDT-SWAP","side":"long","sizing":{"max_loss_usd":"5.0"},"order":{"type":"market","limit_price":null,"reference":null,"max_slippage_bps":5},"protection":{"stop_price":"900.00"},"expires_in_ms":10000}"#;
+        let first: TradeRequest = serde_json::from_str(raw).unwrap();
+        let second: TradeRequest = serde_json::from_str(
+            &raw.replace("5.0", "5.00").replace("900.00", "900")
+        ).unwrap();
+        assert_eq!(
+            first.canonical_semantic().unwrap(),
+            second.canonical_semantic().unwrap()
+        );
+        let canonical = first.canonical_semantic().unwrap();
+        match canonical {
+            TradeRequest::Execute { sizing, protection, .. } => {
+                assert_eq!(sizing, Sizing::MaxLossUsd { max_loss_usd: "5".into() });
+                assert_eq!(protection, Some(Protection::Price { stop_price: "900".into() }));
+            }
+            _ => panic!("expected execute"),
+        }
+    }
+
     #[test]
     fn live_parameters_v1_fail_closed_and_bound_default() {
         let valid = serde_json::json!({"fast":20,"slow":50});
