@@ -2648,17 +2648,21 @@ mod raw_native_session_tests {
                 }
             }
             let close_fills_retired = feed.advance_recorded_route(
-                "fixture-executor-a", "/api/v5/trade/fills-history",
+                "fixture-executor-a",
+                "/api/v5/trade/fills-history",
                 close_history_pages,
             );
             let close_bills_retired = feed.advance_recorded_route(
-                "fixture-executor-a", "/api/v5/account/bills-archive",
-                (0..12).map(|_| RecordedGet {
-                    access_key: "fixture-executor-a".into(),
-                    path: "/api/v5/account/bills-archive".into(),
-                    required_query: vec![],
-                    raw_response: raw_bill.clone(),
-                }).collect(),
+                "fixture-executor-a",
+                "/api/v5/account/bills-archive",
+                (0..12)
+                    .map(|_| RecordedGet {
+                        access_key: "fixture-executor-a".into(),
+                        path: "/api/v5/account/bills-archive".into(),
+                        required_query: vec![],
+                        raw_response: raw_bill.clone(),
+                    })
+                    .collect(),
             );
             eprintln!(
                 "T09_1_POST_FILL_SOURCE_FRONTIER_V1:retired_fills={} retired_bills={} recorded_pages_per_partition=12",
