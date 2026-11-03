@@ -1,6 +1,6 @@
 {
   "schema": "okx.windows-preflight-request/v1",
-  "request_id": "t093-terminal-money-fb0801f-026",
+  "request_id": "t093-finite-balance-b9e454f-027",
   "case": "T09.3-R2",
-  "target_sha": "fb0801fe40bc7a1afea82dad52c711b812cd1b71"
+  "target_sha": "b9e454f13fcbc7549e5327f01d82c88f45ae7b08"
 }
