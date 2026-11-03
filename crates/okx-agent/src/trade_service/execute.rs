@@ -760,13 +760,27 @@ impl TradeService {
                 .instrument_rules(instrument)
                 .await
                 .ok_or("ENTRY_INSTRUMENT_RULES_UNAVAILABLE")?;
-            let fees = r.observer.fee_schedule(&rules).await.map_err(err)?;
-            let quote_snapshot = r.observer.snapshot().await.map_err(err)?;
+            // Native SQL PREPARED already exists. Transient LOCAL/NO-SEND
+            // private-GET admission must wait inside this ORIGINAL Execute,
+            // not escape as Err to a caller which might replay the mutation
+            // under the same idempotency key. A sent GET, exchange error or
+            // expired command still fails closed; no POST retry is introduced.
+            let fees = r
+                .observer
+                .fee_schedule_until(&rules, until)
+                .await
+                .map_err(err)?;
+            let quote_snapshot = r.observer.snapshot_until(until).await.map_err(err)?;
             let fx = Self::usd_conversion(&quote_snapshot)?;
-            let account = r.execution.account.config().await.map_err(err)?;
+            let account = r
+                .execution
+                .account
+                .config_wait(until.saturating_duration_since(Instant::now()))
+                .await
+                .map_err(err)?;
             let leverage = dec(&r
                 .observer
-                .configured_leverage(
+                .configured_leverage_until(
                     instrument,
                     okx_api::MarginMode::Cross,
                     if plan.position_side == "long" {
@@ -774,6 +788,7 @@ impl TradeService {
                     } else {
                         "short"
                     },
+                    until,
                 )
                 .await
                 .map_err(err)?)?;
@@ -908,8 +923,8 @@ impl TradeService {
                     .map_err(err)?;
                 return Err("ENTRY_ALL_IN_COST_UNPROVEN".into());
             }
-            let census = self.census(&state).await?;
-            let snapshot = r.observer.snapshot().await.map_err(err)?;
+            let census = self.census_until(&state, until).await?;
+            let snapshot = r.observer.snapshot_until(until).await.map_err(err)?;
             let conversion = Self::usd_conversion(&snapshot)?;
             let usdt = (plan.planned_loss_usd / dec(&conversion.usd_per_usdt)?)
                 .round_dp_with_strategy(9, RoundingStrategy::ToPositiveInfinity);
@@ -1605,6 +1620,23 @@ impl TradeService {
         self.census_with_reads(state, None, None, None, None, None)
             .await
             .map(|v| v.0)
+    }
+
+    /// PRE-RESERVE read-only cohort census, bounded by the SAME Execute
+    /// deadline as PREPARED. Wait only for authenticated LOCAL, NOT-SENT
+    /// private reads; never tolerate missing lots, pending POSTs or stops.
+    pub(super) async fn census_until(
+        &self,
+        state: &CentralGovernanceSnapshot,
+        until: Instant,
+    ) -> Result<NativeRiskCensus, String> {
+        tokio::time::timeout_at(
+            until.into(),
+            self.census_with_reads(state, None, None, Some(until), None, None),
+        )
+        .await
+        .map_err(|_| "ENTRY_CENSUS_SOURCE_DEADLINE".to_owned())?
+        .map(|v| v.0)
     }
 
     /// Only the protection reconciliation of an existing managed position
