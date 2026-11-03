@@ -33,6 +33,11 @@ function prove(e) {
   assert.equal(e.saved_strategy_ids[e.account_a], e.a_strategy);
   assert.equal(e.saved_strategy_ids[e.account_b], e.b_strategy);
   assert.ok(Number.isSafeInteger(e.policy_revision) && e.policy_revision > 2);
+  assert.equal(e.same_intent_id_cross_account, true,
+    "same intent ID must remain valid across two different verified accounts");
+  assert.equal(e.independent_account_scope, true);
+  assert.equal(e.distinct_reservation_keys, true,
+    "central RiskBook must never reuse a different account's reservation");
   assert.equal(e.first_status, "HELD");
   assert.equal(e.second_status, "HELD");
   assert.equal(e.third_status, "DENIED");

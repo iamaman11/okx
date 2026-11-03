@@ -401,9 +401,14 @@ try {
       policy_revision:sharedStrategyGovernance.revision,census
     });
     assert.ok(sharedStrategyGovernance,"strategy policy must originate from actual Worker CAS");
-    const firstRequest=requested(uid,"native_alpha","a_0001","a");
-    const secondRequest=requested(uidB,"native_beta","b_0001","b");
+    // Same externally visible intent key is legal in TWO distinct verified
+    // account scopes. Identity must be account-qualified even under concurrent
+    // RESERVE; the plans differ deliberately to detect cross-account reuse.
+    const firstRequest=requested(uid,"native_alpha","same_0001","a");
+    const secondRequest=requested(uidB,"native_beta","same_0001","b");
     const thirdRequest=requested(uid,"native_alpha","a_0002","c");
+    assert.equal(firstRequest.intent_id, secondRequest.intent_id);
+    assert.notEqual(firstRequest.account_uid, secondRequest.account_uid);
     // A valid UID and authentic policy generation must not let B borrow A's
     // exclusively registered strategy. This must be denied before any risk
     // can be held, independent of remaining shared campaign headroom.
@@ -479,6 +484,9 @@ try {
       policy_revision:sharedStrategyGovernance.revision,
       saved_strategy_ids:sharedStrategyGovernance.by_account,
       instrument_id:firstRequest.instrument_id,
+      same_intent_id_cross_account:firstRequest.intent_id===secondRequest.intent_id,
+      independent_account_scope:firstRequest.account_uid!==secondRequest.account_uid,
+      distinct_reservation_keys:firstReserve.reservation_key!==secondReserve.reservation_key,
       first_status:firstReserve.status,
       second_status:secondReserve.status,
       third_status:denied.status,
