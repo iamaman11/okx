@@ -3,6 +3,7 @@
 // or creating a private synthetic close engine.
 struct T09_6CloseContext {
     trade: Arc<TradeService>,
+    rate_budget: RateBudget,
     feed: Arc<crate::accounts::recorded_support::RecordedAccountHttp>,
     opening_intent_id: String,
     operation_key: String,
@@ -15,7 +16,7 @@ async fn t09_6_close_owned_lot(input: T09_6CloseContext) -> serde_json::Value {
     use crate::accounts::recorded_support::{RecordedGet, RecordedPost};
     use okx_protocol::trading::TradeRequest;
     let T09_6CloseContext {
-        trade, feed, opening_intent_id, operation_key, quantity,
+        trade, rate_budget, feed, opening_intent_id, operation_key, quantity,
         venue_order_id, expected_post_count,
     } = input;
     let at=chrono::Utc::now().timestamp_millis().to_string();
@@ -46,14 +47,64 @@ async fn t09_6_close_owned_lot(input: T09_6CloseContext) -> serde_json::Value {
             "accFillSz":"0","avgPx":"","state":"live","cTime":at,"uTime":at
         }])),
     });
-    let close=trade.trade("fixture-a",&TradeRequest::Close {
-        idempotency_key:operation_key,
+    let mut close=trade.trade("fixture-a",&TradeRequest::Close {
+        idempotency_key:operation_key.clone(),
         reference:opening_intent_id.clone(),
         expires_in_ms:30_000,
     },None).await.unwrap_or_else(|reason|panic!(
         "T09_6_PUBLIC_CLOSE_DENIED:source_intent={opening_intent_id}:quantity={quantity}:reason={reason}:posts={:?}",
         feed.outbound_posts.lock().unwrap().len()
     ));
+    // Native Execute persists the exact authenticated exchange ACK before
+    // its final public Status readback. That read-only GET can be deferred by
+    // the SHARED local PrivateRestUser budget: a terminal `uncertain`
+    // wrapper is NOT evidence that the POST failed. Never retry Close or
+    // Execute after any possible send. First prove exactly ONE expected POST
+    // and its finite signed recorded ACK, then reconcile by STATUS only.
+    if close["data"]["intent"]["exchange_order_id"]!=venue_order_id {
+        assert_eq!(feed.outbound_posts.lock().unwrap().len(),expected_post_count,
+            "T09_6_CLOSE_NOT_POSTED_NO_RETRY:close={close}");
+        assert_eq!(feed.unconsumed_posts(),0,
+            "T09_6_CLOSE_ACK_SOURCE_NOT_CONSUMED_NO_RETRY:close={close}");
+        let until=std::time::Instant::now()+Duration::from_secs(15);
+        loop {
+            let remaining=until.saturating_duration_since(std::time::Instant::now());
+            if remaining<=Duration::from_millis(150) {
+                panic!("T09_6_CLOSE_ACK_STATUS_UNPROVEN:close={close}");
+            }
+            let result=tokio::time::timeout_at(until.into(),trade.trade(
+                "fixture-a",&TradeRequest::Status{reference:operation_key.clone()},None
+            )).await.unwrap_or_else(|_|panic!(
+                "T09_6_CLOSE_ACK_STATUS_DEADLINE:close={close}"
+            ));
+            match result {
+                Ok(status)=>{
+                    close=status;
+                    assert_eq!(feed.outbound_posts.lock().unwrap().len(),expected_post_count,
+                        "T09_6_STATUS_MUST_NOT_REPOST_CLOSE:close={close}");
+                    if close["data"]["intent"]["exchange_order_id"]==venue_order_id {break}
+                    assert_ne!(close["data"]["state"],"REJECTED",
+                        "T09_6_CLOSE_SQL_REJECTED_AFTER_AUTHENTICATED_POST:close={close}");
+                    tokio::time::timeout_at(until.into(),
+                        tokio::time::sleep(Duration::from_millis(150)))
+                        .await.unwrap_or_else(|_|panic!(
+                            "T09_6_CLOSE_ACK_STATUS_UNPROVEN:close={close}"
+                        ));
+                },
+                Err(reason)=>{
+                    let remaining=until.saturating_duration_since(std::time::Instant::now());
+                    let delay=recorded_preview_local_defer(
+                        &reason,&rate_budget,remaining).unwrap_or_else(||panic!(
+                            "T09_6_CLOSE_ACK_NONLOCAL_STATUS_DENIAL:{reason}:close={close}"
+                        ));
+                    tokio::time::timeout_at(until.into(),tokio::time::sleep(delay))
+                        .await.unwrap_or_else(|_|panic!(
+                            "T09_6_CLOSE_ACK_LOCAL_READ_DEADLINE:close={close}"
+                        ));
+                }
+            }
+        }
+    }
     let intent=&close["data"]["intent"];
     // The recorded fill/bill event is observed AFTER the production Close
     // has durably passed BEGIN_POST and returned its venue ACK. Previously
