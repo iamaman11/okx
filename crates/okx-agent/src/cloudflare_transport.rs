@@ -2765,7 +2765,10 @@ mod raw_native_session_tests {
                         });
                         let source_ready = health.last_success_ms.is_some_and(|t| t >= closed_ms)
                             && source_ms.is_some_and(|t| t >= closed_ms);
+                        let signed_flat = snapshot.as_ref()
+                            .is_some_and(|s|s.positions.is_empty());
                         last_capture_witness = json!({
+                            "signed_flat":signed_flat,
                             "capture_success_ms": health.last_success_ms,
                             "capture_failure": health.reason_code,
                             "snapshot_received_ms": source_ms,
@@ -2775,7 +2778,11 @@ mod raw_native_session_tests {
                             "fills": fills,
                             "bills": bills
                         });
-                        if source_ready && fill_ready && bill_ready {
+                        // A newer source/cursor clock can coexist with an
+                        // in-flight earlier signed nonflat GET. The same
+                        // authenticated snapshot must prove FLAT before the
+                        // final capture is accepted; retain the 15s bound.
+                        if source_ready && fill_ready && bill_ready && signed_flat {
                             let snapshot = snapshot
                                 .expect("T09.1 proven production source snapshot");
                             assert!(
