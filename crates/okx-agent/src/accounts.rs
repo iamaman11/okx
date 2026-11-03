@@ -1922,8 +1922,14 @@ pub(crate) mod recorded_support {
             let mut after = Vec::new();
             for inst_type in ["SWAP", "FUTURES"] {
                 for kind in [
-                    "conditional", "oco", "trigger", "move_order_stop",
-                    "chase", "iceberg", "twap", "smart_iceberg",
+                    "conditional",
+                    "oco",
+                    "trigger",
+                    "move_order_stop",
+                    "chase",
+                    "iceberg",
+                    "twap",
+                    "smart_iceberg",
                 ] {
                     let query = vec![
                         ("instType".into(), inst_type.into()),
@@ -1984,10 +1990,7 @@ pub(crate) mod recorded_support {
         }
 
         fn causal_cancel() -> okx_api::HttpRequest {
-            let url = reqwest::Url::parse(
-                "https://www.okx.com/api/v5/trade/cancel-algos"
-            )
-            .unwrap();
+            let url = reqwest::Url::parse("https://www.okx.com/api/v5/trade/cancel-algos").unwrap();
             let mut request = reqwest::Request::new(reqwest::Method::POST, url);
             request.headers_mut().insert(
                 "OK-ACCESS-KEY",
@@ -2037,12 +2040,9 @@ pub(crate) mod recorded_support {
                     deliver_causal(&feed, causal_get("fixture-observer-a", "100")).await
                 })
             };
-            tokio::time::timeout(
-                std::time::Duration::from_secs(2),
-                entered.notified(),
-            )
-            .await
-            .expect("pre-cancel read admitted at transport boundary");
+            tokio::time::timeout(std::time::Duration::from_secs(2), entered.notified())
+                .await
+                .expect("pre-cancel read admitted at transport boundary");
             deliver_causal(&feed, causal_cancel()).await.unwrap();
             resume.notify_one();
             let old = in_flight.await.unwrap().unwrap();
@@ -2064,7 +2064,11 @@ pub(crate) mod recorded_support {
             let account = deliver_causal(&feed, causal_get("fixture-observer-b", "100"))
                 .await
                 .unwrap_err();
-            assert!(account.to_string().contains("TRANSCRIPT_ALGO_ACCOUNT_MISMATCH"));
+            assert!(
+                account
+                    .to_string()
+                    .contains("TRANSCRIPT_ALGO_ACCOUNT_MISMATCH")
+            );
             let query = deliver_causal(&feed, causal_get("fixture-observer-a", "99"))
                 .await
                 .unwrap_err();
