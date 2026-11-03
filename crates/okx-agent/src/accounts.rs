@@ -1438,8 +1438,7 @@ pub(crate) mod recorded_support {
                             verified_fixture_uid(key.as_str()).is_some_and(|uid| {
                                 verified_fixture_uid(scenario.account.as_str()) == Some(uid)
                             })
-                        })
-                        {
+                        }) {
                             let mut query = request
                                 .url()
                                 .query_pairs()
