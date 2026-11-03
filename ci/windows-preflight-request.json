@@ -1,6 +1,6 @@
 {
   "schema": "okx.windows-preflight-request/v1",
-  "request_id": "t093-source-counters-2955d96-021",
+  "request_id": "t093-money-diagnostic-e499773-022",
   "case": "T09.3",
-  "target_sha": "2955d967357bf2aa5d96c4b65a31fb6f438cadda"
+  "target_sha": "e49977318439ff21f154914dfdfe7afdc8480e57"
 }
