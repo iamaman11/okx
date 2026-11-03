@@ -1852,6 +1852,46 @@ mod raw_native_session_tests {
             }
             published
         });
+        // The campaign SQL witness is short-lived (3 s relative to the
+        // source cutoff). The earlier readiness handoff precedes several
+        // public and private observations and cannot be reused at Execute.
+        // This check is READ-ONLY against both existing SQL owners. Only
+        // production maintenance can refresh their persisted source frontier;
+        // an absent/stale receipt still fails closed under the real policy.
+        let mut latest_readiness = String::from("NOT_OBSERVED");
+        tokio::time::timeout(Duration::from_secs(9), async {
+            loop {
+                let through = chrono::Utc::now().timestamp_millis() - 2_000;
+                let mut all_recent = true;
+                for alias in ["fixture-a", "fixture-b"] {
+                    let account = accounts.resolve(alias).await.unwrap();
+                    let campaign = campaign_id.clone();
+                    match account.execution.store.call(
+                        std::time::Instant::now() + Duration::from_secs(2),
+                        move |s| s.verify_campaign_entry_readiness(
+                            &campaign, native_origin, through
+                        ),
+                    ).await {
+                        Ok(()) => {}
+                        Err(reason) => {
+                            all_recent = false;
+                            latest_readiness = format!("{alias}:{reason}");
+                            break;
+                        }
+                    }
+                }
+                if all_recent {
+                    eprintln!(
+                        "T09_1_PRE_EXECUTE_READINESS_V1:actors=2 through_ms={through} state=SOURCE_VERIFIED"
+                    );
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        }).await.unwrap_or_else(|_| panic!(
+            "T09_1_PRE_EXECUTE_CAMPAIGN_READINESS_NOT_FRESH:{latest_readiness}"
+        ));
+
         // An admission can be deferred by the SHARED production RateBudget
         // while maintenance consumes the same authenticated private-GET
         // domain. Retry is permitted here ONLY after a proven LOCAL,

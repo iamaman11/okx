@@ -1,0 +1,47 @@
+# Isolated acceptance probe for exact S1 WIP: no production venue POST.
+# PR #493 remains the sole release/mandatory-26 gate.
+name: S1 targeted recorded Windows
+on:
+  push:
+    branches:
+      - work/s1-t09-causal-20261103
+
+permissions:
+  contents: read
+
+concurrency:
+  group: s1-t09-targeted-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  t09-2:
+    name: Source-bound T09.2 Native/Worker preflight
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master 2026-09-29
+        with:
+          toolchain: 1.95.0
+          components: rustfmt
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Exact Rust format
+        run: cargo fmt --all -- --check
+      - name: Install locked production workerd dependencies
+        shell: pwsh
+        run: |
+          npm ci --prefix cloudflare/okx-mcp --ignore-scripts --no-audit --no-fund
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Native and persisted Worker T09.2
+        shell: pwsh
+        run: |
+          $dir = Join-Path $env:RUNNER_TEMP "t09-targeted"
+          node scripts/run-trade-integration.mjs --case T09.2 --artifacts "$dir"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Preserve actual signed-source evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: s1-t09-2-${{ github.sha }}
+          path: ${{ runner.temp }}\t09-targeted
+          retention-days: 14
