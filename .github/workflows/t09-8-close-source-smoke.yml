@@ -1,0 +1,40 @@
+name: T09.8 causal Close source and clock (WIP only)
+on:
+  push:
+    branches:
+      - work/t09-8-post-fill-clock-20261104
+permissions:
+  contents: read
+jobs:
+  t09-8-windows-targeted:
+    runs-on: windows-latest
+    timeout-minutes: 18
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de
+        with:
+          toolchain: 1.95.0
+          components: rustfmt
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Verify Rust test-only source formatting
+        shell: pwsh
+        run: |
+          cargo fmt --all
+          git diff --exit-code -- crates/okx-agent/src/cloudflare_transport.rs
+      - name: Install locked Workerd dependencies
+        run: npm ci --prefix cloudflare/okx-mcp --ignore-scripts --no-audit --no-fund
+      - name: Precompile Native integration test
+        run: cargo test --locked -p okx-agent --lib native_to_workerd_risk_summary_over_actual_websocket --no-run
+      - name: Run exact T09.8 real Native and persisted Worker (not full 26)
+        shell: pwsh
+        run: |
+          $artifacts = Join-Path $env:RUNNER_TEMP "t09-8"
+          node scripts/run-trade-integration.mjs --case T09.8 --artifacts "$artifacts"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: t09-8-source-frontier-${{ github.sha }}
+          path: ${{ runner.temp }}\t09-8
+          if-no-files-found: warn
+          retention-days: 7
