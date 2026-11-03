@@ -131,8 +131,9 @@ check(foreign.status==="DENIED"&&foreign.reason==="STRATEGY_NOT_ENABLED_FOR_ACCO
  "T09-MA: nonmanual strategy not registered to UID B cannot reserve real risk");
 const foreignAfter=(await readRiskBook(sa))!;
 check(foreignAfter.entry_budget?.reserved_usd===foreignBefore.entry_budget?.reserved_usd
- &&foreignAfter.reserved_loss_usd===foreignBefore.reserved_loss_usd,
- "foreign strategy denial cannot mutate central loss or entry budget");
+ &&foreignAfter.occupied_usdt===foreignBefore.occupied_usdt
+ &&foreignAfter.consumed_loss_usd===foreignBefore.consumed_loss_usd,
+ "foreign strategy denial cannot mutate central held exposure, loss or entry budget");
 const disabledStore=new Storage();disabledStore.map=structuredClone(sa.map);
 const disabledGovernance=structuredClone(governance);
 disabledGovernance.accounts[1].strategies[0].enabled=false;
