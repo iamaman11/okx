@@ -4,6 +4,7 @@ import { actualNativeWorker, hash } from "../native-workerd.mjs";
 export async function run({root,signal}) {
   const source=await actualNativeWorker(root,signal,{statusProbe:true,secondAdmission:true,partialFills:true});
   const proof=source.nativePartialFills;
+  const terminalSettlement=source.nativeTerminalSettlement;
   const cross=source.nativeCrossUidDenial;
   const admitted=source.nativeSecondAdmission;
   const multi=source.nativeStrategyAccountPreflight;
@@ -43,6 +44,13 @@ export async function run({root,signal}) {
   assert.equal(cross.worker_budget.reserved_loss_usd,
     admitted.after_worker_budget.reserved_loss_usd);
   assert.ok(proof && proof.phases.length===2,"Native account capture evidence required");
+  assert.ok(terminalSettlement,"real public Status terminal money reconciliation required");
+  assert.equal(terminalSettlement.consumed_usd,"4.002");
+  assert.equal(terminalSettlement.reserved_usd,"4");
+  assert.equal(terminalSettlement.outbound_posts,4);
+  assert.ok(Number.isSafeInteger(terminalSettlement.extra_status_checks));
+  assert.ok(terminalSettlement.extra_status_checks>=0 && terminalSettlement.extra_status_checks<=3);
+  assert.ok(terminalSettlement.worker_risk_book_sequence<=proof.risk_book_sequence);
   const [partial,terminal]=proof.phases;
   for (const phase of [partial,terminal]) {
     assert.ok(phase.source_read_counts,"raw Native source count checkpoint missing");
@@ -94,6 +102,9 @@ export async function run({root,signal}) {
       {id:"terminal_qty",expected:"0.3",actual:terminal.sql.quantity},
       {id:"terminal_fee",expected:"0.0015",actual:terminal.sql.fee_usdt},
       {id:"cumulative_spent",expected:"4.002",actual:proof.worker_budget.entry_budget.consumed_usd},
+      {id:"terminal_settlement_spent",expected:"4.002",actual:terminalSettlement.consumed_usd},
+      {id:"terminal_settlement_held",expected:"4",actual:terminalSettlement.reserved_usd},
+      {id:"terminal_settlement_no_resend",expected:"4",actual:String(terminalSettlement.outbound_posts)},
       {id:"foreign_uid_status_no_read",expected:"INTENT_NOT_FOUND",actual:cross.status_reason},
       {id:"foreign_uid_cancel_no_mutation",expected:"INTENT_NOT_FOUND",actual:cross.cancel_reason},
       {id:"foreign_uid_no_exchange_post",expected:"4",actual:String(cross.outbound_posts_after)},
