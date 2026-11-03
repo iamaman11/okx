@@ -1435,7 +1435,7 @@ pub(crate) mod recorded_support {
                     let selected = {
                         let mut phase = self.causal_algos.lock().unwrap();
                         if let Some(scenario) = phase.as_mut().filter(|scenario| {
-                            verified_fixture_uid(key.as_str()).is_some_and(|uid| {
+                            verified_fixture_uid(key).is_some_and(|uid| {
                                 verified_fixture_uid(scenario.account.as_str()) == Some(uid)
                             })
                         }) {
