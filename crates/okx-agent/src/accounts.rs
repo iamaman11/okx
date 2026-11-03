@@ -954,7 +954,6 @@ pub(crate) mod recorded_support {
         after_reads: usize,
     }
 
-
     // UID B's independent signed inventory is immutable; A's cancel ACK
     // never selects or mutates this source.
     struct StaticAlgoScope {
@@ -1157,16 +1156,14 @@ pub(crate) mod recorded_support {
             ));
         }
 
-
         /// A separate verified UID must supply its own exact, finite, raw
         /// signed empty census. No fallback to A and no page-count phase.
-        pub(crate) fn expect_static_algo_inventory(
-            &self,
-            account: &str,
-            pages: Vec<RecordedGet>,
-        ) {
+        pub(crate) fn expect_static_algo_inventory(&self, account: &str, pages: Vec<RecordedGet>) {
             const PATH: &str = "/api/v5/trade/orders-algo-pending";
-            assert_eq!(account, "fixture-observer-b", "TRANSCRIPT_STATIC_ALGO_ACCOUNT");
+            assert_eq!(
+                account, "fixture-observer-b",
+                "TRANSCRIPT_STATIC_ALGO_ACCOUNT"
+            );
             assert_eq!(pages.len(), 16, "TRANSCRIPT_STATIC_ALGO_SCOPE_COUNT");
             let mut seen = std::collections::BTreeSet::new();
             let mut scopes = Vec::with_capacity(16);
@@ -1176,7 +1173,10 @@ pub(crate) mod recorded_support {
                 let mut query = page.required_query;
                 query.sort();
                 assert_eq!(query.len(), 3, "TRANSCRIPT_STATIC_ALGO_QUERY_SHAPE");
-                assert!(seen.insert(query.clone()), "TRANSCRIPT_STATIC_ALGO_DUP_SCOPE");
+                assert!(
+                    seen.insert(query.clone()),
+                    "TRANSCRIPT_STATIC_ALGO_DUP_SCOPE"
+                );
                 let source: serde_json::Value = serde_json::from_slice(&page.raw_response)
                     .expect("TRANSCRIPT_STATIC_ALGO_RAW_SOURCE");
                 assert_eq!(source["code"], "0", "TRANSCRIPT_STATIC_ALGO_SOURCE_CODE");
@@ -2221,8 +2221,14 @@ pub(crate) mod recorded_support {
             let mut pages = Vec::new();
             for inst_type in ["SWAP", "FUTURES"] {
                 for kind in [
-                    "conditional", "oco", "trigger", "move_order_stop",
-                    "chase", "iceberg", "twap", "smart_iceberg",
+                    "conditional",
+                    "oco",
+                    "trigger",
+                    "move_order_stop",
+                    "chase",
+                    "iceberg",
+                    "twap",
+                    "smart_iceberg",
                 ] {
                     pages.push(RecordedGet {
                         access_key: "fixture-observer-b".into(),
@@ -2238,7 +2244,9 @@ pub(crate) mod recorded_support {
             }
             feed.expect_static_algo_inventory("fixture-observer-b", pages);
             for actor in ["fixture-observer-b", "fixture-executor-b"] {
-                let reply = deliver_causal(&feed, causal_get(actor, "100")).await.unwrap();
+                let reply = deliver_causal(&feed, causal_get(actor, "100"))
+                    .await
+                    .unwrap();
                 assert_eq!(reply["data"].as_array().unwrap().len(), 0);
             }
             let a_before = deliver_causal(&feed, causal_get("fixture-observer-a", "100"))
