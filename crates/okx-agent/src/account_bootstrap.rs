@@ -393,7 +393,8 @@ impl AccountBootstrapper {
         strict_read_only_permissions(&config.perm)
             .map_err(|_| ConfiguredLeverageBootstrapError::PermissionRejected)?;
 
-        let rows = self.api
+        let rows = self
+            .api
             .leverage_wait(
                 instrument_id,
                 margin_mode,
