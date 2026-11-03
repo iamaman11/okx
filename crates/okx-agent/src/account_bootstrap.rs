@@ -328,7 +328,7 @@ impl AccountBootstrapper {
                     }
                 };
 
-                let fee = self.fee_schedule_authorized(rules).await?;
+                let fee = self.fee_schedule_authorized(rules, None).await?;
                 (
                     true,
                     non_empty_owned(instrument.lever),
