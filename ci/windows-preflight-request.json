@@ -1,6 +1,6 @@
 {
   "schema": "okx.windows-preflight-request/v1",
-  "request_id": "t093-finite-balance-b9e454f-027",
-  "case": "T09.3-R2",
+  "request_id": "t094-signed-frontier-b9e454f-028",
+  "case": "T09.4",
   "target_sha": "b9e454f13fcbc7549e5327f01d82c88f45ae7b08"
 }
