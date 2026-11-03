@@ -666,6 +666,8 @@ try {
           maintenance_errors:lines.filter(line => line.includes("OKX_ENTRY_BASELINE_V1")).slice(-12).map(line => line.slice(0, 240)),
           managed_census_denials:lines.filter(line =>
             line.includes("MANAGED_AGGREGATE_CENSUS_DENIAL_V1:")).slice(-5).map(line => line.slice(0, 500)),
+          s1_cohort_diagnostics:lines.filter(line =>
+            line.includes("S1_COHORT_DENIAL_DIAG_V1:")).slice(-8).map(line => line.slice(0, 700)),
           restart_reached:recorded.includes("T09_1_NATIVE_SQL_RESTART_V1:"),
           terminal_reached:recorded.includes("T09_1_NATIVE_TERMINAL_CLOSE_V1:"),
         }) + "\n");

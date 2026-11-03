@@ -2338,6 +2338,16 @@ fn verify_local_intent_coverage_with_managed(
             return Err("COHORT_LOCAL_INTENT_CORRUPT".into());
         }
         if matches!(intent.state, IntentState::Posting | IntentState::Unknown) {
+            #[cfg(test)]
+            eprintln!(
+                "S1_COHORT_DENIAL_DIAG_V1:kind=UNKNOWN_POST state={:?} active={} pending={} verified_live={} instrument={} risk_increase={}",
+                intent.state,
+                active.len(),
+                unresolved.len(),
+                verified_live_intents.len(),
+                intent.instrument_id,
+                intent.risk_increase
+            );
             return Err("COHORT_UNRESOLVED_POST_OUTCOME".into());
         }
         let central_pending = unresolved.binary_search(&intent.intent_id).is_ok();
@@ -2386,14 +2396,26 @@ fn verify_local_intent_coverage_with_managed(
                     })
             });
             if !matching_release && !managed_open_entry && !proved_flat_peer {
-                return Err(match terminal_release {
+                let reason = match terminal_release {
                     Some(scope) if scope.intent_id == intent.intent_id => {
                         "COHORT_TERMINAL_RELEASE_RECEIPT_MISMATCH"
                     }
                     Some(_) => "COHORT_OTHER_TERMINAL_RISK_RELEASE_PENDING",
                     None => "COHORT_TERMINAL_RISK_RELEASE_PENDING",
-                }
-                .into());
+                };
+                #[cfg(test)]
+                eprintln!(
+                    "S1_COHORT_DENIAL_DIAG_V1:kind=TERMINAL_PENDING reason={reason} intent_state={:?} risk_increase={} active={} pending={} verified_live={} live_matches={} receipt_present={} release_scope={}",
+                    intent.state,
+                    intent.risk_increase,
+                    active.len(),
+                    unresolved.len(),
+                    verified_live_intents.len(),
+                    verified_live_intents.contains(&intent.intent_id),
+                    receipt.is_some(),
+                    terminal_release.is_some()
+                );
+                return Err(reason.into());
             }
             if matching_release {
                 release_scope_matched = true;
