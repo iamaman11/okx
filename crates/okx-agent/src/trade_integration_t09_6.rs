@@ -675,9 +675,35 @@ async fn t09_6_source_backed_close_release(
             command.installation_id="installation_test".into();
             risk.request(command).await.map(|w|w.risk_book_sequence)
         } else {Ok(None)};
+        // The native-child runner preserves a bounded first panic line.
+        // Put every peer's decisive SQL predicates BEFORE verbose GET/rate
+        // details, or the second reservation is lost to log truncation.
+        let compact=match &peer_sql {
+            Ok(sql)=>{
+                let peers=sql["cohort"].as_array().map(|members|members.iter().map(|m|{
+                    serde_json::json!({
+                        "id":m["id"].as_str().and_then(|id|id.get(0..18)).unwrap_or("?"),
+                        "state":m["state"],"revision":m["revision"],
+                        "pending":m["pending"],"active":m["active_receipt"],
+                        "proof":m["proof_kind"],"hash_ok":m["proof_hash_matches"],
+                        "late":m["late_pending"],"lots":m["remaining_owned_lots"],
+                        "venue_at":m["proof_venue_update_ms"],
+                        "source_at":m["proof_source_through_ms"]
+                    })
+                }).collect::<Vec<_>>()).unwrap_or_default();
+                serde_json::json!({
+                    "peers":peers,
+                    "fills":sql["fills_watermark"],"fills_gen":sql["fills_generation"],
+                    "fills_gaps":sql["fills_gaps"],
+                    "bills":sql["bills_watermark"],"bills_gen":sql["bills_generation"],
+                    "bills_gaps":sql["bills_gaps"]
+                }).to_string()
+            },
+            Err(reason)=>format!("SQL_READ_FAILED:{reason:?}")
+        };
         assert_eq!(status["data"]["central_release"]["state"],"verified",
-            "T09.6 peer release diagnostic: intent={}, release={}, sql={peer_sql:?}, worker_sequence={worker_sequence:?}, financial_error={}, source_trace={}",
-            intent,status["data"]["central_release"],status["data"]["financial_error"],source_trace);
+            "T09_6_COHORT_CAUSAL_V2:intent={intent}:sql={compact}:worker_sequence={worker_sequence:?}:release={}:financial_error={}:source_trace={}",
+            status["data"]["central_release"],status["data"]["financial_error"],source_trace);
         assert_eq!(status["data"]["protection_incident"],false);
         entry["release"]=status["data"]["central_release"].clone();
         entry["financial_complete"]=status["data"]["financial_complete"].clone();
