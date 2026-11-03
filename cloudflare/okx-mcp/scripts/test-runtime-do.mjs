@@ -693,8 +693,13 @@ try {
             send_state:source.send_state ?? null,
             posts:source.outbound_posts ?? null,
             balance_phase_ms:source.recorded_balance_phase_ms ?? null,
-            denied_route_codes:(source.denied_routes ?? []).slice(0,5)
-              .map(x=>String(x).split(":")[0].slice(0,100)),
+            denied_routes:(source.denied_routes ?? []).slice(0,5).map(x=>{
+              const match=String(x).match(
+                /^(TRANSCRIPT_[A-Z_]+):(fixture-(?:observer|executor)-[ab]):(\/api\/v5\/[a-z0-9/-]+)$/
+              );
+              return match ? {code:match[1],fixture:match[2],route:match[3]}
+                : {code:String(x).split(":")[0].slice(0,100)};
+            }),
           }) + "\n");
       }
       const matches = [...recorded.matchAll(/T09_1_NATIVE_CLOSE_FAILURE_V1:(\{[^\r\n]+\})/g)];
