@@ -69,6 +69,20 @@ try {
   assert.notEqual(await semantic.tradeSemanticSha256(
       fixture.trade.account_key,changed),fixture.trade.sha256,
     "S2 changed amount requires a different semantic hash");
+  const otherAccountKey="okx:real:"+"b".repeat(64);
+  assert.notEqual(await semantic.tradeSemanticSha256(
+      otherAccountKey,fixture.trade.variants[0]),fixture.trade.sha256,
+    "S2 semantic digest is bound to the verified account identity");
+  const changedExpiry=structuredClone(fixture.trade.variants[0]);
+  changedExpiry.expires_in_ms=changedExpiry.expires_in_ms+1000;
+  assert.notEqual(await semantic.tradeSemanticSha256(
+      fixture.trade.account_key,changedExpiry),fixture.trade.sha256,
+    "S2 distinct requested deadline must not replay the previous execution");
+  const changedStrategy=structuredClone(fixture.trade.variants[0]);
+  changedStrategy.strategy_instance="different";
+  assert.notEqual(await semantic.tradeSemanticSha256(
+      fixture.trade.account_key,changedStrategy),fixture.trade.sha256,
+    "S2 immutable strategy identity must not collide on an idempotency key");
   console.log("S2 shared Rust/Worker golden numeric and semantic fixture PASS");
   const {PUBLIC_TOOLS}=await import(pathToFileURL(join(output,"execution_tools.js")));
   const {payloadFixtures}=await import(pathToFileURL(join(output,"execution_tools.test.js")));
