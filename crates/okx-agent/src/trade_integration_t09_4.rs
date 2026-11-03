@@ -31,6 +31,45 @@
         terminal_fill_at_ms: i64,
     }
 
+    // FILLED is an exchange order state, NOT evidence that immutable fees
+    // reached the native SQL owner and were settled with central RiskBook.
+    // An opened position may legitimately keep central RELEASE pending; the
+    // independent Worker budget oracle below still requires exact 6.003.
+    fn t09_4_incremental_entry_proven(status:&serde_json::Value)->bool {
+        status["data"]["intent"]["state"]=="FILLED"
+            && status["data"]["entry_fill_evidence"]["state"]
+                =="verified_native_fill_and_bill_fee_sources"
+            && status["data"]["incremental_entry_settlement"]["state"]
+                =="verified_or_no_change"
+            && status["data"]["financial_error"].is_null()
+            && status["data"]["protection_incident"]!=true
+    }
+
+    #[test]
+    fn t09_4_filled_is_not_central_entry_settlement_proof() {
+        let mut status=serde_json::json!({"data":{
+            "intent":{"state":"FILLED"},
+            "entry_fill_evidence":{"state":"verified_native_fill_and_bill_fee_sources"},
+            "incremental_entry_settlement":{"state":"verified_or_no_change"},
+            "financial_error":null,
+            "protection_incident":false
+        }});
+        assert!(t09_4_incremental_entry_proven(&status));
+        status["data"]["incremental_entry_settlement"]["state"]=serde_json::json!("pending");
+        assert!(!t09_4_incremental_entry_proven(&status));
+        status["data"]["incremental_entry_settlement"]["state"]=serde_json::json!("not_evaluated");
+        assert!(!t09_4_incremental_entry_proven(&status));
+        status["data"]["incremental_entry_settlement"]["state"]=serde_json::json!("verified_or_no_change");
+        status["data"]["entry_fill_evidence"]["state"]=serde_json::json!("native_fills_verified_bill_pending");
+        assert!(!t09_4_incremental_entry_proven(&status));
+        status["data"]["entry_fill_evidence"]["state"]=serde_json::json!("verified_native_fill_and_bill_fee_sources");
+        status["data"]["financial_error"]=serde_json::json!("ACCOUNT_SOURCE_NOT_READY");
+        assert!(!t09_4_incremental_entry_proven(&status));
+        status["data"]["financial_error"]=serde_json::Value::Null;
+        status["data"]["protection_incident"]=serde_json::json!(true);
+        assert!(!t09_4_incremental_entry_proven(&status));
+    }
+
     // The only injected material is the venue's raw signed GET history,
     // position, protective algo and order details. The same production
     // account capture, SQL lot owner, TradeService and Worker settle them.
@@ -262,44 +301,78 @@
             "fixture-observer-a","/api/v5/trade/orders-algo-pending",pending
         );
         eprintln!("T09_4_CAUSAL_INVENTORY_AFTER_SQL_V1 fill=0.2 bill=0.001 position=0.5 stops=2");
-        // The production LocalBudget may defer this READ-ONLY status even
-        // after immutable fill/bill capture succeeded. An unsent read can
-        // safely wait for its bounded local rate window; never retry POST.
-        let status= {
+        // An order may be FILLED before the account SQL and Worker finish
+        // source-backed incremental settlement. Observe that distinction on
+        // the SAME public TradeService Status: no direct SQL/Worker mutation,
+        // no added venue POST, no invented receipt, no relaxed oracle/TTL.
+        // Preserve the existing 15s bound and the first financial reason.
+        let status={
             let deadline=std::time::Instant::now()+Duration::from_secs(15);
+            let mut last=serde_json::Value::Null;
             loop {
                 let answer=tokio::time::timeout_at(deadline.into(),trade.trade(
                     "fixture-a",
                     &okx_protocol::trading::TradeRequest::Status {
                         reference:intent_id.clone()
                     },None
-                )).await.expect("T09.4 signed status read deadline");
+                )).await.unwrap_or_else(|_|panic!(
+                    "T09_4_ENTRY_SETTLEMENT_STATUS_DEADLINE:{last}"
+                ));
                 match answer {
-                    Ok(status)=>break status,
+                    Ok(status)=>{
+                        assert_eq!(status["data"]["intent"]["state"],"FILLED",
+                            "T09_4_SOURCE_BACKED_STATUS_NOT_FILLED:{status}");
+                        assert_ne!(status["data"]["protection_incident"],true,
+                            "T09_4_PROTECTION_INCIDENT_EVIDENCE_V1:{}",serde_json::json!({
+                                "intent_state":status["data"]["intent"]["state"],
+                                "intent_incident":status["data"]["intent"]["incident"],
+                                "protection":status["data"]["protection"],
+                                "financial_error":status["data"]["financial_error"],
+                                "central_release":status["data"]["central_release"],
+                                "quality":status["quality"]
+                            }));
+                        assert_eq!(feed.outbound_posts.lock().unwrap().len(),5,
+                            "Status reconciliation must never send another venue POST");
+                        if t09_4_incremental_entry_proven(&status) {
+                            break status;
+                        }
+                        last=serde_json::json!({
+                            "incremental_entry_settlement":status["data"]["incremental_entry_settlement"],
+                            "entry_fill_evidence":status["data"]["entry_fill_evidence"]["state"],
+                            "financial_error":status["data"]["financial_error"],
+                            "central_release":status["data"]["central_release"],
+                            "financial_complete":status["data"]["financial_complete"],
+                            "quality":status["quality"],
+                        });
+                        // Open 0.50 lots can keep terminal RELEASE pending:
+                        // only independent incremental SETTLE_ENTRY permits
+                        // the central consumed-budget assertion below.
+                        let remaining=deadline.saturating_duration_since(
+                            std::time::Instant::now());
+                        if remaining<=Duration::from_millis(250) {
+                            panic!("T09_4_ENTRY_SETTLEMENT_NOT_PROVEN:{last}");
+                        }
+                        tokio::time::timeout_at(deadline.into(),
+                            tokio::time::sleep(Duration::from_millis(250)))
+                            .await.unwrap_or_else(|_|panic!(
+                                "T09_4_ENTRY_SETTLEMENT_NOT_PROVEN:{last}"
+                            ));
+                    },
                     Err(reason)=>{
                         let remaining=deadline.saturating_duration_since(
                             std::time::Instant::now());
                         let delay=recorded_preview_local_defer(
                             &reason,&rate_budget,remaining).unwrap_or_else(||panic!(
-                                "T09.4 non-local status read failure: {reason}"
+                                "T09.4 non-local status read failure: {reason}; last={last}"
                             ));
                         tokio::time::timeout_at(deadline.into(),tokio::time::sleep(delay))
-                            .await.expect("T09.4 source-authorized rate defer expired");
+                            .await.unwrap_or_else(|_|panic!(
+                                "T09_4_ENTRY_SETTLEMENT_LOCAL_RATE_DEADLINE:{last}"
+                            ));
                     }
                 }
             }
         };
-        assert_eq!(status["data"]["intent"]["state"],"FILLED",
-            "T09_4_SOURCE_BACKED_STATUS_NOT_FILLED:{status}");
-        assert_ne!(status["data"]["protection_incident"],true,
-            "T09_4_PROTECTION_INCIDENT_EVIDENCE_V1:{}",serde_json::json!({
-                "intent_state":status["data"]["intent"]["state"],
-                "intent_incident":status["data"]["intent"]["incident"],
-                "protection":status["data"]["protection"],
-                "financial_error":status["data"]["financial_error"],
-                "central_release":status["data"]["central_release"],
-                "quality":status["quality"]
-            }));
         let mut command=summary("risk_t09_4_after_linked_fill");
         command.installation_id="installation_test".into();
         let worker=risk.request(command).await.unwrap();
