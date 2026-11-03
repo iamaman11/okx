@@ -6,6 +6,15 @@ import { actualNativeWorker, hash } from "../native-workerd.mjs";
 export async function run({ caseId, root, signal }) {
   const evidence = await actualNativeWorker(root, signal);
   const { nativeReplay: native, workerReplay: worker, transcript_sha256 } = evidence;
+  const scope = evidence.nativeAccountScope;
+  assert.equal(scope.same_client_key, true);
+  assert.equal(scope.distinct_account_scopes, true);
+  assert.equal(scope.foreign_sql_intent_absent, true);
+  assert.equal(scope.owner_semantic_sha256, native.sql_request_hash);
+  assert.match(scope.other_semantic_sha256, /^[0-9a-f]{64}$/);
+  assert.notEqual(scope.other_semantic_sha256,scope.owner_semantic_sha256);
+  assert.equal(scope.outbound_posts, 1,
+    "S2-07 verified second account cannot cause a duplicate send");
   const policy = process.env.OKX_S2_05_POLICY_CAS_PROBE === "1"
     ? evidence.nativePolicyReplay : null;
   const workerCas = process.env.OKX_S2_05_POLICY_CAS_PROBE === "1"
@@ -60,6 +69,10 @@ export async function run({ caseId, root, signal }) {
       { id:"identical_replay_intent",
         expected:native.opened_intent_id, actual:native.replayed_intent_id },
       { id:"one_possible_create_post", expected:"1", actual:String(native.created_posts) },
+      { id:"s2_07_independent_uid_scope", expected:"true",
+        actual:String(scope.foreign_sql_intent_absent) },
+      { id:"s2_07_owner_identity", expected:native.sql_request_hash,
+        actual:scope.owner_semantic_sha256 },
       { id:"s2_04_equivalent_decimal_replay", expected:"true",
         actual:String(native.semantic_decimal_equivalent_replay) },
       { id:"s2_04_different_amount_conflict", expected:"IDEMPOTENCY_CONFLICT",

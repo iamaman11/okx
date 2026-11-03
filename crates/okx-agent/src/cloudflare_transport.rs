@@ -2247,6 +2247,46 @@ mod raw_native_session_tests {
                 "reserved_entry_usd_after_replay": after.budget.as_ref().unwrap().entry_budget.as_ref().unwrap().reserved_usd,
             })
         );
+        // S2-07 account identity uses the independently verified SQL
+        // owner, never the mutable UI alias or the request display account.
+        // A different account may reuse the SAME public idempotency token
+        // without sharing the A request hash or seeing its SQL reservation.
+        use sha2::{Digest, Sha256};
+        let account_a = accounts.resolve("fixture-a").await.unwrap();
+        let account_b = accounts.resolve("fixture-b").await.unwrap();
+        let scope_a = account_a.configuration.account_key.wire();
+        let scope_b = account_b.configuration.account_key.wire();
+        assert_ne!(scope_a, scope_b);
+        let hash_a = format!(
+            "{:x}",
+            Sha256::digest(execute.canonical_semantic_json(&scope_a).unwrap().as_bytes())
+        );
+        let hash_b = format!(
+            "{:x}",
+            Sha256::digest(execute.canonical_semantic_json(&scope_b).unwrap().as_bytes())
+        );
+        assert_eq!(hash_a, saved.request_hash);
+        assert_ne!(hash_a, hash_b, "S2-07 verified accounts must have separate identities");
+        let other_key_absent = account_b
+            .execution
+            .store
+            .call(std::time::Instant::now() + Duration::from_secs(3), |sql| {
+                Ok(sql.by_idempotency("t09_real_public_execute_0001")?.is_none())
+            })
+            .await
+            .expect("S2-07 independent account B Native SQL");
+        assert!(other_key_absent, "S2-07 account B must not inherit A's intent");
+        println!(
+            "S2_07_NATIVE_ACCOUNT_SCOPE_V1:{}",
+            json!({
+                "same_client_key":true,
+                "distinct_account_scopes":true,
+                "owner_semantic_sha256":hash_a,
+                "other_semantic_sha256":hash_b,
+                "foreign_sql_intent_absent":other_key_absent,
+                "outbound_posts":feed.outbound_posts.lock().unwrap().len(),
+            })
+        );
         assert_eq!(
             after
                 .budget
