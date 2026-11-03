@@ -345,6 +345,34 @@ fn t09_6_publish_final_empty_algos(
     }
     feed.advance_recorded_route("fixture-observer-a",
         "/api/v5/trade/orders-algo-pending",pages);
+    // Both independently ACKed cancel-algos POSTs have now removed the
+    // attached stop obligations, AFTER the verified close fills and bills.
+    // This is a NEW bounded recorded external balance observation for the
+    // read-only terminal-release census, not a reset of the 64-read default,
+    // a financial SQL mutation or a Worker RELEASE receipt. The economic
+    // state remains 100 opening NAV - 0.006 seven linked fees = 99.994.
+    // It must not appear before the two signed cancel ACKs: those earlier
+    // statuses still use the prior T09.6 terminal source frontier.
+    let at=chrono::Utc::now().timestamp_millis().to_string();
+    let unchanged=serde_json::to_vec(&serde_json::json!({
+        "code":"0","msg":"","data":[{
+            "totalEq":"99.994","adjEq":"99.994","uTime":at,
+            "details":[{
+                "ccy":"USDT","eq":"99.994","liab":"0",
+                "availEq":"99.994","availBal":"99.994",
+                "eqUsd":"99.994","uTime":at
+            }]
+        }]
+    })).expect("T09.6 post-cancel signed balance envelope");
+    let retired=feed.advance_recorded_route(
+        "fixture-observer-a","/api/v5/account/balance",
+        (0..12).map(|_|RecordedGet {
+            access_key:"fixture-observer-a".into(),
+            path:"/api/v5/account/balance".into(),
+            required_query:vec![],raw_response:unchanged.clone(),
+        }).collect()
+    );
+    eprintln!("T09_6_POST_CANCEL_BALANCE_FRONTIER_V1 retired={retired} new_pages=12 equity=99.994");
 }
 // Repeat a public read-only Status only when the shared production
 // RateBudget proves a LOCAL, NO-SEND private GET defer. The same captured
