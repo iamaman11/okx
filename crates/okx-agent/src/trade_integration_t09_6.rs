@@ -501,6 +501,57 @@ async fn t09_6_source_backed_close_release(
             "T09.6 the original order remains terminal after both stop cancels");
         let release=&status["data"]["central_release"];
         if index==0 && release["state"]=="pending" {
+            // A scoped-release identity failure is NOT equivalent to an
+            // independently unproven terminal peer. Capture the actual
+            // single-writer SQL scope and immutable frontiers at the first
+            // mismatch; do not accept either as a substitute PASS.
+            if release["reason_code"] != "COHORT_OTHER_TERMINAL_RISK_RELEASE_PENDING" {
+                let selected=intent.to_owned();
+                let owner=accounts.resolve("fixture-a").await
+                    .expect("T09.6 diagnostic reads the existing SQL owner");
+                let sql=owner.execution.store.call(
+                    std::time::Instant::now()+Duration::from_secs(3),
+                    move |s| {
+                        let (intents,pending)=s.risk_census_intents(100)?;
+                        let current=s.intent(&selected)?
+                            .ok_or(okx_execution::StoreError::Invalid("T09_6_SELECTED_INTENT_MISSING"))?;
+                        let active=s.active_central_receipt(&selected)?.is_some();
+                        let proof=s.operation(&format!("entry-settlement:{selected}"))?;
+                        let fills=s.cursor("fills","SWAP")?;
+                        let bills=s.cursor("bills","account")?;
+                        Ok(serde_json::json!({
+                            "selected_state":current.state.as_str(),
+                            "selected_revision":current.revision,
+                            "selected_pending":pending.contains(&selected),
+                            "selected_active_receipt":active,
+                            "selected_terminal_proof_kind":proof.map(|p|p.kind),
+                            "pending_count":pending.len(),
+                            "pending_ids":pending,
+                            "cohort":intents.iter().map(|i|serde_json::json!({
+                                "id":i.intent_id,"state":i.state.as_str(),
+                                "risk_increase":i.risk_increase
+                            })).collect::<Vec<_>>(),
+                            "fills":fills.map(|c|serde_json::json!({
+                                "watermark":c.watermark,"generation":c.generation,
+                                "cursor_empty":c.cursor.is_empty(),"gaps":c.coverage_gaps
+                            })),
+                            "bills":bills.map(|c|serde_json::json!({
+                                "watermark":c.watermark,"generation":c.generation,
+                                "cursor_empty":c.cursor.is_empty(),"gaps":c.coverage_gaps
+                            }))
+                        }))
+                    }
+                ).await;
+                let mut command=summary("risk_t09_6_terminal_scope_diagnostic");
+                command.installation_id="installation_test".into();
+                let worker=risk.request(command).await;
+                let posts=feed.outbound_posts.lock().unwrap().len();
+                panic!(
+                    "T09_6_TERMINAL_SCOPE_DIAGNOSTIC_V1:reason={}:sql={sql:?}:worker={worker:?}:posts={posts}:financial_error={}:entry_fill={}:central_release={}",
+                    release["reason_code"],status["data"]["financial_error"],
+                    status["data"]["entry_fill_evidence"],status["data"]["central_release"]
+                );
+            }
             assert_eq!(release["reason_code"],
                 "COHORT_OTHER_TERMINAL_RISK_RELEASE_PENDING",
                 "T09.6 first entry cannot release over an unproven terminal peer");
