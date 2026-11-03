@@ -4089,9 +4089,15 @@ mod raw_native_session_tests {
             .expect("recorded public publisher did not terminate")
             .unwrap();
         if std::env::var("OKX_S2_05_POLICY_CAS_PROBE").as_deref() == Ok("1") {
-            assert!(!status_probe, "S2-05 policy rotation is a standalone T09.5 probe");
+            assert!(
+                !status_probe,
+                "S2-05 policy rotation is a standalone T09.5 probe"
+            );
             let posts_before = feed.outbound_posts.lock().unwrap().len();
-            assert_eq!(posts_before, 1, "S2-05 begins after one real venue create ACK");
+            assert_eq!(
+                posts_before, 1,
+                "S2-05 begins after one real venue create ACK"
+            );
             std::fs::write(
                 format!("{handoff_path}.s2-policy-cas-ready"),
                 b"AFTER_SIGNED_ACK_AND_SEMANTIC_REPLAY",
@@ -4146,8 +4152,7 @@ mod raw_native_session_tests {
                 .await
                 .expect_err("S2-05 new key must apply the current pause");
             assert_eq!(
-                new_reason,
-                "ACCOUNT_NEW_RISK_PAUSED",
+                new_reason, "ACCOUNT_NEW_RISK_PAUSED",
                 "S2-05 new key must be denied by current policy rather than stale authority"
             );
             let persisted = accounts
@@ -4168,7 +4173,10 @@ mod raw_native_session_tests {
             assert_eq!(persisted.client_order_id, saved.client_order_id);
             assert_eq!(persisted.policy_revision, saved.policy_revision);
             let posts_after = feed.outbound_posts.lock().unwrap().len();
-            assert_eq!(posts_after, posts_before, "S2-05 policy CAS must not trigger a new POST");
+            assert_eq!(
+                posts_after, posts_before,
+                "S2-05 policy CAS must not trigger a new POST"
+            );
             println!(
                 "S2_05_NATIVE_POLICY_REPLAY_V1:{}",
                 json!({
