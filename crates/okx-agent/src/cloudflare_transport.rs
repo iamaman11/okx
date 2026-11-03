@@ -2634,6 +2634,37 @@ mod raw_native_session_tests {
             use crate::accounts::recorded_support::RecordedPost;
             let close_time = chrono::Utc::now().timestamp_millis().to_string();
             feed.expect_public_clock(envelope(json!([{"ts":close_time}])));
+            // T09.8 executes this SAME T09.1 Close after an extended
+            // source/SQL reconciliation. A clock timestamp frozen when
+            // the fixture is registered may be >5s old by the first real
+            // /public/time GET. Publish fresh immutable external raw
+            // samples at bounded ticks ONLY before the first GET consumes
+            // one. The recorded transport's atomic delivery fence ensures
+            // we cannot rearm an already consumed sample, and production
+            // clock skew, RTT, age and mutation gates remain unchanged.
+            assert_eq!(feed.unconsumed_public_clock(), 1,
+                "T09.1 Close must have exactly one raw exchange-clock source");
+            let close_clock_before = feed.public_clock_deliveries();
+            let close_clock_feed = feed.clone();
+            let close_clock_publisher = tokio::spawn(async move {
+                let mut ticks = tokio::time::interval(Duration::from_millis(200));
+                ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                let mut published = 0usize;
+                for _ in 0..140 {
+                    ticks.tick().await;
+                    let raw = serde_json::to_vec(&json!({
+                        "code":"0","msg":"",
+                        "data":[{"ts":chrono::Utc::now().timestamp_millis().to_string()}]
+                    })).expect("T09.1 recorded external clock bytes");
+                    if !close_clock_feed.refresh_unconsumed_public_clock(
+                        close_clock_before, raw
+                    ) {
+                        break;
+                    }
+                    published += 1;
+                }
+                published
+            });
             feed.expect_post(RecordedPost {
                 access_key: "fixture-executor-a".into(),
                 path: "/api/v5/trade/order".into(),
@@ -2670,6 +2701,22 @@ mod raw_native_session_tests {
                     None,
                 )
                 .await;
+            if close_result.is_ok() {
+                let samples = tokio::time::timeout(
+                    Duration::from_secs(2), close_clock_publisher
+                ).await.expect("T09.1 close clock producer did not terminate")
+                    .expect("T09.1 close clock producer panicked");
+                assert_eq!(feed.public_clock_deliveries(), close_clock_before + 1,
+                    "T09.1 Close must consume one real recorded public-time GET");
+                eprintln!(
+                    "T09_1_CLOSE_CLOCK_SOURCE_V1:samples={samples} before={} after={}",
+                    close_clock_before, feed.public_clock_deliveries()
+                );
+            } else {
+                // An early source/risk rejection must not leave a fixture
+                // publisher running or mask the original production reason.
+                close_clock_publisher.abort();
+            }
             if let Err(reason) = &close_result {
                 // The Node runner must show this exact public production
                 // denial instead of truncating a nested cargo panic stack.
