@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { promisify } from "node:util";
 import { execFile } from "node:child_process";
-import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { setTimeout as delay } from "node:timers/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -610,9 +610,16 @@ try {
     assert.equal(url.hostname,"127.0.0.1","CI worker must be loopback-only");
     const wsUrl = new URL("/runtime",url);
     wsUrl.protocol = "ws:";
-    await writeFile(handoffPath, JSON.stringify({
+    // Publish only a COMPLETE handoff. The Rust test waits for path
+    // existence, so writing directly to that name lets it read an empty
+    // or truncated JSON file on Windows before writeFile finishes.
+    // Same-directory rename is the sole readiness barrier; no new service,
+    // test exchange, financial receipt or timeout is involved.
+    const stagedHandoff = handoffPath + ".pending";
+    await writeFile(stagedHandoff, JSON.stringify({
       ws_url:wsUrl.toString(),token,reservation_key:addMode ? null : held.reservation_key,
     }), {mode:0o600});
+    await rename(stagedHandoff, handoffPath);
     let stdout, stderr;
     try {
       ({stdout,stderr} = await nativeProcess);
