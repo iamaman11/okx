@@ -1,6 +1,6 @@
 {
   "schema": "okx.windows-preflight-request/v1",
-  "request_id": "t093-b-cap-31ec527-016",
+  "request_id": "t093-clock-source-1783505-017",
   "case": "T09.3",
-  "target_sha": "31ec527e50aadf8292c49c0b5e5c82972fb7ada5"
+  "target_sha": "1783505d51128e279617c55b0ec3fed20a86cfed"
 }
