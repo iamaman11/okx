@@ -462,9 +462,34 @@ async fn t09_6_status_after_local_read_defer(
         if let Some(delay) = local_reason.and_then(|reason| {
             recorded_preview_local_defer(reason, rate_budget, remaining)
         }) {
+            // Only a typed LOCAL PrivateRestRead no-send defer authorizes
+            // retrying this read-only Status. It may have consumed the one
+            // raw venue /public/time page before that defer. Record a NEW,
+            // finite external clock observation at this witnessed retry
+            // boundary; never synthesize a clock in the HTTP GET handler,
+            // repeat an exchange POST, or relax mutation_timing(5000).
+            let deliveries_before = feed.public_clock_deliveries();
             tokio::time::timeout_at(until.into(), tokio::time::sleep(delay))
                 .await
                 .expect("T09.6 authorized read defer expired");
+            let observed_at = chrono::Utc::now().timestamp_millis();
+            let raw = serde_json::to_vec(&serde_json::json!({
+                "code":"0", "msg":"", "data":[{"ts":observed_at.to_string()}]
+            })).expect("recorded external clock wire");
+            let retired = feed.advance_recorded_public_clock(raw);
+            assert!(
+                retired <= 1,
+                "T09.6 retry cannot retire multiple unconsumed clock samples"
+            );
+            eprintln!(
+                "T09_6_CLOCK_AFTER_LOCAL_READ_DEFER_V1:remaining_ms={} delivered_before={} delivered_now={} retired={} posts_before={} posts_now={}",
+                until.saturating_duration_since(std::time::Instant::now()).as_millis(),
+                deliveries_before,
+                feed.public_clock_deliveries(),
+                retired,
+                posts_before,
+                posts_now,
+            );
             continue;
         }
         let status = result.unwrap_or_else(|reason| {
