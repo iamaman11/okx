@@ -558,6 +558,26 @@ impl AccountApi {
             .await
     }
 
+    /// Deadline-owned authenticated leverage GET. Only LOCAL rate admission
+    /// may wait before the HTTP request; there is no retry of sent reads or POST.
+    pub async fn leverage_wait(
+        &self,
+        instrument_id: &str,
+        margin_mode: MarginMode,
+        max_wait: Duration,
+    ) -> Result<Vec<LeverageInfo>, OkxError> {
+        self.client
+            .private_get_wait(
+                "/api/v5/account/leverage-info",
+                &[
+                    ("instId", instrument_id.to_owned()),
+                    ("mgnMode", margin_mode.to_string()),
+                ],
+                max_wait,
+            )
+            .await
+    }
+
     /// A non-order configuration write. Caller must hold the single native
     /// execution-owner mutex and independently verify both long/short sides.
     /// Never replay a possibly-sent request after an uncertain outcome.
@@ -618,6 +638,26 @@ impl AccountApi {
                     ("instType", instrument_type.to_string()),
                     ("instFamily", instrument_family.to_owned()),
                 ],
+            )
+            .await
+    }
+
+    /// Deadline-owned authenticated fee GET, same exact family scope as
+    /// fee_rates_for_family. Only local no-send read admission may wait.
+    pub async fn fee_rates_for_family_wait(
+        &self,
+        instrument_type: InstrumentType,
+        instrument_family: &str,
+        max_wait: Duration,
+    ) -> Result<Vec<FeeRate>, OkxError> {
+        self.client
+            .private_get_wait(
+                "/api/v5/account/trade-fee",
+                &[
+                    ("instType", instrument_type.to_string()),
+                    ("instFamily", instrument_family.to_owned()),
+                ],
+                max_wait,
             )
             .await
     }
