@@ -132,6 +132,12 @@ jobs:
           npm ci --prefix cloudflare/okx-mcp --ignore-scripts --no-audit --no-fund
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      - name: Compile and test Worker RiskBook and governance contracts
+        shell: pwsh
+        run: |
+          npm run check --prefix cloudflare/okx-mcp
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       # Component-only source: genuine persisted Workerd DO, concurrently
       # processing A/B RESERVE. This is not full Native T10-07 acceptance.
       - name: Verify persisted two-account central campaign cap
