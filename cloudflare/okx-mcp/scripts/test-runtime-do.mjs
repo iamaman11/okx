@@ -650,6 +650,11 @@ try {
             || lines.some(line => /stack overflow|has overflowed its stack/i.test(line)),
           t09_2_last_phase:phases.at(-1) ?? null,
           t09_2_phases:phases.slice(-10),
+          // Bounded counters from the actual recorded HTTP transport.
+          // Never forward arbitrary request URLs, bodies or credentials.
+          t09_3_source_reads:lines.filter(line =>
+            line.startsWith("T09_3_SOURCE_READS_V1 ")).slice(-6)
+            .map(line=>line.slice(0, 360)),
           rust_assertion:cause.slice(0, 1900) || "RUST_CHILD_EXIT_WITHOUT_ASSERTION",
           maintenance_errors:lines.filter(line => line.includes("OKX_ENTRY_BASELINE_V1")).slice(-12).map(line => line.slice(0, 240)),
           managed_census_denials:lines.filter(line =>
