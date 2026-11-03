@@ -32,6 +32,8 @@ jobs:
         run: |
           npm ci --prefix cloudflare/okx-mcp --ignore-scripts --no-audit --no-fund
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Precompile the same Native test before starting its bounded child
+        run: cargo test --locked -p okx-agent --lib native_to_workerd_risk_summary_over_actual_websocket --no-run
       - name: Native and persisted Worker T09.2
         shell: pwsh
         run: |
