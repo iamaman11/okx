@@ -491,7 +491,7 @@ async fn t09_6_source_backed_close_release(
     // Exercise exactly this two-peer schedule, not an unbounded retry or
     // a fabricated central receipt. No Status may create a venue order.
     t09_6_publish_final_empty_algos(feed);
-    let mut first_release_pending=false;
+    let mut pending_release_indices=Vec::new();
     for (index, entry) in entry_results.iter_mut().enumerate() {
         let intent=entry["intent_id"].as_str().expect("T09.6 persisted entry id");
         let status=t09_6_status_after_local_read_defer(
@@ -500,7 +500,7 @@ async fn t09_6_source_backed_close_release(
         assert_eq!(status["data"]["intent"]["state"],"FILLED",
             "T09.6 the original order remains terminal after both stop cancels");
         let release=&status["data"]["central_release"];
-        if index==0 && release["state"]=="pending" {
+        if release["state"]=="pending" {
             // A scoped-release identity failure is NOT equivalent to an
             // independently unproven terminal peer. Capture the actual
             // single-writer SQL scope and immutable frontiers at the first
@@ -554,7 +554,7 @@ async fn t09_6_source_backed_close_release(
             }
             assert_eq!(release["reason_code"],
                 "COHORT_OTHER_TERMINAL_RISK_RELEASE_PENDING",
-                "T09.6 first entry cannot release over an unproven terminal peer");
+                "T09.6 any pending entry requires an independently unproven peer");
             let id=intent.to_owned();
             let owner=accounts.resolve("fixture-a").await
                 .expect("T09.6 existing native SQL owner for peer ordering");
@@ -564,7 +564,7 @@ async fn t09_6_source_backed_close_release(
             ).await.expect("T09.6 read-only first terminal SQL proof");
             assert!(proof.is_some_and(|saved|saved.kind=="ENTRY_SETTLEMENT_PROVEN"),
                 "T09.6 pending RELEASE must preserve its genuine source-bound terminal proof");
-            first_release_pending=true;
+            pending_release_indices.push(index);
         } else {
             assert_eq!(release["state"],"verified",
                 "T09.6 later peer must RELEASE from independently proven SQL: intent={}, release={}, incremental={}, entry_fill={}, financial_error={}, remaining={}, protection={}",
@@ -578,21 +578,22 @@ async fn t09_6_source_backed_close_release(
         entry["release"]=release.clone();
         entry["financial_complete"]=status["data"]["financial_complete"].clone();
     }
-    if first_release_pending {
-        // The second Status has now source-verified and released its OWN
-        // terminal entry. One bounded read-only replay can discharge the
-        // first; a missing or changed peer proof remains an actual FAIL.
-        let first=&mut entry_results[0];
-        let intent=first["intent_id"].as_str().expect("T09.6 first persisted entry");
+    // Each public Status has now bound that entry's OWN immutable SQL
+    // terminal proof. On the next bounded pass, both peers can be proven
+    // in the same census; no retry grants risk or resends an exchange POST.
+    // A missing/changed proof or still-pending RELEASE remains a hard FAIL.
+    for index in pending_release_indices {
+        let entry=&mut entry_results[index];
+        let intent=entry["intent_id"].as_str().expect("T09.6 pending persisted entry");
         let status=t09_6_status_after_local_read_defer(
             trade,rate_budget,feed,intent,0
         ).await;
         assert_eq!(status["data"]["central_release"]["state"],"verified",
-            "T09.6 terminal first-entry RELEASE requires proven second peer: intent={}, release={}, financial_error={}",
+            "T09.6 terminal peer RELEASE requires both immutable SQL proofs: intent={}, release={}, financial_error={}",
             intent,status["data"]["central_release"],status["data"]["financial_error"]);
         assert_eq!(status["data"]["protection_incident"],false);
-        first["release"]=status["data"]["central_release"].clone();
-        first["financial_complete"]=status["data"]["financial_complete"].clone();
+        entry["release"]=status["data"]["central_release"].clone();
+        entry["financial_complete"]=status["data"]["financial_complete"].clone();
     }
     let owner=accounts.resolve("fixture-a").await.expect("T09.6 native account");
     let final_algos=owner.observer.pending_derivative_risk_algos().await
@@ -787,6 +788,29 @@ async fn t09_8_excess_entry_denied(
     let raw=|v|serde_json::to_vec(&serde_json::json!({
         "code":"0","msg":"","data":v
     })).expect("T09.8 recorded signed HTTP envelope");
+    // T09.8 is a separate pre-Execute signed account observation AFTER
+    // verified terminal sources. The earlier T09.6 balance pages may have
+    // been consumed by independent SQL maintenance; neither stale bytes nor
+    // an unbounded default may authorize new risk. Equity is unchanged:
+    // opening 100 minus the seven independently proven fees = 99.994.
+    let balance=raw(serde_json::json!([{
+        "totalEq":"99.994","adjEq":"99.994","uTime":at.clone(),
+        "details":[{
+            "ccy":"USDT","eq":"99.994","liab":"0",
+            "availEq":"99.994","availBal":"99.994","eqUsd":"99.994",
+            "uTime":at.clone()
+        }]
+    }]));
+    let retired=feed.advance_recorded_route(
+        "fixture-observer-a","/api/v5/account/balance",
+        (0..12).map(|_|RecordedGet {
+            access_key:"fixture-observer-a".into(),
+            path:"/api/v5/account/balance".into(),
+            required_query:vec![],
+            raw_response:balance.clone(),
+        }).collect()
+    );
+    eprintln!("T09_8_BALANCE_FRONTIER_V1 retired={retired} new_pages=12 equity=99.994");
     feed.advance_recorded_route(
         "fixture-observer-a","/api/v5/account/trade-fee",
         (0..12).map(|_|RecordedGet {

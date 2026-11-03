@@ -103,14 +103,9 @@
             "posSide":"long","pos":"0.5","mgnMode":"cross",
             "avgPx":"1000","markPx":"1000","uTime":filled_at.to_string()
         }]));
-        feed.advance_recorded_route(
-            "fixture-observer-a","/api/v5/account/positions",
-            (0..64).map(|_|RecordedGet {
-                access_key:"fixture-observer-a".into(),
-                path:"/api/v5/account/positions".into(),
-                required_query:vec![],raw_response:positions.clone(),
-            }).collect()
-        );
+        // T09.4: stage this 0.50 venue snapshot until its immutable
+        // 0.20 fill and linked bill are committed by the real SQL owner.
+        // Do not expose a position the native census cannot yet attribute.
         let mut signed_orders=Vec::new();
         for _ in 0..24 {
             for (order,quantity,at,client) in [
@@ -158,9 +153,8 @@
                 });
             }
         }
-        feed.advance_recorded_route(
-            "fixture-executor-a","/api/v5/trade/order-algo",signed_algos
-        );
+        // The attached stop is real recorded venue evidence, but is not
+        // visible to the aggregate census until the same SQL fill barrier.
         let mut pending=Vec::new();
         for _ in 0..12 {
             for inst in ["SWAP","FUTURES"] {
@@ -201,9 +195,8 @@
                 }
             }
         }
-        feed.advance_recorded_route(
-            "fixture-observer-a","/api/v5/trade/orders-algo-pending",pending
-        );
+        // Both owned pending stops are published together at the barrier
+        // below, so a concurrent census never sees a premature new stop.
         let owner=accounts.resolve("fixture-a").await.unwrap();
         let mut latest=String::from("NOT_OBSERVED");
         let sql=tokio::time::timeout(Duration::from_secs(16),async {
@@ -248,6 +241,24 @@
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }
         }).await.unwrap_or_else(|_|panic!("T09_4_CAPTURE_UNPROVEN:{latest}"));
+        // Only after native SQL has independently sourced the exact fill and
+        // bill may the recorded observer publish the corresponding 0.50
+        // position and both live stops. No SQL/risk receipt is test-written.
+        feed.advance_recorded_route(
+            "fixture-observer-a","/api/v5/account/positions",
+            (0..64).map(|_|RecordedGet {
+                access_key:"fixture-observer-a".into(),
+                path:"/api/v5/account/positions".into(),
+                required_query:vec![],raw_response:positions.clone(),
+            }).collect()
+        );
+        feed.advance_recorded_route(
+            "fixture-executor-a","/api/v5/trade/order-algo",signed_algos
+        );
+        feed.advance_recorded_route(
+            "fixture-observer-a","/api/v5/trade/orders-algo-pending",pending
+        );
+        eprintln!("T09_4_CAUSAL_INVENTORY_AFTER_SQL_V1 fill=0.2 bill=0.001 position=0.5 stops=2");
         // The production LocalBudget may defer this READ-ONLY status even
         // after immutable fill/bill capture succeeded. An unsent read can
         // safely wait for its bounded local rate window; never retry POST.
@@ -477,6 +488,14 @@
 
         // The producer must publish NEW signed public quotes only AFTER
         // the slower financial frontier is proven, before a single Execute.
+        // Avoid aging already signed public market and fee evidence while
+        // awaiting unrelated Worker Summary. This is read-only risk evidence.
+        let mut before=summary("risk_t09_4_before_managed_add");
+        before.installation_id="installation_test".into();
+        let observed=risk.request(before).await.unwrap();
+        let start_budget=observed.budget.as_ref().unwrap().entry_budget.as_ref().unwrap();
+        assert_eq!(start_budget.consumed_usd,"4.002");
+        assert_eq!(start_budget.reserved_usd,"0");
         need_new_market.send(()).expect("T09.4 market request channel");
         fresh_market_ready.await.expect("T09.4 recorded market refresh missing");
         let signed_now=chrono::Utc::now().timestamp_millis().to_string();
@@ -602,12 +621,7 @@
             protection:Some(Protection::Price{stop_price:"900".into()}),
             expires_in_ms:30_000,
         };
-        let mut before=summary("risk_t09_4_before_managed_add");
-        before.installation_id="installation_test".into();
-        let observed=risk.request(before).await.unwrap();
-        let start_budget=observed.budget.as_ref().unwrap().entry_budget.as_ref().unwrap();
-        assert_eq!(start_budget.consumed_usd,"4.002");
-        assert_eq!(start_budget.reserved_usd,"0");
+
         assert!(request.valid());
         let response=trade.trade("fixture-a",&request,None).await
             .unwrap_or_else(|reason|panic!("T09_4_MANAGED_ADD_DENIED:{reason}"));
