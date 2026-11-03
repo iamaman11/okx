@@ -618,8 +618,65 @@ async fn t09_6_source_backed_close_release(
                 "last_local_rate_throttle":format!("{:?}",rate_budget.snapshot().last_throttle)
             })
         } else {serde_json::Value::Null};
+        // The existing fail-closed peer gate does not identify which SQL
+        // obligation is still pending. On failure only, read the ORIGINAL
+        // single-writer SQL owner and Worker; neither read can change risk
+        // state, manufacture a terminal proof or send a venue POST.
+        let peer_sql = if status["data"]["central_release"]["state"]!="verified" {
+            let owner=accounts.resolve("fixture-a").await
+                .expect("T09.6 failed peer diagnostic uses the native SQL owner");
+            owner.execution.store.call(
+                std::time::Instant::now()+Duration::from_secs(3),
+                |s| {
+                    let (intents,pending)=s.risk_census_intents(100)?;
+                    let mut cohort=Vec::new();
+                    for member in &intents {
+                        let saved=s.operation(&format!("entry-settlement:{}",member.intent_id))?;
+                        let proof=saved.as_ref().and_then(|o|
+                            serde_json::from_str::<okx_execution::EntrySettlementEvidence>(
+                                &o.result_ref
+                            ).ok()
+                        );
+                        let lots=s.active_lots(&member.instrument_id)?;
+                        cohort.push(serde_json::json!({
+                            "id":member.intent_id,
+                            "state":member.state.as_str(),
+                            "revision":member.revision,
+                            "risk_increase":member.risk_increase,
+                            "pending":pending.binary_search(&member.intent_id).is_ok(),
+                            "active_receipt":s.active_central_receipt(&member.intent_id)?.is_some(),
+                            "proof_kind":saved.as_ref().map(|o|o.kind.as_str()),
+                            "proof_hash_matches":saved.as_ref().map(|o|o.request_hash==member.plan_hash),
+                            "proof_venue_update_ms":proof.as_ref().map(|p|p.venue_update_ms),
+                            "proof_source_through_ms":proof.as_ref().map(|p|p.source_covered_through_ms),
+                            "late_pending":s.entry_late_pending(&member.intent_id)?,
+                            "remaining_owned_lots":lots.iter().filter(|l|
+                                l.intent_id.as_deref()==Some(member.intent_id.as_str())
+                                    && l.remaining_qty>Decimal::ZERO
+                            ).count()
+                        }));
+                    }
+                    let fills=s.cursor("fills","SWAP")?;
+                    let bills=s.cursor("bills","account")?;
+                    Ok(serde_json::json!({
+                        "cohort":cohort,
+                        "fills_watermark":fills.as_ref().map(|c|c.watermark),
+                        "fills_generation":fills.as_ref().map(|c|c.generation),
+                        "fills_gaps":fills.as_ref().map(|c|c.coverage_gaps.len()),
+                        "bills_watermark":bills.as_ref().map(|c|c.watermark),
+                        "bills_generation":bills.as_ref().map(|c|c.generation),
+                        "bills_gaps":bills.as_ref().map(|c|c.coverage_gaps.len())
+                    }))
+                }
+            ).await
+        } else {Ok(serde_json::Value::Null)};
+        let worker_sequence = if status["data"]["central_release"]["state"]!="verified" {
+            let mut command=summary("risk_t09_6_failed_peer_readback");
+            command.installation_id="installation_test".into();
+            risk.request(command).await.map(|w|w.risk_book_sequence)
+        } else {Ok(None)};
         assert_eq!(status["data"]["central_release"]["state"],"verified",
-            "T09.6 terminal peer RELEASE requires both immutable SQL proofs: intent={}, release={}, financial_error={}, source_trace={}",
+            "T09.6 peer release diagnostic: intent={}, release={}, sql={peer_sql:?}, worker_sequence={worker_sequence:?}, financial_error={}, source_trace={}",
             intent,status["data"]["central_release"],status["data"]["financial_error"],source_trace);
         assert_eq!(status["data"]["protection_incident"],false);
         entry["release"]=status["data"]["central_release"].clone();
