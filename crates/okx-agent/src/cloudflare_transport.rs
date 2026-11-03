@@ -1831,21 +1831,24 @@ mod raw_native_session_tests {
         // The producer stops as soon as ONE genuine GET consumes the sample,
         // and cannot rearm it (atomic queue+delivery fence in RecordedAccountHttp).
         // This models a changing exchange clock without a test HTTP server.
-        let clock_before_first_execute=feed.public_clock_deliveries();
-        let clock_feed=feed.clone();
-        let first_clock_publisher=tokio::spawn(async move {
-            let mut ticks=tokio::time::interval(Duration::from_millis(750));
+        let clock_before_first_execute = feed.public_clock_deliveries();
+        let clock_feed = feed.clone();
+        let first_clock_publisher = tokio::spawn(async move {
+            let mut ticks = tokio::time::interval(Duration::from_millis(750));
             ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            let mut published=0usize;
+            let mut published = 0usize;
             for _ in 0..32 {
                 ticks.tick().await;
-                let raw=serde_json::to_vec(&json!({
-                    "code":"0","msg":"","data":[{"ts":chrono::Utc::now().timestamp_millis().to_string()}]
-                })).unwrap();
-                if !clock_feed.refresh_unconsumed_public_clock(clock_before_first_execute,raw) {
+                let raw = serde_json::to_vec(&json!({
+                    "code": "0",
+                    "msg": "",
+                    "data": [{"ts": chrono::Utc::now().timestamp_millis().to_string()}]
+                }))
+                .unwrap();
+                if !clock_feed.refresh_unconsumed_public_clock(clock_before_first_execute, raw) {
                     break;
                 }
-                published+=1;
+                published += 1;
             }
             published
         });
@@ -1970,13 +1973,18 @@ mod raw_native_session_tests {
             }
             panic!("T09.1 exhausted definitive local no-send admission attempts");
         }).await;
-        let clock_samples=tokio::time::timeout(Duration::from_secs(2),first_clock_publisher)
-            .await.expect("first external clock publisher did not terminate")
+        let clock_samples = tokio::time::timeout(Duration::from_secs(2), first_clock_publisher)
+            .await
+            .expect("first external clock publisher did not terminate")
             .expect("first external clock publisher task failed");
-        assert!(feed.public_clock_deliveries()>clock_before_first_execute,
-            "production clock evidence must consume a one-use raw clock GET");
-        eprintln!("T09_1_RECORDED_CLOCK_SOURCE_V1:samples={clock_samples} delivered={}",
-            feed.public_clock_deliveries()-clock_before_first_execute);
+        assert!(
+            feed.public_clock_deliveries() > clock_before_first_execute,
+            "production clock evidence must consume a one-use raw clock GET"
+        );
+        eprintln!(
+            "T09_1_RECORDED_CLOCK_SOURCE_V1:samples={clock_samples} delivered={}",
+            feed.public_clock_deliveries() - clock_before_first_execute
+        );
         // Venue ACK and identity-bound order readback prove the create,
         // but no fill/fee/bill has been published. The production Engine
         // must report financial incompleteness instead of fabricated money.
