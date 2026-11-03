@@ -1,6 +1,6 @@
 //! Strict public trading, strategy and portfolio commands. Native owners classify risk.
+use crate::numeric::{DecimalInputError, positive_decimal};
 use serde::{Deserialize, Serialize};
-use crate::numeric::{positive_decimal, DecimalInputError};
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum TradeRequest {
@@ -332,10 +332,7 @@ impl TradeRequest {
 
     /// Canonical UTF-8 preimage for SHA256 of the semantic trade request.
     /// This deliberately excludes resolved policy and source revisions.
-    pub fn canonical_semantic_json(
-        &self,
-        account_key: &str,
-    ) -> Result<String, DecimalInputError> {
+    pub fn canonical_semantic_json(&self, account_key: &str) -> Result<String, DecimalInputError> {
         let normalized = self.canonical_semantic()?;
         let envelope = serde_json::json!({
             "schema": "okx.trade.semantic/v1",
@@ -499,18 +496,29 @@ mod typed_strategy_parameters_tests {
     fn s2_01_execute_semantic_decimal_equivalence() {
         let raw = r#"{"action":"execute","idempotency_key":"numeric_semantic_01","operation":"open","strategy_instance":"manual","instrument":"BTC-USDT-SWAP","side":"long","sizing":{"max_loss_usd":"5.0"},"order":{"type":"market","limit_price":null,"reference":null,"max_slippage_bps":5},"protection":{"stop_price":"900.00"},"expires_in_ms":10000}"#;
         let first: TradeRequest = serde_json::from_str(raw).unwrap();
-        let second: TradeRequest = serde_json::from_str(
-            &raw.replace("5.0", "5.00").replace("900.00", "900")
-        ).unwrap();
+        let second: TradeRequest =
+            serde_json::from_str(&raw.replace("5.0", "5.00").replace("900.00", "900")).unwrap();
         assert_eq!(
             first.canonical_semantic().unwrap(),
             second.canonical_semantic().unwrap()
         );
         let canonical = first.canonical_semantic().unwrap();
         match canonical {
-            TradeRequest::Execute { sizing, protection, .. } => {
-                assert_eq!(sizing, Sizing::MaxLossUsd { max_loss_usd: "5".into() });
-                assert_eq!(protection, Some(Protection::Price { stop_price: "900".into() }));
+            TradeRequest::Execute {
+                sizing, protection, ..
+            } => {
+                assert_eq!(
+                    sizing,
+                    Sizing::MaxLossUsd {
+                        max_loss_usd: "5".into()
+                    }
+                );
+                assert_eq!(
+                    protection,
+                    Some(Protection::Price {
+                        stop_price: "900".into()
+                    })
+                );
             }
             _ => panic!("expected execute"),
         }

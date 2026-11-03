@@ -39,9 +39,7 @@ pub fn canonical_decimal(
     if whole.is_empty()
         || whole.len() > 1 && whole.starts_with('0')
         || !whole.bytes().all(|b| b.is_ascii_digit())
-        || fraction.is_some_and(|part| {
-            part.is_empty() || !part.bytes().all(|b| b.is_ascii_digit())
-        })
+        || fraction.is_some_and(|part| part.is_empty() || !part.bytes().all(|b| b.is_ascii_digit()))
     {
         return Err(DecimalInputError::InvalidSyntax);
     }
