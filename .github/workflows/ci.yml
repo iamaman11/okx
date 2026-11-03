@@ -299,25 +299,6 @@ jobs:
           npm ci --prefix cloudflare/okx-mcp --ignore-scripts --no-audit --no-fund
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      # #449 B1: genuine two-account public Native TradeService admission,
-      # independent account SQL and persisted Worker shared cap. This is a
-      # PARTIAL prerequisite and MUST NOT satisfy T09-MA/T10-07 manifest.
-      - name: B1 Native two-account shared-cap prerequisite (not T09-MA/T10-07)
-        if: github.event_name == 'pull_request'
-        shell: pwsh
-        run: |
-          $artifacts = Join-Path $env:RUNNER_TEMP "b1-native"
-          node scripts/trade-integration/b1-native-cap.mjs --artifacts "$artifacts"
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-      - uses: actions/upload-artifact@v4
-        if: always() && github.event_name == 'pull_request'
-        with:
-          name: b1-native-partial-${{ github.event.pull_request.head.sha || github.sha }}
-          path: ${{ runner.temp }}\b1-native
-          if-no-files-found: warn
-          retention-days: 7
-
       - name: Mandatory native Windows T09/T10 recorded acceptance
         if: github.event_name == 'pull_request'
         shell: pwsh
@@ -559,3 +540,38 @@ jobs:
           path: ${{ runner.temp }}\\t09-repro
           if-no-files-found: warn
           retention-days: 14
+
+# B1 uses its own Windows OS process/runner. Its source/SQL/workerd test
+  # must not alter the workload or maintenance cadence of mandatory ALL26.
+  # This is a PARTIAL Native prerequisite, not T09-MA/T10-07 acceptance.
+  b1-native:
+    name: windows-b1-native-prerequisite
+    needs: classify
+    if: github.event_name == 'pull_request' && needs.classify.outputs.build_required == 'true'
+    runs-on: windows-latest
+    timeout-minutes: 18
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de
+        with:
+          toolchain: 1.95.0
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Install locked production workerd test dependencies
+        run: npm ci --prefix cloudflare/okx-mcp --ignore-scripts --no-audit --no-fund
+      - name: Precompile actual Native/Worker child
+        run: cargo test --locked -p okx-agent --lib native_to_workerd_risk_summary_over_actual_websocket --no-run
+      - name: B1 two-account Native shared-cap negative (partial only)
+        shell: pwsh
+        run: |
+          $artifacts = Join-Path $env:RUNNER_TEMP "b1-native"
+          node scripts/trade-integration/b1-native-cap.mjs --artifacts "$artifacts"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: b1-native-partial-${{ github.event.pull_request.head.sha || github.sha }}
+          path: ${{ runner.temp }}\b1-native
+          if-no-files-found: warn
+          retention-days: 7
