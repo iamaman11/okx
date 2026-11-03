@@ -161,7 +161,10 @@ export async function actualNativeWorker(root, signal, { statusProbe = false, se
             nativeCrossUidDenial: receipt(stdout, "T09_MA_CROSS_UID_DENIAL_V1"),
             nativeStrategyAccountPreflight: receipt(stdout, "T09_MA_NATIVE_SQL_STRATEGY_PREFLIGHT_V1"),
             workerSecondAdmission: receipt(stdout, "T09_2_WORKER_AFTER_RECONNECT_V1"),
-            ...(partialFills ? { nativePartialFills: receipt(stdout, "T09_3_NATIVE_PARTIAL_TERMINAL_V1") } : {}),
+            ...(partialFills ? {
+              nativePartialFills: receipt(stdout, "T09_3_NATIVE_PARTIAL_TERMINAL_V1"),
+              nativeTerminalSettlement: receipt(stdout, "T09_3_TERMINAL_SETTLEMENT_RECONCILED_V1"),
+            } : {}),
             ...(managedAdd ? { nativeManagedAdd: receipt(stdout, "T09_4_NATIVE_MANAGED_ADD_V1") } : {}),
             ...(closeMode ? { nativeCloseAck: receipt(stdout, "T09_6_NATIVE_CLOSE_ACK_V1") } : {}),
             ...(closeMode ? { nativeCloseTerminal: receipt(stdout, "T09_6_NATIVE_TERMINAL_V1"), nativeCloseFinancialSources:receipt(stdout,"T09_6_NATIVE_FINANCIAL_SOURCES_V1"), workerCloseReconciled:receipt(stdout,"T09_6_WORKER_CLOSE_RECONCILED_V1") } : {}),
