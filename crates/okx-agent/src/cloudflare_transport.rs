@@ -3330,11 +3330,100 @@ mod raw_native_session_tests {
                     // it independently on the SAME Tokio runtime and retain
                     // the unchanged TradeService, SQL and Worker owners.
                     let execute_trade = trade.clone();
+                    let execute_accounts = accounts.clone();
+                    let execute_risk = risk.clone();
+                    let execute_feed = feed.clone();
+                    let execute_budget = rate_budget.clone();
                     let execute_task = tokio::spawn(async move {
                         eprintln!("T09_2_PHASE_V1:EXECUTE_TASK_STARTED");
-                        let result = execute_trade.trade("fixture-a", &second, None).await;
-                        eprintln!("T09_2_PHASE_V1:EXECUTE_TASK_RETURNED");
-                        result
+                        let until = std::time::Instant::now() + Duration::from_secs(10);
+                        for attempt in 0..24 {
+                            let result = execute_trade.trade("fixture-a", &second, None).await;
+                            match result {
+                                Ok(result) => {
+                                    eprintln!("T09_2_PHASE_V1:EXECUTE_TASK_RETURNED");
+                                    return Ok(result);
+                                }
+                                Err(reason) => {
+                                    // A real shared PrivateRestUser RateBudget
+                                    // may defer account/config before an intent
+                                    // exists. This is NOT permission to replay
+                                    // an ambiguous/sent order. Re-enter only
+                                    // after proving no SQL intent, no new POST,
+                                    // and no new shared monetary reservation.
+                                    let remaining = until.saturating_duration_since(
+                                        std::time::Instant::now()
+                                    );
+                                    let Some(delay) = recorded_preview_local_defer(
+                                        &reason,
+                                        &execute_budget,
+                                        remaining,
+                                    ) else {
+                                        return Err(reason);
+                                    };
+                                    let owner = execute_accounts
+                                        .resolve("fixture-a")
+                                        .await
+                                        .expect("local defer account owner");
+                                    let absent = owner
+                                        .execution
+                                        .store
+                                        .call(
+                                            std::time::Instant::now() + Duration::from_secs(3),
+                                            |s| Ok(s.by_idempotency(
+                                                "t09_real_public_execute_0002"
+                                            )?.is_none()),
+                                        )
+                                        .await
+                                        .expect("local defer exact SQL absence");
+                                    assert!(absent, "cannot retry after a durable intent exists");
+                                    let posts = execute_feed.outbound_posts.lock().unwrap().len();
+                                    assert_eq!(
+                                        posts, 3,
+                                        "rate-deferred execute cannot have a possible venue POST"
+                                    );
+                                    let mut check = summary(&format!(
+                                        "risk_t09_2_local_get_defer_{attempt}"
+                                    ));
+                                    check.installation_id = "installation_test".into();
+                                    let current = execute_risk
+                                        .request(check)
+                                        .await
+                                        .expect("local defer central readback");
+                                    let b = current.budget.as_ref().expect("central budget");
+                                    let entry = b.entry_budget.as_ref().expect("entry budget");
+                                    assert_eq!(
+                                        entry.reserved_usd,
+                                        if add_mode { "0" } else { "4" },
+                                        "local read defer must not hold new entry risk"
+                                    );
+                                    assert_eq!(
+                                        entry.consumed_usd,
+                                        if add_mode { "0" } else { "1.0005" },
+                                        "local read defer cannot change campaign spent"
+                                    );
+                                    assert_eq!(
+                                        b.reserved_loss_usd,
+                                        if add_mode { "0" } else { "1" },
+                                        "local read defer cannot mint modeled loss"
+                                    );
+                                    let wait = delay.max(Duration::from_millis(250));
+                                    if attempt == 23 || wait > remaining {
+                                        return Err(format!(
+                                            "T09_2_LOCAL_PRIVATE_GET_DEFER_DEADLINE:{reason}"
+                                        ));
+                                    }
+                                    eprintln!(
+                                        "T09_2_LOCAL_PRIVATE_GET_DEFER_V1:attempt={attempt} delay_ms={} no_intent={absent} posts={posts} entry_reserved={} entry_spent={}",
+                                        wait.as_millis(),
+                                        entry.reserved_usd,
+                                        entry.consumed_usd
+                                    );
+                                    tokio::time::sleep(wait).await;
+                                }
+                            }
+                        }
+                        Err("T09_2_LOCAL_PRIVATE_GET_DEFER_EXHAUSTED".into())
                     });
                     eprintln!("T09_2_PHASE_V1:EXECUTE_TASK_SPAWNED");
                     let accepted = execute_task
