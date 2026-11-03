@@ -2164,10 +2164,48 @@ mod raw_native_session_tests {
             .await
             .expect_err("S2-04 side mismatch must not replay");
         assert_eq!(side_conflict_reason, "IDEMPOTENCY_CONFLICT");
+        let mut reference_conflict = semantic_replay.clone();
+        if let TradeRequest::Execute { order, .. } = &mut reference_conflict {
+            order.reference = Some("other_saved_intent".into());
+        } else {
+            panic!("S2-04 target variant missing");
+        }
+        assert!(reference_conflict.valid());
+        let reference_conflict_reason = trade
+            .trade("fixture-a", &reference_conflict, None)
+            .await
+            .expect_err("S2-04 target reference change cannot reuse an intent");
+        assert_eq!(reference_conflict_reason, "IDEMPOTENCY_CONFLICT");
+        let mut basis_conflict = semantic_replay.clone();
+        if let TradeRequest::Execute { protection, .. } = &mut basis_conflict {
+            *protection = Some(Protection::Distance {
+                stop_distance_bps: 1000,
+            });
+        } else {
+            panic!("S2-04 stop basis variant missing");
+        }
+        assert!(basis_conflict.valid());
+        let basis_conflict_reason = trade
+            .trade("fixture-a", &basis_conflict, None)
+            .await
+            .expect_err("S2-04 protection basis change cannot reuse an intent");
+        assert_eq!(basis_conflict_reason, "IDEMPOTENCY_CONFLICT");
+        let mut deadline_conflict = semantic_replay.clone();
+        if let TradeRequest::Execute { expires_in_ms, .. } = &mut deadline_conflict {
+            *expires_in_ms = 20000;
+        } else {
+            panic!("S2-04 explicit deadline variant missing");
+        }
+        assert!(deadline_conflict.valid());
+        let deadline_conflict_reason = trade
+            .trade("fixture-a", &deadline_conflict, None)
+            .await
+            .expect_err("S2-04 explicit expiry change cannot extend an existing intent");
+        assert_eq!(deadline_conflict_reason, "IDEMPOTENCY_CONFLICT");
         assert_eq!(
             feed.outbound_posts.lock().unwrap().len(),
             1,
-            "S2-04 equivalent replay and two conflicts may not create extra venue POSTs"
+            "S2-04 equivalent replay and five conflicts may not create extra venue POSTs"
         );
         // A read-only replay may return UNKNOWN even after transport has
         // consumed the raw GET: a deadline or decode/readback failure does
@@ -2243,6 +2281,9 @@ mod raw_native_session_tests {
                 "semantic_decimal_equivalent_replay":true,
                 "semantic_amount_conflict_reason":amount_conflict_reason,
                 "semantic_side_conflict_reason":side_conflict_reason,
+                "semantic_reference_conflict_reason":reference_conflict_reason,
+                "semantic_basis_conflict_reason":basis_conflict_reason,
+                "semantic_deadline_conflict_reason":deadline_conflict_reason,
                 "reserved_entry_usd_before_replay": before_repeat.budget.as_ref().unwrap().entry_budget.as_ref().unwrap().reserved_usd,
                 "reserved_entry_usd_after_replay": after.budget.as_ref().unwrap().entry_budget.as_ref().unwrap().reserved_usd,
             })

@@ -48,6 +48,9 @@ export async function run({ caseId, root, signal }) {
     "S2-04 Native/Worker must reuse decimal-semantic intent");
   assert.equal(native.semantic_amount_conflict_reason, "IDEMPOTENCY_CONFLICT");
   assert.equal(native.semantic_side_conflict_reason, "IDEMPOTENCY_CONFLICT");
+  assert.equal(native.semantic_reference_conflict_reason, "IDEMPOTENCY_CONFLICT");
+  assert.equal(native.semantic_basis_conflict_reason, "IDEMPOTENCY_CONFLICT");
+  assert.equal(native.semantic_deadline_conflict_reason, "IDEMPOTENCY_CONFLICT");
   assert.equal(native.reserved_entry_usd_before_replay, "5.0005");
   assert.equal(native.reserved_entry_usd_after_replay,
     native.reserved_entry_usd_before_replay);
@@ -79,6 +82,12 @@ export async function run({ caseId, root, signal }) {
         actual:native.semantic_amount_conflict_reason },
       { id:"s2_04_different_side_conflict", expected:"IDEMPOTENCY_CONFLICT",
         actual:native.semantic_side_conflict_reason },
+      { id:"s2_04_changed_reference_conflict", expected:"IDEMPOTENCY_CONFLICT",
+        actual:native.semantic_reference_conflict_reason },
+      { id:"s2_04_changed_stop_basis_conflict", expected:"IDEMPOTENCY_CONFLICT",
+        actual:native.semantic_basis_conflict_reason },
+      { id:"s2_04_changed_expiry_conflict", expected:"IDEMPOTENCY_CONFLICT",
+        actual:native.semantic_deadline_conflict_reason },
       { id:"no_second_risk_reserve", expected:"5.0005",
         actual:native.reserved_entry_usd_after_replay },
       { id:"worker_cross_owner_reserved_entry", expected:"5.0005",
