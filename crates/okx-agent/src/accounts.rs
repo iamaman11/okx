@@ -1418,18 +1418,15 @@ pub(crate) mod recorded_support {
                 if path == "/api/v5/trade/orders-algo-pending" {
                     let selected = {
                         let mut phase = self.causal_algos.lock().unwrap();
-                        if let Some(scenario) = phase.as_mut() {
+                        if let Some(scenario) =
+                            phase.as_mut().filter(|scenario| key == scenario.account)
+                        {
                             let mut query = request
                                 .url()
                                 .query_pairs()
                                 .map(|(k, v)| (k.into_owned(), v.into_owned()))
                                 .collect::<Vec<_>>();
                             query.sort();
-                            if key != scenario.account {
-                                return Err(OkxError::Response(
-                                    "TRANSCRIPT_ALGO_ACCOUNT_MISMATCH".into(),
-                                ));
-                            }
                             let scope = scenario
                                 .scopes
                                 .iter_mut()
@@ -1462,6 +1459,14 @@ pub(crate) mod recorded_support {
                             ));
                             Some((raw, scenario.held_read.take()))
                         } else {
+                            // Account B retains its independently scripted
+                            // signed source queue; unknown cross-account
+                            // sources cannot read the account A fixture.
+                            if phase.is_some() && !scripted {
+                                return Err(OkxError::Response(
+                                    "TRANSCRIPT_ALGO_ACCOUNT_MISMATCH".into(),
+                                ));
+                            }
                             None
                         }
                     };
