@@ -1,6 +1,6 @@
 {
   "schema": "okx.windows-preflight-request/v1",
-  "request_id": "t09-all26-exact-f843191-030",
-  "case": "ALL26",
-  "target_sha": "f843191e4d348fab8a668841a42551f1e2d7b107"
+  "request_id": "t096-close-balance-d3945c2-031",
+  "case": "T09.6",
+  "target_sha": "d3945c2abb123adb6a58d6f67745eba4393a5f6c"
 }
