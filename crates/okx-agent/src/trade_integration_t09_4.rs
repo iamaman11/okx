@@ -254,22 +254,46 @@
                             .ok_or(okx_execution::StoreError::Invalid("T09_4_FILL_CURSOR_MISSING"))?;
                         let b=s.cursor("bills","account")?
                             .ok_or(okx_execution::StoreError::Invalid("T09_4_BILL_CURSOR_MISSING"))?;
+                        // A committed fill/bill does not by itself certify
+                        // that the SAME native SQL finance projection has
+                        // written the corresponding live position lots.
+                        // Publishing signed 0.50/2-stop observations before
+                        // that projection makes an authentic aggregate
+                        // protection census fail closed at a false frontier.
+                        let lots=s.active_lots("BTC-USDT-SWAP")?;
+                        let own_qty=lots.iter()
+                            .filter(|l|l.intent_id.as_deref()==Some(id.as_str()))
+                            .fold(Decimal::ZERO,|sum,l|sum+l.remaining_qty);
+                        let prior_qty=lots.iter()
+                            .filter(|l|l.intent_id.as_deref()!=Some(id.as_str()))
+                            .fold(Decimal::ZERO,|sum,l|sum+l.remaining_qty);
+                        let (intents,_pending)=s.risk_census_intents(100)?;
+                        let unresolved=intents.iter()
+                            .filter(|i|matches!(i.state,
+                                okx_execution::IntentState::Posting |
+                                okx_execution::IntentState::Unknown))
+                            .map(|i|(i.intent_id.clone(),format!("{:?}",i.state)))
+                            .collect::<Vec<_>>();
                         Ok((
                             s.intent_fill_cost_evidence(&id,f.watermark),
                             s.intent_fee_bill_evidence(&id,b.watermark),
-                            f.watermark,b.watermark,f.coverage_gaps,b.coverage_gaps
+                            f.watermark,b.watermark,f.coverage_gaps,b.coverage_gaps,
+                            own_qty,prior_qty,unresolved
                         ))
                     }
                 ).await;
                 match observed {
-                    Ok((Ok(f),Ok(b),fw,bw,fg,bg)) => {
-                        latest=format!("fill={f:?} bill={b:?} fw={fw} bw={bw}");
+                    Ok((Ok(f),Ok(b),fw,bw,fg,bg,own,prior,unresolved)) => {
+                        latest=format!("fill={f:?} bill={b:?} fw={fw} bw={bw} own_lots={own} prior_lots={prior} unresolved={unresolved:?}");
                         if f.filled_quantity==Decimal::new(2,1)
                             && f.fill_count==1
                             && b.linked_bill_count==1
                             && b.conservative_verified_fee_usdt==Decimal::new(1,3)
                             && fw>=filled_at && bw>=filled_at
                             && fg.is_empty() && bg.is_empty()
+                            && own==Decimal::new(2,1)
+                            && prior==Decimal::new(3,1)
+                            && unresolved.is_empty()
                         {
                             break serde_json::json!({
                                 "fill_count":f.fill_count,
@@ -277,7 +301,10 @@
                                 "fee_usdt":b.conservative_verified_fee_usdt.normalize().to_string(),
                                 "bill_count":b.linked_bill_count,
                                 "linked_bill_source_digest":b.source_digest,
-                                "fill_watermark":fw,"bill_watermark":bw
+                                "fill_watermark":fw,"bill_watermark":bw,
+                                "sql_owned_add_lots":own.normalize().to_string(),
+                                "sql_owned_prior_lots":prior.normalize().to_string(),
+                                "sql_posting_or_unknown_intents":0
                             });
                         }
                     }
@@ -287,7 +314,8 @@
             }
         }).await.unwrap_or_else(|_|panic!("T09_4_CAPTURE_UNPROVEN:{latest}"));
         // Only after native SQL has independently sourced the exact fill and
-        // bill may the recorded observer publish the corresponding 0.50
+        // bill, projected 0.20 + 0.30 owned lots, and proved no unresolved
+        // POSTING/UNKNOWN intent may the observer publish the 0.50
         // position and both live stops. No SQL/risk receipt is test-written.
         feed.advance_recorded_route(
             "fixture-observer-a","/api/v5/account/positions",
