@@ -2,7 +2,7 @@
   "tools": [
     {
       "name": "accounts",
-      "description": "Manage accounts and limits.",
+      "description": "Accounts and limits.",
       "inputSchema": {
         "oneOf": [
           {
@@ -295,7 +295,7 @@
         "$defs": {
           "positiveDecimal": {
             "type": "string",
-            "pattern": "^(?=(?:[^0-9]*[0-9]){1,28}[^0-9]*$)(?!0+(\\.0+)?$)(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?$"
+            "pattern": "^(?!\\d{29})(?!0(?:\\.0+)?$)(?:0|[1-9]\\d*)(?:\\.\\d+)?$"
           }
         }
       },
@@ -307,7 +307,7 @@
     },
     {
       "name": "strategies",
-      "description": "Manage strategies; may trade.",
+      "description": "Strategies; may trade.",
       "inputSchema": {
         "oneOf": [
           {
@@ -585,7 +585,7 @@
         "$defs": {
           "positiveDecimal": {
             "type": "string",
-            "pattern": "^(?=(?:[^0-9]*[0-9]){1,28}[^0-9]*$)(?!0+(\\.0+)?$)(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?$"
+            "pattern": "^(?!\\d{29})(?!0(?:\\.0+)?$)(?:0|[1-9]\\d*)(?:\\.\\d+)?$"
           }
         }
       },
@@ -597,7 +597,7 @@
     },
     {
       "name": "market",
-      "description": "Read market data.",
+      "description": "Market data.",
       "inputSchema": {
         "oneOf": [
           {
@@ -888,7 +888,7 @@
               },
               "size_contracts": {
                 "type": "string",
-                "pattern": "^(?=(?:[^0-9]*[0-9]){1,28}[^0-9]*$)(?!0+(\\.0+)?$)(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?$"
+                "pattern": "^(?!\\d{29})(?!0(?:\\.0+)?$)(?:0|[1-9]\\d*)(?:\\.\\d+)?$"
               }
             },
             "required": [
@@ -919,7 +919,7 @@
     },
     {
       "name": "research",
-      "description": "Manage research.",
+      "description": "Research.",
       "inputSchema": {
         "oneOf": [
           {
@@ -1353,7 +1353,7 @@
     },
     {
       "name": "portfolio",
-      "description": "Portfolio scenarios.",
+      "description": "Portfolio.",
       "inputSchema": {
         "oneOf": [
           {
@@ -1530,7 +1530,7 @@
         "$defs": {
           "positiveDecimal": {
             "type": "string",
-            "pattern": "^(?=(?:[^0-9]*[0-9]){1,28}[^0-9]*$)(?!0+(\\.0+)?$)(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?$"
+            "pattern": "^(?!\\d{29})(?!0(?:\\.0+)?$)(?:0|[1-9]\\d*)(?:\\.\\d+)?$"
           }
         }
       },
@@ -1542,7 +1542,7 @@
     },
     {
       "name": "diagnostics",
-      "description": "Runtime diagnostics.",
+      "description": "Diagnostics.",
       "inputSchema": {
         "oneOf": [
           {
@@ -1620,7 +1620,7 @@
     },
     {
       "name": "trade.preview",
-      "description": "Preview a trade; no order.",
+      "description": "Preview; no order.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -1793,7 +1793,7 @@
         "$defs": {
           "positiveDecimal": {
             "type": "string",
-            "pattern": "^(?=(?:[^0-9]*[0-9]){1,28}[^0-9]*$)(?!0+(\\.0+)?$)(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?$"
+            "pattern": "^(?!\\d{29})(?!0(?:\\.0+)?$)(?:0|[1-9]\\d*)(?:\\.\\d+)?$"
           }
         }
       },
@@ -1991,7 +1991,7 @@
         "$defs": {
           "positiveDecimal": {
             "type": "string",
-            "pattern": "^(?=(?:[^0-9]*[0-9]){1,28}[^0-9]*$)(?!0+(\\.0+)?$)(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?$"
+            "pattern": "^(?!\\d{29})(?!0(?:\\.0+)?$)(?:0|[1-9]\\d*)(?:\\.\\d+)?$"
           }
         }
       },
@@ -2003,7 +2003,7 @@
     },
     {
       "name": "trade.status",
-      "description": "Read trade status.",
+      "description": "Trade status.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -2032,7 +2032,7 @@
     },
     {
       "name": "trade.cancel",
-      "description": "Cancel an exchange order.",
+      "description": "Cancel venue order.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -2068,7 +2068,7 @@
     },
     {
       "name": "trade.close",
-      "description": "Close a position by real exchange order.",
+      "description": "Close via real exchange order.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -2110,7 +2110,7 @@
     },
     {
       "name": "trade.capabilities",
-      "description": "Read trade permissions.",
+      "description": "Trade permissions.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -2133,7 +2133,7 @@
     },
     {
       "name": "trade.preflight",
-      "description": "Check readiness; no order.",
+      "description": "Readiness; no order.",
       "inputSchema": {
         "type": "object",
         "properties": {
