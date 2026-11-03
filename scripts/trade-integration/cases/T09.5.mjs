@@ -11,6 +11,10 @@ export async function run({ caseId, root, signal }) {
   assert.equal(native.sql_state, "ACKNOWLEDGED");
   assert.ok(Number.isSafeInteger(native.sql_revision) && native.sql_revision > 0);
   assert.equal(native.created_posts, 1);
+  assert.equal(native.semantic_decimal_equivalent_replay, true,
+    "S2-04 Native/Worker must reuse decimal-semantic intent");
+  assert.equal(native.semantic_amount_conflict_reason, "IDEMPOTENCY_CONFLICT");
+  assert.equal(native.semantic_side_conflict_reason, "IDEMPOTENCY_CONFLICT");
   assert.equal(native.reserved_entry_usd_before_replay, "5.0005");
   assert.equal(native.reserved_entry_usd_after_replay,
     native.reserved_entry_usd_before_replay);
@@ -32,6 +36,12 @@ export async function run({ caseId, root, signal }) {
       { id:"identical_replay_intent",
         expected:native.opened_intent_id, actual:native.replayed_intent_id },
       { id:"one_possible_create_post", expected:"1", actual:String(native.created_posts) },
+      { id:"s2_04_equivalent_decimal_replay", expected:"true",
+        actual:String(native.semantic_decimal_equivalent_replay) },
+      { id:"s2_04_different_amount_conflict", expected:"IDEMPOTENCY_CONFLICT",
+        actual:native.semantic_amount_conflict_reason },
+      { id:"s2_04_different_side_conflict", expected:"IDEMPOTENCY_CONFLICT",
+        actual:native.semantic_side_conflict_reason },
       { id:"no_second_risk_reserve", expected:"5.0005",
         actual:native.reserved_entry_usd_after_replay },
       { id:"worker_cross_owner_reserved_entry", expected:"5.0005",

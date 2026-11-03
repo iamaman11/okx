@@ -2080,10 +2080,29 @@ mod raw_native_session_tests {
                 .reserved_usd,
             if add_mode { "1.0005" } else { "5.0005" }
         );
+        // S2-04 Native/public-path proof: a differently spelled decimal
+        // request is the SAME semantic intent. No second reserve or POST.
+        // Do not update the original persisted plan or its deadline.
+        let mut semantic_replay = execute.clone();
+        if let TradeRequest::Execute {
+            sizing: Sizing::Contracts { contracts },
+            order,
+            protection: Some(Protection::Price { stop_price }),
+            ..
+        } = &mut semantic_replay
+        {
+            *contracts = "0.1".into();
+            order.limit_price = Some("1000.00".into());
+            order.max_entry_usd = Some("10.00".into());
+            *stop_price = "900.00".into();
+        } else {
+            panic!("S2-04 requires the original contracts/price/stop request");
+        }
+        assert!(semantic_replay.valid());
         let repeated = trade
-            .trade("fixture-a", &execute, None)
+            .trade("fixture-a", &semantic_replay, None)
             .await
-            .expect("T09.1 identical Execute must be idempotent");
+            .expect("S2-04 equivalent decimal Execute must reuse the original intent");
         // An unchanged idempotency key must never send another POST. When
         // the read-only order GET is locally deferred, UNKNOWN with the exact
         // no-resubmit reason is the safe production answer; it is not an
@@ -2115,7 +2134,40 @@ mod raw_native_session_tests {
         assert_eq!(
             feed.outbound_posts.lock().unwrap().len(),
             1,
-            "identical Execute must not post to OKX twice"
+            "semantically equivalent Execute must not post to OKX twice"
+        );
+        // Same authenticated account/action/key with a meaningful quantity
+        // or side change is an IDEMPOTENCY_CONFLICT before any possible POST.
+        let mut amount_conflict = semantic_replay.clone();
+        if let TradeRequest::Execute {
+            sizing: Sizing::Contracts { contracts },
+            ..
+        } = &mut amount_conflict
+        {
+            *contracts = "0.11".into();
+        } else {
+            panic!("S2-04 contracts variant missing");
+        }
+        let amount_conflict_reason = trade
+            .trade("fixture-a", &amount_conflict, None)
+            .await
+            .expect_err("S2-04 amount mismatch must not replay");
+        assert_eq!(amount_conflict_reason, "IDEMPOTENCY_CONFLICT");
+        let mut side_conflict = semantic_replay.clone();
+        if let TradeRequest::Execute { side, .. } = &mut side_conflict {
+            *side = PositionSide::Short;
+        } else {
+            panic!("S2-04 side variant missing");
+        }
+        let side_conflict_reason = trade
+            .trade("fixture-a", &side_conflict, None)
+            .await
+            .expect_err("S2-04 side mismatch must not replay");
+        assert_eq!(side_conflict_reason, "IDEMPOTENCY_CONFLICT");
+        assert_eq!(
+            feed.outbound_posts.lock().unwrap().len(),
+            1,
+            "S2-04 equivalent replay and two conflicts may not create extra venue POSTs"
         );
         // A read-only replay may return UNKNOWN even after transport has
         // consumed the raw GET: a deadline or decode/readback failure does
@@ -2183,6 +2235,9 @@ mod raw_native_session_tests {
                 "sql_revision":saved.revision,
                 "sql_state":saved.state.as_str(),
                 "created_posts":feed.outbound_posts.lock().unwrap().len(),
+                "semantic_decimal_equivalent_replay":true,
+                "semantic_amount_conflict_reason":amount_conflict_reason,
+                "semantic_side_conflict_reason":side_conflict_reason,
                 "reserved_entry_usd_before_replay": before_repeat.budget.as_ref().unwrap().entry_budget.as_ref().unwrap().reserved_usd,
                 "reserved_entry_usd_after_replay": after.budget.as_ref().unwrap().entry_budget.as_ref().unwrap().reserved_usd,
             })

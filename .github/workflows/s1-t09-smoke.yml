@@ -15,7 +15,7 @@ concurrency:
 
 jobs:
   t09-repeat:
-    name: S2 integrated T09.2 + T09.6 + T09.7 on one SHA
+    name: S2 semantic T09.5 + T09.2 + T09.6 + T09.7 on one SHA
     runs-on: windows-latest
     timeout-minutes: 40
     steps:
@@ -37,7 +37,7 @@ jobs:
       - name: Repeat T09.2 / T09.6 / T09.7 on one immutable SHA
         shell: pwsh
         run: |
-          $cases = @('T09.2', 'T09.6', 'T09.7')
+          $cases = @('T09.5', 'T09.2', 'T09.6', 'T09.7')
           $anyFailure = $false
           for ($i = 0; $i -lt $cases.Length; $i++) {
             $case = $cases[$i]
