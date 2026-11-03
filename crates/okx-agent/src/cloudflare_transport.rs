@@ -2305,6 +2305,11 @@ mod raw_native_session_tests {
                 "outbound_posts":feed.outbound_posts.lock().unwrap().len(),
             })
         );
+        // These read-only probes must not outlive their phase: keeping a
+        // cloned AccountResources Arc alive prevents the normal SQL-owner
+        // shutdown receipt and causes a false S1-05 teardown timeout.
+        drop(account_a);
+        drop(account_b);
         assert_eq!(
             after
                 .budget
