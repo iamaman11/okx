@@ -727,8 +727,27 @@ try {
         assert.equal(admitted.quote_entry_usd, "3.0015");
         assert.equal(admitted.preview_reserved_entry_usd, managedAdd ? "0" : "4",
           "clean managed-Add acceptance cohort excludes T09.0 component reservations");
-        assert.equal(afterNative.budget?.entry_budget?.reserved_usd,managedAdd?"0":partialFills?"4":"7.0015");
-        assert.equal(afterNative.budget?.entry_budget?.consumed_usd,managedAdd?"6.003":partialFills?"4.002":"1.0005");
+        const expectedReserved=managedAdd?"0":partialFills?"4":"7.0015";
+        const expectedSpent=managedAdd?"6.003":partialFills?"4.002":"1.0005";
+        if(afterNative.budget?.entry_budget?.reserved_usd!==expectedReserved
+          ||afterNative.budget?.entry_budget?.consumed_usd!==expectedSpent){
+          // Only numeric Worker/Native receipts. Never dump WSS frames,
+          // signed source bodies or account credentials on assertion failure.
+          const nativePartial=partialFills
+            ?receipt(stdout,"T09_3_NATIVE_PARTIAL_TERMINAL_V1"):null;
+          process.stderr.write("T09_2_POST_NATIVE_BUDGET_MISMATCH_V1:"+JSON.stringify({
+            expected_reserved_usd:expectedReserved,
+            actual_reserved_usd:afterNative.budget?.entry_budget?.reserved_usd??null,
+            expected_spent_usd:expectedSpent,
+            actual_spent_usd:afterNative.budget?.entry_budget?.consumed_usd??null,
+            worker_risk_book_sequence:afterNative.risk_book_sequence,
+            native_risk_book_sequence:nativePartial?.risk_book_sequence??null,
+            native_worker_budget:nativePartial?.worker_budget??admitted.after_worker_budget,
+            native_read_counts:nativePartial?.phases?.map(p=>p.source_read_counts)??null
+          })+"\n");
+        }
+        assert.equal(afterNative.budget?.entry_budget?.reserved_usd,expectedReserved);
+        assert.equal(afterNative.budget?.entry_budget?.consumed_usd,expectedSpent);
         // Select the latest source-backed checkpoint, never T09.4 once
         // the two managed Close releases have happened. A follow-up T09.8
         // can advance source time, but every economic field must match.
