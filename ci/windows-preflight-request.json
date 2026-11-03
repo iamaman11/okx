@@ -1,6 +1,6 @@
 {
   "schema": "okx.windows-preflight-request/v1",
-  "request_id": "t093-budget-visible-2be40f2-025",
+  "request_id": "t093-terminal-money-fb0801f-026",
   "case": "T09.3-R2",
-  "target_sha": "2be40f25ccd41700f99f8a62f8557459372aaf9e"
+  "target_sha": "fb0801fe40bc7a1afea82dad52c711b812cd1b71"
 }
