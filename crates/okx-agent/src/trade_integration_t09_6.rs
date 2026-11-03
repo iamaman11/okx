@@ -345,34 +345,6 @@ fn t09_6_publish_final_empty_algos(
     }
     feed.advance_recorded_route("fixture-observer-a",
         "/api/v5/trade/orders-algo-pending",pages);
-    // Both independently ACKed cancel-algos POSTs have now removed the
-    // attached stop obligations, AFTER the verified close fills and bills.
-    // This is a NEW bounded recorded external balance observation for the
-    // read-only terminal-release census, not a reset of the 64-read default,
-    // a financial SQL mutation or a Worker RELEASE receipt. The economic
-    // state remains 100 opening NAV - 0.006 seven linked fees = 99.994.
-    // It must not appear before the two signed cancel ACKs: those earlier
-    // statuses still use the prior T09.6 terminal source frontier.
-    let at=chrono::Utc::now().timestamp_millis().to_string();
-    let unchanged=serde_json::to_vec(&serde_json::json!({
-        "code":"0","msg":"","data":[{
-            "totalEq":"99.994","adjEq":"99.994","uTime":at,
-            "details":[{
-                "ccy":"USDT","eq":"99.994","liab":"0",
-                "availEq":"99.994","availBal":"99.994",
-                "eqUsd":"99.994","uTime":at
-            }]
-        }]
-    })).expect("T09.6 post-cancel signed balance envelope");
-    let retired=feed.advance_recorded_route(
-        "fixture-observer-a","/api/v5/account/balance",
-        (0..12).map(|_|RecordedGet {
-            access_key:"fixture-observer-a".into(),
-            path:"/api/v5/account/balance".into(),
-            required_query:vec![],raw_response:unchanged.clone(),
-        }).collect()
-    );
-    eprintln!("T09_6_POST_CANCEL_BALANCE_FRONTIER_V1 retired={retired} new_pages=12 equity=99.994");
 }
 // Repeat a public read-only Status only when the shared production
 // RateBudget proves a LOCAL, NO-SEND private GET defer. The same captured
@@ -616,9 +588,39 @@ async fn t09_6_source_backed_close_release(
         let status=t09_6_status_after_local_read_defer(
             trade,rate_budget,feed,intent,0
         ).await;
+        // On a failed terminal peer RELEASE, retain exact *read-only* raw
+        // source accounting in the assertion itself. The parent harness
+        // preserves this panic even if nested Workerd stdout is unavailable.
+        // Never convert missing source coverage into a successful receipt.
+        let source_trace=if status["data"]["central_release"]["state"]!="verified" {
+            // Drop each mutex guard before touching the next route: the
+            // recorded HTTP owner may acquire page and request locks in
+            // the opposite order while async source capture is running.
+            let counts={
+                let requests=feed.requests.lock().unwrap();
+                let count=|route:&str| requests.iter().filter(|x|x.starts_with(route)).count();
+                serde_json::json!({
+                    "observer_balance_gets":count("fixture-observer-a:/api/v5/account/balance?"),
+                    "observer_positions_gets":count("fixture-observer-a:/api/v5/account/positions?"),
+                    "observer_pending_orders_gets":count("fixture-observer-a:/api/v5/trade/orders-pending?"),
+                    "observer_algos_gets":count("fixture-observer-a:/api/v5/trade/orders-algo-pending?")
+                })
+            };
+            let denied={
+                let routes=feed.denied_routes.lock().unwrap();
+                routes.iter().rev().take(8).cloned().collect::<Vec<_>>()
+            };
+            let remaining=feed.unconsumed_reads();
+            let posts=feed.outbound_posts.lock().unwrap().len();
+            serde_json::json!({
+                "counts":counts,"last_source_denials":denied,
+                "unconsumed_source_pages":remaining,"outbound_posts":posts,
+                "last_local_rate_throttle":format!("{:?}",rate_budget.snapshot().last_throttle)
+            })
+        } else {serde_json::Value::Null};
         assert_eq!(status["data"]["central_release"]["state"],"verified",
-            "T09.6 terminal peer RELEASE requires both immutable SQL proofs: intent={}, release={}, financial_error={}",
-            intent,status["data"]["central_release"],status["data"]["financial_error"]);
+            "T09.6 terminal peer RELEASE requires both immutable SQL proofs: intent={}, release={}, financial_error={}, source_trace={}",
+            intent,status["data"]["central_release"],status["data"]["financial_error"],source_trace);
         assert_eq!(status["data"]["protection_incident"],false);
         entry["release"]=status["data"]["central_release"].clone();
         entry["financial_complete"]=status["data"]["financial_complete"].clone();

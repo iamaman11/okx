@@ -140,6 +140,25 @@
                 required_query:vec![("instId".into(),"BTC-USDT-SWAP".into())],
                 raw_response:order.clone(),
             }).collect());
+        // Standalone T09.3 observes this terminal venue order AFTER the
+        // independent signed fill/bill phase. Its pending-order inventory is
+        // therefore newly empty. Publish a finite, query-bound external GET
+        // transcript for that distinct terminal phase, rather than silently
+        // increasing/rewinding the original 64-request baseline. Extended
+        // T09.4/T09.6 paths own subsequent live-Add source transitions.
+        let standalone=std::env::var("OKX_T09_4_MANAGED_ADD_PROBE").as_deref()!=Ok("1")
+            && std::env::var("OKX_T09_6_CLOSE_PROBE").as_deref()!=Ok("1");
+        if terminal && standalone {
+            for _ in 0..8 {
+                feed.expect_get(RecordedGet {
+                    access_key:"fixture-observer-a".into(),
+                    path:"/api/v5/trade/orders-pending".into(),
+                    required_query:vec![("limit".into(),"100".into())],
+                    raw_response:raw(serde_json::json!([])),
+                });
+            }
+            eprintln!("T09_3_TERMINAL_PENDING_ORDERS_SOURCE_V1 phase=terminal new_pages=8 signed_order=FILLED");
+        }
         let stop_id=format!("s{}",&cl_id[..31]);
         feed.advance_recorded_route("fixture-executor-a","/api/v5/trade/order-algo",
             (0..5).map(|_| RecordedGet{
@@ -235,4 +254,29 @@
             "financial_complete":status["data"]["financial_complete"],
             "protection":status["data"]["protection"],
         }),first)
+    }
+
+    #[tokio::test]
+    async fn t09_3_terminal_pending_orders_source_is_one_use_and_fails_closed() {
+        use crate::accounts::recorded_support::{RecordedAccountHttp, RecordedGet};
+        use okx_api::{AccountApi, Credentials, OkxRestClient};
+        let feed=Arc::new(RecordedAccountHttp::default());
+        feed.expect_get(RecordedGet {
+            access_key:"fixture-observer-a".into(),
+            path:"/api/v5/trade/orders-pending".into(),
+            required_query:vec![("limit".into(),"100".into())],
+            raw_response:br#"{"code":"0","msg":"","data":[]}"#.to_vec(),
+        });
+        let client=OkxRestClient::with_http_transport(
+            OkxEnvironment::new(okx_api::Region::Global,false),
+            Credentials::new("fixture-observer-a".into(),"observer-secret".into(),"pass".into()).unwrap(),
+            RateBudget::new(),feed.clone(),
+        ).unwrap();
+        let api=AccountApi::new(client);
+        assert!(api.pending_orders().await.unwrap().is_empty(),
+            "one matching signed terminal inventory is valid");
+        assert_eq!(feed.unconsumed_reads(),0);
+        let exhausted=api.pending_orders().await.unwrap_err();
+        assert!(exhausted.to_string().contains("TRANSCRIPT_SOURCE_PAGE_UNEXPECTED_OR_EXHAUSTED"),
+            "the signed empty terminal source is one-use; no default empty fallback: {exhausted}");
     }
