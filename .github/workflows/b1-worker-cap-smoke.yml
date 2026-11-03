@@ -1,0 +1,30 @@
+name: B1 Worker Shared Cap (WIP only)
+on:
+  push:
+    branches:
+      - work/b1-worker-cap-20261104
+permissions:
+  contents: read
+jobs:
+  actual-worker-shared-cap:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install existing Worker locked dependencies
+        working-directory: cloudflare/okx-mcp
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: B1 independent oracle rejects fabricated budget
+        run: node scripts/trade-integration/worker-shared-cap.mjs --self-test
+      - name: B1 production RuntimeSession + persisted SQLite DO, worker component only
+        run: node scripts/trade-integration/worker-shared-cap.mjs --artifacts "${{ runner.temp }}/b1"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: b1-worker-only-${{ github.sha }}
+          path: ${{ runner.temp }}/b1
+          if-no-files-found: warn
+          retention-days: 7
