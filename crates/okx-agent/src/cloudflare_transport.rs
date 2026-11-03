@@ -3977,6 +3977,34 @@ mod raw_native_session_tests {
                         let posts_before = feed.outbound_posts.lock().unwrap().len();
                         assert_eq!(posts_before, 4);
 
+                        // B1 causal source boundary: A's signed venue ACK
+                        // was persisted before B may request a new central
+                        // risk decision. Register a finite post-ACK account
+                        // balance observation for the real background owners.
+                        // The earlier bootstrap balance must not become an
+                        // accidental global GET-count admission gate. This
+                        // does not change a production TTL, risk budget, SQL
+                        // record, or authorize any venue POST.
+                        let b1_balance_at = chrono::Utc::now().timestamp_millis().to_string();
+                        for (label, equity) in [("a", "100"), ("b", "100")] {
+                            for _ in 0..24 {
+                                feed.expect_optional_get(RecordedGet {
+                                    access_key: format!("fixture-observer-{label}"),
+                                    path: "/api/v5/account/balance".into(),
+                                    required_query: vec![],
+                                    raw_response: envelope(json!([{
+                                        "totalEq": equity, "adjEq": equity,
+                                        "uTime": b1_balance_at,
+                                        "details": [{
+                                            "ccy": "USDT", "eq": equity,
+                                            "liab": "0", "availEq": equity,
+                                            "availBal": equity, "eqUsd": equity,
+                                            "uTime": b1_balance_at
+                                        }]
+                                    }])),
+                                });
+                            }
+                        }
                         refresh_recorded_market();
                         let b_fee_ts = chrono::Utc::now().timestamp_millis().to_string();
                         feed.advance_recorded_route(
