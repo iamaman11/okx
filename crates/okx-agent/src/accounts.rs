@@ -2198,6 +2198,21 @@ mod tests {
         assert!(feed.outbound_posts.lock().unwrap().is_empty());
     }
 
+    #[test]
+    fn recorded_clock_publisher_cannot_rearm_or_multiply_source_pages() {
+        use super::recorded_support::RecordedAccountHttp;
+        let feed = RecordedAccountHttp::default();
+        assert!(!feed.refresh_unconsumed_public_clock(0, b"unsolicited".to_vec()));
+        feed.expect_public_clock(b"recorded_first".to_vec());
+        assert!(feed.refresh_unconsumed_public_clock(0, b"recorded_new".to_vec()));
+        assert_eq!(feed.unconsumed_public_clock(), 1);
+        assert!(!feed.refresh_unconsumed_public_clock(1, b"wrong_generation".to_vec()));
+        assert_eq!(feed.unconsumed_public_clock(), 1);
+        feed.expect_public_clock(b"another_source".to_vec());
+        assert!(!feed.refresh_unconsumed_public_clock(0, b"multiply".to_vec()));
+        assert_eq!(feed.unconsumed_public_clock(), 2);
+    }
+
     /// Exercise the actual signed OKX adapter's POST through the raw
     /// transport boundary. A mismatched request cannot consume a response,
     /// and the response is not an invented execution or a fill.
