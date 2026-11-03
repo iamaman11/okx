@@ -284,7 +284,7 @@ fn stable_semantic_json(value: &serde_json::Value, output: &mut String) {
         serde_json::Value::Object(values) => {
             output.push('{');
             let mut ordered = values.iter().collect::<Vec<_>>();
-            ordered.sort_by(|(left, _), (right, _)| left.cmp(right));
+            ordered.sort_by_key(|(left, _)| *left);
             for (index, (key, value)) in ordered.iter().enumerate() {
                 if index != 0 {
                     output.push(',');

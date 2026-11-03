@@ -83,7 +83,7 @@ function publicSchema(schema:Schema):Schema {
  const factor=(node:any):any=>{
   if(Array.isArray(node))return node.map(factor);
   if(node&&typeof node==='object'){
-   if(node.type==='string'&&node.pattern===money.pattern&&Object.keys(node).length===2){
+   if(node.type==='string'&&node.pattern===money.pattern&&node.maxLength===money.maxLength&&Object.keys(node).length===3){
     repeats++;return {$ref:'#/$defs/positiveDecimal'};
    }
    return Object.fromEntries(Object.entries(node).map(([k,v])=>[k,factor(v)]));
