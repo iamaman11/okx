@@ -44,7 +44,7 @@ jobs:
           $request = Get-Content -Raw -LiteralPath $file | ConvertFrom-Json
           if ($request.schema -ne "okx.windows-preflight-request/v1") { throw "REQUEST_SCHEMA_INVALID" }
           if ($request.target_sha -cnotmatch '^[0-9a-f]{40}$') { throw "TARGET_SHA_INVALID" }
-          if ($request.case -cnotin @("T09.1","T09.3","T09.4","T09.6","T09.7","T09.8","ALL26")) {
+          if ($request.case -cnotin @("T09.1","T09.3","T09.3-R2","T09.4","T09.6","T09.7","T09.8","ALL26")) {
             throw "TARGET_CASE_NOT_ALLOWED"
           }
           if ($request.request_id -cnotmatch '^[A-Za-z0-9._-]{8,80}$') { throw "REQUEST_ID_INVALID" }
@@ -141,7 +141,7 @@ jobs:
       # Component-only source: genuine persisted Workerd DO, concurrently
       # processing A/B RESERVE. This is not full Native T10-07 acceptance.
       - name: Verify persisted two-account central campaign cap
-        if: steps.request.outputs.case == 'T09.3' || steps.request.outputs.case == 'ALL26'
+        if: steps.request.outputs.case == 'T09.3' || steps.request.outputs.case == 'T09.3-R2' || steps.request.outputs.case == 'ALL26'
         shell: pwsh
         run: |
           $artifacts = Join-Path $env:RUNNER_TEMP "trade-integration"
@@ -161,6 +161,20 @@ jobs:
           $artifacts = Join-Path $env:RUNNER_TEMP "trade-integration"
           if ($env:OKX_PREFLIGHT_CASE -eq "ALL26") {
             node scripts/run-trade-integration.mjs --suite t09,t10 --artifacts "$artifacts"
+          } elseif ($env:OKX_PREFLIGHT_CASE -eq "T09.3-R2") {
+            # Reproduce the same immutable source twice with fresh native SQL,
+            # persisted Workerd and unmodified raw venue transcript in each.
+            # Never reuse evidence files or count a PASS if either repeat fails.
+            $failed = 0
+            foreach ($iteration in @(1, 2)) {
+              $repeatArtifacts = Join-Path $artifacts "t093-repeat-$iteration"
+              Write-Host "T093_REPEAT_START=$iteration"
+              node scripts/run-trade-integration.mjs --case T09.3 --artifacts "$repeatArtifacts"
+              $caseExit = $LASTEXITCODE
+              Write-Host "T093_REPEAT_EXIT_$iteration=$caseExit"
+              if ($caseExit -ne 0) { $failed += 1 }
+            }
+            if ($failed -ne 0) { throw "T093_REPEAT_REGRESSION_FAILED:$failed/2" }
           } elseif ($env:OKX_PREFLIGHT_CASE -cin @("T09.1","T09.3","T09.4","T09.6","T09.7","T09.8")) {
             node scripts/run-trade-integration.mjs --case $env:OKX_PREFLIGHT_CASE --artifacts "$artifacts"
           } else {
