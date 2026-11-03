@@ -157,6 +157,21 @@
         let status_result=trade.trade("fixture-a",&okx_protocol::trading::TradeRequest::Status{reference:id},None)
             .await;
         trace_source_reads("after_status");
+        let source_read_counts = {
+            let requests = feed.requests.lock().unwrap();
+            let count = |route: &str| {
+                requests.iter().filter(|entry| entry.starts_with(route)).count()
+            };
+            serde_json::json!({
+                "observer_balance":count("fixture-observer-a:/api/v5/account/balance?"),
+                "observer_positions":count("fixture-observer-a:/api/v5/account/positions?"),
+                "observer_orders":count("fixture-observer-a:/api/v5/trade/orders-pending?"),
+                "observer_algos":count("fixture-observer-a:/api/v5/trade/orders-algo-pending?"),
+                "executor_fills":count("fixture-executor-a:/api/v5/trade/fills-history?"),
+                "executor_bills":count("fixture-executor-a:/api/v5/account/bills-archive?"),
+                "all_recorded_gets":requests.len()
+            })
+        };
         let status=status_result.expect("T09.3 real TradeService status");
         if !terminal {
             assert_eq!(status["data"]["intent"]["state"],"PARTIALLY_FILLED",
@@ -176,6 +191,7 @@
         (serde_json::json!({
             "phase":if terminal {"terminal"} else {"partial"},
             "raw_history_event_at_ms":now_ms,
+            "source_read_counts":source_read_counts,
             "sql":sql,"status":status["status"],
             "intent_state":status["data"]["intent"]["state"],
             "entry_fill_evidence_state":status["data"]["entry_fill_evidence"]["state"],
