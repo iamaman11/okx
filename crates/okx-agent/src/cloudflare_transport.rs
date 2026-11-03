@@ -3460,6 +3460,112 @@ mod raw_native_session_tests {
                         resource.configuration.account_key.verified_uid,
                         "two aliases must not silently share a verified UID"
                     );
+                    // T09-MA partial Native proof: actual independent SQL
+                    // owners durably register two distinct strategy instances.
+                    // They stay disabled in this probe: registering an
+                    // instance must never silently authorize automated live
+                    // trading, reserve central risk or mint venue POST.
+                    let sql_a = resource.execution.store.clone();
+                    let sql_b = other.execution.store.clone();
+                    let (a_instances, b_instances) = tokio::join!(
+                        sql_a.call(std::time::Instant::now() + Duration::from_secs(5), |s| {
+                            let instance = okx_execution::StrategyInstance {
+                                instance_id: "native_alpha".into(),
+                                definition_id: "ema_cross_v1".into(),
+                                definition_version: "1".into(),
+                                parameters: r#"{"parameters":{"fast":2,"slow":3},"instruments":["BTC-USDT-SWAP"],"timeframe_ms":60000}"#.into(),
+                                enabled: false,
+                                policy_revision: 1,
+                                budget: Decimal::ONE,
+                                last_decision_key: None,
+                            };
+                            s.mutate_instance(
+                                "native_ma_register_a_0001",
+                                "native_ma_registration_hash_a_0001",
+                                "create",
+                                &instance,
+                                None,
+                                chrono::Utc::now().timestamp_millis(),
+                            )?;
+                            s.instances()
+                        }),
+                        sql_b.call(std::time::Instant::now() + Duration::from_secs(5), |s| {
+                            let instance = okx_execution::StrategyInstance {
+                                instance_id: "native_beta".into(),
+                                definition_id: "ema_cross_v1".into(),
+                                definition_version: "1".into(),
+                                parameters: r#"{"parameters":{"fast":3,"slow":5},"instruments":["BTC-USDT-SWAP"],"timeframe_ms":60000}"#.into(),
+                                enabled: false,
+                                policy_revision: 1,
+                                budget: Decimal::ONE,
+                                last_decision_key: None,
+                            };
+                            s.mutate_instance(
+                                "native_ma_register_b_0001",
+                                "native_ma_registration_hash_b_0001",
+                                "create",
+                                &instance,
+                                None,
+                                chrono::Utc::now().timestamp_millis(),
+                            )?;
+                            s.instances()
+                        })
+                    );
+                    let a_instances = a_instances.expect("A strategy definition committed to A SQL");
+                    let b_instances = b_instances.expect("B strategy definition committed to B SQL");
+                    assert!(a_instances.iter().any(|i|
+                        i.instance_id == "native_alpha" && !i.enabled));
+                    assert!(b_instances.iter().any(|i|
+                        i.instance_id == "native_beta" && !i.enabled));
+                    assert!(!a_instances.iter().any(|i| i.instance_id == "native_beta"),
+                        "strategy B must never appear in SQL account A");
+                    assert!(!b_instances.iter().any(|i| i.instance_id == "native_alpha"),
+                        "strategy A must never appear in SQL account B");
+
+                    // Concurrent read-only public TradeService calls target
+                    // their own account SQL, while sharing ONE central
+                    // RiskBook. Preflight is explicitly non-authorizing.
+                    let (native_a, native_b) = tokio::join!(
+                        trade.trade("fixture-a", &TradeRequest::Preflight {}, None),
+                        trade.trade("fixture-b", &TradeRequest::Preflight {}, None),
+                    );
+                    let native_a = native_a.expect("A public preflight must be serviced");
+                    let native_b = native_b.expect("B public preflight must be serviced");
+                    assert_eq!(
+                        native_a["account"],
+                        resource.configuration.account_key.wire(),
+                        "A preflight must not be rerouted by B account selection"
+                    );
+                    assert_eq!(
+                        native_b["account"],
+                        other.configuration.account_key.wire(),
+                        "B preflight must own its distinct SQL and verified UID"
+                    );
+                    assert_eq!(native_a["ready_for_new_risk"], false);
+                    assert_eq!(native_b["ready_for_new_risk"], false);
+                    assert_eq!(
+                        feed.outbound_posts.lock().unwrap().len(),
+                        4,
+                        "non-authorizing two-account preflights cannot emit exchange POST"
+                    );
+                    println!(
+                        "T09_MA_NATIVE_SQL_STRATEGY_PREFLIGHT_V1:{}",
+                        json!({
+                            "account_a_uid":resource.configuration.account_key.verified_uid,
+                            "account_b_uid":other.configuration.account_key.verified_uid,
+                            "a_strategy_registered":true,
+                            "b_strategy_registered":true,
+                            "a_other_strategy_absent":true,
+                            "b_other_strategy_absent":true,
+                            "a_strategy_enabled":false,
+                            "b_strategy_enabled":false,
+                            "a_public_account":native_a["account"],
+                            "b_public_account":native_b["account"],
+                            "a_new_risk_authorized":native_a["ready_for_new_risk"],
+                            "b_new_risk_authorized":native_b["ready_for_new_risk"],
+                            "native_outbound_posts":feed.outbound_posts.lock().unwrap().len(),
+                        })
+                    );
                     let foreign_id = new_intent_id.clone();
                     let before_foreign = other
                         .execution
