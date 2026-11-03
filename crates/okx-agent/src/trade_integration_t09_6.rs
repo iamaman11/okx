@@ -382,6 +382,29 @@ fn t09_6_cleanup_recorded_transport(
         }
     }
     feed.expect_causal_algo_inventory(cancel_id, before, after);
+    // Independently recorded and source-bound UID B never shares the
+    // cancellation-dependent A snapshots. One immutable raw response
+    // per exact B scope is bounded in the recorded transport.
+    let peer_empty = wrap(serde_json::json!([]));
+    let mut peer = Vec::with_capacity(16);
+    for inst_type in ["SWAP", "FUTURES"] {
+        for kind in [
+            "conditional", "oco", "trigger", "move_order_stop",
+            "chase", "iceberg", "twap", "smart_iceberg",
+        ] {
+            peer.push(RecordedGet {
+                access_key: "fixture-observer-b".into(),
+                path: "/api/v5/trade/orders-algo-pending".into(),
+                required_query: vec![
+                    ("instType".into(), inst_type.into()),
+                    ("ordType".into(), kind.into()),
+                    ("limit".into(), "100".into()),
+                ],
+                raw_response: peer_empty.clone(),
+            });
+        }
+    }
+    feed.expect_static_algo_inventory("fixture-observer-b", peer);
     feed.advance_recorded_public_clock(wrap(serde_json::json!([{
         "ts": chrono::Utc::now().timestamp_millis().to_string()
     }])));

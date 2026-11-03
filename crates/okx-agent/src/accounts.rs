@@ -954,6 +954,21 @@ pub(crate) mod recorded_support {
         after_reads: usize,
     }
 
+
+    // UID B's independent signed inventory is immutable; A's cancel ACK
+    // never selects or mutates this source.
+    struct StaticAlgoScope {
+        query: Vec<(String, String)>,
+        response: Vec<u8>,
+        reads: usize,
+    }
+
+    struct StaticAlgoInventory {
+        account: String,
+        source_received_at_ms: i64,
+        scopes: Vec<StaticAlgoScope>,
+    }
+
     struct CausalAlgoReadGate {
         entered: Arc<tokio::sync::Notify>,
         resume: Arc<tokio::sync::Notify>,
@@ -985,6 +1000,7 @@ pub(crate) mod recorded_support {
     // verification, source capture and maintenance. A missing scope, extra
     // POST or exhausted bound fails closed, not as a financial denial.
     const CAUSAL_ALGO_READS_PER_SCOPE_AND_PHASE: usize = 12;
+    const STATIC_ALGO_READS_PER_SCOPE: usize = 32;
 
     #[derive(Default)]
     pub(crate) struct RecordedAccountHttp {
@@ -1012,6 +1028,7 @@ pub(crate) mod recorded_support {
         public_clock_deliveries: AtomicU64,
         strict_read_routes: Mutex<std::collections::BTreeSet<(String, String)>>,
         causal_algos: Mutex<Option<CausalAlgoScenario>>,
+        static_algos: Mutex<Option<StaticAlgoInventory>>,
         pub(crate) causal_algo_trace: Mutex<Vec<String>>,
     }
     impl RecordedAccountHttp {
@@ -1137,6 +1154,54 @@ pub(crate) mod recorded_support {
             });
             self.causal_algo_trace.lock().unwrap().push(format!(
                 "event=INVENTORY_ARMED uid=account-001 actor={account} cancel_id={cancel_id} scopes=16"
+            ));
+        }
+
+
+        /// A separate verified UID must supply its own exact, finite, raw
+        /// signed empty census. No fallback to A and no page-count phase.
+        pub(crate) fn expect_static_algo_inventory(
+            &self,
+            account: &str,
+            pages: Vec<RecordedGet>,
+        ) {
+            const PATH: &str = "/api/v5/trade/orders-algo-pending";
+            assert_eq!(account, "fixture-observer-b", "TRANSCRIPT_STATIC_ALGO_ACCOUNT");
+            assert_eq!(pages.len(), 16, "TRANSCRIPT_STATIC_ALGO_SCOPE_COUNT");
+            let mut seen = std::collections::BTreeSet::new();
+            let mut scopes = Vec::with_capacity(16);
+            for page in pages {
+                assert_eq!(page.access_key, account, "TRANSCRIPT_STATIC_ALGO_ACTOR");
+                assert_eq!(page.path, PATH, "TRANSCRIPT_STATIC_ALGO_ROUTE");
+                let mut query = page.required_query;
+                query.sort();
+                assert_eq!(query.len(), 3, "TRANSCRIPT_STATIC_ALGO_QUERY_SHAPE");
+                assert!(seen.insert(query.clone()), "TRANSCRIPT_STATIC_ALGO_DUP_SCOPE");
+                let source: serde_json::Value = serde_json::from_slice(&page.raw_response)
+                    .expect("TRANSCRIPT_STATIC_ALGO_RAW_SOURCE");
+                assert_eq!(source["code"], "0", "TRANSCRIPT_STATIC_ALGO_SOURCE_CODE");
+                assert_eq!(
+                    source["data"].as_array().map(Vec::len),
+                    Some(0),
+                    "TRANSCRIPT_STATIC_ALGO_B_NOT_FLAT"
+                );
+                scopes.push(StaticAlgoScope {
+                    query,
+                    response: page.raw_response,
+                    reads: 0,
+                });
+            }
+            self.strict_read_routes
+                .lock()
+                .unwrap()
+                .insert((account.to_owned(), PATH.to_owned()));
+            *self.static_algos.lock().unwrap() = Some(StaticAlgoInventory {
+                account: account.to_owned(),
+                source_received_at_ms: chrono::Utc::now().timestamp_millis(),
+                scopes,
+            });
+            self.causal_algo_trace.lock().unwrap().push(format!(
+                "event=PEER_INVENTORY_ARMED uid=account-002 actor={account} scopes=16"
             ));
         }
 
@@ -1477,15 +1542,54 @@ pub(crate) mod recorded_support {
                             ));
                             Some((raw, scenario.held_read.take()))
                         } else {
-                            // Account B retains its independently scripted
-                            // signed source queue; unknown cross-account
-                            // sources cannot read the account A fixture.
-                            if phase.is_some() && !scripted {
-                                return Err(OkxError::Response(
-                                    "TRANSCRIPT_ALGO_ACCOUNT_MISMATCH".into(),
+                            // UID B never inherits UID A's cancel-dependent
+                            // view. Each B GET matches a signed raw peer scope.
+                            let mut peer = self.static_algos.lock().unwrap();
+                            if let Some(other) = peer.as_mut().filter(|other| {
+                                verified_fixture_uid(key).is_some_and(|uid| {
+                                    verified_fixture_uid(other.account.as_str()) == Some(uid)
+                                })
+                            }) {
+                                let mut query = request
+                                    .url()
+                                    .query_pairs()
+                                    .map(|(k, v)| (k.into_owned(), v.into_owned()))
+                                    .collect::<Vec<_>>();
+                                query.sort();
+                                let source_received_at_ms = other.source_received_at_ms;
+                                let scope = other
+                                    .scopes
+                                    .iter_mut()
+                                    .find(|scope| scope.query == query)
+                                    .ok_or_else(|| {
+                                        OkxError::Response(
+                                            "TRANSCRIPT_STATIC_ALGO_QUERY_MISMATCH".into(),
+                                        )
+                                    })?;
+                                if scope.reads >= STATIC_ALGO_READS_PER_SCOPE {
+                                    return Err(OkxError::Response(
+                                        "TRANSCRIPT_STATIC_ALGO_READ_BUDGET_EXCEEDED".into(),
+                                    ));
+                                }
+                                scope.reads += 1;
+                                let read = scope.reads;
+                                let body = scope.response.clone();
+                                let digest = format!("{:x}", Sha256::digest(&body));
+                                self.causal_algo_trace.lock().unwrap().push(format!(
+                                    "event=GET_STARTED uid=account-002 actor={key} route={path} query={query:?} stage=INDEPENDENT_STATIC source_received_at_ms={source_received_at_ms} read={read} digest={digest}"
                                 ));
+                                Some((body, None))
+                            } else {
+                                if phase.is_some() && !scripted {
+                                    self.causal_algo_trace.lock().unwrap().push(format!(
+                                        "event=GET_DENIED actor={key} uid={uid} route={path} reason=TRANSCRIPT_ALGO_ACCOUNT_MISMATCH"
+                                    ));
+                                    return Err(OkxError::Response(
+                                        "TRANSCRIPT_ALGO_ACCOUNT_MISMATCH".into(),
+                                    ));
+                                }
+                                None
                             }
-                            None
                         }
                     };
                     if let Some((body, held)) = selected {
@@ -2104,6 +2208,60 @@ pub(crate) mod recorded_support {
             assert!(trace.contains("actor=fixture-executor-a"));
             assert!(trace.contains("actor=fixture-observer-a"));
             assert!(trace.contains("event=CANCEL_ACK"));
+            assert_eq!(feed.outbound_posts.lock().unwrap().len(), 1);
+        }
+
+        #[tokio::test]
+        async fn s1_05_other_uid_has_its_own_immutable_signed_inventory() {
+            let feed = causal_algo_fixture();
+            let raw = serde_json::to_vec(&serde_json::json!({
+                "code": "0", "msg": "", "data": []
+            }))
+            .unwrap();
+            let mut pages = Vec::new();
+            for inst_type in ["SWAP", "FUTURES"] {
+                for kind in [
+                    "conditional", "oco", "trigger", "move_order_stop",
+                    "chase", "iceberg", "twap", "smart_iceberg",
+                ] {
+                    pages.push(RecordedGet {
+                        access_key: "fixture-observer-b".into(),
+                        path: "/api/v5/trade/orders-algo-pending".into(),
+                        required_query: vec![
+                            ("instType".into(), inst_type.into()),
+                            ("ordType".into(), kind.into()),
+                            ("limit".into(), "100".into()),
+                        ],
+                        raw_response: raw.clone(),
+                    });
+                }
+            }
+            feed.expect_static_algo_inventory("fixture-observer-b", pages);
+            for actor in ["fixture-observer-b", "fixture-executor-b"] {
+                let reply = deliver_causal(&feed, causal_get(actor, "100")).await.unwrap();
+                assert_eq!(reply["data"].as_array().unwrap().len(), 0);
+            }
+            let a_before = deliver_causal(&feed, causal_get("fixture-observer-a", "100"))
+                .await
+                .unwrap();
+            assert_eq!(a_before["data"].as_array().unwrap().len(), 2);
+            deliver_causal(&feed, causal_cancel()).await.unwrap();
+            let a_after = deliver_causal(&feed, causal_get("fixture-executor-a", "100"))
+                .await
+                .unwrap();
+            assert_eq!(a_after["data"].as_array().unwrap().len(), 1);
+            let b_after = deliver_causal(&feed, causal_get("fixture-observer-b", "100"))
+                .await
+                .unwrap();
+            assert_eq!(b_after["data"].as_array().unwrap().len(), 0);
+            let wrong = deliver_causal(&feed, causal_get("fixture-observer-b", "99"))
+                .await
+                .unwrap_err();
+            assert!(
+                wrong
+                    .to_string()
+                    .contains("TRANSCRIPT_STATIC_ALGO_QUERY_MISMATCH")
+            );
             assert_eq!(feed.outbound_posts.lock().unwrap().len(), 1);
         }
 
