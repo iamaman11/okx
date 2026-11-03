@@ -4,8 +4,28 @@ import assert from "node:assert/strict";
 import { actualNativeWorker, hash } from "../native-workerd.mjs";
 
 export async function run({ caseId, root, signal }) {
-  const { nativeReplay: native, workerReplay: worker, transcript_sha256 } =
-    await actualNativeWorker(root, signal);
+  const evidence = await actualNativeWorker(root, signal);
+  const { nativeReplay: native, workerReplay: worker, transcript_sha256 } = evidence;
+  const policy = process.env.OKX_S2_05_POLICY_CAS_PROBE === "1"
+    ? evidence.nativePolicyReplay : null;
+  const workerCas = process.env.OKX_S2_05_POLICY_CAS_PROBE === "1"
+    ? evidence.workerPolicyCas : null;
+  if (process.env.OKX_S2_05_POLICY_CAS_PROBE === "1") {
+    assert.ok(policy && workerCas, "S2-05 actual Native/Worker policy receipts");
+    assert.equal(workerCas.prior_revision, native.sql_policy_revision);
+    assert.equal(workerCas.new_revision, native.sql_policy_revision + 1);
+    assert.equal(workerCas.persisted_worker_durable_object, true);
+    assert.equal(policy.new_governance_revision, workerCas.new_revision);
+    assert.equal(policy.native_sql_revision, workerCas.new_revision);
+    assert.equal(policy.native_sql_matches_governance, true);
+    assert.equal(policy.original_intent_id, native.opened_intent_id);
+    assert.equal(policy.replayed_intent_id, native.opened_intent_id);
+    assert.equal(policy.original_request_hash, policy.persisted_request_hash);
+    assert.equal(policy.original_deadline_ms, policy.persisted_deadline_ms);
+    assert.equal(policy.new_key_reason, "ACCOUNT_NEW_RISK_PAUSED");
+    assert.equal(policy.posts_before, 1);
+    assert.equal(policy.posts_after, 1);
+  }
   assert.equal(native.opened_intent_id, native.replayed_intent_id);
   assert.equal(native.opened_intent_id, native.sql_intent_id);
   assert.equal(native.sql_state, "ACKNOWLEDGED");

@@ -620,9 +620,50 @@ try {
       ws_url:wsUrl.toString(),token,reservation_key:addMode ? null : held.reservation_key,
     }), {mode:0o600});
     await rename(stagedHandoff, handoffPath);
+    // S2-05: alter REAL persisted Worker governance only after Native has
+    // committed and replayed an immutable public order. The authenticated
+    // RuntimeSession broadcasts the new PolicySnapshot on its existing WSS.
+    // Files are bounded synchronization markers, not financial/source facts.
+    const policyCas = process.env.OKX_S2_05_POLICY_CAS_PROBE === "1"
+      ? (async () => {
+        const ready = handoffPath + ".s2-policy-cas-ready";
+        const until = Date.now() + 90_000;
+        let present = false;
+        while (Date.now() < until) {
+          try { await stat(ready); present = true; break; }
+          catch (error) { if (error?.code !== "ENOENT") throw error; }
+          await delay(25);
+        }
+        assert.ok(present, "S2-05 Native ACK+replay causality marker missing");
+        const prior = await request(second, "/account-governance");
+        assert.equal(prior.status, 200);
+        const changed = await request(second, "/account-governance/pause", "POST", {
+          account: accountKey, explicit_pause: true,
+          expected_revision: prior.body.revision,
+          idempotency_key: "s2_05_worker_policy_pause_after_ack_0001",
+        });
+        assert.equal(changed.status, 200, "S2-05 actual Worker governance CAS");
+        const persisted = await request(second, "/account-governance");
+        assert.equal(persisted.status, 200);
+        assert.equal(persisted.body.revision, prior.body.revision + 1);
+        assert.equal(persisted.body.accounts.find(a =>
+          a.account_key === accountKey).explicit_pause, true);
+        await writeFile(
+          handoffPath + ".s2-policy-cas-committed",
+          String(persisted.body.revision), {mode:0o600},
+        );
+        return {prior_revision:prior.body.revision,
+          new_revision:persisted.body.revision,
+          account_paused:true, persisted_worker_durable_object:true};
+      })().then(value => ({ok:true,value}), error => ({ok:false,error}))
+      : Promise.resolve({ok:true,value:null});
     let stdout, stderr;
     try {
       ({stdout,stderr} = await nativeProcess);
+      const rotated = await policyCas;
+      if (!rotated.ok) throw rotated.error;
+      if (rotated.value) console.log("S2_05_WORKER_POLICY_CAS_V1:" +
+        JSON.stringify(rotated.value));
     } catch (error) {
       // cargo test --nocapture holds the original Native failure in stdout.
       // Emit only the bounded structured production denial; the outer test

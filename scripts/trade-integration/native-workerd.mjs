@@ -149,6 +149,10 @@ export async function actualNativeWorker(root, signal, { statusProbe = false, se
       nativeBootstrap: receipt(stdout, "T09_0_NATIVE_SQL_EVIDENCE_V1"),
       workerBootstrap: receipt(stdout, "T09_0_WORKER_EVIDENCE_V1"),
       nativeReplay: receipt(stdout, "T09_5_NATIVE_IDEMPOTENCY_EVIDENCE_V1"),
+      ...(process.env.OKX_S2_05_POLICY_CAS_PROBE === "1" ? {
+        nativePolicyReplay: receipt(stdout, "S2_05_NATIVE_POLICY_REPLAY_V1"),
+        workerPolicyCas: receipt(stdout, "S2_05_WORKER_POLICY_CAS_V1"),
+      } : {}),
       nativeFinancial: receipt(stdout, "T09_1_NATIVE_FILL_BILL_EVIDENCE_V1"),
       ...(statusProbe
         ? {

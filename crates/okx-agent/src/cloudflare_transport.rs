@@ -4088,6 +4088,107 @@ mod raw_native_session_tests {
             .await
             .expect("recorded public publisher did not terminate")
             .unwrap();
+        if std::env::var("OKX_S2_05_POLICY_CAS_PROBE").as_deref() == Ok("1") {
+            assert!(!status_probe, "S2-05 policy rotation is a standalone T09.5 probe");
+            let posts_before = feed.outbound_posts.lock().unwrap().len();
+            assert_eq!(posts_before, 1, "S2-05 begins after one real venue create ACK");
+            std::fs::write(
+                format!("{handoff_path}.s2-policy-cas-ready"),
+                b"AFTER_SIGNED_ACK_AND_SEMANTIC_REPLAY",
+            )
+            .expect("S2-05 causal Worker policy-CAS barrier");
+            // The REAL RuntimeSession commits an account pause via its
+            // governance HTTP CAS and pushes PolicySnapshot over existing WSS.
+            // Only the normal production policy handler can update account SQL.
+            let paused = tokio::time::timeout(Duration::from_secs(18), async {
+                loop {
+                    let caps = trade
+                        .trade("fixture-a", &TradeRequest::Capabilities {}, None)
+                        .await
+                        .expect("S2-05 native capabilities readback");
+                    if caps["governance"]["revision"] == json!(3)
+                        && caps["governance"]["explicit_pause"] == true
+                        && caps["native_sql_policy"]["revision"] == json!(3)
+                        && caps["native_sql_policy"]["matches_governance"] == true
+                    {
+                        break caps;
+                    }
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            })
+            .await
+            .expect("S2-05 actual Worker policy CAS must reach both Native SQL owners");
+            let resumed = trade
+                .trade("fixture-a", &execute, None)
+                .await
+                .expect("S2-05 old accepted key must survive an actual policy pause");
+            let replay_id = if resumed["status"] == "unknown" {
+                resumed["intent_id"].as_str()
+            } else {
+                resumed["data"]["intent"]["intent_id"].as_str()
+            };
+            assert_eq!(
+                replay_id,
+                Some(saved.intent_id.as_str()),
+                "S2-05 old semantic request must retain original identity after policy CAS"
+            );
+            let mut new_key = execute.clone();
+            if let TradeRequest::Execute {
+                idempotency_key, ..
+            } = &mut new_key
+            {
+                *idempotency_key = "s2_05_new_policy_key_denied_0001".into();
+            } else {
+                panic!("S2-05 requires the original Execute shape");
+            }
+            let new_reason = trade
+                .trade("fixture-a", &new_key, None)
+                .await
+                .expect_err("S2-05 new key must apply the current pause");
+            assert_eq!(
+                new_reason,
+                "ACCOUNT_NEW_RISK_PAUSED",
+                "S2-05 new key must be denied by current policy rather than stale authority"
+            );
+            let persisted = accounts
+                .resolve("fixture-a")
+                .await
+                .unwrap()
+                .execution
+                .store
+                .call(std::time::Instant::now() + Duration::from_secs(3), |sql| {
+                    sql.by_idempotency("t09_real_public_execute_0001")
+                })
+                .await
+                .expect("S2-05 original Native SQL owner must answer")
+                .expect("S2-05 original SQL intent cannot be lost");
+            assert_eq!(persisted.request_hash, saved.request_hash);
+            assert_eq!(persisted.plan_hash, saved.plan_hash);
+            assert_eq!(persisted.deadline, saved.deadline);
+            assert_eq!(persisted.client_order_id, saved.client_order_id);
+            assert_eq!(persisted.policy_revision, saved.policy_revision);
+            let posts_after = feed.outbound_posts.lock().unwrap().len();
+            assert_eq!(posts_after, posts_before, "S2-05 policy CAS must not trigger a new POST");
+            println!(
+                "S2_05_NATIVE_POLICY_REPLAY_V1:{}",
+                json!({
+                    "source":"runtime_session_governance_cas_over_wss",
+                    "original_intent_id":saved.intent_id,
+                    "replayed_intent_id":replay_id,
+                    "original_policy_revision":saved.policy_revision,
+                    "new_governance_revision":paused["governance"]["revision"],
+                    "native_sql_revision":paused["native_sql_policy"]["revision"],
+                    "native_sql_matches_governance":paused["native_sql_policy"]["matches_governance"],
+                    "original_request_hash":saved.request_hash,
+                    "persisted_request_hash":persisted.request_hash,
+                    "original_deadline_ms":saved.deadline,
+                    "persisted_deadline_ms":persisted.deadline,
+                    "new_key_reason":new_reason,
+                    "posts_before":posts_before,
+                    "posts_after":posts_after,
+                })
+            );
+        }
         println!("t09_public_trade_execute_open_ack_and_idempotency PASS: posts=1");
         shutdown_tx.send(true).unwrap();
         let terminated = tokio::time::timeout(Duration::from_secs(10), session)
