@@ -2626,6 +2626,48 @@ mod raw_native_session_tests {
                     "created_posts":feed.outbound_posts.lock().unwrap().len()
                 })
             );
+            // A terminal fill/bill and a public Status observation have
+            // now occurred. Re-read the SAME immutable signed financial
+            // history at this causal frontier: the previous finite POST-fill
+            // pages may have been consumed by independent maintenance
+            // before public Close is admitted. Never turn an exhausted SPOT
+            // source into a fabricated empty/campaign-ready state.
+            let mut close_history_pages = Vec::new();
+            for _ in 0..12 {
+                for partition in ["SPOT", "MARGIN", "FUTURES", "OPTION", "SWAP"] {
+                    close_history_pages.push(RecordedGet {
+                        access_key: "fixture-executor-a".into(),
+                        path: "/api/v5/trade/fills-history".into(),
+                        required_query: vec![("instType".into(), partition.into())],
+                        raw_response: if partition == "SWAP" {
+                            raw_fill.clone()
+                        } else {
+                            envelope(json!([]))
+                        },
+                    });
+                }
+            }
+            let close_fills_retired = feed.advance_recorded_route(
+                "fixture-executor-a",
+                "/api/v5/trade/fills-history",
+                close_history_pages,
+            );
+            let close_bills_retired = feed.advance_recorded_route(
+                "fixture-executor-a",
+                "/api/v5/account/bills-archive",
+                (0..12)
+                    .map(|_| RecordedGet {
+                        access_key: "fixture-executor-a".into(),
+                        path: "/api/v5/account/bills-archive".into(),
+                        required_query: vec![],
+                        raw_response: raw_bill.clone(),
+                    })
+                    .collect(),
+            );
+            eprintln!(
+                "T09_1_POST_FILL_SOURCE_FRONTIER_V1:retired_fills={} retired_bills={} recorded_pages_per_partition=12",
+                close_fills_retired, close_bills_retired
+            );
             // T09.1 next boundary: a user-facing Close is routed through the
             // same TradeService/SQL owner. The only synthetic input is the
             // independently recorded signed OKX create ACK and order GET.
@@ -2633,7 +2675,11 @@ mod raw_native_session_tests {
             // protection inventory are independently captured.
             use crate::accounts::recorded_support::RecordedPost;
             let close_time = chrono::Utc::now().timestamp_millis().to_string();
-            feed.expect_public_clock(envelope(json!([{"ts":close_time}])));
+            // A later mutation must not consume the old entry-clock
+            // observation left in a shared recorded clock queue.
+            // Retire it only AFTER the authenticated post-fill source
+            // frontier above; do not change production clock limits.
+            feed.advance_recorded_public_clock(envelope(json!([{"ts":close_time}])));
             feed.expect_post(RecordedPost {
                 access_key: "fixture-executor-a".into(),
                 path: "/api/v5/trade/order".into(),
