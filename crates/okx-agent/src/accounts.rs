@@ -1910,6 +1910,172 @@ pub(crate) mod recorded_support {
     mod recorded_order_binding_tests {
         use super::*;
 
+        fn causal_algo_fixture() -> Arc<RecordedAccountHttp> {
+            let feed = Arc::new(RecordedAccountHttp::default());
+            let raw = |data: serde_json::Value| {
+                serde_json::to_vec(&serde_json::json!({
+                    "code": "0", "msg": "", "data": data
+                }))
+                .unwrap()
+            };
+            let mut before = Vec::new();
+            let mut after = Vec::new();
+            for inst_type in ["SWAP", "FUTURES"] {
+                for kind in [
+                    "conditional", "oco", "trigger", "move_order_stop",
+                    "chase", "iceberg", "twap", "smart_iceberg",
+                ] {
+                    let query = vec![
+                        ("instType".into(), inst_type.into()),
+                        ("ordType".into(), kind.into()),
+                        ("limit".into(), "100".into()),
+                    ];
+                    let active = inst_type == "SWAP" && kind == "conditional";
+                    before.push(RecordedGet {
+                        access_key: "fixture-observer-a".into(),
+                        path: "/api/v5/trade/orders-algo-pending".into(),
+                        required_query: query.clone(),
+                        raw_response: raw(if active {
+                            serde_json::json!([
+                                {"algoId": "900000002"},
+                                {"algoId": "900000003"}
+                            ])
+                        } else {
+                            serde_json::json!([])
+                        }),
+                    });
+                    after.push(RecordedGet {
+                        access_key: "fixture-observer-a".into(),
+                        path: "/api/v5/trade/orders-algo-pending".into(),
+                        required_query: query,
+                        raw_response: raw(if active {
+                            serde_json::json!([{"algoId": "900000003"}])
+                        } else {
+                            serde_json::json!([])
+                        }),
+                    });
+                }
+            }
+            feed.expect_causal_algo_inventory("900000002", before, after);
+            feed.expect_post(RecordedPost {
+                access_key: "fixture-executor-a".into(),
+                path: "/api/v5/trade/cancel-algos".into(),
+                expected_body: serde_json::json!([{
+                    "instId": "BTC-USDT-SWAP", "algoId": "900000002"
+                }]),
+                raw_response: raw(serde_json::json!([{
+                    "algoId": "900000002", "sCode": "0"
+                }])),
+            });
+            feed
+        }
+
+        fn causal_get(account: &'static str, limit: &str) -> okx_api::HttpRequest {
+            let url = reqwest::Url::parse(&format!(
+                "https://www.okx.com/api/v5/trade/orders-algo-pending?instType=SWAP&ordType=conditional&limit={limit}"
+            ))
+            .unwrap();
+            let mut request = reqwest::Request::new(reqwest::Method::GET, url);
+            request.headers_mut().insert(
+                "OK-ACCESS-KEY",
+                reqwest::header::HeaderValue::from_static(account),
+            );
+            request
+        }
+
+        fn causal_cancel() -> okx_api::HttpRequest {
+            let url = reqwest::Url::parse(
+                "https://www.okx.com/api/v5/trade/cancel-algos"
+            )
+            .unwrap();
+            let mut request = reqwest::Request::new(reqwest::Method::POST, url);
+            request.headers_mut().insert(
+                "OK-ACCESS-KEY",
+                reqwest::header::HeaderValue::from_static("fixture-executor-a"),
+            );
+            *request.body_mut() = Some(reqwest::Body::from(
+                r#"[{"instId":"BTC-USDT-SWAP","algoId":"900000002"}]"#,
+            ));
+            request
+        }
+
+        async fn deliver_causal(
+            feed: &RecordedAccountHttp,
+            request: okx_api::HttpRequest,
+        ) -> Result<serde_json::Value, okx_api::OkxError> {
+            use okx_api::HttpTransport;
+            let reply = feed
+                .send(request, Instant::now() + std::time::Duration::from_secs(3))
+                .await?;
+            serde_json::from_slice(&reply.body).map_err(Into::into)
+        }
+
+        #[tokio::test]
+        async fn s1_01_maintenance_read_before_cancel_ack_keeps_second_stop() {
+            let feed = causal_algo_fixture();
+            let before = deliver_causal(&feed, causal_get("fixture-observer-a", "100"))
+                .await
+                .unwrap();
+            assert_eq!(before["data"].as_array().unwrap().len(), 2);
+            deliver_causal(&feed, causal_cancel()).await.unwrap();
+            let after = deliver_causal(&feed, causal_get("fixture-observer-a", "100"))
+                .await
+                .unwrap();
+            assert_eq!(after["data"].as_array().unwrap().len(), 1);
+            assert_eq!(after["data"][0]["algoId"], "900000003");
+            assert_eq!(feed.outbound_posts.lock().unwrap().len(), 1);
+            assert_eq!(feed.unconsumed_posts(), 0);
+        }
+
+        #[tokio::test]
+        async fn s1_02_pre_cancel_get_late_delivery_does_not_rewrite_inventory() {
+            let feed = causal_algo_fixture();
+            let (entered, resume) = feed.hold_next_causal_algo_get();
+            let in_flight = {
+                let feed = feed.clone();
+                tokio::spawn(async move {
+                    deliver_causal(&feed, causal_get("fixture-observer-a", "100")).await
+                })
+            };
+            tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                entered.notified(),
+            )
+            .await
+            .expect("pre-cancel read admitted at transport boundary");
+            deliver_causal(&feed, causal_cancel()).await.unwrap();
+            resume.notify_one();
+            let old = in_flight.await.unwrap().unwrap();
+            assert_eq!(old["data"].as_array().unwrap().len(), 2);
+            let fresh = deliver_causal(&feed, causal_get("fixture-observer-a", "100"))
+                .await
+                .unwrap();
+            assert_eq!(fresh["data"].as_array().unwrap().len(), 1);
+            assert_eq!(fresh["data"][0]["algoId"], "900000003");
+            assert_eq!(feed.outbound_posts.lock().unwrap().len(), 1);
+            let duplicate = deliver_causal(&feed, causal_cancel()).await.unwrap_err();
+            assert!(duplicate.to_string().contains("TRANSCRIPT_UNEXPECTED_POST"));
+            assert_eq!(feed.outbound_posts.lock().unwrap().len(), 2);
+        }
+
+        #[tokio::test]
+        async fn s1_03_unknown_scope_fails_without_advancing_cancel_inventory() {
+            let feed = causal_algo_fixture();
+            let account = deliver_causal(&feed, causal_get("fixture-observer-b", "100"))
+                .await
+                .unwrap_err();
+            assert!(account.to_string().contains("TRANSCRIPT_ALGO_ACCOUNT_MISMATCH"));
+            let query = deliver_causal(&feed, causal_get("fixture-observer-a", "99"))
+                .await
+                .unwrap_err();
+            assert!(query.to_string().contains("TRANSCRIPT_ALGO_QUERY_MISMATCH"));
+            let unchanged = deliver_causal(&feed, causal_get("fixture-observer-a", "100"))
+                .await
+                .unwrap();
+            assert_eq!(unchanged["data"].as_array().unwrap().len(), 2);
+            assert_eq!(feed.outbound_posts.lock().unwrap().len(), 0);
+        }
+
         #[test]
         fn recorded_clients_use_one_native_rate_budget_across_api_identities() {
             // A scripted transport must not gain independent admission windows
