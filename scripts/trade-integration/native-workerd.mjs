@@ -100,17 +100,35 @@ export async function actualNativeWorker(root, signal, { statusProbe = false, se
         throw Error("NATIVE_RUST_ASSERTION:" +
           String(detail.rust_assertion).slice(0, 1200));
       }
+      // Extract only bounded economic facts from the real persisted Worker
+      // mismatch. Previously double-escaped braces prevented this receipt
+      // from matching; the outer runner hid the true monetary divergence.
       const moneyMismatch = stderr.match(
-        /T09_2_POST_NATIVE_BUDGET_MISMATCH_V1:(\\{[^\\r\\n]+\\})/
+        /T09_2_POST_NATIVE_BUDGET_MISMATCH_V1:(\{[^\r\n]+\})/
       );
       if (moneyMismatch) {
         const evidence = JSON.parse(moneyMismatch[1]);
+        const decimal = value => typeof value === "string" &&
+          /^(?:0|[1-9][0-9]{0,10})(?:\.[0-9]{1,9})?$/.test(value)
+          ? value : null;
+        const nativeEntry = evidence.native_worker_budget?.entry_budget ?? {};
+        const detail = {
+          schema: "okx.t09-worker-budget-mismatch/v1",
+          expected_reserved_usd: decimal(evidence.expected_reserved_usd),
+          actual_reserved_usd: decimal(evidence.actual_reserved_usd),
+          expected_spent_usd: decimal(evidence.expected_spent_usd),
+          actual_spent_usd: decimal(evidence.actual_spent_usd),
+          native_reserved_usd: decimal(nativeEntry.reserved_usd),
+          native_spent_usd: decimal(nativeEntry.consumed_usd),
+          worker_risk_book_sequence: evidence.worker_risk_book_sequence ?? null,
+          native_risk_book_sequence: evidence.native_risk_book_sequence ?? null,
+        };
         process.stderr.write("T09_2_POST_NATIVE_BUDGET_MISMATCH_V1:" +
-          JSON.stringify(evidence) + "\n");
+          JSON.stringify(detail) + "\n");
         throw Error("T09_2_POST_NATIVE_BUDGET_MISMATCH:" +
-          String(evidence.actual_reserved_usd) + ":expected=" +
-          String(evidence.expected_reserved_usd) + ":spent=" +
-          String(evidence.actual_spent_usd));
+          String(detail.actual_reserved_usd) + ":expected=" +
+          String(detail.expected_reserved_usd) + ":spent=" +
+          String(detail.actual_spent_usd));
       }
       // Preserve only bounded, secret-free evidence from the nested child.
       // The previous fallback hid its assertion behind "Command failed".
