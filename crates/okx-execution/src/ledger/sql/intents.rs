@@ -1306,6 +1306,36 @@ impl AccountStore {
             })
             .collect()
     }
+    /// A reduce-only local: reservation never reached Worker RiskBook.
+    /// Its SQL no-send obligation must still leave risk_census_intents;
+    /// success without a durable release ACK is not settlement.
+    pub fn acknowledge_local_unsent_release(&mut self, id: &str) -> StoreResult<()> {
+        let proof = self.unsent_release_receipt(id)?
+            .ok_or(StoreError::Invalid("LOCAL_UNSENT_SQL_PROOF_REQUIRED"))?;
+        let intent = self.intent(id)?
+            .ok_or(StoreError::Invalid("LOCAL_UNSENT_INTENT_MISSING"))?;
+        let local_key = format!("local:{id}");
+        let receipt = self.central_receipt(id)?
+            .ok_or(StoreError::Invalid("LOCAL_UNSENT_RECEIPT_MISSING"))?;
+        if intent.risk_increase || intent.state != IntentState::Rejected
+            || intent.exchange_order_id.is_some()
+            || proof.reservation_key != local_key || proof.intent_id != id
+            || proof.account_key != self.meta.account_key
+            || proof.plan_hash != intent.plan_hash
+            || proof.request_hash != intent.request_hash
+            || receipt.reservation_key != local_key
+            || receipt.account_key != self.meta.account_key
+            || receipt.plan_hash != intent.plan_hash
+            || self.operation(&format!("risk-reserve:{id}"))?.is_some()
+        {
+            return Err(StoreError::Invalid("LOCAL_UNSENT_RELEASE_PROOF_MISMATCH"));
+        }
+        let bytes = serde_json::to_vec(&proof)
+            .map_err(|_| StoreError::Invalid("LOCAL_UNSENT_PROOF_SERIALIZATION_FAILED"))?;
+        let evidence = format!("local-unsent-sql:{:x}", Sha256::digest(bytes));
+        self.acknowledge_central_release(&local_key, &evidence)
+    }
+
     pub fn acknowledge_central_release(&mut self, key: &str, evidence: &str) -> StoreResult<()> {
         if evidence.is_empty() {
             return Err(StoreError::Invalid("CENTRAL_RELEASE_EVIDENCE_REQUIRED"));

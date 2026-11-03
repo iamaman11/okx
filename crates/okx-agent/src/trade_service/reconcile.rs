@@ -908,6 +908,14 @@ impl TradeService {
             .ok_or("AUTHORITY_UNAVAILABLE")?;
         let reservation = proof.reservation_key.clone();
         if reservation.starts_with("local:") {
+            // Real Worker risk was never granted, but the one Native SQL
+            // owner's local no-send lifecycle marker must be discharged.
+            let local_id = i.intent_id.clone();
+            r.execution
+                .store
+                .call(deadline(), move |s| s.acknowledge_local_unsent_release(&local_id))
+                .await
+                .map_err(err)?;
             return Ok(());
         }
         for _ in 0..4 {

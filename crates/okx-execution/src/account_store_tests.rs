@@ -4586,6 +4586,90 @@ fn f1_prepared_before_reserve_is_recovered_once_without_central_release() {
 }
 
 #[test]
+fn local_unsent_close_releases_only_after_original_sql_no_send_witness() {
+    let mut s = store();
+    let definition = s.ensure_manual_instance(1).unwrap();
+    let d = Decision {
+        decision_id: "local-close-decision".into(),
+        instance_id: None, decision_at: 2, input_digest: "signed-close".into(),
+        policy_revision: 1, code_version: "test".into(),
+    };
+    let id = "local-close";
+    let request = NewIntent {
+        plan: IntentPlan {
+            strategy_definition_id: definition.definition_id,
+            strategy_definition_version: definition.version,
+            strategy_parameters_digest: definition.parameters_digest,
+            contract_value: Decimal::ONE, inverse: false,
+            settlement_currency: "USDT".into(), position_side: "long".into(),
+            private_source_generation: 1, operation: "close".into(),
+            side: "sell".into(), quantity: Decimal::ONE,
+            limit_price: Decimal::from(100), stop_price: None,
+            strategy_instance: "manual".into(),
+            planned_loss_usd: Decimal::ZERO, source_generation: 1,
+        },
+        intent_id: id.into(), idempotency_key: "local-close-request".into(),
+        request_hash: "local-close-body".into(),
+        client_order_id: "local-close-client".into(), deadline: 100,
+        plan_hash: "local-close-plan".into(), policy_revision: 1,
+        risk_increase: false, instrument_id: "BTC-USDT-SWAP".into(),
+    };
+    let prepared = s.prepare(&d, &request).unwrap();
+    s.reserve(&CentralReceipt {
+        reservation_key: format!("local:{id}"),
+        account_key: s.meta.account_key.clone(),
+        installation_id: s.meta.installation_id.clone(),
+        instance_id: None, intent_id: id.into(),
+        plan_hash: prepared.plan_hash, policy_revision: 1,
+        receipt_hash: "local-receipt".into(),
+        requested_loss_usd: Decimal::ZERO,
+        conversion_digest: "local-conversion".into(),
+    }, 3).unwrap();
+    // Negative: local HELD without REJECTED_UNSENT is not enough.
+    assert!(matches!(
+        s.acknowledge_local_unsent_release(id),
+        Err(StoreError::Invalid("LOCAL_UNSENT_SQL_PROOF_REQUIRED"))
+    ));
+    assert!(s.risk_census_intents(100).unwrap().1.contains(&id.to_string()));
+    assert!(s.operation(&format!("central-release:local:{id}")).unwrap().is_none());
+    s.reject_unsent(id, "COMMAND_EXPIRED", 4).unwrap();
+    let proof = s.unsent_release_receipt(id).unwrap().unwrap();
+    assert_eq!(proof.reservation_key, format!("local:{id}"));
+    assert_eq!(proof.reason, "COMMAND_EXPIRED");
+    assert!(s.risk_census_intents(100).unwrap().1.contains(&id.to_string()));
+    assert!(s.operation(&format!("risk-reserve:{id}")).unwrap().is_none());
+    // Positive: original SQL proof acknowledges the local lifecycle marker.
+    s.acknowledge_local_unsent_release(id).unwrap();
+    assert!(!s.risk_census_intents(100).unwrap().1.contains(&id.to_string()));
+    let original = s.operation(&format!("central-release:local:{id}"))
+        .unwrap().unwrap();
+    assert_eq!(original.kind, "CENTRAL_RELEASE");
+    assert!(original.result_ref.starts_with("local-unsent-sql:"));
+    s.acknowledge_local_unsent_release(id).unwrap();
+    assert_eq!(
+        s.operation(&format!("central-release:local:{id}")).unwrap().unwrap().result_ref,
+        original.result_ref
+    );
+    assert!(!s.begin_post(id, 1, 6).unwrap(), "rejected Close must not POST");
+}
+
+#[test]
+fn local_unsent_release_cannot_clear_a_real_central_reservation() {
+    let mut s = store();
+    intent(&mut s);
+    reserve(&mut s);
+    s.reject_unsent("intent", "COMMAND_EXPIRED", 5).unwrap();
+    assert!(s.unsent_release_receipt("intent").unwrap().is_some());
+    assert!(matches!(
+        s.acknowledge_local_unsent_release("intent"),
+        Err(StoreError::Invalid("LOCAL_UNSENT_RELEASE_PROOF_MISMATCH"))
+    ));
+    assert!(s.risk_census_intents(100).unwrap().1.contains(&"intent".to_string()));
+    assert!(s.operation("central-release:central-key").unwrap().is_none());
+    assert!(!s.begin_post("intent", 1, 6).unwrap());
+}
+
+#[test]
 fn f3_crash_after_native_reserve_before_post_claim_releases_no_send() {
     let mut s = store();
     intent(&mut s);
