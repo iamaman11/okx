@@ -44,6 +44,12 @@ export async function run({root,signal}) {
     admitted.after_worker_budget.reserved_loss_usd);
   assert.ok(proof && proof.phases.length===2,"Native account capture evidence required");
   const [partial,terminal]=proof.phases;
+  for (const phase of [partial,terminal]) {
+    assert.ok(phase.source_read_counts,"raw Native source count checkpoint missing");
+    for (const [route,count] of Object.entries(phase.source_read_counts))
+      assert.ok(Number.isSafeInteger(count)&&count>=0,
+        "invalid bounded native HTTP count for "+route);
+  }
   for (const [phase,quantity,fee,fillCount] of [
     [partial,"0.12","0.0006",1],[terminal,"0.3","0.0015",2]
   ]) {
@@ -77,7 +83,11 @@ export async function run({root,signal}) {
   assert.deepEqual(source.workerSecondAdmission.budget,proof.worker_budget);
   return {
     case_id:"T09.3",status:"PASS",
-    provenance:{schema:"okx.native-workerd-transcript/v1",sha256:source.transcript_sha256},
+    provenance:{schema:"okx.native-workerd-transcript/v1",
+      sha256:source.transcript_sha256,
+      source_read_counts:{
+        partial:partial.source_read_counts,terminal:terminal.source_read_counts,
+      }},
     assertions:[
       {id:"partial_qty",expected:"0.12",actual:partial.sql.quantity},
       {id:"partial_fee",expected:"0.0006",actual:partial.sql.fee_usdt},
