@@ -6,7 +6,25 @@ export async function run({root,signal}) {
   const proof=source.nativePartialFills;
   const cross=source.nativeCrossUidDenial;
   const admitted=source.nativeSecondAdmission;
+  const multi=source.nativeStrategyAccountPreflight;
   assert.ok(cross&&admitted,"independent cross-UID Native/Worker checkpoint required");
+  assert.ok(multi,"independent Native A/B strategy SQL and public preflight receipt required");
+  assert.equal(multi.account_a_uid,admitted.account_uid);
+  assert.equal(multi.account_b_uid,cross.foreign_uid);
+  assert.notEqual(multi.account_a_uid,multi.account_b_uid);
+  assert.equal(multi.a_strategy_registered,true);
+  assert.equal(multi.b_strategy_registered,true);
+  assert.equal(multi.a_other_strategy_absent,true);
+  assert.equal(multi.b_other_strategy_absent,true);
+  assert.equal(multi.a_strategy_enabled,false,
+    "registration is not an automatic authority for trading");
+  assert.equal(multi.b_strategy_enabled,false);
+  assert.equal(multi.a_public_account,"okx:real:"+multi.account_a_uid);
+  assert.equal(multi.b_public_account,"okx:real:"+multi.account_b_uid);
+  assert.equal(multi.a_new_risk_authorized,false);
+  assert.equal(multi.b_new_risk_authorized,false);
+  assert.equal(multi.native_outbound_posts,4,
+    "two concurrent account preflights must not create venue POST");
   assert.match(cross.owner_uid,/^[a-f0-9]{64}$/);
   assert.match(cross.foreign_uid,/^[a-f0-9]{64}$/);
   assert.notEqual(cross.owner_uid,cross.foreign_uid);
@@ -70,7 +88,14 @@ export async function run({root,signal}) {
       {id:"foreign_uid_cancel_no_mutation",expected:"INTENT_NOT_FOUND",actual:cross.cancel_reason},
       {id:"foreign_uid_no_exchange_post",expected:"4",actual:String(cross.outbound_posts_after)},
       {id:"foreign_uid_has_no_sql_intent",expected:"true",actual:String(cross.foreign_sql_intent_absent)},
-      {id:"foreign_uid_has_no_sql_key",expected:"true",actual:String(cross.foreign_sql_idempotency_absent)}
+      {id:"foreign_uid_has_no_sql_key",expected:"true",actual:String(cross.foreign_sql_idempotency_absent)},
+      {id:"account_a_strategy_isolated",expected:"true",actual:String(multi.a_other_strategy_absent)},
+      {id:"account_b_strategy_isolated",expected:"true",actual:String(multi.b_other_strategy_absent)},
+      {id:"account_a_public_route",expected:"okx:real:"+admitted.account_uid,
+        actual:multi.a_public_account},
+      {id:"account_b_public_route",expected:"okx:real:"+cross.foreign_uid,
+        actual:multi.b_public_account},
+      {id:"two_account_preflight_no_post",expected:"4",actual:String(multi.native_outbound_posts)}
     ],
     events:[
       {stage:"public_trade_entered",owner:"TradeService",source_digest:hash(source.nativeSecondAdmission.intent_id)},
@@ -83,7 +108,9 @@ export async function run({root,signal}) {
       {stage:"release_confirmed",owner:"RuntimeSession/SQLiteDO",source_digest:hash(source.nativeTerminal.opening_status.data.central_release)},
       {stage:"cross_uid_denial_verified",owner:"TradeService+AccountStore+RiskBook",
         source_digest:hash([cross.owner_uid,cross.foreign_uid,cross.status_reason,
-          cross.cancel_reason,cross.foreign_sql_intent_absent,cross.worker_budget])}
+          cross.cancel_reason,cross.foreign_sql_intent_absent,cross.worker_budget])},
+      {stage:"two_account_strategy_sql_preflight",owner:"TradeService+AccountStore(A/B)",
+        source_digest:hash(multi)}
     ],
     readbacks:{
       sql:[{revision:terminal.sql.fill_watermark,digest:hash([partial.sql,terminal.sql])}],
