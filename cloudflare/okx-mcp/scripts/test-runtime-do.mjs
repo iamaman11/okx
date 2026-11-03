@@ -404,6 +404,19 @@ try {
     const firstRequest=requested(uid,"native_alpha","a_0001","a");
     const secondRequest=requested(uidB,"native_beta","b_0001","b");
     const thirdRequest=requested(uid,"native_alpha","a_0002","c");
+    // A valid UID and authentic policy generation must not let B borrow A's
+    // exclusively registered strategy. This must be denied before any risk
+    // can be held, independent of remaining shared campaign headroom.
+    const foreignStrategy = requested(uidB,"native_alpha","foreign_a_0001","d");
+    const foreignDecision = await risk(
+      socket1,"reserve_foreign_strategy_0001",foreignStrategy
+    );
+    assert.equal(foreignDecision.status,"DENIED",
+      "foreign strategy must never be authorized by account-level fallback");
+    assert.equal(foreignDecision.reason,"STRATEGY_NOT_ENABLED_FOR_ACCOUNT");
+    const afterForeign=await summary(socket1,"summary_foreign_strategy_denied_0001");
+    assert.equal(afterForeign.budget.entry_budget.reserved_usd,"0");
+    assert.equal(afterForeign.budget.reserved_loss_usd,"0");
     // Both accounts genuinely contend over one SQLite RiskBook owner.
     // Distinct command IDs mean concurrent WSS results cannot be confused.
     const [firstReserve,secondReserve]=await Promise.all([
@@ -470,6 +483,11 @@ try {
       second_status:secondReserve.status,
       third_status:denied.status,
       third_reason:denied.reason,
+      foreign_strategy_status:foreignDecision.status,
+      foreign_strategy_reason:foreignDecision.reason,
+      foreign_strategy_no_budget_reserved:
+        afterForeign.budget.entry_budget.reserved_usd==="0" &&
+        afterForeign.budget.reserved_loss_usd==="0",
       replay_status:repeated.status,
       replay_reservation_identical:repeated.reservation_key===firstReserve.reservation_key,
       persisted_a_state:inspectA.reservation_state,
