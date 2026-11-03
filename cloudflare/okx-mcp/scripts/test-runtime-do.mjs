@@ -815,6 +815,18 @@ try {
         if (managedClose) {
           assertBudgetEconomicsUnchanged(latestNativeBudget,afterNative.budget,
             "T09.2/T09.6 persisted Worker versus latest Native terminal budget");
+        } else if (process.env.OKX_B1_NATIVE_CAP_PROBE === "1") {
+          // B's independently authenticated public Execute is rejected by
+          // the shared cap but may advance the COMPLETE account census.
+          // Preserve every economic field while allowing ONLY a newer
+          // source_as_of_ms. Ordinary T09.2 retains exact object equality.
+          const b1 = receipt(stdout,"B1_NATIVE_SHARED_CAP_DENIAL_V1");
+          assert.equal(b1.denial_reason,"CAMPAIGN_ENTRY_BUDGET_EXHAUSTED");
+          assert.equal(b1.outbound_posts_before,b1.outbound_posts_after);
+          assertBudgetEconomicsUnchanged(b1.before_budget,b1.after_budget,
+            "B1 rejected second account cannot change shared campaign money");
+          assertBudgetEconomicsUnchanged(latestNativeBudget,afterNative.budget,
+            "B1 resumed Worker must match Native money after source refresh");
         } else {
           assert.deepEqual(afterNative.budget,latestNativeBudget,
             "T09.2 persisted Worker must equal Native pre-close budget");
