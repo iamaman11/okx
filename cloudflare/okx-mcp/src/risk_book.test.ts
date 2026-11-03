@@ -119,6 +119,37 @@ check(historicalNext.consumed_usd==="5.01"&&
  "next reservation never resets prior campaign spent or double-charges an entry");
 
 check(units("1.000000001")===1000000001n&&units("1e9")===null,"decimal exact");
+// Cross-account strategy ownership is part of the central authorization,
+// not just an accounting label. This is the exact fail-closed negative that
+// the real persisted Workerd WSS scenario exercises independently.
+const foreignBefore=(await readRiskBook(sa))!;
+const foreign=await reserve({
+ ...request,uid:b,strategy_id:"native_alpha",intent_id:"intent_foreign_strategy_001",
+ loss_usdt:"1",loss_usd:"1",entry_upper_usd:"1"
+});
+check(foreign.status==="DENIED"&&foreign.reason==="STRATEGY_NOT_ENABLED_FOR_ACCOUNT",
+ "T09-MA: nonmanual strategy not registered to UID B cannot reserve real risk");
+const foreignAfter=(await readRiskBook(sa))!;
+check(foreignAfter.entry_budget?.reserved_usd===foreignBefore.entry_budget?.reserved_usd
+ &&foreignAfter.reserved_loss_usd===foreignBefore.reserved_loss_usd,
+ "foreign strategy denial cannot mutate central loss or entry budget");
+const disabledStore=new Storage();disabledStore.map=structuredClone(sa.map);
+const disabledGovernance=structuredClone(governance);
+disabledGovernance.accounts[1].strategies[0].enabled=false;
+await disabledStore.put("account_access_v1",disabledGovernance);
+const disabled=await reserveRisk(disabledStore,policy,census,{
+ ...request,uid:b,intent_id:"intent_disabled_strategy_001",
+ loss_usdt:"1",loss_usd:"1",entry_upper_usd:"1"
+},native);
+check(disabled.status==="DENIED"&&disabled.reason==="STRATEGY_NOT_ENABLED_FOR_ACCOUNT",
+ "disabled named strategy cannot fall back to account-level modelled loss");
+const manualStore=new Storage();manualStore.map=structuredClone(sa.map);
+const manual=await reserveRisk(manualStore,policy,census,{
+ ...request,uid:b,strategy_id:"manual",intent_id:"intent_manual_account_001",
+ loss_usdt:"1",loss_usd:"1",entry_upper_usd:"1"
+},native);
+check(manual.status==="HELD",
+ "manual account-level capital retains the existing permitted risk model");
 const both=await Promise.all([reserve(),reserve({...request,uid:b,intent_id:"intent_23456789",loss_usdt:"5",loss_usd:"5"})]);
 check(both[0].status==="HELD"&&both[1].status==="DENIED","RISK-01 competing accounts aggregate");
 const held=both[0];if(held.status!=="HELD")throw Error("held");
