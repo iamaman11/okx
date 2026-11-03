@@ -1,0 +1,49 @@
+# Isolated temporary S2 smoke on this exact WIP branch only.
+# No deployment, private exchange credentials, venue POST or PR merge.
+name: S2 WIP semantic smoke
+on:
+  push:
+    branches:
+      - work/s2-integrated-p02-20261103
+
+permissions:
+  contents: read
+
+concurrency:
+  group: s2-smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust-semantic:
+    name: Rust semantic and Native build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de
+        with:
+          toolchain: 1.95.0
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Exact repo Rust format
+        run: cargo fmt --all -- --check
+      - name: Shared protocol decimal and literal SHA256
+        run: cargo test --locked -p okx-protocol --lib s2_ -- --nocapture
+      - name: Strict portable protocol Clippy
+        run: cargo clippy --locked -p okx-protocol --all-targets -- -D warnings
+      - name: Native exact decimal and semantic tests
+        run: cargo test --locked -p okx-agent --lib s2_ -- --nocapture
+
+  worker-semantic:
+    name: Worker TypeScript and shared golden
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: cloudflare/okx-mcp
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - name: Install exact locked Worker dependencies
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Compile and execute Worker unit/golden cases
+        run: npm run check
+      - name: Generated public tool contracts must not drift
+        run: git diff --exit-code -- contracts/tools.schema.json contracts/action-fixtures.json

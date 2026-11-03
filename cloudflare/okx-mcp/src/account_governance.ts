@@ -71,7 +71,7 @@ function positive(value:unknown):boolean {
   const n=units(value);return n!==null&&n>0n;
 }
 function ratio(value:unknown):boolean{
-  const n=units(value);return n!==null&&n>=0n&&n<=1000000000n;
+  const n=units(value);return n!==null&&n>=0n&&n<=units("1")!;
 }
 function optionalPositive(value:unknown):boolean{return value===null||positive(value);}
 export function validLimits(value:unknown):value is Limits{

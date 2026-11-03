@@ -601,8 +601,22 @@ impl TradeService {
             .mutation_capacity
             .try_acquire()
             .map_err(|_| "ACCOUNT_MUTATION_BUSY")?;
-        let body_hash =
-            bound_hash.unwrap_or(digest(&(r.configuration.account_key.wire(), request))?);
+        let account_key = r.configuration.account_key.wire();
+        // Keep the historical raw hash solely for read-only replay of
+        // already persisted intents. Never rewrite their IDs, plans or hashes.
+        // The old SQL record has only request_hash (not the complete original
+        // semantic DTO); a different spelling of a legacy amount must NOT be
+        // guessed equivalent or permitted to create another venue POST.
+        let historical_raw_hash = digest(&(account_key.clone(), request))?;
+        let body_hash = match bound_hash {
+            Some(bound) => bound,
+            None => {
+                let preimage = request
+                    .canonical_semantic_json(&account_key)
+                    .map_err(|cause| cause.code().to_owned())?;
+                format!("{:x}", Sha256::digest(preimage.as_bytes()))
+            }
+        };
         let key = idempotency_key.clone();
         let prior = r
             .execution
@@ -611,7 +625,7 @@ impl TradeService {
             .await
             .map_err(err)?;
         if let Some(i) = prior {
-            if i.request_hash != body_hash {
+            if i.request_hash != body_hash && i.request_hash != historical_raw_hash {
                 return Err("IDEMPOTENCY_CONFLICT".into());
             }
             drop(_capacity);
@@ -5109,5 +5123,25 @@ mod tests {
                 .state,
             IntentState::Rejected
         );
+    }
+}
+
+#[cfg(test)]
+mod s2_decimal_contract_tests {
+    use super::*;
+
+    #[test]
+    fn s2_02_shared_fixture_exact_rust_decimal_addition_and_overflow() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../contracts/trade-semantic-golden.json"
+        ))
+        .unwrap();
+        let inputs = fixture["numeric"]["sum"].as_array().unwrap();
+        let left = Decimal::from_str(inputs[0].as_str().unwrap()).unwrap();
+        let right = Decimal::from_str(inputs[1].as_str().unwrap()).unwrap();
+        let exact = left.checked_add(right).unwrap().normalize().to_string();
+        assert_eq!(exact, inputs[2].as_str().unwrap());
+        let maximum = Decimal::from_str("9999999999999999999999999999").unwrap();
+        assert!(maximum.checked_mul(maximum).is_none(), "NUMERIC_RANGE");
     }
 }
