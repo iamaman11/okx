@@ -153,8 +153,14 @@
                 });
             }
         }
-        // The attached stop is real recorded venue evidence, but is not
-        // visible to the aggregate census until the same SQL fill barrier.
+        // The independently signed attached stop must remain available
+        // as soon as the venue ACK exists: TradeService may verify it before
+        // the finance ingest catches up. This one-order readback is NOT the
+        // full managed-position census. Aggregate position and both live
+        // stops are separately gated by the immutable SQL fill/bill below.
+        feed.advance_recorded_route(
+            "fixture-executor-a","/api/v5/trade/order-algo",signed_algos
+        );
         let mut pending=Vec::new();
         for _ in 0..12 {
             for inst in ["SWAP","FUTURES"] {
@@ -251,9 +257,6 @@
                 path:"/api/v5/account/positions".into(),
                 required_query:vec![],raw_response:positions.clone(),
             }).collect()
-        );
-        feed.advance_recorded_route(
-            "fixture-executor-a","/api/v5/trade/order-algo",signed_algos
         );
         feed.advance_recorded_route(
             "fixture-observer-a","/api/v5/trade/orders-algo-pending",pending
