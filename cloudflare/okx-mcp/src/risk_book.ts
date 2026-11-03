@@ -546,8 +546,15 @@ export async function reserveRisk(
     const account=governance.accounts.find(a=>
       a.venue===input.venue && a.environment==="real" && a.uid_fingerprint===input.uid &&
       accessEnabled(a));
-    const strategy=account?.strategies.find(s=>s.id===input.strategy_id && s.enabled);
     if(!account)return {status:"DENIED",reason:"ACCOUNT_NOT_ACTIVE"};
+    const strategy=account.strategies.find(s=>s.id===input.strategy_id && s.enabled);
+    // Only the literal manual execution label may use account-level
+    // modelled-risk capacity. A named strategy must be enabled under THIS
+    // verified account's current authoritative governance revision;
+    // otherwise an arbitrary / foreign strategy ID could inherit the
+    // account limit and acquire a real central HELD reservation.
+    if(input.strategy_id!=="manual"&&!strategy)
+      return {status:"DENIED",reason:"STRATEGY_NOT_ENABLED_FOR_ACCOUNT"};
     if(!account.limits.allowed_instruments.includes(input.instrument_id))
       return {status:"DENIED",reason:"INSTRUMENT_NOT_ALLOWED_BY_ACCOUNT"};
     // An account-level entry cap is independent of the campaign entry
