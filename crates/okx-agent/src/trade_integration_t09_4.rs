@@ -392,6 +392,29 @@
             "code":"0","msg":"","data":v
         })).unwrap();
         let ts=chrono::Utc::now().timestamp_millis().to_string();
+        // A managed Add is a NEW authenticated financial frontier after
+        // T09.3's terminal settlement. Never fall back to the old generic
+        // 64-read baseline or silently reset its read counter. The existing
+        // recorded transport publishes a finite, UID-bound raw balance page
+        // for this distinct source cycle, just like position/fill/bill pages.
+        let source_balance=wrap(serde_json::json!([{
+            "totalEq":"100","adjEq":"100","uTime":ts,
+            "details":[{
+                "ccy":"USDT","eq":"100","liab":"0",
+                "availEq":"100","availBal":"100","eqUsd":"100","uTime":ts
+            }]
+        }]));
+        let retired_balance=feed.advance_recorded_route(
+            "fixture-observer-a","/api/v5/account/balance",
+            (0..48).map(|_|RecordedGet {
+                access_key:"fixture-observer-a".into(),
+                path:"/api/v5/account/balance".into(),
+                required_query:vec![],raw_response:source_balance.clone(),
+            }).collect()
+        );
+        eprintln!(
+            "T09_4_BALANCE_FRONTIER_V1 retired={retired_balance} new_pages=48"
+        );
         let source_position=wrap(serde_json::json!([{
             "instType":"SWAP","instId":"BTC-USDT-SWAP","posSide":"long",
             "pos":"0.3","mgnMode":"cross","avgPx":"1000","markPx":"1000","uTime":ts
