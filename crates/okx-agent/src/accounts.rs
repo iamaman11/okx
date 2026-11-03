@@ -1075,15 +1075,16 @@ pub(crate) mod recorded_support {
                 let mut query = page.required_query;
                 query.sort();
                 assert_eq!(query.len(), 3, "TRANSCRIPT_ALGO_QUERY_SHAPE");
-                assert!(seen.insert(query.clone()), "TRANSCRIPT_ALGO_DUPLICATE_SCOPE");
+                assert!(
+                    seen.insert(query.clone()),
+                    "TRANSCRIPT_ALGO_DUPLICATE_SCOPE"
+                );
                 let matching = after
                     .iter()
                     .filter(|other| {
                         let mut other_query = other.required_query.clone();
                         other_query.sort();
-                        other.access_key == account
-                            && other.path == path
-                            && other_query == query
+                        other.access_key == account && other.path == path && other_query == query
                     })
                     .collect::<Vec<_>>();
                 assert_eq!(matching.len(), 1, "TRANSCRIPT_ALGO_POST_SCOPE_MISMATCH");
@@ -1104,12 +1105,14 @@ pub(crate) mod recorded_support {
                 .lock()
                 .unwrap()
                 .insert((account.into(), path.into()));
-            self.reads.lock().unwrap().retain(|page| {
-                page.access_key != account || page.path != path
-            });
-            self.optional_reads.lock().unwrap().retain(|page| {
-                page.access_key != account || page.path != path
-            });
+            self.reads
+                .lock()
+                .unwrap()
+                .retain(|page| page.access_key != account || page.path != path);
+            self.optional_reads
+                .lock()
+                .unwrap()
+                .retain(|page| page.access_key != account || page.path != path);
             *phase = Some(CausalAlgoScenario {
                 account: account.into(),
                 cancel_id: cancel_id.into(),
@@ -1131,7 +1134,10 @@ pub(crate) mod recorded_support {
             let resume = Arc::new(tokio::sync::Notify::new());
             let mut phase = self.causal_algos.lock().unwrap();
             let scenario = phase.as_mut().expect("TRANSCRIPT_ALGO_PHASE_REQUIRED");
-            assert!(scenario.held_read.is_none(), "TRANSCRIPT_ALGO_BARRIER_ALREADY_ARMED");
+            assert!(
+                scenario.held_read.is_none(),
+                "TRANSCRIPT_ALGO_BARRIER_ALREADY_ARMED"
+            );
             scenario.held_read = Some(CausalAlgoReadGate {
                 entered: entered.clone(),
                 resume: resume.clone(),
@@ -1326,21 +1332,21 @@ pub(crate) mod recorded_support {
                             .get(0)
                             .and_then(|row| row.get("algoId"))
                             .and_then(serde_json::Value::as_str)
-                            .ok_or_else(|| OkxError::Response(
-                                "TRANSCRIPT_CANCEL_ID_MISSING".into()
-                            ))?;
+                            .ok_or_else(|| {
+                                OkxError::Response("TRANSCRIPT_CANCEL_ID_MISSING".into())
+                            })?;
                         if parsed["data"][0]["sCode"] != "0"
                             || parsed["data"][0]["algoId"] != observed_id
                         {
                             return Err(OkxError::Response(
-                                "TRANSCRIPT_CANCEL_ACK_MISMATCH".into()
+                                "TRANSCRIPT_CANCEL_ACK_MISMATCH".into(),
                             ));
                         }
                         let mut phase = self.causal_algos.lock().unwrap();
                         if let Some(scenario) = phase.as_mut() {
                             if scenario.cancel_id != observed_id || scenario.acked {
                                 return Err(OkxError::Response(
-                                    "TRANSCRIPT_ALGO_CANCEL_EVENT_MISMATCH".into()
+                                    "TRANSCRIPT_ALGO_CANCEL_EVENT_MISMATCH".into(),
                                 ));
                             }
                             scenario.acked = true;
@@ -1421,16 +1427,16 @@ pub(crate) mod recorded_support {
                             query.sort();
                             if key != scenario.account {
                                 return Err(OkxError::Response(
-                                    "TRANSCRIPT_ALGO_ACCOUNT_MISMATCH".into()
+                                    "TRANSCRIPT_ALGO_ACCOUNT_MISMATCH".into(),
                                 ));
                             }
                             let scope = scenario
                                 .scopes
                                 .iter_mut()
                                 .find(|scope| scope.query == query)
-                                .ok_or_else(|| OkxError::Response(
-                                    "TRANSCRIPT_ALGO_QUERY_MISMATCH".into()
-                                ))?;
+                                .ok_or_else(|| {
+                                    OkxError::Response("TRANSCRIPT_ALGO_QUERY_MISMATCH".into())
+                                })?;
                             let acked = scenario.acked;
                             let count = if acked {
                                 &mut scope.after_reads
@@ -1439,7 +1445,7 @@ pub(crate) mod recorded_support {
                             };
                             if *count >= CAUSAL_ALGO_READS_PER_SCOPE_AND_PHASE {
                                 return Err(OkxError::Response(
-                                    "TRANSCRIPT_ALGO_PHASE_READ_BUDGET_EXCEEDED".into()
+                                    "TRANSCRIPT_ALGO_PHASE_READ_BUDGET_EXCEEDED".into(),
                                 ));
                             }
                             *count += 1;
@@ -1467,9 +1473,9 @@ pub(crate) mod recorded_support {
                                 gate.resume.notified(),
                             )
                             .await
-                            .map_err(|_| OkxError::Response(
-                                "TRANSCRIPT_ALGO_HELD_READ_TIMEOUT".into()
-                            ))?;
+                            .map_err(|_| {
+                                OkxError::Response("TRANSCRIPT_ALGO_HELD_READ_TIMEOUT".into())
+                            })?;
                         }
                         self.requests.lock().unwrap().push(format!(
                             "{key}:{path}?{}",
