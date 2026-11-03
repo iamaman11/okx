@@ -1492,6 +1492,7 @@ dependencies = [
  "okx-protocol",
  "okx-research",
  "okx-runtime",
+ "reqwest",
  "rusqlite",
  "rust_decimal",
  "serde",
