@@ -888,9 +888,11 @@ try {
     persisted_generation:true,
     risk_book_source:"RuntimeSession.webSocketMessage",
     authentic_reserve:true,
-    authentic_begin_post:true,
-    reserved_loss_usd:"1",
-    reserved_entry_usd:"2",
+    // The isolated shared-cap probe performs no BEGIN_POST and intentionally
+    // retains both HELD reservations. Do not certify a Native/venue lifecycle.
+    authentic_begin_post:!sharedCapMode,
+    reserved_loss_usd:sharedCapMode ? "2" : "1",
+    reserved_entry_usd:sharedCapMode ? "8" : "2",
     risk_monetary_post_count:0,
   }));
 } finally {

@@ -75,8 +75,18 @@ if (process.argv.includes("--self-test")) {
   });
   const result = singleLine(stdout, marker);
   prove(result);
-  assert.equal(stdout.split(/\r?\n/).filter(x => x.startsWith(terminalMarker)).length, 1,
+  const terminalLines = stdout.split(/\r?\n/).filter(x => x.startsWith(terminalMarker));
+  assert.equal(terminalLines.length, 1,
     "production RuntimeSession terminal assertion is mandatory");
+  const terminal = JSON.parse(terminalLines[0]);
+  assert.equal(terminal.real_durable_object, true);
+  assert.equal(terminal.persisted_generation, true);
+  assert.equal(terminal.authentic_reserve, true);
+  assert.equal(terminal.authentic_begin_post, false,
+    "isolated cap probe must never claim a Native BeginPost");
+  assert.equal(terminal.reserved_loss_usd, "2");
+  assert.equal(terminal.reserved_entry_usd, "8");
+  assert.equal(terminal.risk_monetary_post_count, 0);
   const evidence = {
     schema: "okx.b1-worker-cap-component/v1",
     status: "PASS", requirement: "#449:T10-07:WORKER_ONLY",
