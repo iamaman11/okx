@@ -677,6 +677,26 @@ try {
       // Emit only the bounded structured production denial; the outer test
       // runner's 200-char reason must never hide it behind a Node stack.
       const recorded = String(error.stdout ?? "");
+      // Keep the FIRST typed Native B positive refusal visible to CI.
+      // Never expose raw authenticated HTTP bytes or credentials.
+      const b1Refusal = [...recorded.matchAll(
+        /B1_POSITIVE_DIAGNOSTIC_V1:(\{[^\r\n]+\})/g
+      )];
+      if (b1Refusal.length) {
+        const source = JSON.parse(b1Refusal.at(-1)[1]);
+        process.stderr.write("B1_POSITIVE_DENIAL_EVIDENCE_V1:" +
+          JSON.stringify({
+            status:source.status ?? null,
+            state:source.state ?? null,
+            reason:String(source.primary_reason ?? "NOT_REPORTED").slice(0,170),
+            origin:source.rejection_origin ?? null,
+            send_state:source.send_state ?? null,
+            posts:source.outbound_posts ?? null,
+            balance_phase_ms:source.recorded_balance_phase_ms ?? null,
+            denied_route_codes:(source.denied_routes ?? []).slice(0,5)
+              .map(x=>String(x).split(":")[0].slice(0,100)),
+          }) + "\n");
+      }
       const matches = [...recorded.matchAll(/T09_1_NATIVE_CLOSE_FAILURE_V1:(\{[^\r\n]+\})/g)];
       if (matches.length) {
         process.stderr.write("T09_1_CLOSE_ERROR_FROM_RUST_V1:" +
