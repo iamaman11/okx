@@ -381,7 +381,6 @@ fn t09_6_cleanup_recorded_transport(
             }
         }
     }
-    feed.expect_causal_algo_inventory(cancel_id, before, after);
     // Independently recorded and source-bound UID B never shares the
     // cancellation-dependent A snapshots. One immutable raw response
     // per exact B scope is bounded in the recorded transport.
@@ -405,6 +404,9 @@ fn t09_6_cleanup_recorded_transport(
         }
     }
     feed.expect_static_algo_inventory("fixture-observer-b", peer);
+    // Publish B's independent signed source BEFORE the A cancel-dependent
+    // scenario is armed; concurrent maintenance must never see a B gap.
+    feed.expect_causal_algo_inventory(cancel_id, before, after);
     feed.advance_recorded_public_clock(wrap(serde_json::json!([{
         "ts": chrono::Utc::now().timestamp_millis().to_string()
     }])));
