@@ -326,6 +326,8 @@
                             "T09_4_PROTECTION_INCIDENT_EVIDENCE_V1:{}",serde_json::json!({
                                 "intent_state":status["data"]["intent"]["state"],
                                 "intent_incident":status["data"]["intent"]["incident"],
+                                "entry_fill_evidence":status["data"]["entry_fill_evidence"]["state"],
+                                "incremental_entry_settlement":status["data"]["incremental_entry_settlement"],
                                 "protection":status["data"]["protection"],
                                 "financial_error":status["data"]["financial_error"],
                                 "central_release":status["data"]["central_release"],
@@ -702,7 +704,8 @@
         let response=trade.trade("fixture-a",&request,None).await
             .unwrap_or_else(|reason|panic!("T09_4_MANAGED_ADD_DENIED:{reason}"));
         let id=response["data"]["intent"]["intent_id"].as_str()
-            .expect("T09.4 Native Add intent ID").to_owned();
+            .unwrap_or_else(||panic!("T09_4_MANAGED_ADD_MISSING_INTENT_V1:{response}"))
+            .to_owned();
         let owner=accounts.resolve("fixture-a").await.unwrap();
         let id_for_sql=id.clone();
         let (intent,reserve,post)=owner.execution.store.call(
