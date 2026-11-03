@@ -4323,6 +4323,23 @@ mod raw_native_session_tests {
                             let b_positive = b_positive_task.await
                                 .expect("B1 Native B positive task join")
                                 .expect("B1 real B venue create must be admitted");
+                            if b_positive["status"] != "partial" {
+                                // First actual production denial is authoritative.
+                                // Only redact-safe typed fields are emitted;
+                                // no signed HTTP bytes, keys or bearer tokens.
+                                println!("B1_POSITIVE_DIAGNOSTIC_V1:{}", json!({
+                                    "status": b_positive["status"],
+                                    "state": b_positive["data"]["state"],
+                                    "primary_reason": b_positive["data"]["primary_reason"],
+                                    "rejection_origin": b_positive["data"]["rejection_origin"],
+                                    "send_state": b_positive["data"]["send_state"],
+                                    "as_of_ms": b_positive["as_of_ms"],
+                                    "outbound_posts": feed.outbound_posts.lock().unwrap().len(),
+                                    "denied_routes": feed.denied_routes.lock().unwrap()
+                                        .iter().rev().take(6).cloned().collect::<Vec<_>>(),
+                                    "recorded_balance_phase_ms": b1_balance_at,
+                                }));
+                            }
                             assert_eq!(b_positive["status"], "partial");
                             assert_eq!(b_positive["data"]["intent"]["state"], "ACKNOWLEDGED");
                             assert_eq!(b_positive["data"]["intent"]["exchange_order_id"],
