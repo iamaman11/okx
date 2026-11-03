@@ -2206,7 +2206,10 @@ mod tests {
         feed.expect_public_clock(b"recorded_first".to_vec());
         assert!(feed.refresh_unconsumed_public_clock(0, b"recorded_new".to_vec()));
         assert_eq!(feed.unconsumed_public_clock(), 1);
-        assert!(!feed.refresh_unconsumed_public_clock(1, b"wrong_generation".to_vec()));
+        assert!(!feed.refresh_unconsumed_public_clock(
+            1,
+            b"wrong_generation".to_vec()
+        ));
         assert_eq!(feed.unconsumed_public_clock(), 1);
         feed.expect_public_clock(b"another_source".to_vec());
         assert!(!feed.refresh_unconsumed_public_clock(0, b"multiply".to_vec()));
