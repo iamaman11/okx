@@ -913,7 +913,9 @@ impl TradeService {
             let local_id = i.intent_id.clone();
             r.execution
                 .store
-                .call(deadline(), move |s| s.acknowledge_local_unsent_release(&local_id))
+                .call(deadline(), move |s| {
+                    s.acknowledge_local_unsent_release(&local_id)
+                })
                 .await
                 .map_err(err)?;
             return Ok(());

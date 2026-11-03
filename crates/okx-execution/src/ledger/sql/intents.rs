@@ -1310,16 +1310,21 @@ impl AccountStore {
     /// Its SQL no-send obligation must still leave risk_census_intents;
     /// success without a durable release ACK is not settlement.
     pub fn acknowledge_local_unsent_release(&mut self, id: &str) -> StoreResult<()> {
-        let proof = self.unsent_release_receipt(id)?
+        let proof = self
+            .unsent_release_receipt(id)?
             .ok_or(StoreError::Invalid("LOCAL_UNSENT_SQL_PROOF_REQUIRED"))?;
-        let intent = self.intent(id)?
+        let intent = self
+            .intent(id)?
             .ok_or(StoreError::Invalid("LOCAL_UNSENT_INTENT_MISSING"))?;
         let local_key = format!("local:{id}");
-        let receipt = self.central_receipt(id)?
+        let receipt = self
+            .central_receipt(id)?
             .ok_or(StoreError::Invalid("LOCAL_UNSENT_RECEIPT_MISSING"))?;
-        if intent.risk_increase || intent.state != IntentState::Rejected
+        if intent.risk_increase
+            || intent.state != IntentState::Rejected
             || intent.exchange_order_id.is_some()
-            || proof.reservation_key != local_key || proof.intent_id != id
+            || proof.reservation_key != local_key
+            || proof.intent_id != id
             || proof.account_key != self.meta.account_key
             || proof.plan_hash != intent.plan_hash
             || proof.request_hash != intent.request_hash
