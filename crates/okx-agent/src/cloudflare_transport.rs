@@ -2642,8 +2642,11 @@ mod raw_native_session_tests {
             // one. The recorded transport's atomic delivery fence ensures
             // we cannot rearm an already consumed sample, and production
             // clock skew, RTT, age and mutation gates remain unchanged.
-            assert_eq!(feed.unconsumed_public_clock(), 1,
-                "T09.1 Close must have exactly one raw exchange-clock source");
+            assert_eq!(
+                feed.unconsumed_public_clock(),
+                1,
+                "T09.1 Close must have exactly one raw exchange-clock source"
+            );
             let close_clock_before = feed.public_clock_deliveries();
             let close_clock_feed = feed.clone();
             let close_clock_publisher = tokio::spawn(async move {
@@ -2655,10 +2658,9 @@ mod raw_native_session_tests {
                     let raw = serde_json::to_vec(&json!({
                         "code":"0","msg":"",
                         "data":[{"ts":chrono::Utc::now().timestamp_millis().to_string()}]
-                    })).expect("T09.1 recorded external clock bytes");
-                    if !close_clock_feed.refresh_unconsumed_public_clock(
-                        close_clock_before, raw
-                    ) {
+                    }))
+                    .expect("T09.1 recorded external clock bytes");
+                    if !close_clock_feed.refresh_unconsumed_public_clock(close_clock_before, raw) {
                         break;
                     }
                     published += 1;
@@ -2702,15 +2704,19 @@ mod raw_native_session_tests {
                 )
                 .await;
             if close_result.is_ok() {
-                let samples = tokio::time::timeout(
-                    Duration::from_secs(2), close_clock_publisher
-                ).await.expect("T09.1 close clock producer did not terminate")
+                let samples = tokio::time::timeout(Duration::from_secs(2), close_clock_publisher)
+                    .await
+                    .expect("T09.1 close clock producer did not terminate")
                     .expect("T09.1 close clock producer panicked");
-                assert_eq!(feed.public_clock_deliveries(), close_clock_before + 1,
-                    "T09.1 Close must consume one real recorded public-time GET");
+                assert_eq!(
+                    feed.public_clock_deliveries(),
+                    close_clock_before + 1,
+                    "T09.1 Close must consume one real recorded public-time GET"
+                );
                 eprintln!(
                     "T09_1_CLOSE_CLOCK_SOURCE_V1:samples={samples} before={} after={}",
-                    close_clock_before, feed.public_clock_deliveries()
+                    close_clock_before,
+                    feed.public_clock_deliveries()
                 );
             } else {
                 // An early source/risk rejection must not leave a fixture
