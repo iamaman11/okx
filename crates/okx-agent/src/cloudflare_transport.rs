@@ -4084,6 +4084,33 @@ mod raw_native_session_tests {
                         // accidental global GET-count admission gate. This
                         // does not change a production TTL, risk budget, SQL
                         // record, or authorize any venue POST.
+                        // The exact A second-entry create ACK and its one
+                        // original signed GET are already proven above.
+                        // During independent B admission the same production
+                        // reconciliation owner can re-read this A order.
+                        // Make only that existing A order source available
+                        // at the post-ACK B1 phase, not a guessed venue order,
+                        // fabricated fill, new POST, or global replay increase.
+                        for _ in 0..8 {
+                            feed.expect_optional_get(RecordedGet {
+                                access_key: "fixture-executor-a".into(),
+                                path: "/api/v5/trade/order".into(),
+                                required_query: vec![(
+                                    "instId".into(), "BTC-USDT-SWAP".into()
+                                )],
+                                raw_response: envelope(json!([{
+                                    "instId":"BTC-USDT-SWAP",
+                                    "ordId":"recorded-t09-second-001",
+                                    "clOrdId":"__REQUEST_CL_ORD_ID__",
+                                    "side":"buy","posSide":"long",
+                                    "tdMode":"cross","ordType":"limit",
+                                    "px":"1000","sz":"0.3",
+                                    "accFillSz":"0","avgPx":"",
+                                    "state":"live","cTime":new_clock,
+                                    "uTime":new_clock
+                                }])),
+                            });
+                        }
                         let b1_balance_at = chrono::Utc::now().timestamp_millis().to_string();
                         for (label, equity) in [("a", "100"), ("b", "100")] {
                             for _ in 0..24 {
