@@ -14,8 +14,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  t09-2:
-    name: Source-bound T09.2 Native/Worker preflight
+  t09-6:
+    name: Source-bound T09.6 Native/Worker preflight
     runs-on: windows-latest
     timeout-minutes: 25
     steps:
@@ -34,16 +34,16 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Precompile the same Native test before starting its bounded child
         run: cargo test --locked -p okx-agent --lib native_to_workerd_risk_summary_over_actual_websocket --no-run
-      - name: Native and persisted Worker T09.2
+      - name: Native and persisted Worker T09.6
         shell: pwsh
         run: |
           $dir = Join-Path $env:RUNNER_TEMP "t09-targeted"
-          node scripts/run-trade-integration.mjs --case T09.2 --artifacts "$dir"
+          node scripts/run-trade-integration.mjs --case T09.6 --artifacts "$dir"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Preserve actual signed-source evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: s1-t09-2-${{ github.sha }}
+          name: s1-t09-6-${{ github.sha }}
           path: ${{ runner.temp }}\t09-targeted
           retention-days: 14
