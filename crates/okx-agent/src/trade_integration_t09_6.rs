@@ -24,6 +24,30 @@ async fn t09_6_close_owned_lot(input: T09_6CloseContext) -> serde_json::Value {
         "code":"0","msg":"","data":v
     })).expect("signed test HTTP envelope");
     feed.advance_recorded_public_clock(raw(serde_json::json!([{"ts":at}])));
+    // This is a distinct authenticated pre-Close source cycle. The old
+    // T09.4 account/balance pages were finite and may have been consumed by
+    // source capture / managed-position reconciliation. The post-Close
+    // terminal financial balance is published only AFTER both fills below,
+    // so do not move it forward or fake an earlier debit. Serve fresh signed
+    // GET bytes preserving the previously observed 100-USDT snapshot until
+    // the immutable close fill/bill frontier actually advances.
+    let unchanged_balance=raw(serde_json::json!([{
+        "totalEq":"100","adjEq":"100","uTime":at,
+        "details":[{
+            "ccy":"USDT","eq":"100","liab":"0","availEq":"100",
+            "availBal":"100","eqUsd":"100","uTime":at
+        }]
+    }]));
+    let retired=feed.advance_recorded_route(
+        "fixture-observer-a","/api/v5/account/balance",
+        (0..48).map(|_|RecordedGet {
+            access_key:"fixture-observer-a".into(),
+            path:"/api/v5/account/balance".into(),
+            required_query:vec![],
+            raw_response:unchanged_balance.clone(),
+        }).collect()
+    );
+    eprintln!("T09_6_PRE_CLOSE_BALANCE_FRONTIER_V1 retired={retired} new_signed_pages=48");
     feed.expect_post(RecordedPost {
         access_key:"fixture-executor-a".into(),
         path:"/api/v5/trade/order".into(),
