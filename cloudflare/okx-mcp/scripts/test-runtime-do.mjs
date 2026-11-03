@@ -779,11 +779,13 @@ try {
         const admitted = receipt(stdout, "T09_2_NATIVE_ADMISSION_V1");
         assert.equal(admitted.state, "ACKNOWLEDGED");
         assert.equal(admitted.post_ack_financial_complete, false);
-        assert.equal(admitted.create_posts_total, 4);
+        assert.equal(admitted.create_posts_total,
+          process.env.OKX_B1_SECOND_POSITIVE_PROBE === "1" ? 5 : 4);
         assert.equal(admitted.quote_entry_usd, "3.0015");
         assert.equal(admitted.preview_reserved_entry_usd, managedAdd ? "0" : "4",
           "clean managed-Add acceptance cohort excludes T09.0 component reservations");
-        const expectedReserved=managedAdd?"0":partialFills?"4":"7.0015";
+        const expectedReserved=managedAdd?"0":partialFills?"4":
+          process.env.OKX_B1_SECOND_POSITIVE_PROBE === "1"?"8.002":"7.0015";
         const expectedSpent=managedAdd?"6.003":partialFills?"4.002":"1.0005";
         if(afterNative.budget?.entry_budget?.reserved_usd!==expectedReserved
           ||afterNative.budget?.entry_budget?.consumed_usd!==expectedSpent){
@@ -825,8 +827,18 @@ try {
           assert.equal(b1.outbound_posts_before,b1.outbound_posts_after);
           assertBudgetEconomicsUnchanged(b1.before_budget,b1.after_budget,
             "B1 rejected second account cannot change shared campaign money");
-          assertBudgetEconomicsUnchanged(latestNativeBudget,afterNative.budget,
-            "B1 resumed Worker must match Native money after source refresh");
+          if (process.env.OKX_B1_SECOND_POSITIVE_PROBE === "1") {
+            const acceptedB = receipt(stdout,"B1_NATIVE_SECOND_ACCOUNT_ACCEPTED_V1");
+            assert.equal(acceptedB.b_sql_state,"ACKNOWLEDGED");
+            assert.equal(acceptedB.b_sql_reserve_held,true);
+            assert.equal(acceptedB.outbound_posts_after,5);
+            assert.equal(acceptedB.after_budget.entry_budget.reserved_usd,"8.002");
+            assertBudgetEconomicsUnchanged(acceptedB.after_budget,afterNative.budget,
+              "B1 A+B public accepted Native money equals persisted Worker");
+          } else {
+            assertBudgetEconomicsUnchanged(latestNativeBudget,afterNative.budget,
+              "B1 resumed Worker must match Native money after source refresh");
+          }
         } else {
           assert.deepEqual(afterNative.budget,latestNativeBudget,
             "T09.2 persisted Worker must equal Native pre-close budget");

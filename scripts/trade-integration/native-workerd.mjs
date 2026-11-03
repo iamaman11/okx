@@ -169,6 +169,9 @@ export async function actualNativeWorker(root, signal, { statusProbe = false, se
             ...(process.env.OKX_B1_NATIVE_CAP_PROBE === "1" ? {
               nativeB1Cap: receipt(stdout, "B1_NATIVE_SHARED_CAP_DENIAL_V1"),
             } : {}),
+            ...(process.env.OKX_B1_SECOND_POSITIVE_PROBE === "1" ? {
+              nativeB1Positive: receipt(stdout, "B1_NATIVE_SECOND_ACCOUNT_ACCEPTED_V1"),
+            } : {}),
             ...(partialFills ? {
               nativePartialFills: receipt(stdout, "T09_3_NATIVE_PARTIAL_TERMINAL_V1"),
               nativeTerminalSettlement: receipt(stdout, "T09_3_TERMINAL_SETTLEMENT_RECONCILED_V1"),
