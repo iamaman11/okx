@@ -302,6 +302,51 @@ try {
   const enrolled = await request(first,"/account-governance");
   assert.equal(enrolled.status,200);
   assert.deepEqual(enrolled.body.accounts.map((a) => a.account_key).sort(),accountKeys);
+  let sharedStrategyGovernance = null;
+  if (sharedCapMode) {
+    // Use the ordinary authenticated governance CAS; no test-only strategy
+    // whitelist or separate RiskBook. Real account revisions advance to 3.
+    const activeStrategies = {
+      [accountKey]: "native_alpha",
+      [accountKeyB]: "native_beta",
+    };
+    const update = {
+      expected_revision: enrolled.body.revision,
+      idempotency_key: "governance_two_account_strategies_0001",
+      max_total_modelled_loss_usdt: enrolled.body.max_total_modelled_loss_usdt,
+      accounts: enrolled.body.accounts.map((entry) => ({
+        id: entry.id,
+        label: entry.label,
+        enabled: entry.enabled,
+        explicit_pause: entry.explicit_pause,
+        limits: entry.limits,
+        strategies: [{
+          id: activeStrategies[entry.account_key],
+          enabled: true,
+          allocated_capital_usdt: "1",
+          max_modelled_loss_usdt: "1",
+          max_daily_realized_loss_usdt: "2",
+          max_drawdown_ratio: "0.1",
+        }],
+      })),
+    };
+    const changed = await request(first,"/account-governance","POST",update);
+    assert.equal(changed.status,200,"real account-strategy governance CAS must commit");
+    const saved = await request(first,"/account-governance");
+    assert.equal(saved.status,200);
+    assert.equal(saved.body.revision,enrolled.body.revision+1);
+    for (const entry of saved.body.accounts) {
+      assert.equal(entry.policy_revision,saved.body.revision);
+      assert.deepEqual(entry.strategies.map(s=>s.id),[activeStrategies[entry.account_key]]);
+      assert.equal(entry.strategies[0].enabled,true);
+    }
+    sharedStrategyGovernance = {
+      revision: saved.body.revision,
+      by_account: Object.fromEntries(saved.body.accounts.map(entry=>[
+        entry.account_key,entry.strategies[0].id
+      ])),
+    };
+  }
   const socket1 = await session(first);
   const before = await summary(socket1,"risk_workerd_first_0001");
   assert.equal(before.budget?.entry_budget,null);
@@ -353,11 +398,12 @@ try {
       entry_upper_usd:"4",entry_proof_digest:"e".repeat(64),
       usd_conversion:{usd_per_usdt:"1",
         source_digest:"e".repeat(64),observed_at_ms:observedAt},
-      policy_revision:2,census
+      policy_revision:sharedStrategyGovernance.revision,census
     });
-    const firstRequest=requested(uid,"manual","a_0001","a");
-    const secondRequest=requested(uidB,"manual","b_0001","b");
-    const thirdRequest=requested(uid,"manual","a_0002","c");
+    assert.ok(sharedStrategyGovernance,"strategy policy must originate from actual Worker CAS");
+    const firstRequest=requested(uid,"native_alpha","a_0001","a");
+    const secondRequest=requested(uidB,"native_beta","b_0001","b");
+    const thirdRequest=requested(uid,"native_alpha","a_0002","c");
     // Both accounts genuinely contend over one SQLite RiskBook owner.
     // Distinct command IDs mean concurrent WSS results cannot be confused.
     const [firstReserve,secondReserve]=await Promise.all([
@@ -417,6 +463,8 @@ try {
       account_a:accountKey,account_b:accountKeyB,
       a_strategy:firstRequest.strategy_id,
       b_strategy:secondRequest.strategy_id,
+      policy_revision:sharedStrategyGovernance.revision,
+      saved_strategy_ids:sharedStrategyGovernance.by_account,
       instrument_id:firstRequest.instrument_id,
       first_status:firstReserve.status,
       second_status:secondReserve.status,
