@@ -2259,23 +2259,41 @@ mod raw_native_session_tests {
         assert_ne!(scope_a, scope_b);
         let hash_a = format!(
             "{:x}",
-            Sha256::digest(execute.canonical_semantic_json(&scope_a).unwrap().as_bytes())
+            Sha256::digest(
+                execute
+                    .canonical_semantic_json(&scope_a)
+                    .unwrap()
+                    .as_bytes()
+            )
         );
         let hash_b = format!(
             "{:x}",
-            Sha256::digest(execute.canonical_semantic_json(&scope_b).unwrap().as_bytes())
+            Sha256::digest(
+                execute
+                    .canonical_semantic_json(&scope_b)
+                    .unwrap()
+                    .as_bytes()
+            )
         );
         assert_eq!(hash_a, saved.request_hash);
-        assert_ne!(hash_a, hash_b, "S2-07 verified accounts must have separate identities");
+        assert_ne!(
+            hash_a, hash_b,
+            "S2-07 verified accounts must have separate identities"
+        );
         let other_key_absent = account_b
             .execution
             .store
             .call(std::time::Instant::now() + Duration::from_secs(3), |sql| {
-                Ok(sql.by_idempotency("t09_real_public_execute_0001")?.is_none())
+                Ok(sql
+                    .by_idempotency("t09_real_public_execute_0001")?
+                    .is_none())
             })
             .await
             .expect("S2-07 independent account B Native SQL");
-        assert!(other_key_absent, "S2-07 account B must not inherit A's intent");
+        assert!(
+            other_key_absent,
+            "S2-07 account B must not inherit A's intent"
+        );
         println!(
             "S2_07_NATIVE_ACCOUNT_SCOPE_V1:{}",
             json!({
