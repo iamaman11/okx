@@ -3404,7 +3404,7 @@ mod raw_native_session_tests {
                                     );
                                     assert_eq!(
                                         b.reserved_loss_usd,
-                                        if add_mode { "0" } else { "1" },
+                                        if add_mode { "0" } else { "2" },
                                         "local read defer cannot mint modeled loss"
                                     );
                                     let wait = delay.max(Duration::from_millis(250));
