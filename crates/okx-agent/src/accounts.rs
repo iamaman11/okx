@@ -964,6 +964,10 @@ pub(crate) mod recorded_support {
         optional_reads: Mutex<Vec<RecordedGet>>,
         // Raw public time responses, never a synthesized exchange clock.
         public_clock_reads: Mutex<Vec<Vec<u8>>>,
+        // Test-only count of raw public-clock GET deliveries; the same
+        // queue lock linearizes a generated external sample against its
+        // exactly-once consumption by the real production OKX clock parser.
+        public_clock_deliveries: AtomicU64,
         strict_read_routes: Mutex<std::collections::BTreeSet<(String, String)>>,
     }
     impl RecordedAccountHttp {
@@ -1047,6 +1051,30 @@ pub(crate) mod recorded_support {
             self.public_clock_reads.lock().unwrap().len()
         }
 
+        pub(crate) fn public_clock_deliveries(&self) -> u64 {
+            self.public_clock_deliveries.load(Ordering::Acquire)
+        }
+
+        /// Only a scripted external clock publisher may replace an unused
+        /// raw sample before the FIRST requested clock GET. It never mints
+        /// a response on demand or changes clock policy/tolerances.
+        /// Once the recorded transport delivered a sample, the publisher
+        /// cannot rearm that delivery or inject an unsolicited second one.
+        pub(crate) fn refresh_unconsumed_public_clock(
+            &self,
+            expected_deliveries: u64,
+            sample: Vec<u8>,
+        ) -> bool {
+            let mut queued = self.public_clock_reads.lock().unwrap();
+            if queued.len() != 1
+                || self.public_clock_deliveries.load(Ordering::Acquire) != expected_deliveries
+            {
+                return false;
+            }
+            queued[0] = sample;
+            true
+        }
+
         pub(crate) fn unconsumed_posts(&self) -> usize {
             self.posts.lock().unwrap().len()
         }
@@ -1070,6 +1098,7 @@ pub(crate) mod recorded_support {
                         return Err(OkxError::Response("TRANSCRIPT_CLOCK_EXHAUSTED".into()));
                     }
                     let body = queued.remove(0);
+                    self.public_clock_deliveries.fetch_add(1, Ordering::AcqRel);
                     drop(queued);
                     self.requests
                         .lock()
