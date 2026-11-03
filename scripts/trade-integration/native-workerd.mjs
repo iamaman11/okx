@@ -166,6 +166,9 @@ export async function actualNativeWorker(root, signal, { statusProbe = false, se
             nativeCrossUidDenial: receipt(stdout, "T09_MA_CROSS_UID_DENIAL_V1"),
             nativeStrategyAccountPreflight: receipt(stdout, "T09_MA_NATIVE_SQL_STRATEGY_PREFLIGHT_V1"),
             workerSecondAdmission: receipt(stdout, "T09_2_WORKER_AFTER_RECONNECT_V1"),
+            ...(process.env.OKX_B1_NATIVE_CAP_PROBE === "1" ? {
+              nativeB1Cap: receipt(stdout, "B1_NATIVE_SHARED_CAP_DENIAL_V1"),
+            } : {}),
             ...(partialFills ? {
               nativePartialFills: receipt(stdout, "T09_3_NATIVE_PARTIAL_TERMINAL_V1"),
               nativeTerminalSettlement: receipt(stdout, "T09_3_TERMINAL_SETTLEMENT_RECONCILED_V1"),

@@ -3956,6 +3956,199 @@ mod raw_native_session_tests {
                             "risk_book_sequence":foreign_budget.risk_book_sequence,
                         })
                     );
+
+                    // B1 / #449 T09-MA + T10-07 prerequisite: a SECOND
+                    // verified UID reaches the public Native TradeService on
+                    // the same live, persisted Worker campaign as A's
+                    // acknowledged, but not yet financially settled entry.
+                    // It requests > remaining shared entry headroom and must
+                    // be refused centrally without any B venue POST. This
+                    // isolated probe is NOT the full B two-positive-execute,
+                    // three-by-four, or RELEASE acceptance.
+                    if std::env::var("OKX_B1_NATIVE_CAP_PROBE").as_deref() == Ok("1") {
+                        let mut cap_before_cmd = summary("risk_b1_before_b_public_execute");
+                        cap_before_cmd.installation_id = "installation_test".into();
+                        let cap_before = risk.request(cap_before_cmd).await.unwrap();
+                        let before_money = cap_before.budget.as_ref().unwrap();
+                        let before_entry = before_money.entry_budget.as_ref().unwrap();
+                        assert_eq!(before_entry.consumed_usd, "1.0005");
+                        assert_eq!(before_entry.reserved_usd, "7.0015");
+                        assert_eq!(before_entry.remaining_usd, "1.998");
+                        let posts_before = feed.outbound_posts.lock().unwrap().len();
+                        assert_eq!(posts_before, 4);
+
+                        refresh_recorded_market();
+                        let b_fee_ts = chrono::Utc::now().timestamp_millis().to_string();
+                        feed.advance_recorded_route(
+                            "fixture-observer-b",
+                            "/api/v5/account/trade-fee",
+                            (0..4).map(|_| RecordedGet {
+                                access_key:"fixture-observer-b".into(),
+                                path:"/api/v5/account/trade-fee".into(),
+                                required_query:vec![
+                                    ("instType".into(),"SWAP".into()),
+                                    ("instFamily".into(),"BTC-USDT".into()),
+                                ],
+                                raw_response:envelope(json!([{
+                                    "instType":"SWAP","level":"Lv1","ts":b_fee_ts,
+                                    "feeGroup":[{"groupId":"4","maker":"0.0005","taker":"0.0005"}]
+                                }])),
+                            }).collect(),
+                        );
+                        feed.advance_recorded_route(
+                            "fixture-observer-b",
+                            "/api/v5/account/leverage-info",
+                            (0..4).map(|_| RecordedGet {
+                                access_key:"fixture-observer-b".into(),
+                                path:"/api/v5/account/leverage-info".into(),
+                                required_query:vec![
+                                    ("instId".into(),"BTC-USDT-SWAP".into()),
+                                    ("mgnMode".into(),"cross".into()),
+                                ],
+                                raw_response:envelope(json!([
+                                    {"instId":"BTC-USDT-SWAP","mgnMode":"cross","posSide":"long","lever":"2"},
+                                    {"instId":"BTC-USDT-SWAP","mgnMode":"cross","posSide":"short","lever":"2"}
+                                ])),
+                            }).collect(),
+                        );
+                        let b_clock = chrono::Utc::now().timestamp_millis().to_string();
+                        feed.advance_recorded_public_clock(envelope(json!([{"ts":b_clock}])));
+                        // Deliberately reuse A's idempotency key: identity is
+                        // (AccountKey,action,key), never the key alone.
+                        let b_request = TradeRequest::Execute {
+                            idempotency_key:"t09_real_public_execute_0002".into(),
+                            operation:TradeOperation::Open,
+                            strategy_instance:"manual".into(),
+                            instrument:"BTC-USDT-SWAP".into(),
+                            side:PositionSide::Long,
+                            sizing:Sizing::Contracts{contracts:"0.30".into()},
+                            order:OrderConstraints {
+                                order_type:"limit".into(),
+                                limit_price:Some("1000".into()),
+                                reference:None,
+                                max_entry_usd:Some("10".into()),
+                                max_slippage_bps:0,
+                            },
+                            protection:Some(Protection::Price{
+                                stop_price:"900".into()
+                            }),
+                            expires_in_ms:30_000,
+                        };
+                        assert!(b_request.valid());
+                        let b_trade = trade.clone();
+                        let b_accounts = accounts.clone();
+                        let b_feed = feed.clone();
+                        let b_budget = rate_budget.clone();
+                        // Preserve causal no-send proof before a local-only
+                        // rate-budget retry; never retry after an SQL intent
+                        // exists or a possible venue POST has been observed.
+                        let b_task = tokio::spawn(async move {
+                            let until = std::time::Instant::now() + Duration::from_secs(12);
+                            for attempt in 0..12 {
+                                match b_trade.trade("fixture-b",&b_request,None).await {
+                                    Ok(result)=>return Ok(result),
+                                    Err(reason)=>{
+                                        let remaining=until.saturating_duration_since(
+                                            std::time::Instant::now());
+                                        let Some(delay)=recorded_preview_local_defer(
+                                            &reason,&b_budget,remaining
+                                        ) else {return Err(reason)};
+                                        let b_owner=b_accounts.resolve("fixture-b").await
+                                            .expect("B1 independent B SQL owner");
+                                        let absent=b_owner.execution.store.call(
+                                            std::time::Instant::now()+Duration::from_secs(3),
+                                            |s| Ok(s.by_idempotency(
+                                                "t09_real_public_execute_0002"
+                                            )?.is_none())
+                                        ).await.expect("B1 no durable intent before local defer");
+                                        assert!(absent,"B1 cannot repeat a durable B intent");
+                                        assert_eq!(b_feed.outbound_posts.lock().unwrap().len(),4,
+                                            "B1 local read defer cannot transmit venue POST");
+                                        if attempt==11 || delay>remaining {
+                                            return Err(format!(
+                                                "B1_LOCAL_SOURCE_DEFER_DEADLINE:{reason}"
+                                            ));
+                                        }
+                                        tokio::time::sleep(delay.max(Duration::from_millis(200))).await;
+                                    }
+                                }
+                            }
+                            Err("B1_LOCAL_SOURCE_DEFER_EXHAUSTED".into())
+                        });
+                        let denied=b_task.await.expect("B1 B-side production task must join")
+                            .expect("B1 requires a structured central risk refusal");
+                        assert_eq!(denied["data"]["state"],"REJECTED",
+                            "B1 cannot claim an authorized second account order");
+                        assert_eq!(denied["data"]["rejection_origin"],"CENTRAL");
+                        assert_eq!(denied["data"]["send_state"],"NOT_STARTED");
+                        assert_eq!(denied["data"]["primary_reason"],
+                            "CAMPAIGN_ENTRY_BUDGET_EXHAUSTED");
+                        let delivered_b=feed.delivered_fees.lock().unwrap().clone();
+                        assert!(delivered_b.iter().any(|(key,ts,_)|
+                            key=="fixture-observer-b" && ts==&b_fee_ts
+                        ),"B1 refusal needs B's own newly signed tariff");
+                        let posts_after=feed.outbound_posts.lock().unwrap().len();
+                        assert_eq!(posts_after,posts_before,"B1 cannot reach venue POST");
+                        assert_eq!(feed.unconsumed_posts(),0);
+                        let b_account=accounts.resolve("fixture-b").await.unwrap();
+                        assert_ne!(b_account.configuration.account_key.verified_uid,
+                            resource.configuration.account_key.verified_uid);
+                        let (b_state,b_held,b_quote,b_upper,b_intent)=b_account.execution.store.call(
+                            std::time::Instant::now()+Duration::from_secs(3),
+                            |s| {
+                                let intent=s.by_idempotency("t09_real_public_execute_0002")?
+                                    .ok_or(okx_execution::StoreError::Invalid(
+                                        "B1_B_ACCOUNT_SQL_INTENT_MISSING"))?;
+                                let held=s.active_central_receipt(&intent.intent_id)?.is_some();
+                                let quote=s.entry_quote(&intent.intent_id)?
+                                    .ok_or(okx_execution::StoreError::Invalid(
+                                        "B1_B_ACCOUNT_QUOTE_MISSING"))?;
+                                let cost=s.entry_admission(&intent.intent_id)?
+                                    .ok_or(okx_execution::StoreError::Invalid(
+                                        "B1_B_ACCOUNT_COST_PROOF_MISSING"))?;
+                                Ok((intent.state.as_str().to_owned(),held,
+                                    quote.total_usd.normalize().to_string(),
+                                    cost.entry_upper_usd.normalize().to_string(),
+                                    intent.intent_id))
+                            }
+                        ).await.expect("B1 authentic B SQL readback");
+                        assert_eq!(b_state,"REJECTED");
+                        assert!(!b_held,"B1 B cannot retain unauthorized reserve");
+                        assert_eq!(b_quote,"3.0015");
+                        assert_eq!(b_upper,"3.0015");
+                        let a_id=persisted.intent_id.clone();
+                        assert_ne!(b_intent,a_id,"two SQL owners must not share an intent");
+                        let mut cap_after_cmd=summary("risk_b1_after_b_public_execute");
+                        cap_after_cmd.installation_id="installation_test".into();
+                        let cap_after=risk.request(cap_after_cmd).await.unwrap();
+                        let after_money=cap_after.budget.as_ref().unwrap();
+                        let after_entry=after_money.entry_budget.as_ref().unwrap();
+                        assert_eq!(after_entry.consumed_usd,before_entry.consumed_usd);
+                        assert_eq!(after_entry.reserved_usd,before_entry.reserved_usd);
+                        assert_eq!(after_entry.remaining_usd,before_entry.remaining_usd);
+                        assert_eq!(after_money.reserved_loss_usd,before_money.reserved_loss_usd);
+                        println!("B1_NATIVE_SHARED_CAP_DENIAL_V1:{}",json!({
+                            "account_a_uid":resource.configuration.account_key.verified_uid,
+                            "account_b_uid":b_account.configuration.account_key.verified_uid,
+                            "same_idempotency_key":true,
+                            "a_intent_id":a_id,
+                            "b_intent_id":b_intent,
+                            "b_sql_state":b_state,
+                            "b_sql_reserve_held":b_held,
+                            "b_sql_quote_upper_usd":b_quote,
+                            "b_sql_admission_upper_usd":b_upper,
+                            "b_signed_fee_ts":b_fee_ts,
+                            "denial_reason":denied["data"]["primary_reason"],
+                            "denial_origin":denied["data"]["rejection_origin"],
+                            "send_state":denied["data"]["send_state"],
+                            "outbound_posts_before":posts_before,
+                            "outbound_posts_after":posts_after,
+                            "before_budget":before_money,
+                            "after_budget":after_money,
+                            "before_sequence":cap_before.risk_book_sequence,
+                            "after_sequence":cap_after.risk_book_sequence
+                        }));
+                    }
                     println!(
                         "T09_2_NATIVE_ADMISSION_V1:{}",
                         json!({
