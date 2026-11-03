@@ -1,6 +1,6 @@
 {
   "schema": "okx.windows-preflight-request/v1",
-  "request_id": "t093-ma-strategy-4dbdae4-018",
+  "request_id": "red-cross-strategy-7ecf99f-019",
   "case": "T09.3",
-  "target_sha": "4dbdae499695ab8ca80e72d9fdaae371bb66b609"
+  "target_sha": "7ecf99fee9f451f7fe08c43dddb278787427bea4"
 }
