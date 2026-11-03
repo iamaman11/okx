@@ -17,6 +17,8 @@ const transcript = await actualNativeWorker(root, AbortSignal.timeout(260_000), 
 });
 const b = transcript.nativeB1Cap;
 const a = transcript.nativeSecondAdmission;
+const positiveMode = process.env.OKX_B1_SECOND_POSITIVE_PROBE === "1";
+const bPositive = positiveMode ? transcript.nativeB1Positive : null;
 assert.ok(b && a, "real Native B and A account receipts required");
 assert.match(b.account_a_uid, /^[a-f0-9]{64}$/);
 assert.match(b.account_b_uid, /^[a-f0-9]{64}$/);
@@ -47,14 +49,37 @@ assert.equal(b.after_budget.reserved_loss_usd,
 assert.ok(Number.isSafeInteger(b.before_sequence) &&
   Number.isSafeInteger(b.after_sequence) &&
   b.after_sequence >= b.before_sequence);
+if (positiveMode) {
+  assert.ok(bPositive,"source-backed B positive Native/Worker receipt required");
+  assert.equal(bPositive.account_a_uid,b.account_a_uid);
+  assert.equal(bPositive.account_b_uid,b.account_b_uid);
+  assert.notEqual(bPositive.b_intent_id,b.b_intent_id);
+  assert.notEqual(bPositive.b_intent_id,a.intent_id);
+  assert.equal(bPositive.b_sql_state,"ACKNOWLEDGED");
+  assert.equal(bPositive.b_sql_reserve_held,true);
+  assert.equal(bPositive.b_entry_quote_usd,"1.0005");
+  assert.equal(bPositive.b_exchange_order_id,"recorded-b1-b-001");
+  assert.equal(bPositive.outbound_posts_before,4);
+  assert.equal(bPositive.outbound_posts_after,5);
+  assert.equal(bPositive.before_budget.entry_budget.reserved_usd,"7.0015");
+  assert.equal(bPositive.after_budget.entry_budget.reserved_usd,"8.002");
+  assert.equal(bPositive.after_budget.entry_budget.remaining_usd,"0.9975");
+  assert.equal(bPositive.after_budget.entry_budget.consumed_usd,"1.0005");
+  assert.equal(bPositive.after_budget.campaign_limit_usd,"10");
+}
 const result = {
   schema: "okx.b1-native-shared-cap-prerequisite/v1",
   status: "PASS", exact_requirement: "#449:T09-MA/T10-07:PARTIAL",
   required_case_accepted: false, native_public_trade_exercised: true,
   worker_persisted_sqlite: true, native_account_sql_independent: true,
   negative_b_venue_post_count: 0,
+  positive_b_venue_post_count: positiveMode ? 1 : 0,
+  positive_b_accepted: positiveMode,
+  positive_b_evidence: bPositive,
   limitations: [
-    "No two positive Native Execute attempts with two distinct accounts",
+    ...(positiveMode ? [] :
+      ["No two positive Native Execute attempts with two distinct accounts"]),
+    "Native A/B positive sends not yet executed concurrently",
     "No three-by-four Native admission in same campaign",
     "No Native-source-proven release one held reservation 8->4",
   ],
@@ -75,5 +100,5 @@ process.stdout.write(JSON.stringify({
   native_public_trade_exercised: true,
   required_case_accepted: false, a_uid: b.account_a_uid,
   b_uid: b.account_b_uid, central_denial: b.denial_reason,
-  venue_posts_added: 0,
+  venue_posts_added: positiveMode ? 1 : 0,
 }) + "\n");

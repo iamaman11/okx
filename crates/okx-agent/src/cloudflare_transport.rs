@@ -3977,6 +3977,34 @@ mod raw_native_session_tests {
                         let posts_before = feed.outbound_posts.lock().unwrap().len();
                         assert_eq!(posts_before, 4);
 
+                        // B1 causal source boundary: A's signed venue ACK
+                        // was persisted before B may request a new central
+                        // risk decision. Register a finite post-ACK account
+                        // balance observation for the real background owners.
+                        // The earlier bootstrap balance must not become an
+                        // accidental global GET-count admission gate. This
+                        // does not change a production TTL, risk budget, SQL
+                        // record, or authorize any venue POST.
+                        let b1_balance_at = chrono::Utc::now().timestamp_millis().to_string();
+                        for (label, equity) in [("a", "100"), ("b", "100")] {
+                            for _ in 0..24 {
+                                feed.expect_optional_get(RecordedGet {
+                                    access_key: format!("fixture-observer-{label}"),
+                                    path: "/api/v5/account/balance".into(),
+                                    required_query: vec![],
+                                    raw_response: envelope(json!([{
+                                        "totalEq": equity, "adjEq": equity,
+                                        "uTime": b1_balance_at,
+                                        "details": [{
+                                            "ccy": "USDT", "eq": equity,
+                                            "liab": "0", "availEq": equity,
+                                            "availBal": equity, "eqUsd": equity,
+                                            "uTime": b1_balance_at
+                                        }]
+                                    }])),
+                                });
+                            }
+                        }
                         refresh_recorded_market();
                         let b_fee_ts = chrono::Utc::now().timestamp_millis().to_string();
                         feed.advance_recorded_route(
@@ -4148,6 +4176,226 @@ mod raw_native_session_tests {
                             "before_sequence":cap_before.risk_book_sequence,
                             "after_sequence":cap_after.risk_book_sequence
                         }));
+                        if std::env::var("OKX_B1_SECOND_POSITIVE_PROBE").as_deref()
+                            == Ok("1")
+                        {
+                            // After proving B's larger request cannot borrow A's
+                            // budget, send a NEW, smaller, source-priced public
+                            // B Execute on its own SQL owner. It has a distinct
+                            // key from B's rejected same-key probe. A and B
+                            // share ONE persisted campaign, not two $10 caps.
+                            refresh_recorded_market();
+                            let b_positive_ts = chrono::Utc::now().timestamp_millis().to_string();
+                            feed.advance_recorded_route(
+                                "fixture-observer-b",
+                                "/api/v5/account/trade-fee",
+                                (0..4).map(|_| RecordedGet {
+                                    access_key: "fixture-observer-b".into(),
+                                    path: "/api/v5/account/trade-fee".into(),
+                                    required_query: vec![
+                                        ("instType".into(), "SWAP".into()),
+                                        ("instFamily".into(), "BTC-USDT".into()),
+                                    ],
+                                    raw_response: envelope(json!([{
+                                        "instType": "SWAP", "level": "Lv1", "ts": b_positive_ts,
+                                        "feeGroup": [{"groupId": "4", "maker": "0.0005", "taker": "0.0005"}]
+                                    }])),
+                                }).collect(),
+                            );
+                            feed.advance_recorded_route(
+                                "fixture-observer-b",
+                                "/api/v5/account/leverage-info",
+                                (0..4).map(|_| RecordedGet {
+                                    access_key: "fixture-observer-b".into(),
+                                    path: "/api/v5/account/leverage-info".into(),
+                                    required_query: vec![
+                                        ("instId".into(), "BTC-USDT-SWAP".into()),
+                                        ("mgnMode".into(), "cross".into()),
+                                    ],
+                                    raw_response: envelope(json!([
+                                        {"instId": "BTC-USDT-SWAP", "mgnMode": "cross", "posSide": "long", "lever": "2"},
+                                        {"instId": "BTC-USDT-SWAP", "mgnMode": "cross", "posSide": "short", "lever": "2"}
+                                    ])),
+                                }).collect(),
+                            );
+                            let b_positive_clock = chrono::Utc::now().timestamp_millis().to_string();
+                            feed.advance_recorded_public_clock(
+                                envelope(json!([{"ts": b_positive_clock}]))
+                            );
+                            feed.expect_post(RecordedPost {
+                                access_key: "fixture-executor-b".into(),
+                                path: "/api/v5/trade/order".into(),
+                                expected_body: json!({
+                                    "instId": "BTC-USDT-SWAP", "tdMode": "cross",
+                                    "clOrdId": "__REQUEST_CL_ORD_ID__",
+                                    "side": "buy", "posSide": "long", "ordType": "limit",
+                                    "sz": "0.1", "px": "1000",
+                                    "attachAlgoOrds": [{
+                                        "attachAlgoClOrdId": "__REQUEST_ATTACH_ALGO_ID__",
+                                        "tpTriggerPxType": "mark", "slTriggerPx": "900",
+                                        "slTriggerPxType": "mark", "slOrdPx": "-1"
+                                    }]
+                                }),
+                                raw_response: br#"{"code":"0","msg":"","data":[{"ordId":"recorded-b1-b-001","clOrdId":"__REQUEST_CL_ORD_ID__","sCode":"0"}]}"#.to_vec(),
+                            });
+                            // First B executor order read on this
+                            // account: register bounded, optional raw venue
+                            // GETs rather than advancing an unregistered
+                            // phase. ACK comes only from the exact POST below.
+                            for _ in 0..2 {
+                                feed.expect_optional_get(RecordedGet {
+                                    access_key: "fixture-executor-b".into(),
+                                    path: "/api/v5/trade/order".into(),
+                                    required_query: vec![("instId".into(), "BTC-USDT-SWAP".into())],
+                                    raw_response: envelope(json!([{
+                                        "instId": "BTC-USDT-SWAP", "ordId": "recorded-b1-b-001",
+                                        "clOrdId": "__REQUEST_CL_ORD_ID__",
+                                        "side": "buy", "posSide": "long",
+                                        "tdMode": "cross", "ordType": "limit", "px": "1000",
+                                        "sz": "0.1", "accFillSz": "0", "avgPx": "",
+                                        "state": "live", "cTime": b_positive_clock,
+                                        "uTime": b_positive_clock
+                                    }])),
+                                });
+                            }
+                            let b_positive_request = TradeRequest::Execute {
+                                idempotency_key: "b1_b_positive_after_shared_denial_001".into(),
+                                operation: TradeOperation::Open,
+                                strategy_instance: "manual".into(),
+                                instrument: "BTC-USDT-SWAP".into(),
+                                side: PositionSide::Long,
+                                sizing: Sizing::Contracts { contracts: "0.10".into() },
+                                order: OrderConstraints {
+                                    order_type: "limit".into(),
+                                    limit_price: Some("1000".into()),
+                                    reference: None,
+                                    max_entry_usd: Some("10".into()),
+                                    max_slippage_bps: 0,
+                                },
+                                protection: Some(Protection::Price {
+                                    stop_price: "900".into(),
+                                }),
+                                expires_in_ms: 30_000,
+                            };
+                            assert!(b_positive_request.valid());
+                            let b_public = trade.clone();
+                            let b_source = feed.clone();
+                            let b_accounts_positive = accounts.clone();
+                            let b_rate = rate_budget.clone();
+                            let b_positive_task = tokio::spawn(async move {
+                                let until = std::time::Instant::now() + Duration::from_secs(12);
+                                for attempt in 0..12 {
+                                    match b_public.trade("fixture-b", &b_positive_request, None).await {
+                                        Ok(outcome) => return Ok(outcome),
+                                        Err(reason) => {
+                                            let remaining = until.saturating_duration_since(
+                                                std::time::Instant::now()
+                                            );
+                                            let Some(delay) = recorded_preview_local_defer(
+                                                &reason, &b_rate, remaining
+                                            ) else { return Err(reason) };
+                                            let owner = b_accounts_positive.resolve("fixture-b")
+                                                .await.expect("B1 B positive SQL owner");
+                                            let absent = owner.execution.store.call(
+                                                std::time::Instant::now() + Duration::from_secs(3),
+                                                |s| Ok(s.by_idempotency(
+                                                    "b1_b_positive_after_shared_denial_001"
+                                                )?.is_none())
+                                            ).await.expect("B1 no-send SQL precondition");
+                                            assert!(absent, "B1 cannot replay a durable positive intent");
+                                            assert_eq!(
+                                                b_source.outbound_posts.lock().unwrap().len(), 4,
+                                                "local defer cannot replay a B venue POST"
+                                            );
+                                            if attempt == 11 || delay > remaining {
+                                                return Err(format!(
+                                                    "B1_POSITIVE_PRIVATE_READ_DEADLINE:{reason}"
+                                                ));
+                                            }
+                                            tokio::time::sleep(
+                                                delay.max(Duration::from_millis(200))
+                                            ).await;
+                                        }
+                                    }
+                                }
+                                Err("B1_POSITIVE_PRIVATE_READ_EXHAUSTED".into())
+                            });
+                            let b_positive = b_positive_task.await
+                                .expect("B1 Native B positive task join")
+                                .expect("B1 real B venue create must be admitted");
+                            if b_positive["status"] != "partial" {
+                                // First actual production denial is authoritative.
+                                // Only redact-safe typed fields are emitted;
+                                // no signed HTTP bytes, keys or bearer tokens.
+                                println!("B1_POSITIVE_DIAGNOSTIC_V1:{}", json!({
+                                    "status": b_positive["status"],
+                                    "state": b_positive["data"]["state"],
+                                    "primary_reason": b_positive["data"]["primary_reason"],
+                                    "rejection_origin": b_positive["data"]["rejection_origin"],
+                                    "send_state": b_positive["data"]["send_state"],
+                                    "as_of_ms": b_positive["as_of_ms"],
+                                    "outbound_posts": feed.outbound_posts.lock().unwrap().len(),
+                                    "denied_routes": feed.denied_routes.lock().unwrap()
+                                        .iter().rev().take(6).cloned().collect::<Vec<_>>(),
+                                    "recorded_balance_phase_ms": b1_balance_at,
+                                }));
+                            }
+                            assert_eq!(b_positive["status"], "partial");
+                            assert_eq!(b_positive["data"]["intent"]["state"], "ACKNOWLEDGED");
+                            assert_eq!(b_positive["data"]["intent"]["exchange_order_id"],
+                                "recorded-b1-b-001");
+                            assert_eq!(b_positive["data"]["financial_complete"], false);
+                            let posts_b = feed.outbound_posts.lock().unwrap().len();
+                            assert_eq!(posts_b, 5, "exactly ONE independent B create POST");
+                            assert_eq!(feed.unconsumed_posts(), 0);
+                            let (state_b, held_b, upper_b, order_b, intent_b) =
+                                b_account.execution.store.call(
+                                    std::time::Instant::now() + Duration::from_secs(3),
+                                    |s| {
+                                        let intent = s.by_idempotency(
+                                            "b1_b_positive_after_shared_denial_001"
+                                        )?.ok_or(okx_execution::StoreError::Invalid(
+                                            "B1_POSITIVE_SQL_INTENT_MISSING"
+                                        ))?;
+                                        let held = s.active_central_receipt(&intent.intent_id)?.is_some();
+                                        let quote = s.entry_quote(&intent.intent_id)?
+                                            .ok_or(okx_execution::StoreError::Invalid(
+                                                "B1_POSITIVE_SQL_ENTRY_QUOTE_MISSING"
+                                            ))?;
+                                        Ok((intent.state.as_str().to_owned(), held,
+                                            quote.total_usd.normalize().to_string(),
+                                            intent.exchange_order_id.clone(),
+                                            intent.intent_id))
+                                    }
+                                ).await.expect("B1 persisted B positive SQL");
+                            assert_eq!(state_b, "ACKNOWLEDGED");
+                            assert!(held_b, "B1 B position must retain its true central risk");
+                            assert_eq!(upper_b, "1.0005");
+                            assert_eq!(order_b.as_deref(), Some("recorded-b1-b-001"));
+                            assert_ne!(intent_b, persisted.intent_id);
+                            let mut b_after_cmd = summary("risk_b1_after_positive_b_account");
+                            b_after_cmd.installation_id = "installation_test".into();
+                            let b_after = risk.request(b_after_cmd).await.unwrap();
+                            let b_after_budget = b_after.budget.as_ref().unwrap();
+                            let b_after_entry = b_after_budget.entry_budget.as_ref().unwrap();
+                            assert_eq!(b_after_entry.consumed_usd, "1.0005");
+                            assert_eq!(b_after_entry.reserved_usd, "8.002");
+                            assert_eq!(b_after_entry.remaining_usd, "0.9975");
+                            println!("B1_NATIVE_SECOND_ACCOUNT_ACCEPTED_V1:{}", json!({
+                                "account_a_uid": resource.configuration.account_key.verified_uid,
+                                "account_b_uid": b_account.configuration.account_key.verified_uid,
+                                "b_intent_id": intent_b,
+                                "b_sql_state": state_b,
+                                "b_sql_reserve_held": held_b,
+                                "b_entry_quote_usd": upper_b,
+                                "b_exchange_order_id": order_b,
+                                "outbound_posts_before": posts_after,
+                                "outbound_posts_after": posts_b,
+                                "before_budget": after_money,
+                                "after_budget": b_after_budget,
+                                "risk_book_sequence": b_after.risk_book_sequence,
+                            }));
+                        }
                     }
                     println!(
                         "T09_2_NATIVE_ADMISSION_V1:{}",

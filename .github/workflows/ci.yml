@@ -562,7 +562,9 @@ jobs:
         run: npm ci --prefix cloudflare/okx-mcp --ignore-scripts --no-audit --no-fund
       - name: Precompile actual Native/Worker child
         run: cargo test --locked -p okx-agent --lib native_to_workerd_risk_summary_over_actual_websocket --no-run
-      - name: B1 two-account Native shared-cap negative (partial only)
+      - name: B1 Native A/B independent order ACK and central shared-cap denial (partial only)
+        env:
+          OKX_B1_SECOND_POSITIVE_PROBE: "1"
         shell: pwsh
         run: |
           $artifacts = Join-Path $env:RUNNER_TEMP "b1-native"
