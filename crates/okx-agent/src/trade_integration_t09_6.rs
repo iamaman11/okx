@@ -484,26 +484,64 @@ async fn t09_6_source_backed_close_release(
             "financial_complete":status["data"]["financial_complete"],
         }));
     }
-    // Only after BOTH real cancel-algos ACKs may a fresh signed all-scope
-    // empty inventory authorize either central RELEASE. The first Status
-    // need not be repeated as a mutation: it was a one-shot cancel.
+    // Both signed cancel ACKs and the same complete empty source census
+    // precede RELEASE. Independent entry reservations have a real ordering
+    // dependency: the first can bind its immutable terminal SQL settlement
+    // yet remain HELD until the second has its OWN source-verified proof.
+    // Exercise exactly this two-peer schedule, not an unbounded retry or
+    // a fabricated central receipt. No Status may create a venue order.
     t09_6_publish_final_empty_algos(feed);
-    for entry in &mut entry_results {
+    let mut first_release_pending=false;
+    for (index, entry) in entry_results.iter_mut().enumerate() {
         let intent=entry["intent_id"].as_str().expect("T09.6 persisted entry id");
         let status=t09_6_status_after_local_read_defer(
             trade,rate_budget,feed,intent,0
         ).await;
         assert_eq!(status["data"]["intent"]["state"],"FILLED",
             "T09.6 the original order remains terminal after both stop cancels");
-        assert_eq!(status["data"]["central_release"]["state"],"verified",
-            "T09.6 release after BOTH stop cancels must be verified: intent={}, release={}, incremental={}, entry_fill={}, financial_error={}, remaining={}, protection={}",
-            intent,status["data"]["central_release"],status["data"]["incremental_entry_settlement"],
-            status["data"]["entry_fill_evidence"],status["data"]["financial_error"],
-            status["data"]["remaining_exposure"],status["data"]["protection"]);
+        let release=&status["data"]["central_release"];
+        if index==0 && release["state"]=="pending" {
+            assert_eq!(release["reason_code"],
+                "COHORT_OTHER_TERMINAL_RISK_RELEASE_PENDING",
+                "T09.6 first entry cannot release over an unproven terminal peer");
+            let id=intent.to_owned();
+            let owner=accounts.resolve("fixture-a").await
+                .expect("T09.6 existing native SQL owner for peer ordering");
+            let proof=owner.execution.store.call(
+                std::time::Instant::now()+Duration::from_secs(3),
+                move |s|s.operation(&format!("entry-settlement:{id}"))
+            ).await.expect("T09.6 read-only first terminal SQL proof");
+            assert!(proof.is_some_and(|saved|saved.kind=="ENTRY_SETTLEMENT_PROVEN"),
+                "T09.6 pending RELEASE must preserve its genuine source-bound terminal proof");
+            first_release_pending=true;
+        } else {
+            assert_eq!(release["state"],"verified",
+                "T09.6 later peer must RELEASE from independently proven SQL: intent={}, release={}, incremental={}, entry_fill={}, financial_error={}, remaining={}, protection={}",
+                intent,release,status["data"]["incremental_entry_settlement"],
+                status["data"]["entry_fill_evidence"],status["data"]["financial_error"],
+                status["data"]["remaining_exposure"],status["data"]["protection"]);
+        }
         assert_eq!(status["data"]["protection_incident"],false,
             "T09.6 final release must not hide a protection incident");
-        entry["release"]=status["data"]["central_release"].clone();
+        entry["terminal_peer_gate_before"]=release.clone();
+        entry["release"]=release.clone();
         entry["financial_complete"]=status["data"]["financial_complete"].clone();
+    }
+    if first_release_pending {
+        // The second Status has now source-verified and released its OWN
+        // terminal entry. One bounded read-only replay can discharge the
+        // first; a missing or changed peer proof remains an actual FAIL.
+        let first=&mut entry_results[0];
+        let intent=first["intent_id"].as_str().expect("T09.6 first persisted entry");
+        let status=t09_6_status_after_local_read_defer(
+            trade,rate_budget,feed,intent,0
+        ).await;
+        assert_eq!(status["data"]["central_release"]["state"],"verified",
+            "T09.6 terminal first-entry RELEASE requires proven second peer: intent={}, release={}, financial_error={}",
+            intent,status["data"]["central_release"],status["data"]["financial_error"]);
+        assert_eq!(status["data"]["protection_incident"],false);
+        first["release"]=status["data"]["central_release"].clone();
+        first["financial_complete"]=status["data"]["financial_complete"].clone();
     }
     let owner=accounts.resolve("fixture-a").await.expect("T09.6 native account");
     let final_algos=owner.observer.pending_derivative_risk_algos().await
