@@ -1,6 +1,6 @@
 {
   "schema": "okx.windows-preflight-request/v1",
-  "request_id": "t094-frontier-f843191-029",
+  "request_id": "t094-managed-balance-f843191-029",
   "case": "T09.4",
   "target_sha": "f843191e4d348fab8a668841a42551f1e2d7b107"
 }
