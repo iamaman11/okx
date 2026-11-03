@@ -638,8 +638,19 @@ async fn t09_6_source_backed_close_release(
                             ).ok()
                         );
                         let lots=s.active_lots(&member.instrument_id)?;
+                        let unsent=s.unsent_release_receipt(&member.intent_id)?;
+                        let reserve_attempt=s.operation(&format!("risk-reserve:{}",member.intent_id))?;
+                        let terminal=s.operation(&format!("terminal:{}",member.intent_id))?;
                         cohort.push(serde_json::json!({
                             "id":member.intent_id,
+                            "idempotency":member.idempotency_key,
+                            "incident":member.incident,
+                            "unsent_sql":unsent.is_some(),
+                            "unsent_key":unsent.as_ref().map(|u|u.reservation_key.as_str()),
+                            "reserve_marker":reserve_attempt.as_ref().map(|o|o.kind.as_str()),
+                            "terminal_marker":terminal.as_ref().map(|o|o.kind.as_str()),
+                            "reserve_denied":s.declined_reserve(&member.intent_id)?,
+                            "pre_reserve_unsent":s.unsent_before_reserve(&member.intent_id)?,
                             "state":member.state.as_str(),
                             "revision":member.revision,
                             "risk_increase":member.risk_increase,
@@ -701,9 +712,31 @@ async fn t09_6_source_backed_close_release(
             },
             Err(reason)=>format!("SQL_READ_FAILED:{reason:?}")
         };
+        // The parent native-child panic is capped: report the REJECTED
+        // obligation FIRST. A FILLED peer's proof cannot clear its unrelated
+        // unresolved no-send reservation.
+        let rejected=match &peer_sql {
+            Ok(sql)=>sql["cohort"].as_array().map(|members|{
+                members.iter().filter(|m|m["state"]=="REJECTED").map(|m|
+                    serde_json::json!({
+                        "id":m["id"],"key":m["idempotency"],
+                        "incident":m["incident"].as_str().unwrap_or("?")
+                            .chars().take(105).collect::<String>(),
+                        "incident_len":m["incident"].as_str().map(str::len),
+                        "pending":m["pending"],"risk_increase":m["risk_increase"],
+                        "unsent_sql":m["unsent_sql"],"unsent_key":m["unsent_key"],
+                        "reserve_marker":m["reserve_marker"],
+                        "terminal_marker":m["terminal_marker"],
+                        "reserve_denied":m["reserve_denied"],
+                        "pre_reserve_unsent":m["pre_reserve_unsent"]
+                    })
+                ).collect::<Vec<_>>()
+            }).unwrap_or_default(),
+            Err(_)=>Vec::new()
+        };
         assert_eq!(status["data"]["central_release"]["state"],"verified",
-            "T09_6_COHORT_CAUSAL_V2:intent={intent}:sql={compact}:worker_sequence={worker_sequence:?}:release={}:financial_error={}:source_trace={}",
-            status["data"]["central_release"],status["data"]["financial_error"],source_trace);
+            "T09_6_REJECTED_FIRST_CAUSE_V3:rejected={}:intent={intent}:worker_sequence={worker_sequence:?}:cohort={compact}:release={}:financial_error={}:source_trace={}",
+            serde_json::json!(rejected),status["data"]["central_release"],status["data"]["financial_error"],source_trace);
         assert_eq!(status["data"]["protection_incident"],false);
         entry["release"]=status["data"]["central_release"].clone();
         entry["financial_complete"]=status["data"]["financial_complete"].clone();
