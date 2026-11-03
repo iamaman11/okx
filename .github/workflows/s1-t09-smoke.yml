@@ -15,7 +15,7 @@ concurrency:
 
 jobs:
   t09-repeat:
-    name: S2-05 actual Worker policy-CAS and semantic Native replay
+    name: S2 combined Native / Worker semantic and financial acceptance
     runs-on: windows-latest
     timeout-minutes: 40
     steps:
@@ -37,14 +37,18 @@ jobs:
       - name: Repeat T09.2 / T09.6 / T09.7 on one immutable SHA
         shell: pwsh
         run: |
-          $cases = @('T09.5')
-          $env:OKX_S2_05_POLICY_CAS_PROBE = '1'
+          $cases = @('T09.5', 'T09.2', 'T09.6', 'T09.7', 'T09.8')
           $anyFailure = $false
           for ($i = 0; $i -lt $cases.Length; $i++) {
             $case = $cases[$i]
             $iteration = $i + 1
             $dir = Join-Path $env:RUNNER_TEMP ("s1-targeted\\iteration-{0}-{1}" -f $iteration, $case.Replace('.', '-'))
-            Write-Host ("S1_EXACT_SHA_BOUNDARY_V1:{0} iteration={1} case={2}" -f $env:GITHUB_SHA, $iteration, $case)
+            Write-Host ("S2_EXACT_SHA_BOUNDARY_V1:{0} iteration={1} case={2}" -f $env:GITHUB_SHA, $iteration, $case)
+            if ($case -eq 'T09.5') {
+              $env:OKX_S2_05_POLICY_CAS_PROBE = '1'
+            } else {
+              Remove-Item Env:OKX_S2_05_POLICY_CAS_PROBE -ErrorAction SilentlyContinue
+            }
             node scripts/run-trade-integration.mjs --case $case --artifacts "$dir"
             if ($LASTEXITCODE -ne 0) {
               $anyFailure = $true
