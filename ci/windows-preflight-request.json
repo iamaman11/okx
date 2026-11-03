@@ -1,6 +1,6 @@
 {
   "schema": "okx.windows-preflight-request/v1",
-  "request_id": "t093-safe-get-defer-cca979d-024",
+  "request_id": "t093-budget-visible-2be40f2-025",
   "case": "T09.3-R2",
-  "target_sha": "cca979dbf014655b37b09ec2977d46297a1a4b37"
+  "target_sha": "2be40f25ccd41700f99f8a62f8557459372aaf9e"
 }
