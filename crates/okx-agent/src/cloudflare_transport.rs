@@ -2080,10 +2080,29 @@ mod raw_native_session_tests {
                 .reserved_usd,
             if add_mode { "1.0005" } else { "5.0005" }
         );
+        // S2-04 Native/public-path proof: a differently spelled decimal
+        // request is the SAME semantic intent. No second reserve or POST.
+        // Do not update the original persisted plan or its deadline.
+        let mut semantic_replay = execute.clone();
+        if let TradeRequest::Execute {
+            sizing: Sizing::Contracts { contracts },
+            order,
+            protection: Some(Protection::Price { stop_price }),
+            ..
+        } = &mut semantic_replay
+        {
+            *contracts = "0.1".into();
+            order.limit_price = Some("1000.00".into());
+            order.max_entry_usd = Some("10.00".into());
+            *stop_price = "900.00".into();
+        } else {
+            panic!("S2-04 requires the original contracts/price/stop request");
+        }
+        assert!(semantic_replay.valid());
         let repeated = trade
-            .trade("fixture-a", &execute, None)
+            .trade("fixture-a", &semantic_replay, None)
             .await
-            .expect("T09.1 identical Execute must be idempotent");
+            .expect("S2-04 equivalent decimal Execute must reuse the original intent");
         // An unchanged idempotency key must never send another POST. When
         // the read-only order GET is locally deferred, UNKNOWN with the exact
         // no-resubmit reason is the safe production answer; it is not an
@@ -2115,7 +2134,78 @@ mod raw_native_session_tests {
         assert_eq!(
             feed.outbound_posts.lock().unwrap().len(),
             1,
-            "identical Execute must not post to OKX twice"
+            "semantically equivalent Execute must not post to OKX twice"
+        );
+        // Same authenticated account/action/key with a meaningful quantity
+        // or side change is an IDEMPOTENCY_CONFLICT before any possible POST.
+        let mut amount_conflict = semantic_replay.clone();
+        if let TradeRequest::Execute {
+            sizing: Sizing::Contracts { contracts },
+            ..
+        } = &mut amount_conflict
+        {
+            *contracts = "0.11".into();
+        } else {
+            panic!("S2-04 contracts variant missing");
+        }
+        let amount_conflict_reason = trade
+            .trade("fixture-a", &amount_conflict, None)
+            .await
+            .expect_err("S2-04 amount mismatch must not replay");
+        assert_eq!(amount_conflict_reason, "IDEMPOTENCY_CONFLICT");
+        let mut side_conflict = semantic_replay.clone();
+        if let TradeRequest::Execute { side, .. } = &mut side_conflict {
+            *side = PositionSide::Short;
+        } else {
+            panic!("S2-04 side variant missing");
+        }
+        let side_conflict_reason = trade
+            .trade("fixture-a", &side_conflict, None)
+            .await
+            .expect_err("S2-04 side mismatch must not replay");
+        assert_eq!(side_conflict_reason, "IDEMPOTENCY_CONFLICT");
+        let mut reference_conflict = semantic_replay.clone();
+        if let TradeRequest::Execute { order, .. } = &mut reference_conflict {
+            order.reference = Some("other_saved_intent".into());
+        } else {
+            panic!("S2-04 target variant missing");
+        }
+        assert!(reference_conflict.valid());
+        let reference_conflict_reason = trade
+            .trade("fixture-a", &reference_conflict, None)
+            .await
+            .expect_err("S2-04 target reference change cannot reuse an intent");
+        assert_eq!(reference_conflict_reason, "IDEMPOTENCY_CONFLICT");
+        let mut basis_conflict = semantic_replay.clone();
+        if let TradeRequest::Execute { protection, .. } = &mut basis_conflict {
+            *protection = Some(Protection::Distance {
+                stop_distance_bps: 1000,
+            });
+        } else {
+            panic!("S2-04 stop basis variant missing");
+        }
+        assert!(basis_conflict.valid());
+        let basis_conflict_reason = trade
+            .trade("fixture-a", &basis_conflict, None)
+            .await
+            .expect_err("S2-04 protection basis change cannot reuse an intent");
+        assert_eq!(basis_conflict_reason, "IDEMPOTENCY_CONFLICT");
+        let mut deadline_conflict = semantic_replay.clone();
+        if let TradeRequest::Execute { expires_in_ms, .. } = &mut deadline_conflict {
+            *expires_in_ms = 20000;
+        } else {
+            panic!("S2-04 explicit deadline variant missing");
+        }
+        assert!(deadline_conflict.valid());
+        let deadline_conflict_reason = trade
+            .trade("fixture-a", &deadline_conflict, None)
+            .await
+            .expect_err("S2-04 explicit expiry change cannot extend an existing intent");
+        assert_eq!(deadline_conflict_reason, "IDEMPOTENCY_CONFLICT");
+        assert_eq!(
+            feed.outbound_posts.lock().unwrap().len(),
+            1,
+            "S2-04 equivalent replay and five conflicts may not create extra venue POSTs"
         );
         // A read-only replay may return UNKNOWN even after transport has
         // consumed the raw GET: a deadline or decode/readback failure does
@@ -2182,11 +2272,85 @@ mod raw_native_session_tests {
                 "sql_intent_id":saved.intent_id,
                 "sql_revision":saved.revision,
                 "sql_state":saved.state.as_str(),
+                "sql_request_hash":saved.request_hash,
+                "sql_plan_hash":saved.plan_hash,
+                "sql_deadline_ms":saved.deadline,
+                "sql_client_order_id":saved.client_order_id,
+                "sql_policy_revision":saved.policy_revision,
                 "created_posts":feed.outbound_posts.lock().unwrap().len(),
+                "semantic_decimal_equivalent_replay":true,
+                "semantic_amount_conflict_reason":amount_conflict_reason,
+                "semantic_side_conflict_reason":side_conflict_reason,
+                "semantic_reference_conflict_reason":reference_conflict_reason,
+                "semantic_basis_conflict_reason":basis_conflict_reason,
+                "semantic_deadline_conflict_reason":deadline_conflict_reason,
                 "reserved_entry_usd_before_replay": before_repeat.budget.as_ref().unwrap().entry_budget.as_ref().unwrap().reserved_usd,
                 "reserved_entry_usd_after_replay": after.budget.as_ref().unwrap().entry_budget.as_ref().unwrap().reserved_usd,
             })
         );
+        // S2-07 account identity uses the independently verified SQL
+        // owner, never the mutable UI alias or the request display account.
+        // A different account may reuse the SAME public idempotency token
+        // without sharing the A request hash or seeing its SQL reservation.
+        use sha2::{Digest, Sha256};
+        let account_a = accounts.resolve("fixture-a").await.unwrap();
+        let account_b = accounts.resolve("fixture-b").await.unwrap();
+        let scope_a = account_a.configuration.account_key.wire();
+        let scope_b = account_b.configuration.account_key.wire();
+        assert_ne!(scope_a, scope_b);
+        let hash_a = format!(
+            "{:x}",
+            Sha256::digest(
+                execute
+                    .canonical_semantic_json(&scope_a)
+                    .unwrap()
+                    .as_bytes()
+            )
+        );
+        let hash_b = format!(
+            "{:x}",
+            Sha256::digest(
+                execute
+                    .canonical_semantic_json(&scope_b)
+                    .unwrap()
+                    .as_bytes()
+            )
+        );
+        assert_eq!(hash_a, saved.request_hash);
+        assert_ne!(
+            hash_a, hash_b,
+            "S2-07 verified accounts must have separate identities"
+        );
+        let other_key_absent = account_b
+            .execution
+            .store
+            .call(std::time::Instant::now() + Duration::from_secs(3), |sql| {
+                Ok(sql
+                    .by_idempotency("t09_real_public_execute_0001")?
+                    .is_none())
+            })
+            .await
+            .expect("S2-07 independent account B Native SQL");
+        assert!(
+            other_key_absent,
+            "S2-07 account B must not inherit A's intent"
+        );
+        println!(
+            "S2_07_NATIVE_ACCOUNT_SCOPE_V1:{}",
+            json!({
+                "same_client_key":true,
+                "distinct_account_scopes":true,
+                "owner_semantic_sha256":hash_a,
+                "other_semantic_sha256":hash_b,
+                "foreign_sql_intent_absent":other_key_absent,
+                "outbound_posts":feed.outbound_posts.lock().unwrap().len(),
+            })
+        );
+        // These read-only probes must not outlive their phase: keeping a
+        // cloned AccountResources Arc alive prevents the normal SQL-owner
+        // shutdown receipt and causes a false S1-05 teardown timeout.
+        drop(account_a);
+        drop(account_b);
         assert_eq!(
             after
                 .budget
@@ -4028,6 +4192,115 @@ mod raw_native_session_tests {
             .await
             .expect("recorded public publisher did not terminate")
             .unwrap();
+        if std::env::var("OKX_S2_05_POLICY_CAS_PROBE").as_deref() == Ok("1") {
+            assert!(
+                !status_probe,
+                "S2-05 policy rotation is a standalone T09.5 probe"
+            );
+            let posts_before = feed.outbound_posts.lock().unwrap().len();
+            assert_eq!(
+                posts_before, 1,
+                "S2-05 begins after one real venue create ACK"
+            );
+            std::fs::write(
+                format!("{handoff_path}.s2-policy-cas-ready"),
+                b"AFTER_SIGNED_ACK_AND_SEMANTIC_REPLAY",
+            )
+            .expect("S2-05 causal Worker policy-CAS barrier");
+            // The REAL RuntimeSession commits an account pause via its
+            // governance HTTP CAS and pushes PolicySnapshot over existing WSS.
+            // Only the normal production policy handler can update account SQL.
+            let paused = tokio::time::timeout(Duration::from_secs(18), async {
+                loop {
+                    let caps = trade
+                        .trade("fixture-a", &TradeRequest::Capabilities {}, None)
+                        .await
+                        .expect("S2-05 native capabilities readback");
+                    if caps["governance"]["revision"] == json!(3)
+                        && caps["governance"]["explicit_pause"] == true
+                        && caps["native_sql_policy"]["revision"] == json!(3)
+                        && caps["native_sql_policy"]["matches_governance"] == true
+                    {
+                        break caps;
+                    }
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            })
+            .await
+            .expect("S2-05 actual Worker policy CAS must reach both Native SQL owners");
+            let resumed = trade
+                .trade("fixture-a", &execute, None)
+                .await
+                .expect("S2-05 old accepted key must survive an actual policy pause");
+            let replay_id = if resumed["status"] == "unknown" {
+                resumed["intent_id"].as_str()
+            } else {
+                resumed["data"]["intent"]["intent_id"].as_str()
+            };
+            assert_eq!(
+                replay_id,
+                Some(saved.intent_id.as_str()),
+                "S2-05 old semantic request must retain original identity after policy CAS"
+            );
+            let mut new_key = execute.clone();
+            if let TradeRequest::Execute {
+                idempotency_key, ..
+            } = &mut new_key
+            {
+                *idempotency_key = "s2_05_new_policy_key_denied_0001".into();
+            } else {
+                panic!("S2-05 requires the original Execute shape");
+            }
+            let new_reason = trade
+                .trade("fixture-a", &new_key, None)
+                .await
+                .expect_err("S2-05 new key must apply the current pause");
+            assert_eq!(
+                new_reason, "ACCOUNT_NEW_RISK_PAUSED",
+                "S2-05 new key must be denied by current policy rather than stale authority"
+            );
+            let persisted = accounts
+                .resolve("fixture-a")
+                .await
+                .unwrap()
+                .execution
+                .store
+                .call(std::time::Instant::now() + Duration::from_secs(3), |sql| {
+                    sql.by_idempotency("t09_real_public_execute_0001")
+                })
+                .await
+                .expect("S2-05 original Native SQL owner must answer")
+                .expect("S2-05 original SQL intent cannot be lost");
+            assert_eq!(persisted.request_hash, saved.request_hash);
+            assert_eq!(persisted.plan_hash, saved.plan_hash);
+            assert_eq!(persisted.deadline, saved.deadline);
+            assert_eq!(persisted.client_order_id, saved.client_order_id);
+            assert_eq!(persisted.policy_revision, saved.policy_revision);
+            let posts_after = feed.outbound_posts.lock().unwrap().len();
+            assert_eq!(
+                posts_after, posts_before,
+                "S2-05 policy CAS must not trigger a new POST"
+            );
+            println!(
+                "S2_05_NATIVE_POLICY_REPLAY_V1:{}",
+                json!({
+                    "source":"runtime_session_governance_cas_over_wss",
+                    "original_intent_id":saved.intent_id,
+                    "replayed_intent_id":replay_id,
+                    "original_policy_revision":saved.policy_revision,
+                    "new_governance_revision":paused["governance"]["revision"],
+                    "native_sql_revision":paused["native_sql_policy"]["revision"],
+                    "native_sql_matches_governance":paused["native_sql_policy"]["matches_governance"],
+                    "original_request_hash":saved.request_hash,
+                    "persisted_request_hash":persisted.request_hash,
+                    "original_deadline_ms":saved.deadline,
+                    "persisted_deadline_ms":persisted.deadline,
+                    "new_key_reason":new_reason,
+                    "posts_before":posts_before,
+                    "posts_after":posts_after,
+                })
+            );
+        }
         println!("t09_public_trade_execute_open_ack_and_idempotency PASS: posts=1");
         shutdown_tx.send(true).unwrap();
         let terminated = tokio::time::timeout(Duration::from_secs(10), session)
@@ -4158,6 +4431,11 @@ mod raw_native_session_tests {
                     Ok(json!({
                         "opening_intent_id":opening.intent_id,
                         "opening_state":opening.state.as_str(),
+                        "opening_request_hash":opening.request_hash,
+                        "opening_plan_hash":opening.plan_hash,
+                        "opening_deadline_ms":opening.deadline,
+                        "opening_client_order_id":opening.client_order_id,
+                        "opening_policy_revision":opening.policy_revision,
                         "close_intent_id":close.intent_id,
                         "close_state":close.state.as_str(),
                         "active_central_receipt":active_central.is_some(),

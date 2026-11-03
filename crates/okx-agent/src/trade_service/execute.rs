@@ -5,6 +5,13 @@ use okx_api::{
 };
 /// Immutable provenance for checking the fresh post-HELD FX rate against the
 /// exact native account that owns the central reservation.
+// A legacy SQL intent stores its original RAW request hash but not the
+// semantic DTO. Exact raw replay remains read-only. A new spelling cannot
+// retroactively reinterpret a persisted legacy receipt as equivalent.
+fn existing_request_hash_matches(stored: &str, semantic: &str, historical_raw: &str) -> bool {
+    stored == semantic || stored == historical_raw
+}
+
 // A syntactically valid Worker response does not by itself grant authority
 // for this intent. Bind the actual receipt to this reservation and policy.
 fn risk_receipt_bound(
@@ -601,8 +608,22 @@ impl TradeService {
             .mutation_capacity
             .try_acquire()
             .map_err(|_| "ACCOUNT_MUTATION_BUSY")?;
-        let body_hash =
-            bound_hash.unwrap_or(digest(&(r.configuration.account_key.wire(), request))?);
+        let account_key = r.configuration.account_key.wire();
+        // Keep the historical raw hash solely for read-only replay of
+        // already persisted intents. Never rewrite their IDs, plans or hashes.
+        // The old SQL record has only request_hash (not the complete original
+        // semantic DTO); a different spelling of a legacy amount must NOT be
+        // guessed equivalent or permitted to create another venue POST.
+        let historical_raw_hash = digest(&(account_key.clone(), request))?;
+        let body_hash = match bound_hash {
+            Some(bound) => bound,
+            None => {
+                let preimage = request
+                    .canonical_semantic_json(&account_key)
+                    .map_err(|cause| cause.code().to_owned())?;
+                format!("{:x}", Sha256::digest(preimage.as_bytes()))
+            }
+        };
         let key = idempotency_key.clone();
         let prior = r
             .execution
@@ -611,7 +632,7 @@ impl TradeService {
             .await
             .map_err(err)?;
         if let Some(i) = prior {
-            if i.request_hash != body_hash {
+            if !existing_request_hash_matches(&i.request_hash, &body_hash, &historical_raw_hash) {
                 return Err("IDEMPOTENCY_CONFLICT".into());
             }
             drop(_capacity);
@@ -622,6 +643,14 @@ impl TradeService {
             operation,
             TradeOperation::Open | TradeOperation::Add | TradeOperation::Replace
         );
+        // S2-05: only a NEW request reaches this point. A real Worker
+        // policy pause must deny new risk before a potentially stale
+        // campaign-source read; an accepted old key was already resolved
+        // above without re-authorizing, re-reserving or re-sending it.
+        // The existing plan also enforces this gate (defense in depth).
+        if increase && !control.access_enabled() {
+            return Err("ACCOUNT_NEW_RISK_PAUSED".into());
+        }
         if increase
             && r.configuration.account_key.environment == okx_protocol::accounts::Environment::Real
         {
@@ -3797,6 +3826,15 @@ mod tests {
             }
         }
     }
+    fn s2_08_legacy_request() -> TradeRequest {
+        let request: TradeRequest = serde_json::from_str(
+            r#"{"action":"execute","idempotency_key":"fixture_command_01","operation":"open","strategy_instance":"manual","instrument":"BTC-USDT-SWAP","side":"long","sizing":{"contracts":"1.00"},"order":{"type":"limit","limit_price":"100.00","max_entry_usd":"10.00","max_slippage_bps":0},"protection":{"stop_price":"99.00"},"expires_in_ms":30000}"#,
+        )
+        .unwrap();
+        assert!(request.valid());
+        request
+    }
+
     async fn reserved(
         label: &str,
         increase: bool,
@@ -3886,7 +3924,12 @@ mod tests {
             plan,
             intent_id: "intent_fixture".into(),
             idempotency_key: "fixture_command_01".into(),
-            request_hash: "b".repeat(64),
+            request_hash: if label == "s2_08_legacy" {
+                let original = s2_08_legacy_request();
+                digest(&(account.clone(), &original)).unwrap()
+            } else {
+                "b".repeat(64)
+            },
             client_order_id: "b".repeat(32),
             deadline: if expired { at - 1 } else { at + 30000 },
             plan_hash: "c".repeat(64),
@@ -5109,5 +5152,104 @@ mod tests {
                 .state,
             IntentState::Rejected
         );
+    }
+
+    #[tokio::test]
+    async fn s2_08_legacy_exact_raw_hash_survives_sql_backup_and_reopen() {
+        // The original-format receipt is produced by the genuine SQL
+        // prepare API. No existing intent, reserve, ID, deadline or finance
+        // row is rewritten to migrate it to the semantic hash format.
+        let original = s2_08_legacy_request();
+        let account = format!("okx:real:{}", "a".repeat(64));
+        let exact_raw = digest(&(account.clone(), &original)).unwrap();
+        let canonical = original.canonical_semantic_json(&account).unwrap();
+        let semantic = format!("{:x}", Sha256::digest(canonical.as_bytes()));
+        assert_ne!(exact_raw, semantic);
+        let (store, saved, root) = reserved("s2_08_legacy", true, false, false).await;
+        assert_eq!(saved.request_hash, exact_raw);
+        let copy = root.join("original-legacy-account.db");
+        store
+            .call(deadline(), move |sql| sql.backup(&copy))
+            .await
+            .unwrap();
+        drop(store);
+        let reopened = AccountStoreHandle::open_existing(
+            root.join("original-legacy-account.db"),
+            account.clone(),
+            "installation_test".into(),
+        )
+        .await
+        .unwrap();
+        let restored = reopened
+            .call(deadline(), |sql| sql.by_idempotency("fixture_command_01"))
+            .await
+            .unwrap()
+            .expect("S2-08 old SQL intent must survive physical reopen");
+        assert_eq!(restored.intent_id, saved.intent_id);
+        assert_eq!(restored.request_hash, exact_raw);
+        assert_eq!(restored.plan_hash, saved.plan_hash);
+        assert_eq!(restored.client_order_id, saved.client_order_id);
+        assert_eq!(restored.deadline, saved.deadline);
+        assert_eq!(restored.policy_revision, saved.policy_revision);
+        assert!(existing_request_hash_matches(
+            &restored.request_hash,
+            &semantic,
+            &exact_raw
+        ));
+        let mut equivalent = original.clone();
+        if let TradeRequest::Execute {
+            sizing: Sizing::Contracts { contracts },
+            order,
+            protection: Some(Protection::Price { stop_price }),
+            ..
+        } = &mut equivalent
+        {
+            *contracts = "1.0".into();
+            order.limit_price = Some("100".into());
+            order.max_entry_usd = Some("10".into());
+            *stop_price = "99".into();
+        } else {
+            panic!("S2-08 legacy replay fixture shape changed");
+        }
+        let equivalent_raw = digest(&(account.clone(), &equivalent)).unwrap();
+        let equivalent_semantic = format!(
+            "{:x}",
+            Sha256::digest(
+                equivalent
+                    .canonical_semantic_json(&account)
+                    .unwrap()
+                    .as_bytes()
+            )
+        );
+        assert_eq!(equivalent_semantic, semantic);
+        assert_ne!(equivalent_raw, exact_raw);
+        assert!(
+            !existing_request_hash_matches(
+                &restored.request_hash,
+                &equivalent_semantic,
+                &equivalent_raw
+            ),
+            "S2-08 may not infer numeric equivalence for an old raw-only SQL receipt"
+        );
+    }
+}
+
+#[cfg(test)]
+mod s2_decimal_contract_tests {
+    use super::*;
+
+    #[test]
+    fn s2_02_shared_fixture_exact_rust_decimal_addition_and_overflow() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../contracts/trade-semantic-golden.json"
+        ))
+        .unwrap();
+        let inputs = fixture["numeric"]["sum"].as_array().unwrap();
+        let left = Decimal::from_str(inputs[0].as_str().unwrap()).unwrap();
+        let right = Decimal::from_str(inputs[1].as_str().unwrap()).unwrap();
+        let exact = left.checked_add(right).unwrap().normalize().to_string();
+        assert_eq!(exact, inputs[2].as_str().unwrap());
+        let maximum = Decimal::from_str("9999999999999999999999999999").unwrap();
+        assert!(maximum.checked_mul(maximum).is_none(), "NUMERIC_RANGE");
     }
 }

@@ -13,7 +13,8 @@ export async function run({root,signal}) {
   const terminal=transcript.nativeCloseTerminal;
   const sql=transcript.nativeRestart;
   const ack=transcript.nativeCloseAck;
-  assert.ok(native&&worker&&terminal&&sql&&ack,
+  const replay=transcript.nativeReplay;
+  assert.ok(native&&worker&&terminal&&sql&&ack&&replay,
     "T09.7 requires real independent Native/Worker restart receipts");
   assert.equal(native.new_os_process,true);
   assert.equal(native.new_exchange_posts,0,
@@ -45,6 +46,20 @@ export async function run({root,signal}) {
   assert.equal(native.account_b.finance_totals,0,
     "A's finance entries must not appear on B");
   assert.equal(sql.remaining_lot_quantity,"0");
+  // S2-08: production SQL was physically reopened, not reconstructed.
+  // The original semantic identity, client order, immutable plan, entry
+  // deadline and policy revision must survive the close and Native restart
+  // without a rekey or another exchange create.
+  for (const [field, original, restored] of [
+    ["request_hash",replay.sql_request_hash,sql.opening_request_hash],
+    ["plan_hash",replay.sql_plan_hash,sql.opening_plan_hash],
+    ["deadline_ms",replay.sql_deadline_ms,sql.opening_deadline_ms],
+    ["client_order_id",replay.sql_client_order_id,sql.opening_client_order_id],
+    ["policy_revision",replay.sql_policy_revision,sql.opening_policy_revision],
+  ]) assert.equal(restored,original,"S2-08 persisted "+field+" mutated");
+  assert.match(sql.opening_request_hash,/^[0-9a-f]{64}$/);
+  assert.match(sql.opening_plan_hash,/^[0-9a-f]{64}$/);
+  assert.ok(Number.isSafeInteger(sql.opening_deadline_ms)&&sql.opening_deadline_ms>0);
   assert.equal(worker.native_sql_reopened,true);
   assert.equal(worker.native_remaining_lot_quantity,"0");
   assert.equal(worker.native_second_risk_held,false);
@@ -71,6 +86,10 @@ export async function run({root,signal}) {
         actual:worker.worker_budget.entry_budget.consumed_usd},
       {id:"duplicate_posts",expected:"0",
         actual:String(native.new_exchange_posts)},
+      {id:"s2_08_persisted_semantic_identity",expected:replay.sql_request_hash,
+        actual:sql.opening_request_hash},
+      {id:"s2_08_persisted_original_deadline",expected:String(replay.sql_deadline_ms),
+        actual:String(sql.opening_deadline_ms)},
       {id:"equity_b_usd",expected:"100",actual:native.account_b.equity_b_usd},
       {id:"remaining_exposure",expected:"0",
         actual:String(native.account_a.remaining_lots)},

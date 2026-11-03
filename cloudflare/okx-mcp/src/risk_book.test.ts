@@ -118,7 +118,29 @@ check(historicalNext.consumed_usd==="5.01"&&
  historicalNext.reserved_usd==="0.5"&&historicalRemaining===units("4.49"),
  "next reservation never resets prior campaign spent or double-charges an entry");
 
-check(units("1.000000001")===1000000001n&&units("1e9")===null,"decimal exact");
+// S2-02/03: shared 28-digit decimal contract. A Worker bigint must
+// never silently round the tenth decimal place to its old scale9.
+check(units("1.000000001")===10n**28n+10n**19n
+  &&units("1e9")===null,"decimal exact");
+check(units("5")===units("5.0")&&units("5.0")===units("5.00")
+  &&amount(units("5.00")!)==="5","S2-01 canonical equivalent amounts");
+check(units("9999999999999999999999999999")!==null
+  &&amount(units("9999999999999999999999999999")!)
+      ==="9999999999999999999999999999"
+  &&units("0.0000000001")!+units("0.0000000002")!
+      ===units("0.0000000003")
+  &&amount(units("0.0000000001")!+units("0.0000000002")!)
+      ==="0.0000000003","S2-02 exact 28-digit arithmetic");
+for(const bad of ["99999999999999999999999999999","1e-10"," 5","NaN","01"]) {
+  check(units(bad)===null,"S2-03 rejected numeric "+bad);
+}
+check(amount(units("6.003")!)==="6.003"
+  &&amount(units("0.000000001")!)==="0.000000001",
+  "S2-08 persisted scale9 values round-trip unchanged");
+check((()=>{try{amount(10n**56n);return false;}catch(e){
+  return (e as Error).message==="NUMERIC_RANGE";
+}})(),"S2-03 checked Worker arithmetic range");
+
 // Cross-account strategy ownership is part of the central authorization,
 // not just an accounting label. This is the exact fail-closed negative that
 // the real persisted Workerd WSS scenario exercises independently.
