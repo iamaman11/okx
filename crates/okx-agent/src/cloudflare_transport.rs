@@ -3213,29 +3213,6 @@ mod raw_native_session_tests {
                     // precedes positive Execute; the production freshness gate,
                     // fee generation and reference generation remain unchanged.
                     refresh_recorded_market();
-                    let execute_fee_at = chrono::Utc::now().timestamp_millis().to_string();
-                    let retired_stale_fees = feed.advance_recorded_route(
-                        "fixture-observer-a",
-                        "/api/v5/account/trade-fee",
-                        (0..4)
-                            .map(|_| RecordedGet {
-                                access_key: "fixture-observer-a".into(),
-                                path: "/api/v5/account/trade-fee".into(),
-                                required_query: vec![
-                                    ("instType".into(), "SWAP".into()),
-                                    ("instFamily".into(), "BTC-USDT".into()),
-                                ],
-                                raw_response: envelope(json!([{
-                                    "instType":"SWAP","level":"Lv1","ts":execute_fee_at,
-                                    "feeGroup":[{"groupId":"4","maker":"0.0005","taker":"0.0005"}]
-                                }])),
-                            })
-                            .collect(),
-                    );
-                    assert_eq!(
-                        retired_stale_fees, 0,
-                        "negative Execute must consume the lone stale signed fee reply"
-                    );
                     // Preview and the explicit negative Execute may already
                     // consume all leverage-info pages. Bind the NEW signed
                     // leverage observation to the positive admission phase.
@@ -3331,6 +3308,33 @@ mod raw_native_session_tests {
                         }),
                         expires_in_ms: 30_000,
                     };
+                    // Capture the new authenticated-shaped fee source at the
+                    // last deterministic pre-Execute boundary, AFTER prior
+                    // census and source preparation. Production fee TTL is
+                    // unchanged; any truly stale source must still fail closed.
+                    let execute_fee_at = chrono::Utc::now().timestamp_millis().to_string();
+                    let retired_stale_fees = feed.advance_recorded_route(
+                        "fixture-observer-a",
+                        "/api/v5/account/trade-fee",
+                        (0..4)
+                            .map(|_| RecordedGet {
+                                access_key: "fixture-observer-a".into(),
+                                path: "/api/v5/account/trade-fee".into(),
+                                required_query: vec![
+                                    ("instType".into(), "SWAP".into()),
+                                    ("instFamily".into(), "BTC-USDT".into()),
+                                ],
+                                raw_response: envelope(json!([{
+                                    "instType":"SWAP","level":"Lv1","ts":execute_fee_at,
+                                    "feeGroup":[{"groupId":"4","maker":"0.0005","taker":"0.0005"}]
+                                }])),
+                            })
+                            .collect(),
+                    );
+                    assert_eq!(
+                        retired_stale_fees, 0,
+                        "negative Execute must consume the lone stale signed fee reply"
+                    );
                     eprintln!("T09_2_PHASE_V1:BEFORE_POSITIVE_EXECUTE");
                     // The production Execute future must not be polled inside
                     // the large T09.2 integration task's call stack. Schedule
