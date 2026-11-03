@@ -3774,9 +3774,67 @@ mod raw_native_session_tests {
                             new_intent_id.clone(),persisted.client_order_id.clone(),Some(ts),
                         )).await.expect("T09.3 terminal native task");
                         captured_signed_times=Some((first["raw_history_event_at_ms"].as_i64().unwrap(),terminal["raw_history_event_at_ms"].as_i64().unwrap()));
-                        let mut summary_cmd=summary("risk_t09_3_after_terminal");
-                        summary_cmd.installation_id="installation_test".into();
-                        let after=risk.request(summary_cmd).await.unwrap();
+                        // The terminal signed fill+bill may reach SQL before
+                        // a fresh account-wide financial capture can commit
+                        // its central SETTLE_ENTRY. Earlier checks incorrectly
+                        // allowed Native to exit with the *partial* Worker
+                        // cost still reserved. Continue the same PUBLIC Status
+                        // reconciliation, with no test-owned financial writes,
+                        // until the persisted Worker proves the terminal debit.
+                        let mut last_status = terminal["entry_fill_evidence_state"].clone();
+                        let mut final_settlement_attempts = 0u32;
+                        let after = loop {
+                            let mut summary_cmd = summary(&format!(
+                                "risk_t09_3_terminal_money_{final_settlement_attempts}"
+                            ));
+                            summary_cmd.installation_id = "installation_test".into();
+                            let observed = risk.request(summary_cmd).await.unwrap();
+                            let entry = observed.budget.as_ref().unwrap().entry_budget.as_ref().unwrap();
+                            if entry.consumed_usd == "4.002"
+                                && entry.reserved_usd == if add_mode { "0" } else { "4" }
+                            {
+                                break observed;
+                            }
+                            assert!(
+                                final_settlement_attempts < 3,
+                                "T09.3 terminal SQL fills/bills not settled by actual public Status: spent={} held={} status={last_status}",
+                                entry.consumed_usd,
+                                entry.reserved_usd
+                            );
+                            assert_eq!(
+                                feed.outbound_posts.lock().unwrap().len(),
+                                4,
+                                "T09.3 monetary catch-up must never resubmit a venue create"
+                            );
+                            final_settlement_attempts += 1;
+                            tokio::time::sleep(Duration::from_millis(250)).await;
+                            let settled = trade
+                                .trade(
+                                    "fixture-a",
+                                    &TradeRequest::Status {
+                                        reference: new_intent_id.clone(),
+                                    },
+                                    None,
+                                )
+                                .await
+                                .expect("terminal settlement requires the same real TradeService Status");
+                            last_status = json!({
+                                "status": settled["status"],
+                                "incremental": settled["data"]["incremental_entry_settlement"],
+                                "fill": settled["data"]["entry_fill_evidence"]["state"],
+                                "financial_complete": settled["data"]["financial_complete"],
+                            });
+                        };
+                        println!(
+                            "T09_3_TERMINAL_SETTLEMENT_RECONCILED_V1:{}",
+                            json!({
+                                "extra_status_checks":final_settlement_attempts,
+                                "worker_risk_book_sequence":after.risk_book_sequence,
+                                "consumed_usd":after.budget.as_ref().unwrap().entry_budget.as_ref().unwrap().consumed_usd,
+                                "reserved_usd":after.budget.as_ref().unwrap().entry_budget.as_ref().unwrap().reserved_usd,
+                                "outbound_posts":feed.outbound_posts.lock().unwrap().len(),
+                            })
+                        );
                         println!("T09_3_NATIVE_PARTIAL_TERMINAL_V1:{}",
                             serde_json::json!({
                                 "intent_id":new_intent_id,
