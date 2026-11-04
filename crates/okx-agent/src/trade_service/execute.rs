@@ -1859,7 +1859,7 @@ fn b_census_probe_failure(phase: &str, account: &str, reason: &str, until: Optio
                 let generation = r.private_ws.status().await.connection_generation;
                 let report=|phase: &str, reason: String| {
                     #[cfg(test)]
-                    b_census_probe_failure(phase,&c.account_key,&reason,until);
+                    Self::b_census_probe_failure(phase,&c.account_key,&reason,until);
                     reason
                 };
                 // Inventory can span several bounded REST scopes. Read the
