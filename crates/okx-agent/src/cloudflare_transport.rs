@@ -575,6 +575,7 @@ mod raw_native_session_tests {
     include!("trade_integration_t09_3.rs");
     include!("trade_integration_t09_4.rs");
     include!("trade_integration_t09_6.rs");
+    include!("trade_integration_t10_14.rs");
 
     /// Retry permission is test-only and limited to an explicitly read-only
     /// Preview that failed at the *local* request-admission boundary. The
@@ -4774,6 +4775,15 @@ mod raw_native_session_tests {
                                 "after_budget": b_after_budget,
                                 "risk_book_sequence": b_after.risk_book_sequence,
                             }));
+                            if std::env::var("OKX_T10_14_NATIVE_PROBE").as_deref() == Ok("1") {
+                                let client_b = b_positive["data"]["intent"]["client_order_id"]
+                                    .as_str().expect("T10-14 B client ID").to_owned();
+                                let isolation = t10_14_b_public_cancel_while_a_sql_held(
+                                    accounts.clone(), trade.clone(), risk.clone(), feed.clone(),
+                                    intent_b.clone(), client_b,
+                                ).await;
+                                println!("T10_14_NATIVE_ISOLATION_V1:{isolation}");
+                            }
                         }
                     }
                     println!(

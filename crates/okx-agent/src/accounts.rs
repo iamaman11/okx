@@ -1340,7 +1340,10 @@ pub(crate) mod recorded_support {
                     if !key.starts_with("fixture-executor-") {
                         return Err(OkxError::Response("TRANSCRIPT_POST_NOT_EXECUTOR".into()));
                     }
-                    if path != "/api/v5/trade/order" && path != "/api/v5/trade/cancel-algos" {
+                    if path != "/api/v5/trade/order"
+                        && path != "/api/v5/trade/cancel-algos"
+                        && path != "/api/v5/trade/cancel-order"
+                    {
                         return Err(OkxError::Response(
                             "TRANSCRIPT_POST_ROUTE_UNRECOGNIZED".into(),
                         ));
@@ -1435,6 +1438,18 @@ pub(crate) mod recorded_support {
                                 chrono::Utc::now().timestamp_millis()
                             ));
                         }
+                    }
+                    if path == "/api/v5/trade/cancel-order" {
+                        let parsed: serde_json::Value = serde_json::from_str(&response)?;
+                        let submitted = observed.get("clOrdId").and_then(serde_json::Value::as_str);
+                        if submitted.is_none()
+                            || parsed["data"][0]["clOrdId"].as_str() != submitted
+                            || parsed["data"][0]["sCode"] != "0"
+                            || parsed["data"][0]["ordId"].as_str().is_none()
+                        {
+                            return Err(OkxError::Response("TRANSCRIPT_CANCEL_ORDER_ACK_UNBOUND".into()));
+                        }
+                        // An authenticated cancel ACK is NOT terminal proof.
                     }
                     if path == "/api/v5/trade/order" {
                         let parsed: serde_json::Value = serde_json::from_str(&response)?;

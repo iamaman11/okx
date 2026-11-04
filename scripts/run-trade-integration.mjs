@@ -40,6 +40,11 @@ const requiredStagesByCase = new Map([
   ["T09.8", ["public_trade_entered"]],
   ["T09-MA", mandatoryStages.slice(0, 4)],
   ["T09-SPEC", mandatoryStages.slice(0, 4)],
+  ["T10-14", [
+    "public_trade_entered", "a_sql_owner_held", "b_public_status_read",
+    "b_exact_venue_cancel_observed", "a_sql_owner_rejoined",
+    "worker_budget_after_cancel_verified",
+  ]],
 ]);
 const entryGolden = new Map([["T09.1", "1.0005"]]);
 // Independent immutable acceptance constants from #449 §4, never calculated

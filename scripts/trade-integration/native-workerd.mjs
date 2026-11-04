@@ -32,6 +32,7 @@ export async function actualNativeWorker(root, signal, { statusProbe = false, se
     process.env.OKX_S2_05_POLICY_CAS_PROBE === "1" ? "policy-cas" : "normal-policy",
     process.env.OKX_B1_NATIVE_CAP_PROBE === "1" ? "b1-cap" : "normal-cap",
     process.env.OKX_B1_SECOND_POSITIVE_PROBE === "1" ? "b1-positive" : "normal-b",
+    process.env.OKX_T10_14_NATIVE_PROBE === "1" ? "t10-14" : "no-t10-14",
   ].join(":");
   const reused = memo.has(key);
   if (!reused) {
@@ -200,6 +201,9 @@ export async function actualNativeWorker(root, signal, { statusProbe = false, se
             } : {}),
             ...(process.env.OKX_B1_SECOND_POSITIVE_PROBE === "1" ? {
               nativeB1Positive: receipt(stdout, "B1_NATIVE_SECOND_ACCOUNT_ACCEPTED_V1"),
+            } : {}),
+            ...(process.env.OKX_T10_14_NATIVE_PROBE === "1" ? {
+              nativeT10Isolation: receipt(stdout, "T10_14_NATIVE_ISOLATION_V1"),
             } : {}),
             ...(partialFills ? {
               nativePartialFills: receipt(stdout, "T09_3_NATIVE_PARTIAL_TERMINAL_V1"),
