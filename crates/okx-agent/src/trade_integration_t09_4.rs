@@ -378,19 +378,68 @@
                     Ok(status)=>{
                         assert_eq!(status["data"]["intent"]["state"],"FILLED",
                             "T09_4_SOURCE_BACKED_STATUS_NOT_FILLED:{status}");
-                        assert_ne!(status["data"]["protection_incident"],true,
-                            "T09_4_PROTECTION_INCIDENT_EVIDENCE_V1:{}",serde_json::json!({
-                                "intent_state":status["data"]["intent"]["state"],
-                                "intent_incident":status["data"]["intent"]["incident"],
-                                "entry_fill_evidence":status["data"]["entry_fill_evidence"]["state"],
-                                "incremental_entry_settlement":status["data"]["incremental_entry_settlement"],
-                                "protection":status["data"]["protection"],
+                        let actual_posts=feed.outbound_posts.lock().unwrap().len();
+                        // Captures the first failed ordering, not a new
+                        // business oracle. The same production Status/SQL/
+                        // Worker remain authoritative. In particular, an
+                        // emergency safety POST is an observable failure of
+                        // this *positive* cohort, never reclassified as PASS.
+                        let first_cause=if status["data"]["protection_incident"]==true
+                            || actual_posts!=5 {
+                            let sends=feed.outbound_posts.lock().unwrap().iter()
+                                .skip(5).take(3).map(|(actor,path,body)|serde_json::json!({
+                                    "actor":actor,"route":path,
+                                    "client_id":body.get("clOrdId")
+                                        .and_then(serde_json::Value::as_str)
+                                        .and_then(|id|id.get(0..12)),
+                                    "algo":body.as_array()
+                                        .and_then(|v|v.first())
+                                        .and_then(|v|v.get("algoId"))
+                                })).collect::<Vec<_>>();
+                            let sql=owner.execution.store.call(
+                                std::time::Instant::now()+Duration::from_secs(2),
+                                |s|{
+                                    let (members,pending)=s.risk_census_intents(100)?;
+                                    let observed=members.iter().take(6).map(|member|{
+                                        let protection=s.protection(&member.intent_id)?;
+                                        let central=s.active_central_receipt(&member.intent_id)?;
+                                        Ok(serde_json::json!({
+                                            "id":member.intent_id.get(0..12),
+                                            "state":member.state.as_str(),
+                                            "revision":member.revision,
+                                            "pending":pending.binary_search(&member.intent_id).is_ok(),
+                                            "held":central.is_some(),
+                                            "stop":protection.map(|p|p.algo_id),
+                                        }))
+                                    }).collect::<okx_execution::StoreResult<Vec<_>>>()?;
+                                    Ok(serde_json::json!(observed))
+                                }
+                            ).await;
+                            let mut cmd=summary("t09_4_first_cause_readonly");
+                            cmd.installation_id="installation_test".into();
+                            let central=risk.request(cmd).await;
+                            let recent=feed.requests.lock().unwrap().iter().rev()
+                                .filter(|line|line.contains("orders-algo-pending"))
+                                .take(3).cloned().collect::<Vec<_>>();
+                            serde_json::json!({
+                                "schema":"okx.t09-4-first-cause/v1",
+                                "intent":intent_id.get(0..12),
+                                "expected_stops":[old_stop,new_stop],
+                                "posts":actual_posts,"extra":sends,
+                                "status_incident":status["data"]["intent"]["incident"],
+                                "protection_incident":status["data"]["protection_incident"],
                                 "financial_error":status["data"]["financial_error"],
-                                "central_release":status["data"]["central_release"],
-                                "quality":status["quality"]
-                            }));
-                        assert_eq!(feed.outbound_posts.lock().unwrap().len(),5,
-                            "Status reconciliation must never send another venue POST");
+                                "incremental":status["data"]["incremental_entry_settlement"]["state"],
+                                "release":status["data"]["central_release"]["state"],
+                                "sql":format!("{sql:?}").chars().take(850).collect::<String>(),
+                                "risk_sequence":central.ok().and_then(|r|r.risk_book_sequence),
+                                "recent_algo_get":recent,
+                            })
+                        }else{serde_json::Value::Null};
+                        assert_ne!(status["data"]["protection_incident"],true,
+                            "T09_4_FIRST_CAUSE_PROTECTION_V1:{first_cause}");
+                        assert_eq!(actual_posts,5,
+                            "T09_4_FIRST_CAUSE_OUTBOUND_V1:{first_cause}");
                         if t09_4_incremental_entry_proven(&status) {
                             break status;
                         }
