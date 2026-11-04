@@ -4617,7 +4617,7 @@ mod raw_native_session_tests {
                             let (state_b, held_b, upper_b, order_b, intent_b) =
                                 b_account.execution.store.call(
                                     std::time::Instant::now() + Duration::from_secs(3),
-                                    |s| {
+                                    move |s| {
                                         let intent = s.by_idempotency(
                                             &b_positive_accepted_key
                                         )?.ok_or(okx_execution::StoreError::Invalid(
