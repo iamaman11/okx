@@ -7684,11 +7684,19 @@ async fn blocked_a_sql_owner_does_not_delay_b_cancel_receipt() {
     drop(first);
     drop(second);
     let a = crate::AccountStoreHandle::open_existing(
-        a_path, a_meta.account_key, a_meta.installation_id,
-    ).await.unwrap();
+        a_path,
+        a_meta.account_key,
+        a_meta.installation_id,
+    )
+    .await
+    .unwrap();
     let b = crate::AccountStoreHandle::open_existing(
-        b_path, b_meta.account_key, b_meta.installation_id,
-    ).await.unwrap();
+        b_path,
+        b_meta.account_key,
+        b_meta.installation_id,
+    )
+    .await
+    .unwrap();
 
     let (block_tx, block_rx) = std::sync::mpsc::channel::<()>();
     let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
@@ -7699,11 +7707,13 @@ async fn blocked_a_sql_owner_does_not_delay_b_cancel_receipt() {
                 std::time::Instant::now() + Duration::from_secs(9),
                 move |owner| {
                     let _ = entered_tx.send(());
-                    block_rx.recv_timeout(Duration::from_secs(7))
+                    block_rx
+                        .recv_timeout(Duration::from_secs(7))
                         .map_err(|_| StoreError::Invalid("T10_14_A_GATE_NOT_RELEASED"))?;
                     Ok(owner.meta.account_key.clone())
                 },
-            ).await
+            )
+            .await
         }
     });
     tokio::time::timeout(Duration::from_secs(3), entered_rx)
@@ -7720,24 +7730,30 @@ async fn blocked_a_sql_owner_does_not_delay_b_cancel_receipt() {
                 let account_key = owner.meta.account_key.clone();
                 let account_summary = owner.account_summary()?;
                 let bytes = serde_json::to_vec(&account_summary).unwrap().len();
-                let first = owner.begin_operation(
-                    "t10-14-b-cancel", "b-venue-order", "CANCEL", 2,
-                )?;
+                let first =
+                    owner.begin_operation("t10-14-b-cancel", "b-venue-order", "CANCEL", 2)?;
                 owner.operation_receipt(
-                    "t10-14-b-cancel", "b-venue-order", "CANCEL",
-                    "CANCELLED", 3,
+                    "t10-14-b-cancel",
+                    "b-venue-order",
+                    "CANCEL",
+                    "CANCELLED",
+                    3,
                 )?;
-                let duplicate = owner.begin_operation(
-                    "t10-14-b-cancel", "b-venue-order", "CANCEL", 4,
-                )?;
+                let duplicate =
+                    owner.begin_operation("t10-14-b-cancel", "b-venue-order", "CANCEL", 4)?;
                 Ok((account_key, bytes, first, duplicate))
             },
         ),
-    ).await;
+    )
+    .await;
     let b_elapsed_ms = b_started.elapsed().as_millis();
     // Release and join A even if B times out; never strand a SQL test worker.
-    block_tx.send(()).expect("A causal hold receiver must remain alive");
-    let a_result = held_a.await.expect("A SQL worker task must join")
+    block_tx
+        .send(())
+        .expect("A causal hold receiver must remain alive");
+    let a_result = held_a
+        .await
+        .expect("A SQL worker task must join")
         .expect("A SQL owner must resume after bounded test gate");
     assert_eq!(a_result, a_key);
     let (b_result, bytes, first, duplicate) = b_result
