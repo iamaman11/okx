@@ -610,6 +610,7 @@ mod raw_native_session_tests {
     include!("trade_integration_t10_14.rs");
     include!("trade_integration_t10_02.rs");
     include!("trade_integration_t10_04.rs");
+    include!("trade_integration_t09_spec.rs");
 
     /// Retry permission is test-only and limited to an explicitly read-only
     /// Preview that failed at the *local* request-admission boundary. The
@@ -1019,21 +1020,33 @@ mod raw_native_session_tests {
         use serde_json::json;
         let feed = recorded_http.expect("the integration run requires recorded HTTP");
         let connector = Arc::new(RecordedWsConnector::default());
-        let reference = ReferenceRegistry::from_public(
-            chrono::Utc::now().to_rfc3339(),
-            vec![
-                serde_json::from_value(json!({
-                    "instType":"SWAP","instId":"BTC-USDT-SWAP",
-                    "instFamily":"BTC-USDT","uly":"BTC-USDT","state":"live",
-                    "ruleType":"normal","settleCcy":"USDT","tickSz":"0.1",
-                    "lotSz":"0.01","minSz":"0.01","maxLmtSz":"1000",
-                    "maxMktSz":"1000","ctType":"linear","ctVal":"0.01",
-                    "ctValCcy":"BTC","groupId":"4","lever":"20"
-                }))
-                .unwrap(),
-            ],
-        )
-        .unwrap();
+        let spec_mode=std::env::var("OKX_T09_SPEC_SECOND_LINEAR_PROBE").as_deref()==Ok("1");
+        let mut supported_specs=vec![
+            serde_json::from_value(json!({
+                "instType":"SWAP","instId":"BTC-USDT-SWAP",
+                "instFamily":"BTC-USDT","uly":"BTC-USDT","state":"live",
+                "ruleType":"normal","settleCcy":"USDT","tickSz":"0.1",
+                "lotSz":"0.01","minSz":"0.01","maxLmtSz":"1000",
+                "maxMktSz":"1000","ctType":"linear","ctVal":"0.01",
+                "ctValCcy":"BTC","groupId":"4","lever":"20"
+            })).unwrap()
+        ];
+        if spec_mode {
+            // Second exchange-provided valid linear spec, different symbol,
+            // multiplier, lot, minimum and tick. This is test-only recorded
+            // public metadata; it cannot grant policy permission by itself.
+            supported_specs.push(serde_json::from_value(json!({
+                "instType":"SWAP","instId":"ETH-USDT-SWAP",
+                "instFamily":"ETH-USDT","uly":"ETH-USDT","state":"live",
+                "ruleType":"normal","settleCcy":"USDT","tickSz":"0.5",
+                "lotSz":"0.05","minSz":"0.05","maxLmtSz":"1000",
+                "maxMktSz":"1000","ctType":"linear","ctVal":"0.02",
+                "ctValCcy":"ETH","groupId":"4","lever":"20"
+            })).unwrap());
+        }
+        let reference=ReferenceRegistry::from_public(
+            chrono::Utc::now().to_rfc3339(),supported_specs
+        ).unwrap();
         let stamp = chrono::Utc::now().timestamp_millis();
         let timestamp = stamp.to_string();
         let funding_time = (stamp + 8 * 60 * 60 * 1000).to_string();
@@ -5209,6 +5222,14 @@ mod raw_native_session_tests {
                             "post_ack_financial_complete":accepted["data"]["financial_complete"]
                         })
                     );
+                    if spec_mode {
+                        let proved=t09_spec_second_linear_product(
+                            accounts.clone(),trade.clone(),risk.clone(),
+                            public_ws.clone(),connector.clone(),feed.clone(),
+                            rate_budget.clone()
+                        ).await;
+                        println!("T09_SPEC_NATIVE_SECOND_LINEAR_V1:{proved}");
+                    }
                     if std::env::var("OKX_T10_04_FOREIGN_WORKER_REPLY_PROBE").as_deref()==Ok("1") {
                         // Financially clean A order+Worker readback already
                         // exist. Trigger only the next independent B RESERVE,

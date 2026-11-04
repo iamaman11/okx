@@ -42,6 +42,7 @@ const configuration = {
 const addMode=process.env.OKX_T09_4_MANAGED_ADD_PROBE==="1";
 const sharedCapMode=process.env.OKX_T10_7_SHARED_CAP_PROBE==="1";
 const reserveReplyLossMode=process.env.OKX_T10_03_LOST_RESERVE_REPLY_PROBE==="1";
+const specMode=process.env.OKX_T09_SPEC_SECOND_LINEAR_PROBE==="1";
 if (reserveReplyLossMode && !sharedCapMode)
   throw Error("T10_03_REQUIRES_REAL_PERSISTED_SHARED_CAP_WORKER");
 if (sharedCapMode && (addMode || process.env.OKX_NATIVE_WORKER_INTEGRATION==="1"))
@@ -279,7 +280,8 @@ try {
     max_modelled_loss_usdt:"5",max_order_loss_usdt:"1",
     max_notional_usdt:"100",max_entry_usd:"10",max_leverage:"3",
     max_daily_realized_loss_usdt:"2",max_drawdown_ratio:"0.1",
-    allowed_instruments:["BTC-USDT-SWAP"],
+    allowed_instruments:specMode
+      ? ["BTC-USDT-SWAP","ETH-USDT-SWAP"] : ["BTC-USDT-SWAP"],
   };
   const enrollment = await request(first,"/account-governance/enroll","POST",{
     uid_fingerprint:uid,venue:"okx",environment:"real",
@@ -896,6 +898,7 @@ try {
           "clean managed-Add acceptance cohort excludes T09.0 component reservations");
         const expectedReserved=managedAdd?"0":partialFills?"4":
           process.env.OKX_T10_04_FOREIGN_WORKER_REPLY_PROBE === "1"?"8.002":
+          specMode?"8.002":
           process.env.OKX_B1_SECOND_POSITIVE_PROBE === "1"?"8.002":"7.0015";
         const expectedSpent=managedAdd?"6.003":partialFills?"4.002":"1.0005";
         if(afterNative.budget?.entry_budget?.reserved_usd!==expectedReserved
@@ -950,6 +953,20 @@ try {
             assertBudgetEconomicsUnchanged(latestNativeBudget,afterNative.budget,
               "B1 resumed Worker must match Native money after source refresh");
           }
+        } else if (specMode) {
+          const spec=receipt(stdout,"T09_SPEC_NATIVE_SECOND_LINEAR_V1");
+          assert.equal(spec.intent_state,"ACKNOWLEDGED");
+          assert.equal(spec.sql_risk_held,true);
+          assert.equal(spec.posts_after-spec.posts_before,1);
+          assert.equal(afterNative.budget.entry_budget.reserved_usd,"8.002");
+          assert.equal(afterNative.budget.entry_budget.consumed_usd,"1.0005");
+          console.log("T09_SPEC_WORKER_SECOND_LINEAR_V1:"+JSON.stringify({
+            schema:"okx.t09-spec-worker-risk/v1",
+            budget:afterNative.budget,
+            risk_book_sequence:afterNative.risk_book_sequence,
+            account_b:spec.account_uid,
+            venue_new_posts:spec.posts_after-spec.posts_before,
+          }));
         } else if (process.env.OKX_T10_04_FOREIGN_WORKER_REPLY_PROBE === "1") {
           const blocked=receipt(stdout,"T10_04_NATIVE_FOREIGN_WORKER_REPLY_V1");
           assert.equal(blocked.posts_before,4);

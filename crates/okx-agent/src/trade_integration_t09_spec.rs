@@ -1,0 +1,239 @@
+// T09-SPEC: a second genuine linear reference spec goes through the same
+// public Rust TradeService, Native account SQL and persisted Worker RiskBook.
+async fn t09_spec_second_linear_product(
+    accounts: Arc<AccountRuntimeRegistry>,
+    trade: Arc<TradeService>,
+    risk: NativeRiskClient,
+    public_ws: okx_runtime::PublicWsHandle,
+    connector: Arc<crate::accounts::recorded_support::RecordedWsConnector>,
+    feed: Arc<crate::accounts::recorded_support::RecordedAccountHttp>,
+    rate_budget: RateBudget,
+) -> serde_json::Value {
+    use crate::accounts::recorded_support::{RecordedGet, RecordedPost};
+    use okx_protocol::trading::{
+        OrderConstraints, PositionSide, Protection, Sizing, TradeOperation, TradeRequest,
+    };
+    use serde_json::json;
+    const INST:&str="ETH-USDT-SWAP";
+    let stamp=chrono::Utc::now().timestamp_millis();
+    let ts=stamp.to_string();
+    let funding=(stamp+8*60*60*1000).to_string();
+    // These are raw public venue frames for the dynamic second ticker, not a
+    // second MarketSnapshot builder or a direct mutation of production state.
+    let subscriptions=vec![
+        (json!({"channel":"tickers","instId":INST}),
+         json!({"instType":"SWAP","instId":INST,
+           "last":"500","lastSz":"1","askPx":"500","askSz":"20",
+           "bidPx":"499.5","bidSz":"20","ts":ts}),None),
+        (json!({"channel":"mark-price","instId":INST}),
+         json!({"instType":"SWAP","instId":INST,"markPx":"500","ts":ts}),None),
+        (json!({"channel":"index-tickers","instId":"ETH-USDT"}),
+         json!({"instId":"ETH-USDT","idxPx":"500","ts":ts}),None),
+        (json!({"channel":"funding-rate","instId":INST}),
+         json!({"instType":"SWAP","instId":INST,"fundingRate":"0.0001",
+            "fundingTime":ts,"nextFundingTime":funding,"ts":ts}),None),
+        (json!({"channel":"open-interest","instId":INST}),
+         json!({"instType":"SWAP","instId":INST,
+            "oi":"1000","oiCcy":"20","oiUsd":"10000","ts":ts}),None),
+        (json!({"channel":"books","instId":INST}),
+         json!({"asks":[["500","20","0","1"]],
+            "bids":[["499.5","20","0","1"]],
+            "seqId":10,"prevSeqId":-1,"ts":ts}),Some("snapshot")),
+    ];
+    for (arg,data,action) in subscriptions {
+        let ack=json!({"event":"subscribe","arg":arg,"connId":"recorded-public"}).to_string();
+        let book=arg["channel"]=="books";
+        let mut frames=Vec::new();
+        if !book { frames.push(ack.clone()); }
+        let mut message=json!({"arg":arg,"data":[data]});
+        if let Some(action)=action { message["action"]=action.into(); }
+        frames.push(message.to_string());
+        if book { frames.push(ack); }
+        connector.expect_public_subscription(arg,frames);
+    }
+    public_ws.demand_instrument(INST).await.expect("T09-SPEC public instrument demand");
+    let mut observed=public_ws.subscribe_market_updates();
+    let market=tokio::time::timeout(Duration::from_secs(8),async {
+        loop{
+            if let Ok(m)=public_ws.risk_fresh_snapshot(
+                INST,chrono::Utc::now().timestamp_millis() as u64,5000,5000,
+                chrono::Utc::now().to_rfc3339()
+            ).await {break m;}
+            observed.changed().await.expect("T09-SPEC market coordinator exited");
+        }
+    }).await.expect("T09-SPEC public source deadline");
+    assert_eq!(market.market.ticker.best_ask,"500");
+    assert_eq!(connector.unconsumed_public_subscriptions(),0);
+    let rules=public_ws.instrument_rules(INST).await.expect("T09-SPEC valid rules");
+    assert_eq!(rules.instrument.tick_size,"0.5");
+    assert_eq!(rules.instrument.lot_size,"0.05");
+    assert_eq!(rules.instrument.min_size,"0.05");
+    assert_eq!(rules.instrument.contract_value.as_deref(),Some("0.02"));
+    assert_eq!(rules.instrument.contract_value_currency.as_deref(),Some("ETH"));
+    let wrap=|data:serde_json::Value|serde_json::to_vec(&json!({
+        "code":"0","msg":"","data":data
+    })).unwrap();
+    let fee=wrap(json!([{
+        "instType":"SWAP","level":"Lv1","ts":ts,
+        "feeGroup":[{"groupId":"4","maker":"0.0005","taker":"0.0005"}]
+    }]));
+    feed.advance_recorded_route("fixture-observer-b","/api/v5/account/trade-fee",
+        (0..12).map(|_|RecordedGet {
+            access_key:"fixture-observer-b".into(),
+            path:"/api/v5/account/trade-fee".into(),
+            required_query:vec![
+                ("instType".into(),"SWAP".into()),
+                ("instFamily".into(),"ETH-USDT".into()),
+            ],raw_response:fee.clone()
+        }).collect()
+    );
+    let lev=wrap(json!([
+        {"instId":INST,"mgnMode":"cross","posSide":"long","lever":"2"},
+        {"instId":INST,"mgnMode":"cross","posSide":"short","lever":"2"}
+    ]));
+    feed.advance_recorded_route("fixture-observer-b","/api/v5/account/leverage-info",
+        (0..12).map(|_|RecordedGet{
+            access_key:"fixture-observer-b".into(),
+            path:"/api/v5/account/leverage-info".into(),
+            required_query:vec![
+                ("instId".into(),INST.into()),
+                ("mgnMode".into(),"cross".into())
+            ],raw_response:lev.clone()
+        }).collect()
+    );
+    feed.advance_recorded_public_clock(wrap(json!([{"ts":ts}])));
+    let mk_preview=|contracts:&str,limit:&str|TradeRequest::Preview {
+        operation:TradeOperation::Open,strategy_instance:"manual".into(),
+        instrument:INST.into(),side:PositionSide::Long,
+        sizing:Sizing::Contracts{contracts:contracts.into()},
+        order:OrderConstraints {
+            order_type:"limit".into(),limit_price:Some(limit.into()),
+            reference:None,max_entry_usd:Some("10".into()),max_slippage_bps:0
+        },
+        protection:Some(Protection::Price{stop_price:"450".into()}),
+    };
+    let posts_before=feed.outbound_posts.lock().unwrap().len();
+    assert_eq!(posts_before,4,"T09-SPEC only after two positive A orders");
+
+    // Invalid exact size is a source-validated rejection, never a rounding
+    // to the next lot. A noncrossing price below the 500 ask must not silently
+    // move outside the user's limit to the next 0.5 price tick.
+    let bad_lot=trade.trade("fixture-b",&mk_preview("0.06","500"),None)
+        .await.expect_err("T09-SPEC off-lot quantity must reject");
+    assert_eq!(bad_lot,"QUANTITY_NOT_ON_VENUE_LOT");
+    let bad_tick=trade.trade("fixture-b",&mk_preview("0.1","499.9"),None)
+        .await.expect_err("T09-SPEC unsatisfiable price bound must reject");
+    assert_eq!(bad_tick,"NO_EXECUTABLE_PRICE_WITHIN_SLIPPAGE");
+    assert_eq!(feed.outbound_posts.lock().unwrap().len(),posts_before);
+
+    let until=std::time::Instant::now()+Duration::from_secs(15);
+    let preview=loop {
+        let result=tokio::time::timeout_at(until.into(),
+            trade.trade("fixture-b",&mk_preview("0.10","500"),None)
+        ).await.expect("T09-SPEC finite preview");
+        match result {
+            Ok(value)=>break value,
+            Err(reason)=>{
+                let remaining=until.saturating_duration_since(std::time::Instant::now());
+                let defer=recorded_preview_local_defer(
+                    &reason,&rate_budget,remaining
+                ).unwrap_or_else(||panic!("T09-SPEC preview source failure: {reason}"));
+                tokio::time::timeout_at(until.into(),tokio::time::sleep(defer))
+                    .await.expect("T09-SPEC preview rate admission");
+            }
+        }
+    };
+    let quote=preview["data"]["entry_costs"]["entry_total_usd"]
+        .as_str().expect("T09-SPEC preview exact USD");
+    assert_eq!(quote,"1.0005");
+
+    feed.expect_post(RecordedPost {
+        access_key:"fixture-executor-b".into(),
+        path:"/api/v5/trade/order".into(),
+        expected_body:json!({
+            "instId":INST,"tdMode":"cross",
+            "clOrdId":"__REQUEST_CL_ORD_ID__",
+            "side":"buy","posSide":"long","ordType":"limit",
+            "sz":"0.1","px":"500",
+            "attachAlgoOrds":[{
+                "attachAlgoClOrdId":"__REQUEST_ATTACH_ALGO_ID__",
+                "tpTriggerPxType":"mark",
+                "slTriggerPx":"450","slTriggerPxType":"mark","slOrdPx":"-1"
+            }]
+        }),
+        raw_response:br#"{"code":"0","msg":"","data":[{"ordId":"recorded-eth-spec-001","clOrdId":"__REQUEST_CL_ORD_ID__","sCode":"0"}]}"#.to_vec(),
+    });
+    let mut readback=Vec::new();
+    for _ in 0..6 {
+        readback.push(RecordedGet {
+            access_key:"fixture-executor-b".into(),
+            path:"/api/v5/trade/order".into(),
+            required_query:vec![("instId".into(),INST.into())],
+            raw_response:wrap(json!([{
+                "instId":INST,"ordId":"recorded-eth-spec-001",
+                "clOrdId":"__REQUEST_CL_ORD_ID__",
+                "side":"buy","posSide":"long","tdMode":"cross","ordType":"limit",
+                "px":"500","sz":"0.1","accFillSz":"0","avgPx":"",
+                "state":"live","cTime":ts,"uTime":ts
+            }]))
+        });
+    }
+    for page in readback {feed.expect_get(page);}
+    let request=TradeRequest::Execute {
+        idempotency_key:"t09_spec_second_linear_open_0001".into(),
+        operation:TradeOperation::Open,strategy_instance:"manual".into(),
+        instrument:INST.into(),side:PositionSide::Long,
+        sizing:Sizing::Contracts{contracts:"0.10".into()},
+        order:OrderConstraints {
+            order_type:"limit".into(),limit_price:Some("500".into()),
+            reference:None,max_entry_usd:Some("10".into()),max_slippage_bps:0
+        },
+        protection:Some(Protection::Price{stop_price:"450".into()}),
+        expires_in_ms:30_000,
+    };
+    let accepted=trade.trade("fixture-b",&request,None).await
+        .expect("T09-SPEC public Execute must reach real Native Worker risk");
+    let id=accepted["data"]["intent"]["intent_id"].as_str()
+        .expect("T09-SPEC accepted intent id").to_owned();
+    let resource=accounts.resolve("fixture-b").await.expect("T09-SPEC B SQL");
+    let sql_id=id.clone();
+    let (intent,central,fence)=resource.execution.store.call(
+        std::time::Instant::now()+Duration::from_secs(3),
+        move |s| {
+            let intent=s.intent(&sql_id)?.ok_or(
+                okx_execution::StoreError::Invalid("T09_SPEC_SQL_INTENT_MISSING")
+            )?;
+            let central=s.active_central_receipt(&sql_id)?;
+            let fence=s.post_fence_evidence(&sql_id)?;
+            Ok((intent,central,fence))
+        }
+    ).await.expect("T09-SPEC B persisted SQL");
+    assert_eq!(intent.state.as_str(),"ACKNOWLEDGED");
+    assert_eq!(intent.exchange_order_id.as_deref(),Some("recorded-eth-spec-001"));
+    assert_eq!(intent.plan.quantity,Decimal::new(1,1));
+    assert_eq!(intent.plan.contract_value,Decimal::new(2,2));
+    assert!(fence.0>0,"T09-SPEC BEGIN_POST must be durable");
+    assert!(central.is_some(),"T09-SPEC Worker HELD receipt must be bound to B SQL");
+    let mut summary_cmd=summary("risk_t09_spec_after_second_linear");
+    summary_cmd.installation_id="installation_test".into();
+    let worker=risk.request(summary_cmd).await.expect("T09-SPEC persisted Worker");
+    let budget=worker.budget.as_ref().unwrap().entry_budget.as_ref().unwrap();
+    assert_eq!(budget.reserved_usd,"8.002");
+    assert_eq!(budget.consumed_usd,"1.0005");
+    let posts_after=feed.outbound_posts.lock().unwrap().len();
+    assert_eq!(posts_after,posts_before+1,"one signed ETH create only");
+    serde_json::json!({
+        "schema":"okx.t09-spec-second-linear-native-worker/v1",
+        "account_uid":resource.configuration.account_key.verified_uid,
+        "instrument":INST,"tick":"0.5","lot":"0.05","minimum":"0.05",
+        "multiplier":"0.02","quote_entry_upper_usd":quote,
+        "invalid_lot_reason":bad_lot,"invalid_tick_reason":bad_tick,
+        "intent_id":id,"intent_state":intent.state.as_str(),
+        "sql_revision":intent.revision,
+        "sql_risk_held":central.is_some(),
+        "begin_post_at_ms":fence.0,
+        "venue_order_id":intent.exchange_order_id,
+        "posts_before":posts_before,"posts_after":posts_after,
+        "worker_budget":worker.budget,"worker_sequence":worker.risk_book_sequence,
+    })
+}
