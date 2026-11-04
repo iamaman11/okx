@@ -45,6 +45,7 @@ export async function actualNativeWorker(root, signal, { statusProbe = false, se
     process.env.OKX_T10_03_POST_AUTH_REPLY_LOST_PROBE === "1" ? "t10-03" : "no-t10-03",
     process.env.OKX_T10_01_PARTIAL_SOURCE_RECOVERY_PROBE === "1" ? "t10-01" : "no-t10-01",
     process.env.OKX_T10_13_STOP_PROBE === "1" ? "t10-13" : "no-t10-13",
+    process.env.OKX_T10_10_FINANCE_REPLAY_PROBE === "1" ? "t10-10" : "no-t10-10",
   ].join(":");
   const reused = memo.has(key);
   if (!reused) {
@@ -256,6 +257,9 @@ export async function actualNativeWorker(root, signal, { statusProbe = false, se
             ...(process.env.OKX_T10_01_PARTIAL_SOURCE_RECOVERY_PROBE === "1" ? {
               nativeT10SourceRecovery: receipt(stdout, "T10_01_NATIVE_SOURCE_RECOVERY_V1"),
               workerT10SourceRecovery: receipt(stdout, "T10_01_WORKER_SOURCE_RECOVERY_V1"),
+            } : {}),
+            ...(process.env.OKX_T10_10_FINANCE_REPLAY_PROBE === "1" ? {
+              nativeT10FinanceReplay: receipt(stdout, "T10_10_NATIVE_SIGNED_REPLAY_V1"),
             } : {}),
             ...(process.env.OKX_T10_13_STOP_PROBE === "1" ? {
               nativeT10Stop: receipt(stdout, "T10_13_NATIVE_STOP_AFTER_FILL_V1"),

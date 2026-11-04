@@ -672,6 +672,7 @@ mod raw_native_session_tests {
     include!("trade_integration_t10_03.rs");
     include!("trade_integration_t10_01.rs");
     include!("trade_integration_t10_13.rs");
+    include!("trade_integration_t10_10.rs");
 
     /// Retry permission is test-only and limited to an explicitly read-only
     /// Preview that failed at the *local* request-admission boundary. The
@@ -5412,6 +5413,13 @@ mod raw_native_session_tests {
                                 "outbound_posts":feed.outbound_posts.lock().unwrap().len(),
                             })
                         );
+                        if std::env::var("OKX_T10_10_FINANCE_REPLAY_PROBE").as_deref()==Ok("1") {
+                            let repeated=t10_10_signed_duplicate_ingestion(
+                                accounts.clone(),trade.clone(),risk.clone(),feed.clone(),
+                                new_intent_id.clone(),
+                            ).await;
+                            println!("T10_10_NATIVE_SIGNED_REPLAY_V1:{repeated}");
+                        }
                         println!("T09_3_NATIVE_PARTIAL_TERMINAL_V1:{}",
                             serde_json::json!({
                                 "intent_id":new_intent_id,

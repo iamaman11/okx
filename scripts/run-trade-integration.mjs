@@ -405,6 +405,7 @@ const scopedProbeKeys = Object.freeze([
   "OKX_T10_03_LOST_RESERVE_REPLY_PROBE",
   "OKX_T10_01_PARTIAL_SOURCE_RECOVERY_PROBE",
   "OKX_T10_13_STOP_PROBE",
+  "OKX_T10_10_FINANCE_REPLAY_PROBE",
   "OKX_T10_14_NATIVE_PROBE",
   "OKX_B1_NATIVE_CAP_PROBE",
   "OKX_B1_SECOND_POSITIVE_PROBE",
@@ -424,7 +425,7 @@ for (const caseId of cli.selected) {
     const controller = new AbortController();
     // Managed close + native OS process and persisted DO restart are the
     // same bounded full financial replay, not a short isolated unit case.
-    const deadline = ["T10-05", "T10-07"].includes(caseId) ? 300_000
+    const deadline = ["T10-05", "T10-07", "T10-10"].includes(caseId) ? 300_000
       : ["T09.6", "T09.7", "T09.8"].includes(caseId) ? 260_000 : 120_000;
     let timer;
     try {
