@@ -9,13 +9,21 @@ import { execFile } from "node:child_process";
 import { mkdtemp, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { setTimeout as delay } from "node:timers/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
 import { Miniflare } from "miniflare";
 import { assertBudgetEconomicsUnchanged } from "../../../scripts/trade-integration/budget-evidence.mjs";
 
-const root = await mkdtemp(join(tmpdir(), "okx-workerd-risk-"));
+const crashChild=process.env.OKX_T10_12_WORKER_CRASH_CHILD==="1";
+const crashRecovery=process.env.OKX_T10_12_WORKER_CRASH_RECOVERY==="1";
+if(crashChild&&crashRecovery)throw Error("T10_12_CONFLICTING_TEST_MODES");
+const recoveryRoot=process.env.OKX_T10_12_PERSISTED_ROOT;
+if(crashRecovery&&(!recoveryRoot||
+  !resolve(recoveryRoot).includes("okx-workerd-risk-")))
+  throw Error("T10_12_REQUIRES_PRIOR_PERSISTED_STORAGE");
+const root=crashRecovery ? resolve(recoveryRoot)
+  :await mkdtemp(join(tmpdir(),"okx-workerd-risk-"));
 const outfile = join(root, "runtime-test.mjs");
 const handoffPath = join(root, "native-handoff.json");
 // Only a uniquely emitted production Rust receipt can certify terminal
@@ -50,6 +58,10 @@ const t10SourceChangedMode=process.env.OKX_T10_15_POST_HELD_SOURCE_PROBE==="1";
 const t10PostReplyLostMode=process.env.OKX_T10_03_POST_AUTH_REPLY_LOST_PROBE==="1";
 const t10SourceRecoveryMode=process.env.OKX_T10_01_PARTIAL_SOURCE_RECOVERY_PROBE==="1";
 const t10StopMode=process.env.OKX_T10_13_STOP_PROBE==="1";
+if ((crashChild||crashRecovery)&&!sharedCapMode)
+  throw Error("T10_12_REQUIRES_EXISTING_WORKER_SHARED_CAP_FIXTURE");
+if(crashChild&&!reserveReplyLossMode)
+  throw Error("T10_12_REQUIRES_UNREAD_ORIGINAL_RESERVE_REPLY");
 if (reserveReplyLossMode && !sharedCapMode)
   throw Error("T10_03_REQUIRES_REAL_PERSISTED_SHARED_CAP_WORKER");
 if (concurrentCapMode && (!sharedCapMode || reserveReplyLossMode))
@@ -133,6 +145,12 @@ function frames(ws) {
           reject(new Error("WORKER_FRAME_TIMEOUT"));
         }, 5000);
         waiters.push(waiter);
+      });
+    },
+    closed(){
+      return new Promise((resolve,reject)=>{
+        const timeout=setTimeout(()=>reject(Error("T10_12_STALE_FRAME_CLOSE_TIMEOUT")),5000);
+        ws.addEventListener("close",e=>{clearTimeout(timeout);resolve(e.code)},{once:true});
       });
     },
     close() { ws.close(1000, "integration complete"); },
@@ -222,6 +240,7 @@ function fixtureOpening(campaignStartedAt, asOf, accountKeys) {
   return source;
 }
 let first, second;
+async function runRuntimeFixture(){
 try {
   await build({
     entryPoints: [fileURLToPath(new URL("../src/integration/runtime_entry.ts", import.meta.url))],
@@ -279,6 +298,65 @@ try {
     ]);
   }
   first = new Miniflare(opts);
+  if(crashRecovery){
+    const proof=JSON.parse(await readFile(join(root,"t10-12-handoff.json"),"utf8"));
+    assert.equal(proof.schema,"okx.t10-12-worker-pre-kill/v1");
+    const installed=await request(first,"/installation/initialize","POST",installation);
+    assert.equal(installed.status,200);
+    const recovered=await session(first);
+    assert.ok(recovered.hello.connection_generation>proof.connection_generation,
+      "independent new process must advance persisted Durable Object generation");
+    const before=await summary(recovered,"t10_12_recovered_risk");
+    assert.ok(before.risk_book_sequence>=proof.risk_book_sequence);
+    for(const [field,value] of Object.entries({
+      limit_usd:"10",reserved_usd:"8",remaining_usd:"2",consumed_usd:"0"
+    })){
+      assert.equal(before.budget.entry_budget[field],value,
+        "no financial reset after Worker process kill: "+field);
+    }
+    const original=await risk(recovered,"t10_12_original_held_inspect",{
+      action:"INSPECT",reservation_key:proof.reservation_key,
+      plan_sha256:proof.plan_sha256,
+    });
+    assert.equal(original.status,"OBSERVED");
+    assert.equal(original.reservation_state,"HELD");
+    const closed=recovered.ws.closed();
+    recovered.ws.send({
+      type:"risk_control",schema:FRAME_SCHEMA,
+      session_id:proof.session_id,
+      connection_generation:proof.connection_generation,
+      command:{
+        schema:"okx.risk-command/v1",
+        command_id:"t10_12_old_session_summary_rejected",
+        installation_id:configuration.installation_id,
+        action:{action:"SUMMARY"},
+      },
+    });
+    const staleCloseCode=await closed;
+    assert.equal(staleCloseCode,1008,
+      "old generation may not send a risk command on new session");
+    const current=await session(first);
+    const after=await summary(current,"t10_12_after_stale_session_denial");
+    assert.equal(after.risk_book_sequence,before.risk_book_sequence);
+    assert.deepEqual(after.budget.entry_budget,before.budget.entry_budget);
+    console.log("T10_12_ACTUAL_WORKER_PROCESS_RECOVERY_V1:"+JSON.stringify({
+      schema:"okx.t10-12-worker-process-recovery/v1",
+      persisted_do_reopened:true,
+      generation_before:proof.connection_generation,
+      generation_after:current.hello.connection_generation,
+      sequence_before:proof.risk_book_sequence,
+      sequence_after:after.risk_book_sequence,
+      consumed_usd:after.budget.entry_budget.consumed_usd,
+      reserved_usd:after.budget.entry_budget.reserved_usd,
+      remaining_usd:after.budget.entry_budget.remaining_usd,
+      original_state:original.reservation_state,
+      original_reply_unread:true,
+      stale_frame_close_code:staleCloseCode,
+      native_sql_and_settlement_crash_proven:false,
+    }));
+    current.ws.close();
+    return;
+  }
   const install = await request(first, "/installation/initialize", "POST", installation);
   assert.equal(install.status, 200, "real governance/RiskBook created in one DO transaction");
   // Enrol one test account via the actual DO governance transaction.
@@ -565,6 +643,25 @@ try {
       "invalid release cannot advance Worker money/CAS sequence");
     assert.deepEqual(afterInvalidRelease.budget.entry_budget,
       budgetBeforeRestart.budget.entry_budget);
+    if(crashChild){
+      const handoff={
+        schema:"okx.t10-12-worker-pre-kill/v1",
+        session_id:socket1.hello.session_id,
+        connection_generation:socket1.hello.connection_generation,
+        risk_book_sequence:budgetBeforeRestart.risk_book_sequence,
+        reservation_key:firstReserve.reservation_key,
+        plan_sha256:firstRequest.plan_sha256,
+        entry_reserved_usd:budgetBeforeRestart.budget.entry_budget.reserved_usd,
+        original_reply_unread:true,
+      };
+      assert.equal(reserveReplyLossMode,true);
+      await writeFile(join(root,"t10-12-handoff.json"),JSON.stringify(handoff)+"\n");
+      process.stdout.write("T10_12_WORKER_COMMIT_READY_V1:"+
+        JSON.stringify({root,...handoff})+"\n");
+      // The OS parent terminates this process tree with the real SQLite DO
+      // open. No return, fake Err, in-process dispose or Rust struct reset.
+      while(true)await delay(30_000);
+    }
     socket1.ws.close();
     await first.dispose();
     first=null;
@@ -1326,3 +1423,5 @@ try {
   if (second) await second.dispose();
   await rm(root, {recursive: true, force: true});
 }
+}
+await runRuntimeFixture();
