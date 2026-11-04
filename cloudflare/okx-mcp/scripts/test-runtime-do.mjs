@@ -43,6 +43,8 @@ const addMode=process.env.OKX_T09_4_MANAGED_ADD_PROBE==="1";
 const sharedCapMode=process.env.OKX_T10_7_SHARED_CAP_PROBE==="1";
 const reserveReplyLossMode=process.env.OKX_T10_03_LOST_RESERVE_REPLY_PROBE==="1";
 const specMode=process.env.OKX_T09_SPEC_SECOND_LINEAR_PROBE==="1";
+const t10PostOutcomeMode=process.env.OKX_T10_05_LOST_ACK_PROBE==="1"
+  ||process.env.OKX_T10_05_EXPLICIT_REJECT_PROBE==="1";
 if (reserveReplyLossMode && !sharedCapMode)
   throw Error("T10_03_REQUIRES_REAL_PERSISTED_SHARED_CAP_WORKER");
 if (sharedCapMode && (addMode || process.env.OKX_NATIVE_WORKER_INTEGRATION==="1"))
@@ -903,6 +905,7 @@ try {
         const expectedReserved=managedAdd?"0":partialFills?"4":
           process.env.OKX_T10_04_FOREIGN_WORKER_REPLY_PROBE === "1"?"8.002":
           specMode?"8.002":
+          t10PostOutcomeMode?"8.002":
           process.env.OKX_B1_SECOND_POSITIVE_PROBE === "1"?"8.002":"7.0015";
         const expectedSpent=managedAdd?"6.003":partialFills?"4.002":"1.0005";
         if(afterNative.budget?.entry_budget?.reserved_usd!==expectedReserved
@@ -957,6 +960,20 @@ try {
             assertBudgetEconomicsUnchanged(latestNativeBudget,afterNative.budget,
               "B1 resumed Worker must match Native money after source refresh");
           }
+        } else if (t10PostOutcomeMode) {
+          const witness=receipt(stdout,"T10_05_NATIVE_POST_OUTCOME_V1");
+          assert.equal(witness.posts_before,4);
+          assert.equal(witness.posts_after,5);
+          assert.equal(afterNative.budget.entry_budget.reserved_usd,"8.002");
+          assert.equal(afterNative.budget.entry_budget.consumed_usd,"1.0005");
+          assertBudgetEconomicsUnchanged(witness.worker_budget_after,afterNative.budget,
+            "T10-05 post-send ACK outcome cannot double-debit or silently release");
+          console.log("T10_05_WORKER_AFTER_NATIVE_V1:"+JSON.stringify({
+            schema:"okx.t10-05-worker-post-outcome/v1",
+            mode:witness.mode,budget:afterNative.budget,
+            risk_book_sequence:afterNative.risk_book_sequence,
+            no_extra_posts:witness.posts_after-witness.posts_before===1,
+          }));
         } else if (specMode) {
           const spec=receipt(stdout,"T09_SPEC_NATIVE_SECOND_LINEAR_V1");
           assert.equal(spec.intent_state,"ACKNOWLEDGED");
