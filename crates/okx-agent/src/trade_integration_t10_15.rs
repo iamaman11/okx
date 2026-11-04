@@ -215,7 +215,7 @@ async fn t10_15_fee_source_after_worker_held(
     assert_eq!(budget_after.remaining_usd,budget_before.remaining_usd);
     assert_eq!(budget_after.consumed_usd,"1.0005");
     assert_eq!(budget_after.reserved_usd,"7.0015");
-    assert_eq!(budget_after.remaining_usd,"0.9975".replace("0.9975","1.998"));
+    assert_eq!(budget_after.remaining_usd,"1.998");
     assert!(after.risk_book_sequence.unwrap_or(0)>
         worker_before.risk_book_sequence.unwrap_or(0),
         "authentic central RELEASE must advance durable Worker sequence");
