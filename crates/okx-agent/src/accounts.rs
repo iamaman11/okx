@@ -1311,6 +1311,58 @@ pub(crate) mod recorded_support {
             self.posts.lock().unwrap().len()
         }
     }
+    #[cfg(test)]
+    mod causal_phase_transition_tests {
+        use super::*;
+
+        fn source(acked: bool) -> RecordedAccountHttp {
+            let feed = RecordedAccountHttp::default();
+            *feed.causal_algos.lock().unwrap() = Some(CausalAlgoScenario {
+                account: "fixture-observer-a".into(),
+                cancel_id: "recorded-stop-cancel-001".into(),
+                acked,
+                scopes: vec![],
+                held_read: None,
+                source_received_at_ms: 1,
+            });
+            feed
+        }
+
+        #[test]
+        fn signed_cancel_ack_is_required_to_retire_a_recorded_inventory() {
+            let pre_ack = source(false);
+            assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                pre_ack.retire_acked_causal_algo_inventory("fixture-observer-a");
+            })).is_err(), "cannot advance source phase before ACK");
+
+            let wrong_account = source(true);
+            assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                wrong_account.retire_acked_causal_algo_inventory("fixture-observer-b");
+            })).is_err(), "another verified UID cannot retire A's inventory");
+
+            let acknowledged = source(true);
+            acknowledged.retire_acked_causal_algo_inventory("fixture-observer-a");
+            assert!(acknowledged.causal_algos.lock().unwrap().is_none());
+            assert!(acknowledged.causal_algo_trace.lock().unwrap().iter().any(|line| {
+                line.contains("INVENTORY_PHASE_RETIRED")
+                    && line.contains("evidence=CANCEL_ACK")
+            }));
+        }
+
+        #[test]
+        fn pending_late_read_barrier_blocks_inventory_retirement() {
+            let held = source(true);
+            held.causal_algos.lock().unwrap().as_mut().unwrap().held_read =
+                Some(CausalAlgoReadGate {
+                    entered: Arc::new(tokio::sync::Notify::new()),
+                    resume: Arc::new(tokio::sync::Notify::new()),
+                });
+            assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                held.retire_acked_causal_algo_inventory("fixture-observer-a");
+            })).is_err(), "a held signed GET must be resumed, not discarded");
+        }
+    }
+
     impl HttpTransport for RecordedAccountHttp {
         fn send(&self, request: HttpRequest, deadline: Instant) -> HttpSend<'_> {
             Box::pin(async move {
