@@ -288,6 +288,19 @@ const events = [];
 const caseResults = [];
 const assertions = [];
 const caseReadbacks = [];
+// Cases execute in one Node process; never let an opt-in fault probe from
+// a previous case silently change the next Native/Worker financial cohort.
+// Preserve deliberate caller-provided environment (e.g. targeted S2-05)
+// while restoring every per-case override before advancing the matrix.
+const scopedProbeKeys = Object.freeze([
+  "OKX_T09_MA_CONCURRENT_PROBE",
+  "OKX_T10_06_CONCURRENT_PROBE",
+  "OKX_T10_14_NATIVE_PROBE",
+  "OKX_B1_NATIVE_CAP_PROBE",
+  "OKX_B1_SECOND_POSITIVE_PROBE",
+  "OKX_S2_05_POLICY_CAS_PROBE",
+]);
+const initialProbes = new Map(scopedProbeKeys.map(k => [k, process.env[k]]));
 
 const started = Date.now();
 for (const caseId of cli.selected) {
@@ -328,6 +341,11 @@ for (const caseId of cli.selected) {
   } catch (error) {
     reason = (error instanceof Error ? error.message : String(error)).slice(0, 200);
     events.push({ case_id: caseId, stage: "case_failed", owner: "integration_runner", reason });
+  } finally {
+    for (const [key, original] of initialProbes) {
+      if (original === undefined) delete process.env[key];
+      else process.env[key] = original;
+    }
   }
   caseResults.push({ id: caseId, status, reason, elapsed_ms: Date.now() - runStarted });
 }
