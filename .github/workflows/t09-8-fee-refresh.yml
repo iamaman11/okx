@@ -1,0 +1,36 @@
+name: T09.8 Fee Phase Exact Windows Repro (WIP)
+on:
+  push:
+    branches: [work/t09-8-fee-refresh-20261104]
+permissions:
+  contents: read
+jobs:
+  t09-8-windows:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de
+        with:
+          toolchain: 1.95.0
+          components: rustfmt
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Check Rust formatting
+        run: cargo fmt --all -- --check
+      - name: Install locked Workerd dependencies
+        run: npm ci --prefix cloudflare/okx-mcp --ignore-scripts --no-audit --no-fund
+      - name: Precompile Native to Workerd test
+        run: cargo test --locked -p okx-agent --lib native_to_workerd_risk_summary_over_actual_websocket --no-run
+      - name: Execute exactly T09.8 on Native and persisted Worker
+        shell: pwsh
+        run: |
+          $dir = Join-Path $env:RUNNER_TEMP "t09-8-fee"
+          node scripts/run-trade-integration.mjs --case T09.8 --artifacts "$dir"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: t09-8-fee-${{ github.sha }}
+          path: ${{ runner.temp }}\t09-8-fee
+          if-no-files-found: warn
+          retention-days: 7

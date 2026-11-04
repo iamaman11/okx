@@ -1892,6 +1892,46 @@ mod raw_native_session_tests {
             "T09_1_PRE_EXECUTE_CAMPAIGN_READINESS_NOT_FRESH:{latest_readiness}"
         ));
 
+        // A complete, production SQL-backed campaign readiness scan can
+        // outlive the earlier immutable fee GET from fixture preparation.
+        // T09.8 exercised this path under Windows contention and proved
+        // ENTRY_FEE_EXCHANGE_TIME_STALE before its first venue POST.
+        // After BOTH existing SQL owners report a fresh campaign frontier,
+        // register a new finite, signed-source-shaped fee observation at the
+        // actual pre-Execute boundary. No production TTL, cache, rate, risk
+        // policy, clock or SQL money state is modified; truly stale GETs
+        // must still fail closed. Do not mint responses on demand.
+        assert_eq!(
+            feed.outbound_posts.lock().unwrap().len(),
+            0,
+            "fee phase may only advance before the first venue create POST"
+        );
+        let pre_execute_fee_at = chrono::Utc::now().timestamp_millis().to_string();
+        let retired_pre_execute_fees = feed.advance_recorded_route(
+            "fixture-observer-a",
+            "/api/v5/account/trade-fee",
+            (0..4)
+                .map(|_| RecordedGet {
+                    access_key: "fixture-observer-a".into(),
+                    path: "/api/v5/account/trade-fee".into(),
+                    required_query: vec![
+                        ("instType".into(), "SWAP".into()),
+                        ("instFamily".into(), "BTC-USDT".into()),
+                    ],
+                    raw_response: envelope(json!([{
+                        "instType": "SWAP", "level": "Lv1",
+                        "ts": pre_execute_fee_at,
+                        "feeGroup": [
+                            {"groupId": "4", "maker": "0.0005", "taker": "0.0005"}
+                        ]
+                    }])),
+                })
+                .collect(),
+        );
+        eprintln!(
+            "T09_1_SIGNED_FEE_PRE_EXECUTE_PHASE_V1:retired={retired_pre_execute_fees} pages=4 venue_posts=0"
+        );
+
         // An admission can be deferred by the SHARED production RateBudget
         // while maintenance consumes the same authenticated private-GET
         // domain. Retry is permitted here ONLY after a proven LOCAL,
