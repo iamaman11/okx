@@ -280,8 +280,10 @@ try {
     max_modelled_loss_usdt:"5",max_order_loss_usdt:"1",
     max_notional_usdt:"100",max_entry_usd:"10",max_leverage:"3",
     max_daily_realized_loss_usdt:"2",max_drawdown_ratio:"0.1",
-    allowed_instruments:specMode
-      ? ["BTC-USDT-SWAP","ETH-USDT-SWAP"] : ["BTC-USDT-SWAP"],
+    // A remains BTC-only even if public metadata discovers ETH. B's ETH
+    // permission is an explicit governed account choice, not a side effect
+    // of registry discovery or a hidden ticker whitelist.
+    allowed_instruments:["BTC-USDT-SWAP"],
   };
   const enrollment = await request(first,"/account-governance/enroll","POST",{
     uid_fingerprint:uid,venue:"okx",environment:"real",
@@ -298,7 +300,9 @@ try {
   const enrollmentB = await request(first,"/account-governance/enroll","POST",{
     uid_fingerprint:uidB,venue:"okx",environment:"real",
     label:"Recorded account B",alias:"recordedB",enabled:true,
-    limits,credential_ref:"fixture-credentials-b",
+    limits:specMode?{
+      ...limits,allowed_instruments:["BTC-USDT-SWAP","ETH-USDT-SWAP"]
+    }:limits,credential_ref:"fixture-credentials-b",
     idempotency_key:"enroll_recorded_account_002",
   });
   assert.equal(enrollmentB.status,200,"second account must be enrolled in the same Worker");

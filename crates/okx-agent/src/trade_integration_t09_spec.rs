@@ -115,6 +115,12 @@ async fn t09_spec_second_linear_product(
     let posts_before=feed.outbound_posts.lock().unwrap().len();
     assert_eq!(posts_before,4,"T09-SPEC only after two positive A orders");
 
+    // The same newly discovered public metadata cannot grant account A the
+    // right to trade ETH. Only B's separately governed permission allows it.
+    let denied_a=trade.trade("fixture-a",&mk_preview("0.10","500"),None)
+        .await.expect_err("T09-SPEC public registry must not authorize A");
+    assert_eq!(denied_a,"INSTRUMENT_NOT_ALLOWED");
+
     // Invalid exact size is a source-validated rejection, never a rounding
     // to the next lot. A noncrossing price below the 500 ask must not silently
     // move outside the user's limit to the next 0.5 price tick.
@@ -227,6 +233,7 @@ async fn t09_spec_second_linear_product(
         "account_uid":resource.configuration.account_key.verified_uid,
         "instrument":INST,"tick":"0.5","lot":"0.05","minimum":"0.05",
         "multiplier":"0.02","quote_entry_upper_usd":quote,
+        "no_metadata_permission_expansion":denied_a,
         "invalid_lot_reason":bad_lot,"invalid_tick_reason":bad_tick,
         "intent_id":id,"intent_state":intent.state.as_str(),
         "sql_revision":intent.revision,

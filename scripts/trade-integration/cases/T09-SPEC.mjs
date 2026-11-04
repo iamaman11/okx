@@ -17,6 +17,7 @@ export async function run({caseId,root,signal}){
   assert.equal(n.lot,"0.05");
   assert.equal(n.minimum,"0.05");
   assert.equal(n.multiplier,"0.02");
+  assert.equal(n.no_metadata_permission_expansion,"INSTRUMENT_NOT_ALLOWED");
   assert.equal(n.invalid_lot_reason,"QUANTITY_NOT_ON_VENUE_LOT");
   assert.equal(n.invalid_tick_reason,"NO_EXECUTABLE_PRICE_WITHIN_SLIPPAGE");
   assert.equal(n.quote_entry_upper_usd,"1.0005");
@@ -43,6 +44,8 @@ export async function run({caseId,root,signal}){
     provenance:{schema:"okx.native-workerd-transcript/v1",sha256:t.transcript_sha256},
     assertions:[
       {id:"different_symbol",expected:"ETH-USDT-SWAP",actual:n.instrument},
+      {id:"registry_does_not_grant_permission",expected:"INSTRUMENT_NOT_ALLOWED",
+        actual:n.no_metadata_permission_expansion},
       {id:"second_contract_multiplier",expected:"0.02",actual:n.multiplier},
       {id:"second_venue_lot",expected:"0.05",actual:n.lot},
       {id:"second_entry_cost_usd",expected:"1.0005",actual:n.quote_entry_upper_usd},
