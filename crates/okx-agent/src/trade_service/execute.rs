@@ -4550,6 +4550,24 @@ mod tests {
                 });
             }
         }
+        // Emitted only after 20 real OS kills, reopening each original WAL
+        // database and checking unknown/no-repost/readback outcomes.
+        // This is NOT full T10-11: the remaining F0-F4/F7/F8 phases need
+        // their own process-level proof and native/Worker causal binding.
+        println!(
+            "T10_11_NATIVE_WINDOWS_OS_KILLS_V1:{}",
+            serde_json::json!({
+                "schema":"okx.t10-11-native-windows-os-kills/v1",
+                "f5_os_kills":10,
+                "f6_os_kills":10,
+                "total_os_kills":20,
+                "original_wal_reopened":true,
+                "unknown_never_resubmitted":true,
+                "f6_independent_venue_readback":true,
+                "f0_f4_f7_f8_proven":false,
+                "native_worker_same_campaign_proven":false,
+            })
+        );
     }
 
     #[tokio::test]
