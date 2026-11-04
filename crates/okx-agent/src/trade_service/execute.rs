@@ -812,11 +812,6 @@ impl TradeService {
             // not escape as Err to a caller which might replay the mutation
             // under the same idempotency key. A sent GET, exchange error or
             // expired command still fails closed; no POST retry is introduced.
-            let fees = r
-                .observer
-                .fee_schedule_until(&rules, until)
-                .await
-                .map_err(err)?;
             let quote_snapshot = r.observer.snapshot_until(until).await.map_err(err)?;
             let fx = Self::usd_conversion(&quote_snapshot)?;
             let account = r
@@ -839,6 +834,16 @@ impl TradeService {
                 )
                 .await
                 .map_err(err)?)?;
+            // Read the independently signed fee LAST: the private snapshot,
+            // account config and leverage can be locally rate-admitted for
+            // seconds. Their wait must not age the fee before assessment.
+            // The original caller deadline and exchange timestamp gate still
+            // apply; a truly stale venue tariff continues to fail closed.
+            let fees = r
+                .observer
+                .fee_schedule_until(&rules, until)
+                .await
+                .map_err(err)?;
             let (entry_cost_proof, rate) = entry_budget::assess_order(
                 &plan,
                 entry_budget::EntryAssessmentSources {

@@ -8,6 +8,7 @@ on:
       - work/b-readonly-source-admission-20261105
       - work/b-t09-protection-causal-20261105
       - work/b-seven-readback-consolidation-20261105
+      - work/b-source-owner-causal-fixes-20261105
 
 permissions:
   contents: read
@@ -68,7 +69,7 @@ jobs:
           # Run B candidates together; T10-07 remains deliberately not proven.
           # Two independent executions on one immutable SHA expose source-order
           # flakiness without mixing evidence from different commits.
-          $ids = @('T09.8','T09-MA','T09-SPEC','T10-01','T10-02','T10-14','T10-15')
+          $ids = @('T10-01','T10-02')
           $env:OKX_B_CENSUS_CAUSE_PROBE = '1'
           $env:OKX_T09_4_SOURCE_COHERENCE_PROBE = '1'
           $env:OKX_T10_01_MAINT_SHUTDOWN_PROBE = '1'

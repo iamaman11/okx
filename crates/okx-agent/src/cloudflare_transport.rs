@@ -1847,6 +1847,31 @@ mod raw_native_session_tests {
         .expect("refreshed recorded WS sources were not accepted by production parser");
         let fresh_clock_at = chrono::Utc::now().timestamp_millis().to_string();
         feed.expect_public_clock(envelope(json!([{"ts":fresh_clock_at}])));
+        // Campaign readiness can take several real two-second finance
+        // captures. The original tariff transcript was recorded BEFORE that
+        // readiness; retaining its old exchange timestamp makes a subsequent
+        // authenticated Execute fail the unchanged five-second age oracle.
+        // Publish the next finite RAW tariff phase at the proved source
+        // boundary, as for T09.4. Never backdate, retime after delivery,
+        // lengthen TTL or synthesize a response inside the HTTP handler.
+        let fee_phase_at = chrono::Utc::now().timestamp_millis().to_string();
+        let fee_phase = envelope(json!([{
+            "instType":"SWAP","level":"Lv1","ts":fee_phase_at,
+            "feeGroup":[{"groupId":"4","maker":"0.0005","taker":"0.0005"}]
+        }]));
+        let retired_fee = feed.advance_recorded_route(
+            "fixture-observer-a", "/api/v5/account/trade-fee",
+            (0..6).map(|_| RecordedGet {
+                access_key:"fixture-observer-a".into(),
+                path:"/api/v5/account/trade-fee".into(),
+                required_query:vec![
+                    ("instType".into(),"SWAP".into()),
+                    ("instFamily".into(),"BTC-USDT".into()),
+                ],
+                raw_response:fee_phase.clone(),
+            }).collect()
+        );
+        eprintln!("T09_1_FEE_AFTER_READINESS_V1:retired={retired_fee} pages=6");
         feed.expect_post(RecordedPost {
             access_key: "fixture-executor-a".into(),
             path: "/api/v5/trade/order".into(),
@@ -3415,10 +3440,41 @@ mod raw_native_session_tests {
                     .parse()
                     .expect("T09.1 terminal close exchange timestamp");
                 let mut last_capture_witness = json!(null);
+                let mut sql_verified_capture_ms: Option<i64> = None;
                 let terminal_capture = tokio::time::timeout(Duration::from_secs(15), async {
                     loop {
                         let health = resource.source_capture_health.read().await.clone();
                         let snapshot = resource.latest_snapshot.read().await.clone();
+                        let source_ms = snapshot.as_ref().and_then(|s| {
+                            chrono::DateTime::parse_from_rfc3339(&s.source_received_at)
+                                .ok()
+                                .map(|t| t.timestamp_millis())
+                        });
+                        let source_ready = health.last_success_ms.is_some_and(|t| t >= closed_ms)
+                            && source_ms.is_some_and(|t| t >= closed_ms);
+                        let signed_flat = snapshot.as_ref()
+                            .is_some_and(|s|s.positions.is_empty());
+                        // Every completed capture commits its SQL pages
+                        // BEFORE source_capture_health reports success.
+                        // Reading SQL early or repeatedly for the SAME cycle
+                        // just queues behind financial ingest and can starve
+                        // the actual account owner. Await a newly completed
+                        // signed-flat cycle, then read its cursor proof once.
+                        if !source_ready || !signed_flat
+                            || sql_verified_capture_ms == health.last_success_ms
+                        {
+                            last_capture_witness = json!({
+                                "signed_flat":signed_flat,
+                                "capture_success_ms":health.last_success_ms,
+                                "capture_failure":health.reason_code,
+                                "snapshot_received_ms":source_ms,
+                                "source_ready":source_ready,
+                                "cursor_stage":"WAIT_FINANCE_CYCLE"
+                            });
+                            tokio::time::sleep(Duration::from_millis(50)).await;
+                            continue;
+                        }
+                        sql_verified_capture_ms = health.last_success_ms;
                         let (fills, bills) = resource
                             .execution
                             .store
@@ -3427,11 +3483,6 @@ mod raw_native_session_tests {
                             })
                             .await
                             .expect("T09.1 read-only production finance owner readback");
-                        let source_ms = snapshot.as_ref().and_then(|s| {
-                            chrono::DateTime::parse_from_rfc3339(&s.source_received_at)
-                                .ok()
-                                .map(|t| t.timestamp_millis())
-                        });
                         let fill_ready = fills.as_ref().is_some_and(|c| {
                             c.generation > 0 && c.cursor.is_empty()
                                 && c.coverage_gaps.is_empty() && c.watermark >= closed_ms
@@ -3440,10 +3491,6 @@ mod raw_native_session_tests {
                             c.generation > 0 && c.cursor.is_empty()
                                 && c.coverage_gaps.is_empty() && c.watermark >= closed_ms
                         });
-                        let source_ready = health.last_success_ms.is_some_and(|t| t >= closed_ms)
-                            && source_ms.is_some_and(|t| t >= closed_ms);
-                        let signed_flat = snapshot.as_ref()
-                            .is_some_and(|s|s.positions.is_empty());
                         last_capture_witness = json!({
                             "signed_flat":signed_flat,
                             "capture_success_ms": health.last_success_ms,
