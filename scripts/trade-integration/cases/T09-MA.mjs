@@ -19,6 +19,10 @@ export async function run({caseId,root,signal}) {
   assert.equal(both.schema,"okx.t09-ma-public-native-concurrency/v1");
   assert.equal(both.native_public_barrier_participants,2);
   assert.equal(both.same_instrument,"BTC-USDT-SWAP");
+  assert.equal(both.a_strategy_instance,"manual");
+  assert.equal(both.b_strategy_instance,"manual");
+  assert.notEqual(both.a_scoped_strategy,both.b_scoped_strategy,
+    "the same strategy name cannot erase the Native account owner");
   assert.equal(both.a_intent_id,a.intent_id);
   assert.equal(both.b_intent_id,b.b_intent_id);
   assert.notEqual(both.a_intent_id,both.b_intent_id);
@@ -66,6 +70,8 @@ export async function run({caseId,root,signal}) {
       {id:"concurrent_public_actor_count",expected:"2",
         actual:String(both.native_public_barrier_participants)},
       {id:"same_instrument",expected:"BTC-USDT-SWAP",actual:both.same_instrument},
+      {id:"a_durable_strategy_instance",expected:"manual",actual:both.a_strategy_instance},
+      {id:"b_durable_strategy_instance",expected:"manual",actual:both.b_strategy_instance},
       {id:"shared_campaign_cap",expected:"10",actual:both.worker_shared_cap_usd},
       {id:"shared_held_usd",expected:"8.002",actual:both.worker_reserved_usd},
       {id:"shared_consumed_usd",expected:"1.0005",actual:both.worker_consumed_usd},

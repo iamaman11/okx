@@ -4912,7 +4912,7 @@ mod raw_native_session_tests {
                             let posts_b = feed.outbound_posts.lock().unwrap().len();
                             assert_eq!(posts_b, 5, "exactly ONE independent B create POST");
                             assert_eq!(feed.unconsumed_posts(), 0);
-                            let (state_b, held_b, upper_b, order_b, intent_b) =
+                            let (state_b, held_b, upper_b, order_b, intent_b, b_strategy) =
                                 b_account.execution.store.call(
                                     std::time::Instant::now() + Duration::from_secs(3),
                                     move |s| {
@@ -4929,7 +4929,8 @@ mod raw_native_session_tests {
                                         Ok((intent.state.as_str().to_owned(), held,
                                             quote.total_usd.normalize().to_string(),
                                             intent.exchange_order_id.clone(),
-                                            intent.intent_id))
+                                            intent.intent_id,
+                                            intent.plan.strategy_instance))
                                     }
                                 ).await.expect("B1 persisted B positive SQL");
                             assert_eq!(state_b, "ACKNOWLEDGED");
@@ -4966,6 +4967,10 @@ mod raw_native_session_tests {
                                     "b_sql_state":state_b,
                                     "native_public_barrier_participants":2,
                                     "same_instrument":"BTC-USDT-SWAP",
+                                    "a_strategy_instance":persisted.plan.strategy_instance,
+                                    "b_strategy_instance":b_strategy,
+                                    "a_scoped_strategy":format!("{}:{}", resource.configuration.account_key.wire(), persisted.plan.strategy_instance),
+                                    "b_scoped_strategy":format!("{}:{}", b_account.configuration.account_key.wire(), b_strategy),
                                     "outbound_posts_after":5,
                                     "worker_shared_cap_usd":b_after_budget.campaign_limit_usd,
                                     "worker_reserved_usd":b_after_entry.reserved_usd,
