@@ -687,6 +687,31 @@ try {
         process.stderr.write("B1_B_PREPOST_CAUSE_V1:" +
           b1Prepost.at(-1)[1] + "\n");
       }
+      const b1Transport = [...rawChildErrorChannels.matchAll(
+        /B1_POSITIVE_TRANSPORT_FAILURE_V1:(\{[^\r\n]+\})/g
+      )];
+      if (b1Transport.length) {
+        const source = JSON.parse(b1Transport.at(-1)[1]);
+        const scopes = Object.fromEntries(Object.entries(source.a_algo_scopes ?? {})
+          .filter(([scope, count]) =>
+            /^(?:SWAP|FUTURES):(?:conditional|oco|trigger|move_order_stop|chase|iceberg|twap|smart_iceberg)$/.test(scope) &&
+            Number.isSafeInteger(count) && count >= 0));
+        process.stderr.write("B1_POSITIVE_TRANSPORT_FAILURE_V1:" + JSON.stringify({
+          schema: "okx.b1-transport-cause/v1",
+          phase: "B_POSITIVE_AFTER_A_ACK",
+          reason_code: [
+            "TRANSCRIPT_SOURCE_PAGE_UNEXPECTED_OR_EXHAUSTED",
+            "TRANSCRIPT_REPEAT_EXCEEDED", "LOCAL_RATE_DEFER",
+            "OTHER_B1_EXECUTE_FAILURE",
+          ].includes(source.reason_code) ? source.reason_code : "UNRECOGNIZED",
+          source_actor: "fixture-observer-a",
+          source_route: "/api/v5/trade/orders-algo-pending",
+          a_algo_success_reads_total: source.a_algo_success_reads_total,
+          a_algo_success_reads_since_positive: source.a_algo_success_reads_since_positive,
+          a_algo_scopes: scopes,
+          outbound_posts: source.outbound_posts,
+        }) + "\n");
+      }
       const b1Refusal = [...recorded.matchAll(
         /B1_POSITIVE_DIAGNOSTIC_V1:(\{[^\r\n]+\})/g
       )];

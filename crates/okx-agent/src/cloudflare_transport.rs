@@ -4427,6 +4427,9 @@ mod raw_native_session_tests {
                                 expires_in_ms: 30_000,
                             };
                             assert!(b_positive_request.valid());
+                            // Snapshot the transport trace before B's second positive
+                            // Execute. No new pages or changed risk policy.
+                            let b_positive_read_cursor = feed.requests.lock().unwrap().len();
                             let b_public = trade.clone();
                             let b_source = feed.clone();
                             let b_accounts_positive = accounts.clone();
@@ -4586,8 +4589,61 @@ mod raw_native_session_tests {
                                 }
                                 Err("B1_POSITIVE_PRIVATE_READ_EXHAUSTED".into())
                             });
-                            let (b_positive, b_positive_accepted_key) = b_positive_task.await
-                                .expect("B1 Native B positive task join")
+                            let b_positive_result = b_positive_task.await
+                                .expect("B1 Native B positive task join");
+                            if let Err(ref reason) = b_positive_result {
+                                let requests = feed.requests.lock().unwrap();
+                                let a_algo_prefix =
+                                    "fixture-observer-a:/api/v5/trade/orders-algo-pending?";
+                                let mut scopes = std::collections::BTreeMap::<String, usize>::new();
+                                let mut total = 0_usize;
+                                let mut phase_reads = 0_usize;
+                                for (index, route) in requests.iter().enumerate() {
+                                    if !route.starts_with(a_algo_prefix) {
+                                        continue;
+                                    }
+                                    total += 1;
+                                    if index >= b_positive_read_cursor {
+                                        phase_reads += 1;
+                                    }
+                                    let inst_type = if route.contains("instType=SWAP") {
+                                        "SWAP"
+                                    } else if route.contains("instType=FUTURES") {
+                                        "FUTURES"
+                                    } else {
+                                        "UNKNOWN"
+                                    };
+                                    let kind = [
+                                        "conditional", "oco", "trigger", "move_order_stop",
+                                        "chase", "iceberg", "twap", "smart_iceberg",
+                                    ].into_iter().find(|kind| {
+                                        route.contains(&format!("ordType={kind}"))
+                                    }).unwrap_or("UNKNOWN");
+                                    *scopes.entry(format!("{inst_type}:{kind}")).or_default() += 1;
+                                }
+                                let reason_code = if reason.contains(
+                                    "TRANSCRIPT_SOURCE_PAGE_UNEXPECTED_OR_EXHAUSTED"
+                                ) {
+                                    "TRANSCRIPT_SOURCE_PAGE_UNEXPECTED_OR_EXHAUSTED"
+                                } else if reason.contains("TRANSCRIPT_REPEAT_EXCEEDED") {
+                                    "TRANSCRIPT_REPEAT_EXCEEDED"
+                                } else if reason.contains("rate/backpressure defer") {
+                                    "LOCAL_RATE_DEFER"
+                                } else {
+                                    "OTHER_B1_EXECUTE_FAILURE"
+                                };
+                                println!("B1_POSITIVE_TRANSPORT_FAILURE_V1:{}", json!({
+                                    "phase": "B_POSITIVE_AFTER_A_ACK",
+                                    "reason_code": reason_code,
+                                    "source_actor": "fixture-observer-a",
+                                    "source_route": "/api/v5/trade/orders-algo-pending",
+                                    "a_algo_success_reads_total": total,
+                                    "a_algo_success_reads_since_positive": phase_reads,
+                                    "a_algo_scopes": scopes,
+                                    "outbound_posts": feed.outbound_posts.lock().unwrap().len(),
+                                }));
+                            }
+                            let (b_positive, b_positive_accepted_key) = b_positive_result
                                 .expect("B1 real B venue create must be admitted");
                             if b_positive["status"] != "partial" {
                                 // First actual production denial is authoritative.

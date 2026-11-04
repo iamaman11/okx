@@ -92,6 +92,16 @@ export async function actualNativeWorker(root, signal, { statusProbe = false, se
       // The nested workerd script has access to cargo's stdout AND stderr.
       // Preserve its bounded last Rust assertion instead of re-wrapping the
       // unhelpful Node "Command failed" prefix. No raw HTTP bodies or secrets.
+      const b1Transport = stderr.match(/B1_POSITIVE_TRANSPORT_FAILURE_V1:(\{[^\r\n]+\})/);
+      if (b1Transport) {
+        const diagnostic = JSON.parse(b1Transport[1]);
+        process.stderr.write("B1_POSITIVE_TRANSPORT_FAILURE_V1:" +
+          JSON.stringify(diagnostic) + "\n");
+        const failure = Error("B1_TRANSPORT_FIRST_CAUSE:" +
+          String(diagnostic.reason_code).slice(0, 90));
+        failure.b1Diagnostic = diagnostic;
+        throw failure;
+      }
       const b1Cause = stderr.match(/B1_POSITIVE_DENIAL_EVIDENCE_V1:(\{[^\r\n]+\})/);
       if (b1Cause) {
         const detail = JSON.parse(b1Cause[1]);
