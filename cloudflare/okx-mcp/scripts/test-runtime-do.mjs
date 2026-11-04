@@ -949,6 +949,12 @@ try {
             assertBudgetEconomicsUnchanged(latestNativeBudget,afterNative.budget,
               "B1 resumed Worker must match Native money after source refresh");
           }
+        } else if (process.env.OKX_T10_02_EXTERNAL_EXPOSURE_PROBE === "1") {
+          // T10-02's negative public Execute deliberately observes a newer
+          // external position. That can advance signed source timestamps
+          // without changing the one authoritative amount of held/spent risk.
+          assertBudgetEconomicsUnchanged(latestNativeBudget,afterNative.budget,
+            "T10-02 foreign exposure must not mutate accepted managed money");
         } else {
           assert.deepEqual(afterNative.budget,latestNativeBudget,
             "T09.2 persisted Worker must equal Native pre-close budget");
