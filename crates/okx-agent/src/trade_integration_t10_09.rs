@@ -164,8 +164,8 @@ async fn t10_09_b_signed_late_fill_after_cancel(
                     && value["fill_count"]==1
                     && value["bill_count"]==1
                     && value["verified_fee_usdt"]=="0.0002"
-                    && value["fill_gaps"]==json!([])
-                    && value["bill_gaps"]==json!([])
+                    && value["fill_gaps"].as_str()==Some("")
+                    && value["bill_gaps"].as_str()==Some("")
                     && value["fill_watermark"].as_i64().unwrap_or(0)>=now_ms
                     && value["bill_watermark"].as_i64().unwrap_or(0)>=now_ms
                 {
@@ -190,6 +190,7 @@ async fn t10_09_b_signed_late_fill_after_cancel(
             let denials = feed.denied_routes.lock().unwrap();
             eprintln!("T10_09_B_CAPTURE_TIMEOUT_V1:{}", json!({
                 "schema":"okx.t10-09-signed-b-capture-timeout/v1",
+                "signed_event_at_ms":now_ms,
                 "last_sql":last_seen,
                 "source_health":{
                     "last_attempt_ms":health.last_attempt_ms,

@@ -1063,7 +1063,7 @@ try {
               const health = data.source_health ?? {};
               const reads = data.signed_source_reads ?? {};
               const decimal = value => typeof value === "string" &&
-                /^(?:0|[1-9][0-9]{0,11})(?:\\.[0-9]{1,9})?$/.test(value)
+                /^(?:0|[1-9][0-9]{0,11})(?:\.[0-9]{1,9})?$/.test(value)
                 ? value : null;
               const count = value => Number.isSafeInteger(value) && value>=0 ? value : null;
               bTimeout = {
@@ -1074,8 +1074,8 @@ try {
                   verified_fee_usdt:decimal(sql.verified_fee_usdt),
                   fill_watermark:count(sql.fill_watermark),
                   bill_watermark:count(sql.bill_watermark),
-                  fill_gaps:Array.isArray(sql.fill_gaps)?sql.fill_gaps.length:null,
-                  bill_gaps:Array.isArray(sql.bill_gaps)?sql.bill_gaps.length:null,
+                  fill_gaps_empty:sql.fill_gaps==="",
+                  bill_gaps_empty:sql.bill_gaps==="",
                   active_central_receipt:sql.active_central_receipt===true,
                   sql_readback_error:typeof sql.sql_readback_error==="string"
                     ?sql.sql_readback_error.slice(0,120):null,
