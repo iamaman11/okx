@@ -178,6 +178,7 @@ async fn t09_spec_second_linear_product(
     // pre-Execute boundary. The unchanged PublicWsCoordinator parser must
     // authenticate every channel's new exchange timestamp before risk can
     // be requested. No stale snapshot is rewritten or production TTL raised.
+    let continuing_subscriptions=refresh_subscriptions.clone();
     let refreshed=chrono::Utc::now().timestamp_millis();
     let refreshed_at=refreshed.to_string();
     let mut updates=public_ws.subscribe_market_updates();
@@ -216,6 +217,25 @@ async fn t09_spec_second_linear_product(
     assert_eq!(fresh_market.market.ticker.best_ask,"500");
     feed.advance_recorded_public_clock(
         wrap(json!([{"ts":refreshed_at}]))
+    );
+    // Explicitly re-observe the signed fee source. The earlier negative
+    // Preview and read-admission phases can consume its 5-second freshness
+    // window. Never promote the prior fee timestamp into a new quote.
+    let fee_at=chrono::Utc::now().timestamp_millis().to_string();
+    let live_fee=wrap(json!([{
+        "instType":"SWAP","level":"Lv1","ts":fee_at,
+        "feeGroup":[{"groupId":"4","maker":"0.0005","taker":"0.0005"}]
+    }]));
+    feed.advance_recorded_route("fixture-observer-b",
+        "/api/v5/account/trade-fee",
+        (0..12).map(|_|RecordedGet {
+            access_key:"fixture-observer-b".into(),
+            path:"/api/v5/account/trade-fee".into(),
+            required_query:vec![
+                ("instType".into(),"SWAP".into()),
+                ("instFamily".into(),"ETH-USDT".into()),
+            ],raw_response:live_fee.clone(),
+        }).collect()
     );
 
     feed.expect_post(RecordedPost {
@@ -262,7 +282,48 @@ async fn t09_spec_second_linear_product(
         protection:Some(Protection::Price{stop_price:"450".into()}),
         expires_in_ms:30_000,
     };
-    let accepted=trade.trade("fixture-b",&request,None).await
+    // Execute includes a real campaign-opening read barrier and several
+    // independent private REST admissions. A single 5-second ETH public
+    // snapshot cannot cover an arbitrarily delayed transaction. Supply
+    // successive monotonically sequenced, raw exchange-shaped WS messages
+    // while the original Execute is in flight; all freshness and book
+    // coherency still belong to the unmodified PublicWsCoordinator.
+    // No RiskBook/SQL/market snapshot mutation is performed here.
+    let (stop_tx,mut stop_rx)=tokio::sync::oneshot::channel::<()>();
+    let publisher_connector=connector.clone();
+    let publisher=tokio::spawn(async move {
+        let mut sequence=11_i64;
+        let mut interval=tokio::time::interval(Duration::from_millis(650));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                _=&mut stop_rx=>break,
+                _=interval.tick()=>{
+                    sequence+=1;
+                    let stamp=chrono::Utc::now().timestamp_millis();
+                    for (arg,mut data,action) in continuing_subscriptions.iter().cloned() {
+                        data["ts"]=stamp.to_string().into();
+                        if data.get("fundingTime").is_some() {
+                            data["fundingTime"]=stamp.to_string().into();
+                            data["nextFundingTime"]=
+                                (stamp+8*60*60*1000).to_string().into();
+                        }
+                        let mut frame=json!({"arg":arg,"data":[data]});
+                        if action==Some("snapshot") {
+                            frame["data"][0]["seqId"]=sequence.into();
+                            frame["data"][0]["prevSeqId"]=(sequence-1).into();
+                            frame["action"]="update".into();
+                        }
+                        publisher_connector.send_public_frame(frame.to_string());
+                    }
+                }
+            }
+        }
+    });
+    let execution=trade.trade("fixture-b",&request,None).await;
+    let _=stop_tx.send(());
+    publisher.await.expect("T09-SPEC RAW ETH frame publisher joined");
+    let accepted=execution
         .expect("T09-SPEC public Execute must reach real Native Worker risk");
     let id=accepted["data"]["intent"]["intent_id"].as_str()
         .expect("T09-SPEC accepted intent id").to_owned();
