@@ -1534,12 +1534,24 @@ impl TradeService {
             .observer
             .snapshot_after_held_until(until)
             .await
-            .map_err(err)?;
+            .map_err(|e|{
+                let reason=err(e);
+                #[cfg(test)]
+                Self::b_census_probe_failure("POST_HELD_SELECTED_SNAPSHOT",
+                    &r.configuration.account_key.wire(),&reason,Some(until));
+                reason
+            })?;
         let fee = r
             .observer
             .fee_schedule_until(&rules, until)
             .await
-            .map_err(err)?;
+            .map_err(|e|{
+                let reason=err(e);
+                #[cfg(test)]
+                Self::b_census_probe_failure("POST_HELD_FEE_SOURCE",
+                    &r.configuration.account_key.wire(),&reason,Some(until));
+                reason
+            })?;
         if snap.account_uid_fingerprint != r.configuration.account_key.verified_uid {
             return Err("POST_ENTRY_ACCOUNT_CHANGED".into());
         }
@@ -1554,10 +1566,16 @@ impl TradeService {
             .account
             .config_wait(until.saturating_duration_since(Instant::now()))
             .await
-            .map_err(err)?;
+            .map_err(|e|{
+                let reason=err(e);
+                #[cfg(test)]
+                Self::b_census_probe_failure("POST_HELD_EXECUTOR_CONFIG",
+                    &r.configuration.account_key.wire(),&reason,Some(until));
+                reason
+            })?;
         let leverage = dec(&r
             .observer
-            .configured_leverage(
+            .configured_leverage_until(
                 &intent.instrument_id,
                 okx_api::MarginMode::Cross,
                 if intent.plan.position_side == "long" {
@@ -1565,9 +1583,16 @@ impl TradeService {
                 } else {
                     "short"
                 },
+                until,
             )
             .await
-            .map_err(err)?)?;
+            .map_err(|e|{
+                let reason=err(e);
+                #[cfg(test)]
+                Self::b_census_probe_failure("POST_HELD_LEVERAGE",
+                    &r.configuration.account_key.wire(),&reason,Some(until));
+                reason
+            })?)?;
         let (reassessed, _) = entry_budget::assess_order(
             &intent.plan,
             entry_budget::EntryAssessmentSources {
