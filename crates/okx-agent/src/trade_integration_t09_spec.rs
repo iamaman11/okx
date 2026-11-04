@@ -40,6 +40,7 @@ async fn t09_spec_second_linear_product(
             "bids":[["499.5","20","0","1"]],
             "seqId":10,"prevSeqId":-1,"ts":ts}),Some("snapshot")),
     ];
+    let refresh_subscriptions=subscriptions.clone();
     for (arg,data,action) in subscriptions {
         let ack=json!({"event":"subscribe","arg":arg,"connId":"recorded-public"}).to_string();
         let book=arg["channel"]=="books";
@@ -170,6 +171,52 @@ async fn t09_spec_second_linear_product(
     let quote=preview["data"]["entry_costs"]["entry_total_usd"]
         .as_str().expect("T09-SPEC preview exact USD");
     assert_eq!(quote,"1.0005");
+
+    // The negative/preview probes above use finite LOCAL rate admission and
+    // may outlive the original ETH market observation. Publish another
+    // independently recorded set of RAW venue frames at this precise
+    // pre-Execute boundary. The unchanged PublicWsCoordinator parser must
+    // authenticate every channel's new exchange timestamp before risk can
+    // be requested. No stale snapshot is rewritten or production TTL raised.
+    let refreshed=chrono::Utc::now().timestamp_millis();
+    let refreshed_at=refreshed.to_string();
+    let mut updates=public_ws.subscribe_market_updates();
+    for (arg,mut data,action) in refresh_subscriptions {
+        data["ts"]=refreshed_at.clone().into();
+        if data.get("fundingTime").is_some() {
+            data["fundingTime"]=refreshed_at.clone().into();
+            data["nextFundingTime"]=(refreshed+8*60*60*1000).to_string().into();
+        }
+        if action==Some("snapshot") {
+            data["seqId"]=11.into();
+        }
+        let mut frame=json!({"arg":arg,"data":[data]});
+        if let Some(kind)=action {frame["action"]=kind.into();}
+        connector.send_public_frame(frame.to_string());
+    }
+    let fresh_market=tokio::time::timeout(Duration::from_secs(5),async {
+        loop {
+            if let Ok(source)=public_ws.risk_fresh_snapshot(
+                INST,chrono::Utc::now().timestamp_millis() as u64,
+                5000,5000,chrono::Utc::now().to_rfc3339()
+            ).await {
+                if source.market.ticker.exchange_timestamp_ms==refreshed_at
+                    && source.market.mark_price.exchange_timestamp_ms==refreshed_at
+                    && source.market.index_price.exchange_timestamp_ms==refreshed_at
+                    && source.market.open_interest.exchange_timestamp_ms==refreshed_at
+                    && source.market.funding.as_ref().is_some_and(|f|
+                        f.exchange_timestamp_ms==refreshed_at)
+                {
+                    break source;
+                }
+            }
+            updates.changed().await.expect("T09-SPEC public source coordinator exited");
+        }
+    }).await.expect("T09-SPEC all freshly signed ETH channels required");
+    assert_eq!(fresh_market.market.ticker.best_ask,"500");
+    feed.advance_recorded_public_clock(
+        wrap(json!([{"ts":refreshed_at}]))
+    );
 
     feed.expect_post(RecordedPost {
         access_key:"fixture-executor-b".into(),
