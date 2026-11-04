@@ -330,7 +330,19 @@ async fn t09_spec_second_linear_product(
     // source window. This is not an invitation to issue a second Execute.
     // Require its exact durable intent identity and prove ACK, owner,
     // central HELD and one signed POST independently below.
+
+    // A recorded local rejection is NOT a missing intent ID or a successful POST.
+    // Preserve its original phase/reason before attempting any status readback.
+    if accepted["data"]["state"] == "REJECTED" {
+        panic!(
+            "T09_SPEC_FIRST_POSITIVE_DENIAL:reply={accepted}:posts={}:denied_routes={:?}:last_throttle={:?}",
+            feed.outbound_posts.lock().unwrap().len(),
+            feed.denied_routes.lock().unwrap().iter().rev().take(8).cloned().collect::<Vec<_>>(),
+            rate_budget.snapshot().last_throttle
+        );
+    }
     let id=accepted["data"]["intent"]["intent_id"].as_str()
+        .or_else(||accepted["data"]["intent_id"].as_str())
         .or_else(||accepted["intent_id"].as_str())
         .unwrap_or_else(||panic!(
             "T09_SPEC_EXECUTE_NO_DURABLE_ID:status={} reason={} state={} posts={}",

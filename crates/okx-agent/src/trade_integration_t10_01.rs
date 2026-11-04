@@ -194,7 +194,20 @@ async fn t10_01_partial_balance_denial_recovery(
     // immediately available public Status. An incomplete local readback
     // after one acknowledged POST produces UNKNOWN/no-resubmit; never
     // retry a possibly sent Execute to manufacture an accepted wrapper.
+
+    // A successful transport response may still be a LOCAL no-send REJECTED
+    // outcome. Report its native origin/reason rather than masking the actual
+    // first failure as a missing intent ID; never retry this Execute.
+    if accepted["data"]["state"] == "REJECTED" {
+        panic!(
+            "T10_01_FIRST_RECOVERY_DENIAL:reply={accepted}:posts={}:denied_routes={:?}:last_throttle={:?}",
+            feed.outbound_posts.lock().unwrap().len(),
+            feed.denied_routes.lock().unwrap().iter().rev().take(8).cloned().collect::<Vec<_>>(),
+            rate_budget.snapshot().last_throttle
+        );
+    }
     let id=accepted["data"]["intent"]["intent_id"].as_str()
+        .or_else(||accepted["data"]["intent_id"].as_str())
         .or_else(||accepted["intent_id"].as_str())
         .unwrap_or_else(||panic!(
             "T10_01_RECOVERY_NO_DURABLE_ID:status={} reason={} state={} posts={}",
