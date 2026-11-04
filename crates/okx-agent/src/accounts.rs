@@ -1563,12 +1563,12 @@ pub(crate) mod recorded_support {
             let wrong = feed.send(
                 signed_inventory_request("fixture-observer-a", "unknown"),
                 deadline(),
-            ).await.unwrap_err();
+            ).await.err().expect("wrong query must reject");
             assert!(wrong.to_string().contains("TRANSCRIPT_ALGO_QUERY_MISMATCH"));
             let other = feed.send(
                 signed_inventory_request("fixture-observer-b", "conditional"),
                 deadline(),
-            ).await.unwrap_err();
+            ).await.err().expect("foreign UID must reject");
             assert!(other.to_string().contains("TRANSCRIPT_ALGO_ACCOUNT_MISMATCH"));
             for _ in 0..CAUSAL_ALGO_READS_PER_SCOPE_AND_PHASE {
                 let observed = feed.send(
@@ -1580,7 +1580,7 @@ pub(crate) mod recorded_support {
             let excess = feed.send(
                 signed_inventory_request("fixture-observer-a", "conditional"),
                 deadline(),
-            ).await.unwrap_err();
+            ).await.err().expect("exhausted phase must reject");
             assert!(excess.to_string().contains(
                 "TRANSCRIPT_ALGO_PHASE_READ_BUDGET_EXCEEDED"
             ));

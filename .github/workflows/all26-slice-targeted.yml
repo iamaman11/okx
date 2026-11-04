@@ -43,6 +43,12 @@ jobs:
           }
           node scripts/trade-integration/cases/T10-12.mjs --self-test
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Compile and actually kill Windows Native F5/F6 processes
+        shell: pwsh
+        timeout-minutes: 12
+        run: |
+          cargo test --locked -p okx-agent --lib trade_service::execute::tests::k5_windows_actual_process_kill_f5_f6_ten_times_each -- --exact --nocapture
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: S1 causal recorded GET/cancel interleaving regressions (test-only)
         shell: pwsh
         timeout-minutes: 3
@@ -53,12 +59,6 @@ jobs:
           if (($output -join "`n") -notmatch '2 passed; 0 failed') {
             throw "S1_CAUSAL_TEST_COUNT_UNVERIFIED"
           }
-      - name: Compile and actually kill Windows Native F5/F6 processes
-        shell: pwsh
-        timeout-minutes: 12
-        run: |
-          cargo test --locked -p okx-agent --lib trade_service::execute::tests::k5_windows_actual_process_kill_f5_f6_ten_times_each -- --exact --nocapture
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Install existing locked workerd test runtime
         shell: pwsh
         run: |
