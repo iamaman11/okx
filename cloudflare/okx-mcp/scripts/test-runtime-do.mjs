@@ -1048,6 +1048,55 @@ try {
         const phases = [...[String(error.stdout ?? ""), String(error.stderr ?? "")]
           .flatMap(channel => [...channel.matchAll(/T09_2_PHASE_V1:([A-Z_]+)/g)])
           .map(match => match[1])];
+        // A causal T10-09 Native SQL timeout is lost when cargo stdout is
+        // wrapped by the nested worker child. Forward only typed financial
+        // counters and stable source errors, never signed payloads or keys.
+        const bTimeoutLine = lines.findLast(line =>
+          line.startsWith("T10_09_B_CAPTURE_TIMEOUT_V1:"));
+        let bTimeout = null;
+        if (bTimeoutLine) {
+          try {
+            const data = JSON.parse(bTimeoutLine.slice(
+              "T10_09_B_CAPTURE_TIMEOUT_V1:".length));
+            if (data.schema === "okx.t10-09-signed-b-capture-timeout/v1") {
+              const sql = data.last_sql ?? {};
+              const health = data.source_health ?? {};
+              const reads = data.signed_source_reads ?? {};
+              const decimal = value => typeof value === "string" &&
+                /^(?:0|[1-9][0-9]{0,11})(?:\\.[0-9]{1,9})?$/.test(value)
+                ? value : null;
+              const count = value => Number.isSafeInteger(value) && value>=0 ? value : null;
+              bTimeout = {
+                sql: {
+                  quantity:decimal(sql.quantity),
+                  fill_count:count(sql.fill_count),
+                  bill_count:count(sql.bill_count),
+                  verified_fee_usdt:decimal(sql.verified_fee_usdt),
+                  fill_watermark:count(sql.fill_watermark),
+                  bill_watermark:count(sql.bill_watermark),
+                  fill_gaps:Array.isArray(sql.fill_gaps)?sql.fill_gaps.length:null,
+                  bill_gaps:Array.isArray(sql.bill_gaps)?sql.bill_gaps.length:null,
+                  active_central_receipt:sql.active_central_receipt===true,
+                  sql_readback_error:typeof sql.sql_readback_error==="string"
+                    ?sql.sql_readback_error.slice(0,120):null,
+                },
+                source_health: {
+                  reason_code:/^[A-Z0-9_]{1,96}$/.test(health.reason_code??"")
+                    ?health.reason_code:null,
+                  last_attempt_ms:count(health.last_attempt_ms),
+                  last_success_ms:count(health.last_success_ms),
+                  last_failure_ms:count(health.last_failure_ms),
+                },
+                signed_source_reads: {
+                  fills:count(reads.fills),bills:count(reads.bills),
+                  positions:count(reads.positions),balance:count(reads.balance),
+                  order:count(reads.order),
+                },
+                denied_route_count:count(data.denied_route_count),
+              };
+            }
+          } catch { bTimeout={error:"INVALID_BOUNDED_CAPTURE_DIAGNOSTIC"}; }
+        }
         process.stderr.write("T09_1_NATIVE_CHILD_FAILURE_V2:" + JSON.stringify({
           schema:"okx.t09-native-child-failure/v2",
           exit_code:exitCode,
@@ -1061,6 +1110,7 @@ try {
             line.startsWith("T09_3_SOURCE_READS_V1 ")).slice(-6)
             .map(line=>line.slice(0, 360)),
           rust_assertion:cause.slice(0, 1900) || "RUST_CHILD_EXIT_WITHOUT_ASSERTION",
+          t10_09_capture:bTimeout,
           maintenance_errors:lines.filter(line => line.includes("OKX_ENTRY_BASELINE_V1")).slice(-12).map(line => line.slice(0, 240)),
           managed_census_denials:lines.filter(line =>
             line.includes("MANAGED_AGGREGATE_CENSUS_DENIAL_V1:")).slice(-5).map(line => line.slice(0, 500)),
