@@ -155,9 +155,8 @@ async fn t10_05_create_outcome(
             .expect("T10-05 replay identity").to_owned();
         assert_eq!(repeated_id,intent_id);
         assert_eq!(feed.outbound_posts.lock().unwrap().len(),posts_after_first);
-        let mut status=serde_json::Value::Null;
         for _ in 0..4 {
-            status=trade.trade("fixture-b",
+            let status=trade.trade("fixture-b",
                 &TradeRequest::Status{reference:intent_id.clone()},None
             ).await.expect("T10-05 public Status readback");
             if status["data"]["intent"]["state"]=="ACKNOWLEDGED"{break;}
@@ -182,7 +181,7 @@ async fn t10_05_create_outcome(
             .expect("T10-05 replay rejected identity").to_owned();
         assert_eq!(repeated_id,intent_id);
         assert_eq!(feed.outbound_posts.lock().unwrap().len(),posts_after_first);
-        (sql_initial_state,repeated_id,None,initial_revision)
+        (sql_initial_state.clone(),repeated_id,None,initial_revision)
     };
     assert_eq!(replayed_id,intent_id);
     let mut after_risk=summary("risk_t10_05_after_b_create");
