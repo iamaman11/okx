@@ -15,6 +15,53 @@ async fn t10_02_unowned_exposure_denied(
     let wrap = |data: serde_json::Value| serde_json::to_vec(&serde_json::json!({
         "code":"0","msg":"","data":data
     })).unwrap();
+    // The previous managed Add changes durable SQL/financial frontiers.
+    // An unrelated external venue position must NOT be hidden behind a
+    // campaign-readiness timeout from that earlier positive cohort. Wait
+    // READ-ONLY until the real background maintenance owner has reconciled
+    // BOTH account SQL frontiers. Do not call refresh/seal here, do not
+    // mutate financial state, and never grant risk in this test fixture.
+    let mut readiness_cmd=summary("risk_t10_02_wait_for_post_add_maintenance");
+    readiness_cmd.installation_id="installation_test".into();
+    let before_external=risk.request(readiness_cmd).await
+        .expect("T10-02 real Worker campaign before signed external exposure");
+    let origin=before_external.budget.as_ref()
+        .and_then(|b|b.campaign_origin.as_ref())
+        .expect("T10-02 real Worker campaign origin");
+    let campaign=origin.campaign_id.clone();
+    let from=i64::try_from(origin.started_at_ms)
+        .expect("T10-02 campaign origin must fit signed SQL time");
+    let mut last_failure=String::from("NOT_CHECKED");
+    tokio::time::timeout(Duration::from_secs(9),async {
+        loop {
+            let through=chrono::Utc::now().timestamp_millis()-2_000;
+            let mut complete=true;
+            for alias in ["fixture-a","fixture-b"] {
+                let account=accounts.resolve(alias).await
+                    .expect("T10-02 independent account owner");
+                let campaign=campaign.clone();
+                match account.execution.store.call(
+                    std::time::Instant::now()+Duration::from_secs(2),
+                    move |s|s.verify_campaign_entry_readiness(
+                        &campaign,from,through
+                    ),
+                ).await {
+                    Ok(())=>{},
+                    Err(reason)=>{
+                        last_failure=format!("{alias}:{reason}");
+                        complete=false;
+                        break;
+                    }
+                }
+            }
+            if complete {break}
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }).await.unwrap_or_else(|_|panic!(
+        "T10_02_POST_ADD_NATIVE_SQL_READINESS_UNVERIFIED:{last_failure}"
+    ));
+    // Only now inject the different 0.70 authenticated position. All
+    // exchange timestamps and fee/public proof remain newly observed.
     let fresh_at = chrono::Utc::now().timestamp_millis();
     let position = wrap(serde_json::json!([{
         "instType":"SWAP","instId":"BTC-USDT-SWAP","posSide":"long",
