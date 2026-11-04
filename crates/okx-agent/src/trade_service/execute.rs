@@ -2687,7 +2687,7 @@ async fn reject_prepost_denial(
             "LOCAL_RATE_LIMIT",
         ]
         .into_iter()
-        .filter(|item| reason.contains(item))
+        .filter(|item| reason.contains(*item))
         .collect::<Vec<_>>();
         let routes = [
             "/api/v5/trade/order",
@@ -2700,7 +2700,7 @@ async fn reject_prepost_denial(
             "/api/v5/account/bills-archive",
         ]
         .into_iter()
-        .filter(|item| reason.contains(item))
+        .filter(|item| reason.contains(*item))
         .collect::<Vec<_>>();
         let actors = [
             "fixture-executor-a",
@@ -2709,14 +2709,14 @@ async fn reject_prepost_denial(
             "fixture-observer-b",
         ]
         .into_iter()
-        .filter(|item| reason.contains(item))
+        .filter(|item| reason.contains(*item))
         .collect::<Vec<_>>();
         eprintln!(
             "B1_B_PREPOST_CAUSE_V1:{}",
             json!({
                 "source_digest":format!("{:x}",Sha256::digest(reason.as_bytes())),
                 "typed_codes":codes,"signed_routes":routes,"recorded_actors":actors,
-                "response_bounded":reason.len()>128
+                "response_bounded":reason.len() > 128
             })
         );
     }
