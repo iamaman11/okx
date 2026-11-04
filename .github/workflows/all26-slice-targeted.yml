@@ -80,7 +80,7 @@ jobs:
               $reason = 'SUMMARY_MISSING'
             }
             $rows += [pscustomobject]@{id=$id;status= $(if($ok){'PASS'}else{'FAIL'});reason=$reason;exit_code=$code;sha=$env:GITHUB_SHA}
-            Write-Output "B_STAGE_RESULT:$id:$reason"
+            Write-Output "B_STAGE_RESULT:${id}:${reason}"
           }
           $rows | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $dir 'b-stage-results.json') -Encoding utf8NoBOM
           $passed = @($rows | Where-Object status -eq 'PASS').Count
