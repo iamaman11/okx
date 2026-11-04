@@ -48,6 +48,7 @@ const t10PostOutcomeMode=process.env.OKX_T10_05_LOST_ACK_PROBE==="1"
 const t10SourceChangedMode=process.env.OKX_T10_15_POST_HELD_SOURCE_PROBE==="1";
 const t10PostReplyLostMode=process.env.OKX_T10_03_POST_AUTH_REPLY_LOST_PROBE==="1";
 const t10SourceRecoveryMode=process.env.OKX_T10_01_PARTIAL_SOURCE_RECOVERY_PROBE==="1";
+const t10StopMode=process.env.OKX_T10_13_STOP_PROBE==="1";
 if (reserveReplyLossMode && !sharedCapMode)
   throw Error("T10_03_REQUIRES_REAL_PERSISTED_SHARED_CAP_WORKER");
 if (sharedCapMode && (addMode || process.env.OKX_NATIVE_WORKER_INTEGRATION==="1"))
@@ -727,6 +728,44 @@ try {
           account_paused:true, persisted_worker_durable_object:true};
       })().then(value => ({ok:true,value}), error => ({ok:false,error}))
       : Promise.resolve({ok:true,value:null});
+    // T10-13 STOP occurs after authenticated fill+bill/status but before
+    // the same Native account submits its required real protective Close.
+    // The Worker is the only governance writer, and propagates a normal
+    // PolicySnapshot on the existing WSS session.
+    const stopCas=t10StopMode
+      ? (async()=>{
+          const ready=handoffPath+".t10-stop-after-fill-ready";
+          const until=Date.now()+90_000;
+          let present=false;
+          while(Date.now()<until){
+            try{await stat(ready);present=true;break;}
+            catch(error){if(error?.code!=="ENOENT")throw error;}
+            await delay(25);
+          }
+          assert.ok(present,"T10-13 actual Native filled source handoff missing");
+          const prior=await request(second,"/account-governance");
+          assert.equal(prior.status,200);
+          const changed=await request(second,"/account-governance/pause","POST",{
+            account:accountKey,explicit_pause:true,
+            expected_revision:prior.body.revision,
+            idempotency_key:"t10_13_stop_after_real_fill_0001",
+          });
+          assert.equal(changed.status,200,"T10-13 real Worker STOP CAS");
+          const saved=await request(second,"/account-governance");
+          assert.equal(saved.status,200);
+          assert.equal(saved.body.revision,prior.body.revision+1);
+          assert.equal(saved.body.accounts.find(a=>
+            a.account_key===accountKey).explicit_pause,true);
+          return {
+            schema:"okx.t10-13-worker-stop/v1",
+            account_key:accountKey,
+            before_revision:prior.body.revision,
+            stop_revision:saved.body.revision,
+            persisted_worker_durable_object:true,
+            explicit_pause:true,
+          };
+        })().then(value=>({ok:true,value}),error=>({ok:false,error}))
+      : Promise.resolve({ok:true,value:null});
     let stdout, stderr;
     try {
       ({stdout,stderr} = await nativeProcess);
@@ -734,6 +773,10 @@ try {
       if (!rotated.ok) throw rotated.error;
       if (rotated.value) console.log("S2_05_WORKER_POLICY_CAS_V1:" +
         JSON.stringify(rotated.value));
+      const stopped=await stopCas;
+      if (!stopped.ok) throw stopped.error;
+      if (stopped.value) console.log("T10_13_WORKER_STOP_V1:"+
+        JSON.stringify(stopped.value));
     } catch (error) {
       // cargo test --nocapture holds the original Native failure in stdout.
       // Emit only the bounded structured production denial; the outer test

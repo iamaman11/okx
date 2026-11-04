@@ -43,6 +43,7 @@ export async function actualNativeWorker(root, signal, { statusProbe = false, se
     process.env.OKX_T10_15_POST_HELD_SOURCE_PROBE === "1" ? "t10-15" : "no-t10-15",
     process.env.OKX_T10_03_POST_AUTH_REPLY_LOST_PROBE === "1" ? "t10-03" : "no-t10-03",
     process.env.OKX_T10_01_PARTIAL_SOURCE_RECOVERY_PROBE === "1" ? "t10-01" : "no-t10-01",
+    process.env.OKX_T10_13_STOP_PROBE === "1" ? "t10-13" : "no-t10-13",
   ].join(":");
   const reused = memo.has(key);
   if (!reused) {
@@ -254,6 +255,10 @@ export async function actualNativeWorker(root, signal, { statusProbe = false, se
             ...(process.env.OKX_T10_01_PARTIAL_SOURCE_RECOVERY_PROBE === "1" ? {
               nativeT10SourceRecovery: receipt(stdout, "T10_01_NATIVE_SOURCE_RECOVERY_V1"),
               workerT10SourceRecovery: receipt(stdout, "T10_01_WORKER_SOURCE_RECOVERY_V1"),
+            } : {}),
+            ...(process.env.OKX_T10_13_STOP_PROBE === "1" ? {
+              nativeT10Stop: receipt(stdout, "T10_13_NATIVE_STOP_AFTER_FILL_V1"),
+              workerT10Stop: receipt(stdout, "T10_13_WORKER_STOP_V1"),
             } : {}),
             ...(closeMode ? { nativeCloseAck: receipt(stdout, "T09_6_NATIVE_CLOSE_ACK_V1") } : {}),
             ...(closeMode ? { nativeCloseTerminal: receipt(stdout, "T09_6_NATIVE_TERMINAL_V1"), nativeCloseFinancialSources:receipt(stdout,"T09_6_NATIVE_FINANCIAL_SOURCES_V1"), workerCloseReconciled:receipt(stdout,"T09_6_WORKER_CLOSE_RECONCILED_V1") } : {}),

@@ -671,6 +671,7 @@ mod raw_native_session_tests {
     include!("trade_integration_t10_15.rs");
     include!("trade_integration_t10_03.rs");
     include!("trade_integration_t10_01.rs");
+    include!("trade_integration_t10_13.rs");
 
     /// Retry permission is test-only and limited to an explicitly read-only
     /// Preview that failed at the *local* request-admission boundary. The
@@ -2986,6 +2987,13 @@ mod raw_native_session_tests {
                     "created_posts":feed.outbound_posts.lock().unwrap().len()
                 })
             );
+            if std::env::var("OKX_T10_13_STOP_PROBE").as_deref()==Ok("1") {
+                let stop=t10_13_stop_and_source_blocker(
+                    &handoff_path,accounts.clone(),trade.clone(),risk.clone(),
+                    feed.clone(),idempotent_intent_id.clone()
+                ).await;
+                println!("T10_13_NATIVE_STOP_AFTER_FILL_V1:{stop}");
+            }
             // A terminal fill/bill and a public Status observation have
             // now occurred. Re-read the SAME immutable signed financial
             // history at this causal frontier: the previous finite POST-fill
