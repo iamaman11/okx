@@ -105,8 +105,19 @@ async fn t10_02_unowned_exposure_denied(
     let after=risk.request(after_cmd).await.expect("T10-02 persisted Worker after");
     let before_budget=before.budget.as_ref().expect("T10-02 before budget");
     let after_budget=after.budget.as_ref().expect("T10-02 after budget");
-    assert_eq!(before_budget,after_budget,
-        "unowned external position cannot reserve new or release existing money");
+    // Source as-of timestamps and revisions may advance during background
+    // observations. Compare independent economic invariants rather than
+    // pretending that a fresh read must be byte-identical to an old snapshot.
+    assert_eq!(before_budget.campaign_limit_usd,after_budget.campaign_limit_usd);
+    assert_eq!(before_budget.consumed_loss_usd,after_budget.consumed_loss_usd);
+    assert_eq!(before_budget.reserved_loss_usd,after_budget.reserved_loss_usd);
+    assert_eq!(before_budget.remaining_loss_usd,after_budget.remaining_loss_usd);
+    let before_entry=before_budget.entry_budget.as_ref().expect("T10-02 entry budget");
+    let after_entry=after_budget.entry_budget.as_ref().expect("T10-02 entry budget after");
+    assert_eq!(before_entry.limit_usd,after_entry.limit_usd);
+    assert_eq!(before_entry.consumed_usd,after_entry.consumed_usd);
+    assert_eq!(before_entry.reserved_usd,after_entry.reserved_usd);
+    assert_eq!(before_entry.remaining_usd,after_entry.remaining_usd);
     assert_eq!(posts_after,posts_before,
         "unowned external position cannot lead to any venue POST");
     assert!(
