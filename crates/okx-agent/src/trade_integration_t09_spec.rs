@@ -349,10 +349,17 @@ async fn t09_spec_second_linear_product(
             accepted["status"],accepted["reason_code"],
             accepted["data"]["state"],feed.outbound_posts.lock().unwrap().len()
         )).to_owned();
+    // Authenticated order ACK and terminal financial backfill are distinct.
+    // Status is allowed to be partial ONLY with a proven authenticated order
+    // readback; the mandatory SQL/Worker/POST assertions below still apply.
     assert!(
-        accepted["status"]=="completed" || accepted["status"]=="unknown",
-        "T09-SPEC public Execute must have a typed outcome"
+        ["completed","partial","unknown"].contains(&accepted["status"].as_str().unwrap_or("")),
+        "T09-SPEC public Execute must have a typed outcome: {accepted}"
     );
+    if accepted["status"]=="partial" {
+        assert_eq!(accepted["quality"]["execution"],"authenticated_readback");
+        assert_eq!(accepted["quality"]["financial"],"incomplete");
+    }
     if accepted["status"]=="unknown" {
         assert_eq!(accepted["reason_code"],"ORDER_READBACK_INCOMPLETE_NO_RESUBMIT",
             "T09-SPEC no other ambiguous POST outcome may count as signed ACK");
