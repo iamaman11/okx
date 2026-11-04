@@ -1,0 +1,50 @@
+name: All26 single-slice targeted Windows checks (WIP only)
+on:
+  push:
+    branches:
+      - work/all26-one-slice-20261104
+
+permissions:
+  contents: read
+
+concurrency:
+  group: all26-targeted-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows-targeted:
+    runs-on: windows-latest
+    timeout-minutes: 18
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de
+        with:
+          toolchain: 1.95.0
+          components: rustfmt
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        with:
+          cache-on-failure: true
+      - name: Check source formatting without mutating files
+        run: cargo fmt --all -- --check
+      - name: Validate exact mandatory scenario manifest and runner oracles
+        shell: pwsh
+        run: |
+          node scripts/run-trade-integration.mjs --list
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node scripts/run-trade-integration.mjs --self-test
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Verify all newly added scripts parse
+        shell: pwsh
+        run: |
+          foreach ($file in @('T10-07', 'T10-08', 'T10-09', 'T10-11', 'T10-12')) {
+            node --check "scripts/trade-integration/cases/$file.mjs"
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+          node scripts/trade-integration/cases/T10-12.mjs --self-test
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Compile and actually kill Windows Native F5/F6 processes
+        shell: pwsh
+        timeout-minutes: 12
+        run: |
+          cargo test --locked -p okx-agent --lib trade_service::execute::tests::k5_windows_actual_process_kill_f5_f6_ten_times_each -- --exact --nocapture
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
