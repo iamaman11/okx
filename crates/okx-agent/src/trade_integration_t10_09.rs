@@ -104,6 +104,31 @@ async fn t10_09_b_signed_late_fill_after_cancel(
             required_query: vec![],raw_response:positions.clone(),
         });
     }
+    // A newly executed partial 0.04 entry needs a separately authenticated
+    // live protective stop of precisely its filled amount. A Cancel ACK
+    // does not create this fact: this is an explicit later venue GET sample,
+    // with its own known algo ID, not a synthetic SQL protection receipt.
+    // Without it production correctly enters emergency_exit, potentially
+    // sending a new safety Cancel; that is a distinct negative fixture.
+    assert!(client_id.len() >= 31, "B client ID must bind the attached stop");
+    let stop_client = format!("s{}", &client_id[..31]);
+    let stop_id = "900000004";
+    let signed_stop = raw(json!([{
+        "instId":"BTC-USDT-SWAP",
+        "algoId":stop_id,"algoClOrdId":stop_client,
+        "state":"live","sz":"0.04",
+        "side":"sell","posSide":"long","tdMode":"cross",
+        "ordType":"conditional",
+        "slTriggerPx":"900","slTriggerPxType":"mark","slOrdPx":"-1"
+    }]));
+    for _ in 0..6 {
+        feed.expect_get(RecordedGet {
+            access_key:"fixture-executor-b".into(),
+            path:"/api/v5/trade/order-algo".into(),
+            required_query:vec![("algoClOrdId".into(),stop_client.clone())],
+            raw_response:signed_stop.clone(),
+        });
+    }
     let balance = raw(json!([{
         "totalEq":"100","adjEq":"100","uTime":at,
         "details":[{"ccy":"USDT","eq":"100","liab":"0",
@@ -227,6 +252,12 @@ async fn t10_09_b_signed_late_fill_after_cancel(
         "fixture-b",&TradeRequest::Status{reference:intent_id.clone()},None
     ).await.expect("T10-09 public B Status after late signed fill");
     assert_eq!(status["data"]["intent"]["intent_id"],intent_id);
+    assert_eq!(status["data"]["protection_incident"],false,
+        "a separately signed live 0.04 stop must protect the B late fill");
+    assert_eq!(status["data"]["protection"]["algo_id"],stop_id,
+        "the SQL protection receipt must bind the observed venue algo ID");
+    assert_eq!(status["data"]["protection"]["quantity"],"0.04",
+        "remaining venue stop must cover exactly the signed partial fill");
     assert_ne!(status["data"]["intent"]["state"],"CANCELLED",
         "a cancel acknowledgement cannot suppress the late venue fill");
     // Read-only fail evidence: classify a possible post-cancel protective
