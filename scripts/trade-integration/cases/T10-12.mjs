@@ -7,6 +7,19 @@ import {promisify} from "node:util";
 import {mkdir,writeFile,rm} from "node:fs/promises";
 import {resolve} from "node:path";
 const exec=promisify(execFile);
+// stdout is a byte stream. A durable-commit JSON marker can be split across
+// arbitrary chunks. Parse only complete lines before killing the process.
+function lineFramer(onLine) {
+  let pending="";
+  return (chunk) => {
+    pending+=chunk;
+    const lines=pending.split(/\r?\n/);
+    pending=lines.pop() ?? "";
+    if(pending.length>32768) throw Error("T10_12_WORKER_READY_LINE_TOO_LONG");
+    for(const line of lines) onLine(line);
+  };
+}
+
 async function terminateTree(child){
   if(process.platform==="win32"){
     await exec("taskkill",["/PID",String(child.pid),"/T","/F"],
@@ -28,20 +41,21 @@ async function killAndRecover(root,signal){
     detached:process.platform!=="win32",
     stdio:["ignore","pipe","pipe"],windowsHide:true,
   });
-  let ready=null,exited=null,output="",stderr="",wasKilled=false;
+  let ready=null,exited=null,stderr="",wasKilled=false;
   const awaiting=new Promise((done,fail)=>{
     const timer=setTimeout(()=>fail(Error("T10_12_WORKER_DURABLE_READY_TIMEOUT")),120000);
     child.stdout.setEncoding("utf8");
-    child.stdout.on("data",chunk=>{
-      output=(output+chunk).slice(-32000);
-      for(const line of output.split(/\r?\n/)){
-        const marker="T10_12_WORKER_COMMIT_READY_V1:";
-        if(line.startsWith(marker)&&!ready){
-          try{ready=JSON.parse(line.slice(marker.length))}
-          catch(e){clearTimeout(timer);fail(e);return}
-          clearTimeout(timer);done(ready);
-        }
+    const consume=lineFramer(line=>{
+      const marker="T10_12_WORKER_COMMIT_READY_V1:";
+      if(line.startsWith(marker)&&!ready){
+        ready=JSON.parse(line.slice(marker.length));
+        clearTimeout(timer);
+        done(ready);
       }
+    });
+    child.stdout.on("data",chunk=>{
+      try{consume(chunk)}
+      catch(e){clearTimeout(timer);fail(e)}
     });
     child.stderr.setEncoding("utf8");
     child.stderr.on("data",chunk=>{stderr=(stderr+chunk).slice(-512)});
@@ -114,4 +128,21 @@ export async function run({caseId,root,signal,artifactsDir}){
         "same_native_sql_account_and_no_double_financial_mutation",
         "old_worker_reply_binding_rejected_by_native"]},null,2)+"\n");
   throw Error("T10_12_SETTLEMENT_CRASH_AND_NATIVE_REPLY_NOT_PROVEN");
+}
+
+// Standalone parser regression. Real OS process kill remains mandatory.
+if(process.argv.includes("--self-test")){
+  const observed=[];
+  const accept=lineFramer(line=>observed.push(line));
+  accept("diagnostic\r");
+  accept("\nT10_12_WORKER_COMMIT_");
+  accept('READY_V1:{"entry_reserved_usd":"8"}\r');
+  assert.equal(observed.length,1,"do not parse incomplete JSON");
+  accept("\n");
+  assert.deepEqual(observed,["diagnostic",
+    'T10_12_WORKER_COMMIT_READY_V1:{"entry_reserved_usd":"8"}']);
+  const bounded=lineFramer(()=>{});
+  assert.throws(()=>bounded("x".repeat(32769)),
+    /T10_12_WORKER_READY_LINE_TOO_LONG/);
+  process.stdout.write("T10_12_WORKER_LINE_FRAMER_SELF_TEST_PASS\n");
 }
