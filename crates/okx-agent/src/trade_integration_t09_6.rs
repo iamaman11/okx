@@ -103,7 +103,7 @@ async fn t09_6_close_owned_lot(input: T09_6CloseContext) -> serde_json::Value {
                 let denials=feed.denied_routes.lock().unwrap().iter()
                     .filter(|reason|reason.contains("/api/v5/trade/order")
                         || reason.contains("TRANSCRIPT_CLOCK"))
-                    .map(|reason|reason.split(':').next().unwrap_or("UNKNOWN"))
+                    .map(|reason|reason.split(':').next().unwrap_or("UNKNOWN").to_owned())
                     .take(6).collect::<Vec<_>>();
                 let last=rate_budget.snapshot().last_throttle;
                 eprintln!("T09_6_CLOSE_READBACK_TRANSCRIPT_V1:{}",serde_json::json!({
