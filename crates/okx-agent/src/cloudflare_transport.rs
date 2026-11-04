@@ -2552,6 +2552,10 @@ mod raw_native_session_tests {
         // workerd RiskBook, but never changes the accepted T09.0/T09.5 run.
         let mut managed_add_proof: Option<serde_json::Value> = None;
         let mut first_close_at: Option<String> = None;
+        // Retain the EXACT immutable signed T09.1 terminal wire sources for
+        // the later A-pending/B-admission causal phases. This is test input,
+        // not a replay of SQL facts or a derived financial oracle.
+        let mut b1_terminal_financial_wire: Option<(Vec<u8>, Vec<u8>)> = None;
         if status_probe {
             let after_fill_order = envelope(json!([{
                 "instId":"BTC-USDT-SWAP",
@@ -2889,6 +2893,8 @@ mod raw_native_session_tests {
                         "ts":closing_at
                     }
                 ]));
+                b1_terminal_financial_wire =
+                    Some((raw_close_fill.clone(), raw_close_bill.clone()));
                 // All six history partitions remain strictly scripted; old
                 // entry-only repetitions are retired at the acknowledged venue
                 // transition so the first terminal source read sees BOTH trades.
@@ -4084,6 +4090,60 @@ mod raw_native_session_tests {
                         let posts_before = feed.outbound_posts.lock().unwrap().len();
                         assert_eq!(posts_before, 4);
 
+                        // T09.1's authenticated terminal fill/bill history
+                        // remains immutable while A's T09.2 entry is LIVE and
+                        // unfilled. B1 has two explicitly distinct causal
+                        // windows: B negative source-bound admission and B
+                        // positive source-bound admission after its refusal.
+                        // A may be captured by six 2-second maintenance
+                        // ticks during each 12-second window, plus at most
+                        // two direct admission/Status scans. Each scan reads
+                        // the five exact instType partitions and one bill
+                        // archive. There is NO default empty-page fallback,
+                        // extra GET, financial rewrite or production TTL bypass.
+                        let (a_terminal_fills, a_terminal_bills) =
+                            b1_terminal_financial_wire
+                                .as_ref()
+                                .expect("B1 requires accepted T09.1 signed terminal sources")
+                                .clone();
+                        let rearm_a_finance = |phase: &str| {
+                            const ROUNDS: usize = 8;
+                            let mut recorded = Vec::with_capacity(ROUNDS * 5);
+                            for _ in 0..ROUNDS {
+                                for partition in ["SPOT", "MARGIN", "SWAP", "FUTURES", "OPTION"] {
+                                    recorded.push(RecordedGet {
+                                        access_key: "fixture-executor-a".into(),
+                                        path: "/api/v5/trade/fills-history".into(),
+                                        required_query: vec![("instType".into(), partition.into())],
+                                        raw_response: if partition == "SWAP" {
+                                            a_terminal_fills.clone()
+                                        } else {
+                                            envelope(json!([]))
+                                        },
+                                    });
+                                }
+                            }
+                            let retired_fills = feed.advance_recorded_route(
+                                "fixture-executor-a", "/api/v5/trade/fills-history", recorded,
+                            );
+                            let retired_bills = feed.advance_recorded_route(
+                                "fixture-executor-a",
+                                "/api/v5/account/bills-archive",
+                                (0..ROUNDS)
+                                    .map(|_| RecordedGet {
+                                        access_key: "fixture-executor-a".into(),
+                                        path: "/api/v5/account/bills-archive".into(),
+                                        required_query: vec![],
+                                        raw_response: a_terminal_bills.clone(),
+                                    })
+                                    .collect(),
+                            );
+                            eprintln!(
+                                "B1_A_FINANCIAL_CAUSAL_PHASE_V1:phase={phase} read_cycles={ROUNDS} partitions=5 retired_fills={retired_fills} retired_bills={retired_bills}"
+                            );
+                        };
+                        rearm_a_finance("A_PENDING_ACK_BEFORE_B_DENIAL");
+
                         // B1 causal source boundary: A's signed venue ACK
                         // was persisted before B may request a new central
                         // risk decision. Register a finite post-ACK account
@@ -4391,6 +4451,11 @@ mod raw_native_session_tests {
                                 "unchanged_global_repeat_limit": 64,
                                 "outbound_posts": feed.outbound_posts.lock().unwrap().len(),
                             }));
+                            // This is a NEW admitted B source cycle, not
+                            // a license for indefinite A history reads.
+                            // The same immutable A finance history remains
+                            // authoritative; only observation slots change.
+                            rearm_a_finance("B_POSITIVE_AFTER_CENTRAL_NO_SEND");
                             refresh_recorded_market();
                             let b_positive_ts = chrono::Utc::now().timestamp_millis().to_string();
                             feed.advance_recorded_route(

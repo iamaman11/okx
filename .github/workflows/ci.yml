@@ -18,6 +18,7 @@ on:
           - T09.5
           - B1
           - S2-05
+          - T10-14
           - T09.3
           - T09.4
           - T09.6
@@ -416,7 +417,7 @@ jobs:
         run: |
           $head = (git rev-parse HEAD).Trim()
           if ($head -ne $env:GITHUB_SHA) { throw "PREFLIGHT_HEAD_MISMATCH" }
-          if ($env:OKX_TARGET_CASE -notin @('T09.1','T09.3','T09.4','T09.5','T09.6','T09.7','T09.8','B1','S2-05')) {
+          if ($env:OKX_TARGET_CASE -notin @('T09.1','T09.3','T09.4','T09.5','T09.6','T09.7','T09.8','B1','S2-05','T10-14')) {
             throw "PREFLIGHT_CASE_NOT_ALLOWED"
           }
           Write-Host "PREFLIGHT_HEAD=$head"
@@ -446,7 +447,7 @@ jobs:
         env:
           OKX_TARGET_CASE: ${{ inputs.target_case || 'T09.6' }}
         run: |
-          if ($env:OKX_TARGET_CASE -notin @('T09.1','T09.3','T09.4','T09.5','T09.6','T09.7','T09.8','B1','S2-05')) {
+          if ($env:OKX_TARGET_CASE -notin @('T09.1','T09.3','T09.4','T09.5','T09.6','T09.7','T09.8','B1','S2-05','T10-14')) {
             throw "PREFLIGHT_CASE_NOT_ALLOWED"
           }
           $artifacts = Join-Path $env:RUNNER_TEMP "trade-integration"
