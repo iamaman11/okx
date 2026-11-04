@@ -94,6 +94,30 @@ async fn t09_6_close_owned_lot(input: T09_6CloseContext) -> serde_json::Value {
         loop {
             let remaining=until.saturating_duration_since(std::time::Instant::now());
             if remaining<=Duration::from_millis(150) {
+                // Fail-only readout; neither retries a POST nor changes
+                // a single recorded source or production RiskBook byte.
+                let readbacks=feed.requests.lock().unwrap().iter()
+                    .filter(|route|route.starts_with(
+                        "fixture-executor-a:/api/v5/trade/order?"
+                    )).count();
+                let denials=feed.denied_routes.lock().unwrap().iter()
+                    .filter(|reason|reason.contains("/api/v5/trade/order")
+                        || reason.contains("TRANSCRIPT_CLOCK"))
+                    .map(|reason|reason.split(':').next().unwrap_or("UNKNOWN"))
+                    .take(6).collect::<Vec<_>>();
+                let last=rate_budget.snapshot().last_throttle;
+                eprintln!("T09_6_CLOSE_READBACK_TRANSCRIPT_V1:{}",serde_json::json!({
+                    "schema":"okx.t09-6-close-readback-transcript/v1",
+                    "close_status":close["status"],
+                    "close_reason_code":close["reason_code"],
+                    "outbound_posts":feed.outbound_posts.lock().unwrap().len(),
+                    "signed_order_gets_total":readbacks,
+                    "denied_source_codes":denials,
+                    "last_rate_operation":last.as_ref().map(|v|format!("{:?}",v.operation)),
+                    "last_rate_source":last.as_ref().map(|v|format!("{:?}",v.source)),
+                    "last_rate_request_sent":last.as_ref().map(|v|v.request_sent),
+                    "last_rate_defer_ms":last.as_ref().map(|v|v.local_defer_ms),
+                }));
                 panic!("T09_6_CLOSE_ACK_STATUS_UNPROVEN:close={close}");
             }
             let result=tokio::time::timeout_at(until.into(),trade.trade(

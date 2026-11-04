@@ -971,6 +971,24 @@ try {
       // Keep the FIRST typed Native B positive refusal visible to CI.
       // Never expose raw authenticated HTTP bytes or credentials.
       const rawChildErrorChannels = recorded + "\n" + String(error.stderr ?? "");
+      // Forward a bounded, source-redacted classification emitted by
+      // TradeService at the FIRST failed order readback. The outer Node
+      // adapter otherwise surfaces only an uninformative UNKNOWN status.
+      for (const marker of [
+        "T09_6_ORDER_READBACK_CAUSE_V1",
+        "T09_6_CLOSE_READBACK_TRANSCRIPT_V1",
+      ]) {
+        const samples=[...rawChildErrorChannels.matchAll(
+          new RegExp(marker + ":(\\{[^\\r\\n]+\\})", "g")
+        )];
+        for (const sample of samples.slice(-4)) {
+          const fact=JSON.parse(sample[1]);
+          if (typeof fact.schema==="string" &&
+              fact.schema.startsWith("okx.t09-6-")) {
+            process.stderr.write(marker + ":" + JSON.stringify(fact) + "\n");
+          }
+        }
+      }
       const b1Prepost = [...rawChildErrorChannels.matchAll(
         /B1_B_PREPOST_CAUSE_V1:(\{[^\r\n]+\})/g
       )];
