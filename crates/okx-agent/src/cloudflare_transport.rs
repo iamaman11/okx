@@ -41,6 +41,19 @@ static T10_04_CORRUPT_NEXT_HELD_COMMAND: std::sync::atomic::AtomicBool =
 static T10_04_FOREIGN_COMMAND_INJECTED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
+// A test-only post-HELD handoff: Worker commits the authentic reservation,
+// Native has NOT yet received that reply, and the scripted signed source
+// changes before the ordinary production revalidation may continue.
+#[cfg(test)]
+static T10_15_ARM_AFTER_HELD: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+#[cfg(test)]
+static T10_15_WORKER_HELD_COMMITTED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+#[cfg(test)]
+static T10_15_SIGNED_SOURCE_CHANGED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 pub struct CloudflareTransportConfig {
     ws_url: String,
     runtime_id: String,
@@ -270,6 +283,27 @@ where
                 T10_04_FOREIGN_COMMAND_INJECTED.store(
                     true,std::sync::atomic::Ordering::SeqCst
                 );
+            }
+            // An authentic, committed HELD is the causal boundary for the
+            // optional source-change test. No test ever creates or mutates
+            // the Worker response. The production post-HELD freshness fence
+            // runs unchanged when the signed source phase is published.
+            #[cfg(test)]
+            if result.status==okx_protocol::risk_authority::RiskDecisionStatus::Held
+                && T10_15_ARM_AFTER_HELD.swap(
+                    false,std::sync::atomic::Ordering::SeqCst
+                )
+            {
+                T10_15_WORKER_HELD_COMMITTED.store(
+                    true,std::sync::atomic::Ordering::SeqCst
+                );
+                tokio::time::timeout(Duration::from_secs(4),async {
+                    while !T10_15_SIGNED_SOURCE_CHANGED.load(
+                        std::sync::atomic::Ordering::SeqCst
+                    ) {
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                    }
+                }).await.map_err(|_|transport("T10_15_SIGNED_SOURCE_HANDOFF_MISSING"))?;
             }
             // An unsolicited, stale or foreign command ID must never be
             // mistaken for the active reservation's authorization. Reject
@@ -612,6 +646,7 @@ mod raw_native_session_tests {
     include!("trade_integration_t10_04.rs");
     include!("trade_integration_t09_spec.rs");
     include!("trade_integration_t10_05.rs");
+    include!("trade_integration_t10_15.rs");
 
     /// Retry permission is test-only and limited to an explicitly read-only
     /// Preview that failed at the *local* request-admission boundary. The
@@ -5223,6 +5258,14 @@ mod raw_native_session_tests {
                             "post_ack_financial_complete":accepted["data"]["financial_complete"]
                         })
                     );
+                    if std::env::var("OKX_T10_15_POST_HELD_SOURCE_PROBE").as_deref()==Ok("1") {
+                        refresh_recorded_market();
+                        let switched=t10_15_fee_source_after_worker_held(
+                            accounts.clone(),trade.clone(),risk.clone(),
+                            feed.clone(),rate_budget.clone()
+                        ).await;
+                        println!("T10_15_NATIVE_CAUSAL_SOURCE_V1:{switched}");
+                    }
                     if std::env::var("OKX_T10_05_LOST_ACK_PROBE").as_deref()==Ok("1")
                         || std::env::var("OKX_T10_05_EXPLICIT_REJECT_PROBE").as_deref()==Ok("1") {
                         refresh_recorded_market();
