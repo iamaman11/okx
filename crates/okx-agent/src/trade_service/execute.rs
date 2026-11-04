@@ -1909,8 +1909,18 @@ fn b_census_probe_failure(phase: &str, account: &str, reason: &str, until: Optio
                             .map_err(|e|report("ALGO_INVENTORY_NORMAL",err(e)))?
                     }
                 } else {
+                    // POST-HELD is still within the original Execute's
+                    // monotonic deadline. Previously this branch made 16
+                    // derivative-algo GETs with immediate local rate admission,
+                    // turning a safe NO-SEND throttle into a definitive reject
+                    // of an already durable HELD intent. Use the same bounded
+                    // authenticated read admission as pre-reserve; a missing
+                    // page, changed generation or expired deadline still
+                    // prevents BEGIN_POST.
                     r.observer
-                        .pending_derivative_risk_algos()
+                        .pending_derivative_risk_algos_until(
+                            until.ok_or("POST_DEADLINE_MISSING")?
+                        )
                         .await
                         .map_err(|e|report("ALGO_INVENTORY_POST_HELD",err(e)))?
                 };

@@ -69,7 +69,7 @@ jobs:
           # Run B candidates together; T10-07 remains deliberately not proven.
           # Two independent executions on one immutable SHA expose source-order
           # flakiness without mixing evidence from different commits.
-          $ids = @('T10-01','T10-02')
+          $ids = @('T10-01')
           $env:OKX_B_CENSUS_CAUSE_PROBE = '1'
           $env:OKX_T09_4_SOURCE_COHERENCE_PROBE = '1'
           $env:OKX_T10_01_MAINT_SHUTDOWN_PROBE = '1'
