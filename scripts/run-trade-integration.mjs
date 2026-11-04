@@ -38,7 +38,11 @@ const requiredStagesByCase = new Map([
   ["T09.6", ["public_trade_entered", "fill_ingested", "protection_verified", "settlement_committed", "release_confirmed"]],
   ["T09.7", ["public_trade_entered", "settlement_committed", "release_confirmed"]],
   ["T09.8", ["public_trade_entered"]],
-  ["T09-MA", mandatoryStages.slice(0, 4)],
+  ["T09-MA", [
+    "public_trade_entered", "a_and_b_sql_distinct",
+    "concurrent_public_owner_routing", "shared_risk_book_verified",
+    "cross_account_mutation_denied",
+  ]],
   ["T09-SPEC", mandatoryStages.slice(0, 4)],
   ["T10-06", [
     "public_trade_entered", "reserve_committed", "begin_post_committed",

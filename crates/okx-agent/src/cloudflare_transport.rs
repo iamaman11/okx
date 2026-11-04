@@ -4644,11 +4644,36 @@ mod raw_native_session_tests {
                             // Snapshot the transport trace before B's second positive
                             // Execute. No new pages or changed risk policy.
                             let b_positive_read_cursor = feed.requests.lock().unwrap().len();
+                            let ma_probe = std::env::var("OKX_T09_MA_CONCURRENT_PROBE")
+                                .as_deref() == Ok("1");
+                            // A independent read and B NEW Execute enter the same
+                            // public TradeService at a causally shared barrier.
+                            // They are two distinct authenticated Native SQL
+                            // owners with one persisted Worker RiskBook. An A
+                            // query must never be routed to B's new intent.
+                            let ma_barrier = ma_probe.then(|| Arc::new(
+                                tokio::sync::Barrier::new(2)
+                            ));
+                            let ma_status_task = ma_barrier.as_ref().map(|barrier| {
+                                let gate = barrier.clone();
+                                let public_a = trade.clone();
+                                let a_intent = new_intent_id.clone();
+                                tokio::spawn(async move {
+                                    gate.wait().await;
+                                    public_a.trade(
+                                        "fixture-a",
+                                        &TradeRequest::Status { reference: a_intent },
+                                        None,
+                                    ).await
+                                })
+                            });
+                            let b_gate = ma_barrier.clone();
                             let b_public = trade.clone();
                             let b_source = feed.clone();
                             let b_accounts_positive = accounts.clone();
                             let b_rate = rate_budget.clone();
                             let b_positive_task = tokio::spawn(async move {
+                                if let Some(barrier) = b_gate { barrier.wait().await; }
                                 let until = std::time::Instant::now() + Duration::from_secs(12);
                                 let mut b_positive_request = b_positive_request;
                                 for attempt in 0..12 {
@@ -4805,6 +4830,9 @@ mod raw_native_session_tests {
                             });
                             let b_positive_result = b_positive_task.await
                                 .expect("B1 Native B positive task join");
+                            let ma_a_status = if let Some(task) = ma_status_task {
+                                Some(task.await.expect("T09-MA A Status task must join"))
+                            } else { None };
                             if let Err(ref reason) = b_positive_result {
                                 let requests = feed.requests.lock().unwrap();
                                 let a_algo_prefix =
@@ -4917,6 +4945,34 @@ mod raw_native_session_tests {
                             assert_eq!(b_after_entry.consumed_usd, "1.0005");
                             assert_eq!(b_after_entry.reserved_usd, "8.002");
                             assert_eq!(b_after_entry.remaining_usd, "0.9975");
+                            if let Some(observed) = ma_a_status {
+                                let source_a = observed.expect(
+                                    "T09-MA A must service its concurrent read"
+                                );
+                                assert_eq!(source_a["data"]["intent"]["intent_id"],
+                                    new_intent_id, "A Status cannot see B's intent");
+                                assert_eq!(source_a["data"]["intent"]["state"],
+                                    "ACKNOWLEDGED", "A order must remain owned and unsettled");
+                                assert_eq!(feed.outbound_posts.lock().unwrap().len(), 5,
+                                    "A Status must not create a second venue POST");
+                                println!("T09_MA_CONCURRENT_PUBLIC_V1:{}", json!({
+                                    "schema":"okx.t09-ma-public-native-concurrency/v1",
+                                    "a_intent_id":new_intent_id,
+                                    "b_intent_id":intent_b,
+                                    "a_account_uid":resource.configuration.account_key.verified_uid,
+                                    "b_account_uid":b_account.configuration.account_key.verified_uid,
+                                    "a_public_status":source_a["status"],
+                                    "a_sql_state":source_a["data"]["intent"]["state"],
+                                    "b_sql_state":state_b,
+                                    "native_public_barrier_participants":2,
+                                    "same_instrument":"BTC-USDT-SWAP",
+                                    "outbound_posts_after":5,
+                                    "worker_shared_cap_usd":b_after_budget.campaign_limit_usd,
+                                    "worker_reserved_usd":b_after_entry.reserved_usd,
+                                    "worker_consumed_usd":b_after_entry.consumed_usd,
+                                    "worker_sequence":b_after.risk_book_sequence,
+                                }));
+                            }
                             println!("B1_NATIVE_SECOND_ACCOUNT_ACCEPTED_V1:{}", json!({
                                 "account_a_uid": resource.configuration.account_key.verified_uid,
                                 "account_b_uid": b_account.configuration.account_key.verified_uid,
