@@ -112,7 +112,7 @@ const requiredStagesByCase = new Map([
   ]],
   ["T10-15", [
     "preview_source_snapshot", "held_source_revision_changed",
-    "post_held_proof_rejected", "policy_change_prevents_stale_post",
+    "post_held_proof_rejected", "fee_change_prevents_stale_post",
     "fresh_plan_revalidated",
   ]],
   ["T10-14", [

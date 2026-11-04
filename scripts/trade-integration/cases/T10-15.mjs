@@ -30,7 +30,7 @@ export async function run({caseId,root,signal}){
     ["held_source_revision_changed","RuntimeSession/SQLiteDO",
       [n.worker_held_witness,n.signed_changed_fee_digest]],
     ["post_held_proof_rejected","NativeAccountSQL",n.first_denial],
-    ["policy_change_prevents_stale_post","RecordedAuthenticatedHTTP",n.posts_after],
+    ["fee_change_prevents_stale_post","RecordedAuthenticatedHTTP",n.posts_after],
     ["fresh_plan_revalidated","TradeService",n.new_quote_usd],
   ].map(([stage,owner,source])=>({stage,owner,source_digest:hash(source)}));
   return {

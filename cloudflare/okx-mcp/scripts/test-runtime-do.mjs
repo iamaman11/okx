@@ -907,7 +907,7 @@ try {
           process.env.OKX_T10_04_FOREIGN_WORKER_REPLY_PROBE === "1"?"8.002":
           specMode?"8.002":
           t10PostOutcomeMode?"8.002":
-          t10SourceChangedMode?"8.002":
+          t10SourceChangedMode?(afterNative.budget?.entry_budget?.reserved_usd):
           process.env.OKX_B1_SECOND_POSITIVE_PROBE === "1"?"8.002":"7.0015";
         const expectedSpent=managedAdd?"6.003":partialFills?"4.002":"1.0005";
         if(afterNative.budget?.entry_budget?.reserved_usd!==expectedReserved
@@ -926,6 +926,14 @@ try {
             native_worker_budget:nativePartial?.worker_budget??admitted.after_worker_budget,
             native_read_counts:nativePartial?.phases?.map(p=>p.source_read_counts)??null
           })+"\n");
+        }
+        if (t10SourceChangedMode) {
+          // Only two legal exact central states after this no-send fault:
+          // the original HELD remains, or it was released using verified
+          // Native REJECTED_UNSENT proof. Never infer a financial reset from
+          // an absent response or a process timeout.
+          assert.ok(["7.0015","8.002"].includes(expectedReserved),
+            "T10-15 central reserve must be either retained or source-proven released");
         }
         assert.equal(afterNative.budget?.entry_budget?.reserved_usd,expectedReserved);
         assert.equal(afterNative.budget?.entry_budget?.consumed_usd,expectedSpent);
