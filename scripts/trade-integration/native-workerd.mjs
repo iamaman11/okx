@@ -33,6 +33,7 @@ export async function actualNativeWorker(root, signal, { statusProbe = false, se
     process.env.OKX_B1_NATIVE_CAP_PROBE === "1" ? "b1-cap" : "normal-cap",
     process.env.OKX_B1_SECOND_POSITIVE_PROBE === "1" ? "b1-positive" : "normal-b",
     process.env.OKX_T10_14_NATIVE_PROBE === "1" ? "t10-14" : "no-t10-14",
+    process.env.OKX_T10_09_LATE_FILL_PROBE === "1" ? "t10-09" : "no-t10-09",
     process.env.OKX_T10_06_CONCURRENT_PROBE === "1" ? "t10-06" : "no-t10-06",
     process.env.OKX_T10_07_NATIVE_PROBE === "1" ? "t10-07" : "no-t10-07",
     process.env.OKX_T09_MA_CONCURRENT_PROBE === "1" ? "t09-ma" : "no-t09-ma",
@@ -224,6 +225,9 @@ export async function actualNativeWorker(root, signal, { statusProbe = false, se
             } : {}),
             ...(process.env.OKX_T10_14_NATIVE_PROBE === "1" ? {
               nativeT10Isolation: receipt(stdout, "T10_14_NATIVE_ISOLATION_V1"),
+            } : {}),
+            ...(process.env.OKX_T10_09_LATE_FILL_PROBE === "1" ? {
+              nativeT10LateFill: receipt(stdout, "T10_09_NATIVE_LATE_B_FILL_V1"),
             } : {}),
             ...(partialFills ? {
               nativePartialFills: receipt(stdout, "T09_3_NATIVE_PARTIAL_TERMINAL_V1"),
