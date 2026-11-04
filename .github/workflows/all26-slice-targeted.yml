@@ -43,6 +43,16 @@ jobs:
           }
           node scripts/trade-integration/cases/T10-12.mjs --self-test
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: S1 causal recorded GET/cancel interleaving regressions (test-only)
+        shell: pwsh
+        timeout-minutes: 3
+        run: |
+          $output = cargo test --locked -p okx-agent --lib causal_algo_phase_ -- --nocapture 2>&1
+          $output | Out-Host
+          if ($LASTEXITCODE -ne 0) { throw "S1_CAUSAL_RECORDED_TRANSPORT_FAILED" }
+          if (($output -join "`n") -notmatch '2 passed; 0 failed') {
+            throw "S1_CAUSAL_TEST_COUNT_UNVERIFIED"
+          }
       - name: Compile and actually kill Windows Native F5/F6 processes
         shell: pwsh
         timeout-minutes: 12
@@ -81,10 +91,20 @@ jobs:
             throw "T10_09_SIGNED_ECONOMIC_READBACK_INVALID"
           }
           Write-Output "T10_09_SAME_B_CANCEL_LATE_FILL_SQL_WORKER_FIRST_LEG_VERIFIED"
+      - name: A1 T09.8 exact-source Windows reproducer (mandatory case still fail-closed)
+        if: always()
+        shell: pwsh
+        timeout-minutes: 6
+        run: |
+          $artifacts = Join-Path $env:RUNNER_TEMP "t09-8-a1"
+          node scripts/run-trade-integration.mjs --case T09.8 --artifacts "$artifacts"
+          if ($LASTEXITCODE -ne 0) { throw "T09_8_A1_TARGET_NOT_ACCEPTED" }
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
           name: t10-09-first-leg-${{ github.sha }}
-          path: ${{ runner.temp }}\\t10-09-first-leg
+          path: |
+            ${{ runner.temp }}\\t10-09-first-leg
+            ${{ runner.temp }}\\t09-8-a1
           if-no-files-found: warn
           retention-days: 7

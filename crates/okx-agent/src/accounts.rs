@@ -979,6 +979,9 @@ pub(crate) mod recorded_support {
         acked: bool,
         scopes: Vec<CausalAlgoScope>,
         held_read: Option<CausalAlgoReadGate>,
+        // A started GET owns an immutable pre-ACK snapshot until delivery or
+        // cancellation. Taking the one-shot gate must not mark it completed.
+        inflight_held_reads: usize,
         source_received_at_ms: i64,
     }
 
@@ -1033,6 +1036,23 @@ pub(crate) mod recorded_support {
         causal_algos: Mutex<Option<CausalAlgoScenario>>,
         static_algos: Mutex<Option<StaticAlgoInventory>>,
         pub(crate) causal_algo_trace: Mutex<Vec<String>>,
+    }
+    // A cancelled/expired transport future must release its recorded I/O
+    // lease as well as a normally resumed GET. This is TEST-ONLY scheduling
+    // state; it is not a venue, SQL or risk transition.
+    struct CausalAlgoReadInFlight<'a>(&'a RecordedAccountHttp);
+    impl Drop for CausalAlgoReadInFlight<'_> {
+        fn drop(&mut self) {
+            let mut active = self.0.causal_algos.lock().unwrap();
+            let phase = active
+                .as_mut()
+                .expect("TRANSCRIPT_ALGO_PHASE_RETIRED_DURING_READ");
+            assert!(
+                phase.inflight_held_reads > 0,
+                "TRANSCRIPT_ALGO_INFLIGHT_UNDERFLOW"
+            );
+            phase.inflight_held_reads -= 1;
+        }
     }
     impl RecordedAccountHttp {
         pub(crate) fn expect_get(&self, page: RecordedGet) {
@@ -1108,7 +1128,7 @@ pub(crate) mod recorded_support {
                 "TRANSCRIPT_ALGO_PHASE_RETIRED_BEFORE_MATCHING_CANCEL_ACK"
             );
             assert!(
-                phase.held_read.is_none(),
+                phase.held_read.is_none() && phase.inflight_held_reads == 0,
                 "TRANSCRIPT_ALGO_PHASE_RETIRED_WITH_UNRESOLVED_BARRIER"
             );
             let cancel_id = phase.cancel_id.clone();
@@ -1163,7 +1183,11 @@ pub(crate) mod recorded_support {
             }
             let mut phase = self.causal_algos.lock().unwrap();
             assert!(
-                phase.as_ref().is_none_or(|previous| previous.acked),
+                phase.as_ref().is_none_or(|previous| {
+                    previous.acked
+                        && previous.held_read.is_none()
+                        && previous.inflight_held_reads == 0
+                }),
                 "TRANSCRIPT_ALGO_UNACKNOWLEDGED_PHASE"
             );
             self.strict_read_routes
@@ -1184,6 +1208,7 @@ pub(crate) mod recorded_support {
                 acked: false,
                 scopes,
                 held_read: None,
+                inflight_held_reads: 0,
                 source_received_at_ms: chrono::Utc::now().timestamp_millis(),
             });
             self.causal_algo_trace.lock().unwrap().push(format!(
@@ -1336,6 +1361,7 @@ pub(crate) mod recorded_support {
                 acked,
                 scopes: vec![],
                 held_read: None,
+                inflight_held_reads: 0,
                 source_received_at_ms: 1,
             });
             feed
@@ -1373,6 +1399,193 @@ pub(crate) mod recorded_support {
             assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 held.retire_acked_causal_algo_inventory("fixture-observer-a");
             })).is_err(), "a held signed GET must be resumed, not discarded");
+        }
+
+        fn exact_query(inst_type: &str, kind: &str) -> Vec<(String, String)> {
+            vec![
+                ("instType".into(), inst_type.into()),
+                ("ordType".into(), kind.into()),
+                ("limit".into(), "100".into()),
+            ]
+        }
+
+        fn recorded_envelope(data: serde_json::Value) -> Vec<u8> {
+            serde_json::to_vec(&serde_json::json!({
+                "code": "0", "msg": "", "data": data
+            }))
+            .unwrap()
+        }
+
+        fn causal_fixture(feed: &RecordedAccountHttp) {
+            let mut before = Vec::new();
+            let mut after = Vec::new();
+            for inst in ["SWAP", "FUTURES"] {
+                for kind in [
+                    "conditional", "oco", "trigger", "move_order_stop",
+                    "chase", "iceberg", "twap", "smart_iceberg",
+                ] {
+                    let raw = if inst == "SWAP" && kind == "conditional" {
+                        serde_json::json!([{"algoId": "900000002"}, {"algoId": "900000003"}])
+                    } else {
+                        serde_json::json!([])
+                    };
+                    let remaining = if inst == "SWAP" && kind == "conditional" {
+                        serde_json::json!([{"algoId": "900000003"}])
+                    } else {
+                        serde_json::json!([])
+                    };
+                    before.push(RecordedGet {
+                        access_key: "fixture-observer-a".into(),
+                        path: "/api/v5/trade/orders-algo-pending".into(),
+                        required_query: exact_query(inst, kind),
+                        raw_response: recorded_envelope(raw),
+                    });
+                    after.push(RecordedGet {
+                        access_key: "fixture-observer-a".into(),
+                        path: "/api/v5/trade/orders-algo-pending".into(),
+                        required_query: exact_query(inst, kind),
+                        raw_response: recorded_envelope(remaining),
+                    });
+                }
+            }
+            feed.expect_causal_algo_inventory("900000002", before, after);
+            feed.expect_post(RecordedPost {
+                access_key: "fixture-executor-a".into(),
+                path: "/api/v5/trade/cancel-algos".into(),
+                expected_body: serde_json::json!([{
+                    "instId": "BTC-USDT-SWAP", "algoId": "900000002"
+                }]),
+                raw_response: recorded_envelope(serde_json::json!([{
+                    "algoId": "900000002", "sCode": "0"
+                }])),
+            });
+        }
+
+        fn signed_inventory_request(actor: &str, kind: &str) -> HttpRequest {
+            reqwest::Client::new()
+                .get(format!(
+                    "https://www.okx.com/api/v5/trade/orders-algo-pending?instType=SWAP&ordType={kind}&limit=100"
+                ))
+                .header("OK-ACCESS-KEY", actor)
+                .build()
+                .unwrap()
+        }
+
+        fn signed_cancel_request() -> HttpRequest {
+            reqwest::Client::new()
+                .post("https://www.okx.com/api/v5/trade/cancel-algos")
+                .header("OK-ACCESS-KEY", "fixture-executor-a")
+                .body(r#"[{"instId":"BTC-USDT-SWAP","algoId":"900000002"}]"#)
+                .build()
+                .unwrap()
+        }
+
+        fn raw_items(response: RawHttpResponse) -> serde_json::Value {
+            serde_json::from_slice::<serde_json::Value>(&response.body).unwrap()["data"].clone()
+        }
+
+        #[tokio::test]
+        async fn causal_algo_phase_keeps_old_inflight_get_until_delivery_after_cancel_ack() {
+            let feed = Arc::new(RecordedAccountHttp::default());
+            causal_fixture(&feed);
+            let deadline = || Instant::now() + std::time::Duration::from_secs(3);
+
+            // The first Status/maintenance observation is not allowed to
+            // disappear merely because another read happens before cancel.
+            let initial = feed.send(
+                signed_inventory_request("fixture-observer-a", "conditional"),
+                deadline(),
+            ).await.unwrap();
+            assert_eq!(raw_items(initial).as_array().unwrap().len(), 2);
+
+            let (entered, resume) = feed.hold_next_causal_algo_get();
+            let reading_feed = feed.clone();
+            let old_read = tokio::spawn(async move {
+                reading_feed.send(
+                    signed_inventory_request("fixture-observer-a", "conditional"),
+                    Instant::now() + std::time::Duration::from_secs(3),
+                ).await
+            });
+            tokio::time::timeout(
+                std::time::Duration::from_secs(2), entered.notified()
+            ).await.expect("old signed GET must reach its I/O barrier");
+
+            let canceled = feed.send(signed_cancel_request(), deadline())
+                .await.unwrap();
+            assert_eq!(raw_items(canceled)[0]["algoId"], "900000002");
+            {
+                let state = feed.causal_algos.lock().unwrap();
+                let phase = state.as_ref().unwrap();
+                assert!(phase.acked);
+                assert!(phase.held_read.is_none());
+                assert_eq!(phase.inflight_held_reads, 1,
+                    "taking an I/O gate must not authorize source retirement");
+            }
+            // After ACK, a NEW signed read sees the other still-live stop.
+            let fresh = feed.send(
+                signed_inventory_request("fixture-observer-a", "conditional"),
+                deadline(),
+            ).await.unwrap();
+            assert_eq!(raw_items(fresh), serde_json::json!([{
+                "algoId": "900000003"
+            }]));
+            // The late response contains the exact immutable pre-ACK bytes.
+            resume.notify_one();
+            let stale = tokio::time::timeout(
+                std::time::Duration::from_secs(2), old_read
+            ).await.expect("old read join deadline").unwrap().unwrap();
+            assert_eq!(raw_items(stale).as_array().unwrap().len(), 2);
+            assert_eq!(
+                feed.causal_algos.lock().unwrap().as_ref().unwrap()
+                    .inflight_held_reads,
+                0
+            );
+            let trace = feed.causal_algo_trace.lock().unwrap();
+            let events = trace.iter().filter(|line| {
+                line.contains("event=GET_STARTED") || line.contains("event=CANCEL_ACK")
+            }).collect::<Vec<_>>();
+            assert_eq!(events.len(), 4);
+            assert!(events[0].contains("stage=BEFORE_ACK"));
+            assert!(events[1].contains("stage=BEFORE_ACK"));
+            assert!(events[2].contains("event=CANCEL_ACK"));
+            assert!(events[3].contains("stage=AFTER_ACK"));
+            drop(trace);
+            feed.retire_acked_causal_algo_inventory("fixture-observer-a");
+            assert!(feed.causal_algos.lock().unwrap().is_none());
+            assert_eq!(feed.outbound_posts.lock().unwrap().len(), 1);
+        }
+
+        #[tokio::test]
+        async fn causal_algo_phase_rejects_wrong_query_and_excess_reads_without_mutation() {
+            let feed = RecordedAccountHttp::default();
+            causal_fixture(&feed);
+            let deadline = || Instant::now() + std::time::Duration::from_secs(3);
+            let wrong = feed.send(
+                signed_inventory_request("fixture-observer-a", "unknown"),
+                deadline(),
+            ).await.unwrap_err();
+            assert!(wrong.to_string().contains("TRANSCRIPT_ALGO_QUERY_MISMATCH"));
+            let other = feed.send(
+                signed_inventory_request("fixture-observer-b", "conditional"),
+                deadline(),
+            ).await.unwrap_err();
+            assert!(other.to_string().contains("TRANSCRIPT_ALGO_ACCOUNT_MISMATCH"));
+            for _ in 0..CAUSAL_ALGO_READS_PER_SCOPE_AND_PHASE {
+                let observed = feed.send(
+                    signed_inventory_request("fixture-observer-a", "conditional"),
+                    deadline(),
+                ).await.unwrap();
+                assert_eq!(raw_items(observed).as_array().unwrap().len(), 2);
+            }
+            let excess = feed.send(
+                signed_inventory_request("fixture-observer-a", "conditional"),
+                deadline(),
+            ).await.unwrap_err();
+            assert!(excess.to_string().contains(
+                "TRANSCRIPT_ALGO_PHASE_READ_BUDGET_EXCEEDED"
+            ));
+            assert_eq!(feed.outbound_posts.lock().unwrap().len(), 0);
+            assert!(!feed.causal_algos.lock().unwrap().as_ref().unwrap().acked);
         }
     }
 
@@ -1676,7 +1889,11 @@ pub(crate) mod recorded_support {
                                 "event=GET_STARTED uid=account-001 actor={key} route={path} query={query:?} stage={stage} source_received_at_ms={} read={} digest={digest}",
                                 scenario.source_received_at_ms, *count
                             ));
-                            Some((raw, scenario.held_read.take()))
+                            let held = scenario.held_read.take();
+                            if held.is_some() {
+                                scenario.inflight_held_reads += 1;
+                            }
+                            Some((raw, held))
                         } else {
                             // UID B never inherits UID A's cancel-dependent
                             // view. Each B GET matches a signed raw peer scope.
@@ -1730,6 +1947,7 @@ pub(crate) mod recorded_support {
                     };
                     if let Some((body, held)) = selected {
                         if let Some(gate) = held {
+                            let _inflight = CausalAlgoReadInFlight(self);
                             gate.entered.notify_one();
                             tokio::time::timeout_at(
                                 tokio::time::Instant::from_std(deadline),
