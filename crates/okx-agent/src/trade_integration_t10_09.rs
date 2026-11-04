@@ -122,7 +122,8 @@ async fn t10_09_b_signed_late_fill_after_cancel(
     // account's actual capture loop must ingest its new signed economic fact.
     let owner = accounts.resolve("fixture-b").await.expect("T10-09 B owner");
     let target = intent_id.clone();
-    let evidence = tokio::time::timeout(Duration::from_secs(15), async {
+    let mut last_seen = json!({"state":"NO_SQL_READBACK_YET"});
+    let captured = tokio::time::timeout(Duration::from_secs(15), async {
         loop {
             let id = target.clone();
             let observed = owner.execution.store.call(
@@ -157,7 +158,8 @@ async fn t10_09_b_signed_late_fill_after_cancel(
                     }))
                 }
             ).await;
-            if let Ok(value) = observed {
+            match observed {
+              Ok(value) => {
                 if value["quantity"]=="0.04"
                     && value["fill_count"]==1
                     && value["bill_count"]==1
@@ -169,10 +171,45 @@ async fn t10_09_b_signed_late_fill_after_cancel(
                 {
                     break value;
                 }
+                last_seen = value;
+              }
+              Err(error) => {
+                last_seen = json!({"sql_readback_error": format!("{error:?}")});
+              }
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
-    }).await.expect("T10_09_B_SIGNED_LATE_FILL_NOT_INGESTED");
+    }).await;
+    let evidence = match captured {
+        Ok(evidence) => evidence,
+        Err(_) => {
+            let health = owner.source_capture_health.read().await;
+            let requests = feed.requests.lock().unwrap();
+            let source_counts = |route: &str| requests.iter()
+                .filter(|entry| entry.starts_with(route)).count();
+            let denials = feed.denied_routes.lock().unwrap();
+            eprintln!("T10_09_B_CAPTURE_TIMEOUT_V1:{}", json!({
+                "schema":"okx.t10-09-signed-b-capture-timeout/v1",
+                "last_sql":last_seen,
+                "source_health":{
+                    "last_attempt_ms":health.last_attempt_ms,
+                    "last_success_ms":health.last_success_ms,
+                    "last_failure_ms":health.last_failure_ms,
+                    "reason_code":health.reason_code,
+                },
+                "signed_source_reads":{
+                    "fills":source_counts("fixture-executor-b:/api/v5/trade/fills-history?"),
+                    "bills":source_counts("fixture-executor-b:/api/v5/account/bills-archive?"),
+                    "positions":source_counts("fixture-observer-b:/api/v5/account/positions?"),
+                    "balance":source_counts("fixture-observer-b:/api/v5/account/balance?"),
+                    "order":source_counts("fixture-executor-b:/api/v5/trade/order?"),
+                },
+                "denied_route_count":denials.len(),
+                "denied_route_last":denials.last(),
+            }));
+            panic!("T10_09_B_SIGNED_LATE_FILL_NOT_INGESTED");
+        }
+    };
     assert_eq!(evidence["active_central_receipt"],true,
         "Cancel ACK and late fill cannot release the B reservation");
     let status = trade.trade(
