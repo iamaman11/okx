@@ -56,7 +56,7 @@ jobs:
           $output = cargo test --locked -p okx-agent --lib causal_algo_phase_ -- --nocapture 2>&1
           $output | Out-Host
           if ($LASTEXITCODE -ne 0) { throw "S1_CAUSAL_RECORDED_TRANSPORT_FAILED" }
-          if (($output -join "`n") -notmatch '2 passed; 0 failed') {
+          if (($output -join "`n") -notmatch '3 passed; 0 failed') {
             throw "S1_CAUSAL_TEST_COUNT_UNVERIFIED"
           }
       - name: Install existing locked workerd test runtime

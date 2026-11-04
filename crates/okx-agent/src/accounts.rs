@@ -1556,6 +1556,37 @@ pub(crate) mod recorded_support {
         }
 
         #[tokio::test]
+        async fn causal_algo_phase_rejects_foreign_cancel_ack_without_switching_a() {
+            let feed = source(false);
+            feed.expect_post(RecordedPost {
+                access_key: "fixture-executor-b".into(),
+                path: "/api/v5/trade/cancel-algos".into(),
+                expected_body: serde_json::json!([{
+                    "instId": "BTC-USDT-SWAP",
+                    "algoId": "recorded-stop-cancel-001"
+                }]),
+                raw_response: recorded_envelope(serde_json::json!([{
+                    "algoId": "recorded-stop-cancel-001", "sCode": "0"
+                }])),
+            });
+            let foreign = reqwest::Client::new()
+                .post("https://www.okx.com/api/v5/trade/cancel-algos")
+                .header("OK-ACCESS-KEY", "fixture-executor-b")
+                .body(r#"[{"instId":"BTC-USDT-SWAP","algoId":"recorded-stop-cancel-001"}]"#)
+                .build()
+                .unwrap();
+            let denied = feed.send(
+                foreign, Instant::now() + std::time::Duration::from_secs(3),
+            ).await.err().expect("foreign account cannot complete A's cancel event");
+            assert!(denied.to_string().contains(
+                "TRANSCRIPT_ALGO_CANCEL_ACCOUNT_MISMATCH"
+            ));
+            assert!(!feed.causal_algos.lock().unwrap().as_ref().unwrap().acked);
+            assert_eq!(feed.outbound_posts.lock().unwrap().len(), 1,
+                "even rejected outbound requests remain visible");
+        }
+
+        #[tokio::test]
         async fn causal_algo_phase_rejects_wrong_query_and_excess_reads_without_mutation() {
             let feed = RecordedAccountHttp::default();
             causal_fixture(&feed);
@@ -1736,6 +1767,15 @@ pub(crate) mod recorded_support {
                         }
                         let mut phase = self.causal_algos.lock().unwrap();
                         if let Some(scenario) = phase.as_mut() {
+                            // A signed B cancel must never select A's inventory
+                            // merely because a venue algo ID is identical.
+                            if verified_fixture_uid(key)
+                                != verified_fixture_uid(scenario.account.as_str())
+                            {
+                                return Err(OkxError::Response(
+                                    "TRANSCRIPT_ALGO_CANCEL_ACCOUNT_MISMATCH".into(),
+                                ));
+                            }
                             if scenario.cancel_id != observed_id || scenario.acked {
                                 return Err(OkxError::Response(
                                     "TRANSCRIPT_ALGO_CANCEL_EVENT_MISMATCH".into(),
