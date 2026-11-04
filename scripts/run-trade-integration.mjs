@@ -106,9 +106,9 @@ const requiredStagesByCase = new Map([
     "single_risk_mutation_verified",
   ]],
   ["T10-13", [
-    "stop_before_claim_ack", "post_stop_new_claims_denied",
-    "stop_after_fill_applied", "safe_reduce_or_cancel_attempted",
-    "stale_reduction_blocker_verified",
+    "fill_ingested", "stop_after_fill_applied",
+    "post_stop_new_claims_denied", "stale_reduction_blocker_verified",
+    "safe_reduce_or_cancel_attempted",
   ]],
   ["T10-15", [
     "preview_source_snapshot", "held_source_revision_changed",

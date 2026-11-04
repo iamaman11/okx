@@ -118,6 +118,13 @@ async fn t10_13_stop_and_source_blocker(
             required_query:vec![],raw_response:restored.clone(),
         }).collect(),
     );
+    let opening_key=opening_intent.clone();
+    let opening_sql_revision=owner.execution.store.call(
+        std::time::Instant::now()+Duration::from_secs(3),
+        move |s|s.intent(&opening_key)?.map(|i|i.revision)
+            .ok_or(okx_execution::StoreError::Invalid("T10_13_OPENING_SQL_MISSING"))
+    ).await.expect("T10-13 original persisted SQL revision");
+    assert!(opening_sql_revision>0);
     let mut inspect=summary("risk_t10_13_stop_before_close");
     inspect.installation_id="installation_test".into();
     let worker=risk.request(inspect).await.expect("T10-13 risk remains held for Close");
@@ -127,6 +134,7 @@ async fn t10_13_stop_and_source_blocker(
         "schema":"okx.t10-13-native-stop-after-fill/v1",
         "account_uid":owner.configuration.account_key.verified_uid,
         "intent_id":opening_intent,
+        "opening_sql_revision":opening_sql_revision,
         "source_fault_reads":reads_after-reads_before,
         "stale_reduce_blocker":refusal,
         "stop_governance_revision":caps["governance"]["revision"],

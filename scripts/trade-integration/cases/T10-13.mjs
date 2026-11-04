@@ -29,12 +29,13 @@ export async function run({caseId,root,signal}){
   assert.equal(terminal.opening_status.data.central_release.state,"verified");
   assert.equal(terminal.worker_budget.reserved_loss_usd,"0");
   const events=[
-    ["stop_before_claim_ack","RuntimeSession/SQLiteDO",w.stop_revision],
+    ["fill_ingested","NativeAccountSQL",terminal.opening_intent_id],
+    ["stop_after_fill_applied","RuntimeSession/SQLiteDO",
+      [w.stop_revision,n.worker_budget_before_close]],
     ["post_stop_new_claims_denied","TradeService+NativeAccountSQL",n.new_claim_denial],
-    ["stop_after_fill_applied","NativeAccountSQL",[n.intent_id,n.worker_budget_before_close]],
-    ["safe_reduce_or_cancel_attempted","TradeService+RecordedAuthenticatedHTTP",close],
-    ["stale_reduction_blocker_verified","NativeAccountSQL",
+    ["stale_reduction_blocker_verified","RecordedAuthenticatedHTTP",
       [n.stale_reduce_blocker,n.source_fault_reads]],
+    ["safe_reduce_or_cancel_attempted","TradeService+RecordedAuthenticatedHTTP",close],
   ].map(([stage,owner,source])=>({stage,owner,source_digest:hash(source)}));
   return {
     case_id:caseId,status:"PASS",
@@ -52,7 +53,8 @@ export async function run({caseId,root,signal}){
         actual:terminal.worker_budget.reserved_loss_usd},
     ],events,
     readbacks:{
-      sql:[{revision:w.stop_revision,digest:hash([n.intent_id,n.new_claim_denial])}],
+      sql:[{revision:n.opening_sql_revision,
+        digest:hash([n.intent_id,n.new_claim_denial])}],
       risk_book:[{revision:terminal.worker_risk_book_sequence,
         digest:hash(terminal.worker_budget)}],
     },
