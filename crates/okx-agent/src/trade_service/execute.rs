@@ -604,10 +604,13 @@ impl TradeService {
         };
         let started = Instant::now();
         let until = started + Duration::from_millis(*expires_in_ms);
-        let _capacity = r
-            .mutation_capacity
-            .try_acquire()
-            .map_err(|_| "ACCOUNT_MUTATION_BUSY")?;
+        // New risk still requires the exact per-account mutation semaphore.
+        // An ALREADY PERSISTED same-key replay is READ-ONLY, however, and
+        // must never fail merely because an unrelated command temporarily
+        // holds that semaphore. We may inspect its SQL identity without
+        // obtaining mutation capacity; no new intent, reserve or venue POST
+        // is permitted on this read-only path.
+        let capacity = r.mutation_capacity.try_acquire().ok();
         let account_key = r.configuration.account_key.wire();
         // Keep the historical raw hash solely for read-only replay of
         // already persisted intents. Never rewrite their IDs, plans or hashes.
@@ -635,9 +638,14 @@ impl TradeService {
             if !existing_request_hash_matches(&i.request_hash, &body_hash, &historical_raw_hash) {
                 return Err("IDEMPOTENCY_CONFLICT".into());
             }
-            drop(_capacity);
+            drop(capacity);
             return self.status_intent(r, &i.intent_id).await;
         }
+        // If this key is NEW, an unavailable semaphore remains a strict
+        // no-send rejection. A concurrent task that created the intent
+        // after our read cannot be double-posted: only the holder may
+        // prepare/reserve/BEGIN_POST, and other calls must replay on retry.
+        let _capacity = capacity.ok_or("ACCOUNT_MUTATION_BUSY")?;
         let (state, control) = self.authority(r, supplied).await?;
         let increase = matches!(
             operation,
