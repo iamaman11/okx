@@ -52,16 +52,16 @@ jobs:
         run: |
           cargo test --locked -p okx-agent --lib --no-run
           if ($LASTEXITCODE -ne 0) { throw 'B_STAGE_NATIVE_PRECOMPILE_FAILED' }
-      - name: A1 first-cause T09.8 — exact-SHA Windows acceptance
+      - name: Stage B seven candidates — exact-SHA Windows acceptance
         shell: pwsh
         timeout-minutes: 21
         run: |
           $ErrorActionPreference = 'Stop'
           $dir = Join-Path $env:RUNNER_TEMP 'b-stage'
           New-Item -ItemType Directory -Path $dir -Force | Out-Null
-          # One causal blocker only; do not burn six independent B cohorts
-          # while repairing the inherited T09.4 -> T09.6 -> T09.8 prefix.
-          $ids = @('T09.8')
+          # One completed A1 T09.8 path is now proven on the prior SHA.
+          # Run B candidates together; T10-07 remains deliberately not proven.
+          $ids = @('T09.8','T09-MA','T09-SPEC','T10-01','T10-02','T10-14','T10-15')
           $rows = @()
           foreach ($id in $ids) {
             $out = Join-Path $dir $id
