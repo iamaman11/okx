@@ -1910,7 +1910,7 @@ mod raw_native_session_tests {
         let retired_pre_execute_fees = feed.advance_recorded_route(
             "fixture-observer-a",
             "/api/v5/account/trade-fee",
-            (0..4)
+            (0..3)
                 .map(|_| RecordedGet {
                     access_key: "fixture-observer-a".into(),
                     path: "/api/v5/account/trade-fee".into(),
@@ -1929,7 +1929,7 @@ mod raw_native_session_tests {
                 .collect(),
         );
         eprintln!(
-            "T09_1_SIGNED_FEE_PRE_EXECUTE_PHASE_V1:retired={retired_pre_execute_fees} pages=4 venue_posts=0"
+            "T09_1_SIGNED_FEE_PRE_EXECUTE_PHASE_V1:retired={retired_pre_execute_fees} pages=3 venue_posts=0"
         );
 
         // An admission can be deferred by the SHARED production RateBudget
