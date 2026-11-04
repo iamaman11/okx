@@ -105,6 +105,18 @@ pub struct AccountResources {
     _identity_lease: File,
     source_tasks: Mutex<Vec<JoinHandle<()>>>,
 }
+#[cfg(test)]
+impl AccountResources {
+    pub(crate) fn source_task_debug_ids(&self) -> Vec<String> {
+        self.source_tasks
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|task| format!("{:?}", task.id()))
+            .collect()
+    }
+}
+
 impl Drop for AccountResources {
     fn drop(&mut self) {
         let _ = self.source_shutdown.send(true);
@@ -1007,6 +1019,10 @@ pub(crate) mod recorded_support {
     #[derive(Default)]
     pub(crate) struct RecordedAccountHttp {
         pub(crate) requests: Mutex<Vec<String>>,
+        // TEST-ONLY: record each signed balance GET admission attempt before
+        // fixture selection. Task IDs attribute reads to source owners versus
+        // the TradeService caller without changing replay or risk behavior.
+        signed_balance_reads: Mutex<Vec<(String, String, i64)>>,
         pub(crate) outbound_posts: Mutex<Vec<(String, String, serde_json::Value)>>,
         /// Actual signed fee GETs delivered by this test transport:
         /// (account API key, exchange ts, local delivery timestamp).
@@ -1055,6 +1071,19 @@ pub(crate) mod recorded_support {
         }
     }
     impl RecordedAccountHttp {
+        pub(crate) fn balance_read_probe(&self) -> serde_json::Value {
+            let events = self.signed_balance_reads.lock().unwrap();
+            let mut by_task = std::collections::BTreeMap::<String, usize>::new();
+            for (actor, task, _) in events.iter() {
+                *by_task.entry(format!("{actor}/{task}")).or_default() += 1;
+            }
+            serde_json::json!({
+                "admitted_attempts": events.len(),
+                "by_actor_and_task": by_task,
+                "recent": events.iter().rev().take(6).cloned().collect::<Vec<_>>(),
+            })
+        }
+
         pub(crate) fn expect_get(&self, page: RecordedGet) {
             self.strict_read_routes
                 .lock()
@@ -1664,6 +1693,13 @@ pub(crate) mod recorded_support {
                     _ => return Err(OkxError::Response("TRANSCRIPT_ACCOUNT_UNKNOWN".into())),
                 };
                 let path = request.url().path();
+                if request.method() == "GET" && path == "/api/v5/account/balance" {
+                    self.signed_balance_reads.lock().unwrap().push((
+                        key.to_owned(),
+                        format!("{:?}", tokio::task::try_id()),
+                        chrono::Utc::now().timestamp_millis(),
+                    ));
+                }
                 if request.method() == "POST" {
                     // Count every possible outbound create, even when the
                     // transcript rejects it. Never silently replay a POST.

@@ -1,3 +1,35 @@
+// TEST-ONLY finite source attribution for the first T09-SPEC denial.
+// Compare route deltas across phases with task identity and the existing
+// FinanceTrace cycle timings; no extra GET or SQL/risk operation is issued.
+fn t09_spec_source_meter(
+    feed: &crate::accounts::recorded_support::RecordedAccountHttp,
+    phase: &str,
+) -> serde_json::Value {
+    let mut counts = std::collections::BTreeMap::<String, usize>::new();
+    {
+        let requests = feed.requests.lock().unwrap();
+        for request in requests.iter() {
+            if [
+                "/api/v5/account/balance",
+                "/api/v5/account/config",
+                "/api/v5/account/positions",
+                "/api/v5/trade/orders-pending",
+            ]
+            .iter()
+            .any(|route| request.contains(route))
+            {
+                *counts.entry(request.clone()).or_default() += 1;
+            }
+        }
+    }
+    serde_json::json!({
+        "phase": phase,
+        "route_counts": counts,
+        "balance_by_task": feed.balance_read_probe(),
+        "posts": feed.outbound_posts.lock().unwrap().len(),
+    })
+}
+
 // T09-SPEC: a second genuine linear reference spec goes through the same
 // public Rust TradeService, Native account SQL and persisted Worker RiskBook.
 async fn t09_spec_second_linear_product(
@@ -15,6 +47,7 @@ async fn t09_spec_second_linear_product(
     };
     use serde_json::json;
     const INST:&str="ETH-USDT-SWAP";
+    let mut source_phases = vec![t09_spec_source_meter(&feed, "SPEC_START")];
     let stamp=chrono::Utc::now().timestamp_millis();
     let ts=stamp.to_string();
     let funding=(stamp+8*60*60*1000).to_string();
@@ -150,6 +183,7 @@ async fn t09_spec_second_linear_product(
         .await.expect_err("T09-SPEC minimum must reject without a venue POST");
     assert_eq!(bad_min,"ENTRY_BUDGET_BELOW_VENUE_MINIMUM");
     assert_eq!(feed.outbound_posts.lock().unwrap().len(),posts_before);
+    source_phases.push(t09_spec_source_meter(&feed, "NEGATIVE_PREVIEWS_DONE"));
 
     let until=std::time::Instant::now()+Duration::from_secs(15);
     let preview=loop {
@@ -168,6 +202,7 @@ async fn t09_spec_second_linear_product(
             }
         }
     };
+    source_phases.push(t09_spec_source_meter(&feed, "POSITIVE_PREVIEW_DONE"));
     let quote=preview["data"]["entry_costs"]["entry_total_usd"]
         .as_str().expect("T09-SPEC preview exact USD");
     assert_eq!(quote,"1.0005");
@@ -320,9 +355,11 @@ async fn t09_spec_second_linear_product(
             }
         }
     });
+    source_phases.push(t09_spec_source_meter(&feed, "BEFORE_EXECUTE"));
     let execution=trade.trade("fixture-b",&request,None).await;
     let _=stop_tx.send(());
     publisher.await.expect("T09-SPEC RAW ETH frame publisher joined");
+    source_phases.push(t09_spec_source_meter(&feed, "AFTER_EXECUTE"));
     let accepted=execution
         .expect("T09-SPEC public Execute must reach real Native Worker risk");
     // The original public Execute may return UNKNOWN if its POST was
@@ -334,8 +371,18 @@ async fn t09_spec_second_linear_product(
     // A recorded local rejection is NOT a missing intent ID or a successful POST.
     // Preserve its original phase/reason before attempting any status readback.
     if accepted["data"]["state"] == "REJECTED" {
+        let a = accounts.resolve("fixture-a").await.expect("SPEC finance A");
+        let b = accounts.resolve("fixture-b").await.expect("SPEC finance B");
+        let owner_tasks = serde_json::json!({
+            "a": a.source_task_debug_ids(),
+            "b": b.source_task_debug_ids(),
+        });
+        let finance_cycles = serde_json::json!({
+            "a": a.finance_trace.readback(None, 8),
+            "b": b.finance_trace.readback(None, 8),
+        });
         panic!(
-            "T09_SPEC_FIRST_POSITIVE_DENIAL:reply={accepted}:posts={}:denied_routes={:?}:last_throttle={:?}",
+            "T09_SPEC_FIRST_POSITIVE_DENIAL:reply={accepted}:source_phases={source_phases:?}:source_owner_tasks={owner_tasks}:finance_cycles={finance_cycles}:posts={}:denied_routes={:?}:last_throttle={:?}",
             feed.outbound_posts.lock().unwrap().len(),
             feed.denied_routes.lock().unwrap().iter().rev().take(8).cloned().collect::<Vec<_>>(),
             rate_budget.snapshot().last_throttle
