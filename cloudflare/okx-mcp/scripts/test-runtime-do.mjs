@@ -1303,6 +1303,25 @@ try {
             account_b:spec.account_uid,
             venue_new_posts:spec.posts_after-spec.posts_before,
           }));
+        } else if (process.env.OKX_T10_09_LATE_FILL_PROBE === "1") {
+          // Signed venue fill and linked bill were captured through the SAME
+          // B Native SQLite owner after the real public Cancel ACK. Worker
+          // may settle cumulative entry spend, but cannot release B risk.
+          const late=receipt(stdout,"T10_09_NATIVE_LATE_B_FILL_V1");
+          assert.equal(late.schema,"okx.t10-09-late-signed-b-fill/v1");
+          assert.equal(late.after_cancel_ack,true);
+          assert.equal(late.signed_fill_and_bill_ingested_by_native_sql,true);
+          assert.equal(late.sql.quantity,"0.04");
+          assert.equal(late.sql.fill_count,1);
+          assert.equal(late.sql.bill_count,1);
+          assert.equal(late.sql.verified_fee_usdt,"0.0002");
+          assert.equal(late.sql.active_central_receipt,true);
+          assert.equal(late.posts_before,6);
+          assert.equal(late.posts_after,6);
+          assertBudgetEconomicsUnchanged(late.worker_budget,afterNative.budget,
+            "late signed B fill must be the same persisted Worker campaign");
+          assert.notEqual(afterNative.budget.entry_budget.reserved_usd,"0",
+            "cancel ACK cannot release the filled B risk");
         } else if (process.env.OKX_T10_04_FOREIGN_WORKER_REPLY_PROBE === "1") {
           const blocked=receipt(stdout,"T10_04_NATIVE_FOREIGN_WORKER_REPLY_V1");
           assert.equal(blocked.posts_before,4);
