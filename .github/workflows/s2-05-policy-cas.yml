@@ -1,0 +1,39 @@
+name: S2-05 Native Worker Policy CAS (WIP only)
+on:
+  push:
+    branches:
+      - work/s2-05-policy-cas-20261104
+permissions:
+  contents: read
+jobs:
+  s2-05-windows:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de
+        with:
+          toolchain: 1.95.0
+          components: rustfmt
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Check Rust source format
+        run: cargo fmt --all -- --check
+      - name: Install locked production Workerd dependencies
+        run: npm ci --prefix cloudflare/okx-mcp --ignore-scripts --no-audit --no-fund
+      - name: Precompile actual Native/Worker integration
+        run: cargo test --locked -p okx-agent --lib native_to_workerd_risk_summary_over_actual_websocket --no-run
+      - name: Execute original-key replay and new-key policy-CAS denial
+        env:
+          OKX_S2_05_POLICY_CAS_PROBE: "1"
+        shell: pwsh
+        run: |
+          $artifacts = Join-Path $env:RUNNER_TEMP "s2-05-policy-cas"
+          node scripts/trade-integration/s2-05-native-policy-cas.mjs --artifacts "$artifacts"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: s2-05-policy-cas-${{ github.sha }}
+          path: ${{ runner.temp }}\\s2-05-policy-cas
+          if-no-files-found: warn
+          retention-days: 7
