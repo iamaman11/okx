@@ -2252,6 +2252,16 @@ mod raw_native_session_tests {
                         let id = v["data"]["intent"]["intent_id"].as_str()
                             .or_else(|| v["intent_id"].as_str());
                         if id == Some(opened_intent_id.as_str()) {
+                            if v["status"] == "unknown" {
+                                assert_eq!(v["retryable"], false,
+                                    "T10-06 unknown must never authorize a resend");
+                                assert_eq!(v["next_action"], "trade.status");
+                                assert!(matches!(v["reason_code"].as_str(),
+                                    Some("ACCOUNT_MUTATION_BUSY_STATUS_NOT_EVALUATED_NO_RESUBMIT")
+                                    | Some("ORDER_READBACK_INCOMPLETE_NO_RESUBMIT")
+                                    | Some("EXCHANGE_ORDER_STATE_UNKNOWN")),
+                                    "T10-06 unknown must identify a real read/owner blocker: {v}");
+                            }
                             identical += 1;
                         } else {
                             errors.push(format!("T10_06_WRONG_INTENT:{v}"));

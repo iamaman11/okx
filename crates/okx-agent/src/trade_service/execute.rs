@@ -605,11 +605,12 @@ impl TradeService {
         let started = Instant::now();
         let until = started + Duration::from_millis(*expires_in_ms);
         // New risk still requires the exact per-account mutation semaphore.
-        // An ALREADY PERSISTED same-key replay is READ-ONLY, however, and
-        // must never fail merely because an unrelated command temporarily
-        // holds that semaphore. We may inspect its SQL identity without
-        // obtaining mutation capacity; no new intent, reserve or venue POST
-        // is permitted on this read-only path.
+        // Check an existing semantic identity from SQL before demanding
+        // mutation capacity. However, status_intent is NOT read-only: it can
+        // reconcile fills, risk and protective orders. If the permit is busy,
+        // return an identity-bound UNKNOWN/no-resubmit instead of launching
+        // overlapping financial reconciliation. This preserves the original
+        // single-owner mutation fence under 100 same-key concurrent calls.
         let capacity = r.mutation_capacity.try_acquire().ok();
         let account_key = r.configuration.account_key.wire();
         // Keep the historical raw hash solely for read-only replay of
@@ -637,6 +638,15 @@ impl TradeService {
         if let Some(i) = prior {
             if !existing_request_hash_matches(&i.request_hash, &body_hash, &historical_raw_hash) {
                 return Err("IDEMPOTENCY_CONFLICT".into());
+            }
+            // A concurrent mutation may be legitimately in progress. The
+            // original durable intent remains the ONLY identity; do not
+            // pretend a current exchange or financial state was read.
+            if capacity.is_none() {
+                return Ok(uncertain(
+                    &i.intent_id,
+                    "ACCOUNT_MUTATION_BUSY_STATUS_NOT_EVALUATED_NO_RESUBMIT",
+                ));
             }
             drop(capacity);
             return self.status_intent(r, &i.intent_id).await;

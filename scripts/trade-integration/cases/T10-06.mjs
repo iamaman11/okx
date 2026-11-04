@@ -14,6 +14,8 @@ export async function run({caseId,root,signal}) {
   assert.equal(v.nonlocal_failures,0);
   assert.equal(v.original_intent_id,n.opened_intent_id);
   assert.equal(v.persisted_intent_id,n.opened_intent_id);
+  // A status/finance mutation already holding capacity may return
+  // exact-identity UNKNOWN/no-resubmit; it may not generate a second intent.
   assert.equal(v.created_posts,1);
   assert.equal(v.conflict_reason,"IDEMPOTENCY_CONFLICT");
   assert.ok(Number.isSafeInteger(v.sql_revision) && v.sql_revision>0);
