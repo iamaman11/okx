@@ -182,6 +182,33 @@ export async function actualNativeWorker(root, signal, { statusProbe = false, se
       throw Error("NATIVE_WORKER_CHILD_FAILED:" + evidence.error_class +
         ":" + evidence.phase + ":" + evidence.first_visible_error.slice(0, 70));
     });
+
+    // Count-only signed GET source phases from the underlying real Native
+    // test must remain inspectable even when that test succeeds.
+    if (process.env.OKX_T09_SPEC_SOURCE_PHASE_PROBE === "1") {
+      const allowed=new Set(["BEFORE_NEGATIVE_PREVIEWS","AFTER_NEGATIVE_PREVIEWS",
+        "AFTER_POSITIVE_PREVIEW","BEFORE_POSITIVE_EXECUTE","AFTER_POSITIVE_EXECUTE"]);
+      for(const m of String(stderr).matchAll(
+        /T09_SPEC_SOURCE_PHASE_V1:(\{[^\r\n]+\})/g
+      )){
+        try{
+          const v=JSON.parse(m[1]);
+          if(!allowed.has(v.phase))continue;
+          const counts=Object.fromEntries(
+            ["a_balance","b_balance","a_config","b_config","a_algo","b_algo",
+              "outbound_posts"].map(k=>[k,
+                Number.isSafeInteger(v.counts?.[k])&&v.counts[k]>=0?v.counts[k]:null])
+          );
+          process.stderr.write("T09_SPEC_SOURCE_PHASE_V1:"+JSON.stringify({
+            phase:v.phase,counts,
+            a_capture_last_success_ms:v.a_capture_last_success_ms??null,
+            a_capture_last_failure_ms:v.a_capture_last_failure_ms??null,
+            a_capture_reason:typeof v.a_capture_reason==="string"&&
+              /^[A-Z0-9_]{1,96}$/.test(v.a_capture_reason)?v.a_capture_reason:null
+          })+"\n");
+        }catch { /* Original child error remains authoritative. */ }
+      }
+    }
     assert.match(stdout, /t09_public_trade_execute_open_ack_and_idempotency PASS: posts=1/);
     assert.match(stdout, /native_to_persisted_workerd_riskbook PASS/);
     const terminal = [...stdout.matchAll(/\{"suite":"runtime-session-sqlite-do","status":"PASS"[^\r\n]*\}/g)];

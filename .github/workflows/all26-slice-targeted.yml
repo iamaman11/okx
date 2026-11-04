@@ -65,12 +65,15 @@ jobs:
           New-Item -ItemType Directory -Path $dir -Force | Out-Null
           # One completed A1 T09.8 path is now proven on the prior SHA.
           # Run B candidates together; T10-07 remains deliberately not proven.
-          $ids = @('T09-SPEC')
+          $ids = @('T09-SPEC','T09-SPEC')
+          $env:OKX_T09_SPEC_SOURCE_PHASE_PROBE = '1'
           $env:OKX_B_CENSUS_CAUSE_PROBE = '1'
           $rows = @()
+          $attempt = 0
           foreach ($id in $ids) {
-            $out = Join-Path $dir $id
-            Write-Output "B_STAGE_START:$id"
+            $attempt++
+            $out = Join-Path $dir "$id-$attempt"
+            Write-Output "B_STAGE_START:${id}:attempt=$attempt"
             node scripts/run-trade-integration.mjs --case "$id" --artifacts "$out"
             $code = $LASTEXITCODE
             $file = Join-Path $out 'summary.json'
@@ -93,11 +96,11 @@ jobs:
               $reason = 'SUMMARY_MISSING'
             }
             $rows += [pscustomobject]@{id=$id;status= $(if($ok){'PASS'}else{'FAIL'});reason=$reason;exit_code=$code;sha=$env:GITHUB_SHA}
-            Write-Output "B_STAGE_RESULT:${id}:${reason}"
+            Write-Output "B_STAGE_RESULT:${id}:attempt=${attempt}:${reason}"
           }
           $rows | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $dir 'b-stage-results.json') -Encoding utf8NoBOM
           $passed = @($rows | Where-Object status -eq 'PASS').Count
-          Write-Output "B_STAGE_EXACT_SHA_RESULTS:$passed/$($ids.Count):$env:GITHUB_SHA"
+          Write-Output "B_SPEC_REPEAT_RESULTS:$passed/$($ids.Count):$env:GITHUB_SHA"
           if ($passed -ne $ids.Count) { throw 'B_STAGE_ACCEPTANCE_NOT_COMPLETE' }
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
