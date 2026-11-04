@@ -970,7 +970,37 @@ impl TradeService {
                     .map_err(err)?;
                 return Err("ENTRY_ALL_IN_COST_UNPROVEN".into());
             }
-            let census = self.census_until(&state, until).await?;
+            // A census source can be refused by the REAL local REST
+            // limiter after SQL PREPARE, but before ANY Worker RESERVE.
+            // Leaving that intent PREPARED forces the public caller to
+            // guess whether it can safely issue another request. Complete
+            // the immutable SQL no-send terminal proof on the same owner:
+            // no exchange POST, no central risk/release or fabricated zero
+            // exposure. A failed local SQL commit stays UNKNOWN/no-resubmit.
+            let census = match self.census_until(&state, until).await {
+                Ok(census) => census,
+                Err(reason) => {
+                    let pre_reserve_id = prepared.intent_id.clone();
+                    let rejected = pre_reserve_id.clone();
+                    let denied_reason = reason.clone();
+                    if r.execution.store.call(deadline(), move |s| {
+                        s.reject_unsent(&rejected, &denied_reason, now())
+                    }).await.is_err() {
+                        return Ok(uncertain(
+                            &pre_reserve_id,
+                            "PRE_RESERVE_LOCAL_REJECTION_UNCONFIRMED_NO_RESUBMIT",
+                        ));
+                    }
+                    return Ok(completed(json!({
+                        "intent_id":pre_reserve_id,
+                        "state":"REJECTED",
+                        "rejection_origin":"LOCAL",
+                        "send_state":"NOT_STARTED",
+                        "primary_reason":reason,
+                        "risk_release_state":"NOT_RESERVED",
+                    })));
+                }
+            };
             let snapshot = r.observer.snapshot_until(until).await.map_err(err)?;
             let conversion = Self::usd_conversion(&snapshot)?;
             let usdt = (plan.planned_loss_usd / dec(&conversion.usd_per_usdt)?)

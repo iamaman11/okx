@@ -4970,7 +4970,10 @@ mod raw_native_session_tests {
                                                 && outcome["data"]["state"] == "REJECTED"
                                                 && outcome["data"]["rejection_origin"] == "LOCAL"
                                                 && outcome["data"]["send_state"] == "NOT_STARTED"
-                                                && outcome["data"]["risk_release_state"] == "RELEASED";
+                                                && matches!(
+                                                    outcome["data"]["risk_release_state"].as_str(),
+                                                    Some("RELEASED" | "NOT_RESERVED")
+                                                );
                                             let delay = definitive_local_unsent.then(|| {
                                                 recorded_preview_local_defer(
                                                     primary, &b_rate, remaining
@@ -4987,7 +4990,7 @@ mod raw_native_session_tests {
                                             let owner = b_accounts_positive.resolve("fixture-b")
                                                 .await.expect("B1 rate-rejected B owner");
                                             let sql_key = key.clone();
-                                            let (state, still_held) = owner.execution.store.call(
+                                            let (state, still_held, before_reserve) = owner.execution.store.call(
                                                 std::time::Instant::now() + Duration::from_secs(3),
                                                 move |s| {
                                                     let intent = s.by_idempotency(&sql_key)?
@@ -4997,11 +5000,16 @@ mod raw_native_session_tests {
                                                     Ok((intent.state.as_str().to_owned(),
                                                         s.active_central_receipt(
                                                             &intent.intent_id
-                                                        )?.is_some()))
+                                                        )?.is_some(),
+                                                        s.unsent_before_reserve(&intent.intent_id)?))
                                                 }
                                             ).await.expect("B1 durable local no-send release proof");
                                             assert_eq!(state, "REJECTED");
                                             assert!(!still_held, "B1 cannot retry a held B risk");
+                                            if outcome["data"]["risk_release_state"] == "NOT_RESERVED" {
+                                                assert!(before_reserve,
+                                                    "B1 must prove no Worker RESERVE attempt before retry");
+                                            }
                                             assert_eq!(
                                                 b_source.outbound_posts.lock().unwrap().len(), 4,
                                                 "B1 local defer cannot replay a venue POST"
