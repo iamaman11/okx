@@ -651,6 +651,20 @@ impl TradeApi {
     pub async fn pending_derivative_risk_algos(
         &self,
     ) -> Result<PendingDerivativeAlgoRiskInventory, OkxError> {
+        // Ordinary callers retain the existing five-second bounded inventory.
+        self.pending_derivative_risk_algos_until(Instant::now() + Duration::from_millis(5_000))
+            .await
+    }
+
+    /// Source-backed admission shares the trade owner's ORIGINAL deadline
+    /// across all 16 authenticated scopes. Do not replace it with an
+    /// internal five-second window: LOCAL/no-send rate admission can otherwise
+    /// reject a fully authorized census before its caller's deadline.
+    /// This grants no venue POST and never retries a sent HTTP request.
+    pub async fn pending_derivative_risk_algos_until(
+        &self,
+        admission_deadline: Instant,
+    ) -> Result<PendingDerivativeAlgoRiskInventory, OkxError> {
         use futures_util::{StreamExt, TryStreamExt, stream};
         let scopes = ["SWAP", "FUTURES"]
             .into_iter()
@@ -665,7 +679,6 @@ impl TradeApi {
         // GETs and parser are used: only local no-send defers can wait.
         // After HELD, the central causal fence still independently limits
         // this read and rejects it if too slow.
-        let admission_deadline = Instant::now() + Duration::from_millis(5_000);
         let calls = scopes
             .into_iter()
             .map(|(kind, order_type)| {
