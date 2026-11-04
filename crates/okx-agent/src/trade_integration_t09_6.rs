@@ -431,6 +431,7 @@ async fn t09_6_status_after_local_read_defer(
     feed: &Arc<crate::accounts::recorded_support::RecordedAccountHttp>,
     intent: &str,
     allowed_new_cancel_posts: usize,
+    phase: &str,
 ) -> serde_json::Value {
     use okx_protocol::trading::TradeRequest;
     assert!(allowed_new_cancel_posts <= 1, "one protective cancel per Status");
@@ -446,7 +447,35 @@ async fn t09_6_status_after_local_read_defer(
             ),
         )
         .await
-        .expect("T09.6 bounded source-backed status");
+        .unwrap_or_else(|_| {
+            // Preserve the first failing Status phase and the actual recorded
+            // I/O frontier. This read-only diagnostic runs only on timeout;
+            // it never extends the deadline, replays a POST or mutates SQL.
+            // Release each transport lock before sampling the next one.
+            let recent_gets = {
+                let requests = feed.requests.lock().unwrap();
+                requests.iter().rev().take(8).cloned().collect::<Vec<_>>()
+            };
+            let denied_routes = {
+                let denied = feed.denied_routes.lock().unwrap();
+                denied.iter().rev().take(8).cloned().collect::<Vec<_>>()
+            };
+            let posts_now = feed.outbound_posts.lock().unwrap().len();
+            let diagnostic = serde_json::json!({
+                "schema":"okx.t09-6-status-timeout/v1",
+                "phase":phase,
+                "intent":intent,
+                "allowed_new_cancel_posts":allowed_new_cancel_posts,
+                "outbound_posts_before":posts_before,
+                "outbound_posts_now":posts_now,
+                "recent_recorded_gets":recent_gets,
+                "denied_recorded_routes":denied_routes,
+                "unconsumed_required_gets":feed.unconsumed_reads(),
+                "public_clock_deliveries":feed.public_clock_deliveries(),
+                "last_private_throttle":format!("{:?}",rate_budget.snapshot().last_throttle),
+            });
+            panic!("T09_6_STATUS_TIMEOUT_V1:{phase}:{diagnostic}");
+        });
         let posts_now = feed.outbound_posts.lock().unwrap().len();
         assert!(
             posts_now >= posts_before && posts_now <= posts_before + allowed_new_cancel_posts,
@@ -524,7 +553,7 @@ async fn t09_6_source_backed_close_release(
         let intent=close["close_intent_id"].as_str()
             .expect("T09.6 real close intent");
         let status=t09_6_status_after_local_read_defer(
-            trade,rate_budget,feed,intent,0
+            trade,rate_budget,feed,intent,0,"CLOSE_TERMINAL_STATUS"
         ).await;
         assert_eq!(status["data"]["intent"]["state"],"FILLED",
             "T09.6 close must be terminal from signed venue GET");
@@ -560,7 +589,7 @@ async fn t09_6_source_backed_close_release(
             feed,cancel_algo,other_stop_live,&second_client_id,&add_client_id
         );
         let status=t09_6_status_after_local_read_defer(
-            trade,rate_budget,feed,intent,1
+            trade,rate_budget,feed,intent,1,"ENTRY_CANCEL_STOP_STATUS"
         ).await;
         assert_eq!(status["data"]["intent"]["state"],"FILLED",
             "T09.6 original entry must remain FILLED after close");
@@ -596,7 +625,7 @@ async fn t09_6_source_backed_close_release(
     for (index, entry) in entry_results.iter_mut().enumerate() {
         let intent=entry["intent_id"].as_str().expect("T09.6 persisted entry id");
         let status=t09_6_status_after_local_read_defer(
-            trade,rate_budget,feed,intent,0
+            trade,rate_budget,feed,intent,0,"POST_CANCEL_RELEASE_STATUS"
         ).await;
         assert_eq!(status["data"]["intent"]["state"],"FILLED",
             "T09.6 the original order remains terminal after both stop cancels");
@@ -687,7 +716,7 @@ async fn t09_6_source_backed_close_release(
         let entry=&mut entry_results[index];
         let intent=entry["intent_id"].as_str().expect("T09.6 pending persisted entry");
         let status=t09_6_status_after_local_read_defer(
-            trade,rate_budget,feed,intent,0
+            trade,rate_budget,feed,intent,0,"POST_PEER_RELEASE_STATUS"
         ).await;
         // On a failed terminal peer RELEASE, retain exact *read-only* raw
         // source accounting in the assertion itself. The parent harness
