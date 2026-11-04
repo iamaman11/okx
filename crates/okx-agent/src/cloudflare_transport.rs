@@ -2277,20 +2277,24 @@ mod raw_native_session_tests {
             assert_eq!(feed.outbound_posts.lock().unwrap().len(), 1,
                 "100 concurrent same-key calls must not emit another POST");
             let saved_id = opened_intent_id.clone();
+            let semantic_key = match &semantic_replay {
+                TradeRequest::Execute { idempotency_key, .. } => idempotency_key.clone(),
+                _ => unreachable!("T10-06 requires original public Execute key"),
+            };
             let owner = accounts.resolve("fixture-a").await.unwrap();
-            let sql = owner.execution.store.call(
+            let (by_id, by_key) = owner.execution.store.call(
                 std::time::Instant::now() + Duration::from_secs(3),
-                move |s| s.by_idempotency("t09_real_public_execute_0001")
-            ).await.expect("T10-06 SQL owner");
-            // The original key may be decorated by an earlier explicitly
-            // rejected local no-send attempt; verify the exact saved intent
-            // by its authenticated ID instead of assuming a key spelling.
-            let persisted = if sql.is_some() { sql } else {
-                owner.execution.store.call(
-                    std::time::Instant::now() + Duration::from_secs(3),
-                    move |s| s.intent(&saved_id)
-                ).await.expect("T10-06 persisted intent")
-            }.expect("T10-06 same original persisted intent");
+                move |s| Ok((
+                    s.intent(&saved_id)?,
+                    s.by_idempotency(&semantic_key)?,
+                ))
+            ).await.expect("T10-06 same account SQL owner");
+            // Do not mistake a previously rejected LOCAL/NOT_STARTED key
+            // for the real ACKed order after a legal explicit-key retry.
+            let persisted = by_id.expect("T10-06 original persisted intent");
+            let keyed = by_key.expect("T10-06 semantic key persisted intent");
+            assert_eq!(keyed.intent_id, persisted.intent_id,
+                "100 same-key public requests must bind to original intent");
             assert_eq!(persisted.intent_id, opened_intent_id);
             assert_eq!(persisted.state, okx_execution::IntentState::Acknowledged);
             println!("T10_06_NATIVE_CONCURRENT_V1:{}", json!({
