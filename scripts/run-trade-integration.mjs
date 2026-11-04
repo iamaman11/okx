@@ -40,6 +40,10 @@ const requiredStagesByCase = new Map([
   ["T09.8", ["public_trade_entered"]],
   ["T09-MA", mandatoryStages.slice(0, 4)],
   ["T09-SPEC", mandatoryStages.slice(0, 4)],
+  ["T10-06", [
+    "public_trade_entered", "reserve_committed", "begin_post_committed",
+    "transport_send_observed", "concurrent_idempotency_reconciled",
+  ]],
   ["T10-14", [
     "public_trade_entered", "a_sql_owner_held", "b_public_status_read",
     "b_exact_venue_cancel_observed", "a_sql_owner_rejoined",
@@ -49,6 +53,13 @@ const requiredStagesByCase = new Map([
 const entryGolden = new Map([["T09.1", "1.0005"]]);
 // Independent immutable acceptance constants from #449 §4, never calculated
 // from the same production finance function under test.
+const concurrentGolden = new Map([["T10-06", new Map([
+  ["concurrent_requests","100"],
+  ["same_intent_or_proven_no_send","100"],
+  ["one_venue_create","1"],
+  ["changed_payload_rejected","IDEMPOTENCY_CONFLICT"],
+  ["no_spurious_worker_debit","0"],
+])]]);
 const terminalGolden = new Map([
   ["T09.6", new Map([
     ["remaining_exposure", "0"], ["orphan_algo_orders", "0"],
@@ -128,6 +139,16 @@ function verified(output, caseId) {
   if (golden && !output.assertions.some(a => a.id === "opening_spent_usd"
       && a.expected === golden && a.actual === golden))
     throw Error(`${failures.invalid}:INDEPENDENT_ENTRY_GOLDEN_MISSING`);
+  const concurrent = concurrentGolden.get(caseId);
+  if (concurrent) {
+    for (const [id, expected] of concurrent) {
+      if (!output.assertions.some(a => a.id === id
+          && a.expected === expected && a.actual === expected))
+        throw Error(`${failures.invalid}:INDEPENDENT_CONCURRENT_GOLDEN_MISSING:${id}`);
+    }
+    if (createCount !== 1)
+      throw Error(`${failures.invalid}:T10_06_SINGLE_SEND_UNVERIFIED`);
+  }
   const terminal = terminalGolden.get(caseId);
   if (terminal) {
     for (const [id, expected] of terminal) {

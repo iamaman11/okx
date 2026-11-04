@@ -2222,6 +2222,20 @@ mod raw_native_session_tests {
         // transmit another venue POST. A definitive independent admission
         // cannot borrow the first worker reservation.
         if std::env::var("OKX_T10_06_CONCURRENT_PROBE").as_deref() == Ok("1") {
+            // The script asks for exactly 100 idempotent public reads. Record
+            // one immutable authenticated order GET per caller, NOT a new
+            // create/fill, and do not let unbounded default pages mask a
+            // missing source. Production ratelimits still apply normally.
+            feed.advance_recorded_route(
+                "fixture-executor-a",
+                "/api/v5/trade/order",
+                (0..100).map(|_| RecordedGet {
+                    access_key: "fixture-executor-a".into(),
+                    path: "/api/v5/trade/order".into(),
+                    required_query: vec![("instId".into(),"BTC-USDT-SWAP".into())],
+                    raw_response: raw_order.clone(),
+                }).collect(),
+            );
             let mut concurrent = tokio::task::JoinSet::new();
             let started = std::time::Instant::now();
             for _ in 0..100 {
