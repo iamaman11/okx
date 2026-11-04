@@ -150,8 +150,6 @@ function verified(output, caseId) {
           && a.expected === expected && a.actual === expected))
         throw Error(`${failures.invalid}:INDEPENDENT_CONCURRENT_GOLDEN_MISSING:${id}`);
     }
-    if (createCount !== 1)
-      throw Error(`${failures.invalid}:T10_06_SINGLE_SEND_UNVERIFIED`);
   }
   const terminal = terminalGolden.get(caseId);
   if (terminal) {
@@ -184,6 +182,11 @@ function verified(output, caseId) {
   const createCount = output.outbound_sends
     .filter(send => send.operation_kind === "create")
     .reduce((count, send) => count + send.count, 0);
+  // This depends on a validated, unique send ledger. Computing it in the
+  // golden-assertions loop above would access createCount before initialization
+  // and turn an otherwise verified T10-06 into a false failure.
+  if (caseId === "T10-06" && createCount !== 1)
+    throw Error(`${failures.invalid}:T10_06_SINGLE_SEND_UNVERIFIED`);
   if (["T09.1", "T09.2", "T09.4", "T09-SPEC"].includes(caseId) && createCount === 0)
     throw Error(`${failures.invalid}:VENUE_CREATE_NOT_OBSERVED`);
   // The two separately owned lots need two real, distinct, reduce-only
@@ -254,6 +257,32 @@ function selfTest() {
   missingMoney.assertions.pop();
   rejectTerminal(missingMoney, "T09.6", "missing_money");
 
+  // Regression: the 100-way public Execute case must be accepted with
+  // exactly one create and must reject a missing or doubled send witness.
+  const concurrentCase = structuredClone(full);
+  concurrentCase.case_id = "T10-06";
+  concurrentCase.assertions = [...concurrentGolden.get("T10-06")].map(
+    ([id, value]) => ({ id, expected: value, actual: value }));
+  concurrentCase.events = [
+    ...mandatoryStages.slice(0, 4).map(stage =>
+      ({ stage, owner: "test_owner", source_digest: digest })),
+    { stage: "concurrent_idempotency_reconciled",
+      owner: "test_owner", source_digest: digest },
+  ];
+  verified(concurrentCase, "T10-06");
+  const noConcurrentSend = structuredClone(concurrentCase);
+  noConcurrentSend.outbound_sends = [];
+  rejectTerminal(noConcurrentSend, "T10-06", "concurrent_missing_create");
+  const doubleConcurrentSend = structuredClone(concurrentCase);
+  doubleConcurrentSend.outbound_sends[0].count = 2;
+  rejectTerminal(doubleConcurrentSend, "T10-06", "concurrent_double_create");
+  const incorrectConcurrentProof = structuredClone(concurrentCase);
+  incorrectConcurrentProof.assertions[1].actual = "99";
+  rejectTerminal(incorrectConcurrentProof, "T10-06", "concurrent_incorrect_count");
+  const missingConcurrentStage = structuredClone(concurrentCase);
+  missingConcurrentStage.events.pop();
+  rejectTerminal(missingConcurrentStage, "T10-06", "concurrent_missing_stage");
+
   const restart = structuredClone(terminalCase);
   restart.case_id = "T09.7";
   restart.assertions = [...terminalGolden.get("T09.7")].map(
@@ -270,7 +299,7 @@ function selfTest() {
   verified(budget, "T09.8");
   budget.assertions[2].actual = "STALE_SOURCE";
   rejectTerminal(budget, "T09.8", "wrong_denial");
-  process.stdout.write(`TRADE_INTEGRATION_RUNNER_SELF_TEST_PASS negatives=${negatives + 5}\n`);
+  process.stdout.write(`TRADE_INTEGRATION_RUNNER_SELF_TEST_PASS negatives=${negatives + 9}\n`);
 }
 const cli = args(process.argv.slice(2));
 if (cli.selfTest) { selfTest(); process.exit(0); }
