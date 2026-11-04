@@ -20,6 +20,19 @@ export async function run({caseId,root,signal}){
   assert.ok(n.sql_revision>0);
   assert.notEqual(n.sql_state,"ACKNOWLEDGED");
   assert.notEqual(n.sql_state,"POSTING");
+  assert.equal(n.sql_state,"REJECTED");
+  assert.equal(n.release_state,"RELEASED");
+  assert.equal(n.sql_unsent_receipt_verified,true);
+  assert.equal(n.sql_release_not_active,true);
+  assert.equal(n.worker_release_verified,true);
+  assert.match(n.sql_reservation_key,/^[^\s]+$/);
+  assert.match(n.sql_plan_hash,/^[a-f0-9]{64}$/);
+  assert.ok(Number.isSafeInteger(n.worker_release_inspect_sequence)
+    && n.worker_release_inspect_sequence>0);
+  assert.equal(n.worker_before.entry_budget.reserved_usd,"7.0015");
+  assert.equal(n.worker_after.entry_budget.reserved_usd,"7.0015");
+  assert.equal(n.worker_after.entry_budget.remaining_usd,"1.998");
+  assert.equal(n.worker_after.entry_budget.consumed_usd,"1.0005");
   assert.equal(n.posts_before,4);
   assert.equal(n.posts_after,4);
   assert.equal(w.posts_for_changed_plan,0);
@@ -30,6 +43,10 @@ export async function run({caseId,root,signal}){
     ["held_source_revision_changed","RuntimeSession/SQLiteDO",
       [n.worker_held_witness,n.signed_changed_fee_digest]],
     ["post_held_proof_rejected","NativeAccountSQL",n.first_denial],
+    ["durable_unsent_release","NativeAccountSQL",
+      [n.sql_reservation_key,n.sql_plan_hash,n.sql_revision]],
+    ["released_reservation_inspected","RuntimeSession/SQLiteDO",
+      [n.sql_reservation_key,n.worker_release_inspect_sequence,n.worker_after]],
     ["fee_change_prevents_stale_post","RecordedAuthenticatedHTTP",n.posts_after],
     ["fresh_plan_revalidated","TradeService",n.new_quote_usd],
   ].map(([stage,owner,source])=>({stage,owner,source_digest:hash(source)}));
@@ -43,11 +60,20 @@ export async function run({caseId,root,signal}){
         actual:String(n.posts_after-n.posts_before)},
       {id:"unchanged_consumed_entry_money",expected:"1.0005",
         actual:w.budget.entry_budget.consumed_usd},
+      {id:"sql_source_backed_release",expected:"RELEASED",
+        actual:n.release_state},
+      {id:"sql_no_active_reservation",expected:"true",
+        actual:String(n.sql_release_not_active)},
+      {id:"worker_reserved_after_source_backed_release",expected:"7.0015",
+        actual:n.worker_after.entry_budget.reserved_usd},
     ],
     events,
     readbacks:{
-      sql:[{revision:n.sql_revision,digest:hash([n.sql_state,n.intent_id])}],
-      risk_book:[{revision:w.risk_book_sequence,digest:hash(w.budget)}],
+      sql:[{revision:n.sql_revision,
+        digest:hash([n.sql_state,n.intent_id,n.sql_reservation_key,n.sql_plan_hash])}],
+      risk_book:[{revision:n.worker_release_inspect_sequence,
+        digest:hash([n.sql_reservation_key,n.worker_after])},
+        {revision:w.risk_book_sequence,digest:hash(w.budget)}],
     },
     outbound_sends:[],
   };
