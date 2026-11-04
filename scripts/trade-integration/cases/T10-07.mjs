@@ -95,6 +95,11 @@ export async function run({ caseId, root, signal, artifactsDir }) {
     both.worker_sequence > 0);
   assert.equal(released.schema, "okx.t10-15-post-held-source-change/v1");
   assert.equal(released.same_campaign_as_native_b1, true);
+  assert.equal(released.account_uid, both.b_account_uid,
+    "released SQL no-send belongs to B's verified account in the Native campaign");
+  assert.notEqual(released.intent_id, both.a_intent_id);
+  assert.notEqual(released.intent_id, both.b_intent_id,
+    "this is a distinct transient Native reservation, not release of B's ACKed order");
   assert.equal(released.old_quote_usd, "0.50025");
   assert.equal(released.new_quote_usd, "0.5003");
   assert.equal(released.release_state, "RELEASED");
@@ -108,12 +113,27 @@ export async function run({ caseId, root, signal, artifactsDir }) {
   assert.equal(released.posts_before, 5);
   assert.equal(released.posts_after, 5);
   assert.equal(released.worker_before.entry_budget.reserved_usd, "8.002");
+  assert.equal(released.worker_before.entry_budget.reserved_usd,
+    both.worker_reserved_usd, "release must observe A/B's same Worker reservations");
+  assert.equal(released.worker_before.entry_budget.consumed_usd,
+    positive.after_budget.entry_budget.consumed_usd);
+  assert.equal(released.worker_before.entry_budget.remaining_usd,
+    positive.after_budget.entry_budget.remaining_usd);
   assert.equal(released.worker_after.entry_budget.reserved_usd, "8.002");
   assert.equal(released.worker_after.entry_budget.remaining_usd, "0.9975");
   assert.equal(released.worker_after.entry_budget.consumed_usd, "1.0005");
   assert.equal(workerRelease.budget.entry_budget.reserved_usd, "8.002");
   assert.equal(workerRelease.budget.entry_budget.remaining_usd, "0.9975");
   assert.equal(workerRelease.risk_book_sequence, released.worker_sequence);
+  assert.equal(released.worker_after.entry_budget.reserved_usd,
+    released.worker_before.entry_budget.reserved_usd,
+    "a transient third release cannot free A or B's live reservation");
+  assert.equal(released.worker_after.entry_budget.consumed_usd,
+    released.worker_before.entry_budget.consumed_usd,
+    "no-send release must not debit financial consumption");
+  assert.equal(released.worker_after.entry_budget.remaining_usd,
+    released.worker_before.entry_budget.remaining_usd,
+    "releasing only the transient reservation leaves A/B headroom unchanged");
   await writeFile(resolve(dir, "native-prerequisite-confirmed.json"),
     JSON.stringify({
       schema: "okx.t10-07-native-checkpoint/v1",
@@ -137,6 +157,9 @@ export async function run({ caseId, root, signal, artifactsDir }) {
       release_worker_sequence: released.worker_release_inspect_sequence,
       release_signed_fee_digest: released.signed_changed_fee_digest,
       release_extra_posts: released.posts_after - released.posts_before,
+      release_native_account_uid: released.account_uid,
+      release_native_intent_id: released.intent_id,
+      release_is_one_of_original_two_held: false,
       after_source_backed_release_budget: released.worker_after,
     }, null, 2) + "\n");
 
