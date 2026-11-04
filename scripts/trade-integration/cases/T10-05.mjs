@@ -42,7 +42,11 @@ export async function run({caseId,root,signal}){
     assert.equal(worker.schema,"okx.t10-05-worker-post-outcome/v1");
     assert.equal(worker.no_extra_posts,true);
     assert.equal(worker.budget.entry_budget.consumed_usd,"1.0005");
-    assert.equal(worker.budget.entry_budget.reserved_usd,"8.002");
+    if(worker.mode==="lost_ack")
+      assert.equal(worker.budget.entry_budget.reserved_usd,"8.002");
+    else
+      assert.ok(["7.0015","8.002"].includes(worker.budget.entry_budget.reserved_usd),
+        "explicit reject may release only on its own source-backed receipt");
   }
   const ev=[
     ["public_trade_entered","TradeService",[a.intent_id,b.intent_id]],

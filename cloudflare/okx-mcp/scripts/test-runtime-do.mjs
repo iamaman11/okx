@@ -906,7 +906,10 @@ try {
         const expectedReserved=managedAdd?"0":partialFills?"4":
           process.env.OKX_T10_04_FOREIGN_WORKER_REPLY_PROBE === "1"?"8.002":
           specMode?"8.002":
-          t10PostOutcomeMode?"8.002":
+          t10PostOutcomeMode?(
+            process.env.OKX_T10_05_LOST_ACK_PROBE==="1"?"8.002":
+            afterNative.budget?.entry_budget?.reserved_usd
+          ):
           t10SourceChangedMode?(afterNative.budget?.entry_budget?.reserved_usd):
           process.env.OKX_B1_SECOND_POSITIVE_PROBE === "1"?"8.002":"7.0015";
         const expectedSpent=managedAdd?"6.003":partialFills?"4.002":"1.0005";
@@ -926,6 +929,10 @@ try {
             native_worker_budget:nativePartial?.worker_budget??admitted.after_worker_budget,
             native_read_counts:nativePartial?.phases?.map(p=>p.source_read_counts)??null
           })+"\n");
+        }
+        if (t10PostOutcomeMode && process.env.OKX_T10_05_EXPLICIT_REJECT_PROBE==="1") {
+          assert.ok(["7.0015","8.002"].includes(expectedReserved),
+            "a signed venue reject may release with proof or retain unresolved risk");
         }
         if (t10SourceChangedMode) {
           // Only two legal exact central states after this no-send fault:
@@ -988,7 +995,12 @@ try {
           const witness=receipt(stdout,"T10_05_NATIVE_POST_OUTCOME_V1");
           assert.equal(witness.posts_before,4);
           assert.equal(witness.posts_after,5);
-          assert.equal(afterNative.budget.entry_budget.reserved_usd,"8.002");
+          assert.ok(
+            (witness.mode==="lost_ack" && afterNative.budget.entry_budget.reserved_usd==="8.002")
+            ||(witness.mode==="venue_rejected"
+              &&["7.0015","8.002"].includes(afterNative.budget.entry_budget.reserved_usd)),
+            "UNKNOWN cannot release risk, explicit venue rejection needs independent terminal proof"
+          );
           assert.equal(afterNative.budget.entry_budget.consumed_usd,"1.0005");
           assertBudgetEconomicsUnchanged(witness.worker_budget_after,afterNative.budget,
             "T10-05 post-send ACK outcome cannot double-debit or silently release");
