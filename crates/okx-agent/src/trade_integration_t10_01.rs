@@ -16,7 +16,6 @@ async fn t10_01_partial_balance_denial_recovery(
     let wrap=|rows:serde_json::Value|serde_json::to_vec(&json!({
         "code":"0","msg":"","data":rows
     })).unwrap();
-    let stamp=chrono::Utc::now().timestamp_millis().to_string();
     let empty=wrap(json!([]));
     let observed_digest=format!("{:x}",sha2::Sha256::digest(&empty));
     let route="/api/v5/account/balance";
@@ -92,6 +91,10 @@ async fn t10_01_partial_balance_denial_recovery(
 
     // Source recovery publishes raw signed venue bytes, not a test-owned
     // AccountSnapshot or a bypass of the production observer parser.
+    // The incomplete-source refusal can consume a bounded real-time
+    // deadline. The recovery uses a newly observed signed exchange stamp,
+    // never a timestamp copied from before the failed attempt.
+    let stamp=chrono::Utc::now().timestamp_millis().to_string();
     let fresh=wrap(json!([{
         "totalEq":"100","adjEq":"100","uTime":stamp,
         "details":[{"ccy":"USDT","eq":"100","liab":"0",
