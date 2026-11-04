@@ -5,6 +5,7 @@
 // source-priced B admission that is denied by the central campaign cap.
 // No test-only risk or SQL mutation and no venue emulator.
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -12,9 +13,43 @@ import { actualNativeWorker } from "./native-workerd.mjs";
 
 const root = fileURLToPath(new URL("../../", import.meta.url));
 process.env.OKX_B1_NATIVE_CAP_PROBE = "1";
-const transcript = await actualNativeWorker(root, AbortSignal.timeout(260_000), {
-  statusProbe: true, secondAdmission: true,
-});
+const artifactArg = process.argv.indexOf("--artifacts");
+const artifactDir = artifactArg >= 0 ? process.argv[artifactArg + 1] : null;
+if (artifactArg >= 0) {
+  assert.ok(artifactDir, "artifacts directory required");
+  await mkdir(artifactDir, { recursive: true });
+}
+let transcript;
+try {
+  transcript = await actualNativeWorker(root, AbortSignal.timeout(260_000), {
+    statusProbe: true, secondAdmission: true,
+  });
+} catch (error) {
+  // Retain a typed, bounded failure even when the nested Rust child exits.
+  // Never persist raw HTTP bytes, authentication or an unredacted stack.
+  if (artifactDir) {
+    const message = String(error?.message ?? "");
+    const detail = error?.b1Diagnostic ?? {};
+    const reasonCode = detail.reason_code ??
+      message.match(/TRANSCRIPT_[A-Z_]+/)?.[0] ??
+      (message.startsWith("B1_POSITIVE_REFUSED:") ? "B1_POSITIVE_REFUSED" : "CHILD_FAILED");
+    const failure = {
+      schema: "okx.b1-native-failure/v1", status: "FAIL",
+      phase: "native_worker", reason_code: reasonCode,
+      source_actor: detail.source_actor ?? null,
+      source_route: detail.source_route ?? null,
+      a_algo_success_reads_total: detail.a_algo_success_reads_total ?? null,
+      a_algo_success_reads_since_positive: detail.a_algo_success_reads_since_positive ?? null,
+      a_algo_scopes: detail.a_algo_scopes ?? null,
+      outbound_posts: detail.outbound_posts ?? null,
+      message_sha256: createHash("sha256").update(message).digest("hex"),
+      commit_sha: process.env.GITHUB_SHA ?? null,
+    };
+    await writeFile(resolve(artifactDir, "b1-native-failure.json"),
+      JSON.stringify(failure, null, 2) + "\n");
+  }
+  throw error;
+}
 const b = transcript.nativeB1Cap;
 const a = transcript.nativeSecondAdmission;
 const positiveMode = process.env.OKX_B1_SECOND_POSITIVE_PROBE === "1";
@@ -87,12 +122,8 @@ const result = {
   a_evidence: { intent_id: a.intent_id, account_uid: a.account_uid },
   transcript_sha256: transcript.transcript_sha256,
 };
-const arg = process.argv.indexOf("--artifacts");
-if (arg >= 0) {
-  const dir = process.argv[arg + 1];
-  assert.ok(dir, "artifacts directory required");
-  await mkdir(dir, { recursive: true });
-  await writeFile(resolve(dir, "b1-native-shared-cap.json"),
+if (artifactDir) {
+  await writeFile(resolve(artifactDir, "b1-native-shared-cap.json"),
     JSON.stringify(result, null, 2) + "\n");
 }
 process.stdout.write(JSON.stringify({
