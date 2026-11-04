@@ -7748,8 +7748,12 @@ async fn blocked_a_sql_owner_does_not_delay_b_cancel_receipt() {
     .await;
     let b_elapsed_ms = b_started.elapsed().as_millis();
     // Release and join A even if B times out; never strand a SQL test worker.
-    block_tx.send(()).expect("A causal hold receiver must remain alive");
-    let a_result = held_a.await.expect("A SQL worker task must join")
+    block_tx
+        .send(())
+        .expect("A causal hold receiver must remain alive");
+    let a_result = held_a
+        .await
+        .expect("A SQL worker task must join")
         .expect("A SQL owner must resume after bounded test gate");
     assert_eq!(a_result, a_key);
     let (b_result, bytes, first, duplicate) = b_result

@@ -4622,17 +4622,53 @@ mod raw_native_session_tests {
                                             let owner = b_accounts_positive.resolve("fixture-b")
                                                 .await.expect("B1 B positive SQL owner");
                                             let sql_key = key.clone();
-                                            let absent = owner.execution.store.call(
-                                                std::time::Instant::now() + Duration::from_secs(3),
-                                                move |s| Ok(
-                                                    s.by_idempotency(&sql_key)?.is_none()
-                                                )
-                                            ).await.expect("B1 no-send SQL precondition");
-                                            assert!(absent, "B1 cannot replay a durable positive intent");
-                                            assert_eq!(
-                                                b_source.outbound_posts.lock().unwrap().len(), 4,
-                                                "local defer cannot replay a B venue POST"
-                                            );
+                                            let (sql_state, held, exchange_id) =
+                                                owner.execution.store.call(
+                                                    std::time::Instant::now() + Duration::from_secs(3),
+                                                    move |s| {
+                                                        if let Some(intent) =
+                                                            s.by_idempotency(&sql_key)?
+                                                        {
+                                                            Ok((
+                                                                Some(intent.state.as_str().to_owned()),
+                                                                s.active_central_receipt(
+                                                                    &intent.intent_id
+                                                                )?.is_some(),
+                                                                intent.exchange_order_id.clone(),
+                                                            ))
+                                                        } else {
+                                                            Ok((None, false, None))
+                                                        }
+                                                    }
+                                                ).await.expect("B1 first no-send SQL readback");
+                                            let venue_posts =
+                                                b_source.outbound_posts.lock().unwrap().len();
+                                            if sql_state.is_some() {
+                                                // A durable intent cannot be replayed by
+                                                // this test under another key. Preserve
+                                                // the first cause without altering SQL,
+                                                // RiskBook, authentication or exchange I/O.
+                                                eprintln!(
+                                                    "B1_B_DURABLE_AFTER_PRIVATE_GET_DEFER_V1:{}",
+                                                    json!({
+                                                        "phase":"B_POSITIVE",
+                                                        "sql_state":sql_state,
+                                                        "central_held":held,
+                                                        "exchange_order_known":exchange_id.is_some(),
+                                                        "outbound_posts":venue_posts,
+                                                        "first_reason_digest":format!("{:x}",
+                                                            Sha256::digest(reason.as_bytes())),
+                                                        "typed_local_private_get":true,
+                                                        "safety_decision":"NO_RETRY"
+                                                    })
+                                                );
+                                                return Err(format!(
+                                                    "B1_DURABLE_INTENT_NO_RETRY:sql={sql_state:?}:held={held}:exchange_id_known={}:venue_posts={venue_posts}",
+                                                    exchange_id.is_some()
+                                                ));
+                                            }
+                                            assert_eq!(venue_posts, 4,
+                                                "local defer cannot replay a B venue POST");
                                             if attempt == 11 || delay > remaining {
                                                 return Err(format!(
                                                     "B1_POSITIVE_PRIVATE_READ_DEADLINE:{reason}"
