@@ -585,6 +585,7 @@ mod raw_native_session_tests {
     include!("trade_integration_t09_4.rs");
     include!("trade_integration_t09_6.rs");
     include!("trade_integration_t10_14.rs");
+    include!("trade_integration_t10_02.rs");
 
     /// Retry permission is test-only and limited to an explicitly read-only
     /// Preview that failed at the *local* request-admission boundary. The
@@ -5289,6 +5290,13 @@ mod raw_native_session_tests {
                         market_tx.send(()).expect("T09.4 signed market reply handoff failed");
                         let add=task.await.expect("T09.4 managed Add native task");
                         println!("T09_4_NATIVE_ADD_BOUND_V1:{add}");
+                        if std::env::var("OKX_T10_02_EXTERNAL_EXPOSURE_PROBE").as_deref()==Ok("1") {
+                            let denied=t10_02_unowned_exposure_denied(
+                                accounts.clone(),trade.clone(),risk.clone(),feed.clone(),
+                                add["intent_id"].as_str().expect("T10-02 managed ID").to_owned()
+                            ).await;
+                            println!("T10_02_NATIVE_UNOWNED_EXPOSURE_V1:{denied}");
+                        }
                         if close_mode {
                             let add_id=add["intent_id"].as_str().expect("T09.6 add intent id").to_owned();
                             let mut closes=Vec::new();
