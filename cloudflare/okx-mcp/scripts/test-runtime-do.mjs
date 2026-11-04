@@ -1248,12 +1248,22 @@ try {
           }));
         } else if (t10SourceChangedMode) {
           const witnessed=receipt(stdout,"T10_15_NATIVE_CAUSAL_SOURCE_V1");
-          assert.equal(witnessed.posts_before,4);
-          assert.equal(witnessed.posts_after,4);
-          assert.equal(witnessed.new_quote_usd,"1.0006");
+          const sameNativeCampaign=process.env.OKX_T10_07_NATIVE_PROBE==="1";
+          const expectedPosts=sameNativeCampaign?5:4;
+          const expectedQuote=sameNativeCampaign?"0.5003":"1.0006";
+          const expectedHeld=sameNativeCampaign?"8.002":"7.0015";
+          const expectedRemaining=sameNativeCampaign?"0.9975":"1.998";
+          assert.equal(witnessed.same_campaign_as_native_b1,sameNativeCampaign);
+          assert.equal(witnessed.release_state,"RELEASED");
+          assert.equal(witnessed.worker_release_verified,true);
+          assert.equal(witnessed.sql_unsent_receipt_verified,true);
+          assert.equal(witnessed.posts_before,expectedPosts);
+          assert.equal(witnessed.posts_after,expectedPosts);
+          assert.equal(witnessed.new_quote_usd,expectedQuote);
           assert.equal(afterNative.budget.entry_budget.consumed_usd,"1.0005");
-          assert.ok(["7.0015","8.002"].includes(afterNative.budget.entry_budget.reserved_usd),
-            "the actual Worker must either retain HELD or accept source-proven UNSENT release");
+          assert.equal(afterNative.budget.entry_budget.reserved_usd,expectedHeld,
+            "source-proven Native release must restore pre-reserve headroom");
+          assert.equal(afterNative.budget.entry_budget.remaining_usd,expectedRemaining);
           console.log("T10_15_WORKER_AFTER_NATIVE_V1:"+JSON.stringify({
             schema:"okx.t10-15-worker-source-change/v1",
             budget:afterNative.budget,
