@@ -123,13 +123,20 @@ async fn t09_spec_second_linear_product(
             let prefix=format!("{actor}:{path}");
             reads.iter().filter(|route|route.starts_with(&prefix)).count()
         };
+        let a_balance=count("fixture-observer-a","/api/v5/account/balance");
+        let b_balance=count("fixture-observer-b","/api/v5/account/balance");
+        let a_config=count("fixture-observer-a","/api/v5/account/config");
+        let b_config=count("fixture-observer-b","/api/v5/account/config");
+        let a_algo=count("fixture-observer-a","/api/v5/trade/orders-algo-pending");
+        let b_algo=count("fixture-observer-b","/api/v5/trade/orders-algo-pending");
+        drop(reads);
         json!({
-            "a_balance":count("fixture-observer-a","/api/v5/account/balance"),
-            "b_balance":count("fixture-observer-b","/api/v5/account/balance"),
-            "a_config":count("fixture-observer-a","/api/v5/account/config"),
-            "b_config":count("fixture-observer-b","/api/v5/account/config"),
-            "a_algo":count("fixture-observer-a","/api/v5/trade/orders-algo-pending"),
-            "b_algo":count("fixture-observer-b","/api/v5/trade/orders-algo-pending"),
+            "a_balance":a_balance,
+            "b_balance":b_balance,
+            "a_config":a_config,
+            "b_config":b_config,
+            "a_algo":a_algo,
+            "b_algo":b_algo,
             "outbound_posts":feed.outbound_posts.lock().unwrap().len()
         })
     };

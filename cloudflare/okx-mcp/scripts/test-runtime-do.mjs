@@ -988,6 +988,33 @@ try {
           }catch { /* Diagnostic must not affect the test oracle. */ }
         }
       }
+
+      // Exact phase-labelled, count-only authenticated GET evidence from the
+      // original T09-SPEC Native process; never forward request bytes/URLs.
+      const specPhases=[...rawChildErrorChannels.matchAll(
+        /T09_SPEC_SOURCE_PHASE_V1:(\{[^\r\n]+\})/g
+      )];
+      for (const item of specPhases.slice(0,8)) {
+        try {
+          const v=JSON.parse(item[1]);
+          if (!["BEFORE_NEGATIVE_PREVIEWS","AFTER_NEGATIVE_PREVIEWS",
+            "AFTER_POSITIVE_PREVIEW","BEFORE_POSITIVE_EXECUTE",
+            "AFTER_POSITIVE_EXECUTE"].includes(v.phase)) continue;
+          const counts=Object.fromEntries(
+            ["a_balance","b_balance","a_config","b_config","a_algo","b_algo",
+             "outbound_posts"].map(k=>[k,
+              Number.isSafeInteger(v.counts?.[k]) && v.counts[k]>=0?v.counts[k]:null])
+          );
+          process.stderr.write("T09_SPEC_SOURCE_PHASE_V1:" + JSON.stringify({
+            phase:v.phase,counts,
+            a_capture_last_success_ms:v.a_capture_last_success_ms??null,
+            a_capture_last_failure_ms:v.a_capture_last_failure_ms??null,
+            a_capture_reason:typeof v.a_capture_reason==="string"
+              && /^[A-Z0-9_]{1,96}$/.test(v.a_capture_reason)
+              ?v.a_capture_reason:null
+          })+"\n");
+        } catch { /* Diagnostic records never change acceptance outcome. */ }
+      }
       // Forward a bounded, source-redacted classification emitted by
       // TradeService at the FIRST failed order readback. The outer Node
       // adapter otherwise surfaces only an uninformative UNKNOWN status.
