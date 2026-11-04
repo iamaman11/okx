@@ -49,3 +49,42 @@ jobs:
         run: |
           cargo test --locked -p okx-agent --lib trade_service::execute::tests::k5_windows_actual_process_kill_f5_f6_ten_times_each -- --exact --nocapture
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Install existing locked workerd test runtime
+        shell: pwsh
+        run: |
+          npm ci --prefix cloudflare/okx-mcp --ignore-scripts --no-audit --no-fund
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: T10-09 signed late-fill first leg (not full acceptance)
+        shell: pwsh
+        timeout-minutes: 8
+        run: |
+          $artifacts = Join-Path $env:RUNNER_TEMP "t10-09-first-leg"
+          node scripts/run-trade-integration.mjs --case T10-09 --artifacts "$artifacts"
+          $exit = $LASTEXITCODE
+          $summaryPath = Join-Path $artifacts "summary.json"
+          $proofPath = Join-Path $artifacts "T10-09/cancel-ack-no-release.json"
+          if (-not (Test-Path -LiteralPath $summaryPath)) {
+            throw "T10_09_SUMMARY_NOT_PERSISTED"
+          }
+          $summary = Get-Content -LiteralPath $summaryPath -Raw | ConvertFrom-Json
+          $reason = [string]$summary.outcomes[0].reason
+          if ($exit -ne 1 -or $reason -ne "T10_09_PARTIAL_CLOSE_PROTECTION_AND_TERMINAL_NOT_PROVEN") {
+            throw "T10_09_FIRST_LEG_NOT_PROVEN:$reason"
+          }
+          if (-not (Test-Path -LiteralPath $proofPath)) {
+            throw "T10_09_NATIVE_SQL_WORKER_PROOF_MISSING"
+          }
+          $proof = Get-Content -LiteralPath $proofPath -Raw | ConvertFrom-Json
+          if ($proof.signed_late_fill_sql.quantity -ne "0.04" -or
+              $proof.signed_late_fill_sql.bill_count -ne 1 -or
+              $proof.signed_late_fill_sql.active_central_receipt -ne $true) {
+            throw "T10_09_SIGNED_ECONOMIC_READBACK_INVALID"
+          }
+          Write-Output "T10_09_SAME_B_CANCEL_LATE_FILL_SQL_WORKER_FIRST_LEG_VERIFIED"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: t10-09-first-leg-${{ github.sha }}
+          path: ${{ runner.temp }}\\t10-09-first-leg
+          if-no-files-found: warn
+          retention-days: 7
