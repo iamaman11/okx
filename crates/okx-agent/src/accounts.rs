@@ -1012,6 +1012,10 @@ pub(crate) mod recorded_support {
         pub(crate) denied_routes: Mutex<Vec<String>>,
         /// (signed account key, exact sent clOrdId, acknowledged ordId).
         acknowledged_creates: Mutex<Vec<(String, String, String)>>,
+        // Test-only lost network ACK AFTER exactly one signed venue create.
+        // The real HTTP request is counted and its authenticated venue
+        // order identity remains available for independent GET reconciliation.
+        lose_next_created_ack: AtomicBool,
         posts: Mutex<Vec<RecordedPost>>,
         reads: Mutex<Vec<RecordedGet>>,
         // Bounded extra recorded GET bytes for read-only Preview retries
@@ -1262,6 +1266,15 @@ pub(crate) mod recorded_support {
 
         pub(crate) fn expect_post(&self, post: RecordedPost) {
             self.posts.lock().unwrap().push(post);
+        }
+
+        pub(crate) fn arm_lost_next_create_ack(&self) {
+            assert!(!self.lose_next_created_ack.swap(true, Ordering::SeqCst),
+                "TRANSCRIPT_ACK_LOSS_ALREADY_ARMED");
+        }
+
+        pub(crate) fn lost_create_ack_was_consumed(&self) -> bool {
+            !self.lose_next_created_ack.load(Ordering::SeqCst)
         }
 
         pub(crate) fn expect_public_clock(&self, raw_response: Vec<u8>) {
@@ -1543,8 +1556,23 @@ pub(crate) mod recorded_support {
                         })?;
                         if rows.len() != 1
                             || rows[0]["clOrdId"].as_str() != client_id.as_deref()
-                            || rows[0]["sCode"].as_str() != Some("0")
                         {
+                            return Err(OkxError::Response("TRANSCRIPT_CREATE_ACK_UNBOUND".into()));
+                        }
+                        // An explicit signed venue rejection is valid raw
+                        // input. Do not invent a successful order ID for it;
+                        // the production PlaceAckVerdict must decide that
+                        // REJECTED is different from an unbound/missing ACK.
+                        if let Some(code) = rows[0]["sCode"].as_str()
+                            && !code.is_empty() && code != "0"
+                        {
+                            return Ok(RawHttpResponse {
+                                status: HttpStatusCode::OK,
+                                headers: Default::default(),
+                                body: response.into_bytes(),
+                            });
+                        }
+                        if rows[0]["sCode"].as_str() != Some("0") {
                             return Err(OkxError::Response("TRANSCRIPT_CREATE_ACK_UNBOUND".into()));
                         }
                         let ord_id = rows[0]["ordId"]
@@ -1560,6 +1588,14 @@ pub(crate) mod recorded_support {
                             })?,
                             ord_id.to_owned(),
                         ));
+                        // The venue ACK was genuine, but its delivery is
+                        // lost after the authenticated create was sent. Never
+                        // replay this POST to "repair" a test connection.
+                        if self.lose_next_created_ack.swap(false, Ordering::SeqCst) {
+                            return Err(OkxError::Response(
+                                "TRANSCRIPT_POST_ACK_LOST_AFTER_SEND".into(),
+                            ));
+                        }
                     }
                     return Ok(RawHttpResponse {
                         status: HttpStatusCode::OK,
