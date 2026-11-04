@@ -94,14 +94,16 @@ async fn t10_09_b_signed_late_fill_after_cancel(
         "posSide":"long","pos":"0.04","mgnMode":"cross",
         "avgPx":"1000","markPx":"1000","uTime":at
     }]));
-    feed.advance_recorded_route(
-        "fixture-observer-b","/api/v5/account/positions",
-        (0..12).map(|_|RecordedGet {
+    // This is B's FIRST signed non-flat position source; there was no
+    // earlier positions route to advance. Keep the first-page registration
+    // strict and finite rather than installing a synthetic fallback.
+    for _ in 0..12 {
+        feed.expect_get(RecordedGet {
             access_key: "fixture-observer-b".into(),
             path: "/api/v5/account/positions".into(),
             required_query: vec![],raw_response:positions.clone(),
-        }).collect()
-    );
+        });
+    }
     let balance = raw(json!([{
         "totalEq":"100","adjEq":"100","uTime":at,
         "details":[{"ccy":"USDT","eq":"100","liab":"0",
