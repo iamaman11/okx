@@ -337,7 +337,29 @@
         let status={
             let deadline=std::time::Instant::now()+Duration::from_secs(15);
             let mut last=serde_json::Value::Null;
+            let mut status_attempts=0_u32;
             loop {
+                // Causal source boundary: the independently signed Add fill,
+                // linked fee bill and both owned position lots have NOW been
+                // durably proven above. The earlier raw /public/time responses
+                // were recorded for admission, before an up-to-16s SQL wait;
+                // reusing their old exchange timestamp for Status violates the
+                // unchanged production clock-offset gate. At each explicitly
+                // requested public Status attempt, record ONE new finite raw
+                // external time reply BEFORE production requests it. No clock
+                // bytes are minted by the HTTP handler or transformed after
+                // delivery; previously delivered observations remain facts.
+                let clock_ms=chrono::Utc::now().timestamp_millis();
+                let retired=feed.advance_recorded_public_clock(envelope(
+                    serde_json::json!([{"ts":clock_ms.to_string()}])
+                ));
+                assert!(retired <= if status_attempts==0 { 9 } else { 1 },
+                    "T09.4 Status source phase may only retire old unused clock replies");
+                status_attempts+=1;
+                eprintln!(
+                    "T09_4_STATUS_CLOCK_SOURCE_PHASE_V1:attempt={} retired={} exchange_ts={} clock_deliveries={}",
+                    status_attempts, retired, clock_ms, feed.public_clock_deliveries()
+                );
                 let answer=tokio::time::timeout_at(deadline.into(),trade.trade(
                     "fixture-a",
                     &okx_protocol::trading::TradeRequest::Status {
