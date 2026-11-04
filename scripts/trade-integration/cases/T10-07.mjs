@@ -59,6 +59,10 @@ export async function run({ caseId, root, signal, artifactsDir }) {
   // request is denied centrally with zero extra venue POST; a smaller B
   // request can then use the remaining shared capacity.
   process.env.OKX_T10_07_NATIVE_PROBE = "1";
+  // Reuse the existing public TradeService fee-change/no-send path inside
+  // this SAME native A/B campaign. This proves an authentic release, but
+  // not yet the distinct Worker three-by-four 8 -> 4 requirement.
+  process.env.OKX_T10_15_POST_HELD_SOURCE_PROBE = "1";
   process.env.OKX_B1_NATIVE_CAP_PROBE = "1";
   process.env.OKX_B1_SECOND_POSITIVE_PROBE = "1";
   process.env.OKX_T09_MA_CONCURRENT_PROBE = "1";
@@ -67,8 +71,10 @@ export async function run({ caseId, root, signal, artifactsDir }) {
   });
   const negative = t.nativeB1Cap, positive = t.nativeB1Positive;
   const both = t.nativeMAConcurrent, persisted = t.workerSecondAdmission;
-  assert.ok(negative && positive && both && persisted,
-    "public Native A/B account SQL and real Worker budget required");
+  const released = t.nativeT10SourceChanged;
+  const workerRelease = t.workerT10SourceChanged;
+  assert.ok(negative && positive && both && persisted && released && workerRelease,
+    "public Native A/B account SQL, Worker budget and true no-send release required");
   assert.equal(t.cohort_execution.reused, false,
     "T10-07 needs an independent Native execution, not T09-MA's cached run");
   assert.equal(negative.denial_origin, "CENTRAL");
@@ -87,10 +93,34 @@ export async function run({ caseId, root, signal, artifactsDir }) {
   assert.equal(positive.outbound_posts_after, 5);
   assert.ok(Number.isSafeInteger(both.worker_sequence) &&
     both.worker_sequence > 0);
+  assert.equal(released.schema, "okx.t10-15-post-held-source-change/v1");
+  assert.equal(released.same_campaign_as_native_b1, true);
+  assert.equal(released.old_quote_usd, "0.50025");
+  assert.equal(released.new_quote_usd, "0.5003");
+  assert.equal(released.release_state, "RELEASED");
+  assert.equal(released.sql_unsent_receipt_verified, true);
+  assert.equal(released.sql_release_not_active, true);
+  assert.equal(released.worker_release_verified, true);
+  assert.equal(released.sql_state, "REJECTED");
+  assert.match(released.sql_plan_hash, /^[0-9a-f]{64}$/);
+  assert.ok(Number.isSafeInteger(released.worker_release_inspect_sequence));
+  assert.ok(released.worker_release_inspect_sequence > both.worker_sequence);
+  assert.equal(released.posts_before, 5);
+  assert.equal(released.posts_after, 5);
+  assert.equal(released.worker_before.entry_budget.reserved_usd, "8.002");
+  assert.equal(released.worker_after.entry_budget.reserved_usd, "8.002");
+  assert.equal(released.worker_after.entry_budget.remaining_usd, "0.9975");
+  assert.equal(released.worker_after.entry_budget.consumed_usd, "1.0005");
+  assert.equal(workerRelease.budget.entry_budget.reserved_usd, "8.002");
+  assert.equal(workerRelease.budget.entry_budget.remaining_usd, "0.9975");
+  assert.equal(workerRelease.risk_book_sequence, released.worker_sequence);
   await writeFile(resolve(dir, "native-prerequisite-confirmed.json"),
     JSON.stringify({
       schema: "okx.t10-07-native-checkpoint/v1",
-      status: "NATIVE_SHARED_CAP_ONLY", source_backed_release: false,
+      status: "NATIVE_SAME_CAMPAIGN_SMALL_RELEASE_ONLY",
+      source_backed_release: true,
+      native_source_backed_release_entry_usd: "0.50025",
+      same_campaign_as_native_a_b: true,
       same_campaign_as_worker_three_by_four: false,
       cohort_transcript_sha256: t.transcript_sha256,
       a_intent_id: both.a_intent_id, b_intent_id: both.b_intent_id,
@@ -101,12 +131,19 @@ export async function run({ caseId, root, signal, artifactsDir }) {
       negative_reason: negative.denial_reason,
       negative_extra_posts: negative.outbound_posts_after -
         negative.outbound_posts_before,
+      release_sql_reservation_key: released.sql_reservation_key,
+      release_sql_plan_hash: released.sql_plan_hash,
+      release_sql_revision: released.sql_revision,
+      release_worker_sequence: released.worker_release_inspect_sequence,
+      release_signed_fee_digest: released.signed_changed_fee_digest,
+      release_extra_posts: released.posts_after - released.posts_before,
+      after_source_backed_release_budget: released.worker_after,
     }, null, 2) + "\n");
 
-  // The two components intentionally use different campaigns. They do NOT
-  // prove that a real Native SQL RELEASE of either 4 USD reservation occurred.
-  // Once the public Native owner implements that SAME-campaign witness, wire
-  // it here, assert 8->4/remaining 6/zero extra POST and return ordered stages,
-  // SQL+Worker revisions, and source digests. Never manufacture a PASS now.
+  // A source-backed Native no-send release is now proved in the real Native
+  // A/B campaign, but for 0.50025 USD. The independent concurrent Worker
+  // three-by-four campaign still has no Native SQL owner for its 4 USD HELD
+  // entries. T10-07 cannot PASS until THOSE reservations and the authentic
+  // 8 -> 4 / remaining 6 witness belong to one production owner and campaign.
   throw Error("T10_07_SAME_CAMPAIGN_NATIVE_SOURCE_BACKED_RELEASE_NOT_PROVEN");
 }
