@@ -47,6 +47,7 @@ const t10PostOutcomeMode=process.env.OKX_T10_05_LOST_ACK_PROBE==="1"
   ||process.env.OKX_T10_05_EXPLICIT_REJECT_PROBE==="1";
 const t10SourceChangedMode=process.env.OKX_T10_15_POST_HELD_SOURCE_PROBE==="1";
 const t10PostReplyLostMode=process.env.OKX_T10_03_POST_AUTH_REPLY_LOST_PROBE==="1";
+const t10SourceRecoveryMode=process.env.OKX_T10_01_PARTIAL_SOURCE_RECOVERY_PROBE==="1";
 if (reserveReplyLossMode && !sharedCapMode)
   throw Error("T10_03_REQUIRES_REAL_PERSISTED_SHARED_CAP_WORKER");
 if (sharedCapMode && (addMode || process.env.OKX_NATIVE_WORKER_INTEGRATION==="1"))
@@ -907,6 +908,7 @@ try {
         const expectedReserved=managedAdd?"0":partialFills?"4":
           process.env.OKX_T10_04_FOREIGN_WORKER_REPLY_PROBE === "1"?"8.002":
           t10PostReplyLostMode?"8.002":
+          t10SourceRecoveryMode?"8.002":
           specMode?"8.002":
           t10PostOutcomeMode?(
             process.env.OKX_T10_05_LOST_ACK_PROBE==="1"?"8.002":
@@ -979,6 +981,23 @@ try {
             assertBudgetEconomicsUnchanged(latestNativeBudget,afterNative.budget,
               "B1 resumed Worker must match Native money after source refresh");
           }
+        } else if (t10SourceRecoveryMode) {
+          const native=receipt(stdout,"T10_01_NATIVE_SOURCE_RECOVERY_V1");
+          assert.equal(native.posts_before,4);
+          assert.equal(native.posts_on_incomplete,4);
+          assert.equal(native.posts_after_recovery,5);
+          assert.equal(native.fresh_sql_state,"ACKNOWLEDGED");
+          assert.equal(afterNative.budget.entry_budget.reserved_usd,"8.002");
+          assert.equal(afterNative.budget.entry_budget.consumed_usd,"1.0005");
+          assertBudgetEconomicsUnchanged(native.worker_budget_after,afterNative.budget,
+            "T10-01 valid recovery must persist exactly one independent B reserve");
+          console.log("T10_01_WORKER_SOURCE_RECOVERY_V1:"+JSON.stringify({
+            schema:"okx.t10-01-worker-source-recovery/v1",
+            budget:afterNative.budget,
+            risk_book_sequence:afterNative.risk_book_sequence,
+            no_post_on_incomplete:native.posts_on_incomplete===native.posts_before,
+            one_post_on_recovered:native.posts_after_recovery-native.posts_before===1,
+          }));
         } else if (t10PostReplyLostMode) {
           const native=receipt(stdout,"T10_03_NATIVE_POST_AUTH_REPLY_LOST_V1");
           assert.equal(native.lost_post_authorization,true);

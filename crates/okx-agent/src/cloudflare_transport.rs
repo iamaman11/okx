@@ -670,6 +670,7 @@ mod raw_native_session_tests {
     include!("trade_integration_t10_05.rs");
     include!("trade_integration_t10_15.rs");
     include!("trade_integration_t10_03.rs");
+    include!("trade_integration_t10_01.rs");
 
     /// Retry permission is test-only and limited to an explicitly read-only
     /// Preview that failed at the *local* request-admission boundary. The
@@ -5281,6 +5282,14 @@ mod raw_native_session_tests {
                             "post_ack_financial_complete":accepted["data"]["financial_complete"]
                         })
                     );
+                    if std::env::var("OKX_T10_01_PARTIAL_SOURCE_RECOVERY_PROBE").as_deref()==Ok("1") {
+                        refresh_recorded_market();
+                        let recovery=t10_01_partial_balance_denial_recovery(
+                            accounts.clone(),trade.clone(),risk.clone(),
+                            feed.clone(),rate_budget.clone()
+                        ).await;
+                        println!("T10_01_NATIVE_SOURCE_RECOVERY_V1:{recovery}");
+                    }
                     if std::env::var("OKX_T10_03_POST_AUTH_REPLY_LOST_PROBE").as_deref()==Ok("1") {
                         refresh_recorded_market();
                         let lost=t10_03_worker_committed_post_reply_lost(
