@@ -236,12 +236,10 @@ impl TradeService {
             return Err("ACCOUNT_SOURCE_GENERATION_UNVERIFIED".into());
         }
         let private_generation = r.private_ws.status().await.connection_generation;
-        let snap = if increase {
-            r.observer.snapshot().await
-        } else {
-            r.observer.snapshot_until(until).await
-        }
-        .map_err(err)?;
+        // One caller-owned read deadline for BOTH admission and read-only
+        // preview. Local/no-send REST admission may wait, but the exact same
+        // authenticated fields and freshness checks below remain mandatory.
+        let snap = r.observer.snapshot_until(until).await.map_err(err)?;
         let received = chrono::DateTime::parse_from_rfc3339(&snap.source_received_at)
             .map_err(err)?
             .timestamp_millis();
@@ -326,7 +324,7 @@ impl TradeService {
             return Err("PROTECTION_INVALID".into());
         }
         let fee_rate = if increase {
-            let fee = r.observer.fee_schedule(&rules).await.map_err(err)?;
+            let fee = r.observer.fee_schedule_until(&rules,until).await.map_err(err)?;
             entry_budget::verified_entry_fee_rate(
                 &fee,
                 instrument,
@@ -379,7 +377,7 @@ impl TradeService {
             }
             let leverage = dec(&r
                 .observer
-                .configured_leverage(instrument, MarginMode::Cross, side_name)
+                .configured_leverage_until(instrument, MarginMode::Cross, side_name, until)
                 .await
                 .map_err(err)?)?;
             if leverage <= Decimal::ZERO

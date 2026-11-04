@@ -687,7 +687,9 @@ mod raw_native_session_tests {
         // Account-facing TradeService may wrap the same typed local no-send
         // refusal as "OKX API error: ...". Strip only this exact envelope;
         // the shared RateBudget witness still decides whether waiting is safe.
-        let reason = reason.strip_prefix("OKX API error: ").unwrap_or(reason);
+        let reason=reason.strip_prefix("OKX API error: ")
+            .or_else(||reason.strip_prefix("OKX private API error: "))
+            .unwrap_or(reason);
         if !reason.starts_with("OKX rate/backpressure defer: ") {
             return None;
         }

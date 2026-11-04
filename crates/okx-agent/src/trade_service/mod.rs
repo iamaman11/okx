@@ -573,6 +573,7 @@ impl TradeService {
                 protection,
             } => {
                 let (a, c) = self.preview_authority(&r, governance).await?;
+                let preview_until=Instant::now()+Duration::from_secs(10);
                 let plan = self
                     .plan(
                         &r,
@@ -584,7 +585,7 @@ impl TradeService {
                         sizing,
                         order,
                         protection.as_ref(),
-                        Instant::now() + Duration::from_secs(10),
+                        preview_until,
                         false,
                     )
                     .await?;
@@ -623,13 +624,15 @@ impl TradeService {
                         .instrument_rules(instrument)
                         .await
                         .ok_or("INSTRUMENT_RULES_UNAVAILABLE")?;
-                    let fees = r.observer.fee_schedule(&rules).await.map_err(err)?;
-                    let source = r.observer.snapshot().await.map_err(err)?;
+                    let fees = r.observer.fee_schedule_until(&rules,preview_until).await.map_err(err)?;
+                    let source = r.observer.snapshot_until(preview_until).await.map_err(err)?;
                     let conversion = Self::usd_conversion(&source)?;
-                    let account = r.execution.account.config().await.map_err(err)?;
+                    let account = r.execution.account.config_wait(
+                        preview_until.saturating_duration_since(Instant::now())
+                    ).await.map_err(err)?;
                     let leverage = dec(&r
                         .observer
-                        .configured_leverage(
+                        .configured_leverage_until(
                             instrument,
                             okx_api::MarginMode::Cross,
                             if plan.position_side == "long" {
@@ -637,6 +640,7 @@ impl TradeService {
                             } else {
                                 "short"
                             },
+                            preview_until,
                         )
                         .await
                         .map_err(err)?)?;
@@ -712,7 +716,7 @@ impl TradeService {
                 // The Observer's ordinary positions/orders are distinct from
                 // pending algos, open UNKNOWN intents and central reservations.
                 // Never equate zero ordinary rows with a proved flat account.
-                let exposure = r.observer.snapshot().await.map_err(err)?;
+                let exposure = r.observer.snapshot_until(preview_until).await.map_err(err)?;
                 let exposure_fresh =
                     chrono::DateTime::parse_from_rfc3339(&exposure.source_received_at)
                         .ok()
