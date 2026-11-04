@@ -1084,6 +1084,37 @@ pub(crate) mod recorded_support {
             retired
         }
 
+        /// Explicitly finish a cancel-dependent inventory only AFTER its
+        /// matching authenticated cancel ACK. Otherwise an old immutable
+        /// after-ACK page would shadow the next separately recorded inventory
+        /// forever, even after the new fill/SQL projection was proven. This
+        /// changes only the test transport's source phase, never exchange,
+        /// SQL, RiskBook or production source freshness.
+        pub(crate) fn retire_acked_causal_algo_inventory(&self, account: &str) {
+            let mut active = self.causal_algos.lock().unwrap();
+            let phase = active
+                .as_ref()
+                .expect("TRANSCRIPT_ALGO_PHASE_MISSING_AT_RETIRE");
+            assert_eq!(
+                phase.account.as_str(), account,
+                "TRANSCRIPT_ALGO_PHASE_CROSS_ACCOUNT_RETIRE"
+            );
+            assert!(
+                phase.acked,
+                "TRANSCRIPT_ALGO_PHASE_RETIRED_BEFORE_MATCHING_CANCEL_ACK"
+            );
+            assert!(
+                phase.held_read.is_none(),
+                "TRANSCRIPT_ALGO_PHASE_RETIRED_WITH_UNRESOLVED_BARRIER"
+            );
+            let cancel_id = phase.cancel_id.clone();
+            *active = None;
+            drop(active);
+            self.causal_algo_trace.lock().unwrap().push(format!(
+                "event=INVENTORY_PHASE_RETIRED actor={account} cancel_id={cancel_id} evidence=CANCEL_ACK"
+            ));
+        }
+
         /// Script the two immutable signed inventories for exactly one cancel.
         /// The ACK in the real HTTP send path changes their visibility.
         /// Replacing an unacknowledged transition is forbidden.

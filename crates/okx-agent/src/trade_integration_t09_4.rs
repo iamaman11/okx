@@ -325,6 +325,12 @@
                 required_query:vec![],raw_response:positions.clone(),
             }).collect()
         );
+        // The previous cancel-linked HTTP inventory has served its
+        // after-ACK phase. Only after immutable fills/bills and both SQL
+        // lots above are verified may this new two-stop venue observation
+        // supersede it. Without retirement the old causal overlay shadows
+        // this signed route regardless of how many pages are queued.
+        feed.retire_acked_causal_algo_inventory("fixture-observer-a");
         feed.advance_recorded_route(
             "fixture-observer-a","/api/v5/trade/orders-algo-pending",pending
         );
