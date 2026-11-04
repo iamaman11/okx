@@ -21,11 +21,44 @@ async fn t10_01_partial_balance_denial_recovery(
     let route="/api/v5/account/balance";
     // An exchange response with an empty data array is INCOMPLETE, not
     // "zero margin". It must never be promoted to a valid account state.
-    feed.advance_recorded_route("fixture-observer-b",route,
-        (0..20).map(|_|RecordedGet {
-            access_key:"fixture-observer-b".into(),path:route.into(),
-            required_query:vec![],raw_response:empty.clone(),
-        }).collect());
+    // B has no prior authenticated REST balance transcript in this
+    // baseline. Register its FIRST finite source rather than pretending
+    // that a phase already exists; a later actual source change uses advance.
+    for page in (0..20).map(|_|RecordedGet {
+        access_key:"fixture-observer-b".into(),path:route.into(),
+        required_query:vec![],raw_response:empty.clone(),
+    }) {
+        feed.expect_get(page);
+    }
+    let initial_ts=chrono::Utc::now().timestamp_millis().to_string();
+    let initial_fee=wrap(json!([{
+        "instType":"SWAP","level":"Lv1","ts":initial_ts,
+        "feeGroup":[{"groupId":"4","maker":"0.0005","taker":"0.0005"}]
+    }]));
+    for page in (0..12).map(|_|RecordedGet {
+        access_key:"fixture-observer-b".into(),
+        path:"/api/v5/account/trade-fee".into(),
+        required_query:vec![
+            ("instType".into(),"SWAP".into()),
+            ("instFamily".into(),"BTC-USDT".into()),
+        ],raw_response:initial_fee.clone()
+    }) {
+        feed.expect_get(page);
+    }
+    let leverage=wrap(json!([
+        {"instId":"BTC-USDT-SWAP","mgnMode":"cross","posSide":"long","lever":"2"},
+        {"instId":"BTC-USDT-SWAP","mgnMode":"cross","posSide":"short","lever":"2"}
+    ]));
+    for page in (0..12).map(|_|RecordedGet {
+        access_key:"fixture-observer-b".into(),
+        path:"/api/v5/account/leverage-info".into(),
+        required_query:vec![
+            ("instId".into(),"BTC-USDT-SWAP".into()),
+            ("mgnMode".into(),"cross".into()),
+        ],raw_response:leverage.clone()
+    }) {
+        feed.expect_get(page);
+    }
     let request=|id:&str|TradeRequest::Execute {
         idempotency_key:id.into(),operation:TradeOperation::Open,
         strategy_instance:"manual".into(),instrument:"BTC-USDT-SWAP".into(),

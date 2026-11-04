@@ -31,28 +31,54 @@ async fn t10_15_fee_source_after_worker_held(
         "details":[{"ccy":"USDT","eq":"100","liab":"0",
             "availEq":"100","availBal":"100","eqUsd":"100","uTime":stamp}]
     }]));
-    feed.advance_recorded_route("fixture-observer-b","/api/v5/account/balance",
-        (0..16).map(|_|RecordedGet{
-            access_key:"fixture-observer-b".into(),
-            path:"/api/v5/account/balance".into(),
-            required_query:vec![],raw_response:balance.clone(),
-        }).collect()
-    );
+    let balance_pages=(0..16).map(|_|RecordedGet{
+        access_key:"fixture-observer-b".into(),
+        path:"/api/v5/account/balance".into(),
+        required_query:vec![],raw_response:balance.clone(),
+    }).collect::<Vec<_>>();
+    if shared_b1 {
+        // B1 previously installed this route in the SAME Native campaign.
+        feed.advance_recorded_route("fixture-observer-b",
+            "/api/v5/account/balance",balance_pages);
+    } else {
+        // B's first REST source: no earlier phase may be retired.
+        for page in balance_pages { feed.expect_get(page); }
+    }
     let fee=|rate:&str,at:&str|wrap(serde_json::json!([{
         "instType":"SWAP","level":"Lv1","ts":at,
         "feeGroup":[{"groupId":"4","maker":rate,"taker":rate}]
     }]));
     let initial=fee("0.0005",&stamp);
-    feed.advance_recorded_route("fixture-observer-b","/api/v5/account/trade-fee",
-        (0..12).map(|_|RecordedGet{
+    let fee_pages=(0..12).map(|_|RecordedGet{
+        access_key:"fixture-observer-b".into(),
+        path:"/api/v5/account/trade-fee".into(),
+        required_query:vec![
+            ("instType".into(),"SWAP".into()),
+            ("instFamily".into(),"BTC-USDT".into()),
+        ],raw_response:initial.clone(),
+    }).collect::<Vec<_>>();
+    if shared_b1 {
+        feed.advance_recorded_route("fixture-observer-b",
+            "/api/v5/account/trade-fee",fee_pages);
+    } else {
+        for page in fee_pages { feed.expect_get(page); }
+        // A distinct signed leverage source is required for the first
+        // B public Preview; no default leverage may authorize risk.
+        let leverage=wrap(serde_json::json!([
+            {"instId":"BTC-USDT-SWAP","mgnMode":"cross","posSide":"long","lever":"2"},
+            {"instId":"BTC-USDT-SWAP","mgnMode":"cross","posSide":"short","lever":"2"}
+        ]));
+        for page in (0..12).map(|_|RecordedGet {
             access_key:"fixture-observer-b".into(),
-            path:"/api/v5/account/trade-fee".into(),
+            path:"/api/v5/account/leverage-info".into(),
             required_query:vec![
-                ("instType".into(),"SWAP".into()),
-                ("instFamily".into(),"BTC-USDT".into()),
-            ],raw_response:initial.clone(),
-        }).collect()
-    );
+                ("instId".into(),"BTC-USDT-SWAP".into()),
+                ("mgnMode".into(),"cross".into()),
+            ],raw_response:leverage.clone()
+        }) {
+            feed.expect_get(page);
+        }
+    }
     feed.advance_recorded_public_clock(
         wrap(serde_json::json!([{"ts":stamp}]))
     );
