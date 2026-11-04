@@ -47,6 +47,11 @@ export async function run({caseId,root,signal,artifactsDir}) {
   assert.equal(late.sql.bill_count,1);
   assert.equal(late.sql.verified_fee_usdt,"0.0002");
   assert.equal(late.sql.active_central_receipt,true);
+  // Independent economics: fill0.04 × multiplier0.01 × price1000
+  // plus signed fee0.0002 transfers 0.4002 from held to consumed.
+  assert.equal(late.worker_budget.entry_budget.consumed_usd,"1.4007");
+  assert.equal(late.worker_budget.entry_budget.reserved_usd,"7.6018");
+  assert.equal(late.worker_budget.entry_budget.remaining_usd,"0.9975");
   assert.equal(late.posts_before,6);
   assert.equal(late.posts_after,6);
   assert.ok(Number.isSafeInteger(late.sql.sql_revision)&&late.sql.sql_revision>0);

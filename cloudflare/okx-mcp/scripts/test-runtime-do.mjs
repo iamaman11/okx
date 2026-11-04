@@ -1184,7 +1184,18 @@ try {
         assert.equal(admitted.quote_entry_usd, "3.0015");
         assert.equal(admitted.preview_reserved_entry_usd, managedAdd ? "0" : "4",
           "clean managed-Add acceptance cohort excludes T09.0 component reservations");
+        // The signed B late fill transfers 0.4002 from HELD to consumed:
+        // 0.04 contracts × 0.01 BTC × 1000 USD + 0.0002 signed fee.
+        // The campaign limit/remaining does not change on Cancel ACK.
+        const t10LateFillMode=process.env.OKX_T10_09_LATE_FILL_PROBE === "1";
+        if (t10LateFillMode) {
+          assert.equal(process.env.OKX_B1_NATIVE_CAP_PROBE,"1",
+            "T10-09 must use the same real A/B Native campaign");
+          assert.equal(process.env.OKX_B1_SECOND_POSITIVE_PROBE,"1",
+            "T10-09 must source B's accepted Native SQL intent");
+        }
         const expectedReserved=managedAdd?"0":partialFills?"4":
+          t10LateFillMode?"7.6018":
           process.env.OKX_T10_04_FOREIGN_WORKER_REPLY_PROBE === "1"?"8.002":
           t10PostReplyLostMode?"8.002":
           t10SourceRecoveryMode?"8.002":
@@ -1195,7 +1206,8 @@ try {
           ):
           t10SourceChangedMode?(afterNative.budget?.entry_budget?.reserved_usd):
           process.env.OKX_B1_SECOND_POSITIVE_PROBE === "1"?"8.002":"7.0015";
-        const expectedSpent=managedAdd?"6.003":partialFills?"4.002":"1.0005";
+        const expectedSpent=t10LateFillMode?"1.4007":
+          managedAdd?"6.003":partialFills?"4.002":"1.0005";
         if(afterNative.budget?.entry_budget?.reserved_usd!==expectedReserved
           ||afterNative.budget?.entry_budget?.consumed_usd!==expectedSpent){
           // Only numeric Worker/Native receipts. Never dump WSS frames,
@@ -1254,8 +1266,33 @@ try {
             assert.equal(acceptedB.b_sql_reserve_held,true);
             assert.equal(acceptedB.outbound_posts_after,5);
             assert.equal(acceptedB.after_budget.entry_budget.reserved_usd,"8.002");
-            assertBudgetEconomicsUnchanged(acceptedB.after_budget,afterNative.budget,
-              "B1 A+B public accepted Native money equals persisted Worker");
+            if (t10LateFillMode) {
+              const late=receipt(stdout,"T10_09_NATIVE_LATE_B_FILL_V1");
+              assert.equal(late.schema,"okx.t10-09-late-signed-b-fill/v1");
+              assert.equal(late.after_cancel_ack,true);
+              assert.equal(late.signed_fill_and_bill_ingested_by_native_sql,true);
+              assert.equal(late.sql.quantity,"0.04");
+              assert.equal(late.sql.fill_count,1);
+              assert.equal(late.sql.bill_count,1);
+              assert.equal(late.sql.verified_fee_usdt,"0.0002");
+              assert.equal(late.sql.active_central_receipt,true);
+              assert.equal(late.posts_before,6);
+              assert.equal(late.posts_after,6);
+              const before=acceptedB.after_budget.entry_budget;
+              const after=afterNative.budget.entry_budget;
+              assert.equal(before.consumed_usd,"1.0005");
+              assert.equal(before.reserved_usd,"8.002");
+              assert.equal(after.consumed_usd,"1.4007");
+              assert.equal(after.reserved_usd,"7.6018");
+              assert.equal(after.remaining_usd,before.remaining_usd,
+                "Cancel ACK plus late fill cannot replenish campaign capacity");
+              assert.equal(after.limit_usd,before.limit_usd);
+              assertBudgetEconomicsUnchanged(late.worker_budget,afterNative.budget,
+                "T10-09 signed B fill must match persisted Worker money");
+            } else {
+              assertBudgetEconomicsUnchanged(acceptedB.after_budget,afterNative.budget,
+                "B1 A+B public accepted Native money equals persisted Worker");
+            }
           } else {
             assertBudgetEconomicsUnchanged(latestNativeBudget,afterNative.budget,
               "B1 resumed Worker must match Native money after source refresh");
@@ -1353,25 +1390,8 @@ try {
             account_b:spec.account_uid,
             venue_new_posts:spec.posts_after-spec.posts_before,
           }));
-        } else if (process.env.OKX_T10_09_LATE_FILL_PROBE === "1") {
-          // Signed venue fill and linked bill were captured through the SAME
-          // B Native SQLite owner after the real public Cancel ACK. Worker
-          // may settle cumulative entry spend, but cannot release B risk.
-          const late=receipt(stdout,"T10_09_NATIVE_LATE_B_FILL_V1");
-          assert.equal(late.schema,"okx.t10-09-late-signed-b-fill/v1");
-          assert.equal(late.after_cancel_ack,true);
-          assert.equal(late.signed_fill_and_bill_ingested_by_native_sql,true);
-          assert.equal(late.sql.quantity,"0.04");
-          assert.equal(late.sql.fill_count,1);
-          assert.equal(late.sql.bill_count,1);
-          assert.equal(late.sql.verified_fee_usdt,"0.0002");
-          assert.equal(late.sql.active_central_receipt,true);
-          assert.equal(late.posts_before,6);
-          assert.equal(late.posts_after,6);
-          assertBudgetEconomicsUnchanged(late.worker_budget,afterNative.budget,
-            "late signed B fill must be the same persisted Worker campaign");
-          assert.notEqual(afterNative.budget.entry_budget.reserved_usd,"0",
-            "cancel ACK cannot release the filled B risk");
+        } else if (t10LateFillMode) {
+          throw Error("T10_09_UNSCOPED_NATIVE_B_CAMPAIGN");
         } else if (process.env.OKX_T10_04_FOREIGN_WORKER_REPLY_PROBE === "1") {
           const blocked=receipt(stdout,"T10_04_NATIVE_FOREIGN_WORKER_REPLY_V1");
           assert.equal(blocked.posts_before,4);
