@@ -958,9 +958,20 @@ try {
           assert.equal(afterNative.budget.entry_budget.reserved_usd,"8.002",
             "real Worker HELD survives corrupt delivery, Native did not POST");
           assert.equal(afterNative.budget.entry_budget.consumed_usd,"1.0005");
-          assert.equal(afterNative.budget.reserved_loss_usd,
-            blocked.worker_budget_before.reserved_loss_usd === "0" ? "0"
-              : afterNative.budget.reserved_loss_usd);
+          // Compare central monetary reservations as exact fixed-scale
+          // integers. A mismatched Native reply cannot release previously
+          // held risk or hide the new authoritative Worker HELD.
+          const riskUnits = (value) => {
+            assert.match(value,/^(0|[1-9][0-9]*)(?:\\.[0-9]{1,9})?$/);
+            const [whole,fraction=""] = value.split(".");
+            return BigInt(whole)*1_000_000_000n+
+              BigInt(fraction.padEnd(9,"0"));
+          };
+          assert.ok(
+            riskUnits(afterNative.budget.reserved_loss_usd) >=
+              riskUnits(blocked.worker_budget_before.reserved_loss_usd),
+            "Native must not report a fabricated release after foreign Worker command"
+          );
           console.log("T10_04_WORKER_FOREIGN_REPLY_V1:"+JSON.stringify({
             schema:"okx.t10-04-worker-post-commit-binding/v1",
             committed_worker_budget:afterNative.budget,
