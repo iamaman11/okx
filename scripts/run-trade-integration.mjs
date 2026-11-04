@@ -48,6 +48,73 @@ const requiredStagesByCase = new Map([
     "public_trade_entered", "reserve_committed", "begin_post_committed",
     "transport_send_observed", "concurrent_idempotency_reconciled",
   ]],
+  // These are mandatory per-case causal witnesses, not credit for merely
+  // having a JS case file. The future Native/Worker cases must report their
+  // own owner/readback/send evidence in this order; missing stages stay RED.
+  ["T10-01", [
+    "public_trade_entered", "stale_source_before_admission_denied",
+    "stale_source_after_held_denied", "source_denials_no_venue_send",
+    "fresh_source_recovery_verified",
+  ]],
+  ["T10-02", [
+    "managed_exposure_positive_admitted", "external_or_unowned_exposure_observed",
+    "unknown_exposure_denied", "sql_worker_exposure_unchanged",
+  ]],
+  ["T10-03", [
+    "public_trade_entered", "worker_reply_lost_after_durable_commit",
+    "same_reservation_inspected", "no_duplicate_grant_or_send",
+    "pending_risk_reconciled",
+  ]],
+  ["T10-04", [
+    "public_trade_entered", "foreign_worker_reply_injected",
+    "binding_error_observed", "sql_worker_no_mutation",
+    "zero_venue_create_verified",
+  ]],
+  ["T10-05", [
+    "public_trade_entered", "venue_send_observed",
+    "venue_ack_lost_or_unbound", "unknown_without_resubmit",
+    "same_client_order_readback_verified", "explicit_venue_reject_distinguished",
+  ]],
+  ["T10-07", [
+    "public_trade_entered", "two_independent_held_reserves",
+    "third_central_denial_without_post", "one_reservation_released",
+    "shared_worker_cap_reconciled",
+  ]],
+  ["T10-08", [
+    "partial_fill_ingested", "protection_failure_source_observed",
+    "new_risk_fenced", "bounded_protective_attempt_observed",
+    "late_fill_financial_reconciled",
+  ]],
+  ["T10-09", [
+    "cancel_ack_observed", "risk_not_released_on_ack",
+    "late_fill_ingested", "partial_close_recorded",
+    "remaining_position_and_protection_verified",
+  ]],
+  ["T10-10", [
+    "duplicate_fill_and_bill_replayed", "single_economic_debit_verified",
+    "late_fee_or_rebate_ingested", "settlement_revision_replayed",
+    "fee_upper_breach_or_pending_verified",
+  ]],
+  ["T10-11", [
+    "native_crash_f0_through_f8_repeated", "native_process_restarts_verified",
+    "durable_sql_worker_readbacks", "no_duplicate_post_or_finance",
+    "unresolved_outcome_not_fabricated",
+  ]],
+  ["T10-12", [
+    "worker_committed_before_kill", "worker_process_terminated",
+    "worker_new_generation_recovered", "stale_reply_denied",
+    "single_risk_mutation_verified",
+  ]],
+  ["T10-13", [
+    "stop_before_claim_ack", "post_stop_new_claims_denied",
+    "stop_after_fill_applied", "safe_reduce_or_cancel_attempted",
+    "stale_reduction_blocker_verified",
+  ]],
+  ["T10-15", [
+    "preview_source_snapshot", "held_source_revision_changed",
+    "post_held_proof_rejected", "policy_change_prevents_stale_post",
+    "fresh_plan_revalidated",
+  ]],
   ["T10-14", [
     "public_trade_entered", "a_sql_owner_held", "b_public_status_read",
     "b_exact_venue_cancel_observed", "a_sql_owner_rejoined",
@@ -196,7 +263,10 @@ function verified(output, caseId) {
   // Recovery is not a license to replay an already-sent order.
   if (caseId === "T09.7" && createCount !== 0)
     throw Error(`${failures.invalid}:RESTART_REPOST_OBSERVED`);
-  if (["T09.8", "T10-01", "T10-04"].includes(caseId) && createCount !== 0)
+  // T10-01 must prove zero sends during stale/HELD denials, but may later
+  // admit a freshly revalidated request; a blanket zero-send check would
+  // incorrectly forbid the required positive recovery half.
+  if (["T09.8", "T10-03", "T10-04"].includes(caseId) && createCount !== 0)
     throw Error(`${failures.invalid}:FORBIDDEN_VENUE_CREATE`);
   return output;
 }
