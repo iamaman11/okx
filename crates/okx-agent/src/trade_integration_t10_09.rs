@@ -229,8 +229,33 @@ async fn t10_09_b_signed_late_fill_after_cancel(
     assert_eq!(status["data"]["intent"]["intent_id"],intent_id);
     assert_ne!(status["data"]["intent"]["state"],"CANCELLED",
         "a cancel acknowledgement cannot suppress the late venue fill");
+    // Read-only fail evidence: classify a possible post-cancel protective
+    // action by the exact signed route and operation IDs. Do not permit an
+    // extra create, suppress a cancellation, or pre-label a POST as safe.
+    let unexpected_posts = {
+        let sent = feed.outbound_posts.lock().unwrap();
+        sent.iter().skip(posts_before)
+            .map(|(actor, route, body)| json!({
+                "account_actor": actor,
+                "route": route,
+                "client_order_id": body.get("clOrdId"),
+                "algo_ids": body.as_array().map(|orders| orders.iter()
+                    .filter_map(|order| order.get("algoId"))
+                    .collect::<Vec<_>>()),
+            }))
+            .collect::<Vec<_>>()
+    };
     let posts_after = feed.outbound_posts.lock().unwrap().len();
-    assert_eq!(posts_after,posts_before,"late fill cannot create venue POST");
+    assert_eq!(posts_after,posts_before,
+        "T10_09_POST_CANCEL_LATE_FILL_MUTATION_V1:{}",
+        json!({
+            "before":posts_before,"after":posts_after,
+            "unexpected_posts":unexpected_posts,
+            "public_status_state":status["data"]["intent"]["state"],
+            "protection_incident":status["data"]["protection_incident"],
+            "protection":status["data"]["protection"],
+            "financial_error":status["data"]["financial_error"],
+        }));
     let mut cmd = summary("risk_t10_09_after_signed_late_b_fill");
     cmd.installation_id="installation_test".into();
     let worker = risk.request(cmd).await.expect("T10-09 real Worker readback");
