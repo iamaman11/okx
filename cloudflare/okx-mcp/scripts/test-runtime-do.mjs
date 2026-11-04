@@ -962,7 +962,7 @@ try {
           // integers. A mismatched Native reply cannot release previously
           // held risk or hide the new authoritative Worker HELD.
           const riskUnits = (value) => {
-            assert.match(value,/^(0|[1-9][0-9]*)(?:\\.[0-9]{1,9})?$/);
+            assert.match(value,/^(0|[1-9][0-9]*)(?:\.[0-9]{1,9})?$/);
             const [whole,fraction=""] = value.split(".");
             return BigInt(whole)*1_000_000_000n+
               BigInt(fraction.padEnd(9,"0"));
