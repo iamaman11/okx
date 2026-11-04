@@ -672,6 +672,7 @@ mod raw_native_session_tests {
     include!("trade_integration_t10_03.rs");
     include!("trade_integration_t10_01.rs");
     include!("trade_integration_t10_13.rs");
+    include!("trade_integration_t10_09.rs");
     include!("trade_integration_t10_10.rs");
 
     /// Retry permission is test-only and limited to an explicitly read-only
@@ -5263,9 +5264,16 @@ mod raw_native_session_tests {
                                     .as_str().expect("T10-14 B client ID").to_owned();
                                 let isolation = t10_14_b_public_cancel_while_a_sql_held(
                                     accounts.clone(), trade.clone(), risk.clone(), feed.clone(),
-                                    intent_b.clone(), client_b,
+                                    intent_b.clone(), client_b.clone(),
                                 ).await;
                                 println!("T10_14_NATIVE_ISOLATION_V1:{isolation}");
+                                if std::env::var("OKX_T10_09_LATE_FILL_PROBE").as_deref()==Ok("1") {
+                                    let late = t10_09_b_signed_late_fill_after_cancel(
+                                        accounts.clone(), trade.clone(), risk.clone(), feed.clone(),
+                                        intent_b.clone(), client_b,
+                                    ).await;
+                                    println!("T10_09_NATIVE_LATE_B_FILL_V1:{late}");
+                                }
                             }
                         }
                     }
