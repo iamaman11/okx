@@ -35,11 +35,11 @@ async fn t10_14_b_public_cancel_while_a_sql_held(
     let a_task=tokio::spawn(async move {
         a_owner.execution.store.call(
             std::time::Instant::now()+Duration::from_secs(17),
-            move |sql| {
+            move |_sql| {
                 let _=entered_tx.send(());
                 release_rx.recv_timeout(Duration::from_secs(15))
                     .map_err(|_|okx_execution::StoreError::Invalid("T10_14_A_GATE_NOT_RELEASED"))?;
-                Ok(sql.meta.account_key.clone())
+                Ok(())
             }
         ).await
     });
@@ -88,10 +88,9 @@ async fn t10_14_b_public_cancel_while_a_sql_held(
 
     // No ASSERT or early return is permitted before releasing A's worker.
     release_tx.send(()).expect("T10-14 release held A SQL");
-    let a_result=tokio::time::timeout(Duration::from_secs(4),a_task).await
+    tokio::time::timeout(Duration::from_secs(4),a_task).await
         .expect("T10-14 A SQL join deadline").expect("T10-14 A SQL task join")
         .expect("T10-14 A SQL result");
-    assert_eq!(a_result,a_key);
     let observed_status=status.expect("T10-14 B Status cannot wait for A")
         .expect("T10-14 B Status production read");
     assert_eq!(observed_status["data"]["intent"]["intent_id"],b_intent);

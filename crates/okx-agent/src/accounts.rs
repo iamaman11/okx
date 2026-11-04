@@ -1447,7 +1447,9 @@ pub(crate) mod recorded_support {
                             || parsed["data"][0]["sCode"] != "0"
                             || parsed["data"][0]["ordId"].as_str().is_none()
                         {
-                            return Err(OkxError::Response("TRANSCRIPT_CANCEL_ORDER_ACK_UNBOUND".into()));
+                            return Err(OkxError::Response(
+                                "TRANSCRIPT_CANCEL_ORDER_ACK_UNBOUND".into(),
+                            ));
                         }
                         // An authenticated cancel ACK is NOT terminal proof.
                     }
