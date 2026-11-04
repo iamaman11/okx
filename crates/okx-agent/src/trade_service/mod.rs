@@ -630,7 +630,6 @@ impl TradeService {
                         .instrument_rules(instrument)
                         .await
                         .ok_or("INSTRUMENT_RULES_UNAVAILABLE")?;
-                    let fees = r.observer.fee_schedule_until(&rules,preview_until).await.map_err(err)?;
                     let source = r.observer.snapshot_until(preview_until).await.map_err(err)?;
                     let conversion = Self::usd_conversion(&source)?;
                     let account = r.execution.account.config_wait(
@@ -650,6 +649,14 @@ impl TradeService {
                         )
                         .await
                         .map_err(err)?)?;
+                    // Fetch the independent signed tariff after slower
+                    // snapshot/config/leverage reads. Its original exchange
+                    // timestamp freshness bound is enforced by assess_order.
+                    // Preview remains read-only and grants no POST permission.
+                    let fees = r.observer
+                        .fee_schedule_until(&rules, preview_until)
+                        .await
+                        .map_err(err)?;
                     let (proof, fee_rate) = entry_budget::assess_order(
                         &plan,
                         entry_budget::EntryAssessmentSources {

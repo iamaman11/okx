@@ -1847,31 +1847,9 @@ mod raw_native_session_tests {
         .expect("refreshed recorded WS sources were not accepted by production parser");
         let fresh_clock_at = chrono::Utc::now().timestamp_millis().to_string();
         feed.expect_public_clock(envelope(json!([{"ts":fresh_clock_at}])));
-        // Campaign readiness can take several real two-second finance
-        // captures. The original tariff transcript was recorded BEFORE that
-        // readiness; retaining its old exchange timestamp makes a subsequent
-        // authenticated Execute fail the unchanged five-second age oracle.
-        // Publish the next finite RAW tariff phase at the proved source
-        // boundary, as for T09.4. Never backdate, retime after delivery,
-        // lengthen TTL or synthesize a response inside the HTTP handler.
-        let fee_phase_at = chrono::Utc::now().timestamp_millis().to_string();
-        let fee_phase = envelope(json!([{
-            "instType":"SWAP","level":"Lv1","ts":fee_phase_at,
-            "feeGroup":[{"groupId":"4","maker":"0.0005","taker":"0.0005"}]
-        }]));
-        let retired_fee = feed.advance_recorded_route(
-            "fixture-observer-a", "/api/v5/account/trade-fee",
-            (0..6).map(|_| RecordedGet {
-                access_key:"fixture-observer-a".into(),
-                path:"/api/v5/account/trade-fee".into(),
-                required_query:vec![
-                    ("instType".into(),"SWAP".into()),
-                    ("instFamily".into(),"BTC-USDT".into()),
-                ],
-                raw_response:fee_phase.clone(),
-            }).collect()
-        );
-        eprintln!("T09_1_FEE_AFTER_READINESS_V1:retired={retired_fee} pages=6");
+        // Keep exactly one canonical signed fee phase for first Execute.
+        // T09.2 will advance its own recorded venue tariff at its source
+        // boundary. Extra required GET pages here are not actual evidence.
         feed.expect_post(RecordedPost {
             access_key: "fixture-executor-a".into(),
             path: "/api/v5/trade/order".into(),
@@ -2598,14 +2576,11 @@ mod raw_native_session_tests {
         // not turn the observation into a verified outcome. Only an
         // *unattempted* read leaves exactly one queued transcript reply.
         // Both cases must remain no-resubmit and subsequently reconcile.
-        let replay_remaining = feed.unconsumed_route_reads(
-            "fixture-executor-a", "/api/v5/trade/order"
-        );
+        let replay_remaining = feed.unconsumed_reads();
         assert!(
             replay_remaining == 0 || (replay_readback_unknown && replay_remaining == 1),
-            "T09_5_ORDER_READBACK_TRANSCRIPT_INVALID: status={}, order_remaining={replay_remaining}, all_pending_source_pages={}",
-            repeated["status"],
-            feed.unconsumed_reads(),
+            "T09_5_REPLAY_TRANSCRIPT_INVALID: status={}, remaining={replay_remaining}",
+            repeated["status"]
         );
         let mut after_public = summary("risk_after_public_trade_post_001");
         after_public.installation_id = "installation_test".into();
