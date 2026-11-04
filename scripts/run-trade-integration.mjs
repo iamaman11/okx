@@ -131,6 +131,21 @@ const concurrentGolden = new Map([["T10-06", new Map([
   ["changed_payload_rejected","IDEMPOTENCY_CONFLICT"],
   ["no_spurious_worker_debit","0"],
 ])]]);
+// T10-07 is one SQL-owned campaign, not a sum of unrelated Worker and
+// Native checkpoints. The runner independently pins the required economics;
+// individual cases must also validate actual owner/readback/source evidence.
+const sharedCapGolden = new Map([["T10-07", new Map([
+  ["concurrent_requests", "3"],
+  ["reserve_decisions", "HELD,HELD,DENIED"],
+  ["reserved_before_release_usd", "8"],
+  ["remaining_before_release_usd", "2"],
+  ["reserved_after_release_usd", "4"],
+  ["remaining_after_release_usd", "6"],
+  ["native_sql_source_backed_release", "true"],
+  ["same_worker_campaign", "true"],
+  ["third_denial_extra_posts", "0"],
+  ["release_extra_posts", "0"],
+])]]);
 const terminalGolden = new Map([
   ["T09.6", new Map([
     ["remaining_exposure", "0"], ["orphan_algo_orders", "0"],
@@ -216,6 +231,14 @@ function verified(output, caseId) {
       if (!output.assertions.some(a => a.id === id
           && a.expected === expected && a.actual === expected))
         throw Error(`${failures.invalid}:INDEPENDENT_CONCURRENT_GOLDEN_MISSING:${id}`);
+    }
+  }
+  const cap = sharedCapGolden.get(caseId);
+  if (cap) {
+    for (const [id, expected] of cap) {
+      if (!output.assertions.some(a => a.id === id
+          && a.expected === expected && a.actual === expected))
+        throw Error(`${failures.invalid}:INDEPENDENT_SHARED_CAP_GOLDEN_MISSING:${id}`);
     }
   }
   const terminal = terminalGolden.get(caseId);
@@ -353,6 +376,31 @@ function selfTest() {
   missingConcurrentStage.events.pop();
   rejectTerminal(missingConcurrentStage, "T10-06", "concurrent_missing_stage");
 
+  // A plausible-looking pair of independent component checkpoints is not
+  // a full source-backed 8 -> 4 release. Wrong money, missing campaign
+  // identity and missing no-send evidence must each fail the top-level gate.
+  const capCase = structuredClone(full);
+  capCase.case_id = "T10-07";
+  capCase.assertions = [...sharedCapGolden.get("T10-07")].map(
+    ([id, value]) => ({ id, expected: value, actual: value }));
+  capCase.events = requiredStagesByCase.get("T10-07").map(stage =>
+    ({ stage, owner: "test_owner", source_digest: digest }));
+  capCase.outbound_sends = [];
+  verified(capCase, "T10-07");
+  const wrongSharedMoney = structuredClone(capCase);
+  wrongSharedMoney.assertions.find(a => a.id === "reserved_after_release_usd").actual = "8";
+  rejectTerminal(wrongSharedMoney, "T10-07", "shared_cap_release_not_performed");
+  const differentCampaigns = structuredClone(capCase);
+  differentCampaigns.assertions.find(a => a.id === "same_worker_campaign").actual = "false";
+  rejectTerminal(differentCampaigns, "T10-07", "separate_worker_campaigns");
+  const missingNativeRelease = structuredClone(capCase);
+  missingNativeRelease.assertions = missingNativeRelease.assertions.filter(
+    a => a.id !== "native_sql_source_backed_release");
+  rejectTerminal(missingNativeRelease, "T10-07", "missing_native_sql_release");
+  const repostOnRelease = structuredClone(capCase);
+  repostOnRelease.assertions.find(a => a.id === "release_extra_posts").actual = "1";
+  rejectTerminal(repostOnRelease, "T10-07", "release_caused_post");
+
   const restart = structuredClone(terminalCase);
   restart.case_id = "T09.7";
   restart.assertions = [...terminalGolden.get("T09.7")].map(
@@ -369,7 +417,7 @@ function selfTest() {
   verified(budget, "T09.8");
   budget.assertions[2].actual = "STALE_SOURCE";
   rejectTerminal(budget, "T09.8", "wrong_denial");
-  process.stdout.write(`TRADE_INTEGRATION_RUNNER_SELF_TEST_PASS negatives=${negatives + 9}\n`);
+  process.stdout.write(`TRADE_INTEGRATION_RUNNER_SELF_TEST_PASS negatives=${negatives + 13}\n`);
 }
 const cli = args(process.argv.slice(2));
 if (cli.selfTest) { selfTest(); process.exit(0); }
