@@ -5291,6 +5291,11 @@ mod raw_native_session_tests {
                         let add=task.await.expect("T09.4 managed Add native task");
                         println!("T09_4_NATIVE_ADD_BOUND_V1:{add}");
                         if std::env::var("OKX_T10_02_EXTERNAL_EXPOSURE_PROBE").as_deref()==Ok("1") {
+                            // The positive managed-Add settlement can wait for
+                            // finance readbacks. Publish an explicit fresh raw
+                            // public market frame before the negative Execute;
+                            // source expiry must not hide the true foreign lot.
+                            refresh_recorded_market();
                             let denied=t10_02_unowned_exposure_denied(
                                 accounts.clone(),trade.clone(),risk.clone(),feed.clone(),
                                 add["intent_id"].as_str().expect("T10-02 managed ID").to_owned()
