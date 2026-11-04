@@ -14,6 +14,17 @@ async fn t10_15_fee_source_after_worker_held(
     let wrap=|rows:serde_json::Value|serde_json::to_vec(&serde_json::json!({
         "code":"0","msg":"","data":rows
     })).unwrap();
+    // T10-07 exercises this SAME native no-send owner after the second
+    // account's positive order. The available campaign headroom is smaller;
+    // use an ordinary 0.05-contract public request rather than bypassing
+    // the entry cap. A second cohort cannot prove the shared release.
+    let shared_b1=std::env::var("OKX_T10_07_NATIVE_PROBE").as_deref()==Ok("1");
+    let contracts=if shared_b1{"0.05"}else{"0.1"};
+    let quoted_before=if shared_b1{"0.50025"}else{"1.0005"};
+    let quoted_after=if shared_b1{"0.5003"}else{"1.0006"};
+    let held_before=if shared_b1{"8.002"}else{"7.0015"};
+    let remaining_before=if shared_b1{"0.9975"}else{"1.998"};
+    let expected_posts=if shared_b1{5}else{4};
     let stamp=chrono::Utc::now().timestamp_millis().to_string();
     let balance=wrap(serde_json::json!([{
         "totalEq":"100","adjEq":"100","uTime":stamp,
@@ -45,7 +56,7 @@ async fn t10_15_fee_source_after_worker_held(
     feed.advance_recorded_public_clock(
         wrap(serde_json::json!([{"ts":stamp}]))
     );
-    let sizing=Sizing::Contracts{contracts:"0.1".into()};
+    let sizing=Sizing::Contracts{contracts:contracts.into()};
     let order=OrderConstraints{
         order_type:"limit".into(),limit_price:Some("1000".into()),
         reference:None,max_entry_usd:Some("10".into()),max_slippage_bps:0
@@ -74,15 +85,15 @@ async fn t10_15_fee_source_after_worker_held(
     };
     let old_quote=old["data"]["entry_costs"]["entry_total_usd"]
         .as_str().expect("T10-15 original quoted amount").to_owned();
-    assert_eq!(old_quote,"1.0005");
+    assert_eq!(old_quote,quoted_before);
     let mut before_risk=summary("risk_t10_15_before_held");
     before_risk.installation_id="installation_test".into();
     let worker_before=risk.request(before_risk).await
         .expect("T10-15 actual Worker before");
     assert_eq!(worker_before.budget.as_ref().unwrap().entry_budget.as_ref().unwrap().reserved_usd,
-        "7.0015");
+        held_before);
     let posts_before=feed.outbound_posts.lock().unwrap().len();
-    assert_eq!(posts_before,4);
+    assert_eq!(posts_before,expected_posts);
     T10_15_WORKER_HELD_COMMITTED.store(false,std::sync::atomic::Ordering::SeqCst);
     T10_15_SIGNED_SOURCE_CHANGED.store(false,std::sync::atomic::Ordering::SeqCst);
     T10_15_ARM_AFTER_HELD.store(true,std::sync::atomic::Ordering::SeqCst);
@@ -189,7 +200,7 @@ async fn t10_15_fee_source_after_worker_held(
         operation:TradeOperation::Open,strategy_instance:"manual".into(),
         instrument:"BTC-USDT-SWAP".into(),
         side:PositionSide::Long,
-        sizing:Sizing::Contracts{contracts:"0.1".into()},
+        sizing:Sizing::Contracts{contracts:contracts.into()},
         order:OrderConstraints{
             order_type:"limit".into(),limit_price:Some("1000".into()),
             reference:None,max_entry_usd:Some("10".into()),max_slippage_bps:0
@@ -200,7 +211,7 @@ async fn t10_15_fee_source_after_worker_held(
         .expect("T10-15 fresh quote after signed fee revision");
     let quote=next["data"]["entry_costs"]["entry_total_usd"]
         .as_str().expect("T10-15 refreshed source quote").to_owned();
-    assert_eq!(quote,"1.0006");
+    assert_eq!(quote,quoted_after);
     assert_eq!(feed.outbound_posts.lock().unwrap().len(),posts_before);
     let mut after_risk=summary("risk_t10_15_after_fee_revision");
     after_risk.installation_id="installation_test".into();
@@ -214,8 +225,8 @@ async fn t10_15_fee_source_after_worker_held(
         "Native no-send must return its transient HELD allocation");
     assert_eq!(budget_after.remaining_usd,budget_before.remaining_usd);
     assert_eq!(budget_after.consumed_usd,"1.0005");
-    assert_eq!(budget_after.reserved_usd,"7.0015");
-    assert_eq!(budget_after.remaining_usd,"1.998");
+    assert_eq!(budget_after.reserved_usd,held_before);
+    assert_eq!(budget_after.remaining_usd,remaining_before);
     assert!(after.risk_book_sequence.unwrap_or(0)>
         worker_before.risk_book_sequence.unwrap_or(0),
         "authentic central RELEASE must advance durable Worker sequence");
@@ -225,7 +236,9 @@ async fn t10_15_fee_source_after_worker_held(
         "old_quote_usd":old_quote,"new_quote_usd":quote,
         "signed_changed_fee_digest":digest,
         "first_denial":reason,
-        "worker_held_witness":true,"sql_state":row.1,
+        "worker_held_witness":true,
+        "same_campaign_as_native_b1":shared_b1,
+        "sql_state":row.1,
         "sql_revision":row.2,"intent_id":row.0,
         "release_state":"RELEASED",
         "sql_unsent_receipt_verified":true,
