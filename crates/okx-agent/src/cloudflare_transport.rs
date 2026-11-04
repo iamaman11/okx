@@ -4433,9 +4433,125 @@ mod raw_native_session_tests {
                             let b_rate = rate_budget.clone();
                             let b_positive_task = tokio::spawn(async move {
                                 let until = std::time::Instant::now() + Duration::from_secs(12);
+                                let mut b_positive_request = b_positive_request;
                                 for attempt in 0..12 {
+                                    let key = match &b_positive_request {
+                                        TradeRequest::Execute { idempotency_key, .. } =>
+                                            idempotency_key.clone(),
+                                        _ => unreachable!("B1 only sends a valid Execute"),
+                                    };
                                     match b_public.trade("fixture-b", &b_positive_request, None).await {
-                                        Ok(outcome) => return Ok(outcome),
+                                        Ok(outcome) => {
+                                            let primary = outcome["data"]["primary_reason"]
+                                                .as_str().unwrap_or("");
+                                            let remaining = until.saturating_duration_since(
+                                                std::time::Instant::now()
+                                            );
+                                            let definitive_local_unsent =
+                                                outcome["status"] == "completed"
+                                                && outcome["data"]["state"] == "REJECTED"
+                                                && outcome["data"]["rejection_origin"] == "LOCAL"
+                                                && outcome["data"]["send_state"] == "NOT_STARTED"
+                                                && outcome["data"]["risk_release_state"] == "RELEASED";
+                                            let delay = definitive_local_unsent.then(|| {
+                                                recorded_preview_local_defer(
+                                                    primary, &b_rate, remaining
+                                                )
+                                            }).flatten();
+                                            let Some(delay) = delay else {
+                                                return Ok((outcome, key));
+                                            };
+                                            // Reissuing a new explicit key is legal ONLY
+                                            // after this original key is durably REJECTED,
+                                            // its central receipt is no longer active, and
+                                            // no venue POST has been attempted. Never retry
+                                            // UNKNOWN, possibly sent, or unreleased risk.
+                                            let owner = b_accounts_positive.resolve("fixture-b")
+                                                .await.expect("B1 rate-rejected B owner");
+                                            let sql_key = key.clone();
+                                            let (state, still_held) = owner.execution.store.call(
+                                                std::time::Instant::now() + Duration::from_secs(3),
+                                                move |s| {
+                                                    let intent = s.by_idempotency(&sql_key)?
+                                                        .ok_or(okx_execution::StoreError::Invalid(
+                                                            "B1_RATE_REJECTED_SQL_MISSING"
+                                                        ))?;
+                                                    Ok((intent.state.as_str().to_owned(),
+                                                        s.active_central_receipt(
+                                                            &intent.intent_id
+                                                        )?.is_some()))
+                                                }
+                                            ).await.expect("B1 durable local no-send release proof");
+                                            assert_eq!(state, "REJECTED");
+                                            assert!(!still_held, "B1 cannot retry a held B risk");
+                                            assert_eq!(
+                                                b_source.outbound_posts.lock().unwrap().len(), 4,
+                                                "B1 local defer cannot replay a venue POST"
+                                            );
+                                            if attempt == 11 || delay > remaining {
+                                                return Ok((outcome, key));
+                                            }
+                                            eprintln!(
+                                                "B1_B_LOCAL_NO_SEND_RATE_RELEASED_V1:attempt={attempt} delay_ms={} sql_state={state} held={still_held} venue_posts=4",
+                                                delay.as_millis()
+                                            );
+                                            tokio::time::sleep(
+                                                delay.max(Duration::from_millis(200))
+                                            ).await;
+                                            // Fresh real-API-shaped recorded responses at
+                                            // this proven local no-send retry boundary.
+                                            // Rates, leverage and policy stay unchanged.
+                                            let observed_at =
+                                                chrono::Utc::now().timestamp_millis().to_string();
+                                            b_source.advance_recorded_route(
+                                                "fixture-observer-b",
+                                                "/api/v5/account/trade-fee",
+                                                (0..4).map(|_| RecordedGet {
+                                                    access_key:"fixture-observer-b".into(),
+                                                    path:"/api/v5/account/trade-fee".into(),
+                                                    required_query:vec![
+                                                        ("instType".into(),"SWAP".into()),
+                                                        ("instFamily".into(),"BTC-USDT".into()),
+                                                    ],
+                                                    raw_response:envelope(json!([{
+                                                        "instType":"SWAP","level":"Lv1",
+                                                        "ts":observed_at,
+                                                        "feeGroup":[{
+                                                            "groupId":"4","maker":"0.0005",
+                                                            "taker":"0.0005"
+                                                        }]
+                                                    }])),
+                                                }).collect(),
+                                            );
+                                            b_source.advance_recorded_route(
+                                                "fixture-observer-b",
+                                                "/api/v5/account/leverage-info",
+                                                (0..4).map(|_| RecordedGet {
+                                                    access_key:"fixture-observer-b".into(),
+                                                    path:"/api/v5/account/leverage-info".into(),
+                                                    required_query:vec![
+                                                        ("instId".into(),"BTC-USDT-SWAP".into()),
+                                                        ("mgnMode".into(),"cross".into()),
+                                                    ],
+                                                    raw_response:envelope(json!([
+                                                        {"instId":"BTC-USDT-SWAP","mgnMode":"cross",
+                                                         "posSide":"long","lever":"2"},
+                                                        {"instId":"BTC-USDT-SWAP","mgnMode":"cross",
+                                                         "posSide":"short","lever":"2"}
+                                                    ])),
+                                                }).collect(),
+                                            );
+                                            b_source.advance_recorded_public_clock(
+                                                envelope(json!([{"ts":observed_at}]))
+                                            );
+                                            if let TradeRequest::Execute {
+                                                idempotency_key, ..
+                                            } = &mut b_positive_request {
+                                                *idempotency_key = format!(
+                                                    "b1_b_positive_after_shared_denial_001_rate_{attempt}"
+                                                );
+                                            }
+                                        }
                                         Err(reason) => {
                                             let remaining = until.saturating_duration_since(
                                                 std::time::Instant::now()
@@ -4445,11 +4561,12 @@ mod raw_native_session_tests {
                                             ) else { return Err(reason) };
                                             let owner = b_accounts_positive.resolve("fixture-b")
                                                 .await.expect("B1 B positive SQL owner");
+                                            let sql_key = key.clone();
                                             let absent = owner.execution.store.call(
                                                 std::time::Instant::now() + Duration::from_secs(3),
-                                                |s| Ok(s.by_idempotency(
-                                                    "b1_b_positive_after_shared_denial_001"
-                                                )?.is_none())
+                                                move |s| Ok(
+                                                    s.by_idempotency(&sql_key)?.is_none()
+                                                )
                                             ).await.expect("B1 no-send SQL precondition");
                                             assert!(absent, "B1 cannot replay a durable positive intent");
                                             assert_eq!(
@@ -4469,7 +4586,7 @@ mod raw_native_session_tests {
                                 }
                                 Err("B1_POSITIVE_PRIVATE_READ_EXHAUSTED".into())
                             });
-                            let b_positive = b_positive_task.await
+                            let (b_positive, b_positive_accepted_key) = b_positive_task.await
                                 .expect("B1 Native B positive task join")
                                 .expect("B1 real B venue create must be admitted");
                             if b_positive["status"] != "partial" {
@@ -4502,7 +4619,7 @@ mod raw_native_session_tests {
                                     std::time::Instant::now() + Duration::from_secs(3),
                                     |s| {
                                         let intent = s.by_idempotency(
-                                            "b1_b_positive_after_shared_denial_001"
+                                            &b_positive_accepted_key
                                         )?.ok_or(okx_execution::StoreError::Invalid(
                                             "B1_POSITIVE_SQL_INTENT_MISSING"
                                         ))?;
