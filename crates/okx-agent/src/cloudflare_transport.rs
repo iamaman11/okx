@@ -1676,33 +1676,6 @@ mod raw_native_session_tests {
         })
         .await
         .expect("refreshed recorded WS sources were not accepted by production parser");
-        let fresh_fee_at = chrono::Utc::now().timestamp_millis().to_string();
-        for _ in 0..3 {
-            feed.expect_get(RecordedGet {
-                access_key: "fixture-observer-a".into(),
-                path: "/api/v5/account/trade-fee".into(),
-                required_query: vec![
-                    ("instType".into(), "SWAP".into()),
-                    ("instFamily".into(), "BTC-USDT".into()),
-                ],
-                raw_response: envelope(json!([{
-                    "instType":"SWAP","level":"Lv1","ts":fresh_fee_at,
-                    "feeGroup":[{"groupId":"4","maker":"0.0005","taker":"0.0005"}]
-                }])),
-            });
-            feed.expect_get(RecordedGet {
-                access_key: "fixture-observer-a".into(),
-                path: "/api/v5/account/leverage-info".into(),
-                required_query: vec![
-                    ("instId".into(), "BTC-USDT-SWAP".into()),
-                    ("mgnMode".into(), "cross".into()),
-                ],
-                raw_response: envelope(json!([
-                    {"instId":"BTC-USDT-SWAP","mgnMode":"cross","posSide":"long","lever":"2"},
-                    {"instId":"BTC-USDT-SWAP","mgnMode":"cross","posSide":"short","lever":"2"}
-                ])),
-            });
-        }
         let fresh_clock_at = chrono::Utc::now().timestamp_millis().to_string();
         feed.expect_public_clock(envelope(json!([{"ts":fresh_clock_at}])));
         feed.expect_post(RecordedPost {
@@ -1892,6 +1865,40 @@ mod raw_native_session_tests {
             "T09_1_PRE_EXECUTE_CAMPAIGN_READINESS_NOT_FRESH:{latest_readiness}"
         ));
 
+        // Record the first signed fee/leverage pages only AFTER the two
+        // independent SQL campaign frontiers are fresh. Previously their
+        // exchange ts was captured before the bounded readiness wait; when
+        // maintenance needed several seconds, the otherwise valid fee page
+        // expired under the unchanged 5s production source-age gate before
+        // public Execute could consume it. These are still finite, immutable
+        // raw responses; a late/invalid page must fail closed.
+        let fresh_fee_at = chrono::Utc::now().timestamp_millis().to_string();
+        for _ in 0..3 {
+            feed.expect_get(RecordedGet {
+                access_key: "fixture-observer-a".into(),
+                path: "/api/v5/account/trade-fee".into(),
+                required_query: vec![
+                    ("instType".into(), "SWAP".into()),
+                    ("instFamily".into(), "BTC-USDT".into()),
+                ],
+                raw_response: envelope(json!([{
+                    "instType":"SWAP","level":"Lv1","ts":fresh_fee_at,
+                    "feeGroup":[{"groupId":"4","maker":"0.0005","taker":"0.0005"}]
+                }])),
+            });
+            feed.expect_get(RecordedGet {
+                access_key: "fixture-observer-a".into(),
+                path: "/api/v5/account/leverage-info".into(),
+                required_query: vec![
+                    ("instId".into(), "BTC-USDT-SWAP".into()),
+                    ("mgnMode".into(), "cross".into()),
+                ],
+                raw_response: envelope(json!([
+                    {"instId":"BTC-USDT-SWAP","mgnMode":"cross","posSide":"long","lever":"2"},
+                    {"instId":"BTC-USDT-SWAP","mgnMode":"cross","posSide":"short","lever":"2"}
+                ])),
+            });
+        }
         // An admission can be deferred by the SHARED production RateBudget
         // while maintenance consumes the same authenticated private-GET
         // domain. Retry is permitted here ONLY after a proven LOCAL,
