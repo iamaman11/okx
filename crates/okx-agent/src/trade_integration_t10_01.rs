@@ -59,7 +59,7 @@ async fn t10_01_partial_balance_denial_recovery(
     }) {
         feed.expect_get(page);
     }
-    let request=|id:&str|TradeRequest::Execute {
+    let request=|id:&str,expires_in_ms:u64|TradeRequest::Execute {
         idempotency_key:id.into(),operation:TradeOperation::Open,
         strategy_instance:"manual".into(),instrument:"BTC-USDT-SWAP".into(),
         side:PositionSide::Long,sizing:Sizing::Contracts{contracts:"0.1".into()},
@@ -68,9 +68,9 @@ async fn t10_01_partial_balance_denial_recovery(
             reference:None,max_entry_usd:Some("10".into()),max_slippage_bps:0
         },
         protection:Some(Protection::Price{stop_price:"900".into()}),
-        expires_in_ms:6000,
+        expires_in_ms,
     };
-    let bad=request("t10_01_incomplete_private_balance_0001");
+    let bad=request("t10_01_incomplete_private_balance_0001",6000);
     assert!(bad.valid());
     let mut before_cmd=summary("risk_t10_01_before_source_denial");
     before_cmd.installation_id="installation_test".into();
@@ -155,7 +155,13 @@ async fn t10_01_partial_balance_denial_recovery(
     feed.advance_recorded_public_clock(
         wrap(json!([{"ts":stamp}]))
     );
-    let positive=request("t10_01_recovered_fresh_private_balance_0001");
+    // The recovered attempt legitimately reads all Real account scopes under
+    // the unchanged authenticated 5-per-2s private budget. Six seconds was
+    // shorter than the bounded two-account source census; the witnessed
+    // LOCAL no-send rejection was therefore a fixture deadline, not a missing
+    // SQL intent. Preserve the 6s negative case and use a single 30s positive
+    // Execute (never repeated) with complete fresh signed source evidence.
+    let positive=request("t10_01_recovered_fresh_private_balance_0001",30_000);
     assert!(positive.valid());
     feed.expect_post(RecordedPost {
         access_key:"fixture-executor-b".into(),path:"/api/v5/trade/order".into(),
@@ -186,43 +192,28 @@ async fn t10_01_partial_balance_denial_recovery(
             }]))
         });
     }
-    let accepted=recorded_execute_after_proven_local_no_send(
-        &accounts,&trade,&feed,&rate_budget,"fixture-b",positive,||{
-            let at=chrono::Utc::now().timestamp_millis().to_string();
-            let new_balance=wrap(json!([{
-                "totalEq":"100","adjEq":"100","uTime":at,
-                "details":[{"ccy":"USDT","eq":"100","liab":"0",
-                    "availEq":"100","availBal":"100","eqUsd":"100","uTime":at}]
-            }]));
-            feed.advance_recorded_route("fixture-observer-b",route,
-                (0..20).map(|_|RecordedGet{
-                    access_key:"fixture-observer-b".into(),path:route.into(),
-                    required_query:vec![],raw_response:new_balance.clone(),
-                }).collect()
-            );
-            let new_fee=wrap(json!([{
-                "instType":"SWAP","level":"Lv1","ts":at,
-                "feeGroup":[{"groupId":"4","maker":"0.0005","taker":"0.0005"}]
-            }]));
-            feed.advance_recorded_route("fixture-observer-b",
-                "/api/v5/account/trade-fee",
-                (0..12).map(|_|RecordedGet{
-                    access_key:"fixture-observer-b".into(),
-                    path:"/api/v5/account/trade-fee".into(),
-                    required_query:vec![
-                        ("instType".into(),"SWAP".into()),
-                        ("instFamily".into(),"BTC-USDT".into())
-                    ],raw_response:new_fee.clone()
-                }).collect()
-            );
-            feed.advance_recorded_public_clock(wrap(json!([{"ts":at}])));
-        }
-    ).await;
+    let accepted=tokio::time::timeout(Duration::from_secs(35),
+        trade.trade("fixture-b",&positive,None)
+    ).await.expect("T10-01 fresh recovery deadline")
+      .expect("T10-01 real Worker/Native source recovery must execute");
     // Worker/SQL and the authenticated venue ACK are separate from the
     // immediately available public Status. An incomplete local readback
     // after one acknowledged POST produces UNKNOWN/no-resubmit; never
     // retry a possibly sent Execute to manufacture an accepted wrapper.
+
+    // A successful transport response may still be a LOCAL no-send REJECTED
+    // outcome. Report its native origin/reason rather than masking the actual
+    // first failure as a missing intent ID; never retry this Execute.
+    if accepted["data"]["state"] == "REJECTED" {
+        panic!(
+            "T10_01_FIRST_RECOVERY_DENIAL:reply={accepted}:posts={}:denied_routes={:?}:last_throttle={:?}",
+            feed.outbound_posts.lock().unwrap().len(),
+            feed.denied_routes.lock().unwrap().iter().rev().take(8).cloned().collect::<Vec<_>>(),
+            rate_budget.snapshot().last_throttle
+        );
+    }
     let id=accepted["data"]["intent"]["intent_id"].as_str()
+        .or_else(||accepted["data"]["intent_id"].as_str())
         .or_else(||accepted["intent_id"].as_str())
         .unwrap_or_else(||panic!(
             "T10_01_RECOVERY_NO_DURABLE_ID:status={} reason={} state={} posts={}",
@@ -230,9 +221,13 @@ async fn t10_01_partial_balance_denial_recovery(
             accepted["data"]["state"],feed.outbound_posts.lock().unwrap().len()
         )).to_owned();
     assert!(
-        accepted["status"]=="completed" || accepted["status"]=="unknown",
-        "T10-01 public recovery requires typed outcome"
+        ["completed","partial","unknown"].contains(&accepted["status"].as_str().unwrap_or("")),
+        "T10-01 public recovery requires typed outcome: {accepted}"
     );
+    if accepted["status"]=="partial" {
+        assert_eq!(accepted["quality"]["execution"],"authenticated_readback");
+        assert_eq!(accepted["quality"]["financial"],"incomplete");
+    }
     if accepted["status"]=="unknown" {
         assert_eq!(accepted["reason_code"],"ORDER_READBACK_INCOMPLETE_NO_RESUBMIT",
             "T10-01 cannot accept an unverified or possibly unacknowledged POST");

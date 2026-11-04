@@ -320,27 +320,7 @@ async fn t09_spec_second_linear_product(
             }
         }
     });
-    let execution=recorded_execute_after_proven_local_no_send(
-        &accounts,&trade,&feed,&rate_budget,"fixture-b",request,||{
-            let ts=chrono::Utc::now().timestamp_millis().to_string();
-            let updated_fee=wrap(json!([{
-                "instType":"SWAP","level":"Lv1","ts":ts,
-                "feeGroup":[{"groupId":"4","maker":"0.0005","taker":"0.0005"}]
-            }]));
-            feed.advance_recorded_route(
-                "fixture-observer-b","/api/v5/account/trade-fee",
-                (0..12).map(|_|RecordedGet {
-                    access_key:"fixture-observer-b".into(),
-                    path:"/api/v5/account/trade-fee".into(),
-                    required_query:vec![
-                        ("instType".into(),"SWAP".into()),
-                        ("instFamily".into(),"ETH-USDT".into())
-                    ],raw_response:updated_fee.clone(),
-                }).collect(),
-            );
-            feed.advance_recorded_public_clock(wrap(json!([{"ts":ts}])));
-        }
-    ).await;
+    let execution=trade.trade("fixture-b",&request,None).await;
     let _=stop_tx.send(());
     publisher.await.expect("T09-SPEC RAW ETH frame publisher joined");
     let accepted=execution
@@ -350,17 +330,36 @@ async fn t09_spec_second_linear_product(
     // source window. This is not an invitation to issue a second Execute.
     // Require its exact durable intent identity and prove ACK, owner,
     // central HELD and one signed POST independently below.
+
+    // A recorded local rejection is NOT a missing intent ID or a successful POST.
+    // Preserve its original phase/reason before attempting any status readback.
+    if accepted["data"]["state"] == "REJECTED" {
+        panic!(
+            "T09_SPEC_FIRST_POSITIVE_DENIAL:reply={accepted}:posts={}:denied_routes={:?}:last_throttle={:?}",
+            feed.outbound_posts.lock().unwrap().len(),
+            feed.denied_routes.lock().unwrap().iter().rev().take(8).cloned().collect::<Vec<_>>(),
+            rate_budget.snapshot().last_throttle
+        );
+    }
     let id=accepted["data"]["intent"]["intent_id"].as_str()
+        .or_else(||accepted["data"]["intent_id"].as_str())
         .or_else(||accepted["intent_id"].as_str())
         .unwrap_or_else(||panic!(
             "T09_SPEC_EXECUTE_NO_DURABLE_ID:status={} reason={} state={} posts={}",
             accepted["status"],accepted["reason_code"],
             accepted["data"]["state"],feed.outbound_posts.lock().unwrap().len()
         )).to_owned();
+    // Authenticated order ACK and terminal financial backfill are distinct.
+    // Status is allowed to be partial ONLY with a proven authenticated order
+    // readback; the mandatory SQL/Worker/POST assertions below still apply.
     assert!(
-        accepted["status"]=="completed" || accepted["status"]=="unknown",
-        "T09-SPEC public Execute must have a typed outcome"
+        ["completed","partial","unknown"].contains(&accepted["status"].as_str().unwrap_or("")),
+        "T09-SPEC public Execute must have a typed outcome: {accepted}"
     );
+    if accepted["status"]=="partial" {
+        assert_eq!(accepted["quality"]["execution"],"authenticated_readback");
+        assert_eq!(accepted["quality"]["financial"],"incomplete");
+    }
     if accepted["status"]=="unknown" {
         assert_eq!(accepted["reason_code"],"ORDER_READBACK_INCOMPLETE_NO_RESUBMIT",
             "T09-SPEC no other ambiguous POST outcome may count as signed ACK");

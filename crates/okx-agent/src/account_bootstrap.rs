@@ -484,7 +484,7 @@ impl AccountBootstrapper {
         let (config, _) = self.observer_config_until(until).await?;
         strict_read_only_permissions(&config.perm)
             .map_err(|_| AccountLedgerBootstrapError::PermissionRejected)?;
-        tokio::time::timeout_at(until.into(), self.trade.pending_derivative_risk_algos())
+        tokio::time::timeout_at(until.into(), self.trade.pending_derivative_risk_algos_until(until))
             .await
             .map_err(|_| AccountLedgerBootstrapError::SourceDeadline)?
             .map_err(AccountLedgerBootstrapError::from)
