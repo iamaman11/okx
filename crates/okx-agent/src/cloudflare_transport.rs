@@ -32,6 +32,15 @@ use tokio_tungstenite::{
 };
 use zeroize::Zeroizing;
 
+// Only the public Native/Worker integration test may arm a single fault
+// at the real Worker response boundary. Production builds have no such knob.
+#[cfg(test)]
+static T10_04_CORRUPT_NEXT_HELD_COMMAND: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+#[cfg(test)]
+static T10_04_FOREIGN_COMMAND_INJECTED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 pub struct CloudflareTransportConfig {
     ws_url: String,
     runtime_id: String,
@@ -247,7 +256,21 @@ where
         F::Ping{nonce,..}=>{challenges.retain(|_,t|t.elapsed()<Duration::from_secs(15));if challenges.len()<64{challenges.insert(nonce.clone(),Instant::now());}send(&mut sink,F::Pong{schema:SCHEMA.into(),session_id:session_id.clone(),connection_generation,nonce}).await?;},
         F::Pong{..}=>{},
         F::PolicySnapshot{snapshot,..}=>{ctx.trade.update_governance(&snapshot).await.map_err(|_|transport("INVALID_POLICY_SNAPSHOT"))?;},
-        F::RiskControlResult{result,..}=>{
+        F::RiskControlResult{mut result,..}=>{
+            // This is a one-shot corruption of the delivery only: the actual
+            // Worker committed its real HELD receipt and sent correct bytes.
+            // The test verifies Native rejects a foreign ID after that commit.
+            #[cfg(test)]
+            if result.status==okx_protocol::risk_authority::RiskDecisionStatus::Held
+                && T10_04_CORRUPT_NEXT_HELD_COMMAND.swap(
+                    false,std::sync::atomic::Ordering::SeqCst
+                )
+            {
+                result.command_id="risk_t10_04_foreign_unbound_0001".into();
+                T10_04_FOREIGN_COMMAND_INJECTED.store(
+                    true,std::sync::atomic::Ordering::SeqCst
+                );
+            }
             // An unsolicited, stale or foreign command ID must never be
             // mistaken for the active reservation's authorization. Reject
             // the frame instead of silently dropping it and waiting for a
@@ -586,6 +609,7 @@ mod raw_native_session_tests {
     include!("trade_integration_t09_6.rs");
     include!("trade_integration_t10_14.rs");
     include!("trade_integration_t10_02.rs");
+    include!("trade_integration_t10_04.rs");
 
     /// Retry permission is test-only and limited to an explicitly read-only
     /// Preview that failed at the *local* request-admission boundary. The
@@ -5185,6 +5209,16 @@ mod raw_native_session_tests {
                             "post_ack_financial_complete":accepted["data"]["financial_complete"]
                         })
                     );
+                    if std::env::var("OKX_T10_04_FOREIGN_WORKER_REPLY_PROBE").as_deref()==Ok("1") {
+                        // Financially clean A order+Worker readback already
+                        // exist. Trigger only the next independent B RESERVE,
+                        // never the T09 baseline authorization.
+                        refresh_recorded_market();
+                        let refused=t10_04_foreign_worker_result(
+                            accounts.clone(),trade.clone(),risk.clone(),feed.clone()
+                        ).await;
+                        println!("T10_04_NATIVE_FOREIGN_WORKER_REPLY_V1:{refused}");
+                    }
                     let mut captured_signed_times=None;
                     if std::env::var("OKX_T09_3_PARTIAL_PROBE").as_deref() == Ok("1") {
                         let (first, ts) = tokio::spawn(t09_3_phase(
@@ -5526,10 +5560,17 @@ mod raw_native_session_tests {
             .await
             .unwrap()
             .unwrap();
-        assert!(
-            terminated.is_ok(),
-            "native session should terminate cleanly: {terminated:?}"
-        );
+        if std::env::var("OKX_T10_04_FOREIGN_WORKER_REPLY_PROBE").as_deref()==Ok("1") {
+            let transport_failure=terminated.expect_err(
+                "T10-04 wrong Worker command must close the Native WSS session");
+            assert!(transport_failure.to_string().contains("RISK_RESULT_COMMAND_UNBOUND"),
+                "T10-04 must preserve first binding failure: {transport_failure}");
+        } else {
+            assert!(
+                terminated.is_ok(),
+                "native session should terminate cleanly: {terminated:?}"
+            );
+        }
         public_shutdown.send(true).unwrap();
         tokio::time::timeout(Duration::from_secs(5), public_task)
             .await

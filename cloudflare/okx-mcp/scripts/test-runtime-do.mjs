@@ -895,6 +895,7 @@ try {
         assert.equal(admitted.preview_reserved_entry_usd, managedAdd ? "0" : "4",
           "clean managed-Add acceptance cohort excludes T09.0 component reservations");
         const expectedReserved=managedAdd?"0":partialFills?"4":
+          process.env.OKX_T10_04_FOREIGN_WORKER_REPLY_PROBE === "1"?"8.002":
           process.env.OKX_B1_SECOND_POSITIVE_PROBE === "1"?"8.002":"7.0015";
         const expectedSpent=managedAdd?"6.003":partialFills?"4.002":"1.0005";
         if(afterNative.budget?.entry_budget?.reserved_usd!==expectedReserved
@@ -949,6 +950,26 @@ try {
             assertBudgetEconomicsUnchanged(latestNativeBudget,afterNative.budget,
               "B1 resumed Worker must match Native money after source refresh");
           }
+        } else if (process.env.OKX_T10_04_FOREIGN_WORKER_REPLY_PROBE === "1") {
+          const blocked=receipt(stdout,"T10_04_NATIVE_FOREIGN_WORKER_REPLY_V1");
+          assert.equal(blocked.posts_before,4);
+          assert.equal(blocked.posts_after,4);
+          assert.equal(blocked.worker_budget_before.entry_budget.reserved_usd,"7.0015");
+          assert.equal(afterNative.budget.entry_budget.reserved_usd,"8.002",
+            "real Worker HELD survives corrupt delivery, Native did not POST");
+          assert.equal(afterNative.budget.entry_budget.consumed_usd,"1.0005");
+          assert.equal(afterNative.budget.reserved_loss_usd,
+            blocked.worker_budget_before.reserved_loss_usd === "0" ? "0"
+              : afterNative.budget.reserved_loss_usd);
+          console.log("T10_04_WORKER_FOREIGN_REPLY_V1:"+JSON.stringify({
+            schema:"okx.t10-04-worker-post-commit-binding/v1",
+            committed_worker_budget:afterNative.budget,
+            committed_worker_sequence:afterNative.risk_book_sequence,
+            native_sql_state:blocked.sql_state,
+            posts_for_denied_command:blocked.posts_after-blocked.posts_before,
+            original_source_before:blocked.worker_budget_before,
+            transport_error_expected:"RISK_RESULT_COMMAND_UNBOUND",
+          }));
         } else if (process.env.OKX_T10_02_EXTERNAL_EXPOSURE_PROBE === "1") {
           // T10-02's negative public Execute deliberately observes a newer
           // external position. That can advance signed source timestamps

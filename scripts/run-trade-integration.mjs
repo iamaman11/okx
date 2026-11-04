@@ -67,8 +67,8 @@ const requiredStagesByCase = new Map([
   ]],
   ["T10-04", [
     "public_trade_entered", "foreign_worker_reply_injected",
-    "binding_error_observed", "sql_worker_no_mutation",
-    "zero_venue_create_verified",
+    "binding_error_observed", "sql_did_not_authorize_post",
+    "worker_held_not_fabricated_release", "zero_venue_create_verified",
   ]],
   ["T10-05", [
     "public_trade_entered", "venue_send_observed",
@@ -395,6 +395,7 @@ const scopedProbeKeys = Object.freeze([
   "OKX_T09_MA_CONCURRENT_PROBE",
   "OKX_T10_06_CONCURRENT_PROBE",
   "OKX_T10_02_EXTERNAL_EXPOSURE_PROBE",
+  "OKX_T10_04_FOREIGN_WORKER_REPLY_PROBE",
   "OKX_T10_14_NATIVE_PROBE",
   "OKX_B1_NATIVE_CAP_PROBE",
   "OKX_B1_SECOND_POSITIVE_PROBE",
