@@ -142,6 +142,11 @@
             "posSide":"long","pos":"0.5","mgnMode":"cross",
             "avgPx":"1000","markPx":"1000","uTime":filled_at.to_string()
         }]));
+        // Existing native background account-capture is the only authority
+        // that may adopt the next source phase. The public Status must not
+        // interpret the 0.50 external position before its source snapshot
+        // has been ingested as part of that existing capture cycle.
+        let source_boundary=chrono::Utc::now().timestamp_millis();
         // T09.4: stage this 0.50 venue snapshot until its immutable
         // 0.20 fill and linked bill are committed by the real SQL owner.
         // Do not expose a position the native census cannot yet attribute.
@@ -335,6 +340,36 @@
             "fixture-observer-a","/api/v5/trade/orders-algo-pending",pending
         );
         eprintln!("T09_4_CAUSAL_INVENTORY_AFTER_SQL_V1 fill=0.2 bill=0.001 position=0.5 stops=2");
+        // The signed 0.50 position and two pending stops are now registered
+        // on the real recorded HTTP source. Wait for the ordinary Native
+        // account-capture loop to consume the position before asking
+        // TradeService Status to evaluate managed protection. Status itself
+        // must fetch the two signed stops; requiring a stop GET earlier
+        // would deadlock the independent source owners. This is read-only,
+        // time-bounded, and never certifies or invents a protected position.
+        let mut last_snapshot=String::from("NOT_OBSERVED");
+        tokio::time::timeout(Duration::from_secs(8),async {
+            loop {
+                let observed=owner.latest_snapshot.read().await.clone();
+                let last_success=owner.source_capture_health.read().await.last_success_ms;
+                let matching=observed.as_ref().map(|snap|
+                    snap.positions.iter().filter(|p|
+                        p.instrument_id=="BTC-USDT-SWAP"
+                            && p.position_side=="long"
+                    ).map(|p|p.position.as_str()).collect::<Vec<_>>()
+                ).unwrap_or_default();
+                if last_success.is_some_and(|ms|ms>=source_boundary)
+                    && matching==vec!["0.5"]
+                { break; }
+                last_snapshot=format!(
+                    "captured_after_phase={} signed_long_positions={matching:?}",
+                    last_success.is_some_and(|ms|ms>=source_boundary)
+                );
+                tokio::time::sleep(Duration::from_millis(40)).await;
+            }
+        }).await.unwrap_or_else(|_|panic!(
+            "T09_4_MANAGED_POSITION_NOT_CAPTURED_BEFORE_STATUS:{last_snapshot}"
+        ));
         // An order may be FILLED before the account SQL and Worker finish
         // source-backed incremental settlement. Observe that distinction on
         // the SAME public TradeService Status: no direct SQL/Worker mutation,
