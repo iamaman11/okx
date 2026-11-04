@@ -20,6 +20,8 @@ export async function run({caseId,root,signal}){
   assert.equal(n.no_metadata_permission_expansion,"INSTRUMENT_NOT_ALLOWED");
   assert.equal(n.invalid_lot_reason,"QUANTITY_NOT_ON_VENUE_LOT");
   assert.equal(n.invalid_tick_reason,"NO_EXECUTABLE_PRICE_WITHIN_SLIPPAGE");
+  assert.equal(n.invalid_min_size_reason,"ENTRY_BUDGET_BELOW_VENUE_MINIMUM",
+    "sub-minimum budget must be rejected, not rounded up to the venue lot");
   assert.equal(n.quote_entry_upper_usd,"1.0005");
   assert.equal(n.intent_state,"ACKNOWLEDGED");
   assert.equal(n.sql_risk_held,true);
@@ -52,6 +54,8 @@ export async function run({caseId,root,signal}){
       {id:"off_lot_refused",expected:"QUANTITY_NOT_ON_VENUE_LOT",actual:n.invalid_lot_reason},
       {id:"off_bound_tick_refused",expected:"NO_EXECUTABLE_PRICE_WITHIN_SLIPPAGE",
         actual:n.invalid_tick_reason},
+      {id:"below_minimum_refused",expected:"ENTRY_BUDGET_BELOW_VENUE_MINIMUM",
+        actual:n.invalid_min_size_reason},
       {id:"single_venue_create",expected:"1",actual:String(n.posts_after-n.posts_before)},
     ],
     events,

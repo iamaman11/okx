@@ -130,6 +130,24 @@ async fn t09_spec_second_linear_product(
     let bad_tick=trade.trade("fixture-b",&mk_preview("0.1","499.9"),None)
         .await.expect_err("T09-SPEC unsatisfiable price bound must reject");
     assert_eq!(bad_tick,"NO_EXECUTABLE_PRICE_WITHIN_SLIPPAGE");
+    // A positive budget of 0.5 USD cannot buy the minimum 0.05
+    // ETH contracts at 0.02 ETH/contract and the signed 500 ask.
+    // Budget sizing exercises the MINIMUM gate independently of the
+    // prior explicit Contracts off-lot rejection (0.06).
+    let small_budget=TradeRequest::Preview {
+        operation:TradeOperation::Open,strategy_instance:"manual".into(),
+        instrument:INST.into(),side:PositionSide::Long,
+        sizing:Sizing::EntryBudgetUsd{entry_budget_usd:"0.5".into()},
+        order:OrderConstraints {
+            order_type:"limit".into(),limit_price:Some("500".into()),
+            reference:None,max_entry_usd:Some("10".into()),max_slippage_bps:0,
+        },
+        protection:Some(Protection::Price{stop_price:"450".into()}),
+    };
+    assert!(small_budget.valid(),"T09-SPEC valid sub-minimum budget probe");
+    let bad_min=trade.trade("fixture-b",&small_budget,None)
+        .await.expect_err("T09-SPEC minimum must reject without a venue POST");
+    assert_eq!(bad_min,"ENTRY_BUDGET_BELOW_VENUE_MINIMUM");
     assert_eq!(feed.outbound_posts.lock().unwrap().len(),posts_before);
 
     let until=std::time::Instant::now()+Duration::from_secs(15);
@@ -235,6 +253,7 @@ async fn t09_spec_second_linear_product(
         "multiplier":"0.02","quote_entry_upper_usd":quote,
         "no_metadata_permission_expansion":denied_a,
         "invalid_lot_reason":bad_lot,"invalid_tick_reason":bad_tick,
+        "invalid_min_size_reason":bad_min,
         "intent_id":id,"intent_state":intent.state.as_str(),
         "sql_revision":intent.revision,
         "sql_risk_held":central.is_some(),
