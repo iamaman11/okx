@@ -704,6 +704,111 @@ mod raw_native_session_tests {
         (delay <= remaining).then_some(delay)
     }
 
+
+    /// Test-only public Execute recovery: an explicitly NEW request is legal
+    /// solely after the previous request is proven by its independent SQL
+    /// owner to have terminated before ANY central RESERVE or venue POST.
+    /// This does not retry a possibly-sent order, alter the production rate
+    /// limiter, synthesize a RiskBook grant or mark an unsafe error as PASS.
+    async fn recorded_execute_after_proven_local_no_send<F>(
+        accounts: &Arc<AccountRuntimeRegistry>,
+        trade: &Arc<TradeService>,
+        feed: &Arc<crate::accounts::recorded_support::RecordedAccountHttp>,
+        rate_budget: &RateBudget,
+        alias: &str,
+        mut request: okx_protocol::trading::TradeRequest,
+        mut refresh_signed_source: F,
+    ) -> serde_json::Value
+    where
+        F: FnMut(),
+    {
+        use okx_protocol::trading::TradeRequest;
+        let original_key = match &request {
+            TradeRequest::Execute { idempotency_key, .. } => idempotency_key.clone(),
+            _ => panic!("RECORDED_SAFE_EXECUTE_REQUIRES_PUBLIC_EXECUTE"),
+        };
+        let owner = accounts.resolve(alias).await.expect("signed SQL owner");
+        let original_post_count = feed.outbound_posts.lock().unwrap().len();
+        let until = std::time::Instant::now() + Duration::from_secs(17);
+        for attempt in 0..4 {
+            let key = match &request {
+                TradeRequest::Execute { idempotency_key, .. } => idempotency_key.clone(),
+                _ => unreachable!(),
+            };
+            let response = tokio::time::timeout_at(
+                until.into(), trade.trade(alias, &request, None)
+            ).await.expect("bounded public Execute source admission");
+            let reason = match response {
+                Ok(value) if value["data"]["state"] == "REJECTED" => {
+                    let reason = value["data"]["primary_reason"].as_str()
+                        .unwrap_or("MISSING_PUBLIC_DENIAL_REASON").to_owned();
+                    assert_eq!(value["status"], "completed");
+                    assert_eq!(value["data"]["rejection_origin"], "LOCAL",
+                        "only a real LOCAL denial can permit a new explicit order");
+                    assert_eq!(value["data"]["send_state"], "NOT_STARTED");
+                    assert_eq!(value["data"]["risk_release_state"], "NOT_RESERVED",
+                        "only a proven pre-RESERVE refusal may be retried");
+                    let id = value["data"]["intent_id"].as_str()
+                        .expect("SQL intent ID required on local pre-reserve denial")
+                        .to_owned();
+                    let saved_key = key.clone();
+                    let saved_id = id.clone();
+                    let (intent, no_reserve, central) = owner.execution.store.call(
+                        std::time::Instant::now() + Duration::from_secs(3),
+                        move |sql| {
+                            let intent = sql.by_idempotency(&saved_key)?
+                                .ok_or(okx_execution::StoreError::Invalid(
+                                    "LOCAL_NO_SEND_SQL_INTENT_MISSING"
+                                ))?;
+                            let no_reserve = sql.unsent_before_reserve(&saved_id)?;
+                            let central = sql.active_central_receipt(&saved_id)?;
+                            Ok((intent, no_reserve, central))
+                        },
+                    ).await.expect("durable pre-reserve SQL and central readback");
+                    assert_eq!(intent.intent_id, id);
+                    assert_eq!(intent.state.as_str(), "REJECTED");
+                    assert!(no_reserve, "SQL must prove no Worker RESERVE attempt");
+                    assert!(central.is_none(), "denied intent cannot hold Worker risk");
+                    reason
+                }
+                Err(reason) => {
+                    // A local rate denial BEFORE SQL PREPARE may be retried
+                    // under a different user intent only if SQL is absent.
+                    let saved_key = key.clone();
+                    let maybe = owner.execution.store.call(
+                        std::time::Instant::now() + Duration::from_secs(3),
+                        move |sql| sql.by_idempotency(&saved_key),
+                    ).await.expect("pre-prepare refusal SQL existence check");
+                    assert!(maybe.is_none(),
+                        "never retry Execute after any durable PREPARE or possible POST");
+                    reason
+                }
+                Ok(value) => return value,
+            };
+            assert_eq!(feed.outbound_posts.lock().unwrap().len(), original_post_count,
+                "local read denial must not reach venue POST");
+            assert_eq!(feed.unconsumed_posts(), 1,
+                "unclaimed signed POST transcript must remain exactly once");
+            let remaining = until.saturating_duration_since(std::time::Instant::now());
+            let delay = recorded_preview_local_defer(&reason, rate_budget, remaining)
+                .unwrap_or_else(|| panic!(
+                    "LOCAL_EXECUTE_RETRY_NOT_PROVEN:reason={}:attempt={}:posts={}",
+                    reason,attempt,original_post_count
+                ));
+            assert!(attempt < 3,
+                "four independent finite signed source attempts exhausted");
+            tokio::time::timeout_at(until.into(), tokio::time::sleep(delay))
+                .await.expect("bounded LOCAL no-send admission defer");
+            // Only a fresh external RAW source phase is published for the
+            // new explicit command; SQL and RiskBook remain untouched.
+            refresh_signed_source();
+            if let TradeRequest::Execute { idempotency_key, .. } = &mut request {
+                *idempotency_key = format!("{original_key}_local_{attempt}");
+            }
+        }
+        unreachable!("bounded Execute attempts always produce a terminal outcome");
+    }
+
     // An explicitly recorded *new* all-scopes inventory after T09.1 has
     // verified cancellation of its attached protection. Keep the finite
     // transcript builder synchronous, outside the large Native async test

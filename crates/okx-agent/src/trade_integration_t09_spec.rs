@@ -320,7 +320,27 @@ async fn t09_spec_second_linear_product(
             }
         }
     });
-    let execution=trade.trade("fixture-b",&request,None).await;
+    let execution=recorded_execute_after_proven_local_no_send(
+        &accounts,&trade,&feed,&rate_budget,"fixture-b",request,||{
+            let ts=chrono::Utc::now().timestamp_millis().to_string();
+            let updated_fee=wrap(json!([{
+                "instType":"SWAP","level":"Lv1","ts":ts,
+                "feeGroup":[{"groupId":"4","maker":"0.0005","taker":"0.0005"}]
+            }]));
+            feed.advance_recorded_route(
+                "fixture-observer-b","/api/v5/account/trade-fee",
+                (0..12).map(|_|RecordedGet {
+                    access_key:"fixture-observer-b".into(),
+                    path:"/api/v5/account/trade-fee".into(),
+                    required_query:vec![
+                        ("instType".into(),"SWAP".into()),
+                        ("instFamily".into(),"ETH-USDT".into())
+                    ],raw_response:updated_fee.clone(),
+                }).collect(),
+            );
+            feed.advance_recorded_public_clock(wrap(json!([{"ts":ts}])));
+        }
+    ).await;
     let _=stop_tx.send(());
     publisher.await.expect("T09-SPEC RAW ETH frame publisher joined");
     let accepted=execution

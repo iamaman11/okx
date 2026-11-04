@@ -186,10 +186,38 @@ async fn t10_01_partial_balance_denial_recovery(
             }]))
         });
     }
-    let accepted=tokio::time::timeout(Duration::from_secs(20),
-        trade.trade("fixture-b",&positive,None)
-    ).await.expect("T10-01 fresh recovery deadline")
-      .expect("T10-01 real Worker/Native source recovery must execute");
+    let accepted=recorded_execute_after_proven_local_no_send(
+        &accounts,&trade,&feed,&rate_budget,"fixture-b",positive,||{
+            let at=chrono::Utc::now().timestamp_millis().to_string();
+            let new_balance=wrap(json!([{
+                "totalEq":"100","adjEq":"100","uTime":at,
+                "details":[{"ccy":"USDT","eq":"100","liab":"0",
+                    "availEq":"100","availBal":"100","eqUsd":"100","uTime":at}]
+            }]));
+            feed.advance_recorded_route("fixture-observer-b",route,
+                (0..20).map(|_|RecordedGet{
+                    access_key:"fixture-observer-b".into(),path:route.into(),
+                    required_query:vec![],raw_response:new_balance.clone(),
+                }).collect()
+            );
+            let new_fee=wrap(json!([{
+                "instType":"SWAP","level":"Lv1","ts":at,
+                "feeGroup":[{"groupId":"4","maker":"0.0005","taker":"0.0005"}]
+            }]));
+            feed.advance_recorded_route("fixture-observer-b",
+                "/api/v5/account/trade-fee",
+                (0..12).map(|_|RecordedGet{
+                    access_key:"fixture-observer-b".into(),
+                    path:"/api/v5/account/trade-fee".into(),
+                    required_query:vec![
+                        ("instType".into(),"SWAP".into()),
+                        ("instFamily".into(),"BTC-USDT".into())
+                    ],raw_response:new_fee.clone()
+                }).collect()
+            );
+            feed.advance_recorded_public_clock(wrap(json!([{"ts":at}])));
+        }
+    ).await;
     // Worker/SQL and the authenticated venue ACK are separate from the
     // immediately available public Status. An incomplete local readback
     // after one acknowledged POST produces UNKNOWN/no-resubmit; never
