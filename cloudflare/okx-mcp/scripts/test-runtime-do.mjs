@@ -524,6 +524,47 @@ try {
     assert.equal(budgetBeforeRestart.budget.entry_budget.remaining_usd,"2");
     assert.equal(budgetBeforeRestart.budget.reserved_loss_usd,"2");
     assert.equal(budgetBeforeRestart.budget.remaining_loss_usd,"8");
+    // A scripted WSS command is NOT the persisted NativeAccountSQL owner's
+    // unsent-release proof. Missing or foreign proof must never free budget.
+    // These are DENIAL inputs only; no test mutates SQL/Worker financial state.
+    const withoutSqlProof=await risk(
+      socket1,"release_without_native_sql_proof_0001",{
+        action:"RELEASE_UNSENT",
+        reservation_key:firstReserve.reservation_key,
+        plan_sha256:firstRequest.plan_sha256,
+        expected_risk_book_sequence:budgetBeforeRestart.risk_book_sequence,
+      }
+    );
+    assert.equal(withoutSqlProof.status,"DENIED");
+    assert.equal(withoutSqlProof.reason,"INVALID_UNSENT_RELEASE_COMMAND");
+    const wrongAccountProof=await risk(
+      socket1,"release_wrong_sql_owner_0001",{
+        action:"RELEASE_UNSENT",
+        reservation_key:firstReserve.reservation_key,
+        plan_sha256:firstRequest.plan_sha256,
+        expected_risk_book_sequence:budgetBeforeRestart.risk_book_sequence,
+        proof:{
+          reservation_key:firstReserve.reservation_key,
+          account_key:accountKeyB,
+          intent_id:firstRequest.intent_id,
+          plan_hash:firstRequest.plan_sha256,
+          request_hash:"a".repeat(64),
+          reason:"REJECTED_UNSENT",
+          record_digest:"b".repeat(64),
+        },
+      }
+    );
+    assert.equal(wrongAccountProof.status,"DENIED");
+    assert.ok(["INVALID_UNSENT_SQL_PROOF",
+      "UNSENT_RELEASE_IDENTITY_OR_STATE_MISMATCH"].includes(wrongAccountProof.reason),
+      "a foreign account cannot free A's central reservation");
+    const afterInvalidRelease=await summary(
+      socket1,"summary_after_unproven_release_denials_0001");
+    assert.equal(afterInvalidRelease.risk_book_sequence,
+      budgetBeforeRestart.risk_book_sequence,
+      "invalid release cannot advance Worker money/CAS sequence");
+    assert.deepEqual(afterInvalidRelease.budget.entry_budget,
+      budgetBeforeRestart.budget.entry_budget);
     socket1.ws.close();
     await first.dispose();
     first=null;
@@ -603,6 +644,12 @@ try {
         afterForeign.budget.reserved_loss_usd==="0",
       replay_status:repeated.status,
       replay_reservation_identical:repeated.reservation_key===firstReserve.reservation_key,
+      without_native_sql_proof_status:withoutSqlProof.status,
+      without_native_sql_proof_reason:withoutSqlProof.reason,
+      foreign_sql_owner_release_status:wrongAccountProof.status,
+      foreign_sql_owner_release_reason:wrongAccountProof.reason,
+      denied_release_sequence_unchanged:
+        afterInvalidRelease.risk_book_sequence===budgetBeforeRestart.risk_book_sequence,
       persisted_a_state:inspectA.reservation_state,
       persisted_b_state:inspectB.reservation_state,
       before_budget:budgetBeforeRestart.budget,

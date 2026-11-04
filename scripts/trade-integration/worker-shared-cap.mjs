@@ -48,6 +48,13 @@ function prove(e) {
   assert.equal(e.foreign_strategy_no_budget_reserved, true);
   assert.equal(e.replay_status, "HELD");
   assert.equal(e.replay_reservation_identical, true);
+  assert.equal(e.without_native_sql_proof_status,"DENIED");
+  assert.equal(e.without_native_sql_proof_reason,"INVALID_UNSENT_RELEASE_COMMAND");
+  assert.equal(e.foreign_sql_owner_release_status,"DENIED");
+  assert.ok(["INVALID_UNSENT_SQL_PROOF",
+    "UNSENT_RELEASE_IDENTITY_OR_STATE_MISMATCH"].includes(
+      e.foreign_sql_owner_release_reason));
+  assert.equal(e.denied_release_sequence_unchanged,true);
   assert.equal(e.persisted_a_state, "HELD");
   assert.equal(e.persisted_b_state, "HELD");
   assert.equal(e.before_budget.campaign_limit_usd, "10");
@@ -133,6 +140,7 @@ if (process.argv.includes("--self-test")) {
     worker: result,
     concurrent_worker: concurrent,
     limitations: ["Native public Execute + SQL owner not exercised",
+      "Malformed and foreign SQL release commands were denied, not source-backed release",
       "No source-backed Native RELEASE proof: reservations stay HELD"],
   };
   const outputIndex = process.argv.indexOf("--artifacts");
