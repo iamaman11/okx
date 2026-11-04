@@ -9,6 +9,7 @@ on:
       - work/b-t09-protection-causal-20261105
       - work/b-seven-readback-consolidation-20261105
       - work/b-source-owner-causal-fixes-20261105
+      - work/b-replay-source-isolation-20261105
 
 permissions:
   contents: read

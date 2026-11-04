@@ -2598,11 +2598,14 @@ mod raw_native_session_tests {
         // not turn the observation into a verified outcome. Only an
         // *unattempted* read leaves exactly one queued transcript reply.
         // Both cases must remain no-resubmit and subsequently reconcile.
-        let replay_remaining = feed.unconsumed_reads();
+        let replay_remaining = feed.unconsumed_route_reads(
+            "fixture-executor-a", "/api/v5/trade/order"
+        );
         assert!(
             replay_remaining == 0 || (replay_readback_unknown && replay_remaining == 1),
-            "T09_5_REPLAY_TRANSCRIPT_INVALID: status={}, remaining={replay_remaining}",
-            repeated["status"]
+            "T09_5_ORDER_READBACK_TRANSCRIPT_INVALID: status={}, order_remaining={replay_remaining}, all_pending_source_pages={}",
+            repeated["status"],
+            feed.unconsumed_reads(),
         );
         let mut after_public = summary("risk_after_public_trade_post_001");
         after_public.installation_id = "installation_test".into();

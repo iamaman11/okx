@@ -1318,6 +1318,21 @@ pub(crate) mod recorded_support {
             self.reads.lock().unwrap().len()
         }
 
+        /// A replay must account only for the signed order readback it
+        /// requested. Finance and fee transcript pages are independent
+        /// owners and may still be pending for later source-capture turns.
+        /// Keep their required pages strict rather than consuming, ignoring
+        /// or globally clearing them to satisfy an unrelated readback.
+        pub(crate) fn unconsumed_route_reads(
+            &self,
+            access_key: &str,
+            path: &str,
+        ) -> usize {
+            self.reads.lock().unwrap().iter()
+                .filter(|page| page.access_key == access_key && page.path == path)
+                .count()
+        }
+
         pub(crate) fn expect_post(&self, post: RecordedPost) {
             self.posts.lock().unwrap().push(post);
         }
