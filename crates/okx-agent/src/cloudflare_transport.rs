@@ -1910,10 +1910,92 @@ mod raw_native_session_tests {
         let opened = Box::pin(async {
             let admission_deadline = std::time::Instant::now() + Duration::from_secs(16);
             for attempt in 0..4 {
-                let admission = trade
-                    .trade("fixture-a", &execute, None)
-                    .await
-                    .expect("T09.1 public Execute must return its typed admission");
+                let admission = if attempt == 0
+                    && std::env::var("OKX_T10_06_CONCURRENT_PROBE").as_deref() == Ok("1")
+                {
+                    // Unlike the warm replay test below, NONE of these 100
+                    // calls has an already durable intent at the barrier.
+                    // Only one existing Native owner may win BEGIN_POST. All
+                    // other calls must be the same owner/key or fail locally,
+                    // never create a second reservation or exchange POST.
+                    for _ in 0..100 {
+                        feed.expect_optional_get(RecordedGet {
+                            access_key:"fixture-executor-a".into(),
+                            path:"/api/v5/trade/order".into(),
+                            required_query:vec![
+                                ("instId".into(),"BTC-USDT-SWAP".into())
+                            ],
+                            raw_response:raw_order.clone(),
+                        });
+                    }
+                    let started = std::time::Instant::now();
+                    let gate = Arc::new(tokio::sync::Barrier::new(101));
+                    let mut tasks = tokio::task::JoinSet::new();
+                    for _ in 0..100 {
+                        let public = trade.clone();
+                        let request = execute.clone();
+                        let wait = gate.clone();
+                        tasks.spawn(async move {
+                            wait.wait().await;
+                            public.trade("fixture-a", &request, None).await
+                        });
+                    }
+                    gate.wait().await;
+                    let mut signed = Vec::new();
+                    let mut busy = 0usize;
+                    let mut read_deferred = 0usize;
+                    while let Some(result) = tokio::time::timeout_at(
+                        admission_deadline.into(), tasks.join_next()
+                    ).await.expect("T10-06 cold concurrent join deadline") {
+                        match result.expect("T10-06 cold public task panicked") {
+                            Ok(v) if v["status"] == "partial" || v["status"] == "unknown" => {
+                                signed.push(v);
+                            }
+                            Err(reason) if reason == "ACCOUNT_MUTATION_BUSY" => busy += 1,
+                            Err(reason) if recorded_preview_local_defer(
+                                &reason, &rate_budget,
+                                admission_deadline.saturating_duration_since(
+                                    std::time::Instant::now()
+                                )
+                            ).is_some() => read_deferred += 1,
+                            other => panic!("T10_06_UNSAFE_COLD_CONCURRENT_OUTCOME:{other:?}"),
+                        }
+                    }
+                    assert_eq!(signed.len() + busy + read_deferred, 100,
+                        "T10-06 all 100 cold calls must be accounted for");
+                    let acknowledged = signed.iter()
+                        .find(|v| v["status"] == "partial"
+                            && v["data"]["intent"]["state"] == "ACKNOWLEDGED")
+                        .expect("T10-06 one cold public call must get actual venue ACK")
+                        .clone();
+                    let original = acknowledged["data"]["intent"]["intent_id"]
+                        .as_str().expect("T10-06 original durable intent");
+                    for result in &signed {
+                        let observed = result["data"]["intent"]["intent_id"]
+                            .as_str().or_else(|| result["intent_id"].as_str());
+                        assert_eq!(observed, Some(original),
+                            "100 concurrent same-key requests must never create a second intent");
+                        if result["status"] == "unknown" {
+                            assert_eq!(result["retryable"],false,
+                                "T10-06 UNKNOWN must be no-resubmit");
+                        }
+                    }
+                    assert_eq!(feed.outbound_posts.lock().unwrap().len(), 1,
+                        "T10-06 cold concurrency may create only ONE venue POST");
+                    println!("T10_06_NATIVE_COLD_CONCURRENT_V1:{}",json!({
+                        "requested":100,
+                        "same_durable_intent_readbacks":signed.len(),
+                        "local_mutation_busy_no_send":busy,
+                        "local_private_read_defer_no_send":read_deferred,
+                        "original_intent_id":original,
+                        "outbound_create_posts":1,
+                        "elapsed_ms":started.elapsed().as_millis()
+                    }));
+                    acknowledged
+                } else {
+                    trade.trade("fixture-a", &execute, None).await
+                        .expect("T09.1 public Execute must return its typed admission")
+                };
                 if admission["status"] == "partial" {
                     return admission;
                 }

@@ -182,6 +182,7 @@ export async function actualNativeWorker(root, signal, { statusProbe = false, se
       workerBootstrap: receipt(stdout, "T09_0_WORKER_EVIDENCE_V1"),
       nativeReplay: receipt(stdout, "T09_5_NATIVE_IDEMPOTENCY_EVIDENCE_V1"),
       ...(process.env.OKX_T10_06_CONCURRENT_PROBE === "1" ? {
+        nativeT10Cold: receipt(stdout, "T10_06_NATIVE_COLD_CONCURRENT_V1"),
         nativeT10Concurrency: receipt(stdout, "T10_06_NATIVE_CONCURRENT_V1"),
       } : {}),
       nativeAccountScope: receipt(stdout, "S2_07_NATIVE_ACCOUNT_SCOPE_V1"),

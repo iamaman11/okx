@@ -7,8 +7,17 @@ export async function run({caseId,root,signal}) {
   process.env.OKX_T10_06_CONCURRENT_PROBE="1";
   const t=await actualNativeWorker(root,signal);
   const v=t.nativeT10Concurrency;
+  const cold=t.nativeT10Cold;
   const n=t.nativeReplay,w=t.workerReplay;
-  assert.ok(v && n && w,"actual Native/Worker concurrent witness required");
+  assert.ok(v && cold && n && w,"actual cold+warm Native/Worker witnesses required");
+  assert.equal(cold.requested,100);
+  assert.equal(cold.same_durable_intent_readbacks+
+    cold.local_mutation_busy_no_send+
+    cold.local_private_read_defer_no_send,100);
+  assert.equal(cold.original_intent_id,n.opened_intent_id);
+  assert.equal(cold.outbound_create_posts,1);
+  assert.ok(cold.same_durable_intent_readbacks>=1);
+  assert.ok(Number.isSafeInteger(cold.elapsed_ms)&&cold.elapsed_ms>=0);
   assert.equal(v.requested,100);
   assert.equal(v.same_intent_returns + v.local_no_send_read_denials,100);
   assert.equal(v.nonlocal_failures,0);
@@ -27,6 +36,13 @@ export async function run({caseId,root,signal}) {
     provenance:{schema:"okx.native-workerd-transcript/v1",sha256:t.transcript_sha256},
     assertions:[
       {id:"concurrent_requests",expected:"100",actual:String(v.requested)},
+      {id:"cold_concurrent_requests",expected:"100",actual:String(cold.requested)},
+      {id:"cold_same_key_all_accounted",expected:"100",
+        actual:String(cold.same_durable_intent_readbacks+
+          cold.local_mutation_busy_no_send+
+          cold.local_private_read_defer_no_send)},
+      {id:"cold_single_possible_venue_send",expected:"1",
+        actual:String(cold.outbound_create_posts)},
       {id:"same_intent_or_proven_no_send",expected:"100",
         actual:String(v.same_intent_returns+v.local_no_send_read_denials)},
       {id:"one_venue_create",expected:"1",actual:String(v.created_posts)},
@@ -39,7 +55,9 @@ export async function run({caseId,root,signal}) {
     ],
     events:[
       {stage:"public_trade_entered",owner:"TradeService",
-        source_digest:hash([v.requested,v.original_intent_id])},
+        source_digest:hash([cold.requested,cold.original_intent_id])},
+      {stage:"cold_concurrent_single_send_verified",owner:"TradeService+NativeAccountSQL",
+        source_digest:hash(cold)},
       {stage:"reserve_committed",owner:"RuntimeSession/SQLiteDO",
         source_digest:hash(w.budget)},
       {stage:"begin_post_committed",owner:"NativeAccountSQL",
