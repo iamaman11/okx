@@ -1990,11 +1990,35 @@ fn b_census_probe_failure(phase: &str, account: &str, reason: &str, until: Optio
                         continue;
                     };
                     covered_position_count += 1;
+                    // The active lots, each independently verified stop and
+                    // its central receipt must be observed in ONE SQLite
+                    // owner turn. Multiple queue hops could age the signed
+                    // venue snapshot before the final freshness gate.
                     let instrument = p.instrument_id.clone();
-                    let lots = r
+                    let direction = position_direction.to_owned();
+                    let (lots, owned_proofs) = r
                         .execution
                         .store
-                        .call(deadline(), move |s| s.active_lots(&instrument))
+                        .call(deadline(), move |s| {
+                            let lots = s.active_lots(&instrument)?;
+                            let proofs = lots
+                                .iter()
+                                .filter(|lot| lot.side == direction)
+                                .map(|lot| {
+                                    let id = lot.intent_id.as_ref().ok_or(
+                                        okx_execution::StoreError::Invalid(
+                                            "UNATTRIBUTED_POSITION_LOT",
+                                        ),
+                                    )?;
+                                    Ok((
+                                        id.clone(),
+                                        s.protection(id)?,
+                                        s.active_central_receipt(id)?,
+                                    ))
+                                })
+                                .collect::<okx_execution::StoreResult<Vec<_>>>()?;
+                            Ok((lots, proofs))
+                        })
                         .await
                         .map_err(err)?;
                     let covered = lots
@@ -2011,17 +2035,7 @@ fn b_census_probe_failure(phase: &str, account: &str, reason: &str, until: Optio
                     if covered != actual_qty {
                         return Err("UNATTRIBUTED_EXCHANGE_POSITION".to_owned());
                     }
-                    for lot in lots.iter().filter(|l| l.side == position_direction) {
-                        let id = lot.intent_id.clone().ok_or("UNATTRIBUTED_POSITION_LOT")?;
-                        let owner_id = id.clone();
-                        let (protection, receipt) = r
-                            .execution
-                            .store
-                            .call(deadline(), move |s| {
-                                Ok((s.protection(&id)?, s.active_central_receipt(&id)?))
-                            })
-                            .await
-                            .map_err(err)?;
+                    for (owner_id, protection, receipt) in owned_proofs {
                         let protection = protection.ok_or("PROTECTION_UNVERIFIED")?;
                         let receipt = receipt.ok_or("CENTRAL_RESERVATION_UNVERIFIED")?;
                         let owned_qty = lots
@@ -2048,21 +2062,31 @@ fn b_census_probe_failure(phase: &str, account: &str, reason: &str, until: Optio
                         verified_live_intents.insert(owner_id.clone());
                     }
                 }
+                // The same one-owner readback applies to all pending orders.
+                // No missing client ID or unmatched SQL intent can disappear
+                // in a batch; every venue order is still checked separately.
+                let clients = snapshot.pending_orders
+                    .iter()
+                    .map(|order| order.client_order_id.clone()
+                        .ok_or("UNATTRIBUTED_PENDING_ORDER"))
+                    .collect::<Result<Vec<_>, _>>()?;
                 let mut covered_order_count = 0_usize;
-                for order in &snapshot.pending_orders {
-                    let client = order
-                        .client_order_id
-                        .clone()
-                        .ok_or("UNATTRIBUTED_PENDING_ORDER")?;
-                    let known = r
+                if !clients.is_empty() {
+                    let known_orders = r
                         .execution
                         .store
-                        .call(deadline(), move |s| s.by_client_order_id(&client))
+                        .call(deadline(), move |s| {
+                            clients.iter().map(|client|
+                                s.by_client_order_id(client)
+                            ).collect::<okx_execution::StoreResult<Vec<_>>>()
+                        })
                         .await
                         .map_err(err)?;
-                    let known = known.ok_or("UNATTRIBUTED_PENDING_ORDER")?;
-                    verify_pending_order_binding(order, &known)?;
-                    covered_order_count += 1;
+                    for (order, known) in snapshot.pending_orders.iter().zip(known_orders) {
+                        let known = known.ok_or("UNATTRIBUTED_PENDING_ORDER")?;
+                        verify_pending_order_binding(order, &known)?;
+                        covered_order_count += 1;
+                    }
                 }
                 let observed_algos = algos
                     .samples
