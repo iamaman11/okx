@@ -115,6 +115,29 @@ async fn t09_spec_second_linear_product(
     };
     let posts_before=feed.outbound_posts.lock().unwrap().len();
     assert_eq!(posts_before,4,"T09-SPEC only after two positive A orders");
+    // Finite test-only transport accounting: no new GET, SQL, RiskBook or
+    // venue mutation. Attribute source exhaustion before any fixture expansion.
+    let source_counts=||{
+        let reads=feed.requests.lock().unwrap();
+        let count=|actor:&str,path:&str|{
+            let prefix=format!("{actor}:{path}");
+            reads.iter().filter(|route|route.starts_with(&prefix)).count()
+        };
+        json!({
+            "a_balance":count("fixture-observer-a","/api/v5/account/balance"),
+            "b_balance":count("fixture-observer-b","/api/v5/account/balance"),
+            "a_config":count("fixture-observer-a","/api/v5/account/config"),
+            "b_config":count("fixture-observer-b","/api/v5/account/config"),
+            "a_algo":count("fixture-observer-a","/api/v5/trade/orders-algo-pending"),
+            "b_algo":count("fixture-observer-b","/api/v5/trade/orders-algo-pending"),
+            "outbound_posts":feed.outbound_posts.lock().unwrap().len()
+        })
+    };
+    let spec_phase_start=source_counts();
+    eprintln!("T09_SPEC_SOURCE_PHASE_V1:{}",json!({
+        "phase":"BEFORE_NEGATIVE_PREVIEWS","counts":spec_phase_start
+    }));
+
 
     // The same newly discovered public metadata cannot grant account A the
     // right to trade ETH. Only B's separately governed permission allows it.
@@ -150,6 +173,9 @@ async fn t09_spec_second_linear_product(
         .await.expect_err("T09-SPEC minimum must reject without a venue POST");
     assert_eq!(bad_min,"ENTRY_BUDGET_BELOW_VENUE_MINIMUM");
     assert_eq!(feed.outbound_posts.lock().unwrap().len(),posts_before);
+    eprintln!("T09_SPEC_SOURCE_PHASE_V1:{}",json!({
+        "phase":"AFTER_NEGATIVE_PREVIEWS","counts":source_counts()
+    }));
 
     let until=std::time::Instant::now()+Duration::from_secs(15);
     let preview=loop {
@@ -171,6 +197,9 @@ async fn t09_spec_second_linear_product(
     let quote=preview["data"]["entry_costs"]["entry_total_usd"]
         .as_str().expect("T09-SPEC preview exact USD");
     assert_eq!(quote,"1.0005");
+    eprintln!("T09_SPEC_SOURCE_PHASE_V1:{}",json!({
+        "phase":"AFTER_POSITIVE_PREVIEW","counts":source_counts()
+    }));
 
     // The negative/preview probes above use finite LOCAL rate admission and
     // may outlive the original ETH market observation. Publish another
@@ -320,7 +349,25 @@ async fn t09_spec_second_linear_product(
             }
         }
     });
+    let a_source=accounts.resolve("fixture-a").await
+        .expect("T09-SPEC A source health");
+    let a_before=a_source.source_capture_health.read().await.clone();
+    let prior=source_counts();
+    eprintln!("T09_SPEC_SOURCE_PHASE_V1:{}",json!({
+        "phase":"BEFORE_POSITIVE_EXECUTE","counts":prior,
+        "a_capture_last_success_ms":a_before.last_success_ms,
+        "a_capture_last_failure_ms":a_before.last_failure_ms,
+        "a_capture_reason":a_before.reason_code
+    }));
     let execution=trade.trade("fixture-b",&request,None).await;
+    let after=source_counts();
+    let a_after=a_source.source_capture_health.read().await.clone();
+    eprintln!("T09_SPEC_SOURCE_PHASE_V1:{}",json!({
+        "phase":"AFTER_POSITIVE_EXECUTE","counts":after,
+        "a_capture_last_success_ms":a_after.last_success_ms,
+        "a_capture_last_failure_ms":a_after.last_failure_ms,
+        "a_capture_reason":a_after.reason_code
+    }));
     let _=stop_tx.send(());
     publisher.await.expect("T09-SPEC RAW ETH frame publisher joined");
     let accepted=execution
@@ -335,7 +382,7 @@ async fn t09_spec_second_linear_product(
     // Preserve its original phase/reason before attempting any status readback.
     if accepted["data"]["state"] == "REJECTED" {
         panic!(
-            "T09_SPEC_FIRST_POSITIVE_DENIAL:reply={accepted}:posts={}:denied_routes={:?}:last_throttle={:?}",
+            "T09_SPEC_FIRST_POSITIVE_DENIAL:reply={accepted}:posts={}:denied_routes={:?}:last_throttle={:?}:pre_reads={prior}:after_reads={after}",
             feed.outbound_posts.lock().unwrap().len(),
             feed.denied_routes.lock().unwrap().iter().rev().take(8).cloned().collect::<Vec<_>>(),
             rate_budget.snapshot().last_throttle
