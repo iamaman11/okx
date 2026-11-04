@@ -247,7 +247,16 @@ where
         F::Ping{nonce,..}=>{challenges.retain(|_,t|t.elapsed()<Duration::from_secs(15));if challenges.len()<64{challenges.insert(nonce.clone(),Instant::now());}send(&mut sink,F::Pong{schema:SCHEMA.into(),session_id:session_id.clone(),connection_generation,nonce}).await?;},
         F::Pong{..}=>{},
         F::PolicySnapshot{snapshot,..}=>{ctx.trade.update_governance(&snapshot).await.map_err(|_|transport("INVALID_POLICY_SNAPSHOT"))?;},
-        F::RiskControlResult{result,..}=>{pending.retain(|_,sender|!sender.is_closed());if let Some(sender)=pending.remove(&result.command_id){let _=sender.send(result);}},
+        F::RiskControlResult{result,..}=>{
+            // An unsolicited, stale or foreign command ID must never be
+            // mistaken for the active reservation's authorization. Reject
+            // the frame instead of silently dropping it and waiting for a
+            // timeout while the caller still believes a grant is pending.
+            pending.retain(|_,sender|!sender.is_closed());
+            let sender=pending.remove(&result.command_id)
+                .ok_or_else(||transport("RISK_RESULT_COMMAND_UNBOUND"))?;
+            let _=sender.send(result);
+        },
         F::Request{request,operator_governance,..}=>{
         let id=request.request_id.clone();send(&mut sink,F::DeliveryAck{schema:SCHEMA.into(),session_id:session_id.clone(),connection_generation,request_id:id.clone()}).await?;
         if active.contains(&id){continue;}
@@ -878,6 +887,62 @@ mod raw_native_session_tests {
         drop(output_rx);
         std::fs::remove_dir_all(root).unwrap();
     }
+    #[tokio::test]
+    async fn foreign_risk_reply_command_never_authorizes_pending_reserve() {
+        let (ctx, root, client, mut risk_rx) = test_dispatch().await;
+        let (input_tx, input_rx) = mpsc::unbounded_channel();
+        let (output_tx, mut output_rx) = mpsc::unbounded_channel();
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let session = tokio::spawn(async move {
+            run_connected_session(
+                RawFrames { inbound: input_rx, outbound: output_tx },
+                test_hello(), ctx, &mut risk_rx, shutdown_rx,
+            ).await
+        });
+        assert!(matches!(parse(output_rx.recv().await.unwrap()), F::Hello { .. }));
+        let session_id = "session_test_unbound_command".to_owned();
+        let generation = 21;
+        input_tx.send(Ok(wire(F::HelloAck {
+            schema: SCHEMA.into(),
+            session_id: session_id.clone(),
+            connection_generation: generation,
+        }))).unwrap();
+
+        let operation = tokio::spawn({
+            let client = client.clone();
+            async move { client.request(summary("risk_wire_expected_command")).await }
+        });
+        let observed = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                match parse(output_rx.recv().await.expect("risk outbound closed")) {
+                    F::RiskControl { command, .. } => break command.command_id,
+                    F::Ping { .. } => continue,
+                    other => panic!("unexpected native outbound: {other:?}"),
+                }
+            }
+        }).await.unwrap();
+        assert_eq!(observed, "risk_wire_expected_command");
+        input_tx.send(Ok(wire(F::RiskControlResult {
+            schema: SCHEMA.into(),
+            session_id,
+            connection_generation: generation,
+            result: denied("risk_wire_foreign_command"),
+        }))).unwrap();
+
+        let stopped = tokio::time::timeout(Duration::from_secs(3), session)
+            .await.unwrap().unwrap();
+        assert!(stopped.unwrap_err().to_string().contains("RISK_RESULT_COMMAND_UNBOUND"));
+        let pending = tokio::time::timeout(Duration::from_secs(3), operation)
+            .await.unwrap().unwrap();
+        assert_eq!(pending.unwrap_err(), "RISK_TRANSPORT_LOST_DO_NOT_REPLAY",
+            "an unbound reply cannot become an authorization or a second grant");
+        drop(client);
+        drop(input_tx);
+        drop(shutdown_tx);
+        drop(output_rx);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     /// Opt-in only from the pinned Linux integration job. This socket talks
     /// directly to the real workerd RuntimeSession and its persisted SQLite DO;
     /// there is no mock Worker/RiskBook, fixture exchange or alternate executor.
