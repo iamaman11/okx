@@ -120,11 +120,19 @@ async fn t10_15_fee_source_after_worker_held(
     let result=tokio::time::timeout(Duration::from_secs(15),pending)
         .await.expect("T10-15 source-changed Execute deadline")
         .expect("T10-15 public Execute task");
-    let reason=match result{
+    // This must be an authentic production SQL-backed no-send release,
+    // not merely a rejected plan with a held Worker reservation left behind.
+    // The public Execute response is issued after the Rust owner requested
+    // RELEASE_UNSENT and persisted its central acknowledgement.
+    let release_reply=result.as_ref().ok()
+        .and_then(|body|body["data"]["risk_release_state"].as_str());
+    let reason=match &result{
         Ok(body)=>body["data"]["primary_reason"].as_str()
             .unwrap_or("NO_TYPED_REFUSAL").to_owned(),
-        Err(reason)=>reason,
+        Err(reason)=>reason.clone(),
     };
+    assert_eq!(release_reply,Some("RELEASED"),
+        "T10-15 requires Native SQL -> Worker RELEASE_UNSENT, not a pending release: {result:?}");
     assert!(
         reason.contains("POST_ENTRY_FEE_OR_SPEC_CHANGED")
           ||reason.contains("POST_ENTRY_FEE_SOURCE_CHANGED"),
@@ -139,11 +147,42 @@ async fn t10_15_fee_source_after_worker_held(
             let i=s.by_idempotency(
                 "t10_15_fee_changed_between_held_and_post_0001"
             )?.ok_or(okx_execution::StoreError::Invalid("T10_15_SQL_INTENT_MISSING"))?;
-            Ok((i.intent_id,i.state.as_str().to_owned(),i.revision,i.exchange_order_id))
+            let unsent=s.unsent_release_receipt(&i.intent_id)?
+                .ok_or(okx_execution::StoreError::Invalid(
+                    "T10_15_DURABLE_UNSENT_SQL_PROOF_MISSING"))?;
+            let retained=s.central_receipt(&i.intent_id)?
+                .ok_or(okx_execution::StoreError::Invalid(
+                    "T10_15_RETAINED_RESERVATION_RECEIPT_MISSING"))?;
+            let still_held=s.active_central_receipt(&i.intent_id)?.is_some();
+            Ok((i.intent_id,i.state.as_str().to_owned(),i.revision,
+                i.exchange_order_id,unsent,retained,still_held,
+                i.plan_hash,i.request_hash))
         }
     ).await.expect("T10-15 real SQL readback");
+    assert_eq!(row.1,"REJECTED");
     assert!(row.3.is_none());
-    assert!(!matches!(row.1.as_str(),"ACKNOWLEDGED"|"FILLED"|"POSTING"));
+    assert!(!row.6,"Native SQL must not count the released reservation as active");
+    assert_eq!(row.4.intent_id,row.0);
+    assert_eq!(row.4.account_key,owner.configuration.account_key.wire());
+    assert_eq!(row.4.plan_hash,row.7);
+    assert_eq!(row.4.request_hash,row.8);
+    assert_eq!(row.4.reservation_key,row.5.reservation_key);
+    assert_eq!(row.5.plan_hash,row.7);
+    let inspect=risk.request(RiskCommand{
+        schema:RISK_COMMAND_SCHEMA_V1.into(),
+        command_id:"risk_t10_15_inspect_native_unsent_release".into(),
+        installation_id:"installation_test".into(),
+        action:RiskCommandAction::Inspect{
+            reservation_key:row.4.reservation_key.clone(),
+            plan_sha256:row.7.clone(),
+        },
+    }).await.expect("T10-15 Worker INSPECT after Native SQL release");
+    assert_eq!(inspect.status,RiskDecisionStatus::Observed);
+    assert_eq!(inspect.reservation_key.as_deref(),
+        Some(row.4.reservation_key.as_str()));
+    assert_eq!(inspect.reservation_state,
+        Some(okx_protocol::risk_authority::RiskReservationState::Released),
+        "Native's durable no-send release must be committed by the real Worker");
     // A newly entered preview must use the newly signed fee rate rather
     // than returning the old frozen plan. It creates no reserve or POST.
     let new_preview=TradeRequest::Preview {
@@ -166,8 +205,20 @@ async fn t10_15_fee_source_after_worker_held(
     let mut after_risk=summary("risk_t10_15_after_fee_revision");
     after_risk.installation_id="installation_test".into();
     let after=risk.request(after_risk).await.expect("T10-15 Worker finance after");
-    assert_eq!(after.budget.as_ref().unwrap().entry_budget.as_ref().unwrap().consumed_usd,
-        "1.0005");
+    let budget_before=worker_before.budget.as_ref().unwrap()
+        .entry_budget.as_ref().unwrap();
+    let budget_after=after.budget.as_ref().unwrap()
+        .entry_budget.as_ref().unwrap();
+    assert_eq!(budget_after.consumed_usd,budget_before.consumed_usd);
+    assert_eq!(budget_after.reserved_usd,budget_before.reserved_usd,
+        "Native no-send must return its transient HELD allocation");
+    assert_eq!(budget_after.remaining_usd,budget_before.remaining_usd);
+    assert_eq!(budget_after.consumed_usd,"1.0005");
+    assert_eq!(budget_after.reserved_usd,"7.0015");
+    assert_eq!(budget_after.remaining_usd,"0.9975".replace("0.9975","1.998"));
+    assert!(after.risk_book_sequence.unwrap_or(0)>
+        worker_before.risk_book_sequence.unwrap_or(0),
+        "authentic central RELEASE must advance durable Worker sequence");
     serde_json::json!({
         "schema":"okx.t10-15-post-held-source-change/v1",
         "account_uid":owner.configuration.account_key.verified_uid,
@@ -176,6 +227,13 @@ async fn t10_15_fee_source_after_worker_held(
         "first_denial":reason,
         "worker_held_witness":true,"sql_state":row.1,
         "sql_revision":row.2,"intent_id":row.0,
+        "release_state":"RELEASED",
+        "sql_unsent_receipt_verified":true,
+        "sql_release_not_active":!row.6,
+        "sql_reservation_key":row.4.reservation_key,
+        "sql_plan_hash":row.7,
+        "worker_release_verified":true,
+        "worker_release_inspect_sequence":inspect.risk_book_sequence,
         "posts_before":posts_before,"posts_after":posts_after,
         "worker_before":worker_before.budget,
         "worker_after":after.budget,"worker_sequence":after.risk_book_sequence,
