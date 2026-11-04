@@ -41,6 +41,7 @@ const configuration = {
 };
 const addMode=process.env.OKX_T09_4_MANAGED_ADD_PROBE==="1";
 const sharedCapMode=process.env.OKX_T10_7_SHARED_CAP_PROBE==="1";
+const concurrentCapMode=process.env.OKX_T10_7_CONCURRENT_CAP_PROBE==="1";
 const reserveReplyLossMode=process.env.OKX_T10_03_LOST_RESERVE_REPLY_PROBE==="1";
 const specMode=process.env.OKX_T09_SPEC_SECOND_LINEAR_PROBE==="1";
 const t10PostOutcomeMode=process.env.OKX_T10_05_LOST_ACK_PROBE==="1"
@@ -51,6 +52,8 @@ const t10SourceRecoveryMode=process.env.OKX_T10_01_PARTIAL_SOURCE_RECOVERY_PROBE
 const t10StopMode=process.env.OKX_T10_13_STOP_PROBE==="1";
 if (reserveReplyLossMode && !sharedCapMode)
   throw Error("T10_03_REQUIRES_REAL_PERSISTED_SHARED_CAP_WORKER");
+if (concurrentCapMode && (!sharedCapMode || reserveReplyLossMode))
+  throw Error("T10_07_CONCURRENT_REQUIRES_ISOLATED_SHARED_CAP_WITHOUT_REPLY_LOSS");
 if (sharedCapMode && (addMode || process.env.OKX_NATIVE_WORKER_INTEGRATION==="1"))
   throw Error("SHARED_CAP_WORKER_PROBE_MUST_BE_ISOLATED_FROM_NATIVE_FINANCIAL_SCENARIO");
 const token = "integration-only-ephemeral-token";
@@ -439,7 +442,7 @@ try {
     assert.equal(afterForeign.budget.reserved_loss_usd,"0");
     // Both accounts genuinely contend over one SQLite RiskBook owner.
     // Distinct command IDs mean concurrent WSS results cannot be confused.
-    let firstReserve,secondReserve;
+    let firstReserve,secondReserve,concurrentThirdDecision;
     if (reserveReplyLossMode) {
       // T10-03 causal fault: the real Worker commits RESERVE A, but the
       // client deliberately does NOT consume A's risk_control_result.
@@ -485,6 +488,15 @@ try {
         budget_after_commit:authoritative.budget,
         budget_after_replay:afterReplay.budget,
       }));
+    } else if (concurrentCapMode) {
+      // Three independent commands enter the SAME authenticated WSS session
+      // before awaiting any reply. The real SQLite DO, not this test,
+      // serializes the campaign-cap decisions. WSS command order is A/B/A2.
+      [firstReserve,secondReserve,concurrentThirdDecision]=await Promise.all([
+        risk(socket1,"reserve_three_way_a_0001",firstRequest),
+        risk(socket1,"reserve_three_way_b_0001",secondRequest),
+        risk(socket1,"reserve_three_way_a_0002",thirdRequest),
+      ]);
     } else {
       [firstReserve,secondReserve]=await Promise.all([
         risk(socket1,"reserve_concurrent_a_0001",firstRequest),
@@ -497,7 +509,8 @@ try {
     const beforeDenied=await summary(socket1,"summary_before_third_cap_0001");
     assert.equal(beforeDenied.budget.entry_budget.reserved_usd,"8");
     assert.equal(beforeDenied.budget.entry_budget.remaining_usd,"2");
-    const denied=await risk(socket1,"reserve_third_over_cap_0001",thirdRequest);
+    const denied=concurrentCapMode ? concurrentThirdDecision
+      : await risk(socket1,"reserve_third_over_cap_0001",thirdRequest);
     assert.equal(denied.status,"DENIED");
     assert.equal(denied.reason,"CAMPAIGN_ENTRY_BUDGET_EXHAUSTED");
     const repeated=await risk(socket1,"reserve_duplicate_a_0001",firstRequest);
@@ -538,6 +551,35 @@ try {
     assert.equal(inspectB.status,"OBSERVED");
     assert.equal(inspectA.reservation_state,"HELD");
     assert.equal(inspectB.reservation_state,"HELD");
+    // A three-way command burst is checked separately from the original
+    // two-way/reply-loss component probe. No simulated venue POST or release.
+    if (concurrentCapMode) {
+      const decisions=[firstReserve,secondReserve,denied];
+      assert.deepEqual(decisions.map(d=>d.status),["HELD","HELD","DENIED"]);
+      assert.equal(persisted.budget.entry_budget.reserved_usd,"8");
+      assert.equal(persisted.budget.entry_budget.remaining_usd,"2");
+      console.log("T10_7_WORKER_CONCURRENT_CAP_V1:"+JSON.stringify({
+        schema:"okx.t10-worker-concurrent-cap/v1",
+        actual_worker_sqlite_do:true,
+        command_ids:["reserve_three_way_a_0001","reserve_three_way_b_0001",
+          "reserve_three_way_a_0002"],
+        command_count:3,
+        statuses:decisions.map(d=>d.status),
+        held_count:decisions.filter(d=>d.status==="HELD").length,
+        denied_count:decisions.filter(d=>d.status==="DENIED").length,
+        denied_reason:denied.reason,
+        two_distinct_verified_accounts:firstRequest.account_uid!==secondRequest.account_uid,
+        held_reservations_distinct:firstReserve.reservation_key!==secondReserve.reservation_key,
+        limit_usd:persisted.budget.entry_budget.limit_usd,
+        reserved_usd:persisted.budget.entry_budget.reserved_usd,
+        remaining_usd:persisted.budget.entry_budget.remaining_usd,
+        consumed_usd:persisted.budget.entry_budget.consumed_usd,
+        before_sequence:budgetBeforeRestart.risk_book_sequence,
+        persisted_sequence:persisted.risk_book_sequence,
+        persisted_generation_advanced:
+          restarted.hello.connection_generation>socket1.hello.connection_generation,
+      }));
+    }
     // No fabricated SQL REJECTED_UNSENT receipt is supplied to release money.
     console.log("T10_7_WORKER_SHARED_CAP_V1:"+JSON.stringify({
       schema:"okx.t10-shared-worker-cap/v1",

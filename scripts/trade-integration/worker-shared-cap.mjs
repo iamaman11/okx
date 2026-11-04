@@ -14,6 +14,7 @@ const exec = promisify(execFile);
 const repo = fileURLToPath(new URL("../../", import.meta.url));
 const test = resolve(repo, "cloudflare/okx-mcp/scripts/test-runtime-do.mjs");
 const marker = "T10_7_WORKER_SHARED_CAP_V1:";
+const concurrentMarker = "T10_7_WORKER_CONCURRENT_CAP_V1:";
 const terminalMarker = '{"suite":"runtime-session-sqlite-do","status":"PASS"';
 
 function singleLine(stdout, prefix) {
@@ -64,22 +65,53 @@ function prove(e) {
   assert.ok(Number.isSafeInteger(e.connection_generation_before));
   assert.ok(e.connection_generation_after > e.connection_generation_before);
 }
+function proveConcurrent(e) {
+  assert.equal(e.schema,"okx.t10-worker-concurrent-cap/v1");
+  assert.equal(e.actual_worker_sqlite_do,true);
+  assert.equal(e.command_count,3);
+  assert.equal(new Set(e.command_ids).size,3);
+  assert.deepEqual(e.statuses,["HELD","HELD","DENIED"]);
+  assert.equal(e.held_count,2);
+  assert.equal(e.denied_count,1);
+  assert.equal(e.denied_reason,"CAMPAIGN_ENTRY_BUDGET_EXHAUSTED");
+  assert.equal(e.two_distinct_verified_accounts,true);
+  assert.equal(e.held_reservations_distinct,true);
+  assert.equal(e.limit_usd,"10");
+  assert.equal(e.reserved_usd,"8");
+  assert.equal(e.remaining_usd,"2");
+  assert.equal(e.consumed_usd,"0");
+  assert.ok(Number.isSafeInteger(e.before_sequence) && e.before_sequence>0);
+  assert.ok(e.persisted_sequence>=e.before_sequence);
+  assert.equal(e.persisted_generation_advanced,true);
+}
 // Self-test MUST reject an incorrect budget; never substitute synthetic
 // evidence for the actual Worker run.
 if (process.argv.includes("--self-test")) {
   const bad = { schema: "okx.t10-shared-worker-cap/v1", before_budget: {
     campaign_limit_usd: "10", entry_budget: { reserved_usd: "12" } } };
   assert.throws(() => prove(bad));
+  assert.throws(() => proveConcurrent({
+    schema:"okx.t10-worker-concurrent-cap/v1",actual_worker_sqlite_do:true,
+    command_count:3,command_ids:["a","b","c"],statuses:["HELD","HELD","HELD"],
+    held_count:3,denied_count:0,denied_reason:null,
+    two_distinct_verified_accounts:true,held_reservations_distinct:true,
+    limit_usd:"10",reserved_usd:"12",remaining_usd:"0",consumed_usd:"0",
+    before_sequence:1,persisted_sequence:2,persisted_generation_advanced:true,
+  }));
   process.stdout.write("B1_WORKER_ORACLE_SELF_TEST_PASS\n");
 } else {
+  const concurrentMode=process.argv.includes("--concurrent");
   const { stdout, stderr } = await exec(process.execPath, [test], {
     cwd: resolve(repo, "cloudflare/okx-mcp"),
     env: { ...process.env, OKX_T10_7_SHARED_CAP_PROBE: "1",
+      OKX_T10_7_CONCURRENT_CAP_PROBE: concurrentMode ? "1" : "0",
       OKX_NATIVE_WORKER_INTEGRATION: "0", OKX_T09_4_MANAGED_ADD_PROBE: "0" },
     timeout: 120_000, maxBuffer: 4 * 1024 * 1024,
   });
   const result = singleLine(stdout, marker);
   prove(result);
+  const concurrent = concurrentMode ? singleLine(stdout, concurrentMarker) : null;
+  if (concurrentMode) proveConcurrent(concurrent);
   const terminalLines = stdout.split(/\r?\n/).filter(x => x.startsWith(terminalMarker));
   assert.equal(terminalLines.length, 1,
     "production RuntimeSession terminal assertion is mandatory");
@@ -98,6 +130,7 @@ if (process.argv.includes("--self-test")) {
     full_t10_07_accepted: false, native_trade_exercised: false,
     source: "RuntimeSession/SQLiteDO",
     worker: result,
+    concurrent_worker: concurrent,
     limitations: ["Native public Execute + SQL owner not exercised",
       "No source-backed Native RELEASE proof: reservations stay HELD"],
   };
@@ -113,6 +146,7 @@ if (process.argv.includes("--self-test")) {
     schema: evidence.schema, status: "PASS", full_t10_07_accepted: false,
     entry_reserved_usd: result.after_budget.entry_budget.reserved_usd,
     entry_remaining_usd: result.after_budget.entry_budget.remaining_usd,
+    concurrent_three_way: concurrentMode ? "PASS" : "NOT_RUN",
     first: result.first_status, second: result.second_status,
     third: result.third_reason, worker_restart: "PASS",
   }) + "\n");
