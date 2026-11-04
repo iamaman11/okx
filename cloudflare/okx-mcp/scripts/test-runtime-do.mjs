@@ -1153,6 +1153,8 @@ try {
             line.startsWith("T09_4_SIGNED_STOP_PAGE_V1:")).slice(-12),
           t09_4_algo_mismatch:lines.filter(line =>
             line.startsWith("T09_4_CENSUS_ALGO_MISMATCH_V1:")).slice(-4),
+          t10_01_maintenance_shutdown:lines.filter(line =>
+            line.startsWith("T10_01_OWNER_SHUTDOWN_V1:")).slice(-20),
           restart_reached:recorded.includes("T09_1_NATIVE_SQL_RESTART_V1:"),
           terminal_reached:recorded.includes("T09_1_NATIVE_TERMINAL_CLOSE_V1:"),
         }) + "\n");
