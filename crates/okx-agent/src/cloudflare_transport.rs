@@ -2226,16 +2226,14 @@ mod raw_native_session_tests {
             // one immutable authenticated order GET per caller, NOT a new
             // create/fill, and do not let unbounded default pages mask a
             // missing source. Production ratelimits still apply normally.
-            feed.advance_recorded_route(
-                "fixture-executor-a",
-                "/api/v5/trade/order",
-                (0..100).map(|_| RecordedGet {
+            for _ in 0..100 {
+                feed.expect_optional_get(RecordedGet {
                     access_key: "fixture-executor-a".into(),
                     path: "/api/v5/trade/order".into(),
-                    required_query: vec![("instId".into(),"BTC-USDT-SWAP".into())],
+                    required_query: vec![("instId".into(), "BTC-USDT-SWAP".into())],
                     raw_response: raw_order.clone(),
-                }).collect(),
-            );
+                });
+            }
             let mut concurrent = tokio::task::JoinSet::new();
             let started = std::time::Instant::now();
             for _ in 0..100 {
