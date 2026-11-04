@@ -4111,6 +4111,29 @@ mod raw_native_session_tests {
                                 }])),
                             });
                         }
+                        // Post-ACK campaign census may reread the signed A
+                        // pending-order inventory while B tries admission.
+                        // Reflect exactly the already ACK-bound A second order
+                        // (ordId, clOrdId, size, state from its original order
+                        // GET), not an invented empty inventory or a new send.
+                        // Finite phase-scoped pages avoid relying on the
+                        // unrelated bootstrap raw 64-repeat ceiling.
+                        for _ in 0..24 {
+                            feed.expect_optional_get(RecordedGet {
+                                access_key: "fixture-observer-a".into(),
+                                path: "/api/v5/trade/orders-pending".into(),
+                                required_query: vec![("limit".into(), "100".into())],
+                                raw_response: envelope(json!([{
+                                    "instId":"BTC-USDT-SWAP",
+                                    "ordId":"recorded-t09-second-001",
+                                    "clOrdId":persisted.client_order_id.clone(),
+                                    "side":"buy","posSide":"long","tdMode":"cross",
+                                    "ordType":"limit","px":"1000","sz":"0.3",
+                                    "accFillSz":"0","avgPx":"","state":"live",
+                                    "cTime":new_clock.clone(),"uTime":new_clock.clone()
+                                }])),
+                            });
+                        }
                         let b1_balance_at = chrono::Utc::now().timestamp_millis().to_string();
                         for (label, equity) in [("a", "100"), ("b", "100")] {
                             for _ in 0..24 {
