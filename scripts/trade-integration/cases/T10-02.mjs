@@ -23,7 +23,16 @@ export async function run({caseId,root,signal}) {
     /UNATTRIBUTED_EXCHANGE_POSITION|COHORT_UNMANAGED_EXTERNAL_EXPOSURE/);
   assert.equal(v.posts_before,5);
   assert.equal(v.posts_after,5);
-  assert.deepEqual(v.worker_after,v.worker_before);
+  // Read-only source timestamps may advance while the same financial
+  // values remain unchanged; test the money oracle, not JSON metadata.
+  for (const field of ["campaign_limit_usd","consumed_loss_usd",
+    "reserved_loss_usd","remaining_loss_usd"]) {
+    assert.equal(v.worker_after[field],v.worker_before[field],field);
+  }
+  for (const field of ["limit_usd","consumed_usd","reserved_usd","remaining_usd"]) {
+    assert.equal(v.worker_after.entry_budget[field],
+      v.worker_before.entry_budget[field],field);
+  }
   assert.equal(v.worker_after.entry_budget.consumed_usd,"6.003");
   assert.equal(v.worker_after.entry_budget.reserved_usd,"0");
   assert.equal(t.nativeCrossUidDenial.foreign_sql_intent_absent,true);
