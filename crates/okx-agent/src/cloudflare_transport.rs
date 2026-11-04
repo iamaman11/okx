@@ -4658,13 +4658,22 @@ mod raw_native_session_tests {
                                         ) else {return Err(reason)};
                                         let b_owner=b_accounts.resolve("fixture-b").await
                                             .expect("B1 independent B SQL owner");
-                                        let absent=b_owner.execution.store.call(
+                                        let prior=b_owner.execution.store.call(
                                             std::time::Instant::now()+Duration::from_secs(3),
-                                            |s| Ok(s.by_idempotency(
+                                            |s| s.by_idempotency(
                                                 "t09_real_public_execute_0002"
-                                            )?.is_none())
-                                        ).await.expect("B1 no durable intent before local defer");
-                                        assert!(absent,"B1 cannot repeat a durable B intent");
+                                            )
+                                        ).await.expect("B1 durable SQL check before any retry");
+                                        if let Some(intent)=prior {
+                                            // Never run another Execute after PREPARE, even if
+                                            // a private REST read failed locally. This is a
+                                            // causal signal that the original Execute must
+                                            // resolve the source inside its durable lifetime.
+                                            return Err(format!(
+                                                "B1_DURABLE_AFTER_LOCAL_READ_DEFER:state={}:revision={}:reason={reason}",
+                                                intent.state.as_str(),intent.revision
+                                            ));
+                                        }
                                         assert_eq!(b_feed.outbound_posts.lock().unwrap().len(),4,
                                             "B1 local read defer cannot transmit venue POST");
                                         if attempt==11 || delay>remaining {
@@ -5071,13 +5080,16 @@ mod raw_native_session_tests {
                                             let owner = b_accounts_positive.resolve("fixture-b")
                                                 .await.expect("B1 B positive SQL owner");
                                             let sql_key = key.clone();
-                                            let absent = owner.execution.store.call(
+                                            let original = owner.execution.store.call(
                                                 std::time::Instant::now() + Duration::from_secs(3),
-                                                move |s| Ok(
-                                                    s.by_idempotency(&sql_key)?.is_none()
-                                                )
-                                            ).await.expect("B1 no-send SQL precondition");
-                                            assert!(absent, "B1 cannot replay a durable positive intent");
+                                                move |s| s.by_idempotency(&sql_key)
+                                            ).await.expect("B1 positive SQL must be read before retry");
+                                            if let Some(intent)=original {
+                                                return Err(format!(
+                                                    "B1_DURABLE_POSITIVE_AFTER_LOCAL_READ_DEFER:state={}:revision={}:reason={reason}",
+                                                    intent.state.as_str(),intent.revision
+                                                ));
+                                            }
                                             assert_eq!(
                                                 b_source.outbound_posts.lock().unwrap().len(), 4,
                                                 "local defer cannot replay a B venue POST"
