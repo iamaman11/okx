@@ -417,7 +417,9 @@
                             ).await;
                             let mut cmd=summary("t09_4_first_cause_readonly");
                             cmd.installation_id="installation_test".into();
-                            let central=risk.request(cmd).await;
+                            let central=tokio::time::timeout(
+                                Duration::from_secs(2),risk.request(cmd)
+                            ).await;
                             let recent=feed.requests.lock().unwrap().iter().rev()
                                 .filter(|line|line.contains("orders-algo-pending"))
                                 .take(3).cloned().collect::<Vec<_>>();
@@ -432,7 +434,8 @@
                                 "incremental":status["data"]["incremental_entry_settlement"]["state"],
                                 "release":status["data"]["central_release"]["state"],
                                 "sql":format!("{sql:?}").chars().take(850).collect::<String>(),
-                                "risk_sequence":central.ok().and_then(|r|r.risk_book_sequence),
+                                "risk_sequence":central.ok().and_then(Result::ok)
+                                    .and_then(|r|r.risk_book_sequence),
                                 "recent_algo_get":recent,
                             })
                         }else{serde_json::Value::Null};
