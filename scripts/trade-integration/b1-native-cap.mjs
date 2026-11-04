@@ -52,6 +52,7 @@ try {
 }
 const b = transcript.nativeB1Cap;
 const a = transcript.nativeSecondAdmission;
+const preflight = transcript.nativeStrategyAccountPreflight;
 const positiveMode = process.env.OKX_B1_SECOND_POSITIVE_PROBE === "1";
 const bPositive = positiveMode ? transcript.nativeB1Positive : null;
 if (artifactDir) {
@@ -76,12 +77,28 @@ if (artifactDir) {
     b_positive_state: bPositive?.b_sql_state ?? null,
     b_positive_posts_after: bPositive?.outbound_posts_after ?? null,
     b_positive_entry_budget: bPositive?.after_budget?.entry_budget ?? null,
+    a_strategy_registered: preflight?.a_strategy_registered ?? null,
+    b_strategy_registered: preflight?.b_strategy_registered ?? null,
+    account_preflight_posts: preflight?.native_outbound_posts ?? null,
     cohort_execution: transcript.cohort_execution ?? null,
   };
   await writeFile(resolve(artifactDir, "b1-native-pre-oracle.json"),
     JSON.stringify(checkpoint, null, 2) + "\n");
 }
-assert.ok(b && a, "real Native B and A account receipts required");
+assert.ok(b && a && preflight,
+  "real Native A/B account, separate SQL strategy and public preflight receipts required");
+assert.equal(preflight.account_a_uid, b.account_a_uid);
+assert.equal(preflight.account_b_uid, b.account_b_uid);
+assert.equal(preflight.a_strategy_registered, true);
+assert.equal(preflight.b_strategy_registered, true);
+assert.equal(preflight.a_other_strategy_absent, true);
+assert.equal(preflight.b_other_strategy_absent, true);
+assert.equal(preflight.a_strategy_enabled, false);
+assert.equal(preflight.b_strategy_enabled, false);
+assert.equal(preflight.a_new_risk_authorized, false);
+assert.equal(preflight.b_new_risk_authorized, false);
+assert.equal(preflight.native_outbound_posts, 4,
+  "A/B concurrent public preflight cannot transmit a venue POST");
 assert.match(b.account_a_uid, /^[a-f0-9]{64}$/);
 assert.match(b.account_b_uid, /^[a-f0-9]{64}$/);
 assert.notEqual(b.account_a_uid, b.account_b_uid);
@@ -134,6 +151,8 @@ const result = {
   status: "PASS", exact_requirement: "#449:T09-MA/T10-07:PARTIAL",
   required_case_accepted: false, native_public_trade_exercised: true,
   worker_persisted_sqlite: true, native_account_sql_independent: true,
+  concurrent_public_preflight_proven: true,
+  independent_disabled_strategy_instances_proven: true,
   negative_b_venue_post_count: 0,
   positive_b_venue_post_count: positiveMode ? 1 : 0,
   positive_b_accepted: positiveMode,

@@ -583,6 +583,23 @@ jobs:
         run: npm ci --prefix cloudflare/okx-mcp --ignore-scripts --no-audit --no-fund
       - name: Precompile actual Native/Worker child
         run: cargo test --locked -p okx-agent --lib native_to_workerd_risk_summary_over_actual_websocket --no-run
+      - name: T10-14 isolated Native SQL owners prerequisite (not a required case PASS)
+        shell: pwsh
+        run: |
+          cargo test --locked -p okx-execution --lib blocked_a_sql_owner_does_not_delay_b_cancel_receipt -- --nocapture |
+            Tee-Object -FilePath "$env:RUNNER_TEMP\t10-14-native-sql.log"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $evidence = Get-Content -Raw -LiteralPath "$env:RUNNER_TEMP\t10-14-native-sql.log"
+          if ($evidence -notmatch 'T10_14_NATIVE_SQL_PREREQUISITE_V1:') {
+            throw "T10_14_NATIVE_SQL_RECEIPT_MISSING"
+          }
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: t10-14-sql-prerequisite-${{ github.event.pull_request.head.sha || github.sha }}
+          path: ${{ runner.temp }}\t10-14-native-sql.log
+          if-no-files-found: warn
+          retention-days: 7
       - name: B1 Native A/B independent order ACK and central shared-cap denial (partial only)
         env:
           OKX_B1_SECOND_POSITIVE_PROBE: "1"
