@@ -65,13 +65,17 @@ jobs:
           New-Item -ItemType Directory -Path $dir -Force | Out-Null
           # One completed A1 T09.8 path is now proven on the prior SHA.
           # Run B candidates together; T10-07 remains deliberately not proven.
-          $ids = @('T09.8')
+          # Two independent executions on one immutable SHA expose source-order
+          # flakiness without mixing evidence from different commits.
+          $ids = @('T09.8','T09.8')
           $env:OKX_B_CENSUS_CAUSE_PROBE = '1'
           $env:OKX_T09_4_SOURCE_COHERENCE_PROBE = '1'
           $rows = @()
+          $attempt = 0
           foreach ($id in $ids) {
-            $out = Join-Path $dir $id
-            Write-Output "B_STAGE_START:$id"
+            $attempt++
+            $out = Join-Path $dir "$id-$attempt"
+            Write-Output "B_STAGE_START:${id}:attempt=$attempt"
             node scripts/run-trade-integration.mjs --case "$id" --artifacts "$out"
             $code = $LASTEXITCODE
             $file = Join-Path $out 'summary.json'
@@ -94,7 +98,7 @@ jobs:
               $reason = 'SUMMARY_MISSING'
             }
             $rows += [pscustomobject]@{id=$id;status= $(if($ok){'PASS'}else{'FAIL'});reason=$reason;exit_code=$code;sha=$env:GITHUB_SHA}
-            Write-Output "B_STAGE_RESULT:${id}:${reason}"
+            Write-Output "B_STAGE_RESULT:${id}:attempt=${attempt}:${reason}"
           }
           $rows | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $dir 'b-stage-results.json') -Encoding utf8NoBOM
           $passed = @($rows | Where-Object status -eq 'PASS').Count
