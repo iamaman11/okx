@@ -325,12 +325,12 @@
                 required_query:vec![],raw_response:positions.clone(),
             }).collect()
         );
-        // The previous cancel-linked HTTP inventory has served its
-        // after-ACK phase. Only after immutable fills/bills and both SQL
-        // lots above are verified may this new two-stop venue observation
-        // supersede it. Without retirement the old causal overlay shadows
-        // this signed route regardless of how many pages are queued.
-        feed.retire_acked_causal_algo_inventory("fixture-observer-a");
+        // T09.4 is BEFORE the first protective Cancel. No cancel-dependent
+        // inventory has been armed yet, so demanding a matching ACK here
+        // was an invalid fixture transition (A1 repro: PHASE_MISSING_AT_RETIRE).
+        // Publish the independent, immutable two-stop source only after the
+        // genuine SQL fill/bill/lot frontier above. T09.6 will arm and retire
+        // its own cancel-dependent inventory at the actual signed cancel ACK.
         feed.advance_recorded_route(
             "fixture-observer-a","/api/v5/trade/orders-algo-pending",pending
         );

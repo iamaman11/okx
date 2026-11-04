@@ -213,6 +213,16 @@ async fn t10_09_b_signed_late_fill_after_cancel(
     };
     assert_eq!(evidence["active_central_receipt"],true,
         "Cancel ACK and late fill cannot release the B reservation");
+    // The async financial capture above may outlive the original B order
+    // clock observation. Status now starts a distinct read-only source phase:
+    // publish ONE signed exchange time at that real boundary, never a
+    // clock-on-demand fallback or relaxed production freshness check.
+    let status_clock = chrono::Utc::now().timestamp_millis().to_string();
+    let retired_clock = feed.advance_recorded_public_clock(
+        raw(json!([{"ts":status_clock}]))
+    );
+    assert!(retired_clock <= 1,
+        "T10-09 cannot replace multiple unseen authenticated clock samples");
     let status = trade.trade(
         "fixture-b",&TradeRequest::Status{reference:intent_id.clone()},None
     ).await.expect("T10-09 public B Status after late signed fill");
