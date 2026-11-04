@@ -190,8 +190,25 @@ async fn t10_01_partial_balance_denial_recovery(
         trade.trade("fixture-b",&positive,None)
     ).await.expect("T10-01 fresh recovery deadline")
       .expect("T10-01 real Worker/Native source recovery must execute");
+    // Worker/SQL and the authenticated venue ACK are separate from the
+    // immediately available public Status. An incomplete local readback
+    // after one acknowledged POST produces UNKNOWN/no-resubmit; never
+    // retry a possibly sent Execute to manufacture an accepted wrapper.
     let id=accepted["data"]["intent"]["intent_id"].as_str()
-        .expect("T10-01 accepted B intent").to_owned();
+        .or_else(||accepted["intent_id"].as_str())
+        .unwrap_or_else(||panic!(
+            "T10_01_RECOVERY_NO_DURABLE_ID:status={} reason={} state={} posts={}",
+            accepted["status"],accepted["reason_code"],
+            accepted["data"]["state"],feed.outbound_posts.lock().unwrap().len()
+        )).to_owned();
+    assert!(
+        accepted["status"]=="completed" || accepted["status"]=="unknown",
+        "T10-01 public recovery requires typed outcome"
+    );
+    if accepted["status"]=="unknown" {
+        assert_eq!(accepted["reason_code"],"ORDER_READBACK_INCOMPLETE_NO_RESUBMIT",
+            "T10-01 cannot accept an unverified or possibly unacknowledged POST");
+    }
     let sql_id=id.clone();
     let (intent,reserve)=owner.execution.store.call(
         std::time::Instant::now()+Duration::from_secs(3),

@@ -233,8 +233,29 @@ async fn t10_15_fee_source_after_worker_held(
         },
         protection:Some(Protection::Price{stop_price:"900".into()}),
     };
-    let next=trade.trade("fixture-b",&new_preview,None).await
-        .expect("T10-15 fresh quote after signed fee revision");
+    // A read-only Preview may be deferred before sending a private GET
+    // by the REAL authenticated-user quota. Retry ONLY that typed LOCAL
+    // no-send admission, under one finite deadline. No Execute, risk
+    // reservation, stale quote reuse or enlarged production rate policy.
+    let preview_until=std::time::Instant::now()+Duration::from_secs(12);
+    let next=loop {
+        let answer=tokio::time::timeout_at(preview_until.into(),
+            trade.trade("fixture-b",&new_preview,None)
+        ).await.expect("T10-15 new signed Preview deadline");
+        match answer {
+            Ok(value)=>break value,
+            Err(reason)=>{
+                let delay=recorded_preview_local_defer(
+                    &reason,&rate_budget,
+                    preview_until.saturating_duration_since(std::time::Instant::now())
+                ).unwrap_or_else(||panic!(
+                    "T10-15 new Preview non-local refusal: {reason}"
+                ));
+                tokio::time::timeout_at(preview_until.into(),tokio::time::sleep(delay))
+                    .await.expect("T10-15 bounded local no-send Preview defer");
+            }
+        }
+    };
     let quote=next["data"]["entry_costs"]["entry_total_usd"]
         .as_str().expect("T10-15 refreshed source quote").to_owned();
     assert_eq!(quote,quoted_after);

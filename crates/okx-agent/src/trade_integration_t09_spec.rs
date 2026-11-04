@@ -325,8 +325,26 @@ async fn t09_spec_second_linear_product(
     publisher.await.expect("T09-SPEC RAW ETH frame publisher joined");
     let accepted=execution
         .expect("T09-SPEC public Execute must reach real Native Worker risk");
+    // The original public Execute may return UNKNOWN if its POST was
+    // acknowledged but the subsequent read-only Status exhausted a LOCAL
+    // source window. This is not an invitation to issue a second Execute.
+    // Require its exact durable intent identity and prove ACK, owner,
+    // central HELD and one signed POST independently below.
     let id=accepted["data"]["intent"]["intent_id"].as_str()
-        .expect("T09-SPEC accepted intent id").to_owned();
+        .or_else(||accepted["intent_id"].as_str())
+        .unwrap_or_else(||panic!(
+            "T09_SPEC_EXECUTE_NO_DURABLE_ID:status={} reason={} state={} posts={}",
+            accepted["status"],accepted["reason_code"],
+            accepted["data"]["state"],feed.outbound_posts.lock().unwrap().len()
+        )).to_owned();
+    assert!(
+        accepted["status"]=="completed" || accepted["status"]=="unknown",
+        "T09-SPEC public Execute must have a typed outcome"
+    );
+    if accepted["status"]=="unknown" {
+        assert_eq!(accepted["reason_code"],"ORDER_READBACK_INCOMPLETE_NO_RESUBMIT",
+            "T09-SPEC no other ambiguous POST outcome may count as signed ACK");
+    }
     let resource=accounts.resolve("fixture-b").await.expect("T09-SPEC B SQL");
     let sql_id=id.clone();
     let (intent,central,fence)=resource.execution.store.call(
