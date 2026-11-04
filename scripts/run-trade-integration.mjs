@@ -9,6 +9,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { basename, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import os from "node:os";
+import { nativeCohortSnapshot } from "./trade-integration/native-workerd.mjs";
 
 const here = fileURLToPath(new URL(".", import.meta.url));
 const root = resolve(here, "..");
@@ -257,7 +258,7 @@ const events = [];
 const caseResults = [];
 const assertions = [];
 const caseReadbacks = [];
-const cohortUsages = [];
+
 const started = Date.now();
 for (const caseId of cli.selected) {
   const script = resolve(root, "scripts", "trade-integration", "cases", caseId + ".mjs");
@@ -283,15 +284,6 @@ for (const caseId of cli.selected) {
         }),
       ]);
       const accepted = verified(output, caseId);
-      // This is runtime telemetry, never an alternative financial oracle.
-      // Memoized cohorts are NOT independent repeated native executions.
-      if (accepted.cohort_execution) {
-        const c = accepted.cohort_execution;
-        if (!Number.isSafeInteger(c.elapsed_ms) || c.elapsed_ms < 0
-            || typeof c.key !== "string" || typeof c.reused !== "boolean")
-          throw Error("COHORT_TIMING_UNVERIFIED");
-        cohortUsages.push({ case_id: caseId, ...c });
-      }
       status = "PASS";
       caseReadbacks.push({
         case_id:caseId,
@@ -324,7 +316,7 @@ const summary = {
   executed_pass: caseResults.filter(c => c.status === "PASS").length,
   executed_failures: caseResults.filter(c => c.status !== "PASS" && c.reason !== failures.missing).map(c => c.id),
   missing_required: caseResults.filter(c => c.reason === failures.missing).map(c => c.id),
-  cohort_usages: cohortUsages,
+  cohort_usages: nativeCohortSnapshot(),
   elapsed_ms: Date.now() - started,
   gate: successful ? "PASS" : "BLOCKED",
   rerun: cli.selected.length === 1

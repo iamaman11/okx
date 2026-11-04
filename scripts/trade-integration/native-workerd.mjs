@@ -12,6 +12,7 @@ import { summarizeNativeWorkerdFailure } from "./native-failure.mjs";
 const exec = promisify(execFile);
 const hash = value => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 const memo = new Map();
+const cohortMetrics = new Map();
 function receipt(stdout, prefix) {
   const matches = [...stdout.matchAll(new RegExp(prefix + ":(\\{[^\\r\\n]+\\})", "g"))];
   assert.equal(matches.length, 1, prefix + " must have one authentic child readback");
@@ -224,8 +225,19 @@ export async function actualNativeWorker(root, signal, { statusProbe = false, se
     })());
   }
   const evidence = await memo.get(key);
+  const previous = cohortMetrics.get(key);
+  cohortMetrics.set(key, {
+    ...evidence.cohort_execution,
+    calls: (previous?.calls ?? 0) + 1,
+  });
   return { ...evidence,
     cohort_execution: { ...evidence.cohort_execution, reused },
   };
+}
+// Driver-level metrics come from the real child even when individual case
+// return objects expose only independently verified financial assertions.
+// These measurements do not imply independent repeat executions.
+export function nativeCohortSnapshot() {
+  return [...cohortMetrics.values()].map(value => ({ ...value }));
 }
 export { hash };

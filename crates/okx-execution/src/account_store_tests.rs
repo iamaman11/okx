@@ -7652,6 +7652,118 @@ async fn writer_queue_backpressure_and_account_isolation() {
     assert!(rejected > 0);
 }
 
+// T10-14 Native owner prerequisite. The A SQL worker is intentionally held
+// inside a real account-owned command. An independent B worker must still
+// serve a real read and persist an idempotent cancellation-operation receipt
+// BEFORE A is released. This is not the complete Native/Worker/venue T10-14.
+#[tokio::test]
+async fn blocked_a_sql_owner_does_not_delay_b_cancel_receipt() {
+    let first = store();
+    let second_meta = AccountMeta {
+        account_key: "okx:demo:fixture-blocked-owner-b".into(),
+        installation_id: "fixture-installation-b".into(),
+        initialize_operation_id: "fixture-connect-b".into(),
+        ..first.meta.clone()
+    };
+    let opening = OpeningSnapshot {
+        opening_equity_usd: Decimal::from(100),
+        source_ref: second_meta.opening_source.clone(),
+        observed_at: 1,
+        positions: 0,
+        orders: 0,
+        conditional_orders: 0,
+        liabilities: Decimal::ZERO,
+        balances: vec![("USDT".into(), Decimal::from(100))],
+    };
+    let second = AccountStore::initialize_flat(path(), second_meta, &opening).unwrap();
+    let a_key = first.meta.account_key.clone();
+    let b_key = second.meta.account_key.clone();
+    assert_ne!(a_key, b_key, "two SQL owners need distinct account scopes");
+    let (a_path, a_meta) = (first.path.clone(), first.meta.clone());
+    let (b_path, b_meta) = (second.path.clone(), second.meta.clone());
+    drop(first);
+    drop(second);
+    let a = crate::AccountStoreHandle::open_existing(
+        a_path, a_meta.account_key, a_meta.installation_id,
+    ).await.unwrap();
+    let b = crate::AccountStoreHandle::open_existing(
+        b_path, b_meta.account_key, b_meta.installation_id,
+    ).await.unwrap();
+
+    let (block_tx, block_rx) = std::sync::mpsc::channel::<()>();
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let held_a = tokio::spawn({
+        let a = a.clone();
+        async move {
+            a.call(
+                std::time::Instant::now() + Duration::from_secs(9),
+                move |owner| {
+                    let _ = entered_tx.send(());
+                    block_rx.recv_timeout(Duration::from_secs(7))
+                        .map_err(|_| StoreError::Invalid("T10_14_A_GATE_NOT_RELEASED"))?;
+                    Ok(owner.meta.account_key.clone())
+                },
+            ).await
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(3), entered_rx)
+        .await
+        .expect("A's SQL owner must enter the causal hold")
+        .expect("A gate admission sender must survive");
+
+    let b_started = std::time::Instant::now();
+    let b_result = tokio::time::timeout(
+        Duration::from_secs(3),
+        b.call(
+            std::time::Instant::now() + Duration::from_secs(4),
+            |owner| {
+                let account_key = owner.meta.account_key.clone();
+                let account_summary = owner.account_summary()?;
+                let bytes = serde_json::to_vec(&account_summary).unwrap().len();
+                let first = owner.begin_operation(
+                    "t10-14-b-cancel", "b-venue-order", "CANCEL", 2,
+                )?;
+                owner.operation_receipt(
+                    "t10-14-b-cancel", "b-venue-order", "CANCEL",
+                    "CANCELLED", 3,
+                )?;
+                let duplicate = owner.begin_operation(
+                    "t10-14-b-cancel", "b-venue-order", "CANCEL", 4,
+                )?;
+                Ok((account_key, bytes, first, duplicate))
+            },
+        ),
+    ).await;
+    let b_elapsed_ms = b_started.elapsed().as_millis();
+    // Release and join A even if B times out; never strand a SQL test worker.
+    block_tx.send(()).expect("A causal hold receiver must remain alive");
+    let a_result = held_a.await.expect("A SQL worker task must join")
+        .expect("A SQL owner must resume after bounded test gate");
+    assert_eq!(a_result, a_key);
+    let (b_result, bytes, first, duplicate) = b_result
+        .expect("B must service read and cancellation receipt while A is blocked")
+        .expect("B SQL account owner command must succeed");
+    assert_eq!(b_result, b_key);
+    assert!(first && !duplicate, "B operation must persist exactly once");
+    assert!(bytes <= 12_288, "B summary must remain bounded");
+    println!(
+        "T10_14_NATIVE_SQL_PREREQUISITE_V1:{}",
+        serde_json::json!({
+            "schema":"okx.t10-14-native-owner-prerequisite/v1",
+            "status":"PASS", "owners":2,
+            "distinct_accounts":true,
+            "a_held_until_b_completed":true,
+            "b_read_and_cancel_operation_persisted":true,
+            "b_duplicate_operation_rejected":true,
+            "b_elapsed_ms":b_elapsed_ms,
+            "a_joined_after_release":true,
+            "venue_cancel_post_exercised":false,
+            "worker_risk_book_exercised":false,
+            "full_t10_14_accepted":false
+        })
+    );
+}
+
 #[tokio::test]
 async fn two_account_100_parallel_sql_readonly_isolation() {
     // Two distinct account keys and actor-owned databases. No exchange transport.
