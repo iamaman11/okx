@@ -735,6 +735,98 @@ mod tests {
         assert!(verify_entry_rules_match(&rules, "BTC-USDT-SWAP", &plan).is_ok());
     }
 
+    // T09-SPEC Native plan gate prerequisite: a second linear-USDT symbol
+    // with a different contract multiplier, tick and minimum/lot grid must
+    // work through the existing plan-vs-venue check. This alone grants no
+    // Worker risk admission or live exchange permission.
+    #[test]
+    fn b_second_linear_contract_spec_uses_existing_precision_gate() {
+        let second = okx_observation::InstrumentSpec {
+            instrument_id: "DOGE-USDT-SWAP".into(),
+            instrument_type: okx_observation::InstrumentType::Swap,
+            instrument_family: None,
+            underlying: None,
+            state: "live".into(),
+            rule_type: None,
+            funding_requirement: okx_observation::FundingRequirement::Unknown,
+            base_currency: Some("DOGE".into()),
+            quote_currency: Some("USDT".into()),
+            settle_currency: Some("USDT".into()),
+            tick_size: "0.00005".into(),
+            lot_size: "0.05".into(),
+            min_size: "0.10".into(),
+            max_limit_size: Some("1.00".into()),
+            max_market_size: None,
+            max_limit_amount: None,
+            max_market_amount: None,
+            contract_type: Some("linear".into()),
+            contract_value: Some("1000".into()),
+            contract_value_currency: Some("DOGE".into()),
+            fee_group_id: None,
+            max_leverage: None,
+            list_time_ms: None,
+            expiry_time_ms: None,
+            initial_price_limit_pct: None,
+            floating_price_limit_pct: None,
+            maximum_price_limit_pct: None,
+            upcoming_rule_changes: Vec::new(),
+        };
+        let mut rules = okx_observation::InstrumentRulesSnapshot {
+            reference_generation: "doge-generation".into(),
+            source_received_at: "2026-11-04T00:00:00Z".into(),
+            instrument: second,
+        };
+        let mut plan = IntentPlan {
+            contract_value: dec("1000").unwrap(),
+            quantity: dec("0.10").unwrap(),
+            limit_price: dec("0.04005").unwrap(),
+            ..Default::default()
+        };
+        assert_eq!(
+            verify_entry_rules_match(&rules, "DOGE-USDT-SWAP", &plan),
+            Ok(())
+        );
+        assert_eq!(
+            plan.quantity * plan.contract_value * plan.limit_price,
+            dec("4.005").unwrap(),
+            "independent second-spec contract multiplier golden"
+        );
+        plan.quantity = dec("0.11").unwrap();
+        assert_eq!(
+            verify_entry_rules_match(&rules, "DOGE-USDT-SWAP", &plan),
+            Err("ENTRY_VENUE_RULES_OR_PRECISION_CHANGED".into())
+        );
+        plan.quantity = dec("0.05").unwrap();
+        assert_eq!(
+            verify_entry_rules_match(&rules, "DOGE-USDT-SWAP", &plan),
+            Err("ENTRY_VENUE_RULES_OR_PRECISION_CHANGED".into())
+        );
+        plan.quantity = dec("0.10").unwrap();
+        plan.limit_price = dec("0.04001").unwrap();
+        assert_eq!(
+            verify_entry_rules_match(&rules, "DOGE-USDT-SWAP", &plan),
+            Err("ENTRY_VENUE_RULES_OR_PRECISION_CHANGED".into())
+        );
+        plan.limit_price = dec("0.04005").unwrap();
+        plan.contract_value = dec("10").unwrap();
+        assert_eq!(
+            verify_entry_rules_match(&rules, "DOGE-USDT-SWAP", &plan),
+            Err("ENTRY_VENUE_RULES_OR_PRECISION_CHANGED".into())
+        );
+        plan.contract_value = dec("1000").unwrap();
+        rules.instrument.contract_value_currency = Some("BTC".into());
+        assert_eq!(
+            verify_entry_rules_match(&rules, "DOGE-USDT-SWAP", &plan),
+            Err("ENTRY_CONTRACT_UNIT_UNVERIFIED".into())
+        );
+        rules.instrument.contract_value_currency = Some("DOGE".into());
+        assert_eq!(
+            verify_entry_rules_match(&rules, "BTC-USDT-SWAP", &plan),
+            Err("ENTRY_INSTRUMENT_SOURCE_CHANGED".into())
+        );
+        assert!(verify_entry_rules_match(&rules, "DOGE-USDT-SWAP", &plan).is_ok());
+    }
+
     #[test]
     fn e1_linear_swap_contract_value_unit_is_not_guessed_from_empty_base_fields() {
         assert_eq!(
