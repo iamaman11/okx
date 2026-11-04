@@ -1722,6 +1722,32 @@ impl TradeService {
         .map(|v| v.0)
     }
 
+
+#[cfg(test)]
+fn b_census_probe_failure(phase: &str, account: &str, reason: &str, until: Option<Instant>) {
+    if std::env::var("OKX_B_CENSUS_CAUSE_PROBE").as_deref()!=Ok("1") { return; }
+    let fingerprint=format!("{:x}",Sha256::digest(account.as_bytes()));
+    let code=[
+      "COHORT_FINANCIAL_SOURCE_INCOMPLETE","COHORT_ALGO_SOURCE_STALE",
+      "COHORT_EVIDENCE_INCOMPLETE","COHORT_SOURCE_GENERATION_CHANGED",
+      "ENTRY_CENSUS_SOURCE_DEADLINE","TRANSCRIPT_SOURCE_PAGE_UNEXPECTED_OR_EXHAUSTED",
+      "TRANSCRIPT_CLOCK_EXHAUSTED","TRANSCRIPT_REPEAT_EXCEEDED",
+      "RateLimited","rate/backpressure defer","SourceDeadline",
+    ].into_iter().find(|s|reason.contains(s)).unwrap_or("OTHER_TYPED_FAILURE");
+    let endpoint=[
+      "/api/v5/account/config","/api/v5/account/balance",
+      "/api/v5/account/positions","/api/v5/account/trade-fee",
+      "/api/v5/trade/orders-algo-pending","/api/v5/trade/orders-pending",
+    ].into_iter().find(|s|reason.contains(s));
+    eprintln!("B_CENSUS_FIRST_FAILURE_V1:{}",json!({
+      "schema":"okx.b-census-first-failure/v1","phase":phase,
+      "account_digest_prefix":&fingerprint[..12],
+      "reason_code":code,"endpoint":endpoint,
+      "reason_sha256":format!("{:x}",Sha256::digest(reason.as_bytes())),
+      "remaining_ms":until.map(|v|v.saturating_duration_since(Instant::now()).as_millis() as u64)
+    }));
+}
+
     /// Only the protection reconciliation of an existing managed position
     /// may wait for LOCAL/NO-SEND private reads. The same complete cohort
     /// proof and freshness rules apply; failure remains fail-closed within
@@ -1831,6 +1857,11 @@ impl TradeService {
                     return Err("COHORT_SOURCE_GENERATION_UNVERIFIED".into());
                 }
                 let generation = r.private_ws.status().await.connection_generation;
+                let report=|phase: &str, reason: String| {
+                    #[cfg(test)]
+                    b_census_probe_failure(phase,&c.account_key,&reason,until);
+                    reason
+                };
                 // Inventory can span several bounded REST scopes. Read the
                 // authenticated account snapshot AFTER inventory so source
                 // freshness is checked at the final census proof, not before
@@ -1840,18 +1871,18 @@ impl TradeService {
                         r.observer
                             .pending_derivative_risk_algos_until(until)
                             .await
-                            .map_err(err)?
+                            .map_err(|e|report("ALGO_INVENTORY_DEADLINE_OWNED",err(e)))?
                     } else {
                         r.observer
                             .pending_derivative_risk_algos()
                             .await
-                            .map_err(err)?
+                            .map_err(|e|report("ALGO_INVENTORY_NORMAL",err(e)))?
                     }
                 } else {
                     r.observer
                         .pending_derivative_risk_algos()
                         .await
-                        .map_err(err)?
+                        .map_err(|e|report("ALGO_INVENTORY_POST_HELD",err(e)))?
                 };
                 let snapshot = if let Some(witness) = selected {
                     verify_post_held_selected(
@@ -1868,18 +1899,21 @@ impl TradeService {
                     r.observer
                         .snapshot_after_held_until(until.ok_or("POST_DEADLINE_MISSING")?)
                         .await
-                        .map_err(err)?
+                        .map_err(|e|report("ACCOUNT_SNAPSHOT_POST_HELD",err(e)))?
                 } else if terminal_release.is_some() {
                     // Terminal release needs the same fresh private GETs as
                     // the regular census, with bounded LOCAL no-send admission.
-                    r.observer.snapshot_until(deadline()).await.map_err(err)?
+                    r.observer.snapshot_until(deadline()).await
+                        .map_err(|e|report("ACCOUNT_SNAPSHOT_TERMINAL",err(e)))?
                 } else if let Some(until) = until {
                     // The managed-protection census retries only authenticated
                     // LOCAL/NO-SEND read admission, bounded by its deadline.
                     // It still requires the complete current cohort evidence.
-                    r.observer.snapshot_until(until).await.map_err(err)?
+                    r.observer.snapshot_until(until).await
+                        .map_err(|e|report("ACCOUNT_SNAPSHOT_PRE_RESERVE",err(e)))?
                 } else {
-                    r.observer.snapshot().await.map_err(err)?
+                    r.observer.snapshot().await
+                        .map_err(|e|report("ACCOUNT_SNAPSHOT_NORMAL",err(e)))?
                 };
                 // The selected account's fresh USD/USDT conversion must
                 // still cover the identical reserved USD exposure. A rate
@@ -1898,7 +1932,8 @@ impl TradeService {
                 // This is the earliest REST response across every pending
                 // derivative-algo scope. Complete coverage is insufficient
                 // if the underlying source timestamp is absent or stale.
-                let algo_source_floor = verified_algo_source_time(algos.received_at_ms, now())?;
+                let algo_source_floor=verified_algo_source_time(algos.received_at_ms,now())
+                    .map_err(|e|report("ALGO_SOURCE_FRESHNESS",e))?;
                 let mut managed_algos = std::collections::BTreeSet::new();
                 // Identifiers here are populated ONLY after the independently
                 // observed venue position, SQL lots, central reserve and
@@ -2130,7 +2165,27 @@ impl TradeService {
                         Ok((s.financial_risk(now(), None)?, s.policy()?.4))
                     })
                     .await
-                    .map_err(err)?;
+                    .map_err(|e|report("FINANCIAL_SQL_OWNER",err(e)))?;
+                #[cfg(test)]
+                if std::env::var("OKX_B_CENSUS_CAUSE_PROBE").as_deref()==Ok("1")
+                    && !financial.0.nav_complete
+                {
+                    let h=r.source_capture_health.read().await;
+                    let fingerprint=format!("{:x}",Sha256::digest(c.account_key.as_bytes()));
+                    eprintln!("B_CENSUS_FINANCIAL_GAP_V1:{}",json!({
+                        "schema":"okx.b-census-financial-gap/v1",
+                        "account_digest_prefix":&fingerprint[..12],
+                        "nav_complete":financial.0.nav_complete,
+                        "source_as_of":financial.0.source_as_of,
+                        "snapshot_received_at":snapshot.source_received_at,
+                        "algo_received_ms":algos.received_at_ms,
+                        "capture_last_attempt_ms":h.last_attempt_ms,
+                        "capture_last_success_ms":h.last_success_ms,
+                        "capture_last_failure_ms":h.last_failure_ms,
+                        "capture_reason_code":h.reason_code,
+                        "remaining_ms":until.map(|v|v.saturating_duration_since(Instant::now()).as_millis() as u64)
+                    }));
+                }
                 // A freshly constructed census is not proof that its underlying
                 // account or ledger sources were fresh. Keep the actual oldest
                 // source timestamp, not just the time at which we read it.
@@ -2141,7 +2196,8 @@ impl TradeService {
                     financial.0.nav_complete,
                     financial.0.source_as_of,
                     now(),
-                )?
+                )
+                .map_err(|e|report("FINANCIAL_SOURCE_FLOOR",e))?
                 .min(algo_source_floor);
                 // Bind SQL source quality and financial state to the same
                 // content proof as the account and conditional-order reads.

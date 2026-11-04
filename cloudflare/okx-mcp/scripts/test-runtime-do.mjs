@@ -971,6 +971,23 @@ try {
       // Keep the FIRST typed Native B positive refusal visible to CI.
       // Never expose raw authenticated HTTP bytes or credentials.
       const rawChildErrorChannels = recorded + "\n" + String(error.stderr ?? "");
+
+      // Preserve only bounded, redacted provenance from first failed census.
+      for (const [marker,schema] of [
+        ["B_CENSUS_FIRST_FAILURE_V1","okx.b-census-first-failure/v1"],
+        ["B_CENSUS_FINANCIAL_GAP_V1","okx.b-census-financial-gap/v1"],
+      ]) {
+        const samples=[...rawChildErrorChannels.matchAll(
+          new RegExp(marker+":(\\{[^\\r\\n]+\\})","g")
+        )];
+        for(const sample of samples.slice(0,8)){
+          try {
+            const data=JSON.parse(sample[1]);
+            if(data.schema===schema)
+              process.stderr.write(marker+":"+JSON.stringify(data)+"\n");
+          }catch { /* Diagnostic must not affect the test oracle. */ }
+        }
+      }
       // Forward a bounded, source-redacted classification emitted by
       // TradeService at the FIRST failed order readback. The outer Node
       // adapter otherwise surfaces only an uninformative UNKNOWN status.
