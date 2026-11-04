@@ -2049,13 +2049,34 @@ fn b_census_probe_failure(phase: &str, account: &str, reason: &str, until: Optio
                     verify_pending_order_binding(order, &known)?;
                     covered_order_count += 1;
                 }
-                if algos
+                let observed_algos = algos
                     .samples
                     .iter()
                     .map(|a| a.algo_order_id.clone())
-                    .collect::<std::collections::BTreeSet<_>>()
-                    != managed_algos
-                {
+                    .collect::<std::collections::BTreeSet<_>>();
+                if observed_algos != managed_algos {
+                    // This is a HARD safety mismatch, never accepted as flat
+                    // or retried with an expanded trading permission. Only
+                    // the test transcript can emit source/SQL attribution.
+                    #[cfg(test)]
+                    if std::env::var("OKX_T09_4_SOURCE_COHERENCE_PROBE").as_deref() == Ok("1") {
+                        let positions = snapshot.positions.iter().map(|p| json!({
+                            "instrument":p.instrument_id,
+                            "side":p.position_side,
+                            "quantity":p.position,
+                        })).collect::<Vec<_>>();
+                        eprintln!("T09_4_CENSUS_ALGO_MISMATCH_V1:{}", json!({
+                            "account":c.account_key,
+                            "observed_algo_ids":observed_algos,
+                            "sql_protection_algo_ids":managed_algos,
+                            "positions":positions,
+                            "algo_received_at_ms":algos.received_at_ms,
+                            "snapshot_received_at":snapshot.source_received_at,
+                            "generation":generation,
+                            "held":held_received.is_some(),
+                            "remaining_ms":until.map(|v|v.saturating_duration_since(Instant::now()).as_millis() as u64),
+                        }));
+                    }
                     return Err("UNATTRIBUTED_CONDITIONAL_ORDER".into());
                 }
                 // Active SQL intents are obligations too. A fresh venue

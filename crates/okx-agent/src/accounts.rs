@@ -2115,6 +2115,22 @@ pub(crate) mod recorded_support {
                             chrono::Utc::now().timestamp_millis(),
                         ));
                     }
+                    #[cfg(test)]
+                    if path == "/api/v5/trade/orders-algo-pending"
+                        && std::env::var("OKX_T09_4_SOURCE_COHERENCE_PROBE").as_deref() == Ok("1")
+                        && request.url().query_pairs().any(|(k,v)|k=="ordType" && v=="conditional")
+                    {
+                        let parsed = serde_json::from_slice::<serde_json::Value>(&body)
+                            .unwrap_or(serde_json::Value::Null);
+                        let ids = parsed["data"].as_array().map(|rows|rows.iter()
+                            .filter_map(|row|row["algoId"].as_str())
+                            .collect::<Vec<_>>()).unwrap_or_default();
+                        eprintln!("T09_4_SIGNED_STOP_PAGE_V1:{}",serde_json::json!({
+                            "actor":key,
+                            "algo_ids":ids,
+                            "time_ms":chrono::Utc::now().timestamp_millis(),
+                        }));
+                    }
                     self.requests.lock().unwrap().push(format!(
                         "{key}:{path}?{}",
                         request.url().query().unwrap_or_default()

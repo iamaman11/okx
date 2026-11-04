@@ -1149,6 +1149,10 @@ try {
           maintenance_errors:lines.filter(line => line.includes("OKX_ENTRY_BASELINE_V1")).slice(-12).map(line => line.slice(0, 240)),
           managed_census_denials:lines.filter(line =>
             line.includes("MANAGED_AGGREGATE_CENSUS_DENIAL_V1:")).slice(-5).map(line => line.slice(0, 500)),
+          t09_4_stop_pages:lines.filter(line =>
+            line.startsWith("T09_4_SIGNED_STOP_PAGE_V1:")).slice(-12),
+          t09_4_algo_mismatch:lines.filter(line =>
+            line.startsWith("T09_4_CENSUS_ALGO_MISMATCH_V1:")).slice(-4),
           restart_reached:recorded.includes("T09_1_NATIVE_SQL_RESTART_V1:"),
           terminal_reached:recorded.includes("T09_1_NATIVE_TERMINAL_CLOSE_V1:"),
         }) + "\n");

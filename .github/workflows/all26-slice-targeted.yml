@@ -6,6 +6,7 @@ on:
       - work/b-seven-causal-consolidation-20261105
       - work/b-first-source-diagnostics-20261105
       - work/b-readonly-source-admission-20261105
+      - work/b-t09-protection-causal-20261105
 
 permissions:
   contents: read
@@ -64,8 +65,9 @@ jobs:
           New-Item -ItemType Directory -Path $dir -Force | Out-Null
           # One completed A1 T09.8 path is now proven on the prior SHA.
           # Run B candidates together; T10-07 remains deliberately not proven.
-          $ids = @('T09-SPEC','T10-15')
+          $ids = @('T09.8')
           $env:OKX_B_CENSUS_CAUSE_PROBE = '1'
+          $env:OKX_T09_4_SOURCE_COHERENCE_PROBE = '1'
           $rows = @()
           foreach ($id in $ids) {
             $out = Join-Path $dir $id
