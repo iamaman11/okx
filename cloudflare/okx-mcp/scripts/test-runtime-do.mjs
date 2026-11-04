@@ -1149,6 +1149,8 @@ try {
           maintenance_errors:lines.filter(line => line.includes("OKX_ENTRY_BASELINE_V1")).slice(-12).map(line => line.slice(0, 240)),
           managed_census_denials:lines.filter(line =>
             line.includes("MANAGED_AGGREGATE_CENSUS_DENIAL_V1:")).slice(-5).map(line => line.slice(0, 500)),
+          t10_01_maintenance_shutdown:lines.filter(line =>
+            line.startsWith("T10_01_OWNER_SHUTDOWN_V1:")).slice(-20),
           restart_reached:recorded.includes("T09_1_NATIVE_SQL_RESTART_V1:"),
           terminal_reached:recorded.includes("T09_1_NATIVE_TERMINAL_CLOSE_V1:"),
         }) + "\n");
