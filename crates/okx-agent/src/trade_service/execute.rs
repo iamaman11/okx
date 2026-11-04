@@ -984,7 +984,13 @@ impl TradeService {
                     let rejected = pre_reserve_id.clone();
                     let denied_reason = reason.clone();
                     if r.execution.store.call(deadline(), move |s| {
-                        s.reject_unsent(&rejected, &denied_reason, now())
+                        s.reject_unsent(&rejected, &denied_reason, now())?;
+                        if !s.unsent_before_reserve(&rejected)? {
+                            return Err(okx_execution::StoreError::Invalid(
+                                "PRE_RESERVE_SQL_NO_SEND_PROOF_MISSING",
+                            ));
+                        }
+                        Ok(())
                     }).await.is_err() {
                         return Ok(uncertain(
                             &pre_reserve_id,
