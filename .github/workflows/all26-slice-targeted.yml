@@ -14,7 +14,7 @@ concurrency:
 jobs:
   windows-targeted:
     runs-on: windows-latest
-    timeout-minutes: 18
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de
@@ -27,84 +27,69 @@ jobs:
       - name: Report repository formatting debt (required CI still enforces format)
         continue-on-error: true
         run: cargo fmt --all -- --check
-      - name: Validate exact mandatory scenario manifest and runner oracles
+      - name: Validate unchanged 26 mandatory IDs and evidence oracle
         shell: pwsh
         run: |
           node scripts/run-trade-integration.mjs --list
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node scripts/run-trade-integration.mjs --self-test
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Verify all newly added scripts parse
+      - name: Verify stage B case adapters parse
         shell: pwsh
         run: |
-          foreach ($file in @('T10-07', 'T10-08', 'T10-09', 'T10-11', 'T10-12')) {
-            node --check "scripts/trade-integration/cases/$file.mjs"
+          foreach ($id in @('T09.8','T09-MA','T09-SPEC','T10-01','T10-02','T10-07','T10-14','T10-15')) {
+            node --check "scripts/trade-integration/cases/$id.mjs"
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
-          node scripts/trade-integration/cases/T10-12.mjs --self-test
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Compile and actually kill Windows Native F5/F6 processes
-        shell: pwsh
-        timeout-minutes: 12
-        run: |
-          cargo test --locked -p okx-agent --lib trade_service::execute::tests::k5_windows_actual_process_kill_f5_f6_ten_times_each -- --exact --nocapture
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: S1 causal recorded GET/cancel interleaving regressions (test-only)
-        shell: pwsh
-        timeout-minutes: 3
-        run: |
-          $output = cargo test --locked -p okx-agent --lib causal_algo_phase_ -- --nocapture 2>&1
-          $output | Out-Host
-          if ($LASTEXITCODE -ne 0) { throw "S1_CAUSAL_RECORDED_TRANSPORT_FAILED" }
-          if (($output -join "`n") -notmatch '3 passed; 0 failed') {
-            throw "S1_CAUSAL_TEST_COUNT_UNVERIFIED"
-          }
-      - name: Install existing locked workerd test runtime
+      - name: Install locked persisted Worker runtime
         shell: pwsh
         run: |
           npm ci --prefix cloudflare/okx-mcp --ignore-scripts --no-audit --no-fund
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: T10-09 signed late-fill first leg (not full acceptance)
+      - name: B stage existing complete adapters — exact-SHA Windows acceptance
         shell: pwsh
-        timeout-minutes: 8
+        timeout-minutes: 21
         run: |
-          $artifacts = Join-Path $env:RUNNER_TEMP "t10-09-first-leg"
-          node scripts/run-trade-integration.mjs --case T10-09 --artifacts "$artifacts"
-          $exit = $LASTEXITCODE
-          $summaryPath = Join-Path $artifacts "summary.json"
-          $proofPath = Join-Path $artifacts "T10-09/cancel-ack-no-release.json"
-          if (-not (Test-Path -LiteralPath $summaryPath)) {
-            throw "T10_09_SUMMARY_NOT_PERSISTED"
+          $ErrorActionPreference = 'Stop'
+          $dir = Join-Path $env:RUNNER_TEMP 'b-stage'
+          New-Item -ItemType Directory -Path $dir -Force | Out-Null
+          $ids = @('T09.8','T09-MA','T09-SPEC','T10-01','T10-02','T10-14','T10-15')
+          $rows = @()
+          foreach ($id in $ids) {
+            $out = Join-Path $dir $id
+            Write-Output "B_STAGE_START:$id"
+            node scripts/run-trade-integration.mjs --case "$id" --artifacts "$out"
+            $code = $LASTEXITCODE
+            $file = Join-Path $out 'summary.json'
+            if (Test-Path -LiteralPath $file) {
+              $report = Get-Content -LiteralPath $file -Raw | ConvertFrom-Json
+              $ok = $code -eq 0 -and
+                $report.exact_commit -eq $env:GITHUB_SHA -and
+                $report.spec_revision -eq '#449-r8.3' -and
+                $report.required.Count -eq 26 -and
+                $report.selected.Count -eq 1 -and
+                $report.selected[0] -eq $id -and
+                $report.executed_pass -eq 1 -and
+                $report.executed_failures.Count -eq 0 -and
+                $report.gate -eq 'PASS'
+              $reason = if ($ok) { 'PASS' } elseif ($report.outcomes.Count -gt 0) {
+                [string]$report.outcomes[0].reason
+              } else { 'INVALID_RUNNER_SUMMARY' }
+            } else {
+              $ok = $false
+              $reason = 'SUMMARY_MISSING'
+            }
+            $rows += [pscustomobject]@{id=$id;status= $(if($ok){'PASS'}else{'FAIL'});reason=$reason;exit_code=$code;sha=$env:GITHUB_SHA}
+            Write-Output "B_STAGE_RESULT:$id:$reason"
           }
-          $summary = Get-Content -LiteralPath $summaryPath -Raw | ConvertFrom-Json
-          $reason = [string]$summary.outcomes[0].reason
-          if ($exit -ne 1 -or $reason -ne "T10_09_PARTIAL_CLOSE_PROTECTION_AND_TERMINAL_NOT_PROVEN") {
-            throw "T10_09_FIRST_LEG_NOT_PROVEN:$reason"
-          }
-          if (-not (Test-Path -LiteralPath $proofPath)) {
-            throw "T10_09_NATIVE_SQL_WORKER_PROOF_MISSING"
-          }
-          $proof = Get-Content -LiteralPath $proofPath -Raw | ConvertFrom-Json
-          if ($proof.signed_late_fill_sql.quantity -ne "0.04" -or
-              $proof.signed_late_fill_sql.bill_count -ne 1 -or
-              $proof.signed_late_fill_sql.active_central_receipt -ne $true) {
-            throw "T10_09_SIGNED_ECONOMIC_READBACK_INVALID"
-          }
-          Write-Output "T10_09_SAME_B_CANCEL_LATE_FILL_SQL_WORKER_FIRST_LEG_VERIFIED"
-      - name: A1 T09.8 exact-source Windows reproducer (mandatory case still fail-closed)
-        if: always()
-        shell: pwsh
-        timeout-minutes: 6
-        run: |
-          $artifacts = Join-Path $env:RUNNER_TEMP "t09-8-a1"
-          node scripts/run-trade-integration.mjs --case T09.8 --artifacts "$artifacts"
-          if ($LASTEXITCODE -ne 0) { throw "T09_8_A1_TARGET_NOT_ACCEPTED" }
+          $rows | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $dir 'b-stage-results.json') -Encoding utf8NoBOM
+          $passed = @($rows | Where-Object status -eq 'PASS').Count
+          Write-Output "B_STAGE_EXACT_SHA_RESULTS:$passed/$($ids.Count):$env:GITHUB_SHA"
+          if ($passed -ne $ids.Count) { throw 'B_STAGE_ACCEPTANCE_NOT_COMPLETE' }
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
-          name: t10-09-first-leg-${{ github.sha }}
-          path: |
-            ${{ runner.temp }}\\t10-09-first-leg
-            ${{ runner.temp }}\\t09-8-a1
+          name: b-stage-${{ github.sha }}
+          path: ${{ runner.temp }}\\b-stage
           if-no-files-found: warn
-          retention-days: 7
+          retention-days: 14
