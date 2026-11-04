@@ -2669,6 +2669,57 @@ async fn reject_prepost_denial(
     reason: &str,
 ) -> Result<Value, String> {
     let id = intent.intent_id.clone();
+    #[cfg(test)]
+    if std::env::var("OKX_B1_NATIVE_CAP_PROBE").as_deref() == Ok("1")
+        && intent.idempotency_key == "b1_b_positive_after_shared_denial_001"
+    {
+        // Test-only first cause BEFORE the economic ledger bounds its size.
+        // Report allowlisted route/code identifiers and the stable digest,
+        // NEVER the underlying signed HTTP request or response.
+        let codes = [
+            "TRANSCRIPT_SOURCE_PAGE_UNEXPECTED_OR_EXHAUSTED",
+            "TRANSCRIPT_REPEAT_EXCEEDED",
+            "TRANSCRIPT_CLOCK_EXHAUSTED",
+            "ENTRY_FEE_EXCHANGE_TIME_STALE",
+            "FINANCIAL_SOURCE_INCOMPLETE_OR_STALE",
+            "ACCOUNT_EVIDENCE_EXPIRED_DURING_PLAN",
+            "POST_CENSUS_STALE",
+            "LOCAL_RATE_LIMIT",
+        ]
+        .into_iter()
+        .filter(|item| reason.contains(item))
+        .collect::<Vec<_>>();
+        let routes = [
+            "/api/v5/trade/order",
+            "/api/v5/account/balance",
+            "/api/v5/account/trade-fee",
+            "/api/v5/account/leverage-info",
+            "/api/v5/trade/orders-pending",
+            "/api/v5/trade/orders-algo-pending",
+            "/api/v5/trade/fills-history",
+            "/api/v5/account/bills-archive",
+        ]
+        .into_iter()
+        .filter(|item| reason.contains(item))
+        .collect::<Vec<_>>();
+        let actors = [
+            "fixture-executor-a",
+            "fixture-executor-b",
+            "fixture-observer-a",
+            "fixture-observer-b",
+        ]
+        .into_iter()
+        .filter(|item| reason.contains(item))
+        .collect::<Vec<_>>();
+        eprintln!(
+            "B1_B_PREPOST_CAUSE_V1:{}",
+            json!({
+                "source_digest":format!("{:x}",Sha256::digest(reason.as_bytes())),
+                "typed_codes":codes,"signed_routes":routes,"recorded_actors":actors,
+                "response_bounded":reason.len()>128
+            })
+        );
+    }
     let original = bounded_unsent_reason(reason);
     store
         .call(deadline(), move |s| s.reject_unsent(&id, &original, now()))

@@ -679,6 +679,13 @@ try {
       const recorded = String(error.stdout ?? "");
       // Keep the FIRST typed Native B positive refusal visible to CI.
       // Never expose raw authenticated HTTP bytes or credentials.
+      const b1Prepost = [...recorded.matchAll(
+        /B1_B_PREPOST_CAUSE_V1:(\{[^\r\n]+\})/g
+      )];
+      if (b1Prepost.length) {
+        process.stderr.write("B1_B_PREPOST_CAUSE_V1:" +
+          b1Prepost.at(-1)[1] + "\n");
+      }
       const b1Refusal = [...recorded.matchAll(
         /B1_POSITIVE_DIAGNOSTIC_V1:(\{[^\r\n]+\})/g
       )];
