@@ -4124,7 +4124,7 @@ mod raw_native_session_tests {
                                 path: "/api/v5/trade/orders-pending".into(),
                                 required_query: vec![("limit".into(), "100".into())],
                                 raw_response: envelope(json!([{
-                                    "instId":"BTC-USDT-SWAP",
+                                    "instType":"SWAP","instId":"BTC-USDT-SWAP",
                                     "ordId":"recorded-t09-second-001",
                                     "clOrdId":persisted.client_order_id.clone(),
                                     "side":"buy","posSide":"long","tdMode":"cross",
