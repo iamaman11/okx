@@ -615,6 +615,12 @@ impl TradeService {
                 let instance_nav_blocked = instance_nav_complete == Some(false);
                 // Preview uses the same price-bounded, fee-inclusive cost model as
                 // native admission; do not silently suppress missing fee evidence.
+                // The read-only quote and its partial exposure display use
+                // the same authenticated observer snapshot. A second GET
+                // after the independent census did not authorize any trade:
+                // freshness is still checked at the time exposure is shown.
+                // Execute and its pre-/post-HELD sources remain independent.
+                let mut quote_snapshot = None;
                 let costs = if matches!(
                     operation,
                     TradeOperation::Open | TradeOperation::Add | TradeOperation::Replace
@@ -674,6 +680,7 @@ impl TradeService {
                         entry_budget::unproven_entry_cost_headroom(entry.total_usd, entry_ceiling)?;
                     let all_in_upper = proof.proven_upper_usd()?;
                     let missing = proof.missing_reasons();
+                    quote_snapshot = Some(source);
                     json!({"price_bound_usdt":exact(plan.limit_price),
                            "notional_usdt":exact(entry.notional_usdt),
                            "entry_fee_usdt":exact(entry.fee_usdt),
@@ -716,7 +723,12 @@ impl TradeService {
                 // The Observer's ordinary positions/orders are distinct from
                 // pending algos, open UNKNOWN intents and central reservations.
                 // Never equate zero ordinary rows with a proved flat account.
-                let exposure = r.observer.snapshot_until(preview_until).await.map_err(err)?;
+                let exposure = if let Some(source) = quote_snapshot {
+                    source
+                } else {
+                    // Close/reduce previews have no entry-cost quote source.
+                    r.observer.snapshot_until(preview_until).await.map_err(err)?
+                };
                 let exposure_fresh =
                     chrono::DateTime::parse_from_rfc3339(&exposure.source_received_at)
                         .ok()
