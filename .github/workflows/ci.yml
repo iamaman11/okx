@@ -9,12 +9,15 @@ on:
   workflow_dispatch:
     inputs:
       target_case:
-        description: 'Targeted recorded Windows T09 preflight (not full 26/26 acceptance)'
+        description: 'Targeted Windows T09, B1 prerequisite or S2-05 CAS (not 26/26)'
         type: choice
         required: false
         default: T09.6
         options:
           - T09.1
+          - T09.5
+          - B1
+          - S2-05
           - T09.3
           - T09.4
           - T09.6
@@ -144,6 +147,8 @@ jobs:
           components: rustfmt, clippy
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          cache-on-failure: true
 
       - name: Format
         run: cargo fmt --all -- --check
@@ -285,6 +290,8 @@ jobs:
           components: clippy
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          cache-on-failure: true
 
       - name: Clippy native Windows crates
         run: cargo clippy --locked -p okx-agent -p okx-host-control -p okx-host-launcher -p okx-execution --all-targets -- -D warnings
@@ -391,7 +398,7 @@ jobs:
   # branch. No deployment, no exchange network and no relaxation of the
   # mandatory 26-case pull_request gate.
   windows-t09-preflight:
-    name: windows-t09-targeted
+    name: windows-t09-b1-s2-targeted
     if: github.event_name == 'workflow_dispatch'
     runs-on: windows-latest
     timeout-minutes: 35
@@ -409,7 +416,7 @@ jobs:
         run: |
           $head = (git rev-parse HEAD).Trim()
           if ($head -ne $env:GITHUB_SHA) { throw "PREFLIGHT_HEAD_MISMATCH" }
-          if ($env:OKX_TARGET_CASE -notin @('T09.1','T09.3','T09.4','T09.6','T09.7','T09.8')) {
+          if ($env:OKX_TARGET_CASE -notin @('T09.1','T09.3','T09.4','T09.5','T09.6','T09.7','T09.8','B1','S2-05')) {
             throw "PREFLIGHT_CASE_NOT_ALLOWED"
           }
           Write-Host "PREFLIGHT_HEAD=$head"
@@ -422,6 +429,8 @@ jobs:
           components: rustfmt
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          cache-on-failure: true
 
       - name: Check Rust format without changing source
         run: cargo fmt --all -- --check
@@ -432,23 +441,31 @@ jobs:
           npm ci --prefix cloudflare/okx-mcp --ignore-scripts --no-audit --no-fund
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - name: Execute exactly one recorded Native and Worker T09 case
+      - name: Execute one Native/Worker scenario or B1/S2-05 prerequisite
         shell: pwsh
         env:
           OKX_TARGET_CASE: ${{ inputs.target_case || 'T09.6' }}
         run: |
-          if ($env:OKX_TARGET_CASE -notin @('T09.1','T09.3','T09.4','T09.6','T09.7','T09.8')) {
+          if ($env:OKX_TARGET_CASE -notin @('T09.1','T09.3','T09.4','T09.5','T09.6','T09.7','T09.8','B1','S2-05')) {
             throw "PREFLIGHT_CASE_NOT_ALLOWED"
           }
           $artifacts = Join-Path $env:RUNNER_TEMP "trade-integration"
-          node scripts/run-trade-integration.mjs --case $env:OKX_TARGET_CASE --artifacts "$artifacts"
+          if ($env:OKX_TARGET_CASE -eq 'B1') {
+            $env:OKX_B1_SECOND_POSITIVE_PROBE = '1'
+            node scripts/trade-integration/b1-native-cap.mjs --artifacts "$artifacts"
+          } elseif ($env:OKX_TARGET_CASE -eq 'S2-05') {
+            $env:OKX_S2_05_POLICY_CAS_PROBE = '1'
+            node scripts/run-trade-integration.mjs --case T09.5 --artifacts "$artifacts"
+          } else {
+            node scripts/run-trade-integration.mjs --case $env:OKX_TARGET_CASE --artifacts "$artifacts"
+          }
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Preserve targeted evidence even on failure
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: t09-targeted-${{ inputs.target_case || 'T09.6' }}-${{ github.sha }}
+          name: native-targeted-${{ inputs.target_case || 'T09.6' }}-${{ github.sha }}
           path: ${{ runner.temp }}\trade-integration
           if-no-files-found: warn
           retention-days: 14
@@ -490,6 +507,8 @@ jobs:
           components: rustfmt
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          cache-on-failure: true
 
       - name: Check Rust formatting
         run: cargo fmt --all -- --check
@@ -558,6 +577,8 @@ jobs:
         with:
           toolchain: 1.95.0
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          cache-on-failure: true
       - name: Install locked production workerd test dependencies
         run: npm ci --prefix cloudflare/okx-mcp --ignore-scripts --no-audit --no-fund
       - name: Precompile actual Native/Worker child
@@ -577,3 +598,20 @@ jobs:
           path: ${{ runner.temp }}\b1-native
           if-no-files-found: warn
           retention-days: 7
+      # Actual Worker governance CAS after a signed Native ACK; T09.5
+      # verifies preserved original identity/hash/deadline and zero extra POST.
+      - name: S2-05 live Native/Worker policy CAS and semantic replay
+        shell: pwsh
+        env:
+          OKX_S2_05_POLICY_CAS_PROBE: "1"
+        run: |
+          $artifacts = Join-Path $env:RUNNER_TEMP "s2-05-policy-cas"
+          node scripts/run-trade-integration.mjs --case T09.5 --artifacts "$artifacts"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: s2-05-native-worker-${{ github.event.pull_request.head.sha || github.sha }}
+          path: ${{ runner.temp }}\s2-05-policy-cas
+          if-no-files-found: warn
+          retention-days: 14

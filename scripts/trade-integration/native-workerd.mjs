@@ -25,8 +25,17 @@ export async function actualNativeWorker(root, signal, { statusProbe = false, se
   if (budgetDenial && !closeMode) throw Error("T09.8_REQUIRES_T09.6");
   // A failing T09.8 must not invalidate independently completed T09.6/7
   // receipts. Both modes still execute the complete Native+Worker cohort.
-  const key = closeMode ? (budgetDenial ? "managed-close-denial" : "managed-close") : managedAdd ? "managed-add" : partialFills ? "partial-fills" : secondAdmission ? "second-admission" : statusProbe ? "post-fill-status" : "baseline";
-  if (!memo.has(key)) memo.set(key, (async () => {
+  const mode = closeMode ? (budgetDenial ? "managed-close-denial" : "managed-close") : managedAdd ? "managed-add" : partialFills ? "partial-fills" : secondAdmission ? "second-admission" : statusProbe ? "post-fill-status" : "baseline";
+  // Financial evidence must never be memoized across different opt-in probes.
+  const key = [mode,
+    process.env.OKX_S2_05_POLICY_CAS_PROBE === "1" ? "policy-cas" : "normal-policy",
+    process.env.OKX_B1_NATIVE_CAP_PROBE === "1" ? "b1-cap" : "normal-cap",
+    process.env.OKX_B1_SECOND_POSITIVE_PROBE === "1" ? "b1-positive" : "normal-b",
+  ].join(":");
+  const reused = memo.has(key);
+  if (!reused) {
+    const startedAt = Date.now();
+    memo.set(key, (async () => {
     const { stdout, stderr } = await exec(
       process.execPath,
       [resolve(root, "cloudflare", "okx-mcp", "scripts", "test-runtime-do.mjs")],
@@ -209,8 +218,14 @@ export async function actualNativeWorker(root, signal, { statusProbe = false, se
         }
         : { workerReplay: receipt(stdout, "T09_5_WORKER_IDEMPOTENCY_EVIDENCE_V1") }),
       transcript_sha256: createHash("sha256").update(stdout + stderr).digest("hex"),
+      cohort_execution: { key, elapsed_ms: Date.now() - startedAt,
+        source: "actual-native-worker-child" },
     };
-  })());
-  return memo.get(key);
+    })());
+  }
+  const evidence = await memo.get(key);
+  return { ...evidence,
+    cohort_execution: { ...evidence.cohort_execution, reused },
+  };
 }
 export { hash };

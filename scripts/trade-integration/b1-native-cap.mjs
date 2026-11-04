@@ -54,6 +54,33 @@ const b = transcript.nativeB1Cap;
 const a = transcript.nativeSecondAdmission;
 const positiveMode = process.env.OKX_B1_SECOND_POSITIVE_PROBE === "1";
 const bPositive = positiveMode ? transcript.nativeB1Positive : null;
+if (artifactDir) {
+  // Recorded owner/Worker facts before the oracle: a later failing assertion
+  // must not erase its independently captured first financial discrepancy.
+  // Store only bounded typed fields, never WSS frames, API keys or raw HTTP.
+  const checkpoint = {
+    schema: "okx.b1-native-pre-oracle/v1", status: "UNVERIFIED",
+    exact_sha: process.env.GITHUB_SHA ?? null,
+    a_uid_hash: b?.account_a_uid ?? null,
+    b_uid_hash: b?.account_b_uid ?? null,
+    a_sql_intent_id: a?.intent_id ?? null,
+    b_sql_intent_id: b?.b_intent_id ?? null,
+    b_sql_state: b?.b_sql_state ?? null,
+    b_send_state: b?.send_state ?? null,
+    b_denial_reason: b?.denial_reason ?? null,
+    b_denial_origin: b?.denial_origin ?? null,
+    b_outbound_before: b?.outbound_posts_before ?? null,
+    b_outbound_after: b?.outbound_posts_after ?? null,
+    before_entry_budget: b?.before_budget?.entry_budget ?? null,
+    after_entry_budget: b?.after_budget?.entry_budget ?? null,
+    b_positive_state: bPositive?.b_sql_state ?? null,
+    b_positive_posts_after: bPositive?.outbound_posts_after ?? null,
+    b_positive_entry_budget: bPositive?.after_budget?.entry_budget ?? null,
+    cohort_execution: transcript.cohort_execution ?? null,
+  };
+  await writeFile(resolve(artifactDir, "b1-native-pre-oracle.json"),
+    JSON.stringify(checkpoint, null, 2) + "\n");
+}
 assert.ok(b && a, "real Native B and A account receipts required");
 assert.match(b.account_a_uid, /^[a-f0-9]{64}$/);
 assert.match(b.account_b_uid, /^[a-f0-9]{64}$/);

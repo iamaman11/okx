@@ -245,7 +245,7 @@ const cli = args(process.argv.slice(2));
 if (cli.selfTest) { selfTest(); process.exit(0); }
 if (cli.list) {
   process.stdout.write(JSON.stringify({
-    schema: "okx.trade-integration-manifest/v1", spec_revision: "#449-r6",
+    schema: "okx.trade-integration-manifest/v1", spec_revision: "#449-r8.2",
     required, mandatory_stages: mandatoryStages
   }, null, 2) + "\n");
   process.exit(0);
@@ -257,6 +257,7 @@ const events = [];
 const caseResults = [];
 const assertions = [];
 const caseReadbacks = [];
+const cohortUsages = [];
 const started = Date.now();
 for (const caseId of cli.selected) {
   const script = resolve(root, "scripts", "trade-integration", "cases", caseId + ".mjs");
@@ -282,6 +283,15 @@ for (const caseId of cli.selected) {
         }),
       ]);
       const accepted = verified(output, caseId);
+      // This is runtime telemetry, never an alternative financial oracle.
+      // Memoized cohorts are NOT independent repeated native executions.
+      if (accepted.cohort_execution) {
+        const c = accepted.cohort_execution;
+        if (!Number.isSafeInteger(c.elapsed_ms) || c.elapsed_ms < 0
+            || typeof c.key !== "string" || typeof c.reused !== "boolean")
+          throw Error("COHORT_TIMING_UNVERIFIED");
+        cohortUsages.push({ case_id: caseId, ...c });
+      }
       status = "PASS";
       caseReadbacks.push({
         case_id:caseId,
@@ -301,7 +311,7 @@ for (const caseId of cli.selected) {
 }
 const successful = caseResults.every(c => c.status === "PASS");
 const summary = {
-  schema: "okx.trade-integration-summary/v1", spec_revision: "#449-r6",
+  schema: "okx.trade-integration-summary/v1", spec_revision: "#449-r8.2",
   exact_commit: git("rev-parse", "HEAD"), exact_tree: git("rev-parse", "HEAD^{tree}"),
   driver_sha256: hashFile(fileURLToPath(import.meta.url)),
   cargo_lock_sha256: hashFile(resolve(root, "Cargo.lock")),
@@ -310,7 +320,12 @@ const summary = {
   os: { platform: os.platform(), release: os.release(), arch: os.arch() },
   runtime: process.version, seed: process.env.OKX_INTEGRATION_SEED ?? null,
   required, selected: cli.selected,
-  outcomes: caseResults, elapsed_ms: Date.now() - started,
+  outcomes: caseResults,
+  executed_pass: caseResults.filter(c => c.status === "PASS").length,
+  executed_failures: caseResults.filter(c => c.status !== "PASS" && c.reason !== failures.missing).map(c => c.id),
+  missing_required: caseResults.filter(c => c.reason === failures.missing).map(c => c.id),
+  cohort_usages: cohortUsages,
+  elapsed_ms: Date.now() - started,
   gate: successful ? "PASS" : "BLOCKED",
   rerun: cli.selected.length === 1
     ? `node scripts/run-trade-integration.mjs --case ${cli.selected[0]} --artifacts <run-dir>`
