@@ -33,6 +33,7 @@ export async function actualNativeWorker(root, signal, { statusProbe = false, se
     process.env.OKX_B1_NATIVE_CAP_PROBE === "1" ? "b1-cap" : "normal-cap",
     process.env.OKX_B1_SECOND_POSITIVE_PROBE === "1" ? "b1-positive" : "normal-b",
     process.env.OKX_T10_14_NATIVE_PROBE === "1" ? "t10-14" : "no-t10-14",
+    process.env.OKX_T10_06_CONCURRENT_PROBE === "1" ? "t10-06" : "no-t10-06",
   ].join(":");
   const reused = memo.has(key);
   if (!reused) {
@@ -179,6 +180,9 @@ export async function actualNativeWorker(root, signal, { statusProbe = false, se
       nativeBootstrap: receipt(stdout, "T09_0_NATIVE_SQL_EVIDENCE_V1"),
       workerBootstrap: receipt(stdout, "T09_0_WORKER_EVIDENCE_V1"),
       nativeReplay: receipt(stdout, "T09_5_NATIVE_IDEMPOTENCY_EVIDENCE_V1"),
+      ...(process.env.OKX_T10_06_CONCURRENT_PROBE === "1" ? {
+        nativeT10Concurrency: receipt(stdout, "T10_06_NATIVE_CONCURRENT_V1"),
+      } : {}),
       nativeAccountScope: receipt(stdout, "S2_07_NATIVE_ACCOUNT_SCOPE_V1"),
       ...(process.env.OKX_S2_05_POLICY_CAS_PROBE === "1" ? {
         nativePolicyReplay: receipt(stdout, "S2_05_NATIVE_POLICY_REPLAY_V1"),

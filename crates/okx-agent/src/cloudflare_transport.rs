@@ -2215,6 +2215,83 @@ mod raw_native_session_tests {
             1,
             "S2-04 equivalent replay and five conflicts may not create extra venue POSTs"
         );
+        // T10-06: 100 real simultaneous PUBLIC TradeService requests with
+        // exactly the same persisted owner/account/idempotency/payload.
+        // Competing requests may be locally deferred by the production
+        // admission/read budget, but must never create another intent or
+        // transmit another venue POST. A definitive independent admission
+        // cannot borrow the first worker reservation.
+        if std::env::var("OKX_T10_06_CONCURRENT_PROBE").as_deref() == Ok("1") {
+            let mut concurrent = tokio::task::JoinSet::new();
+            let started = std::time::Instant::now();
+            for _ in 0..100 {
+                let public = trade.clone();
+                let same_request = semantic_replay.clone();
+                concurrent.spawn(async move {
+                    public.trade("fixture-a", &same_request, None).await
+                });
+            }
+            let mut identical = 0_u32;
+            let mut local_read_denied = 0_u32;
+            let mut errors = Vec::new();
+            while let Some(task) = concurrent.join_next().await {
+                match task.expect("T10-06 public task must finish") {
+                    Ok(v) => {
+                        let id = v["data"]["intent"]["intent_id"].as_str()
+                            .or_else(|| v["intent_id"].as_str());
+                        if id == Some(opened_intent_id.as_str()) {
+                            identical += 1;
+                        } else {
+                            errors.push(format!("T10_06_WRONG_INTENT:{v}"));
+                        }
+                    }
+                    Err(reason) => {
+                        let last = rate_budget.snapshot().last_throttle;
+                        if reason.contains("rate/backpressure defer")
+                            && last.as_ref().is_some_and(|r| !r.request_sent)
+                        {
+                            local_read_denied += 1;
+                        } else {
+                            errors.push(format!("T10_06_NONLOCAL_FAILURE:{reason}"));
+                        }
+                    }
+                }
+            }
+            assert!(errors.is_empty(), "T10-06 unsafe concurrent results: {errors:?}");
+            assert_eq!(identical + local_read_denied, 100,
+                "each T10-06 request must be accounted for");
+            assert_eq!(feed.outbound_posts.lock().unwrap().len(), 1,
+                "100 concurrent same-key calls must not emit another POST");
+            let saved_id = opened_intent_id.clone();
+            let owner = accounts.resolve("fixture-a").await.unwrap();
+            let sql = owner.execution.store.call(
+                std::time::Instant::now() + Duration::from_secs(3),
+                move |s| s.by_idempotency("t09_real_public_execute_0001")
+            ).await.expect("T10-06 SQL owner");
+            // The original key may be decorated by an earlier explicitly
+            // rejected local no-send attempt; verify the exact saved intent
+            // by its authenticated ID instead of assuming a key spelling.
+            let persisted = if sql.is_some() { sql } else {
+                owner.execution.store.call(
+                    std::time::Instant::now() + Duration::from_secs(3),
+                    move |s| s.intent(&saved_id)
+                ).await.expect("T10-06 persisted intent")
+            }.expect("T10-06 same original persisted intent");
+            assert_eq!(persisted.intent_id, opened_intent_id);
+            assert_eq!(persisted.state, okx_execution::IntentState::Acknowledged);
+            println!("T10_06_NATIVE_CONCURRENT_V1:{}", json!({
+                "requested":100,
+                "same_intent_returns":identical,
+                "local_no_send_read_denials":local_read_denied,
+                "nonlocal_failures":errors.len(),
+                "original_intent_id":opened_intent_id,
+                "persisted_intent_id":persisted.intent_id,
+                "sql_revision":persisted.revision,
+                "created_posts":feed.outbound_posts.lock().unwrap().len(),
+                "elapsed_ms":started.elapsed().as_millis(),
+                "conflict_reason":amount_conflict_reason,
+            }));
+        }
         // A read-only replay may return UNKNOWN even after transport has
         // consumed the raw GET: a deadline or decode/readback failure does
         // not turn the observation into a verified outcome. Only an
