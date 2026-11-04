@@ -2670,9 +2670,7 @@ async fn reject_prepost_denial(
 ) -> Result<Value, String> {
     let id = intent.intent_id.clone();
     #[cfg(test)]
-    if std::env::var("OKX_B1_NATIVE_CAP_PROBE").as_deref() == Ok("1")
-        && intent.idempotency_key == "b1_b_positive_after_shared_denial_001"
-    {
+    if std::env::var("OKX_B1_NATIVE_CAP_PROBE").as_deref() == Ok("1") {
         // Test-only first cause BEFORE the economic ledger bounds its size.
         // Report allowlisted route/code identifiers and the stable digest,
         // NEVER the underlying signed HTTP request or response.
@@ -2711,10 +2709,11 @@ async fn reject_prepost_denial(
         .into_iter()
         .filter(|item| reason.contains(*item))
         .collect::<Vec<_>>();
-        eprintln!(
+        println!(
             "B1_B_PREPOST_CAUSE_V1:{}",
             json!({
                 "source_digest":format!("{:x}",Sha256::digest(reason.as_bytes())),
+                "b_positive_key":intent.idempotency_key == "b1_b_positive_after_shared_denial_001",
                 "typed_codes":codes,"signed_routes":routes,"recorded_actors":actors,
                 "response_bounded":reason.len() > 128
             })
