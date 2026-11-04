@@ -34,6 +34,7 @@ export async function actualNativeWorker(root, signal, { statusProbe = false, se
     process.env.OKX_B1_SECOND_POSITIVE_PROBE === "1" ? "b1-positive" : "normal-b",
     process.env.OKX_T10_14_NATIVE_PROBE === "1" ? "t10-14" : "no-t10-14",
     process.env.OKX_T10_06_CONCURRENT_PROBE === "1" ? "t10-06" : "no-t10-06",
+    process.env.OKX_T10_07_NATIVE_PROBE === "1" ? "t10-07" : "no-t10-07",
     process.env.OKX_T09_MA_CONCURRENT_PROBE === "1" ? "t09-ma" : "no-t09-ma",
     process.env.OKX_T10_02_EXTERNAL_EXPOSURE_PROBE === "1" ? "t10-02" : "no-t10-02",
     process.env.OKX_T10_04_FOREIGN_WORKER_REPLY_PROBE === "1" ? "t10-04" : "no-t10-04",
