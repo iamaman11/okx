@@ -12,7 +12,7 @@ use std::{
     },
     time::{Duration, Instant},
 };
-use tokio::sync::oneshot;
+use tokio::sync::{oneshot, watch};
 type Job = Box<dyn FnOnce(&mut AccountStore) + Send + 'static>;
 
 // A WAL file can stay above the checkpoint byte threshold even after a
@@ -144,6 +144,8 @@ struct WorkerOwner {
     sender: SyncSender<Job>,
     timings: Arc<SqlTimingCounters>,
     maintenance: Arc<Mutex<MaintenanceHistory>>,
+    /// Observability only; it never owns a second SQL writer.
+    terminated: watch::Receiver<bool>,
 }
 
 struct PendingBackup {
@@ -182,6 +184,7 @@ impl AccountStoreHandle {
         let maintenance = Arc::new(Mutex::new(MaintenanceHistory::default()));
         let worker_maintenance = Arc::clone(&maintenance);
         let (ready_tx, ready_rx) = oneshot::channel();
+        let (terminated_tx, terminated_rx) = watch::channel(false);
         std::thread::Builder::new()
             .name("okx-account-sql".into())
             .spawn(move || {
@@ -294,6 +297,9 @@ impl AccountStoreHandle {
                         }
                     }
                 }
+                // Signal only after the SQLite connection has actually closed.
+                drop(store);
+                let _ = terminated_tx.send(true);
             })?;
         ready_rx
             .await
@@ -303,9 +309,16 @@ impl AccountStoreHandle {
                 sender,
                 timings,
                 maintenance,
+                terminated: terminated_rx,
             }),
         })
     }
+    /// A read-only completion witness, usable after all AccountStoreHandle
+    /// clones are dropped. It cannot stop work or mutate account storage.
+    pub fn termination_signal(&self) -> watch::Receiver<bool> {
+        self.owner.terminated.clone()
+    }
+
     /// Reads bounded history without entering the account SQL owner's FIFO.
     pub fn maintenance_timing(&self) -> AccountMaintenanceTimingV1 {
         match self.owner.maintenance.try_lock() {
@@ -549,6 +562,7 @@ mod maintenance_history_tests {
                 sender: sync_channel(1).0,
                 timings: Arc::new(SqlTimingCounters::default()),
                 maintenance: Arc::clone(&history),
+                terminated: watch::channel(false).1,
             }),
         };
         let _guard = history.lock().unwrap();

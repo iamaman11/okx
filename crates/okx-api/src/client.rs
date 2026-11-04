@@ -1,4 +1,7 @@
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+};
 
 use reqwest::{Client, StatusCode, header::RETRY_AFTER};
 use serde::de::DeserializeOwned;
@@ -10,6 +13,7 @@ use crate::{
     config::{Credentials, OkxEnvironment},
     error::OkxError,
     rate::{GENERAL_RATE_LIMIT_CODE, RateBudget, RateRequestPlan, SUBACCOUNT_RATE_LIMIT_CODE},
+    transport::{HttpTransport, RawHttpResponse, ReqwestHttpTransport},
 };
 
 #[derive(Debug, Deserialize)]
@@ -51,6 +55,7 @@ pub struct CapturedPublicRows<T> {
 #[derive(Clone)]
 pub struct OkxPublicClient {
     http: Client,
+    transport: Arc<dyn HttpTransport>,
     environment: OkxEnvironment,
     rate_budget: RateBudget,
 }
@@ -65,8 +70,24 @@ impl OkxPublicClient {
         rate_budget: RateBudget,
     ) -> Result<Self, OkxError> {
         let http = build_http_client()?;
+        let transport: Arc<dyn HttpTransport> = Arc::new(ReqwestHttpTransport::new(http.clone()));
         Ok(Self {
             http,
+            transport,
+            environment,
+            rate_budget,
+        })
+    }
+
+    /// Same signed production requests with an injected HTTP delivery boundary.
+    pub fn with_http_transport(
+        environment: OkxEnvironment,
+        rate_budget: RateBudget,
+        transport: Arc<dyn HttpTransport>,
+    ) -> Result<Self, OkxError> {
+        Ok(Self {
+            http: build_http_client()?,
+            transport,
             environment,
             rate_budget,
         })
@@ -81,7 +102,13 @@ impl OkxPublicClient {
     }
 
     pub async fn clock_evidence(&self) -> Result<ClockEvidence, OkxError> {
-        fetch_clock_evidence(&self.http, self.environment, &self.rate_budget).await
+        fetch_clock_evidence(
+            &self.http,
+            &self.transport,
+            self.environment,
+            &self.rate_budget,
+        )
+        .await
     }
 
     pub(crate) async fn public_get<T>(
@@ -104,7 +131,12 @@ impl OkxPublicClient {
             request = request.header("x-simulated-trading", "1");
         }
 
-        decode(request.send().await?, &self.rate_budget, &plan).await
+        decode(
+            send_request(&self.transport, request).await?,
+            &self.rate_budget,
+            &plan,
+        )
+        .await
     }
 
     pub(crate) async fn public_get_captured<T>(
@@ -159,8 +191,12 @@ impl OkxPublicClient {
         if self.environment.demo {
             request = request.header("x-simulated-trading", "1");
         }
-        let (envelope, raw_body) =
-            decode_envelope_captured(request.send().await?, &self.rate_budget, &plan).await?;
+        let (envelope, raw_body) = decode_envelope_captured(
+            send_request(&self.transport, request).await?,
+            &self.rate_budget,
+            &plan,
+        )
+        .await?;
         if envelope.code != "0" {
             return Err(OkxError::Api {
                 code: envelope.code,
@@ -177,6 +213,7 @@ impl OkxPublicClient {
 #[derive(Clone)]
 pub struct OkxRestClient {
     http: Client,
+    transport: Arc<dyn HttpTransport>,
     environment: OkxEnvironment,
     credentials: Credentials,
     rate_budget: RateBudget,
@@ -193,9 +230,27 @@ impl OkxRestClient {
         rate_budget: RateBudget,
     ) -> Result<Self, OkxError> {
         let http = build_http_client()?;
+        let transport: Arc<dyn HttpTransport> = Arc::new(ReqwestHttpTransport::new(http.clone()));
 
         Ok(Self {
             http,
+            transport,
+            environment,
+            credentials,
+            rate_budget,
+        })
+    }
+
+    /// Same private signer and parser, regardless of delivery implementation.
+    pub fn with_http_transport(
+        environment: OkxEnvironment,
+        credentials: Credentials,
+        rate_budget: RateBudget,
+        transport: Arc<dyn HttpTransport>,
+    ) -> Result<Self, OkxError> {
+        Ok(Self {
+            http: build_http_client()?,
+            transport,
             environment,
             credentials,
             rate_budget,
@@ -211,7 +266,13 @@ impl OkxRestClient {
     }
 
     pub async fn clock_evidence(&self) -> Result<ClockEvidence, OkxError> {
-        fetch_clock_evidence(&self.http, self.environment, &self.rate_budget).await
+        fetch_clock_evidence(
+            &self.http,
+            &self.transport,
+            self.environment,
+            &self.rate_budget,
+        )
+        .await
     }
 
     pub(crate) async fn private_get<T>(
@@ -222,8 +283,42 @@ impl OkxRestClient {
     where
         T: DeserializeOwned,
     {
+        self.private_get_with_queue_budget(path, params, None).await
+    }
+
+    /// An opt-in rate-admitted read: wait only for local no-send capacity.
+    /// Trading POST, exchange throttles and already-sent requests are never retried.
+    pub(crate) async fn private_get_wait<T>(
+        &self,
+        path: &str,
+        params: &[(&str, String)],
+        max_wait: Duration,
+    ) -> Result<Vec<T>, OkxError>
+    where
+        T: DeserializeOwned,
+    {
+        self.private_get_with_queue_budget(path, params, Some(max_wait))
+            .await
+    }
+
+    async fn private_get_with_queue_budget<T>(
+        &self,
+        path: &str,
+        params: &[(&str, String)],
+        max_wait: Option<Duration>,
+    ) -> Result<Vec<T>, OkxError>
+    where
+        T: DeserializeOwned,
+    {
         let plan = self.rate_budget.private_rest_plan(path, params);
-        admit(&self.rate_budget, &plan)?;
+        if let Some(wait) = max_wait {
+            self.rate_budget
+                .admit_wait(&plan, wait)
+                .await
+                .map_err(|evidence| OkxError::RateLimited { evidence })?;
+        } else {
+            admit(&self.rate_budget, &plan)?;
+        }
 
         let request_path = request_path_with_query(path, params);
 
@@ -249,7 +344,12 @@ impl OkxRestClient {
             request = request.header("x-simulated-trading", "1");
         }
 
-        decode(request.send().await?, &self.rate_budget, &plan).await
+        decode(
+            send_request(&self.transport, request).await?,
+            &self.rate_budget,
+            &plan,
+        )
+        .await
     }
 
     pub(crate) async fn private_read_post<T, B>(
@@ -338,12 +438,18 @@ impl OkxRestClient {
             request = request.header("x-simulated-trading", "1");
         }
 
-        decode_envelope(request.send().await?, &self.rate_budget, rate_plan).await
+        decode_envelope(
+            send_request(&self.transport, request).await?,
+            &self.rate_budget,
+            rate_plan,
+        )
+        .await
     }
 }
 
 async fn fetch_clock_evidence(
     http: &Client,
+    transport: &Arc<dyn HttpTransport>,
     environment: OkxEnvironment,
     rate_budget: &RateBudget,
 ) -> Result<ClockEvidence, OkxError> {
@@ -354,10 +460,11 @@ async fn fetch_clock_evidence(
     let started = Instant::now();
     let url = format!("{}{}", environment.rest_base_url(), OKX_PUBLIC_TIME_PATH);
     let rows: Vec<ServerTime> = decode(
-        http.get(url)
-            .header("Accept", "application/json")
-            .send()
-            .await?,
+        send_request(
+            transport,
+            http.get(url).header("Accept", "application/json"),
+        )
+        .await?,
         rate_budget,
         &plan,
     )
@@ -373,6 +480,15 @@ async fn fetch_clock_evidence(
         OkxError::Clock("OKX server time is not a Unix millisecond timestamp".to_owned())
     })?;
     ClockEvidence::from_sample(server_time_ms, local_started_ms, round_trip, Instant::now())
+}
+
+async fn send_request(
+    transport: &Arc<dyn HttpTransport>,
+    request: reqwest::RequestBuilder,
+) -> Result<RawHttpResponse, OkxError> {
+    transport
+        .send(request.build()?, Instant::now() + OKX_REQUEST_TIMEOUT)
+        .await
 }
 
 fn system_unix_ms() -> Result<u64, OkxError> {
@@ -403,7 +519,7 @@ fn admit(rate_budget: &RateBudget, plan: &RateRequestPlan) -> Result<(), OkxErro
 }
 
 async fn decode<T>(
-    response: reqwest::Response,
+    response: RawHttpResponse,
     rate_budget: &RateBudget,
     plan: &RateRequestPlan,
 ) -> Result<Vec<T>, OkxError>
@@ -423,7 +539,7 @@ where
 }
 
 async fn decode_envelope<T>(
-    response: reqwest::Response,
+    response: RawHttpResponse,
     rate_budget: &RateBudget,
     plan: &RateRequestPlan,
 ) -> Result<ApiEnvelope<T>, OkxError>
@@ -435,7 +551,7 @@ where
 }
 
 async fn decode_envelope_captured<T>(
-    response: reqwest::Response,
+    response: RawHttpResponse,
     rate_budget: &RateBudget,
     plan: &RateRequestPlan,
 ) -> Result<(ApiEnvelope<T>, Vec<u8>), OkxError>
@@ -444,9 +560,8 @@ where
 {
     let server_retry_after_ms = retry_after_ms(&response);
 
-    if response.status() == StatusCode::TOO_MANY_REQUESTS {
-        let body = response.bytes().await?;
-        let exchange_code = throttle_code_from_http_429_body(&body);
+    if response.status == StatusCode::TOO_MANY_REQUESTS {
+        let exchange_code = throttle_code_from_http_429_body(&response.body);
         let evidence =
             rate_budget.record_exchange_throttle(plan, &exchange_code, server_retry_after_ms);
         return Err(OkxError::RateLimited {
@@ -458,26 +573,23 @@ where
     // Preserve ONLY a validated numeric OKX code for native operator diagnosis;
     // never return a raw authentication response, headers or any secret.
     if matches!(
-        response.status(),
+        response.status,
         StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
     ) {
-        let status = response.status().as_u16();
-        let mut rejected = response;
-        // A single bounded chunk avoids unbounded HTML/gateway response bodies.
-        let code = rejected
-            .chunk()
-            .await?
-            .as_deref()
-            .and_then(auth_rejection_code)
-            .unwrap_or_else(|| "NOT_PROVIDED".to_owned());
+        let status = response.status.as_u16();
+        let code = auth_rejection_code(&response.body).unwrap_or_else(|| "NOT_PROVIDED".to_owned());
         return Err(OkxError::AuthenticationRejected {
             status,
             okx_code: code,
         });
     }
 
-    let response = response.error_for_status()?;
-    let body = response.bytes().await?;
+    if response.status.is_client_error() || response.status.is_server_error() {
+        return Err(OkxError::HttpStatus {
+            status: response.status.as_u16(),
+        });
+    }
+    let body = response.body;
     let envelope: ApiEnvelope<T> = serde_json::from_slice(&body)?;
 
     if matches!(
@@ -491,7 +603,7 @@ where
         });
     }
 
-    Ok((envelope, body.to_vec()))
+    Ok((envelope, body))
 }
 
 /// The response is untrusted and may be an HTML gateway page rather than
@@ -518,9 +630,9 @@ fn throttle_code_from_http_429_body(body: &[u8]) -> String {
         .unwrap_or_else(|| "HTTP_429".to_owned())
 }
 
-fn retry_after_ms(response: &reqwest::Response) -> Option<u64> {
+fn retry_after_ms(response: &RawHttpResponse) -> Option<u64> {
     response
-        .headers()
+        .headers
         .get(RETRY_AFTER)?
         .to_str()
         .ok()?
@@ -571,6 +683,307 @@ mod tests {
             throttle_code_from_http_429_body(br#"{"code":"51000","msg":"other error","data":[]}"#),
             "HTTP_429"
         );
+    }
+
+    /// Transcript feeds raw responses, without a fake exchange or risk engine.
+    #[derive(Default)]
+    struct ScriptedDelivery {
+        responses: std::sync::Mutex<std::collections::VecDeque<(&'static str, RawHttpResponse)>>,
+        requests: std::sync::Mutex<Vec<(String, reqwest::header::HeaderMap)>>,
+    }
+    impl HttpTransport for ScriptedDelivery {
+        fn send(
+            &self,
+            request: reqwest::Request,
+            _deadline: Instant,
+        ) -> crate::transport::HttpSend<'_> {
+            Box::pin(async move {
+                let path = request.url().path().to_owned();
+                self.requests
+                    .lock()
+                    .unwrap()
+                    .push((path.clone(), request.headers().clone()));
+                let (expected, reply) = self
+                    .responses
+                    .lock()
+                    .unwrap()
+                    .pop_front()
+                    .ok_or_else(|| OkxError::Response("UNEXPECTED_HTTP_REQUEST".to_owned()))?;
+                if expected != path {
+                    return Err(OkxError::Response("HTTP_TRANSCRIPT_MISMATCH".to_owned()));
+                }
+                Ok(reply)
+            })
+        }
+    }
+    fn reply(status: StatusCode, body: &[u8]) -> RawHttpResponse {
+        RawHttpResponse {
+            status,
+            headers: reqwest::header::HeaderMap::new(),
+            body: body.to_vec(),
+        }
+    }
+    #[tokio::test]
+    async fn signed_private_request_and_real_decode_use_the_same_delivery_port() {
+        let wire = Arc::new(ScriptedDelivery::default());
+        wire.responses.lock().unwrap().push_back((
+            "/api/v5/account/config",
+            reply(
+                StatusCode::OK,
+                br#"{"code":"0","msg":"","data":[{"uid":"123"}]}"#,
+            ),
+        ));
+        let creds = Credentials::new("key".into(), "secret".into(), "pass".into()).unwrap();
+        let api = OkxRestClient::with_http_transport(
+            OkxEnvironment::new(crate::config::Region::Global, false),
+            creds,
+            RateBudget::new(),
+            wire.clone(),
+        )
+        .unwrap();
+        let rows: Vec<serde_json::Value> = api
+            .private_get("/api/v5/account/config", &[])
+            .await
+            .unwrap();
+        assert_eq!(rows[0]["uid"], "123");
+        let sent = wire.requests.lock().unwrap();
+        assert_eq!(sent.len(), 1);
+        assert!(sent[0].1.contains_key("OK-ACCESS-SIGN"));
+        assert_eq!(wire.responses.lock().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn concurrent_signed_reads_cannot_exceed_shared_user_http_budget() {
+        // Observer and Executor use different API keys but one native user
+        // RateBudget. Each admitted request crosses the real signed REST path.
+        let budget = RateBudget::new();
+        let wire = Arc::new(ScriptedDelivery::default());
+        for _ in 0..10 {
+            wire.responses.lock().unwrap().push_back((
+                "/api/v5/account/balance",
+                reply(
+                    StatusCode::OK,
+                    br#"{"code":"0","msg":"","data":[{"details":[]}]}"#,
+                ),
+            ));
+        }
+        let environment = OkxEnvironment::new(crate::config::Region::Global, false);
+        let observer = OkxRestClient::with_http_transport(
+            environment,
+            Credentials::new("observer-key".into(), "secret".into(), "pass".into()).unwrap(),
+            budget.clone(),
+            wire.clone(),
+        )
+        .unwrap();
+        let executor = OkxRestClient::with_http_transport(
+            environment,
+            Credentials::new("executor-key".into(), "secret".into(), "pass".into()).unwrap(),
+            budget,
+            wire.clone(),
+        )
+        .unwrap();
+
+        let mut tasks = tokio::task::JoinSet::new();
+        for index in 0..100 {
+            let client = if index % 2 == 0 {
+                observer.clone()
+            } else {
+                executor.clone()
+            };
+            tasks.spawn(async move {
+                client
+                    .private_get::<serde_json::Value>("/api/v5/account/balance", &[])
+                    .await
+            });
+        }
+        let mut admitted = 0;
+        let mut locally_denied = 0;
+        while let Some(joined) = tasks.join_next().await {
+            match joined.unwrap() {
+                Ok(rows) => {
+                    assert_eq!(rows.len(), 1);
+                    admitted += 1;
+                }
+                Err(OkxError::RateLimited { evidence })
+                    if !evidence.request_sent
+                        && evidence.domain.local_max_requests == 10
+                        && evidence.domain.local_window_ms == 2_000 =>
+                {
+                    locally_denied += 1;
+                }
+                other => panic!("unexpected signed read result: {other:?}"),
+            }
+        }
+        assert_eq!(admitted, 10, "identities share ten requests per 2s");
+        assert_eq!(locally_denied, 90, "no extra HTTP attempts");
+        let sends = wire.requests.lock().unwrap();
+        assert_eq!(sends.len(), 10);
+        assert!(sends.iter().all(|(_, headers)| {
+            headers.contains_key("OK-ACCESS-SIGN") && headers.contains_key("OK-ACCESS-KEY")
+        }));
+        assert_eq!(wire.responses.lock().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn bounded_private_balance_read_waits_only_before_http_and_fails_closed() {
+        let rate = RateBudget::new();
+        let plan = rate.private_rest_plan("/api/v5/account/balance", &[]);
+        for _ in 0..10 {
+            rate.admit(&plan).expect("within documented balance budget");
+        }
+        let wire = Arc::new(ScriptedDelivery::default());
+        wire.responses.lock().unwrap().push_back((
+            "/api/v5/account/balance",
+            reply(
+                StatusCode::OK,
+                br#"{"code":"0","msg":"","data":[{"details":[]}]}"#,
+            ),
+        ));
+        let creds = Credentials::new("key".into(), "secret".into(), "pass".into()).unwrap();
+        let api = OkxRestClient::with_http_transport(
+            OkxEnvironment::new(crate::config::Region::Global, false),
+            creds,
+            rate,
+            wire.clone(),
+        )
+        .unwrap();
+
+        // Exhausted admission + expired caller deadline must not call the
+        // HTTP transport. The scripted reply must remain untouched.
+        let denied = api
+            .private_get_wait::<serde_json::Value>("/api/v5/account/balance", &[], Duration::ZERO)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            denied,
+            OkxError::RateLimited { evidence }
+                if !evidence.request_sent && evidence.local_defer_ms > 0
+        ));
+        assert!(wire.requests.lock().unwrap().is_empty());
+        assert_eq!(wire.responses.lock().unwrap().len(), 1);
+
+        // The same typed budget releases its real admission window and sends
+        // exactly one authenticated GET; there is no HTTP retry or fake data.
+        let started = Instant::now();
+        let rows: Vec<serde_json::Value> = api
+            .private_get_wait("/api/v5/account/balance", &[], Duration::from_secs(3))
+            .await
+            .expect("local wait then one recorded HTTP response");
+        assert!(started.elapsed() >= Duration::from_millis(1500));
+        assert_eq!(rows.len(), 1);
+        assert_eq!(wire.requests.lock().unwrap().len(), 1);
+        assert!(
+            wire.requests.lock().unwrap()[0]
+                .1
+                .contains_key("OK-ACCESS-SIGN")
+        );
+        assert!(wire.responses.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn bounded_config_read_never_sends_when_local_deadline_is_exhausted() {
+        let rate = RateBudget::new();
+        let plan = rate.private_rest_plan("/api/v5/account/config", &[]);
+        for _ in 0..5 {
+            rate.admit(&plan).unwrap();
+        }
+        let wire = Arc::new(ScriptedDelivery::default());
+        let api = OkxRestClient::with_http_transport(
+            OkxEnvironment::new(crate::config::Region::Global, false),
+            Credentials::new("key".into(), "secret".into(), "pass".into()).unwrap(),
+            rate,
+            wire.clone(),
+        )
+        .unwrap();
+        let denied = api
+            .private_get_wait::<serde_json::Value>("/api/v5/account/config", &[], Duration::ZERO)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            denied,
+            OkxError::RateLimited { evidence }
+                if !evidence.request_sent
+                    && evidence.local_defer_ms > 0
+                    && evidence.domain.endpoint.as_deref() == Some("/api/v5/account/config")
+        ));
+        assert!(wire.requests.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn bounded_private_balance_does_not_retry_exchange_throttle() {
+        let wire = Arc::new(ScriptedDelivery::default());
+        wire.responses.lock().unwrap().push_back((
+            "/api/v5/account/balance",
+            reply(
+                StatusCode::TOO_MANY_REQUESTS,
+                br#"{"code":"50011","data":[]}"#,
+            ),
+        ));
+        let api = OkxRestClient::with_http_transport(
+            OkxEnvironment::new(crate::config::Region::Global, false),
+            Credentials::new("key".into(), "secret".into(), "pass".into()).unwrap(),
+            RateBudget::new(),
+            wire.clone(),
+        )
+        .unwrap();
+        let denied = api
+            .private_get_wait::<serde_json::Value>(
+                "/api/v5/account/balance",
+                &[],
+                Duration::from_secs(3),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            denied,
+            OkxError::RateLimited { evidence }
+                if evidence.request_sent && evidence.exchange_code.as_deref() == Some("50011")
+        ));
+        assert_eq!(wire.requests.lock().unwrap().len(), 1);
+        assert!(wire.responses.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn raw_http_throttle_auth_and_status_are_typed_without_live_calls() {
+        for (status, body) in [
+            (
+                StatusCode::TOO_MANY_REQUESTS,
+                br#"{"code":"50011","data":[]}"#.as_slice(),
+            ),
+            (
+                StatusCode::UNAUTHORIZED,
+                br#"{"code":"50119","secret":"hidden"}"#.as_slice(),
+            ),
+            (StatusCode::SERVICE_UNAVAILABLE, b"gateway".as_slice()),
+        ] {
+            let wire = Arc::new(ScriptedDelivery::default());
+            wire.responses
+                .lock()
+                .unwrap()
+                .push_back(("/api/v5/public/instruments", reply(status, body)));
+            let api = OkxPublicClient::with_http_transport(
+                OkxEnvironment::new(crate::config::Region::Global, false),
+                RateBudget::new(),
+                wire.clone(),
+            )
+            .unwrap();
+            let failure = api
+                .public_get::<serde_json::Value>("/api/v5/public/instruments", &[])
+                .await
+                .unwrap_err();
+            match status {
+                StatusCode::TOO_MANY_REQUESTS => {
+                    assert!(matches!(failure, OkxError::RateLimited { .. }))
+                }
+                StatusCode::UNAUTHORIZED => assert!(matches!(
+                    failure,
+                    OkxError::AuthenticationRejected { status: 401, .. }
+                )),
+                _ => assert!(matches!(failure, OkxError::HttpStatus { status: 503 })),
+            }
+            assert_eq!(wire.requests.lock().unwrap().len(), 1);
+            assert_eq!(wire.responses.lock().unwrap().len(), 0);
+        }
     }
 
     #[test]

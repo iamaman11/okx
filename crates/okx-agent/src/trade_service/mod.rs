@@ -624,24 +624,39 @@ impl TradeService {
                         .await
                         .ok_or("INSTRUMENT_RULES_UNAVAILABLE")?;
                     let fees = r.observer.fee_schedule(&rules).await.map_err(err)?;
-                    if !fees.exact_for_instrument
-                        || fees.reference_generation != rules.reference_generation
-                    {
-                        return Err("FEE_SOURCE_GENERATION_MISMATCH".into());
-                    }
-                    let fee_rate = dec(&fees.taker_rate)?
-                        .abs()
-                        .max(dec(&fees.maker_rate)?.abs());
                     let source = r.observer.snapshot().await.map_err(err)?;
                     let conversion = Self::usd_conversion(&source)?;
-                    let fx = dec(&conversion.usd_per_usdt)?;
-                    let entry = entry_budget::quote(
-                        plan.quantity,
-                        plan.contract_value,
-                        plan.limit_price,
-                        fee_rate,
-                        fx,
+                    let account = r.execution.account.config().await.map_err(err)?;
+                    let leverage = dec(&r
+                        .observer
+                        .configured_leverage(
+                            instrument,
+                            okx_api::MarginMode::Cross,
+                            if plan.position_side == "long" {
+                                "long"
+                            } else {
+                                "short"
+                            },
+                        )
+                        .await
+                        .map_err(err)?)?;
+                    let (proof, fee_rate) = entry_budget::assess_order(
+                        &plan,
+                        entry_budget::EntryAssessmentSources {
+                            instrument,
+                            order_type: &order.order_type,
+                            rules: &rules,
+                            fees: &fees,
+                            account: &account,
+                            snapshot: &source,
+                            conversion: &conversion,
+                            leverage,
+                            verified_uid: &r.configuration.account_key.verified_uid,
+                            observed_at_ms: now(),
+                        },
                     )?;
+                    let entry = proof.quote.clone();
+                    let fx = dec(&conversion.usd_per_usdt)?;
                     let entry_ceiling = entry_budget::enforced_entry_ceiling(
                         true,
                         c.environment == okx_protocol::account_governance::AccountEnvironment::Real,
@@ -653,21 +668,30 @@ impl TradeService {
                     // costs, rather than treating them as zero.
                     let unproven_headroom =
                         entry_budget::unproven_entry_cost_headroom(entry.total_usd, entry_ceiling)?;
+                    let all_in_upper = proof.proven_upper_usd()?;
+                    let missing = proof.missing_reasons();
                     json!({"price_bound_usdt":exact(plan.limit_price),
                            "notional_usdt":exact(entry.notional_usdt),
                            "entry_fee_usdt":exact(entry.fee_usdt),
                            "entry_total_usdt":exact(entry.total_usdt),
                            "entry_total_usd":exact(entry.total_usd),
                            "usd_per_usdt":exact(fx),
+                           "admission_fx_snapshot_state":if all_in_upper.is_some() {"SOURCE_CLASSIFIED_CANDIDATE"} else {"PENDING_INDEPENDENT_COST_SOURCES"},
+                           "entry_total_usd_basis":"QUOTED_FX_PREVIEW_NOT_FROZEN_ADMISSION",
                            "fee_rate":exact(fee_rate),
-                           "fee_currency":"USDT",
+                           "fee_model_currency":"USDT",
+                           "actual_fee_settlement_currency":null,
+                           "actual_fee_settlement_currency_state":"UNPROVEN",
                            "fee_rounding":"CEIL_0.000001",
                            "entry_cap_usd":entry_ceiling.map(exact),
                            "account_entry_cap_usd":c.limits.max_entry_usd,
                            "price_enforcement":"VENUE_LIMIT_OR_IOC_FOK",
                            "remaining_cap_for_unproven_costs_usd":unproven_headroom.map(exact),
-                           "all_in_entry_cost_proven":false,
-                           "other_costs":"UNAVAILABLE_NOT_INCLUDED"})
+                           "all_in_entry_cost_proven":all_in_upper.is_some(),
+                           "entry_budget_upper_reporting":all_in_upper.map(exact),
+                           "entry_cost_proof_schema":"okx.entry-cost-proof/v1",
+                           "entry_cost_reason_codes":missing,
+                           "other_costs":if all_in_upper.is_some() {"CLASSIFIED"} else {"UNAVAILABLE_NOT_INCLUDED"}})
                 } else {
                     json!(null)
                 };

@@ -4,6 +4,7 @@ pub mod accounts;
 pub mod analytics;
 pub mod crypto;
 pub mod host_state_proto;
+pub mod numeric;
 pub mod risk_authority;
 pub mod trading;
 

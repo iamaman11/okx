@@ -105,21 +105,25 @@ impl PublicRuntimeState {
         self.last_error = None;
 
         let reference_generation = self.reference.generation().as_str().to_owned();
+        // The public handle can register market demand in the shared state
+        // BEFORE its command reaches the coordinator. That pre-created market
+        // must move to this connection generation too; otherwise valid frames
+        // are rejected as GENERATION_MISMATCH after a startup/reconnect race.
+        for market in self.markets.values_mut() {
+            market.reset_generation(generation, reference_generation.clone());
+        }
         for instrument_id in demands {
-            if self.reference.get(instrument_id).is_some() {
-                match self.markets.get_mut(instrument_id) {
-                    Some(state) => state.reset_generation(generation, reference_generation.clone()),
-                    None => {
-                        self.markets.insert(
-                            instrument_id.clone(),
-                            MarketStreamState::new(
-                                instrument_id.clone(),
-                                generation,
-                                reference_generation.clone(),
-                            ),
-                        );
-                    }
-                }
+            if self.reference.get(instrument_id).is_some()
+                && !self.markets.contains_key(instrument_id)
+            {
+                self.markets.insert(
+                    instrument_id.clone(),
+                    MarketStreamState::new(
+                        instrument_id.clone(),
+                        generation,
+                        reference_generation.clone(),
+                    ),
+                );
             }
         }
     }
@@ -293,5 +297,53 @@ impl PublicRuntimeState {
             .ok_or_else(|| PublicRuntimeError::MarketStateNotInitialized(instrument_id.to_owned()))?
             .publish(&self.reference, source_received_at)
             .map_err(Into::into)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn connection_generation_resets_precreated_market_before_demand_command() {
+        let reference = ReferenceRegistry::from_public(
+            "source-at-start",
+            vec![
+                serde_json::from_value(json!({
+                    "instType": "SWAP",
+                    "instId": "BTC-USDT-SWAP",
+                    "instFamily": "BTC-USDT",
+                    "uly": "BTC-USDT",
+                    "state": "live",
+                    "ruleType": "normal",
+                    "settleCcy": "USDT",
+                    "tickSz": "0.1",
+                    "lotSz": "0.01",
+                    "minSz": "0.01",
+                    "maxLmtSz": "1000",
+                    "maxMktSz": "1000",
+                    "ctType": "linear",
+                    "ctVal": "0.01",
+                    "ctValCcy": "BTC"
+                }))
+                .unwrap(),
+            ],
+        )
+        .unwrap();
+        let reference_generation = reference.generation().as_str().to_owned();
+        let mut state = PublicRuntimeState::new(reference);
+        // demand_instrument writes market state before the mpsc demand is
+        // received, so the coordinator's demands set is initially empty.
+        state.markets.insert(
+            "BTC-USDT-SWAP".into(),
+            MarketStreamState::new("BTC-USDT-SWAP", 0, reference_generation),
+        );
+        state.begin_generation(1, &BTreeSet::new());
+        assert_eq!(state.markets["BTC-USDT-SWAP"].generation(), 1);
+        assert_eq!(state.connection_state(), PublicConnectionState::Connected);
+        // A reconnect cannot retain the previous generation's quote/book.
+        state.begin_generation(2, &BTreeSet::new());
+        assert_eq!(state.markets["BTC-USDT-SWAP"].generation(), 2);
     }
 }

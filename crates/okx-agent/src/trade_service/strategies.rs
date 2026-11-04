@@ -292,6 +292,44 @@ impl TradeService {
         }
     }
     async fn maintenance_turn(&self) {
+        // One existing maintenance owner. The recovery scheduler provides
+        // bounded retry spacing for the campaign, while independent account
+        // capture keeps advancing cursors every two seconds. No archive
+        // history is downloaded from trade.execute or from a new daemon.
+        if let Some(authority) = self.governance.read().await.clone()
+            && authority.state.campaign_entry_limit_usd.is_some()
+        {
+            let due = self.recovery_schedule.lock().await.due(
+                "campaign-opening",
+                &authority.state.campaign_id,
+                Instant::now(),
+            );
+            if due {
+                let until = Instant::now() + Duration::from_secs(4);
+                let result = tokio::time::timeout(
+                    Duration::from_secs(4),
+                    self.install_captured_empty_campaign_opening(&authority, until),
+                )
+                .await;
+                match result {
+                    Ok(Ok(())) => {
+                        // A successfully reconciled source needs a fresh
+                        // cheap readiness read on the next maintenance turn.
+                        // Do not back off into 30s windows of stale admission.
+                        self.recovery_schedule
+                            .lock()
+                            .await
+                            .finish("campaign-opening", &authority.state.campaign_id);
+                    }
+                    Ok(Err(reason)) => {
+                        eprintln!("OKX_ENTRY_BASELINE_V1 state=PENDING reason={reason}");
+                    }
+                    Err(_) => {
+                        eprintln!("OKX_ENTRY_BASELINE_V1 state=PENDING reason=TIMEOUT");
+                    }
+                }
+            }
+        }
         use futures_util::{StreamExt, stream};
         stream::iter(self.accounts.list().await)
             .for_each_concurrent(4, |config| async move {

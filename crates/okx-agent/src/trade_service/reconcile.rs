@@ -1,5 +1,430 @@
 use super::*;
 use okx_api::CancelOrderRequest;
+
+/// A successful source capture only proves that the API replied. It cannot
+/// complete the financial lifecycle when no identity-bound fill+bill evidence
+/// has been captured. A terminal verified zero-fill cancellation is separate:
+/// its central release must still be proven by the existing pending gate.
+fn entry_fill_finance_pending(
+    risk_increase: bool,
+    verified_zero_cancel: bool,
+    evidence: &serde_json::Value,
+) -> bool {
+    risk_increase
+        && !verified_zero_cancel
+        && evidence["state"] != "verified_native_fill_and_bill_fee_sources"
+}
+/// Bind the native immutable fill sum to an independent, exact venue
+/// readback. A cursor-covered subset is not necessarily the whole execution,
+/// especially across partial/late fills or a lost POST response. This check
+/// never proves all-in USD debit, fee currency finality, or settlement.
+fn verify_venue_fill_coverage(
+    intent: &StoredIntent,
+    source: &okx_execution::IntentFillCostEvidence,
+    observed: &okx_api::TradeOrderDetails,
+) -> Result<(), String> {
+    if source.intent_id != intent.intent_id
+        || source.plan_hash != intent.plan_hash
+        || source.exchange_order_id.is_empty()
+        || source.exchange_order_id != observed.order_id
+        || observed.client_order_id != intent.client_order_id
+        || observed.instrument_id != intent.instrument_id
+        || observed.side != intent.plan.side
+    {
+        return Err("ENTRY_FILL_VENUE_IDENTITY_MISMATCH".into());
+    }
+    let update = observed
+        .update_time_ms
+        .parse::<i64>()
+        .map_err(|_| "ENTRY_FILL_VENUE_TIME_UNVERIFIED")?;
+    if update <= 0 || source.covered_through < update {
+        return Err("ENTRY_FILL_VENUE_TIME_UNCOVERED".into());
+    }
+    let venue_filled = dec(&observed.accumulated_fill_size)?;
+    if venue_filled <= Decimal::ZERO
+        || venue_filled > intent.plan.quantity
+        || source.filled_quantity <= Decimal::ZERO
+        || source.filled_quantity != venue_filled
+    {
+        return Err("ENTRY_FILL_VENUE_QUANTITY_MISMATCH".into());
+    }
+    if !matches!(
+        observed.state.as_str(),
+        "live" | "partially_filled" | "filled" | "canceled" | "mmp_canceled"
+    ) {
+        return Err("ENTRY_FILL_VENUE_STATE_UNKNOWN".into());
+    }
+    Ok(())
+}
+
+/// One authoritative exchange update timestamp is reused for both fills and
+/// bills cursor checks. Malformed uTime may never bypass final reconciliation.
+fn terminal_order_update_time(
+    order: Option<&okx_api::TradeOrderDetails>,
+) -> Result<Option<i64>, String> {
+    order
+        .map(|o| {
+            let at = o
+                .update_time_ms
+                .parse::<i64>()
+                .map_err(|_| "TERMINAL_ORDER_UPDATE_TIME_INVALID")?;
+            if at <= 0 {
+                return Err("TERMINAL_ORDER_UPDATE_TIME_INVALID".into());
+            }
+            Ok(at)
+        })
+        .transpose()
+}
+
+/// One native source gate for active protective order evidence. A saved
+/// SQL protection receipt or an algo ID in an inventory is not proof of a
+/// live, correctly sized exchange stop. Shared by trade.status and restart
+/// recovery; this performs no network or SQL calls of its own.
+pub(super) fn verified_live_protection(
+    intent: &StoredIntent,
+    quantity: Decimal,
+    source: &okx_api::TradeAlgoOrderDetails,
+) -> Result<(), String> {
+    let client_id = intent
+        .client_order_id
+        .get(..31)
+        .ok_or("PROTECTION_CLIENT_ID_INVALID")?;
+    let expected_client = format!("s{client_id}");
+    let opposite = matches!(
+        (intent.plan.side.as_str(), source.side.as_str()),
+        ("buy", "sell") | ("sell", "buy")
+    );
+    if quantity <= Decimal::ZERO
+        || source.instrument_id != intent.instrument_id
+        || source.client_order_id != expected_client
+        || source.algo_order_id.is_empty()
+        || source.state != "live"
+        || !matches!(source.position_side.as_str(), "net" | "long" | "short")
+        || (source.position_side != "net" && source.position_side != intent.plan.position_side)
+        || !source.failure_code.is_empty()
+        || source.stop_loss_trigger_price_type != "mark"
+        || !opposite
+        || intent.plan.stop_price.is_none()
+        || dec(&source.stop_loss_trigger_price).ok() != intent.plan.stop_price
+        || dec(&source.size).ok() != Some(quantity)
+    {
+        return Err("PROTECTION_LIVE_SOURCE_UNVERIFIED".into());
+    }
+    Ok(())
+}
+
+/// Actual parsed venue positions, not an opening order's cumulative fills,
+/// determine whether the first-test position is flat and whether protection
+/// covers all current exposure. Invalid amounts may never count as zero.
+fn verified_position_quantity<'a>(
+    amounts: impl IntoIterator<Item = &'a str>,
+) -> Result<Decimal, String> {
+    amounts.into_iter().try_fold(Decimal::ZERO, |total, value| {
+        let quantity = dec(value).map_err(|_| "POSITION_QUANTITY_UNVERIFIED")?;
+        total
+            .checked_add(quantity.abs())
+            .ok_or_else(|| "POSITION_QUANTITY_OVERFLOW".into())
+    })
+}
+
+/// The venue's net_mode position direction is encoded in the SIGNED
+/// `pos` field, not the `posSide` label ("net"). Native SQL lots instead
+/// use long/short. This is the sole normalization shared by status,
+/// all-account census and recovery. Unknown or inconsistent sources cannot
+/// certify a flat position or permit a new order.
+pub(super) fn verified_venue_position_direction(
+    position_side: &str,
+    raw_position: &str,
+) -> Result<Option<(&'static str, Decimal)>, String> {
+    let signed = dec(raw_position).map_err(|_| "VENUE_POSITION_QUANTITY_UNVERIFIED")?;
+    if signed == Decimal::ZERO {
+        if !matches!(position_side, "net" | "long" | "short") {
+            return Err("VENUE_POSITION_SIDE_UNVERIFIED".into());
+        }
+        return Ok(None);
+    }
+    let (direction, quantity) = match position_side {
+        "net" if signed > Decimal::ZERO => ("long", signed),
+        "net" => (
+            "short",
+            signed
+                .checked_mul(-Decimal::ONE)
+                .ok_or("VENUE_POSITION_QUANTITY_OVERFLOW")?,
+        ),
+        "long" if signed > Decimal::ZERO => ("long", signed),
+        "short" => (
+            "short",
+            if signed < Decimal::ZERO {
+                signed
+                    .checked_mul(-Decimal::ONE)
+                    .ok_or("VENUE_POSITION_QUANTITY_OVERFLOW")?
+            } else {
+                signed
+            },
+        ),
+        "long" => return Err("VENUE_POSITION_SIDE_QUANTITY_MISMATCH".into()),
+        _ => return Err("VENUE_POSITION_SIDE_UNVERIFIED".into()),
+    };
+    Ok(Some((direction, quantity)))
+}
+
+/// A one-intent status view must not present a net-mode opposite
+/// position as zero exposure. Such a read is inconclusive for its stop,
+/// so the existing reconcile/STOP route stays responsible.
+fn verified_intent_position_quantity<'a>(
+    expected_side: &str,
+    positions: impl IntoIterator<Item = (&'a str, &'a str)>,
+) -> Result<Decimal, String> {
+    positions
+        .into_iter()
+        .try_fold(
+            Decimal::ZERO,
+            |total, (side, raw)| match verified_venue_position_direction(side, raw)? {
+                None => Ok(total),
+                Some((direction, quantity)) if direction == expected_side => total
+                    .checked_add(quantity)
+                    .ok_or_else(|| "VENUE_POSITION_QUANTITY_OVERFLOW".into()),
+                Some(_) => Err("VENUE_POSITION_OPPOSITE_EXPOSURE_UNVERIFIED".into()),
+            },
+        )
+}
+
+/// Protection cleanup must inspect the whole instrument (both hedge
+/// sides), not just the original side. A malformed or overflowing position
+/// is UNKNOWN exposure and may never authorize removing a live stop.
+fn verify_instrument_is_flat<'a>(
+    instrument: &str,
+    positions: impl IntoIterator<Item = (&'a str, &'a str)>,
+) -> Result<(), String> {
+    let exposure = verified_position_quantity(
+        positions
+            .into_iter()
+            .filter(|(id, _)| *id == instrument)
+            .map(|(_, quantity)| quantity),
+    )?;
+    if exposure != Decimal::ZERO {
+        return Err("PROTECTION_STILL_REQUIRED".into());
+    }
+    Ok(())
+}
+
+/// The first real campaign accepts protection only when the live order
+/// covers exactly the remaining first-test position. Matching the original
+/// fill count alone can leave an overprotective order after a partial close.
+fn protection_covers_live_position(
+    opening_side: &str,
+    protection_side: &str,
+    cumulative_fill: Decimal,
+    venue_position: Decimal,
+    protection_size: &str,
+) -> bool {
+    let opposite = matches!(
+        (opening_side, protection_side),
+        ("buy", "sell") | ("sell", "buy")
+    );
+    opposite
+        && cumulative_fill > Decimal::ZERO
+        && venue_position > Decimal::ZERO
+        && cumulative_fill == venue_position
+        && dec(protection_size).ok() == Some(venue_position)
+}
+
+/// An attached Add stop covers this intent's actually executed increment,
+/// NOT the whole net-mode venue position already covered by older verified
+/// stops. All older lots, stops and reservations are rechecked by the native
+/// full-cohort census before this compound protection can be certified.
+fn protection_covers_managed_increment(
+    opening_side: &str,
+    protection_side: &str,
+    cumulative_fill: Decimal,
+    venue_position: Decimal,
+    protection_size: &str,
+) -> bool {
+    cumulative_fill > Decimal::ZERO
+        && venue_position >= cumulative_fill
+        && protection_covers_live_position(
+            opening_side,
+            protection_side,
+            cumulative_fill,
+            cumulative_fill,
+            protection_size,
+        )
+}
+
+/// Every venue readback must refer to this durable intent before it can
+/// change local state, protection requirements, or exchange-order identity.
+/// An exchange lookup by client ID alone is a lookup, not an identity proof.
+fn verified_order_readback(
+    intent: &StoredIntent,
+    order: &okx_api::TradeOrderDetails,
+) -> Result<Decimal, String> {
+    if order.order_id.is_empty()
+        || order.client_order_id != intent.client_order_id
+        || order.instrument_id != intent.instrument_id
+        || order.side != intent.plan.side
+        || intent
+            .exchange_order_id
+            .as_deref()
+            .is_some_and(|id| id != order.order_id)
+    {
+        return Err("ORDER_READBACK_IDENTITY_MISMATCH".into());
+    }
+    if dec(&order.size)? != intent.plan.quantity {
+        return Err("ORDER_READBACK_PLAN_MISMATCH".into());
+    }
+    let filled =
+        dec(&order.accumulated_fill_size).map_err(|_| "ORDER_READBACK_FILLED_SIZE_INVALID")?;
+    if filled < Decimal::ZERO || filled > intent.plan.quantity {
+        return Err("ORDER_READBACK_FILLED_SIZE_INVALID".into());
+    }
+    Ok(filled)
+}
+
+/// Replace is a NEW entry, not a retry of the canceled entry. Even after
+/// a successful cancel ACK, an unavailable venue readback or ANY executed
+/// quantity must never be treated as an empty old order.
+fn verify_empty_canceled_order_for_replace(
+    intent: &StoredIntent,
+    order: &okx_api::TradeOrderDetails,
+) -> Result<(), String> {
+    if !matches!(order.state.as_str(), "canceled" | "mmp_canceled") {
+        return Err("REPLACE_CANCELED_READBACK_UNPROVEN".into());
+    }
+    verified_terminal_order_update_time(intent, Some(order))
+        .map_err(|_| "REPLACE_CANCELED_READBACK_UNPROVEN")?;
+    let filled =
+        verified_order_readback(intent, order).map_err(|_| "REPLACE_CANCELED_READBACK_UNPROVEN")?;
+    if filled != Decimal::ZERO {
+        return Err("REPLACE_PARTIAL_FILL_REQUIRES_EXPLICIT_CLOSE".into());
+    }
+    Ok(())
+}
+
+/// The authoritative SQL lots for one intent must agree on direction and
+/// contain only positive remaining exposure. Never silently add opposite
+/// sides, skip negative lots or overflow before constructing a close order.
+fn verified_close_lot_exposure<'a>(
+    lots: impl IntoIterator<Item = (&'a str, Decimal)>,
+) -> Result<(PositionSide, Decimal), String> {
+    let mut direction: Option<&str> = None;
+    let mut quantity = Decimal::ZERO;
+    for (side, remaining) in lots {
+        if !matches!(side, "long" | "short") {
+            return Err("CLOSE_LOT_SIDE_UNATTESTED".into());
+        }
+        if remaining <= Decimal::ZERO {
+            return Err("CLOSE_LOT_QUANTITY_UNVERIFIED".into());
+        }
+        if direction.is_some_and(|old| old != side) {
+            return Err("CLOSE_LOT_MIXED_DIRECTIONS".into());
+        }
+        direction = Some(side);
+        quantity = quantity
+            .checked_add(remaining)
+            .ok_or("CLOSE_LOT_QUANTITY_OVERFLOW")?;
+    }
+    let side = match direction {
+        Some("long") => PositionSide::Long,
+        Some("short") => PositionSide::Short,
+        _ => return Err("NO_ATTRIBUTED_POSITION_TO_CLOSE".into()),
+    };
+    Ok((side, quantity))
+}
+
+/// A terminal local state alone is not source proof that an exchange order is
+/// terminal. No real release without matching exchange identity, covered final
+/// update and a bounded executed quantity. In particular, missing readback is
+/// UNKNOWN, not a zero-fill terminal outcome.
+fn verified_terminal_order_update_time(
+    intent: &StoredIntent,
+    order: Option<&okx_api::TradeOrderDetails>,
+) -> Result<i64, String> {
+    let o = order.ok_or("TERMINAL_ORDER_READBACK_MISSING")?;
+    if intent.exchange_order_id.as_deref() != Some(o.order_id.as_str()) {
+        return Err("TERMINAL_ORDER_IDENTITY_MISMATCH".into());
+    }
+    verified_order_readback(intent, o).map_err(|_| "TERMINAL_ORDER_IDENTITY_OR_SIZE_UNVERIFIED")?;
+    if !matches!(o.state.as_str(), "filled" | "canceled" | "mmp_canceled") {
+        return Err("TERMINAL_ORDER_STATE_UNVERIFIED".into());
+    }
+    terminal_order_update_time(Some(o))?.ok_or_else(|| "TERMINAL_ORDER_READBACK_MISSING".into())
+}
+
+/// The native SQL owner independently verifies both records on readback.
+/// An observed price-only quote is NOT authority to submit. A fully sourced
+/// admission is still cost evidence, not an exchange POST authorization.
+fn entry_cost_status(
+    stored: Option<okx_execution::EntryQuoteEvidence>,
+    admission: Option<okx_execution::EntryAdmissionEvidence>,
+) -> Result<Value, String> {
+    let Some(quote) = stored else {
+        return Ok(json!({
+            "state": "not_proven",
+            "all_in_entry_cost_proven": false,
+            "entry_budget_upper_reporting": null,
+            "reason_codes": ["ENTRY_QUOTE_NOT_RECORDED"],
+            "next_action": "RECONCILE_ENTRY_COST_SOURCES"
+        }));
+    };
+    let known = entry_budget::quote(
+        quote.quantity,
+        quote.contract_value,
+        quote.limit_price,
+        quote.fee_rate,
+        quote.usd_per_usdt,
+    )?;
+    if known.notional_usdt != quote.notional_usdt
+        || known.fee_usdt != quote.fee_usdt
+        || known.total_usdt != quote.total_usdt
+        || known.total_usd != quote.total_usd
+    {
+        return Err("ENTRY_QUOTE_READBACK_MISMATCH".into());
+    }
+    if let Some(cost) = admission {
+        if cost.intent_id != quote.intent_id
+            || cost.plan_hash != quote.plan_hash
+            || cost.account_key != quote.account_key
+            || cost.installation_id != quote.installation_id
+            || cost.entry_upper_usd < quote.total_usd
+            || cost.entry_upper_usd <= Decimal::ZERO
+        {
+            return Err("ENTRY_ADMISSION_READBACK_MISMATCH".into());
+        }
+        return Ok(json!({
+            "schema":"okx.entry-admission/v2",
+            "state":"source_bound_entry_cost",
+            "known_notional_usdt":exact(quote.notional_usdt),
+            "known_fee_usdt":exact(quote.fee_usdt),
+            "known_entry_total_usd":exact(quote.total_usd),
+            "all_in_entry_cost_proven":true,
+            "entry_budget_upper_reporting":exact(cost.entry_upper_usd),
+            "entry_budget_metric":"OpeningNotionalPlusEntryFees",
+            "valuation_mode":"AdmissionSnapshot",
+            "entry_proof_digest":cost.entry_proof_digest,
+            "source":{"quote_digest":cost.quote_digest,"observed_at_ms":cost.observed_at},
+            "authorization":"COST_PROOF_ONLY_NOT_POST_AUTHORITY",
+        }));
+    }
+    let proof = entry_budget::EntryCostProof::unproven_linear_quote(known);
+    Ok(json!({
+        "schema": "okx.entry-known-quote/v1",
+        "state": "historical_known_cost_only",
+        "known_notional_usdt": exact(quote.notional_usdt),
+        "known_fee_usdt": exact(quote.fee_usdt),
+        "known_entry_total_usd": exact(quote.total_usd),
+        "source": {
+            "observed_at_ms": quote.observed_at,
+            "fee_generation": quote.fee_generation,
+            "reference_generation": quote.reference_generation,
+            "conversion_source_digest": quote.conversion_digest,
+        },
+        "all_in_entry_cost_proven": false,
+        "entry_budget_upper_reporting": null,
+        "reason_codes": proof.missing_reasons(),
+        "next_action": "RECONCILE_ENTRY_COST_SOURCES"
+    }))
+}
+
 impl TradeService {
     async fn find_intent(
         &self,
@@ -25,7 +450,25 @@ impl TradeService {
         reference: &str,
     ) -> Result<Value, String> {
         let mut i = self.find_intent(r, reference).await?;
+        // Historical fee/notional is a recorded fact, not an authorized entry.
+        let entry_costs = if i.risk_increase
+            && r.configuration.account_key.environment == okx_protocol::accounts::Environment::Real
+        {
+            let id = i.intent_id.clone();
+            let (quote, admission) = r
+                .execution
+                .store
+                .call(deadline(), move |s| {
+                    Ok((s.entry_quote(&id)?, s.entry_admission(&id)?))
+                })
+                .await
+                .map_err(err)?;
+            entry_cost_status(quote, admission)?
+        } else {
+            json!(null)
+        };
         let mut protection_failed = false;
+        let mut venue_flat_verified = false;
         if matches!(i.state, IntentState::Prepared | IntentState::Reserved) {
             if now() >= i.deadline {
                 let id = i.intent_id.clone();
@@ -39,7 +482,7 @@ impl TradeService {
                 i = self.find_intent(r, &i.intent_id).await?;
             } else {
                 return Ok(completed(
-                    json!({"intent":i,"remaining_exposure":"not_evaluated"}),
+                    json!({"intent":i,"remaining_exposure":"not_evaluated","entry_costs":entry_costs}),
                 ));
             }
         }
@@ -52,6 +495,7 @@ impl TradeService {
         {
             return Ok(completed(json!({
                 "intent":i,"send_state":"NOT_STARTED",
+                "entry_costs":entry_costs,
                 "rejection_origin":"CENTRAL","primary_reason":i.incident,
                 "central_release":{"state":"not_required","proof":"RESERVE_DENIED"}
             })));
@@ -69,6 +513,7 @@ impl TradeService {
             return Ok(completed(json!({
                 "intent":i,
                 "send_state":"NOT_STARTED",
+                "entry_costs":entry_costs,
                 "rejection_origin":"LOCAL",
                 "primary_reason":i.incident,
                 "finance_state":"NOT_APPLICABLE",
@@ -100,6 +545,7 @@ impl TradeService {
             return Ok(completed(json!({
                 "intent":i,
                 "send_state":"NOT_STARTED",
+                "entry_costs":entry_costs,
                 "rejection_origin":"LOCAL",
                 "primary_reason":i.incident,
                 "finance_state":"NOT_APPLICABLE",
@@ -112,7 +558,7 @@ impl TradeService {
             match r
                 .execution
                 .trade
-                .order_by_client_id(&i.instrument_id, &i.client_order_id)
+                .order_by_client_id_until(&i.instrument_id, &i.client_order_id, deadline())
                 .await
             {
                 Ok(o) => Some(o),
@@ -132,15 +578,9 @@ impl TradeService {
                 "canceled" | "mmp_canceled" => IntentState::Cancelled,
                 _ => return Ok(uncertain(&i.intent_id, "EXCHANGE_ORDER_STATE_UNKNOWN")),
             };
-            if dec(&o.size)? != i.plan.quantity
-                || o.side != i.plan.side
-                || o.instrument_id != i.instrument_id
-            {
-                return Err("ORDER_READBACK_PLAN_MISMATCH".into());
-            }
+            let filled = verified_order_readback(&i, o)?;
             let id = i.intent_id.clone();
             let order_id = o.order_id.clone();
-            let filled = dec(&o.accumulated_fill_size)?;
             if !i.state.terminal() {
                 r.execution
                     .store
@@ -151,17 +591,50 @@ impl TradeService {
                     .map_err(err)?;
             }
             i = self.find_intent(r, &i.intent_id).await?;
-            let snapshot = r.observer.snapshot().await.map_err(err)?;
-            let exposed = snapshot.positions.iter().any(|p| {
-                p.instrument_id == i.instrument_id
-                    && p.position_side == i.plan.position_side
-                    && dec(&p.position).is_ok_and(|q| q != Decimal::ZERO)
-            });
+            // Both entry and reduction status must reconcile against fresh
+            // authenticated account facts. A private GET may be deferred by
+            // the existing per-user RateBudget without ever reaching OKX.
+            // Wait only for that LOCAL no-send read admission, within the
+            // existing finite status deadline. No venue mutation is retried,
+            // no stale snapshot is substituted, and terminal release still
+            // requires independent finance/census proof.
+            let snapshot = r.observer.snapshot_until(deadline()).await.map_err(err)?;
+            let position_qty = verified_intent_position_quantity(
+                &i.plan.position_side,
+                snapshot
+                    .positions
+                    .iter()
+                    .filter(|p| p.instrument_id == i.instrument_id)
+                    .map(|p| (p.position_side.as_str(), p.position.as_str())),
+            )?;
+            let exposed = position_qty > Decimal::ZERO;
+            // A reduction's local terminal marker is not discharged by an
+            // order ACK. Require an authenticated flat-instrument readback.
+            venue_flat_verified = verify_instrument_is_flat(
+                &i.instrument_id,
+                snapshot
+                    .positions
+                    .iter()
+                    .map(|p| (p.instrument_id.as_str(), p.position.as_str())),
+            )
+            .is_ok();
             if !exposed && i.risk_increase {
                 self.cleanup_flat_protection(r, &i).await?;
             }
-            if filled > Decimal::ZERO && i.risk_increase && exposed {
-                let algo_client = format!("s{}", &i.client_order_id[..31]);
+            // An Add ACK with zero executed contracts does NOT own the
+            // previously protected position observed on this net-mode
+            // instrument. The pre-POST signed full-cohort census verified
+            // that earlier exposure and its live stops. An unfilled Add
+            // must retain its central reservation, but its attached stop
+            // is not yet an active stop against the old lots. Never
+            // emergency-cancel an unrelated managed position because a
+            // new limit order has not filled.
+            if i.risk_increase && exposed && filled > Decimal::ZERO {
+                let algo_client = i
+                    .client_order_id
+                    .get(..31)
+                    .map(|client| format!("s{client}"))
+                    .ok_or("PROTECTION_CLIENT_ID_INVALID")?;
                 let p = r
                     .execution
                     .trade
@@ -169,14 +642,14 @@ impl TradeService {
                     .await;
                 match p {
                     Ok(p)
-                        if p.instrument_id == i.instrument_id
-                            && p.client_order_id == algo_client
-                            && p.state == "live"
-                            && p.failure_code.is_empty()
-                            && p.stop_loss_trigger_price_type == "mark"
-                            && dec(&p.stop_loss_trigger_price).ok() == i.plan.stop_price
-                            && dec(&p.size).ok() == Some(filled)
-                            && p.side != i.plan.side =>
+                        if verified_live_protection(&i, filled, &p).is_ok()
+                            && protection_covers_managed_increment(
+                                &i.plan.side,
+                                &p.side,
+                                filled,
+                                position_qty,
+                                &p.size,
+                            ) =>
                     {
                         let source_digest = digest(&p)?;
                         let protection = okx_execution::ProtectionReceipt {
@@ -194,6 +667,37 @@ impl TradeService {
                             .call(deadline(), move |s| s.verify_protection(&protection))
                             .await
                             .map_err(err)?;
+                        // If the live venue quantity exceeds this intent's
+                        // fill, the previous position MUST still be covered by
+                        // its own SQL lots, distinct venue stop(s) and active
+                        // RiskBook reservation. Reuse the sole full-cohort
+                        // signed census, never simply subtract the old qty.
+                        if position_qty > filled {
+                            let aggregate_result = match self.governance.read().await.clone() {
+                                Some(state) => self
+                                    .census_for_managed_protection_until(&state, deadline())
+                                    .await
+                                    .map(|_| ()),
+                                None => Err("AUTHORITY_UNAVAILABLE".into()),
+                            };
+                            if let Err(reason) = aggregate_result {
+                                eprintln!("MANAGED_AGGREGATE_CENSUS_DENIAL_V1:{reason}");
+
+                                protection_failed = true;
+                                let id = i.intent_id.clone();
+                                r.execution
+                                    .store
+                                    .call(deadline(), move |s| {
+                                        s.protection_incident(
+                                            &id,
+                                            "MANAGED_AGGREGATE_PROTECTION_UNVERIFIED",
+                                            now(),
+                                        )
+                                    })
+                                    .await
+                                    .map_err(err)?;
+                            }
+                        }
                     }
                     _ => {
                         protection_failed = true;
@@ -223,8 +727,39 @@ impl TradeService {
         } else {
             None
         };
+        // Count every independently captured partial fill + linked fee bill
+        // against the original frozen admission before a terminal release.
+        // A missing bill is PENDING, never zero or an invented risk refund.
+        // This uses the same SQLite owner and central SETTLE_ENTRY command.
+        let verified_zero_cancel = i.state == IntentState::Cancelled
+            && order.as_ref().is_some_and(|venue| {
+                verified_terminal_order_update_time(&i, Some(venue)).is_ok()
+                    && verified_order_readback(&i, venue) == Ok(Decimal::ZERO)
+            });
+        let incremental_entry = if financial && i.risk_increase && verified_zero_cancel {
+            // The terminal zero-fee proof and central settlement are owned
+            // exclusively by release_terminal; a missing partial fill cannot
+            // be treated as an incremental settlement failure.
+            json!({"state":"not_applicable_zero_fill_terminal"})
+        } else if financial
+            && i.risk_increase
+            && matches!(
+                i.state,
+                IntentState::PartiallyFilled | IntentState::Filled | IntentState::Cancelled
+            )
+        {
+            match self.settle_incremental_entry(r, &i, order.as_ref()).await {
+                Ok(()) => json!({"state":"verified_or_no_change"}),
+                Err(reason) => json!({"state":"pending","reason_code":reason}),
+            }
+        } else {
+            json!({"state":"not_evaluated"})
+        };
         let central_release = if i.state.terminal() && financial {
-            match self.release_terminal(r, &i, order.as_ref()).await {
+            match self
+                .release_terminal(r, &i, order.as_ref(), venue_flat_verified)
+                .await
+            {
                 Ok(()) => json!({"state":"verified"}),
                 Err(reason) => {
                     json!({"state":"pending","reason_code":reason,"scope":"intent","next_action":"trade.status"})
@@ -251,13 +786,99 @@ impl TradeService {
             .call(deadline(), move |s| s.protection(&id))
             .await
             .map_err(err)?;
+        // Expose the immutable, cursor-covered source ledger for this intent,
+        // not an estimate from venue order status or a permission to settle
+        // central USD entry spend. Missing coverage remains explicitly blocked.
+        let entry_fill_evidence =
+            if financial && i.risk_increase {
+                let evidence_id = i.intent_id.clone();
+                match r
+                    .execution
+                    .store
+                    .call(deadline(), move |s| {
+                        let cursor = s.cursor("fills", "SWAP")?.ok_or(
+                            okx_execution::StoreError::Invalid("ENTRY_FILL_COVERAGE_UNPROVEN"),
+                        )?;
+                        s.intent_fill_cost_evidence(&evidence_id, cursor.watermark)
+                    })
+                    .await
+                {
+                    Ok(source) => match order.as_ref() {
+                        Some(observed) => match verify_venue_fill_coverage(&i, &source, observed) {
+                            Ok(()) => {
+                                // The independent venue order proves the
+                                // filled quantity, not that the venue has
+                                // published its final fee bill. Cross-check
+                                // each raw fill's fee with the SAME account
+                                // finance event linked by a real bill.
+                                let bill_id = i.intent_id.clone();
+                                let through = source.covered_through;
+                                match r
+                                    .execution
+                                    .store
+                                    .call(deadline(), move |s| {
+                                        s.intent_fee_bill_evidence(&bill_id, through)
+                                    })
+                                    .await
+                                {
+                                    Ok(billed) => json!({
+                                        "state":"verified_native_fill_and_bill_fee_sources",
+                                        "scope":"USDT_fee_bill_source_link_only",
+                                        "final_bill_and_margin_debit_proven":false,
+                                        "all_in_entry_cost_proven":false,
+                                        "source":billed,
+                                    }),
+                                    Err(reason) => json!({
+                                        "state":"native_fills_verified_bill_pending",
+                                        "scope":"USDT_fill_notional_and_fee_only",
+                                        "all_in_entry_cost_proven":false,
+                                        "reason_code":err(reason),
+                                        "source":source,
+                                    }),
+                                }
+                            }
+                            Err(reason) => json!({"state":"incomplete",
+                                "all_in_entry_cost_proven":false,
+                                "reason_code":reason}),
+                        },
+                        None => json!({"state":"incomplete",
+                            "all_in_entry_cost_proven":false,
+                            "reason_code":"ENTRY_FILL_VENUE_ORDER_UNAVAILABLE"}),
+                    },
+                    Err(reason) => json!({"state":"incomplete",
+                    "all_in_entry_cost_proven":false,
+                    "reason_code":err(reason)}),
+                }
+            } else {
+                json!({"state":"not_evaluated","all_in_entry_cost_proven":false})
+            };
+        let entry_fill_pending =
+            entry_fill_finance_pending(i.risk_increase, verified_zero_cancel, &entry_fill_evidence);
+        let settlement_pending = incremental_entry["state"] == "pending"
+            || central_release["state"] == "pending"
+            || entry_fill_pending;
         let mut result = completed(
-            json!({"intent":i,"remaining_exposure":if financial{Some(exact(exposure))}else{None},"protection":protection,"central_release":central_release,"financial_error":financial_error,"financial_complete":financial,"protection_incident":protection_failed,"compensation":compensation}),
+            json!({"intent":i,"remaining_exposure":if financial{Some(exact(exposure))}else{None},
+                "entry_costs":entry_costs,
+                "entry_fill_evidence":entry_fill_evidence,
+                "incremental_entry_settlement":incremental_entry,
+                "protection":protection,"central_release":central_release,
+                "financial_error":financial_error,"financial_complete":financial && !settlement_pending,
+                "protection_incident":protection_failed,"compensation":compensation}),
         );
-        result["quality"] = json!({"execution":"authenticated_readback","financial":if financial{"complete"}else{"incomplete"},"protection":if protection_failed{"incident"}else{"evaluated"}});
-        if !financial {
+        result["quality"] = json!({
+            "execution":"authenticated_readback",
+            "financial":if financial && !settlement_pending {"complete"}else{"incomplete"},
+            "entry_settlement":if settlement_pending {"pending"} else {"evaluated"},
+            "protection":if protection_failed{"incident"}else{"evaluated"}
+        });
+        if !financial || settlement_pending {
             result["status"] = json!("partial");
-            result["warnings"] = json!(["FINANCIAL_BACKFILL_PENDING"]);
+            result["warnings"] = json!([if !financial || entry_fill_pending {
+                "FINANCIAL_BACKFILL_PENDING"
+            } else {
+                "ENTRY_SETTLEMENT_PENDING"
+            }]);
         }
         Ok(result)
     }
@@ -287,6 +908,16 @@ impl TradeService {
             .ok_or("AUTHORITY_UNAVAILABLE")?;
         let reservation = proof.reservation_key.clone();
         if reservation.starts_with("local:") {
+            // Real Worker risk was never granted, but the one Native SQL
+            // owner's local no-send lifecycle marker must be discharged.
+            let local_id = i.intent_id.clone();
+            r.execution
+                .store
+                .call(deadline(), move |s| {
+                    s.acknowledge_local_unsent_release(&local_id)
+                })
+                .await
+                .map_err(err)?;
             return Ok(());
         }
         for _ in 0..4 {
@@ -373,11 +1004,308 @@ impl TradeService {
         }
         Err("CENTRAL_UNSENT_RELEASE_CAS_BUSY".into())
     }
+    /// Cumulative native financial proof, independent of the terminal close
+    /// fence. A PARTIALLY_FILLED order still owns open exposure and its
+    /// unsettled entry-budget remainder; this method never releases risk.
+    async fn settle_incremental_entry(
+        &self,
+        r: &AccountResources,
+        i: &StoredIntent,
+        order: Option<&okx_api::TradeOrderDetails>,
+    ) -> Result<(), String> {
+        if r.configuration.account_key.environment != okx_protocol::accounts::Environment::Real
+            || !i.risk_increase
+        {
+            return Ok(());
+        }
+        let venue = order.ok_or("PARTIAL_ENTRY_ORDER_READBACK_UNAVAILABLE")?;
+        if !matches!(
+            venue.state.as_str(),
+            "partially_filled" | "filled" | "canceled" | "mmp_canceled"
+        ) {
+            return Err("PARTIAL_ENTRY_ORDER_STATE_UNVERIFIED".into());
+        }
+        let filled = verified_order_readback(i, venue)?;
+        if filled <= Decimal::ZERO {
+            return Err("PARTIAL_ENTRY_ZERO_FILL_SOURCE_UNPROVEN".into());
+        }
+        let state = self
+            .governance
+            .read()
+            .await
+            .clone()
+            .ok_or("AUTHORITY_UNAVAILABLE")?;
+        let id = i.intent_id.clone();
+        let (receipt, fill_cursor, bill_cursor) = r
+            .execution
+            .store
+            .call(deadline(), move |s| {
+                Ok((
+                    s.central_receipt(&id)?,
+                    s.cursor("fills", "SWAP")?,
+                    s.cursor("bills", "account")?,
+                ))
+            })
+            .await
+            .map_err(err)?;
+        let receipt = receipt.ok_or("PARTIAL_ENTRY_RESERVATION_UNVERIFIED")?;
+        if receipt.reservation_key.starts_with("local:") || receipt.plan_hash != i.plan_hash {
+            return Err("PARTIAL_ENTRY_RESERVATION_INVALID".into());
+        }
+        if i.exchange_order_id.as_deref() != Some(venue.order_id.as_str()) {
+            return Err("PARTIAL_ENTRY_ORDER_IDENTITY_MISMATCH".into());
+        }
+        let venue_at =
+            terminal_order_update_time(Some(venue))?.ok_or("PARTIAL_ENTRY_UPDATE_TIME_MISSING")?;
+        // Inspect before any native money mutation. Existing central RELEASE
+        // remains terminal even when a late fee requires a new debit.
+        let inspection = self
+            .risk
+            .request(self.risk_command(
+                &state,
+                format!("inspect_partial_pre_{}", i.client_order_id),
+                RiskCommandAction::Inspect {
+                    reservation_key: receipt.reservation_key.clone(),
+                    plan_sha256: i.plan_hash.clone(),
+                },
+            ))
+            .await
+            .map_err(str::to_owned)?;
+        let fills = fill_cursor.ok_or("PARTIAL_ENTRY_FILLS_UNCOVERED")?;
+        let bills = bill_cursor.ok_or("PARTIAL_ENTRY_BILLS_UNCOVERED")?;
+        if !fills.cursor.is_empty()
+            || !bills.cursor.is_empty()
+            || !fills.coverage_gaps.is_empty()
+            || !bills.coverage_gaps.is_empty()
+            || fills.generation <= 0
+            || bills.generation <= 0
+        {
+            return Err("PARTIAL_ENTRY_SOURCE_PAGES_INCOMPLETE".into());
+        }
+        let through = fills.watermark.min(bills.watermark);
+        if through < venue_at {
+            return Err("PARTIAL_ENTRY_FINANCIAL_COVERAGE_PENDING".into());
+        }
+        if inspection.reservation_state == Some(RiskReservationState::Released) {
+            let id = i.intent_id.clone();
+            let late = r
+                .execution
+                .store
+                .call(deadline(), move |s| s.entry_late_pending(&id))
+                .await
+                .map_err(err)?;
+            if !late {
+                let existing_id = format!("entry-settlement:{}", i.intent_id);
+                let recorded = r
+                    .execution
+                    .store
+                    .call(deadline(), move |s| s.operation(&existing_id))
+                    .await
+                    .map_err(err)?;
+                return if recorded.is_some_and(|w| w.kind == "ENTRY_SETTLEMENT_PROVEN") {
+                    Ok(())
+                } else {
+                    Err("RELEASED_ENTRY_TERMINAL_SOURCE_MISSING".into())
+                };
+            }
+            if !i.state.terminal() {
+                return Err("LATE_ENTRY_ORDER_NOT_TERMINAL".into());
+            }
+            let id = i.intent_id.clone();
+            let late_proof = r
+                .execution
+                .store
+                .call(deadline(), move |s| {
+                    s.bind_late_entry_settlement(&id, venue_at, filled, through)
+                })
+                .await
+                .map_err(err)?;
+            if late_proof.schema != "okx.entry-late-settlement/v1"
+                || late_proof.reservation_key != receipt.reservation_key
+                || late_proof.venue_order_id != venue.order_id
+            {
+                return Err("LATE_ENTRY_ACCOUNT_PROOF_MISSING".into());
+            }
+            for _ in 0..3 {
+                let checked = self
+                    .risk
+                    .request(self.risk_command(
+                        &state,
+                        format!("inspect_late_{}", i.client_order_id),
+                        RiskCommandAction::Inspect {
+                            reservation_key: receipt.reservation_key.clone(),
+                            plan_sha256: i.plan_hash.clone(),
+                        },
+                    ))
+                    .await
+                    .map_err(str::to_owned)?;
+                if checked.reservation_state != Some(RiskReservationState::Released) {
+                    return Err("LATE_ENTRY_RESERVATION_CHANGED".into());
+                }
+                let sequence = checked
+                    .risk_book_sequence
+                    .ok_or("LATE_ENTRY_RISK_SEQUENCE_MISSING")?;
+                let done = self
+                    .risk
+                    .request(self.risk_command(
+                        &state,
+                        format!(
+                            "settle_late_{}_r{}",
+                            i.client_order_id, late_proof.settlement_revision
+                        ),
+                        RiskCommandAction::SettleEntry {
+                            reservation_key: late_proof.reservation_key.clone(),
+                            plan_sha256: late_proof.plan_hash.clone(),
+                            expected_risk_book_sequence: sequence,
+                            cumulative_entry_usd: exact(late_proof.cumulative_entry_usd),
+                            settlement_revision: late_proof.settlement_revision,
+                            source_digest: late_proof.source_digest.clone(),
+                        },
+                    ))
+                    .await
+                    .map_err(str::to_owned)?;
+                if done.status == RiskDecisionStatus::Updated {
+                    r.execution
+                        .store
+                        .call(deadline(), move |s| {
+                            s.acknowledge_late_entry_settlement(&late_proof)
+                        })
+                        .await
+                        .map_err(err)?;
+                    return Ok(());
+                }
+                if !matches!(
+                    done.reason.as_deref(),
+                    Some(
+                        "STALE_SESSION_OR_BOOK_SEQUENCE"
+                            | "ENTRY_SETTLEMENT_SOURCE_OR_STATE_UNPROVEN"
+                    )
+                ) {
+                    return Err(done.reason.unwrap_or("LATE_ENTRY_SETTLEMENT_DENIED".into()));
+                }
+            }
+            return Err("LATE_ENTRY_SETTLEMENT_CAS_BUSY".into());
+        }
+        // A terminal settlement may already have been bound during an earlier
+        // Status which could not RELEASE because another terminal reservation
+        // was still pending. Re-verify that same immutable terminal source
+        // witness; never attempt a PARTIAL settlement against its receipt
+        // (a different schema/revision) or silently accept changed fills/fees.
+        // The normal release_terminal path below still owns Worker SETTLE_ENTRY
+        // and central RELEASE; this read-only replay grants no new capacity.
+        if i.state.terminal() {
+            let id = i.intent_id.clone();
+            let existing = r
+                .execution
+                .store
+                .call(deadline(), move |s| {
+                    if s.operation(&format!("entry-settlement:{id}"))?.is_none() {
+                        return Ok(None);
+                    }
+                    if s.entry_late_pending(&id)? {
+                        return Err(okx_execution::StoreError::Invalid(
+                            "TERMINAL_ENTRY_LATE_BILL_PENDING",
+                        ));
+                    }
+                    s.bind_terminal_entry_settlement(&id, venue_at, filled, through)
+                        .map(Some)
+                })
+                .await
+                .map_err(err)?;
+            if let Some(proof) = existing {
+                if proof.plan_hash != i.plan_hash
+                    || proof.venue_order_id != venue.order_id
+                    || proof.venue_filled_quantity != filled
+                {
+                    return Err("TERMINAL_ENTRY_REPLAY_IDENTITY_MISMATCH".into());
+                }
+                return Ok(());
+            }
+        }
+        let partial_id = i.intent_id.clone();
+        let proof = r
+            .execution
+            .store
+            .call(deadline(), move |s| {
+                s.bind_partial_entry_settlement(&partial_id, venue_at, filled, through)
+            })
+            .await
+            .map_err(err)?;
+        if proof.reservation_key != receipt.reservation_key
+            || proof.plan_hash != i.plan_hash
+            || proof.venue_order_id != venue.order_id
+        {
+            return Err("PARTIAL_ENTRY_SOURCE_IDENTITY_MISMATCH".into());
+        }
+        for _ in 0..3 {
+            let observed = self
+                .risk
+                .request(self.risk_command(
+                    &state,
+                    format!("inspect_partial_{}", i.client_order_id),
+                    RiskCommandAction::Inspect {
+                        reservation_key: receipt.reservation_key.clone(),
+                        plan_sha256: i.plan_hash.clone(),
+                    },
+                ))
+                .await
+                .map_err(str::to_owned)?;
+            if observed.reservation_state == Some(RiskReservationState::Released) {
+                return Err("LATE_ENTRY_SETTLEMENT_AFTER_RELEASE_REQUIRES_RECONCILIATION".into());
+            }
+            let sequence = observed
+                .risk_book_sequence
+                .ok_or("PARTIAL_ENTRY_RISK_SEQUENCE_MISSING")?;
+            let result = self
+                .risk
+                .request(self.risk_command(
+                    &state,
+                    format!(
+                        "settle_partial_{}_{}",
+                        i.client_order_id, proof.settlement_revision
+                    ),
+                    RiskCommandAction::SettleEntry {
+                        reservation_key: proof.reservation_key.clone(),
+                        plan_sha256: proof.plan_hash.clone(),
+                        expected_risk_book_sequence: sequence,
+                        cumulative_entry_usd: exact(proof.cumulative_entry_usd),
+                        settlement_revision: proof.settlement_revision,
+                        source_digest: proof.source_digest.clone(),
+                    },
+                ))
+                .await
+                .map_err(str::to_owned)?;
+            if result.status == RiskDecisionStatus::Updated {
+                let committed = proof.clone();
+                r.execution
+                    .store
+                    .call(deadline(), move |s| {
+                        s.acknowledge_partial_entry_settlement(&committed)
+                    })
+                    .await
+                    .map_err(err)?;
+                return Ok(());
+            }
+            if !matches!(
+                result.reason.as_deref(),
+                Some(
+                    "STALE_SESSION_OR_BOOK_SEQUENCE" | "ENTRY_SETTLEMENT_SOURCE_OR_STATE_UNPROVEN"
+                )
+            ) {
+                return Err(result
+                    .reason
+                    .unwrap_or("PARTIAL_ENTRY_SETTLEMENT_DENIED".into()));
+            }
+        }
+        Err("PARTIAL_ENTRY_SETTLEMENT_CAS_BUSY".into())
+    }
+
     async fn release_terminal(
         &self,
         r: &AccountResources,
         i: &StoredIntent,
         order: Option<&okx_api::TradeOrderDetails>,
+        venue_flat_verified: bool,
     ) -> Result<(), String> {
         if r.configuration.account_key.environment != okx_protocol::accounts::Environment::Real {
             return Ok(());
@@ -396,11 +1324,17 @@ impl TradeService {
             .await
             .map_err(err)?;
         let Some(receipt) = receipt else {
-            return Ok(());
+            // Rejected PRE-RESERVE / centrally DENIED intents are handled by
+            // their independent SQL witnesses before terminal reconciliation.
+            // For any risk-increasing terminal intent with a possible POST,
+            // absent local central receipt does not prove released capacity.
+            return if i.risk_increase {
+                Err("TERMINAL_CENTRAL_RESERVATION_UNVERIFIED".into())
+            } else {
+                Ok(())
+            };
         };
-        if receipt.reservation_key.starts_with("local:") {
-            return Ok(());
-        }
+        let local_reduction = receipt.reservation_key.starts_with("local:");
         let instrument = i.instrument_id.clone();
         let lots = r
             .execution
@@ -409,7 +1343,8 @@ impl TradeService {
             .await
             .map_err(err)?;
         if lots.iter().any(|l| {
-            l.intent_id.as_deref() == Some(&i.intent_id) && l.remaining_qty > Decimal::ZERO
+            (l.intent_id.as_deref() == Some(&i.intent_id) || local_reduction)
+                && l.remaining_qty > Decimal::ZERO
         }) {
             return Err("INTENT_EXPOSURE_REMAINS".into());
         }
@@ -425,14 +1360,55 @@ impl TradeService {
             .await
             .map_err(err)?
             .ok_or("FILL_COVERAGE_MISSING")?;
-        if !complete.coverage_gaps.is_empty()
-            || order.is_some_and(|o| {
-                o.update_time_ms
-                    .parse::<i64>()
-                    .is_ok_and(|at| complete.watermark < at)
-            })
+        let venue_updated_at = verified_terminal_order_update_time(i, order)?;
+        if complete.generation <= 0
+            || !complete.cursor.is_empty()
+            || !complete.coverage_gaps.is_empty()
+            || complete.watermark < venue_updated_at
         {
             return Err("FILL_COVERAGE_INCOMPLETE".into());
+        }
+        if local_reduction {
+            let bills = r
+                .execution
+                .store
+                .call(deadline(), |s| s.cursor("bills", "account"))
+                .await
+                .map_err(err)?
+                .ok_or("BILLS_COVERAGE_MISSING")?;
+            if bills.generation <= 0
+                || !bills.cursor.is_empty()
+                || !bills.coverage_gaps.is_empty()
+                || bills.watermark < venue_updated_at
+            {
+                return Err("FINANCIAL_COVERAGE_INCOMPLETE".into());
+            }
+            // Reduce-only has NO central RiskBook grant. Its SQL receipt must
+            // nevertheless be completed after its own terminal venue/fill/bill
+            // readback. Leaving it TERMINAL_PENDING_CENTRAL causes the next
+            // full cohort census to block the opening intent's legitimate
+            // central RELEASE forever.
+            if i.risk_increase || !venue_flat_verified {
+                return Err("LOCAL_CLOSE_FLAT_POSITION_UNPROVEN".into());
+            }
+            let venue = order.ok_or("LOCAL_CLOSE_ORDER_READBACK_MISSING")?;
+            if !matches!(venue.state.as_str(), "filled" | "canceled" | "mmp_canceled") {
+                return Err("LOCAL_CLOSE_VENUE_NOT_TERMINAL".into());
+            }
+            let filled = verified_order_readback(i, venue)?;
+            if filled <= Decimal::ZERO || filled != i.plan.quantity {
+                return Err("LOCAL_CLOSE_FILL_QUANTITY_UNPROVEN".into());
+            }
+            let id = i.intent_id.clone();
+            let order_id = venue.order_id.clone();
+            r.execution
+                .store
+                .call(deadline(), move |s| {
+                    s.acknowledge_local_terminal_close(&id, &order_id, filled, venue_updated_at)
+                })
+                .await
+                .map_err(err)?;
+            return Ok(());
         }
         let observed = self
             .risk
@@ -447,6 +1423,18 @@ impl TradeService {
             .await
             .map_err(str::to_owned)?;
         if observed.reservation_state == Some(RiskReservationState::Released) {
+            // A late bill may already be captured but not yet acknowledged
+            // by central SETTLE_ENTRY. Never overwrite that pending marker
+            // with the original terminal release acknowledgement.
+            let id = i.intent_id.clone();
+            if r.execution
+                .store
+                .call(deadline(), move |s| s.entry_late_pending(&id))
+                .await
+                .map_err(err)?
+            {
+                return Err("LATE_ENTRY_SETTLEMENT_PENDING".into());
+            }
             let k = receipt.reservation_key.clone();
             let e = digest(&observed)?;
             r.execution
@@ -456,7 +1444,6 @@ impl TradeService {
                 .map_err(err)?;
             return Ok(());
         }
-        let census = self.census(&state).await?;
         let (through, loss) = r
             .execution
             .store
@@ -469,15 +1456,96 @@ impl TradeService {
             })
             .await
             .map_err(err)?;
-        if !through.coverage_gaps.is_empty()
-            || order.is_some_and(|o| {
-                o.update_time_ms
-                    .parse::<i64>()
-                    .is_ok_and(|at| through.watermark < at)
-            })
+        if through.generation <= 0
+            || !through.cursor.is_empty()
+            || !through.coverage_gaps.is_empty()
+            || through.watermark < venue_updated_at
         {
             return Err("FINANCIAL_COVERAGE_INCOMPLETE".into());
         }
+        // The account-wide fills and bills cursors can advance independently
+        // because their native SQL page ingests are separate atomic writes.
+        // A newer bill watermark is NOT itself proof that fills have advanced
+        // equally far. Use their common proven frontier, exactly as the
+        // incremental SETTLE_ENTRY path already does, without downgrading
+        // either source's completeness or the venue uTime requirement.
+        let financial_through = complete.watermark.min(through.watermark);
+        if financial_through < venue_updated_at {
+            return Err("FINANCIAL_COVERAGE_INCOMPLETE".into());
+        }
+        // A terminal POST may free entry capacity only after the independent
+        // venue order and all immutable native fill/fee bills agree. The
+        // SQL owner commits the exact final cumulative proof BEFORE any WSS
+        // SETTLE_ENTRY. A lost central reply reuses that same receipt.
+        let venue_order = order.ok_or("TERMINAL_ENTRY_VENUE_ORDER_UNAVAILABLE")?;
+        if !matches!(
+            venue_order.state.as_str(),
+            "filled" | "canceled" | "mmp_canceled"
+        ) {
+            return Err("TERMINAL_ENTRY_VENUE_STATE_UNVERIFIED".into());
+        }
+        let filled = verified_order_readback(i, venue_order)?;
+        // A truly canceled zero-fill order uses the same terminal USD
+        // settlement/release path but requires separate SQL no-money proof.
+        // Any missing stream, unmatched bill, or existing partial fill denies.
+        if filled == Decimal::ZERO && i.state != IntentState::Cancelled {
+            return Err("TERMINAL_ZERO_FILL_STATE_UNVERIFIED".into());
+        }
+        let id = i.intent_id.clone();
+        let settlement = r
+            .execution
+            .store
+            .call(deadline(), move |s| {
+                s.bind_terminal_entry_settlement(&id, venue_updated_at, filled, financial_through)
+            })
+            .await
+            .map_err(err)?;
+        if settlement.reservation_key != receipt.reservation_key
+            || settlement.plan_hash != i.plan_hash
+            || settlement.venue_order_id != venue_order.order_id
+        {
+            return Err("TERMINAL_ENTRY_SETTLEMENT_IDENTITY_MISMATCH".into());
+        }
+        let settled = self
+            .risk
+            .request(self.risk_command(
+                &state,
+                format!("settle_{}", i.client_order_id),
+                RiskCommandAction::SettleEntry {
+                    reservation_key: settlement.reservation_key.clone(),
+                    plan_sha256: settlement.plan_hash.clone(),
+                    expected_risk_book_sequence:
+                        observed.risk_book_sequence.ok_or("RISK_SEQUENCE_MISSING")?,
+                    cumulative_entry_usd: exact(settlement.cumulative_entry_usd),
+                    settlement_revision: settlement.settlement_revision,
+                    source_digest: settlement.source_digest.clone(),
+                },
+            ))
+            .await
+            .map_err(str::to_owned)?;
+        if settled.status != RiskDecisionStatus::Updated {
+            return Err(settled
+                .reason
+                .unwrap_or("CENTRAL_ENTRY_SETTLEMENT_PENDING".into()));
+        }
+        let settlement_sequence = settled
+            .risk_book_sequence
+            .ok_or("ENTRY_SETTLEMENT_SEQUENCE_MISSING")?;
+        // The central SETTLE_ENTRY is now confirmed, but SQL must retain
+        // the terminal intent's pending reservation until this RELEASE is
+        // durably acknowledged. Construct a fresh full-cohort census with
+        // exactly this settled reservation scoped for terminal resolution.
+        // Every other terminal-pending / unknown intent still denies release.
+        let account_key = r.configuration.account_key.wire();
+        let census = self
+            .census_for_terminal_release(
+                &state,
+                &account_key,
+                &i.intent_id,
+                &receipt.reservation_key,
+                &i.plan_hash,
+            )
+            .await?;
         let proof = TerminalRiskLedgerProof {
             account_uid: r.configuration.account_key.verified_uid.clone(),
             run_id: "continuous_engine".into(),
@@ -491,6 +1559,13 @@ impl TradeService {
             record_digest: digest(&(i, order, loss, through))?,
             cumulative_loss_usd: exact(loss),
             remaining_exposure_usdt: "0".into(),
+            // The previous SETTLE_ENTRY committed the entire observed
+            // amount. Terminal RELEASE must not create another revision or
+            // claim a new debit; Worker compares these exact immutable
+            // SQL-backed fields to the existing settled RiskBook entry.
+            cumulative_entry_usd: Some(exact(settlement.cumulative_entry_usd)),
+            entry_settlement_revision: Some(settlement.settlement_revision),
+            entry_settlement_digest: Some(settlement.source_digest.clone()),
         };
         let command = self.risk_command(
             &state,
@@ -498,9 +1573,7 @@ impl TradeService {
             RiskCommandAction::Resolve {
                 reservation_key: receipt.reservation_key.clone(),
                 plan_sha256: i.plan_hash.clone(),
-                expected_risk_book_sequence: observed
-                    .risk_book_sequence
-                    .ok_or("RISK_SEQUENCE_MISSING")?,
+                expected_risk_book_sequence: settlement_sequence,
                 next_state: RiskResolution::Released,
                 source_proof_sha256: digest(&proof)?,
                 terminal_census: Some(census),
@@ -643,14 +1716,37 @@ impl TradeService {
         {
             return Ok(());
         }
-        let snapshot = r.observer.snapshot().await.map_err(err)?;
-        if snapshot.positions.iter().any(|p| {
-            p.instrument_id == i.instrument_id
-                && p.position_side == i.plan.position_side
-                && dec(&p.position).is_ok_and(|q| q != Decimal::ZERO)
-        }) {
-            return Err("PROTECTION_STILL_REQUIRED".into());
-        }
+        // A local no-send read throttle must not strand an already-flat
+        // position with a live protective order. This fresh authenticated
+        // snapshot is still required before cancel-algos; only read admission
+        // may wait, bounded by the existing command deadline.
+        let snapshot = r.observer.snapshot_until(deadline()).await.map_err(err)?;
+        verify_instrument_is_flat(
+            &i.instrument_id,
+            snapshot
+                .positions
+                .iter()
+                .map(|position| (position.instrument_id.as_str(), position.position.as_str())),
+        )?;
+        // Local no-send admission precedes durable BEGIN. Once BEGIN is
+        // persisted, an unknown cancel outcome must never be re-posted.
+        let request = okx_api::CancelAlgoOrderRequest {
+            instrument_id: i.instrument_id.clone(),
+            algo_order_id: saved.algo_id.clone(),
+        };
+        let timing = r
+            .execution
+            .clock
+            .clock_evidence()
+            .await
+            .map_err(err)?
+            .mutation_timing(5000)
+            .map_err(err)?;
+        let rate = r
+            .execution
+            .trade
+            .admit_cancel_algo_order(&request)
+            .map_err(err)?;
         let key = format!("cleanup_{}", &i.client_order_id);
         let hash = digest(&(
             i.intent_id.clone(),
@@ -670,23 +1766,6 @@ impl TradeService {
         if !fresh {
             return Err("PROTECTION_CANCEL_OUTCOME_UNKNOWN_INSPECT".into());
         }
-        let request = okx_api::CancelAlgoOrderRequest {
-            instrument_id: i.instrument_id.clone(),
-            algo_order_id: saved.algo_id.clone(),
-        };
-        let timing = r
-            .execution
-            .clock
-            .clock_evidence()
-            .await
-            .map_err(err)?
-            .mutation_timing(5000)
-            .map_err(err)?;
-        let rate = r
-            .execution
-            .trade
-            .admit_cancel_algo_order(&request)
-            .map_err(err)?;
         let response = r
             .execution
             .trade
@@ -859,15 +1938,23 @@ impl TradeService {
         if !matches!(after.state, IntentState::Cancelled | IntentState::Rejected) {
             return Ok(uncertain(&after.intent_id, "REPLACE_CANCEL_NOT_TERMINAL"));
         }
-        if let Ok(order) = r
+        // A timeout, not-found reply or incomplete venue order is UNKNOWN,
+        // never evidence of a zero-fill cancel. No second POST on that path.
+        let old_order = match r
             .execution
             .trade
             .order_by_client_id(&target.instrument_id, &target.client_order_id)
             .await
-            && dec(&order.accumulated_fill_size)? > Decimal::ZERO
         {
-            return Err("REPLACE_PARTIAL_FILL_REQUIRES_EXPLICIT_CLOSE".into());
-        }
+            Ok(order) => order,
+            Err(_) => {
+                return Ok(uncertain(
+                    &after.intent_id,
+                    "REPLACE_ORDER_READBACK_UNKNOWN_NO_POST",
+                ));
+            }
+        };
+        verify_empty_canceled_order_for_replace(&after, &old_order)?;
         let remaining = expires_in_ms.saturating_sub(begun.elapsed().as_millis() as u64);
         if remaining == 0 {
             return Err("COMMAND_EXPIRED".into());
@@ -926,15 +2013,10 @@ impl TradeService {
             .iter()
             .filter(|l| l.intent_id.as_deref() == Some(&original.intent_id))
             .collect::<Vec<_>>();
-        let quantity = mine.iter().fold(Decimal::ZERO, |s, l| s + l.remaining_qty);
-        if quantity <= Decimal::ZERO {
-            return Err("NO_ATTRIBUTED_POSITION_TO_CLOSE".into());
-        }
-        let side = match mine.first().map(|l| l.side.as_str()) {
-            Some("long") => PositionSide::Long,
-            Some("short") => PositionSide::Short,
-            _ => return Err("POSITION_SIDE_UNATTESTED".into()),
-        };
+        let (side, quantity) = verified_close_lot_exposure(
+            mine.iter()
+                .map(|lot| (lot.side.as_str(), lot.remaining_qty)),
+        )?;
         let command = TradeRequest::Execute {
             idempotency_key: key.into(),
             operation: TradeOperation::Close,
@@ -956,5 +2038,615 @@ impl TradeService {
         };
         self.execute_bound(r, &command, governance, Some(bound_hash))
             .await
+    }
+}
+
+#[cfg(test)]
+mod entry_cost_status_tests {
+    use super::*;
+
+    #[test]
+    fn t09_public_ack_without_fill_bill_evidence_cannot_complete_finance() {
+        let missing = json!({"state":"incomplete","reason_code":"ENTRY_FILL_EVIDENCE_EMPTY"});
+        let bill_pending = json!({"state":"native_fills_verified_bill_pending"});
+        let verified = json!({"state":"verified_native_fill_and_bill_fee_sources"});
+        assert!(entry_fill_finance_pending(true, false, &missing));
+        assert!(entry_fill_finance_pending(true, false, &bill_pending));
+        assert!(!entry_fill_finance_pending(true, false, &verified));
+        // A venue-confirmed zero-fill cancellation is a distinct terminal
+        // proof, and still needs the separate central_release pending gate.
+        assert!(!entry_fill_finance_pending(true, true, &missing));
+        assert!(!entry_fill_finance_pending(false, false, &missing));
+    }
+
+    #[test]
+    fn e2_terminal_cursors_never_trust_invalid_exchange_order_time() {
+        assert_eq!(terminal_order_update_time(None), Ok(None));
+        let order = |t: &str| {
+            serde_json::from_value::<okx_api::TradeOrderDetails>(json!({"uTime":t})).unwrap()
+        };
+        assert_eq!(terminal_order_update_time(Some(&order("16"))), Ok(Some(16)));
+        for invalid in ["", "invalid", "0", "-1", "9223372036854775808"] {
+            assert_eq!(
+                terminal_order_update_time(Some(&order(invalid))),
+                Err("TERMINAL_ORDER_UPDATE_TIME_INVALID".into())
+            );
+        }
+    }
+
+    #[test]
+    fn e1_native_fills_require_independent_exact_venue_quantity_and_time() {
+        let intent = StoredIntent {
+            intent_id: "intent".into(),
+            client_order_id: "client".into(),
+            instrument_id: "BTC-USDT-SWAP".into(),
+            plan_hash: "a".repeat(64),
+            idempotency_key: "idem".into(),
+            request_hash: "request".into(),
+            state: IntentState::Filled,
+            revision: 1,
+            deadline: 15,
+            policy_revision: 1,
+            risk_increase: true,
+            exchange_order_id: Some("venue-order".into()),
+            incident: None,
+            plan: okx_execution::IntentPlan {
+                quantity: Decimal::ONE,
+                side: "buy".into(),
+                ..Default::default()
+            },
+        };
+        let source = okx_execution::IntentFillCostEvidence {
+            intent_id: intent.intent_id.clone(),
+            plan_hash: intent.plan_hash.clone(),
+            exchange_order_id: "venue-order".into(),
+            reservation_key: "central-key".into(),
+            fill_count: 2,
+            filled_quantity: Decimal::ONE,
+            covered_through: 10,
+            gross_notional_usdt: Decimal::from(94),
+            conservative_fee_usdt: Decimal::new(3, 2),
+            source_digest: "b".repeat(64),
+        };
+        let order = okx_api::TradeOrderDetails {
+            instrument_id: intent.instrument_id.clone(),
+            order_id: source.exchange_order_id.clone(),
+            client_order_id: intent.client_order_id.clone(),
+            side: "buy".into(),
+            position_side: "long".into(),
+            trade_mode: "cross".into(),
+            order_type: "limit".into(),
+            price: "100".into(),
+            size: "1".into(),
+            accumulated_fill_size: "1".into(),
+            average_fill_price: "94".into(),
+            state: "filled".into(),
+            creation_time_ms: "3".into(),
+            update_time_ms: "10".into(),
+        };
+        assert!(verify_venue_fill_coverage(&intent, &source, &order).is_ok());
+        assert_eq!(verified_order_readback(&intent, &order), Ok(Decimal::ONE));
+        assert_eq!(
+            verified_terminal_order_update_time(&intent, Some(&order)),
+            Ok(10)
+        );
+        assert_eq!(
+            verified_terminal_order_update_time(&intent, None),
+            Err("TERMINAL_ORDER_READBACK_MISSING".into())
+        );
+        let mut changed = order.clone();
+        changed.state = "partially_filled".into();
+        assert_eq!(
+            verified_terminal_order_update_time(&intent, Some(&changed)),
+            Err("TERMINAL_ORDER_STATE_UNVERIFIED".into())
+        );
+        changed = order.clone();
+        changed.order_id = "other".into();
+        assert_eq!(
+            verified_terminal_order_update_time(&intent, Some(&changed)),
+            Err("TERMINAL_ORDER_IDENTITY_MISMATCH".into())
+        );
+        changed = order.clone();
+        changed.client_order_id = "wrong-client".into();
+        assert_eq!(
+            verified_order_readback(&intent, &changed),
+            Err("ORDER_READBACK_IDENTITY_MISMATCH".into())
+        );
+        changed = order.clone();
+        changed.order_id = "other-venue-order".into();
+        assert_eq!(
+            verified_order_readback(&intent, &changed),
+            Err("ORDER_READBACK_IDENTITY_MISMATCH".into())
+        );
+        changed = order.clone();
+        changed.size = "2".into();
+        assert_eq!(
+            verified_order_readback(&intent, &changed),
+            Err("ORDER_READBACK_PLAN_MISMATCH".into())
+        );
+        changed = order.clone();
+        changed.accumulated_fill_size = "1.1".into();
+        assert_eq!(
+            verified_order_readback(&intent, &changed),
+            Err("ORDER_READBACK_FILLED_SIZE_INVALID".into())
+        );
+        assert_eq!(
+            verified_terminal_order_update_time(&intent, Some(&changed)),
+            Err("TERMINAL_ORDER_IDENTITY_OR_SIZE_UNVERIFIED".into())
+        );
+        let mut changed = order.clone();
+        changed.accumulated_fill_size = "0.9".into();
+        assert_eq!(
+            verify_venue_fill_coverage(&intent, &source, &changed),
+            Err("ENTRY_FILL_VENUE_QUANTITY_MISMATCH".into())
+        );
+        changed = order.clone();
+        changed.update_time_ms = "11".into();
+        assert_eq!(
+            verify_venue_fill_coverage(&intent, &source, &changed),
+            Err("ENTRY_FILL_VENUE_TIME_UNCOVERED".into())
+        );
+        changed = order.clone();
+        changed.order_id = "other".into();
+        assert_eq!(
+            verify_venue_fill_coverage(&intent, &source, &changed),
+            Err("ENTRY_FILL_VENUE_IDENTITY_MISMATCH".into())
+        );
+        changed = order.clone();
+        changed.client_order_id = "other".into();
+        assert_eq!(
+            verify_venue_fill_coverage(&intent, &source, &changed),
+            Err("ENTRY_FILL_VENUE_IDENTITY_MISMATCH".into())
+        );
+        changed = order.clone();
+        changed.update_time_ms = "invalid".into();
+        assert_eq!(
+            verify_venue_fill_coverage(&intent, &source, &changed),
+            Err("ENTRY_FILL_VENUE_TIME_UNVERIFIED".into())
+        );
+        changed = order;
+        changed.state = "unknown".into();
+        assert_eq!(
+            verify_venue_fill_coverage(&intent, &source, &changed),
+            Err("ENTRY_FILL_VENUE_STATE_UNKNOWN".into())
+        );
+    }
+
+    #[test]
+    fn e2_protective_readback_requires_exact_venue_exposure_and_opposite_side() {
+        let one = Decimal::ONE;
+        let half = dec("0.5").unwrap();
+        assert!(protection_covers_live_position(
+            "buy", "sell", one, one, "1"
+        ));
+        assert!(protection_covers_live_position(
+            "sell", "buy", one, one, "1"
+        ));
+        assert!(!protection_covers_live_position(
+            "buy", "buy", one, one, "1"
+        ));
+        assert!(!protection_covers_live_position(
+            "buy", "close", one, one, "1"
+        ));
+        assert!(!protection_covers_live_position(
+            "buy", "sell", one, half, "1"
+        ));
+        assert!(!protection_covers_live_position(
+            "buy", "sell", one, one, "0.5"
+        ));
+        assert!(!protection_covers_live_position(
+            "buy", "sell", one, one, "invalid"
+        ));
+        assert!(!protection_covers_live_position(
+            "buy",
+            "sell",
+            Decimal::ZERO,
+            one,
+            "1"
+        ));
+    }
+
+    #[test]
+    fn t09_4_add_attached_stop_must_cover_exact_increment_not_old_position() {
+        let add = dec("0.2").unwrap();
+        let net = dec("0.5").unwrap();
+        assert!(protection_covers_managed_increment(
+            "buy", "sell", add, net, "0.2"
+        ));
+        assert!(!protection_covers_managed_increment(
+            "buy", "sell", add, net, "0.5"
+        ));
+        assert!(!protection_covers_managed_increment(
+            "buy", "sell", add, net, "0.19"
+        ));
+        assert!(!protection_covers_managed_increment(
+            "buy", "buy", add, net, "0.2"
+        ));
+        assert!(!protection_covers_managed_increment(
+            "buy",
+            "sell",
+            Decimal::ZERO,
+            net,
+            "0.2"
+        ));
+        assert!(!protection_covers_managed_increment(
+            "buy",
+            "sell",
+            dec("0.6").unwrap(),
+            net,
+            "0.6"
+        ));
+    }
+
+    #[test]
+    fn e2_shared_protection_check_is_strict_about_live_venue_state_and_size() {
+        let intent = StoredIntent {
+            intent_id: "intent".into(),
+            client_order_id: "c".repeat(32),
+            instrument_id: "BTC-USDT-SWAP".into(),
+            plan_hash: "a".repeat(64),
+            idempotency_key: "key".into(),
+            request_hash: "req".into(),
+            state: IntentState::Filled,
+            revision: 1,
+            deadline: 100,
+            policy_revision: 1,
+            risk_increase: true,
+            exchange_order_id: Some("order".into()),
+            incident: None,
+            plan: okx_execution::IntentPlan {
+                side: "buy".into(),
+                position_side: "long".into(),
+                quantity: Decimal::ONE,
+                stop_price: Some(dec("96").unwrap()),
+                ..Default::default()
+            },
+        };
+        let p = okx_api::TradeAlgoOrderDetails {
+            instrument_id: "BTC-USDT-SWAP".into(),
+            algo_order_id: "algo".into(),
+            client_order_id: format!("s{}", "c".repeat(31)),
+            state: "live".into(),
+            stop_loss_trigger_price_type: "mark".into(),
+            stop_loss_trigger_price: "96".into(),
+            size: "1".into(),
+            side: "sell".into(),
+            position_side: "net".into(),
+            ..serde_json::from_value::<okx_api::TradeAlgoOrderDetails>(json!({})).unwrap()
+        };
+        assert!(verified_live_protection(&intent, Decimal::ONE, &p).is_ok());
+        let mut changed = p.clone();
+        changed.size = "0.5".into();
+        assert_eq!(
+            verified_live_protection(&intent, Decimal::ONE, &changed),
+            Err("PROTECTION_LIVE_SOURCE_UNVERIFIED".into())
+        );
+        changed = p.clone();
+        changed.state = "pause".into();
+        assert!(verified_live_protection(&intent, Decimal::ONE, &changed).is_err());
+        changed = p.clone();
+        changed.side = "buy".into();
+        assert!(verified_live_protection(&intent, Decimal::ONE, &changed).is_err());
+        changed = p.clone();
+        changed.stop_loss_trigger_price_type = "last".into();
+        assert!(verified_live_protection(&intent, Decimal::ONE, &changed).is_err());
+        changed = p.clone();
+        changed.stop_loss_trigger_price = "95".into();
+        assert!(verified_live_protection(&intent, Decimal::ONE, &changed).is_err());
+        changed = p.clone();
+        changed.client_order_id = "wrong".into();
+        assert!(verified_live_protection(&intent, Decimal::ONE, &changed).is_err());
+        changed = p.clone();
+        changed.position_side = "short".into();
+        assert!(verified_live_protection(&intent, Decimal::ONE, &changed).is_err());
+        changed = p.clone();
+        changed.position_side.clear();
+        assert!(verified_live_protection(&intent, Decimal::ONE, &changed).is_err());
+        changed = p.clone();
+        changed.position_side = "long".into();
+        assert!(verified_live_protection(&intent, Decimal::ONE, &changed).is_ok());
+        changed = p.clone();
+        changed.failure_code = "failure".into();
+        assert!(verified_live_protection(&intent, Decimal::ONE, &changed).is_err());
+        changed = p.clone();
+        changed.algo_order_id.clear();
+        assert!(verified_live_protection(&intent, Decimal::ONE, &changed).is_err());
+        assert!(verified_live_protection(&intent, Decimal::ZERO, &p).is_err());
+        let mut short_client = intent;
+        short_client.client_order_id = "short".into();
+        assert_eq!(
+            verified_live_protection(&short_client, Decimal::ONE, &p),
+            Err("PROTECTION_CLIENT_ID_INVALID".into())
+        );
+    }
+
+    #[test]
+    fn e2_position_source_does_not_treat_malformed_exposure_as_flat() {
+        assert_eq!(
+            verified_position_quantity(["0", "0"].into_iter()),
+            Ok(Decimal::ZERO)
+        );
+        assert_eq!(
+            verified_position_quantity(["0.5", "-0.25"].into_iter()),
+            Ok(dec("0.75").unwrap())
+        );
+        assert_eq!(
+            verified_position_quantity(["0", "unreadable"].into_iter()),
+            Err("POSITION_QUANTITY_UNVERIFIED".into())
+        );
+        assert_eq!(
+            verified_position_quantity(["79228162514264337593543950335", "1"].into_iter()),
+            Err("POSITION_QUANTITY_OVERFLOW".into())
+        );
+    }
+
+    #[test]
+    fn e2_position_direction_is_identical_for_net_status_census_and_recovery() {
+        let one = Decimal::ONE;
+        let half = dec("0.5").unwrap();
+        assert_eq!(
+            verified_venue_position_direction("net", "1"),
+            Ok(Some(("long", one)))
+        );
+        assert_eq!(
+            verified_venue_position_direction("net", "-0.5"),
+            Ok(Some(("short", half)))
+        );
+        assert_eq!(
+            verified_intent_position_quantity("long", [("net", "0.25"), ("net", "0.75")]),
+            Ok(one)
+        );
+        assert_eq!(
+            verified_intent_position_quantity("short", [("net", "-0.5")]),
+            Ok(half)
+        );
+        assert_eq!(
+            verified_intent_position_quantity("long", [("net", "-0.5")]),
+            Err("VENUE_POSITION_OPPOSITE_EXPOSURE_UNVERIFIED".into())
+        );
+        assert_eq!(
+            verified_intent_position_quantity("short", [("long", "0")]),
+            Ok(Decimal::ZERO)
+        );
+        assert_eq!(
+            verified_venue_position_direction("long", "1"),
+            Ok(Some(("long", one)))
+        );
+        assert_eq!(
+            verified_venue_position_direction("short", "0.5"),
+            Ok(Some(("short", half)))
+        );
+        for side in ["long", "short", "net"] {
+            assert_eq!(verified_venue_position_direction(side, "0"), Ok(None));
+        }
+        assert_eq!(
+            verified_venue_position_direction("long", "-1"),
+            Err("VENUE_POSITION_SIDE_QUANTITY_MISMATCH".into())
+        );
+        assert_eq!(
+            verified_venue_position_direction("unknown", "0"),
+            Err("VENUE_POSITION_SIDE_UNVERIFIED".into())
+        );
+        assert_eq!(
+            verified_venue_position_direction("unknown", "1"),
+            Err("VENUE_POSITION_SIDE_UNVERIFIED".into())
+        );
+        assert_eq!(
+            verified_venue_position_direction("net", "bad"),
+            Err("VENUE_POSITION_QUANTITY_UNVERIFIED".into())
+        );
+    }
+
+    #[test]
+    fn e2_cleanup_does_not_remove_protection_for_any_unverified_hedge_side() {
+        let instrument = "BTC-USDT-SWAP";
+        assert!(
+            verify_instrument_is_flat(
+                instrument,
+                [
+                    (instrument, "0"),
+                    (instrument, "0"),
+                    ("ETH-USDT-SWAP", "20"),
+                ]
+            )
+            .is_ok()
+        );
+        assert_eq!(
+            verify_instrument_is_flat(instrument, [(instrument, "0"), (instrument, "-0.2"),]),
+            Err("PROTECTION_STILL_REQUIRED".into())
+        );
+        assert_eq!(
+            verify_instrument_is_flat(instrument, [(instrument, "unreadable")]),
+            Err("POSITION_QUANTITY_UNVERIFIED".into())
+        );
+        assert_eq!(
+            verify_instrument_is_flat(
+                instrument,
+                [
+                    (instrument, "79228162514264337593543950335"),
+                    (instrument, "1"),
+                ]
+            ),
+            Err("POSITION_QUANTITY_OVERFLOW".into())
+        );
+    }
+
+    #[test]
+    fn e2_replace_requires_independent_terminal_zero_fill_order_readback() {
+        let intent = StoredIntent {
+            intent_id: "intent".into(),
+            client_order_id: "client".into(),
+            instrument_id: "BTC-USDT-SWAP".into(),
+            plan_hash: "a".repeat(64),
+            idempotency_key: "idem".into(),
+            request_hash: "request".into(),
+            state: IntentState::Cancelled,
+            revision: 2,
+            deadline: 40,
+            policy_revision: 1,
+            risk_increase: true,
+            exchange_order_id: Some("venue".into()),
+            incident: None,
+            plan: okx_execution::IntentPlan {
+                quantity: Decimal::ONE,
+                side: "buy".into(),
+                ..Default::default()
+            },
+        };
+        let order = okx_api::TradeOrderDetails {
+            instrument_id: intent.instrument_id.clone(),
+            order_id: "venue".into(),
+            client_order_id: "client".into(),
+            side: "buy".into(),
+            position_side: "long".into(),
+            trade_mode: "cross".into(),
+            order_type: "limit".into(),
+            price: "100".into(),
+            size: "1".into(),
+            accumulated_fill_size: "0".into(),
+            average_fill_price: "".into(),
+            state: "canceled".into(),
+            creation_time_ms: "1".into(),
+            update_time_ms: "2".into(),
+        };
+        assert!(verify_empty_canceled_order_for_replace(&intent, &order).is_ok());
+        let mut partial = order.clone();
+        partial.accumulated_fill_size = "0.1".into();
+        assert_eq!(
+            verify_empty_canceled_order_for_replace(&intent, &partial),
+            Err("REPLACE_PARTIAL_FILL_REQUIRES_EXPLICIT_CLOSE".into())
+        );
+        let mut nonterminal = order.clone();
+        nonterminal.state = "live".into();
+        assert_eq!(
+            verify_empty_canceled_order_for_replace(&intent, &nonterminal),
+            Err("REPLACE_CANCELED_READBACK_UNPROVEN".into())
+        );
+        let mut wrong_id = order.clone();
+        wrong_id.order_id = "other".into();
+        assert_eq!(
+            verify_empty_canceled_order_for_replace(&intent, &wrong_id),
+            Err("REPLACE_CANCELED_READBACK_UNPROVEN".into())
+        );
+        let mut missing_time = order.clone();
+        missing_time.update_time_ms = "0".into();
+        assert_eq!(
+            verify_empty_canceled_order_for_replace(&intent, &missing_time),
+            Err("REPLACE_CANCELED_READBACK_UNPROVEN".into())
+        );
+        let mut malformed = order;
+        malformed.accumulated_fill_size = "unreadable".into();
+        assert_eq!(
+            verify_empty_canceled_order_for_replace(&intent, &malformed),
+            Err("REPLACE_CANCELED_READBACK_UNPROVEN".into())
+        );
+    }
+
+    #[test]
+    fn e2_close_lots_require_one_side_positive_amounts_and_exact_sum() {
+        assert_eq!(
+            verified_close_lot_exposure([
+                ("long", dec("0.2").unwrap()),
+                ("long", dec("0.3").unwrap())
+            ])
+            .map(|(_, quantity)| quantity),
+            Ok(dec("0.5").unwrap())
+        );
+        assert!(verified_close_lot_exposure([("short", Decimal::ONE)]).is_ok());
+        assert_eq!(
+            verified_close_lot_exposure(std::iter::empty()),
+            Err("NO_ATTRIBUTED_POSITION_TO_CLOSE".into())
+        );
+        assert_eq!(
+            verified_close_lot_exposure([("long", Decimal::ONE), ("short", Decimal::ONE)]),
+            Err("CLOSE_LOT_MIXED_DIRECTIONS".into())
+        );
+        assert_eq!(
+            verified_close_lot_exposure([("long", Decimal::ZERO)]),
+            Err("CLOSE_LOT_QUANTITY_UNVERIFIED".into())
+        );
+        assert_eq!(
+            verified_close_lot_exposure([("long", -Decimal::ONE)]),
+            Err("CLOSE_LOT_QUANTITY_UNVERIFIED".into())
+        );
+        assert_eq!(
+            verified_close_lot_exposure([("unknown", Decimal::ONE)]),
+            Err("CLOSE_LOT_SIDE_UNATTESTED".into())
+        );
+        assert_eq!(
+            verified_close_lot_exposure([("long", Decimal::MAX), ("long", Decimal::ONE)]),
+            Err("CLOSE_LOT_QUANTITY_OVERFLOW".into())
+        );
+    }
+
+    #[test]
+    fn e1_status_never_promotes_known_quote_into_all_in_entry_permission() {
+        let empty = entry_cost_status(None, None).unwrap();
+        assert_eq!(empty["all_in_entry_cost_proven"], false);
+        assert!(empty["entry_budget_upper_reporting"].is_null());
+        assert_eq!(empty["reason_codes"][0], "ENTRY_QUOTE_NOT_RECORDED");
+        let quote = okx_execution::EntryQuoteEvidence {
+            schema: "okx.entry-known-quote/v1".into(),
+            account_key: "okx:real:test".into(),
+            installation_id: "install".into(),
+            intent_id: "intent".into(),
+            plan_hash: "a".repeat(64),
+            policy_revision: 1,
+            instrument_id: "BTC-USDT-SWAP".into(),
+            quantity: dec("0.01").unwrap(),
+            limit_price: dec("100").unwrap(),
+            contract_value: Decimal::ONE,
+            fee_rate: dec("0.0005").unwrap(),
+            maker_rate: "-0.0002".into(),
+            taker_rate: "0.0005".into(),
+            fee_level: "Lv1".into(),
+            fee_exchange_at: 1,
+            usd_per_usdt: Decimal::ONE,
+            notional_usdt: Decimal::ONE,
+            fee_usdt: dec("0.0005").unwrap(),
+            total_usdt: dec("1.0005").unwrap(),
+            total_usd: dec("1.0005").unwrap(),
+            fee_generation: format!("sha256:{}", "b".repeat(64)),
+            reference_generation: "ref".into(),
+            fee_received_at: 1,
+            conversion_digest: "c".repeat(64),
+            conversion_received_at: 1,
+            observed_at: 1,
+        };
+        let view = entry_cost_status(Some(quote.clone()), None).unwrap();
+        assert_eq!(view["state"], "historical_known_cost_only");
+        assert_eq!(view["known_entry_total_usd"], "1.0005");
+        assert_eq!(view["all_in_entry_cost_proven"], false);
+        assert!(view["entry_budget_upper_reporting"].is_null());
+        assert_eq!(view["reason_codes"].as_array().unwrap().len(), 5);
+        let admitted = okx_execution::EntryAdmissionEvidence {
+            schema: "okx.entry-admission/v2".into(),
+            account_key: quote.account_key.clone(),
+            installation_id: quote.installation_id.clone(),
+            intent_id: quote.intent_id.clone(),
+            plan_hash: quote.plan_hash.clone(),
+            quote_digest: "c".repeat(64),
+            admission_usd_per_usdt: Decimal::ONE,
+            other_entry_costs_upper_usd: Decimal::ONE,
+            entry_upper_usd: Decimal::new(20005, 4),
+            entry_proof_digest: "d".repeat(64),
+            observed_at: quote.observed_at,
+        };
+        let shown = entry_cost_status(Some(quote.clone()), Some(admitted.clone())).unwrap();
+        assert_eq!(shown["all_in_entry_cost_proven"], true);
+        assert_eq!(shown["entry_budget_upper_reporting"], "2.0005");
+        assert_eq!(shown["authorization"], "COST_PROOF_ONLY_NOT_POST_AUTHORITY");
+        let mut mismatched = admitted;
+        mismatched.plan_hash = "different".into();
+        assert_eq!(
+            entry_cost_status(Some(quote.clone()), Some(mismatched)).unwrap_err(),
+            "ENTRY_ADMISSION_READBACK_MISMATCH"
+        );
+        let mut tampered = quote;
+        tampered.total_usd = Decimal::ONE;
+        assert_eq!(
+            entry_cost_status(Some(tampered), None).unwrap_err(),
+            "ENTRY_QUOTE_READBACK_MISMATCH"
+        );
     }
 }

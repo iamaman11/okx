@@ -150,12 +150,34 @@ impl Default for RateBudgetState {
 
 #[derive(Debug, Clone, Default)]
 pub struct RateBudget {
+    // One mutable backend; only authenticated-user domains are namespaced.
     inner: Arc<Mutex<RateBudgetState>>,
+    authenticated_user: Option<String>,
 }
 
 impl RateBudget {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Retain the same mutex across all accounts, but key exchange user
+    /// quotas by the verified account identity, not the observer API key.
+    pub fn for_authenticated_user(&self, user: &str) -> Self {
+        assert!(
+            !user.is_empty(),
+            "authenticated user scope must not be empty"
+        );
+        Self {
+            inner: self.inner.clone(),
+            authenticated_user: Some(user.to_owned()),
+        }
+    }
+
+    fn user_domain(&self, scope: Option<String>) -> Option<String> {
+        match self.authenticated_user.as_deref() {
+            Some(user) => Some(format!("user:{user}:{}", scope.unwrap_or_default())),
+            None => scope,
+        }
     }
 
     /// Read-only analytics may wait for the SAME native rate-domain capacity.
@@ -209,7 +231,7 @@ impl RateBudget {
                 key: RateDomainKey {
                     kind: RateDomainKind::PrivateRestUser,
                     endpoint: Some(path.to_owned()),
-                    scope,
+                    scope: self.user_domain(scope),
                 },
                 max_requests,
                 window_ms,
@@ -243,7 +265,8 @@ impl RateBudget {
             (RateOperationClass::CancelOrder, None) => RateDomainKind::TradeCancelInstrument,
             _ => RateDomainKind::WsOrderUser,
         };
-        let trade_scope = instrument_family.unwrap_or(instrument_id).to_owned();
+        let trade_scope =
+            self.user_domain(Some(instrument_family.unwrap_or(instrument_id).to_owned()));
         let mut domains = vec![RateWindowSpec {
             key: RateDomainKey {
                 kind: trade_domain,
@@ -256,7 +279,7 @@ impl RateBudget {
                     }
                     .to_owned(),
                 ),
-                scope: Some(trade_scope),
+                scope: trade_scope,
             },
             max_requests: TRADE_INSTRUMENT_LIMIT_PER_2S,
             window_ms: TRADE_WINDOW_MS,
@@ -271,7 +294,7 @@ impl RateBudget {
                 key: RateDomainKey {
                     kind: RateDomainKind::SubaccountAggregate,
                     endpoint: None,
-                    scope: Some("authenticated_subaccount".to_owned()),
+                    scope: self.user_domain(Some("authenticated_subaccount".to_owned())),
                 },
                 max_requests: current_limit,
                 window_ms: TRADE_WINDOW_MS,
@@ -622,6 +645,40 @@ mod tests {
             .await
             .unwrap();
         assert!(started.elapsed() >= Duration::from_millis(1_500));
+    }
+
+    #[test]
+    fn authenticated_user_buckets_are_isolated_but_public_ip_is_shared() {
+        let root = RateBudget::new();
+        let a_observer = root.for_authenticated_user("uid-a");
+        let a_executor = root.for_authenticated_user("uid-a");
+        let b_observer = root.for_authenticated_user("uid-b");
+        let config_a = a_observer.private_rest_plan("/api/v5/account/config", &[]);
+        let config_b = b_observer.private_rest_plan("/api/v5/account/config", &[]);
+        assert_ne!(config_a.domains[0].key, config_b.domains[0].key);
+        for _ in 0..5 {
+            a_observer.admit(&config_a).unwrap();
+        }
+        assert!(!a_executor.admit(&config_a).unwrap_err().request_sent);
+        for _ in 0..5 {
+            b_observer.admit(&config_b).unwrap();
+        }
+        assert!(!b_observer.admit(&config_b).unwrap_err().request_sent);
+
+        let a_place =
+            a_observer.trade_rest_plan(RateOperationClass::PlaceOrder, "BTC-USDT-SWAP", None);
+        let b_place =
+            b_observer.trade_rest_plan(RateOperationClass::PlaceOrder, "BTC-USDT-SWAP", None);
+        assert_ne!(a_place.domains[0].key, b_place.domains[0].key);
+        assert_ne!(a_place.domains[1].key, b_place.domains[1].key);
+
+        let public_a = a_observer.public_rest_plan("/api/v5/public/time", &[]);
+        let public_b = b_observer.public_rest_plan("/api/v5/public/time", &[]);
+        assert_eq!(public_a.domains[0].key, public_b.domains[0].key);
+        for _ in 0..5 {
+            a_observer.admit(&public_a).unwrap();
+        }
+        assert!(!b_observer.admit(&public_b).unwrap_err().request_sent);
     }
 
     #[test]

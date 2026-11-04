@@ -7,6 +7,23 @@ on:
     branches:
       - main
   workflow_dispatch:
+    inputs:
+      target_case:
+        description: 'Targeted Windows T09, B1 prerequisite or S2-05 CAS (not 26/26)'
+        type: choice
+        required: false
+        default: T09.6
+        options:
+          - T09.1
+          - T09.5
+          - B1
+          - S2-05
+          - T10-14
+          - T09.3
+          - T09.4
+          - T09.6
+          - T09.7
+          - T09.8
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -20,6 +37,7 @@ permissions:
 jobs:
   classify:
     name: classify
+    if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
     outputs:
       build_required: ${{ steps.classify.outputs.build_required }}
@@ -99,6 +117,12 @@ jobs:
       - name: Verify versioned SQLite account ledger schema
         run: python3 scripts/check_ledger_sql.py
 
+      - name: Verify exact T09/T10 required-case manifest
+        run: node scripts/run-trade-integration.mjs --list
+
+      - name: Reject incomplete or fabricated T09/T10 runner evidence
+        run: node scripts/run-trade-integration.mjs --self-test
+
       - name: Verify clean Engine product contract
         run: |
           python3 scripts/check_product_contract.py --self-test
@@ -124,6 +148,8 @@ jobs:
           components: rustfmt, clippy
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          cache-on-failure: true
 
       - name: Format
         run: cargo fmt --all -- --check
@@ -147,10 +173,26 @@ jobs:
           set -euo pipefail
           # Run in the same job/toolchain that already compiled native SQL.
           # No new runner or production transport, no additional Rust rebuild.
+          # Native SQL creates actual immutable terminal fill/bill admission
+          # and campaign source *before* the Worker financial CAS fixture.
+          # This is a single offline CI composition, no real exchange POST.
+          OKX_E1_BRIDGE_SOURCE_PATH="$RUNNER_TEMP/e1-native-sql-source.json" \
+            cargo test --locked -p okx-execution --lib \
+              e1_e2_native_real_fee_sources_baseline_and_second_admission_under_ten -- --nocapture
+          test -s "$RUNNER_TEMP/e1-native-sql-source.json"
           pushd cloudflare/okx-mcp
           npm ci --ignore-scripts --no-audit --no-fund
-          OKX_A2_TRACE=1 npm run check | tee "$RUNNER_TEMP/a2-worker-cas.log"
+          OKX_E1_BRIDGE_SOURCE_JSON="$(cat "$RUNNER_TEMP/e1-native-sql-source.json")" \
+            OKX_A2_TRACE=1 npm run check | tee "$RUNNER_TEMP/a2-worker-cas.log"
           popd
+          test "$(grep -c '^E1_SQL_WORKER_BRIDGE_TRACE_V1:' "$RUNNER_TEMP/a2-worker-cas.log")" -eq 1
+          sed -n 's/^E1_SQL_WORKER_BRIDGE_TRACE_V1://p' "$RUNNER_TEMP/a2-worker-cas.log" \
+            > "$RUNNER_TEMP/e1-worker-riskbook.json"
+          test -s "$RUNNER_TEMP/e1-worker-riskbook.json"
+          OKX_E1_BRIDGE_SOURCE_PATH="$RUNNER_TEMP/e1-native-sql-source.json" \
+            OKX_E1_BRIDGE_RESULT_PATH="$RUNNER_TEMP/e1-worker-riskbook.json" \
+            cargo test --locked -p okx-execution --lib \
+              e1_worker_finance_receipt_roundtrip_matches_native_sql_after_restart -- --ignored --nocapture
           test "$(grep -c '^A2_SQL_BRIDGE_TRACE_V1:' "$RUNNER_TEMP/a2-worker-cas.log")" -eq 1
           sed -n 's/^A2_SQL_BRIDGE_TRACE_V1://p' "$RUNNER_TEMP/a2-worker-cas.log" > "$RUNNER_TEMP/a2-worker-governance.json"
           test -s "$RUNNER_TEMP/a2-worker-governance.json"
@@ -158,6 +200,11 @@ jobs:
             cargo test --locked -p okx-protocol --lib worker_do_policy_frames_decode_and_fail_closed_in_native_protocol -- --ignored --nocapture
           OKX_A2_TRACE_PATH="$RUNNER_TEMP/a2-worker-governance.json" \
             cargo test --locked -p okx-execution --lib central_worker_cas_trace_native_sql_readback_and_restart -- --ignored --nocapture
+
+      - name: Real Rust Native WSS to persisted Worker SQLite DO (no exchange POST)
+        timeout-minutes: 8
+        working-directory: cloudflare/okx-mcp
+        run: OKX_NATIVE_WORKER_INTEGRATION=1 node scripts/test-runtime-do.mjs
 
 
   cloudflare-mcp:
@@ -183,6 +230,24 @@ jobs:
 
       - name: Typecheck
         run: npm run check
+      - name: Accept production RuntimeSession backed by persisted workerd SQLite
+        run: node scripts/test-runtime-do.mjs
+
+      # B1/#449 T10-07: real SQLite-backed Worker shared-cap prerequisite.
+      # This is NOT Native/SQL T10-07 acceptance; mandatory 26-case gate stays blocked.
+      - name: B1 Worker two-account shared-cap regression (component only)
+        working-directory: .
+        run: |
+          node scripts/trade-integration/worker-shared-cap.mjs --self-test
+          node scripts/trade-integration/worker-shared-cap.mjs --artifacts "${{ runner.temp }}/b1-worker-cap"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: b1-worker-only-${{ github.sha }}
+          path: ${{ runner.temp }}/b1-worker-cap
+          retention-days: 7
+          if-no-files-found: warn
+
       - name: Reject drift in generated MCP public contracts
         working-directory: cloudflare/okx-mcp
         run: git diff --exit-code -- contracts/tools.schema.json contracts/action-fixtures.json
@@ -192,7 +257,7 @@ jobs:
   linux:
     name: linux-core
     needs: [classify, architecture, linux-rust, cloudflare-mcp]
-    if: always()
+    if: always() && github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - name: Aggregate required Linux, architecture and Cloudflare gates
@@ -226,12 +291,38 @@ jobs:
           components: clippy
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          cache-on-failure: true
 
       - name: Clippy native Windows crates
         run: cargo clippy --locked -p okx-agent -p okx-host-control -p okx-host-launcher -p okx-execution --all-targets -- -D warnings
 
       - name: Test native Windows crates
         run: cargo test --locked -p okx-agent -p okx-host-control -p okx-host-launcher -p okx-execution
+
+      - name: Install locked production workerd test dependencies on Windows
+        if: github.event_name == 'pull_request'
+        shell: pwsh
+        run: |
+          npm ci --prefix cloudflare/okx-mcp --ignore-scripts --no-audit --no-fund
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Mandatory native Windows T09/T10 recorded acceptance
+        if: github.event_name == 'pull_request'
+        shell: pwsh
+        run: |
+          $artifacts = Join-Path $env:RUNNER_TEMP "trade-integration"
+          node scripts/run-trade-integration.mjs --suite t09,t10 --artifacts "$artifacts"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Upload T09/T10 acceptance evidence even on failure
+        if: always() && github.event_name == 'pull_request'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: t09-t10-native-${{ github.event.pull_request.head.sha }}
+          path: ${{ runner.temp }}\trade-integration
+          if-no-files-found: warn
+          retention-days: 14
 
       - name: K9 native two-heavy cancellation latency evidence
         shell: pwsh
@@ -302,4 +393,243 @@ jobs:
           path: ${{ runner.temp }}\okx-windows-bundle
           if-no-files-found: error
           compression-level: 9
+          retention-days: 14
+
+  # Manually dispatched from the existing CI workflow on the selected PR
+  # branch. No deployment, no exchange network and no relaxation of the
+  # mandatory 26-case pull_request gate.
+  windows-t09-preflight:
+    name: windows-t09-b1-s2-targeted
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: windows-latest
+    timeout-minutes: 35
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Bind exact source SHA and restrict target scenario
+        shell: pwsh
+        env:
+          OKX_TARGET_CASE: ${{ inputs.target_case || 'T09.6' }}
+        run: |
+          $head = (git rev-parse HEAD).Trim()
+          if ($head -ne $env:GITHUB_SHA) { throw "PREFLIGHT_HEAD_MISMATCH" }
+          if ($env:OKX_TARGET_CASE -notin @('T09.1','T09.3','T09.4','T09.5','T09.6','T09.7','T09.8','B1','S2-05','T10-14')) {
+            throw "PREFLIGHT_CASE_NOT_ALLOWED"
+          }
+          Write-Host "PREFLIGHT_HEAD=$head"
+          Write-Host "PREFLIGHT_CASE=$env:OKX_TARGET_CASE"
+          Write-Host "PREFLIGHT_SCOPE=TARGETED_ONLY_NOT_26_CASE_ACCEPTANCE"
+
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master snapshot 2026-09-29
+        with:
+          toolchain: 1.95.0
+          components: rustfmt
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          cache-on-failure: true
+
+      - name: Check Rust format without changing source
+        run: cargo fmt --all -- --check
+
+      - name: Install locked workerd test dependencies
+        shell: pwsh
+        run: |
+          npm ci --prefix cloudflare/okx-mcp --ignore-scripts --no-audit --no-fund
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Execute one Native/Worker scenario or B1/S2-05 prerequisite
+        shell: pwsh
+        env:
+          OKX_TARGET_CASE: ${{ inputs.target_case || 'T09.6' }}
+        run: |
+          if ($env:OKX_TARGET_CASE -notin @('T09.1','T09.3','T09.4','T09.5','T09.6','T09.7','T09.8','B1','S2-05','T10-14')) {
+            throw "PREFLIGHT_CASE_NOT_ALLOWED"
+          }
+          $artifacts = Join-Path $env:RUNNER_TEMP "trade-integration"
+          if ($env:OKX_TARGET_CASE -eq 'B1') {
+            $env:OKX_B1_SECOND_POSITIVE_PROBE = '1'
+            node scripts/trade-integration/b1-native-cap.mjs --artifacts "$artifacts"
+          } elseif ($env:OKX_TARGET_CASE -eq 'S2-05') {
+            $env:OKX_S2_05_POLICY_CAS_PROBE = '1'
+            node scripts/run-trade-integration.mjs --case T09.5 --artifacts "$artifacts"
+          } else {
+            node scripts/run-trade-integration.mjs --case $env:OKX_TARGET_CASE --artifacts "$artifacts"
+          }
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Preserve targeted evidence even on failure
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: native-targeted-${{ inputs.target_case || 'T09.6' }}-${{ github.sha }}
+          path: ${{ runner.temp }}\trade-integration
+          if-no-files-found: warn
+          retention-days: 14
+
+  # Opt-in autonomous Windows reproduction on the exact PR head.
+  # Triggered by PR synchronize only while the temporary PR title has
+  # [T09-REPRO]; intentionally does NOT substitute the mandatory ALL26 gate.
+  windows-t09-autonomous:
+    name: windows-t09-repro-${{ matrix.case_id }}
+    if: github.event_name == 'pull_request' && contains(github.event.pull_request.title, '[T09-REPRO]')
+    runs-on: windows-latest
+    timeout-minutes: 55
+    strategy:
+      fail-fast: false
+      matrix:
+        case_id: ['T09.3', 'T09.6', 'T09.7', 'T09.8']
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Pin the immutable PR HEAD
+        shell: pwsh
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
+          CASE_ID: ${{ matrix.case_id }}
+        run: |
+          $actual = (git rev-parse HEAD).Trim()
+          if ($actual -ne $env:EXPECTED_SHA) { throw "T09_REPRO_SOURCE_SHA_MISMATCH" }
+          Write-Host "T09_REPRO_HEAD=$actual"
+          Write-Host "T09_REPRO_CASE=$env:CASE_ID"
+          Write-Host "T09_REPRO_SCOPE=THREE_TARGETED_REPETITIONS_NOT_ALL26"
+
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master snapshot 2026-09-29
+        with:
+          toolchain: 1.95.0
+          components: rustfmt
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          cache-on-failure: true
+
+      - name: Check Rust formatting
+        run: cargo fmt --all -- --check
+
+      # Compile the exact Rust test harness before the nested Workerd run:
+      # its 115s/120s bootstrap deadlines measure runtime readiness, not a
+      # cold cargo build. No production timeout or finance guard is changed.
+      - name: Precompile Native SQL and Worker acceptance Rust harness
+        shell: pwsh
+        run: |
+          cargo test --locked -p okx-agent --lib --no-run
+          if ($LASTEXITCODE -ne 0) { throw "T09_REPRO_NATIVE_PREBUILD_FAILED" }
+
+      - name: Install pinned Workerd dependencies
+        shell: pwsh
+        run: |
+          npm ci --prefix cloudflare/okx-mcp --ignore-scripts --no-audit --no-fund
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Run three independent repetitions with separate evidence
+        shell: pwsh
+        env:
+          CASE_ID: ${{ matrix.case_id }}
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          node scripts/run-trade-integration.mjs --self-test
+          if ($LASTEXITCODE -ne 0) { throw "T09_REPRO_RUNNER_SELF_TEST_FAILED" }
+          $base = Join-Path $env:RUNNER_TEMP "t09-repro"
+          for ($repetition = 1; $repetition -le 3; $repetition++) {
+            $dir = Join-Path $base "repeat-$repetition"
+            New-Item -ItemType Directory -Force -Path $dir | Out-Null
+            "head=$env:EXPECTED_SHA case=$env:CASE_ID repeat=$repetition" |
+              Set-Content -Path (Join-Path $dir "source.txt")
+            Write-Host "T09_REPRO_BEGIN case=$env:CASE_ID repeat=$repetition"
+            node scripts/run-trade-integration.mjs --case $env:CASE_ID --artifacts "$dir/evidence" 2>&1 |
+              Tee-Object -FilePath (Join-Path $dir "console.log")
+            $status = $LASTEXITCODE
+            Write-Host "T09_REPRO_END case=$env:CASE_ID repeat=$repetition exit=$status"
+            if ($status -ne 0) { throw "T09_REPRO_CASE_FAILED:$($env:CASE_ID):repeat-$repetition" }
+          }
+
+      - name: Preserve each repetition even on failure
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: t09-repro-${{ matrix.case_id }}-${{ github.event.pull_request.head.sha }}
+          path: ${{ runner.temp }}\\t09-repro
+          if-no-files-found: warn
+          retention-days: 14
+
+# B1 uses its own Windows OS process/runner. Its source/SQL/workerd test
+  # must not alter the workload or maintenance cadence of mandatory ALL26.
+  # This is a PARTIAL Native prerequisite, not T09-MA/T10-07 acceptance.
+  b1-native:
+    name: windows-b1-native-prerequisite
+    needs: classify
+    if: github.event_name == 'pull_request' && needs.classify.outputs.build_required == 'true'
+    runs-on: windows-latest
+    timeout-minutes: 18
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de
+        with:
+          toolchain: 1.95.0
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          cache-on-failure: true
+      - name: Install locked production workerd test dependencies
+        run: npm ci --prefix cloudflare/okx-mcp --ignore-scripts --no-audit --no-fund
+      - name: Precompile actual Native/Worker child
+        run: cargo test --locked -p okx-agent --lib native_to_workerd_risk_summary_over_actual_websocket --no-run
+      - name: T10-14 isolated Native SQL owners prerequisite (not a required case PASS)
+        shell: pwsh
+        run: |
+          cargo test --locked -p okx-execution --lib blocked_a_sql_owner_does_not_delay_b_cancel_receipt -- --nocapture |
+            Tee-Object -FilePath "$env:RUNNER_TEMP\t10-14-native-sql.log"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $evidence = Get-Content -Raw -LiteralPath "$env:RUNNER_TEMP\t10-14-native-sql.log"
+          if ($evidence -notmatch 'T10_14_NATIVE_SQL_PREREQUISITE_V1:') {
+            throw "T10_14_NATIVE_SQL_RECEIPT_MISSING"
+          }
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: t10-14-sql-prerequisite-${{ github.event.pull_request.head.sha || github.sha }}
+          path: ${{ runner.temp }}\t10-14-native-sql.log
+          if-no-files-found: warn
+          retention-days: 7
+      - name: B1 Native A/B independent order ACK and central shared-cap denial (partial only)
+        env:
+          OKX_B1_SECOND_POSITIVE_PROBE: "1"
+        shell: pwsh
+        run: |
+          $artifacts = Join-Path $env:RUNNER_TEMP "b1-native"
+          node scripts/trade-integration/b1-native-cap.mjs --artifacts "$artifacts"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: b1-native-partial-${{ github.event.pull_request.head.sha || github.sha }}
+          path: ${{ runner.temp }}\b1-native
+          if-no-files-found: warn
+          retention-days: 7
+      # Actual Worker governance CAS after a signed Native ACK; T09.5
+      # verifies preserved original identity/hash/deadline and zero extra POST.
+      - name: S2-05 live Native/Worker policy CAS and semantic replay
+        shell: pwsh
+        env:
+          OKX_S2_05_POLICY_CAS_PROBE: "1"
+        run: |
+          $artifacts = Join-Path $env:RUNNER_TEMP "s2-05-policy-cas"
+          node scripts/run-trade-integration.mjs --case T09.5 --artifacts "$artifacts"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: s2-05-native-worker-${{ github.event.pull_request.head.sha || github.sha }}
+          path: ${{ runner.temp }}\s2-05-policy-cas
+          if-no-files-found: warn
           retention-days: 14

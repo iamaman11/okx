@@ -1,8 +1,10 @@
 import {isObject,type Json} from './shared.js';
+import {normalizeDecimal} from './risk_book.js';
 type Schema=Record<string,any>;
 const text=(max=128):Schema=>({type:'string',minLength:1,maxLength:max});
 const token={...text(),minLength:8,pattern:'^[A-Za-z0-9_-]+$'};
-const money={type:'string',pattern:'^(?!0+(\\.0+)?$)(0|[1-9]\\d{0,14})(\\.\\d{1,9})?$'};
+// Count all wire digits without binary floats or implicit rounding.
+const money={type:'string',pattern:'^(?!\\d{29})(?!0(?:\\.0+)?$)(?:0|[1-9]\\d*)(?:\\.\\d+)?$',maxLength:29};
 const integer=(min=0,max=Number.MAX_SAFE_INTEGER):Schema=>({type:'integer',minimum:min,maximum:max});
 // Enum values already constrain JSON types; omit redundant type to keep tools/list bounded.
 const choice=(...values:string[]):Schema=>({enum:values});
@@ -10,7 +12,7 @@ const array=(items:Schema,max=32):Schema=>({type:'array',items,maxItems:max,uniq
 const object=(properties:Schema,required=Object.keys(properties)):Schema=>({type:'object',properties,required,additionalProperties:false});
 const action=(name:string,props:Schema={},required=Object.keys(props)):Schema=>object({action:{const:name},...props},['action',...required]);
 const account=text();const mutation={idempotency_key:token};
-const limits=object({max_modelled_loss_usdt:money,max_order_loss_usdt:money,max_notional_usdt:{anyOf:[money,{type:'null'}]},max_leverage:{anyOf:[money,{type:'null'}]},max_daily_realized_loss_usdt:{anyOf:[money,{type:'null'}]},max_drawdown_ratio:{anyOf:[{type:'string',pattern:'^(?:0(?:\\.[0-9]{1,9})?|1(?:\\.0{1,9})?)$',maxLength:11},{type:'null'}]},allowed_instruments:array(text(64))});
+const limits=object({max_modelled_loss_usdt:money,max_order_loss_usdt:money,max_notional_usdt:{anyOf:[money,{type:'null'}]},max_leverage:{anyOf:[money,{type:'null'}]},max_daily_realized_loss_usdt:{anyOf:[money,{type:'null'}]},max_drawdown_ratio:{anyOf:[{type:'string',pattern:'^(?:0(?:\\.[0-9]{1,27})?|1(?:\\.0{1,27})?)$',maxLength:29},{type:'null'}]},allowed_instruments:array(text(64))});
 const limitsWithEntry=object({...limits.properties,max_entry_usd:money},limits.required);
 const sizing={oneOf:[object({contracts:money}),object({max_loss_usd:money}),object({entry_budget_usd:money})]};
 const constraints=object({type:choice('limit','market','post_only','ioc','fok'),limit_price:money,reference:text(),max_entry_usd:money,max_slippage_bps:integer(0,10000)},['type','max_slippage_bps']);
@@ -54,21 +56,21 @@ ACTION_SCHEMAS.diagnostics[0].allOf=[{anyOf:[{required:['account']},{required:['
 // The MCP tool is the permission/approval boundary. Do not mix preview
 // with real order submission under a single model-callable descriptor.
 const TOOL_NOTES:Record<string,{description:string;readOnlyHint:boolean;destructiveHint:boolean}>={
- accounts:{description:'Manage accounts and limits.',readOnlyHint:false,destructiveHint:true},
- strategies:{description:'Manage strategies; may trade.',readOnlyHint:false,destructiveHint:true},
- market:{description:'Read market data.',readOnlyHint:true,destructiveHint:false},
- research:{description:'Manage research.',readOnlyHint:false,destructiveHint:true},
- portfolio:{description:'Portfolio scenarios.',readOnlyHint:true,destructiveHint:false},
- diagnostics:{description:'Runtime diagnostics.',readOnlyHint:true,destructiveHint:false},
+ accounts:{description:'Accounts and limits.',readOnlyHint:false,destructiveHint:true},
+ strategies:{description:'Strategies; may trade.',readOnlyHint:false,destructiveHint:true},
+ market:{description:'Market data.',readOnlyHint:true,destructiveHint:false},
+ research:{description:'Research.',readOnlyHint:false,destructiveHint:true},
+ portfolio:{description:'Portfolio.',readOnlyHint:true,destructiveHint:false},
+ diagnostics:{description:'Diagnostics.',readOnlyHint:true,destructiveHint:false},
 };
 const TRADE_NOTES:Record<string,{description:string;readOnlyHint:boolean;destructiveHint:boolean}>={
- preview:{description:'Preview a trade; no order.',readOnlyHint:true,destructiveHint:false},
+ preview:{description:'Preview; no order.',readOnlyHint:true,destructiveHint:false},
  execute:{description:'Submit a real order; financial loss possible. Requires approval, account limits and STOP.',readOnlyHint:false,destructiveHint:true},
- status:{description:'Read trade status.',readOnlyHint:true,destructiveHint:false},
- cancel:{description:'Cancel an exchange order.',readOnlyHint:false,destructiveHint:true},
- close:{description:'Close a position by real exchange order.',readOnlyHint:false,destructiveHint:true},
- capabilities:{description:'Read trade permissions.',readOnlyHint:true,destructiveHint:false},
- preflight:{description:'Check readiness; no order.',readOnlyHint:true,destructiveHint:false},
+ status:{description:'Trade status.',readOnlyHint:true,destructiveHint:false},
+ cancel:{description:'Cancel venue order.',readOnlyHint:false,destructiveHint:true},
+ close:{description:'Close via real exchange order.',readOnlyHint:false,destructiveHint:true},
+ capabilities:{description:'Trade permissions.',readOnlyHint:true,destructiveHint:false},
+ preflight:{description:'Readiness; no order.',readOnlyHint:true,destructiveHint:false},
 };
 const annotation=(meta:{readOnlyHint:boolean;destructiveHint:boolean})=>({
  readOnlyHint:meta.readOnlyHint,destructiveHint:meta.destructiveHint,openWorldHint:false
@@ -81,7 +83,7 @@ function publicSchema(schema:Schema):Schema {
  const factor=(node:any):any=>{
   if(Array.isArray(node))return node.map(factor);
   if(node&&typeof node==='object'){
-   if(node.type==='string'&&node.pattern===money.pattern&&Object.keys(node).length===2){
+   if(node.type==='string'&&node.pattern===money.pattern&&node.maxLength===money.maxLength&&Object.keys(node).length===3){
     repeats++;return {$ref:'#/$defs/positiveDecimal'};
    }
    return Object.fromEntries(Object.entries(node).map(([k,v])=>[k,factor(v)]));
@@ -125,3 +127,65 @@ export function matches(s:Schema,v:unknown):boolean {
 export function validTool(name:string,args:unknown):boolean {if(name==='trade'&&isObject(args)&&['preview','execute'].includes(String(args.action))&&['open','add','replace'].includes(String(args.operation))&&!args.protection)return false;return !!ACTION_SCHEMAS[name]&&matches({oneOf:ACTION_SCHEMAS[name]},args)&&!(isObject(args)&&typeof args.start_ms==='number'&&typeof args.end_ms==='number'&&args.end_ms<=args.start_ms);}
 export function isExecutionMutation(type:unknown,action?:unknown):boolean{return type==='connect_account'||(type==='trade'&&action!=='preview'&&action!=='status')||(type==='strategies'&&!['list','status'].includes(String(action)))||(type==='research'&&['backtest','grid','cancel'].includes(String(action)));}
 export function executionProfilePermitsOperation(profile:unknown,_type:unknown):boolean{return profile==='engine';}
+
+// Semantic DTO matches the Native TradeRequest::Execute wire representation,
+// not raw MCP field order. Dynamic policy/strategy revisions are NOT request
+// identity. Absent optional fields become the existing serde defaults only.
+export function canonicalTradeSemantic(accountKey:string, request:unknown):string {
+  if(!isObject(request)||request.action!=="execute")
+    throw Error("INVALID_TRADE_SEMANTIC_INPUT");
+  const sizing=request.sizing;
+  const order=request.order;
+  if(!isObject(sizing)||!isObject(order))throw Error("INVALID_TRADE_SEMANTIC_INPUT");
+  const sizeFields=["contracts","max_loss_usd","entry_budget_usd"]
+    .filter(field=>field in sizing);
+  if(sizeFields.length!==1)throw Error("INVALID_TRADE_SEMANTIC_INPUT");
+  const positive=(value:unknown):string=>{
+    const normalized=normalizeDecimal(value);
+    if(normalized.canonical===null)throw Error(normalized.error_code);
+    return normalized.canonical;
+  };
+  const basis=sizeFields[0];
+  const normalizedOrder:Record<string,unknown>={
+    type:order.type,
+    limit_price:order.limit_price==null?null:positive(order.limit_price),
+    reference:order.reference??null,
+    max_slippage_bps:order.max_slippage_bps,
+  };
+  if(order.max_entry_usd!=null)
+    normalizedOrder.max_entry_usd=positive(order.max_entry_usd);
+  const inputProtection=request.protection;
+  let protection:Record<string,unknown>|null=null;
+  if(inputProtection!=null){
+    if(!isObject(inputProtection))throw Error("INVALID_TRADE_SEMANTIC_INPUT");
+    if("stop_price" in inputProtection)
+      protection={stop_price:positive(inputProtection.stop_price)};
+    else if("stop_distance_bps" in inputProtection)
+      protection={stop_distance_bps:inputProtection.stop_distance_bps};
+    else throw Error("INVALID_TRADE_SEMANTIC_INPUT");
+  }
+  const semanticRequest={
+    action:"execute",idempotency_key:request.idempotency_key,
+    operation:request.operation,strategy_instance:request.strategy_instance,
+    instrument:request.instrument,side:request.side,
+    sizing:{[basis]:positive(sizing[basis])},
+    order:normalizedOrder,protection,expires_in_ms:request.expires_in_ms,
+  };
+  const stable=(value:unknown):unknown=>{
+    if(Array.isArray(value))return value.map(stable);
+    if(isObject(value))return Object.fromEntries(
+      Object.entries(value).sort(([left],[right])=>left<right?-1:left>right?1:0)
+        .map(([key,child])=>[key,stable(child)])
+    );
+    return value;
+  };
+  return JSON.stringify(stable({
+    account_key:accountKey,request:semanticRequest,
+    schema:"okx.trade.semantic/v1",
+  }));
+}
+export async function tradeSemanticSha256(accountKey:string,request:unknown):Promise<string>{
+  const input=new TextEncoder().encode(canonicalTradeSemantic(accountKey,request));
+  const digest=await crypto.subtle.digest("SHA-256",input);
+  return Array.from(new Uint8Array(digest),v=>v.toString(16).padStart(2,"0")).join("");
+}

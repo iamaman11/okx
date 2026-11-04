@@ -15,6 +15,7 @@ CREATE TABLE orders(order_id TEXT PRIMARY KEY,exchange_order_id TEXT UNIQUE,inte
 CREATE INDEX idx_orders_intent ON orders(intent_id);
 CREATE INDEX idx_orders_active ON orders(state,order_id);
 CREATE TABLE fills(fill_id TEXT PRIMARY KEY,instrument_id TEXT NOT NULL,trade_id TEXT NOT NULL,exchange_order_id TEXT NOT NULL,intent_id TEXT REFERENCES intents(intent_id),time INTEGER NOT NULL,qty TEXT NOT NULL,price TEXT NOT NULL,fee TEXT NOT NULL,currency TEXT NOT NULL,side TEXT NOT NULL CHECK(side IN('buy','sell')),UNIQUE(instrument_id,trade_id,exchange_order_id)) STRICT;
+CREATE INDEX idx_fills_intent ON fills(intent_id,fill_id);
 CREATE INDEX idx_fills_time ON fills(time,fill_id);
 CREATE INDEX idx_fills_instrument_time ON fills(instrument_id,time,fill_id);
 CREATE TABLE fill_projection_pending(fill_id TEXT PRIMARY KEY REFERENCES fills(fill_id),side TEXT NOT NULL) STRICT;
@@ -33,6 +34,7 @@ CREATE INDEX idx_finance_source_component ON finance_entries(source_ref,componen
 CREATE TABLE finance_totals(currency TEXT NOT NULL,component TEXT NOT NULL,amount TEXT NOT NULL,PRIMARY KEY(currency,component)) STRICT;
 CREATE TABLE instance_finance_totals(instance_id TEXT NOT NULL REFERENCES strategy_instances(instance_id),currency TEXT NOT NULL,component TEXT NOT NULL,amount TEXT NOT NULL,PRIMARY KEY(instance_id,currency,component)) STRICT;
 CREATE TABLE finance_source_links(entry_id TEXT NOT NULL REFERENCES finance_entries(entry_id),source_ref TEXT NOT NULL,PRIMARY KEY(entry_id,source_ref)) STRICT;
+CREATE INDEX idx_finance_links_source ON finance_source_links(source_ref,entry_id);
 CREATE TABLE nav_points(scope_id TEXT NOT NULL,time INTEGER NOT NULL,source_version TEXT NOT NULL,equity TEXT NOT NULL,pnl TEXT NOT NULL,flows TEXT NOT NULL,currency TEXT NOT NULL,coverage TEXT NOT NULL,mark_source TEXT NOT NULL,PRIMARY KEY(scope_id,time,source_version)) STRICT;
 -- Pure lookup acceleration: strategy NAV as-of queries filter by immutable revision.
 CREATE INDEX idx_nav_scope_version_time ON nav_points(scope_id,source_version,time);
@@ -45,6 +47,8 @@ CREATE TABLE source_cursors(source TEXT NOT NULL,stream_partition TEXT NOT NULL,
 CREATE TABLE risk_receipts(reservation_key TEXT PRIMARY KEY,intent_id TEXT NOT NULL UNIQUE REFERENCES intents(intent_id),account_key TEXT NOT NULL,installation_id TEXT NOT NULL,instance_id TEXT,plan_hash TEXT NOT NULL,policy_revision INTEGER NOT NULL,receipt_hash TEXT NOT NULL,requested_loss_usd TEXT NOT NULL,conversion_digest TEXT NOT NULL,state TEXT NOT NULL) STRICT;
 CREATE INDEX idx_risk_receipts_active ON risk_receipts(state,intent_id);
 CREATE TABLE operation_receipts(operation_id TEXT PRIMARY KEY,kind TEXT NOT NULL,request_hash TEXT NOT NULL,result_ref TEXT NOT NULL,committed_at INTEGER NOT NULL) STRICT;
+CREATE TRIGGER IF NOT EXISTS immutable_entry_quote_update BEFORE UPDATE ON operation_receipts WHEN OLD.kind='ENTRY_QUOTE_UNPROVEN' BEGIN SELECT RAISE(ABORT,'IMMUTABLE_ENTRY_QUOTE'); END;
+CREATE TRIGGER IF NOT EXISTS immutable_entry_quote_delete BEFORE DELETE ON operation_receipts WHEN OLD.kind='ENTRY_QUOTE_UNPROVEN' BEGIN SELECT RAISE(ABORT,'IMMUTABLE_ENTRY_QUOTE'); END;
 CREATE TABLE account_policy(singleton INTEGER PRIMARY KEY CHECK(singleton=1),revision INTEGER NOT NULL,paused INTEGER NOT NULL CHECK(paused IN(0,1)),campaign_id TEXT NOT NULL,campaign_limit TEXT NOT NULL,campaign_loss TEXT NOT NULL) STRICT;
 CREATE TABLE storage_recovery(singleton INTEGER PRIMARY KEY CHECK(singleton=1),requires_reconcile INTEGER NOT NULL CHECK(requires_reconcile IN(0,1)),backup_at INTEGER,reconciled_evidence TEXT) STRICT;
 PRAGMA user_version=2;

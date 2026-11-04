@@ -6,13 +6,13 @@ use crate::{
     execution_runtime::ExecutionRuntime,
     okx_credentials::{NamedAccountCredentials, load_native_account_credentials},
 };
-use okx_api::{AccountApi, OkxRestClient, RateBudget};
+use okx_api::{AccountApi, Credentials, OkxEnvironment, OkxRestClient, RateBudget};
 use okx_execution::{AccountMeta, AccountStoreHandle, OpeningSnapshot};
 use okx_protocol::{
     account_catalog_proto,
     accounts::{AccountKey, Environment, VerifiedAccountConfig, valid_reference},
 };
-use okx_runtime::{PrivateWsCoordinator, PrivateWsHandle};
+use okx_runtime::{LiveWsConnector, PrivateWsCoordinator, PrivateWsHandle, WsConnector};
 use rust_decimal::Decimal;
 use sha2::{Digest, Sha256};
 use std::{
@@ -108,6 +108,34 @@ pub struct AccountResources {
 impl Drop for AccountResources {
     fn drop(&mut self) {
         let _ = self.source_shutdown.send(true);
+    }
+}
+
+/// One verified account bootstrap, regardless of who delivers HTTP/WS bytes.
+pub(crate) struct PreparedAccountClients {
+    environment: OkxEnvironment,
+    observer: OkxRestClient,
+    executor: OkxRestClient,
+    observer_login: Credentials,
+    ws_connector: Arc<dyn WsConnector>,
+}
+
+impl PreparedAccountClients {
+    fn live(credentials: NamedAccountCredentials, budget: RateBudget) -> AgentResult<Self> {
+        let observer = OkxRestClient::with_rate_budget(
+            credentials.environment,
+            credentials.observer.clone(),
+            budget.clone(),
+        )?;
+        let executor =
+            OkxRestClient::with_rate_budget(credentials.environment, credentials.executor, budget)?;
+        Ok(Self {
+            environment: credentials.environment,
+            observer,
+            executor,
+            observer_login: credentials.observer,
+            ws_connector: Arc::new(LiveWsConnector),
+        })
     }
 }
 
@@ -387,28 +415,38 @@ impl AccountRuntimeRegistry {
         credentials: NamedAccountCredentials,
         initialize: bool,
     ) -> AgentResult<Arc<AccountResources>> {
-        let uid = verify_credentials(&credentials, self.rate_budget.clone()).await?;
+        let budget = self
+            .rate_budget
+            .for_authenticated_user(&configuration.account_key.verified_uid);
+        let clients = PreparedAccountClients::live(credentials, budget)?;
+        let leases = crate::config::default_root().join("account-leases");
+        self.open_resources_with_clients(configuration, clients, initialize, &leases)
+            .await
+    }
+
+    async fn open_resources_with_clients(
+        &self,
+        configuration: VerifiedAccountConfig,
+        clients: PreparedAccountClients,
+        initialize: bool,
+        lease_root: &Path,
+    ) -> AgentResult<Arc<AccountResources>> {
+        let uid =
+            verify_client_pair(clients.environment, &clients.observer, &clients.executor).await?;
         if uid != configuration.account_key.verified_uid
-            || credentials.environment.demo
+            || clients.environment.demo
                 != (configuration.account_key.environment == Environment::Demo)
         {
             return Err(AgentError::FinancialCaptureTask(
                 "ACCOUNT_IDENTITY_MISMATCH".into(),
             ));
         }
-        let observer = AccountBootstrapper::new(OkxRestClient::with_rate_budget(
-            credentials.environment,
-            credentials.observer.clone(),
-            self.rate_budget.clone(),
-        )?);
+        let observer = AccountBootstrapper::new(clients.observer);
         let root = self
             .root
             .join("accounts")
             .join(key_hash(&configuration.account_key));
-        let identity_lease = acquire_identity_lease(
-            &crate::config::default_root().join("account-leases"),
-            &configuration.account_key,
-        )?;
+        let identity_lease = acquire_identity_lease(lease_root, &configuration.account_key)?;
         fs::create_dir_all(&root)?;
         let database = root.join("account.sqlite");
         let store = if initialize {
@@ -524,18 +562,18 @@ impl AccountRuntimeRegistry {
                 |s| s.source_generation_base(),
             )
             .await?;
-        let execution = Arc::new(ExecutionRuntime::new(
+        let execution = Arc::new(ExecutionRuntime::from_client(
             store,
-            credentials.environment,
-            credentials.executor,
+            clients.executor,
+            clients.environment,
             uid.clone(),
-            self.rate_budget.clone(),
-        )?);
-        let (coordinator, private_ws) = PrivateWsCoordinator::new_with_rate_budget_seed(
-            credentials.environment,
-            credentials.observer,
+        ));
+        let (coordinator, private_ws) = PrivateWsCoordinator::new_with_connector_seed(
+            clients.environment,
+            clients.observer_login,
             self.rate_budget.clone(),
             source_generation_seed,
+            clients.ws_connector,
         );
         let (shutdown, receiver) = watch::channel(false);
         let resources = Arc::new(AccountResources {
@@ -555,6 +593,21 @@ impl AccountRuntimeRegistry {
         });
         start_sources(&resources, coordinator, receiver);
         Ok(resources)
+    }
+
+    /// Test-only composition. No alternate bootstrap, bypass or installed route.
+    /// All identity, permission, SQL and capture checks above still execute.
+    #[cfg(test)]
+    pub(crate) async fn connect_prepared(
+        &self,
+        configuration: VerifiedAccountConfig,
+        clients: PreparedAccountClients,
+    ) -> AgentResult<()> {
+        let leases = self.root.join("account-leases");
+        let resources = self
+            .open_resources_with_clients(configuration, clients, true, &leases)
+            .await?;
+        self.publish(resources).await
     }
 
     pub async fn shutdown(&self) {
@@ -585,29 +638,35 @@ pub(crate) async fn verify_credentials(
     credentials: &NamedAccountCredentials,
     budget: RateBudget,
 ) -> AgentResult<String> {
-    let observer = AccountApi::new(OkxRestClient::with_rate_budget(
+    let observer = OkxRestClient::with_rate_budget(
         credentials.environment,
         credentials.observer.clone(),
         budget.clone(),
-    )?);
-    let executor = AccountApi::new(OkxRestClient::with_rate_budget(
+    )?;
+    let executor = OkxRestClient::with_rate_budget(
         credentials.environment,
         credentials.executor.clone(),
         budget,
-    )?);
+    )?;
+    verify_client_pair(credentials.environment, &observer, &executor).await
+}
+
+async fn verify_client_pair(
+    environment: OkxEnvironment,
+    observer: &OkxRestClient,
+    executor: &OkxRestClient,
+) -> AgentResult<String> {
+    let observer = AccountApi::new(observer.clone());
+    let executor = AccountApi::new(executor.clone());
     let (observer, executor) = tokio::try_join!(observer.config(), executor.config())?;
-    let result = if credentials.environment.demo {
+    let result = if environment.demo {
         crate::execution_preflight::evaluate_demo_executor_preflight(
-            credentials.environment,
+            environment,
             &observer,
             &executor,
         )
     } else {
-        crate::execution_preflight::evaluate_executor_preflight(
-            credentials.environment,
-            &observer,
-            &executor,
-        )
+        crate::execution_preflight::evaluate_executor_preflight(environment, &observer, &executor)
     };
     if !result.accepted {
         return Err(AgentError::FinancialCaptureTask(
@@ -784,6 +843,1634 @@ pub fn build_release() -> &'static str {
 }
 
 #[cfg(test)]
+pub(crate) mod recorded_support {
+    use super::*;
+    use okx_api::{
+        HttpRequest, HttpSend, HttpStatusCode, HttpTransport, OkxError, RawHttpResponse,
+    };
+    use std::time::Instant;
+
+    /// A raw external GET response, consumed once by the same production
+    /// parser as a live HTTP response. Query expectations are an explicit
+    /// subset: dynamic bounded capture windows are not generated by tests.
+    pub(crate) struct RecordedGet {
+        pub(crate) access_key: String,
+        pub(crate) path: String,
+        pub(crate) required_query: Vec<(String, String)>,
+        pub(crate) raw_response: Vec<u8>,
+    }
+
+    /// One pre-recorded response for one exact signed executor POST. This is
+    /// only a transport transcript, never an exchange/account state machine.
+    pub(crate) struct RecordedPost {
+        pub(crate) access_key: String,
+        pub(crate) path: String,
+        pub(crate) expected_body: serde_json::Value,
+        pub(crate) raw_response: Vec<u8>,
+    }
+
+    // Bind immutable external GET bytes to the order ID from a signed POST ACK.
+    // No matching, fills, order creation or money is simulated in this port.
+    fn recorded_order_source_matches(
+        acknowledged: &[(String, String, String)],
+        access_key: &str,
+        client_id: &str,
+        raw_get: &[u8],
+    ) -> bool {
+        let matched = acknowledged
+            .iter()
+            .filter(|(key, client, _)| key == access_key && client == client_id)
+            .collect::<Vec<_>>();
+        if matched.len() != 1 {
+            return false;
+        }
+        let Ok(envelope) = serde_json::from_slice::<serde_json::Value>(raw_get) else {
+            return false;
+        };
+        let Some(data) = envelope["data"].as_array() else {
+            return false;
+        };
+        data.len() == 1
+            && data[0]["ordId"].as_str() == Some(matched[0].2.as_str())
+            && data[0]["clOrdId"].as_str() == Some("__REQUEST_CL_ORD_ID__")
+    }
+
+    // Bind history rows only to the already-observed signed POST ACK.
+    fn bind_recorded_history_ids(
+        acknowledgements: &[(String, String, String)],
+        account: &str,
+        raw: Vec<u8>,
+    ) -> Result<Vec<u8>, OkxError> {
+        if !raw
+            .windows("__REQUEST_CL_ORD_ID__".len())
+            .any(|bytes| bytes == b"__REQUEST_CL_ORD_ID__")
+        {
+            return Ok(raw);
+        }
+        let mut envelope: serde_json::Value = serde_json::from_slice(&raw)?;
+        let rows = envelope["data"]
+            .as_array_mut()
+            .ok_or_else(|| OkxError::Response("TRANSCRIPT_HISTORY_ROWS_MISSING".into()))?;
+        if rows.is_empty() {
+            return Err(OkxError::Response("TRANSCRIPT_HISTORY_ROWS_MISSING".into()));
+        }
+        // Production financial history is read with the EXECUTOR key,
+        // identical to the signing identity that received the create ACK.
+        if !account.starts_with("fixture-executor-") {
+            return Err(OkxError::Response(
+                "TRANSCRIPT_HISTORY_EXECUTOR_IDENTITY_INVALID".into(),
+            ));
+        }
+        for row in rows {
+            if row["clOrdId"] != "__REQUEST_CL_ORD_ID__" {
+                return Err(OkxError::Response(
+                    "TRANSCRIPT_HISTORY_CLIENT_ID_UNBOUND".into(),
+                ));
+            }
+            let order = row["ordId"]
+                .as_str()
+                .ok_or_else(|| OkxError::Response("TRANSCRIPT_HISTORY_ORDER_ID_UNBOUND".into()))?;
+            let matched = acknowledgements
+                .iter()
+                .filter(|(key, _, id)| key == account && id == order)
+                .collect::<Vec<_>>();
+            if matched.len() != 1 {
+                return Err(OkxError::Response(
+                    "TRANSCRIPT_HISTORY_ACK_ID_MISMATCH".into(),
+                ));
+            }
+            row["clOrdId"] = matched[0].1.clone().into();
+        }
+        serde_json::to_vec(&envelope).map_err(Into::into)
+    }
+
+    // Immutable external snapshots selected by an actual matching cancel ACK,
+    // never by the number or order of maintenance/Status GETs.
+    struct CausalAlgoScope {
+        query: Vec<(String, String)>,
+        before_ack: Vec<u8>,
+        after_ack: Vec<u8>,
+        before_reads: usize,
+        after_reads: usize,
+    }
+
+    // UID B's independent signed inventory is immutable; A's cancel ACK
+    // never selects or mutates this source.
+    struct StaticAlgoScope {
+        query: Vec<(String, String)>,
+        response: Vec<u8>,
+        reads: usize,
+    }
+
+    struct StaticAlgoInventory {
+        account: String,
+        source_received_at_ms: i64,
+        scopes: Vec<StaticAlgoScope>,
+    }
+
+    struct CausalAlgoReadGate {
+        entered: Arc<tokio::sync::Notify>,
+        resume: Arc<tokio::sync::Notify>,
+    }
+
+    struct CausalAlgoScenario {
+        account: String,
+        cancel_id: String,
+        acked: bool,
+        scopes: Vec<CausalAlgoScope>,
+        held_read: Option<CausalAlgoReadGate>,
+        source_received_at_ms: i64,
+    }
+
+    // The two signed API identities are different actors of the same verified
+    // OKX UID. A scripted venue inventory belongs to the UID, never the key.
+    fn verified_fixture_uid(actor: &str) -> Option<&'static str> {
+        let label = actor
+            .strip_prefix("fixture-observer-")
+            .or_else(|| actor.strip_prefix("fixture-executor-"))?;
+        match label {
+            "a" => Some("account-001"),
+            "b" => Some("account-002"),
+            _ => None,
+        }
+    }
+
+    // Each of 16 scopes has a predeclared budget for Status, post-ACK
+    // verification, source capture and maintenance. A missing scope, extra
+    // POST or exhausted bound fails closed, not as a financial denial.
+    const CAUSAL_ALGO_READS_PER_SCOPE_AND_PHASE: usize = 12;
+    const STATIC_ALGO_READS_PER_SCOPE: usize = 32;
+
+    #[derive(Default)]
+    pub(crate) struct RecordedAccountHttp {
+        pub(crate) requests: Mutex<Vec<String>>,
+        pub(crate) outbound_posts: Mutex<Vec<(String, String, serde_json::Value)>>,
+        /// Actual signed fee GETs delivered by this test transport:
+        /// (account API key, exchange ts, local delivery timestamp).
+        pub(crate) delivered_fees: Mutex<Vec<(String, String, i64)>>,
+        /// Strict test transcript GET denial paths only: no headers or secrets.
+        pub(crate) denied_routes: Mutex<Vec<String>>,
+        /// (signed account key, exact sent clOrdId, acknowledged ordId).
+        acknowledged_creates: Mutex<Vec<(String, String, String)>>,
+        posts: Mutex<Vec<RecordedPost>>,
+        reads: Mutex<Vec<RecordedGet>>,
+        // Bounded extra recorded GET bytes for read-only Preview retries
+        // after a proven LOCAL no-send rate defer. Required fixture pages
+        // remain mandatory and are consumed first; extras are never a
+        // fallback for missing routes or an unbounded exchange simulator.
+        optional_reads: Mutex<Vec<RecordedGet>>,
+        // Raw public time responses, never a synthesized exchange clock.
+        public_clock_reads: Mutex<Vec<Vec<u8>>>,
+        // Test-only count of raw public-clock GET deliveries; the same
+        // queue lock linearizes a generated external sample against its
+        // exactly-once consumption by the real production OKX clock parser.
+        public_clock_deliveries: AtomicU64,
+        strict_read_routes: Mutex<std::collections::BTreeSet<(String, String)>>,
+        causal_algos: Mutex<Option<CausalAlgoScenario>>,
+        static_algos: Mutex<Option<StaticAlgoInventory>>,
+        pub(crate) causal_algo_trace: Mutex<Vec<String>>,
+    }
+    impl RecordedAccountHttp {
+        pub(crate) fn expect_get(&self, page: RecordedGet) {
+            self.strict_read_routes
+                .lock()
+                .unwrap()
+                .insert((page.access_key.clone(), page.path.clone()));
+            self.reads.lock().unwrap().push(page);
+        }
+
+        pub(crate) fn expect_optional_get(&self, page: RecordedGet) {
+            self.strict_read_routes
+                .lock()
+                .unwrap()
+                .insert((page.access_key.clone(), page.path.clone()));
+            self.optional_reads.lock().unwrap().push(page);
+        }
+
+        /// At an explicitly verified venue transition (such as the CLOSE
+        /// ACK), retire the previous finite raw source pages and register the
+        /// next immutable HTTP responses. This operates ONLY on the recorded
+        /// transport and cannot touch SQLite, Worker state or live trading.
+        /// A missing route or a response for another account is an error.
+        pub(crate) fn advance_recorded_route(
+            &self,
+            access_key: &str,
+            path: &str,
+            pages: Vec<RecordedGet>,
+        ) -> usize {
+            assert!(!pages.is_empty(), "TRANSCRIPT_PHASE_WITHOUT_SOURCE");
+            assert!(
+                self.strict_read_routes
+                    .lock()
+                    .unwrap()
+                    .contains(&(access_key.to_owned(), path.to_owned())),
+                "TRANSCRIPT_PHASE_UNREGISTERED_ROUTE:{access_key}:{path}"
+            );
+            assert!(
+                pages
+                    .iter()
+                    .all(|page| page.access_key == access_key && page.path == path),
+                "TRANSCRIPT_PHASE_CROSS_ACCOUNT_OR_ROUTE"
+            );
+            let mut required = self.reads.lock().unwrap();
+            let retired = required
+                .iter()
+                .filter(|page| page.access_key == access_key && page.path == path)
+                .count();
+            required.retain(|page| page.access_key != access_key || page.path != path);
+            let mut optional = self.optional_reads.lock().unwrap();
+            optional.retain(|page| page.access_key != access_key || page.path != path);
+            required.extend(pages);
+            retired
+        }
+
+        /// Script the two immutable signed inventories for exactly one cancel.
+        /// The ACK in the real HTTP send path changes their visibility.
+        /// Replacing an unacknowledged transition is forbidden.
+        pub(crate) fn expect_causal_algo_inventory(
+            &self,
+            cancel_id: &str,
+            before: Vec<RecordedGet>,
+            after: Vec<RecordedGet>,
+        ) {
+            let path = "/api/v5/trade/orders-algo-pending";
+            assert_eq!(before.len(), 16, "TRANSCRIPT_ALGO_PRE_SCOPE_COUNT");
+            assert_eq!(after.len(), 16, "TRANSCRIPT_ALGO_POST_SCOPE_COUNT");
+            let account = "fixture-observer-a";
+            let mut scopes = Vec::with_capacity(16);
+            let mut seen = std::collections::BTreeSet::new();
+            for page in before {
+                assert_eq!(page.access_key, account, "TRANSCRIPT_ALGO_ACCOUNT");
+                assert_eq!(page.path, path, "TRANSCRIPT_ALGO_ROUTE");
+                let mut query = page.required_query;
+                query.sort();
+                assert_eq!(query.len(), 3, "TRANSCRIPT_ALGO_QUERY_SHAPE");
+                assert!(
+                    seen.insert(query.clone()),
+                    "TRANSCRIPT_ALGO_DUPLICATE_SCOPE"
+                );
+                let matching = after
+                    .iter()
+                    .filter(|other| {
+                        let mut other_query = other.required_query.clone();
+                        other_query.sort();
+                        other.access_key == account && other.path == path && other_query == query
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(matching.len(), 1, "TRANSCRIPT_ALGO_POST_SCOPE_MISMATCH");
+                scopes.push(CausalAlgoScope {
+                    query,
+                    before_ack: page.raw_response,
+                    after_ack: matching[0].raw_response.clone(),
+                    before_reads: 0,
+                    after_reads: 0,
+                });
+            }
+            let mut phase = self.causal_algos.lock().unwrap();
+            assert!(
+                phase.as_ref().is_none_or(|previous| previous.acked),
+                "TRANSCRIPT_ALGO_UNACKNOWLEDGED_PHASE"
+            );
+            self.strict_read_routes
+                .lock()
+                .unwrap()
+                .insert((account.into(), path.into()));
+            self.reads
+                .lock()
+                .unwrap()
+                .retain(|page| page.access_key != account || page.path != path);
+            self.optional_reads
+                .lock()
+                .unwrap()
+                .retain(|page| page.access_key != account || page.path != path);
+            *phase = Some(CausalAlgoScenario {
+                account: account.into(),
+                cancel_id: cancel_id.into(),
+                acked: false,
+                scopes,
+                held_read: None,
+                source_received_at_ms: chrono::Utc::now().timestamp_millis(),
+            });
+            self.causal_algo_trace.lock().unwrap().push(format!(
+                "event=INVENTORY_ARMED uid=account-001 actor={account} cancel_id={cancel_id} scopes=16"
+            ));
+        }
+
+        /// A separate verified UID must supply its own exact, finite, raw
+        /// signed empty census. No fallback to A and no page-count phase.
+        pub(crate) fn expect_static_algo_inventory(&self, account: &str, pages: Vec<RecordedGet>) {
+            const PATH: &str = "/api/v5/trade/orders-algo-pending";
+            assert_eq!(
+                account, "fixture-observer-b",
+                "TRANSCRIPT_STATIC_ALGO_ACCOUNT"
+            );
+            assert_eq!(pages.len(), 16, "TRANSCRIPT_STATIC_ALGO_SCOPE_COUNT");
+            let mut seen = std::collections::BTreeSet::new();
+            let mut scopes = Vec::with_capacity(16);
+            for page in pages {
+                assert_eq!(page.access_key, account, "TRANSCRIPT_STATIC_ALGO_ACTOR");
+                assert_eq!(page.path, PATH, "TRANSCRIPT_STATIC_ALGO_ROUTE");
+                let mut query = page.required_query;
+                query.sort();
+                assert_eq!(query.len(), 3, "TRANSCRIPT_STATIC_ALGO_QUERY_SHAPE");
+                assert!(
+                    seen.insert(query.clone()),
+                    "TRANSCRIPT_STATIC_ALGO_DUP_SCOPE"
+                );
+                let source: serde_json::Value = serde_json::from_slice(&page.raw_response)
+                    .expect("TRANSCRIPT_STATIC_ALGO_RAW_SOURCE");
+                assert_eq!(source["code"], "0", "TRANSCRIPT_STATIC_ALGO_SOURCE_CODE");
+                assert_eq!(
+                    source["data"].as_array().map(Vec::len),
+                    Some(0),
+                    "TRANSCRIPT_STATIC_ALGO_B_NOT_FLAT"
+                );
+                scopes.push(StaticAlgoScope {
+                    query,
+                    response: page.raw_response,
+                    reads: 0,
+                });
+            }
+            self.strict_read_routes
+                .lock()
+                .unwrap()
+                .insert((account.to_owned(), PATH.to_owned()));
+            *self.static_algos.lock().unwrap() = Some(StaticAlgoInventory {
+                account: account.to_owned(),
+                source_received_at_ms: chrono::Utc::now().timestamp_millis(),
+                scopes,
+            });
+            self.causal_algo_trace.lock().unwrap().push(format!(
+                "event=PEER_INVENTORY_ARMED uid=account-002 actor={account} scopes=16"
+            ));
+        }
+
+        /// Optional deterministic I/O barrier. A GET that starts before ACK
+        /// keeps its old raw response even if released after ACK.
+        pub(crate) fn hold_next_causal_algo_get(
+            &self,
+        ) -> (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>) {
+            let entered = Arc::new(tokio::sync::Notify::new());
+            let resume = Arc::new(tokio::sync::Notify::new());
+            let mut phase = self.causal_algos.lock().unwrap();
+            let scenario = phase.as_mut().expect("TRANSCRIPT_ALGO_PHASE_REQUIRED");
+            assert!(
+                scenario.held_read.is_none(),
+                "TRANSCRIPT_ALGO_BARRIER_ALREADY_ARMED"
+            );
+            scenario.held_read = Some(CausalAlgoReadGate {
+                entered: entered.clone(),
+                resume: resume.clone(),
+            });
+            (entered, resume)
+        }
+
+        pub(crate) fn unconsumed_reads(&self) -> usize {
+            self.reads.lock().unwrap().len()
+        }
+
+        pub(crate) fn expect_post(&self, post: RecordedPost) {
+            self.posts.lock().unwrap().push(post);
+        }
+
+        pub(crate) fn expect_public_clock(&self, raw_response: Vec<u8>) {
+            self.public_clock_reads.lock().unwrap().push(raw_response);
+        }
+
+        /// At a proven LOCAL/NOT_STARTED admission denial, retire an unused
+        /// recorded exchange-clock reply and install new raw venue bytes.
+        /// This changes only the test HTTP boundary, not ClockEvidence.
+        pub(crate) fn advance_recorded_public_clock(&self, raw_response: Vec<u8>) -> usize {
+            let mut pending = self.public_clock_reads.lock().unwrap();
+            let retired = pending.len();
+            pending.clear();
+            pending.push(raw_response);
+            retired
+        }
+
+        pub(crate) fn unconsumed_public_clock(&self) -> usize {
+            self.public_clock_reads.lock().unwrap().len()
+        }
+
+        pub(crate) fn public_clock_deliveries(&self) -> u64 {
+            self.public_clock_deliveries.load(Ordering::Acquire)
+        }
+
+        /// Only a scripted external clock publisher may replace an unused
+        /// raw sample before the FIRST requested clock GET. It never mints
+        /// a response on demand or changes clock policy/tolerances.
+        /// Once the recorded transport delivered a sample, the publisher
+        /// cannot rearm that delivery or inject an unsolicited second one.
+        pub(crate) fn refresh_unconsumed_public_clock(
+            &self,
+            expected_deliveries: u64,
+            sample: Vec<u8>,
+        ) -> bool {
+            let mut queued = self.public_clock_reads.lock().unwrap();
+            if queued.len() != 1
+                || self.public_clock_deliveries.load(Ordering::Acquire) != expected_deliveries
+            {
+                return false;
+            }
+            queued[0] = sample;
+            true
+        }
+
+        pub(crate) fn unconsumed_posts(&self) -> usize {
+            self.posts.lock().unwrap().len()
+        }
+    }
+    impl HttpTransport for RecordedAccountHttp {
+        fn send(&self, request: HttpRequest, deadline: Instant) -> HttpSend<'_> {
+            Box::pin(async move {
+                if request.method() != "GET" && request.method() != "POST" {
+                    return Err(OkxError::Response("TRANSCRIPT_METHOD_MISMATCH".into()));
+                }
+                // Public time is intentionally unsigned. One explicitly recorded
+                // raw response is consumed by the production clock parser.
+                // A missing/extra clock read is a hard transcript failure.
+                if request.method() == "GET" && request.url().path() == "/api/v5/public/time" {
+                    let mut queued = self.public_clock_reads.lock().unwrap();
+                    if queued.is_empty() {
+                        self.denied_routes
+                            .lock()
+                            .unwrap()
+                            .push("TRANSCRIPT_CLOCK_EXHAUSTED".into());
+                        return Err(OkxError::Response("TRANSCRIPT_CLOCK_EXHAUSTED".into()));
+                    }
+                    let body = queued.remove(0);
+                    self.public_clock_deliveries.fetch_add(1, Ordering::AcqRel);
+                    drop(queued);
+                    self.requests
+                        .lock()
+                        .unwrap()
+                        .push("public:/api/v5/public/time".into());
+                    return Ok(RawHttpResponse {
+                        status: HttpStatusCode::OK,
+                        headers: Default::default(),
+                        body,
+                    });
+                }
+                let key = request
+                    .headers()
+                    .get("OK-ACCESS-KEY")
+                    .and_then(|h| h.to_str().ok())
+                    .ok_or_else(|| OkxError::Response("TRANSCRIPT_ACCOUNT_UNBOUND".into()))?;
+                let (uid, permission) = match key {
+                    "fixture-observer-a" => ("account-001", "read_only"),
+                    "fixture-executor-a" => ("account-001", "read_only,trade"),
+                    "fixture-observer-b" => ("account-002", "read_only"),
+                    "fixture-executor-b" => ("account-002", "read_only,trade"),
+                    _ => return Err(OkxError::Response("TRANSCRIPT_ACCOUNT_UNKNOWN".into())),
+                };
+                let path = request.url().path();
+                if request.method() == "POST" {
+                    // Count every possible outbound create, even when the
+                    // transcript rejects it. Never silently replay a POST.
+                    let bytes = request
+                        .body()
+                        .and_then(|body| body.as_bytes())
+                        .ok_or_else(|| OkxError::Response("TRANSCRIPT_POST_BODY_MISSING".into()))?;
+                    let observed: serde_json::Value = serde_json::from_slice(bytes)?;
+                    self.outbound_posts.lock().unwrap().push((
+                        key.to_owned(),
+                        path.to_owned(),
+                        observed.clone(),
+                    ));
+                    if !key.starts_with("fixture-executor-") {
+                        return Err(OkxError::Response("TRANSCRIPT_POST_NOT_EXECUTOR".into()));
+                    }
+                    if path != "/api/v5/trade/order"
+                        && path != "/api/v5/trade/cancel-algos"
+                        && path != "/api/v5/trade/cancel-order"
+                    {
+                        return Err(OkxError::Response(
+                            "TRANSCRIPT_POST_ROUTE_UNRECOGNIZED".into(),
+                        ));
+                    }
+                    let mut expected = self.posts.lock().unwrap();
+                    let index = expected
+                        .iter()
+                        .position(|item| item.access_key == key && item.path == path)
+                        .ok_or_else(|| OkxError::Response("TRANSCRIPT_UNEXPECTED_POST".into()))?;
+                    let post = &expected[index];
+                    let mut body = post.expected_body.clone();
+                    let mut client_id = None;
+                    if path == "/api/v5/trade/order" {
+                        let id = observed
+                            .get("clOrdId")
+                            .and_then(serde_json::Value::as_str)
+                            .ok_or_else(|| {
+                                OkxError::Response("TRANSCRIPT_CLIENT_ID_MISSING".into())
+                            })?;
+                        if id.is_empty()
+                            || id.len() > 32
+                            || !id.bytes().all(|b| b.is_ascii_alphanumeric())
+                        {
+                            return Err(OkxError::Response("TRANSCRIPT_CLIENT_ID_INVALID".into()));
+                        }
+                        if body.get("clOrdId").and_then(serde_json::Value::as_str)
+                            == Some("__REQUEST_CL_ORD_ID__")
+                        {
+                            body["clOrdId"] = id.into();
+                        }
+                        if let Some(attached) = body
+                            .get_mut("attachAlgoOrds")
+                            .and_then(serde_json::Value::as_array_mut)
+                        {
+                            for algo in attached {
+                                if algo
+                                    .get("attachAlgoClOrdId")
+                                    .and_then(serde_json::Value::as_str)
+                                    == Some("__REQUEST_ATTACH_ALGO_ID__")
+                                {
+                                    let prefix = id.get(..31).ok_or_else(|| {
+                                        OkxError::Response(
+                                            "TRANSCRIPT_ATTACH_CLIENT_ID_INVALID".into(),
+                                        )
+                                    })?;
+                                    algo["attachAlgoClOrdId"] = format!("s{prefix}").into();
+                                }
+                            }
+                        }
+                        client_id = Some(id.to_owned());
+                    }
+                    if body != observed {
+                        return Err(OkxError::Response("TRANSCRIPT_POST_BODY_MISMATCH".into()));
+                    }
+                    let recorded = expected.remove(index);
+                    drop(expected);
+                    // Binding a dynamic client order ID to pre-recorded raw
+                    // response bytes does not generate fills, fees or balances.
+                    let response = String::from_utf8(recorded.raw_response)
+                        .map_err(|_| OkxError::Response("TRANSCRIPT_RESPONSE_UTF8".into()))?;
+                    let response = if let Some(client_id) = client_id.as_deref() {
+                        response.replace("__REQUEST_CL_ORD_ID__", client_id)
+                    } else {
+                        response
+                    };
+                    if path == "/api/v5/trade/cancel-algos" {
+                        let parsed: serde_json::Value = serde_json::from_str(&response)?;
+                        let observed_id = observed
+                            .get(0)
+                            .and_then(|row| row.get("algoId"))
+                            .and_then(serde_json::Value::as_str)
+                            .ok_or_else(|| {
+                                OkxError::Response("TRANSCRIPT_CANCEL_ID_MISSING".into())
+                            })?;
+                        if parsed["data"][0]["sCode"] != "0"
+                            || parsed["data"][0]["algoId"] != observed_id
+                        {
+                            return Err(OkxError::Response(
+                                "TRANSCRIPT_CANCEL_ACK_MISMATCH".into(),
+                            ));
+                        }
+                        let mut phase = self.causal_algos.lock().unwrap();
+                        if let Some(scenario) = phase.as_mut() {
+                            if scenario.cancel_id != observed_id || scenario.acked {
+                                return Err(OkxError::Response(
+                                    "TRANSCRIPT_ALGO_CANCEL_EVENT_MISMATCH".into(),
+                                ));
+                            }
+                            scenario.acked = true;
+                            self.causal_algo_trace.lock().unwrap().push(format!(
+                                "event=CANCEL_ACK uid=account-001 actor={key} route={path} cancel_id={observed_id} at_ms={}",
+                                chrono::Utc::now().timestamp_millis()
+                            ));
+                        }
+                    }
+                    if path == "/api/v5/trade/cancel-order" {
+                        let parsed: serde_json::Value = serde_json::from_str(&response)?;
+                        let submitted = observed.get("clOrdId").and_then(serde_json::Value::as_str);
+                        if submitted.is_none()
+                            || parsed["data"][0]["clOrdId"].as_str() != submitted
+                            || parsed["data"][0]["sCode"] != "0"
+                            || parsed["data"][0]["ordId"].as_str().is_none()
+                        {
+                            return Err(OkxError::Response(
+                                "TRANSCRIPT_CANCEL_ORDER_ACK_UNBOUND".into(),
+                            ));
+                        }
+                        // An authenticated cancel ACK is NOT terminal proof.
+                    }
+                    if path == "/api/v5/trade/order" {
+                        let parsed: serde_json::Value = serde_json::from_str(&response)?;
+                        let rows = parsed["data"].as_array().ok_or_else(|| {
+                            OkxError::Response("TRANSCRIPT_CREATE_ACK_UNBOUND".into())
+                        })?;
+                        if rows.len() != 1
+                            || rows[0]["clOrdId"].as_str() != client_id.as_deref()
+                            || rows[0]["sCode"].as_str() != Some("0")
+                        {
+                            return Err(OkxError::Response("TRANSCRIPT_CREATE_ACK_UNBOUND".into()));
+                        }
+                        let ord_id = rows[0]["ordId"]
+                            .as_str()
+                            .filter(|id| !id.is_empty())
+                            .ok_or_else(|| {
+                                OkxError::Response("TRANSCRIPT_CREATE_ORDER_ID_MISSING".into())
+                            })?;
+                        self.acknowledged_creates.lock().unwrap().push((
+                            key.to_owned(),
+                            client_id.ok_or_else(|| {
+                                OkxError::Response("TRANSCRIPT_CLIENT_ID_MISSING".into())
+                            })?,
+                            ord_id.to_owned(),
+                        ));
+                    }
+                    return Ok(RawHttpResponse {
+                        status: HttpStatusCode::OK,
+                        headers: Default::default(),
+                        body: response.into_bytes(),
+                    });
+                }
+                // An explicitly scripted history route MUST NOT silently
+                // fall back to the old empty baseline when pages run out.
+                let guarded_route = (key.to_owned(), path.to_owned());
+                let scripted = self
+                    .strict_read_routes
+                    .lock()
+                    .unwrap()
+                    .contains(&guarded_route);
+                // A signed GET must select exactly its own prior POST; a
+                // different account's ACK, client ID or recorded order fails.
+                let requested_client = if path == "/api/v5/trade/order" {
+                    let ids = request
+                        .url()
+                        .query_pairs()
+                        .filter(|(name, _)| name == "clOrdId")
+                        .map(|(_, value)| value.into_owned())
+                        .collect::<Vec<_>>();
+                    if ids.len() != 1 || ids[0].is_empty() {
+                        return Err(OkxError::Response(
+                            "TRANSCRIPT_ORDER_READBACK_ID_MISMATCH".into(),
+                        ));
+                    }
+                    Some(ids[0].clone())
+                } else {
+                    None
+                };
+                // Unlike ordered one-shot pages, a causal inventory returns
+                // the immutable phase snapshot to every authorized competing
+                // GET. Its phase switches only at the signed cancel ACK.
+                if path == "/api/v5/trade/orders-algo-pending" {
+                    let selected = {
+                        let mut phase = self.causal_algos.lock().unwrap();
+                        if let Some(scenario) = phase.as_mut().filter(|scenario| {
+                            verified_fixture_uid(key).is_some_and(|uid| {
+                                verified_fixture_uid(scenario.account.as_str()) == Some(uid)
+                            })
+                        }) {
+                            let mut query = request
+                                .url()
+                                .query_pairs()
+                                .map(|(k, v)| (k.into_owned(), v.into_owned()))
+                                .collect::<Vec<_>>();
+                            query.sort();
+                            let scope = scenario
+                                .scopes
+                                .iter_mut()
+                                .find(|scope| scope.query == query)
+                                .ok_or_else(|| {
+                                    OkxError::Response("TRANSCRIPT_ALGO_QUERY_MISMATCH".into())
+                                })?;
+                            let acked = scenario.acked;
+                            let count = if acked {
+                                &mut scope.after_reads
+                            } else {
+                                &mut scope.before_reads
+                            };
+                            if *count >= CAUSAL_ALGO_READS_PER_SCOPE_AND_PHASE {
+                                return Err(OkxError::Response(
+                                    "TRANSCRIPT_ALGO_PHASE_READ_BUDGET_EXCEEDED".into(),
+                                ));
+                            }
+                            *count += 1;
+                            let raw = if acked {
+                                scope.after_ack.clone()
+                            } else {
+                                scope.before_ack.clone()
+                            };
+                            let stage = if acked { "AFTER_ACK" } else { "BEFORE_ACK" };
+                            let digest = format!("{:x}", Sha256::digest(&raw));
+                            self.causal_algo_trace.lock().unwrap().push(format!(
+                                "event=GET_STARTED uid=account-001 actor={key} route={path} query={query:?} stage={stage} source_received_at_ms={} read={} digest={digest}",
+                                scenario.source_received_at_ms, *count
+                            ));
+                            Some((raw, scenario.held_read.take()))
+                        } else {
+                            // UID B never inherits UID A's cancel-dependent
+                            // view. Each B GET matches a signed raw peer scope.
+                            let mut peer = self.static_algos.lock().unwrap();
+                            if let Some(other) = peer.as_mut().filter(|other| {
+                                verified_fixture_uid(key).is_some_and(|uid| {
+                                    verified_fixture_uid(other.account.as_str()) == Some(uid)
+                                })
+                            }) {
+                                let mut query = request
+                                    .url()
+                                    .query_pairs()
+                                    .map(|(k, v)| (k.into_owned(), v.into_owned()))
+                                    .collect::<Vec<_>>();
+                                query.sort();
+                                let source_received_at_ms = other.source_received_at_ms;
+                                let scope = other
+                                    .scopes
+                                    .iter_mut()
+                                    .find(|scope| scope.query == query)
+                                    .ok_or_else(|| {
+                                        OkxError::Response(
+                                            "TRANSCRIPT_STATIC_ALGO_QUERY_MISMATCH".into(),
+                                        )
+                                    })?;
+                                if scope.reads >= STATIC_ALGO_READS_PER_SCOPE {
+                                    return Err(OkxError::Response(
+                                        "TRANSCRIPT_STATIC_ALGO_READ_BUDGET_EXCEEDED".into(),
+                                    ));
+                                }
+                                scope.reads += 1;
+                                let read = scope.reads;
+                                let body = scope.response.clone();
+                                let digest = format!("{:x}", Sha256::digest(&body));
+                                self.causal_algo_trace.lock().unwrap().push(format!(
+                                    "event=GET_STARTED uid=account-002 actor={key} route={path} query={query:?} stage=INDEPENDENT_STATIC source_received_at_ms={source_received_at_ms} read={read} digest={digest}"
+                                ));
+                                Some((body, None))
+                            } else {
+                                if phase.is_some() && !scripted {
+                                    self.causal_algo_trace.lock().unwrap().push(format!(
+                                        "event=GET_DENIED actor={key} uid={uid} route={path} reason=TRANSCRIPT_ALGO_ACCOUNT_MISMATCH"
+                                    ));
+                                    return Err(OkxError::Response(
+                                        "TRANSCRIPT_ALGO_ACCOUNT_MISMATCH".into(),
+                                    ));
+                                }
+                                None
+                            }
+                        }
+                    };
+                    if let Some((body, held)) = selected {
+                        if let Some(gate) = held {
+                            gate.entered.notify_one();
+                            tokio::time::timeout_at(
+                                tokio::time::Instant::from_std(deadline),
+                                gate.resume.notified(),
+                            )
+                            .await
+                            .map_err(|_| {
+                                OkxError::Response("TRANSCRIPT_ALGO_HELD_READ_TIMEOUT".into())
+                            })?;
+                        }
+                        self.requests.lock().unwrap().push(format!(
+                            "{key}:{path}?{}",
+                            request.url().query().unwrap_or_default()
+                        ));
+                        return Ok(RawHttpResponse {
+                            status: HttpStatusCode::OK,
+                            headers: Default::default(),
+                            body,
+                        });
+                    }
+                }
+                if scripted {
+                    let matches_page = |page: &RecordedGet| {
+                        page.access_key == key
+                            && page.path == path
+                            && page.required_query.iter().all(|(name, expected)| {
+                                request.url().query_pairs().any(|(k, v)| {
+                                    k.as_ref() == name.as_str() && v.as_ref() == expected.as_str()
+                                })
+                            })
+                            && requested_client.as_ref().is_none_or(|client| {
+                                recorded_order_source_matches(
+                                    &self.acknowledged_creates.lock().unwrap(),
+                                    key,
+                                    client,
+                                    &page.raw_response,
+                                )
+                            })
+                    };
+                    let mut required = self.reads.lock().unwrap();
+                    let page = if let Some(index) = required.iter().position(&matches_page) {
+                        required.remove(index)
+                    } else {
+                        drop(required);
+                        let mut optional = self.optional_reads.lock().unwrap();
+                        let index = optional.iter().position(&matches_page).ok_or_else(|| {
+                            let missing = format!(
+                                "TRANSCRIPT_SOURCE_PAGE_UNEXPECTED_OR_EXHAUSTED:{key}:{path}"
+                            );
+                            self.denied_routes.lock().unwrap().push(missing.clone());
+                            OkxError::Response(missing)
+                        })?;
+                        optional.remove(index)
+                    };
+                    // Order readback is an independently recorded raw GET,
+                    // not a synthetic response to POST. Only its dynamic
+                    // clOrdId is bound to the one actually observed executor
+                    // request; no balances/fills/protection are invented.
+                    let body = if path == "/api/v5/trade/order" {
+                        let client_id = requested_client.as_deref().ok_or_else(|| {
+                            OkxError::Response("TRANSCRIPT_ORDER_READBACK_ID_MISSING".into())
+                        })?;
+                        let raw = String::from_utf8(page.raw_response).map_err(|_| {
+                            OkxError::Response("TRANSCRIPT_ORDER_READBACK_UTF8".into())
+                        })?;
+                        // Source association was checked before consumption.
+                        // Only this observed clOrdId is bound to immutable bytes.
+                        raw.replace("__REQUEST_CL_ORD_ID__", client_id).into_bytes()
+                    } else if matches!(
+                        path,
+                        "/api/v5/trade/fills-history" | "/api/v5/account/bills-archive"
+                    ) {
+                        bind_recorded_history_ids(
+                            &self.acknowledged_creates.lock().unwrap(),
+                            key,
+                            page.raw_response,
+                        )?
+                    } else {
+                        page.raw_response
+                    };
+                    if path == "/api/v5/account/trade-fee" {
+                        let raw: serde_json::Value = serde_json::from_slice(&body)?;
+                        let exchange_ts = raw["data"][0]["ts"].as_str().ok_or_else(|| {
+                            OkxError::Response("TRANSCRIPT_FEE_EXCHANGE_TS_MISSING".into())
+                        })?;
+                        self.delivered_fees.lock().unwrap().push((
+                            key.to_owned(),
+                            exchange_ts.to_owned(),
+                            chrono::Utc::now().timestamp_millis(),
+                        ));
+                    }
+                    self.requests.lock().unwrap().push(format!(
+                        "{key}:{path}?{}",
+                        request.url().query().unwrap_or_default()
+                    ));
+                    return Ok(RawHttpResponse {
+                        status: HttpStatusCode::OK,
+                        headers: Default::default(),
+                        body,
+                    });
+                }
+                let data = match path {
+                    "/api/v5/account/config" => serde_json::json!([{
+                        "uid": uid,
+                        "mainUid": "main-account",
+                        "acctLv": "2",
+                        "posMode": "long_short_mode",
+                        "type": "1",
+                        "perm": permission,
+                        "autoLoan": false,
+                        "ip": "127.0.0.1"
+                    }]),
+                    "/api/v5/account/balance" => serde_json::json!([{
+                        "totalEq": "100",
+                        "adjEq": "100",
+                        "uTime": "1793460000000",
+                        "details": [{
+                            "ccy": "USDT", "eq": "100",
+                            "liab": "0", "availEq": "100", "availBal": "100",
+                            "eqUsd": "100", "uTime": "1793460000000"
+                        }]
+                    }]),
+                    "/api/v5/trade/fills-history" | "/api/v5/account/bills-archive" => {
+                        serde_json::json!([])
+                    }
+                    "/api/v5/account/positions"
+                    | "/api/v5/trade/orders-pending"
+                    | "/api/v5/trade/orders-algo-pending" => {
+                        if path == "/api/v5/trade/orders-algo-pending" {
+                            let params = request.url().query_pairs().collect::<Vec<_>>();
+                            if !params.iter().any(|(k, _)| k == "ordType")
+                                || !params.iter().any(|(k, v)| {
+                                    k == "instType" && (v == "SWAP" || v == "FUTURES")
+                                })
+                                || !params.iter().any(|(k, v)| k == "limit" && v == "100")
+                            {
+                                return Err(OkxError::Response(
+                                    "TRANSCRIPT_ALGO_SCOPE_MISMATCH".into(),
+                                ));
+                            }
+                        }
+                        serde_json::json!([])
+                    }
+                    _ => {
+                        self.denied_routes
+                            .lock()
+                            .unwrap()
+                            .push(format!("TRANSCRIPT_UNEXPECTED_REQUEST:{key}:{path}"));
+                        return Err(OkxError::Response("TRANSCRIPT_UNEXPECTED_REQUEST".into()));
+                    }
+                };
+                // A transcript has explicitly bounded reads, not an infinite
+                // fake account endpoint. Concurrent polls can reorder safely.
+                let request_key =
+                    format!("{key}:{path}?{}", request.url().query().unwrap_or_default());
+                // The production T09 assembly runs background two-second
+                // capture, multi-account census and post-HELD rereads on the
+                // same recorded account. The transcript permits a finite 64
+                // identical raw source responses per exact signed query.
+                // There is no live fallback; unknown routes still hard-fail.
+                let max_repeats = match path {
+                    "/api/v5/account/config"
+                    | "/api/v5/account/balance"
+                    | "/api/v5/account/positions"
+                    | "/api/v5/trade/orders-pending"
+                    | "/api/v5/trade/orders-algo-pending"
+                    | "/api/v5/trade/fills-history"
+                    | "/api/v5/account/bills-archive" => {
+                        // Only the explicitly opt-in long integration chain
+                        // has extra finite raw observations. This is NOT an
+                        // exchange rate-limit override or a live HTTP fallback.
+                        if std::env::var("OKX_T09_4_MANAGED_ADD_PROBE").as_deref() == Ok("1") {
+                            192
+                        } else {
+                            64
+                        }
+                    }
+                    _ => 0,
+                };
+                let mut observed = self.requests.lock().unwrap();
+                let consumed = observed.iter().filter(|v| **v == request_key).count();
+                if consumed >= max_repeats {
+                    return Err(OkxError::Response(format!(
+                        "TRANSCRIPT_REPEAT_EXCEEDED:{request_key}:count={consumed}:limit={max_repeats}"
+                    )));
+                }
+                observed.push(request_key);
+                drop(observed);
+                let body = serde_json::to_vec(&serde_json::json!({
+                    "code": "0", "msg": "", "data": data
+                }))?;
+                Ok(RawHttpResponse {
+                    status: HttpStatusCode::OK,
+                    headers: Default::default(),
+                    body,
+                })
+            })
+        }
+    }
+
+    /// Only raw recorded socket delivery; real PrivateWsCoordinator still
+    /// parses, authenticates and establishes source generations.
+    type RecordedPublicSubscriptions = Arc<Mutex<Vec<(serde_json::Value, Vec<String>)>>>;
+
+    pub(crate) struct RecordedWsConnector {
+        pub(crate) sent: Arc<Mutex<Vec<serde_json::Value>>>,
+        /// Expected subscribe args and one-shot raw ACK/data frames. No
+        /// snapshots or readied flags are supplied to the runtime directly.
+        public_subscriptions: RecordedPublicSubscriptions,
+        public_injection: Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<String>>>,
+        public_sender: tokio::sync::mpsc::UnboundedSender<String>,
+    }
+    impl Default for RecordedWsConnector {
+        fn default() -> Self {
+            let (public_sender, public_injection) = tokio::sync::mpsc::unbounded_channel();
+            Self {
+                sent: Arc::new(Mutex::new(Vec::new())),
+                public_subscriptions: Arc::new(Mutex::new(Vec::new())),
+                public_injection: Mutex::new(Some(public_injection)),
+                public_sender,
+            }
+        }
+    }
+    impl RecordedWsConnector {
+        /// Deliver another explicitly scripted RAW venue frame on the same
+        /// connected socket. The production parser and generation rules remain
+        /// the sole authorities for source freshness and market readiness.
+        pub(crate) fn send_public_frame(&self, frame: String) {
+            self.public_sender
+                .send(frame)
+                .expect("recorded public socket closed");
+        }
+
+        pub(crate) fn expect_public_subscription(
+            &self,
+            arg: serde_json::Value,
+            frames: Vec<String>,
+        ) {
+            self.public_subscriptions
+                .lock()
+                .unwrap()
+                .push((arg, frames));
+        }
+
+        pub(crate) fn unconsumed_public_subscriptions(&self) -> usize {
+            self.public_subscriptions.lock().unwrap().len()
+        }
+    }
+    struct RecordedWire {
+        inbound: std::collections::VecDeque<tokio_tungstenite::tungstenite::Message>,
+        sent: Arc<Mutex<Vec<serde_json::Value>>>,
+        public_subscriptions: Option<RecordedPublicSubscriptions>,
+        public_injection: Option<tokio::sync::mpsc::UnboundedReceiver<String>>,
+    }
+    impl okx_runtime::WsWire for RecordedWire {
+        fn send(
+            &mut self,
+            frame: tokio_tungstenite::tungstenite::Message,
+        ) -> okx_runtime::WsCall<'_> {
+            Box::pin(async move {
+                if let tokio_tungstenite::tungstenite::Message::Text(data) = frame {
+                    // OKX application-level idle heartbeat is real production
+                    // behavior (20s ping, 10s pong deadline). Script only
+                    // the raw venue pong; never bypass the generation guard.
+                    if data.as_str() == "ping" {
+                        self.inbound
+                            .push_back(tokio_tungstenite::tungstenite::Message::Text(
+                                "pong".into(),
+                            ));
+                        return Ok(());
+                    }
+                    let outgoing: serde_json::Value =
+                        serde_json::from_str(data.as_str()).unwrap_or(serde_json::Value::Null);
+                    self.sent.lock().unwrap().push(outgoing.clone());
+                    if let Some(script) = &self.public_subscriptions
+                        && outgoing["op"] == "subscribe"
+                    {
+                        let Some(args) = outgoing["args"].as_array() else {
+                            return Err(tokio_tungstenite::tungstenite::Error::ConnectionClosed);
+                        };
+                        for arg in args {
+                            let frames = {
+                                let mut remaining = script.lock().unwrap();
+                                let Some(index) =
+                                    remaining.iter().position(|(expected, _)| expected == arg)
+                                else {
+                                    return Err(
+                                        tokio_tungstenite::tungstenite::Error::ConnectionClosed,
+                                    );
+                                };
+                                remaining.remove(index).1
+                            };
+                            self.inbound.extend(frames.into_iter().map(|raw| {
+                                tokio_tungstenite::tungstenite::Message::Text(raw.into())
+                            }));
+                        }
+                    }
+                }
+                Ok(())
+            })
+        }
+        fn flush(&mut self) -> okx_runtime::WsCall<'_> {
+            Box::pin(async { Ok(()) })
+        }
+        fn next(&mut self) -> okx_runtime::WsReceive<'_> {
+            Box::pin(async move {
+                if let Some(frame) = self.inbound.pop_front() {
+                    return Some(Ok(frame));
+                }
+                if let Some(injection) = self.public_injection.as_mut() {
+                    return injection
+                        .recv()
+                        .await
+                        .map(|raw| Ok(tokio_tungstenite::tungstenite::Message::Text(raw.into())));
+                }
+                std::future::pending().await
+            })
+        }
+        fn close(&mut self) -> okx_runtime::WsCall<'_> {
+            Box::pin(async { Ok(()) })
+        }
+    }
+    impl WsConnector for RecordedWsConnector {
+        fn connect(&self, url: String) -> okx_runtime::WsConnect<'_> {
+            Box::pin(async move {
+                let public = url.ends_with("/public");
+                let transcript: Vec<&str> = if public {
+                    vec![]
+                } else if url.ends_with("/business") {
+                    vec![
+                        r#"{"event":"login","code":"0","msg":"","connId":"recorded-business"}"#,
+                        r#"{"event":"subscribe","arg":{"channel":"orders-algo","instType":"ANY"},"connId":"recorded-business"}"#,
+                    ]
+                } else if url.ends_with("/private") {
+                    vec![
+                        r#"{"event":"login","code":"0","msg":"","connId":"recorded-private"}"#,
+                        r#"{"event":"subscribe","arg":{"channel":"account"},"connId":"recorded-private"}"#,
+                        r#"{"event":"subscribe","arg":{"channel":"positions","instType":"ANY"},"connId":"recorded-private"}"#,
+                        r#"{"event":"subscribe","arg":{"channel":"orders","instType":"ANY"},"connId":"recorded-private"}"#,
+                        r#"{"arg":{"channel":"account"},"data":[{"totalEq":"100","uTime":"1793460000000"}]}"#,
+                        r#"{"arg":{"channel":"positions","instType":"ANY"},"data":[]}"#,
+                    ]
+                } else {
+                    return Err(tokio_tungstenite::tungstenite::Error::ConnectionClosed);
+                };
+                let inbound = transcript
+                    .into_iter()
+                    .map(|raw| tokio_tungstenite::tungstenite::Message::Text(raw.into()))
+                    .collect();
+                Ok(Box::new(RecordedWire {
+                    inbound,
+                    sent: self.sent.clone(),
+                    public_subscriptions: if public {
+                        Some(self.public_subscriptions.clone())
+                    } else {
+                        None
+                    },
+                    public_injection: if public {
+                        self.public_injection.lock().unwrap().take()
+                    } else {
+                        None
+                    },
+                }) as Box<dyn okx_runtime::WsWire>)
+            })
+        }
+    }
+    pub(crate) struct OfflineSocket;
+    impl WsConnector for OfflineSocket {
+        fn connect(&self, _: String) -> okx_runtime::WsConnect<'_> {
+            Box::pin(async { Err(tokio_tungstenite::tungstenite::Error::ConnectionClosed) })
+        }
+    }
+
+    /// Exact recorded request delivery from both identity-bound API keys.
+    /// Sharing this constructor prevents a separate test account owner.
+    pub(crate) fn prepared(
+        label: &str,
+        feed: Arc<RecordedAccountHttp>,
+        budget: RateBudget,
+    ) -> (VerifiedAccountConfig, PreparedAccountClients) {
+        prepared_with_socket(label, feed, Arc::new(OfflineSocket), budget)
+    }
+
+    pub(crate) fn prepared_with_socket(
+        label: &str,
+        feed: Arc<RecordedAccountHttp>,
+        ws_connector: Arc<dyn WsConnector>,
+        budget: RateBudget,
+    ) -> (VerifiedAccountConfig, PreparedAccountClients) {
+        let uid = match label {
+            "a" => "account-001",
+            "b" => "account-002",
+            _ => panic!("unexpected recorded account"),
+        };
+        let environment = OkxEnvironment::new(okx_api::Region::Global, false);
+        let budget = budget.for_authenticated_user(uid);
+        let observed = Credentials::new(
+            format!("fixture-observer-{label}"),
+            "observer-secret".into(),
+            "pass".into(),
+        )
+        .unwrap();
+        let executing = Credentials::new(
+            format!("fixture-executor-{label}"),
+            "executor-secret".into(),
+            "pass".into(),
+        )
+        .unwrap();
+        let observer = OkxRestClient::with_http_transport(
+            environment,
+            observed.clone(),
+            budget.clone(),
+            feed.clone(),
+        )
+        .unwrap();
+        let executor =
+            OkxRestClient::with_http_transport(environment, executing, budget, feed).unwrap();
+        let config = VerifiedAccountConfig {
+            account_key: AccountKey {
+                venue: "okx".into(),
+                environment: Environment::Real,
+                verified_uid: okx_api::account_uid_fingerprint(uid),
+            },
+            alias: format!("fixture-{label}"),
+            credential_ref: format!("fixture-creds-{label}"),
+            connect_operation_id: format!("fixture-connect-operation-{label}"),
+            configuration_digest: "a".repeat(64),
+        };
+        (
+            config,
+            PreparedAccountClients {
+                environment,
+                observer,
+                executor,
+                observer_login: observed,
+                ws_connector,
+            },
+        )
+    }
+    #[cfg(test)]
+    mod recorded_order_binding_tests {
+        use super::*;
+
+        fn causal_algo_fixture() -> Arc<RecordedAccountHttp> {
+            let feed = Arc::new(RecordedAccountHttp::default());
+            let raw = |data: serde_json::Value| {
+                serde_json::to_vec(&serde_json::json!({
+                    "code": "0", "msg": "", "data": data
+                }))
+                .unwrap()
+            };
+            let mut before = Vec::new();
+            let mut after = Vec::new();
+            for inst_type in ["SWAP", "FUTURES"] {
+                for kind in [
+                    "conditional",
+                    "oco",
+                    "trigger",
+                    "move_order_stop",
+                    "chase",
+                    "iceberg",
+                    "twap",
+                    "smart_iceberg",
+                ] {
+                    let query = vec![
+                        ("instType".into(), inst_type.into()),
+                        ("ordType".into(), kind.into()),
+                        ("limit".into(), "100".into()),
+                    ];
+                    let active = inst_type == "SWAP" && kind == "conditional";
+                    before.push(RecordedGet {
+                        access_key: "fixture-observer-a".into(),
+                        path: "/api/v5/trade/orders-algo-pending".into(),
+                        required_query: query.clone(),
+                        raw_response: raw(if active {
+                            serde_json::json!([
+                                {"algoId": "900000002"},
+                                {"algoId": "900000003"}
+                            ])
+                        } else {
+                            serde_json::json!([])
+                        }),
+                    });
+                    after.push(RecordedGet {
+                        access_key: "fixture-observer-a".into(),
+                        path: "/api/v5/trade/orders-algo-pending".into(),
+                        required_query: query,
+                        raw_response: raw(if active {
+                            serde_json::json!([{"algoId": "900000003"}])
+                        } else {
+                            serde_json::json!([])
+                        }),
+                    });
+                }
+            }
+            feed.expect_causal_algo_inventory("900000002", before, after);
+            feed.expect_post(RecordedPost {
+                access_key: "fixture-executor-a".into(),
+                path: "/api/v5/trade/cancel-algos".into(),
+                expected_body: serde_json::json!([{
+                    "instId": "BTC-USDT-SWAP", "algoId": "900000002"
+                }]),
+                raw_response: raw(serde_json::json!([{
+                    "algoId": "900000002", "sCode": "0"
+                }])),
+            });
+            feed
+        }
+
+        fn causal_get(account: &'static str, limit: &str) -> okx_api::HttpRequest {
+            let url = reqwest::Url::parse(&format!(
+                "https://www.okx.com/api/v5/trade/orders-algo-pending?instType=SWAP&ordType=conditional&limit={limit}"
+            ))
+            .unwrap();
+            let mut request = reqwest::Request::new(reqwest::Method::GET, url);
+            request.headers_mut().insert(
+                "OK-ACCESS-KEY",
+                reqwest::header::HeaderValue::from_static(account),
+            );
+            request
+        }
+
+        fn causal_cancel() -> okx_api::HttpRequest {
+            let url = reqwest::Url::parse("https://www.okx.com/api/v5/trade/cancel-algos").unwrap();
+            let mut request = reqwest::Request::new(reqwest::Method::POST, url);
+            request.headers_mut().insert(
+                "OK-ACCESS-KEY",
+                reqwest::header::HeaderValue::from_static("fixture-executor-a"),
+            );
+            *request.body_mut() = Some(reqwest::Body::from(
+                r#"[{"instId":"BTC-USDT-SWAP","algoId":"900000002"}]"#,
+            ));
+            request
+        }
+
+        async fn deliver_causal(
+            feed: &RecordedAccountHttp,
+            request: okx_api::HttpRequest,
+        ) -> Result<serde_json::Value, okx_api::OkxError> {
+            use okx_api::HttpTransport;
+            let reply = feed
+                .send(request, Instant::now() + std::time::Duration::from_secs(3))
+                .await?;
+            serde_json::from_slice(&reply.body).map_err(Into::into)
+        }
+
+        #[tokio::test]
+        async fn s1_01_maintenance_read_before_cancel_ack_keeps_second_stop() {
+            let feed = causal_algo_fixture();
+            let before = deliver_causal(&feed, causal_get("fixture-observer-a", "100"))
+                .await
+                .unwrap();
+            assert_eq!(before["data"].as_array().unwrap().len(), 2);
+            deliver_causal(&feed, causal_cancel()).await.unwrap();
+            let after = deliver_causal(&feed, causal_get("fixture-executor-a", "100"))
+                .await
+                .unwrap();
+            assert_eq!(after["data"].as_array().unwrap().len(), 1);
+            assert_eq!(after["data"][0]["algoId"], "900000003");
+            assert_eq!(feed.outbound_posts.lock().unwrap().len(), 1);
+            assert_eq!(feed.unconsumed_posts(), 0);
+        }
+
+        #[tokio::test]
+        async fn s1_02_pre_cancel_get_late_delivery_does_not_rewrite_inventory() {
+            let feed = causal_algo_fixture();
+            let (entered, resume) = feed.hold_next_causal_algo_get();
+            let in_flight = {
+                let feed = feed.clone();
+                tokio::spawn(async move {
+                    deliver_causal(&feed, causal_get("fixture-observer-a", "100")).await
+                })
+            };
+            tokio::time::timeout(std::time::Duration::from_secs(2), entered.notified())
+                .await
+                .expect("pre-cancel read admitted at transport boundary");
+            deliver_causal(&feed, causal_cancel()).await.unwrap();
+            resume.notify_one();
+            let old = in_flight.await.unwrap().unwrap();
+            assert_eq!(old["data"].as_array().unwrap().len(), 2);
+            let fresh = deliver_causal(&feed, causal_get("fixture-executor-a", "100"))
+                .await
+                .unwrap();
+            assert_eq!(fresh["data"].as_array().unwrap().len(), 1);
+            assert_eq!(fresh["data"][0]["algoId"], "900000003");
+            assert_eq!(feed.outbound_posts.lock().unwrap().len(), 1);
+            let duplicate = deliver_causal(&feed, causal_cancel()).await.unwrap_err();
+            assert!(duplicate.to_string().contains("TRANSCRIPT_UNEXPECTED_POST"));
+            assert_eq!(feed.outbound_posts.lock().unwrap().len(), 2);
+        }
+
+        #[tokio::test]
+        async fn s1_04_executor_and_observer_share_one_verified_uid_inventory() {
+            let feed = causal_algo_fixture();
+            let executor = deliver_causal(&feed, causal_get("fixture-executor-a", "100"))
+                .await
+                .unwrap();
+            assert_eq!(executor["data"].as_array().unwrap().len(), 2);
+            let observer = deliver_causal(&feed, causal_get("fixture-observer-a", "100"))
+                .await
+                .unwrap();
+            assert_eq!(observer["data"].as_array().unwrap().len(), 2);
+            deliver_causal(&feed, causal_cancel()).await.unwrap();
+            for actor in ["fixture-observer-a", "fixture-executor-a"] {
+                let fresh = deliver_causal(&feed, causal_get(actor, "100"))
+                    .await
+                    .unwrap();
+                assert_eq!(fresh["data"].as_array().unwrap().len(), 1);
+                assert_eq!(fresh["data"][0]["algoId"], "900000003");
+            }
+            let trace = feed.causal_algo_trace.lock().unwrap().join("\n");
+            assert!(trace.contains("actor=fixture-executor-a"));
+            assert!(trace.contains("actor=fixture-observer-a"));
+            assert!(trace.contains("event=CANCEL_ACK"));
+            assert_eq!(feed.outbound_posts.lock().unwrap().len(), 1);
+        }
+
+        #[tokio::test]
+        async fn s1_05_other_uid_has_its_own_immutable_signed_inventory() {
+            let feed = causal_algo_fixture();
+            let raw = serde_json::to_vec(&serde_json::json!({
+                "code": "0", "msg": "", "data": []
+            }))
+            .unwrap();
+            let mut pages = Vec::new();
+            for inst_type in ["SWAP", "FUTURES"] {
+                for kind in [
+                    "conditional",
+                    "oco",
+                    "trigger",
+                    "move_order_stop",
+                    "chase",
+                    "iceberg",
+                    "twap",
+                    "smart_iceberg",
+                ] {
+                    pages.push(RecordedGet {
+                        access_key: "fixture-observer-b".into(),
+                        path: "/api/v5/trade/orders-algo-pending".into(),
+                        required_query: vec![
+                            ("instType".into(), inst_type.into()),
+                            ("ordType".into(), kind.into()),
+                            ("limit".into(), "100".into()),
+                        ],
+                        raw_response: raw.clone(),
+                    });
+                }
+            }
+            feed.expect_static_algo_inventory("fixture-observer-b", pages);
+            for actor in ["fixture-observer-b", "fixture-executor-b"] {
+                let reply = deliver_causal(&feed, causal_get(actor, "100"))
+                    .await
+                    .unwrap();
+                assert_eq!(reply["data"].as_array().unwrap().len(), 0);
+            }
+            let a_before = deliver_causal(&feed, causal_get("fixture-observer-a", "100"))
+                .await
+                .unwrap();
+            assert_eq!(a_before["data"].as_array().unwrap().len(), 2);
+            deliver_causal(&feed, causal_cancel()).await.unwrap();
+            let a_after = deliver_causal(&feed, causal_get("fixture-executor-a", "100"))
+                .await
+                .unwrap();
+            assert_eq!(a_after["data"].as_array().unwrap().len(), 1);
+            let b_after = deliver_causal(&feed, causal_get("fixture-observer-b", "100"))
+                .await
+                .unwrap();
+            assert_eq!(b_after["data"].as_array().unwrap().len(), 0);
+            let wrong = deliver_causal(&feed, causal_get("fixture-observer-b", "99"))
+                .await
+                .unwrap_err();
+            assert!(
+                wrong
+                    .to_string()
+                    .contains("TRANSCRIPT_STATIC_ALGO_QUERY_MISMATCH")
+            );
+            assert_eq!(feed.outbound_posts.lock().unwrap().len(), 1);
+        }
+
+        #[tokio::test]
+        async fn s1_03_unknown_scope_fails_without_advancing_cancel_inventory() {
+            let feed = causal_algo_fixture();
+            let account = deliver_causal(&feed, causal_get("fixture-observer-b", "100"))
+                .await
+                .unwrap_err();
+            assert!(
+                account
+                    .to_string()
+                    .contains("TRANSCRIPT_ALGO_ACCOUNT_MISMATCH")
+            );
+            let query = deliver_causal(&feed, causal_get("fixture-observer-a", "99"))
+                .await
+                .unwrap_err();
+            assert!(query.to_string().contains("TRANSCRIPT_ALGO_QUERY_MISMATCH"));
+            let unchanged = deliver_causal(&feed, causal_get("fixture-observer-a", "100"))
+                .await
+                .unwrap();
+            assert_eq!(unchanged["data"].as_array().unwrap().len(), 2);
+            assert_eq!(feed.outbound_posts.lock().unwrap().len(), 0);
+        }
+
+        #[test]
+        fn recorded_clients_use_one_native_rate_budget_across_api_identities() {
+            // A scripted transport must not gain independent admission windows
+            // merely because Observer and Executor use different API keys.
+            // The identical shared budget is also passed to the Registry and
+            // public WS owner by the integrated Native/Worker assembly.
+            let budget = RateBudget::new();
+            let feed = Arc::new(RecordedAccountHttp::default());
+            let (_, a) =
+                prepared_with_socket("a", feed.clone(), Arc::new(OfflineSocket), budget.clone());
+            let (_, b) = prepared_with_socket("b", feed, Arc::new(OfflineSocket), budget.clone());
+            let plan = a
+                .observer
+                .rate_budget()
+                .private_rest_plan("/api/v5/account/config", &[]);
+            for _ in 0..5 {
+                a.observer.rate_budget().admit(&plan).unwrap();
+            }
+            let a_plan = a
+                .executor
+                .rate_budget()
+                .private_rest_plan("/api/v5/account/config", &[]);
+            let a_denied = a.executor.rate_budget().admit(&a_plan).unwrap_err();
+            assert!(!a_denied.request_sent, "same-user identities share quota");
+            assert_eq!(a_denied.domain.local_max_requests, 5);
+            let b_plan = b
+                .observer
+                .rate_budget()
+                .private_rest_plan("/api/v5/account/config", &[]);
+            for _ in 0..5 {
+                b.observer.rate_budget().admit(&b_plan).unwrap();
+            }
+            let b_denied = b.executor.rate_budget().admit(&b_plan).unwrap_err();
+            assert!(!b_denied.request_sent, "second account has its own bound");
+            assert_ne!(a_denied.domain.scope, b_denied.domain.scope);
+        }
+
+        #[test]
+        fn signed_order_readback_must_match_same_account_client_and_acknowledged_order() {
+            let ack = vec![
+                (
+                    "fixture-executor-a".to_owned(),
+                    "client_A".to_owned(),
+                    "order_A".to_owned(),
+                ),
+                (
+                    "fixture-executor-a".to_owned(),
+                    "client_B".to_owned(),
+                    "order_B".to_owned(),
+                ),
+                (
+                    "fixture-executor-b".to_owned(),
+                    "client_B".to_owned(),
+                    "order_C".to_owned(),
+                ),
+            ];
+            let raw = |order: &str, client: &str| {
+                serde_json::to_vec(&serde_json::json!({
+                    "code":"0", "msg":"", "data":[{"ordId":order,"clOrdId":client}]
+                }))
+                .unwrap()
+            };
+            assert!(recorded_order_source_matches(
+                &ack,
+                "fixture-executor-a",
+                "client_A",
+                &raw("order_A", "__REQUEST_CL_ORD_ID__")
+            ));
+            assert!(recorded_order_source_matches(
+                &ack,
+                "fixture-executor-a",
+                "client_B",
+                &raw("order_B", "__REQUEST_CL_ORD_ID__")
+            ));
+            assert!(!recorded_order_source_matches(
+                &ack,
+                "fixture-executor-a",
+                "client_A",
+                &raw("order_B", "__REQUEST_CL_ORD_ID__")
+            ));
+            assert!(!recorded_order_source_matches(
+                &ack,
+                "fixture-executor-b",
+                "client_B",
+                &raw("order_B", "__REQUEST_CL_ORD_ID__")
+            ));
+            assert!(!recorded_order_source_matches(
+                &ack,
+                "fixture-executor-a",
+                "unknown",
+                &raw("order_A", "__REQUEST_CL_ORD_ID__")
+            ));
+            assert!(!recorded_order_source_matches(
+                &ack,
+                "fixture-executor-a",
+                "client_A",
+                &raw("order_A", "different_client")
+            ));
+            let mut duplicate = ack.clone();
+            duplicate.push(ack[0].clone());
+            assert!(!recorded_order_source_matches(
+                &duplicate,
+                "fixture-executor-a",
+                "client_A",
+                &raw("order_A", "__REQUEST_CL_ORD_ID__")
+            ));
+            assert!(!recorded_order_source_matches(
+                &ack,
+                "fixture-executor-a",
+                "client_A",
+                b"{malformed"
+            ));
+        }
+
+        #[test]
+        fn recorded_financial_history_binds_each_order_and_rejects_other_accounts() {
+            let ack = vec![
+                (
+                    "fixture-executor-a".to_owned(),
+                    "client_A".to_owned(),
+                    "order_A".to_owned(),
+                ),
+                (
+                    "fixture-executor-a".to_owned(),
+                    "client_B".to_owned(),
+                    "order_B".to_owned(),
+                ),
+                (
+                    "fixture-executor-b".to_owned(),
+                    "client_C".to_owned(),
+                    "order_C".to_owned(),
+                ),
+            ];
+            let bytes = serde_json::to_vec(&serde_json::json!({
+                "data":[
+                    {"ordId":"order_B","clOrdId":"__REQUEST_CL_ORD_ID__"},
+                    {"ordId":"order_A","clOrdId":"__REQUEST_CL_ORD_ID__"}
+                ]
+            }))
+            .unwrap();
+            let bound =
+                bind_recorded_history_ids(&ack, "fixture-executor-a", bytes.clone()).unwrap();
+            let parsed: serde_json::Value = serde_json::from_slice(&bound).unwrap();
+            assert_eq!(parsed["data"][0]["clOrdId"], "client_B");
+            assert_eq!(parsed["data"][1]["clOrdId"], "client_A");
+            assert!(bind_recorded_history_ids(&ack, "fixture-executor-b", bytes.clone()).is_err());
+            let mut duplicate = ack.clone();
+            duplicate.push(ack[0].clone());
+            assert!(bind_recorded_history_ids(&duplicate, "fixture-executor-a", bytes).is_err());
+            let unknown = serde_json::to_vec(&serde_json::json!({
+                "data":[{"ordId":"unknown","clOrdId":"__REQUEST_CL_ORD_ID__"}]
+            }))
+            .unwrap();
+            assert!(bind_recorded_history_ids(&ack, "fixture-executor-a", unknown).is_err());
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     fn root() -> PathBuf {
@@ -801,6 +2488,703 @@ mod tests {
             verified_uid: "a".repeat(64),
         }
     }
+    /// This exercises the same identity/permission bootstrap with an exhausted
+    /// raw HTTP transcript. A failed identity proof must never create SQL or
+    /// a durable account route; no real network/credential store is contacted.
+    #[tokio::test]
+    async fn prepared_account_rejects_unverified_identity_before_sql() {
+        use okx_api::{HttpSend, HttpTransport, OkxError};
+        use std::time::Instant;
+        struct NoRecordedResponse;
+        impl HttpTransport for NoRecordedResponse {
+            fn send(&self, _: okx_api::HttpRequest, _: Instant) -> HttpSend<'_> {
+                Box::pin(async { Err(OkxError::Response("HTTP_TRANSCRIPT_EXHAUSTED".into())) })
+            }
+        }
+        let root = root();
+        initialize_installation(&root, "installation-test").unwrap();
+        let registry = AccountRuntimeRegistry::open(&root, RateBudget::new())
+            .await
+            .unwrap();
+        let environment = OkxEnvironment::new(okx_api::Region::Global, false);
+        let creds = Credentials::new(
+            "fixture-key".into(),
+            "fixture-secret".into(),
+            "fixture-pass".into(),
+        )
+        .unwrap();
+        let transport: Arc<dyn HttpTransport> = Arc::new(NoRecordedResponse);
+        let observer = OkxRestClient::with_http_transport(
+            environment,
+            creds.clone(),
+            RateBudget::new(),
+            transport.clone(),
+        )
+        .unwrap();
+        let executor = OkxRestClient::with_http_transport(
+            environment,
+            creds.clone(),
+            RateBudget::new(),
+            transport,
+        )
+        .unwrap();
+        let clients = PreparedAccountClients {
+            environment,
+            observer,
+            executor,
+            observer_login: creds,
+            ws_connector: Arc::new(LiveWsConnector),
+        };
+        let config = VerifiedAccountConfig {
+            account_key: key(),
+            alias: "fixture-account".into(),
+            credential_ref: "fixture-credentials".into(),
+            connect_operation_id: "fixture-connect-00001".into(),
+            configuration_digest: "a".repeat(64),
+        };
+        assert!(registry.connect_prepared(config, clients).await.is_err());
+        assert!(registry.list().await.is_empty());
+        assert!(!root.join("accounts").exists());
+        assert!(!root.join("account-leases").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// The production PublicWsCoordinator, not the recording, must establish
+    /// an acknowledged generation, contiguous book and fresh market snapshot.
+    #[tokio::test]
+    async fn recorded_public_ws_frames_make_production_market_snapshot_fresh() {
+        use super::recorded_support::RecordedWsConnector;
+        use serde_json::{Value, json};
+        let reference = okx_observation::ReferenceRegistry::from_public(
+            "2026-10-31T00:00:00Z",
+            vec![
+                serde_json::from_value(json!({
+                    "instType": "SWAP",
+                    "instId": "BTC-USDT-SWAP",
+                    "instFamily": "BTC-USDT",
+                    "uly": "BTC-USDT",
+                    "state": "live",
+                    "ruleType": "normal",
+                    "settleCcy": "USDT",
+                    "tickSz": "0.1",
+                    "lotSz": "0.01",
+                    "minSz": "0.01",
+                    "maxLmtSz": "1000",
+                    "maxMktSz": "1000",
+                    "ctType": "linear",
+                    "ctVal": "0.01",
+                    "ctValCcy": "BTC",
+                    "lever": "20"
+                }))
+                .unwrap(),
+            ],
+        )
+        .unwrap();
+        let connector = Arc::new(RecordedWsConnector::default());
+        let stamp = chrono::Utc::now().timestamp_millis();
+        let timestamp = stamp.to_string();
+        let future = (stamp + 8 * 60 * 60 * 1000).to_string();
+        let recordings: Vec<(Value, Option<Value>, Option<&str>)> = vec![
+            (
+                json!({"channel":"instruments","instType":"SWAP"}),
+                None,
+                None,
+            ),
+            (
+                json!({"channel":"instruments","instType":"FUTURES"}),
+                None,
+                None,
+            ),
+            (
+                json!({"channel":"tickers","instId":"BTC-USDT-SWAP"}),
+                Some(json!({"instType":"SWAP","instId":"BTC-USDT-SWAP",
+                    "last":"1000","lastSz":"1","askPx":"1000","askSz":"10",
+                    "bidPx":"999.9","bidSz":"10","ts":timestamp})),
+                None,
+            ),
+            (
+                json!({"channel":"mark-price","instId":"BTC-USDT-SWAP"}),
+                Some(json!({"instType":"SWAP","instId":"BTC-USDT-SWAP",
+                    "markPx":"1000","ts":timestamp})),
+                None,
+            ),
+            (
+                json!({"channel":"index-tickers","instId":"BTC-USDT"}),
+                Some(json!({"instId":"BTC-USDT","idxPx":"1000","ts":timestamp})),
+                None,
+            ),
+            (
+                json!({"channel":"funding-rate","instId":"BTC-USDT-SWAP"}),
+                Some(json!({"instType":"SWAP","instId":"BTC-USDT-SWAP",
+                    "fundingRate":"0.0001","fundingTime":timestamp,
+                    "nextFundingTime":future,"ts":timestamp})),
+                None,
+            ),
+            (
+                json!({"channel":"open-interest","instId":"BTC-USDT-SWAP"}),
+                Some(json!({"instType":"SWAP","instId":"BTC-USDT-SWAP",
+                    "oi":"1000","oiCcy":"10","oiUsd":"10000","ts":timestamp})),
+                None,
+            ),
+            (
+                json!({"channel":"books","instId":"BTC-USDT-SWAP"}),
+                Some(json!({"asks":[["1000","10","0","1"]],
+                    "bids":[["999.9","10","0","1"]],
+                    "seqId":10,"prevSeqId":-1,"ts":timestamp})),
+                Some("snapshot"),
+            ),
+        ];
+        for (arg, data, action) in recordings {
+            let ack = json!({
+                "event":"subscribe","arg":arg,"connId":"recorded-public"
+            })
+            .to_string();
+            let last_ack_after_data = arg["channel"] == "books";
+            let mut raw = Vec::new();
+            if !last_ack_after_data {
+                raw.push(ack.clone());
+            }
+            if let Some(data) = data {
+                let mut message = json!({"arg":arg,"data":[data]});
+                if let Some(action) = action {
+                    message["action"] = action.into();
+                }
+                raw.push(message.to_string());
+            }
+            // The book data frame is processed BEFORE its final subscribe
+            // ACK. Only the real subscription readiness wakeup can complete
+            // the public market: no extra data is injected after the ACK.
+            if last_ack_after_data {
+                raw.push(ack);
+            }
+            connector.expect_public_subscription(arg, raw);
+        }
+        let (coordinator, market) = okx_runtime::PublicWsCoordinator::new_with_connector(
+            OkxEnvironment::new(okx_api::Region::Global, false),
+            reference,
+            RateBudget::new(),
+            connector.clone(),
+        );
+        let (shutdown, stop) = watch::channel(false);
+        let task = tokio::spawn(coordinator.run(stop));
+        let mut updates = market.subscribe_market_updates();
+        market.demand_instrument("BTC-USDT-SWAP").await.unwrap();
+        let verified = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if let Ok(snapshot) = market
+                    .risk_fresh_snapshot(
+                        "BTC-USDT-SWAP",
+                        u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap(),
+                        5_000,
+                        5_000,
+                        chrono::Utc::now().to_rfc3339(),
+                    )
+                    .await
+                {
+                    break snapshot;
+                }
+                updates.changed().await.expect("market coordinator stopped");
+            }
+        })
+        .await;
+        let verified = match verified {
+            Ok(snapshot) => snapshot,
+            Err(_) => {
+                let quality = market
+                    .risk_quality_snapshot(
+                        "BTC-USDT-SWAP",
+                        u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap(),
+                        5_000,
+                        5_000,
+                    )
+                    .await;
+                let sent = connector.sent.lock().unwrap().clone();
+                let remaining = connector.unconsumed_public_subscriptions();
+                panic!(
+                    "PUBLIC_WS_RECORDED_SOURCE_NOT_FRESH: quality={quality:?} remaining={remaining} sent={sent:?}"
+                );
+            }
+        };
+        assert_eq!(verified.market.instrument_id, "BTC-USDT-SWAP");
+        assert_eq!(verified.market.ticker.best_ask, "1000");
+        assert_eq!(verified.order_book.seq_id, Some(10));
+        assert_eq!(connector.unconsumed_public_subscriptions(), 0);
+        shutdown.send(true).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), task)
+            .await
+            .expect("public coordinator did not stop")
+            .unwrap()
+            .unwrap();
+    }
+
+    /// The production AccountBootstrapper consumes venue-provided fee, leverage
+    /// and account instrument bytes through signed observer REST. No test
+    /// shortcut supplies a parsed FeeScheduleSnapshot or permission flag.
+    /// A consumed or wrong-account source must fail closed.
+    #[tokio::test]
+    async fn recorded_account_capabilities_and_fee_sources_use_real_observer_parsers() {
+        use super::recorded_support::{RecordedAccountHttp, RecordedGet, prepared};
+        use serde_json::json;
+        let feed = Arc::new(RecordedAccountHttp::default());
+        let budget = RateBudget::new();
+        let (_config, clients) = prepared("a", feed.clone(), budget.clone());
+        let observer = crate::account_bootstrap::AccountBootstrapper::new(clients.observer);
+        let reference = okx_observation::ReferenceRegistry::from_public(
+            "2026-10-31T00:00:00Z",
+            vec![
+                serde_json::from_value(json!({
+                    "instType":"SWAP","instId":"BTC-USDT-SWAP",
+                    "instFamily":"BTC-USDT","uly":"BTC-USDT",
+                    "state":"live","ruleType":"normal",
+                    "settleCcy":"USDT","tickSz":"0.1",
+                    "lotSz":"0.01","minSz":"0.01",
+                    "maxLmtSz":"1000","maxMktSz":"1000",
+                    "ctType":"linear","ctVal":"0.01","ctValCcy":"BTC",
+                    "groupId":"4","lever":"20"
+                }))
+                .unwrap(),
+            ],
+        )
+        .unwrap();
+        let rules = reference.instrument_rules("BTC-USDT-SWAP").unwrap();
+        let stamp = chrono::Utc::now().timestamp_millis().to_string();
+        let envelope = |data: serde_json::Value| {
+            serde_json::to_vec(&json!({"code":"0","msg":"","data":data})).unwrap()
+        };
+        let observer_key = "fixture-observer-a".to_owned();
+        feed.expect_get(RecordedGet {
+            access_key: observer_key.clone(),
+            path: "/api/v5/account/instruments".into(),
+            required_query: vec![("instType".into(), "SWAP".into())],
+            raw_response: envelope(json!([{
+                "instType":"SWAP","instId":"BTC-USDT-SWAP",
+                "state":"live","lever":"20"
+            }])),
+        });
+        for _ in 0..2 {
+            feed.expect_get(RecordedGet {
+                access_key: observer_key.clone(),
+                path: "/api/v5/account/leverage-info".into(),
+                required_query: vec![
+                    ("instId".into(), "BTC-USDT-SWAP".into()),
+                    ("mgnMode".into(), "cross".into()),
+                ],
+                raw_response: envelope(json!([
+                    {"instId":"BTC-USDT-SWAP","mgnMode":"cross","posSide":"long","lever":"5"},
+                    {"instId":"BTC-USDT-SWAP","mgnMode":"cross","posSide":"short","lever":"5"}
+                ])),
+            });
+            feed.expect_get(RecordedGet {
+                access_key: observer_key.clone(),
+                path: "/api/v5/account/trade-fee".into(),
+                required_query: vec![
+                    ("instType".into(), "SWAP".into()),
+                    ("instFamily".into(), "BTC-USDT".into()),
+                ],
+                raw_response: envelope(json!([{
+                    "instType":"SWAP","level":"Lv1","ts":stamp,
+                    "feeGroup":[{"groupId":"4","maker":"0.0005","taker":"0.0005"}]
+                }])),
+            });
+        }
+        let capabilities = observer
+            .trading_capabilities(&rules, okx_api::MarginMode::Cross)
+            .await
+            .expect("production account capability capture");
+        assert!(capabilities.instrument.available_to_account);
+        assert_eq!(
+            capabilities.instrument.account_max_leverage.as_deref(),
+            Some("20")
+        );
+        assert_eq!(capabilities.account.position_mode, "long_short_mode");
+        assert_eq!(capabilities.account.api_key_permissions, vec!["read_only"]);
+        assert_eq!(
+            capabilities.account.account_uid_fingerprint,
+            okx_api::account_uid_fingerprint("account-001")
+        );
+        assert_eq!(capabilities.configured_leverage.len(), 2);
+        let rate = capabilities.fee_schedule.unwrap();
+        assert_eq!(rate.maker_rate, "0.0005");
+        assert_eq!(rate.taker_rate, "0.0005");
+        assert!(rate.exact_for_instrument);
+        assert_eq!(rate.instrument_id, "BTC-USDT-SWAP");
+        let selected = observer
+            .configured_leverage("BTC-USDT-SWAP", okx_api::MarginMode::Cross, "long")
+            .await
+            .unwrap();
+        assert_eq!(selected, "5");
+        let fees = observer.fee_schedule(&rules).await.unwrap();
+        assert_eq!(fees.taker_rate, "0.0005");
+        assert_eq!(feed.unconsumed_reads(), 0);
+        // Neither cached account configuration nor a previous successful
+        // normalization permits using exhausted signed financial input.
+        assert!(observer.fee_schedule(&rules).await.is_err());
+        assert_eq!(feed.unconsumed_reads(), 0);
+        let (_other, other_clients) = prepared("b", feed.clone(), budget);
+        let other = crate::account_bootstrap::AccountBootstrapper::new(other_clients.observer);
+        assert!(other.fee_schedule(&rules).await.is_err());
+        assert!(feed.outbound_posts.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn recorded_clock_publisher_cannot_rearm_or_multiply_source_pages() {
+        use super::recorded_support::RecordedAccountHttp;
+        let feed = RecordedAccountHttp::default();
+        assert!(!feed.refresh_unconsumed_public_clock(0, b"unsolicited".to_vec()));
+        feed.expect_public_clock(b"recorded_first".to_vec());
+        assert!(feed.refresh_unconsumed_public_clock(0, b"recorded_new".to_vec()));
+        assert_eq!(feed.unconsumed_public_clock(), 1);
+        assert!(!feed.refresh_unconsumed_public_clock(1, b"wrong_generation".to_vec()));
+        assert_eq!(feed.unconsumed_public_clock(), 1);
+        feed.expect_public_clock(b"another_source".to_vec());
+        assert!(!feed.refresh_unconsumed_public_clock(0, b"multiply".to_vec()));
+        assert_eq!(feed.unconsumed_public_clock(), 2);
+    }
+
+    /// Exercise the actual signed OKX adapter's POST through the raw
+    /// transport boundary. A mismatched request cannot consume a response,
+    /// and the response is not an invented execution or a fill.
+    #[tokio::test]
+    async fn recorded_executor_post_requires_exact_request_and_consumes_once() {
+        use super::recorded_support::{RecordedAccountHttp, RecordedPost};
+        use okx_api::{
+            ApiOrderSide, ApiOrderType, ApiPositionSide, ApiTradeMode, Credentials, MutationTiming,
+            OkxRestClient, PlaceOrderRequest, TradeApi,
+        };
+        let feed = Arc::new(RecordedAccountHttp::default());
+        let env = OkxEnvironment::new(okx_api::Region::Global, false);
+        let credentials = Credentials::new(
+            "fixture-executor-a".into(),
+            "executor-secret".into(),
+            "pass".into(),
+        )
+        .unwrap();
+        let client =
+            OkxRestClient::with_http_transport(env, credentials, RateBudget::new(), feed.clone())
+                .unwrap();
+        let trade = TradeApi::new(client);
+        let request = PlaceOrderRequest {
+            instrument_id: "BTC-USDT-SWAP".into(),
+            trade_mode: ApiTradeMode::Cross,
+            client_order_id: "recordedOrder123".into(),
+            side: ApiOrderSide::Buy,
+            position_side: ApiPositionSide::Long,
+            reduce_only: None,
+            order_type: ApiOrderType::Limit,
+            size: "0.30".into(),
+            price: "1000".into(),
+            attached_algo_orders: vec![],
+        };
+        let mut expected = serde_json::to_value(&request).unwrap();
+        expected["clOrdId"] = "__REQUEST_CL_ORD_ID__".into();
+        feed.expect_post(RecordedPost {
+            access_key: "fixture-executor-a".into(),
+            path: "/api/v5/trade/order".into(),
+            expected_body: expected,
+            raw_response: br#"{"code":"0","msg":"","data":[{"ordId":"123456","clOrdId":"__REQUEST_CL_ORD_ID__","sCode":"0"}]}"#.to_vec(),
+        });
+        let timestamp = u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap();
+        let timing = MutationTiming::from_exchange_time_ms(timestamp, 2_000).unwrap();
+        let mut wrong = request.clone();
+        wrong.size = "0.40".into();
+        let mismatch = trade.place_order(&wrong, &timing).await.unwrap_err();
+        assert!(
+            mismatch
+                .to_string()
+                .contains("TRANSCRIPT_POST_BODY_MISMATCH")
+        );
+        assert_eq!(
+            feed.unconsumed_posts(),
+            1,
+            "mismatch must not advance transcript"
+        );
+        let response = trade.place_order(&request, &timing).await.unwrap();
+        assert_eq!(response.data.len(), 1);
+        assert_eq!(response.data[0].order_id, "123456");
+        assert_eq!(response.data[0].client_order_id, request.client_order_id);
+        assert_eq!(feed.unconsumed_posts(), 0);
+        let exhausted = trade.place_order(&request, &timing).await.unwrap_err();
+        assert!(exhausted.to_string().contains("TRANSCRIPT_UNEXPECTED_POST"));
+        assert_eq!(
+            feed.outbound_posts.lock().unwrap().len(),
+            3,
+            "all possible sends, including rejected/repeated, must be observable"
+        );
+    }
+
+    /// A nonempty recorded fill page enters the real OKX history decoder.
+    /// Consumed external evidence cannot silently turn into a fresh empty page.
+    #[tokio::test]
+    async fn recorded_financial_history_page_is_raw_one_use_and_fail_closed() {
+        use super::recorded_support::{RecordedAccountHttp, RecordedGet};
+        use okx_api::{AccountHistoryApi, Credentials, OkxRestClient};
+        let feed = Arc::new(RecordedAccountHttp::default());
+        feed.expect_get(RecordedGet {
+            access_key: "fixture-observer-a".into(),
+            path: "/api/v5/trade/fills-history".into(),
+            required_query: vec![("instType".into(), "SWAP".into())],
+            raw_response: br#"{"code":"0","msg":"","data":[{"instType":"SWAP","instId":"BTC-USDT-SWAP","tradeId":"10001","ordId":"20001","clOrdId":"order123","billId":"30001","subType":"1","side":"buy","posSide":"long","fillPx":"1000","fillSz":"0.12","fee":"-0.0006","feeCcy":"USDT","ts":"1793460000000"}]}"#.to_vec(),
+        });
+        let client = OkxRestClient::with_http_transport(
+            OkxEnvironment::new(okx_api::Region::Global, false),
+            Credentials::new(
+                "fixture-observer-a".into(),
+                "observer-secret".into(),
+                "pass".into(),
+            )
+            .unwrap(),
+            RateBudget::new(),
+            feed.clone(),
+        )
+        .unwrap();
+        let api = AccountHistoryApi::new(client);
+        let end = chrono::Utc::now().timestamp_millis();
+        let rows = api
+            .fills_history_page("SWAP", end - 60_000, end, None)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].fill_size, "0.12");
+        assert_eq!(rows[0].fee, "-0.0006");
+        assert_eq!(feed.unconsumed_reads(), 0);
+        let exhausted = api
+            .fills_history_page("SWAP", end - 60_000, end, None)
+            .await
+            .unwrap_err();
+        assert!(
+            exhausted
+                .to_string()
+                .contains("TRANSCRIPT_SOURCE_PAGE_UNEXPECTED_OR_EXHAUSTED"),
+            "unrecorded extra source pages must not become empty proof: {exhausted}"
+        );
+    }
+
+    /// T09 bootstrap component: independent UIDs create separate real SQL
+    /// owners from bounded raw HTTP records, not from a fake exchange state.
+    #[tokio::test]
+    async fn recorded_two_account_bootstrap_opens_independent_sql_owners() {
+        use super::recorded_support::{RecordedAccountHttp, prepared};
+        let temp = root();
+        initialize_installation(&temp, "installation-test").unwrap();
+        let budget = RateBudget::new();
+        let registry = AccountRuntimeRegistry::open(&temp, budget.clone())
+            .await
+            .unwrap();
+        let feed = Arc::new(RecordedAccountHttp::default());
+        let mut stopped_sql_owners = Vec::new();
+
+        for label in ["a", "b"] {
+            let (config, clients) = prepared(label, feed.clone(), budget.clone());
+            registry
+                .connect_prepared(config.clone(), clients)
+                .await
+                .unwrap();
+            let owner = registry.resolve(&config.account_key.wire()).await.unwrap();
+            assert_eq!(owner.execution.uid(), config.account_key.verified_uid);
+            stopped_sql_owners.push(owner.execution.store.termination_signal());
+            assert!(
+                temp.join("accounts")
+                    .join(key_hash(&config.account_key))
+                    .join("account.sqlite")
+                    .is_file()
+            );
+        }
+
+        assert_eq!(registry.list().await.len(), 2);
+        {
+            let observed = feed.requests.lock().unwrap();
+            for label in ["a", "b"] {
+                let prefix = format!("fixture-observer-{label}:/api/v5/trade/orders-algo-pending?");
+                assert_eq!(
+                    observed
+                        .iter()
+                        .filter(|request| request.starts_with(&prefix))
+                        .count(),
+                    16,
+                    "every required derivative algo scope must be read"
+                );
+            }
+        }
+        // Enter the PUBLIC production TradeService with two separately
+        // bootstrapped native SQL owners. No recorded HTTP/WS input is allowed
+        // to synthesize a source generation, Worker grant or venue POST.
+        use crate::trade_service::TradeService;
+        use okx_protocol::trading::{
+            OrderConstraints, PositionSide, Protection, Sizing, TradeOperation, TradeRequest,
+        };
+        let registry = Arc::new(registry);
+        let public_environment = OkxEnvironment::new(okx_api::Region::Global, false);
+        let reference =
+            okx_observation::ReferenceRegistry::from_public("2026-10-31T00:00:00Z", vec![])
+                .unwrap();
+        let (_public_coordinator, public_ws) =
+            okx_runtime::PublicWsCoordinator::new_with_rate_budget(
+                public_environment,
+                reference,
+                budget,
+            );
+        let (risk_tx, mut risk_outbound) = tokio::sync::mpsc::channel(4);
+        let trade = TradeService::new(
+            registry.clone(),
+            public_ws,
+            crate::risk_bridge::NativeRiskClient::new(risk_tx),
+        );
+        let request = TradeRequest::Execute {
+            idempotency_key: "public_native_no_source_001".into(),
+            operation: TradeOperation::Open,
+            strategy_instance: "manual".into(),
+            instrument: "BTC-USDT-SWAP".into(),
+            side: PositionSide::Long,
+            sizing: Sizing::Contracts {
+                contracts: "0.10".into(),
+            },
+            order: OrderConstraints {
+                order_type: "limit".into(),
+                limit_price: Some("1000".into()),
+                reference: None,
+                max_entry_usd: Some("10".into()),
+                max_slippage_bps: 0,
+            },
+            protection: Some(Protection::Price {
+                stop_price: "900".into(),
+            }),
+            expires_in_ms: 2_000,
+        };
+        assert!(request.valid());
+        for label in ["a", "b"] {
+            let alias = format!("fixture-{label}");
+            let expected_uid = okx_api::account_uid_fingerprint(&format!(
+                "account-00{}",
+                if label == "a" { "1" } else { "2" }
+            ));
+            let caps = trade
+                .trade(&alias, &TradeRequest::Capabilities {}, None)
+                .await
+                .unwrap();
+            assert_eq!(
+                caps["account"],
+                format!("okx:real:{expected_uid}"),
+                "public trade routing must preserve the authenticated account owner"
+            );
+            assert_eq!(caps["executor"]["state"], "verified");
+            assert_eq!(caps["ready_for_post"], false);
+            let preflight = trade
+                .trade(&alias, &TradeRequest::Preflight {}, None)
+                .await
+                .unwrap();
+            assert_eq!(preflight["ready_for_new_risk"], false);
+            assert_eq!(preflight["state"], "blocked");
+            let rejected = trade.trade(&alias, &request, None).await.unwrap_err();
+            assert_eq!(rejected, "AUTHORITY_UNAVAILABLE");
+            assert!(
+                risk_outbound.try_recv().is_err(),
+                "an unproved public Execute must never request central risk"
+            );
+        }
+        drop(trade);
+        registry.shutdown().await;
+        drop(registry);
+        // On Windows, removing an open SQLite file fails with ERROR_SHARING_VIOLATION.
+        // Wait for the real SQL owner to close its DB; no sleep or assumed timeout
+        // is used as a substitute for a termination receipt.
+        for mut stopped in stopped_sql_owners {
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                while !*stopped.borrow_and_update() {
+                    stopped
+                        .changed()
+                        .await
+                        .expect("SQL owner exited without receipt");
+                }
+            })
+            .await
+            .expect("SQL owner did not terminate");
+        }
+        std::fs::remove_dir_all(temp).unwrap();
+    }
+
+    /// The original public account capture, not a fixture-set "fresh" flag.
+    #[tokio::test]
+    async fn recorded_ws_login_business_ack_and_six_history_pages_capture_both_sql_accounts() {
+        use super::recorded_support::{
+            RecordedAccountHttp, RecordedWsConnector, prepared_with_socket,
+        };
+        let temp = root();
+        initialize_installation(&temp, "installation-test").unwrap();
+        let budget = RateBudget::new();
+        let registry = AccountRuntimeRegistry::open(&temp, budget.clone())
+            .await
+            .unwrap();
+        let http = Arc::new(RecordedAccountHttp::default());
+        let mut receipts = Vec::new();
+        let mut sockets = Vec::new();
+        for label in ["a", "b"] {
+            let ws = Arc::new(RecordedWsConnector::default());
+            let (config, clients) =
+                prepared_with_socket(label, http.clone(), ws.clone(), budget.clone());
+            registry
+                .connect_prepared(config.clone(), clients)
+                .await
+                .unwrap();
+            let account = registry.resolve(&config.account_key.wire()).await.unwrap();
+            receipts.push(account.execution.store.termination_signal());
+            sockets.push(ws);
+        }
+        for (label, ws) in ["a", "b"].into_iter().zip(&sockets) {
+            let account = registry.resolve(&format!("fixture-{label}")).await.unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(12), async {
+                loop {
+                    let status = account.private_ws.status().await;
+                    let completed = account.source_capture_health.read().await.last_success_ms;
+                    if status.logged_in
+                        && status.subscriptions_complete
+                        && status.algo_subscription_ready
+                        && status.account_data_seen
+                        && status.positions_data_seen
+                        && account.source_identity_ready().await
+                        && completed.is_some()
+                    {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .expect("real source capture did not converge from recorded frames");
+            {
+                let sent = ws.sent.lock().unwrap();
+                assert_eq!(sent.iter().filter(|v| v["op"] == "login").count(), 2);
+                assert_eq!(sent.iter().filter(|v| v["op"] == "subscribe").count(), 2);
+            }
+            let recorded = account
+                .execution
+                .store
+                .call(Instant::now() + std::time::Duration::from_secs(3), |s| {
+                    Ok((s.cursor("fills", "SWAP")?, s.cursor("bills", "account")?))
+                })
+                .await
+                .unwrap();
+            assert!(recorded.0.is_some(), "SWAP history source not committed");
+            assert!(recorded.1.is_some(), "bills history source not committed");
+            assert_eq!(recorded.0.unwrap().coverage_gaps, "");
+            assert_eq!(recorded.1.unwrap().coverage_gaps, "");
+        }
+        registry.shutdown().await;
+        drop(registry);
+        for mut receipt in receipts {
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                while !*receipt.borrow_and_update() {
+                    receipt
+                        .changed()
+                        .await
+                        .expect("SQL owner exited without receipt");
+                }
+            })
+            .await
+            .expect("SQL owner not closed");
+        }
+        std::fs::remove_dir_all(temp).unwrap();
+    }
+
     #[tokio::test]
     async fn initialize_without_any_legacy_files() {
         let root = root();

@@ -1,7 +1,7 @@
 import {validGovernance,projectRiskPolicy,accessEnabled,GOVERNANCE_STORAGE_KEY} from "./account_governance.js";
 import {amount,units,beginRiskPost,readRiskBook,inspectRisk,reserveRisk,transitionRisk,
   type CompleteRiskCensus,type NativeSessionRiskProof,type CausalPostProof,type RiskReservation,
-  type TerminalRiskReleaseProof,type UnsentRiskReleaseProof,releaseUnsentRisk,inspectNoReserveFence} from "./risk_book.js";
+  type TerminalRiskReleaseProof,type UnsentRiskReleaseProof,releaseUnsentRisk,inspectNoReserveFence,settleEntrySpend,installCampaignEntryProof,type CampaignEntryOpeningSource} from "./risk_book.js";
 
 const COMMAND_SCHEMA="okx.risk-command/v1";
 const RESULT_SCHEMA="okx.risk-result/v1";
@@ -11,7 +11,11 @@ type ResultStatus="DENIED"|"HELD"|"POST_AUTHORIZED"|"UPDATED"|"OBSERVED";
 interface Result {
   schema:typeof RESULT_SCHEMA;command_id:string;status:ResultStatus;
   account_budget?:{account_key:string;active_reservations:number;occupied_usd:string;cumulative_loss_usd:string;latest_activity_ms:number};
-  budget?:{campaign_limit_usd:string;consumed_loss_usd:string;reserved_loss_usd:string;remaining_loss_usd:string;occupied_modelled_loss_usdt:string;source_as_of_ms:number|null};
+  budget?:{campaign_limit_usd:string;consumed_loss_usd:string;reserved_loss_usd:string;remaining_loss_usd:string;occupied_modelled_loss_usdt:string;source_as_of_ms:number|null;
+    /** Immutable installation-owned inception; null on legacy books. */
+    campaign_origin?:{campaign_id:string;installation_id:string;started_at_ms:number}|null;
+    /** Null means opening finance history NOT PROVEN, not a zero spend. */
+    entry_budget?:{campaign_id:string;limit_usd:string;consumed_usd:string;reserved_usd:string;remaining_usd:string;bound_breach_usd:string;opening_source_digest:string;opening_as_of_ms:number}|null};
   reason:string|null;reservation_key:string|null;
   risk_book_sequence:number|null;policy_revision:number|null;
   existing_modelled_loss_usdt:string|null;
@@ -64,6 +68,28 @@ export async function handleNativeRiskCommand(
   const installation=await storage.get(GOVERNANCE_STORAGE_KEY);
   if(!validGovernance(installation)||raw.installation_id!==installation.installation_id)return deny(id,"INSTALLATION_ID_MISMATCH");
   const a=raw.action;
+  if(a.action==="INSTALL_ENTRY_OPENING"){
+    // No public MCP route: only the authenticated current native WSS session
+    // can submit SQL-owner opening facts. The transaction rechecks campaign
+    // inception, exact registered real-account cohort, financial scope and
+    // consumed total; digest syntax alone is never accepted as a baseline.
+    if(await storage.get("generation")!==session.connection_generation)
+      return deny(id,"STALE_NATIVE_INSPECTION_SESSION");
+    if(!isObject(a.source)||!Array.isArray(a.source.accounts))
+      return deny(id,"ENTRY_OPENING_SOURCE_INVALID");
+    if(typeof a.source.as_of_ms!=="number"||!Number.isSafeInteger(a.source.as_of_ms)||a.source.as_of_ms>now_ms||
+      now_ms-a.source.as_of_ms>60_000)
+      return deny(id,"ENTRY_OPENING_SOURCE_STALE");
+    const accepted=await storage.transaction(async(tx:any)=>
+      installCampaignEntryProof(tx,a.source as unknown as CampaignEntryOpeningSource));
+    if(!accepted)return deny(id,"ENTRY_OPENING_SOURCE_NOT_PROVEN");
+    // The existing exact typed SUMMARY is the receipt/readback. Do not add
+    // an independently maintained balance or a new externally writable API.
+    return handleNativeRiskCommand(storage,session,{
+      schema:COMMAND_SCHEMA,command_id:id,installation_id:raw.installation_id,
+      action:{action:"SUMMARY"}
+    },now_ms);
+  }
   if(a.action==="ACCOUNT_SUMMARY"){
     if(await storage.get("generation")!==session.connection_generation)return deny(id,"STALE_NATIVE_INSPECTION_SESSION");
     if(typeof a.account_key!=="string"||!/^okx:real:[0-9a-f]{64}$/.test(a.account_key)||!installation.accounts.some((v:any)=>v.account_key===a.account_key))return deny(id,"ACCOUNT_ACCESS_MISSING");
@@ -84,7 +110,21 @@ export async function handleNativeRiskCommand(
     const meta=await readRiskBook(storage);if(!meta)return deny(id,"RISK_BOOK_MISSING_OR_CORRUPT");
     const remaining=units(meta.campaign_limit_usd)!-units(meta.consumed_loss_usd)!-units(meta.occupied_usd)!;
     return {schema:RESULT_SCHEMA,command_id:id,status:"OBSERVED",reason:null,reservation_key:null,risk_book_sequence:meta.sequence,policy_revision:installation.revision,existing_modelled_loss_usdt:null,reservation_state:null,
-      budget:{campaign_limit_usd:meta.campaign_limit_usd,consumed_loss_usd:meta.consumed_loss_usd,reserved_loss_usd:meta.occupied_usd,remaining_loss_usd:amount(remaining<0n?0n:remaining),occupied_modelled_loss_usdt:meta.occupied_usdt,source_as_of_ms:meta.source_as_of_ms||null}};
+      budget:{campaign_limit_usd:meta.campaign_limit_usd,consumed_loss_usd:meta.consumed_loss_usd,reserved_loss_usd:meta.occupied_usd,remaining_loss_usd:amount(remaining<0n?0n:remaining),occupied_modelled_loss_usdt:meta.occupied_usdt,source_as_of_ms:meta.source_as_of_ms||null,
+        campaign_origin:meta.campaign_origin??null,
+        entry_budget:meta.entry_budget?{
+          campaign_id:meta.entry_budget.campaign_id,limit_usd:meta.entry_budget.limit_usd,
+          consumed_usd:meta.entry_budget.consumed_usd,reserved_usd:meta.entry_budget.reserved_usd,
+          bound_breach_usd:meta.entry_budget.bound_breach_usd??"0",
+          remaining_usd:amount((()=>{
+            const remaining=units(meta.entry_budget!.limit_usd)!-
+              units(meta.entry_budget!.consumed_usd)!-
+              units(meta.entry_budget!.reserved_usd)!;
+            return remaining>0n?remaining:0n;
+          })()),
+          opening_source_digest:meta.entry_budget.opening_source_digest,
+          opening_as_of_ms:meta.entry_budget.opening_as_of_ms
+        }:null}};
   }
   if(a.action==="INSPECT"){
     if(typeof a.reservation_key!=="string"||typeof a.plan_sha256!=="string"
@@ -123,6 +163,7 @@ export async function handleNativeRiskCommand(
       typeof a.run_id!=="string"||typeof a.intent_id!=="string"||typeof a.strategy_id!=="string"||
       typeof a.instrument_id!=="string"||
       typeof a.plan_sha256!=="string"||typeof a.requested_loss_usdt!=="string"||
+      typeof a.entry_upper_usd!=="string"||typeof a.entry_proof_digest!=="string"||
       !Number.isSafeInteger(a.policy_revision))
       return deny(id,"INVALID_RESERVATION_INPUT");
     const governance:unknown=await storage.get(GOVERNANCE_STORAGE_KEY);
@@ -141,7 +182,9 @@ export async function handleNativeRiskCommand(
     const input:RiskReservation={
       venue:a.venue,environment:"real",uid:a.account_uid,run_id:a.run_id,
       intent_id:a.intent_id,strategy_id:a.strategy_id,instrument_id:a.instrument_id,
-      plan_hash:a.plan_sha256,loss_usdt:a.requested_loss_usdt,loss_usd:a.requested_loss_usd as string,usd_conversion:a.usd_conversion as RiskReservation["usd_conversion"],
+      plan_hash:a.plan_sha256,loss_usdt:a.requested_loss_usdt,loss_usd:a.requested_loss_usd as string,
+      entry_upper_usd:a.entry_upper_usd,entry_proof_digest:a.entry_proof_digest,
+      usd_conversion:a.usd_conversion as RiskReservation["usd_conversion"],
       policy_revision:a.policy_revision as number,now_ms,
     };
     const decision=await reserveRisk(storage,policy,census,input,proof);
@@ -181,6 +224,35 @@ export async function handleNativeRiskCommand(
         policy_revision:a.policy_revision as number,
         existing_modelled_loss_usdt:result.existing_modelled_loss_usdt!,reservation_state:null}
       :deny(id,result.reason??"POST_FENCE_DENIED");
+  }
+  if(a.action==="SETTLE_ENTRY"){
+    // Only an authenticated engine WSS is eligible to arrive here. The
+    // complete native source verifier must supply cumulative value/revision;
+    // this is intentionally not an MCP/HTTP/action user input.
+    if(typeof a.reservation_key!=="string"||a.reservation_key.length>512||
+      typeof a.plan_sha256!=="string"||!SHA.test(a.plan_sha256)||
+      !Number.isSafeInteger(a.expected_risk_book_sequence)||
+      (a.expected_risk_book_sequence as number)<=0||
+      typeof a.cumulative_entry_usd!=="string"||
+      typeof a.source_digest!=="string"||!SHA.test(a.source_digest)||
+      !Number.isSafeInteger(a.settlement_revision)||(a.settlement_revision as number)<1)
+      return deny(id,"INVALID_NATIVE_ENTRY_SETTLEMENT");
+    const result=await settleEntrySpend(storage,a.reservation_key,a.plan_sha256,{
+      connection_generation:session.connection_generation,
+      expected_book_sequence:a.expected_risk_book_sequence as number,
+      cumulative_entry_usd:a.cumulative_entry_usd,
+      revision:a.settlement_revision as number,
+      source_digest:a.source_digest,
+    });
+    if(result.status!=="UPDATED")return deny(id,result.reason??"ENTRY_SETTLEMENT_DENIED");
+    const observed=await inspectRisk(storage,a.reservation_key);
+    return observed?.entry&&observed.meta
+      ?{schema:RESULT_SCHEMA,command_id:id,status:"UPDATED",
+        reason:result.reason??null,
+        reservation_key:observed.entry.key,risk_book_sequence:observed.meta.sequence,
+        policy_revision:observed.entry.policy_revision,
+        existing_modelled_loss_usdt:null,reservation_state:null}
+      :deny(id,"ENTRY_SETTLEMENT_READBACK_UNAVAILABLE");
   }
   if(a.action==="RELEASE_UNSENT"){
     if(typeof a.reservation_key!=="string"||typeof a.plan_sha256!=="string"||
