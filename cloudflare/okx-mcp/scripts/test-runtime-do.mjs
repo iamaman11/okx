@@ -41,6 +41,9 @@ const configuration = {
 };
 const addMode=process.env.OKX_T09_4_MANAGED_ADD_PROBE==="1";
 const sharedCapMode=process.env.OKX_T10_7_SHARED_CAP_PROBE==="1";
+const reserveReplyLossMode=process.env.OKX_T10_03_LOST_RESERVE_REPLY_PROBE==="1";
+if (reserveReplyLossMode && !sharedCapMode)
+  throw Error("T10_03_REQUIRES_REAL_PERSISTED_SHARED_CAP_WORKER");
 if (sharedCapMode && (addMode || process.env.OKX_NATIVE_WORKER_INTEGRATION==="1"))
   throw Error("SHARED_CAP_WORKER_PROBE_MUST_BE_ISOLATED_FROM_NATIVE_FINANCIAL_SCENARIO");
 const token = "integration-only-ephemeral-token";
@@ -424,10 +427,58 @@ try {
     assert.equal(afterForeign.budget.reserved_loss_usd,"0");
     // Both accounts genuinely contend over one SQLite RiskBook owner.
     // Distinct command IDs mean concurrent WSS results cannot be confused.
-    const [firstReserve,secondReserve]=await Promise.all([
-      risk(socket1,"reserve_concurrent_a_0001",firstRequest),
-      risk(socket1,"reserve_concurrent_b_0001",secondRequest),
-    ]);
+    let firstReserve,secondReserve;
+    if (reserveReplyLossMode) {
+      // T10-03 causal fault: the real Worker commits RESERVE A, but the
+      // client deliberately does NOT consume A's risk_control_result.
+      // The same socket submits B and queries the authoritative Worker
+      // balance; A's orphaned reply stays unread in the receive queue.
+      // This is a delivery fault, never a fake Worker decision or SQL edit.
+      socket1.ws.send({
+        type:"risk_control",schema:FRAME_SCHEMA,
+        session_id:socket1.hello.session_id,
+        connection_generation:socket1.hello.connection_generation,
+        command:{
+          schema:"okx.risk-command/v1",
+          command_id:"reserve_lost_reply_a_0001",
+          installation_id:configuration.installation_id,
+          action:firstRequest,
+        },
+      });
+      secondReserve=await risk(socket1,"reserve_concurrent_b_0001",secondRequest);
+      const authoritative=await summary(socket1,"summary_t10_03_after_lost_reply");
+      assert.equal(authoritative.budget.entry_budget.reserved_usd,"8",
+        "both committed real Worker reservations survive unread A reply");
+      assert.equal(authoritative.budget.entry_budget.consumed_usd,"0");
+      // Replay is an identity-bound INSPECT-like idempotent return, not a
+      // fresh reserve or venue POST. The first reply is never read by caller.
+      firstReserve=await risk(socket1,"reserve_reinspect_a_0001",firstRequest);
+      assert.equal(firstReserve.status,"HELD");
+      const afterReplay=await summary(socket1,"summary_t10_03_after_same_identity");
+      assert.equal(afterReplay.budget.entry_budget.reserved_usd,"8");
+      assert.equal(afterReplay.budget.reserved_loss_usd,
+        authoritative.budget.reserved_loss_usd);
+      console.log("T10_03_WORKER_LOST_RESERVE_REPLY_V1:"+JSON.stringify({
+        schema:"okx.t10-03-worker-lost-reserve-reply/v1",
+        real_sqlite_do:true,
+        account_a:accountKey,account_b:accountKeyB,
+        original_command_id:"reserve_lost_reply_a_0001",
+        original_reply_consumed:false,
+        same_intent_id:firstRequest.intent_id,
+        replay_command_id:"reserve_reinspect_a_0001",
+        replay_status:firstReserve.status,
+        durable_reservation_key:firstReserve.reservation_key,
+        worker_sequence_after_commit:authoritative.risk_book_sequence,
+        worker_sequence_after_replay:afterReplay.risk_book_sequence,
+        budget_after_commit:authoritative.budget,
+        budget_after_replay:afterReplay.budget,
+      }));
+    } else {
+      [firstReserve,secondReserve]=await Promise.all([
+        risk(socket1,"reserve_concurrent_a_0001",firstRequest),
+        risk(socket1,"reserve_concurrent_b_0001",secondRequest),
+      ]);
+    }
     assert.equal(firstReserve.status,"HELD","account A must receive real held risk");
     assert.equal(secondReserve.status,"HELD","account B must receive real held risk");
     assert.notEqual(firstReserve.reservation_key,secondReserve.reservation_key);
