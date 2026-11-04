@@ -56,17 +56,20 @@ async fn t10_09_b_signed_late_fill_after_cancel(
             });
         }
     }
-    feed.advance_recorded_route(
-        "fixture-executor-b","/api/v5/trade/fills-history",fill_reads
-    );
-    feed.advance_recorded_route(
-        "fixture-executor-b","/api/v5/account/bills-archive",
-        (0..8).map(|_|RecordedGet {
+    // Account B has never had an execution fill before this cancel ACK.
+    // These are FIRST registered signed B history routes, not phase
+    // advancement of an already registered transcript. The strict finite
+    // transport rejects unregistered advance_recorded_route by design.
+    for page in fill_reads {
+        feed.expect_get(page);
+    }
+    for _ in 0..8 {
+        feed.expect_get(RecordedGet {
             access_key: "fixture-executor-b".into(),
             path: "/api/v5/account/bills-archive".into(),
             required_query: vec![],raw_response:bill_wire.clone(),
-        }).collect()
-    );
+        });
+    }
     // Late fill is NOT a terminal canceled order. The venue can still report
     // a partial position after acknowledging only the cancel request.
     let order = raw(json!([{
