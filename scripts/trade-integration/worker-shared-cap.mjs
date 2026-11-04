@@ -105,6 +105,7 @@ if (process.argv.includes("--self-test")) {
     cwd: resolve(repo, "cloudflare/okx-mcp"),
     env: { ...process.env, OKX_T10_7_SHARED_CAP_PROBE: "1",
       OKX_T10_7_CONCURRENT_CAP_PROBE: concurrentMode ? "1" : "0",
+      OKX_T10_03_LOST_RESERVE_REPLY_PROBE: "0",
       OKX_NATIVE_WORKER_INTEGRATION: "0", OKX_T09_4_MANAGED_ADD_PROBE: "0" },
     timeout: 120_000, maxBuffer: 4 * 1024 * 1024,
   });
