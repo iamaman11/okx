@@ -46,6 +46,7 @@ const specMode=process.env.OKX_T09_SPEC_SECOND_LINEAR_PROBE==="1";
 const t10PostOutcomeMode=process.env.OKX_T10_05_LOST_ACK_PROBE==="1"
   ||process.env.OKX_T10_05_EXPLICIT_REJECT_PROBE==="1";
 const t10SourceChangedMode=process.env.OKX_T10_15_POST_HELD_SOURCE_PROBE==="1";
+const t10PostReplyLostMode=process.env.OKX_T10_03_POST_AUTH_REPLY_LOST_PROBE==="1";
 if (reserveReplyLossMode && !sharedCapMode)
   throw Error("T10_03_REQUIRES_REAL_PERSISTED_SHARED_CAP_WORKER");
 if (sharedCapMode && (addMode || process.env.OKX_NATIVE_WORKER_INTEGRATION==="1"))
@@ -905,6 +906,7 @@ try {
           "clean managed-Add acceptance cohort excludes T09.0 component reservations");
         const expectedReserved=managedAdd?"0":partialFills?"4":
           process.env.OKX_T10_04_FOREIGN_WORKER_REPLY_PROBE === "1"?"8.002":
+          t10PostReplyLostMode?"8.002":
           specMode?"8.002":
           t10PostOutcomeMode?(
             process.env.OKX_T10_05_LOST_ACK_PROBE==="1"?"8.002":
@@ -977,6 +979,25 @@ try {
             assertBudgetEconomicsUnchanged(latestNativeBudget,afterNative.budget,
               "B1 resumed Worker must match Native money after source refresh");
           }
+        } else if (t10PostReplyLostMode) {
+          const native=receipt(stdout,"T10_03_NATIVE_POST_AUTH_REPLY_LOST_V1");
+          assert.equal(native.lost_post_authorization,true);
+          assert.equal(native.central_state,"POSTED");
+          assert.equal(native.posts_before,4);
+          assert.equal(native.posts_after,4);
+          assert.equal(native.active_sql_receipt,true);
+          assert.equal(afterNative.budget.entry_budget.consumed_usd,"1.0005");
+          assert.equal(afterNative.budget.entry_budget.reserved_usd,"8.002",
+            "a committed POSTED risk must not be released as unsent on lost response");
+          assertBudgetEconomicsUnchanged(native.worker_budget,afterNative.budget,
+            "T10-03 lost post fence cannot change money on worker reconnect");
+          console.log("T10_03_WORKER_POST_AUTH_RECONCILED_V1:"+JSON.stringify({
+            schema:"okx.t10-03-post-auth-lost-worker/v1",
+            after_budget:afterNative.budget,
+            after_sequence:afterNative.risk_book_sequence,
+            central_state:native.central_state,
+            new_exchange_posts:native.posts_after-native.posts_before,
+          }));
         } else if (t10SourceChangedMode) {
           const witnessed=receipt(stdout,"T10_15_NATIVE_CAUSAL_SOURCE_V1");
           assert.equal(witnessed.posts_before,4);

@@ -54,6 +54,15 @@ static T10_15_WORKER_HELD_COMMITTED: std::sync::atomic::AtomicBool =
 static T10_15_SIGNED_SOURCE_CHANGED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
+// T10-03: Worker commits a real BeginPost CAS but its signed authorization
+// reply is lost at the Native receive boundary. Never forge POST authority.
+#[cfg(test)]
+static T10_03_DROP_NEXT_POST_AUTH: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+#[cfg(test)]
+static T10_03_WORKER_POST_COMMITTED_REPLY_LOST: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 pub struct CloudflareTransportConfig {
     ws_url: String,
     runtime_id: String,
@@ -270,6 +279,19 @@ where
         F::Pong{..}=>{},
         F::PolicySnapshot{snapshot,..}=>{ctx.trade.update_governance(&snapshot).await.map_err(|_|transport("INVALID_POLICY_SNAPSHOT"))?;},
         F::RiskControlResult{mut result,..}=>{
+            #[cfg(test)]
+            if result.status==okx_protocol::risk_authority::RiskDecisionStatus::PostAuthorized
+                && T10_03_DROP_NEXT_POST_AUTH.swap(
+                    false,std::sync::atomic::Ordering::SeqCst)
+            {
+                // The real Worker receipt already committed and crossed WSS.
+                // Only this Native test delivery is discarded. The awaiting
+                // risk requester expires UNKNOWN, then TradeService INSPECTs
+                // the original reserve and MUST NOT send a venue order.
+                T10_03_WORKER_POST_COMMITTED_REPLY_LOST.store(
+                    true,std::sync::atomic::Ordering::SeqCst);
+                continue;
+            }
             // This is a one-shot corruption of the delivery only: the actual
             // Worker committed its real HELD receipt and sent correct bytes.
             // The test verifies Native rejects a foreign ID after that commit.
@@ -647,6 +669,7 @@ mod raw_native_session_tests {
     include!("trade_integration_t09_spec.rs");
     include!("trade_integration_t10_05.rs");
     include!("trade_integration_t10_15.rs");
+    include!("trade_integration_t10_03.rs");
 
     /// Retry permission is test-only and limited to an explicitly read-only
     /// Preview that failed at the *local* request-admission boundary. The
@@ -5258,6 +5281,13 @@ mod raw_native_session_tests {
                             "post_ack_financial_complete":accepted["data"]["financial_complete"]
                         })
                     );
+                    if std::env::var("OKX_T10_03_POST_AUTH_REPLY_LOST_PROBE").as_deref()==Ok("1") {
+                        refresh_recorded_market();
+                        let lost=t10_03_worker_committed_post_reply_lost(
+                            accounts.clone(),trade.clone(),risk.clone(),feed.clone()
+                        ).await;
+                        println!("T10_03_NATIVE_POST_AUTH_REPLY_LOST_V1:{lost}");
+                    }
                     if std::env::var("OKX_T10_15_POST_HELD_SOURCE_PROBE").as_deref()==Ok("1") {
                         refresh_recorded_market();
                         let switched=t10_15_fee_source_after_worker_held(
