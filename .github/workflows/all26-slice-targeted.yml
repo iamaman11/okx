@@ -10,6 +10,7 @@ on:
       - work/b-seven-readback-consolidation-20261105
       - work/b-source-owner-causal-fixes-20261105
       - work/b-replay-source-isolation-20261105
+      - work/b-census-sql-owner-batch-20261105
 
 permissions:
   contents: read
