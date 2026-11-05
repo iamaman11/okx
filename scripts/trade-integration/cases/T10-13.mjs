@@ -27,7 +27,12 @@ export async function run({caseId,root,signal}){
   assert.equal(terminal.created_posts,3);
   assert.equal(terminal.close_status.data.central_release.state,"verified");
   assert.equal(terminal.opening_status.data.central_release.state,"verified");
-  assert.equal(terminal.worker_budget.reserved_loss_usd,"0");
+  // This cohort deliberately holds an independent 2 USD component
+  // reservation before the public opening order. STOP and Close must
+  // release ONLY the filled Native intent's 1 USD risk; freeing the
+  // unrelated reservation would be a serious cross-owner money bug.
+  assert.equal(n.worker_budget_before_close.reserved_loss_usd,"3");
+  assert.equal(terminal.worker_budget.reserved_loss_usd,"2");
   const events=[
     ["fill_ingested","NativeAccountSQL",terminal.opening_intent_id],
     ["stop_after_fill_applied","RuntimeSession/SQLiteDO",
@@ -49,8 +54,10 @@ export async function run({caseId,root,signal}){
         actual:String(n.posts_after_denied_reduce)},
       {id:"real_close_post_follows_fresh_source",expected:"2",
         actual:String(close.created_posts)},
-      {id:"all_active_risk_released_only_after_close",expected:"0",
+      {id:"only_filled_intent_risk_released_after_close",expected:"2",
         actual:terminal.worker_budget.reserved_loss_usd},
+      {id:"prior_held_includes_filled_and_independent_reservation",expected:"3",
+        actual:n.worker_budget_before_close.reserved_loss_usd},
     ],events,
     readbacks:{
       sql:[{revision:n.opening_sql_revision,
