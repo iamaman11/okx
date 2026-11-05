@@ -54,19 +54,6 @@ static T10_15_WORKER_HELD_COMMITTED: std::sync::atomic::AtomicBool =
 static T10_15_SIGNED_SOURCE_CHANGED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
-// T10-07: Worker commits B's HELD before its original reply is delivered.
-// Defer only this response without blocking subsequent WSS risk commands.
-// This is a test-only transport barrier, never a fabricated Worker grant.
-#[cfg(test)]
-static T10_07_DEFER_NEXT_HELD: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
-#[cfg(test)]
-static T10_07_WORKER_HELD_COMMITTED: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
-#[cfg(test)]
-static T10_07_RELEASE_HELD_REPLY: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
-
 // T10-03: Worker commits a real BeginPost CAS but its signed authorization
 // reply is lost at the Native receive boundary. Never forge POST authority.
 #[cfg(test)]
@@ -347,28 +334,6 @@ where
             pending.retain(|_,sender|!sender.is_closed());
             let sender=pending.remove(&result.command_id)
                 .ok_or_else(||transport("RISK_RESULT_COMMAND_UNBOUND"))?;
-            #[cfg(test)]
-            if result.status==okx_protocol::risk_authority::RiskDecisionStatus::Held
-                && T10_07_DEFER_NEXT_HELD.swap(
-                    false,std::sync::atomic::Ordering::SeqCst)
-            {
-                T10_07_WORKER_HELD_COMMITTED.store(
-                    true,std::sync::atomic::Ordering::SeqCst);
-                tokio::spawn(async move {
-                    let released=tokio::time::timeout(Duration::from_secs(15),async {
-                        while !T10_07_RELEASE_HELD_REPLY.load(
-                            std::sync::atomic::Ordering::SeqCst)
-                        {
-                            tokio::time::sleep(Duration::from_millis(5)).await;
-                        }
-                    }).await;
-                    if released.is_ok() {let _=sender.send(result);}
-                    // An expired test barrier never authorizes a venue POST.
-                });
-            } else {
-                let _=sender.send(result);
-            }
-            #[cfg(not(test))]
             let _=sender.send(result);
         },
         F::Request{request,operator_governance,..}=>{
