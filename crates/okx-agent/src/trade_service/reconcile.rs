@@ -1852,7 +1852,7 @@ impl TradeService {
         reference: &str,
         request: &TradeRequest,
     ) -> Result<Value, String> {
-        let _capacity = r
+        let capacity = r
             .mutation_capacity
             .try_acquire()
             .map_err(|_| "ACCOUNT_MUTATION_BUSY")?;
@@ -1869,6 +1869,10 @@ impl TradeService {
             .await
             .map_err(err)?;
         if !fresh {
+            // Status may legitimately clean up a now-flat protective order.
+            // Do not hold this account's sole mutation permit across the
+            // independent reconciliation and emergency safety path.
+            drop(capacity);
             return self.status_intent(r, &i.intent_id).await;
         }
         if matches!(i.state, IntentState::Prepared | IntentState::Reserved) {
@@ -1915,6 +1919,10 @@ impl TradeService {
             })
             .await
             .map_err(err)?;
+        // Cancel ACK is not a terminal financial proof. Reconciliation
+        // must run after releasing the cancel mutation lease, so that its
+        // independent protection cleanup/emergency owner can acquire it.
+        drop(capacity);
         self.status_intent(r, &i.intent_id).await
     }
     pub(super) async fn replace(
