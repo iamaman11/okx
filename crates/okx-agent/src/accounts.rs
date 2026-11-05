@@ -1566,11 +1566,14 @@ pub(crate) mod recorded_support {
             }), "TRANSCRIPT_ALGO_EVENT_SOURCE_OR_QUERY_MISMATCH");
             let retired_count = retired.len();
             drop(retired);
+            // Install before removing the old queue: a competing GET sees
+            // either the old signed bytes or the new identical raw snapshot,
+            // never an artificial empty gap between the two locks.
+            self.expect_static_algo_inventory(ACTOR, pages);
             required.retain(|page| page.access_key != ACTOR || page.path != PATH);
             optional.retain(|page| page.access_key != ACTOR || page.path != PATH);
             drop(optional);
             drop(required);
-            self.expect_static_algo_inventory(ACTOR, pages);
             self.causal_algo_trace.lock().unwrap().push(format!(
                 "event=POST_ACK_FLAT_ALGO_SOURCE actor={ACTOR} order_id={acknowledged_order_id} cause={event_id} retired_pages={retired_count} scopes=16 max_reads_per_scope={STATIC_ALGO_READS_PER_SCOPE}"
             ));
