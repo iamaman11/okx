@@ -1892,8 +1892,8 @@ mod raw_native_session_tests {
         // not an authenticated GET and must remain visibly unconsumed.
         if t10_seven_one_campaign {
             let witness=t10_07_native_one_campaign(
-                accounts.clone(),trade.clone(),risk.clone(),feed.clone(),
-                rate_budget.clone(),&refresh_recorded_market,
+                accounts.clone(),trade.clone(),risk.clone(),public_ws.clone(),
+                feed.clone(),rate_budget.clone(),&refresh_recorded_market,
             ).await;
             println!("T10_07_NATIVE_ONE_CAMPAIGN_V1:{witness}");
             let _=maintenance_shutdown.send(true);
