@@ -1174,7 +1174,7 @@ try {
                 const evidence=JSON.parse(line.slice("T10_06_PENDING_CONSUMERS_V1:".length));
                 const bounded=n=>Number.isSafeInteger(n)&&n>=0?n:null;
                 const byTask=Object.entries(evidence.reads_by_tokio_task??{})
-                  .filter(([task,n])=>/^(None|Some\\(Id\\(\\d+\\)\\))$/.test(task)
+                  .filter(([task,n])=>/^(None|Some\(Id\(\d+\)\))$/.test(task)
                     && bounded(n)!==null)
                   .sort((a,b)=>b[1]-a[1]).slice(0,64)
                   .map(([task,n])=>({task,reads:n}));
