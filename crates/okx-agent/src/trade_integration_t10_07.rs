@@ -283,6 +283,7 @@ async fn t10_07_native_single_campaign(
             "b_release_receipt_verified":b_sql.1.is_some(),
             "b_sql_active_central_receipt":b_sql.2,
             "worker_before_release":before_release.budget,
+            "worker_before_release_sequence":before_release.risk_book_sequence,
             "worker_after_release":after.budget,
             "worker_sequence":after.risk_book_sequence,
             "third_denial":"CAMPAIGN_ENTRY_BUDGET_EXHAUSTED",
