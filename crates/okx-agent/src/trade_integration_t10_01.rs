@@ -34,30 +34,28 @@ async fn t10_01_partial_balance_denial_recovery(
         "instType":"SWAP","level":"Lv1","ts":initial_ts,
         "feeGroup":[{"groupId":"4","maker":"0.0005","taker":"0.0005"}]
     }]));
-    for page in (0..12).map(|_|RecordedGet {
+    // One immutable signed fee snapshot per event, not 12 arbitrary GET pages.
+    feed.expect_immutable_signed_phase("t10-01-b-fee-initial", RecordedGet {
         access_key:"fixture-observer-b".into(),
         path:"/api/v5/account/trade-fee".into(),
         required_query:vec![
             ("instType".into(),"SWAP".into()),
             ("instFamily".into(),"BTC-USDT".into()),
         ],raw_response:initial_fee.clone()
-    }) {
-        feed.expect_get(page);
-    }
+    });
     let leverage=wrap(json!([
         {"instId":"BTC-USDT-SWAP","mgnMode":"cross","posSide":"long","lever":"2"},
         {"instId":"BTC-USDT-SWAP","mgnMode":"cross","posSide":"short","lever":"2"}
     ]));
-    for page in (0..12).map(|_|RecordedGet {
+    // Unchanged leverage source is visible identically to concurrent readers.
+    feed.expect_immutable_signed_phase("t10-01-b-leverage-stable", RecordedGet {
         access_key:"fixture-observer-b".into(),
         path:"/api/v5/account/leverage-info".into(),
         required_query:vec![
             ("instId".into(),"BTC-USDT-SWAP".into()),
             ("mgnMode".into(),"cross".into()),
         ],raw_response:leverage.clone()
-    }) {
-        feed.expect_get(page);
-    }
+    });
     let request=|id:&str,expires_in_ms:u64|TradeRequest::Execute {
         idempotency_key:id.into(),operation:TradeOperation::Open,
         strategy_instance:"manual".into(),instrument:"BTC-USDT-SWAP".into(),
@@ -144,15 +142,15 @@ async fn t10_01_partial_balance_denial_recovery(
         "instType":"SWAP","level":"Lv1","ts":stamp,
         "feeGroup":[{"groupId":"4","maker":"0.0005","taker":"0.0005"}]
     }]));
-    feed.advance_recorded_route("fixture-observer-b","/api/v5/account/trade-fee",
-        (0..12).map(|_|RecordedGet{
+    feed.advance_immutable_signed_phase(
+        "t10-01-b-fee-initial","t10-01-b-fee-recovered",RecordedGet {
             access_key:"fixture-observer-b".into(),
             path:"/api/v5/account/trade-fee".into(),
             required_query:vec![
                 ("instType".into(),"SWAP".into()),
                 ("instFamily".into(),"BTC-USDT".into()),
             ],raw_response:fee.clone()
-        }).collect());
+        });
     // Source recovery and entry-admission are TWO distinct causes.
     // Wait for BOTH ordinary production finance capture owners to publish
     // fresh SQL cursor/NAV results from the just-installed signed phase;
@@ -292,6 +290,7 @@ async fn t10_01_partial_balance_denial_recovery(
         "account_uid":owner.configuration.account_key.verified_uid,
         "partial_source_digest":observed_digest,
         "fresh_source_digest":fresh_digest,
+        "signed_source_events":feed.immutable_phase_trace.lock().unwrap().clone(),
         "incomplete_denial":denied,
         "sql_created_on_denial":bad_sql.is_some(),
         "posts_before":posts_before,
