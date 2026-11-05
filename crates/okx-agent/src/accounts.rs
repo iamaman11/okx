@@ -1988,6 +1988,31 @@ pub(crate) mod recorded_support {
             &&trace[0].contains("cause=observed-fee-change"));
     }
 
+    // Helpers local to these transport tests: the older causal-algo
+    // module intentionally keeps its fixtures private.
+    fn post_ack_exact_query(inst: &str, kind: &str) -> Vec<(String, String)> {
+        vec![
+            ("instType".into(), inst.into()),
+            ("ordType".into(), kind.into()),
+            ("limit".into(), "100".into()),
+        ]
+    }
+
+    fn post_ack_raw_envelope(data: serde_json::Value) -> Vec<u8> {
+        serde_json::to_vec(&serde_json::json!({
+            "code": "0", "msg": "", "data": data
+        })).expect("signed raw algo source")
+    }
+
+    fn post_ack_signed_request(actor: &str, kind: &str) -> HttpRequest {
+        reqwest::Client::new()
+            .get(format!(
+                "https://www.okx.com/api/v5/trade/orders-algo-pending?instType=SWAP&ordType={kind}&limit=100"
+            ))
+            .header("OK-ACCESS-KEY", actor)
+            .build().expect("exact signed algo GET")
+    }
+
     #[tokio::test]
     async fn post_ack_flat_algo_event_reuses_one_bounded_signed_source_per_scope() {
         fn pages() -> Vec<RecordedGet> {
@@ -2000,8 +2025,8 @@ pub(crate) mod recorded_support {
                     result.push(RecordedGet {
                         access_key: "fixture-observer-a".into(),
                         path: "/api/v5/trade/orders-algo-pending".into(),
-                        required_query: exact_query(inst, kind),
-                        raw_response: recorded_envelope(serde_json::json!([])),
+                        required_query: post_ack_exact_query(inst, kind),
+                        raw_response: post_ack_raw_envelope(serde_json::json!([])),
                     });
                 }
             }
@@ -2022,13 +2047,15 @@ pub(crate) mod recorded_support {
         assert_eq!(feed.unconsumed_reads(), 0);
         for _ in 0..18 {
             let signed = feed.send(
-                signed_inventory_request("fixture-observer-a", "conditional"),
+                post_ack_signed_request("fixture-observer-a", "conditional"),
                 Instant::now() + std::time::Duration::from_secs(2),
             ).await.expect("event-selected immutable A source");
-            assert!(raw_items(signed).as_array().unwrap().is_empty());
+            assert!(serde_json::from_slice::<serde_json::Value>(&signed.body)
+                .expect("raw signed inventory")["data"].as_array()
+                .expect("signed inventory data array").is_empty());
         }
         let wrong = feed.send(
-            signed_inventory_request("fixture-observer-a", "unknown"),
+            post_ack_signed_request("fixture-observer-a", "unknown"),
             Instant::now() + std::time::Duration::from_secs(2),
         ).await.err().expect("unknown algo scope must fail closed");
         assert!(wrong.to_string().contains("TRANSCRIPT_STATIC_ALGO_QUERY_MISMATCH"));
@@ -2038,7 +2065,7 @@ pub(crate) mod recorded_support {
         assert_eq!(static_source.scopes.len(), 16);
         assert_eq!(static_source.scopes.iter()
             .find(|row|row.query == {
-                let mut q = exact_query("SWAP","conditional");
+                let mut q = post_ack_exact_query("SWAP","conditional");
                 q.sort();
                 q
             }).unwrap().reads, 18);
@@ -2059,8 +2086,8 @@ pub(crate) mod recorded_support {
                     result.push(RecordedGet {
                         access_key: "fixture-observer-a".into(),
                         path: "/api/v5/trade/orders-algo-pending".into(),
-                        required_query: exact_query(inst, kind),
-                        raw_response: recorded_envelope(serde_json::json!([])),
+                        required_query: post_ack_exact_query(inst, kind),
+                        raw_response: post_ack_raw_envelope(serde_json::json!([])),
                     });
                 }
             }
@@ -2082,8 +2109,8 @@ pub(crate) mod recorded_support {
         changed_old.expect_get(RecordedGet {
             access_key: "fixture-observer-a".into(),
             path: "/api/v5/trade/orders-algo-pending".into(),
-            required_query: exact_query("SWAP", "conditional"),
-            raw_response: recorded_envelope(serde_json::json!([{
+            required_query: post_ack_exact_query("SWAP", "conditional"),
+            raw_response: post_ack_raw_envelope(serde_json::json!([{
                 "algoId": "still-live", "state": "live"
             }])),
         });
