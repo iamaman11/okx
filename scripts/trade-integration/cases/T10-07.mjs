@@ -5,7 +5,7 @@
 import assert from "node:assert/strict";
 import {mkdir,writeFile} from "node:fs/promises";
 import {resolve} from "node:path";
-import {actualNativeWorker} from "../native-workerd.mjs";
+import {actualNativeWorker,hash} from "../native-workerd.mjs";
 
 export async function run({caseId,root,signal,artifactsDir}) {
   assert.equal(caseId,"T10-07");
@@ -75,15 +75,81 @@ export async function run({caseId,root,signal,artifactsDir}) {
   };
   await writeFile(resolve(directory,"native-worker-one-campaign.json"),
     JSON.stringify(proof,null,2)+"\n");
+  // Exactly the existing runner's canonical #449 event, assertion,
+  // SQL and Worker readback contract. Never promote the component-only
+  // three-way Worker test, a synthetic financial value, or a different
+  // Native campaign into a mandatory PASS.
+  const economicProof = [
+    ["concurrent_requests","3",String(n.held_receipts.length)],
+    ["reserve_decisions","HELD,HELD,DENIED",n.held_receipts.join(",")],
+    ["reserved_before_release_usd","8",first.reserved_usd],
+    ["remaining_before_release_usd","2",first.remaining_usd],
+    ["reserved_after_release_usd","4",after.reserved_usd],
+    ["remaining_after_release_usd","6",after.remaining_usd],
+    ["native_sql_source_backed_release","true",String(
+      n.sql_release_verified&&n.worker_release_verified&&
+      w.release_from_original_held&&n.original_b_held_source_reads>0)],
+    ["same_worker_campaign","true",String(
+      w.risk_book_sequence>=n.worker_after_sequence&&
+      n.worker_after_release.entry_budget.reserved_usd===
+        w.budget.entry_budget.reserved_usd&&
+      n.worker_after_release.entry_budget.remaining_usd===
+        w.budget.entry_budget.remaining_usd)],
+    ["third_denial_extra_posts","0",String(n.denied_extra_posts)],
+    ["release_extra_posts","0",String(n.release_extra_posts)],
+  ];
+  const assertions=economicProof.map(([id,expected,actual])=>({id,expected,actual}));
+  const events=[
+    ["public_trade_entered","NativeTradeService",
+      [n.a_intent_id,n.b_intent_id,n.total_venue_posts]],
+    ["two_independent_held_reserves","NativeAccountSQL+RuntimeSessionSQLiteDO",
+      [n.a_account_uid,n.b_account_uid,n.worker_before_release,
+        n.worker_two_held_sequence]],
+    ["third_central_denial_without_post","NativeTradeService+RuntimeSessionSQLiteDO",
+      [n.denial_reason,n.denied_extra_posts,n.third_sql_revision]],
+    ["one_reservation_released","NativeAccountSQL+RuntimeSessionSQLiteDO",
+      [n.b_release_reservation_key,n.b_release_plan_sha256,
+        n.signed_changed_fee_digest,n.worker_after_release]],
+    ["shared_worker_cap_reconciled","RuntimeSessionSQLiteDO",
+      [w.budget,w.risk_book_sequence,w.persisted_generation_advanced]],
+  ].map(([stage,owner,source])=>({stage,owner,source_digest:hash(source)}));
+  for (const revision of [
+    n.a_sql_revision,n.b_sql_revision,n.third_sql_revision,
+    n.worker_two_held_sequence,n.worker_after_sequence,w.risk_book_sequence
+  ]) {
+    assert.ok(Number.isSafeInteger(revision)&&revision>0,
+      "Native SQL and Worker receipt revisions must come from actual owners");
+  }
   return {
-    schema:proof.schema,
-    same_campaign:true,three_native_executes:true,
-    statuses:n.held_receipts,
-    before_reserved_usd:first.reserved_usd,
-    after_reserved_usd:after.reserved_usd,
-    after_remaining_usd:after.remaining_usd,
-    new_venue_posts_during_denial_and_release:0,
-    worker_risk_book_sequence:w.risk_book_sequence,
-    cohort_transcript_sha256:witness.transcript_sha256,
+    case_id:caseId,status:"PASS",
+    provenance:{
+      schema:"okx.native-workerd-transcript/v1",
+      sha256:witness.transcript_sha256,
+    },
+    assertions,events,
+    readbacks:{
+      sql:[
+        {revision:n.a_sql_revision,
+          digest:hash([n.a_account_uid,n.a_intent_id,n.a_sql_state])},
+        {revision:n.b_sql_revision,
+          digest:hash([n.b_account_uid,n.b_intent_id,n.b_sql_state,
+            n.b_release_reservation_key,n.signed_changed_fee_digest])},
+        {revision:n.third_sql_revision,
+          digest:hash([n.a_account_uid,n.denial_reason,n.third_sql_state])},
+      ],
+      risk_book:[
+        {revision:n.worker_two_held_sequence,
+          digest:hash(n.worker_before_release)},
+        {revision:n.worker_after_sequence,
+          digest:hash(n.worker_after_release)},
+        {revision:w.risk_book_sequence,digest:hash(w.budget)},
+      ],
+    },
+    outbound_sends:[
+      {account:n.a_account_uid,intent:n.a_intent_id,
+        operation_kind:"create",count:n.total_venue_posts},
+      {account:n.b_account_uid,intent:n.b_intent_id,
+        operation_kind:"create",count:n.release_extra_posts},
+    ],
   };
 }
