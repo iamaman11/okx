@@ -74,11 +74,11 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $dir = Join-Path $env:RUNNER_TEMP 'b-stage'
           New-Item -ItemType Directory -Path $dir -Force | Out-Null
-          # One completed A1 T09.8 path is now proven on the prior SHA.
-          # Run B candidates together; T10-07 remains deliberately not proven.
-          # Two independent executions on one immutable SHA expose source-order
-          # flakiness without mixing evidence from different commits.
-          $ids = @('T10-01')
+          # Run all seven B candidates on this exact SHA; T10-07 still needs its
+          # own same-campaign Native source-backed 8->4 RELEASE witness.
+          # Each case uses a separate Native/Worker child and durable artifacts.
+          # Green here is 7/7 targeted, NEVER the required B 16/26 acceptance.
+          $ids = @('T09.8','T09-MA','T09-SPEC','T10-01','T10-02','T10-14','T10-15')
           $env:OKX_B_CENSUS_CAUSE_PROBE = '1'
           $env:OKX_T09_4_SOURCE_COHERENCE_PROBE = '1'
           $env:OKX_T10_01_MAINT_SHUTDOWN_PROBE = '1'
