@@ -4900,47 +4900,47 @@ mod raw_native_session_tests {
                             // its newer A order is still unfilled. Do not
                             // invent fills, cancel ACKs or protective stops.
                             //
-                            // Read budget: at most six 2-second background
-                            // captures in the existing 12-second positive
-                            // admission deadline, plus two immediate
-                            // source/admission scans. Each full scan reads
-                            // exactly 16 (instType, ordType, limit) scopes.
-                            // An extra scan or changed query remains FAIL.
-                            const B1_A_ALGO_ROUNDS: usize = 8;
+                            // A's original protection was cancelled and
+                            // terminally settled before its new order ACK.
+                            // B's independent central DENIED response now
+                            // establishes the next signed empty-A inventory
+                            // event. One raw snapshot per exact query is
+                            // immutable across competing maintenance/Status
+                            // reads. No GET-count transition or repeated
+                            // fabricated empty pages can make an order safe.
                             let b1_algo_kinds = [
                                 "conditional", "oco", "trigger", "move_order_stop",
                                 "chase", "iceberg", "twap", "smart_iceberg",
                             ];
                             let b1_empty_algo_source = envelope(json!([]));
                             let mut b1_a_algo_pages =
-                                Vec::with_capacity(B1_A_ALGO_ROUNDS * 2 * b1_algo_kinds.len());
-                            for _ in 0..B1_A_ALGO_ROUNDS {
-                                for inst_type in ["SWAP", "FUTURES"] {
-                                    for kind in b1_algo_kinds {
-                                        b1_a_algo_pages.push(RecordedGet {
-                                            access_key: "fixture-observer-a".into(),
-                                            path: "/api/v5/trade/orders-algo-pending".into(),
-                                            required_query: vec![
-                                                ("instType".into(), inst_type.into()),
-                                                ("ordType".into(), kind.into()),
-                                                ("limit".into(), "100".into()),
-                                            ],
-                                            raw_response: b1_empty_algo_source.clone(),
-                                        });
-                                    }
+                                Vec::with_capacity(2 * b1_algo_kinds.len());
+                            for inst_type in ["SWAP", "FUTURES"] {
+                                for kind in b1_algo_kinds {
+                                    b1_a_algo_pages.push(RecordedGet {
+                                        access_key: "fixture-observer-a".into(),
+                                        path: "/api/v5/trade/orders-algo-pending".into(),
+                                        required_query: vec![
+                                            ("instType".into(), inst_type.into()),
+                                            ("ordType".into(), kind.into()),
+                                            ("limit".into(), "100".into()),
+                                        ],
+                                        raw_response: b1_empty_algo_source.clone(),
+                                    });
                                 }
                             }
-                            let retired_b1_a_algo_pages = feed.advance_recorded_route(
-                                "fixture-observer-a",
-                                "/api/v5/trade/orders-algo-pending",
-                                b1_a_algo_pages,
-                            );
+                            let retired_b1_a_algo_pages =
+                                feed.publish_post_ack_flat_algo_inventory(
+                                    "A_ACK_AND_B_CENTRAL_NO_SEND",
+                                    "recorded-t09-second-001",
+                                    b1_a_algo_pages,
+                                );
                             println!("B1_A_ALGO_PHASE_V1:{}", json!({
                                 "boundary": "A_PENDING_ACK_AND_B_CENTRAL_NO_SEND",
                                 "scopes": 16,
-                                "max_rounds_per_scope": B1_A_ALGO_ROUNDS,
+                                "immutable_source_per_exact_query": true,
+                                "max_reads_per_scope": 32,
                                 "retired_prior_source_pages": retired_b1_a_algo_pages,
-                                "unchanged_global_repeat_limit": 64,
                                 "outbound_posts": feed.outbound_posts.lock().unwrap().len(),
                             }));
                             // This is a NEW admitted B source cycle, not
