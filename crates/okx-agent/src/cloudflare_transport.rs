@@ -63,6 +63,12 @@ static T10_03_DROP_NEXT_POST_AUTH: std::sync::atomic::AtomicBool =
 static T10_03_WORKER_POST_COMMITTED_REPLY_LOST: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
+// The unit test observes the actual dispatcher join point. This is not
+// a production scheduling knob or a second command/control path.
+#[cfg(test)]
+static RISK_IDENTICAL_INFLIGHT_COMMAND_JOINED: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
 pub struct CloudflareTransportConfig {
     ws_url: String,
     runtime_id: String,
@@ -249,8 +255,14 @@ where
     else {
         return Err(transport("HELLO_ACK_REQUIRED"));
     };
-    let mut pending: HashMap<String, oneshot::Sender<okx_protocol::risk_authority::RiskResult>> =
-        HashMap::new();
+    // A command ID is a deterministic identity, not a unique waiter ID.
+    // Same-ID + same-payload callers share the single actual Worker request
+    // and each receives its bound result. Same ID with different contents
+    // is a fatal protocol conflict; it can never inherit the first grant.
+    let mut pending: HashMap<String, (
+        okx_protocol::risk_authority::RiskCommand,
+        Vec<oneshot::Sender<okx_protocol::risk_authority::RiskResult>>
+    )> = HashMap::new();
     let mut challenges: HashMap<String, Instant> = HashMap::new();
     let mut active = HashSet::new();
     let mut flights: FuturesUnordered<BoxFuture<'static, (String, okx_protocol::AgentResponse)>> =
@@ -278,11 +290,27 @@ where
             // after the requesting task times out or is cancelled. A late
             // authentic reply is not an unsolicited foreign authorization.
             let id=outbound.command.command_id.clone();
-            if pending.contains_key(&id){drop(outbound);continue;}
-            pending.insert(id,outbound.return_to);
+            if let Some((first,waiters))=pending.get_mut(&id) {
+                if *first!=outbound.command {
+                    return Err(transport("RISK_COMMAND_ID_PAYLOAD_CONFLICT"));
+                }
+                // Bound total requesters for a single deterministic command;
+                // never silently drop a sender awaiting a Worker decision.
+                if waiters.len()>=128 {
+                    return Err(transport("RISK_IDENTICAL_WAITERS_LIMIT"));
+                }
+                waiters.push(outbound.return_to);
+                #[cfg(test)]
+                RISK_IDENTICAL_INFLIGHT_COMMAND_JOINED.fetch_add(
+                    1,std::sync::atomic::Ordering::SeqCst
+                );
+                continue;
+            }
+            let command=outbound.command;
+            pending.insert(id, (command.clone(),vec![outbound.return_to]));
             send(&mut sink,F::RiskControl{
                 schema:SCHEMA.into(),session_id:session_id.clone(),
-                connection_generation,command:outbound.command
+                connection_generation,command
             }).await?;
         },
         Some((id,result))=flights.next(),if !flights.is_empty()=>{active.remove(&id);send(&mut sink,F::Response{schema:SCHEMA.into(),session_id:session_id.clone(),connection_generation,response:result}).await?;},
@@ -351,9 +379,12 @@ where
             // timed out, sending to its closed receiver simply discards the
             // authentic late reply; a genuinely foreign ID still tears down
             // this WS generation (T10-04).
-            let sender=pending.remove(&result.command_id)
+            let (_,waiters)=pending.remove(&result.command_id)
                 .ok_or_else(||transport("RISK_RESULT_COMMAND_UNBOUND"))?;
-            let _=sender.send(result);
+            // All recipients sent exactly these same command bytes and
+            // must verify their own command ID in NativeRiskClient::request.
+            // Late/cancelled receivers safely discard only their own copy.
+            for sender in waiters {let _=sender.send(result.clone());}
         },
         F::Request{request,operator_governance,..}=>{
         let id=request.request_id.clone();send(&mut sink,F::DeliveryAck{schema:SCHEMA.into(),session_id:session_id.clone(),connection_generation,request_id:id.clone()}).await?;
@@ -1128,6 +1159,79 @@ mod raw_native_session_tests {
         assert_eq!(answer.status, RiskDecisionStatus::Denied);
         shutdown_tx.send(true).unwrap();
         assert!(tokio::time::timeout(Duration::from_secs(3), session)
+            .await.unwrap().unwrap().is_ok());
+        drop(client);
+        drop(input_tx);
+        drop(output_rx);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn identical_inflight_risk_commands_get_one_worker_call_and_two_bound_replies() {
+        let (ctx, root, client, mut risk_rx) = test_dispatch().await;
+        let (input_tx, input_rx) = mpsc::unbounded_channel();
+        let (output_tx, mut output_rx) = mpsc::unbounded_channel();
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let session = tokio::spawn(async move {
+            run_connected_session(
+                RawFrames { inbound: input_rx, outbound: output_tx },
+                test_hello(), ctx, &mut risk_rx, shutdown_rx,
+            ).await
+        });
+        assert!(matches!(parse(output_rx.recv().await.unwrap()), F::Hello { .. }));
+        let session_id="session_test_same_risk_command".to_owned();
+        let generation=24;
+        input_tx.send(Ok(wire(F::HelloAck {
+            schema: SCHEMA.into(),session_id:session_id.clone(),
+            connection_generation:generation,
+        }))).unwrap();
+
+        let first=tokio::spawn({
+            let client=client.clone();
+            async move {client.request(summary("risk_wire_same_deterministic")).await}
+        });
+        let first_id=tokio::time::timeout(Duration::from_secs(3),async {
+            loop {
+                match parse(output_rx.recv().await.expect("outbound closed")) {
+                    F::RiskControl {command,..}=>break command.command_id,
+                    F::Ping {..}=>continue,
+                    other=>panic!("unexpected outbound: {other:?}"),
+                }
+            }
+        }).await.unwrap();
+        assert_eq!(first_id,"risk_wire_same_deterministic");
+
+        let prior=RISK_IDENTICAL_INFLIGHT_COMMAND_JOINED.load(
+            std::sync::atomic::Ordering::SeqCst
+        );
+        let second=tokio::spawn({
+            let client=client.clone();
+            async move {client.request(summary("risk_wire_same_deterministic")).await}
+        });
+        // Wait for the ACTUAL single-owner join, not for an arbitrary sleep.
+        tokio::time::timeout(Duration::from_secs(3),async {
+            while RISK_IDENTICAL_INFLIGHT_COMMAND_JOINED.load(
+                std::sync::atomic::Ordering::SeqCst
+            )==prior {
+                tokio::task::yield_now().await;
+            }
+        }).await.expect("same deterministic Worker request must join its first caller");
+        while let Ok(message)=output_rx.try_recv() {
+            assert!(!matches!(parse(message),F::RiskControl {..}),
+                "identical concurrent command must not send a second Worker mutation");
+        }
+        input_tx.send(Ok(wire(F::RiskControlResult {
+            schema: SCHEMA.into(),session_id,
+            connection_generation:generation,result:denied(&first_id),
+        }))).unwrap();
+        for request in [first,second] {
+            let observed=tokio::time::timeout(Duration::from_secs(3),request)
+                .await.unwrap().unwrap().unwrap();
+            assert_eq!(observed.command_id,first_id);
+            assert_eq!(observed.status,RiskDecisionStatus::Denied);
+        }
+        shutdown_tx.send(true).unwrap();
+        assert!(tokio::time::timeout(Duration::from_secs(3),session)
             .await.unwrap().unwrap().is_ok());
         drop(client);
         drop(input_tx);
