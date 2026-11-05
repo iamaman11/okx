@@ -1450,7 +1450,28 @@ mod raw_native_session_tests {
         }
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let session = tokio::spawn(async move {
-            run_connected_session(socket, hello, ctx, &mut risk_rx, shutdown_rx).await
+            let result=run_connected_session(socket, hello, ctx, &mut risk_rx, shutdown_rx).await;
+            #[cfg(test)]
+            if std::env::var("OKX_T10_06_CONCURRENT_PROBE").as_deref()==Ok("1") {
+                let text=result.as_ref().err().map(ToString::to_string)
+                    .unwrap_or_else(||"OK".into());
+                let kind=if text.contains("RISK_RESULT_COMMAND_UNBOUND") {
+                    "RESULT_COMMAND_UNBOUND"
+                } else if text.contains("WS") || text.contains("WebSocket") {
+                    "WEBSOCKET_ERROR"
+                } else if text.contains("SESSION") {
+                    "SESSION_ERROR"
+                } else if text.contains("transport") || text.contains("Transport") {
+                    "TRANSPORT_ERROR"
+                } else if result.is_ok() {
+                    "CLEAN_SESSION_EXIT"
+                } else {
+                    "OTHER_TYPED_EXIT"
+                };
+                eprintln!("T10_06_RISK_SESSION_EXIT_V1:class={kind} error_digest={:x} clean={}",
+                    sha2::Sha256::digest(text.as_bytes()),result.is_ok());
+            }
+            result
         });
         let mut command = summary("risk_native_real_workerd_001");
         command.installation_id = "installation_test".into();
