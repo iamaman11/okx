@@ -49,6 +49,10 @@ const configuration = {
 };
 const addMode=process.env.OKX_T09_4_MANAGED_ADD_PROBE==="1";
 const sharedCapMode=process.env.OKX_T10_7_SHARED_CAP_PROBE==="1";
+const t10SevenOneCampaign=process.env.OKX_T10_07_ONE_CAMPAIGN==="1";
+if(t10SevenOneCampaign&&
+  (sharedCapMode||addMode||process.env.OKX_NATIVE_WORKER_INTEGRATION!=="1"))
+  throw Error("T10_07_ONE_CAMPAIGN_REQUIRES_FRESH_NATIVE_SQL_OWNERS");
 const concurrentCapMode=process.env.OKX_T10_7_CONCURRENT_CAP_PROBE==="1";
 const reserveReplyLossMode=process.env.OKX_T10_03_LOST_RESERVE_REPLY_PROBE==="1";
 const specMode=process.env.OKX_T09_SPEC_SECOND_LINEAR_PROBE==="1";
@@ -757,7 +761,7 @@ try {
       connection_generation_after:restarted.hello.connection_generation
     }));
     restarted.ws.close();
-  } else if (!addMode) {
+  } else if (!addMode && !t10SevenOneCampaign) {
   const observedAt = Date.now()-1000;
   const census = {
     complete:true,source_digest:"d".repeat(64),content_digest:"a".repeat(64),
@@ -843,7 +847,8 @@ try {
   assert.equal(repeated.budget?.entry_budget?.reserved_usd,"2");
   socket2.ws.close();
   } else {
-    // Independent T09.4 campaign: do not create component-test reserves.
+    // Fresh T09.4 or independent T10-07 Native campaign: do not create
+    // component-test reservations that could occupy the $10 central cap.
     // Real DO SQLite persistence, accounts, authority and 10 USD cap remain.
     socket1.ws.close();
     await first.dispose();
@@ -874,7 +879,8 @@ try {
     // test exchange, financial receipt or timeout is involved.
     const stagedHandoff = handoffPath + ".pending";
     await writeFile(stagedHandoff, JSON.stringify({
-      ws_url:wsUrl.toString(),token,reservation_key:addMode ? null : held.reservation_key,
+      ws_url:wsUrl.toString(),token,
+      reservation_key:(addMode||t10SevenOneCampaign) ? null : held.reservation_key,
     }), {mode:0o600});
     await rename(stagedHandoff, handoffPath);
     // S2-05: alter REAL persisted Worker governance only after Native has
@@ -1167,6 +1173,59 @@ try {
     if (stderr) process.stderr.write(stderr);
     const afterNativeSocket = await session(second);
     const afterNative = await summary(afterNativeSocket, "risk_after_native_real_wss_0001");
+    if(t10SevenOneCampaign) {
+      const native=receipt(stdout,"T10_07_NATIVE_ONE_CAMPAIGN_V1");
+      assert.equal(native.schema,"okx.t10-07-native-one-campaign/v1");
+      assert.notEqual(native.a_account_uid,native.b_account_uid);
+      assert.equal(native.worker_before_release.entry_budget.limit_usd,"10");
+      assert.equal(native.worker_before_release.entry_budget.reserved_usd,"8");
+      assert.equal(native.worker_before_release.entry_budget.remaining_usd,"2");
+      assert.equal(native.worker_after_release.entry_budget.reserved_usd,"4");
+      assert.equal(native.worker_after_release.entry_budget.remaining_usd,"6");
+      assert.equal(native.denial_reason,"CAMPAIGN_ENTRY_BUDGET_EXHAUSTED");
+      assert.equal(native.denied_extra_posts,0);
+      assert.equal(native.release_extra_posts,0);
+      assert.equal(native.sql_release_verified,true);
+      assert.equal(native.worker_release_verified,true);
+      assertBudgetEconomicsUnchanged(native.worker_after_release,afterNative.budget,
+        "T10-07 same campaign Native release must persist in Worker SQL");
+      assert.ok(afterNative.risk_book_sequence>=native.worker_after_sequence);
+      afterNativeSocket.ws.close();
+      await second.dispose();second=null;
+      second=new Miniflare(opts);
+      const reopened=await request(second,"/installation/initialize","POST",installation);
+      assert.equal(reopened.status,200);
+      const persistedSocket=await session(second);
+      const persisted=await summary(persistedSocket,"risk_t10_07_persisted_after_release");
+      assert.ok(persistedSocket.hello.connection_generation>
+        afterNativeSocket.hello.connection_generation);
+      assertBudgetEconomicsUnchanged(afterNative.budget,persisted.budget,
+        "T10-07 new Worker generation must preserve $4/$6 and no consumption");
+      assert.equal(persisted.budget.entry_budget.reserved_usd,"4");
+      assert.equal(persisted.budget.entry_budget.remaining_usd,"6");
+      assert.equal(persisted.budget.entry_budget.consumed_usd,"0");
+      console.log("T10_07_WORKER_ONE_CAMPAIGN_V1:"+JSON.stringify({
+        schema:"okx.t10-07-worker-one-campaign/v1",
+        budget:persisted.budget,
+        before_release:native.worker_before_release,
+        after_release:native.worker_after_release,
+        risk_book_sequence:persisted.risk_book_sequence,
+        persisted_generation_advanced:true,
+        two_native_sql_owners:true,
+        release_from_original_held:true,
+        denied_extra_posts:0,release_extra_posts:0,
+      }));
+      persistedSocket.ws.close();
+      console.log(JSON.stringify({
+        suite:"runtime-session-sqlite-do",status:"PASS",
+        real_durable_object:true,persisted_generation:true,
+        authentic_reserve:true,authentic_begin_post:true,
+        native_one_campaign:true,reserved_loss_usd:persisted.budget.reserved_loss_usd,
+        reserved_entry_usd:persisted.budget.entry_budget.reserved_usd,
+        risk_monetary_post_count:0,
+      }));
+      return;
+    }
     if (process.env.OKX_T09_1_STATUS_PROBE === "1") {
       const secondAdmission = process.env.OKX_T09_2_ADMISSION_PROBE === "1";
       const partialFills = process.env.OKX_T09_3_PARTIAL_PROBE === "1";
