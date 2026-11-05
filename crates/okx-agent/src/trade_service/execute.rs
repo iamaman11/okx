@@ -1108,19 +1108,35 @@ impl TradeService {
             // attempt. Production ordering and fail-closed source fences
             // are identical when this opt-in test hook is absent.
             #[cfg(test)]
-            if super::T10_07_HOLD_SQL_RESERVE.swap(
-                false,std::sync::atomic::Ordering::SeqCst
-            ) {
-                super::T10_07_SQL_RESERVE_PERSISTED.store(
-                    true,std::sync::atomic::Ordering::SeqCst
-                );
-                tokio::time::timeout_at(until.into(),async {
-                    while !super::T10_07_RELEASE_SQL_RESERVE_HOLD.load(
-                        std::sync::atomic::Ordering::SeqCst
-                    ) {
-                        tokio::time::sleep(Duration::from_millis(5)).await;
-                    }
-                }).await.map_err(|_|"T10_07_SQL_HELD_HANDOFF_ORIGINAL_DEADLINE_EXPIRED")?;
+            {
+                // Only the named T10-07 test requests can use either gate.
+                // They are armed at distinct public Execute entrances and
+                // trigger strictly AFTER the real account SQL committed its
+                // original Worker HELD receipt. Other intents never wait.
+                let gate=match prepared.idempotency_key.as_str() {
+                    "t10_07_a_original_four_usd_0001" => Some((
+                        &super::T10_07_HOLD_A_SQL_RESERVE,
+                        &super::T10_07_A_SQL_RESERVE_PERSISTED,
+                        &super::T10_07_RELEASE_A_SQL_RESERVE_HOLD,
+                    )),
+                    "t10_07_b_original_four_usd_0001" => Some((
+                        &super::T10_07_HOLD_SQL_RESERVE,
+                        &super::T10_07_SQL_RESERVE_PERSISTED,
+                        &super::T10_07_RELEASE_SQL_RESERVE_HOLD,
+                    )),
+                    _=>None,
+                };
+                if let Some((armed,persisted,release))=gate
+                    && armed.swap(false,std::sync::atomic::Ordering::SeqCst)
+                {
+                    persisted.store(true,std::sync::atomic::Ordering::SeqCst);
+                    tokio::time::timeout_at(until.into(),async {
+                        while !release.load(std::sync::atomic::Ordering::SeqCst) {
+                            tokio::time::sleep(Duration::from_millis(5)).await;
+                        }
+                    }).await.map_err(|_|
+                        "T10_07_SQL_HELD_HANDOFF_ORIGINAL_DEADLINE_EXPIRED")?;
+                }
             }
             if Instant::now() >= until {
                 return Err("COMMAND_EXPIRED".into());
