@@ -91,6 +91,11 @@ jobs:
           if ($LASTEXITCODE -ne 0 -or (($joined | Out-String) -notmatch '1 passed')) {
             throw 'RISK_IDENTICAL_WORKER_COMMAND_FANOUT_FAILED'
           }
+          $conflict = cargo test --locked -p okx-agent --lib same_risk_command_id_with_different_payload_never_inherits_worker_result -- --nocapture 2>&1
+          $conflict | Out-String | Write-Output
+          if ($LASTEXITCODE -ne 0 -or (($conflict | Out-String) -notmatch '1 passed')) {
+            throw 'RISK_IDENTICAL_ID_DIFFERENT_PAYLOAD_REJECTION_FAILED'
+          }
           cargo test --locked -p okx-agent --lib late_bound_risk_reply_after_cancelled_native_wait_does_not_close_session -- --nocapture
           if ($LASTEXITCODE -ne 0) { throw 'RISK_KNOWN_LATE_REPLY_UNIT_PROOF_FAILED' }
           cargo test --locked -p okx-agent --lib foreign_risk_reply_command_never_authorizes_pending_reserve -- --nocapture
