@@ -1197,6 +1197,59 @@ pub(crate) mod recorded_support {
                 .map_or(0,|item|item.deliveries)
         }
 
+        /// Test-only event handoff from the old finite bootstrap source to a
+        /// new immutable signed snapshot. This is NOT an empty-page fallback:
+        /// all retired pages must have the same exact actor/route/query and
+        /// identical raw bytes. A different old source aborts the handoff.
+        /// Caller holds the account's recorded_capture_gate during this event.
+        pub(crate) fn supersede_queued_signed_source_at_event(
+            &self, event_id: &str, phase_id: &str, page: RecordedGet,
+        ) -> usize {
+            assert!(!event_id.is_empty() && !phase_id.is_empty(),
+                "TRANSCRIPT_SOURCE_EVENT_ID_MISSING");
+            assert!(matches!(page.path.as_str(),
+                "/api/v5/account/trade-fee" | "/api/v5/account/leverage-info"),
+                "TRANSCRIPT_SOURCE_EVENT_ROUTE_NOT_ALLOWED");
+            let actor=page.access_key.clone();
+            let path=page.path.clone();
+            let mut query=page.required_query.clone();
+            query.sort();
+            let mut phases=self.immutable_signed_phases.lock().unwrap();
+            assert!(!phases.iter().any(|p|
+                p.source.access_key==actor && p.source.path==path
+            ),"TRANSCRIPT_SOURCE_EVENT_ALREADY_IMMUTABLE");
+            let mut required=self.reads.lock().unwrap();
+            let mut optional=self.optional_reads.lock().unwrap();
+            let retired=required.iter().chain(optional.iter())
+                .filter(|p|p.access_key==actor && p.path==path)
+                .collect::<Vec<_>>();
+            assert!(!retired.is_empty(),"TRANSCRIPT_SOURCE_EVENT_OLD_SOURCE_MISSING");
+            assert!(retired.iter().all(|p|{
+                let mut old_query=p.required_query.clone();
+                old_query.sort();
+                old_query==query
+            }),"TRANSCRIPT_SOURCE_EVENT_OLD_QUERY_CONFLICT");
+            let old_raw=&retired[0].raw_response;
+            assert!(retired.iter().all(|p|p.raw_response==*old_raw),
+                "TRANSCRIPT_SOURCE_EVENT_OLD_RAW_CONFLICT");
+            let old_digest=format!("{:x}",sha2::Sha256::digest(old_raw));
+            let removed=retired.len();
+            drop(retired);
+            required.retain(|p|p.access_key!=actor || p.path!=path);
+            optional.retain(|p|p.access_key!=actor || p.path!=path);
+            self.strict_read_routes.lock().unwrap().insert(
+                (actor.clone(),path.clone())
+            );
+            phases.push(ImmutableSignedGetPhase {
+                phase_id:phase_id.into(),source:page,deliveries:0,
+            });
+            self.immutable_phase_trace.lock().unwrap().push(format!(
+                "event=SIGNED_SOURCE_SUPERSEDED cause={event_id} phase={phase_id} actor={actor} route={path} query={query:?} old_pages={removed} old_sha256={old_digest} new_sha256={:x}",
+                sha2::Sha256::digest(&phases.last().unwrap().source.raw_response)
+            ));
+            removed
+        }
+
         pub(crate) fn expect_get(&self, page: RecordedGet) {
             assert!(!self.immutable_signed_phases.lock().unwrap().iter().any(|item|
                 item.source.access_key==page.access_key &&item.source.path==page.path
