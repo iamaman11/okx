@@ -46,6 +46,7 @@ async fn t10_04_foreign_worker_result(
     feed.advance_recorded_public_clock(
         wrap(serde_json::json!([{"ts":fresh}]))
     );
+    t10_b_sql_source_adopted(&accounts,fresh.parse().unwrap()).await;
     let posts_before=feed.outbound_posts.lock().unwrap().len();
     assert_eq!(posts_before,4,"T10-04 begins after A positive ACK, before all other probes");
     let mut before_cmd=summary("risk_t10_04_before_worker_fault");

@@ -1,3 +1,42 @@
+// A newly registered signed B balance is not a complete financial baseline
+// until the ORIGINAL periodic Native source-capture and SQLite NAV owner
+// consume it. Status of an unrelated A intent cannot stand in for B.
+async fn t10_b_sql_source_adopted(
+    accounts: &Arc<AccountRuntimeRegistry>, phase_at_ms: i64,
+) {
+    let account=accounts.resolve("fixture-b").await
+        .expect("T10 B account SQL owner");
+    let mut last=String::from("NOT_OBSERVED");
+    tokio::time::timeout(Duration::from_secs(12),async {
+        loop {
+            let state=account.execution.store.call(
+                std::time::Instant::now()+Duration::from_secs(3),
+                |s| {
+                    let financial=s.financial_risk(
+                        chrono::Utc::now().timestamp_millis(),None
+                    )?;
+                    Ok((financial.nav_complete,financial.source_as_of))
+                }
+            ).await;
+            let health=account.source_capture_health.read().await.clone();
+            let generation=account.private_ws.status().await.connection_generation;
+            let identity=account.source_identity_ready().await;
+            if let Ok((true,as_of))=&state
+                && *as_of>=phase_at_ms
+                && health.last_success_ms.is_some_and(|at|at>=phase_at_ms)
+                && generation>0 && identity
+            {break;}
+            last=format!(
+                "sql={state:?} capture_success={:?} capture_failure={:?} generation={generation} identity={identity}",
+                health.last_success_ms,health.reason_code,
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }).await.unwrap_or_else(|_|panic!(
+        "T10_B_SIGNED_SOURCE_SQL_OWNER_NOT_ADOPTED:{last}"
+    ));
+}
+
 // T10-03: a genuine Worker BeginPost is committed to its SQLite DO, then its
 // WSS response is lost before Native receives it. Production TradeService
 // must INSPECT the SAME central reserve, keep SQL uncertain, and do zero POSTs.
@@ -49,6 +88,7 @@ async fn t10_03_worker_committed_post_reply_lost(
             ],raw_response:signed_fee.clone()
         }).collect());
     feed.advance_recorded_public_clock(raw(json!([{"ts":stamped}])));
+    t10_b_sql_source_adopted(&accounts,stamped.parse().unwrap()).await;
     let posts_before=feed.outbound_posts.lock().unwrap().len();
     assert_eq!(posts_before,4,"T10-03 starts after a real A order ACK");
     let key="t10_03_worker_post_auth_response_lost_0001";

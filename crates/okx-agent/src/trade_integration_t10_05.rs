@@ -54,6 +54,7 @@ async fn t10_05_create_outcome(
         }).collect()
     );
     feed.advance_recorded_public_clock(wrap(json!([{"ts":stamp}])));
+    t10_b_sql_source_adopted(&accounts,stamp.parse().unwrap()).await;
     // Signed readback is tied by RecordedAccountHttp to the actual same
     // (account, clOrdId, ordId) ACK that was intentionally lost in delivery.
     if lost_ack{

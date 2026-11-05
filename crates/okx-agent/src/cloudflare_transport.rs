@@ -5740,7 +5740,15 @@ mod raw_native_session_tests {
             );
         }
         println!("t09_public_trade_execute_open_ack_and_idempotency PASS: posts=1");
-        shutdown_tx.send(true).unwrap();
+        // T10-04 deliberately injects a mismatched WSS result and expects
+        // the real Native session to have already terminated. Its watch
+        // receiver may therefore be closed. Never mistake a failed shutdown
+        // signal for the required RISK_RESULT_COMMAND_UNBOUND first cause.
+        if std::env::var("OKX_T10_04_FOREIGN_WORKER_REPLY_PROBE").as_deref()==Ok("1") {
+            let _ = shutdown_tx.send(true);
+        } else {
+            shutdown_tx.send(true).expect("Native session shutdown receiver");
+        }
         let terminated = tokio::time::timeout(Duration::from_secs(10), session)
             .await
             .unwrap()
