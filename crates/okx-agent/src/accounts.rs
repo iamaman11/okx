@@ -103,6 +103,10 @@ pub struct AccountResources {
     /// One risk-increasing admission planner per account. Cancellation,
     /// protective recovery and close do NOT share this gate.
     pub new_risk_admission: Semaphore,
+    /// Status can mutate finance and protection. A second Status on this
+    /// account returns the existing intent identity without another GET.
+    /// Cancel, Close and emergency actions remain independent.
+    pub status_reconciliation: Semaphore,
     source_shutdown: watch::Sender<bool>,
     verified_source_generation: AtomicU64,
     _identity_lease: File,
@@ -608,6 +612,7 @@ impl AccountRuntimeRegistry {
             execution,
             mutation_capacity: Semaphore::new(128),
             new_risk_admission: Semaphore::new(1),
+            status_reconciliation: Semaphore::new(1),
             source_shutdown: shutdown,
             verified_source_generation: AtomicU64::new(0),
             _identity_lease: identity_lease,

@@ -450,6 +450,17 @@ impl TradeService {
         reference: &str,
     ) -> Result<Value, String> {
         let mut i = self.find_intent(r, reference).await?;
+        // This status path is a financial mutation and must have a single
+        // account-local source owner. Concurrent replays receive a durable
+        // intent reference and no-resubmit uncertainty, never a fabricated
+        // balance, order outcome or second exchange POST.
+        let _status_owner = match r.status_reconciliation.try_acquire() {
+            Ok(owner) => owner,
+            Err(_) => return Ok(uncertain(
+                &i.intent_id,
+                "ACCOUNT_MUTATION_BUSY_STATUS_NOT_EVALUATED_NO_RESUBMIT",
+            )),
+        };
         // Historical fee/notional is a recorded fact, not an authorized entry.
         let entry_costs = if i.risk_increase
             && r.configuration.account_key.environment == okx_protocol::accounts::Environment::Real
