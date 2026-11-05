@@ -30,6 +30,22 @@ mod plan;
 mod reconcile;
 mod recovery;
 mod strategies;
+
+// Test-only causal boundary AFTER the genuine Worker HELD receipt has been
+// verified and committed as a central reservation in the original Native SQL
+// account owner. A separate third public Execute may now census this durable
+// RESERVED intent without declaring an unresolved network RESERVE attempt.
+// This hook never writes SQL/Worker money, returns risk, or authorizes POST.
+#[cfg(test)]
+pub(crate) static T10_07_HOLD_SQL_RESERVE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+#[cfg(test)]
+pub(crate) static T10_07_SQL_RESERVE_PERSISTED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+#[cfg(test)]
+pub(crate) static T10_07_RELEASE_SQL_RESERVE_HOLD: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 pub struct TradeService {
     accounts: Arc<AccountRuntimeRegistry>,
     public_ws: PublicWsHandle,
