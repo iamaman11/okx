@@ -279,6 +279,23 @@ async fn t10_07_native_single_campaign(
 
         // B still owns a real pending Rust Execute and SQL reservation.
         // A third distinct public Execute must be denied by the SAME Worker.
+        // Third admission follows both native ACKs and real SQL/Worker
+        // readbacks. The old A tariff now exceeds production source freshness.
+        // Publish a NEW exact signed fee phase on this explicit test event;
+        // never update the old source timestamp on GET or extend the TTL.
+        let a_capture=owner_a.recorded_capture_gate.write().await;
+        let updated_fee_ms=chrono::Utc::now().timestamp_millis().to_string();
+        feed.advance_immutable_signed_phase(
+            "t10-07-a-fee-zero","t10-07-a-fee-third-execute",RecordedGet {
+                access_key:"fixture-observer-a".into(),
+                path:"/api/v5/account/trade-fee".into(),
+                required_query:vec![
+                    ("instType".into(),"SWAP".into()),
+                    ("instFamily".into(),"BTC-USDT".into()),
+                ],raw_response:fee("0",&updated_fee_ms),
+            },source_budget
+        );
+        drop(a_capture);
         let posts_before_third=feed.outbound_posts.lock().unwrap().len();
         feed.advance_recorded_public_clock(wrap(json!([{
             "ts":chrono::Utc::now().timestamp_millis().to_string()
