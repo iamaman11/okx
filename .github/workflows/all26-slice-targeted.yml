@@ -25,8 +25,21 @@ concurrency:
 
 jobs:
   windows-targeted:
+    name: all26-${{ matrix.cohort }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - cohort: t09-core
+            ids: 'T09.0 T09.1 T09.2 T09.3 T09.4 T09.5 T09.6 T09.7 T09.8'
+          - cohort: t09-multi-and-t10-entry
+            ids: 'T09-MA T09-SPEC T10-01 T10-02 T10-03 T10-04 T10-05'
+          - cohort: t10-concurrent-and-finance
+            ids: 'T10-06 T10-07 T10-08 T10-09 T10-10'
+          - cohort: t10-durability-and-control
+            ids: 'T10-11 T10-12 T10-13 T10-14 T10-15'
     runs-on: windows-latest
-    timeout-minutes: 25
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de
@@ -69,18 +82,19 @@ jobs:
         run: |
           cargo test --locked -p okx-agent --lib immutable_signed_ -- --nocapture
           if ($LASTEXITCODE -ne 0) { throw 'SIGNED_SOURCE_PHASE_UNIT_PROOF_FAILED' }
-      - name: Source controller and T10 three-case regression — exact-SHA Windows
+      - name: Mandatory 26-case partition — per-case Native and Worker evidence on exact SHA
         shell: pwsh
-        timeout-minutes: 21
+        timeout-minutes: 52
         run: |
           $ErrorActionPreference = 'Stop'
-          $dir = Join-Path $env:RUNNER_TEMP 'b-stage'
+          $dir = Join-Path $env:RUNNER_TEMP ('all26-' + '${{ matrix.cohort }}')
           New-Item -ItemType Directory -Path $dir -Force | Out-Null
-          # First T10-07 one-campaign Native/SQL/Worker PASS was proven on
-          # SHA 27e2b95. Re-run T10-01, T10-04 and T10-07 together on
-          # this NEW exact immutable SHA. Historical green runs do not count.
-          # Preserve the independent 26-ID and owner evidence oracle.
-          $ids = @('T10-01','T10-04','T10-07')
+          # Every one of the 26 mandatory IDs belongs to exactly one matrix
+          # partition. Parallel independent Windows workers use the same
+          # immutable github.sha and retain individual SQL/Worker readbacks.
+          # No historical case PASS and no Worker-only component count.
+          $ids = '${{ matrix.ids }}' -split ' '
+          if (@($ids).Count -eq 0) { throw 'ALL26_EMPTY_PARTITION' }
           $env:OKX_B_CENSUS_CAUSE_PROBE = '1'
           $env:OKX_T09_4_SOURCE_COHERENCE_PROBE = '1'
           $env:OKX_T10_01_MAINT_SHUTDOWN_PROBE = '1'
@@ -116,12 +130,12 @@ jobs:
           }
           $rows | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $dir 'b-stage-results.json') -Encoding utf8NoBOM
           $passed = @($rows | Where-Object status -eq 'PASS').Count
-          Write-Output "B_STAGE_EXACT_SHA_RESULTS:$passed/$($ids.Count):$env:GITHUB_SHA"
-          if ($passed -ne $ids.Count) { throw 'B_STAGE_ACCEPTANCE_NOT_COMPLETE' }
+          Write-Output "ALL26_PARTITION_RESULT:${{ matrix.cohort }}:$passed/$($ids.Count):$env:GITHUB_SHA"
+          if ($passed -ne $ids.Count) { throw 'ALL26_PARTITION_ACCEPTANCE_NOT_COMPLETE' }
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
-          name: b-stage-${{ github.sha }}
-          path: ${{ runner.temp }}\\b-stage
+          name: all26-${{ matrix.cohort }}-${{ github.sha }}
+          path: ${{ runner.temp }}\\all26-${{ matrix.cohort }}
           if-no-files-found: warn
           retention-days: 14
