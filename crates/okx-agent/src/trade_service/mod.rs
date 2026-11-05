@@ -36,6 +36,18 @@ mod strategies;
 // account owner. A separate third public Execute may now census this durable
 // RESERVED intent without declaring an unresolved network RESERVE attempt.
 // This hook never writes SQL/Worker money, returns risk, or authorizes POST.
+// A and B's independent post-SQL barriers allow the third Execute to enter
+// while BOTH authentic reservations remain in-flight. Not a Worker/SQL stub.
+#[cfg(test)]
+pub(crate) static T10_07_HOLD_A_SQL_RESERVE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+#[cfg(test)]
+pub(crate) static T10_07_A_SQL_RESERVE_PERSISTED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+#[cfg(test)]
+pub(crate) static T10_07_RELEASE_A_SQL_RESERVE_HOLD: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 #[cfg(test)]
 pub(crate) static T10_07_HOLD_SQL_RESERVE: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
