@@ -50,6 +50,29 @@ async fn t10_03_worker_committed_post_reply_lost(
     let posts_before=feed.outbound_posts.lock().unwrap().len();
     assert_eq!(posts_before,4,"T10-03 starts after a real A order ACK");
     let key="t10_03_worker_post_auth_response_lost_0001";
+    // Source event: the public B Execute observes NEW signed fee/time
+    // bytes. No background GET may renew this timestamp or synthesize an
+    // exchange/SQL/Worker state. The predecessor must have identical
+    // exact-route/query raw bytes, or this transition fails closed.
+    let execute_stamp=chrono::Utc::now().timestamp_millis().to_string();
+    let observed_fee=raw(json!([{
+        "instType":"SWAP","level":"Lv1","ts":execute_stamp,
+        "feeGroup":[{"groupId":"4","maker":"0.0005","taker":"0.0005"}]
+    }]));
+    let retired=feed.supersede_queued_signed_source_at_event(
+        "t10-03-positive-execute","t10-03-b-fee-at-execute",
+        RecordedGet {
+            access_key:"fixture-observer-b".into(),
+            path:"/api/v5/account/trade-fee".into(),
+            required_query:vec![
+                ("instType".into(),"SWAP".into()),
+                ("instFamily".into(),"BTC-USDT".into()),
+            ],
+            raw_response:observed_fee,
+        }
+    );
+    assert!(retired>0,"T10-03 needs prior signed B fee source");
+    feed.advance_recorded_public_clock(raw(json!([{"ts":execute_stamp}])));
     T10_03_WORKER_POST_COMMITTED_REPLY_LOST.store(
         false,std::sync::atomic::Ordering::SeqCst
     );
@@ -78,7 +101,10 @@ async fn t10_03_worker_committed_post_reply_lost(
     };
     assert!(T10_03_WORKER_POST_COMMITTED_REPLY_LOST.load(
         std::sync::atomic::Ordering::SeqCst
-    ),"T10-03 must lose the actual Worker POST_AUTHORIZED reply");
+    ),"T10-03 must lose the actual Worker POST_AUTHORIZED reply: public={status} outcome={answer:?} posts={} signed_denials={:?}",
+        feed.outbound_posts.lock().unwrap().len(),
+        feed.denied_routes.lock().unwrap().iter().rev().take(4).cloned().collect::<Vec<_>>()
+    );
     assert!(!T10_03_DROP_NEXT_POST_AUTH.load(
         std::sync::atomic::Ordering::SeqCst
     ),"T10-03 fault was not exercised");

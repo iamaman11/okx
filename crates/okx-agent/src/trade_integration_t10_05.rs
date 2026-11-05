@@ -100,6 +100,29 @@ async fn t10_05_create_outcome(
     let budget_before=risk.request(before_risk).await.expect("T10-05 Worker prior to POST");
     assert_eq!(budget_before.budget.as_ref().unwrap().entry_budget.as_ref().unwrap().reserved_usd,
         "7.0015");
+    // This positive Execute is a new authenticated fee/time observation
+    // after the earlier Worker budget inspection. Retire only the exact
+    // predecessor route/query/raw bytes. Do not alter tariff, risk limits,
+    // source age policy or the venue POST itself.
+    let execute_stamp=chrono::Utc::now().timestamp_millis().to_string();
+    let observed_fee=wrap(json!([{
+        "instType":"SWAP","level":"Lv1","ts":execute_stamp,
+        "feeGroup":[{"groupId":"4","maker":"0.0005","taker":"0.0005"}]
+    }]));
+    let retired=feed.supersede_queued_signed_source_at_event(
+        "t10-05-positive-execute","t10-05-b-fee-at-execute",
+        RecordedGet {
+            access_key:"fixture-observer-b".into(),
+            path:"/api/v5/account/trade-fee".into(),
+            required_query:vec![
+                ("instType".into(),"SWAP".into()),
+                ("instFamily".into(),"BTC-USDT".into()),
+            ],
+            raw_response:observed_fee,
+        }
+    );
+    assert!(retired>0,"T10-05 needs prior signed B fee source");
+    feed.advance_recorded_public_clock(wrap(json!([{"ts":execute_stamp}])));
     if lost_ack {
         feed.arm_lost_next_create_ack();
     }
@@ -142,7 +165,9 @@ async fn t10_05_create_outcome(
     assert!(initial_revision>0);
     let posts_after_first=feed.outbound_posts.lock().unwrap().len();
     assert_eq!(posts_after_first,before_posts+1,
-        "T10-05 never turns uncertainty into a second venue create");
+        "T10-05 must send exactly ONE original create, not replay it: public={first} first_sql_state={sql_initial_state} signed_denials={:?}",
+        feed.denied_routes.lock().unwrap().iter().rev().take(4).cloned().collect::<Vec<_>>()
+    );
     let (final_state,replayed_id,venue_order_id,sql_revision)=if lost_ack {
         assert!(feed.lost_create_ack_was_consumed(),
             "T10-05 fixture must have dropped exactly one post-send ACK");
