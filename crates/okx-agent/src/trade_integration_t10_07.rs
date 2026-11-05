@@ -161,23 +161,55 @@ async fn t10_07_native_one_campaign(
         }])),
     });
 
-    // Stage A's genuine Worker HELD and SQL receipt, but keep its ORIGINAL
-    // public Execute pending. Stage B the same way before the third begins.
-    // This is a real three-way Native overlap, not a sequential B1 cohort.
+    // Arm two independent test-only barriers strictly after each real
+    // Worker HELD has been committed by its own Native SQL account owner.
+    // Start BOTH original public Execute calls together, not sequentially:
+    // their local reserve phases contend for one persisted Worker RiskBook.
+    let both_market=refresh_recorded_market();
+    wait_market(both_market).await;
+    let both_clock=chrono::Utc::now().timestamp_millis();
+    feed.advance_recorded_public_clock(
+        envelope(json!([{"ts":both_clock.to_string()}])));
+    let both_fee_at=chrono::Utc::now().timestamp_millis().to_string();
+    feed.advance_immutable_signed_phase(
+        "t10-07-b-fee","t10-07-b-before-held",RecordedGet {
+            access_key:"fixture-observer-b".into(),
+            path:"/api/v5/account/trade-fee".into(),
+            required_query:vec![
+                ("instType".into(),"SWAP".into()),
+                ("instFamily".into(),"BTC-USDT".into()),
+            ],raw_response:fee("0",&both_fee_at),
+        }
+    );
+    let b=make(B_KEY);assert!(b.valid());
     crate::trade_service::T10_07_A_SQL_RESERVE_PERSISTED.store(false,SeqCst);
     crate::trade_service::T10_07_RELEASE_A_SQL_RESERVE_HOLD.store(false,SeqCst);
     crate::trade_service::T10_07_HOLD_A_SQL_RESERVE.store(true,SeqCst);
+    crate::trade_service::T10_07_SQL_RESERVE_PERSISTED.store(false,SeqCst);
+    crate::trade_service::T10_07_RELEASE_SQL_RESERVE_HOLD.store(false,SeqCst);
+    crate::trade_service::T10_07_HOLD_SQL_RESERVE.store(true,SeqCst);
     let first_pending=tokio::spawn({
         let trade=trade.clone();
         async move{trade.trade("fixture-a",&first,None).await}
     });
-    tokio::time::timeout(Duration::from_secs(12),async {
-        while !crate::trade_service::T10_07_A_SQL_RESERVE_PERSISTED.load(SeqCst) {
-            assert!(!first_pending.is_finished(),
-                "T10-07 A exited before original SQL-held Worker receipt");
+    let pending=tokio::spawn({
+        let trade=trade.clone();
+        async move{trade.trade("fixture-b",&b,None).await}
+    });
+    let held_wait=tokio::time::timeout(Duration::from_secs(12),async {
+        while !crate::trade_service::T10_07_A_SQL_RESERVE_PERSISTED.load(SeqCst)
+            || !crate::trade_service::T10_07_SQL_RESERVE_PERSISTED.load(SeqCst)
+        {
+            assert!(!first_pending.is_finished() && !pending.is_finished(),
+                "T10-07 original A/B Execute failed before both SQL HELDs");
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-    }).await.expect("T10-07 A authentic SQL HELD deadline");
+    }).await;
+    if held_wait.is_err() {
+        let denied=feed.denied_routes.lock().unwrap().clone();
+        panic!("T10_07_BOTH_SQL_HELD_NOT_PERSISTED:posts={} denied_routes={denied:?}",
+            feed.outbound_posts.lock().unwrap().len());
+    }
     let owner_a=accounts.resolve("fixture-a").await.unwrap();
     let owner_b=accounts.resolve("fixture-b").await.unwrap();
     let a_held=owner_a.execution.store.call(
@@ -188,52 +220,7 @@ async fn t10_07_native_one_campaign(
                 .ok_or(okx_execution::StoreError::Invalid("T10_07_A_HELD_RECEIPT_MISSING"))?;
             Ok((intent.state.as_str().to_owned(),intent.intent_id,receipt))
         }
-    ).await.expect("T10-07 A SQL HELD readback");
-    assert_eq!(a_held.0,"RESERVED");
-    assert_eq!(a_held.1,a_held.2.intent_id);
-    assert_eq!(a_held.2.account_key,owner_a.configuration.account_key.wire());
-    assert_eq!(feed.outbound_posts.lock().unwrap().len(),0,
-        "A is HELD in SQL/Worker, but must still be before venue POST");
-
-    // B receives the ORIGINAL authentic Worker HELD. Only AFTER the SQL
-    // owner stores the matching central receipt do we hold its post-HELD
-    // fence. A pre-SQL hold would correctly trip the cohort's unresolved
-    // reserve invariant when the third Native Execute begins.
-    crate::trade_service::T10_07_SQL_RESERVE_PERSISTED.store(false,SeqCst);
-    crate::trade_service::T10_07_RELEASE_SQL_RESERVE_HOLD.store(false,SeqCst);
-    crate::trade_service::T10_07_HOLD_SQL_RESERVE.store(true,SeqCst);
-    let market_b=refresh_recorded_market();
-    wait_market(market_b).await;
-    let clock_b=chrono::Utc::now().timestamp_millis();
-    feed.advance_recorded_public_clock(
-        envelope(json!([{"ts":clock_b.to_string()}])));
-    let b_fee_at=chrono::Utc::now().timestamp_millis().to_string();
-    feed.advance_immutable_signed_phase("t10-07-b-fee","t10-07-b-before-held",
-        RecordedGet {
-            access_key:"fixture-observer-b".into(),
-            path:"/api/v5/account/trade-fee".into(),
-            required_query:vec![
-                ("instType".into(),"SWAP".into()),
-                ("instFamily".into(),"BTC-USDT".into()),
-            ],raw_response:fee("0",&b_fee_at),
-        });
-    let b=make(B_KEY); assert!(b.valid());
-    let pending=tokio::spawn({
-        let trade=trade.clone();
-        async move{trade.trade("fixture-b",&b,None).await}
-    });
-    let held_wait=tokio::time::timeout(Duration::from_secs(12),async {
-        while !crate::trade_service::T10_07_SQL_RESERVE_PERSISTED.load(SeqCst) {
-            assert!(!pending.is_finished(),
-                "T10-07 B terminated before Native SQL confirmed its Worker HELD");
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    }).await;
-    if held_wait.is_err() {
-        let denied=feed.denied_routes.lock().unwrap().clone();
-        panic!("T10_07_B_SQL_HELD_NOT_PERSISTED:posts={} denied_routes={denied:?}",
-            feed.outbound_posts.lock().unwrap().len());
-    }
+    ).await.expect("T10-07 A original SQL HELD readback");
     let persisted_b_held=owner_b.execution.store.call(
         std::time::Instant::now()+Duration::from_secs(3),|s|{
             let intent=s.by_idempotency(B_KEY)?
@@ -242,10 +229,17 @@ async fn t10_07_native_one_campaign(
                 .ok_or(okx_execution::StoreError::Invalid("T10_07_B_HELD_RECEIPT_MISSING"))?;
             Ok((intent.state.as_str().to_owned(),intent.intent_id,receipt))
         }
-    ).await.expect("T10-07 B SQL-held owner readback");
+    ).await.expect("T10-07 B original SQL HELD readback");
+    assert_eq!(a_held.0,"RESERVED");
     assert_eq!(persisted_b_held.0,"RESERVED");
+    assert_eq!(a_held.1,a_held.2.intent_id);
     assert_eq!(persisted_b_held.1,persisted_b_held.2.intent_id);
+    assert_ne!(a_held.1,persisted_b_held.1);
+    assert_eq!(a_held.2.account_key,owner_a.configuration.account_key.wire());
     assert_eq!(persisted_b_held.2.account_key,owner_b.configuration.account_key.wire());
+    assert_eq!(feed.outbound_posts.lock().unwrap().len(),0,
+        "two SQL-held reserves never imply venue POST authority");
+
     // Third $4 Execute reaches the SAME Worker/SQL campaign while B's
     // original reservation remains HELD. There is no authorized extra POST.
     let stage=risk.request(risk_summary("risk_t10_07_two_held")).await.unwrap();
