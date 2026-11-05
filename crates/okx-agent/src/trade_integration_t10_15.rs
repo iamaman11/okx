@@ -6,6 +6,7 @@ async fn t10_15_fee_source_after_worker_held(
     risk: NativeRiskClient,
     feed: Arc<crate::accounts::recorded_support::RecordedAccountHttp>,
     rate_budget: RateBudget,
+    refresh_recorded_market: &impl Fn()->i64,
 )->serde_json::Value {
     use crate::accounts::recorded_support::RecordedGet;
     use okx_protocol::trading::{
@@ -120,6 +121,33 @@ async fn t10_15_fee_source_after_worker_held(
         held_before);
     let posts_before=feed.outbound_posts.lock().unwrap().len();
     assert_eq!(posts_before,expected_posts);
+
+    // Preview is read-only but may consume a local rate-defer window. The
+    // original signed fee/clock were observed BEFORE it; executing against
+    // those old bytes can fail the real 5s source-age/clock gate before any
+    // Worker HELD. Publish a NEW explicit signed event at the Execute
+    // boundary instead of replaying a dozen identical GET pages or changing
+    // financial freshness policy. No SQL or Worker state is set by the test.
+    let trade_source_at=chrono::Utc::now().timestamp_millis().to_string();
+    let unchanged_fee=fee("0.0005",&trade_source_at);
+    let retired=feed.supersede_queued_signed_source_at_event(
+        "t10-15-preview-completed", "t10-15-before-held", RecordedGet {
+            access_key:"fixture-observer-b".into(),
+            path:"/api/v5/account/trade-fee".into(),
+            required_query:vec![
+                ("instType".into(),"SWAP".into()),
+                ("instFamily".into(),"BTC-USDT".into()),
+            ],
+            raw_response:unchanged_fee,
+        }
+    );
+    assert!(retired>0,"T10-15 must retire actual earlier fee pages");
+    let market_at=refresh_recorded_market();
+    let clock_at=chrono::Utc::now().timestamp_millis();
+    assert!(clock_at>=market_at);
+    feed.advance_recorded_public_clock(
+        wrap(serde_json::json!([{"ts":clock_at.to_string()}]))
+    );
     T10_15_WORKER_HELD_COMMITTED.store(false,std::sync::atomic::Ordering::SeqCst);
     T10_15_SIGNED_SOURCE_CHANGED.store(false,std::sync::atomic::Ordering::SeqCst);
     T10_15_ARM_AFTER_HELD.store(true,std::sync::atomic::Ordering::SeqCst);
@@ -143,16 +171,18 @@ async fn t10_15_fee_source_after_worker_held(
     let after_ms=chrono::Utc::now().timestamp_millis().to_string();
     let changed=fee("0.0006",&after_ms);
     let digest=format!("{:x}",sha2::Sha256::digest(&changed));
-    feed.advance_recorded_route("fixture-observer-b","/api/v5/account/trade-fee",
-        (0..14).map(|_|RecordedGet{
+    let delivered_before_change=feed.advance_immutable_signed_phase(
+        "t10-15-before-held","t10-15-after-held",RecordedGet {
             access_key:"fixture-observer-b".into(),
             path:"/api/v5/account/trade-fee".into(),
             required_query:vec![
                 ("instType".into(),"SWAP".into()),
                 ("instFamily".into(),"BTC-USDT".into()),
             ],raw_response:changed.clone(),
-        }).collect()
+        }
     );
+    assert!(delivered_before_change>0,
+        "post-HELD change must follow an actual signed pre-HELD fee read");
     T10_15_SIGNED_SOURCE_CHANGED.store(true,std::sync::atomic::Ordering::SeqCst);
     let result=tokio::time::timeout(Duration::from_secs(15),pending)
         .await.expect("T10-15 source-changed Execute deadline")
