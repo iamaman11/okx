@@ -36,6 +36,9 @@ export async function run({caseId,root,signal,artifactsDir}) {
   assert.equal(n.b_sql_state,"REJECTED");
   assert.equal(n.third_sql_state,"REJECTED");
   assert.deepEqual(n.held_receipts,["HELD","HELD","DENIED"]);
+  assert.equal(n.concurrent_native_three_way_entered,true,
+    "all three actual TradeService Execute calls must overlap at entry");
+  assert.equal(n.concurrent_native_calls,3);
   assert.equal(n.denial_reason,"CAMPAIGN_ENTRY_BUDGET_EXHAUSTED");
   assert.equal(n.denied_extra_posts,0);
   assert.equal(n.release_extra_posts,0);
@@ -80,7 +83,7 @@ export async function run({caseId,root,signal,artifactsDir}) {
   // three-way Worker test, a synthetic financial value, or a different
   // Native campaign into a mandatory PASS.
   const economicProof = [
-    ["concurrent_requests","3",String(n.held_receipts.length)],
+    ["concurrent_requests","3",String(n.concurrent_native_calls)],
     ["reserve_decisions","HELD,HELD,DENIED",n.held_receipts.join(",")],
     ["reserved_before_release_usd","8",first.reserved_usd],
     ["remaining_before_release_usd","2",first.remaining_usd],
@@ -101,7 +104,8 @@ export async function run({caseId,root,signal,artifactsDir}) {
   const assertions=economicProof.map(([id,expected,actual])=>({id,expected,actual}));
   const events=[
     ["public_trade_entered","NativeTradeService",
-      [n.a_intent_id,n.b_intent_id,n.total_venue_posts]],
+      [n.a_intent_id,n.b_intent_id,n.concurrent_native_three_way_entered,
+        n.concurrent_native_calls,n.total_venue_posts]],
     ["two_independent_held_reserves","NativeAccountSQL+RuntimeSessionSQLiteDO",
       [n.a_account_uid,n.b_account_uid,n.worker_before_release,
         n.worker_two_held_sequence]],
