@@ -82,6 +82,14 @@ jobs:
         run: |
           cargo test --locked -p okx-agent --lib immutable_signed_ -- --nocapture
           if ($LASTEXITCODE -ne 0) { throw 'SIGNED_SOURCE_PHASE_UNIT_PROOF_FAILED' }
+      - name: Verify late-bound and foreign Worker replies on the real Native WSS dispatcher
+        if: matrix.cohort == 't10-concurrent-and-finance'
+        shell: pwsh
+        run: |
+          cargo test --locked -p okx-agent --lib late_bound_risk_reply_after_cancelled_native_wait_does_not_close_session -- --nocapture
+          if ($LASTEXITCODE -ne 0) { throw 'RISK_KNOWN_LATE_REPLY_UNIT_PROOF_FAILED' }
+          cargo test --locked -p okx-agent --lib foreign_risk_reply_command_never_authorizes_pending_reserve -- --nocapture
+          if ($LASTEXITCODE -ne 0) { throw 'RISK_FOREIGN_REPLY_UNIT_PROOF_FAILED' }
       - name: Mandatory 26-case partition — per-case Native and Worker evidence on exact SHA
         shell: pwsh
         timeout-minutes: 52

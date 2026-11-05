@@ -5,6 +5,7 @@
 async fn t10_10_native_sql_economics(
     accounts: &Arc<AccountRuntimeRegistry>,
     intent_id: &str,
+    fixed_window: Option<(i64, i64)>,
 ) -> serde_json::Value {
     let owner = accounts.resolve("fixture-a").await.expect("T10-10 SQL owner");
     let target = intent_id.to_owned();
@@ -17,8 +18,20 @@ async fn t10_10_native_sql_economics(
             let bills = s.cursor("bills", "account")?.ok_or(
                 okx_execution::StoreError::Invalid("T10_10_BILL_FRONTIER_MISSING")
             )?;
-            let fill = s.intent_fill_cost_evidence(&target, fills.watermark)?;
-            let bill = s.intent_fee_bill_evidence(&target, bills.watermark)?;
+            // Evidence digests are intentionally bound to the caller's
+            // through-window, not merely to economic amounts. Comparing a
+            // new moving watermark to an older window is a false claim of
+            // duplicate money. Prove the SAME original signed fee/fill
+            // window while separately observing that live cursors advanced.
+            let (fill_through,bill_through)=fixed_window
+                .unwrap_or((fills.watermark,bills.watermark));
+            if fills.watermark<fill_through || bills.watermark<bill_through {
+                return Err(okx_execution::StoreError::Invalid(
+                    "T10_10_FIXED_PROOF_WINDOW_NOT_COVERED"
+                ));
+            }
+            let fill = s.intent_fill_cost_evidence(&target, fill_through)?;
+            let bill = s.intent_fee_bill_evidence(&target, bill_through)?;
             Ok(serde_json::json!({
                 "intent_id":target,
                 "fill_count":fill.fill_count,
@@ -29,6 +42,8 @@ async fn t10_10_native_sql_economics(
                 "bill_source_digest":bill.source_digest,
                 "fill_watermark":fills.watermark,
                 "bill_watermark":bills.watermark,
+                "fill_proof_through":fill_through,
+                "bill_proof_through":bill_through,
                 "finance_revision":s.finance_revision()?,
             }))
         }
@@ -42,7 +57,7 @@ async fn t10_10_signed_duplicate_ingestion(
     feed: Arc<crate::accounts::recorded_support::RecordedAccountHttp>,
     intent_id: String,
 ) -> serde_json::Value {
-    let before = t10_10_native_sql_economics(&accounts, &intent_id).await;
+    let before = t10_10_native_sql_economics(&accounts, &intent_id, None).await;
     assert_eq!(before["fill_count"], 2);
     assert_eq!(before["bill_count"], 2);
     assert_eq!(before["quantity"], "0.3");
@@ -76,7 +91,17 @@ async fn t10_10_signed_duplicate_ingestion(
         }, None,
     ).await.expect("T10-10 public same-intent Status after duplicate capture");
     assert_eq!(status["data"]["intent"]["intent_id"], intent_id);
-    let after = t10_10_native_sql_economics(&accounts, &intent_id).await;
+    let fill_through=before["fill_proof_through"].as_i64()
+        .expect("T10-10 initial immutable fill proof cutoff");
+    let bill_through=before["bill_proof_through"].as_i64()
+        .expect("T10-10 initial immutable bill proof cutoff");
+    let after = t10_10_native_sql_economics(
+        &accounts, &intent_id, Some((fill_through,bill_through))
+    ).await;
+    assert!(after["fill_watermark"].as_i64().unwrap()>=fill_through);
+    assert!(after["bill_watermark"].as_i64().unwrap()>=bill_through);
+    assert_eq!(after["fill_proof_through"],before["fill_proof_through"]);
+    assert_eq!(after["bill_proof_through"],before["bill_proof_through"]);
     for field in ["fill_count", "bill_count", "quantity", "gross_notional_usdt",
                   "verified_fee_usdt", "bill_source_digest"] {
         assert_eq!(after[field], before[field],

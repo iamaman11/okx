@@ -1554,7 +1554,17 @@ mod raw_native_session_tests {
         }
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let session = tokio::spawn(async move {
-            run_connected_session(socket, hello, ctx, &mut risk_rx, shutdown_rx).await
+            let result = run_connected_session(
+                socket, hello, ctx, &mut risk_rx, shutdown_rx
+            ).await;
+            if let Err(ref reason) = result {
+                // Record the *real* Native WSS first failure. A later
+                // RISK_TRANSPORT_LOST is only the requester's secondary
+                // symptom; do not guess that this session broke due to a
+                // full queue, a foreign frame, or a missing reply.
+                eprintln!("T10_06_NATIVE_WSS_SESSION_EXIT_V1:{reason}");
+            }
+            result
         });
         let mut command = summary("risk_native_real_workerd_001");
         command.installation_id = "installation_test".into();

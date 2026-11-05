@@ -47,6 +47,14 @@ async fn t10_03_worker_committed_post_reply_lost(
             ],raw_response:signed_fee.clone()
         }).collect());
     feed.advance_recorded_public_clock(raw(json!([{"ts":stamped}])));
+    // The A order has already been authenticated and acknowledged. The
+    // next event belongs to B, not another periodic A finance/source cycle.
+    // Hold only A's existing test-only capture lease so it cannot exhaust
+    // the old finite executor-A order source while B proves the independent
+    // Worker/SQL outcome. No production GET, SQL or risk guard is weakened.
+    let a_owner=accounts.resolve("fixture-a").await
+        .expect("independent A finance owner before B fault");
+    let _a_capture_lease=a_owner.recorded_capture_gate.write().await;
     let posts_before=feed.outbound_posts.lock().unwrap().len();
     assert_eq!(posts_before,4,"T10-03 starts after a real A order ACK");
     let key="t10_03_worker_post_auth_response_lost_0001";

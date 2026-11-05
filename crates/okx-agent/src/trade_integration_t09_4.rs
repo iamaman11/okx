@@ -322,6 +322,14 @@
         // bill, projected 0.20 + 0.30 owned lots, and proved no unresolved
         // POSTING/UNKNOWN intent may the observer publish the 0.50
         // position and both live stops. No SQL/risk receipt is test-written.
+        // The real background finance capture must not interleave a NEW
+        // 0.50 position with the OLD single-stop inventory. That mixed
+        // source generation legitimately triggers a protection incident
+        // and an emergency venue POST, even though neither new venue
+        // snapshot has yet been fully published. Atomically publish this
+        // pair across the existing test-only capture lease; production
+        // safety and both raw signed HTTP payloads remain unchanged.
+        let inventory_phase_guard=owner.recorded_capture_gate.write().await;
         feed.advance_recorded_route(
             "fixture-observer-a","/api/v5/account/positions",
             (0..64).map(|_|RecordedGet {
@@ -339,6 +347,7 @@
         feed.advance_recorded_route(
             "fixture-observer-a","/api/v5/trade/orders-algo-pending",pending
         );
+        drop(inventory_phase_guard);
         eprintln!("T09_4_CAUSAL_INVENTORY_AFTER_SQL_V1 fill=0.2 bill=0.001 position=0.5 stops=2");
         // The signed 0.50 position and two pending stops are now registered
         // on the real recorded HTTP source. Wait for the ordinary Native
