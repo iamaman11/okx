@@ -872,6 +872,18 @@ pub(crate) mod recorded_support {
         pub(crate) raw_response: Vec<u8>,
     }
 
+    // A signed GET is a read of an external snapshot, not the consumption
+    // of an economic event. Within an explicitly named, immutable phase
+    // concurrent background capture/Preview may receive identical bytes.
+    // Only a test driver can transition the phase, after its own causal
+    // assertion. The production HTTP parser, freshness, quota and SQL
+    // financial source owner remain unchanged.
+    struct ImmutableSignedGetPhase {
+        phase_id: String,
+        source: RecordedGet,
+        deliveries: u64,
+    }
+
     /// One pre-recorded response for one exact signed executor POST. This is
     /// only a transport transcript, never an exchange/account state machine.
     pub(crate) struct RecordedPost {
@@ -1042,6 +1054,10 @@ pub(crate) mod recorded_support {
         // remain mandatory and are consumed first; extras are never a
         // fallback for missing routes or an unbounded exchange simulator.
         optional_reads: Mutex<Vec<RecordedGet>>,
+        // Opt-in event-scoped immutable REST snapshots. Not a fallback for
+        // missing one-shot history/order pages. A snapshot is never refreshed
+        // by the number or timing of GETs.
+        immutable_signed_phases: Mutex<Vec<ImmutableSignedGetPhase>>,
         // Raw public time responses, never a synthesized exchange clock.
         public_clock_reads: Mutex<Vec<Vec<u8>>>,
         // Test-only count of raw public-clock GET deliveries; the same
@@ -1082,6 +1098,75 @@ pub(crate) mod recorded_support {
                 "by_actor_and_task": by_task,
                 "recent": events.iter().rev().take(6).cloned().collect::<Vec<_>>(),
             })
+        }
+
+        /// Install the FIRST snapshot of an account-owned REST route. These
+        /// three routes are read-only and idempotent between source events.
+        /// Fills, bills, order status, clock and algo inventories stay under
+        /// their separate causal/one-shot transcript contracts.
+        pub(crate) fn expect_immutable_signed_phase(&self, phase_id: &str, page: RecordedGet) {
+            assert!(!phase_id.is_empty(),"TRANSCRIPT_IMMUTABLE_PHASE_ID_MISSING");
+            assert!(matches!(
+                page.path.as_str(),
+                "/api/v5/account/balance"
+                    | "/api/v5/account/trade-fee"
+                    | "/api/v5/account/leverage-info"
+            ),"TRANSCRIPT_IMMUTABLE_ROUTE_NOT_ALLOWED");
+            let route=(page.access_key.clone(),page.path.clone());
+            let mut query=page.required_query.clone();
+            query.sort();
+            let mut phases=self.immutable_signed_phases.lock().unwrap();
+            assert!(!phases.iter().any(|item| {
+                let mut previous=item.source.required_query.clone();
+                previous.sort();
+                item.source.access_key==page.access_key
+                    &&item.source.path==page.path && previous==query
+            }),"TRANSCRIPT_IMMUTABLE_PHASE_ALREADY_REGISTERED");
+            assert!(!self.reads.lock().unwrap().iter().any(|item|
+                item.access_key==page.access_key && item.path==page.path
+            ),"TRANSCRIPT_IMMUTABLE_MIXED_WITH_QUEUED_SOURCE");
+            assert!(!self.optional_reads.lock().unwrap().iter().any(|item|
+                item.access_key==page.access_key && item.path==page.path
+            ),"TRANSCRIPT_IMMUTABLE_MIXED_WITH_OPTIONAL_SOURCE");
+            self.strict_read_routes.lock().unwrap().insert(route);
+            phases.push(ImmutableSignedGetPhase {
+                phase_id:phase_id.into(),source:page,deliveries:0,
+            });
+        }
+
+        /// Transition ONLY the same signed account+route+query. This API
+        /// does not accept a new timestamp on a GET: the new raw response
+        /// must be explicitly supplied after a separately verified event.
+        pub(crate) fn advance_immutable_signed_phase(
+            &self, expected_phase:&str, next_phase:&str, page:RecordedGet,
+        ) -> u64 {
+            assert!(!expected_phase.is_empty() && !next_phase.is_empty()
+                && expected_phase!=next_phase,"TRANSCRIPT_IMMUTABLE_PHASE_TRANSITION_INVALID");
+            let mut query=page.required_query.clone();
+            query.sort();
+            let mut phases=self.immutable_signed_phases.lock().unwrap();
+            let prior=phases.iter_mut().find(|item|{
+                let mut existing=item.source.required_query.clone();
+                existing.sort();
+                item.source.access_key==page.access_key
+                    &&item.source.path==page.path && existing==query
+            }).expect("TRANSCRIPT_IMMUTABLE_UNREGISTERED_TRANSITION");
+            assert_eq!(prior.phase_id,expected_phase,
+                "TRANSCRIPT_IMMUTABLE_CAUSAL_PREDECESSOR_MISMATCH");
+            let previously_delivered=prior.deliveries;
+            prior.phase_id=next_phase.into();
+            prior.source=page;
+            prior.deliveries=0;
+            previously_delivered
+        }
+
+        pub(crate) fn immutable_signed_phase_reads(
+            &self, access_key:&str, path:&str, phase_id:&str,
+        )->u64 {
+            self.immutable_signed_phases.lock().unwrap().iter()
+                .find(|item|item.source.access_key==access_key
+                    &&item.source.path==path &&item.phase_id==phase_id)
+                .map_or(0,|item|item.deliveries)
         }
 
         pub(crate) fn expect_get(&self, page: RecordedGet) {
@@ -1918,6 +2003,54 @@ pub(crate) mod recorded_support {
                 } else {
                     None
                 };
+                // Read-only authenticated snapshots are immutable WITHIN
+                // a named phase, even if financial capture races Preview.
+                // A different signer, route or query must fail closed.
+                // No response is minted and no source time is refreshed.
+                let immutable_result={
+                    let mut phases=self.immutable_signed_phases.lock().unwrap();
+                    let matching=phases.iter().enumerate().filter_map(|(index,item)|{
+                        (item.source.access_key==key &&item.source.path==path
+                            &&item.source.required_query.iter().all(|(name, expected)|{
+                                request.url().query_pairs().any(|(k,v)|
+                                    k.as_ref()==name.as_str() &&v.as_ref()==expected.as_str()
+                                )
+                            })).then_some(index)
+                    }).collect::<Vec<_>>();
+                    assert!(matching.len()<=1,"TRANSCRIPT_IMMUTABLE_AMBIGUOUS_QUERY");
+                    if let Some(index)=matching.first(){
+                        phases[*index].deliveries+=1;
+                        Some(Ok(phases[*index].source.raw_response.clone()))
+                    }else if phases.iter().any(|item|
+                        item.source.access_key==key &&item.source.path==path
+                    ){
+                        Some(Err("TRANSCRIPT_IMMUTABLE_QUERY_MISMATCH"))
+                    }else{None}
+                };
+                if let Some(result)=immutable_result {
+                    let body=result.map_err(|reason|{
+                        self.denied_routes.lock().unwrap().push(format!("{reason}:{key}:{path}"));
+                        OkxError::Response(format!("{reason}:{key}:{path}"))
+                    })?;
+                    self.requests.lock().unwrap().push(format!(
+                        "{key}:{path}?{}",request.url().query().unwrap_or_default()
+                    ));
+                    if path=="/api/v5/account/trade-fee" {
+                        let raw:serde_json::Value=serde_json::from_slice(&body)?;
+                        let timestamp=raw["data"][0]["ts"].as_str().ok_or_else(||
+                            OkxError::Response("TRANSCRIPT_FEE_EXCHANGE_TS_MISSING".into())
+                        )?;
+                        self.delivered_fees.lock().unwrap().push((
+                            key.to_owned(),timestamp.into(),
+                            chrono::Utc::now().timestamp_millis(),
+                        ));
+                    }
+                    return Ok(RawHttpResponse {
+                        status:HttpStatusCode::OK,
+                        headers:Default::default(),
+                        body,
+                    });
+                }
                 // Unlike ordered one-shot pages, a causal inventory returns
                 // the immutable phase snapshot to every authorized competing
                 // GET. Its phase switches only at the signed cancel ACK.
