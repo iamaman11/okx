@@ -1891,11 +1891,71 @@ mod raw_native_session_tests {
         // mandatory tariff page set here: an unused recorded response is
         // not an authenticated GET and must remain visibly unconsumed.
         if t10_seven_one_campaign {
+            // Continuous RAW public-WS source only while this one Native
+            // campaign runs. The same production coordinator must parse
+            // fresh quote, book, funding and reference data throughout
+            // admission. A single fresh snapshot before Execute is NOT
+            // enough under the production two-second quote age bound.
+            // There is no synthetic MarketSnapshot or TTL bypass.
+            let (t10_feed_shutdown,mut t10_feed_stop)=watch::channel(false);
+            let t10_feed_connector=connector.clone();
+            let t10_feed_rows=recorded_public.clone();
+            let t10_market_task=tokio::spawn(async move {
+                let mut ticks=tokio::time::interval(Duration::from_millis(750));
+                ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                let mut book_seq=12_i64;
+                loop {
+                    tokio::select! {
+                        changed=t10_feed_stop.changed()=>{
+                            if changed.is_err()||*t10_feed_stop.borrow(){break;}
+                        },
+                        _=ticks.tick()=>{
+                            let observed_at=chrono::Utc::now().timestamp_millis();
+                            for (arg,original,action) in &t10_feed_rows {
+                                if arg["channel"]=="instruments"&&arg["instType"]=="SWAP" {
+                                    t10_feed_connector.send_public_frame(json!({
+                                        "arg":arg,"data":[{
+                                            "instType":"SWAP","instId":"BTC-USDT-SWAP",
+                                            "instFamily":"BTC-USDT","uly":"BTC-USDT",
+                                            "state":"live","ruleType":"normal",
+                                            "settleCcy":"USDT","tickSz":"0.1",
+                                            "lotSz":"0.01","minSz":"0.01",
+                                            "maxLmtSz":"1000","maxMktSz":"1000",
+                                            "ctType":"linear","ctVal":"0.01",
+                                            "ctValCcy":"BTC","groupId":"4","lever":"20"
+                                        }]
+                                    }).to_string());
+                                } else if let Some(mut value)=original.clone() {
+                                    value["ts"]=observed_at.to_string().into();
+                                    if value.get("fundingTime").is_some(){
+                                        value["fundingTime"]=observed_at.to_string().into();
+                                        value["nextFundingTime"]=
+                                            (observed_at+8*60*60*1000).to_string().into();
+                                    }
+                                    if *action==Some("snapshot"){
+                                        value["seqId"]=book_seq.into();
+                                        book_seq+=1;
+                                    }
+                                    let mut frame=json!({"arg":arg,"data":[value]});
+                                    if let Some(action)=action{
+                                        frame["action"]=(*action).into();
+                                    }
+                                    t10_feed_connector.send_public_frame(frame.to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+            });
             let witness=t10_07_native_one_campaign(
                 accounts.clone(),trade.clone(),risk.clone(),public_ws.clone(),
                 feed.clone(),rate_budget.clone(),&refresh_recorded_market,
             ).await;
             println!("T10_07_NATIVE_ONE_CAMPAIGN_V1:{witness}");
+            let _=t10_feed_shutdown.send(true);
+            tokio::time::timeout(Duration::from_secs(5),t10_market_task)
+                .await.expect("T10-07 live market publisher teardown deadline")
+                .expect("T10-07 live market publisher task");
             let _=maintenance_shutdown.send(true);
             let _=public_shutdown.send(true);
             let _=shutdown_tx.send(true);
