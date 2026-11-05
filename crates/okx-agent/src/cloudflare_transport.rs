@@ -5740,7 +5740,15 @@ mod raw_native_session_tests {
             );
         }
         println!("t09_public_trade_execute_open_ack_and_idempotency PASS: posts=1");
-        shutdown_tx.send(true).unwrap();
+        // A foreign Worker command closes the transport BEFORE normal
+        // shutdown; the receiver may already be gone. That is the fault
+        // under test, not a failure to send a shutdown notification.
+        // Ordinary cohorts still REQUIRE a live receiver and clean join.
+        if std::env::var("OKX_T10_04_FOREIGN_WORKER_REPLY_PROBE").as_deref()==Ok("1") {
+            let _=shutdown_tx.send(true);
+        } else {
+            shutdown_tx.send(true).expect("ordinary Native WSS shutdown receiver");
+        }
         let terminated = tokio::time::timeout(Duration::from_secs(10), session)
             .await
             .unwrap()

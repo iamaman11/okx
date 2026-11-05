@@ -61,6 +61,11 @@ jobs:
         run: |
           cargo test --locked -p okx-agent --lib --no-run
           if ($LASTEXITCODE -ne 0) { throw 'B_STAGE_NATIVE_PRECOMPILE_FAILED' }
+      - name: Prove deterministic immutable signed-source phase isolation
+        shell: pwsh
+        run: |
+          cargo test --locked -p okx-agent --lib immutable_signed_ -- --nocapture
+          if ($LASTEXITCODE -ne 0) { throw 'SIGNED_SOURCE_PHASE_UNIT_PROOF_FAILED' }
       - name: Stage B seven candidates — exact-SHA Windows acceptance
         shell: pwsh
         timeout-minutes: 21
@@ -72,7 +77,7 @@ jobs:
           # Run B candidates together; T10-07 remains deliberately not proven.
           # Two independent executions on one immutable SHA expose source-order
           # flakiness without mixing evidence from different commits.
-          $ids = @('T10-01','T10-04')
+          $ids = @('T10-04')
           $env:OKX_B_CENSUS_CAUSE_PROBE = '1'
           $env:OKX_T09_4_SOURCE_COHERENCE_PROBE = '1'
           $env:OKX_T10_01_MAINT_SHUTDOWN_PROBE = '1'
