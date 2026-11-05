@@ -2467,6 +2467,27 @@ mod raw_native_session_tests {
                             raw_response:raw_order.clone(),
                         });
                     }
+                    // One recorded raw empty pending-order inventory remains
+                    // immutable while 100 public Execute entrances compete.
+                    // The prior generic 64-GET fallback is not a valid
+                    // bound for 100 planned consumers. Declare the 100
+                    // entrants plus at most two account-owner reads for each
+                    // two-second finance interval during the 16-second
+                    // admission deadline, before starting the burst.
+                    // No venue order/fee/risk data is calculated here.
+                    let pending_source = || RecordedGet {
+                        access_key: "fixture-observer-a".into(),
+                        path: "/api/v5/trade/orders-pending".into(),
+                        required_query: vec![("limit".into(), "100".into())],
+                        raw_response: envelope(json!([])),
+                    };
+                    let pending_read_budget: u64 = 100 + 2 * (16 / 2 + 1);
+                    assert_eq!(feed.outbound_posts.lock().unwrap().len(), 0,
+                        "T10-06 cold source must be registered before any create POST");
+                    feed.expect_immutable_signed_phase_bounded(
+                        "t10-06-cold-entrance", pending_source(),
+                        pending_read_budget, Duration::from_secs(20),
+                    );
                     let started = std::time::Instant::now();
                     let gate = Arc::new(tokio::sync::Barrier::new(101));
                     let mut tasks = tokio::task::JoinSet::new();
@@ -2521,6 +2542,19 @@ mod raw_native_session_tests {
                     }
                     assert_eq!(feed.outbound_posts.lock().unwrap().len(), 1,
                         "T10-06 cold concurrency may create only ONE venue POST");
+                    // One real ACK is the causal boundary between the cold
+                    // incoming burst and subsequent same-key SQL replays.
+                    // Republish the SAME recorded raw inventory only at that
+                    // observed event; do not create a second economic order.
+                    let cold_source_reads = feed.advance_immutable_signed_phase_bounded(
+                        "t10-06-cold-entrance",
+                        "t10-06-post-ack-replay",
+                        pending_source(),
+                        pending_read_budget,
+                        Duration::from_secs(300),
+                    );
+                    assert!(cold_source_reads > 0 && cold_source_reads <= pending_read_budget,
+                        "T10-06 cold source must be consumed within its declared budget");
                     println!("T10_06_NATIVE_COLD_CONCURRENT_V1:{}",json!({
                         "requested":100,
                         "same_durable_intent_readbacks":signed.len(),
@@ -4952,6 +4986,15 @@ mod raw_native_session_tests {
                         // GET), not an invented empty inventory or a new send.
                         // Finite phase-scoped pages avoid relying on the
                         // unrelated bootstrap raw 64-repeat ceiling.
+                        // The previously observed T10-06 replay is over;
+                        // this separate POST ACK permits a NEW pending-order
+                        // inventory, never mixed with the prior empty bytes.
+                        if std::env::var("OKX_T10_06_CONCURRENT_PROBE").as_deref() == Ok("1") {
+                            feed.retire_immutable_signed_phase(
+                                "t10-06-post-ack-replay", "fixture-observer-a",
+                                "/api/v5/trade/orders-pending",
+                            );
+                        }
                         for _ in 0..24 {
                             feed.expect_optional_get(RecordedGet {
                                 access_key: "fixture-observer-a".into(),

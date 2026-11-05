@@ -1142,7 +1142,7 @@ pub(crate) mod recorded_support {
 
         /// Declare a finite delivery budget and monotonic lifetime BEFORE
         /// publishing the source event. Only the recorded transport uses it.
-        fn expect_immutable_signed_phase_bounded(
+        pub(crate) fn expect_immutable_signed_phase_bounded(
             &self, phase_id: &str, page: RecordedGet,
             max_deliveries: u64, ttl: std::time::Duration,
         ) {
@@ -1154,6 +1154,7 @@ pub(crate) mod recorded_support {
                 "/api/v5/account/balance"
                     | "/api/v5/account/trade-fee"
                     | "/api/v5/account/leverage-info"
+                    | "/api/v5/trade/orders-pending"
             ),"TRANSCRIPT_IMMUTABLE_ROUTE_NOT_ALLOWED");
             let route=(page.access_key.clone(),page.path.clone());
             let mut query=page.required_query.clone();
@@ -1196,7 +1197,7 @@ pub(crate) mod recorded_support {
             )
         }
 
-        fn advance_immutable_signed_phase_bounded(
+        pub(crate) fn advance_immutable_signed_phase_bounded(
             &self, expected_phase:&str, next_phase:&str, page:RecordedGet,
             max_deliveries:u64, ttl:std::time::Duration,
         ) -> u64 {
@@ -1229,6 +1230,35 @@ pub(crate) mod recorded_support {
                 sha2::Sha256::digest(&prior.source.raw_response),ttl.as_millis()
             ));
             previously_delivered
+        }
+
+        /// End a recorded phase only at a separately proven scenario event.
+        /// Follow-on signed pages can then be installed without silently
+        /// mixing their different economic inventories with the old bytes.
+        pub(crate) fn retire_immutable_signed_phase(
+            &self, phase_id: &str, access_key: &str, path: &str,
+        ) -> u64 {
+            let mut phases = self.immutable_signed_phases.lock().unwrap();
+            let index = phases.iter().position(|item| {
+                item.source.access_key == access_key
+                    && item.source.path == path
+                    && item.phase_id == phase_id
+            }).expect("TRANSCRIPT_IMMUTABLE_RETIRE_PHASE_MISSING");
+            let retired = phases.remove(index);
+            assert!(
+                !phases.iter().any(|item| {
+                    item.source.access_key == access_key && item.source.path == path
+                }),
+                "TRANSCRIPT_IMMUTABLE_RETIRE_ROUTE_STILL_ACTIVE"
+            );
+            self.strict_read_routes.lock().unwrap().remove(&(
+                access_key.to_owned(), path.to_owned()
+            ));
+            self.immutable_phase_trace.lock().unwrap().push(format!(
+                "event=SIGNED_PHASE_RETIRED phase={phase_id} actor={access_key} route={path} observed_reads={}",
+                retired.deliveries
+            ));
+            retired.deliveries
         }
 
         pub(crate) fn immutable_signed_phase_reads(
@@ -2292,6 +2322,58 @@ pub(crate) mod recorded_support {
         assert!(trace[0].contains("max_reads=3") && trace[0].contains("ttl_ms=3000"));
         assert!(trace[1].contains("max_reads=4") && trace[1].contains("ttl_ms=1"));
         assert!(trace[2].contains("max_reads=2") && trace[2].contains("ttl_ms=3000"));
+    }
+
+    #[tokio::test]
+    async fn immutable_signed_pending_inventory_requires_explicit_phase_and_retirement() {
+        use std::time::Duration;
+        let feed = RecordedAccountHttp::default();
+        let page = || RecordedGet {
+            access_key: "fixture-observer-a".into(),
+            path: "/api/v5/trade/orders-pending".into(),
+            required_query: vec![("limit".into(), "100".into())],
+            raw_response: b"{\"code\":\"0\",\"msg\":\"\",\"data\":[]}".to_vec(),
+        };
+        let read = |limit: &str| reqwest::Client::new()
+            .get(format!("https://www.okx.com/api/v5/trade/orders-pending?limit={limit}"))
+            .header("OK-ACCESS-KEY", "fixture-observer-a")
+            .build().unwrap();
+        let deadline = || Instant::now() + Duration::from_secs(2);
+        feed.expect_immutable_signed_phase_bounded(
+            "cold-entry", page(), 2, Duration::from_secs(5)
+        );
+        let wrong = feed.send(read("50"), deadline()).await.unwrap_err();
+        assert!(wrong.to_string().contains("TRANSCRIPT_IMMUTABLE_QUERY_MISMATCH"));
+        for _ in 0..2 {
+            let response = feed.send(read("100"), deadline()).await.unwrap();
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&response.body).unwrap()["data"],
+                serde_json::json!([])
+            );
+        }
+        assert!(feed.send(read("100"), deadline()).await.unwrap_err()
+            .to_string().contains("TRANSCRIPT_IMMUTABLE_PHASE_READ_BUDGET_EXCEEDED"));
+        assert_eq!(feed.advance_immutable_signed_phase_bounded(
+            "cold-entry", "post-ack", page(), 2, Duration::from_secs(5)
+        ), 2);
+        feed.send(read("100"), deadline()).await.unwrap();
+        assert_eq!(feed.retire_immutable_signed_phase(
+            "post-ack", "fixture-observer-a", "/api/v5/trade/orders-pending"
+        ), 1);
+        // The next recorded inventory is independent, not a fallback to
+        // either the empty pre-ACK phase or an invented venue result.
+        feed.expect_optional_get(RecordedGet {
+            raw_response: b"{\"code\":\"0\",\"msg\":\"\",\"data\":[{\"ordId\":\"ack-bound-001\"}]}".to_vec(),
+            ..page()
+        });
+        let next = feed.send(read("100"), deadline()).await.unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&next.body).unwrap()["data"][0]["ordId"],
+            "ack-bound-001"
+        );
+        assert!(feed.send(read("100"), deadline()).await.unwrap_err()
+            .to_string().contains("TRANSCRIPT_SOURCE_PAGE_UNEXPECTED_OR_EXHAUSTED"));
+        assert!(feed.outbound_posts.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
