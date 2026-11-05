@@ -12,6 +12,7 @@ on:
       - work/b-replay-source-isolation-20261105
       - work/deterministic-recorded-source-phases-20261105
       - work/recorded-capture-scheduler-20261105
+      - work/recorded-event-source-controller-20261105
       - work/b-census-sql-owner-batch-20261105
 
 permissions:
