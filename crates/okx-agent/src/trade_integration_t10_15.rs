@@ -62,22 +62,29 @@ async fn t10_15_fee_source_after_worker_held(
             "/api/v5/account/trade-fee",fee_pages);
     } else {
         for page in fee_pages { feed.expect_get(page); }
-        // A distinct signed leverage source is required for the first
-        // B public Preview; no default leverage may authorize risk.
-        let leverage=wrap(serde_json::json!([
-            {"instId":"BTC-USDT-SWAP","mgnMode":"cross","posSide":"long","lever":"2"},
-            {"instId":"BTC-USDT-SWAP","mgnMode":"cross","posSide":"short","lever":"2"}
-        ]));
-        for page in (0..12).map(|_|RecordedGet {
-            access_key:"fixture-observer-b".into(),
-            path:"/api/v5/account/leverage-info".into(),
-            required_query:vec![
-                ("instId".into(),"BTC-USDT-SWAP".into()),
-                ("mgnMode".into(),"cross".into()),
-            ],raw_response:leverage.clone()
-        }) {
-            feed.expect_get(page);
-        }
+    }
+    // The independent T10-15 test registers B's first signed leverage
+    // source; the shared T10-07 cohort has ALREADY read B's leverage for
+    // its accepted public order. Advance to a fresh, finite raw leverage
+    // phase only after that real B ACK. Never rearm a source on demand
+    // inside the HTTP handler or weaken the leverage identity oracle.
+    let leverage=wrap(serde_json::json!([
+        {"instId":"BTC-USDT-SWAP","mgnMode":"cross","posSide":"long","lever":"2"},
+        {"instId":"BTC-USDT-SWAP","mgnMode":"cross","posSide":"short","lever":"2"}
+    ]));
+    let leverage_pages=(0..if shared_b1 {4} else {12}).map(|_|RecordedGet{
+        access_key:"fixture-observer-b".into(),
+        path:"/api/v5/account/leverage-info".into(),
+        required_query:vec![
+            ("instId".into(),"BTC-USDT-SWAP".into()),
+            ("mgnMode".into(),"cross".into()),
+        ],raw_response:leverage.clone(),
+    }).collect::<Vec<_>>();
+    if shared_b1 {
+        feed.advance_recorded_route("fixture-observer-b",
+            "/api/v5/account/leverage-info",leverage_pages);
+    } else {
+        for page in leverage_pages { feed.expect_get(page); }
     }
     feed.advance_recorded_public_clock(
         wrap(serde_json::json!([{"ts":stamp}]))
