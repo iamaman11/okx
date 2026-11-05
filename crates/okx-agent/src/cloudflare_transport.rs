@@ -268,7 +268,23 @@ where
         while !flights.is_empty(){tokio::select!{_= &mut deadline=>break,_=flights.next()=>{}}}return Ok(());
         },
         _=heartbeat.tick()=>{if last_seen.elapsed()>Duration::from_secs(35){return Err(transport("HEARTBEAT_TIMEOUT"));}send(&mut sink,F::Ping{schema:SCHEMA.into(),session_id:session_id.clone(),connection_generation,nonce:format!("native_ping_{:032x}",nonce())}).await?;},
-        Some(outbound)=risk.recv()=>{pending.retain(|_,s|!s.is_closed());if pending.len()>=32{drop(outbound);continue;}let id=outbound.command.command_id.clone();if pending.contains_key(&id){drop(outbound);continue;}pending.insert(id,outbound.return_to);send(&mut sink,F::RiskControl{schema:SCHEMA.into(),session_id:session_id.clone(),connection_generation,command:outbound.command}).await?;},
+        Some(outbound)=risk.recv(),if pending.len()<32=>{
+            // Never take a queued command only to drop its one-shot sender
+            // when the in-flight window is full. Backpressure remains on
+            // the bounded risk channel; an unsent command receives a local
+            // admission error, not a false "Worker reply lost" diagnosis.
+            //
+            // Keep known command IDs until their actual Worker reply, even
+            // after the requesting task times out or is cancelled. A late
+            // authentic reply is not an unsolicited foreign authorization.
+            let id=outbound.command.command_id.clone();
+            if pending.contains_key(&id){drop(outbound);continue;}
+            pending.insert(id,outbound.return_to);
+            send(&mut sink,F::RiskControl{
+                schema:SCHEMA.into(),session_id:session_id.clone(),
+                connection_generation,command:outbound.command
+            }).await?;
+        },
         Some((id,result))=flights.next(),if !flights.is_empty()=>{active.remove(&id);send(&mut sink,F::Response{schema:SCHEMA.into(),session_id:session_id.clone(),connection_generation,response:result}).await?;},
         message=source.next()=>{
         let f=frame(message.ok_or_else(||transport("WS_CLOSED"))?.map_err(|_|transport("WS_READ_FAILED"))?)?;
@@ -331,7 +347,10 @@ where
             // mistaken for the active reservation's authorization. Reject
             // the frame instead of silently dropping it and waiting for a
             // timeout while the caller still believes a grant is pending.
-            pending.retain(|_,sender|!sender.is_closed());
+            // Match the exact command that was actually sent. If Native
+            // timed out, sending to its closed receiver simply discards the
+            // authentic late reply; a genuinely foreign ID still tears down
+            // this WS generation (T10-04).
             let sender=pending.remove(&result.command_id)
                 .ok_or_else(||transport("RISK_RESULT_COMMAND_UNBOUND"))?;
             let _=sender.send(result);
@@ -1031,6 +1050,87 @@ mod raw_native_session_tests {
         drop(client);
         drop(input_tx);
         drop(shutdown_tx);
+        drop(output_rx);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn late_bound_risk_reply_after_cancelled_native_wait_does_not_close_session() {
+        let (ctx, root, client, mut risk_rx) = test_dispatch().await;
+        let (input_tx, input_rx) = mpsc::unbounded_channel();
+        let (output_tx, mut output_rx) = mpsc::unbounded_channel();
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let session = tokio::spawn(async move {
+            run_connected_session(
+                RawFrames { inbound: input_rx, outbound: output_tx },
+                test_hello(), ctx, &mut risk_rx, shutdown_rx,
+            ).await
+        });
+        assert!(matches!(parse(output_rx.recv().await.unwrap()), F::Hello { .. }));
+        let session_id = "session_test_late_bound".to_owned();
+        let generation = 23;
+        input_tx.send(Ok(wire(F::HelloAck {
+            schema: SCHEMA.into(),
+            session_id: session_id.clone(),
+            connection_generation: generation,
+        }))).unwrap();
+
+        let first = tokio::spawn({
+            let client = client.clone();
+            async move { client.request(summary("risk_wire_late_known")).await }
+        });
+        let first_id = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                match parse(output_rx.recv().await.expect("first risk outbound closed")) {
+                    F::RiskControl { command, .. } => break command.command_id,
+                    F::Ping { .. } => continue,
+                    other => panic!("unexpected outbound: {other:?}"),
+                }
+            }
+        }).await.unwrap();
+        assert_eq!(first_id, "risk_wire_late_known");
+        first.abort();
+        assert!(first.await.unwrap_err().is_cancelled());
+
+        // The Worker response is authentic and ID-bound, but the original
+        // Native waiter has been cancelled. Do not deliver its authority
+        // to another request; equally, do not break the whole WS session.
+        input_tx.send(Ok(wire(F::RiskControlResult {
+            schema: SCHEMA.into(),
+            session_id: session_id.clone(),
+            connection_generation: generation,
+            result: denied(&first_id),
+        }))).unwrap();
+
+        let next = tokio::spawn({
+            let client = client.clone();
+            async move { client.request(summary("risk_wire_after_late")).await }
+        });
+        let next_id = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                match parse(output_rx.recv().await.expect("second risk outbound closed")) {
+                    F::RiskControl { command, .. } => break command.command_id,
+                    F::Ping { .. } => continue,
+                    other => panic!("unexpected outbound after known late reply: {other:?}"),
+                }
+            }
+        }).await.unwrap();
+        assert_eq!(next_id, "risk_wire_after_late");
+        input_tx.send(Ok(wire(F::RiskControlResult {
+            schema: SCHEMA.into(),
+            session_id,
+            connection_generation: generation,
+            result: denied(&next_id),
+        }))).unwrap();
+        let answer = tokio::time::timeout(Duration::from_secs(3), next)
+            .await.unwrap().unwrap().unwrap();
+        assert_eq!(answer.command_id, next_id);
+        assert_eq!(answer.status, RiskDecisionStatus::Denied);
+        shutdown_tx.send(true).unwrap();
+        assert!(tokio::time::timeout(Duration::from_secs(3), session)
+            .await.unwrap().unwrap().is_ok());
+        drop(client);
+        drop(input_tx);
         drop(output_rx);
         std::fs::remove_dir_all(root).unwrap();
     }
