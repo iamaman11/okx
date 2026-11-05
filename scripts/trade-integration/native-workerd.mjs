@@ -303,4 +303,43 @@ export async function actualNativeWorker(root, signal, { statusProbe = false, se
 export function nativeCohortSnapshot() {
   return [...cohortMetrics.values()].map(value => ({ ...value }));
 }
+// Independent T10-07 entry: ONE clean Native process and ONE persisted
+// Worker. It does not invoke T09.1..8, a Worker-only cap campaign or any
+// memoized prerequisite evidence. All money comes from SQL/Worker readback.
+export async function actualT10_07NativeWorker(root,signal){
+  const {stdout,stderr}=await exec(process.execPath,[
+    resolve(root,"cloudflare","okx-mcp","scripts","test-runtime-do.mjs"),
+  ],{
+    cwd:root,signal,timeout:220_000,
+    maxBuffer:12*1024*1024,windowsHide:true,
+    env:{
+      ...process.env,
+      OKX_NATIVE_WORKER_INTEGRATION:"1",
+      OKX_T10_07_NATIVE_STANDALONE:"1",
+      OKX_T09_1_STATUS_PROBE:"0",
+      OKX_T09_2_ADMISSION_PROBE:"0",
+      OKX_T09_4_MANAGED_ADD_PROBE:"0",
+      OKX_B1_NATIVE_CAP_PROBE:"0",
+      OKX_B1_SECOND_POSITIVE_PROBE:"0",
+    }
+  }).catch(error=>{
+    const log=String(error.stderr??"");
+    const typed=log.match(/T09_1_NATIVE_CHILD_FAILURE_V2:(\{[^\r\n]+\})/);
+    if(typed)process.stderr.write("T10_07_FIRST_NATIVE_FAILURE_V1:"+typed[1]+"\n");
+    throw error;
+  });
+  assert.match(stdout,/native_to_persisted_workerd_riskbook PASS/,
+    "T10-07 must join its true Native SQL/WSS child");
+  const n=receipt(stdout,"T10_07_NATIVE_SINGLE_CAMPAIGN_V1");
+  const w=receipt(stdout,"T10_07_WORKER_SINGLE_CAMPAIGN_V1");
+  const terminal=[...stdout.matchAll(/\{"suite":"runtime-session-sqlite-do","status":"PASS"[^\r\n]*\}/g)];
+  assert.equal(terminal.length,1,"T10-07 same-campaign terminal Worker receipt required");
+  assert.equal(JSON.parse(terminal[0][0]).real_durable_object,true);
+  return {
+    native:n,worker:w,
+    transcript_sha256:createHash("sha256").update(stdout+stderr).digest("hex"),
+    cohort_execution:{source:"actual-standalone-native-worker-child",reused:false},
+  };
+}
+
 export { hash };
