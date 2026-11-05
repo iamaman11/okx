@@ -603,7 +603,11 @@ impl AccountRuntimeRegistry {
             observer,
             private_ws,
             execution,
-            mutation_capacity: Semaphore::new(128),
+            // New-risk Execute, Cancel and Close share one account-local
+            // admission permit. SQLite remains the durable financial owner;
+            // concurrent requests cannot all start independent source plans
+            // while competing for one intent. Other accounts are unaffected.
+            mutation_capacity: Semaphore::new(1),
             source_shutdown: shutdown,
             verified_source_generation: AtomicU64::new(0),
             _identity_lease: identity_lease,
