@@ -1170,6 +1170,9 @@ pub(crate) mod recorded_support {
         }
 
         pub(crate) fn expect_get(&self, page: RecordedGet) {
+            assert!(!self.immutable_signed_phases.lock().unwrap().iter().any(|item|
+                item.source.access_key==page.access_key &&item.source.path==page.path
+            ),"TRANSCRIPT_IMMUTABLE_MIXED_WITH_QUEUED_SOURCE");
             self.strict_read_routes
                 .lock()
                 .unwrap()
@@ -1178,6 +1181,9 @@ pub(crate) mod recorded_support {
         }
 
         pub(crate) fn expect_optional_get(&self, page: RecordedGet) {
+            assert!(!self.immutable_signed_phases.lock().unwrap().iter().any(|item|
+                item.source.access_key==page.access_key &&item.source.path==page.path
+            ),"TRANSCRIPT_IMMUTABLE_MIXED_WITH_OPTIONAL_SOURCE");
             self.strict_read_routes
                 .lock()
                 .unwrap()
@@ -1197,6 +1203,9 @@ pub(crate) mod recorded_support {
             pages: Vec<RecordedGet>,
         ) -> usize {
             assert!(!pages.is_empty(), "TRANSCRIPT_PHASE_WITHOUT_SOURCE");
+            assert!(!self.immutable_signed_phases.lock().unwrap().iter().any(|item|
+                item.source.access_key==access_key &&item.source.path==path
+            ),"TRANSCRIPT_IMMUTABLE_MIXED_WITH_QUEUE_ADVANCE");
             assert!(
                 self.strict_read_routes
                     .lock()
@@ -1812,8 +1821,11 @@ pub(crate) mod recorded_support {
             .get("https://www.okx.com/api/v5/account/trade-fee?instType=SPOT&instFamily=BTC-USDT")
             .header("OK-ACCESS-KEY","fixture-observer-a")
             .build().unwrap();
-        let denial=feed.send(bad,Instant::now()+std::time::Duration::from_secs(2))
-            .await.expect_err("wrong exact scope cannot borrow SWAP raw fees");
+        let denial=match feed.send(bad,
+            Instant::now()+std::time::Duration::from_secs(2)).await {
+                Ok(_)=>panic!("wrong scope cannot borrow SWAP raw fees"),
+                Err(denial)=>denial,
+            };
         assert!(denial.to_string().contains("TRANSCRIPT_IMMUTABLE_QUERY_MISMATCH"));
         assert_eq!(feed.immutable_signed_phase_reads(
             "fixture-observer-a","/api/v5/account/trade-fee","fee-before"),0);
@@ -2107,11 +2119,15 @@ pub(crate) mod recorded_support {
                     let mut phases=self.immutable_signed_phases.lock().unwrap();
                     let matching=phases.iter().enumerate().filter_map(|(index,item)|{
                         (item.source.access_key==key &&item.source.path==path
-                            &&item.source.required_query.iter().all(|(name, expected)|{
-                                request.url().query_pairs().any(|(k,v)|
-                                    k.as_ref()==name.as_str() &&v.as_ref()==expected.as_str()
-                                )
-                            })).then_some(index)
+                            && {
+                                let mut required=item.source.required_query.clone();
+                                required.sort();
+                                let mut sent=request.url().query_pairs()
+                                    .map(|(name,value)| (name.into_owned(),value.into_owned()))
+                                    .collect::<Vec<_>>();
+                                sent.sort();
+                                required==sent
+                            }).then_some(index)
                     }).collect::<Vec<_>>();
                     assert!(matching.len()<=1,"TRANSCRIPT_IMMUTABLE_AMBIGUOUS_QUERY");
                     if let Some(index)=matching.first(){
