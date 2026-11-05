@@ -209,8 +209,20 @@ async fn t10_07_native_single_campaign(
         };
         let third_origin=third_result.as_ref().ok()
             .and_then(|reply|reply["data"]["rejection_origin"].as_str());
+        let cause=third_result.as_ref().ok().map(|reply|json!({
+            "origin":reply["data"]["rejection_origin"],
+            "reason":reply["data"]["primary_reason"],
+            "state":reply["data"]["state"],
+            "send_state":reply["data"]["send_state"],
+            "reason_code":reply["reason_code"],
+        })).unwrap_or_else(||json!({"error":third_text}));
+        let observer=risk.request(read_risk("t10_07_third_first_cause"))
+            .await.expect("T10-07 Worker inspection before classifying third");
+        let entry=observer.budget.as_ref().unwrap().entry_budget.as_ref().unwrap();
         assert_eq!(third_origin,Some("CENTRAL"),
-            "T10-07 third refusal must come from actual Worker");
+            "T10_07_THIRD_FIRST_CAUSE:reply={cause}:worker_held={}:remaining={}:posts={}",
+            entry.reserved_usd,entry.remaining_usd,
+            feed.outbound_posts.lock().unwrap().len());
         assert!(third_text.contains("CAMPAIGN_ENTRY_BUDGET_EXHAUSTED"),
             "T10-07 third must reach Worker shared cap: {third_text}");
         assert_eq!(feed.outbound_posts.lock().unwrap().len(),posts_before_third,
