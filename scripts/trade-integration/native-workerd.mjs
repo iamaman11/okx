@@ -26,7 +26,15 @@ export async function actualNativeWorker(root, signal, { statusProbe = false, se
   if (budgetDenial && !closeMode) throw Error("T09.8_REQUIRES_T09.6");
   // A failing T09.8 must not invalidate independently completed T09.6/7
   // receipts. Both modes still execute the complete Native+Worker cohort.
-  const mode = closeMode ? (budgetDenial ? "managed-close-denial" : "managed-close") : managedAdd ? "managed-add" : partialFills ? "partial-fills" : secondAdmission ? "second-admission" : statusProbe ? "post-fill-status" : "baseline";
+  const singleCampaignT10 = process.env.OKX_T10_07_ONE_CAMPAIGN === "1";
+  if (singleCampaignT10 &&
+      (statusProbe || secondAdmission || partialFills || managedAdd || closeMode || budgetDenial))
+    throw Error("T10_07_ONE_CAMPAIGN_REQUIRES_INDEPENDENT_NATIVE_EXECUTION");
+  const mode = singleCampaignT10 ? "t10-07-one-campaign"
+    : closeMode ? (budgetDenial ? "managed-close-denial" : "managed-close")
+    : managedAdd ? "managed-add" : partialFills ? "partial-fills"
+    : secondAdmission ? "second-admission"
+    : statusProbe ? "post-fill-status" : "baseline";
   // Financial evidence must never be memoized across different opt-in probes.
   const key = [mode,
     process.env.OKX_S2_05_POLICY_CAS_PROBE === "1" ? "policy-cas" : "normal-policy",
@@ -182,13 +190,26 @@ export async function actualNativeWorker(root, signal, { statusProbe = false, se
       throw Error("NATIVE_WORKER_CHILD_FAILED:" + evidence.error_class +
         ":" + evidence.phase + ":" + evidence.first_visible_error.slice(0, 70));
     });
-    assert.match(stdout, /t09_public_trade_execute_open_ack_and_idempotency PASS: posts=1/);
+    if (!singleCampaignT10)
+      assert.match(stdout, /t09_public_trade_execute_open_ack_and_idempotency PASS: posts=1/);
     assert.match(stdout, /native_to_persisted_workerd_riskbook PASS/);
     const terminal = [...stdout.matchAll(/\{"suite":"runtime-session-sqlite-do","status":"PASS"[^\r\n]*\}/g)];
     assert.equal(terminal.length, 1, "production Durable Object test terminal PASS missing");
     const done = JSON.parse(terminal[0][0]);
     assert.equal(done.real_durable_object, true);
     assert.equal(done.persisted_generation, true);
+    if (singleCampaignT10) {
+      assert.equal(done.native_one_campaign,true);
+      return {
+        nativeBootstrap:receipt(stdout,"T09_0_NATIVE_SQL_EVIDENCE_V1"),
+        workerBootstrap:receipt(stdout,"T09_0_WORKER_EVIDENCE_V1"),
+        nativeT10OneCampaign:receipt(stdout,"T10_07_NATIVE_ONE_CAMPAIGN_V1"),
+        workerT10OneCampaign:receipt(stdout,"T10_07_WORKER_ONE_CAMPAIGN_V1"),
+        transcript_sha256:createHash("sha256").update(stdout+stderr).digest("hex"),
+        cohort_execution:{key,elapsed_ms:Date.now()-startedAt,
+          source:"actual-native-worker-child"},
+      };
+    }
     return {
       nativeBootstrap: receipt(stdout, "T09_0_NATIVE_SQL_EVIDENCE_V1"),
       workerBootstrap: receipt(stdout, "T09_0_WORKER_EVIDENCE_V1"),
