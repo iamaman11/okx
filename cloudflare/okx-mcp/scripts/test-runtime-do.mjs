@@ -971,6 +971,26 @@ try {
       // Emit only the bounded structured production denial; the outer test
       // runner's 200-char reason must never hide it behind a Node stack.
       const recorded = String(error.stdout ?? "");
+      // Preserve an independently verified Native/SQL/Worker stage even
+      // when the later source-backed release is not yet proved.
+      if (t10NativeMode) {
+        const stage=recorded.match(/T10_07_NATIVE_CAP_STAGE_V1:(\\{[^\\r\\n]+\\})/);
+        if(stage) {
+          const parsed=JSON.parse(stage[1]);
+          if(parsed.schema==="okx.t10-07-native-cap-stage/v1") {
+            process.stderr.write("T10_07_NATIVE_CAP_STAGE_V1:"+JSON.stringify({
+              schema:parsed.schema,two_sql_owners:parsed.two_sql_owners,
+              a_state:parsed.a_state,b_state:parsed.b_state,
+              third_origin:parsed.third_origin,
+              third_no_post:parsed.third_no_post,
+              worker_reserved:parsed.worker_budget?.entry_budget?.reserved_usd,
+              worker_remaining:parsed.worker_budget?.entry_budget?.remaining_usd,
+              worker_sequence:parsed.worker_sequence,posts:parsed.posts,
+            })+"\\n");
+          }
+        }
+      }
+
       // Keep the FIRST typed Native B positive refusal visible to CI.
       // Never expose raw authenticated HTTP bytes or credentials.
       const rawChildErrorChannels = recorded + "\n" + String(error.stderr ?? "");
