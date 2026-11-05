@@ -7,10 +7,12 @@ async fn t10_04_foreign_worker_result(
     risk: NativeRiskClient,
     feed: Arc<crate::accounts::recorded_support::RecordedAccountHttp>,
 ) -> serde_json::Value {
-    use crate::accounts::recorded_support::RecordedGet;
+    use crate::accounts::recorded_support::{RecordedGet,RecordedPhaseBudget};
     use okx_protocol::trading::{
         OrderConstraints, PositionSide, Protection, Sizing, TradeOperation, TradeRequest,
     };
+    // Same predeclared 90-second / 64-read finite event window as T10-01.
+    let source_budget=RecordedPhaseBudget::new(64,Duration::from_secs(90));
     let wrap=|rows:serde_json::Value|serde_json::to_vec(&serde_json::json!({
         "code":"0","msg":"","data":rows
     })).unwrap();
@@ -27,20 +29,23 @@ async fn t10_04_foreign_worker_result(
         access_key:"fixture-observer-b".into(),
         path:"/api/v5/account/balance".into(),
         required_query:vec![],raw_response:balance.clone(),
-    });
+    },source_budget);
     let fee=wrap(serde_json::json!([{
         "instType":"SWAP","level":"Lv1","ts":fresh,
         "feeGroup":[{"groupId":"4","maker":"0.0005","taker":"0.0005"}]
     }]));
-    feed.advance_recorded_route("fixture-observer-b","/api/v5/account/trade-fee",
-        (0..8).map(|_|RecordedGet {
+    // A new signed fee observation replaces the old coherent finite source
+    // ONLY at this explicit fixture event; no 8-page retry padding.
+    let previous=feed.supersede_queued_signed_source_at_event(
+        "t10-04-b-fee-observed","t10-04-b-fee-before-foreign-result",RecordedGet {
             access_key:"fixture-observer-b".into(),
             path:"/api/v5/account/trade-fee".into(),
             required_query:vec![
                 ("instType".into(),"SWAP".into()),
                 ("instFamily".into(),"BTC-USDT".into()),
             ],raw_response:fee.clone(),
-        }).collect());
+        },source_budget);
+    assert!(previous>0,"T10-04 signed fee must replace a prior coherent source");
     feed.advance_recorded_public_clock(
         wrap(serde_json::json!([{"ts":fresh}]))
     );
