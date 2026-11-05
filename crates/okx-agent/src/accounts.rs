@@ -874,6 +874,7 @@ pub(crate) mod recorded_support {
         HttpRequest, HttpSend, HttpStatusCode, HttpTransport, OkxError, RawHttpResponse,
     };
     use std::time::Instant;
+    use sha2::Digest;
 
     /// A raw external GET response, consumed once by the same production
     /// parser as a live HTTP response. Query expectations are an explicit
@@ -1071,6 +1072,8 @@ pub(crate) mod recorded_support {
         // missing one-shot history/order pages. A snapshot is never refreshed
         // by the number or timing of GETs.
         immutable_signed_phases: Mutex<Vec<ImmutableSignedGetPhase>>,
+        // Digest-only signed source events for exact-phase test evidence.
+        pub(crate) immutable_phase_trace: Mutex<Vec<String>>,
         // Raw public time responses, never a synthesized exchange clock.
         public_clock_reads: Mutex<Vec<Vec<u8>>>,
         // Test-only count of raw public-clock GET deliveries; the same
@@ -1145,6 +1148,12 @@ pub(crate) mod recorded_support {
             phases.push(ImmutableSignedGetPhase {
                 phase_id:phase_id.into(),source:page,deliveries:0,
             });
+            let installed=phases.last().unwrap();
+            self.immutable_phase_trace.lock().unwrap().push(format!(
+                "event=SIGNED_PHASE_INSTALLED phase={phase_id} actor={} route={} query={:?} sha256={:x}",
+                installed.source.access_key,installed.source.path,query,
+                sha2::Sha256::digest(&installed.source.raw_response)
+            ));
         }
 
         /// Transition ONLY the same signed account+route+query. This API
@@ -1167,9 +1176,15 @@ pub(crate) mod recorded_support {
             assert_eq!(prior.phase_id,expected_phase,
                 "TRANSCRIPT_IMMUTABLE_CAUSAL_PREDECESSOR_MISMATCH");
             let previously_delivered=prior.deliveries;
+            let old_sha256=format!("{:x}",sha2::Sha256::digest(&prior.source.raw_response));
             prior.phase_id=next_phase.into();
             prior.source=page;
             prior.deliveries=0;
+            self.immutable_phase_trace.lock().unwrap().push(format!(
+                "event=SIGNED_PHASE_ADVANCED from={expected_phase} to={next_phase} actor={} route={} query={:?} observed_reads={previously_delivered} old_sha256={old_sha256} new_sha256={:x}",
+                prior.source.access_key,prior.source.path,query,
+                sha2::Sha256::digest(&prior.source.raw_response)
+            ));
             previously_delivered
         }
 
@@ -1812,6 +1827,12 @@ pub(crate) mod recorded_support {
         assert_eq!(serde_json::from_slice::<serde_json::Value>(&b.body).unwrap()
             ["data"][0]["totalEq"],"250");
         assert_eq!(feed.outbound_posts.lock().unwrap().len(),0);
+        let trace=feed.immutable_phase_trace.lock().unwrap();
+        assert_eq!(trace.len(),3, "two sources installed and one transition");
+        assert!(trace[2].contains("event=SIGNED_PHASE_ADVANCED")
+            &&trace[2].contains("observed_reads=4")
+            &&trace[2].contains("from=a-before-event")
+            &&trace[2].contains("to=a-after-event"));
     }
 
     #[tokio::test]
