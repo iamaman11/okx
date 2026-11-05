@@ -53,6 +53,17 @@ static T10_15_WORKER_HELD_COMMITTED: std::sync::atomic::AtomicBool =
 #[cfg(test)]
 static T10_15_SIGNED_SOURCE_CHANGED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
+// T10-07: independent test-only reply gate. Unlike T10-15, it must not
+// block the WSS reader: a third Native Execute can race while B is HELD.
+#[cfg(test)]
+static T10_07_ARM_B_HELD_GATE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+#[cfg(test)]
+static T10_07_B_HELD_OBSERVED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+#[cfg(test)]
+static T10_07_RELEASE_B_HELD_GATE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 // T10-03: Worker commits a real BeginPost CAS but its signed authorization
 // reply is lost at the Native receive boundary. Never forge POST authority.
@@ -251,6 +262,8 @@ where
     };
     let mut pending: HashMap<String, oneshot::Sender<okx_protocol::risk_authority::RiskResult>> =
         HashMap::new();
+    #[cfg(test)]
+    let mut deferred_risk_replies=tokio::task::JoinSet::<()>::new();
     let mut challenges: HashMap<String, Instant> = HashMap::new();
     let mut active = HashSet::new();
     let mut flights: FuturesUnordered<BoxFuture<'static, (String, okx_protocol::AgentResponse)>> =
@@ -265,7 +278,10 @@ where
         _=shutdown.changed()=>{
         // Work already accepted by an account SQL owner remains awaited; graceful shutdown is bounded.
         let deadline=tokio::time::sleep(Duration::from_secs(10));tokio::pin!(deadline);
-        while !flights.is_empty(){tokio::select!{_= &mut deadline=>break,_=flights.next()=>{}}}return Ok(());
+        while !flights.is_empty(){tokio::select!{_= &mut deadline=>break,_=flights.next()=>{}}}
+        #[cfg(test)]
+        deferred_risk_replies.shutdown().await;
+        return Ok(());
         },
         _=heartbeat.tick()=>{if last_seen.elapsed()>Duration::from_secs(35){return Err(transport("HEARTBEAT_TIMEOUT"));}send(&mut sink,F::Ping{schema:SCHEMA.into(),session_id:session_id.clone(),connection_generation,nonce:format!("native_ping_{:032x}",nonce())}).await?;},
         Some(outbound)=risk.recv()=>{pending.retain(|_,s|!s.is_closed());if pending.len()>=32{drop(outbound);continue;}let id=outbound.command.command_id.clone();if pending.contains_key(&id){drop(outbound);continue;}pending.insert(id,outbound.return_to);send(&mut sink,F::RiskControl{schema:SCHEMA.into(),session_id:session_id.clone(),connection_generation,command:outbound.command}).await?;},
@@ -305,6 +321,35 @@ where
                 T10_04_FOREIGN_COMMAND_INJECTED.store(
                     true,std::sync::atomic::Ordering::SeqCst
                 );
+            }
+            // The specific B Worker HELD may be held from its Native
+            // caller while later Worker results are still processed. Test-only
+            // scheduling never forges a RiskResult or a central money change.
+            #[cfg(test)]
+            if result.status==okx_protocol::risk_authority::RiskDecisionStatus::Held
+                && T10_07_ARM_B_HELD_GATE.swap(
+                    false,std::sync::atomic::Ordering::SeqCst
+                )
+            {
+                pending.retain(|_,sender|!sender.is_closed());
+                let sender=pending.remove(&result.command_id)
+                    .ok_or_else(||transport("T10_07_HELD_COMMAND_UNBOUND"))?;
+                T10_07_B_HELD_OBSERVED.store(
+                    true,std::sync::atomic::Ordering::SeqCst
+                );
+                deferred_risk_replies.spawn(async move {
+                    let release=tokio::time::timeout(Duration::from_secs(18),async {
+                        while !T10_07_RELEASE_B_HELD_GATE.load(
+                            std::sync::atomic::Ordering::SeqCst
+                        ) {
+                            tokio::time::sleep(Duration::from_millis(5)).await;
+                        }
+                    }).await;
+                    if release.is_ok(){let _=sender.send(result);}
+                    // A missed explicit event drops this channel; the caller
+                    // cannot turn an unknown reserve into POST authority.
+                });
+                continue;
             }
             // An authentic, committed HELD is the causal boundary for the
             // optional source-change test. No test ever creates or mutates
