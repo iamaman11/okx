@@ -154,6 +154,38 @@ async fn t10_07_native_single_campaign(
             }])),
         });
     }
+    // A second real Native account sends its own exact signed B create.
+    // Neither the test nor Worker synthesizes the SQL intent/ACK.
+    feed.expect_post(RecordedPost {
+        access_key:"fixture-executor-b".into(),path:"/api/v5/trade/order".into(),
+        expected_body:json!({
+            "instId":"BTC-USDT-SWAP","tdMode":"cross",
+            "clOrdId":"__REQUEST_CL_ORD_ID__",
+            "side":"buy","posSide":"long","ordType":"limit",
+            "sz":"0.4","px":"1000",
+            "attachAlgoOrds":[{
+                "attachAlgoClOrdId":"__REQUEST_ATTACH_ALGO_ID__",
+                "tpTriggerPxType":"mark","slTriggerPx":"900",
+                "slTriggerPxType":"mark","slOrdPx":"-1"
+            }]
+        }),
+        raw_response:br#"{"code":"0","msg":"","data":[{"ordId":"recorded-t10-07-b-001","clOrdId":"__REQUEST_CL_ORD_ID__","sCode":"0"}]}"#.to_vec(),
+    });
+    for _ in 0..2 {
+        feed.expect_get(RecordedGet {
+            access_key:"fixture-executor-b".into(),
+            path:"/api/v5/trade/order".into(),
+            required_query:vec![("instId".into(),"BTC-USDT-SWAP".into())],
+            raw_response:wrap(json!([{
+                "instId":"BTC-USDT-SWAP","ordId":"recorded-t10-07-b-001",
+                "clOrdId":"__REQUEST_CL_ORD_ID__",
+                "side":"buy","posSide":"long","tdMode":"cross",
+                "ordType":"limit","px":"1000","sz":"0.4",
+                "accFillSz":"0","avgPx":"","state":"live",
+                "cTime":order_time,"uTime":order_time
+            }])),
+        });
+    }
     feed.advance_recorded_public_clock(wrap(json!([{
         "ts":chrono::Utc::now().timestamp_millis().to_string()
     }])));
@@ -183,20 +215,62 @@ async fn t10_07_native_single_campaign(
         assert_eq!(entry_a.reserved_usd,"4");
         assert_eq!(entry_a.consumed_usd,"0");
 
-        T10_07_B_HELD_OBSERVED.store(false,std::sync::atomic::Ordering::SeqCst);
-        T10_07_RELEASE_B_HELD_GATE.store(false,std::sync::atomic::Ordering::SeqCst);
-        T10_07_ARM_B_HELD_GATE.store(true,std::sync::atomic::Ordering::SeqCst);
-        let waiting_b=tokio::spawn({
+        // The prior failed ordering kept B between RESERVE and POST and
+        // correctly triggered COHORT_UNRESOLVED_RESERVE_ATTEMPT in Native.
+        // Finish B's actual ACK/SQL transition before testing central cap.
+        // Enter a public A Status and B Execute at the same explicit barrier:
+        // same Worker campaign, independently owned Native SQL.
+        let gate=Arc::new(tokio::sync::Barrier::new(2));
+        let status_a=tokio::spawn({
+            let gate=gate.clone();
             let trade=trade.clone();
-            async move{trade.trade("fixture-b",&b,None).await}
-        });
-        tokio::time::timeout(Duration::from_secs(12),async {
-            while !T10_07_B_HELD_OBSERVED.load(
-                std::sync::atomic::Ordering::SeqCst
-            ){
-                tokio::time::sleep(Duration::from_millis(10)).await;
+            let intent_id=a_sql.intent_id.clone();
+            async move {
+                gate.wait().await;
+                trade.trade("fixture-a",
+                    &TradeRequest::Status{reference:intent_id},None).await
             }
-        }).await.expect("T10-07 authentic B Worker HELD not committed");
+        });
+        let execute_b=tokio::spawn({
+            let gate=gate.clone();
+            let trade=trade.clone();
+            async move {
+                gate.wait().await;
+                trade.trade("fixture-b",&b,None).await
+            }
+        });
+        let (status_a, b_reply)=tokio::try_join!(
+            async {
+                tokio::time::timeout(Duration::from_secs(28),status_a)
+                    .await.expect("T10-07 A Status concurrent deadline")
+                    .expect("T10-07 A Status task")
+            },
+            async {
+                tokio::time::timeout(Duration::from_secs(28),execute_b)
+                    .await.expect("T10-07 B Execute concurrent deadline")
+                    .expect("T10-07 B task")
+            }
+        ).expect("T10-07 concurrent public calls");
+        assert!(status_a.is_ok(),"T10-07 A public Status must remain accessible");
+        let b_reply=b_reply.expect("T10-07 B actual Execute");
+        if b_reply["data"]["state"]=="REJECTED" {
+            panic!("T10_07_SECOND_EXECUTE_DENIED:{b_reply}");
+        }
+        let b_accepted=owner_b.execution.store.call(
+            std::time::Instant::now()+Duration::from_secs(3),
+            |s|s.by_idempotency("t10_07_b_second_execute_0001")
+        ).await.expect("T10-07 B accepted SQL readback")
+            .expect("T10-07 B actual SQL intent absent");
+        assert_eq!(b_accepted.state.as_str(),"ACKNOWLEDGED");
+        assert_eq!(b_accepted.exchange_order_id.as_deref(),
+            Some("recorded-t10-07-b-001"));
+
+        let after_b=risk.request(read_risk("t10_07_after_two_native_acks"))
+            .await.expect("T10-07 actual persisted Worker after B ACK");
+        let entry_b=after_b.budget.as_ref().unwrap().entry_budget.as_ref().unwrap();
+        assert_eq!(entry_b.reserved_usd,"8");
+        assert_eq!(entry_b.remaining_usd,"2");
+        assert_eq!(entry_b.consumed_usd,"0");
 
         // B still owns a real pending Rust Execute and SQL reservation.
         // A third distinct public Execute must be denied by the SAME Worker.
