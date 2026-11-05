@@ -309,75 +309,31 @@ async fn t10_07_native_single_campaign(
         assert_eq!(entry_two.remaining_usd,"2");
         assert_eq!(entry_two.consumed_usd,"0");
 
-        // A new authenticated B fee source arrives ONLY after the true
-        // Worker 8/2 readback. The unmodified production post-HELD fence
-        // denies the old B quote and obtains SQL-backed RELEASE_UNSENT.
-        let changed=fee("0.0001",&chrono::Utc::now().timestamp_millis().to_string());
-        feed.advance_immutable_signed_phase(
-            "t10-07-b-fee-zero","t10-07-b-fee-changed",RecordedGet {
-                access_key:"fixture-observer-b".into(),
-                path:"/api/v5/account/trade-fee".into(),
-                required_query:vec![
-                    ("instType".into(),"SWAP".into()),
-                    ("instFamily".into(),"BTC-USDT".into()),
-                ],raw_response:changed,
-            },source_budget,
-        );
-        T10_07_RELEASE_B_HELD_GATE.store(true,std::sync::atomic::Ordering::SeqCst);
-        let b_result=tokio::time::timeout(Duration::from_secs(15),waiting_b)
-            .await.expect("T10-07 B post-HELD source fence")
-            .expect("T10-07 B Native task join");
-        let b_text=match &b_result{
-            Ok(reply)=>reply.to_string(),Err(reason)=>reason.clone()
-        };
-        assert!(b_text.contains("POST_ENTRY_FEE_OR_SPEC_CHANGED")
-            ||b_text.contains("POST_ENTRY_FEE_SOURCE_CHANGED"),
-            "T10-07 source change must reject B before POST: {b_text}");
-        let b_sql=owner_b.execution.store.call(
-            std::time::Instant::now()+Duration::from_secs(3),
-            |s|{
-                let i=s.by_idempotency("t10_07_b_second_execute_0001")?
-                    .ok_or(okx_execution::StoreError::Invalid(
-                        "T10_07_B_NATIVE_INTENT_ABSENT"))?;
-                let release=s.unsent_release_receipt(&i.intent_id)?;
-                let still_held=s.active_central_receipt(&i.intent_id)?.is_some();
-                Ok((i,release,still_held))
-            }
-        ).await.expect("T10-07 B SQL release readback");
-        assert_eq!(b_sql.0.state.as_str(),"REJECTED");
-        assert!(b_sql.1.is_some(),"T10-07 B missing authentic SQL unsent receipt");
-        assert!(!b_sql.2,"T10-07 released B cannot remain SQL HELD");
-        let after=risk.request(read_risk("t10_07_after_release"))
-            .await.expect("T10-07 authoritative Worker release");
-        let e=after.budget.as_ref().unwrap().entry_budget.as_ref().unwrap();
-        assert_eq!(e.reserved_usd,"4");
-        assert_eq!(e.remaining_usd,"6");
-        assert_eq!(e.consumed_usd,"0");
-        let posts_after=feed.outbound_posts.lock().unwrap().len();
-        assert_eq!(posts_after,posts_before+1,"only Native A create was sent");
-        serde_json::json!({
-            "schema":"okx.t10-07-native-single-campaign/v1",
+        // Retain this stage immediately: a later release failure MUST NOT
+        // destroy evidence for both genuine SQL-backed Native Execute ACKs
+        // and the independently observed third central denial.
+        println!("T10_07_NATIVE_CAP_STAGE_V1:{}",json!({
+            "schema":"okx.t10-07-native-cap-stage/v1",
+            "two_sql_owners":true,
             "account_keys":account_keys,
-            "two_real_sql_owners":true,
-            "native_execute_count":3,
             "a_intent_id":a_sql.intent_id,
             "a_sql_revision":a_sql.revision,
-            "a_sql_state":a_sql.state.as_str(),
-            "b_intent_id":b_sql.0.intent_id,
-            "b_sql_revision":b_sql.0.revision,
-            "b_sql_state":b_sql.0.state.as_str(),
-            "b_release_receipt_verified":b_sql.1.is_some(),
-            "b_sql_active_central_receipt":b_sql.2,
-            "worker_before_release":before_release.budget,
-            "worker_before_release_sequence":before_release.risk_book_sequence,
-            "worker_after_release":after.budget,
-            "worker_sequence":after.risk_book_sequence,
-            "third_denial":"CAMPAIGN_ENTRY_BUDGET_EXHAUSTED",
-            "third_extra_create_posts":0,
-            "posts_before":posts_before,
-            "posts_after":posts_after,
-            "source_events":feed.immutable_phase_trace.lock().unwrap().clone()
-        })
+            "b_intent_id":b_accepted.intent_id,
+            "b_sql_revision":b_accepted.revision,
+            "a_state":a_sql.state.as_str(),
+            "b_state":b_accepted.state.as_str(),
+            "third_origin":third_origin,
+            "third_no_post":feed.outbound_posts.lock().unwrap().len()==posts_before_third,
+            "worker_budget":before_release.budget,
+            "worker_sequence":before_release.risk_book_sequence,
+            "posts":feed.outbound_posts.lock().unwrap().len(),
+        }));
+        // A posted original B HELD cannot be released as REJECTED_UNSENT:
+        // after two ACKs that would counterfeit the SQL proof. T10-07
+        // remains FAIL CLOSED until production terminal reconciliation from
+        // authenticated venue/finance source proves B's real release.
+        panic!("T10_07_POSTED_B_TERMINAL_SOURCE_RELEASE_NOT_PROVEN");
+
     };
     let publisher=async {
         loop {
