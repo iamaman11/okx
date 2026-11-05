@@ -17,6 +17,12 @@ async fn t10_01_partial_balance_denial_recovery(
     let wrap=|rows:serde_json::Value|serde_json::to_vec(&json!({
         "code":"0","msg":"","data":rows
     })).unwrap();
+    // The prior T09 bootstrap may have finite old fee/leverage pages.
+    // Seal B's real capture owner while atomically publishing this scenario's
+    // new raw signed source event. No production finance is bypassed.
+    let bootstrap_b=accounts.resolve("fixture-b").await
+        .expect("T10-01 verified B source owner at event boundary");
+    let source_boundary=bootstrap_b.recorded_capture_gate.write().await;
     let empty=wrap(json!([]));
     let observed_digest=format!("{:x}",sha2::Sha256::digest(&empty));
     let route="/api/v5/account/balance";
@@ -35,7 +41,8 @@ async fn t10_01_partial_balance_denial_recovery(
         "feeGroup":[{"groupId":"4","maker":"0.0005","taker":"0.0005"}]
     }]));
     // One immutable signed fee snapshot per event, not 12 arbitrary GET pages.
-    feed.expect_immutable_signed_phase("t10-01-b-fee-initial", RecordedGet {
+    let retired_fee_pages=feed.supersede_queued_signed_source_at_event(
+        "t10-01-negative-source-arrived", "t10-01-b-fee-initial", RecordedGet {
         access_key:"fixture-observer-b".into(),
         path:"/api/v5/account/trade-fee".into(),
         required_query:vec![
@@ -43,12 +50,14 @@ async fn t10_01_partial_balance_denial_recovery(
             ("instFamily".into(),"BTC-USDT".into()),
         ],raw_response:initial_fee.clone()
     });
+    assert!(retired_fee_pages>0, "B fee must supersede a real old signed source");
     let leverage=wrap(json!([
         {"instId":"BTC-USDT-SWAP","mgnMode":"cross","posSide":"long","lever":"2"},
         {"instId":"BTC-USDT-SWAP","mgnMode":"cross","posSide":"short","lever":"2"}
     ]));
     // Unchanged leverage source is visible identically to concurrent readers.
-    feed.expect_immutable_signed_phase("t10-01-b-leverage-stable", RecordedGet {
+    let retired_leverage_pages=feed.supersede_queued_signed_source_at_event(
+        "t10-01-negative-source-arrived", "t10-01-b-leverage-stable", RecordedGet {
         access_key:"fixture-observer-b".into(),
         path:"/api/v5/account/leverage-info".into(),
         required_query:vec![
@@ -56,6 +65,9 @@ async fn t10_01_partial_balance_denial_recovery(
             ("mgnMode".into(),"cross".into()),
         ],raw_response:leverage.clone()
     });
+    assert!(retired_leverage_pages>0,
+        "B leverage must supersede a real old signed source");
+    drop(source_boundary);
     let request=|id:&str,expires_in_ms:u64|TradeRequest::Execute {
         idempotency_key:id.into(),operation:TradeOperation::Open,
         strategy_instance:"manual".into(),instrument:"BTC-USDT-SWAP".into(),
@@ -291,6 +303,8 @@ async fn t10_01_partial_balance_denial_recovery(
         "partial_source_digest":observed_digest,
         "fresh_source_digest":fresh_digest,
         "signed_source_events":feed.immutable_phase_trace.lock().unwrap().clone(),
+        "retired_baseline_fee_pages":retired_fee_pages,
+        "retired_baseline_leverage_pages":retired_leverage_pages,
         "incomplete_denial":denied,
         "sql_created_on_denial":bad_sql.is_some(),
         "posts_before":posts_before,
