@@ -58,11 +58,18 @@ async fn t10_15_fee_source_after_worker_held(
             ("instFamily".into(),"BTC-USDT".into()),
         ],raw_response:initial.clone(),
     }).collect::<Vec<_>>();
-    if shared_b1 {
-        feed.advance_recorded_route("fixture-observer-b",
-            "/api/v5/account/trade-fee",fee_pages);
-    } else {
-        for page in fee_pages { feed.expect_get(page); }
+    // T09 has already registered this authenticated fee route for B.
+    // A new T10-15 source event must REPLACE its residual finite pages,
+    // not append a different timestamp to them. Keeping both timestamps
+    // would make the later immutable-phase transition correctly fail with
+    // TRANSCRIPT_SOURCE_EVENT_OLD_RAW_CONFLICT. This replacement is only
+    // the test HTTP transcript, not SQL, Worker, fee policy or a bypass.
+    let retired_prior_fee_pages=feed.advance_recorded_route(
+        "fixture-observer-b","/api/v5/account/trade-fee",fee_pages
+    );
+    assert!(retired_prior_fee_pages<=16,
+        "T10-15 unexpected earlier B fee transcript size");
+    if !shared_b1 {
         // A distinct signed leverage source is required for the first
         // B public Preview; no default leverage may authorize risk.
         let leverage=wrap(serde_json::json!([
