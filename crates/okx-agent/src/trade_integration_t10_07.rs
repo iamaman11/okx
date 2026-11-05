@@ -303,7 +303,8 @@ async fn t10_07_native_one_campaign(
                 .ok_or(okx_execution::StoreError::Invalid("T10_07_B_RESERVATION_RECEIPT_MISSING"))?;
             let still_held=s.active_central_receipt(&intent.intent_id)?.is_some();
             Ok((intent.state.as_str().to_owned(),intent.intent_id,intent.plan_hash,
-                intent.request_hash,intent.exchange_order_id,proof,receipt,still_held))
+                intent.request_hash,intent.exchange_order_id,proof,receipt,still_held,
+                intent.revision))
         }
     ).await.expect("T10-07 B original SQL owner readback");
     assert_eq!(b_sql.0,"REJECTED");
@@ -340,8 +341,11 @@ async fn t10_07_native_one_campaign(
         "a_account_uid":owner_a.configuration.account_key.verified_uid,
         "b_account_uid":owner_b.configuration.account_key.verified_uid,
         "a_sql_state":a_sql.state.as_str(),
+        "a_sql_revision":a_sql.revision,
         "b_sql_state":b_sql.0,
+        "b_sql_revision":b_sql.8,
         "third_sql_state":third_sql.state.as_str(),
+        "third_sql_revision":third_sql.revision,
         "b_intent_id":b_sql.1,"a_intent_id":a_sql.intent_id,
         "b_release_reservation_key":b_sql.5.reservation_key,
         "b_release_plan_sha256":b_sql.2,
