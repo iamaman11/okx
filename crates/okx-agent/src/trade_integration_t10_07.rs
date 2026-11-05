@@ -289,16 +289,51 @@ async fn t10_07_native_one_campaign(
         !first_pending.is_finished() && !pending.is_finished();
     assert!(native_three_way_active,
         "three Native Execute requests must overlap at third public entrance");
-    let third_result=tokio::time::timeout(Duration::from_secs(10),
-        trade.trade("fixture-a",&third,None))
+    // Prove the THIRD task has actually entered its public TradeService
+    // invocation while both original Native requests are still pending.
+    // Immediately release A's post-SQL gate: its original signed entry quote
+    // must remain within the unchanged five-second production fence.
+    let (third_enter_tx,third_enter_rx)=tokio::sync::oneshot::channel();
+    let third_pending=tokio::spawn({
+        let trade=trade.clone();
+        async move{
+            let _=third_enter_tx.send(());
+            trade.trade("fixture-a",&third,None).await
+        }
+    });
+    third_enter_rx.await.expect("T10-07 third Native Execute task started");
+    assert!(!first_pending.is_finished() && !pending.is_finished(),
+        "A/B Native Execute must remain active as third enters TradeService");
+    crate::trade_service::T10_07_RELEASE_A_SQL_RESERVE_HOLD.store(true,SeqCst);
+    let first_out=tokio::time::timeout(Duration::from_secs(12),first_pending)
+        .await.expect("T10-07 A original post-HELD Execute deadline")
+        .expect("T10-07 A original Native Execute task")
+        .expect("T10-07 A original Native Execute must reach venue ACK");
+    assert_eq!(first_out["status"],"partial",
+        "T10-07 A requires original signed venue ACK: {first_out}");
+    assert_eq!(first_out["data"]["intent"]["state"],"ACKNOWLEDGED");
+    let a_sql=owner_a.execution.store.call(
+        std::time::Instant::now()+Duration::from_secs(3),
+        |s|s.by_idempotency(A_KEY)
+    ).await.expect("T10-07 A original SQL after ACK")
+        .expect("T10-07 A original SQL intent");
+    assert_eq!(a_sql.state.as_str(),"ACKNOWLEDGED");
+    assert_eq!(feed.outbound_posts.lock().unwrap().len(),1,
+        "only A original Execute can send while B remains Worker HELD");
+    let third_result=tokio::time::timeout(Duration::from_secs(10),third_pending)
         .await.expect("T10-07 third public Execute deadline")
+        .expect("T10-07 third Native public Execute task")
         .expect("T10-07 third public Execute returns typed central denial");
     let reason=third_result["data"]["primary_reason"].as_str().unwrap_or("").to_owned();
     assert_eq!(third_result["data"]["rejection_origin"],"CENTRAL",
         "third request must not be a test/LOCAL source failure: {third_result}");
     assert_eq!(reason,"CAMPAIGN_ENTRY_BUDGET_EXHAUSTED");
     assert_eq!(third_result["data"]["send_state"],"NOT_STARTED");
-    let denied_extra_posts=feed.outbound_posts.lock().unwrap().len()-posts_at_two_held;
+    let posts_after_third=feed.outbound_posts.lock().unwrap().len();
+    assert_eq!(posts_at_two_held,0);
+    assert_eq!(posts_after_third,1,
+        "only A's genuine acknowledged order may emit a POST; third sends none");
+    let denied_extra_posts=posts_after_third-1;
     assert_eq!(denied_extra_posts,0,"central denial cannot emit a venue POST");
     let third_sql=owner_a.execution.store.call(
         std::time::Instant::now()+Duration::from_secs(3),
@@ -380,53 +415,8 @@ async fn t10_07_native_one_campaign(
     assert_eq!(released_entry.consumed_usd,"0");
     assert!(released.risk_book_sequence.unwrap_or(0)>
         before_release.risk_book_sequence.unwrap_or(0));
-    assert_eq!(feed.outbound_posts.lock().unwrap().len(),0,
-        "both original Native requests are still pre-POST after third DENIED");
-
-    // Finish A's ORIGINAL held public Execute only after observing B's
-    // source-backed no-send RELEASE. Its unchanged zero-fee and complete
-    // balance are independently republished as raw signed source events,
-    // not a SQL shortcut or clock/freshness override.
-    let a_post_at=chrono::Utc::now().timestamp_millis().to_string();
-    feed.advance_immutable_signed_phase(
-        "t10-07-a-fee-for-third","t10-07-a-fee-before-post",RecordedGet {
-            access_key:"fixture-observer-a".into(),
-            path:"/api/v5/account/trade-fee".into(),
-            required_query:vec![
-                ("instType".into(),"SWAP".into()),
-                ("instFamily".into(),"BTC-USDT".into()),
-            ],raw_response:fee("0",&a_post_at),
-        }
-    );
-    feed.advance_immutable_signed_phase(
-        "t10-07-a-balance-for-third","t10-07-a-balance-before-post",RecordedGet {
-            access_key:"fixture-observer-a".into(),
-            path:"/api/v5/account/balance".into(),
-            required_query:vec![],raw_response:balance_a(&a_post_at),
-        }
-    );
-    let market_a_post=refresh_recorded_market();
-    wait_market(market_a_post).await;
-    let clock_a_post=chrono::Utc::now().timestamp_millis();
-    feed.advance_recorded_public_clock(
-        envelope(json!([{"ts":clock_a_post.to_string()}])));
-    assert!(!first_pending.is_finished(),
-        "A must still own its original SQL HELD before first venue POST");
-    crate::trade_service::T10_07_RELEASE_A_SQL_RESERVE_HOLD.store(true,SeqCst);
-    let first_out=tokio::time::timeout(Duration::from_secs(15),first_pending)
-        .await.expect("T10-07 A original post-HELD Execute deadline")
-        .expect("T10-07 A original Native Execute task")
-        .expect("T10-07 A original Native Execute must reach venue ACK");
-    assert_eq!(first_out["status"],"partial",
-        "T10-07 A requires original signed venue ACK: {first_out}");
-    assert_eq!(first_out["data"]["intent"]["state"],"ACKNOWLEDGED");
-    let a_sql=owner_a.execution.store.call(
-        std::time::Instant::now()+Duration::from_secs(3),
-        |s|s.by_idempotency(A_KEY)
-    ).await.expect("T10-07 A original SQL after ACK")
-        .expect("T10-07 A original SQL intent");
-    assert_eq!(a_sql.state.as_str(),"ACKNOWLEDGED");
-    assert_eq!(feed.outbound_posts.lock().unwrap().len(),1);
+    assert_eq!(feed.outbound_posts.lock().unwrap().len(),1,
+        "B's release sends no POST, while A's original signed ACK remains");
 
     let after=risk.request(risk_summary("risk_t10_07_after_all_three"))
         .await.expect("T10-07 persisted Worker after A venue ACK");
