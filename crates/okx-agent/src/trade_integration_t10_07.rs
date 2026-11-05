@@ -378,15 +378,70 @@ async fn t10_07_native_one_campaign(
     assert_eq!(inspected.status,RiskDecisionStatus::Observed);
     assert_eq!(inspected.reservation_state,
         Some(okx_protocol::risk_authority::RiskReservationState::Released));
-    let after=risk.request(risk_summary("risk_t10_07_after_release"))
-        .await.expect("T10-07 persistent Worker after");
+    let released=risk.request(risk_summary("risk_t10_07_after_original_b_release"))
+        .await.expect("T10-07 persisted Worker after original B release");
+    let released_entry=released.budget.as_ref().unwrap().entry_budget.as_ref().unwrap();
+    assert_eq!(released_entry.reserved_usd,"4");
+    assert_eq!(released_entry.remaining_usd,"6");
+    assert_eq!(released_entry.consumed_usd,"0");
+    assert!(released.risk_book_sequence.unwrap_or(0)>
+        before_release.risk_book_sequence.unwrap_or(0));
+    assert_eq!(feed.outbound_posts.lock().unwrap().len(),0,
+        "both original Native requests are still pre-POST after third DENIED");
+
+    // Finish A's ORIGINAL held public Execute only after observing B's
+    // source-backed no-send RELEASE. Its unchanged zero-fee and complete
+    // balance are independently republished as raw signed source events,
+    // not a SQL shortcut or clock/freshness override.
+    let a_post_at=chrono::Utc::now().timestamp_millis().to_string();
+    feed.advance_immutable_signed_phase(
+        "t10-07-a-fee-for-third","t10-07-a-fee-before-post",RecordedGet {
+            access_key:"fixture-observer-a".into(),
+            path:"/api/v5/account/trade-fee".into(),
+            required_query:vec![
+                ("instType".into(),"SWAP".into()),
+                ("instFamily".into(),"BTC-USDT".into()),
+            ],raw_response:fee("0",&a_post_at),
+        }
+    );
+    feed.advance_immutable_signed_phase(
+        "t10-07-a-balance-for-third","t10-07-a-balance-before-post",RecordedGet {
+            access_key:"fixture-observer-a".into(),
+            path:"/api/v5/account/balance".into(),
+            required_query:vec![],raw_response:balance_a(&a_post_at),
+        }
+    );
+    let market_a_post=refresh_recorded_market();
+    wait_market(market_a_post).await;
+    let clock_a_post=chrono::Utc::now().timestamp_millis();
+    feed.advance_recorded_public_clock(
+        envelope(json!([{"ts":clock_a_post.to_string()}])));
+    assert!(!first_pending.is_finished(),
+        "A must still own its original SQL HELD before first venue POST");
+    crate::trade_service::T10_07_RELEASE_A_SQL_RESERVE_HOLD.store(true,SeqCst);
+    let first_out=tokio::time::timeout(Duration::from_secs(15),first_pending)
+        .await.expect("T10-07 A original post-HELD Execute deadline")
+        .expect("T10-07 A original Native Execute task")
+        .expect("T10-07 A original Native Execute must reach venue ACK");
+    assert_eq!(first_out["status"],"partial",
+        "T10-07 A requires original signed venue ACK: {first_out}");
+    assert_eq!(first_out["data"]["intent"]["state"],"ACKNOWLEDGED");
+    let a_sql=owner_a.execution.store.call(
+        std::time::Instant::now()+Duration::from_secs(3),
+        |s|s.by_idempotency(A_KEY)
+    ).await.expect("T10-07 A original SQL after ACK")
+        .expect("T10-07 A original SQL intent");
+    assert_eq!(a_sql.state.as_str(),"ACKNOWLEDGED");
+    assert_eq!(feed.outbound_posts.lock().unwrap().len(),1);
+
+    let after=risk.request(risk_summary("risk_t10_07_after_all_three"))
+        .await.expect("T10-07 persisted Worker after A venue ACK");
     let after_entry=after.budget.as_ref().unwrap().entry_budget.as_ref().unwrap();
     assert_eq!(after_entry.reserved_usd,"4");
     assert_eq!(after_entry.remaining_usd,"6");
     assert_eq!(after_entry.consumed_usd,"0");
     assert!(after.risk_book_sequence.unwrap_or(0)>
         before_release.risk_book_sequence.unwrap_or(0));
-    assert_eq!(feed.outbound_posts.lock().unwrap().len(),1);
 
     json!({
         "schema":"okx.t10-07-native-one-campaign/v1",
@@ -412,6 +467,8 @@ async fn t10_07_native_one_campaign(
         "worker_after_sequence":after.risk_book_sequence,
         "worker_two_held_sequence":stage.risk_book_sequence,
         "held_receipts":["HELD","HELD","DENIED"],
+        "concurrent_native_three_way_entered":native_three_way_active,
+        "concurrent_native_calls":3,
         "original_b_held_source_reads":reads,
         "total_venue_posts":feed.outbound_posts.lock().unwrap().len(),
     })
