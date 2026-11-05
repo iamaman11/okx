@@ -207,6 +207,10 @@ async fn t10_07_native_single_campaign(
         let third_text=match &third_result{
             Ok(reply)=>reply.to_string(),Err(reason)=>reason.clone(),
         };
+        let third_origin=third_result.as_ref().ok()
+            .and_then(|reply|reply["data"]["rejection_origin"].as_str());
+        assert_eq!(third_origin,Some("CENTRAL"),
+            "T10-07 third refusal must come from actual Worker");
         assert!(third_text.contains("CAMPAIGN_ENTRY_BUDGET_EXHAUSTED"),
             "T10-07 third must reach Worker shared cap: {third_text}");
         assert_eq!(feed.outbound_posts.lock().unwrap().len(),posts_before_third,
