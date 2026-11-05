@@ -892,10 +892,20 @@ pub(crate) mod recorded_support {
     // Only a test driver can transition the phase, after its own causal
     // assertion. The production HTTP parser, freshness, quota and SQL
     // financial source owner remain unchanged.
+    // Fixed test-only safety ceiling: a finite source observation is neither
+    // a perpetual exchange feed nor an unlimited synthetic GET generator.
+    // The clock starts at explicit phase publication, NOT on each read.
+    const SIGNED_PHASE_MAX_READS: u64 = 256;
+    const SIGNED_PHASE_MAX_LIFETIME: std::time::Duration =
+        std::time::Duration::from_secs(300);
+
     struct ImmutableSignedGetPhase {
         phase_id: String,
         source: RecordedGet,
         deliveries: u64,
+        max_deliveries: u64,
+        published_at: Instant,
+        ttl: std::time::Duration,
     }
 
     /// One pre-recorded response for one exact signed executor POST. This is
@@ -1121,6 +1131,19 @@ pub(crate) mod recorded_support {
         /// Fills, bills, order status, clock and algo inventories stay under
         /// their separate causal/one-shot transcript contracts.
         pub(crate) fn expect_immutable_signed_phase(&self, phase_id: &str, page: RecordedGet) {
+            self.expect_immutable_signed_phase_bounded(
+                phase_id, page, SIGNED_PHASE_MAX_READS, SIGNED_PHASE_MAX_LIFETIME,
+            );
+        }
+
+        /// Declare a finite delivery budget and monotonic lifetime BEFORE
+        /// publishing the source event. Only the recorded transport uses it.
+        fn expect_immutable_signed_phase_bounded(
+            &self, phase_id: &str, page: RecordedGet,
+            max_deliveries: u64, ttl: std::time::Duration,
+        ) {
+            assert!(max_deliveries>0 && !ttl.is_zero(),
+                "TRANSCRIPT_IMMUTABLE_BUDGET_INVALID");
             assert!(!phase_id.is_empty(),"TRANSCRIPT_IMMUTABLE_PHASE_ID_MISSING");
             assert!(matches!(
                 page.path.as_str(),
@@ -1147,12 +1170,13 @@ pub(crate) mod recorded_support {
             self.strict_read_routes.lock().unwrap().insert(route);
             phases.push(ImmutableSignedGetPhase {
                 phase_id:phase_id.into(),source:page,deliveries:0,
+                max_deliveries,published_at:Instant::now(),ttl,
             });
             let installed=phases.last().unwrap();
             self.immutable_phase_trace.lock().unwrap().push(format!(
-                "event=SIGNED_PHASE_INSTALLED phase={phase_id} actor={} route={} query={:?} sha256={:x}",
+                "event=SIGNED_PHASE_INSTALLED phase={phase_id} actor={} route={} query={:?} sha256={:x} max_reads={max_deliveries} ttl_ms={}",
                 installed.source.access_key,installed.source.path,query,
-                sha2::Sha256::digest(&installed.source.raw_response)
+                sha2::Sha256::digest(&installed.source.raw_response),ttl.as_millis()
             ));
         }
 
@@ -1162,6 +1186,18 @@ pub(crate) mod recorded_support {
         pub(crate) fn advance_immutable_signed_phase(
             &self, expected_phase:&str, next_phase:&str, page:RecordedGet,
         ) -> u64 {
+            self.advance_immutable_signed_phase_bounded(
+                expected_phase,next_phase,page,
+                SIGNED_PHASE_MAX_READS,SIGNED_PHASE_MAX_LIFETIME,
+            )
+        }
+
+        fn advance_immutable_signed_phase_bounded(
+            &self, expected_phase:&str, next_phase:&str, page:RecordedGet,
+            max_deliveries:u64, ttl:std::time::Duration,
+        ) -> u64 {
+            assert!(max_deliveries>0 && !ttl.is_zero(),
+                "TRANSCRIPT_IMMUTABLE_BUDGET_INVALID");
             assert!(!expected_phase.is_empty() && !next_phase.is_empty()
                 && expected_phase!=next_phase,"TRANSCRIPT_IMMUTABLE_PHASE_TRANSITION_INVALID");
             let mut query=page.required_query.clone();
@@ -1180,10 +1216,13 @@ pub(crate) mod recorded_support {
             prior.phase_id=next_phase.into();
             prior.source=page;
             prior.deliveries=0;
+            prior.max_deliveries=max_deliveries;
+            prior.published_at=Instant::now();
+            prior.ttl=ttl;
             self.immutable_phase_trace.lock().unwrap().push(format!(
-                "event=SIGNED_PHASE_ADVANCED from={expected_phase} to={next_phase} actor={} route={} query={:?} observed_reads={previously_delivered} old_sha256={old_sha256} new_sha256={:x}",
-                prior.source.access_key,prior.source.path,query,
-                sha2::Sha256::digest(&prior.source.raw_response)
+                "event=SIGNED_PHASE_ADVANCED from={expected_phase} to={next_phase} actor={} route={} query={query:?} observed_reads={previously_delivered} old_sha256={old_sha256} new_sha256={:x} max_reads={max_deliveries} ttl_ms={}",
+                prior.source.access_key,prior.source.path,
+                sha2::Sha256::digest(&prior.source.raw_response),ttl.as_millis()
             ));
             previously_delivered
         }
@@ -1242,6 +1281,8 @@ pub(crate) mod recorded_support {
             );
             phases.push(ImmutableSignedGetPhase {
                 phase_id:phase_id.into(),source:page,deliveries:0,
+                max_deliveries:SIGNED_PHASE_MAX_READS,
+                published_at:Instant::now(),ttl:SIGNED_PHASE_MAX_LIFETIME,
             });
             self.immutable_phase_trace.lock().unwrap().push(format!(
                 "event=SIGNED_SOURCE_SUPERSEDED cause={event_id} phase={phase_id} actor={actor} route={path} query={query:?} old_pages={removed} old_sha256={old_digest} new_sha256={:x}",
@@ -1982,6 +2023,83 @@ pub(crate) mod recorded_support {
         assert_eq!(feed.outbound_posts.lock().unwrap().len(),0);
     }
 
+    #[tokio::test]
+    async fn immutable_signed_phase_budgets_expire_without_refresh_on_get() {
+        use std::time::Duration;
+        let fee = |phase: &str| RecordedGet {
+            access_key:"fixture-observer-a".into(),
+            path:"/api/v5/account/balance".into(),
+            required_query:vec![],
+            raw_response:serde_json::to_vec(&serde_json::json!({
+                "code":"0","data":[{"phase":phase}]
+            })).unwrap(),
+        };
+        let read=|| reqwest::Client::new()
+            .get("https://www.okx.com/api/v5/account/balance")
+            .header("OK-ACCESS-KEY","fixture-observer-a")
+            .build().unwrap();
+        let deadline=||Instant::now()+Duration::from_secs(2);
+        let feed=RecordedAccountHttp::default();
+        // A three-read event is accepted exactly three times.
+        feed.expect_immutable_signed_phase_bounded(
+            "before-budget",fee("before"),3,Duration::from_secs(3));
+        for _ in 0..3 {
+            feed.send(read(),deadline()).await.expect("within declared budget");
+        }
+        let excess=feed.send(read(),deadline()).await.err()
+            .expect("over-budget read must be denied");
+        assert!(excess.to_string().contains(
+            "TRANSCRIPT_IMMUTABLE_PHASE_READ_BUDGET_EXCEEDED"));
+        assert_eq!(feed.immutable_signed_phase_reads(
+            "fixture-observer-a","/api/v5/account/balance","before-budget"),3);
+        assert_eq!(feed.outbound_posts.lock().unwrap().len(),0);
+        assert_eq!(feed.advance_immutable_signed_phase_bounded(
+            "before-budget","short-lived",fee("after"),4,Duration::from_millis(1)),3);
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        let expired=feed.send(read(),deadline()).await.err()
+            .expect("expired raw source cannot be refreshed by reading it");
+        assert!(expired.to_string().contains("TRANSCRIPT_IMMUTABLE_PHASE_EXPIRED"));
+        assert_eq!(feed.immutable_signed_phase_reads(
+            "fixture-observer-a","/api/v5/account/balance","short-lived"),0);
+        assert_eq!(feed.outbound_posts.lock().unwrap().len(),0);
+        // A new event explicitly republishes the source with a NEW budget.
+        assert_eq!(feed.advance_immutable_signed_phase_bounded(
+            "short-lived","recovered",fee("fresh"),2,Duration::from_secs(3)),0);
+        let recovered=feed.send(read(),deadline()).await.unwrap();
+        assert_eq!(serde_json::from_slice::<serde_json::Value>(&recovered.body).unwrap()
+            ["data"][0]["phase"],"fresh");
+        let denied=feed.denied_routes.lock().unwrap();
+        assert!(denied.iter().any(|x|x.contains("PHASE_EXPIRED")));
+        assert!(denied.iter().any(|x|x.contains("READ_BUDGET_EXCEEDED")));
+        let trace=feed.immutable_phase_trace.lock().unwrap();
+        assert_eq!(trace.len(),3);
+        assert!(trace[0].contains("max_reads=3") && trace[0].contains("ttl_ms=3000"));
+        assert!(trace[1].contains("max_reads=4") && trace[1].contains("ttl_ms=1"));
+        assert!(trace[2].contains("max_reads=2") && trace[2].contains("ttl_ms=3000"));
+    }
+
+    #[tokio::test]
+    async fn immutable_signed_phase_unexpected_post_is_counted_not_replayed() {
+        let feed=RecordedAccountHttp::default();
+        feed.expect_immutable_signed_phase("no-post",RecordedGet {
+            access_key:"fixture-observer-a".into(),
+            path:"/api/v5/account/balance".into(),required_query:vec![],
+            raw_response:b"{\"code\":\"0\",\"data\":[]}".to_vec(),
+        });
+        let request=reqwest::Client::new()
+            .post("https://www.okx.com/api/v5/trade/order")
+            .header("OK-ACCESS-KEY","fixture-executor-a")
+            .json(&serde_json::json!({"clOrdId":"test0001"}))
+            .build().unwrap();
+        let error=feed.send(request,Instant::now()+std::time::Duration::from_secs(2))
+            .await.err().expect("unmatched signed POST must fail");
+        assert!(error.to_string().contains("TRANSCRIPT_UNEXPECTED_POST"));
+        assert_eq!(feed.outbound_posts.lock().unwrap().len(),1,
+            "even rejected outbound attempts are counted");
+        assert_eq!(feed.immutable_signed_phase_reads(
+            "fixture-observer-a","/api/v5/account/balance","no-post"),0);
+    }
+
     impl HttpTransport for RecordedAccountHttp {
         fn send(&self, request: HttpRequest, deadline: Instant) -> HttpSend<'_> {
             Box::pin(async move {
@@ -2271,8 +2389,15 @@ pub(crate) mod recorded_support {
                     }).collect::<Vec<_>>();
                     assert!(matching.len()<=1,"TRANSCRIPT_IMMUTABLE_AMBIGUOUS_QUERY");
                     if let Some(index)=matching.first(){
-                        phases[*index].deliveries+=1;
-                        Some(Ok(phases[*index].source.raw_response.clone()))
+                        let phase=&mut phases[*index];
+                        if phase.published_at.elapsed()>=phase.ttl {
+                            Some(Err("TRANSCRIPT_IMMUTABLE_PHASE_EXPIRED"))
+                        } else if phase.deliveries>=phase.max_deliveries {
+                            Some(Err("TRANSCRIPT_IMMUTABLE_PHASE_READ_BUDGET_EXCEEDED"))
+                        } else {
+                            phase.deliveries+=1;
+                            Some(Ok(phase.source.raw_response.clone()))
+                        }
                     }else if phases.iter().any(|item|
                         item.source.access_key==key &&item.source.path==path
                     ){
