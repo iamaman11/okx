@@ -8,6 +8,7 @@ async fn t10_07_native_one_campaign(
     accounts: Arc<AccountRuntimeRegistry>,
     trade: Arc<TradeService>,
     risk: NativeRiskClient,
+    public_ws: okx_runtime::PublicWsHandle,
     feed: Arc<crate::accounts::recorded_support::RecordedAccountHttp>,
     _rate_budget: RateBudget,
     refresh_recorded_market: &impl Fn()->i64,
@@ -19,6 +20,30 @@ async fn t10_07_native_one_campaign(
     use serde_json::json;
     use std::sync::atomic::Ordering::SeqCst;
 
+    // A raw WS publisher queues frames; production PublicWsCoordinator
+    // processes them asynchronously. Never treat "published" as "FRESH".
+    // Observe the actual connected coordinator's updated rules and risk
+    // snapshot before asking the unchanged TradeService for admission.
+    let wait_market=|event_ms:i64| {
+        let ws=public_ws.clone();
+        async move {
+            tokio::time::timeout(Duration::from_secs(4),async {
+                loop {
+                    let rules=ws.instrument_rules("BTC-USDT-SWAP").await
+                        .expect("T10-07 production instrument rules");
+                    let observed=chrono::DateTime::parse_from_rfc3339(
+                        &rules.source_received_at).unwrap().timestamp_millis();
+                    let ready=ws.risk_fresh_snapshot(
+                        "BTC-USDT-SWAP",
+                        chrono::Utc::now().timestamp_millis() as u64,
+                        5_000,5_000,chrono::Utc::now().to_rfc3339()
+                    ).await.is_ok();
+                    if observed>=event_ms && ready { break; }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            }).await.expect("T10_07_MARKET_EVENT_NOT_YET_ACCEPTED_BY_PRODUCTION_WS");
+        }
+    };
     let envelope=|rows:serde_json::Value|serde_json::to_vec(
         &json!({"code":"0","msg":"","data":rows})
     ).unwrap();
@@ -74,6 +99,7 @@ async fn t10_07_native_one_campaign(
             });
     }
     let fresh_market=refresh_recorded_market();
+    wait_market(fresh_market).await;
     let clock=chrono::Utc::now().timestamp_millis();
     assert!(clock>=fresh_market);
     feed.advance_recorded_public_clock(envelope(json!([{"ts":clock.to_string()}])));
@@ -158,7 +184,11 @@ async fn t10_07_native_one_campaign(
     T10_07_WORKER_HELD_COMMITTED.store(false,SeqCst);
     T10_07_RELEASE_HELD_REPLY.store(false,SeqCst);
     T10_07_DEFER_NEXT_HELD.store(true,SeqCst);
-    refresh_recorded_market();
+    let market_b=refresh_recorded_market();
+    wait_market(market_b).await;
+    let clock_b=chrono::Utc::now().timestamp_millis();
+    feed.advance_recorded_public_clock(
+        envelope(json!([{"ts":clock_b.to_string()}])));
     let b_fee_at=chrono::Utc::now().timestamp_millis().to_string();
     feed.advance_immutable_signed_phase("t10-07-b-fee","t10-07-b-before-held",
         RecordedGet {
@@ -194,6 +224,11 @@ async fn t10_07_native_one_campaign(
     assert_eq!(money.remaining_usd,"2");
     assert_eq!(money.consumed_usd,"0");
     let posts_at_two_held=feed.outbound_posts.lock().unwrap().len();
+    let market_third=refresh_recorded_market();
+    wait_market(market_third).await;
+    let clock_third=chrono::Utc::now().timestamp_millis();
+    feed.advance_recorded_public_clock(
+        envelope(json!([{"ts":clock_third.to_string()}])));
     let third=make(THIRD_KEY);assert!(third.valid());
     let third_result=tokio::time::timeout(Duration::from_secs(10),
         trade.trade("fixture-a",&third,None))
@@ -231,7 +266,8 @@ async fn t10_07_native_one_campaign(
         }
     );
     assert!(reads>0,"original B signed phase must be observed before Worker HELD");
-    refresh_recorded_market();
+    let market_release=refresh_recorded_market();
+    wait_market(market_release).await;
     let release_posts_before=feed.outbound_posts.lock().unwrap().len();
     T10_07_RELEASE_HELD_REPLY.store(true,SeqCst);
     let b_result=tokio::time::timeout(Duration::from_secs(18),pending)
