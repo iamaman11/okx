@@ -220,6 +220,11 @@ async fn t10_07_native_single_campaign(
         // Finish B's actual ACK/SQL transition before testing central cap.
         // Enter a public A Status and B Execute at the same explicit barrier:
         // same Worker campaign, independently owned Native SQL.
+        // A consumed its recorded OKX clock. A new signed trade gets
+        // an independently published raw clock after finance readiness.
+        feed.advance_recorded_public_clock(wrap(json!([{
+            "ts":chrono::Utc::now().timestamp_millis().to_string()
+        }])));
         let gate=Arc::new(tokio::sync::Barrier::new(2));
         let status_a=tokio::spawn({
             let gate=gate.clone();
@@ -275,6 +280,9 @@ async fn t10_07_native_single_campaign(
         // B still owns a real pending Rust Execute and SQL reservation.
         // A third distinct public Execute must be denied by the SAME Worker.
         let posts_before_third=feed.outbound_posts.lock().unwrap().len();
+        feed.advance_recorded_public_clock(wrap(json!([{
+            "ts":chrono::Utc::now().timestamp_millis().to_string()
+        }])));
         let third_result=tokio::time::timeout(Duration::from_secs(13),
             trade.trade("fixture-a",&third,None)
         ).await.expect("T10-07 third concurrent Execute deadline");
