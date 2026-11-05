@@ -253,13 +253,48 @@ async fn t10_07_native_one_campaign(
     assert_eq!(money.reserved_usd,"8");
     assert_eq!(money.remaining_usd,"2");
     assert_eq!(money.consumed_usd,"0");
+    assert!(!first_pending.is_finished() && !pending.is_finished(),
+        "A and B must BOTH remain active Native Execute calls at third entrance");
     let posts_at_two_held=feed.outbound_posts.lock().unwrap().len();
+    assert_eq!(posts_at_two_held,0,
+        "two authentic Worker HELDs are not venue POST authorizations");
     let market_third=refresh_recorded_market();
     wait_market(market_third).await;
     let clock_third=chrono::Utc::now().timestamp_millis();
     feed.advance_recorded_public_clock(
         envelope(json!([{"ts":clock_third.to_string()}])));
+    // A's original fee/balance exchange timestamps may have aged during
+    // the two real SQL-backed RESERVE calls. The third public Execute
+    // consumes new raw authenticated source events, not a stale fixture
+    // or a production source-age exemption.
+    let a_at=chrono::Utc::now().timestamp_millis().to_string();
+    feed.advance_immutable_signed_phase(
+        "t10-07-a-fee","t10-07-a-fee-for-third",RecordedGet {
+            access_key:"fixture-observer-a".into(),
+            path:"/api/v5/account/trade-fee".into(),
+            required_query:vec![
+                ("instType".into(),"SWAP".into()),
+                ("instFamily".into(),"BTC-USDT".into()),
+            ],raw_response:fee("0",&a_at),
+        }
+    );
+    let balance_a=|stamp:&str|envelope(json!([{
+        "totalEq":"100","adjEq":"100","uTime":stamp,
+        "details":[{"ccy":"USDT","eq":"100","liab":"0",
+          "availEq":"100","availBal":"100","eqUsd":"100","uTime":stamp}]
+    }]));
+    feed.advance_immutable_signed_phase(
+        "t10-07-a-balance","t10-07-a-balance-for-third",RecordedGet {
+            access_key:"fixture-observer-a".into(),
+            path:"/api/v5/account/balance".into(),
+            required_query:vec![],raw_response:balance_a(&a_at),
+        }
+    );
     let third=make(THIRD_KEY);assert!(third.valid());
+    let native_three_way_active=
+        !first_pending.is_finished() && !pending.is_finished();
+    assert!(native_three_way_active,
+        "three Native Execute requests must overlap at third public entrance");
     let third_result=tokio::time::timeout(Duration::from_secs(10),
         trade.trade("fixture-a",&third,None))
         .await.expect("T10-07 third public Execute deadline")
