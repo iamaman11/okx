@@ -5217,7 +5217,7 @@ mod raw_native_session_tests {
                                     let source=r.execution.store.call(
                                         std::time::Instant::now()+Duration::from_secs(3),
                                         |s| Ok((
-                                            s.financial_risk(now(),None)?,
+                                            s.financial_risk(chrono::Utc::now().timestamp_millis(),None)?,
                                             s.cursor("fills","SWAP")?,
                                             s.cursor("bills","account")?,
                                         )),
@@ -5227,7 +5227,7 @@ mod raw_native_session_tests {
                                             "sql_readback":"VERIFIED",
                                             "nav_complete":f.nav_complete,
                                             "nav_source_as_of_ms":f.source_as_of,
-                                            "nav_age_ms":now().saturating_sub(f.source_as_of),
+                                            "nav_age_ms":chrono::Utc::now().timestamp_millis().saturating_sub(f.source_as_of),
                                             "fills":fills.map(|c|json!({
                                                 "generation":c.generation,
                                                 "watermark":c.watermark,
