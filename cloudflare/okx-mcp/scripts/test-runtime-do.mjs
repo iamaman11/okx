@@ -1165,6 +1165,30 @@ try {
           t10_06_session_exit:lines.filter(line =>
             line.startsWith("T10_06_NATIVE_WSS_SESSION_EXIT_V1:"))
             .slice(-3).map(line => line.slice(0, 300)),
+          // Transport-only evidence from the actual exhausted T10-06
+          // snapshot. Project numeric task counts, not untrusted GET bytes,
+          // arbitrary source payloads, credentials or request headers.
+          t10_06_pending_consumers:lines.filter(line =>
+            line.startsWith("T10_06_PENDING_CONSUMERS_V1:")).slice(-1).map(line => {
+              try {
+                const evidence=JSON.parse(line.slice("T10_06_PENDING_CONSUMERS_V1:".length));
+                const bounded=n=>Number.isSafeInteger(n)&&n>=0?n:null;
+                const byTask=Object.entries(evidence.reads_by_tokio_task??{})
+                  .filter(([task,n])=>/^(None|Some\\(Id\\(\\d+\\)\\))$/.test(task)
+                    && bounded(n)!==null)
+                  .sort((a,b)=>b[1]-a[1]).slice(0,64)
+                  .map(([task,n])=>({task,reads:n}));
+                return {
+                  read_limit:bounded(evidence.read_limit),
+                  accepted_reads:bounded(evidence.accepted_reads),
+                  attempts:bounded(evidence.attempts),
+                  distinct_task_count:Object.keys(evidence.reads_by_tokio_task??{}).length,
+                  top_task_reads:byTask.slice(0,12),
+                };
+              } catch {
+                return {error:"INVALID_T10_06_PENDING_CONSUMER_TRACE"};
+              }
+            }),
           t10_01_maintenance_shutdown:lines.filter(line =>
             line.startsWith("T10_01_OWNER_SHUTDOWN_V1:")).slice(-20),
           restart_reached:recorded.includes("T09_1_NATIVE_SQL_RESTART_V1:"),
