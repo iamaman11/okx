@@ -1465,8 +1465,8 @@ pub(crate) mod recorded_support {
         /// signed empty census. No fallback to A and no page-count phase.
         pub(crate) fn expect_static_algo_inventory(&self, account: &str, pages: Vec<RecordedGet>) {
             const PATH: &str = "/api/v5/trade/orders-algo-pending";
-            assert_eq!(
-                account, "fixture-observer-b",
+            assert!(
+                matches!(account, "fixture-observer-a" | "fixture-observer-b"),
                 "TRANSCRIPT_STATIC_ALGO_ACCOUNT"
             );
             assert_eq!(pages.len(), 16, "TRANSCRIPT_STATIC_ALGO_SCOPE_COUNT");
@@ -1500,14 +1500,81 @@ pub(crate) mod recorded_support {
                 .lock()
                 .unwrap()
                 .insert((account.to_owned(), PATH.to_owned()));
-            *self.static_algos.lock().unwrap() = Some(StaticAlgoInventory {
+            let mut installed = self.static_algos.lock().unwrap();
+            assert!(installed.is_none(), "TRANSCRIPT_STATIC_ALGO_PHASE_ALREADY_REGISTERED");
+            *installed = Some(StaticAlgoInventory {
                 account: account.to_owned(),
                 source_received_at_ms: chrono::Utc::now().timestamp_millis(),
                 scopes,
             });
+            drop(installed);
+            let uid = verified_fixture_uid(account).expect("verified static algo UID");
             self.causal_algo_trace.lock().unwrap().push(format!(
-                "event=PEER_INVENTORY_ARMED uid=account-002 actor={account} scopes=16"
+                "event=IMMUTABLE_ALGO_INVENTORY_ARMED uid={uid} actor={account} scopes=16"
             ));
+        }
+
+        /// Replace A's exhausted page-queue model only at the observed
+        /// A order ACK + B central no-send decision boundary. All prior
+        /// signed pages must be EXACTLY the same empty raw inventory for
+        /// each of the sixteen scopes; neither a live stop nor a different
+        /// account/query can be silently superseded. The new immutable
+        /// snapshot is finite (STATIC_ALGO_READS_PER_SCOPE), not refreshed
+        /// on background GET and never mutates SQL/Worker/venue state.
+        pub(crate) fn publish_post_ack_flat_algo_inventory(
+            &self,
+            event_id: &str,
+            acknowledged_order_id: &str,
+            pages: Vec<RecordedGet>,
+        ) -> usize {
+            const ACTOR: &str = "fixture-observer-a";
+            const EXECUTOR: &str = "fixture-executor-a";
+            const PATH: &str = "/api/v5/trade/orders-algo-pending";
+            assert!(!event_id.is_empty(), "TRANSCRIPT_ALGO_EVENT_ID_MISSING");
+            assert!(self.acknowledged_creates.lock().unwrap().iter().any(
+                |(actor, _, order_id)| actor == EXECUTOR && order_id == acknowledged_order_id
+            ), "TRANSCRIPT_ALGO_POST_ACK_NOT_OBSERVED");
+            assert_eq!(pages.len(), 16, "TRANSCRIPT_ALGO_EVENT_SCOPE_COUNT");
+            let mut expected = std::collections::BTreeMap::new();
+            for page in &pages {
+                assert_eq!(page.access_key, ACTOR, "TRANSCRIPT_ALGO_EVENT_ACTOR");
+                assert_eq!(page.path, PATH, "TRANSCRIPT_ALGO_EVENT_ROUTE");
+                let mut query = page.required_query.clone();
+                query.sort();
+                assert_eq!(query.len(), 3, "TRANSCRIPT_ALGO_EVENT_QUERY_SHAPE");
+                assert!(
+                    expected.insert(query, page.raw_response.clone()).is_none(),
+                    "TRANSCRIPT_ALGO_EVENT_DUPLICATE_SCOPE"
+                );
+            }
+            let old_causal = self.causal_algos.lock().unwrap().is_some();
+            if old_causal {
+                // A previously installed stop transition may be retired
+                // only after its own signed cancel ACK and all held GETs.
+                self.retire_acked_causal_algo_inventory(ACTOR);
+            }
+            let mut required = self.reads.lock().unwrap();
+            let mut optional = self.optional_reads.lock().unwrap();
+            let retired = required.iter().chain(optional.iter())
+                .filter(|page| page.access_key == ACTOR && page.path == PATH)
+                .collect::<Vec<_>>();
+            assert!(!retired.is_empty(), "TRANSCRIPT_ALGO_EVENT_OLD_SOURCE_MISSING");
+            assert!(retired.iter().all(|page| {
+                let mut query = page.required_query.clone();
+                query.sort();
+                expected.get(&query) == Some(&page.raw_response)
+            }), "TRANSCRIPT_ALGO_EVENT_SOURCE_OR_QUERY_MISMATCH");
+            let retired_count = retired.len();
+            drop(retired);
+            required.retain(|page| page.access_key != ACTOR || page.path != PATH);
+            optional.retain(|page| page.access_key != ACTOR || page.path != PATH);
+            drop(optional);
+            drop(required);
+            self.expect_static_algo_inventory(ACTOR, pages);
+            self.causal_algo_trace.lock().unwrap().push(format!(
+                "event=POST_ACK_FLAT_ALGO_SOURCE actor={ACTOR} order_id={acknowledged_order_id} cause={event_id} retired_pages={retired_count} scopes=16 max_reads_per_scope={STATIC_ALGO_READS_PER_SCOPE}"
+            ));
+            retired_count
         }
 
         /// Optional deterministic I/O barrier. A GET that starts before ACK
@@ -2514,8 +2581,10 @@ pub(crate) mod recorded_support {
                                 let read = scope.reads;
                                 let body = scope.response.clone();
                                 let digest = format!("{:x}", Sha256::digest(&body));
+                                let uid = verified_fixture_uid(key)
+                                    .expect("static algo verified read UID");
                                 self.causal_algo_trace.lock().unwrap().push(format!(
-                                    "event=GET_STARTED uid=account-002 actor={key} route={path} query={query:?} stage=INDEPENDENT_STATIC source_received_at_ms={source_received_at_ms} read={read} digest={digest}"
+                                    "event=GET_STARTED uid={uid} actor={key} route={path} query={query:?} stage=IMMUTABLE_STATIC source_received_at_ms={source_received_at_ms} read={read} digest={digest}"
                                 ));
                                 Some((body, None))
                             } else {
