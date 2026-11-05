@@ -23,6 +23,10 @@ async fn t10_01_partial_balance_denial_recovery(
     let bootstrap_b=accounts.resolve("fixture-b").await
         .expect("T10-01 verified B source owner at event boundary");
     let source_boundary=bootstrap_b.recorded_capture_gate.write().await;
+    // Declared before any transport reads: 90s at a two-second capture
+    // cadence (45 reads) plus 19 direct Preview/Execute observations.
+    // These 64 deliveries contain ONE immutable raw snapshot, not 64 pages.
+    let budget=||RecordedPhaseBudget::new(64,Duration::from_secs(90));
     let empty=wrap(json!([]));
     let observed_digest=format!("{:x}",sha2::Sha256::digest(&empty));
     let route="/api/v5/account/balance";
