@@ -29,13 +29,16 @@ async fn t10_05_create_outcome(
         "details":[{"ccy":"USDT","eq":"100","liab":"0",
             "availEq":"100","availBal":"100","eqUsd":"100","uTime":stamp}]
     }]));
-    feed.advance_recorded_route("fixture-observer-b","/api/v5/account/balance",
-        (0..16).map(|_|RecordedGet{
+    // This is B's FIRST authenticated REST balance source in this
+    // independent Native cohort. No earlier registered route may be
+    // silently treated as an existing phase.
+    for page in (0..16).map(|_|RecordedGet {
             access_key:"fixture-observer-b".into(),
             path:"/api/v5/account/balance".into(),
             required_query:vec![],raw_response:balance.clone(),
-        }).collect()
-    );
+        }) {
+        feed.expect_get(page);
+    }
     let fee=wrap(json!([{
         "instType":"SWAP","level":"Lv1","ts":stamp,
         "feeGroup":[{"groupId":"4","maker":"0.0005","taker":"0.0005"}]
