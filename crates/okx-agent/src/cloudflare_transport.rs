@@ -5366,7 +5366,8 @@ mod raw_native_session_tests {
                         refresh_recorded_market();
                         let switched=t10_15_fee_source_after_worker_held(
                             accounts.clone(),trade.clone(),risk.clone(),
-                            feed.clone(),rate_budget.clone()
+                            feed.clone(),rate_budget.clone(),
+                            &refresh_recorded_market
                         ).await;
                         println!("T10_15_NATIVE_CAUSAL_SOURCE_V1:{switched}");
                     }
