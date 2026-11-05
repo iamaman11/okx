@@ -2129,20 +2129,11 @@ mod raw_native_session_tests {
         // expired under the unchanged 5s production source-age gate before
         // public Execute could consume it. These are still finite, immutable
         // raw responses; a late/invalid page must fail closed.
-        let fresh_fee_at = chrono::Utc::now().timestamp_millis().to_string();
+        // Leverage does not have a signed exchange-time expiry. Publish
+        // the initial fee pages at the FIRST public Execute event instead,
+        // after all read-only readiness and preview work. This preserves
+        // the original three finite signed pages and unchanged 5s gate.
         for _ in 0..3 {
-            feed.expect_get(RecordedGet {
-                access_key: "fixture-observer-a".into(),
-                path: "/api/v5/account/trade-fee".into(),
-                required_query: vec![
-                    ("instType".into(), "SWAP".into()),
-                    ("instFamily".into(), "BTC-USDT".into()),
-                ],
-                raw_response: envelope(json!([{
-                    "instType":"SWAP","level":"Lv1","ts":fresh_fee_at,
-                    "feeGroup":[{"groupId":"4","maker":"0.0005","taker":"0.0005"}]
-                }])),
-            });
             feed.expect_get(RecordedGet {
                 access_key: "fixture-observer-a".into(),
                 path: "/api/v5/account/leverage-info".into(),
@@ -2166,6 +2157,27 @@ mod raw_native_session_tests {
         let opened = Box::pin(async {
             let admission_deadline = std::time::Instant::now() + Duration::from_secs(16);
             for attempt in 0..4 {
+                if attempt == 0 {
+                    // The Native Execute is now actually ready to consume
+                    // this independently signed exchange observation.
+                    // Do not refresh bytes on GET, replay a consumed source,
+                    // or create additional pages because the runner is slow.
+                    let execute_fee_at = chrono::Utc::now().timestamp_millis().to_string();
+                    for _ in 0..3 {
+                        feed.expect_get(RecordedGet {
+                            access_key: "fixture-observer-a".into(),
+                            path: "/api/v5/account/trade-fee".into(),
+                            required_query: vec![
+                                ("instType".into(), "SWAP".into()),
+                                ("instFamily".into(), "BTC-USDT".into()),
+                            ],
+                            raw_response: envelope(json!([{
+                                "instType":"SWAP","level":"Lv1","ts":execute_fee_at,
+                                "feeGroup":[{"groupId":"4","maker":"0.0005","taker":"0.0005"}]
+                            }])),
+                        });
+                    }
+                }
                 let admission = if attempt == 0
                     && std::env::var("OKX_T10_06_CONCURRENT_PROBE").as_deref() == Ok("1")
                 {
@@ -5602,7 +5614,14 @@ mod raw_native_session_tests {
                             need_new_market: frontier_tx,
                             fresh_market_ready: market_rx,
                         }));
-                        frontier_rx.await.expect("T09.4 financial readiness handoff failed");
+                        if frontier_rx.await.is_err() {
+                            // A closed readiness channel means the child
+                            // terminated BEFORE asking for a market update.
+                            // Join it to preserve the original panic/cause;
+                            // reporting RecvError alone masks the first failure.
+                            let child = task.await;
+                            panic!("T09_4_CHILD_BEFORE_MARKET_HANDOFF:{child:?}");
+                        }
                         refresh_recorded_market();
                         market_tx.send(()).expect("T09.4 signed market reply handoff failed");
                         let add=task.await.expect("T09.4 managed Add native task");
