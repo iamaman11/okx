@@ -4136,6 +4136,19 @@ mod raw_native_session_tests {
                         eprintln!("T09_2_PHASE_V1:EXECUTE_TASK_STARTED");
                         let until = std::time::Instant::now() + Duration::from_secs(10);
                         for attempt in 0..24 {
+                            // Explicit NEW exchange-clock observation at the
+                            // public Execute boundary. A clock sampled before
+                            // the preceding finance/census I/O can be older
+                            // than production's unchanged 5 s skew budget.
+                            // Never refresh a source merely because a GET
+                            // occurred; retries here prove SQL intent absence.
+                            let clock_at = chrono::Utc::now().timestamp_millis();
+                            execute_feed.advance_recorded_public_clock(
+                                serde_json::to_vec(&json!({
+                                    "code":"0","msg":"",
+                                    "data":[{"ts":clock_at.to_string()}]
+                                })).expect("T09.2 fresh clock event raw envelope")
+                            );
                             let result = execute_trade.trade("fixture-a", &second, None).await;
                             match result {
                                 Ok(result) => {

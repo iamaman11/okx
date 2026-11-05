@@ -25,12 +25,14 @@ async fn t10_03_worker_committed_post_reply_lost(
         "details":[{"ccy":"USDT","eq":"100","liab":"0",
             "availEq":"100","availBal":"100","eqUsd":"100","uTime":stamped}]
     }]));
-    feed.advance_recorded_route("fixture-observer-b","/api/v5/account/balance",
-        (0..16).map(|_|RecordedGet {
-            access_key:"fixture-observer-b".into(),
-            path:"/api/v5/account/balance".into(),
-            required_query:vec![],raw_response:balance.clone(),
-        }).collect());
+    // This is B's FIRST signed balance source in the independent T10-03
+    // cohort. Advancing an unregistered route falsely fails the fixture
+    // before the production Worker post-fence can be exercised.
+    feed.expect_immutable_signed_phase("t10-03-b-initial-balance",RecordedGet {
+        access_key:"fixture-observer-b".into(),
+        path:"/api/v5/account/balance".into(),
+        required_query:vec![],raw_response:balance,
+    });
     let signed_fee=raw(json!([{
         "instType":"SWAP","level":"Lv1","ts":stamped,
         "feeGroup":[{"groupId":"4","maker":"0.0005","taker":"0.0005"}]
