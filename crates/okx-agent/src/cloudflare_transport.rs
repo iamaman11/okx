@@ -674,6 +674,7 @@ mod raw_native_session_tests {
     include!("trade_integration_t10_13.rs");
     include!("trade_integration_t10_09.rs");
     include!("trade_integration_t10_10.rs");
+    include!("trade_integration_t10_07.rs");
 
     /// Retry permission is test-only and limited to an explicitly read-only
     /// Preview that failed at the *local* request-admission boundary. The
@@ -1075,8 +1076,11 @@ mod raw_native_session_tests {
         let token = handoff["token"].as_str().unwrap().to_owned();
         let reservation_key = handoff["reservation_key"].as_str().unwrap_or("").to_owned();
         let close_mode = std::env::var("OKX_T09_6_CLOSE_PROBE").as_deref() == Ok("1");
+        let t10_single_campaign=
+            std::env::var("OKX_T10_07_NATIVE_STANDALONE").as_deref()==Ok("1");
         let add_mode =
-            close_mode || std::env::var("OKX_T09_4_MANAGED_ADD_PROBE").as_deref() == Ok("1");
+            close_mode || t10_single_campaign
+            || std::env::var("OKX_T09_4_MANAGED_ADD_PROBE").as_deref() == Ok("1");
 
         // The same real public WS coordinator consumes recorded raw market
         // frames. These are immutable venue observations, not a fabricated
@@ -1497,6 +1501,28 @@ mod raw_native_session_tests {
             .unwrap();
         assert_eq!(caps_b["native_sql_policy"]["matches_governance"], true);
         assert_eq!(caps_b["native_sql_policy"]["revision"], 2);
+        if t10_single_campaign {
+            // No T09 component reservations or unrelated trading prelude.
+            // Both independently verified Native SQL owners are now open,
+            // and one clean actual production Worker RiskBook is connected.
+            let result=t10_07_native_single_campaign(
+                accounts.clone(),trade.clone(),risk.clone(),
+                feed.clone(),rate_budget.clone(),&refresh_recorded_market
+            ).await;
+            println!("T10_07_NATIVE_SINGLE_CAMPAIGN_V1:{result}");
+            shutdown_tx.send(true).expect("T10-07 actual WSS owner");
+            tokio::time::timeout(Duration::from_secs(10),session)
+                .await.expect("T10-07 WSS join deadline").unwrap()
+                .expect("T10-07 WSS clean shutdown");
+            public_shutdown.send(true).expect("T10-07 public shutdown");
+            tokio::time::timeout(Duration::from_secs(5),public_task)
+                .await.expect("T10-07 public join deadline").unwrap().unwrap();
+            accounts.shutdown().await;
+            // Do not delete open Native SQLite files on Windows. The
+            // separate process and its sandbox own their final teardown.
+            println!("native_to_persisted_workerd_riskbook PASS: T10-07 actual Native");
+            return;
+        }
         // Positive public Preview: the production instrument parser,
         // market coordinator, account bootstrap, fee calculator, SQL policy
         // and final value projection all run against the same live owners.
