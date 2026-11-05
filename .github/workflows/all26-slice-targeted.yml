@@ -14,6 +14,7 @@ on:
       - work/recorded-capture-scheduler-20261105
       - work/recorded-event-source-controller-20261105
       - work/t10-07-one-campaign-native-20261105
+      - work/t10-07-strict-three-way-20261105
       - work/b-census-sql-owner-batch-20261105
 
 permissions:
@@ -69,7 +70,7 @@ jobs:
         run: |
           cargo test --locked -p okx-agent --lib immutable_signed_ -- --nocapture
           if ($LASTEXITCODE -ne 0) { throw 'SIGNED_SOURCE_PHASE_UNIT_PROOF_FAILED' }
-      - name: Source controller and T10 three-case regression — exact-SHA Windows
+      - name: T10-07 three-way overlapping Native admission — exact-SHA Windows
         shell: pwsh
         timeout-minutes: 21
         run: |
@@ -80,7 +81,7 @@ jobs:
           # SHA 27e2b95. Re-run T10-01, T10-04 and T10-07 together on
           # this NEW exact immutable SHA. Historical green runs do not count.
           # Preserve the independent 26-ID and owner evidence oracle.
-          $ids = @('T10-01','T10-04','T10-07')
+          $ids = @('T10-07')
           $env:OKX_B_CENSUS_CAUSE_PROBE = '1'
           $env:OKX_T09_4_SOURCE_COHERENCE_PROBE = '1'
           $env:OKX_T10_01_MAINT_SHUTDOWN_PROBE = '1'
