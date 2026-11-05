@@ -14,6 +14,7 @@ on:
       - work/recorded-capture-scheduler-20261105
       - work/recorded-event-source-controller-20261105
       - work/event-controller-bounded-source-20261105
+      - work/t10-07-single-native-campaign-20261105
       - work/b-census-sql-owner-batch-20261105
 
 permissions:
@@ -77,10 +78,10 @@ jobs:
           $dir = Join-Path $env:RUNNER_TEMP 'b-stage'
           New-Item -ItemType Directory -Path $dir -Force | Out-Null
           # One completed A1 T09.8 path is now proven on the prior SHA.
-          # Run B candidates together; T10-07 remains deliberately not proven.
+          # Standalone real Native/Worker T10-07 campaign; no two-cohort mixing.
           # Two independent executions on one immutable SHA expose source-order
           # flakiness without mixing evidence from different commits.
-          $ids = @('T10-01','T10-04')
+          $ids = @('T10-07')
           $env:OKX_B_CENSUS_CAUSE_PROBE = '1'
           $env:OKX_T09_4_SOURCE_COHERENCE_PROBE = '1'
           $env:OKX_T10_01_MAINT_SHUTDOWN_PROBE = '1'
