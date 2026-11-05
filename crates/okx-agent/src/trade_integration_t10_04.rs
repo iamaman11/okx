@@ -20,12 +20,14 @@ async fn t10_04_foreign_worker_result(
         "details":[{"ccy":"USDT","eq":"100","liab":"0",
             "availEq":"100","availBal":"100","eqUsd":"100","uTime":fresh}]
     }]));
-    feed.advance_recorded_route("fixture-observer-b","/api/v5/account/balance",
-        (0..16).map(|_|RecordedGet {
-            access_key:"fixture-observer-b".into(),
-            path:"/api/v5/account/balance".into(),
-            required_query:vec![],raw_response:balance.clone(),
-        }).collect());
+    // This is B's FIRST signed balance source. A's earlier order did
+    // not create a phase for the independent B UID. Do not retire a
+    // fictional previous snapshot or append page-count padding.
+    feed.expect_immutable_signed_phase("t10-04-b-before-foreign-result",RecordedGet {
+        access_key:"fixture-observer-b".into(),
+        path:"/api/v5/account/balance".into(),
+        required_query:vec![],raw_response:balance.clone(),
+    });
     let fee=wrap(serde_json::json!([{
         "instType":"SWAP","level":"Lv1","ts":fresh,
         "feeGroup":[{"groupId":"4","maker":"0.0005","taker":"0.0005"}]

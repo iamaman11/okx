@@ -24,12 +24,10 @@ async fn t10_01_partial_balance_denial_recovery(
     // B has no prior authenticated REST balance transcript in this
     // baseline. Register its FIRST finite source rather than pretending
     // that a phase already exists; a later actual source change uses advance.
-    for page in (0..20).map(|_|RecordedGet {
+    feed.expect_immutable_signed_phase("t10-01-b-incomplete",RecordedGet {
         access_key:"fixture-observer-b".into(),path:route.into(),
         required_query:vec![],raw_response:empty.clone(),
-    }) {
-        feed.expect_get(page);
-    }
+    });
     let initial_ts=chrono::Utc::now().timestamp_millis().to_string();
     let initial_fee=wrap(json!([{
         "instType":"SWAP","level":"Lv1","ts":initial_ts,
@@ -134,11 +132,13 @@ async fn t10_01_partial_balance_denial_recovery(
             "availEq":"100","availBal":"100","eqUsd":"100","uTime":stamp}]
     }]));
     let fresh_digest=format!("{:x}",sha2::Sha256::digest(&fresh));
-    feed.advance_recorded_route("fixture-observer-b",route,
-        (0..20).map(|_|RecordedGet{
+    let observed_incomplete_reads=feed.advance_immutable_signed_phase(
+        "t10-01-b-incomplete","t10-01-b-fresh",RecordedGet {
             access_key:"fixture-observer-b".into(),path:route.into(),
             required_query:vec![],raw_response:fresh.clone(),
-        }).collect());
+        });
+    assert!(observed_incomplete_reads>0,
+        "negative TradeService source must read the actual incomplete signed phase");
     let fee=wrap(json!([{
         "instType":"SWAP","level":"Lv1","ts":stamp,
         "feeGroup":[{"groupId":"4","maker":"0.0005","taker":"0.0005"}]

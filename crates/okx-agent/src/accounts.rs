@@ -1734,6 +1734,102 @@ pub(crate) mod recorded_support {
         }
     }
 
+    #[tokio::test]
+    async fn immutable_signed_snapshot_phases_follow_events_not_background_read_counts() {
+        fn balance(account:&str,value:&str)->RecordedGet {
+            RecordedGet {
+                access_key:account.into(),
+                path:"/api/v5/account/balance".into(),
+                required_query:vec![],
+                raw_response:serde_json::to_vec(&serde_json::json!({
+                    "code":"0","msg":"","data":[{"totalEq":value}]
+                })).unwrap(),
+            }
+        }
+        fn read(account:&str)->HttpRequest {
+            reqwest::Client::new()
+                .get("https://www.okx.com/api/v5/account/balance")
+                .header("OK-ACCESS-KEY",account)
+                .build().unwrap()
+        }
+        let feed=RecordedAccountHttp::default();
+        feed.expect_immutable_signed_phase("a-before-event",balance("fixture-observer-a","100"));
+        feed.expect_immutable_signed_phase("b-before-event",balance("fixture-observer-b","250"));
+        // Deliberately interleave the two independent UID sources. Any
+        // number of concurrent GETs in a phase receives the SAME bytes;
+        // neither count nor task scheduling changes exchange truth.
+        for account in [
+            "fixture-observer-a","fixture-observer-b",
+            "fixture-observer-a","fixture-observer-a",
+            "fixture-observer-b","fixture-observer-a",
+        ] {
+            let result=feed.send(read(account),Instant::now()+std::time::Duration::from_secs(2))
+                .await.expect("signed immutable source");
+            let raw:serde_json::Value=serde_json::from_slice(&result.body).unwrap();
+            assert_eq!(raw["data"][0]["totalEq"],
+                if account.ends_with("-a"){"100"}else{"250"});
+        }
+        assert_eq!(feed.immutable_signed_phase_reads(
+            "fixture-observer-a","/api/v5/account/balance","a-before-event"),4);
+        assert_eq!(feed.immutable_signed_phase_reads(
+            "fixture-observer-b","/api/v5/account/balance","b-before-event"),2);
+        assert_eq!(feed.unconsumed_reads(),0,
+            "immutable signed snapshots do not become arbitrary queued pages");
+        // After an independently verified source event, only A transitions;
+        // B's bytes remain unchanged. No test SQL or Worker state is edited.
+        let prior=feed.advance_immutable_signed_phase(
+            "a-before-event","a-after-event",
+            balance("fixture-observer-a","99"));
+        assert_eq!(prior,4);
+        let a=feed.send(read("fixture-observer-a"),
+            Instant::now()+std::time::Duration::from_secs(2)).await.unwrap();
+        let b=feed.send(read("fixture-observer-b"),
+            Instant::now()+std::time::Duration::from_secs(2)).await.unwrap();
+        assert_eq!(serde_json::from_slice::<serde_json::Value>(&a.body).unwrap()
+            ["data"][0]["totalEq"],"99");
+        assert_eq!(serde_json::from_slice::<serde_json::Value>(&b.body).unwrap()
+            ["data"][0]["totalEq"],"250");
+        assert_eq!(feed.outbound_posts.lock().unwrap().len(),0);
+    }
+
+    #[tokio::test]
+    async fn immutable_signed_phase_rejects_wrong_query_and_preserves_source() {
+        let feed=RecordedAccountHttp::default();
+        feed.expect_immutable_signed_phase("fee-before",RecordedGet {
+            access_key:"fixture-observer-a".into(),
+            path:"/api/v5/account/trade-fee".into(),
+            required_query:vec![
+                ("instType".into(),"SWAP".into()),
+                ("instFamily".into(),"BTC-USDT".into())
+            ],
+            raw_response:serde_json::to_vec(&serde_json::json!({
+                "code":"0","msg":"","data":[{
+                    "ts":"1793840000000","feeGroup":[{"maker":"0.0005","taker":"0.0005"}]
+                }]
+            })).unwrap(),
+        });
+        let bad=reqwest::Client::new()
+            .get("https://www.okx.com/api/v5/account/trade-fee?instType=SPOT&instFamily=BTC-USDT")
+            .header("OK-ACCESS-KEY","fixture-observer-a")
+            .build().unwrap();
+        let denial=feed.send(bad,Instant::now()+std::time::Duration::from_secs(2))
+            .await.expect_err("wrong exact scope cannot borrow SWAP raw fees");
+        assert!(denial.to_string().contains("TRANSCRIPT_IMMUTABLE_QUERY_MISMATCH"));
+        assert_eq!(feed.immutable_signed_phase_reads(
+            "fixture-observer-a","/api/v5/account/trade-fee","fee-before"),0);
+        let good=reqwest::Client::new()
+            .get("https://www.okx.com/api/v5/account/trade-fee?instType=SWAP&instFamily=BTC-USDT")
+            .header("OK-ACCESS-KEY","fixture-observer-a")
+            .build().unwrap();
+        let raw=feed.send(good,Instant::now()+std::time::Duration::from_secs(2))
+            .await.expect("signed correct scope");
+        assert_eq!(serde_json::from_slice::<serde_json::Value>(&raw.body).unwrap()
+            ["data"][0]["ts"],"1793840000000");
+        assert_eq!(feed.immutable_signed_phase_reads(
+            "fixture-observer-a","/api/v5/account/trade-fee","fee-before"),1);
+        assert_eq!(feed.outbound_posts.lock().unwrap().len(),0);
+    }
+
     impl HttpTransport for RecordedAccountHttp {
         fn send(&self, request: HttpRequest, deadline: Instant) -> HttpSend<'_> {
             Box::pin(async move {
