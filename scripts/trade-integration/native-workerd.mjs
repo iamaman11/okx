@@ -209,6 +209,10 @@ export async function actualNativeWorker(root, signal, { statusProbe = false, se
           nativeClose: receipt(stdout, "T09_1_NATIVE_CLOSE_ACK_V1"),
           nativeTerminal: receipt(stdout, "T09_1_NATIVE_TERMINAL_CLOSE_V1"),
           nativeRestart: receipt(stdout, "T09_1_NATIVE_SQL_RESTART_V1"),
+          ...(process.env.OKX_T10_13_STOP_PROBE === "1" ? {
+            nativeT10Stop: receipt(stdout, "T10_13_NATIVE_STOP_AFTER_FILL_V1"),
+            workerT10Stop: receipt(stdout, "T10_13_WORKER_STOP_V1"),
+          } : {}),
           ...(secondAdmission ? {
             nativeSecondAdmission: receipt(stdout, "T09_2_NATIVE_ADMISSION_V1"),
             nativeCrossUidDenial: receipt(stdout, "T09_MA_CROSS_UID_DENIAL_V1"),
@@ -264,10 +268,6 @@ export async function actualNativeWorker(root, signal, { statusProbe = false, se
             } : {}),
             ...(process.env.OKX_T10_10_FINANCE_REPLAY_PROBE === "1" ? {
               nativeT10FinanceReplay: receipt(stdout, "T10_10_NATIVE_SIGNED_REPLAY_V1"),
-            } : {}),
-            ...(process.env.OKX_T10_13_STOP_PROBE === "1" ? {
-              nativeT10Stop: receipt(stdout, "T10_13_NATIVE_STOP_AFTER_FILL_V1"),
-              workerT10Stop: receipt(stdout, "T10_13_WORKER_STOP_V1"),
             } : {}),
             ...(closeMode ? { nativeCloseAck: receipt(stdout, "T09_6_NATIVE_CLOSE_ACK_V1") } : {}),
             ...(closeMode ? { nativeCloseTerminal: receipt(stdout, "T09_6_NATIVE_TERMINAL_V1"), nativeCloseFinancialSources:receipt(stdout,"T09_6_NATIVE_FINANCIAL_SOURCES_V1"), workerCloseReconciled:receipt(stdout,"T09_6_WORKER_CLOSE_RECONCILED_V1") } : {}),
