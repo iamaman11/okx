@@ -138,7 +138,8 @@ async fn t10_07_native_single_campaign(
         raw_response:br#"{"code":"0","msg":"","data":[{"ordId":"recorded-t10-07-a-001","clOrdId":"__REQUEST_CL_ORD_ID__","sCode":"0"}]}"#.to_vec(),
     });
     let order_time=chrono::Utc::now().timestamp_millis().to_string();
-    for _ in 0..6 {
+    // Two declared source consumers: Execute ACK and its status readback.
+    for _ in 0..2 {
         feed.expect_get(RecordedGet {
             access_key:"fixture-executor-a".into(),
             path:"/api/v5/trade/order".into(),
