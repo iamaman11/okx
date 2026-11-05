@@ -1059,6 +1059,10 @@ pub(crate) mod recorded_support {
         // fixture selection. Task IDs attribute reads to source owners versus
         // the TradeService caller without changing replay or risk behavior.
         signed_balance_reads: Mutex<Vec<(String, String, i64)>>,
+        // T10-06: record the actual Tokio consumers of the finite, unsigned
+        // fallback inventory. This is diagnostic test state only: never
+        // supplies a venue response or changes financial source freshness.
+        t10_06_pending_consumers: Mutex<Vec<(String, i64)>>,
         pub(crate) outbound_posts: Mutex<Vec<(String, String, serde_json::Value)>>,
         /// Actual signed fee GETs delivered by this test transport:
         /// (account API key, exchange ts, local delivery timestamp).
@@ -2943,9 +2947,38 @@ pub(crate) mod recorded_support {
                     }
                     _ => 0,
                 };
+                let probe_pending_consumers = path == "/api/v5/trade/orders-pending"
+                    && std::env::var("OKX_T10_06_CONCURRENT_PROBE").as_deref() == Ok("1");
+                if probe_pending_consumers {
+                    self.t10_06_pending_consumers.lock().unwrap().push((
+                        format!("{:?}", tokio::task::try_id()),
+                        chrono::Utc::now().timestamp_millis(),
+                    ));
+                }
                 let mut observed = self.requests.lock().unwrap();
                 let consumed = observed.iter().filter(|v| **v == request_key).count();
                 if consumed >= max_repeats {
+                    if probe_pending_consumers {
+                        let events = self.t10_06_pending_consumers.lock().unwrap();
+                        let mut by_task = std::collections::BTreeMap::<String, usize>::new();
+                        for (task, _) in events.iter() {
+                            *by_task.entry(task.clone()).or_default() += 1;
+                        }
+                        eprintln!(
+                            "T10_06_PENDING_CONSUMERS_V1:{}",
+                            serde_json::json!({
+                                "actor": key,
+                                "route": path,
+                                "query": request.url().query().unwrap_or_default(),
+                                "read_limit": max_repeats,
+                                "accepted_reads": consumed,
+                                "attempts": events.len(),
+                                "first_attempt_ms": events.first().map(|(_, at)| at),
+                                "last_attempt_ms": events.last().map(|(_, at)| at),
+                                "reads_by_tokio_task": by_task,
+                            })
+                        );
+                    }
                     return Err(OkxError::Response(format!(
                         "TRANSCRIPT_REPEAT_EXCEEDED:{request_key}:count={consumed}:limit={max_repeats}"
                     )));
