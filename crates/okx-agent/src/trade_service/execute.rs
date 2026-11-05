@@ -1144,10 +1144,29 @@ impl TradeService {
                     central = Some(v);
                     post_held_selected = Some(witness);
                 }
+                Err(reason) if matches!(
+                    reason.as_str(),
+                    "POST_FENCE_OUTCOME_UNKNOWN_NO_POST"
+                        | "RISK_TRANSPORT_LOST_DO_NOT_REPLAY"
+                ) => {
+                    // A lost Worker BeginPost answer is not a negative
+                    // authorization. INSPECT may already have observed
+                    // POSTED, or its own WSS reply may be unavailable.
+                    // Native has NOT entered its venue-post section yet.
+                    // Preserve the original RESERVED SQL intent and its
+                    // persisted central receipt: do not REJECT it, attempt
+                    // RELEASE_UNSENT on a possibly POSTED Worker reserve,
+                    // or issue any venue POST to repair an ambiguous fence.
+                    // A same-key replay remains bound to this durable intent.
+                    return Ok(uncertain(
+                        &prepared.intent_id,
+                        "POST_FENCE_OUTCOME_UNCERTAIN_NATIVE_UNSENT",
+                    ));
+                }
                 Err(reason) => {
-                    // BEGIN_POST failed before any native post claim or venue call.
-                    // Preserve the central first cause in SQL, not a fabricated
-                    // MAY_HAVE_SENT outcome. A failed local commit stays uncertain.
+                    // A proven ordinary pre-post denial may be rejected;
+                    // only an unambiguous unsent release can retire risk.
+                    // The ambiguous Worker outcomes above remain durable.
                     return match reject_prepost_denial(&r.execution.store, &prepared, &reason).await
                     {
                         Ok(mut result) => {
