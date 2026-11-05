@@ -54,6 +54,19 @@ static T10_15_WORKER_HELD_COMMITTED: std::sync::atomic::AtomicBool =
 static T10_15_SIGNED_SOURCE_CHANGED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
+// T10-07: Worker commits B's HELD before its original reply is delivered.
+// Defer only this response without blocking subsequent WSS risk commands.
+// This is a test-only transport barrier, never a fabricated Worker grant.
+#[cfg(test)]
+static T10_07_DEFER_NEXT_HELD: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+#[cfg(test)]
+static T10_07_WORKER_HELD_COMMITTED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+#[cfg(test)]
+static T10_07_RELEASE_HELD_REPLY: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 // T10-03: Worker commits a real BeginPost CAS but its signed authorization
 // reply is lost at the Native receive boundary. Never forge POST authority.
 #[cfg(test)]
@@ -334,6 +347,28 @@ where
             pending.retain(|_,sender|!sender.is_closed());
             let sender=pending.remove(&result.command_id)
                 .ok_or_else(||transport("RISK_RESULT_COMMAND_UNBOUND"))?;
+            #[cfg(test)]
+            if result.status==okx_protocol::risk_authority::RiskDecisionStatus::Held
+                && T10_07_DEFER_NEXT_HELD.swap(
+                    false,std::sync::atomic::Ordering::SeqCst)
+            {
+                T10_07_WORKER_HELD_COMMITTED.store(
+                    true,std::sync::atomic::Ordering::SeqCst);
+                tokio::spawn(async move {
+                    let released=tokio::time::timeout(Duration::from_secs(15),async {
+                        while !T10_07_RELEASE_HELD_REPLY.load(
+                            std::sync::atomic::Ordering::SeqCst)
+                        {
+                            tokio::time::sleep(Duration::from_millis(5)).await;
+                        }
+                    }).await;
+                    if released.is_ok() {let _=sender.send(result);}
+                    // An expired test barrier never authorizes a venue POST.
+                });
+            } else {
+                let _=sender.send(result);
+            }
+            #[cfg(not(test))]
             let _=sender.send(result);
         },
         F::Request{request,operator_governance,..}=>{
@@ -674,6 +709,7 @@ mod raw_native_session_tests {
     include!("trade_integration_t10_13.rs");
     include!("trade_integration_t10_09.rs");
     include!("trade_integration_t10_10.rs");
+    include!("trade_integration_t10_07.rs");
 
     /// Retry permission is test-only and limited to an explicitly read-only
     /// Preview that failed at the *local* request-admission boundary. The
@@ -1077,6 +1113,9 @@ mod raw_native_session_tests {
         let close_mode = std::env::var("OKX_T09_6_CLOSE_PROBE").as_deref() == Ok("1");
         let add_mode =
             close_mode || std::env::var("OKX_T09_4_MANAGED_ADD_PROBE").as_deref() == Ok("1");
+        let t10_seven_one_campaign=
+            std::env::var("OKX_T10_07_ONE_CAMPAIGN").as_deref()==Ok("1");
+        let clean_mode=add_mode||t10_seven_one_campaign;
 
         // The same real public WS coordinator consumes recorded raw market
         // frames. These are immutable venue observations, not a fabricated
@@ -1458,9 +1497,9 @@ mod raw_native_session_tests {
         assert_eq!(result.status, RiskDecisionStatus::Observed);
         let budget = result.budget.as_ref().unwrap();
         assert_eq!(budget.campaign_limit_usd, "10");
-        assert_eq!(budget.reserved_loss_usd, if add_mode { "0" } else { "1" });
+        assert_eq!(budget.reserved_loss_usd, if clean_mode { "0" } else { "1" });
         let entry = budget.entry_budget.as_ref().unwrap();
-        assert_eq!(entry.reserved_usd, if add_mode { "0" } else { "2" });
+        assert_eq!(entry.reserved_usd, if clean_mode { "0" } else { "2" });
         assert_eq!(entry.consumed_usd, "0");
         // The Worker publishes its real PolicySnapshot over the same WSS.
         // Its revision must be durably applied by the owning SQL worker
@@ -1580,7 +1619,7 @@ mod raw_native_session_tests {
         let untouched = risk.request(before).await.unwrap();
         assert_eq!(
             untouched.budget.as_ref().unwrap().reserved_loss_usd,
-            if add_mode { "0" } else { "1" }
+            if clean_mode { "0" } else { "1" }
         );
         assert_eq!(
             untouched
@@ -1591,9 +1630,9 @@ mod raw_native_session_tests {
                 .as_ref()
                 .unwrap()
                 .reserved_usd,
-            if add_mode { "0" } else { "2" }
+            if clean_mode { "0" } else { "2" }
         );
-        if !add_mode {
+        if !clean_mode {
             let inspect = RiskCommand {
                 schema: RISK_COMMAND_SCHEMA_V1.into(),
                 command_id: "risk_native_real_workerd_inspect_001".into(),
@@ -1614,7 +1653,7 @@ mod raw_native_session_tests {
         // The second intent is sent by actual Rust Native through the same
         // authenticated WSS path. Evidence values are explicitly scripted
         // boundary inputs: no venue claims and no exchange POST in this test.
-        let checked = if add_mode {
+        let checked = if clean_mode {
             let mut cmd = summary("risk_t09_4_clean_native");
             cmd.installation_id = "installation_test".into();
             risk.request(cmd).await.unwrap()
@@ -1851,6 +1890,26 @@ mod raw_native_session_tests {
         // first Execute boundary (fresh_fee_at). Do not stage a second
         // mandatory tariff page set here: an unused recorded response is
         // not an authenticated GET and must remain visibly unconsumed.
+        if t10_seven_one_campaign {
+            let witness=t10_07_native_one_campaign(
+                accounts.clone(),trade.clone(),risk.clone(),feed.clone(),
+                rate_budget.clone(),&refresh_recorded_market,
+            ).await;
+            println!("T10_07_NATIVE_ONE_CAMPAIGN_V1:{witness}");
+            let _=maintenance_shutdown.send(true);
+            let _=public_shutdown.send(true);
+            let _=shutdown_tx.send(true);
+            tokio::time::timeout(Duration::from_secs(10),maintenance_task)
+                .await.expect("T10-07 maintenance shutdown deadline")
+                .expect("T10-07 maintenance task exit");
+            accounts.shutdown().await;
+            let _=tokio::time::timeout(Duration::from_secs(10),public_task)
+                .await.expect("T10-07 public WS shutdown deadline");
+            let _=tokio::time::timeout(Duration::from_secs(10),session)
+                .await.expect("T10-07 Native risk session shutdown deadline");
+            println!("native_to_persisted_workerd_riskbook PASS: T10-07 one Native campaign");
+            return;
+        }
         feed.expect_post(RecordedPost {
             access_key: "fixture-executor-a".into(),
             path: "/api/v5/trade/order".into(),
