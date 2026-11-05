@@ -1825,6 +1825,59 @@ pub(crate) mod recorded_support {
     }
 
     #[tokio::test]
+    async fn immutable_signed_source_event_supersedes_only_coherent_old_pages() {
+        let raw=|stamp:&str|serde_json::to_vec(&serde_json::json!({
+            "code":"0","msg":"","data":[{
+                "instType":"SWAP","level":"Lv1","ts":stamp,
+                "feeGroup":[{"groupId":"4","maker":"0.0005","taker":"0.0005"}]
+            }]
+        })).unwrap();
+        let page=|ts:&str|RecordedGet {
+            access_key:"fixture-observer-b".into(),
+            path:"/api/v5/account/trade-fee".into(),
+            required_query:vec![
+                ("instType".into(),"SWAP".into()),
+                ("instFamily".into(),"BTC-USDT".into()),
+            ],raw_response:raw(ts)
+        };
+        // An inconsistent old external source is a harness failure, never
+        // a financial denial or permission to discard inconvenient bytes.
+        let conflicting=RecordedAccountHttp::default();
+        conflicting.expect_get(page("100"));
+        conflicting.expect_optional_get(page("101"));
+        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(||{
+            conflicting.supersede_queued_signed_source_at_event(
+                "observed-fee-change","fee-after",page("200"));
+        })).is_err(),"mixed source generations cannot be retired silently");
+
+        let feed=RecordedAccountHttp::default();
+        feed.expect_get(page("100"));
+        feed.expect_optional_get(page("100"));
+        let retired=feed.supersede_queued_signed_source_at_event(
+            "observed-fee-change","fee-after",page("200"));
+        assert_eq!(retired,2);
+        assert_eq!(feed.unconsumed_reads(),0);
+        let request=||reqwest::Client::new()
+            .get("https://www.okx.com/api/v5/account/trade-fee?instType=SWAP&instFamily=BTC-USDT")
+            .header("OK-ACCESS-KEY","fixture-observer-b")
+            .build().unwrap();
+        for _ in 0..3 {
+            let observed=feed.send(request(),
+                Instant::now()+std::time::Duration::from_secs(2)).await.unwrap();
+            assert_eq!(serde_json::from_slice::<serde_json::Value>(&observed.body)
+                .unwrap()["data"][0]["ts"],"200");
+        }
+        assert_eq!(feed.immutable_signed_phase_reads(
+            "fixture-observer-b","/api/v5/account/trade-fee","fee-after"),3);
+        assert_eq!(feed.outbound_posts.lock().unwrap().len(),0);
+        let trace=feed.immutable_phase_trace.lock().unwrap();
+        assert_eq!(trace.len(),1);
+        assert!(trace[0].contains("event=SIGNED_SOURCE_SUPERSEDED")
+            &&trace[0].contains("old_pages=2")
+            &&trace[0].contains("cause=observed-fee-change"));
+    }
+
+    #[tokio::test]
     async fn immutable_signed_snapshot_phases_follow_events_not_background_read_counts() {
         fn balance(account:&str,value:&str)->RecordedGet {
             RecordedGet {
