@@ -38,7 +38,7 @@ async fn t10_01_partial_balance_denial_recovery(
     feed.expect_immutable_signed_phase("t10-01-b-incomplete",RecordedGet {
         access_key:"fixture-observer-b".into(),path:route.into(),
         required_query:vec![],raw_response:empty.clone(),
-    });
+    },budget());
     let initial_ts=chrono::Utc::now().timestamp_millis().to_string();
     let initial_fee=wrap(json!([{
         "instType":"SWAP","level":"Lv1","ts":initial_ts,
@@ -53,7 +53,7 @@ async fn t10_01_partial_balance_denial_recovery(
             ("instType".into(),"SWAP".into()),
             ("instFamily".into(),"BTC-USDT".into()),
         ],raw_response:initial_fee.clone()
-    });
+    },budget());
     assert!(retired_fee_pages>0, "B fee must supersede a real old signed source");
     let leverage=wrap(json!([
         {"instId":"BTC-USDT-SWAP","mgnMode":"cross","posSide":"long","lever":"2"},
@@ -68,7 +68,7 @@ async fn t10_01_partial_balance_denial_recovery(
             ("instId".into(),"BTC-USDT-SWAP".into()),
             ("mgnMode".into(),"cross".into()),
         ],raw_response:leverage.clone()
-    });
+    },budget());
     assert!(retired_leverage_pages>0,
         "B leverage must supersede a real old signed source");
     drop(source_boundary);
@@ -151,7 +151,7 @@ async fn t10_01_partial_balance_denial_recovery(
         "t10-01-b-incomplete","t10-01-b-fresh",RecordedGet {
             access_key:"fixture-observer-b".into(),path:route.into(),
             required_query:vec![],raw_response:fresh.clone(),
-        });
+        },budget());
     assert!(observed_incomplete_reads>0,
         "negative TradeService source must read the actual incomplete signed phase");
     let fee=wrap(json!([{
@@ -166,7 +166,7 @@ async fn t10_01_partial_balance_denial_recovery(
                 ("instType".into(),"SWAP".into()),
                 ("instFamily".into(),"BTC-USDT".into()),
             ],raw_response:fee.clone()
-        });
+        },budget());
     // Source recovery and entry-admission are TWO distinct causes.
     // Wait for BOTH ordinary production finance capture owners to publish
     // fresh SQL cursor/NAV results from the just-installed signed phase;
