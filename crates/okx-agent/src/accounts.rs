@@ -100,6 +100,9 @@ pub struct AccountResources {
     next_finance_cycle: AtomicU64,
     /// Bounded account-local mutation capacity. Never held by reads/analytics.
     pub mutation_capacity: Semaphore,
+    /// One risk-increasing admission planner per account. Cancellation,
+    /// protective recovery and close do NOT share this gate.
+    pub new_risk_admission: Semaphore,
     source_shutdown: watch::Sender<bool>,
     verified_source_generation: AtomicU64,
     _identity_lease: File,
@@ -603,11 +606,8 @@ impl AccountRuntimeRegistry {
             observer,
             private_ws,
             execution,
-            // New-risk Execute, Cancel and Close share one account-local
-            // admission permit. SQLite remains the durable financial owner;
-            // concurrent requests cannot all start independent source plans
-            // while competing for one intent. Other accounts are unaffected.
-            mutation_capacity: Semaphore::new(1),
+            mutation_capacity: Semaphore::new(128),
+            new_risk_admission: Semaphore::new(1),
             source_shutdown: shutdown,
             verified_source_generation: AtomicU64::new(0),
             _identity_lease: identity_lease,

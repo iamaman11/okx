@@ -656,6 +656,20 @@ impl TradeService {
         // after our read cannot be double-posted: only the holder may
         // prepare/reserve/BEGIN_POST, and other calls must replay on retry.
         let _capacity = capacity.ok_or("ACCOUNT_MUTATION_BUSY")?;
+        // 100 cold same-key Execute requests must not all evaluate separate
+        // new-risk plans and contend on one native SQL/financial source.
+        // A dedicated per-account *risk-increase* lane admits one planner;
+        // safety cancel/close and other account owners never acquire it.
+        // A loser is definitively local/no-send and can check the durable
+        // identity on a later public Status/replay call.
+        let _new_risk_admission = if matches!(
+            operation, TradeOperation::Open | TradeOperation::Add | TradeOperation::Replace
+        ) {
+            Some(r.new_risk_admission.try_acquire()
+                .map_err(|_| "ACCOUNT_MUTATION_BUSY")?)
+        } else {
+            None
+        };
         let (state, control) = self.authority(r, supplied).await?;
         let increase = matches!(
             operation,
@@ -1354,6 +1368,7 @@ impl TradeService {
                 .map_err(err)
         })
         .await?;
+        drop(_new_risk_admission);
         drop(_capacity);
         match result {
             Some(response) => match place_ack_verdict(&response, &venue.client_order_id) {
