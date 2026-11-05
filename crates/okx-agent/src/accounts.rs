@@ -1501,7 +1501,16 @@ pub(crate) mod recorded_support {
                 .unwrap()
                 .insert((account.to_owned(), PATH.to_owned()));
             let mut installed = self.static_algos.lock().unwrap();
-            assert!(installed.is_none(), "TRANSCRIPT_STATIC_ALGO_PHASE_ALREADY_REGISTERED");
+            if let Some(prior) = installed.as_ref() {
+                // Existing T09 close/restart tests re-publish B's own
+                // independent signed inventory after a source event.
+                // Never allow one verified UID to replace another, or
+                // permit a second publication of A's new one-shot source.
+                assert_eq!(prior.account, account,
+                    "TRANSCRIPT_STATIC_ALGO_CROSS_ACCOUNT_REPLACEMENT");
+                assert_eq!(account, "fixture-observer-b",
+                    "TRANSCRIPT_STATIC_ALGO_PHASE_ALREADY_REGISTERED");
+            }
             *installed = Some(StaticAlgoInventory {
                 account: account.to_owned(),
                 source_received_at_ms: chrono::Utc::now().timestamp_millis(),

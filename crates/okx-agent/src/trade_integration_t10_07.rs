@@ -239,6 +239,22 @@ async fn t10_07_native_one_campaign(
     let posts_at_two_held=feed.outbound_posts.lock().unwrap().len();
     let market_third=refresh_recorded_market();
     wait_market(market_third).await;
+    // A's first signed fee was delivered before its venue ACK and B's
+    // SQL-HELD barrier. The third public entry is a new source event;
+    // refresh ONLY A's raw authenticated fee timestamp, preserving its
+    // exact zero rate and the production stale-source rejection rule.
+    let a_third_fee_ts=chrono::Utc::now().timestamp_millis().to_string();
+    let a_prior_fee_reads=feed.advance_immutable_signed_phase(
+        "t10-07-a-fee","t10-07-a-before-third",RecordedGet {
+            access_key:"fixture-observer-a".into(),
+            path:"/api/v5/account/trade-fee".into(),
+            required_query:vec![
+                ("instType".into(),"SWAP".into()),
+                ("instFamily".into(),"BTC-USDT".into()),
+            ],raw_response:fee("0",&a_third_fee_ts),
+        });
+    assert!(a_prior_fee_reads>0,
+        "T10-07 original A fee must have been delivered before reobservation");
     let clock_third=chrono::Utc::now().timestamp_millis();
     feed.advance_recorded_public_clock(
         envelope(json!([{"ts":clock_third.to_string()}])));

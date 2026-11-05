@@ -198,6 +198,26 @@ async fn t10_01_partial_balance_denial_recovery(
     feed.advance_recorded_public_clock(
         wrap(json!([{"ts":signed_clock_received_ms.to_string()}]))
     );
+    // The finite recovered fee source was observed BEFORE the two
+    // production SQL capture owners completed. A 17s source-census wait
+    // must not silently turn that old signed timestamp into fresh evidence.
+    // Publish NEW raw OKX fee bytes at the confirmed positive-Execute
+    // event while both recorded capture gates are held. Neither fee rate
+    // nor production age/skew policy changes.
+    let execute_fee_ts=chrono::Utc::now().timestamp_millis().to_string();
+    let execute_fee=wrap(json!([{
+        "instType":"SWAP","level":"Lv1","ts":execute_fee_ts,
+        "feeGroup":[{"groupId":"4","maker":"0.0005","taker":"0.0005"}]
+    }]));
+    feed.advance_immutable_signed_phase(
+        "t10-01-b-fee-recovered","t10-01-b-fee-at-positive-execute",RecordedGet {
+            access_key:"fixture-observer-b".into(),
+            path:"/api/v5/account/trade-fee".into(),
+            required_query:vec![
+                ("instType".into(),"SWAP".into()),
+                ("instFamily".into(),"BTC-USDT".into()),
+            ],raw_response:execute_fee,
+        });
     // The recovered attempt legitimately reads all Real account scopes under
     // the unchanged authenticated 5-per-2s private budget. Six seconds was
     // shorter than the bounded two-account source census; the witnessed
