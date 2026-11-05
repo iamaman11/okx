@@ -104,6 +104,12 @@ pub struct AccountResources {
     verified_source_generation: AtomicU64,
     _identity_lease: File,
     source_tasks: Mutex<Vec<JoinHandle<()>>>,
+    // TEST-ONLY: deterministic read-scheduling barrier. Holding the write
+    // lease prevents the NEXT periodic source cycle while a public
+    // TradeService request is under test. It does not alter real rate
+    // policy, SQL state, freshness or a live production build.
+    #[cfg(test)]
+    pub(crate) recorded_capture_gate: tokio::sync::RwLock<()>,
 }
 #[cfg(test)]
 impl AccountResources {
@@ -602,6 +608,8 @@ impl AccountRuntimeRegistry {
             verified_source_generation: AtomicU64::new(0),
             _identity_lease: identity_lease,
             source_tasks: Mutex::new(Vec::new()),
+            #[cfg(test)]
+            recorded_capture_gate: tokio::sync::RwLock::new(()),
         });
         start_sources(&resources, coordinator, receiver);
         Ok(resources)
@@ -795,6 +803,11 @@ fn start_sources(
         loop {
             tokio::select! { _=shutdown.changed()=>break,_=interval.tick()=>{
              let Some(account)=weak.upgrade()else{break};
+             // Only tests can serialize this timer-driven source cycle with
+             // an independently proven admission boundary. The real source
+             // capture remains unchanged and stays enabled on release.
+             #[cfg(test)]
+             let _recorded_capture_lease=account.recorded_capture_gate.read().await;
              // The attempt starts at the tick, including identity recovery.
              let capture_started = Instant::now();
              let generation=account.private_ws.status().await.connection_generation;

@@ -155,6 +155,31 @@ async fn t10_01_partial_balance_denial_recovery(
     feed.advance_recorded_public_clock(
         wrap(json!([{"ts":stamp}]))
     );
+    // Source recovery and entry-admission are TWO distinct causes.
+    // Wait for BOTH ordinary production finance capture owners to publish
+    // fresh SQL cursor/NAV results from the just-installed signed phase;
+    // then hold the *next* periodic capture tick out of the entry's way.
+    // Never write an account snapshot, finance frontier or Worker grant here.
+    let owner_a=accounts.resolve("fixture-a").await
+        .expect("T10-01 verified A source owner");
+    let owner_b=accounts.resolve("fixture-b").await
+        .expect("T10-01 verified B source owner");
+    let published_after=chrono::Utc::now().timestamp_millis();
+    tokio::time::timeout(Duration::from_secs(17),async{
+        loop {
+            let a=owner_a.source_capture_health.read().await.last_success_ms;
+            let b=owner_b.source_capture_health.read().await.last_success_ms;
+            if a.is_some_and(|t|t>=published_after)
+                &&b.is_some_and(|t|t>=published_after) {break;}
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    }).await.expect("T10-01 both SQL source owners must capture signed recovery");
+    let _capture_a=owner_a.recorded_capture_gate.write().await;
+    let _capture_b=owner_b.recorded_capture_gate.write().await;
+    assert!(owner_a.source_capture_health.read().await.last_success_ms
+        .is_some_and(|t|t>=published_after));
+    assert!(owner_b.source_capture_health.read().await.last_success_ms
+        .is_some_and(|t|t>=published_after));
     // The recovered attempt legitimately reads all Real account scopes under
     // the unchanged authenticated 5-per-2s private budget. Six seconds was
     // shorter than the bounded two-account source census; the witnessed
