@@ -1347,6 +1347,35 @@ try {
               assertBudgetEconomicsUnchanged(acceptedB.after_budget,afterNative.budget,
                 "B1 A+B public accepted Native money equals persisted Worker");
             }
+            // The B1 branch is selected before the independent T10-15 branch
+            // below. When T10-07 runs them in ONE actual Native/Worker cohort,
+            // verify and publish the exact source-backed Worker release here.
+            // No new risk grant, SQL owner or receipt is synthesized.
+            if (t10SourceChangedMode) {
+              assert.equal(process.env.OKX_T10_07_NATIVE_PROBE,"1");
+              const released=receipt(stdout,"T10_15_NATIVE_CAUSAL_SOURCE_V1");
+              assert.equal(released.same_campaign_as_native_b1,true);
+              assert.equal(released.release_state,"RELEASED");
+              assert.equal(released.sql_unsent_receipt_verified,true);
+              assert.equal(released.sql_release_not_active,true);
+              assert.equal(released.worker_release_verified,true);
+              assert.equal(released.posts_before,5);
+              assert.equal(released.posts_after,5);
+              assert.equal(released.new_quote_usd,"0.5003");
+              assert.equal(afterNative.budget.entry_budget.consumed_usd,"1.0005");
+              assert.equal(afterNative.budget.entry_budget.reserved_usd,"8.002");
+              assert.equal(afterNative.budget.entry_budget.remaining_usd,"0.9975");
+              assertBudgetEconomicsUnchanged(released.worker_after,
+                afterNative.budget,
+                "T10-07 Native release must equal same persisted Worker campaign");
+              console.log("T10_15_WORKER_AFTER_NATIVE_V1:"+JSON.stringify({
+                schema:"okx.t10-15-worker-source-change/v1",
+                budget:afterNative.budget,
+                risk_book_sequence:afterNative.risk_book_sequence,
+                posts_for_changed_plan:0,
+                same_campaign_as_native_b1:true,
+              }));
+            }
           } else {
             assertBudgetEconomicsUnchanged(latestNativeBudget,afterNative.budget,
               "B1 resumed Worker must match Native money after source refresh");
