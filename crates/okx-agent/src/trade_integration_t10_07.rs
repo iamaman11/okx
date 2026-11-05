@@ -161,22 +161,39 @@ async fn t10_07_native_one_campaign(
         }])),
     });
 
-    let first_out=tokio::time::timeout(Duration::from_secs(14),
-        trade.trade("fixture-a",&first,None))
-        .await.expect("T10-07 A public Execute deadline")
-        .expect("T10-07 A public Execute must reach Native SQL and Worker");
-    assert_eq!(first_out["status"],"partial",
-        "T10-07 A requires a real signed venue ACK: {first_out}");
-    assert_eq!(first_out["data"]["intent"]["state"],"ACKNOWLEDGED");
-    assert_eq!(feed.outbound_posts.lock().unwrap().len(),1);
+    // Stage A's genuine Worker HELD and SQL receipt, but keep its ORIGINAL
+    // public Execute pending. Stage B the same way before the third begins.
+    // This is a real three-way Native overlap, not a sequential B1 cohort.
+    crate::trade_service::T10_07_A_SQL_RESERVE_PERSISTED.store(false,SeqCst);
+    crate::trade_service::T10_07_RELEASE_A_SQL_RESERVE_HOLD.store(false,SeqCst);
+    crate::trade_service::T10_07_HOLD_A_SQL_RESERVE.store(true,SeqCst);
+    let first_pending=tokio::spawn({
+        let trade=trade.clone();
+        async move{trade.trade("fixture-a",&first,None).await}
+    });
+    tokio::time::timeout(Duration::from_secs(12),async {
+        while !crate::trade_service::T10_07_A_SQL_RESERVE_PERSISTED.load(SeqCst) {
+            assert!(!first_pending.is_finished(),
+                "T10-07 A exited before original SQL-held Worker receipt");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }).await.expect("T10-07 A authentic SQL HELD deadline");
     let owner_a=accounts.resolve("fixture-a").await.unwrap();
     let owner_b=accounts.resolve("fixture-b").await.unwrap();
-    let a_sql=owner_a.execution.store.call(
-        std::time::Instant::now()+Duration::from_secs(3),
-        |s|s.by_idempotency(A_KEY)
-    ).await.expect("T10-07 A SQL owner");
-    let a_sql=a_sql.expect("T10-07 A SQL intent");
-    assert_eq!(a_sql.state.as_str(),"ACKNOWLEDGED");
+    let a_held=owner_a.execution.store.call(
+        std::time::Instant::now()+Duration::from_secs(3),|s|{
+            let intent=s.by_idempotency(A_KEY)?
+                .ok_or(okx_execution::StoreError::Invalid("T10_07_A_HELD_SQL_MISSING"))?;
+            let receipt=s.central_receipt(&intent.intent_id)?
+                .ok_or(okx_execution::StoreError::Invalid("T10_07_A_HELD_RECEIPT_MISSING"))?;
+            Ok((intent.state.as_str().to_owned(),intent.intent_id,receipt))
+        }
+    ).await.expect("T10-07 A SQL HELD readback");
+    assert_eq!(a_held.0,"RESERVED");
+    assert_eq!(a_held.1,a_held.2.intent_id);
+    assert_eq!(a_held.2.account_key,owner_a.configuration.account_key.wire());
+    assert_eq!(feed.outbound_posts.lock().unwrap().len(),0,
+        "A is HELD in SQL/Worker, but must still be before venue POST");
 
     // B receives the ORIGINAL authentic Worker HELD. Only AFTER the SQL
     // owner stores the matching central receipt do we hold its post-HELD
