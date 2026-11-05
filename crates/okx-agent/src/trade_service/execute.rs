@@ -1101,6 +1101,27 @@ impl TradeService {
                 .call(until, move |s| s.reserve(&receipt, now()))
                 .await
                 .map_err(err)?;
+            // TEST-ONLY: the true SQL owner has now persisted Worker HELD.
+            // Holding here (rather than withholding the WSS HELD reply)
+            // keeps the cohort census safe: a separate Execute can observe
+            // RESERVED plus its central receipt, not an unresolved PREPARED
+            // attempt. Production ordering and fail-closed source fences
+            // are identical when this opt-in test hook is absent.
+            #[cfg(test)]
+            if super::T10_07_HOLD_SQL_RESERVE.swap(
+                false,std::sync::atomic::Ordering::SeqCst
+            ) {
+                super::T10_07_SQL_RESERVE_PERSISTED.store(
+                    true,std::sync::atomic::Ordering::SeqCst
+                );
+                tokio::time::timeout_at(until.into(),async {
+                    while !super::T10_07_RELEASE_SQL_RESERVE_HOLD.load(
+                        std::sync::atomic::Ordering::SeqCst
+                    ) {
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                    }
+                }).await.map_err(|_|"T10_07_SQL_HELD_HANDOFF_ORIGINAL_DEADLINE_EXPIRED")?;
+            }
             if Instant::now() >= until {
                 return Err("COMMAND_EXPIRED".into());
             }
