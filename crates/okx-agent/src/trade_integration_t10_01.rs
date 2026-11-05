@@ -7,6 +7,7 @@ async fn t10_01_partial_balance_denial_recovery(
     risk: NativeRiskClient,
     feed: Arc<crate::accounts::recorded_support::RecordedAccountHttp>,
     rate_budget: RateBudget,
+    refresh_recorded_market: &impl Fn()->i64,
 )->serde_json::Value {
     use crate::accounts::recorded_support::{RecordedGet,RecordedPost};
     use okx_protocol::trading::{
@@ -152,9 +153,6 @@ async fn t10_01_partial_balance_denial_recovery(
                 ("instFamily".into(),"BTC-USDT".into()),
             ],raw_response:fee.clone()
         }).collect());
-    feed.advance_recorded_public_clock(
-        wrap(json!([{"ts":stamp}]))
-    );
     // Source recovery and entry-admission are TWO distinct causes.
     // Wait for BOTH ordinary production finance capture owners to publish
     // fresh SQL cursor/NAV results from the just-installed signed phase;
@@ -180,6 +178,16 @@ async fn t10_01_partial_balance_denial_recovery(
         .is_some_and(|t|t>=published_after));
     assert!(owner_b.source_capture_health.read().await.last_success_ms
         .is_some_and(|t|t>=published_after));
+    // After the real capture owners have completed, publish a NEW raw
+    // exchange clock reply and connected market WS frames. Publishing
+    // either BEFORE waiting can make the later Execute's clock/skew proof
+    // stale: the production safety gate must reject that, not the test.
+    let fresh_market_received_ms=refresh_recorded_market();
+    let signed_clock_received_ms=chrono::Utc::now().timestamp_millis();
+    assert!(signed_clock_received_ms>=fresh_market_received_ms);
+    feed.advance_recorded_public_clock(
+        wrap(json!([{"ts":signed_clock_received_ms.to_string()}]))
+    );
     // The recovered attempt legitimately reads all Real account scopes under
     // the unchanged authenticated 5-per-2s private budget. Six seconds was
     // shorter than the bounded two-account source census; the witnessed

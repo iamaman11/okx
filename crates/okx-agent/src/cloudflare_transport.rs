@@ -5351,7 +5351,7 @@ mod raw_native_session_tests {
                         refresh_recorded_market();
                         let recovery=t10_01_partial_balance_denial_recovery(
                             accounts.clone(),trade.clone(),risk.clone(),
-                            feed.clone(),rate_budget.clone()
+                            feed.clone(),rate_budget.clone(),&refresh_recorded_market
                         ).await;
                         println!("T10_01_NATIVE_SOURCE_RECOVERY_V1:{recovery}");
                     }
