@@ -227,6 +227,35 @@ async fn t10_15_fee_source_after_worker_held(
     assert_eq!(inspect.reservation_state,
         Some(okx_protocol::risk_authority::RiskReservationState::Released),
         "Native's durable no-send release must be committed by the real Worker");
+    // This is a SECOND read-only Preview boundary, after the original
+    // transient B reservation has been RELEASED in both Native SQL and
+    // Worker. The first Preview consumed the leverage phase registered
+    // immediately after B's acknowledged order. A fresh authenticated
+    // private REST response is now required for this independent read.
+    // Limit this test-only signed replay to four finite GETs; do not
+    // expand production budgets, accept an absent source, or borrow A's
+    // account configuration.
+    if shared_b1 {
+        let fresh_leverage_pages=(0..4).map(|_|RecordedGet{
+            access_key:"fixture-observer-b".into(),
+            path:"/api/v5/account/leverage-info".into(),
+            required_query:vec![
+                ("instId".into(),"BTC-USDT-SWAP".into()),
+                ("mgnMode".into(),"cross".into()),
+            ],raw_response:leverage.clone(),
+        }).collect();
+        let retired=feed.advance_recorded_route(
+            "fixture-observer-b", "/api/v5/account/leverage-info",
+            fresh_leverage_pages
+        );
+        println!("T10_07_B_LATE_PREVIEW_LEVERAGE_PHASE_V1:{}",serde_json::json!({
+            "phase":"AFTER_NATIVE_SQL_WORKER_RELEASE",
+            "released_reservation_key":row.4.reservation_key,
+            "retired_prior_pages":retired,
+            "registered_signed_gets":4,
+            "venue_posts":posts_after,
+        }));
+    }
     // A newly entered preview must use the newly signed fee rate rather
     // than returning the old frozen plan. It creates no reserve or POST.
     let new_preview=TradeRequest::Preview {
