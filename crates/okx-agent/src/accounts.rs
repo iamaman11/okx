@@ -1989,6 +1989,112 @@ pub(crate) mod recorded_support {
     }
 
     #[tokio::test]
+    async fn post_ack_flat_algo_event_reuses_one_bounded_signed_source_per_scope() {
+        fn pages() -> Vec<RecordedGet> {
+            let mut result = Vec::new();
+            for inst in ["SWAP", "FUTURES"] {
+                for kind in [
+                    "conditional", "oco", "trigger", "move_order_stop",
+                    "chase", "iceberg", "twap", "smart_iceberg",
+                ] {
+                    result.push(RecordedGet {
+                        access_key: "fixture-observer-a".into(),
+                        path: "/api/v5/trade/orders-algo-pending".into(),
+                        required_query: exact_query(inst, kind),
+                        raw_response: recorded_envelope(serde_json::json!([])),
+                    });
+                }
+            }
+            result
+        }
+        let feed = RecordedAccountHttp::default();
+        for page in pages() {
+            feed.expect_get(page);
+        }
+        // The production HTTP transport separately records authenticated
+        // order ACKs; this unit targets the transport event boundary only.
+        feed.acknowledged_creates.lock().unwrap().push((
+            "fixture-executor-a".into(), "actual-client-a".into(), "venue-a-ack".into()
+        ));
+        assert_eq!(feed.publish_post_ack_flat_algo_inventory(
+            "A_ACK_B_CENTRAL_DENIAL", "venue-a-ack", pages()
+        ), 16);
+        assert_eq!(feed.unconsumed_reads(), 0);
+        for _ in 0..18 {
+            let signed = feed.send(
+                signed_inventory_request("fixture-observer-a", "conditional"),
+                Instant::now() + std::time::Duration::from_secs(2),
+            ).await.expect("event-selected immutable A source");
+            assert!(raw_items(signed).as_array().unwrap().is_empty());
+        }
+        let wrong = feed.send(
+            signed_inventory_request("fixture-observer-a", "unknown"),
+            Instant::now() + std::time::Duration::from_secs(2),
+        ).await.err().expect("unknown algo scope must fail closed");
+        assert!(wrong.to_string().contains("TRANSCRIPT_STATIC_ALGO_QUERY_MISMATCH"));
+        assert_eq!(feed.outbound_posts.lock().unwrap().len(), 0);
+        let phase = feed.static_algos.lock().unwrap();
+        let static_source = phase.as_ref().unwrap();
+        assert_eq!(static_source.scopes.len(), 16);
+        assert_eq!(static_source.scopes.iter()
+            .find(|row|row.query == {
+                let mut q = exact_query("SWAP","conditional");
+                q.sort();
+                q
+            }).unwrap().reads, 18);
+        assert!(feed.causal_algo_trace.lock().unwrap().iter()
+            .any(|line|line.contains("event=POST_ACK_FLAT_ALGO_SOURCE")
+                &&line.contains("retired_pages=16")));
+    }
+
+    #[test]
+    fn post_ack_flat_algo_event_rejects_unobserved_ack_and_changed_old_stop() {
+        fn empty_pages() -> Vec<RecordedGet> {
+            let mut result = Vec::new();
+            for inst in ["SWAP", "FUTURES"] {
+                for kind in [
+                    "conditional", "oco", "trigger", "move_order_stop",
+                    "chase", "iceberg", "twap", "smart_iceberg",
+                ] {
+                    result.push(RecordedGet {
+                        access_key: "fixture-observer-a".into(),
+                        path: "/api/v5/trade/orders-algo-pending".into(),
+                        required_query: exact_query(inst, kind),
+                        raw_response: recorded_envelope(serde_json::json!([])),
+                    });
+                }
+            }
+            result
+        }
+        let missing_ack = RecordedAccountHttp::default();
+        for page in empty_pages() {
+            missing_ack.expect_get(page);
+        }
+        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            missing_ack.publish_post_ack_flat_algo_inventory(
+                "A_ACK_B_CENTRAL_DENIAL", "not-acked", empty_pages()
+            );
+        })).is_err(), "unconfirmed venue ACK cannot publish a new inventory");
+        let changed_old = RecordedAccountHttp::default();
+        changed_old.acknowledged_creates.lock().unwrap().push((
+            "fixture-executor-a".into(), "actual-client-a".into(), "venue-a-ack".into()
+        ));
+        changed_old.expect_get(RecordedGet {
+            access_key: "fixture-observer-a".into(),
+            path: "/api/v5/trade/orders-algo-pending".into(),
+            required_query: exact_query("SWAP", "conditional"),
+            raw_response: recorded_envelope(serde_json::json!([{
+                "algoId": "still-live", "state": "live"
+            }])),
+        });
+        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            changed_old.publish_post_ack_flat_algo_inventory(
+                "A_ACK_B_CENTRAL_DENIAL", "venue-a-ack", empty_pages()
+            );
+        })).is_err(), "an old live stop must never be silently replaced with empty");
+    }
+
+    #[tokio::test]
     async fn immutable_signed_snapshot_phases_follow_events_not_background_read_counts() {
         fn balance(account:&str,value:&str)->RecordedGet {
             RecordedGet {
