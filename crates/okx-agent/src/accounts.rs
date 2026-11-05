@@ -2342,7 +2342,7 @@ pub(crate) mod recorded_support {
         feed.expect_immutable_signed_phase_bounded(
             "cold-entry", page(), 2, Duration::from_secs(5)
         );
-        let wrong = feed.send(read("50"), deadline()).await.unwrap_err();
+        let wrong = feed.send(read("50"), deadline()).await.err().expect("expected recorded transport denial");
         assert!(wrong.to_string().contains("TRANSCRIPT_IMMUTABLE_QUERY_MISMATCH"));
         for _ in 0..2 {
             let response = feed.send(read("100"), deadline()).await.unwrap();
@@ -2351,7 +2351,7 @@ pub(crate) mod recorded_support {
                 serde_json::json!([])
             );
         }
-        assert!(feed.send(read("100"), deadline()).await.unwrap_err()
+        assert!(feed.send(read("100"), deadline()).await.err().expect("expected recorded transport denial")
             .to_string().contains("TRANSCRIPT_IMMUTABLE_PHASE_READ_BUDGET_EXCEEDED"));
         assert_eq!(feed.advance_immutable_signed_phase_bounded(
             "cold-entry", "post-ack", page(), 2, Duration::from_secs(5)
@@ -2371,7 +2371,7 @@ pub(crate) mod recorded_support {
             serde_json::from_slice::<serde_json::Value>(&next.body).unwrap()["data"][0]["ordId"],
             "ack-bound-001"
         );
-        assert!(feed.send(read("100"), deadline()).await.unwrap_err()
+        assert!(feed.send(read("100"), deadline()).await.err().expect("expected recorded transport denial")
             .to_string().contains("TRANSCRIPT_SOURCE_PAGE_UNEXPECTED_OR_EXHAUSTED"));
         assert!(feed.outbound_posts.lock().unwrap().is_empty());
     }
