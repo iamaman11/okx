@@ -1239,6 +1239,63 @@ mod raw_native_session_tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    #[tokio::test]
+    async fn same_risk_command_id_with_different_payload_never_inherits_worker_result() {
+        let (ctx, root, client, mut risk_rx) = test_dispatch().await;
+        let (input_tx, input_rx) = mpsc::unbounded_channel();
+        let (output_tx, mut output_rx) = mpsc::unbounded_channel();
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let session = tokio::spawn(async move {
+            run_connected_session(
+                RawFrames { inbound: input_rx, outbound: output_tx },
+                test_hello(), ctx, &mut risk_rx, shutdown_rx,
+            ).await
+        });
+        assert!(matches!(parse(output_rx.recv().await.unwrap()),F::Hello {..}));
+        input_tx.send(Ok(wire(F::HelloAck {
+            schema: SCHEMA.into(),
+            session_id:"session_test_risk_payload_conflict".into(),
+            connection_generation:25,
+        }))).unwrap();
+        let first=tokio::spawn({
+            let client=client.clone();
+            async move {client.request(summary("risk_wire_payload_conflict")).await}
+        });
+        let id=tokio::time::timeout(Duration::from_secs(3),async {
+            loop {
+                match parse(output_rx.recv().await.expect("outbound closed")) {
+                    F::RiskControl {command,..}=>break command.command_id,
+                    F::Ping {..}=>continue,
+                    other=>panic!("unexpected outbound: {other:?}"),
+                }
+            }
+        }).await.unwrap();
+        assert_eq!(id,"risk_wire_payload_conflict");
+        let mut incompatible=summary("risk_wire_payload_conflict");
+        incompatible.installation_id="different_test_installation".into();
+        assert!(incompatible.valid());
+        let second=tokio::spawn({
+            let client=client.clone();
+            async move {client.request(incompatible).await}
+        });
+        let terminated=tokio::time::timeout(Duration::from_secs(3),session)
+            .await.unwrap().unwrap();
+        assert!(terminated.unwrap_err().to_string().contains(
+            "RISK_COMMAND_ID_PAYLOAD_CONFLICT"
+        ));
+        for caller in [first,second] {
+            let outcome=tokio::time::timeout(Duration::from_secs(3),caller)
+                .await.unwrap().unwrap();
+            assert_eq!(outcome.unwrap_err(),"RISK_TRANSPORT_LOST_DO_NOT_REPLAY",
+                "same command ID with different payload cannot receive a grant");
+        }
+        drop(client);
+        drop(shutdown_tx);
+        drop(input_tx);
+        drop(output_rx);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     /// Opt-in only from the pinned Linux integration job. This socket talks
     /// directly to the real workerd RuntimeSession and its persisted SQLite DO;
     /// there is no mock Worker/RiskBook, fixture exchange or alternate executor.
