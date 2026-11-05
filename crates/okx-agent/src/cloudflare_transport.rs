@@ -5202,6 +5202,64 @@ mod raw_native_session_tests {
                             }
                             let (b_positive, b_positive_accepted_key) = b_positive_result
                                 .expect("B1 real B venue create must be admitted");
+                            if b_positive["status"] != "partial"
+                                && std::env::var("OKX_T10_07_NATIVE_PROBE").as_deref()==Ok("1")
+                            {
+                                // Test-only first-cause evidence from each
+                                // genuine account SQL/source owner. No fake
+                                // NAV writes, source refresh, budget change
+                                // or retry follows this diagnostic.
+                                let mut owners=Vec::new();
+                                for alias in ["fixture-a","fixture-b"] {
+                                    let r=accounts.resolve(alias).await
+                                        .expect("T10-07 diagnostic account owner");
+                                    let capture=r.source_capture_health.read().await.clone();
+                                    let source=r.execution.store.call(
+                                        std::time::Instant::now()+Duration::from_secs(3),
+                                        |s| Ok((
+                                            s.financial_risk(now(),None)?,
+                                            s.cursor("fills","SWAP")?,
+                                            s.cursor("bills","account")?,
+                                        )),
+                                    ).await;
+                                    let financial=match source {
+                                        Ok((f,fills,bills))=>json!({
+                                            "sql_readback":"VERIFIED",
+                                            "nav_complete":f.nav_complete,
+                                            "nav_source_as_of_ms":f.source_as_of,
+                                            "nav_age_ms":now().saturating_sub(f.source_as_of),
+                                            "fills":fills.map(|c|json!({
+                                                "generation":c.generation,
+                                                "watermark":c.watermark,
+                                                "cursor_empty":c.cursor.is_empty(),
+                                                "gaps_empty":c.coverage_gaps.is_empty(),
+                                            })),
+                                            "bills":bills.map(|c|json!({
+                                                "generation":c.generation,
+                                                "watermark":c.watermark,
+                                                "cursor_empty":c.cursor.is_empty(),
+                                                "gaps_empty":c.coverage_gaps.is_empty(),
+                                            })),
+                                        }),
+                                        Err(_)=>json!({"sql_readback":"UNAVAILABLE"}),
+                                    };
+                                    owners.push(json!({
+                                        "alias":alias,
+                                        "finance":financial,
+                                        "capture_last_attempt_ms":capture.last_attempt_ms,
+                                        "capture_last_success_ms":capture.last_success_ms,
+                                        "capture_last_failure_ms":capture.last_failure_ms,
+                                        "capture_reason_code":capture.reason_code,
+                                    }));
+                                }
+                                println!("T10_07_B1_FIRST_FINANCIAL_CAUSE_V1:{}",json!({
+                                    "schema":"okx.t10-07-b1-first-financial-cause/v1",
+                                    "owners":owners,
+                                    "denial":b_positive["data"]["primary_reason"],
+                                    "send_state":b_positive["data"]["send_state"],
+                                    "outbound_posts":feed.outbound_posts.lock().unwrap().len(),
+                                }));
+                            }
                             if b_positive["status"] != "partial" {
                                 // First actual production denial is authoritative.
                                 // Only redact-safe typed fields are emitted;

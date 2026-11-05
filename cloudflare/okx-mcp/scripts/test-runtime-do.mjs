@@ -1038,6 +1038,19 @@ try {
           outbound_posts: source.outbound_posts,
         }) + "\n");
       }
+      // T10-07 cannot progress past a synthetic/partial NAV source.
+      // Forward only this bounded, fixture-scoped owner readback so the
+      // next change repairs the actual SQL capture dependency.
+      for (const sample of rawChildErrorChannels.matchAll(
+        /T10_07_B1_FIRST_FINANCIAL_CAUSE_V1:(\{[^\r\n]+\})/g
+      )) {
+        try {
+          const fact=JSON.parse(sample[1]);
+          if(fact.schema==="okx.t10-07-b1-first-financial-cause/v1")
+            process.stderr.write("T10_07_B1_FIRST_FINANCIAL_CAUSE_V1:"+
+              JSON.stringify(fact).slice(0,3200)+"\n");
+        } catch { /* Diagnostic must never change acceptance. */ }
+      }
       const b1Refusal = [...recorded.matchAll(
         /B1_POSITIVE_DIAGNOSTIC_V1:(\{[^\r\n]+\})/g
       )];
