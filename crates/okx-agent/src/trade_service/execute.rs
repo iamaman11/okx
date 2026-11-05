@@ -649,6 +649,19 @@ impl TradeService {
                 ));
             }
             drop(capacity);
+            // A repeated Execute is not an instruction to run 100 concurrent
+            // independent finance/venue Status reconciliations. Keep exactly
+            // one replay readback in flight for this account, and return the
+            // persisted intent identity without authorizing a re-POST to all
+            // other callers. Explicit trade.status remains fully available
+            // to verify partial fills, protection and terminal finance.
+            let _replay_owner = match r.execute_replay_reconciliation.try_acquire() {
+                Ok(owner) => owner,
+                Err(_) => return Ok(uncertain(
+                    &i.intent_id,
+                    "ACCOUNT_MUTATION_BUSY_STATUS_NOT_EVALUATED_NO_RESUBMIT",
+                )),
+            };
             return self.status_intent(r, &i.intent_id).await;
         }
         // If this key is NEW, an unavailable semaphore remains a strict
