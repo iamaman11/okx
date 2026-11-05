@@ -239,7 +239,7 @@ async fn t10_07_native_single_campaign(
                 trade.trade("fixture-b",&b,None).await
             }
         });
-        let (status_a, b_reply)=tokio::try_join!(
+        let (status_a, b_reply)=tokio::join!(
             async {
                 tokio::time::timeout(Duration::from_secs(28),status_a)
                     .await.expect("T10-07 A Status concurrent deadline")
@@ -250,7 +250,7 @@ async fn t10_07_native_single_campaign(
                     .await.expect("T10-07 B Execute concurrent deadline")
                     .expect("T10-07 B task")
             }
-        ).expect("T10-07 concurrent public calls");
+        );
         assert!(status_a.is_ok(),"T10-07 A public Status must remain accessible");
         let b_reply=b_reply.expect("T10-07 B actual Execute");
         if b_reply["data"]["state"]=="REJECTED" {
