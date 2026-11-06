@@ -1150,6 +1150,21 @@ try {
           t09_3_source_reads:lines.filter(line =>
             line.startsWith("T09_3_SOURCE_READS_V1 ")).slice(-6)
             .map(line=>line.slice(0, 360)),
+          // Existing production census caller's first refused scoped read.
+          // Keep cause order; the global rate-budget last_throttle can
+          // belong to another account/operation and cannot classify it.
+          t10_05_first_census_failures:lines.filter(line =>
+            line.startsWith("B_CENSUS_FIRST_FAILURE_V1:"))
+            .slice(0, 5).map(line => {
+              try {
+                const v = JSON.parse(line.slice("B_CENSUS_FIRST_FAILURE_V1:".length));
+                return {
+                  phase:v.phase, account_digest_prefix:v.account_digest_prefix,
+                  reason_code:v.reason_code, endpoint:v.endpoint,
+                  remaining_ms:v.remaining_ms
+                };
+              } catch { return {phase:"INVALID_CAUSE_WITNESS"}; }
+            }),
           rust_assertion:cause.slice(0, 1900) || "RUST_CHILD_EXIT_WITHOUT_ASSERTION",
           t10_09_capture:bTimeout,
           maintenance_errors:lines.filter(line => line.includes("OKX_ENTRY_BASELINE_V1")).slice(-12).map(line => line.slice(0, 240)),
