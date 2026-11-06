@@ -1960,9 +1960,7 @@ impl TradeService {
             self.census_with_reads(state, None, None, Some(until), None, None),
         )
         .await
-        .map_err(|_| {
-            ManagedProtectionCensusError::Denied("MANAGED_CENSUS_SOURCE_DEADLINE".into())
-        })?
+        .map_err(|_| ManagedProtectionCensusError::Denied("MANAGED_CENSUS_SOURCE_DEADLINE".into()))?
         .map(|v| v.0);
         result.map_err(|reason| {
             if reason == POSITION_SOURCE_BEFORE_SQL_FILL {
