@@ -160,6 +160,12 @@
             eprintln!("T09_3_TERMINAL_PENDING_ORDERS_SOURCE_V1 phase=terminal new_pages=8 signed_order=FILLED");
         }
         let stop_id=format!("s{}",&cl_id[..31]);
+        // T10-08 has already witnessed a real 51008-canceled stop. A new
+        // `live` GET with the SAME algoId would fabricate remediation. Only
+        // the stand-alone T09.3 path publishes the original live stop.
+        let t10_08_terminal = terminal
+            && std::env::var("OKX_T10_08_PROTECTION_FAILURE_PROBE").as_deref() == Ok("1");
+        if !t10_08_terminal {
         feed.advance_recorded_route("fixture-executor-a","/api/v5/trade/order-algo",
             (0..5).map(|_| RecordedGet{
                 access_key:"fixture-executor-a".into(),path:"/api/v5/trade/order-algo".into(),
@@ -172,6 +178,7 @@
                     "slTriggerPxType":"mark","slOrdPx":"-1"
                 }])),
             }).collect());
+        }
         let owner=accounts.resolve("fixture-a").await.unwrap();
         let mut last=String::new();
         let sql=tokio::time::timeout(Duration::from_secs(16),async {
@@ -210,6 +217,36 @@
             }
         }).await.unwrap_or_else(|_|panic!("T09_3_CAPTURE_UNPROVEN terminal={terminal}: {last}"));
         trace_source_reads("before_status");
+        if t10_08_terminal {
+            // The original entry has two independently ingested signed fill
+            // and bill events. Do NOT issue a status yet: it can authorize an
+            // emergency Close before this case has observed its own signed
+            // venue POST/ACK and registered a matching finite exchange source.
+            // This receipt is SQL-only and explicitly NOT a public status.
+            let sql_id=id.clone();
+            let durable=owner.execution.store.call(
+                std::time::Instant::now()+Duration::from_secs(3),
+                move |s| {
+                    let intent=s.intent(&sql_id)?.ok_or(
+                        okx_execution::StoreError::Invalid("T10_08_SQL_INTENT_MISSING")
+                    )?;
+                    Ok(intent.state.as_str().to_owned())
+                }
+            ).await.expect("T10-08 terminal source owner SQL state");
+            assert_eq!(durable,"FILLED","late signed fill must be durable before Close");
+            return (serde_json::json!({
+                "phase":"terminal",
+                "raw_history_event_at_ms":now_ms,
+                "source_read_counts":{"stage":"before_recovery_status"},
+                "sql":sql,
+                "intent_state":durable,
+                "status":"not_observed",
+                "entry_fill_evidence_state":"not_evaluated",
+                "financial_complete":false,
+                "protection":null,
+                "public_status_deferred_until_signed_close_sources":true
+            }),first);
+        }
         let status_result=trade.trade("fixture-a",&okx_protocol::trading::TradeRequest::Status{reference:id},None)
             .await;
         trace_source_reads("after_status");
