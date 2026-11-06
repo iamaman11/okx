@@ -2265,7 +2265,10 @@ impl TradeService {
                                     .checked_add(lot.remaining_qty)
                                     .ok_or_else(|| "COHORT_POSITION_QUANTITY_OVERFLOW".to_owned())
                             })?;
-                        if protection.quantity < owned_qty
+                        // An oversized stop can flip an already partially
+                        // reduced position. Exact attributed lot coverage is
+                        // mandatory for every new-risk cohort admission.
+                        if protection.quantity != owned_qty
                             || receipt.plan_hash.is_empty()
                             || receipt.reservation_key.starts_with("local:")
                         {

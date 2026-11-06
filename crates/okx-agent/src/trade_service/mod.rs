@@ -27,6 +27,7 @@ use tokio::sync::{Mutex, RwLock};
 mod entry_budget;
 mod execute;
 mod plan;
+mod protection_resize;
 mod reconcile;
 mod recovery;
 mod strategies;

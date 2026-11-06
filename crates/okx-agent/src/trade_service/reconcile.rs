@@ -759,6 +759,51 @@ impl TradeService {
             // emergency-cancel an unrelated managed position because a
             // new limit order has not filled.
             if i.risk_increase && exposed && filled > Decimal::ZERO && !prior_protection_incident {
+                // Gross entry fills are historical; after a separately
+                // proven partial Reduce the ONLY permitted smaller stop is
+                // the still-owned SQL lot quantity with a verified durable
+                // single-send amendment receipt. An unsigned/synthetic
+                // smaller live stop is always rejected.
+                let original_id = i.intent_id.clone();
+                let original_inst = i.instrument_id.clone();
+                let effective_protected = r.execution.store.call(
+                    deadline(), move |s| {
+                        let lots = s.active_lots(&original_inst)?;
+                        let own = lots.iter().filter(|lot| {
+                            lot.intent_id.as_deref() == Some(original_id.as_str())
+                        }).fold(Decimal::ZERO, |sum, lot| sum + lot.remaining_qty);
+                        if own <= Decimal::ZERO || own > filled {
+                            return Err(okx_execution::StoreError::Invalid(
+                                "PROTECTION_ORIGINAL_SQL_LOT_MISMATCH"
+                            ));
+                        }
+                        if own == filled {
+                            return Ok(own);
+                        }
+                        let receipt = s.protection(&original_id)?.ok_or(
+                            okx_execution::StoreError::Invalid(
+                                "PROTECTION_REDUCED_LOT_RECEIPT_MISSING"
+                            )
+                        )?;
+                        let key = format!(
+                            "protection-shrink:{}:{}", original_id, exact(own)
+                        );
+                        let op = s.operation(&format!("{key}:verified"))?.ok_or(
+                            okx_execution::StoreError::Invalid(
+                                "PROTECTION_REDUCE_SOURCE_ACK_MISSING"
+                            )
+                        )?;
+                        if op.kind != "protection_shrink_verified"
+                            || op.result_ref != "VERIFIED"
+                            || receipt.quantity != own
+                        {
+                            return Err(okx_execution::StoreError::Invalid(
+                                "PROTECTION_REDUCE_SOURCE_MISMATCH"
+                            ));
+                        }
+                        Ok(own)
+                    },
+                ).await.map_err(err)?;
                 let algo_client = i
                     .client_order_id
                     .get(..31)
@@ -771,11 +816,11 @@ impl TradeService {
                     .await;
                 match p {
                     Ok(p)
-                        if verified_live_protection(&i, filled, &p).is_ok()
+                        if verified_live_protection(&i, effective_protected, &p).is_ok()
                             && protection_covers_managed_increment(
                                 &i.plan.side,
                                 &p.side,
-                                filled,
+                                effective_protected,
                                 position_qty,
                                 &p.size,
                             ) =>
@@ -785,7 +830,7 @@ impl TradeService {
                             intent_id: i.intent_id.clone(),
                             algo_id: p.algo_order_id,
                             side: p.side,
-                            quantity: filled,
+                            quantity: effective_protected,
                             trigger_price: i.plan.stop_price.ok_or("STOP_PRICE_MISSING")?,
                             trigger_basis: "mark".into(),
                             verified_at: now(),
@@ -801,7 +846,7 @@ impl TradeService {
                         // its own SQL lots, distinct venue stop(s) and active
                         // RiskBook reservation. Reuse the sole full-cohort
                         // signed census, never simply subtract the old qty.
-                        if position_qty > filled {
+                        if position_qty > effective_protected {
                             let aggregate_result = match self.governance.read().await.clone() {
                                 Some(state) => self
                                     .census_for_managed_protection_until(&state, deadline())
@@ -976,6 +1021,29 @@ impl TradeService {
             }
         } else {
             json!({"state":"not_evaluated"})
+        };
+        let protection_adjustment = if financial
+            && !i.risk_increase
+            && i.plan.operation == "reduce"
+            && i.state == IntentState::Filled
+            && signed_position_qty.is_some_and(|qty| qty > Decimal::ZERO)
+        {
+            match self.shrink_stop_after_reduce(
+                r,
+                &i,
+                order.as_ref().ok_or("REDUCE_VENUE_READBACK_MISSING")?,
+                signed_position_qty.ok_or("REDUCE_SIGNED_POSITION_MISSING")?,
+            ).await {
+                Ok(state) => state,
+                Err(reason) => json!({
+                    "state":"blocked",
+                    "reason_code":reason,
+                    "retry_amend":false,
+                    "next_action":"trade.status",
+                }),
+            }
+        } else {
+            json!({"state":"not_applicable"})
         };
         let central_release = if i.state.terminal() && financial {
             match self
@@ -1162,6 +1230,7 @@ impl TradeService {
                 "entry_fill_evidence":entry_fill_evidence,
                 "incremental_entry_settlement":incremental_entry,
                 "protection":protection,"central_release":central_release,
+                "protection_adjustment":protection_adjustment,
                 "protection_remediation":protection_remediation,
                 "financial_error":financial_error,"financial_complete":financial && !settlement_pending,
                 "protection_incident":live_protection_incident,
@@ -1182,6 +1251,10 @@ impl TradeService {
             }
         });
         if !financial || settlement_pending || protection_source_pending || live_protection_incident
+            || matches!(
+                protection_adjustment["state"].as_str(),
+                Some("blocked" | "ack_source_pending")
+            )
         {
             result["status"] = json!("partial");
             result["warnings"] = json!([if live_protection_incident {
