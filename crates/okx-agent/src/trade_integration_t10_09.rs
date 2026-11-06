@@ -662,6 +662,63 @@ async fn t10_09_b_signed_partial_reduce_finance(
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     };
+
+    // First inspect the signed original 0.04 stop. An ACK for the shrink
+    // can only arrive from the sole production TradeService mutation owner.
+    // The recorded transport does not alter a live algo just because the
+    // test later wants to observe a 0.02 stop.
+    let original_client = reduce["original_intent_id"].as_str()
+        .expect("T10-09 original opening intent id").to_owned();
+    let reduce_client = reduce_id.clone();
+    let (opening_client_id, reducing_client_id) = owner.execution.store.call(
+        std::time::Instant::now()+Duration::from_secs(3),
+        move |s| {
+            let opening=s.intent(&original_client)?.ok_or(
+                okx_execution::StoreError::Invalid(
+                    "T10_09_OPENING_CLIENT_ID_MISSING"
+                )
+            )?;
+            let reduced=s.intent(&reduce_client)?.ok_or(
+                okx_execution::StoreError::Invalid(
+                    "T10_09_REDUCE_CLIENT_ID_MISSING"
+                )
+            )?;
+            Ok((opening.client_order_id, reduced.client_order_id))
+        },
+    ).await.expect("T10-09 exact persisted source identity");
+    let stop_client=format!("s{}",opening_client_id.get(..31)
+        .expect("T10-09 original client ID must be 32 bytes"));
+    let prior_live=raw(json!([{
+        "instId":"BTC-USDT-SWAP",
+        "algoId":"900000004","algoClOrdId":stop_client,
+        "state":"live","sz":"0.04","side":"sell",
+        "posSide":"long","tdMode":"cross","ordType":"conditional",
+        "slTriggerPx":"900","slTriggerPxType":"mark","slOrdPx":"-1"
+    }]));
+    feed.advance_recorded_route(
+        "fixture-executor-b","/api/v5/trade/order-algo",
+        (0..12).map(|_| RecordedGet {
+            access_key:"fixture-executor-b".into(),
+            path:"/api/v5/trade/order-algo".into(),
+            required_query:vec![("algoClOrdId".into(),stop_client.clone())],
+            raw_response:prior_live.clone(),
+        }).collect(),
+    );
+    feed.expect_post(crate::accounts::recorded_support::RecordedPost {
+        access_key:"fixture-executor-b".into(),
+        path:"/api/v5/trade/amend-algos".into(),
+        expected_body:json!({
+            "instId":"BTC-USDT-SWAP","algoId":"900000004",
+            "reqId":reducing_client_id,
+            "newSz":"0.02","cxlOnFail":false,
+        }),
+        raw_response:raw(json!([{
+            "algoId":"900000004",
+            "algoClOrdId":stop_client,
+            "reqId":reducing_client_id,
+            "sCode":"0",
+        }])),
+    });
     // The real TradeService, not the test, records the signed terminal
     // venue readback. A partial Reduce cannot release the local marker
     // while 0.02 remains in the venue, or B's original Worker grant.
@@ -672,6 +729,39 @@ async fn t10_09_b_signed_partial_reduce_finance(
         "fixture-b",&TradeRequest::Status{reference:reduce_id.clone()},None,
     ).await.expect("T10-09 native terminal Reduce Status");
     assert_eq!(status["data"]["intent"]["state"],"FILLED");
+    assert_eq!(status["data"]["protection_adjustment"]["state"],"ack_source_pending",
+        "T10-09 one amend ACK must precede any resized-stop verification");
+    assert_eq!(feed.outbound_posts.lock().unwrap().len(),8,
+        "T10-09 sole amend-algos POST must follow the public Reduce");
+    // The next venue GET is independent of the amend ACK: the old source
+    // remains 0.04 until the explicit post-ACK source handoff.
+    let after_live=raw(json!([{
+        "instId":"BTC-USDT-SWAP",
+        "algoId":"900000004","algoClOrdId":stop_client,
+        "state":"live","sz":"0.02","side":"sell",
+        "posSide":"long","tdMode":"cross","ordType":"conditional",
+        "slTriggerPx":"900","slTriggerPxType":"mark","slOrdPx":"-1"
+    }]));
+    feed.advance_recorded_route(
+        "fixture-executor-b","/api/v5/trade/order-algo",
+        (0..16).map(|_| RecordedGet {
+            access_key:"fixture-executor-b".into(),
+            path:"/api/v5/trade/order-algo".into(),
+            required_query:vec![("algoClOrdId".into(),stop_client.clone())],
+            raw_response:after_live.clone(),
+        }).collect(),
+    );
+    feed.advance_recorded_public_clock(raw(json!([{
+        "ts":chrono::Utc::now().timestamp_millis().to_string()
+    }])));
+    let resized=trade.trade(
+        "fixture-b",&TradeRequest::Status{reference:reduce_id.clone()},None,
+    ).await.expect("T10-09 new independent signed 0.02 stop readback");
+    assert_eq!(resized["data"]["protection_adjustment"]["state"],"verified",
+        "a matching amend ACK alone cannot verify remaining protection");
+    assert_eq!(resized["data"]["protection_adjustment"]["remaining_quantity"],"0.02");
+    assert_eq!(feed.outbound_posts.lock().unwrap().len(),8,
+        "T10-09 verified stop readback must not amend twice");
     let proof=owner.execution.store.call(
         std::time::Instant::now()+Duration::from_secs(3),
         move |s| s.prove_local_partial_reduce(
@@ -681,8 +771,8 @@ async fn t10_09_b_signed_partial_reduce_finance(
     assert_eq!(proof.0,Decimal::new(-1,4));
     assert_eq!(proof.1,1);
     assert_eq!(proof.2.len(),64);
-    assert_eq!(feed.outbound_posts.lock().unwrap().len(),7,
-        "finance-only Reduce readback must not retry the venue POST");
+    assert_eq!(feed.outbound_posts.lock().unwrap().len(),8,
+        "signed stop verification must not retry Reduce or amend");
     json!({
         "schema":"okx.t10-09-signed-partial-reduce-finance/v1",
         "reduce_intent_id":reduce["reduce"]["intent_id"],
@@ -693,6 +783,8 @@ async fn t10_09_b_signed_partial_reduce_finance(
         "source_digest":proof.2,
         "reduce_status":status["data"]["intent"]["state"],
         "central_release_state":status["data"]["central_release"]["state"],
+        "protection_amend_ack":status["data"]["protection_adjustment"],
+        "protection_resized":resized["data"]["protection_adjustment"],
         "outbound_posts":feed.outbound_posts.lock().unwrap().len(),
     })
 }

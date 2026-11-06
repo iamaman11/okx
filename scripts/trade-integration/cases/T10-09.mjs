@@ -74,7 +74,10 @@ export async function run({caseId,root,signal,artifactsDir}) {
   assert.match(reduceFinance.source_digest,/^[a-f0-9]{64}$/);
   assert.equal(reduceFinance.reduce_status,"FILLED");
   assert.notEqual(reduceFinance.central_release_state,"verified");
-  assert.equal(reduceFinance.outbound_posts,7);
+  assert.equal(reduceFinance.protection_amend_ack.state,"ack_source_pending");
+  assert.equal(reduceFinance.protection_resized.state,"verified");
+  assert.equal(reduceFinance.protection_resized.remaining_quantity,"0.02");
+  assert.equal(reduceFinance.outbound_posts,8);
   assert.notEqual(partialReduce.original_central_release.state,"verified");
   assert.ok(Number.isSafeInteger(late.sql.sql_revision)&&late.sql.sql_revision>0);
   assert.match(late.sql.bill_digest,/^[a-f0-9]{64}$/);
@@ -108,8 +111,7 @@ export async function run({caseId,root,signal,artifactsDir}) {
       signed_partial_reduce_finance:reduceFinance,
       worker_after_late_fill:late.worker_budget,
       public_status_after_late_fill:late.public_status_state,
-      missing:["remaining_position_live_protection_after_ack_bound_amend",
-        "terminal_source_backed_risk_release"],
+      missing:["terminal_source_backed_risk_release"],
     },null,2)+"\n");
   // The late fill and bill are genuine B owner facts, but a partial close,
   // remaining protection and final terminal release are still mandatory.

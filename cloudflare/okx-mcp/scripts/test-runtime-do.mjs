@@ -1347,7 +1347,7 @@ try {
         assert.equal(admitted.state, "ACKNOWLEDGED");
         assert.equal(admitted.post_ack_financial_complete, false);
         assert.equal(admitted.create_posts_total,
-          process.env.OKX_T10_09_LATE_FILL_PROBE === "1" ? 7 :
+          process.env.OKX_T10_09_LATE_FILL_PROBE === "1" ? 8 :
           process.env.OKX_T10_14_NATIVE_PROBE === "1" ? 6
           : process.env.OKX_B1_SECOND_POSITIVE_PROBE === "1" ? 5 : 4);
         assert.equal(admitted.quote_entry_usd, "3.0015");

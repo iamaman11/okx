@@ -30,12 +30,15 @@ impl TradeService {
         let instrument = reduction.instrument_id.clone();
         let id = reduction.intent_id.clone();
         let plan_hash = reduction.plan_hash.clone();
+        let reduce_order_id = venue.order_id.clone();
+        let reduce_instance = reduction.plan.strategy_instance.clone();
+        let reduce_position_side = reduction.plan.position_side.clone();
         let account_key = r.configuration.account_key.wire();
         let (opening, old_stop, key, prior, verified) = r.execution.store.call(
             deadline(),
             move |s| {
                 let (fee, fill_count, _) = s.prove_local_partial_reduce(
-                    &id, &venue.order_id, venue_filled, update,
+                    &id, &reduce_order_id, venue_filled, update,
                 )?;
                 if fill_count == 0 || fee > Decimal::ZERO {
                     return Err(okx_execution::StoreError::Invalid(
@@ -45,9 +48,9 @@ impl TradeService {
                 let lots = s.active_lots(&instrument)?;
                 if lots.len() != 1
                     || lots[0].remaining_qty != position_qty
-                    || lots[0].side != reduction.plan.position_side
+                    || lots[0].side != reduce_position_side
                     || lots[0].instance_id.as_deref()
-                        != Some(reduction.plan.strategy_instance.as_str())
+                        != Some(reduce_instance.as_str())
                 {
                     return Err(okx_execution::StoreError::Invalid(
                         "PROTECTION_SHRINK_OWNERSHIP_UNVERIFIED",
@@ -70,8 +73,8 @@ impl TradeService {
                 )?;
                 if !opening.risk_increase
                     || opening.instrument_id != instrument
-                    || opening.plan.strategy_instance != reduction.plan.strategy_instance
-                    || opening.plan.position_side != reduction.plan.position_side
+                    || opening.plan.strategy_instance != reduce_instance
+                    || opening.plan.position_side != reduce_position_side
                     || opening.incident.is_some()
                     || s.active_central_receipt(origin)?.is_none()
                 {

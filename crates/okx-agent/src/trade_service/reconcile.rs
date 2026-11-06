@@ -324,7 +324,7 @@ fn protection_covers_managed_increment(
 /// Every venue readback must refer to this durable intent before it can
 /// change local state, protection requirements, or exchange-order identity.
 /// An exchange lookup by client ID alone is a lookup, not an identity proof.
-fn verified_order_readback(
+pub(super) fn verified_order_readback(
     intent: &StoredIntent,
     order: &okx_api::TradeOrderDetails,
 ) -> Result<Decimal, String> {
@@ -405,7 +405,7 @@ fn verified_close_lot_exposure<'a>(
 /// terminal. No real release without matching exchange identity, covered final
 /// update and a bounded executed quantity. In particular, missing readback is
 /// UNKNOWN, not a zero-fill terminal outcome.
-fn verified_terminal_order_update_time(
+pub(super) fn verified_terminal_order_update_time(
     intent: &StoredIntent,
     order: Option<&okx_api::TradeOrderDetails>,
 ) -> Result<i64, String> {
