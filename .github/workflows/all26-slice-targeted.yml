@@ -129,7 +129,7 @@ jobs:
               $report = Get-Content -LiteralPath $file -Raw | ConvertFrom-Json
               $ok = $code -eq 0 -and
                 $report.exact_commit -eq $env:GITHUB_SHA -and
-                $report.spec_revision -eq '#449-r8.3' -and
+                $report.spec_revision -eq '#449-r9' -and
                 $report.required.Count -eq 26 -and
                 $report.selected.Count -eq 1 -and
                 $report.selected[0] -eq $id -and
