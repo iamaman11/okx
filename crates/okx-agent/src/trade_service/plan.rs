@@ -324,7 +324,11 @@ impl TradeService {
             return Err("PROTECTION_INVALID".into());
         }
         let fee_rate = if increase {
-            let fee = r.observer.fee_schedule_until(&rules,until).await.map_err(err)?;
+            let fee = r
+                .observer
+                .fee_schedule_until(&rules, until)
+                .await
+                .map_err(err)?;
             entry_budget::verified_entry_fee_rate(
                 &fee,
                 instrument,

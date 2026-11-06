@@ -259,10 +259,13 @@ where
     // Same-ID + same-payload callers share the single actual Worker request
     // and each receives its bound result. Same ID with different contents
     // is a fatal protocol conflict; it can never inherit the first grant.
-    let mut pending: HashMap<String, (
-        okx_protocol::risk_authority::RiskCommand,
-        Vec<oneshot::Sender<okx_protocol::risk_authority::RiskResult>>
-    )> = HashMap::new();
+    let mut pending: HashMap<
+        String,
+        (
+            okx_protocol::risk_authority::RiskCommand,
+            Vec<oneshot::Sender<okx_protocol::risk_authority::RiskResult>>,
+        ),
+    > = HashMap::new();
     let mut challenges: HashMap<String, Instant> = HashMap::new();
     let mut active = HashSet::new();
     let mut flights: FuturesUnordered<BoxFuture<'static, (String, okx_protocol::AgentResponse)>> =
@@ -738,8 +741,9 @@ mod raw_native_session_tests {
         // Account-facing TradeService may wrap the same typed local no-send
         // refusal as "OKX API error: ...". Strip only this exact envelope;
         // the shared RateBudget witness still decides whether waiting is safe.
-        let reason=reason.strip_prefix("OKX API error: ")
-            .or_else(||reason.strip_prefix("OKX private API error: "))
+        let reason = reason
+            .strip_prefix("OKX API error: ")
+            .or_else(|| reason.strip_prefix("OKX private API error: "))
             .unwrap_or(reason);
         if !reason.starts_with("OKX rate/backpressure defer: ") {
             return None;
@@ -1037,18 +1041,30 @@ mod raw_native_session_tests {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let session = tokio::spawn(async move {
             run_connected_session(
-                RawFrames { inbound: input_rx, outbound: output_tx },
-                test_hello(), ctx, &mut risk_rx, shutdown_rx,
-            ).await
+                RawFrames {
+                    inbound: input_rx,
+                    outbound: output_tx,
+                },
+                test_hello(),
+                ctx,
+                &mut risk_rx,
+                shutdown_rx,
+            )
+            .await
         });
-        assert!(matches!(parse(output_rx.recv().await.unwrap()), F::Hello { .. }));
+        assert!(matches!(
+            parse(output_rx.recv().await.unwrap()),
+            F::Hello { .. }
+        ));
         let session_id = "session_test_unbound_command".to_owned();
         let generation = 21;
-        input_tx.send(Ok(wire(F::HelloAck {
-            schema: SCHEMA.into(),
-            session_id: session_id.clone(),
-            connection_generation: generation,
-        }))).unwrap();
+        input_tx
+            .send(Ok(wire(F::HelloAck {
+                schema: SCHEMA.into(),
+                session_id: session_id.clone(),
+                connection_generation: generation,
+            })))
+            .unwrap();
 
         let operation = tokio::spawn({
             let client = client.clone();
@@ -1062,22 +1078,38 @@ mod raw_native_session_tests {
                     other => panic!("unexpected native outbound: {other:?}"),
                 }
             }
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
         assert_eq!(observed, "risk_wire_expected_command");
-        input_tx.send(Ok(wire(F::RiskControlResult {
-            schema: SCHEMA.into(),
-            session_id,
-            connection_generation: generation,
-            result: denied("risk_wire_foreign_command"),
-        }))).unwrap();
+        input_tx
+            .send(Ok(wire(F::RiskControlResult {
+                schema: SCHEMA.into(),
+                session_id,
+                connection_generation: generation,
+                result: denied("risk_wire_foreign_command"),
+            })))
+            .unwrap();
 
         let stopped = tokio::time::timeout(Duration::from_secs(3), session)
-            .await.unwrap().unwrap();
-        assert!(stopped.unwrap_err().to_string().contains("RISK_RESULT_COMMAND_UNBOUND"));
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            stopped
+                .unwrap_err()
+                .to_string()
+                .contains("RISK_RESULT_COMMAND_UNBOUND")
+        );
         let pending = tokio::time::timeout(Duration::from_secs(3), operation)
-            .await.unwrap().unwrap();
-        assert_eq!(pending.unwrap_err(), "RISK_TRANSPORT_LOST_DO_NOT_REPLAY",
-            "an unbound reply cannot become an authorization or a second grant");
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            pending.unwrap_err(),
+            "RISK_TRANSPORT_LOST_DO_NOT_REPLAY",
+            "an unbound reply cannot become an authorization or a second grant"
+        );
         drop(client);
         drop(input_tx);
         drop(shutdown_tx);
@@ -1093,18 +1125,30 @@ mod raw_native_session_tests {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let session = tokio::spawn(async move {
             run_connected_session(
-                RawFrames { inbound: input_rx, outbound: output_tx },
-                test_hello(), ctx, &mut risk_rx, shutdown_rx,
-            ).await
+                RawFrames {
+                    inbound: input_rx,
+                    outbound: output_tx,
+                },
+                test_hello(),
+                ctx,
+                &mut risk_rx,
+                shutdown_rx,
+            )
+            .await
         });
-        assert!(matches!(parse(output_rx.recv().await.unwrap()), F::Hello { .. }));
+        assert!(matches!(
+            parse(output_rx.recv().await.unwrap()),
+            F::Hello { .. }
+        ));
         let session_id = "session_test_late_bound".to_owned();
         let generation = 23;
-        input_tx.send(Ok(wire(F::HelloAck {
-            schema: SCHEMA.into(),
-            session_id: session_id.clone(),
-            connection_generation: generation,
-        }))).unwrap();
+        input_tx
+            .send(Ok(wire(F::HelloAck {
+                schema: SCHEMA.into(),
+                session_id: session_id.clone(),
+                connection_generation: generation,
+            })))
+            .unwrap();
 
         let first = tokio::spawn({
             let client = client.clone();
@@ -1118,7 +1162,9 @@ mod raw_native_session_tests {
                     other => panic!("unexpected outbound: {other:?}"),
                 }
             }
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
         assert_eq!(first_id, "risk_wire_late_known");
         first.abort();
         assert!(first.await.unwrap_err().is_cancelled());
@@ -1126,12 +1172,14 @@ mod raw_native_session_tests {
         // The Worker response is authentic and ID-bound, but the original
         // Native waiter has been cancelled. Do not deliver its authority
         // to another request; equally, do not break the whole WS session.
-        input_tx.send(Ok(wire(F::RiskControlResult {
-            schema: SCHEMA.into(),
-            session_id: session_id.clone(),
-            connection_generation: generation,
-            result: denied(&first_id),
-        }))).unwrap();
+        input_tx
+            .send(Ok(wire(F::RiskControlResult {
+                schema: SCHEMA.into(),
+                session_id: session_id.clone(),
+                connection_generation: generation,
+                result: denied(&first_id),
+            })))
+            .unwrap();
 
         let next = tokio::spawn({
             let client = client.clone();
@@ -1145,21 +1193,33 @@ mod raw_native_session_tests {
                     other => panic!("unexpected outbound after known late reply: {other:?}"),
                 }
             }
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
         assert_eq!(next_id, "risk_wire_after_late");
-        input_tx.send(Ok(wire(F::RiskControlResult {
-            schema: SCHEMA.into(),
-            session_id,
-            connection_generation: generation,
-            result: denied(&next_id),
-        }))).unwrap();
+        input_tx
+            .send(Ok(wire(F::RiskControlResult {
+                schema: SCHEMA.into(),
+                session_id,
+                connection_generation: generation,
+                result: denied(&next_id),
+            })))
+            .unwrap();
         let answer = tokio::time::timeout(Duration::from_secs(3), next)
-            .await.unwrap().unwrap().unwrap();
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
         assert_eq!(answer.command_id, next_id);
         assert_eq!(answer.status, RiskDecisionStatus::Denied);
         shutdown_tx.send(true).unwrap();
-        assert!(tokio::time::timeout(Duration::from_secs(3), session)
-            .await.unwrap().unwrap().is_ok());
+        assert!(
+            tokio::time::timeout(Duration::from_secs(3), session)
+                .await
+                .unwrap()
+                .unwrap()
+                .is_ok()
+        );
         drop(client);
         drop(input_tx);
         drop(output_rx);
@@ -1174,65 +1234,103 @@ mod raw_native_session_tests {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let session = tokio::spawn(async move {
             run_connected_session(
-                RawFrames { inbound: input_rx, outbound: output_tx },
-                test_hello(), ctx, &mut risk_rx, shutdown_rx,
-            ).await
+                RawFrames {
+                    inbound: input_rx,
+                    outbound: output_tx,
+                },
+                test_hello(),
+                ctx,
+                &mut risk_rx,
+                shutdown_rx,
+            )
+            .await
         });
-        assert!(matches!(parse(output_rx.recv().await.unwrap()), F::Hello { .. }));
-        let session_id="session_test_same_risk_command".to_owned();
-        let generation=24;
-        input_tx.send(Ok(wire(F::HelloAck {
-            schema: SCHEMA.into(),session_id:session_id.clone(),
-            connection_generation:generation,
-        }))).unwrap();
+        assert!(matches!(
+            parse(output_rx.recv().await.unwrap()),
+            F::Hello { .. }
+        ));
+        let session_id = "session_test_same_risk_command".to_owned();
+        let generation = 24;
+        input_tx
+            .send(Ok(wire(F::HelloAck {
+                schema: SCHEMA.into(),
+                session_id: session_id.clone(),
+                connection_generation: generation,
+            })))
+            .unwrap();
 
-        let first=tokio::spawn({
-            let client=client.clone();
-            async move {client.request(summary("risk_wire_same_deterministic")).await}
+        let first = tokio::spawn({
+            let client = client.clone();
+            async move {
+                client
+                    .request(summary("risk_wire_same_deterministic"))
+                    .await
+            }
         });
-        let first_id=tokio::time::timeout(Duration::from_secs(3),async {
+        let first_id = tokio::time::timeout(Duration::from_secs(3), async {
             loop {
                 match parse(output_rx.recv().await.expect("outbound closed")) {
-                    F::RiskControl {command,..}=>break command.command_id,
-                    F::Ping {..}=>continue,
-                    other=>panic!("unexpected outbound: {other:?}"),
+                    F::RiskControl { command, .. } => break command.command_id,
+                    F::Ping { .. } => continue,
+                    other => panic!("unexpected outbound: {other:?}"),
                 }
             }
-        }).await.unwrap();
-        assert_eq!(first_id,"risk_wire_same_deterministic");
+        })
+        .await
+        .unwrap();
+        assert_eq!(first_id, "risk_wire_same_deterministic");
 
-        let prior=RISK_IDENTICAL_INFLIGHT_COMMAND_JOINED.load(
-            std::sync::atomic::Ordering::SeqCst
-        );
-        let second=tokio::spawn({
-            let client=client.clone();
-            async move {client.request(summary("risk_wire_same_deterministic")).await}
+        let prior =
+            RISK_IDENTICAL_INFLIGHT_COMMAND_JOINED.load(std::sync::atomic::Ordering::SeqCst);
+        let second = tokio::spawn({
+            let client = client.clone();
+            async move {
+                client
+                    .request(summary("risk_wire_same_deterministic"))
+                    .await
+            }
         });
         // Wait for the ACTUAL single-owner join, not for an arbitrary sleep.
-        tokio::time::timeout(Duration::from_secs(3),async {
-            while RISK_IDENTICAL_INFLIGHT_COMMAND_JOINED.load(
-                std::sync::atomic::Ordering::SeqCst
-            )==prior {
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while RISK_IDENTICAL_INFLIGHT_COMMAND_JOINED.load(std::sync::atomic::Ordering::SeqCst)
+                == prior
+            {
                 tokio::task::yield_now().await;
             }
-        }).await.expect("same deterministic Worker request must join its first caller");
-        while let Ok(message)=output_rx.try_recv() {
-            assert!(!matches!(parse(message),F::RiskControl {..}),
-                "identical concurrent command must not send a second Worker mutation");
+        })
+        .await
+        .expect("same deterministic Worker request must join its first caller");
+        while let Ok(message) = output_rx.try_recv() {
+            assert!(
+                !matches!(parse(message), F::RiskControl { .. }),
+                "identical concurrent command must not send a second Worker mutation"
+            );
         }
-        input_tx.send(Ok(wire(F::RiskControlResult {
-            schema: SCHEMA.into(),session_id,
-            connection_generation:generation,result:denied(&first_id),
-        }))).unwrap();
-        for request in [first,second] {
-            let observed=tokio::time::timeout(Duration::from_secs(3),request)
-                .await.unwrap().unwrap().unwrap();
-            assert_eq!(observed.command_id,first_id);
-            assert_eq!(observed.status,RiskDecisionStatus::Denied);
+        input_tx
+            .send(Ok(wire(F::RiskControlResult {
+                schema: SCHEMA.into(),
+                session_id,
+                connection_generation: generation,
+                result: denied(&first_id),
+            })))
+            .unwrap();
+        for request in [first, second] {
+            let observed = tokio::time::timeout(Duration::from_secs(3), request)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            assert_eq!(observed.command_id, first_id);
+            assert_eq!(observed.status, RiskDecisionStatus::Denied);
         }
         shutdown_tx.send(true).unwrap();
-        assert!(tokio::time::timeout(Duration::from_secs(3),session)
-            .await.unwrap().unwrap().is_ok());
+        assert!(
+            tokio::time::timeout(Duration::from_secs(3), session)
+                .await
+                .unwrap()
+                .unwrap()
+                .is_ok()
+        );
         drop(client);
         drop(input_tx);
         drop(output_rx);
@@ -1247,47 +1345,71 @@ mod raw_native_session_tests {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let session = tokio::spawn(async move {
             run_connected_session(
-                RawFrames { inbound: input_rx, outbound: output_tx },
-                test_hello(), ctx, &mut risk_rx, shutdown_rx,
-            ).await
+                RawFrames {
+                    inbound: input_rx,
+                    outbound: output_tx,
+                },
+                test_hello(),
+                ctx,
+                &mut risk_rx,
+                shutdown_rx,
+            )
+            .await
         });
-        assert!(matches!(parse(output_rx.recv().await.unwrap()),F::Hello {..}));
-        input_tx.send(Ok(wire(F::HelloAck {
-            schema: SCHEMA.into(),
-            session_id:"session_test_risk_payload_conflict".into(),
-            connection_generation:25,
-        }))).unwrap();
-        let first=tokio::spawn({
-            let client=client.clone();
-            async move {client.request(summary("risk_wire_payload_conflict")).await}
+        assert!(matches!(
+            parse(output_rx.recv().await.unwrap()),
+            F::Hello { .. }
+        ));
+        input_tx
+            .send(Ok(wire(F::HelloAck {
+                schema: SCHEMA.into(),
+                session_id: "session_test_risk_payload_conflict".into(),
+                connection_generation: 25,
+            })))
+            .unwrap();
+        let first = tokio::spawn({
+            let client = client.clone();
+            async move { client.request(summary("risk_wire_payload_conflict")).await }
         });
-        let id=tokio::time::timeout(Duration::from_secs(3),async {
+        let id = tokio::time::timeout(Duration::from_secs(3), async {
             loop {
                 match parse(output_rx.recv().await.expect("outbound closed")) {
-                    F::RiskControl {command,..}=>break command.command_id,
-                    F::Ping {..}=>continue,
-                    other=>panic!("unexpected outbound: {other:?}"),
+                    F::RiskControl { command, .. } => break command.command_id,
+                    F::Ping { .. } => continue,
+                    other => panic!("unexpected outbound: {other:?}"),
                 }
             }
-        }).await.unwrap();
-        assert_eq!(id,"risk_wire_payload_conflict");
-        let mut incompatible=summary("risk_wire_payload_conflict");
-        incompatible.installation_id="different_test_installation".into();
+        })
+        .await
+        .unwrap();
+        assert_eq!(id, "risk_wire_payload_conflict");
+        let mut incompatible = summary("risk_wire_payload_conflict");
+        incompatible.installation_id = "different_test_installation".into();
         assert!(incompatible.valid());
-        let second=tokio::spawn({
-            let client=client.clone();
-            async move {client.request(incompatible).await}
+        let second = tokio::spawn({
+            let client = client.clone();
+            async move { client.request(incompatible).await }
         });
-        let terminated=tokio::time::timeout(Duration::from_secs(3),session)
-            .await.unwrap().unwrap();
-        assert!(terminated.unwrap_err().to_string().contains(
-            "RISK_COMMAND_ID_PAYLOAD_CONFLICT"
-        ));
-        for caller in [first,second] {
-            let outcome=tokio::time::timeout(Duration::from_secs(3),caller)
-                .await.unwrap().unwrap();
-            assert_eq!(outcome.unwrap_err(),"RISK_TRANSPORT_LOST_DO_NOT_REPLAY",
-                "same command ID with different payload cannot receive a grant");
+        let terminated = tokio::time::timeout(Duration::from_secs(3), session)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            terminated
+                .unwrap_err()
+                .to_string()
+                .contains("RISK_COMMAND_ID_PAYLOAD_CONFLICT")
+        );
+        for caller in [first, second] {
+            let outcome = tokio::time::timeout(Duration::from_secs(3), caller)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                outcome.unwrap_err(),
+                "RISK_TRANSPORT_LOST_DO_NOT_REPLAY",
+                "same command ID with different payload cannot receive a grant"
+            );
         }
         drop(client);
         drop(shutdown_tx);
@@ -1339,9 +1461,8 @@ mod raw_native_session_tests {
         let close_mode = std::env::var("OKX_T09_6_CLOSE_PROBE").as_deref() == Ok("1");
         let add_mode =
             close_mode || std::env::var("OKX_T09_4_MANAGED_ADD_PROBE").as_deref() == Ok("1");
-        let t10_seven_one_campaign=
-            std::env::var("OKX_T10_07_ONE_CAMPAIGN").as_deref()==Ok("1");
-        let clean_mode=add_mode||t10_seven_one_campaign;
+        let t10_seven_one_campaign = std::env::var("OKX_T10_07_ONE_CAMPAIGN").as_deref() == Ok("1");
+        let clean_mode = add_mode || t10_seven_one_campaign;
 
         // The same real public WS coordinator consumes recorded raw market
         // frames. These are immutable venue observations, not a fabricated
@@ -1350,8 +1471,8 @@ mod raw_native_session_tests {
         use serde_json::json;
         let feed = recorded_http.expect("the integration run requires recorded HTTP");
         let connector = Arc::new(RecordedWsConnector::default());
-        let spec_mode=std::env::var("OKX_T09_SPEC_SECOND_LINEAR_PROBE").as_deref()==Ok("1");
-        let mut supported_specs=vec![
+        let spec_mode = std::env::var("OKX_T09_SPEC_SECOND_LINEAR_PROBE").as_deref() == Ok("1");
+        let mut supported_specs = vec![
             serde_json::from_value(json!({
                 "instType":"SWAP","instId":"BTC-USDT-SWAP",
                 "instFamily":"BTC-USDT","uly":"BTC-USDT","state":"live",
@@ -1359,24 +1480,28 @@ mod raw_native_session_tests {
                 "lotSz":"0.01","minSz":"0.01","maxLmtSz":"1000",
                 "maxMktSz":"1000","ctType":"linear","ctVal":"0.01",
                 "ctValCcy":"BTC","groupId":"4","lever":"20"
-            })).unwrap()
+            }))
+            .unwrap(),
         ];
         if spec_mode {
             // Second exchange-provided valid linear spec, different symbol,
             // multiplier, lot, minimum and tick. This is test-only recorded
             // public metadata; it cannot grant policy permission by itself.
-            supported_specs.push(serde_json::from_value(json!({
-                "instType":"SWAP","instId":"ETH-USDT-SWAP",
-                "instFamily":"ETH-USDT","uly":"ETH-USDT","state":"live",
-                "ruleType":"normal","settleCcy":"USDT","tickSz":"0.5",
-                "lotSz":"0.05","minSz":"0.05","maxLmtSz":"1000",
-                "maxMktSz":"1000","ctType":"linear","ctVal":"0.02",
-                "ctValCcy":"ETH","groupId":"4","lever":"20"
-            })).unwrap());
+            supported_specs.push(
+                serde_json::from_value(json!({
+                    "instType":"SWAP","instId":"ETH-USDT-SWAP",
+                    "instFamily":"ETH-USDT","uly":"ETH-USDT","state":"live",
+                    "ruleType":"normal","settleCcy":"USDT","tickSz":"0.5",
+                    "lotSz":"0.05","minSz":"0.05","maxLmtSz":"1000",
+                    "maxMktSz":"1000","ctType":"linear","ctVal":"0.02",
+                    "ctValCcy":"ETH","groupId":"4","lever":"20"
+                }))
+                .unwrap(),
+            );
         }
-        let reference=ReferenceRegistry::from_public(
-            chrono::Utc::now().to_rfc3339(),supported_specs
-        ).unwrap();
+        let reference =
+            ReferenceRegistry::from_public(chrono::Utc::now().to_rfc3339(), supported_specs)
+                .unwrap();
         let stamp = chrono::Utc::now().timestamp_millis();
         let timestamp = stamp.to_string();
         let funding_time = (stamp + 8 * 60 * 60 * 1000).to_string();
@@ -1715,9 +1840,7 @@ mod raw_native_session_tests {
         }
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let session = tokio::spawn(async move {
-            let result = run_connected_session(
-                socket, hello, ctx, &mut risk_rx, shutdown_rx
-            ).await;
+            let result = run_connected_session(socket, hello, ctx, &mut risk_rx, shutdown_rx).await;
             if let Err(ref reason) = result {
                 // Record the *real* Native WSS first failure. A later
                 // RISK_TRANSPORT_LOST is only the requester's secondary
@@ -2133,13 +2256,13 @@ mod raw_native_session_tests {
             // admission. A single fresh snapshot before Execute is NOT
             // enough under the production two-second quote age bound.
             // There is no synthetic MarketSnapshot or TTL bypass.
-            let (t10_feed_shutdown,mut t10_feed_stop)=watch::channel(false);
-            let t10_feed_connector=connector.clone();
-            let t10_feed_rows=recorded_public.clone();
-            let t10_market_task=tokio::spawn(async move {
-                let mut ticks=tokio::time::interval(Duration::from_millis(750));
+            let (t10_feed_shutdown, mut t10_feed_stop) = watch::channel(false);
+            let t10_feed_connector = connector.clone();
+            let t10_feed_rows = recorded_public.clone();
+            let t10_market_task = tokio::spawn(async move {
+                let mut ticks = tokio::time::interval(Duration::from_millis(750));
                 ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-                let mut book_seq=12_i64;
+                let mut book_seq = 12_i64;
                 loop {
                     tokio::select! {
                         changed=t10_feed_stop.changed()=>{
@@ -2183,26 +2306,36 @@ mod raw_native_session_tests {
                     }
                 }
             });
-            let witness=t10_07_native_one_campaign(
-                accounts.clone(),trade.clone(),risk.clone(),public_ws.clone(),
-                feed.clone(),rate_budget.clone(),&refresh_recorded_market,
-            ).await;
+            let witness = t10_07_native_one_campaign(
+                accounts.clone(),
+                trade.clone(),
+                risk.clone(),
+                public_ws.clone(),
+                feed.clone(),
+                rate_budget.clone(),
+                &refresh_recorded_market,
+            )
+            .await;
             println!("T10_07_NATIVE_ONE_CAMPAIGN_V1:{witness}");
-            let _=t10_feed_shutdown.send(true);
-            tokio::time::timeout(Duration::from_secs(5),t10_market_task)
-                .await.expect("T10-07 live market publisher teardown deadline")
+            let _ = t10_feed_shutdown.send(true);
+            tokio::time::timeout(Duration::from_secs(5), t10_market_task)
+                .await
+                .expect("T10-07 live market publisher teardown deadline")
                 .expect("T10-07 live market publisher task");
-            let _=maintenance_shutdown.send(true);
-            let _=public_shutdown.send(true);
-            let _=shutdown_tx.send(true);
-            tokio::time::timeout(Duration::from_secs(10),maintenance_task)
-                .await.expect("T10-07 maintenance shutdown deadline")
+            let _ = maintenance_shutdown.send(true);
+            let _ = public_shutdown.send(true);
+            let _ = shutdown_tx.send(true);
+            tokio::time::timeout(Duration::from_secs(10), maintenance_task)
+                .await
+                .expect("T10-07 maintenance shutdown deadline")
                 .expect("T10-07 maintenance task exit");
             accounts.shutdown().await;
-            let _=tokio::time::timeout(Duration::from_secs(10),public_task)
-                .await.expect("T10-07 public WS shutdown deadline");
-            let _=tokio::time::timeout(Duration::from_secs(10),session)
-                .await.expect("T10-07 Native risk session shutdown deadline");
+            let _ = tokio::time::timeout(Duration::from_secs(10), public_task)
+                .await
+                .expect("T10-07 public WS shutdown deadline");
+            let _ = tokio::time::timeout(Duration::from_secs(10), session)
+                .await
+                .expect("T10-07 Native risk session shutdown deadline");
             println!("native_to_persisted_workerd_riskbook PASS: T10-07 one Native campaign");
             return;
         }
@@ -2894,9 +3027,8 @@ mod raw_native_session_tests {
             for _ in 0..100 {
                 let public = trade.clone();
                 let same_request = semantic_replay.clone();
-                concurrent.spawn(async move {
-                    public.trade("fixture-a", &same_request, None).await
-                });
+                concurrent
+                    .spawn(async move { public.trade("fixture-a", &same_request, None).await });
             }
             let mut identical = 0_u32;
             let mut local_read_denied = 0_u32;
@@ -2904,18 +3036,26 @@ mod raw_native_session_tests {
             while let Some(task) = concurrent.join_next().await {
                 match task.expect("T10-06 public task must finish") {
                     Ok(v) => {
-                        let id = v["data"]["intent"]["intent_id"].as_str()
+                        let id = v["data"]["intent"]["intent_id"]
+                            .as_str()
                             .or_else(|| v["intent_id"].as_str());
                         if id == Some(opened_intent_id.as_str()) {
                             if v["status"] == "unknown" {
-                                assert_eq!(v["retryable"], false,
-                                    "T10-06 unknown must never authorize a resend");
+                                assert_eq!(
+                                    v["retryable"], false,
+                                    "T10-06 unknown must never authorize a resend"
+                                );
                                 assert_eq!(v["next_action"], "trade.status");
-                                assert!(matches!(v["reason_code"].as_str(),
-                                    Some("ACCOUNT_MUTATION_BUSY_STATUS_NOT_EVALUATED_NO_RESUBMIT")
-                                    | Some("ORDER_READBACK_INCOMPLETE_NO_RESUBMIT")
-                                    | Some("EXCHANGE_ORDER_STATE_UNKNOWN")),
-                                    "T10-06 unknown must identify a real read/owner blocker: {v}");
+                                assert!(
+                                    matches!(
+                                        v["reason_code"].as_str(),
+                                        Some(
+                                            "ACCOUNT_MUTATION_BUSY_STATUS_NOT_EVALUATED_NO_RESUBMIT"
+                                        ) | Some("ORDER_READBACK_INCOMPLETE_NO_RESUBMIT")
+                                            | Some("EXCHANGE_ORDER_STATE_UNKNOWN")
+                                    ),
+                                    "T10-06 unknown must identify a real read/owner blocker: {v}"
+                                );
                             }
                             identical += 1;
                         } else {
@@ -2934,44 +3074,62 @@ mod raw_native_session_tests {
                     }
                 }
             }
-            assert!(errors.is_empty(), "T10-06 unsafe concurrent results: {errors:?}");
-            assert_eq!(identical + local_read_denied, 100,
-                "each T10-06 request must be accounted for");
-            assert_eq!(feed.outbound_posts.lock().unwrap().len(), 1,
-                "100 concurrent same-key calls must not emit another POST");
+            assert!(
+                errors.is_empty(),
+                "T10-06 unsafe concurrent results: {errors:?}"
+            );
+            assert_eq!(
+                identical + local_read_denied,
+                100,
+                "each T10-06 request must be accounted for"
+            );
+            assert_eq!(
+                feed.outbound_posts.lock().unwrap().len(),
+                1,
+                "100 concurrent same-key calls must not emit another POST"
+            );
             let saved_id = opened_intent_id.clone();
             let semantic_key = match &semantic_replay {
-                TradeRequest::Execute { idempotency_key, .. } => idempotency_key.clone(),
+                TradeRequest::Execute {
+                    idempotency_key, ..
+                } => idempotency_key.clone(),
                 _ => unreachable!("T10-06 requires original public Execute key"),
             };
             let owner = accounts.resolve("fixture-a").await.unwrap();
-            let (by_id, by_key) = owner.execution.store.call(
-                std::time::Instant::now() + Duration::from_secs(3),
-                move |s| Ok((
-                    s.intent(&saved_id)?,
-                    s.by_idempotency(&semantic_key)?,
-                ))
-            ).await.expect("T10-06 same account SQL owner");
+            let (by_id, by_key) = owner
+                .execution
+                .store
+                .call(
+                    std::time::Instant::now() + Duration::from_secs(3),
+                    move |s| Ok((s.intent(&saved_id)?, s.by_idempotency(&semantic_key)?)),
+                )
+                .await
+                .expect("T10-06 same account SQL owner");
             // Do not mistake a previously rejected LOCAL/NOT_STARTED key
             // for the real ACKed order after a legal explicit-key retry.
             let persisted = by_id.expect("T10-06 original persisted intent");
             let keyed = by_key.expect("T10-06 semantic key persisted intent");
-            assert_eq!(keyed.intent_id, persisted.intent_id,
-                "100 same-key public requests must bind to original intent");
+            assert_eq!(
+                keyed.intent_id, persisted.intent_id,
+                "100 same-key public requests must bind to original intent"
+            );
             assert_eq!(persisted.intent_id, opened_intent_id);
             assert_eq!(persisted.state, okx_execution::IntentState::Acknowledged);
-            println!("T10_06_NATIVE_CONCURRENT_V1:{}", json!({
-                "requested":100,
-                "same_intent_returns":identical,
-                "local_no_send_read_denials":local_read_denied,
-                "nonlocal_failures":errors.len(),
-                "original_intent_id":opened_intent_id,
-                "persisted_intent_id":persisted.intent_id,
-                "sql_revision":persisted.revision,
-                "created_posts":feed.outbound_posts.lock().unwrap().len(),
-                "elapsed_ms":started.elapsed().as_millis(),
-                "conflict_reason":amount_conflict_reason,
-            }));
+            println!(
+                "T10_06_NATIVE_CONCURRENT_V1:{}",
+                json!({
+                    "requested":100,
+                    "same_intent_returns":identical,
+                    "local_no_send_read_denials":local_read_denied,
+                    "nonlocal_failures":errors.len(),
+                    "original_intent_id":opened_intent_id,
+                    "persisted_intent_id":persisted.intent_id,
+                    "sql_revision":persisted.revision,
+                    "created_posts":feed.outbound_posts.lock().unwrap().len(),
+                    "elapsed_ms":started.elapsed().as_millis(),
+                    "conflict_reason":amount_conflict_reason,
+                })
+            );
         }
         // A read-only replay may return UNKNOWN even after transport has
         // consumed the raw GET: a deadline or decode/readback failure does
@@ -3396,11 +3554,16 @@ mod raw_native_session_tests {
                     "created_posts":feed.outbound_posts.lock().unwrap().len()
                 })
             );
-            if std::env::var("OKX_T10_13_STOP_PROBE").as_deref()==Ok("1") {
-                let stop=t10_13_stop_and_source_blocker(
-                    &handoff_path,accounts.clone(),trade.clone(),risk.clone(),
-                    feed.clone(),idempotent_intent_id.clone()
-                ).await;
+            if std::env::var("OKX_T10_13_STOP_PROBE").as_deref() == Ok("1") {
+                let stop = t10_13_stop_and_source_blocker(
+                    &handoff_path,
+                    accounts.clone(),
+                    trade.clone(),
+                    risk.clone(),
+                    feed.clone(),
+                    idempotent_intent_id.clone(),
+                )
+                .await;
                 println!("T10_13_NATIVE_STOP_AFTER_FILL_V1:{stop}");
             }
             // A terminal fill/bill and a public Status observation have
@@ -6184,20 +6347,26 @@ mod raw_native_session_tests {
         // shutdown; the receiver may already be gone. That is the fault
         // under test, not a failure to send a shutdown notification.
         // Ordinary cohorts still REQUIRE a live receiver and clean join.
-        if std::env::var("OKX_T10_04_FOREIGN_WORKER_REPLY_PROBE").as_deref()==Ok("1") {
-            let _=shutdown_tx.send(true);
+        if std::env::var("OKX_T10_04_FOREIGN_WORKER_REPLY_PROBE").as_deref() == Ok("1") {
+            let _ = shutdown_tx.send(true);
         } else {
-            shutdown_tx.send(true).expect("ordinary Native WSS shutdown receiver");
+            shutdown_tx
+                .send(true)
+                .expect("ordinary Native WSS shutdown receiver");
         }
         let terminated = tokio::time::timeout(Duration::from_secs(10), session)
             .await
             .unwrap()
             .unwrap();
-        if std::env::var("OKX_T10_04_FOREIGN_WORKER_REPLY_PROBE").as_deref()==Ok("1") {
-            let transport_failure=terminated.expect_err(
-                "T10-04 wrong Worker command must close the Native WSS session");
-            assert!(transport_failure.to_string().contains("RISK_RESULT_COMMAND_UNBOUND"),
-                "T10-04 must preserve first binding failure: {transport_failure}");
+        if std::env::var("OKX_T10_04_FOREIGN_WORKER_REPLY_PROBE").as_deref() == Ok("1") {
+            let transport_failure = terminated
+                .expect_err("T10-04 wrong Worker command must close the Native WSS session");
+            assert!(
+                transport_failure
+                    .to_string()
+                    .contains("RISK_RESULT_COMMAND_UNBOUND"),
+                "T10-04 must preserve first binding failure: {transport_failure}"
+            );
         } else {
             assert!(
                 terminated.is_ok(),

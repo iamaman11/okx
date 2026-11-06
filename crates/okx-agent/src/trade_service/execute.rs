@@ -657,10 +657,12 @@ impl TradeService {
             // to verify partial fills, protection and terminal finance.
             let _replay_owner = match r.execute_replay_reconciliation.try_acquire() {
                 Ok(owner) => owner,
-                Err(_) => return Ok(uncertain(
-                    &i.intent_id,
-                    "ACCOUNT_MUTATION_BUSY_STATUS_NOT_EVALUATED_NO_RESUBMIT",
-                )),
+                Err(_) => {
+                    return Ok(uncertain(
+                        &i.intent_id,
+                        "ACCOUNT_MUTATION_BUSY_STATUS_NOT_EVALUATED_NO_RESUBMIT",
+                    ));
+                }
             };
             return self.status_intent(r, &i.intent_id).await;
         }
@@ -676,10 +678,14 @@ impl TradeService {
         // A loser is definitively local/no-send and can check the durable
         // identity on a later public Status/replay call.
         let _new_risk_admission = if matches!(
-            operation, TradeOperation::Open | TradeOperation::Add | TradeOperation::Replace
+            operation,
+            TradeOperation::Open | TradeOperation::Add | TradeOperation::Replace
         ) {
-            Some(r.new_risk_admission.try_acquire()
-                .map_err(|_| "ACCOUNT_MUTATION_BUSY")?)
+            Some(
+                r.new_risk_admission
+                    .try_acquire()
+                    .map_err(|_| "ACCOUNT_MUTATION_BUSY")?,
+            )
         } else {
             None
         };
@@ -1015,15 +1021,20 @@ impl TradeService {
                     let pre_reserve_id = prepared.intent_id.clone();
                     let rejected = pre_reserve_id.clone();
                     let denied_reason = reason.clone();
-                    if r.execution.store.call(deadline(), move |s| {
-                        s.reject_unsent(&rejected, &denied_reason, now())?;
-                        if !s.unsent_before_reserve(&rejected)? {
-                            return Err(okx_execution::StoreError::Invalid(
-                                "PRE_RESERVE_SQL_NO_SEND_PROOF_MISSING",
-                            ));
-                        }
-                        Ok(())
-                    }).await.is_err() {
+                    if r.execution
+                        .store
+                        .call(deadline(), move |s| {
+                            s.reject_unsent(&rejected, &denied_reason, now())?;
+                            if !s.unsent_before_reserve(&rejected)? {
+                                return Err(okx_execution::StoreError::Invalid(
+                                    "PRE_RESERVE_SQL_NO_SEND_PROOF_MISSING",
+                                ));
+                            }
+                            Ok(())
+                        })
+                        .await
+                        .is_err()
+                    {
                         return Ok(uncertain(
                             &pre_reserve_id,
                             "PRE_RESERVE_LOCAL_REJECTION_UNCONFIRMED_NO_RESUBMIT",
@@ -1135,19 +1146,18 @@ impl TradeService {
             // attempt. Production ordering and fail-closed source fences
             // are identical when this opt-in test hook is absent.
             #[cfg(test)]
-            if super::T10_07_HOLD_SQL_RESERVE.swap(
-                false,std::sync::atomic::Ordering::SeqCst
-            ) {
-                super::T10_07_SQL_RESERVE_PERSISTED.store(
-                    true,std::sync::atomic::Ordering::SeqCst
-                );
-                tokio::time::timeout_at(until.into(),async {
-                    while !super::T10_07_RELEASE_SQL_RESERVE_HOLD.load(
-                        std::sync::atomic::Ordering::SeqCst
-                    ) {
+            if super::T10_07_HOLD_SQL_RESERVE.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                super::T10_07_SQL_RESERVE_PERSISTED
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+                tokio::time::timeout_at(until.into(), async {
+                    while !super::T10_07_RELEASE_SQL_RESERVE_HOLD
+                        .load(std::sync::atomic::Ordering::SeqCst)
+                    {
                         tokio::time::sleep(Duration::from_millis(5)).await;
                     }
-                }).await.map_err(|_|"T10_07_SQL_HELD_HANDOFF_ORIGINAL_DEADLINE_EXPIRED")?;
+                })
+                .await
+                .map_err(|_| "T10_07_SQL_HELD_HANDOFF_ORIGINAL_DEADLINE_EXPIRED")?;
             }
             if Instant::now() >= until {
                 return Err("COMMAND_EXPIRED".into());
@@ -1171,11 +1181,12 @@ impl TradeService {
                     central = Some(v);
                     post_held_selected = Some(witness);
                 }
-                Err(reason) if matches!(
-                    reason.as_str(),
-                    "POST_FENCE_OUTCOME_UNKNOWN_NO_POST"
-                        | "RISK_TRANSPORT_LOST_DO_NOT_REPLAY"
-                ) => {
+                Err(reason)
+                    if matches!(
+                        reason.as_str(),
+                        "POST_FENCE_OUTCOME_UNKNOWN_NO_POST" | "RISK_TRANSPORT_LOST_DO_NOT_REPLAY"
+                    ) =>
+                {
                     // A lost Worker BeginPost answer is not a negative
                     // authorization. INSPECT may already have observed
                     // POSTED, or its own WSS reply may be unavailable.
@@ -1607,22 +1618,30 @@ impl TradeService {
             .observer
             .snapshot_after_held_until(until)
             .await
-            .map_err(|e|{
-                let reason=err(e);
+            .map_err(|e| {
+                let reason = err(e);
                 #[cfg(test)]
-                Self::b_census_probe_failure("POST_HELD_SELECTED_SNAPSHOT",
-                    &r.configuration.account_key.wire(),&reason,Some(until));
+                Self::b_census_probe_failure(
+                    "POST_HELD_SELECTED_SNAPSHOT",
+                    &r.configuration.account_key.wire(),
+                    &reason,
+                    Some(until),
+                );
                 reason
             })?;
         let fee = r
             .observer
             .fee_schedule_until(&rules, until)
             .await
-            .map_err(|e|{
-                let reason=err(e);
+            .map_err(|e| {
+                let reason = err(e);
                 #[cfg(test)]
-                Self::b_census_probe_failure("POST_HELD_FEE_SOURCE",
-                    &r.configuration.account_key.wire(),&reason,Some(until));
+                Self::b_census_probe_failure(
+                    "POST_HELD_FEE_SOURCE",
+                    &r.configuration.account_key.wire(),
+                    &reason,
+                    Some(until),
+                );
                 reason
             })?;
         if snap.account_uid_fingerprint != r.configuration.account_key.verified_uid {
@@ -1639,11 +1658,15 @@ impl TradeService {
             .account
             .config_wait(until.saturating_duration_since(Instant::now()))
             .await
-            .map_err(|e|{
-                let reason=err(e);
+            .map_err(|e| {
+                let reason = err(e);
                 #[cfg(test)]
-                Self::b_census_probe_failure("POST_HELD_EXECUTOR_CONFIG",
-                    &r.configuration.account_key.wire(),&reason,Some(until));
+                Self::b_census_probe_failure(
+                    "POST_HELD_EXECUTOR_CONFIG",
+                    &r.configuration.account_key.wire(),
+                    &reason,
+                    Some(until),
+                );
                 reason
             })?;
         let leverage = dec(&r
@@ -1659,11 +1682,15 @@ impl TradeService {
                 until,
             )
             .await
-            .map_err(|e|{
-                let reason=err(e);
+            .map_err(|e| {
+                let reason = err(e);
                 #[cfg(test)]
-                Self::b_census_probe_failure("POST_HELD_LEVERAGE",
-                    &r.configuration.account_key.wire(),&reason,Some(until));
+                Self::b_census_probe_failure(
+                    "POST_HELD_LEVERAGE",
+                    &r.configuration.account_key.wire(),
+                    &reason,
+                    Some(until),
+                );
                 reason
             })?)?;
         let (reassessed, _) = entry_budget::assess_order(
@@ -1820,31 +1847,49 @@ impl TradeService {
         .map(|v| v.0)
     }
 
-
-#[cfg(test)]
-fn b_census_probe_failure(phase: &str, account: &str, reason: &str, until: Option<Instant>) {
-    if std::env::var("OKX_B_CENSUS_CAUSE_PROBE").as_deref()!=Ok("1") { return; }
-    let fingerprint=format!("{:x}",Sha256::digest(account.as_bytes()));
-    let code=[
-      "COHORT_FINANCIAL_SOURCE_INCOMPLETE","COHORT_ALGO_SOURCE_STALE",
-      "COHORT_EVIDENCE_INCOMPLETE","COHORT_SOURCE_GENERATION_CHANGED",
-      "ENTRY_CENSUS_SOURCE_DEADLINE","TRANSCRIPT_SOURCE_PAGE_UNEXPECTED_OR_EXHAUSTED",
-      "TRANSCRIPT_CLOCK_EXHAUSTED","TRANSCRIPT_REPEAT_EXCEEDED",
-      "RateLimited","rate/backpressure defer","SourceDeadline",
-    ].into_iter().find(|s|reason.contains(s)).unwrap_or("OTHER_TYPED_FAILURE");
-    let endpoint=[
-      "/api/v5/account/config","/api/v5/account/balance",
-      "/api/v5/account/positions","/api/v5/account/trade-fee",
-      "/api/v5/trade/orders-algo-pending","/api/v5/trade/orders-pending",
-    ].into_iter().find(|s|reason.contains(s));
-    eprintln!("B_CENSUS_FIRST_FAILURE_V1:{}",json!({
-      "schema":"okx.b-census-first-failure/v1","phase":phase,
-      "account_digest_prefix":&fingerprint[..12],
-      "reason_code":code,"endpoint":endpoint,
-      "reason_sha256":format!("{:x}",Sha256::digest(reason.as_bytes())),
-      "remaining_ms":until.map(|v|v.saturating_duration_since(Instant::now()).as_millis() as u64)
-    }));
-}
+    #[cfg(test)]
+    fn b_census_probe_failure(phase: &str, account: &str, reason: &str, until: Option<Instant>) {
+        if std::env::var("OKX_B_CENSUS_CAUSE_PROBE").as_deref() != Ok("1") {
+            return;
+        }
+        let fingerprint = format!("{:x}", Sha256::digest(account.as_bytes()));
+        let code = [
+            "COHORT_FINANCIAL_SOURCE_INCOMPLETE",
+            "COHORT_ALGO_SOURCE_STALE",
+            "COHORT_EVIDENCE_INCOMPLETE",
+            "COHORT_SOURCE_GENERATION_CHANGED",
+            "ENTRY_CENSUS_SOURCE_DEADLINE",
+            "TRANSCRIPT_SOURCE_PAGE_UNEXPECTED_OR_EXHAUSTED",
+            "TRANSCRIPT_CLOCK_EXHAUSTED",
+            "TRANSCRIPT_REPEAT_EXCEEDED",
+            "RateLimited",
+            "rate/backpressure defer",
+            "SourceDeadline",
+        ]
+        .into_iter()
+        .find(|s| reason.contains(s))
+        .unwrap_or("OTHER_TYPED_FAILURE");
+        let endpoint = [
+            "/api/v5/account/config",
+            "/api/v5/account/balance",
+            "/api/v5/account/positions",
+            "/api/v5/account/trade-fee",
+            "/api/v5/trade/orders-algo-pending",
+            "/api/v5/trade/orders-pending",
+        ]
+        .into_iter()
+        .find(|s| reason.contains(s));
+        eprintln!(
+            "B_CENSUS_FIRST_FAILURE_V1:{}",
+            json!({
+              "schema":"okx.b-census-first-failure/v1","phase":phase,
+              "account_digest_prefix":&fingerprint[..12],
+              "reason_code":code,"endpoint":endpoint,
+              "reason_sha256":format!("{:x}",Sha256::digest(reason.as_bytes())),
+              "remaining_ms":until.map(|v|v.saturating_duration_since(Instant::now()).as_millis() as u64)
+            })
+        );
+    }
 
     /// Only the protection reconciliation of an existing managed position
     /// may wait for LOCAL/NO-SEND private reads. The same complete cohort

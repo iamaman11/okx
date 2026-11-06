@@ -882,8 +882,8 @@ pub(crate) mod recorded_support {
     use okx_api::{
         HttpRequest, HttpSend, HttpStatusCode, HttpTransport, OkxError, RawHttpResponse,
     };
-    use std::time::Instant;
     use sha2::Digest;
+    use std::time::Instant;
 
     /// A raw external GET response, consumed once by the same production
     /// parser as a live HTTP response. Query expectations are an explicit
@@ -905,8 +905,7 @@ pub(crate) mod recorded_support {
     // a perpetual exchange feed nor an unlimited synthetic GET generator.
     // The clock starts at explicit phase publication, NOT on each read.
     const SIGNED_PHASE_MAX_READS: u64 = 256;
-    const SIGNED_PHASE_MAX_LIFETIME: std::time::Duration =
-        std::time::Duration::from_secs(300);
+    const SIGNED_PHASE_MAX_LIFETIME: std::time::Duration = std::time::Duration::from_secs(300);
 
     struct ImmutableSignedGetPhase {
         phase_id: String,
@@ -1145,48 +1144,82 @@ pub(crate) mod recorded_support {
         /// their separate causal/one-shot transcript contracts.
         pub(crate) fn expect_immutable_signed_phase(&self, phase_id: &str, page: RecordedGet) {
             self.expect_immutable_signed_phase_bounded(
-                phase_id, page, SIGNED_PHASE_MAX_READS, SIGNED_PHASE_MAX_LIFETIME,
+                phase_id,
+                page,
+                SIGNED_PHASE_MAX_READS,
+                SIGNED_PHASE_MAX_LIFETIME,
             );
         }
 
         /// Declare a finite delivery budget and monotonic lifetime BEFORE
         /// publishing the source event. Only the recorded transport uses it.
         pub(crate) fn expect_immutable_signed_phase_bounded(
-            &self, phase_id: &str, page: RecordedGet,
-            max_deliveries: u64, ttl: std::time::Duration,
+            &self,
+            phase_id: &str,
+            page: RecordedGet,
+            max_deliveries: u64,
+            ttl: std::time::Duration,
         ) {
-            assert!(max_deliveries>0 && !ttl.is_zero(),
-                "TRANSCRIPT_IMMUTABLE_BUDGET_INVALID");
-            assert!(!phase_id.is_empty(),"TRANSCRIPT_IMMUTABLE_PHASE_ID_MISSING");
-            assert!(matches!(
-                page.path.as_str(),
-                "/api/v5/account/balance"
-                    | "/api/v5/account/trade-fee"
-                    | "/api/v5/account/leverage-info"
-                    | "/api/v5/trade/orders-pending"
-            ),"TRANSCRIPT_IMMUTABLE_ROUTE_NOT_ALLOWED");
-            let route=(page.access_key.clone(),page.path.clone());
-            let mut query=page.required_query.clone();
+            assert!(
+                max_deliveries > 0 && !ttl.is_zero(),
+                "TRANSCRIPT_IMMUTABLE_BUDGET_INVALID"
+            );
+            assert!(
+                !phase_id.is_empty(),
+                "TRANSCRIPT_IMMUTABLE_PHASE_ID_MISSING"
+            );
+            assert!(
+                matches!(
+                    page.path.as_str(),
+                    "/api/v5/account/balance"
+                        | "/api/v5/account/trade-fee"
+                        | "/api/v5/account/leverage-info"
+                        | "/api/v5/trade/orders-pending"
+                ),
+                "TRANSCRIPT_IMMUTABLE_ROUTE_NOT_ALLOWED"
+            );
+            let route = (page.access_key.clone(), page.path.clone());
+            let mut query = page.required_query.clone();
             query.sort();
-            let mut phases=self.immutable_signed_phases.lock().unwrap();
-            assert!(!phases.iter().any(|item| {
-                let mut previous=item.source.required_query.clone();
-                previous.sort();
-                item.source.access_key==page.access_key
-                    &&item.source.path==page.path && previous==query
-            }),"TRANSCRIPT_IMMUTABLE_PHASE_ALREADY_REGISTERED");
-            assert!(!self.reads.lock().unwrap().iter().any(|item|
-                item.access_key==page.access_key && item.path==page.path
-            ),"TRANSCRIPT_IMMUTABLE_MIXED_WITH_QUEUED_SOURCE");
-            assert!(!self.optional_reads.lock().unwrap().iter().any(|item|
-                item.access_key==page.access_key && item.path==page.path
-            ),"TRANSCRIPT_IMMUTABLE_MIXED_WITH_OPTIONAL_SOURCE");
+            let mut phases = self.immutable_signed_phases.lock().unwrap();
+            assert!(
+                !phases.iter().any(|item| {
+                    let mut previous = item.source.required_query.clone();
+                    previous.sort();
+                    item.source.access_key == page.access_key
+                        && item.source.path == page.path
+                        && previous == query
+                }),
+                "TRANSCRIPT_IMMUTABLE_PHASE_ALREADY_REGISTERED"
+            );
+            assert!(
+                !self
+                    .reads
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|item| item.access_key == page.access_key && item.path == page.path),
+                "TRANSCRIPT_IMMUTABLE_MIXED_WITH_QUEUED_SOURCE"
+            );
+            assert!(
+                !self
+                    .optional_reads
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|item| item.access_key == page.access_key && item.path == page.path),
+                "TRANSCRIPT_IMMUTABLE_MIXED_WITH_OPTIONAL_SOURCE"
+            );
             self.strict_read_routes.lock().unwrap().insert(route);
             phases.push(ImmutableSignedGetPhase {
-                phase_id:phase_id.into(),source:page,deliveries:0,
-                max_deliveries,published_at:Instant::now(),ttl,
+                phase_id: phase_id.into(),
+                source: page,
+                deliveries: 0,
+                max_deliveries,
+                published_at: Instant::now(),
+                ttl,
             });
-            let installed=phases.last().unwrap();
+            let installed = phases.last().unwrap();
             self.immutable_phase_trace.lock().unwrap().push(format!(
                 "event=SIGNED_PHASE_INSTALLED phase={phase_id} actor={} route={} query={:?} sha256={:x} max_reads={max_deliveries} ttl_ms={}",
                 installed.source.access_key,installed.source.path,query,
@@ -1198,41 +1231,63 @@ pub(crate) mod recorded_support {
         /// does not accept a new timestamp on a GET: the new raw response
         /// must be explicitly supplied after a separately verified event.
         pub(crate) fn advance_immutable_signed_phase(
-            &self, expected_phase:&str, next_phase:&str, page:RecordedGet,
+            &self,
+            expected_phase: &str,
+            next_phase: &str,
+            page: RecordedGet,
         ) -> u64 {
             self.advance_immutable_signed_phase_bounded(
-                expected_phase,next_phase,page,
-                SIGNED_PHASE_MAX_READS,SIGNED_PHASE_MAX_LIFETIME,
+                expected_phase,
+                next_phase,
+                page,
+                SIGNED_PHASE_MAX_READS,
+                SIGNED_PHASE_MAX_LIFETIME,
             )
         }
 
         pub(crate) fn advance_immutable_signed_phase_bounded(
-            &self, expected_phase:&str, next_phase:&str, page:RecordedGet,
-            max_deliveries:u64, ttl:std::time::Duration,
+            &self,
+            expected_phase: &str,
+            next_phase: &str,
+            page: RecordedGet,
+            max_deliveries: u64,
+            ttl: std::time::Duration,
         ) -> u64 {
-            assert!(max_deliveries>0 && !ttl.is_zero(),
-                "TRANSCRIPT_IMMUTABLE_BUDGET_INVALID");
-            assert!(!expected_phase.is_empty() && !next_phase.is_empty()
-                && expected_phase!=next_phase,"TRANSCRIPT_IMMUTABLE_PHASE_TRANSITION_INVALID");
-            let mut query=page.required_query.clone();
+            assert!(
+                max_deliveries > 0 && !ttl.is_zero(),
+                "TRANSCRIPT_IMMUTABLE_BUDGET_INVALID"
+            );
+            assert!(
+                !expected_phase.is_empty()
+                    && !next_phase.is_empty()
+                    && expected_phase != next_phase,
+                "TRANSCRIPT_IMMUTABLE_PHASE_TRANSITION_INVALID"
+            );
+            let mut query = page.required_query.clone();
             query.sort();
-            let mut phases=self.immutable_signed_phases.lock().unwrap();
-            let prior=phases.iter_mut().find(|item|{
-                let mut existing=item.source.required_query.clone();
-                existing.sort();
-                item.source.access_key==page.access_key
-                    &&item.source.path==page.path && existing==query
-            }).expect("TRANSCRIPT_IMMUTABLE_UNREGISTERED_TRANSITION");
-            assert_eq!(prior.phase_id,expected_phase,
-                "TRANSCRIPT_IMMUTABLE_CAUSAL_PREDECESSOR_MISMATCH");
-            let previously_delivered=prior.deliveries;
-            let old_sha256=format!("{:x}",sha2::Sha256::digest(&prior.source.raw_response));
-            prior.phase_id=next_phase.into();
-            prior.source=page;
-            prior.deliveries=0;
-            prior.max_deliveries=max_deliveries;
-            prior.published_at=Instant::now();
-            prior.ttl=ttl;
+            let mut phases = self.immutable_signed_phases.lock().unwrap();
+            let prior = phases
+                .iter_mut()
+                .find(|item| {
+                    let mut existing = item.source.required_query.clone();
+                    existing.sort();
+                    item.source.access_key == page.access_key
+                        && item.source.path == page.path
+                        && existing == query
+                })
+                .expect("TRANSCRIPT_IMMUTABLE_UNREGISTERED_TRANSITION");
+            assert_eq!(
+                prior.phase_id, expected_phase,
+                "TRANSCRIPT_IMMUTABLE_CAUSAL_PREDECESSOR_MISMATCH"
+            );
+            let previously_delivered = prior.deliveries;
+            let old_sha256 = format!("{:x}", sha2::Sha256::digest(&prior.source.raw_response));
+            prior.phase_id = next_phase.into();
+            prior.source = page;
+            prior.deliveries = 0;
+            prior.max_deliveries = max_deliveries;
+            prior.published_at = Instant::now();
+            prior.ttl = ttl;
             self.immutable_phase_trace.lock().unwrap().push(format!(
                 "event=SIGNED_PHASE_ADVANCED from={expected_phase} to={next_phase} actor={} route={} query={query:?} observed_reads={previously_delivered} old_sha256={old_sha256} new_sha256={:x} max_reads={max_deliveries} ttl_ms={}",
                 prior.source.access_key,prior.source.path,
@@ -1245,14 +1300,20 @@ pub(crate) mod recorded_support {
         /// Follow-on signed pages can then be installed without silently
         /// mixing their different economic inventories with the old bytes.
         pub(crate) fn retire_immutable_signed_phase(
-            &self, phase_id: &str, access_key: &str, path: &str,
+            &self,
+            phase_id: &str,
+            access_key: &str,
+            path: &str,
         ) -> u64 {
             let mut phases = self.immutable_signed_phases.lock().unwrap();
-            let index = phases.iter().position(|item| {
-                item.source.access_key == access_key
-                    && item.source.path == path
-                    && item.phase_id == phase_id
-            }).expect("TRANSCRIPT_IMMUTABLE_RETIRE_PHASE_MISSING");
+            let index = phases
+                .iter()
+                .position(|item| {
+                    item.source.access_key == access_key
+                        && item.source.path == path
+                        && item.phase_id == phase_id
+                })
+                .expect("TRANSCRIPT_IMMUTABLE_RETIRE_PHASE_MISSING");
             let retired = phases.remove(index);
             assert!(
                 !phases.iter().any(|item| {
@@ -1260,9 +1321,10 @@ pub(crate) mod recorded_support {
                 }),
                 "TRANSCRIPT_IMMUTABLE_RETIRE_ROUTE_STILL_ACTIVE"
             );
-            self.strict_read_routes.lock().unwrap().remove(&(
-                access_key.to_owned(), path.to_owned()
-            ));
+            self.strict_read_routes
+                .lock()
+                .unwrap()
+                .remove(&(access_key.to_owned(), path.to_owned()));
             self.immutable_phase_trace.lock().unwrap().push(format!(
                 "event=SIGNED_PHASE_RETIRED phase={phase_id} actor={access_key} route={path} observed_reads={}",
                 retired.deliveries
@@ -1271,12 +1333,21 @@ pub(crate) mod recorded_support {
         }
 
         pub(crate) fn immutable_signed_phase_reads(
-            &self, access_key:&str, path:&str, phase_id:&str,
-        )->u64 {
-            self.immutable_signed_phases.lock().unwrap().iter()
-                .find(|item|item.source.access_key==access_key
-                    &&item.source.path==path &&item.phase_id==phase_id)
-                .map_or(0,|item|item.deliveries)
+            &self,
+            access_key: &str,
+            path: &str,
+            phase_id: &str,
+        ) -> u64 {
+            self.immutable_signed_phases
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|item| {
+                    item.source.access_key == access_key
+                        && item.source.path == path
+                        && item.phase_id == phase_id
+                })
+                .map_or(0, |item| item.deliveries)
         }
 
         /// Test-only event handoff from the old finite bootstrap source to a
@@ -1285,71 +1356,111 @@ pub(crate) mod recorded_support {
         /// identical raw bytes. A different old source aborts the handoff.
         /// Caller holds the account's recorded_capture_gate during this event.
         pub(crate) fn supersede_queued_signed_source_at_event(
-            &self, event_id: &str, phase_id: &str, page: RecordedGet,
+            &self,
+            event_id: &str,
+            phase_id: &str,
+            page: RecordedGet,
         ) -> usize {
-            assert!(!event_id.is_empty() && !phase_id.is_empty(),
-                "TRANSCRIPT_SOURCE_EVENT_ID_MISSING");
-            assert!(matches!(page.path.as_str(),
-                "/api/v5/account/trade-fee" | "/api/v5/account/leverage-info"
-                    | "/api/v5/trade/order"),
-                "TRANSCRIPT_SOURCE_EVENT_ROUTE_NOT_ALLOWED");
-            let actor=page.access_key.clone();
-            let path=page.path.clone();
-            let mut query=page.required_query.clone();
+            assert!(
+                !event_id.is_empty() && !phase_id.is_empty(),
+                "TRANSCRIPT_SOURCE_EVENT_ID_MISSING"
+            );
+            assert!(
+                matches!(
+                    page.path.as_str(),
+                    "/api/v5/account/trade-fee"
+                        | "/api/v5/account/leverage-info"
+                        | "/api/v5/trade/order"
+                ),
+                "TRANSCRIPT_SOURCE_EVENT_ROUTE_NOT_ALLOWED"
+            );
+            let actor = page.access_key.clone();
+            let path = page.path.clone();
+            let mut query = page.required_query.clone();
             query.sort();
-            let mut phases=self.immutable_signed_phases.lock().unwrap();
-            assert!(!phases.iter().any(|p|
-                p.source.access_key==actor && p.source.path==path
-            ),"TRANSCRIPT_SOURCE_EVENT_ALREADY_IMMUTABLE");
-            let mut required=self.reads.lock().unwrap();
-            let mut optional=self.optional_reads.lock().unwrap();
-            let retired=required.iter().chain(optional.iter())
-                .filter(|p|p.access_key==actor && p.path==path)
+            let mut phases = self.immutable_signed_phases.lock().unwrap();
+            assert!(
+                !phases
+                    .iter()
+                    .any(|p| p.source.access_key == actor && p.source.path == path),
+                "TRANSCRIPT_SOURCE_EVENT_ALREADY_IMMUTABLE"
+            );
+            let mut required = self.reads.lock().unwrap();
+            let mut optional = self.optional_reads.lock().unwrap();
+            let retired = required
+                .iter()
+                .chain(optional.iter())
+                .filter(|p| p.access_key == actor && p.path == path)
                 .collect::<Vec<_>>();
-            assert!(!retired.is_empty(),"TRANSCRIPT_SOURCE_EVENT_OLD_SOURCE_MISSING");
-            assert!(retired.iter().all(|p|{
-                let mut old_query=p.required_query.clone();
-                old_query.sort();
-                old_query==query || (path=="/api/v5/trade/order"
-                    && old_query.iter().all(|pair|query.contains(pair)))
-            }),"TRANSCRIPT_SOURCE_EVENT_OLD_QUERY_CONFLICT");
-            if path=="/api/v5/trade/order" {
+            assert!(
+                !retired.is_empty(),
+                "TRANSCRIPT_SOURCE_EVENT_OLD_SOURCE_MISSING"
+            );
+            assert!(
+                retired.iter().all(|p| {
+                    let mut old_query = p.required_query.clone();
+                    old_query.sort();
+                    old_query == query
+                        || (path == "/api/v5/trade/order"
+                            && old_query.iter().all(|pair| query.contains(pair)))
+                }),
+                "TRANSCRIPT_SOURCE_EVENT_OLD_QUERY_CONFLICT"
+            );
+            if path == "/api/v5/trade/order" {
                 // Repeated signed reads of a still-LIVE order are one
                 // external snapshot, NOT one new economic event per GET.
                 // Only the exact already acknowledged order may enter this
                 // immutable phase. Changing an order state needs a separate
                 // authenticated source event, never a read-count transition.
-                let client=query.iter().find(|(name,_)|name=="clOrdId")
-                    .map(|(_,value)|value.as_str())
+                let client = query
+                    .iter()
+                    .find(|(name, _)| name == "clOrdId")
+                    .map(|(_, value)| value.as_str())
                     .expect("TRANSCRIPT_ORDER_PHASE_CLIENT_ID_MISSING");
-                assert!(recorded_order_source_matches(
-                    &self.acknowledged_creates.lock().unwrap(),
-                    &actor,client,&page.raw_response,
-                ),"TRANSCRIPT_ORDER_PHASE_ACK_UNBOUND");
-                assert!(retired.iter().all(|p|
+                assert!(
                     recorded_order_source_matches(
                         &self.acknowledged_creates.lock().unwrap(),
-                        &actor,client,&p.raw_response
-                    )
-                ),"TRANSCRIPT_ORDER_PHASE_OLD_ACK_UNBOUND");
-                assert!(retired.iter().all(|p|p.raw_response==page.raw_response),
-                    "TRANSCRIPT_ORDER_PHASE_UNPROVEN_STATE_CHANGE");
+                        &actor,
+                        client,
+                        &page.raw_response,
+                    ),
+                    "TRANSCRIPT_ORDER_PHASE_ACK_UNBOUND"
+                );
+                assert!(
+                    retired.iter().all(|p| recorded_order_source_matches(
+                        &self.acknowledged_creates.lock().unwrap(),
+                        &actor,
+                        client,
+                        &p.raw_response
+                    )),
+                    "TRANSCRIPT_ORDER_PHASE_OLD_ACK_UNBOUND"
+                );
+                assert!(
+                    retired.iter().all(|p| p.raw_response == page.raw_response),
+                    "TRANSCRIPT_ORDER_PHASE_UNPROVEN_STATE_CHANGE"
+                );
             }
-            let old_raw=&retired[0].raw_response;
-            assert!(retired.iter().all(|p|p.raw_response==*old_raw),
-                "TRANSCRIPT_SOURCE_EVENT_OLD_RAW_CONFLICT");
-            let old_digest=format!("{:x}",sha2::Sha256::digest(old_raw));
-            let removed=retired.len();
-            drop(retired);
-            required.retain(|p|p.access_key!=actor || p.path!=path);
-            optional.retain(|p|p.access_key!=actor || p.path!=path);
-            self.strict_read_routes.lock().unwrap().insert(
-                (actor.clone(),path.clone())
+            let old_raw = &retired[0].raw_response;
+            assert!(
+                retired.iter().all(|p| p.raw_response == *old_raw),
+                "TRANSCRIPT_SOURCE_EVENT_OLD_RAW_CONFLICT"
             );
+            let old_digest = format!("{:x}", sha2::Sha256::digest(old_raw));
+            let removed = retired.len();
+            drop(retired);
+            required.retain(|p| p.access_key != actor || p.path != path);
+            optional.retain(|p| p.access_key != actor || p.path != path);
+            self.strict_read_routes
+                .lock()
+                .unwrap()
+                .insert((actor.clone(), path.clone()));
             phases.push(ImmutableSignedGetPhase {
-                phase_id:phase_id.into(),source:page,deliveries:0,
-                max_deliveries:SIGNED_PHASE_MAX_READS,
-                published_at:Instant::now(),ttl:SIGNED_PHASE_MAX_LIFETIME,
+                phase_id: phase_id.into(),
+                source: page,
+                deliveries: 0,
+                max_deliveries: SIGNED_PHASE_MAX_READS,
+                published_at: Instant::now(),
+                ttl: SIGNED_PHASE_MAX_LIFETIME,
             });
             self.immutable_phase_trace.lock().unwrap().push(format!(
                 "event=SIGNED_SOURCE_SUPERSEDED cause={event_id} phase={phase_id} actor={actor} route={path} query={query:?} old_pages={removed} old_sha256={old_digest} new_sha256={:x}",
@@ -1359,9 +1470,16 @@ pub(crate) mod recorded_support {
         }
 
         pub(crate) fn expect_get(&self, page: RecordedGet) {
-            assert!(!self.immutable_signed_phases.lock().unwrap().iter().any(|item|
-                item.source.access_key==page.access_key &&item.source.path==page.path
-            ),"TRANSCRIPT_IMMUTABLE_MIXED_WITH_QUEUED_SOURCE");
+            assert!(
+                !self
+                    .immutable_signed_phases
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|item| item.source.access_key == page.access_key
+                        && item.source.path == page.path),
+                "TRANSCRIPT_IMMUTABLE_MIXED_WITH_QUEUED_SOURCE"
+            );
             self.strict_read_routes
                 .lock()
                 .unwrap()
@@ -1370,9 +1488,16 @@ pub(crate) mod recorded_support {
         }
 
         pub(crate) fn expect_optional_get(&self, page: RecordedGet) {
-            assert!(!self.immutable_signed_phases.lock().unwrap().iter().any(|item|
-                item.source.access_key==page.access_key &&item.source.path==page.path
-            ),"TRANSCRIPT_IMMUTABLE_MIXED_WITH_OPTIONAL_SOURCE");
+            assert!(
+                !self
+                    .immutable_signed_phases
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|item| item.source.access_key == page.access_key
+                        && item.source.path == page.path),
+                "TRANSCRIPT_IMMUTABLE_MIXED_WITH_OPTIONAL_SOURCE"
+            );
             self.strict_read_routes
                 .lock()
                 .unwrap()
@@ -1392,9 +1517,15 @@ pub(crate) mod recorded_support {
             pages: Vec<RecordedGet>,
         ) -> usize {
             assert!(!pages.is_empty(), "TRANSCRIPT_PHASE_WITHOUT_SOURCE");
-            assert!(!self.immutable_signed_phases.lock().unwrap().iter().any(|item|
-                item.source.access_key==access_key &&item.source.path==path
-            ),"TRANSCRIPT_IMMUTABLE_MIXED_WITH_QUEUE_ADVANCE");
+            assert!(
+                !self
+                    .immutable_signed_phases
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|item| item.source.access_key == access_key && item.source.path == path),
+                "TRANSCRIPT_IMMUTABLE_MIXED_WITH_QUEUE_ADVANCE"
+            );
             assert!(
                 self.strict_read_routes
                     .lock()
@@ -1432,7 +1563,8 @@ pub(crate) mod recorded_support {
                 .as_ref()
                 .expect("TRANSCRIPT_ALGO_PHASE_MISSING_AT_RETIRE");
             assert_eq!(
-                phase.account.as_str(), account,
+                phase.account.as_str(),
+                account,
                 "TRANSCRIPT_ALGO_PHASE_CROSS_ACCOUNT_RETIRE"
             );
             assert!(
@@ -1573,10 +1705,14 @@ pub(crate) mod recorded_support {
                 // independent signed inventory after a source event.
                 // Never allow one verified UID to replace another, or
                 // permit a second publication of A's new one-shot source.
-                assert_eq!(prior.account, account,
-                    "TRANSCRIPT_STATIC_ALGO_CROSS_ACCOUNT_REPLACEMENT");
-                assert_eq!(account, "fixture-observer-b",
-                    "TRANSCRIPT_STATIC_ALGO_PHASE_ALREADY_REGISTERED");
+                assert_eq!(
+                    prior.account, account,
+                    "TRANSCRIPT_STATIC_ALGO_CROSS_ACCOUNT_REPLACEMENT"
+                );
+                assert_eq!(
+                    account, "fixture-observer-b",
+                    "TRANSCRIPT_STATIC_ALGO_PHASE_ALREADY_REGISTERED"
+                );
             }
             *installed = Some(StaticAlgoInventory {
                 account: account.to_owned(),
@@ -1607,9 +1743,15 @@ pub(crate) mod recorded_support {
             const EXECUTOR: &str = "fixture-executor-a";
             const PATH: &str = "/api/v5/trade/orders-algo-pending";
             assert!(!event_id.is_empty(), "TRANSCRIPT_ALGO_EVENT_ID_MISSING");
-            assert!(self.acknowledged_creates.lock().unwrap().iter().any(
-                |(actor, _, order_id)| actor == EXECUTOR && order_id == acknowledged_order_id
-            ), "TRANSCRIPT_ALGO_POST_ACK_NOT_OBSERVED");
+            assert!(
+                self.acknowledged_creates
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|(actor, _, order_id)| actor == EXECUTOR
+                        && order_id == acknowledged_order_id),
+                "TRANSCRIPT_ALGO_POST_ACK_NOT_OBSERVED"
+            );
             assert_eq!(pages.len(), 16, "TRANSCRIPT_ALGO_EVENT_SCOPE_COUNT");
             let mut expected = std::collections::BTreeMap::new();
             for page in &pages {
@@ -1631,15 +1773,23 @@ pub(crate) mod recorded_support {
             }
             let mut required = self.reads.lock().unwrap();
             let mut optional = self.optional_reads.lock().unwrap();
-            let retired = required.iter().chain(optional.iter())
+            let retired = required
+                .iter()
+                .chain(optional.iter())
                 .filter(|page| page.access_key == ACTOR && page.path == PATH)
                 .collect::<Vec<_>>();
-            assert!(!retired.is_empty(), "TRANSCRIPT_ALGO_EVENT_OLD_SOURCE_MISSING");
-            assert!(retired.iter().all(|page| {
-                let mut query = page.required_query.clone();
-                query.sort();
-                expected.get(&query) == Some(&page.raw_response)
-            }), "TRANSCRIPT_ALGO_EVENT_SOURCE_OR_QUERY_MISMATCH");
+            assert!(
+                !retired.is_empty(),
+                "TRANSCRIPT_ALGO_EVENT_OLD_SOURCE_MISSING"
+            );
+            assert!(
+                retired.iter().all(|page| {
+                    let mut query = page.required_query.clone();
+                    query.sort();
+                    expected.get(&query) == Some(&page.raw_response)
+                }),
+                "TRANSCRIPT_ALGO_EVENT_SOURCE_OR_QUERY_MISMATCH"
+            );
             let retired_count = retired.len();
             drop(retired);
             // Install before removing the old queue: a competing GET sees
@@ -1685,8 +1835,10 @@ pub(crate) mod recorded_support {
         }
 
         pub(crate) fn arm_lost_next_create_ack(&self) {
-            assert!(!self.lose_next_created_ack.swap(true, Ordering::SeqCst),
-                "TRANSCRIPT_ACK_LOSS_ALREADY_ARMED");
+            assert!(
+                !self.lose_next_created_ack.swap(true, Ordering::SeqCst),
+                "TRANSCRIPT_ACK_LOSS_ALREADY_ARMED"
+            );
         }
 
         pub(crate) fn lost_create_ack_was_consumed(&self) -> bool {
@@ -1761,35 +1913,58 @@ pub(crate) mod recorded_support {
         #[test]
         fn signed_cancel_ack_is_required_to_retire_a_recorded_inventory() {
             let pre_ack = source(false);
-            assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                pre_ack.retire_acked_causal_algo_inventory("fixture-observer-a");
-            })).is_err(), "cannot advance source phase before ACK");
+            assert!(
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    pre_ack.retire_acked_causal_algo_inventory("fixture-observer-a");
+                }))
+                .is_err(),
+                "cannot advance source phase before ACK"
+            );
 
             let wrong_account = source(true);
-            assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                wrong_account.retire_acked_causal_algo_inventory("fixture-observer-b");
-            })).is_err(), "another verified UID cannot retire A's inventory");
+            assert!(
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    wrong_account.retire_acked_causal_algo_inventory("fixture-observer-b");
+                }))
+                .is_err(),
+                "another verified UID cannot retire A's inventory"
+            );
 
             let acknowledged = source(true);
             acknowledged.retire_acked_causal_algo_inventory("fixture-observer-a");
             assert!(acknowledged.causal_algos.lock().unwrap().is_none());
-            assert!(acknowledged.causal_algo_trace.lock().unwrap().iter().any(|line| {
-                line.contains("INVENTORY_PHASE_RETIRED")
-                    && line.contains("evidence=CANCEL_ACK")
-            }));
+            assert!(
+                acknowledged
+                    .causal_algo_trace
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|line| {
+                        line.contains("INVENTORY_PHASE_RETIRED")
+                            && line.contains("evidence=CANCEL_ACK")
+                    })
+            );
         }
 
         #[test]
         fn pending_late_read_barrier_blocks_inventory_retirement() {
             let held = source(true);
-            held.causal_algos.lock().unwrap().as_mut().unwrap().held_read =
-                Some(CausalAlgoReadGate {
-                    entered: Arc::new(tokio::sync::Notify::new()),
-                    resume: Arc::new(tokio::sync::Notify::new()),
-                });
-            assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                held.retire_acked_causal_algo_inventory("fixture-observer-a");
-            })).is_err(), "a held signed GET must be resumed, not discarded");
+            held.causal_algos
+                .lock()
+                .unwrap()
+                .as_mut()
+                .unwrap()
+                .held_read = Some(CausalAlgoReadGate {
+                entered: Arc::new(tokio::sync::Notify::new()),
+                resume: Arc::new(tokio::sync::Notify::new()),
+            });
+            assert!(
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    held.retire_acked_causal_algo_inventory("fixture-observer-a");
+                }))
+                .is_err(),
+                "a held signed GET must be resumed, not discarded"
+            );
         }
 
         fn exact_query(inst_type: &str, kind: &str) -> Vec<(String, String)> {
@@ -1812,8 +1987,14 @@ pub(crate) mod recorded_support {
             let mut after = Vec::new();
             for inst in ["SWAP", "FUTURES"] {
                 for kind in [
-                    "conditional", "oco", "trigger", "move_order_stop",
-                    "chase", "iceberg", "twap", "smart_iceberg",
+                    "conditional",
+                    "oco",
+                    "trigger",
+                    "move_order_stop",
+                    "chase",
+                    "iceberg",
+                    "twap",
+                    "smart_iceberg",
                 ] {
                     let raw = if inst == "SWAP" && kind == "conditional" {
                         serde_json::json!([{"algoId": "900000002"}, {"algoId": "900000003"}])
@@ -1883,58 +2064,82 @@ pub(crate) mod recorded_support {
 
             // The first Status/maintenance observation is not allowed to
             // disappear merely because another read happens before cancel.
-            let initial = feed.send(
-                signed_inventory_request("fixture-observer-a", "conditional"),
-                deadline(),
-            ).await.unwrap();
+            let initial = feed
+                .send(
+                    signed_inventory_request("fixture-observer-a", "conditional"),
+                    deadline(),
+                )
+                .await
+                .unwrap();
             assert_eq!(raw_items(initial).as_array().unwrap().len(), 2);
 
             let (entered, resume) = feed.hold_next_causal_algo_get();
             let reading_feed = feed.clone();
             let old_read = tokio::spawn(async move {
-                reading_feed.send(
-                    signed_inventory_request("fixture-observer-a", "conditional"),
-                    Instant::now() + std::time::Duration::from_secs(3),
-                ).await
+                reading_feed
+                    .send(
+                        signed_inventory_request("fixture-observer-a", "conditional"),
+                        Instant::now() + std::time::Duration::from_secs(3),
+                    )
+                    .await
             });
-            tokio::time::timeout(
-                std::time::Duration::from_secs(2), entered.notified()
-            ).await.expect("old signed GET must reach its I/O barrier");
+            tokio::time::timeout(std::time::Duration::from_secs(2), entered.notified())
+                .await
+                .expect("old signed GET must reach its I/O barrier");
 
-            let canceled = feed.send(signed_cancel_request(), deadline())
-                .await.unwrap();
+            let canceled = feed
+                .send(signed_cancel_request(), deadline())
+                .await
+                .unwrap();
             assert_eq!(raw_items(canceled)[0]["algoId"], "900000002");
             {
                 let state = feed.causal_algos.lock().unwrap();
                 let phase = state.as_ref().unwrap();
                 assert!(phase.acked);
                 assert!(phase.held_read.is_none());
-                assert_eq!(phase.inflight_held_reads, 1,
-                    "taking an I/O gate must not authorize source retirement");
+                assert_eq!(
+                    phase.inflight_held_reads, 1,
+                    "taking an I/O gate must not authorize source retirement"
+                );
             }
             // After ACK, a NEW signed read sees the other still-live stop.
-            let fresh = feed.send(
-                signed_inventory_request("fixture-observer-a", "conditional"),
-                deadline(),
-            ).await.unwrap();
-            assert_eq!(raw_items(fresh), serde_json::json!([{
-                "algoId": "900000003"
-            }]));
+            let fresh = feed
+                .send(
+                    signed_inventory_request("fixture-observer-a", "conditional"),
+                    deadline(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                raw_items(fresh),
+                serde_json::json!([{
+                    "algoId": "900000003"
+                }])
+            );
             // The late response contains the exact immutable pre-ACK bytes.
             resume.notify_one();
-            let stale = tokio::time::timeout(
-                std::time::Duration::from_secs(2), old_read
-            ).await.expect("old read join deadline").unwrap().unwrap();
+            let stale = tokio::time::timeout(std::time::Duration::from_secs(2), old_read)
+                .await
+                .expect("old read join deadline")
+                .unwrap()
+                .unwrap();
             assert_eq!(raw_items(stale).as_array().unwrap().len(), 2);
             assert_eq!(
-                feed.causal_algos.lock().unwrap().as_ref().unwrap()
+                feed.causal_algos
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .unwrap()
                     .inflight_held_reads,
                 0
             );
             let trace = feed.causal_algo_trace.lock().unwrap();
-            let events = trace.iter().filter(|line| {
-                line.contains("event=GET_STARTED") || line.contains("event=CANCEL_ACK")
-            }).collect::<Vec<_>>();
+            let events = trace
+                .iter()
+                .filter(|line| {
+                    line.contains("event=GET_STARTED") || line.contains("event=CANCEL_ACK")
+                })
+                .collect::<Vec<_>>();
             assert_eq!(events.len(), 4);
             assert!(events[0].contains("stage=BEFORE_ACK"));
             assert!(events[1].contains("stage=BEFORE_ACK"));
@@ -1966,15 +2171,22 @@ pub(crate) mod recorded_support {
                 .body(r#"[{"instId":"BTC-USDT-SWAP","algoId":"recorded-stop-cancel-001"}]"#)
                 .build()
                 .unwrap();
-            let denied = feed.send(
-                foreign, Instant::now() + std::time::Duration::from_secs(3),
-            ).await.err().expect("foreign account cannot complete A's cancel event");
-            assert!(denied.to_string().contains(
-                "TRANSCRIPT_ALGO_CANCEL_ACCOUNT_MISMATCH"
-            ));
+            let denied = feed
+                .send(foreign, Instant::now() + std::time::Duration::from_secs(3))
+                .await
+                .err()
+                .expect("foreign account cannot complete A's cancel event");
+            assert!(
+                denied
+                    .to_string()
+                    .contains("TRANSCRIPT_ALGO_CANCEL_ACCOUNT_MISMATCH")
+            );
             assert!(!feed.causal_algos.lock().unwrap().as_ref().unwrap().acked);
-            assert_eq!(feed.outbound_posts.lock().unwrap().len(), 1,
-                "even rejected outbound requests remain visible");
+            assert_eq!(
+                feed.outbound_posts.lock().unwrap().len(),
+                1,
+                "even rejected outbound requests remain visible"
+            );
         }
 
         #[tokio::test]
@@ -1982,30 +2194,51 @@ pub(crate) mod recorded_support {
             let feed = RecordedAccountHttp::default();
             causal_fixture(&feed);
             let deadline = || Instant::now() + std::time::Duration::from_secs(3);
-            let wrong = feed.send(
-                signed_inventory_request("fixture-observer-a", "unknown"),
-                deadline(),
-            ).await.err().expect("wrong query must reject");
-            assert!(wrong.to_string().contains("TRANSCRIPT_ALGO_QUERY_MISMATCH"));
-            let other = feed.send(
-                signed_inventory_request("fixture-observer-b", "conditional"),
-                deadline(),
-            ).await.err().expect("foreign UID must reject");
-            assert!(other.to_string().contains("TRANSCRIPT_ALGO_ACCOUNT_MISMATCH"));
-            for _ in 0..CAUSAL_ALGO_READS_PER_SCOPE_AND_PHASE {
-                let observed = feed.send(
-                    signed_inventory_request("fixture-observer-a", "conditional"),
+            let wrong = feed
+                .send(
+                    signed_inventory_request("fixture-observer-a", "unknown"),
                     deadline(),
-                ).await.unwrap();
+                )
+                .await
+                .err()
+                .expect("wrong query must reject");
+            assert!(wrong.to_string().contains("TRANSCRIPT_ALGO_QUERY_MISMATCH"));
+            let other = feed
+                .send(
+                    signed_inventory_request("fixture-observer-b", "conditional"),
+                    deadline(),
+                )
+                .await
+                .err()
+                .expect("foreign UID must reject");
+            assert!(
+                other
+                    .to_string()
+                    .contains("TRANSCRIPT_ALGO_ACCOUNT_MISMATCH")
+            );
+            for _ in 0..CAUSAL_ALGO_READS_PER_SCOPE_AND_PHASE {
+                let observed = feed
+                    .send(
+                        signed_inventory_request("fixture-observer-a", "conditional"),
+                        deadline(),
+                    )
+                    .await
+                    .unwrap();
                 assert_eq!(raw_items(observed).as_array().unwrap().len(), 2);
             }
-            let excess = feed.send(
-                signed_inventory_request("fixture-observer-a", "conditional"),
-                deadline(),
-            ).await.err().expect("exhausted phase must reject");
-            assert!(excess.to_string().contains(
-                "TRANSCRIPT_ALGO_PHASE_READ_BUDGET_EXCEEDED"
-            ));
+            let excess = feed
+                .send(
+                    signed_inventory_request("fixture-observer-a", "conditional"),
+                    deadline(),
+                )
+                .await
+                .err()
+                .expect("exhausted phase must reject");
+            assert!(
+                excess
+                    .to_string()
+                    .contains("TRANSCRIPT_ALGO_PHASE_READ_BUDGET_EXCEEDED")
+            );
             assert_eq!(feed.outbound_posts.lock().unwrap().len(), 0);
             assert!(!feed.causal_algos.lock().unwrap().as_ref().unwrap().acked);
         }
@@ -2013,55 +2246,86 @@ pub(crate) mod recorded_support {
 
     #[tokio::test]
     async fn immutable_signed_source_event_supersedes_only_coherent_old_pages() {
-        let raw=|stamp:&str|serde_json::to_vec(&serde_json::json!({
-            "code":"0","msg":"","data":[{
-                "instType":"SWAP","level":"Lv1","ts":stamp,
-                "feeGroup":[{"groupId":"4","maker":"0.0005","taker":"0.0005"}]
-            }]
-        })).unwrap();
-        let page=|ts:&str|RecordedGet {
-            access_key:"fixture-observer-b".into(),
-            path:"/api/v5/account/trade-fee".into(),
-            required_query:vec![
-                ("instType".into(),"SWAP".into()),
-                ("instFamily".into(),"BTC-USDT".into()),
-            ],raw_response:raw(ts)
+        let raw = |stamp: &str| {
+            serde_json::to_vec(&serde_json::json!({
+                "code":"0","msg":"","data":[{
+                    "instType":"SWAP","level":"Lv1","ts":stamp,
+                    "feeGroup":[{"groupId":"4","maker":"0.0005","taker":"0.0005"}]
+                }]
+            }))
+            .unwrap()
+        };
+        let page = |ts: &str| RecordedGet {
+            access_key: "fixture-observer-b".into(),
+            path: "/api/v5/account/trade-fee".into(),
+            required_query: vec![
+                ("instType".into(), "SWAP".into()),
+                ("instFamily".into(), "BTC-USDT".into()),
+            ],
+            raw_response: raw(ts),
         };
         // An inconsistent old external source is a harness failure, never
         // a financial denial or permission to discard inconvenient bytes.
-        let conflicting=RecordedAccountHttp::default();
+        let conflicting = RecordedAccountHttp::default();
         conflicting.expect_get(page("100"));
         conflicting.expect_optional_get(page("101"));
-        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(||{
-            conflicting.supersede_queued_signed_source_at_event(
-                "observed-fee-change","fee-after",page("200"));
-        })).is_err(),"mixed source generations cannot be retired silently");
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                conflicting.supersede_queued_signed_source_at_event(
+                    "observed-fee-change",
+                    "fee-after",
+                    page("200"),
+                );
+            }))
+            .is_err(),
+            "mixed source generations cannot be retired silently"
+        );
 
-        let feed=RecordedAccountHttp::default();
+        let feed = RecordedAccountHttp::default();
         feed.expect_get(page("100"));
         feed.expect_optional_get(page("100"));
-        let retired=feed.supersede_queued_signed_source_at_event(
-            "observed-fee-change","fee-after",page("200"));
-        assert_eq!(retired,2);
-        assert_eq!(feed.unconsumed_reads(),0);
-        let request=||reqwest::Client::new()
+        let retired = feed.supersede_queued_signed_source_at_event(
+            "observed-fee-change",
+            "fee-after",
+            page("200"),
+        );
+        assert_eq!(retired, 2);
+        assert_eq!(feed.unconsumed_reads(), 0);
+        let request = || {
+            reqwest::Client::new()
             .get("https://www.okx.com/api/v5/account/trade-fee?instType=SWAP&instFamily=BTC-USDT")
             .header("OK-ACCESS-KEY","fixture-observer-b")
-            .build().unwrap();
+            .build().unwrap()
+        };
         for _ in 0..3 {
-            let observed=feed.send(request(),
-                Instant::now()+std::time::Duration::from_secs(2)).await.unwrap();
-            assert_eq!(serde_json::from_slice::<serde_json::Value>(&observed.body)
-                .unwrap()["data"][0]["ts"],"200");
+            let observed = feed
+                .send(
+                    request(),
+                    Instant::now() + std::time::Duration::from_secs(2),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&observed.body).unwrap()["data"][0]["ts"],
+                "200"
+            );
         }
-        assert_eq!(feed.immutable_signed_phase_reads(
-            "fixture-observer-b","/api/v5/account/trade-fee","fee-after"),3);
-        assert_eq!(feed.outbound_posts.lock().unwrap().len(),0);
-        let trace=feed.immutable_phase_trace.lock().unwrap();
-        assert_eq!(trace.len(),1);
-        assert!(trace[0].contains("event=SIGNED_SOURCE_SUPERSEDED")
-            &&trace[0].contains("old_pages=2")
-            &&trace[0].contains("cause=observed-fee-change"));
+        assert_eq!(
+            feed.immutable_signed_phase_reads(
+                "fixture-observer-b",
+                "/api/v5/account/trade-fee",
+                "fee-after"
+            ),
+            3
+        );
+        assert_eq!(feed.outbound_posts.lock().unwrap().len(), 0);
+        let trace = feed.immutable_phase_trace.lock().unwrap();
+        assert_eq!(trace.len(), 1);
+        assert!(
+            trace[0].contains("event=SIGNED_SOURCE_SUPERSEDED")
+                && trace[0].contains("old_pages=2")
+                && trace[0].contains("cause=observed-fee-change")
+        );
     }
 
     // Helpers local to these transport tests: the older causal-algo
@@ -2077,7 +2341,8 @@ pub(crate) mod recorded_support {
     fn post_ack_raw_envelope(data: serde_json::Value) -> Vec<u8> {
         serde_json::to_vec(&serde_json::json!({
             "code": "0", "msg": "", "data": data
-        })).expect("signed raw algo source")
+        }))
+        .expect("signed raw algo source")
     }
 
     fn post_ack_signed_request(actor: &str, kind: &str) -> HttpRequest {
@@ -2095,8 +2360,14 @@ pub(crate) mod recorded_support {
             let mut result = Vec::new();
             for inst in ["SWAP", "FUTURES"] {
                 for kind in [
-                    "conditional", "oco", "trigger", "move_order_stop",
-                    "chase", "iceberg", "twap", "smart_iceberg",
+                    "conditional",
+                    "oco",
+                    "trigger",
+                    "move_order_stop",
+                    "chase",
+                    "iceberg",
+                    "twap",
+                    "smart_iceberg",
                 ] {
                     result.push(RecordedGet {
                         access_key: "fixture-observer-a".into(),
@@ -2115,39 +2386,73 @@ pub(crate) mod recorded_support {
         // The production HTTP transport separately records authenticated
         // order ACKs; this unit targets the transport event boundary only.
         feed.acknowledged_creates.lock().unwrap().push((
-            "fixture-executor-a".into(), "actual-client-a".into(), "venue-a-ack".into()
+            "fixture-executor-a".into(),
+            "actual-client-a".into(),
+            "venue-a-ack".into(),
         ));
-        assert_eq!(feed.publish_post_ack_flat_algo_inventory(
-            "A_ACK_B_CENTRAL_DENIAL", "venue-a-ack", pages()
-        ), 16);
+        assert_eq!(
+            feed.publish_post_ack_flat_algo_inventory(
+                "A_ACK_B_CENTRAL_DENIAL",
+                "venue-a-ack",
+                pages()
+            ),
+            16
+        );
         assert_eq!(feed.unconsumed_reads(), 0);
         for _ in 0..18 {
-            let signed = feed.send(
-                post_ack_signed_request("fixture-observer-a", "conditional"),
-                Instant::now() + std::time::Duration::from_secs(2),
-            ).await.expect("event-selected immutable A source");
-            assert!(serde_json::from_slice::<serde_json::Value>(&signed.body)
-                .expect("raw signed inventory")["data"].as_array()
-                .expect("signed inventory data array").is_empty());
+            let signed = feed
+                .send(
+                    post_ack_signed_request("fixture-observer-a", "conditional"),
+                    Instant::now() + std::time::Duration::from_secs(2),
+                )
+                .await
+                .expect("event-selected immutable A source");
+            assert!(
+                serde_json::from_slice::<serde_json::Value>(&signed.body)
+                    .expect("raw signed inventory")["data"]
+                    .as_array()
+                    .expect("signed inventory data array")
+                    .is_empty()
+            );
         }
-        let wrong = feed.send(
-            post_ack_signed_request("fixture-observer-a", "unknown"),
-            Instant::now() + std::time::Duration::from_secs(2),
-        ).await.err().expect("unknown algo scope must fail closed");
-        assert!(wrong.to_string().contains("TRANSCRIPT_STATIC_ALGO_QUERY_MISMATCH"));
+        let wrong = feed
+            .send(
+                post_ack_signed_request("fixture-observer-a", "unknown"),
+                Instant::now() + std::time::Duration::from_secs(2),
+            )
+            .await
+            .err()
+            .expect("unknown algo scope must fail closed");
+        assert!(
+            wrong
+                .to_string()
+                .contains("TRANSCRIPT_STATIC_ALGO_QUERY_MISMATCH")
+        );
         assert_eq!(feed.outbound_posts.lock().unwrap().len(), 0);
         let phase = feed.static_algos.lock().unwrap();
         let static_source = phase.as_ref().unwrap();
         assert_eq!(static_source.scopes.len(), 16);
-        assert_eq!(static_source.scopes.iter()
-            .find(|row|row.query == {
-                let mut q = post_ack_exact_query("SWAP","conditional");
-                q.sort();
-                q
-            }).unwrap().reads, 18);
-        assert!(feed.causal_algo_trace.lock().unwrap().iter()
-            .any(|line|line.contains("event=POST_ACK_FLAT_ALGO_SOURCE")
-                &&line.contains("retired_pages=16")));
+        assert_eq!(
+            static_source
+                .scopes
+                .iter()
+                .find(|row| row.query == {
+                    let mut q = post_ack_exact_query("SWAP", "conditional");
+                    q.sort();
+                    q
+                })
+                .unwrap()
+                .reads,
+            18
+        );
+        assert!(
+            feed.causal_algo_trace
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|line| line.contains("event=POST_ACK_FLAT_ALGO_SOURCE")
+                    && line.contains("retired_pages=16"))
+        );
     }
 
     #[test]
@@ -2156,8 +2461,14 @@ pub(crate) mod recorded_support {
             let mut result = Vec::new();
             for inst in ["SWAP", "FUTURES"] {
                 for kind in [
-                    "conditional", "oco", "trigger", "move_order_stop",
-                    "chase", "iceberg", "twap", "smart_iceberg",
+                    "conditional",
+                    "oco",
+                    "trigger",
+                    "move_order_stop",
+                    "chase",
+                    "iceberg",
+                    "twap",
+                    "smart_iceberg",
                 ] {
                     result.push(RecordedGet {
                         access_key: "fixture-observer-a".into(),
@@ -2173,14 +2484,22 @@ pub(crate) mod recorded_support {
         for page in empty_pages() {
             missing_ack.expect_get(page);
         }
-        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            missing_ack.publish_post_ack_flat_algo_inventory(
-                "A_ACK_B_CENTRAL_DENIAL", "not-acked", empty_pages()
-            );
-        })).is_err(), "unconfirmed venue ACK cannot publish a new inventory");
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                missing_ack.publish_post_ack_flat_algo_inventory(
+                    "A_ACK_B_CENTRAL_DENIAL",
+                    "not-acked",
+                    empty_pages(),
+                );
+            }))
+            .is_err(),
+            "unconfirmed venue ACK cannot publish a new inventory"
+        );
         let changed_old = RecordedAccountHttp::default();
         changed_old.acknowledged_creates.lock().unwrap().push((
-            "fixture-executor-a".into(), "actual-client-a".into(), "venue-a-ack".into()
+            "fixture-executor-a".into(),
+            "actual-client-a".into(),
+            "venue-a-ack".into(),
         ));
         changed_old.expect_get(RecordedGet {
             access_key: "fixture-observer-a".into(),
@@ -2190,168 +2509,304 @@ pub(crate) mod recorded_support {
                 "algoId": "still-live", "state": "live"
             }])),
         });
-        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            changed_old.publish_post_ack_flat_algo_inventory(
-                "A_ACK_B_CENTRAL_DENIAL", "venue-a-ack", empty_pages()
-            );
-        })).is_err(), "an old live stop must never be silently replaced with empty");
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                changed_old.publish_post_ack_flat_algo_inventory(
+                    "A_ACK_B_CENTRAL_DENIAL",
+                    "venue-a-ack",
+                    empty_pages(),
+                );
+            }))
+            .is_err(),
+            "an old live stop must never be silently replaced with empty"
+        );
     }
 
     #[tokio::test]
     async fn immutable_signed_snapshot_phases_follow_events_not_background_read_counts() {
-        fn balance(account:&str,value:&str)->RecordedGet {
+        fn balance(account: &str, value: &str) -> RecordedGet {
             RecordedGet {
-                access_key:account.into(),
-                path:"/api/v5/account/balance".into(),
-                required_query:vec![],
-                raw_response:serde_json::to_vec(&serde_json::json!({
+                access_key: account.into(),
+                path: "/api/v5/account/balance".into(),
+                required_query: vec![],
+                raw_response: serde_json::to_vec(&serde_json::json!({
                     "code":"0","msg":"","data":[{"totalEq":value}]
-                })).unwrap(),
+                }))
+                .unwrap(),
             }
         }
-        fn read(account:&str)->HttpRequest {
+        fn read(account: &str) -> HttpRequest {
             reqwest::Client::new()
                 .get("https://www.okx.com/api/v5/account/balance")
-                .header("OK-ACCESS-KEY",account)
-                .build().unwrap()
+                .header("OK-ACCESS-KEY", account)
+                .build()
+                .unwrap()
         }
-        let feed=RecordedAccountHttp::default();
-        feed.expect_immutable_signed_phase("a-before-event",balance("fixture-observer-a","100"));
-        feed.expect_immutable_signed_phase("b-before-event",balance("fixture-observer-b","250"));
+        let feed = RecordedAccountHttp::default();
+        feed.expect_immutable_signed_phase("a-before-event", balance("fixture-observer-a", "100"));
+        feed.expect_immutable_signed_phase("b-before-event", balance("fixture-observer-b", "250"));
         // Deliberately interleave the two independent UID sources. Any
         // number of concurrent GETs in a phase receives the SAME bytes;
         // neither count nor task scheduling changes exchange truth.
         for account in [
-            "fixture-observer-a","fixture-observer-b",
-            "fixture-observer-a","fixture-observer-a",
-            "fixture-observer-b","fixture-observer-a",
+            "fixture-observer-a",
+            "fixture-observer-b",
+            "fixture-observer-a",
+            "fixture-observer-a",
+            "fixture-observer-b",
+            "fixture-observer-a",
         ] {
-            let result=feed.send(read(account),Instant::now()+std::time::Duration::from_secs(2))
-                .await.expect("signed immutable source");
-            let raw:serde_json::Value=serde_json::from_slice(&result.body).unwrap();
-            assert_eq!(raw["data"][0]["totalEq"],
-                if account.ends_with("-a"){"100"}else{"250"});
+            let result = feed
+                .send(
+                    read(account),
+                    Instant::now() + std::time::Duration::from_secs(2),
+                )
+                .await
+                .expect("signed immutable source");
+            let raw: serde_json::Value = serde_json::from_slice(&result.body).unwrap();
+            assert_eq!(
+                raw["data"][0]["totalEq"],
+                if account.ends_with("-a") {
+                    "100"
+                } else {
+                    "250"
+                }
+            );
         }
-        assert_eq!(feed.immutable_signed_phase_reads(
-            "fixture-observer-a","/api/v5/account/balance","a-before-event"),4);
-        assert_eq!(feed.immutable_signed_phase_reads(
-            "fixture-observer-b","/api/v5/account/balance","b-before-event"),2);
-        assert_eq!(feed.unconsumed_reads(),0,
-            "immutable signed snapshots do not become arbitrary queued pages");
+        assert_eq!(
+            feed.immutable_signed_phase_reads(
+                "fixture-observer-a",
+                "/api/v5/account/balance",
+                "a-before-event"
+            ),
+            4
+        );
+        assert_eq!(
+            feed.immutable_signed_phase_reads(
+                "fixture-observer-b",
+                "/api/v5/account/balance",
+                "b-before-event"
+            ),
+            2
+        );
+        assert_eq!(
+            feed.unconsumed_reads(),
+            0,
+            "immutable signed snapshots do not become arbitrary queued pages"
+        );
         // After an independently verified source event, only A transitions;
         // B's bytes remain unchanged. No test SQL or Worker state is edited.
-        let prior=feed.advance_immutable_signed_phase(
-            "a-before-event","a-after-event",
-            balance("fixture-observer-a","99"));
-        assert_eq!(prior,4);
-        let a=feed.send(read("fixture-observer-a"),
-            Instant::now()+std::time::Duration::from_secs(2)).await.unwrap();
-        let b=feed.send(read("fixture-observer-b"),
-            Instant::now()+std::time::Duration::from_secs(2)).await.unwrap();
-        assert_eq!(serde_json::from_slice::<serde_json::Value>(&a.body).unwrap()
-            ["data"][0]["totalEq"],"99");
-        assert_eq!(serde_json::from_slice::<serde_json::Value>(&b.body).unwrap()
-            ["data"][0]["totalEq"],"250");
-        assert_eq!(feed.outbound_posts.lock().unwrap().len(),0);
-        let trace=feed.immutable_phase_trace.lock().unwrap();
-        assert_eq!(trace.len(),3, "two sources installed and one transition");
-        assert!(trace[2].contains("event=SIGNED_PHASE_ADVANCED")
-            &&trace[2].contains("observed_reads=4")
-            &&trace[2].contains("from=a-before-event")
-            &&trace[2].contains("to=a-after-event"));
+        let prior = feed.advance_immutable_signed_phase(
+            "a-before-event",
+            "a-after-event",
+            balance("fixture-observer-a", "99"),
+        );
+        assert_eq!(prior, 4);
+        let a = feed
+            .send(
+                read("fixture-observer-a"),
+                Instant::now() + std::time::Duration::from_secs(2),
+            )
+            .await
+            .unwrap();
+        let b = feed
+            .send(
+                read("fixture-observer-b"),
+                Instant::now() + std::time::Duration::from_secs(2),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&a.body).unwrap()["data"][0]["totalEq"],
+            "99"
+        );
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&b.body).unwrap()["data"][0]["totalEq"],
+            "250"
+        );
+        assert_eq!(feed.outbound_posts.lock().unwrap().len(), 0);
+        let trace = feed.immutable_phase_trace.lock().unwrap();
+        assert_eq!(trace.len(), 3, "two sources installed and one transition");
+        assert!(
+            trace[2].contains("event=SIGNED_PHASE_ADVANCED")
+                && trace[2].contains("observed_reads=4")
+                && trace[2].contains("from=a-before-event")
+                && trace[2].contains("to=a-after-event")
+        );
     }
 
     #[tokio::test]
     async fn immutable_signed_phase_rejects_wrong_query_and_preserves_source() {
-        let feed=RecordedAccountHttp::default();
-        feed.expect_immutable_signed_phase("fee-before",RecordedGet {
-            access_key:"fixture-observer-a".into(),
-            path:"/api/v5/account/trade-fee".into(),
-            required_query:vec![
-                ("instType".into(),"SWAP".into()),
-                ("instFamily".into(),"BTC-USDT".into())
-            ],
-            raw_response:serde_json::to_vec(&serde_json::json!({
-                "code":"0","msg":"","data":[{
-                    "ts":"1793840000000","feeGroup":[{"maker":"0.0005","taker":"0.0005"}]
-                }]
-            })).unwrap(),
-        });
-        let bad=reqwest::Client::new()
+        let feed = RecordedAccountHttp::default();
+        feed.expect_immutable_signed_phase(
+            "fee-before",
+            RecordedGet {
+                access_key: "fixture-observer-a".into(),
+                path: "/api/v5/account/trade-fee".into(),
+                required_query: vec![
+                    ("instType".into(), "SWAP".into()),
+                    ("instFamily".into(), "BTC-USDT".into()),
+                ],
+                raw_response: serde_json::to_vec(&serde_json::json!({
+                    "code":"0","msg":"","data":[{
+                        "ts":"1793840000000","feeGroup":[{"maker":"0.0005","taker":"0.0005"}]
+                    }]
+                }))
+                .unwrap(),
+            },
+        );
+        let bad = reqwest::Client::new()
             .get("https://www.okx.com/api/v5/account/trade-fee?instType=SPOT&instFamily=BTC-USDT")
-            .header("OK-ACCESS-KEY","fixture-observer-a")
-            .build().unwrap();
-        let denial=match feed.send(bad,
-            Instant::now()+std::time::Duration::from_secs(2)).await {
-                Ok(_)=>panic!("wrong scope cannot borrow SWAP raw fees"),
-                Err(denial)=>denial,
-            };
-        assert!(denial.to_string().contains("TRANSCRIPT_IMMUTABLE_QUERY_MISMATCH"));
-        assert_eq!(feed.immutable_signed_phase_reads(
-            "fixture-observer-a","/api/v5/account/trade-fee","fee-before"),0);
-        let good=reqwest::Client::new()
+            .header("OK-ACCESS-KEY", "fixture-observer-a")
+            .build()
+            .unwrap();
+        let denial = match feed
+            .send(bad, Instant::now() + std::time::Duration::from_secs(2))
+            .await
+        {
+            Ok(_) => panic!("wrong scope cannot borrow SWAP raw fees"),
+            Err(denial) => denial,
+        };
+        assert!(
+            denial
+                .to_string()
+                .contains("TRANSCRIPT_IMMUTABLE_QUERY_MISMATCH")
+        );
+        assert_eq!(
+            feed.immutable_signed_phase_reads(
+                "fixture-observer-a",
+                "/api/v5/account/trade-fee",
+                "fee-before"
+            ),
+            0
+        );
+        let good = reqwest::Client::new()
             .get("https://www.okx.com/api/v5/account/trade-fee?instType=SWAP&instFamily=BTC-USDT")
-            .header("OK-ACCESS-KEY","fixture-observer-a")
-            .build().unwrap();
-        let raw=feed.send(good,Instant::now()+std::time::Duration::from_secs(2))
-            .await.expect("signed correct scope");
-        assert_eq!(serde_json::from_slice::<serde_json::Value>(&raw.body).unwrap()
-            ["data"][0]["ts"],"1793840000000");
-        assert_eq!(feed.immutable_signed_phase_reads(
-            "fixture-observer-a","/api/v5/account/trade-fee","fee-before"),1);
-        assert_eq!(feed.outbound_posts.lock().unwrap().len(),0);
+            .header("OK-ACCESS-KEY", "fixture-observer-a")
+            .build()
+            .unwrap();
+        let raw = feed
+            .send(good, Instant::now() + std::time::Duration::from_secs(2))
+            .await
+            .expect("signed correct scope");
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&raw.body).unwrap()["data"][0]["ts"],
+            "1793840000000"
+        );
+        assert_eq!(
+            feed.immutable_signed_phase_reads(
+                "fixture-observer-a",
+                "/api/v5/account/trade-fee",
+                "fee-before"
+            ),
+            1
+        );
+        assert_eq!(feed.outbound_posts.lock().unwrap().len(), 0);
     }
 
     #[tokio::test]
     async fn immutable_signed_phase_budgets_expire_without_refresh_on_get() {
         use std::time::Duration;
         let fee = |phase: &str| RecordedGet {
-            access_key:"fixture-observer-a".into(),
-            path:"/api/v5/account/balance".into(),
-            required_query:vec![],
-            raw_response:serde_json::to_vec(&serde_json::json!({
+            access_key: "fixture-observer-a".into(),
+            path: "/api/v5/account/balance".into(),
+            required_query: vec![],
+            raw_response: serde_json::to_vec(&serde_json::json!({
                 "code":"0","data":[{"phase":phase}]
-            })).unwrap(),
+            }))
+            .unwrap(),
         };
-        let read=|| reqwest::Client::new()
-            .get("https://www.okx.com/api/v5/account/balance")
-            .header("OK-ACCESS-KEY","fixture-observer-a")
-            .build().unwrap();
-        let deadline=||Instant::now()+Duration::from_secs(2);
-        let feed=RecordedAccountHttp::default();
+        let read = || {
+            reqwest::Client::new()
+                .get("https://www.okx.com/api/v5/account/balance")
+                .header("OK-ACCESS-KEY", "fixture-observer-a")
+                .build()
+                .unwrap()
+        };
+        let deadline = || Instant::now() + Duration::from_secs(2);
+        let feed = RecordedAccountHttp::default();
         // A three-read event is accepted exactly three times.
         feed.expect_immutable_signed_phase_bounded(
-            "before-budget",fee("before"),3,Duration::from_secs(3));
+            "before-budget",
+            fee("before"),
+            3,
+            Duration::from_secs(3),
+        );
         for _ in 0..3 {
-            feed.send(read(),deadline()).await.expect("within declared budget");
+            feed.send(read(), deadline())
+                .await
+                .expect("within declared budget");
         }
-        let excess=feed.send(read(),deadline()).await.err()
+        let excess = feed
+            .send(read(), deadline())
+            .await
+            .err()
             .expect("over-budget read must be denied");
-        assert!(excess.to_string().contains(
-            "TRANSCRIPT_IMMUTABLE_PHASE_READ_BUDGET_EXCEEDED"));
-        assert_eq!(feed.immutable_signed_phase_reads(
-            "fixture-observer-a","/api/v5/account/balance","before-budget"),3);
-        assert_eq!(feed.outbound_posts.lock().unwrap().len(),0);
-        assert_eq!(feed.advance_immutable_signed_phase_bounded(
-            "before-budget","short-lived",fee("after"),4,Duration::from_millis(1)),3);
+        assert!(
+            excess
+                .to_string()
+                .contains("TRANSCRIPT_IMMUTABLE_PHASE_READ_BUDGET_EXCEEDED")
+        );
+        assert_eq!(
+            feed.immutable_signed_phase_reads(
+                "fixture-observer-a",
+                "/api/v5/account/balance",
+                "before-budget"
+            ),
+            3
+        );
+        assert_eq!(feed.outbound_posts.lock().unwrap().len(), 0);
+        assert_eq!(
+            feed.advance_immutable_signed_phase_bounded(
+                "before-budget",
+                "short-lived",
+                fee("after"),
+                4,
+                Duration::from_millis(1)
+            ),
+            3
+        );
         tokio::time::sleep(Duration::from_millis(5)).await;
-        let expired=feed.send(read(),deadline()).await.err()
+        let expired = feed
+            .send(read(), deadline())
+            .await
+            .err()
             .expect("expired raw source cannot be refreshed by reading it");
-        assert!(expired.to_string().contains("TRANSCRIPT_IMMUTABLE_PHASE_EXPIRED"));
-        assert_eq!(feed.immutable_signed_phase_reads(
-            "fixture-observer-a","/api/v5/account/balance","short-lived"),0);
-        assert_eq!(feed.outbound_posts.lock().unwrap().len(),0);
+        assert!(
+            expired
+                .to_string()
+                .contains("TRANSCRIPT_IMMUTABLE_PHASE_EXPIRED")
+        );
+        assert_eq!(
+            feed.immutable_signed_phase_reads(
+                "fixture-observer-a",
+                "/api/v5/account/balance",
+                "short-lived"
+            ),
+            0
+        );
+        assert_eq!(feed.outbound_posts.lock().unwrap().len(), 0);
         // A new event explicitly republishes the source with a NEW budget.
-        assert_eq!(feed.advance_immutable_signed_phase_bounded(
-            "short-lived","recovered",fee("fresh"),2,Duration::from_secs(3)),0);
-        let recovered=feed.send(read(),deadline()).await.unwrap();
-        assert_eq!(serde_json::from_slice::<serde_json::Value>(&recovered.body).unwrap()
-            ["data"][0]["phase"],"fresh");
-        let denied=feed.denied_routes.lock().unwrap();
-        assert!(denied.iter().any(|x|x.contains("PHASE_EXPIRED")));
-        assert!(denied.iter().any(|x|x.contains("READ_BUDGET_EXCEEDED")));
-        let trace=feed.immutable_phase_trace.lock().unwrap();
-        assert_eq!(trace.len(),3);
+        assert_eq!(
+            feed.advance_immutable_signed_phase_bounded(
+                "short-lived",
+                "recovered",
+                fee("fresh"),
+                2,
+                Duration::from_secs(3)
+            ),
+            0
+        );
+        let recovered = feed.send(read(), deadline()).await.unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&recovered.body).unwrap()["data"][0]["phase"],
+            "fresh"
+        );
+        let denied = feed.denied_routes.lock().unwrap();
+        assert!(denied.iter().any(|x| x.contains("PHASE_EXPIRED")));
+        assert!(denied.iter().any(|x| x.contains("READ_BUDGET_EXCEEDED")));
+        let trace = feed.immutable_phase_trace.lock().unwrap();
+        assert_eq!(trace.len(), 3);
         assert!(trace[0].contains("max_reads=3") && trace[0].contains("ttl_ms=3000"));
         assert!(trace[1].contains("max_reads=4") && trace[1].contains("ttl_ms=1"));
         assert!(trace[2].contains("max_reads=2") && trace[2].contains("ttl_ms=3000"));
@@ -2367,16 +2822,27 @@ pub(crate) mod recorded_support {
             required_query: vec![("limit".into(), "100".into())],
             raw_response: b"{\"code\":\"0\",\"msg\":\"\",\"data\":[]}".to_vec(),
         };
-        let read = |limit: &str| reqwest::Client::new()
-            .get(format!("https://www.okx.com/api/v5/trade/orders-pending?limit={limit}"))
-            .header("OK-ACCESS-KEY", "fixture-observer-a")
-            .build().unwrap();
+        let read = |limit: &str| {
+            reqwest::Client::new()
+                .get(format!(
+                    "https://www.okx.com/api/v5/trade/orders-pending?limit={limit}"
+                ))
+                .header("OK-ACCESS-KEY", "fixture-observer-a")
+                .build()
+                .unwrap()
+        };
         let deadline = || Instant::now() + Duration::from_secs(2);
-        feed.expect_immutable_signed_phase_bounded(
-            "cold-entry", page(), 2, Duration::from_secs(5)
+        feed.expect_immutable_signed_phase_bounded("cold-entry", page(), 2, Duration::from_secs(5));
+        let wrong = feed
+            .send(read("50"), deadline())
+            .await
+            .err()
+            .expect("expected recorded transport denial");
+        assert!(
+            wrong
+                .to_string()
+                .contains("TRANSCRIPT_IMMUTABLE_QUERY_MISMATCH")
         );
-        let wrong = feed.send(read("50"), deadline()).await.err().expect("expected recorded transport denial");
-        assert!(wrong.to_string().contains("TRANSCRIPT_IMMUTABLE_QUERY_MISMATCH"));
         for _ in 0..2 {
             let response = feed.send(read("100"), deadline()).await.unwrap();
             assert_eq!(
@@ -2384,19 +2850,38 @@ pub(crate) mod recorded_support {
                 serde_json::json!([])
             );
         }
-        assert!(feed.send(read("100"), deadline()).await.err().expect("expected recorded transport denial")
-            .to_string().contains("TRANSCRIPT_IMMUTABLE_PHASE_READ_BUDGET_EXCEEDED"));
-        assert_eq!(feed.advance_immutable_signed_phase_bounded(
-            "cold-entry", "post-ack", page(), 2, Duration::from_secs(5)
-        ), 2);
+        assert!(
+            feed.send(read("100"), deadline())
+                .await
+                .err()
+                .expect("expected recorded transport denial")
+                .to_string()
+                .contains("TRANSCRIPT_IMMUTABLE_PHASE_READ_BUDGET_EXCEEDED")
+        );
+        assert_eq!(
+            feed.advance_immutable_signed_phase_bounded(
+                "cold-entry",
+                "post-ack",
+                page(),
+                2,
+                Duration::from_secs(5)
+            ),
+            2
+        );
         feed.send(read("100"), deadline()).await.unwrap();
-        assert_eq!(feed.retire_immutable_signed_phase(
-            "post-ack", "fixture-observer-a", "/api/v5/trade/orders-pending"
-        ), 1);
+        assert_eq!(
+            feed.retire_immutable_signed_phase(
+                "post-ack",
+                "fixture-observer-a",
+                "/api/v5/trade/orders-pending"
+            ),
+            1
+        );
         // The next recorded inventory is independent, not a fallback to
         // either the empty pre-ACK phase or an invented venue result.
         feed.expect_optional_get(RecordedGet {
-            raw_response: b"{\"code\":\"0\",\"msg\":\"\",\"data\":[{\"ordId\":\"ack-bound-001\"}]}".to_vec(),
+            raw_response: b"{\"code\":\"0\",\"msg\":\"\",\"data\":[{\"ordId\":\"ack-bound-001\"}]}"
+                .to_vec(),
             ..page()
         });
         let next = feed.send(read("100"), deadline()).await.unwrap();
@@ -2404,31 +2889,54 @@ pub(crate) mod recorded_support {
             serde_json::from_slice::<serde_json::Value>(&next.body).unwrap()["data"][0]["ordId"],
             "ack-bound-001"
         );
-        assert!(feed.send(read("100"), deadline()).await.err().expect("expected recorded transport denial")
-            .to_string().contains("TRANSCRIPT_SOURCE_PAGE_UNEXPECTED_OR_EXHAUSTED"));
+        assert!(
+            feed.send(read("100"), deadline())
+                .await
+                .err()
+                .expect("expected recorded transport denial")
+                .to_string()
+                .contains("TRANSCRIPT_SOURCE_PAGE_UNEXPECTED_OR_EXHAUSTED")
+        );
         assert!(feed.outbound_posts.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
     async fn immutable_signed_phase_unexpected_post_is_counted_not_replayed() {
-        let feed=RecordedAccountHttp::default();
-        feed.expect_immutable_signed_phase("no-post",RecordedGet {
-            access_key:"fixture-observer-a".into(),
-            path:"/api/v5/account/balance".into(),required_query:vec![],
-            raw_response:b"{\"code\":\"0\",\"data\":[]}".to_vec(),
-        });
-        let request=reqwest::Client::new()
+        let feed = RecordedAccountHttp::default();
+        feed.expect_immutable_signed_phase(
+            "no-post",
+            RecordedGet {
+                access_key: "fixture-observer-a".into(),
+                path: "/api/v5/account/balance".into(),
+                required_query: vec![],
+                raw_response: b"{\"code\":\"0\",\"data\":[]}".to_vec(),
+            },
+        );
+        let request = reqwest::Client::new()
             .post("https://www.okx.com/api/v5/trade/order")
-            .header("OK-ACCESS-KEY","fixture-executor-a")
+            .header("OK-ACCESS-KEY", "fixture-executor-a")
             .json(&serde_json::json!({"clOrdId":"test0001"}))
-            .build().unwrap();
-        let error=feed.send(request,Instant::now()+std::time::Duration::from_secs(2))
-            .await.err().expect("unmatched signed POST must fail");
+            .build()
+            .unwrap();
+        let error = feed
+            .send(request, Instant::now() + std::time::Duration::from_secs(2))
+            .await
+            .err()
+            .expect("unmatched signed POST must fail");
         assert!(error.to_string().contains("TRANSCRIPT_UNEXPECTED_POST"));
-        assert_eq!(feed.outbound_posts.lock().unwrap().len(),1,
-            "even rejected outbound attempts are counted");
-        assert_eq!(feed.immutable_signed_phase_reads(
-            "fixture-observer-a","/api/v5/account/balance","no-post"),0);
+        assert_eq!(
+            feed.outbound_posts.lock().unwrap().len(),
+            1,
+            "even rejected outbound attempts are counted"
+        );
+        assert_eq!(
+            feed.immutable_signed_phase_reads(
+                "fixture-observer-a",
+                "/api/v5/account/balance",
+                "no-post"
+            ),
+            0
+        );
     }
 
     impl HttpTransport for RecordedAccountHttp {
@@ -2625,9 +3133,7 @@ pub(crate) mod recorded_support {
                         let rows = parsed["data"].as_array().ok_or_else(|| {
                             OkxError::Response("TRANSCRIPT_CREATE_ACK_UNBOUND".into())
                         })?;
-                        if rows.len() != 1
-                            || rows[0]["clOrdId"].as_str() != client_id.as_deref()
-                        {
+                        if rows.len() != 1 || rows[0]["clOrdId"].as_str() != client_id.as_deref() {
                             return Err(OkxError::Response("TRANSCRIPT_CREATE_ACK_UNBOUND".into()));
                         }
                         // An explicit signed venue rejection is valid raw
@@ -2635,7 +3141,8 @@ pub(crate) mod recorded_support {
                         // the production PlaceAckVerdict must decide that
                         // REJECTED is different from an unbound/missing ACK.
                         if let Some(code) = rows[0]["sCode"].as_str()
-                            && !code.is_empty() && code != "0"
+                            && !code.is_empty()
+                            && code != "0"
                         {
                             return Ok(RawHttpResponse {
                                 status: HttpStatusCode::OK,
@@ -2704,75 +3211,96 @@ pub(crate) mod recorded_support {
                 // a named phase, even if financial capture races Preview.
                 // A different signer, route or query must fail closed.
                 // No response is minted and no source time is refreshed.
-                let immutable_result={
-                    let mut phases=self.immutable_signed_phases.lock().unwrap();
-                    let matching=phases.iter().enumerate().filter_map(|(index,item)|{
-                        (item.source.access_key==key &&item.source.path==path
-                            && {
-                                let mut required=item.source.required_query.clone();
+                let immutable_result = {
+                    let mut phases = self.immutable_signed_phases.lock().unwrap();
+                    let matching = phases
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(index, item)| {
+                            (item.source.access_key == key && item.source.path == path && {
+                                let mut required = item.source.required_query.clone();
                                 required.sort();
-                                let mut sent=request.url().query_pairs()
-                                    .map(|(name,value)| (name.into_owned(),value.into_owned()))
+                                let mut sent = request
+                                    .url()
+                                    .query_pairs()
+                                    .map(|(name, value)| (name.into_owned(), value.into_owned()))
                                     .collect::<Vec<_>>();
                                 sent.sort();
-                                required==sent
-                            }).then_some(index)
-                    }).collect::<Vec<_>>();
-                    assert!(matching.len()<=1,"TRANSCRIPT_IMMUTABLE_AMBIGUOUS_QUERY");
-                    if let Some(index)=matching.first(){
-                        let phase=&mut phases[*index];
-                        if phase.published_at.elapsed()>=phase.ttl {
+                                required == sent
+                            })
+                            .then_some(index)
+                        })
+                        .collect::<Vec<_>>();
+                    assert!(matching.len() <= 1, "TRANSCRIPT_IMMUTABLE_AMBIGUOUS_QUERY");
+                    if let Some(index) = matching.first() {
+                        let phase = &mut phases[*index];
+                        if phase.published_at.elapsed() >= phase.ttl {
                             Some(Err("TRANSCRIPT_IMMUTABLE_PHASE_EXPIRED"))
-                        } else if phase.deliveries>=phase.max_deliveries {
+                        } else if phase.deliveries >= phase.max_deliveries {
                             Some(Err("TRANSCRIPT_IMMUTABLE_PHASE_READ_BUDGET_EXCEEDED"))
-                        } else if path=="/api/v5/trade/order"
-                            && !requested_client.as_ref().is_some_and(|client|
+                        } else if path == "/api/v5/trade/order"
+                            && !requested_client.as_ref().is_some_and(|client| {
                                 recorded_order_source_matches(
                                     &self.acknowledged_creates.lock().unwrap(),
-                                    key,client,&phase.source.raw_response
+                                    key,
+                                    client,
+                                    &phase.source.raw_response,
                                 )
-                            )
+                            })
                         {
                             Some(Err("TRANSCRIPT_IMMUTABLE_ORDER_ACK_UNBOUND"))
                         } else {
-                            phase.deliveries+=1;
+                            phase.deliveries += 1;
                             Some(Ok(phase.source.raw_response.clone()))
                         }
-                    }else if phases.iter().any(|item|
-                        item.source.access_key==key &&item.source.path==path
-                    ){
+                    } else if phases
+                        .iter()
+                        .any(|item| item.source.access_key == key && item.source.path == path)
+                    {
                         Some(Err("TRANSCRIPT_IMMUTABLE_QUERY_MISMATCH"))
-                    }else{None}
+                    } else {
+                        None
+                    }
                 };
-                if let Some(result)=immutable_result {
-                    let body=result.map_err(|reason|{
-                        self.denied_routes.lock().unwrap().push(format!("{reason}:{key}:{path}"));
+                if let Some(result) = immutable_result {
+                    let body = result.map_err(|reason| {
+                        self.denied_routes
+                            .lock()
+                            .unwrap()
+                            .push(format!("{reason}:{key}:{path}"));
                         OkxError::Response(format!("{reason}:{key}:{path}"))
                     })?;
-                    let body=if path=="/api/v5/trade/order" {
-                        let client=requested_client.as_deref().ok_or_else(||
+                    let body = if path == "/api/v5/trade/order" {
+                        let client = requested_client.as_deref().ok_or_else(|| {
                             OkxError::Response("TRANSCRIPT_ORDER_READBACK_ID_MISSING".into())
-                        )?;
+                        })?;
                         String::from_utf8(body)
-                            .map_err(|_|OkxError::Response("TRANSCRIPT_ORDER_READBACK_UTF8".into()))?
-                            .replace("__REQUEST_CL_ORD_ID__",client).into_bytes()
-                    } else {body};
+                            .map_err(|_| {
+                                OkxError::Response("TRANSCRIPT_ORDER_READBACK_UTF8".into())
+                            })?
+                            .replace("__REQUEST_CL_ORD_ID__", client)
+                            .into_bytes()
+                    } else {
+                        body
+                    };
                     self.requests.lock().unwrap().push(format!(
-                        "{key}:{path}?{}",request.url().query().unwrap_or_default()
+                        "{key}:{path}?{}",
+                        request.url().query().unwrap_or_default()
                     ));
-                    if path=="/api/v5/account/trade-fee" {
-                        let raw:serde_json::Value=serde_json::from_slice(&body)?;
-                        let timestamp=raw["data"][0]["ts"].as_str().ok_or_else(||
+                    if path == "/api/v5/account/trade-fee" {
+                        let raw: serde_json::Value = serde_json::from_slice(&body)?;
+                        let timestamp = raw["data"][0]["ts"].as_str().ok_or_else(|| {
                             OkxError::Response("TRANSCRIPT_FEE_EXCHANGE_TS_MISSING".into())
-                        )?;
+                        })?;
                         self.delivered_fees.lock().unwrap().push((
-                            key.to_owned(),timestamp.into(),
+                            key.to_owned(),
+                            timestamp.into(),
                             chrono::Utc::now().timestamp_millis(),
                         ));
                     }
                     return Ok(RawHttpResponse {
-                        status:HttpStatusCode::OK,
-                        headers:Default::default(),
+                        status: HttpStatusCode::OK,
+                        headers: Default::default(),
                         body,
                     });
                 }
@@ -2980,18 +3508,29 @@ pub(crate) mod recorded_support {
                     #[cfg(test)]
                     if path == "/api/v5/trade/orders-algo-pending"
                         && std::env::var("OKX_T09_4_SOURCE_COHERENCE_PROBE").as_deref() == Ok("1")
-                        && request.url().query_pairs().any(|(k,v)|k=="ordType" && v=="conditional")
+                        && request
+                            .url()
+                            .query_pairs()
+                            .any(|(k, v)| k == "ordType" && v == "conditional")
                     {
                         let parsed = serde_json::from_slice::<serde_json::Value>(&body)
                             .unwrap_or(serde_json::Value::Null);
-                        let ids = parsed["data"].as_array().map(|rows|rows.iter()
-                            .filter_map(|row|row["algoId"].as_str())
-                            .collect::<Vec<_>>()).unwrap_or_default();
-                        eprintln!("T09_4_SIGNED_STOP_PAGE_V1:{}",serde_json::json!({
-                            "actor":key,
-                            "algo_ids":ids,
-                            "time_ms":chrono::Utc::now().timestamp_millis(),
-                        }));
+                        let ids = parsed["data"]
+                            .as_array()
+                            .map(|rows| {
+                                rows.iter()
+                                    .filter_map(|row| row["algoId"].as_str())
+                                    .collect::<Vec<_>>()
+                            })
+                            .unwrap_or_default();
+                        eprintln!(
+                            "T09_4_SIGNED_STOP_PAGE_V1:{}",
+                            serde_json::json!({
+                                "actor":key,
+                                "algo_ids":ids,
+                                "time_ms":chrono::Utc::now().timestamp_millis(),
+                            })
+                        );
                     }
                     self.requests.lock().unwrap().push(format!(
                         "{key}:{path}?{}",
@@ -3479,20 +4018,21 @@ pub(crate) mod recorded_support {
 
         #[tokio::test]
         async fn immutable_acked_order_readback_is_bound_to_one_signed_post_and_query() {
-            let feed=RecordedAccountHttp::default();
-            let client="ackboundclient0001";
-            let raw=serde_json::to_vec(&serde_json::json!({
+            let feed = RecordedAccountHttp::default();
+            let client = "ackboundclient0001";
+            let raw = serde_json::to_vec(&serde_json::json!({
                 "code":"0","msg":"","data":[{
                     "instId":"BTC-USDT-SWAP","ordId":"signed-ack-001",
                     "clOrdId":"__REQUEST_CL_ORD_ID__",
                     "state":"live","accFillSz":"0","sz":"0.3"
                 }]
-            })).unwrap();
+            }))
+            .unwrap();
             feed.expect_get(RecordedGet {
-                access_key:"fixture-executor-a".into(),
-                path:"/api/v5/trade/order".into(),
-                required_query:vec![("instId".into(),"BTC-USDT-SWAP".into())],
-                raw_response:raw.clone(),
+                access_key: "fixture-executor-a".into(),
+                path: "/api/v5/trade/order".into(),
+                required_query: vec![("instId".into(), "BTC-USDT-SWAP".into())],
+                raw_response: raw.clone(),
             });
             feed.expect_post(RecordedPost{
                 access_key:"fixture-executor-a".into(),
@@ -3500,48 +4040,67 @@ pub(crate) mod recorded_support {
                 expected_body:serde_json::json!({"clOrdId":client}),
                 raw_response:br#"{"code":"0","data":[{"ordId":"signed-ack-001","clOrdId":"__REQUEST_CL_ORD_ID__","sCode":"0"}]}"#.to_vec(),
             });
-            let mut create=reqwest::Request::new(reqwest::Method::POST,
-                reqwest::Url::parse("https://www.okx.com/api/v5/trade/order").unwrap());
-            create.headers_mut().insert("OK-ACCESS-KEY",
-                reqwest::header::HeaderValue::from_static("fixture-executor-a"));
-            *create.body_mut()=Some(reqwest::Body::from(
-                format!(r#"{{"clOrdId":"{client}"}}"#)));
-            let ack=deliver_causal(&feed,create).await.unwrap();
-            assert_eq!(ack["data"][0]["ordId"],"signed-ack-001");
-            let retired=feed.supersede_queued_signed_source_at_event(
-                "genuine-ack","same-live-order",RecordedGet{
-                    access_key:"fixture-executor-a".into(),
-                    path:"/api/v5/trade/order".into(),
-                    required_query:vec![
-                        ("instId".into(),"BTC-USDT-SWAP".into()),
-                        ("clOrdId".into(),client.into())
-                    ],
-                    raw_response:raw,
-                }
+            let mut create = reqwest::Request::new(
+                reqwest::Method::POST,
+                reqwest::Url::parse("https://www.okx.com/api/v5/trade/order").unwrap(),
             );
-            assert_eq!(retired,1);
-            let order_get=|id:&str|{
-                let mut r=reqwest::Request::new(reqwest::Method::GET,
+            create.headers_mut().insert(
+                "OK-ACCESS-KEY",
+                reqwest::header::HeaderValue::from_static("fixture-executor-a"),
+            );
+            *create.body_mut() = Some(reqwest::Body::from(format!(r#"{{"clOrdId":"{client}"}}"#)));
+            let ack = deliver_causal(&feed, create).await.unwrap();
+            assert_eq!(ack["data"][0]["ordId"], "signed-ack-001");
+            let retired = feed.supersede_queued_signed_source_at_event(
+                "genuine-ack",
+                "same-live-order",
+                RecordedGet {
+                    access_key: "fixture-executor-a".into(),
+                    path: "/api/v5/trade/order".into(),
+                    required_query: vec![
+                        ("instId".into(), "BTC-USDT-SWAP".into()),
+                        ("clOrdId".into(), client.into()),
+                    ],
+                    raw_response: raw,
+                },
+            );
+            assert_eq!(retired, 1);
+            let order_get =
+                |id: &str| {
+                    let mut r=reqwest::Request::new(reqwest::Method::GET,
                     reqwest::Url::parse(&format!(
                         "https://www.okx.com/api/v5/trade/order?instId=BTC-USDT-SWAP&clOrdId={id}"
                     )).unwrap());
-                r.headers_mut().insert("OK-ACCESS-KEY",
-                    reqwest::header::HeaderValue::from_static("fixture-executor-a"));
-                r
-            };
+                    r.headers_mut().insert(
+                        "OK-ACCESS-KEY",
+                        reqwest::header::HeaderValue::from_static("fixture-executor-a"),
+                    );
+                    r
+                };
             for _ in 0..2 {
-                let observed=deliver_causal(&feed,order_get(client)).await.unwrap();
-                assert_eq!(observed["data"][0]["ordId"],"signed-ack-001");
-                assert_eq!(observed["data"][0]["clOrdId"],client);
-                assert_eq!(observed["data"][0]["state"],"live");
+                let observed = deliver_causal(&feed, order_get(client)).await.unwrap();
+                assert_eq!(observed["data"][0]["ordId"], "signed-ack-001");
+                assert_eq!(observed["data"][0]["clOrdId"], client);
+                assert_eq!(observed["data"][0]["state"], "live");
             }
-            let wrong=deliver_causal(&feed,order_get("unacknowledged-client")).await
+            let wrong = deliver_causal(&feed, order_get("unacknowledged-client"))
+                .await
                 .expect_err("foreign order must never use another ACK");
-            assert!(wrong.to_string().contains("TRANSCRIPT_IMMUTABLE_QUERY_MISMATCH"));
-            assert_eq!(feed.immutable_signed_phase_reads(
-                "fixture-executor-a","/api/v5/trade/order","same-live-order"
-            ),2,"foreign read must not consume or mutate the signed source");
-            assert_eq!(feed.outbound_posts.lock().unwrap().len(),1);
+            assert!(
+                wrong
+                    .to_string()
+                    .contains("TRANSCRIPT_IMMUTABLE_QUERY_MISMATCH")
+            );
+            assert_eq!(
+                feed.immutable_signed_phase_reads(
+                    "fixture-executor-a",
+                    "/api/v5/trade/order",
+                    "same-live-order"
+                ),
+                2,
+                "foreign read must not consume or mutate the signed source"
+            );
+            assert_eq!(feed.outbound_posts.lock().unwrap().len(), 1);
         }
 
         #[tokio::test]

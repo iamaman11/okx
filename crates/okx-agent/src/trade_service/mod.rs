@@ -589,7 +589,7 @@ impl TradeService {
                 protection,
             } => {
                 let (a, c) = self.preview_authority(&r, governance).await?;
-                let preview_until=Instant::now()+Duration::from_secs(10);
+                let preview_until = Instant::now() + Duration::from_secs(10);
                 let plan = self
                     .plan(
                         &r,
@@ -646,11 +646,18 @@ impl TradeService {
                         .instrument_rules(instrument)
                         .await
                         .ok_or("INSTRUMENT_RULES_UNAVAILABLE")?;
-                    let source = r.observer.snapshot_until(preview_until).await.map_err(err)?;
+                    let source = r
+                        .observer
+                        .snapshot_until(preview_until)
+                        .await
+                        .map_err(err)?;
                     let conversion = Self::usd_conversion(&source)?;
-                    let account = r.execution.account.config_wait(
-                        preview_until.saturating_duration_since(Instant::now())
-                    ).await.map_err(err)?;
+                    let account = r
+                        .execution
+                        .account
+                        .config_wait(preview_until.saturating_duration_since(Instant::now()))
+                        .await
+                        .map_err(err)?;
                     let leverage = dec(&r
                         .observer
                         .configured_leverage_until(
@@ -669,7 +676,8 @@ impl TradeService {
                     // snapshot/config/leverage reads. Its original exchange
                     // timestamp freshness bound is enforced by assess_order.
                     // Preview remains read-only and grants no POST permission.
-                    let fees = r.observer
+                    let fees = r
+                        .observer
                         .fee_schedule_until(&rules, preview_until)
                         .await
                         .map_err(err)?;
@@ -750,7 +758,10 @@ impl TradeService {
                     source
                 } else {
                     // Close/reduce previews have no entry-cost quote source.
-                    r.observer.snapshot_until(preview_until).await.map_err(err)?
+                    r.observer
+                        .snapshot_until(preview_until)
+                        .await
+                        .map_err(err)?
                 };
                 let exposure_fresh =
                     chrono::DateTime::parse_from_rfc3339(&exposure.source_received_at)
