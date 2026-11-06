@@ -113,7 +113,7 @@ async fn t10_05_create_outcome(
     // begins only after this bounded source setup; concurrent A maintenance
     // is deliberately left running.
     let config_setup_until=std::time::Instant::now()+Duration::from_secs(8);
-    let (a_config,b_config)=tokio::try_join!(
+    let (a_config,b_config)=tokio::join!(
         async {
             let a=accounts.resolve("fixture-a").await
                 .expect("T10-05 A account source");
