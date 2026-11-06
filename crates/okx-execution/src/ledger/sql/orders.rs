@@ -138,7 +138,9 @@ impl AccountStore {
             |r| r.get(0),
         )?;
         if attributed != proof_rows.len() as i64 {
-            return Err(StoreError::Invalid("LOCAL_REDUCE_OTHER_ORDER_FILLS_UNVERIFIED"));
+            return Err(StoreError::Invalid(
+                "LOCAL_REDUCE_OTHER_ORDER_FILLS_UNVERIFIED",
+            ));
         }
         let digest = format!(
             "{:x}",
