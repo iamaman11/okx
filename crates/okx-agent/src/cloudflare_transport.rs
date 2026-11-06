@@ -5971,7 +5971,7 @@ mod raw_native_session_tests {
                         refresh_recorded_market();
                         let mode=std::env::var("OKX_T10_05_LOST_ACK_PROBE").as_deref()==Ok("1");
                         let witness=t10_05_create_outcome(
-                            accounts.clone(),trade.clone(),risk.clone(),feed.clone(),mode
+                            accounts.clone(),trade.clone(),risk.clone(),feed.clone(),rate_budget.clone(),mode
                         ).await;
                         println!("T10_05_NATIVE_POST_OUTCOME_V1:{witness}");
                     }
