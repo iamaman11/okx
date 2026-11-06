@@ -430,19 +430,46 @@
                         // this *positive* cohort, never reclassified as PASS.
                         let first_cause=if status["data"]["protection_incident"]==true
                             || actual_posts!=5 {
-                            let sends=feed.outbound_posts.lock().unwrap().iter()
-                                .skip(5).take(3).map(|(actor,path,body)|serde_json::json!({
+                            // Join the first unexpected transport attempt to
+                            // its durable SQL owner before classifying an
+                            // extra POST as emergency, duplicate or foreign.
+                            let extra_posts=feed.outbound_posts.lock().unwrap().iter()
+                                .skip(5).take(3).cloned().collect::<Vec<_>>();
+                            let extra_clients=extra_posts.iter()
+                                .filter_map(|(_,path,body)|{
+                                    (path=="/api/v5/trade/order").then(||body
+                                        .get("clOrdId")
+                                        .and_then(serde_json::Value::as_str))
+                                        .flatten()
+                                        .map(str::to_owned)
+                                }).collect::<Vec<_>>();
+                            let sends=extra_posts.iter().map(|(actor,path,body)|
+                                serde_json::json!({
                                     "actor":actor,"route":path,
-                                    "client_id":body.get("clOrdId")
-                                        .and_then(serde_json::Value::as_str)
-                                        .and_then(|id|id.get(0..12)),
+                                    "client_id":body.get("clOrdId"),
+                                    "side":body.get("side"),
+                                    "position_side":body.get("posSide"),
+                                    "quantity":body.get("sz"),
+                                    "reduce_only":body.get("reduceOnly"),
+                                    "order_type":body.get("ordType"),
                                     "algo":body.as_array()
                                         .and_then(|v|v.first())
                                         .and_then(|v|v.get("algoId"))
-                                })).collect::<Vec<_>>();
+                                })
+                            ).collect::<Vec<_>>();
                             let sql=owner.execution.store.call(
                                 std::time::Instant::now()+Duration::from_secs(2),
-                                |s|{
+                                move |s|{
+                                    let extra_owners=extra_clients.iter().map(|client|{
+                                        let linked=s.by_client_order_id(client)?;
+                                        Ok(serde_json::json!({
+                                            "client_id":client,
+                                            "intent_id":linked.as_ref().map(|i|i.intent_id.as_str()),
+                                            "state":linked.as_ref().map(|i|i.state.as_str()),
+                                            "incident":linked.as_ref()
+                                                .and_then(|i|i.incident.as_deref()),
+                                        }))
+                                    }).collect::<okx_execution::StoreResult<Vec<_>>>()?;
                                     let (members,pending)=s.risk_census_intents(100)?;
                                     let observed=members.iter().take(6).map(|member|{
                                         let protection=s.protection(&member.intent_id)?;
@@ -456,7 +483,10 @@
                                             "stop":protection.map(|p|p.algo_id),
                                         }))
                                     }).collect::<okx_execution::StoreResult<Vec<_>>>()?;
-                                    Ok(serde_json::json!(observed))
+                                    Ok(serde_json::json!({
+                                        "extra_outbound_sql_owners":extra_owners,
+                                        "intents":observed,
+                                    }))
                                 }
                             ).await;
                             let mut cmd=summary("t09_4_first_cause_readonly");
@@ -472,6 +502,7 @@
                                 "intent":intent_id.get(0..12),
                                 "expected_stops":[old_stop,new_stop],
                                 "posts":actual_posts,"extra":sends,
+                                "source_boundary_ms":source_boundary,
                                 "status_incident":status["data"]["intent"]["incident"],
                                 "protection_incident":status["data"]["protection_incident"],
                                 "financial_error":status["data"]["financial_error"],
@@ -853,8 +884,51 @@
         };
 
         assert!(request.valid());
-        let response=trade.trade("fixture-a",&request,None).await
-            .unwrap_or_else(|reason|panic!("T09_4_MANAGED_ADD_DENIED:{reason}"));
+        let response=match trade.trade("fixture-a",&request,None).await {
+            Ok(response)=>response,
+            Err(reason)=>{
+                // Preserve the first Add denial with the durable intent
+                // incidents and existing outbound attempts. A later Status
+                // sample may clear the transient protection flag.
+                let owner=accounts.resolve("fixture-a").await.unwrap();
+                let sql=owner.execution.store.call(
+                    std::time::Instant::now()+Duration::from_secs(2),
+                    |s|{
+                        let (members,_pending)=s.risk_census_intents(100)?;
+                        let rows=members.into_iter().take(6).map(|i|
+                            serde_json::json!({
+                                "id":i.intent_id,
+                                "state":i.state.as_str(),
+                                "revision":i.revision,
+                                "incident":i.incident,
+                            })
+                        ).collect::<Vec<_>>();
+                        Ok(rows)
+                    }
+                ).await;
+                let capture=owner.source_capture_health.read().await;
+                let last_success_ms=capture.last_success_ms;
+                let source_failure=capture.reason_code.clone();
+                drop(capture);
+                let posts=feed.outbound_posts.lock().unwrap().iter().rev()
+                    .take(3).map(|(actor,path,body)|serde_json::json!({
+                        "actor":actor,
+                        "route":path,
+                        "client_id":body.get("clOrdId"),
+                        "side":body.get("side"),
+                        "quantity":body.get("sz"),
+                        "reduce_only":body.get("reduceOnly"),
+                    })).collect::<Vec<_>>();
+                panic!("T09_4_MANAGED_ADD_DENIED:{reason};first_cause={}",
+                    serde_json::json!({
+                        "sql":format!("{sql:?}").chars().take(720).collect::<String>(),
+                        "posts":posts,
+                        "last_source_ms":last_success_ms,
+                        "source_failure":source_failure,
+                    })
+                );
+            }
+        };
         let id=response["data"]["intent"]["intent_id"].as_str()
             .unwrap_or_else(||panic!("T09_4_MANAGED_ADD_MISSING_INTENT_V1:{response}"))
             .to_owned();

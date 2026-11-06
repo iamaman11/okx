@@ -10,6 +10,11 @@ on:
       - work/t10-07-one-campaign-native-20261105
   workflow_dispatch:
     inputs:
+      run_a1:
+        description: 'Run exact 21-case A1 gate on this SHA (no duplicate target preflight)'
+        type: boolean
+        required: false
+        default: false
       target_case:
         description: 'Targeted Windows T09, B1 prerequisite or S2-05 CAS (not 26/26)'
         type: choice
@@ -419,7 +424,7 @@ jobs:
       - name: Bind exact source SHA and restrict target scenario
         shell: pwsh
         env:
-          OKX_TARGET_CASE: ${{ inputs.target_case || (github.event_name == 'push' && 'T10-05') || 'T09.6' }}
+          OKX_TARGET_CASE: ${{ inputs.target_case || (github.event_name == 'push' && 'T09.8') || 'T09.6' }}
         run: |
           $head = (git rev-parse HEAD).Trim()
           if ($head -ne $env:GITHUB_SHA) { throw "PREFLIGHT_HEAD_MISMATCH" }
@@ -448,6 +453,10 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'TWO_ORDER_SOURCE_SCOPE_UNIT_FAILED' }
           cargo test --locked -p okx-agent --lib executor_uid_cache_cannot_cross_account_or_outlive_signed_source -- --nocapture
           if ($LASTEXITCODE -ne 0) { throw 'EXECUTOR_IDENTITY_UID_GENERATION_TTL_UNIT_FAILED' }
+          cargo test --locked -p okx-agent --lib uid_waiting_is_bounded_and_other_account_progresses -- --nocapture
+          if ($LASTEXITCODE -ne 0) { throw 'EXECUTOR_UID_ASYNC_ADMISSION_FAILED' }
+          cargo test --locked -p okx-agent --lib bounded_source_owner_tests -- --nocapture
+          if ($LASTEXITCODE -ne 0) { throw 'FINANCE_SOURCE_OWNER_ASYNC_ADMISSION_FAILED' }
           cargo test --locked -p okx-agent --lib immutable_signed_leverage_handoff_preserves_exact_source_without_extra_pages -- --nocapture
           if ($LASTEXITCODE -ne 0) { throw 'SIGNED_LEVERAGE_SOURCE_UNIT_FAILED' }
           cargo test --locked -p okx-agent --lib signed_fee_phase_advances_only_on_explicit_event_and_keeps_prior_source_time -- --nocapture
@@ -463,9 +472,10 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Execute one Native/Worker scenario or B1/S2-05 prerequisite
+        if: (github.event_name == 'workflow_dispatch' && !inputs.run_a1) || (github.event_name == 'push' && !contains(github.event.head_commit.message, '[A1]'))
         shell: pwsh
         env:
-          OKX_TARGET_CASE: ${{ inputs.target_case || (github.event_name == 'push' && 'T10-05') || 'T09.6' }}
+          OKX_TARGET_CASE: ${{ inputs.target_case || (github.event_name == 'push' && 'T09.8') || 'T09.6' }}
         run: |
           if ($env:OKX_TARGET_CASE -notin @('T09.1','T09.3','T09.4','T09.5','T09.6','T09.7','T09.8','B1','S2-05','T10-14','T10-03','T10-05','T10-06','T10-15')) {
             throw "PREFLIGHT_CASE_NOT_ALLOWED"
@@ -482,8 +492,8 @@ jobs:
           }
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - name: Canonical #449 r9.1 A1 exact 21-case gate on one SHA
-        if: github.event_name == 'push' && github.ref == 'refs/heads/work/t10-07-one-campaign-native-20261105'
+      - name: Canonical #449 r9.3 A1 exact 21-case gate on one SHA
+        if: (github.event_name == 'workflow_dispatch' && inputs.run_a1 && github.ref == 'refs/heads/work/t10-07-one-campaign-native-20261105') || (github.event_name == 'push' && github.ref == 'refs/heads/work/t10-07-one-campaign-native-20261105' && contains(github.event.head_commit.message, '[A1]'))
         shell: pwsh
         timeout-minutes: 28
         run: |
@@ -533,7 +543,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: native-targeted-${{ inputs.target_case || (github.event_name == 'push' && 'T10-05') || 'T09.6' }}-${{ github.sha }}
+          name: native-targeted-${{ inputs.target_case || (github.event_name == 'push' && 'T09.8') || 'T09.6' }}-${{ github.sha }}
           path: ${{ runner.temp }}\trade-integration
           if-no-files-found: warn
           retention-days: 14
