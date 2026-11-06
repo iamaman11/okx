@@ -33,6 +33,18 @@ where
     }
 }
 
+// An authenticated later `live` algo GET cannot silently undo a durable
+// protection incident: the same algoId may be stale, reappear after an ACK,
+// or no longer cover the late fill. Only a separately proven remediation or
+// a signed flat-position outcome can resolve exposure. No guessed success.
+fn protection_incident_still_unresolved(reason: Option<&str>, venue_flat: bool) -> bool {
+    !venue_flat
+        && matches!(
+            reason,
+            Some("PROTECTION_PENDING_OR_FAILED" | "MANAGED_AGGREGATE_PROTECTION_UNVERIFIED")
+        )
+}
+
 /// A previously persisted, signed fill lot belongs to this exact SQL intent
 /// only when its side and quantity agree with the fresh signed venue order
 /// AND the signed account position. A missing or out-of-sync lot does not
@@ -1055,6 +1067,9 @@ impl TradeService {
             } else {
                 json!({"state":"not_evaluated","all_in_entry_cost_proven":false})
             };
+        let prior_protection_incident_unresolved =
+            protection_incident_still_unresolved(i.incident.as_deref(), venue_flat_verified);
+        let live_protection_incident = protection_failed || prior_protection_incident_unresolved;
         let entry_fill_pending =
             entry_fill_finance_pending(i.risk_increase, verified_zero_cancel, &entry_fill_evidence);
         let settlement_pending = incremental_entry["state"] == "pending"
@@ -1067,7 +1082,8 @@ impl TradeService {
                 "incremental_entry_settlement":incremental_entry,
                 "protection":protection,"central_release":central_release,
                 "financial_error":financial_error,"financial_complete":financial && !settlement_pending,
-                "protection_incident":protection_failed,
+                "protection_incident":live_protection_incident,
+                "prior_protection_incident_unresolved":prior_protection_incident_unresolved,
                 "protection_source_pending":protection_source_pending,
                 "compensation":compensation}),
         );
@@ -1075,7 +1091,7 @@ impl TradeService {
             "execution":"authenticated_readback",
             "financial":if financial && !settlement_pending {"complete"}else{"incomplete"},
             "entry_settlement":if settlement_pending {"pending"} else {"evaluated"},
-            "protection":if protection_failed {
+            "protection":if live_protection_incident {
                 "incident"
             } else if protection_source_pending {
                 "pending_source_coherence"
@@ -1083,9 +1099,11 @@ impl TradeService {
                 "evaluated"
             }
         });
-        if !financial || settlement_pending || protection_source_pending || protection_failed {
+        if !financial || settlement_pending || protection_source_pending || live_protection_incident {
             result["status"] = json!("partial");
-            result["warnings"] = json!([if protection_source_pending {
+            result["warnings"] = json!([if live_protection_incident {
+                "PROTECTION_INCIDENT_REMEDIATION_UNVERIFIED"
+            } else if protection_source_pending {
                 "PROTECTION_SOURCE_BEFORE_SQL_FILL"
             } else if !financial || entry_fill_pending {
                 "FINANCIAL_BACKFILL_PENDING"
@@ -2312,6 +2330,25 @@ impl TradeService {
 #[cfg(test)]
 mod entry_cost_status_tests {
     use super::*;
+
+    #[test]
+    fn t10_08_later_live_stop_get_cannot_clear_durable_protection_incident() {
+        for reason in [
+            "PROTECTION_PENDING_OR_FAILED",
+            "MANAGED_AGGREGATE_PROTECTION_UNVERIFIED",
+        ] {
+            assert!(protection_incident_still_unresolved(Some(reason), false));
+            assert!(
+                !protection_incident_still_unresolved(Some(reason), true),
+                "independently signed flat position is a different proof"
+            );
+        }
+        assert!(!protection_incident_still_unresolved(None, false));
+        assert!(!protection_incident_still_unresolved(
+            Some("UNRELATED_LOCAL_ADMISSION_DENIAL"),
+            false
+        ));
+    }
 
     #[tokio::test]
     async fn t10_08_emergency_policy_is_bounded_before_financial_capture() {
