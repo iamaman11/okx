@@ -3184,9 +3184,7 @@ pub(crate) mod recorded_support {
                             || parsed["data"][0]["algoId"] != submitted_id
                             || parsed["data"][0]["reqId"] != submitted_request
                         {
-                            return Err(OkxError::Response(
-                                "TRANSCRIPT_AMEND_ACK_UNBOUND".into(),
-                            ));
+                            return Err(OkxError::Response("TRANSCRIPT_AMEND_ACK_UNBOUND".into()));
                         }
                     }
                     if path == "/api/v5/trade/cancel-algos" {
