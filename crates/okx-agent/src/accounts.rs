@@ -4375,6 +4375,23 @@ pub(crate) mod recorded_support {
             *create.body_mut() = Some(reqwest::Body::from(format!(r#"{{"clOrdId":"{client}"}}"#)));
             let ack = deliver_causal(&feed, create).await.unwrap();
             assert_eq!(ack["data"][0]["ordId"], "signed-ack-001");
+            // All queued predecessor copies are genuinely consumed. A later
+            // immutable handoff must use the digest of this ACK-bound GET,
+            // not depend on an unused synthetic read-count cushion.
+            let mut prior = reqwest::Request::new(
+                reqwest::Method::GET,
+                reqwest::Url::parse(&format!(
+                    "https://www.okx.com/api/v5/trade/order?instId=BTC-USDT-SWAP&clOrdId={client}"
+                ))
+                .unwrap(),
+            );
+            prior.headers_mut().insert(
+                "OK-ACCESS-KEY",
+                reqwest::header::HeaderValue::from_static("fixture-executor-a"),
+            );
+            let first = deliver_causal(&feed, prior).await.unwrap();
+            assert_eq!(first["data"][0]["ordId"], "signed-ack-001");
+            assert_eq!(feed.unconsumed_reads(), 0);
             let retired = feed.supersede_queued_signed_source_at_event(
                 "genuine-ack",
                 "same-live-order",
@@ -4388,7 +4405,9 @@ pub(crate) mod recorded_support {
                     raw_response: raw,
                 },
             );
-            assert_eq!(retired, 1);
+            assert_eq!(retired, 1, "exact prior GET digest is a source proof");
+            assert!(feed.immutable_phase_trace.lock().unwrap()
+                .last().unwrap().contains("old_pages=0"));
             let order_get =
                 |id: &str| {
                     let mut r=reqwest::Request::new(reqwest::Method::GET,
