@@ -14,16 +14,19 @@ const EXECUTOR_IDENTITY_REUSE_AGE: Duration = Duration::from_secs(2);
 
 struct ExecutorIdentityProof {
     verified_uid: String,
+    generation: u64,
     received_at: Instant,
 }
 
 fn current_executor_identity(
     proof: Option<&ExecutorIdentityProof>,
     expected: &str,
+    generation: u64,
     now: Instant,
 ) -> bool {
     proof.is_some_and(|p| {
         p.verified_uid == expected
+            && p.generation == generation
             && now.saturating_duration_since(p.received_at) < EXECUTOR_IDENTITY_REUSE_AGE
     })
 }
@@ -78,6 +81,7 @@ impl ExecutionRuntime {
     pub async fn verified_uid_matches_until(
         &self,
         uid: &str,
+        generation: u64,
         until: Instant,
     ) -> AgentResult<bool> {
         if self.uid != uid {
@@ -94,7 +98,7 @@ impl ExecutionRuntime {
         // One authenticated config GET is sufficient for these overlapping
         // UID-only verifications. Freshness remains anchored to its actual
         // HTTP completion, never to a cache hit.
-        if current_executor_identity(guard.as_ref(), uid, Instant::now()) {
+        if current_executor_identity(guard.as_ref(), uid, generation, Instant::now()) {
             return Ok(true);
         }
         *guard = None;
@@ -111,15 +115,12 @@ impl ExecutionRuntime {
         }
         *guard = Some(ExecutorIdentityProof {
             verified_uid: uid.to_owned(),
+            generation,
             received_at: Instant::now(),
         });
         Ok(true)
     }
 
-    pub async fn verified_uid_matches(&self, uid: &str) -> AgentResult<bool> {
-        self.verified_uid_matches_until(uid, Instant::now() + Duration::from_secs(10))
-            .await
-    }
     pub fn uid(&self) -> &str {
         &self.uid
     }
@@ -134,15 +135,18 @@ mod identity_cache_tests {
         let now = Instant::now();
         let proof = ExecutorIdentityProof {
             verified_uid: "verified-a".into(),
+            generation: 17,
             received_at: now,
         };
-        assert!(current_executor_identity(Some(&proof), "verified-a", now));
-        assert!(!current_executor_identity(Some(&proof), "verified-b", now));
+        assert!(current_executor_identity(Some(&proof), "verified-a", 17, now));
+        assert!(!current_executor_identity(Some(&proof), "verified-b", 17, now));
+        assert!(!current_executor_identity(Some(&proof), "verified-a", 18, now));
         assert!(!current_executor_identity(
             Some(&proof),
             "verified-a",
+            17,
             now + EXECUTOR_IDENTITY_REUSE_AGE,
         ));
-        assert!(!current_executor_identity(None, "verified-a", now));
+        assert!(!current_executor_identity(None, "verified-a", 17, now));
     }
 }
