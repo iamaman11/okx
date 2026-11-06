@@ -446,10 +446,15 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'ACK_BOUND_ORDER_SOURCE_UNIT_FAILED' }
           cargo test --locked -p okx-agent --lib immutable_acked_orders_keep_independent_sources_on_one_route -- --nocapture
           if ($LASTEXITCODE -ne 0) { throw 'TWO_ORDER_SOURCE_SCOPE_UNIT_FAILED' }
+          cargo test --locked -p okx-agent --lib executor_uid_cache_cannot_cross_account_or_outlive_signed_source -- --nocapture
+          if ($LASTEXITCODE -ne 0) { throw 'EXECUTOR_IDENTITY_UID_GENERATION_TTL_UNIT_FAILED' }
           cargo test --locked -p okx-agent --lib immutable_signed_leverage_handoff_preserves_exact_source_without_extra_pages -- --nocapture
           if ($LASTEXITCODE -ne 0) { throw 'SIGNED_LEVERAGE_SOURCE_UNIT_FAILED' }
           cargo test --locked -p okx-agent --lib signed_fee_phase_advances_only_on_explicit_event_and_keeps_prior_source_time -- --nocapture
           if ($LASTEXITCODE -ne 0) { throw 'SIGNED_FEE_CAUSAL_EVENT_UNIT_FAILED' }
+
+      - name: Check Rust format before expensive Native/Worker scenarios
+        run: cargo fmt --all -- --check
 
       - name: Install locked workerd test dependencies
         shell: pwsh
@@ -476,10 +481,6 @@ jobs:
             node scripts/run-trade-integration.mjs --case $env:OKX_TARGET_CASE --artifacts "$artifacts"
           }
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-      - name: Check Rust format without changing source
-        if: always()
-        run: cargo fmt --all -- --check
 
       - name: Canonical #449 r9.1 A1 exact 21-case gate on one SHA
         if: github.event_name == 'push' && github.ref == 'refs/heads/work/t10-07-one-campaign-native-20261105'
