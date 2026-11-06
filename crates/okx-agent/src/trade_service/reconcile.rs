@@ -884,13 +884,16 @@ impl TradeService {
         if let Some(ref action) = protective
             && action["state"] == "blocked"
         {
-            eprintln!("T10_08_PROTECTIVE_BLOCKER_V1:{}", json!({
-                "intent_id":i.intent_id,
-                "elapsed_ms":action["elapsed_ms"],
-                "reason_code":action["reason_code"],
-                "phase":"before_financial_capture",
-                "retry_create":false
-            }));
+            eprintln!(
+                "T10_08_PROTECTIVE_BLOCKER_V1:{}",
+                json!({
+                    "intent_id":i.intent_id,
+                    "elapsed_ms":action["elapsed_ms"],
+                    "reason_code":action["reason_code"],
+                    "phase":"before_financial_capture",
+                    "retry_create":false
+                })
+            );
             let mut result = completed(json!({
                 "intent":i,
                 "remaining_exposure":null,
@@ -1876,7 +1879,9 @@ impl TradeService {
                 .cancel_order_after_admission(&request, &timing, &rate)
                 .await
                 .map_err(|_| "SAFETY_CANCEL_OUTCOME_UNKNOWN_NO_RESUBMIT")?;
-            if !response.top_level_success() || response.data.len() != 1 || !response.data[0].accepted()
+            if !response.top_level_success()
+                || response.data.len() != 1
+                || !response.data[0].accepted()
             {
                 return Err("SAFETY_CANCEL_NOT_CONFIRMED_NO_RESUBMIT".into());
             }
@@ -1922,7 +1927,9 @@ impl TradeService {
             i,
             venue_filled,
             signed_position,
-            owned_lots.iter().map(|(side, quantity)| (side.as_str(), *quantity)),
+            owned_lots
+                .iter()
+                .map(|(side, quantity)| (side.as_str(), *quantity)),
         )?;
         let key = format!("safety_close_{}", &i.client_order_id);
         let outcome = Box::pin(self.close(r, &key, &i.intent_id, 2000, None)).await?;
@@ -2346,55 +2353,55 @@ mod entry_cost_status_tests {
     #[test]
     fn t10_08_emergency_close_requires_same_intent_signed_sql_lots() {
         let mut i = StoredIntent {
-            intent_id:"intent-a".into(),
-            client_order_id:"client-a".into(),
-            instrument_id:"BTC-USDT-SWAP".into(),
-            plan_hash:"a".repeat(64),
-            idempotency_key:"key-a".into(),
-            request_hash:"b".repeat(64),
-            state:IntentState::Filled,
-            revision:2,
-            deadline:20,
-            policy_revision:1,
-            risk_increase:true,
-            exchange_order_id:Some("venue-a".into()),
-            incident:Some("PROTECTION_PENDING_OR_FAILED".into()),
-            plan:okx_execution::IntentPlan {
-                quantity:Decimal::ONE,
-                side:"buy".into(),
-                position_side:"long".into(),
+            intent_id: "intent-a".into(),
+            client_order_id: "client-a".into(),
+            instrument_id: "BTC-USDT-SWAP".into(),
+            plan_hash: "a".repeat(64),
+            idempotency_key: "key-a".into(),
+            request_hash: "b".repeat(64),
+            state: IntentState::Filled,
+            revision: 2,
+            deadline: 20,
+            policy_revision: 1,
+            risk_increase: true,
+            exchange_order_id: Some("venue-a".into()),
+            incident: Some("PROTECTION_PENDING_OR_FAILED".into()),
+            plan: okx_execution::IntentPlan {
+                quantity: Decimal::ONE,
+                side: "buy".into(),
+                position_side: "long".into(),
                 ..Default::default()
-            }
+            },
         };
         let one = Decimal::ONE;
-        let half = Decimal::new(5,1);
+        let half = Decimal::new(5, 1);
         assert_eq!(
-            verified_emergency_owned_exposure(&i,one,one,[("long",half)]),
+            verified_emergency_owned_exposure(&i, one, one, [("long", half)]),
             Ok(half)
         );
         assert_eq!(
-            verified_emergency_owned_exposure(&i,one,one,std::iter::empty()),
+            verified_emergency_owned_exposure(&i, one, one, std::iter::empty()),
             Err("NO_ATTRIBUTED_POSITION_TO_CLOSE".into())
         );
         assert_eq!(
-            verified_emergency_owned_exposure(&i,half,one,[("long",one)]),
+            verified_emergency_owned_exposure(&i, half, one, [("long", one)]),
             Err("EMERGENCY_EXPOSURE_SQL_VENUE_MISMATCH".into())
         );
         assert_eq!(
-            verified_emergency_owned_exposure(&i,one,half,[("long",one)]),
+            verified_emergency_owned_exposure(&i, one, half, [("long", one)]),
             Err("EMERGENCY_EXPOSURE_SQL_VENUE_MISMATCH".into())
         );
         assert_eq!(
-            verified_emergency_owned_exposure(&i,one,one,[("short",half)]),
+            verified_emergency_owned_exposure(&i, one, one, [("short", half)]),
             Err("EMERGENCY_EXPOSURE_SQL_VENUE_MISMATCH".into())
         );
         assert_eq!(
-            verified_emergency_owned_exposure(&i,one,Decimal::ZERO,[("long",half)]),
+            verified_emergency_owned_exposure(&i, one, Decimal::ZERO, [("long", half)]),
             Err("EMERGENCY_EXPOSURE_SOURCE_UNVERIFIED".into())
         );
-        i.plan.position_side="short".into();
+        i.plan.position_side = "short".into();
         assert_eq!(
-            verified_emergency_owned_exposure(&i,one,one,[("long",half)]),
+            verified_emergency_owned_exposure(&i, one, one, [("long", half)]),
             Err("EMERGENCY_EXPOSURE_SQL_VENUE_MISMATCH".into())
         );
     }
