@@ -147,5 +147,64 @@ export async function run({caseId,root,signal,artifactsDir}) {
   // Acceptance requires every causally linked Native + Worker assertion
   // above, including a distinct real Close POST and independently signed
   // closing fill/bill/flat source. Merely deleting the old throw cannot pass.
-  return {caseId,status:"PASS",artifact:resolve(dir,"signed-partial-fill-protection.json")};
+  const assertions=[
+    ["failed_stop_scode","51008",failed.signed_stop_failure.fail_code],
+    ["cancel_ambiguous_no_resubmit","SAFETY_CANCEL_OUTCOME_UNKNOWN_NO_RESUBMIT",
+      failed.protected_action.reason_code],
+    ["cancel_attempt_bounded_ms","true",
+      String(failed.protected_action.elapsed_ms<=2000)],
+    ["partial_verified_fill_qty","0.12",partial.sql.quantity],
+    ["late_verified_cumulative_fill_qty","0.3",terminal.sql.quantity],
+    ["original_filled_state","FILLED",recovery.native_sql.original_state],
+    ["close_verified_qty","0.3",recovery.native_sql.close_quantity],
+    ["close_is_reduce_only","false",String(recovery.native_sql.close_risk_increase)],
+    ["signed_flat_remaining_lots","0",String(recovery.native_sql.remaining_instrument_lots)],
+    ["durable_incident_cleared","true",String(
+      recovery.native_sql.original_incident===null&&!recovery.native_sql.risk_stop_latched)],
+    ["central_entry_released","false",String(recovery.native_sql.central_still_held)],
+    ["original_worker_reserve_after_flat","0",
+      recovery.worker_after.entry_budget.reserved_usd],
+    ["immutable_campaign_entry_consumed_usd","4.002",
+      recovery.worker_after.entry_budget.consumed_usd],
+    ["exact_venue_post_count","6",String(recovery.outbound_posts_after)],
+    ["same_original_intent",witness.intent_id,recovery.original_intent_id],
+  ].map(([id,expected,actual])=>({id,expected,actual}));
+  const events=[
+    ["entry_partial_fill_captured","NativeAccountSQL",partial.sql],
+    ["protection_failed_51008","RecordedAuthenticatedHTTP",
+      failed.signed_stop_failure],
+    ["emergency_cancel_blocked","TradeService+NativeAccountSQL",
+      [failed.protected_action,failed.sql_after.cancel_claim]],
+    ["late_fill_and_second_bill_captured","NativeAccountSQL",terminal.sql],
+    ["single_reduce_only_close_post_acked","TradeService+RecordedAuthenticatedHTTP",
+      recovery.close],
+    ["close_filled_and_position_flat","NativeAccountSQL",
+      [recovery.close_terminal_status,recovery.native_sql]],
+    ["central_release_and_incident_resolution","NativeAccountSQL+RuntimeSessionSQLiteDO",
+      [recovery.worker_after,recovery.original_terminal_status.data.protection_remediation]],
+  ].map(([stage,owner,source])=>({stage,owner,source_digest:hash(source)}));
+  return {
+    case_id:caseId,status:"PASS",
+    provenance:{schema:"okx.native-workerd-transcript/v1",sha256:t.transcript_sha256},
+    assertions,events,
+    readbacks:{
+      sql:[
+        {revision:failed.sql_after.revision,
+          digest:hash([failed.sql_after,failed.first_partial_sql])},
+        {revision:recovery.native_sql.original_revision,
+          digest:hash([recovery.native_sql,terminal.sql])},
+      ],
+      risk_book:[
+        {revision:failed.worker_risk_book_sequence,digest:hash(failed.worker_budget)},
+        {revision:recovery.worker_sequence_before,digest:hash(recovery.worker_before)},
+        {revision:recovery.worker_sequence_after,digest:hash(recovery.worker_after)},
+      ],
+    },
+    outbound_sends:[
+      {account:failed.account_uid,intent:witness.intent_id,
+        operation_kind:"emergency_cancel",count:1},
+      {account:failed.account_uid,intent:recovery.native_sql.close_intent_id,
+        operation_kind:"source_bound_reduce_only_close",count:1},
+    ],
+  };
 }

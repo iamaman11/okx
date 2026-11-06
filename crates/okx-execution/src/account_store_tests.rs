@@ -34,7 +34,9 @@ fn t10_08_flat_protection_stop_resolution_is_atomic_and_idempotent() {
         .unwrap();
     assert!(matches!(
         s.resolve_protection_incident_after_flat("intent", &digest, 6),
-        Err(StoreError::Invalid("PROTECTION_FLAT_CENTRAL_RELEASE_NOT_PROVEN"))
+        Err(StoreError::Invalid(
+            "PROTECTION_FLAT_CENTRAL_RELEASE_NOT_PROVEN"
+        ))
     ));
     assert_eq!(s.stops().unwrap().len(), 1);
     assert_eq!(

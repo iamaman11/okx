@@ -132,7 +132,9 @@ impl AccountStore {
             params![id, now],
         )?;
         if cleared != 1 {
-            return Err(StoreError::Invalid("PROTECTION_INCIDENT_CHANGED_DURING_RESOLUTION"));
+            return Err(StoreError::Invalid(
+                "PROTECTION_INCIDENT_CHANGED_DURING_RESOLUTION",
+            ));
         }
         // The original worker receipt and verified source digest are
         // durable together with the incident/stop transition. Replaying
