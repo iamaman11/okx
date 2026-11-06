@@ -176,6 +176,7 @@ async fn t10_05_create_outcome(
     let owner=accounts.resolve("fixture-b").await.expect("T10-05 B SQL");
     let admission_deadline=std::time::Instant::now()+Duration::from_secs(18);
     let mut local_nosend_attempts=0usize;
+    let mut fee_phase = "t10-05-b-fee-at-execute".to_owned();
     let (key,request,first)=loop {
         let attempt_key=if local_nosend_attempts==0 {
             key.to_owned()
@@ -247,6 +248,31 @@ async fn t10_05_create_outcome(
         tokio::time::timeout_at(admission_deadline.into(),
             tokio::time::sleep(delay)
         ).await.expect("T10-05 original deadline for local no-send admission");
+        // A completed, durably unsent intent is a causal boundary for the
+        // next NEW key. A second authenticated fee observation has its own
+        // exchange timestamp; repeating the first signed source would be
+        // stale after real 5/2s local admission waits. Do not generate bytes
+        // inside the GET handler or change the production freshness gate.
+        let next_stamp=chrono::Utc::now().timestamp_millis().to_string();
+        let next_fee=wrap(json!([{
+            "instType":"SWAP","level":"Lv1","ts":next_stamp,
+            "feeGroup":[{"groupId":"4","maker":"0.0005","taker":"0.0005"}]
+        }]));
+        let next_phase=format!("t10-05-b-fee-after-local-nosend-{local_nosend_attempts}");
+        feed.advance_immutable_signed_phase(
+            &fee_phase, &next_phase,
+            RecordedGet {
+                access_key:"fixture-observer-b".into(),
+                path:"/api/v5/account/trade-fee".into(),
+                required_query:vec![
+                    ("instType".into(),"SWAP".into()),
+                    ("instFamily".into(),"BTC-USDT".into()),
+                ],
+                raw_response:next_fee,
+            }
+        );
+        fee_phase=next_phase;
+        feed.advance_recorded_public_clock(wrap(json!([{"ts":next_stamp}])));
     };
     let first_status=first["status"].as_str().unwrap_or("MISSING_STATUS").to_owned();
     let read=|| {

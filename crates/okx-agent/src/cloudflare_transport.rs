@@ -2567,8 +2567,14 @@ mod raw_native_session_tests {
                     // Do not refresh bytes on GET, replay a consumed source,
                     // or create additional pages because the runner is slow.
                     let execute_fee_at = chrono::Utc::now().timestamp_millis().to_string();
-                    for _ in 0..3 {
-                        feed.expect_get(RecordedGet {
+                    // First public Execute is a distinct signed source event.
+                    // Retire old pre-Execute/Preview observations rather than
+                    // append fresh pages BEHIND still-unconsumed stale bytes.
+                    // The production 5s fee gate stays unchanged.
+                    let _old_fee_pages = feed.advance_recorded_route(
+                        "fixture-observer-a",
+                        "/api/v5/account/trade-fee",
+                        (0..3).map(|_| RecordedGet {
                             access_key: "fixture-observer-a".into(),
                             path: "/api/v5/account/trade-fee".into(),
                             required_query: vec![
@@ -2579,8 +2585,8 @@ mod raw_native_session_tests {
                                 "instType":"SWAP","level":"Lv1","ts":execute_fee_at,
                                 "feeGroup":[{"groupId":"4","maker":"0.0005","taker":"0.0005"}]
                             }])),
-                        });
-                    }
+                        }).collect(),
+                    );
                 }
                 let admission = if attempt == 0
                     && std::env::var("OKX_T10_06_CONCURRENT_PROBE").as_deref() == Ok("1")
