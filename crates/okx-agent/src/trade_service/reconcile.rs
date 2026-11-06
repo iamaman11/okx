@@ -871,13 +871,15 @@ impl TradeService {
                 // The same public Close path is idempotent and obtains the
                 // exact owned SQL-lot quantity. It never guesses a venue size.
                 let key = format!("safety_close_{}", &i.client_order_id);
-                Some(match Box::pin(self.close(r, &key, &i.intent_id, 10000, None)).await {
-                    Ok(result) => json!({"state":"close_attempted",
+                Some(
+                    match Box::pin(self.close(r, &key, &i.intent_id, 10000, None)).await {
+                        Ok(result) => json!({"state":"close_attempted",
                         "protective_action":prepared,"outcome":result}),
-                    Err(reason) => json!({"state":"blocked","phase":"close_after_finance",
+                        Err(reason) => json!({"state":"blocked","phase":"close_after_finance",
                         "protective_action":prepared,"reason_code":reason,
                         "next_action":"trade.status","retry_create":false}),
-                })
+                    },
+                )
             }
         } else {
             None
@@ -1778,7 +1780,10 @@ impl TradeService {
         // A different order, instrument, side, amount or venue ID cannot
         // authorize this intent's emergency cancellation or later Close.
         verified_order_readback(i, &current)?;
-        if matches!(current.state.as_str(), "filled" | "canceled" | "mmp_canceled") {
+        if matches!(
+            current.state.as_str(),
+            "filled" | "canceled" | "mmp_canceled"
+        ) {
             return Ok(());
         }
         if !matches!(current.state.as_str(), "live" | "partially_filled") {
@@ -1814,7 +1819,9 @@ impl TradeService {
         let fresh = r
             .execution
             .store
-            .call(deadline(), move |s| s.begin_operation(&k, &h, "safety_cancel", now()))
+            .call(deadline(), move |s| {
+                s.begin_operation(&k, &h, "safety_cancel", now())
+            })
             .await
             .map_err(err)?;
         if !fresh {
@@ -1826,9 +1833,7 @@ impl TradeService {
             .cancel_order_after_admission(&request, &timing, &rate)
             .await
             .map_err(|_| "SAFETY_CANCEL_OUTCOME_UNKNOWN_NO_RESUBMIT")?;
-        if !response.top_level_success()
-            || response.data.len() != 1
-            || !response.data[0].accepted()
+        if !response.top_level_success() || response.data.len() != 1 || !response.data[0].accepted()
         {
             return Err("SAFETY_CANCEL_NOT_CONFIRMED_NO_RESUBMIT".into());
         }
@@ -2224,26 +2229,21 @@ mod entry_cost_status_tests {
 
     #[tokio::test]
     async fn t10_08_emergency_policy_is_bounded_before_financial_capture() {
-        let first = bounded_protection_before_finance(
-            Instant::now(),
-            Duration::from_millis(50),
-            async { Ok(()) },
-        )
-        .await;
+        let first =
+            bounded_protection_before_finance(Instant::now(), Duration::from_millis(50), async {
+                Ok(())
+            })
+            .await;
         assert_eq!(first["state"], "terminal_order_verified");
         assert_eq!(first["phase"], "before_financial_capture");
 
         // A deferred source/operation cannot consume the whole finance
         // deadline before we report a fail-closed protective blocker.
         let began = Instant::now();
-        let blocked = bounded_protection_before_finance(
-            began,
-            Duration::from_millis(25),
-            async {
-                tokio::time::sleep(Duration::from_millis(500)).await;
-                Ok(())
-            },
-        )
+        let blocked = bounded_protection_before_finance(began, Duration::from_millis(25), async {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            Ok(())
+        })
         .await;
         assert_eq!(blocked["state"], "blocked");
         assert_eq!(
@@ -2253,12 +2253,11 @@ mod entry_cost_status_tests {
         assert_eq!(blocked["retry_create"], false);
         assert!(began.elapsed() < Duration::from_millis(200));
 
-        let local = bounded_protection_before_finance(
-            Instant::now(),
-            Duration::from_millis(50),
-            async { Err("ACCOUNT_MUTATION_BUSY".to_owned()) },
-        )
-        .await;
+        let local =
+            bounded_protection_before_finance(Instant::now(), Duration::from_millis(50), async {
+                Err("ACCOUNT_MUTATION_BUSY".to_owned())
+            })
+            .await;
         assert_eq!(local["state"], "blocked");
         assert_eq!(local["reason_code"], "ACCOUNT_MUTATION_BUSY");
         assert_eq!(local["retry_create"], false);
