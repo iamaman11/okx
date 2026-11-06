@@ -6002,6 +6002,12 @@ mod raw_native_session_tests {
                                         intent_b.clone(),
                                     ).await;
                                     println!("T10_09_NATIVE_PARTIAL_REDUCE_V1:{reduce}");
+                                    let reduction=t10_09_b_signed_partial_reduce_finance(
+                                        accounts.clone(),trade.clone(),feed.clone(),
+                                        &reduce,
+                                        late["signed_late_at_ms"].as_i64().unwrap(),
+                                    ).await;
+                                    println!("T10_09_NATIVE_REDUCE_FINANCE_V1:{reduction}");
                                 }
                             }
                         }

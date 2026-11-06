@@ -1,4 +1,15 @@
 #[test]
+fn t10_09_partial_reduce_proof_cannot_accept_an_opening_intent() {
+    let mut s = store();
+    intent(&mut s);
+    reserve(&mut s);
+    assert!(matches!(
+        s.prove_local_partial_reduce("intent", "venue-order", Decimal::ONE, 5),
+        Err(StoreError::Invalid("LOCAL_REDUCE_TERMINAL_PROOF_INVALID"))
+    ));
+}
+
+#[test]
 fn t10_08_flat_protection_stop_resolution_is_atomic_and_idempotent() {
     let mut s = store();
     intent(&mut s);

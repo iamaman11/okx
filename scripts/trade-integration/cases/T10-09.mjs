@@ -19,8 +19,9 @@ export async function run({caseId,root,signal,artifactsDir}) {
   });
   const cancel=t.nativeT10Isolation, b=t.nativeB1Positive;
   const late=t.nativeT10LateFill, partialReduce=t.nativeT10PartialReduce;
+  const reduceFinance=t.nativeT10ReduceFinance;
   const a=t.nativeSecondAdmission, worker=t.workerSecondAdmission;
-  assert.ok(cancel&&b&&a&&worker&&late&&partialReduce,
+  assert.ok(cancel&&b&&a&&worker&&late&&partialReduce&&reduceFinance,
     "Native A/B Worker, signed late fill and real public partial Reduce ACK required");
   assert.equal(cancel.schema,"okx.t10-14-native-worker-isolation/v1");
   assert.equal(cancel.b_intent_id,b.b_intent_id);
@@ -64,6 +65,16 @@ export async function run({caseId,root,signal,artifactsDir}) {
   assert.equal(partialReduce.outbound_posts_before,6);
   assert.equal(partialReduce.outbound_posts_after,7);
   assert.equal(partialReduce.close_fill_and_remnant_protection_pending,true);
+  assert.equal(reduceFinance.schema,"okx.t10-09-signed-partial-reduce-finance/v1");
+  assert.equal(reduceFinance.reduce_intent_id,partialReduce.reduce.intent_id);
+  assert.equal(reduceFinance.sql.remaining_lot_qty,"0.02");
+  assert.equal(reduceFinance.sql.remaining_lot_count,1);
+  assert.equal(reduceFinance.linked_fee_signed_usdt,"-0.0001");
+  assert.equal(reduceFinance.linked_fill_count,1);
+  assert.match(reduceFinance.source_digest,/^[a-f0-9]{64}$/);
+  assert.equal(reduceFinance.reduce_status,"FILLED");
+  assert.notEqual(reduceFinance.central_release_state,"verified");
+  assert.equal(reduceFinance.outbound_posts,7);
   assert.notEqual(partialReduce.original_central_release.state,"verified");
   assert.ok(Number.isSafeInteger(late.sql.sql_revision)&&late.sql.sql_revision>0);
   assert.match(late.sql.bill_digest,/^[a-f0-9]{64}$/);
@@ -94,10 +105,10 @@ export async function run({caseId,root,signal,artifactsDir}) {
       witness_digest:hash([cancel,b.b_intent_id,late.sql]),
       signed_late_fill_sql:late.sql,
       signed_public_partial_reduce_ack:partialReduce,
+      signed_partial_reduce_finance:reduceFinance,
       worker_after_late_fill:late.worker_budget,
       public_status_after_late_fill:late.public_status_state,
-      missing:["signed_partial_reduce_fill_and_linked_bill",
-        "remaining_position_live_protection_after_ack_bound_amend",
+      missing:["remaining_position_live_protection_after_ack_bound_amend",
         "terminal_source_backed_risk_release"],
     },null,2)+"\n");
   // The late fill and bill are genuine B owner facts, but a partial close,

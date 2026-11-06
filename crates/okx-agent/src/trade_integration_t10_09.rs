@@ -299,6 +299,7 @@ async fn t10_09_b_signed_late_fill_after_cancel(
         "account_uid":owner.configuration.account_key.verified_uid,
         "after_cancel_ack":true,
         "signed_fill_and_bill_ingested_by_native_sql":true,
+        "signed_late_at_ms":now_ms,
         "sql":evidence,
         "public_status_state":status["data"]["intent"]["state"],
         "worker_budget":worker.budget,
@@ -482,5 +483,216 @@ async fn t10_09_b_public_partial_reduce(
         "outbound_posts_before":before,
         "outbound_posts_after":after,
         "close_fill_and_remnant_protection_pending":true,
+    })
+}
+
+
+// The partial Reduce ACK is not a fill. Publish a distinct immutable B
+// execution + bill and a fresh 0.02 signed position; only account capture
+// and the ordinary SQL finance projection can change the owned lot.
+async fn t10_09_b_signed_partial_reduce_finance(
+    accounts: Arc<AccountRuntimeRegistry>,
+    trade: Arc<TradeService>,
+    feed: Arc<crate::accounts::recorded_support::RecordedAccountHttp>,
+    reduce: &serde_json::Value,
+    original_late_at: i64,
+) -> serde_json::Value {
+    use crate::accounts::recorded_support::RecordedGet;
+    use okx_protocol::trading::TradeRequest;
+    use serde_json::json;
+    let raw = |v| serde_json::to_vec(&json!({"code":"0","msg":"","data":v}))
+        .expect("T10-09 authenticated reduce finance source");
+    let reduce_id = reduce["reduce"]["intent_id"]
+        .as_str().expect("T10-09 public Reduce owner").to_owned();
+    let at = chrono::Utc::now().timestamp_millis().max(original_late_at + 1);
+    let first_at = original_late_at.to_string();
+    let reduce_at = at.to_string();
+    let fills = json!([
+        {
+            "instType":"SWAP","instId":"BTC-USDT-SWAP",
+            "tradeId":"t10-09-b-late-trade-001",
+            "ordId":"recorded-b1-b-001","clOrdId":"__REQUEST_CL_ORD_ID__",
+            "billId":"t10-09-b-late-bill-001","subType":"3",
+            "side":"buy","posSide":"long","fillPx":"1000","fillSz":"0.04",
+            "fillPnl":"0","fee":"-0.0002","feeCcy":"USDT",
+            "ts":first_at,"fillTime":first_at
+        },
+        {
+            "instType":"SWAP","instId":"BTC-USDT-SWAP",
+            "tradeId":"t10-09-b-reduce-trade-001",
+            "ordId":"recorded-t10-09-b-reduce-020",
+            "clOrdId":"__REQUEST_CL_ORD_ID__",
+            "billId":"t10-09-b-reduce-bill-001","subType":"5",
+            "side":"sell","posSide":"long","fillPx":"1000","fillSz":"0.02",
+            "fillPnl":"0","fee":"-0.0001","feeCcy":"USDT",
+            "ts":reduce_at,"fillTime":reduce_at
+        }
+    ]);
+    let bills = json!([
+        {
+            "billId":"t10-09-b-late-bill-001","instType":"SWAP",
+            "instId":"BTC-USDT-SWAP","ordId":"recorded-b1-b-001",
+            "tradeId":"t10-09-b-late-trade-001",
+            "clOrdId":"__REQUEST_CL_ORD_ID__",
+            "ccy":"USDT","type":"2","subType":"3",
+            "balChg":"-0.0002","fee":"-0.0002","pnl":"0","ts":first_at
+        },
+        {
+            "billId":"t10-09-b-reduce-bill-001","instType":"SWAP",
+            "instId":"BTC-USDT-SWAP","ordId":"recorded-t10-09-b-reduce-020",
+            "tradeId":"t10-09-b-reduce-trade-001",
+            "clOrdId":"__REQUEST_CL_ORD_ID__",
+            "ccy":"USDT","type":"2","subType":"5",
+            "balChg":"-0.0001","fee":"-0.0001","pnl":"0","ts":reduce_at
+        }
+    ]);
+    let mut pages=Vec::new();
+    for _ in 0..32 {
+        for partition in ["SPOT","MARGIN","SWAP","FUTURES","OPTION"] {
+            pages.push(RecordedGet {
+                access_key:"fixture-executor-b".into(),
+                path:"/api/v5/trade/fills-history".into(),
+                required_query:vec![("instType".into(),partition.into())],
+                raw_response:if partition=="SWAP" {raw(fills.clone())}
+                    else {raw(json!([]))},
+            });
+        }
+    }
+    feed.advance_recorded_route(
+        "fixture-executor-b","/api/v5/trade/fills-history",pages
+    );
+    feed.advance_recorded_route(
+        "fixture-executor-b","/api/v5/account/bills-archive",
+        (0..32).map(|_| RecordedGet {
+            access_key:"fixture-executor-b".into(),
+            path:"/api/v5/account/bills-archive".into(),
+            required_query:vec![],
+            raw_response:raw(bills.clone()),
+        }).collect(),
+    );
+    let position = raw(json!([{
+        "instType":"SWAP","instId":"BTC-USDT-SWAP","posSide":"long",
+        "pos":"0.02","mgnMode":"cross","avgPx":"1000",
+        "markPx":"1000","uTime":reduce_at
+    }]));
+    feed.advance_recorded_route(
+        "fixture-observer-b","/api/v5/account/positions",
+        (0..48).map(|_| RecordedGet {
+            access_key:"fixture-observer-b".into(),
+            path:"/api/v5/account/positions".into(),
+            required_query:vec![],
+            raw_response:position.clone(),
+        }).collect(),
+    );
+    let balance = raw(json!([{
+        "totalEq":"99.9997","adjEq":"99.9997","uTime":reduce_at,
+        "details":[{"ccy":"USDT","eq":"99.9997","liab":"0",
+            "availEq":"99.9997","availBal":"99.9997",
+            "eqUsd":"99.9997","uTime":reduce_at}]
+    }]));
+    feed.advance_recorded_route(
+        "fixture-observer-b","/api/v5/account/balance",
+        (0..48).map(|_| RecordedGet {
+            access_key:"fixture-observer-b".into(),
+            path:"/api/v5/account/balance".into(),
+            required_query:vec![],
+            raw_response:balance.clone(),
+        }).collect(),
+    );
+    let mut orders=Vec::new();
+    for _ in 0..32 {
+        for (order,side,kind,qty,total,when) in [
+            ("recorded-b1-b-001","buy","limit","0.1","0.04",first_at.as_str()),
+            ("recorded-t10-09-b-reduce-020","sell","ioc","0.02","0.02",reduce_at.as_str()),
+        ] {
+            orders.push(RecordedGet {
+                access_key:"fixture-executor-b".into(),
+                path:"/api/v5/trade/order".into(),
+                required_query:vec![("instId".into(),"BTC-USDT-SWAP".into())],
+                raw_response:raw(json!([{
+                    "instId":"BTC-USDT-SWAP","ordId":order,
+                    "clOrdId":"__REQUEST_CL_ORD_ID__","side":side,
+                    "posSide":"long","tdMode":"cross","ordType":kind,
+                    "px":if kind=="ioc" {"999"}else{"1000"},
+                    "sz":qty,"accFillSz":total,"avgPx":"1000",
+                    "state":if kind=="ioc" {"filled"}else{"canceled"},
+                    "cTime":when,"uTime":when
+                }])),
+            });
+        }
+    }
+    feed.advance_recorded_route("fixture-executor-b","/api/v5/trade/order",orders);
+    let owner=accounts.resolve("fixture-b").await.expect("T10-09 B source owner");
+    let reduction=reduce_id.clone();
+    let last=std::time::Instant::now()+Duration::from_secs(16);
+    let mut pending=json!({"reason":"WAITING_FOR_SIGNED_SOURCE"});
+    let signed=loop {
+        assert!(std::time::Instant::now()<last,
+            "T10_09_B_REDUCE_FINANCE_CAPTURE_MISSING:{pending}");
+        let id=reduction.clone();
+        let found=owner.execution.store.call(
+            std::time::Instant::now()+Duration::from_secs(3),
+            move |s| {
+                let active=s.active_lots("BTC-USDT-SWAP")?;
+                let qty=active.iter().fold(Decimal::ZERO,|n,l|n+l.remaining_qty);
+                let fills=s.cursor("fills","SWAP")?;
+                let bills=s.cursor("bills","account")?;
+                Ok(json!({
+                    "remaining_lot_qty":qty.normalize().to_string(),
+                    "remaining_lot_count":active.len(),
+                    "fill_watermark":fills.as_ref().map(|c|c.watermark),
+                    "bill_watermark":bills.as_ref().map(|c|c.watermark),
+                    "fills_complete":fills.as_ref().is_some_and(|c|
+                        c.generation>0&&c.coverage_gaps.is_empty()&&c.cursor.is_empty()),
+                    "bills_complete":bills.as_ref().is_some_and(|c|
+                        c.generation>0&&c.coverage_gaps.is_empty()&&c.cursor.is_empty()),
+                    "reduce_intent":s.intent(&id)?.map(|i|i.state.as_str().to_owned()),
+                }))
+            }
+        ).await;
+        match found {
+            Ok(read) if read["remaining_lot_qty"]=="0.02"
+                && read["remaining_lot_count"]==1
+                && read["fills_complete"]==true
+                && read["bills_complete"]==true
+                && read["fill_watermark"].as_i64().unwrap_or(0)>=at
+                && read["bill_watermark"].as_i64().unwrap_or(0)>=at => break read,
+            Ok(read)=>pending=read,
+            Err(reason)=>pending=json!({"sql_error":format!("{reason:?}")}),
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    // The real TradeService, not the test, records the signed terminal
+    // venue readback. A partial Reduce cannot release the local marker
+    // while 0.02 remains in the venue, or B's original Worker grant.
+    feed.advance_recorded_public_clock(raw(json!([{
+        "ts":chrono::Utc::now().timestamp_millis().to_string()
+    }])));
+    let status=trade.trade(
+        "fixture-b",&TradeRequest::Status{reference:reduce_id.clone()},None,
+    ).await.expect("T10-09 native terminal Reduce Status");
+    assert_eq!(status["data"]["intent"]["state"],"FILLED");
+    let proof=owner.execution.store.call(
+        std::time::Instant::now()+Duration::from_secs(3),
+        move |s| s.prove_local_partial_reduce(
+            &reduce_id,"recorded-t10-09-b-reduce-020",Decimal::new(2,2),at,
+        ),
+    ).await.expect("T10-09 immutable local reduction finance proof");
+    assert_eq!(proof.0,Decimal::new(-1,4));
+    assert_eq!(proof.1,1);
+    assert_eq!(proof.2.len(),64);
+    assert_eq!(feed.outbound_posts.lock().unwrap().len(),7,
+        "finance-only Reduce readback must not retry the venue POST");
+    json!({
+        "schema":"okx.t10-09-signed-partial-reduce-finance/v1",
+        "reduce_intent_id":reduce["reduce"]["intent_id"],
+        "signed_reduce_at_ms":at,
+        "sql":signed,
+        "linked_fee_signed_usdt":proof.0.normalize().to_string(),
+        "linked_fill_count":proof.1,
+        "source_digest":proof.2,
+        "reduce_status":status["data"]["intent"]["state"],
+        "central_release_state":status["data"]["central_release"]["state"],
+        "outbound_posts":feed.outbound_posts.lock().unwrap().len(),
     })
 }
