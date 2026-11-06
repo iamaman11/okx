@@ -4,6 +4,8 @@ import assert from "node:assert/strict";
 import {actualNativeWorker,hash} from "../native-workerd.mjs";
 
 export async function run({caseId,root,signal}){
+  // Existing Native first-cause witness, not a new source or test bypass.
+  process.env.OKX_B_CENSUS_CAUSE_PROBE="1";
   process.env.OKX_T10_05_LOST_ACK_PROBE="1";
   delete process.env.OKX_T10_05_EXPLICIT_REJECT_PROBE;
   const lost=await actualNativeWorker(root,signal,{
