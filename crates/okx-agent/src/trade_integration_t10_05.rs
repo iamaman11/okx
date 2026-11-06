@@ -171,9 +171,9 @@ async fn t10_05_create_outcome(
     assert!(initial_revision>0);
     let posts_after_first=feed.outbound_posts.lock().unwrap().len();
     assert_eq!(posts_after_first,before_posts+1,
-        "T10-05 must send exactly ONE original create, not replay it: public={first} first_sql_state={sql_initial_state} signed_denials={:?} actual_rate_throttle={:?} recent_signed_gets={:?}",
-        feed.denied_routes.lock().unwrap().iter().rev().take(4).cloned().collect::<Vec<_>>(),
+        "T10-05 first CREATE absent: rate_throttle={:?} first_sql_state={sql_initial_state} public={first} signed_denials={:?} recent_signed_gets={:?}",
         rate_budget.snapshot().last_throttle,
+        feed.denied_routes.lock().unwrap().iter().rev().take(4).cloned().collect::<Vec<_>>(),
         feed.requests.lock().unwrap().iter().rev().filter(|event|
             event.contains("fixture-observer-b:") || event.contains("fixture-executor-b:")
         ).take(8).cloned().collect::<Vec<_>>()
