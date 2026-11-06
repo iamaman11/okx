@@ -165,15 +165,42 @@ async fn t10_15_fee_source_after_worker_held(
         protection:Some(Protection::Price{stop_price:"900".into()}),
         expires_in_ms:30_000,
     };
-    let pending=tokio::spawn({
+    // A terminal Execute is evidence too. Waiting solely for HELD hid the
+    // first LOCAL denial and reported a misleading marker timeout.
+    let denial_cursor=feed.denied_routes.lock().unwrap().len();
+    let mut pending=tokio::spawn({
         let trade=trade.clone();
         async move{trade.trade("fixture-b",&execute,None).await}
     });
-    tokio::time::timeout(Duration::from_secs(6),async{
-        while !T10_15_WORKER_HELD_COMMITTED.load(
-            std::sync::atomic::Ordering::SeqCst
-        ){tokio::time::sleep(Duration::from_millis(10)).await;}
-    }).await.expect("T10-15 actual Worker HELD not observed");
+    let held_deadline=tokio::time::sleep(Duration::from_secs(6));
+    tokio::pin!(held_deadline);
+    loop {
+        if T10_15_WORKER_HELD_COMMITTED.load(std::sync::atomic::Ordering::SeqCst) {
+            break;
+        }
+        tokio::select! {
+            completed=&mut pending=>{
+                let outcome=completed.expect("T10-15 Native Execute task panicked");
+                let first_source_denial=feed.denied_routes.lock().unwrap()
+                    .get(denial_cursor).cloned();
+                panic!(
+                    "T10-15 Execute completed BEFORE Worker HELD: outcome={outcome:?} first_source_denial={first_source_denial:?} posts={}",
+                    feed.outbound_posts.lock().unwrap().len()
+                );
+            }
+            _=&mut held_deadline=>{
+                pending.abort();
+                let cancelled=pending.await;
+                let first_source_denial=feed.denied_routes.lock().unwrap()
+                    .get(denial_cursor).cloned();
+                panic!(
+                    "T10-15 Worker HELD deadline: Execute cancelled_and_joined={cancelled:?} first_source_denial={first_source_denial:?} posts={}",
+                    feed.outbound_posts.lock().unwrap().len()
+                );
+            }
+            _=tokio::time::sleep(Duration::from_millis(10))=>{}
+        }
+    }
     let after_ms=chrono::Utc::now().timestamp_millis().to_string();
     let changed=fee("0.0006",&after_ms);
     let digest=format!("{:x}",sha2::Sha256::digest(&changed));
@@ -206,6 +233,9 @@ async fn t10_15_fee_source_after_worker_held(
     };
     assert_eq!(release_reply,Some("RELEASED"),
         "T10-15 requires Native SQL -> Worker RELEASE_UNSENT, not a pending release: {result:?}");
+    assert_eq!(result.as_ref().ok().and_then(|v|v["data"]["send_state"].as_str()),
+        Some("NOT_STARTED"),
+        "post-HELD changed fee must be durable SQL no-send, not a claimed venue POST: {result:?}");
     assert!(
         reason.contains("POST_ENTRY_FEE_OR_SPEC_CHANGED")
           ||reason.contains("POST_ENTRY_FEE_SOURCE_CHANGED"),
@@ -322,6 +352,7 @@ async fn t10_15_fee_source_after_worker_held(
         "worker_held_witness":true,
         "same_campaign_as_native_b1":shared_b1,
         "sql_state":row.1,
+        "send_state":"NOT_STARTED",
         "sql_revision":row.2,"intent_id":row.0,
         "release_state":"RELEASED",
         "sql_unsent_receipt_verified":true,
