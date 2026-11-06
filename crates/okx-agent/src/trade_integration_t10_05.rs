@@ -173,6 +173,31 @@ async fn t10_05_create_outcome(
     let request=make(key);
     assert!(request.valid());
     let owner=accounts.resolve("fixture-b").await.expect("T10-05 B SQL");
+    // Public time is an independent external observation, not a value
+    // manufactured in response to a GET. The after-Worker event above
+    // registered ONE finite raw reply. Refresh its UNUSED bytes on bounded
+    // wall-clock ticks until the first actual /public/time GET consumes it.
+    // The transport's delivery fence forbids rearming the same event after
+    // consumption; production 5s skew/2s age gates remain unchanged.
+    let clock_deliveries_before=feed.public_clock_deliveries();
+    let clock_feed=feed.clone();
+    let public_clock_publisher=tokio::spawn(async move {
+        let mut ticks=tokio::time::interval(Duration::from_millis(200));
+        ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut published=0usize;
+        for _ in 0..95 {
+            ticks.tick().await;
+            let now=chrono::Utc::now().timestamp_millis().to_string();
+            let raw=serde_json::to_vec(&serde_json::json!({
+                "code":"0","msg":"","data":[{"ts":now}]
+            })).expect("T10-05 raw external clock event");
+            if !clock_feed.refresh_unconsumed_public_clock(clock_deliveries_before,raw) {
+                break;
+            }
+            published+=1;
+        }
+        published
+    });
     let denials_before=feed.denied_routes.lock().unwrap().len();
     let first=tokio::time::timeout(
         Duration::from_secs(18), trade.trade("fixture-b",&request,None)
@@ -203,6 +228,15 @@ async fn t10_05_create_outcome(
             rate_budget.snapshot().last_throttle
         );
     }
+    let clock_samples=tokio::time::timeout(
+        Duration::from_secs(2),public_clock_publisher
+    ).await.expect("T10-05 independent clock publisher must stop after consumption")
+        .expect("T10-05 clock publisher task");
+    assert_eq!(
+        feed.public_clock_deliveries()-clock_deliveries_before,1,
+        "T10-05 must consume exactly one pre-registered raw public time observation"
+    );
+    eprintln!("T10_05_EXCHANGE_TIME_WITNESS_V1:samples={clock_samples} delivered=1");
     let first_status=first["status"].as_str().unwrap_or("MISSING_STATUS").to_owned();
     let read=|| {
         let owner=owner.clone();
