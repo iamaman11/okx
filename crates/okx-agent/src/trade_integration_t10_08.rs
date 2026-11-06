@@ -401,10 +401,21 @@ async fn t10_08_recover_signed_flat_after_late_fill(
     // T10-08 must prove its OWN reservation RELEASED with INSPECT below.
     assert_eq!(original_unrelated_worker_reserve,"4",
         "baseline non-T10-08 Worker grant must be independently observed");
-    assert_eq!(
-        held.budget.as_ref().unwrap().entry_budget.as_ref().unwrap().reserved_usd,
-        original_unrelated_worker_reserve,
-        "post-late-fill Worker held must preserve the independent baseline grant"
+    // Native immutable fills can become durable before the Worker has
+    // applied their last SETTLE_ENTRY revision. The post-late-fill Worker
+    // grant therefore may still include part of the 3.0015 USD second
+    // entry, in addition to the independent 4 USD baseline. This is
+    // bounded unsettled exposure, NEVER an extra spend or a reason to
+    // release the unrelated 4 USD grant. The terminal checks below
+    // require exact RELEASED original grant and retained baseline.
+    let held_entry=&held.budget.as_ref().unwrap().entry_budget.as_ref().unwrap();
+    let reserved=Decimal::from_str_exact(&held_entry.reserved_usd)
+        .expect("T10-08 Worker decimal reserve");
+    let baseline=Decimal::from_str_exact(original_unrelated_worker_reserve)
+        .expect("T10-08 independent baseline decimal");
+    assert!(
+        reserved>=baseline && reserved<=Decimal::new(70015,4),
+        "T10-08 post-late-fill Worker grant must be between original independent baseline and pre-fill reserved amount: reserved={reserved} baseline={baseline}"
     );
     // Reuse T09.6's existing public Close + exact signed POST/ACK fixture.
     // The operation key is precisely the one used by emergency_protection,
