@@ -1568,15 +1568,6 @@ pub(crate) mod recorded_support {
         ) -> usize {
             assert!(!pages.is_empty(), "TRANSCRIPT_PHASE_WITHOUT_SOURCE");
             assert!(
-                !self
-                    .immutable_signed_phases
-                    .lock()
-                    .unwrap()
-                    .iter()
-                    .any(|item| item.source.access_key == access_key && item.source.path == path),
-                "TRANSCRIPT_IMMUTABLE_MIXED_WITH_QUEUE_ADVANCE"
-            );
-            assert!(
                 self.strict_read_routes
                     .lock()
                     .unwrap()
@@ -1589,14 +1580,54 @@ pub(crate) mod recorded_support {
                     .all(|page| page.access_key == access_key && page.path == path),
                 "TRANSCRIPT_PHASE_CROSS_ACCOUNT_OR_ROUTE"
             );
+            // Order sources are scoped to a signed venue ordId, never to the
+            // whole executor + endpoint. Actual GET delivery still requires
+            // the separate authenticated (actor, clOrdId, ordId) POST ACK.
+            let order_id = |raw: &[u8]| -> String {
+                let body: serde_json::Value = serde_json::from_slice(raw)
+                    .expect("TRANSCRIPT_ORDER_PHASE_INVALID_JSON");
+                let rows = body["data"]
+                    .as_array()
+                    .expect("TRANSCRIPT_ORDER_PHASE_DATA_MISSING");
+                assert_eq!(rows.len(), 1, "TRANSCRIPT_ORDER_PHASE_AMBIGUOUS_ROWS");
+                rows[0]["ordId"]
+                    .as_str()
+                    .filter(|id| !id.is_empty())
+                    .expect("TRANSCRIPT_ORDER_PHASE_ORDID_MISSING")
+                    .to_owned()
+            };
+            let order_ids = if path == "/api/v5/trade/order" {
+                Some(
+                    pages
+                        .iter()
+                        .map(|page| order_id(&page.raw_response))
+                        .collect::<std::collections::BTreeSet<_>>(),
+                )
+            } else {
+                None
+            };
+            let same_source_scope = |page: &RecordedGet| {
+                if page.access_key != access_key || page.path != path {
+                    return false;
+                }
+                order_ids.as_ref().is_none_or(|ids| {
+                    ids.contains(&order_id(&page.raw_response))
+                })
+            };
+            assert!(
+                !self
+                    .immutable_signed_phases
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|item| same_source_scope(&item.source)),
+                "TRANSCRIPT_IMMUTABLE_MIXED_WITH_QUEUE_ADVANCE"
+            );
             let mut required = self.reads.lock().unwrap();
-            let retired = required
-                .iter()
-                .filter(|page| page.access_key == access_key && page.path == path)
-                .count();
-            required.retain(|page| page.access_key != access_key || page.path != path);
+            let retired = required.iter().filter(|page| same_source_scope(page)).count();
+            required.retain(|page| !same_source_scope(page));
             let mut optional = self.optional_reads.lock().unwrap();
-            optional.retain(|page| page.access_key != access_key || page.path != path);
+            optional.retain(|page| !same_source_scope(page));
             required.extend(pages);
             retired
         }
@@ -4475,6 +4506,38 @@ pub(crate) mod recorded_support {
                     "phase-b"
                 ),
                 b_reads + 2
+            );
+
+            // The next signed event changes only order A. Order B's prior
+            // venue bytes and its finite GET page remain independently
+            // available on the same authenticated executor endpoint.
+            let queued = RecordedAccountHttp::default();
+            queued.expect_get(page("signed-ack-a"));
+            queued.expect_get(page("signed-ack-b"));
+            let new_a = RecordedGet {
+                access_key: "fixture-executor-a".into(),
+                path: "/api/v5/trade/order".into(),
+                required_query: vec![("instId".into(), "BTC-USDT-SWAP".into())],
+                raw_response: raw("signed-ack-a", "partially_filled"),
+            };
+            assert_eq!(
+                queued.advance_recorded_route(
+                    "fixture-executor-a",
+                    "/api/v5/trade/order",
+                    vec![new_a],
+                ),
+                1,
+                "A event may retire only A's signed predecessor"
+            );
+            let remaining = queued.reads.lock().unwrap();
+            assert_eq!(remaining.len(), 2, "B order page must be retained");
+            assert!(
+                remaining.iter().any(|p| p.raw_response == raw("signed-ack-b", "live")),
+                "B's signed order bytes changed"
+            );
+            assert!(
+                remaining.iter().any(|p| p.raw_response == raw("signed-ack-a", "partially_filled")),
+                "A's new order-state event was lost"
             );
         }
 
