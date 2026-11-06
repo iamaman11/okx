@@ -13,7 +13,6 @@ on:
       - work/deterministic-recorded-source-phases-20261105
       - work/recorded-capture-scheduler-20261105
       - work/recorded-event-source-controller-20261105
-      - work/t10-07-one-campaign-native-20261105
       - work/b-census-sql-owner-batch-20261105
 
 permissions:
@@ -129,7 +128,7 @@ jobs:
               $report = Get-Content -LiteralPath $file -Raw | ConvertFrom-Json
               $ok = $code -eq 0 -and
                 $report.exact_commit -eq $env:GITHUB_SHA -and
-                $report.spec_revision -eq '#449-r8.3' -and
+                $report.spec_revision -eq '#449-r9' -and
                 $report.required.Count -eq 26 -and
                 $report.selected.Count -eq 1 -and
                 $report.selected[0] -eq $id -and

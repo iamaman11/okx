@@ -475,6 +475,53 @@ jobs:
         if: always()
         run: cargo fmt --all -- --check
 
+      - name: Canonical #449 r9.1 A1 exact 21-case gate on one SHA
+        if: github.event_name == 'push' && github.ref == 'refs/heads/work/t10-07-one-campaign-native-20261105'
+        shell: pwsh
+        timeout-minutes: 28
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $sha = (git rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0) { throw 'GIT_HEAD_FAILED' }
+          $raw = node scripts/run-trade-integration.mjs --list
+          if ($LASTEXITCODE -ne 0) { throw 'MANIFEST_FAILED' }
+          $manifest = ($raw -join "`n") | ConvertFrom-Json
+          if ($manifest.spec_revision -ne '#449-r9') { throw 'SPEC_NOT_ADOPTED' }
+          $required = @($manifest.required)
+          if ($required.Count -ne 26 -or @($required | Sort-Object -Unique).Count -ne 26) {
+              throw 'INVALID_26_MANIFEST'
+          }
+          $excluded = @('T10-08','T10-09','T10-10','T10-11','T10-12')
+          $ids = @($required | Where-Object { $_ -notin $excluded })
+          if ($ids.Count -ne 21) { throw 'INVALID_A1_SELECTION' }
+          $runRoot = Join-Path $env:TEMP ('okx-a1-' + [guid]::NewGuid().ToString('N'))
+          New-Item -ItemType Directory -Path $runRoot | Out-Null
+          $rows = @()
+          foreach ($id in $ids) {
+              $out = Join-Path $runRoot $id
+              node scripts/run-trade-integration.mjs --case $id --artifacts $out
+              $exitCode = $LASTEXITCODE
+              $file = Join-Path $out 'summary.json'
+              $ok = $false
+              if (Test-Path -LiteralPath $file) {
+                  $s = Get-Content -LiteralPath $file -Raw | ConvertFrom-Json
+                  $ok = $exitCode -eq 0 -and $s.exact_commit -eq $sha -and
+                      $s.spec_revision -eq $manifest.spec_revision -and
+                      @($s.selected).Count -eq 1 -and $s.selected[0] -eq $id -and
+                      @($s.outcomes).Count -eq 1 -and $s.outcomes[0].id -eq $id -and
+                      $s.outcomes[0].status -eq 'PASS' -and $s.gate -eq 'PASS'
+              }
+              $rows += [pscustomobject]@{id=$id;pass=$ok;exit_code=$exitCode;sha=$sha;artifact=$out}
+          }
+          $rows | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $runRoot 'a1-results.json')
+          Write-Output "A1_ARTIFACTS=$runRoot"
+          # Preserve exact canonical summary and each case evidence on CI failure as well.
+          $a1ArtifactRoot = Join-Path $env:RUNNER_TEMP 'trade-integration/a1'
+          New-Item -ItemType Directory -Path $a1ArtifactRoot -Force | Out-Null
+          Copy-Item -Path (Join-Path $runRoot '*') -Destination $a1ArtifactRoot -Recurse -Force
+          if (@($rows | Where-Object { -not $_.pass }).Count -gt 0) { throw 'A1_NOT_ACCEPTED' }
+          Write-Output 'A1=21/21; CODE=BLOCKED_PENDING_OTHER_REQUIREMENTS'
+
       - name: Preserve targeted evidence even on failure
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
