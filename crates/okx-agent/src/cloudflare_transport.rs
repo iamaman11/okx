@@ -725,6 +725,7 @@ mod raw_native_session_tests {
     include!("trade_integration_t10_03.rs");
     include!("trade_integration_t10_01.rs");
     include!("trade_integration_t10_13.rs");
+    include!("trade_integration_t10_08.rs");
     include!("trade_integration_t10_09.rs");
     include!("trade_integration_t10_10.rs");
     include!("trade_integration_t10_07.rs");
@@ -6078,6 +6079,16 @@ mod raw_native_session_tests {
                             accounts.clone(),trade.clone(),feed.clone(),
                             new_intent_id.clone(),persisted.client_order_id.clone(),None,
                         )).await.expect("T09.3 partial native task");
+                        let t10_08_failure = if std::env::var(
+                            "OKX_T10_08_PROTECTION_FAILURE_PROBE"
+                        ).as_deref() == Ok("1") {
+                            let failed=t10_08_failed_stop_before_late_fill(
+                                accounts.clone(),trade.clone(),risk.clone(),feed.clone(),
+                                new_intent_id.clone(),persisted.client_order_id.clone(),
+                            ).await;
+                            println!("T10_08_NATIVE_PROTECTION_FAILURE_V1:{failed}");
+                            Some(failed)
+                        } else {None};
                         let (terminal, _) = tokio::spawn(t09_3_phase(
                             accounts.clone(),trade.clone(),feed.clone(),
                             new_intent_id.clone(),persisted.client_order_id.clone(),Some(ts),
@@ -6112,8 +6123,8 @@ mod raw_native_session_tests {
                             );
                             assert_eq!(
                                 feed.outbound_posts.lock().unwrap().len(),
-                                4,
-                                "T09.3 monetary catch-up must never resubmit a venue create"
+                                if t10_08_failure.is_some() { 5 } else { 4 },
+                                "T09.3/T10-08 monetary catch-up must never resubmit a venue create"
                             );
                             final_settlement_attempts += 1;
                             tokio::time::sleep(Duration::from_millis(250)).await;

@@ -18,9 +18,10 @@ function receipt(stdout, prefix) {
   assert.equal(matches.length, 1, prefix + " must have one authentic child readback");
   return JSON.parse(matches[0][1]);
 }
-export async function actualNativeWorker(root, signal, { statusProbe = false, secondAdmission = false, partialFills = false, managedAdd = false, closeMode = false, budgetDenial = false } = {}) {
+export async function actualNativeWorker(root, signal, { statusProbe = false, secondAdmission = false, partialFills = false, protectionFailure = false, managedAdd = false, closeMode = false, budgetDenial = false } = {}) {
   assert.ok(!secondAdmission || statusProbe, "T09.2 needs the completed terminal T09.1 readback");
   if (partialFills && !secondAdmission) throw Error("T09.3_REQUIRES_T09.2");
+  if (protectionFailure && !partialFills) throw Error("T10_08_REQUIRES_T09_3");
   if (managedAdd && !partialFills) throw Error("T09.4_REQUIRES_T09.3");
   if (closeMode && !managedAdd) throw Error("T09.6_REQUIRES_T09.4");
   if (budgetDenial && !closeMode) throw Error("T09.8_REQUIRES_T09.6");
@@ -42,6 +43,7 @@ export async function actualNativeWorker(root, signal, { statusProbe = false, se
     process.env.OKX_B1_SECOND_POSITIVE_PROBE === "1" ? "b1-positive" : "normal-b",
     process.env.OKX_T10_14_NATIVE_PROBE === "1" ? "t10-14" : "no-t10-14",
     process.env.OKX_T10_09_LATE_FILL_PROBE === "1" ? "t10-09" : "no-t10-09",
+    protectionFailure ? "t10-08-stop-failure" : "no-t10-08",
     process.env.OKX_T10_06_CONCURRENT_PROBE === "1" ? "t10-06" : "no-t10-06",
     process.env.OKX_T10_07_NATIVE_PROBE === "1" ? "t10-07" : "no-t10-07",
     process.env.OKX_T09_MA_CONCURRENT_PROBE === "1" ? "t09-ma" : "no-t09-ma",
@@ -70,6 +72,7 @@ export async function actualNativeWorker(root, signal, { statusProbe = false, se
           OKX_T09_1_STATUS_PROBE: statusProbe ? "1" : "0",
           OKX_T09_2_ADMISSION_PROBE: secondAdmission ? "1" : "0",
           OKX_T09_3_PARTIAL_PROBE: partialFills ? "1" : "0",
+          OKX_T10_08_PROTECTION_FAILURE_PROBE: protectionFailure ? "1" : "0",
           OKX_T09_4_MANAGED_ADD_PROBE: managedAdd ? "1" : "0",
           OKX_T09_6_CLOSE_PROBE: closeMode ? "1" : "0",
           OKX_T09_8_DENIAL_PROBE: budgetDenial ? "1" : "0",
@@ -257,6 +260,9 @@ export async function actualNativeWorker(root, signal, { statusProbe = false, se
             ...(partialFills ? {
               nativePartialFills: receipt(stdout, "T09_3_NATIVE_PARTIAL_TERMINAL_V1"),
               nativeTerminalSettlement: receipt(stdout, "T09_3_TERMINAL_SETTLEMENT_RECONCILED_V1"),
+              ...(protectionFailure ? {
+                nativeT10ProtectionFailure: receipt(stdout, "T10_08_NATIVE_PROTECTION_FAILURE_V1"),
+              } : {}),
             } : {}),
             ...(managedAdd ? { nativeManagedAdd: receipt(stdout, "T09_4_NATIVE_MANAGED_ADD_V1") } : {}),
             ...(process.env.OKX_T10_02_EXTERNAL_EXPOSURE_PROBE === "1" ? {
