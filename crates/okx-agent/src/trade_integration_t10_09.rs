@@ -730,7 +730,8 @@ async fn t10_09_b_signed_partial_reduce_finance(
     ).await.expect("T10-09 native terminal Reduce Status");
     assert_eq!(status["data"]["intent"]["state"],"FILLED");
     assert_eq!(status["data"]["protection_adjustment"]["state"],"ack_source_pending",
-        "T10-09 one amend ACK must precede any resized-stop verification");
+        "T10_09_SHRINK_FIRST_BLOCKER_V1:{}",
+        status["data"]["protection_adjustment"]);
     assert_eq!(feed.outbound_posts.lock().unwrap().len(),8,
         "T10-09 sole amend-algos POST must follow the public Reduce");
     // The next venue GET is independent of the amend ACK: the old source
