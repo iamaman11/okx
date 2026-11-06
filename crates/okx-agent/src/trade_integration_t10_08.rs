@@ -243,16 +243,12 @@ fn t10_08_publish_signed_flat_after_close(
     })).expect("T10-08 signed external source");
     let mut fills=Vec::new();
     let mut bills=Vec::new();
-    for (event,trade_id,bill_id,ord_id,side,sub_type,quantity,fee,at) in [
-        ("t09-entry-001","t09-entry-trade-001","t09-entry-bill-001",
-            "recorded-t09-opening-001","buy","3","0.1","-0.0005",first_at),
-        ("t09-first-close-001","t09-close-trade-001","t09-close-bill-001",
-            "recorded-t09-close-001","sell","5","0.1","-0.0005",first_at),
-        ("t09-second-001","t09-second-001-trade","t09-second-001-bill",
+    for (trade_id,bill_id,ord_id,side,sub_type,quantity,fee,at) in [
+        ("t09-second-001-trade","t09-second-001-bill",
             "recorded-t09-second-001","buy","3","0.12","-0.0006",first_at),
-        ("t09-second-002","t09-second-002-trade","t09-second-002-bill",
+        ("t09-second-002-trade","t09-second-002-bill",
             "recorded-t09-second-001","buy","3","0.18","-0.0009",second_at),
-        ("t10-08-close-001","t10-08-close-001-trade","t10-08-close-001-bill",
+        ("t10-08-close-001-trade","t10-08-close-001-bill",
             "recorded-t10-08-close-030","sell","5","0.3","-0.0015",close_at),
     ] {
         fills.push(serde_json::json!({
@@ -270,7 +266,6 @@ fn t10_08_publish_signed_flat_after_close(
             "type":"2","subType":sub_type,
             "balChg":fee,"fee":fee,"pnl":"0","ts":at.to_string()
         }));
-        assert!(!event.is_empty());
     }
     let mut history=Vec::new();
     for _ in 0..32 {
@@ -293,8 +288,10 @@ fn t10_08_publish_signed_flat_after_close(
             raw_response:raw(serde_json::json!(bills)),
         }).collect()
     );
-    // Five real bills in this native campaign have negative fee amounts
-    // totalling 0.004 USDT. No test-owned SQL or Worker money is inserted.
+    // Keep immutable earlier T09.1 fills in their previously ingested SQL
+    // history: re-publishing them with new timestamps would be a forged
+    // correction. The three NEW/unchanged T09.3/T10-08 rows are separately
+    // signed; total campaign fee of all five bills is 0.004 USDT.
     let observed=chrono::Utc::now().timestamp_millis().max(close_at);
     let flat_balance=raw(serde_json::json!([{
         "totalEq":"99.996","adjEq":"99.996","uTime":observed.to_string(),

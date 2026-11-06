@@ -170,12 +170,13 @@ export async function run({caseId,root,signal,artifactsDir}) {
     ["same_original_intent",witness.intent_id,recovery.original_intent_id],
   ].map(([id,expected,actual])=>({id,expected,actual}));
   const events=[
-    ["entry_partial_fill_captured","NativeAccountSQL",partial.sql],
-    ["protection_failed_51008","RecordedAuthenticatedHTTP",
+    ["partial_fill_ingested","NativeAccountSQL",partial.sql],
+    ["protection_failure_source_observed","RecordedAuthenticatedHTTP",
       failed.signed_stop_failure],
-    ["emergency_cancel_blocked","TradeService+NativeAccountSQL",
+    ["new_risk_fenced","NativeAccountSQL",failed.sql_after],
+    ["bounded_protective_attempt_observed","TradeService+NativeAccountSQL",
       [failed.protected_action,failed.sql_after.cancel_claim]],
-    ["late_fill_and_second_bill_captured","NativeAccountSQL",terminal.sql],
+    ["late_fill_financial_reconciled","NativeAccountSQL",terminal.sql],
     ["single_reduce_only_close_post_acked","TradeService+RecordedAuthenticatedHTTP",
       recovery.close],
     ["close_filled_and_position_flat","NativeAccountSQL",
