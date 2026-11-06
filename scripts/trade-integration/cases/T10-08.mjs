@@ -16,8 +16,9 @@ export async function run({caseId,root,signal,artifactsDir}) {
   });
   const witness=t.nativePartialFills, settlement=t.nativeTerminalSettlement;
   const failed=t.nativeT10ProtectionFailure, recovery=t.nativeT10Recovery;
-  assert.ok(witness&&settlement&&failed&&recovery,
-    "actual same-intent Native failed stop, signed late fill, Close and Worker release required");
+  const reopened=t.nativeT10RestartRecovery;
+  assert.ok(witness&&settlement&&failed&&recovery&&reopened,
+    "actual same-intent failed stop, signed late fill, Close, Worker release and native SQL restart required");
   assert.equal(failed.schema,"okx.t10-08-native-protection-failure/v1");
   assert.equal(failed.intent_id,witness.intent_id,
     "failed stop must be owned by the partial/late fill intent");
@@ -112,6 +113,21 @@ export async function run({caseId,root,signal,artifactsDir}) {
   assert.equal(recovery.outbound_posts_before,5);
   assert.equal(recovery.outbound_posts_after,6);
   assert.equal(recovery.no_venue_post_replayed,true);
+  assert.equal(reopened.schema,"okx.t10-08-native-sql-restart-recovery/v1");
+  assert.equal(reopened.original_intent_id,witness.intent_id);
+  assert.equal(reopened.original_intent_id,recovery.native_sql.original_intent_id);
+  assert.equal(reopened.close_intent_id,recovery.native_sql.close_intent_id);
+  assert.equal(reopened.original_state,"FILLED");
+  assert.equal(reopened.original_incident,null);
+  assert.equal(reopened.original_central_held,false);
+  assert.equal(reopened.close_state,"FILLED");
+  assert.equal(reopened.close_quantity,"0.3");
+  assert.equal(reopened.close_risk_increase,false);
+  assert.equal(reopened.risk_stop_latched,false);
+  assert.equal(reopened.recovery_receipt_kind,"PROTECTION_INCIDENT_FLAT_RESOLVED");
+  assert.match(reopened.recovery_source_digest,/^[a-f0-9]{64}$/);
+  assert.ok(reopened.original_revision>=recovery.native_sql.original_revision,
+    "restart must not rewind incident recovery revision");
   assert.equal(witness.outbound_posts,6,
     "the sixth POST must be exactly the signed reduce-only Close, not an entry retry");
   assert.equal(settlement.outbound_posts,6);
@@ -134,6 +150,7 @@ export async function run({caseId,root,signal,artifactsDir}) {
       },
       request_trace_at_failure:failed.outbound,
       native_close_and_flat_recovery:recovery,
+      persisted_sql_recovery_after_reopen:reopened,
       post_failure_stop_remained_unverified:true,
       signed_flat_after_close:true,
       timestamp_to_emergency_ms:failed.protected_action.elapsed_ms,
@@ -152,6 +169,7 @@ export async function run({caseId,root,signal,artifactsDir}) {
         signed_flat_and_orphan_free:true,
         original_central_release_verified:true,
         durable_sql_incident_resolved:true,
+        durable_recovery_survived_sql_restart:true,
         no_risk_reentry_before_resolution:true
       },
     },null,2)+"\n");
@@ -177,6 +195,9 @@ export async function run({caseId,root,signal,artifactsDir}) {
       recovery.worker_after.entry_budget.reserved_usd],
     ["original_worker_reservation_released","RELEASED",
       recovery.worker_original_reservation_state],
+    ["restart_keeps_recovery_receipt","PROTECTION_INCIDENT_FLAT_RESOLVED",
+      reopened.recovery_receipt_kind],
+    ["restart_keeps_no_exposure","false",String(reopened.original_central_held)],
     ["immutable_campaign_entry_consumed_usd","4.002",
       recovery.worker_after.entry_budget.consumed_usd],
     ["exact_venue_post_count","6",String(recovery.outbound_posts_after)],
@@ -196,6 +217,8 @@ export async function run({caseId,root,signal,artifactsDir}) {
       [recovery.close_terminal_status,recovery.native_sql]],
     ["central_release_and_incident_resolution","NativeAccountSQL+RuntimeSessionSQLiteDO",
       [recovery.worker_after,recovery.original_terminal_status.data.protection_remediation]],
+    ["native_sql_restart_recovery_persisted","NativeAccountSQL",
+      reopened],
   ].map(([stage,owner,source])=>({stage,owner,source_digest:hash(source)}));
   return {
     case_id:caseId,status:"PASS",
@@ -207,6 +230,8 @@ export async function run({caseId,root,signal,artifactsDir}) {
           digest:hash([failed.sql_after,failed.first_partial_sql])},
         {revision:recovery.native_sql.original_revision,
           digest:hash([recovery.native_sql,terminal.sql])},
+        {revision:reopened.original_revision,
+          digest:hash(reopened)},
       ],
       risk_book:[
         {revision:failed.worker_risk_book_sequence,digest:hash(failed.worker_budget)},

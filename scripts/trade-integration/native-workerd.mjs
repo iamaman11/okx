@@ -263,6 +263,7 @@ export async function actualNativeWorker(root, signal, { statusProbe = false, se
               ...(protectionFailure ? {
                 nativeT10ProtectionFailure: receipt(stdout, "T10_08_NATIVE_PROTECTION_FAILURE_V1"),
                 nativeT10Recovery: receipt(stdout, "T10_08_NATIVE_FLAT_RECOVERY_V1"),
+                nativeT10RestartRecovery: receipt(stdout, "T10_08_NATIVE_RESTART_RECOVERY_V1"),
               } : {}),
             } : {}),
             ...(managedAdd ? { nativeManagedAdd: receipt(stdout, "T09_4_NATIVE_MANAGED_ADD_V1") } : {}),
