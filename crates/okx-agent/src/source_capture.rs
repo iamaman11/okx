@@ -385,7 +385,7 @@ pub(crate) async fn capture_account_sources_traced(
     let observer_and_cursors_ms = phase_elapsed_ms(observer_and_cursors_started);
     if snapshot.account_uid_fingerprint != execution.uid()
         || !execution
-            .verified_uid_matches(&snapshot.account_uid_fingerprint)
+            .verified_uid_matches_until(&snapshot.account_uid_fingerprint, capture_until)
             .await?
     {
         return Err(invalid("ACCOUNT_IDENTITY_MISMATCH"));
