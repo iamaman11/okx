@@ -1317,13 +1317,21 @@ pub(crate) mod recorded_support {
             let retired = phases.remove(index);
             // The strict route remains guarded while another client's order
             // phase OR finite queued readback is present on this endpoint.
-            let route_still_owned = phases.iter().any(|item| {
-                item.source.access_key == access_key && item.source.path == path
-            }) || self.reads.lock().unwrap().iter().any(|item| {
-                item.access_key == access_key && item.path == path
-            }) || self.optional_reads.lock().unwrap().iter().any(|item| {
-                item.access_key == access_key && item.path == path
-            });
+            let route_still_owned = phases
+                .iter()
+                .any(|item| item.source.access_key == access_key && item.source.path == path)
+                || self
+                    .reads
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|item| item.access_key == access_key && item.path == path)
+                || self
+                    .optional_reads
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|item| item.access_key == access_key && item.path == path);
             if !route_still_owned {
                 self.strict_read_routes
                     .lock()
@@ -1412,7 +1420,10 @@ pub(crate) mod recorded_support {
                     client.is_some_and(|id| {
                         old_query.iter().all(|pair| query.contains(pair))
                             && recorded_order_source_matches(
-                                &acknowledged, &actor, id, &p.raw_response
+                                &acknowledged,
+                                &actor,
+                                id,
+                                &p.raw_response,
                             )
                     })
                 } else {
@@ -3253,19 +3264,25 @@ pub(crate) mod recorded_support {
                             && page.path == path
                             && page.required_query.iter().all(|(name, expected)| {
                                 request.url().query_pairs().any(|(k, v)| {
-                                    k.as_ref() == name.as_str()
-                                        && v.as_ref() == expected.as_str()
+                                    k.as_ref() == name.as_str() && v.as_ref() == expected.as_str()
                                 })
                             })
                             && requested_client.as_ref().is_none_or(|client| {
                                 recorded_order_source_matches(
                                     &self.acknowledged_creates.lock().unwrap(),
-                                    key, client, &page.raw_response,
+                                    key,
+                                    client,
+                                    &page.raw_response,
                                 )
                             })
                     };
                     self.reads.lock().unwrap().iter().any(&matches_page)
-                        || self.optional_reads.lock().unwrap().iter().any(&matches_page)
+                        || self
+                            .optional_reads
+                            .lock()
+                            .unwrap()
+                            .iter()
+                            .any(&matches_page)
                 };
                 // Read-only authenticated snapshots are immutable WITHIN
                 // a named phase, even if financial capture races Preview.
@@ -4302,13 +4319,16 @@ pub(crate) mod recorded_support {
             let feed = RecordedAccountHttp::default();
             let client_a = "scopeclienta0001";
             let client_b = "scopeclientb0001";
-            let raw = |order: &str, state: &str| serde_json::to_vec(&serde_json::json!({
-                "code":"0","msg":"","data":[{
-                    "instId":"BTC-USDT-SWAP","ordId":order,
-                    "clOrdId":"__REQUEST_CL_ORD_ID__",
-                    "state":state,"accFillSz":"0","sz":"0.3","uTime":"100"
-                }]
-            })).unwrap();
+            let raw = |order: &str, state: &str| {
+                serde_json::to_vec(&serde_json::json!({
+                    "code":"0","msg":"","data":[{
+                        "instId":"BTC-USDT-SWAP","ordId":order,
+                        "clOrdId":"__REQUEST_CL_ORD_ID__",
+                        "state":state,"accFillSz":"0","sz":"0.3","uTime":"100"
+                    }]
+                }))
+                .unwrap()
+            };
             let page = |order: &str| RecordedGet {
                 access_key: "fixture-executor-a".into(),
                 path: "/api/v5/trade/order".into(),
@@ -4324,7 +4344,8 @@ pub(crate) mod recorded_support {
                     expected_body: serde_json::json!({"clOrdId":client}),
                     raw_response: serde_json::to_vec(&serde_json::json!({
                         "code":"0","data":[{"ordId":order,"clOrdId":client,"sCode":"0"}]
-                    })).unwrap(),
+                    }))
+                    .unwrap(),
                 });
             }
             let post = |client: &str| {
@@ -4332,10 +4353,12 @@ pub(crate) mod recorded_support {
                     reqwest::Method::POST,
                     reqwest::Url::parse("https://www.okx.com/api/v5/trade/order").unwrap(),
                 );
-                r.headers_mut().insert("OK-ACCESS-KEY",
-                    reqwest::header::HeaderValue::from_static("fixture-executor-a"));
+                r.headers_mut().insert(
+                    "OK-ACCESS-KEY",
+                    reqwest::header::HeaderValue::from_static("fixture-executor-a"),
+                );
                 *r.body_mut() = Some(reqwest::Body::from(
-                    serde_json::json!({"clOrdId":client}).to_string()
+                    serde_json::json!({"clOrdId":client}).to_string(),
                 ));
                 r
             };
@@ -4346,14 +4369,20 @@ pub(crate) mod recorded_support {
                         "https://www.okx.com/api/v5/trade/order?instId=BTC-USDT-SWAP&clOrdId={client}"
                     )).unwrap(),
                 );
-                r.headers_mut().insert("OK-ACCESS-KEY",
-                    reqwest::header::HeaderValue::from_static("fixture-executor-a"));
+                r.headers_mut().insert(
+                    "OK-ACCESS-KEY",
+                    reqwest::header::HeaderValue::from_static("fixture-executor-a"),
+                );
                 r
             };
-            assert_eq!(deliver_causal(&feed, post(client_a)).await.unwrap()["data"][0]["ordId"],
-                "signed-ack-a");
-            assert_eq!(deliver_causal(&feed, post(client_b)).await.unwrap()["data"][0]["ordId"],
-                "signed-ack-b");
+            assert_eq!(
+                deliver_causal(&feed, post(client_a)).await.unwrap()["data"][0]["ordId"],
+                "signed-ack-a"
+            );
+            assert_eq!(
+                deliver_causal(&feed, post(client_b)).await.unwrap()["data"][0]["ordId"],
+                "signed-ack-b"
+            );
             let phase = |client: &str, order: &str, state: &str| RecordedGet {
                 access_key: "fixture-executor-a".into(),
                 path: "/api/v5/trade/order".into(),
@@ -4363,40 +4392,87 @@ pub(crate) mod recorded_support {
                 ],
                 raw_response: raw(order, state),
             };
-            assert_eq!(feed.supersede_queued_signed_source_at_event(
-                "ack-a", "phase-a", phase(client_a, "signed-ack-a", "live")
-            ), 1);
+            assert_eq!(
+                feed.supersede_queued_signed_source_at_event(
+                    "ack-a",
+                    "phase-a",
+                    phase(client_a, "signed-ack-a", "live")
+                ),
+                1
+            );
             // A GET delivered before the B event remains externally sourced.
             let before_b = deliver_causal(&feed, get(client_a)).await.unwrap();
             assert_eq!(before_b["data"][0]["ordId"], "signed-ack-a");
-            assert_eq!(feed.unconsumed_reads(), 1, "B must retain its own finite source");
-            assert_eq!(feed.supersede_queued_signed_source_at_event(
-                "ack-b", "phase-b", phase(client_b, "signed-ack-b", "live")
-            ), 1);
+            assert_eq!(
+                feed.unconsumed_reads(),
+                1,
+                "B must retain its own finite source"
+            );
+            assert_eq!(
+                feed.supersede_queued_signed_source_at_event(
+                    "ack-b",
+                    "phase-b",
+                    phase(client_b, "signed-ack-b", "live")
+                ),
+                1
+            );
             // A response begun in the older source phase is still A's
             // authenticated bytes when observed after B's source event.
             assert_eq!(before_b["data"][0]["clOrdId"], client_a);
-            assert_eq!(deliver_causal(&feed, get(client_a)).await.unwrap()["data"][0]["ordId"],
-                "signed-ack-a");
+            assert_eq!(
+                deliver_causal(&feed, get(client_a)).await.unwrap()["data"][0]["ordId"],
+                "signed-ack-a"
+            );
             let b_before = deliver_causal(&feed, get(client_b)).await.unwrap();
             assert_eq!(b_before["data"][0]["ordId"], "signed-ack-b");
             let b_reads = feed.immutable_signed_phase_reads(
-                "fixture-executor-a", "/api/v5/trade/order", "phase-b");
-            feed.advance_immutable_signed_phase(
-                "phase-a", "phase-a-new", phase(client_a, "signed-ack-a", "partially_filled")
+                "fixture-executor-a",
+                "/api/v5/trade/order",
+                "phase-b",
             );
-            assert_eq!(feed.immutable_signed_phase_reads(
-                "fixture-executor-a", "/api/v5/trade/order", "phase-b"), b_reads);
-            assert_eq!(deliver_causal(&feed, get(client_b)).await.unwrap(), b_before);
+            feed.advance_immutable_signed_phase(
+                "phase-a",
+                "phase-a-new",
+                phase(client_a, "signed-ack-a", "partially_filled"),
+            );
+            assert_eq!(
+                feed.immutable_signed_phase_reads(
+                    "fixture-executor-a",
+                    "/api/v5/trade/order",
+                    "phase-b"
+                ),
+                b_reads
+            );
+            assert_eq!(
+                deliver_causal(&feed, get(client_b)).await.unwrap(),
+                b_before
+            );
             feed.retire_immutable_signed_phase(
-                "phase-a-new", "fixture-executor-a", "/api/v5/trade/order");
-            assert_eq!(deliver_causal(&feed, get(client_b)).await.unwrap(), b_before);
+                "phase-a-new",
+                "fixture-executor-a",
+                "/api/v5/trade/order",
+            );
+            assert_eq!(
+                deliver_causal(&feed, get(client_b)).await.unwrap(),
+                b_before
+            );
             let foreign = deliver_causal(&feed, get("unacknowledgedclient"))
-                .await.expect_err("foreign clOrdId cannot inherit B");
-            assert!(foreign.to_string().contains("TRANSCRIPT_IMMUTABLE_QUERY_MISMATCH"));
+                .await
+                .expect_err("foreign clOrdId cannot inherit B");
+            assert!(
+                foreign
+                    .to_string()
+                    .contains("TRANSCRIPT_IMMUTABLE_QUERY_MISMATCH")
+            );
             assert_eq!(feed.outbound_posts.lock().unwrap().len(), 2);
-            assert_eq!(feed.immutable_signed_phase_reads(
-                "fixture-executor-a", "/api/v5/trade/order", "phase-b"), b_reads + 2);
+            assert_eq!(
+                feed.immutable_signed_phase_reads(
+                    "fixture-executor-a",
+                    "/api/v5/trade/order",
+                    "phase-b"
+                ),
+                b_reads + 2
+            );
         }
 
         #[tokio::test]

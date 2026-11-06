@@ -4842,6 +4842,62 @@ mod raw_native_session_tests {
                     assert_eq!(b.consumed_usd, "1.0005");
                     assert_eq!(b.reserved_usd, if add_mode {"3.0015"} else {"7.0015"});
 
+                    // The authenticated A create ACK, durable SQL and Worker
+                    // readback establish T10-05's next recorded source event.
+                    // Both handoffs require the exact old signed bytes: no
+                    // route-wide replacement, new fill, or invented inventory.
+                    if std::env::var("OKX_T10_05_LOST_ACK_PROBE").as_deref() == Ok("1")
+                        || std::env::var("OKX_T10_05_EXPLICIT_REJECT_PROBE").as_deref() == Ok("1")
+                    {
+                        let _source_lease = resource.recorded_capture_gate.write().await;
+                        let retired_order = feed.supersede_queued_signed_source_at_event(
+                            "t10-05-a-verified-create-ack",
+                            "t10-05-a-live-order",
+                            RecordedGet {
+                                access_key: "fixture-executor-a".into(),
+                                path: "/api/v5/trade/order".into(),
+                                required_query: vec![
+                                    ("instId".into(), "BTC-USDT-SWAP".into()),
+                                    ("clOrdId".into(), persisted.client_order_id.clone()),
+                                ],
+                                raw_response: envelope(json!([{
+                                    "instId": "BTC-USDT-SWAP",
+                                    "ordId": "recorded-t09-second-001",
+                                    "clOrdId": "__REQUEST_CL_ORD_ID__",
+                                    "side": "buy", "posSide": "long", "tdMode": "cross",
+                                    "ordType": "limit", "px": "1000", "sz": "0.3",
+                                    "accFillSz": "0", "avgPx": "", "state": "live",
+                                    "cTime": new_clock, "uTime": new_clock
+                                }])),
+                            },
+                        );
+                        assert!(retired_order > 0, "T10-05 A order predecessor absent");
+                        let mut scopes = Vec::with_capacity(16);
+                        for inst_type in ["SWAP", "FUTURES"] {
+                            for kind in [
+                                "conditional", "oco", "trigger", "move_order_stop",
+                                "chase", "iceberg", "twap", "smart_iceberg",
+                            ] {
+                                scopes.push(RecordedGet {
+                                    access_key: "fixture-observer-a".into(),
+                                    path: "/api/v5/trade/orders-algo-pending".into(),
+                                    required_query: vec![
+                                        ("instType".into(), inst_type.into()),
+                                        ("ordType".into(), kind.into()),
+                                        ("limit".into(), "100".into()),
+                                    ],
+                                    raw_response: envelope(json!([])),
+                                });
+                            }
+                        }
+                        let retired_algos = feed.publish_post_ack_flat_algo_inventory(
+                            "T10_05_A_VERIFIED_CREATE_ACK",
+                            "recorded-t09-second-001",
+                            scopes,
+                        );
+                        assert!(retired_algos > 0, "T10-05 A algo predecessor absent");
+                    }
+
                     // Slice B negative regression through the *real* public API:
                     // account B must not resolve, inspect or cancel A's durable
                     // intent, even if the caller knows its exact reference.
