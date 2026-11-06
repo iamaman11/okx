@@ -137,9 +137,24 @@ mod identity_cache_tests {
             generation: 17,
             received_at: now,
         };
-        assert!(current_executor_identity(Some(&proof), "verified-a", 17, now));
-        assert!(!current_executor_identity(Some(&proof), "verified-b", 17, now));
-        assert!(!current_executor_identity(Some(&proof), "verified-a", 18, now));
+        assert!(current_executor_identity(
+            Some(&proof),
+            "verified-a",
+            17,
+            now
+        ));
+        assert!(!current_executor_identity(
+            Some(&proof),
+            "verified-b",
+            17,
+            now
+        ));
+        assert!(!current_executor_identity(
+            Some(&proof),
+            "verified-a",
+            18,
+            now
+        ));
         assert!(!current_executor_identity(
             Some(&proof),
             "verified-a",
