@@ -766,15 +766,18 @@ impl TradeService {
                 // smaller live stop is always rejected.
                 let original_id = i.intent_id.clone();
                 let original_inst = i.instrument_id.clone();
-                let effective_protected = r.execution.store.call(
-                    deadline(), move |s| {
+                let effective_protected = r
+                    .execution
+                    .store
+                    .call(deadline(), move |s| {
                         let lots = s.active_lots(&original_inst)?;
-                        let own = lots.iter().filter(|lot| {
-                            lot.intent_id.as_deref() == Some(original_id.as_str())
-                        }).fold(Decimal::ZERO, |sum, lot| sum + lot.remaining_qty);
+                        let own = lots
+                            .iter()
+                            .filter(|lot| lot.intent_id.as_deref() == Some(original_id.as_str()))
+                            .fold(Decimal::ZERO, |sum, lot| sum + lot.remaining_qty);
                         if own <= Decimal::ZERO || own > filled {
                             return Err(okx_execution::StoreError::Invalid(
-                                "PROTECTION_ORIGINAL_SQL_LOT_MISMATCH"
+                                "PROTECTION_ORIGINAL_SQL_LOT_MISMATCH",
                             ));
                         }
                         if own == filled {
@@ -782,28 +785,27 @@ impl TradeService {
                         }
                         let receipt = s.protection(&original_id)?.ok_or(
                             okx_execution::StoreError::Invalid(
-                                "PROTECTION_REDUCED_LOT_RECEIPT_MISSING"
-                            )
+                                "PROTECTION_REDUCED_LOT_RECEIPT_MISSING",
+                            ),
                         )?;
-                        let key = format!(
-                            "protection-shrink:{}:{}", original_id, exact(own)
-                        );
+                        let key = format!("protection-shrink:{}:{}", original_id, exact(own));
                         let op = s.operation(&format!("{key}:verified"))?.ok_or(
                             okx_execution::StoreError::Invalid(
-                                "PROTECTION_REDUCE_SOURCE_ACK_MISSING"
-                            )
+                                "PROTECTION_REDUCE_SOURCE_ACK_MISSING",
+                            ),
                         )?;
                         if op.kind != "protection_shrink_verified"
                             || op.result_ref != "VERIFIED"
                             || receipt.quantity != own
                         {
                             return Err(okx_execution::StoreError::Invalid(
-                                "PROTECTION_REDUCE_SOURCE_MISMATCH"
+                                "PROTECTION_REDUCE_SOURCE_MISMATCH",
                             ));
                         }
                         Ok(own)
-                    },
-                ).await.map_err(err)?;
+                    })
+                    .await
+                    .map_err(err)?;
                 let algo_client = i
                     .client_order_id
                     .get(..31)
@@ -1028,12 +1030,15 @@ impl TradeService {
             && i.state == IntentState::Filled
             && signed_position_qty.is_some_and(|qty| qty > Decimal::ZERO)
         {
-            match self.shrink_stop_after_reduce(
-                r,
-                &i,
-                order.as_ref().ok_or("REDUCE_VENUE_READBACK_MISSING")?,
-                signed_position_qty.ok_or("REDUCE_SIGNED_POSITION_MISSING")?,
-            ).await {
+            match self
+                .shrink_stop_after_reduce(
+                    r,
+                    &i,
+                    order.as_ref().ok_or("REDUCE_VENUE_READBACK_MISSING")?,
+                    signed_position_qty.ok_or("REDUCE_SIGNED_POSITION_MISSING")?,
+                )
+                .await
+            {
                 Ok(state) => state,
                 Err(reason) => json!({
                     "state":"blocked",
@@ -1250,7 +1255,10 @@ impl TradeService {
                 "evaluated"
             }
         });
-        if !financial || settlement_pending || protection_source_pending || live_protection_incident
+        if !financial
+            || settlement_pending
+            || protection_source_pending
+            || live_protection_incident
             || matches!(
                 protection_adjustment["state"].as_str(),
                 Some("blocked" | "ack_source_pending")
