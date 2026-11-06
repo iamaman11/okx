@@ -469,6 +469,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'T10_08_EMERGENCY_UNOWNED_REDUCE_MUST_NOT_POST' }
           cargo test --locked -p okx-agent --lib t10_08_later_live_stop_get_cannot_clear_durable_protection_incident -- --nocapture
           if ($LASTEXITCODE -ne 0) { throw 'T10_08_INCIDENT_RESTORATION_MUST_BE_PROVEN' }
+          cargo test --locked -p okx-execution --lib t10_08_flat_protection_stop_resolution_is_atomic_and_idempotent -- --nocapture
+          if ($LASTEXITCODE -ne 0) { throw 'T10_08_ATOMIC_SQL_AND_ORIGINAL_WORKER_RELEASE_REQUIRED' }
           cargo test --locked -p okx-agent --lib immutable_signed_leverage_handoff_preserves_exact_source_without_extra_pages -- --nocapture
           if ($LASTEXITCODE -ne 0) { throw 'SIGNED_LEVERAGE_SOURCE_UNIT_FAILED' }
           cargo test --locked -p okx-agent --lib signed_fee_phase_advances_only_on_explicit_event_and_keeps_prior_source_time -- --nocapture
