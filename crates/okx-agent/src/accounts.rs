@@ -3094,6 +3094,7 @@ pub(crate) mod recorded_support {
                     if path != "/api/v5/trade/order"
                         && path != "/api/v5/trade/cancel-algos"
                         && path != "/api/v5/trade/cancel-order"
+                        && path != "/api/v5/trade/amend-algos"
                     {
                         return Err(OkxError::Response(
                             "TRANSCRIPT_POST_ROUTE_UNRECOGNIZED".into(),
@@ -3160,6 +3161,34 @@ pub(crate) mod recorded_support {
                     } else {
                         response
                     };
+                    if path == "/api/v5/trade/amend-algos" {
+                        // Exact recorded POST/ACK only. Never synthesize a changed
+                        // live stop: post-ACK protection requires a separate GET.
+                        let parsed: serde_json::Value = serde_json::from_str(&response)?;
+                        let submitted_id = observed
+                            .get("algoId")
+                            .and_then(serde_json::Value::as_str)
+                            .ok_or_else(|| {
+                                OkxError::Response("TRANSCRIPT_AMEND_ALGO_ID_MISSING".into())
+                            })?;
+                        let submitted_request = observed
+                            .get("reqId")
+                            .and_then(serde_json::Value::as_str)
+                            .ok_or_else(|| {
+                                OkxError::Response("TRANSCRIPT_AMEND_REQUEST_ID_MISSING".into())
+                            })?;
+                        if observed["cxlOnFail"] != false
+                            || parsed["code"] != "0"
+                            || parsed["data"].as_array().map(Vec::len) != Some(1)
+                            || parsed["data"][0]["sCode"] != "0"
+                            || parsed["data"][0]["algoId"] != submitted_id
+                            || parsed["data"][0]["reqId"] != submitted_request
+                        {
+                            return Err(OkxError::Response(
+                                "TRANSCRIPT_AMEND_ACK_UNBOUND".into(),
+                            ));
+                        }
+                    }
                     if path == "/api/v5/trade/cancel-algos" {
                         let parsed: serde_json::Value = serde_json::from_str(&response)?;
                         let observed_id = observed
