@@ -1276,6 +1276,9 @@ try {
       const partialFills = process.env.OKX_T09_3_PARTIAL_PROBE === "1";
       const managedAdd = process.env.OKX_T09_4_MANAGED_ADD_PROBE === "1";
       const managedClose = process.env.OKX_T09_6_CLOSE_PROBE === "1";
+      const protectionFailure = process.env.OKX_T10_08_PROTECTION_FAILURE_PROBE === "1";
+      assert.ok(!protectionFailure || partialFills,
+        "T10-08 must share the actual Native T09.3 signed opening intent");
       // T09.1 has already closed the exact public order and released its
       // reservation. Requiring reserved_loss > 2 here would incorrectly
       // demand that a settled RELEASE remain HELD. Compare two independent
@@ -1291,8 +1294,28 @@ try {
         "one opening POST, one closing POST and one attached-protection cancel");
       assert.equal(nativeRestart.active_central_receipt, false,
         "Native SQL restart must not resurrect a released central reservation");
-      assert.equal(nativeRestart.remaining_lot_count, managedClose ? 0 : managedAdd ? 3 : partialFills ? 2 : 0,
-        "Native SQL restart must retain first close and optional second exposure");
+      assert.equal(nativeRestart.remaining_lot_count,
+        managedClose || protectionFailure ? 0 : managedAdd ? 3 : partialFills ? 2 : 0,
+        "reopened SQL must retain T09.3 live lots OR T10-08 source-closed flat state");
+      if (protectionFailure) {
+        const recovery=receipt(stdout,"T10_08_NATIVE_RESTART_RECOVERY_V1");
+        assert.deepEqual(nativeRestart.t10_08_recovery,recovery,
+          "the actual reopened SQL owner, not the pre-restart Native receipt, must prove recovery");
+        assert.equal(nativeRestart.remaining_lot_quantity,"0");
+        assert.equal(nativeRestart.second_intent_state,"FILLED");
+        assert.equal(nativeRestart.second_active_central_receipt,false);
+        assert.equal(recovery.schema,"okx.t10-08-native-sql-restart-recovery/v1");
+        assert.equal(recovery.original_state,"FILLED");
+        assert.equal(recovery.original_incident,null);
+        assert.equal(recovery.original_central_held,false);
+        assert.equal(recovery.close_state,"FILLED");
+        assert.equal(recovery.close_quantity,"0.3");
+        assert.equal(recovery.close_risk_increase,false);
+        assert.equal(recovery.risk_stop_latched,false);
+        assert.equal(recovery.recovery_receipt_kind,"PROTECTION_INCIDENT_FLAT_RESOLVED");
+        assert.match(recovery.recovery_source_digest,/^[a-f0-9]{64}$/,
+          "native SQL post-reopen recovery receipt must preserve its exact source digest");
+      }
       if (managedClose) {
         const terminal=receipt(stdout,"T09_6_NATIVE_TERMINAL_V1");
         assert.equal(terminal.remaining_lots,0);
