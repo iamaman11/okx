@@ -748,6 +748,18 @@ impl TradeService {
                                         "MANAGED_AGGREGATE_SOURCE_PENDING_V1:POSITION_BEFORE_SQL_FILL"
                                     );
                                 }
+                                Err(super::execute::ManagedProtectionCensusError::PendingPeerPost) => {
+                                    // Another SQL intent is POSTING/UNKNOWN. Its venue
+                                    // outcome and any attached protection are unresolved,
+                                    // not a verified failure of this intent's live stop.
+                                    // Keep the global new-risk census fail-closed, report
+                                    // source pending, and do not create a speculative
+                                    // safety_close for a different owned position.
+                                    protection_source_pending = true;
+                                    eprintln!(
+                                        "MANAGED_AGGREGATE_SOURCE_PENDING_V1:COHORT_UNRESOLVED_POST_OUTCOME"
+                                    );
+                                }
                                 Err(super::execute::ManagedProtectionCensusError::Denied(reason)) => {
                                     eprintln!("MANAGED_AGGREGATE_CENSUS_DENIAL_V1:{reason}");
                                     protection_failed = true;

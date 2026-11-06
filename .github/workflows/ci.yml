@@ -459,6 +459,10 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'FINANCE_SOURCE_OWNER_ASYNC_ADMISSION_FAILED' }
           cargo test --locked -p okx-agent --lib managed_census_stale_position_source_requires_fresh_event -- --nocapture
           if ($LASTEXITCODE -ne 0) { throw 'MANAGED_CENSUS_EVENT_ORDER_REGRESSION' }
+          cargo test --locked -p okx-agent --lib unresolved_peer_outcome_is_not_verified_protection_failure -- --nocapture
+          if ($LASTEXITCODE -ne 0) { throw 'MANAGED_CENSUS_PENDING_PEER_MUST_NOT_TRIGGER_EMERGENCY' }
+          cargo test --locked -p okx-agent --lib e2_active_real_intents_have_complete_bounded_central_coverage -- --nocapture
+          if ($LASTEXITCODE -ne 0) { throw 'COHORT_PEER_POSTING_SQL_BOUNDARY_FAILED' }
           cargo test --locked -p okx-agent --lib immutable_signed_leverage_handoff_preserves_exact_source_without_extra_pages -- --nocapture
           if ($LASTEXITCODE -ne 0) { throw 'SIGNED_LEVERAGE_SOURCE_UNIT_FAILED' }
           cargo test --locked -p okx-agent --lib signed_fee_phase_advances_only_on_explicit_event_and_keeps_prior_source_time -- --nocapture

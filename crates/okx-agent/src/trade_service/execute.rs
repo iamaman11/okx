@@ -106,7 +106,43 @@ const POSITION_SOURCE_BEFORE_SQL_FILL: &str = "COHORT_POSITION_SOURCE_BEFORE_SQL
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum ManagedProtectionCensusError {
     SourceBeforeLedgerFill,
+    PendingPeerPost,
     Denied(String),
+}
+
+// New risk must still fail the complete census. For an ALREADY owned
+// position with its own independently checked live stop, a different
+// SQL intent in POSTING/UNKNOWN is an unresolved outcome, not proof
+// that this owned stop failed. Never turn that uncertainty into an
+// unverified emergency reduction. The positive protection test and
+// all other denial reasons remain unchanged.
+fn classify_managed_protection_census_error(reason: String) -> ManagedProtectionCensusError {
+    match reason.as_str() {
+        POSITION_SOURCE_BEFORE_SQL_FILL => ManagedProtectionCensusError::SourceBeforeLedgerFill,
+        "COHORT_UNRESOLVED_POST_OUTCOME" => ManagedProtectionCensusError::PendingPeerPost,
+        _ => ManagedProtectionCensusError::Denied(reason),
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn unresolved_peer_outcome_is_not_verified_protection_failure() {
+    assert_eq!(
+        classify_managed_protection_census_error("COHORT_UNRESOLVED_POST_OUTCOME".into()),
+        ManagedProtectionCensusError::PendingPeerPost
+    );
+    // A direct missing stop, a fresh unowned position and an unrelated
+    // conditional order are still denied, not accepted as a managed census.
+    for code in [
+        "PROTECTION_UNVERIFIED",
+        "UNATTRIBUTED_EXCHANGE_POSITION",
+        "UNATTRIBUTED_CONDITIONAL_ORDER",
+    ] {
+        assert_eq!(
+            classify_managed_protection_census_error(code.into()),
+            ManagedProtectionCensusError::Denied(code.into())
+        );
+    }
 }
 
 fn position_mismatch_reason(
@@ -1962,13 +1998,7 @@ impl TradeService {
         .await
         .map_err(|_| ManagedProtectionCensusError::Denied("MANAGED_CENSUS_SOURCE_DEADLINE".into()))?
         .map(|v| v.0);
-        result.map_err(|reason| {
-            if reason == POSITION_SOURCE_BEFORE_SQL_FILL {
-                ManagedProtectionCensusError::SourceBeforeLedgerFill
-            } else {
-                ManagedProtectionCensusError::Denied(reason)
-            }
-        })
+        result.map_err(classify_managed_protection_census_error)
     }
 
     /// Only the settlement-confirmed terminal-release path may supply this
@@ -3819,9 +3849,17 @@ mod tests {
             Err("COHORT_CENTRAL_RESERVATION_MISMATCH".into())
         );
         intent.state = IntentState::Posting;
+        let posting = verify_local_intent_coverage(
+            &[(intent.clone(), Some(receipt.clone()))],
+            &[],
+            &account,
+        )
+        .unwrap_err();
+        assert_eq!(posting, "COHORT_UNRESOLVED_POST_OUTCOME");
         assert_eq!(
-            verify_local_intent_coverage(&[(intent.clone(), Some(receipt.clone()))], &[], &account),
-            Err("COHORT_UNRESOLVED_POST_OUTCOME".into())
+            classify_managed_protection_census_error(posting),
+            ManagedProtectionCensusError::PendingPeerPost,
+            "SQL POSTING is an inconclusive peer event, never evidence of a lost stop"
         );
         intent.state = IntentState::Unknown;
         assert!(
