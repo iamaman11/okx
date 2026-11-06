@@ -382,6 +382,7 @@ async fn t10_08_recover_signed_flat_after_late_fill(
     original_intent: String,
     client_id: String,
     first_at: i64,
+    original_unrelated_worker_reserve: &str,
     terminal: &serde_json::Value,
 ) -> serde_json::Value {
     let sql=&terminal["sql"];
@@ -394,10 +395,16 @@ async fn t10_08_recover_signed_flat_after_late_fill(
     let mut risk_before=summary("risk_t10_08_before_safe_close");
     risk_before.installation_id="installation_test".into();
     let held=risk.request(risk_before).await.expect("Worker before Close");
-    assert_ne!(
+    // T09.0 has an independently held Worker-only reservation before
+    // any T09.1/T09.2 trading intent. It remains 4 USD throughout this
+    // T10-08 scenario; never infer that an account-wide 4 is this intent.
+    // T10-08 must prove its OWN reservation RELEASED with INSPECT below.
+    assert_eq!(original_unrelated_worker_reserve,"4",
+        "baseline non-T10-08 Worker grant must be independently observed");
+    assert_eq!(
         held.budget.as_ref().unwrap().entry_budget.as_ref().unwrap().reserved_usd,
-        "0",
-        "unprotected late fill cannot release the pending central grant"
+        original_unrelated_worker_reserve,
+        "post-late-fill Worker held must preserve the independent baseline grant"
     );
     // Reuse T09.6's existing public Close + exact signed POST/ACK fixture.
     // The operation key is precisely the one used by emergency_protection,
@@ -484,6 +491,12 @@ async fn t10_08_recover_signed_flat_after_late_fill(
                 "remaining_instrument_lots":lots.len(),
                 "risk_stop_latched":stop,
                 "central_still_held":s.active_central_receipt(&intent)?.is_some(),
+                "original_central_reservation":s.central_receipt(&intent)?.map(|r|
+                    serde_json::json!({
+                        "reservation_key":r.reservation_key,
+                        "plan_hash":r.plan_hash,
+                        "account_key":r.account_key,
+                    })),
                 "recovery_receipt_kind":resolution.map(|r|r.kind),
             }))
         }
@@ -495,11 +508,37 @@ async fn t10_08_recover_signed_flat_after_late_fill(
     assert_eq!(post_sql["close_risk_increase"],false);
     assert_eq!(post_sql["close_quantity"],"0.3");
     assert_eq!(post_sql["recovery_receipt_kind"],"PROTECTION_INCIDENT_FLAT_RESOLVED");
+    let release=&post_sql["original_central_reservation"];
+    assert_eq!(release["account_key"],owner.configuration.account_key.wire());
+    let reservation_key=release["reservation_key"].as_str()
+        .expect("T10-08 original durable central reservation key").to_owned();
+    let plan_hash=release["plan_hash"].as_str()
+        .expect("T10-08 original durable plan hash").to_owned();
+    // The Worker may retain other accounts' grants even after the affected
+    // entry has closed. INSPECT the EXACT original grant instead of
+    // inventing a global budget=0 acceptance requirement.
+    let inspected=risk.request(RiskCommand {
+        schema:RISK_COMMAND_SCHEMA_V1.into(),
+        command_id:"risk_t10_08_inspect_original_released".into(),
+        installation_id:"installation_test".into(),
+        action:RiskCommandAction::Inspect {
+            reservation_key:reservation_key.clone(),
+            plan_sha256:plan_hash,
+        },
+    }).await.expect("T10-08 original Worker grant INSPECT");
+    assert_eq!(inspected.status,RiskDecisionStatus::Observed);
+    assert_eq!(inspected.reservation_key.as_deref(),Some(reservation_key.as_str()));
+    assert_eq!(
+        inspected.reservation_state,
+        Some(okx_protocol::risk_authority::RiskReservationState::Released),
+        "T10-08 must release its OWN grant, never an unrelated baseline grant"
+    );
     let mut command=summary("risk_t10_08_after_flat");
     command.installation_id="installation_test".into();
     let worker=risk.request(command).await.expect("persisted Worker after T10-08 recovery");
     let final_budget=&worker.budget.as_ref().unwrap().entry_budget.as_ref().unwrap();
-    assert_eq!(final_budget.reserved_usd,"0");
+    assert_eq!(final_budget.reserved_usd,original_unrelated_worker_reserve,
+        "baseline Worker grant must survive this intent's independently verified release");
     assert_eq!(final_budget.consumed_usd,"4.002");
     assert_eq!(feed.outbound_posts.lock().unwrap().len(),6,
         "T10-08 cannot resend Cancel/Create/Close after flat reconciliation");
@@ -514,6 +553,9 @@ async fn t10_08_recover_signed_flat_after_late_fill(
         "native_sql":post_sql,
         "worker_before":held.budget,
         "worker_after":worker.budget,
+        "worker_original_reservation_state":"RELEASED",
+        "worker_original_reservation_key":reservation_key,
+        "independent_baseline_reserved_usd":original_unrelated_worker_reserve,
         "worker_sequence_before":held.risk_book_sequence,
         "worker_sequence_after":worker.risk_book_sequence,
         "outbound_posts_before":prior_posts,

@@ -6100,7 +6100,10 @@ mod raw_native_session_tests {
                                 accounts.clone(),trade.clone(),risk.clone(),feed.clone(),
                                 rate_budget.clone(),new_intent_id.clone(),
                                 persisted.client_order_id.clone(),
-                                first["raw_history_event_at_ms"].as_i64().unwrap(),&terminal
+                                first["raw_history_event_at_ms"].as_i64().unwrap(),
+                                &checked.budget.as_ref().unwrap()
+                                    .entry_budget.as_ref().unwrap().reserved_usd,
+                                &terminal
                             ).await;
                             println!("T10_08_NATIVE_FLAT_RECOVERY_V1:{recovered}");
                             Some(recovered)
@@ -6122,7 +6125,7 @@ mod raw_native_session_tests {
                             let observed = risk.request(summary_cmd).await.unwrap();
                             let entry = observed.budget.as_ref().unwrap().entry_budget.as_ref().unwrap();
                             if entry.consumed_usd == "4.002"
-                                && entry.reserved_usd == if add_mode || t10_08_recovery.is_some() { "0" } else { "4" }
+                                && entry.reserved_usd == if add_mode { "0" } else { "4" }
                             {
                                 break observed;
                             }

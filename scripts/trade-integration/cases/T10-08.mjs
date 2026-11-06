@@ -96,7 +96,14 @@ export async function run({caseId,root,signal,artifactsDir}) {
     /^[a-f0-9]{64}$/);
   assert.notEqual(recovery.worker_before.entry_budget.reserved_usd,"0",
     "unprotected exposure must retain central risk before the signed Close");
-  assert.equal(recovery.worker_after.entry_budget.reserved_usd,"0");
+  assert.equal(recovery.independent_baseline_reserved_usd,"4",
+    "an independent Worker grant existed before the second entry");
+  assert.equal(recovery.worker_before.entry_budget.reserved_usd,"4");
+  assert.equal(recovery.worker_original_reservation_state,"RELEASED",
+    "inspect the original T10-08 Worker grant, not account-wide reserved sum");
+  assert.match(recovery.worker_original_reservation_key,/^.+$/);
+  assert.equal(recovery.worker_after.entry_budget.reserved_usd,"4",
+    "a separate previously HELD Worker grant must not be released by T10-08");
   assert.equal(recovery.worker_after.entry_budget.consumed_usd,"4.002");
   assert.ok(recovery.worker_sequence_after>recovery.worker_sequence_before);
   assert.equal(recovery.outbound_posts_before,5);
@@ -105,7 +112,7 @@ export async function run({caseId,root,signal,artifactsDir}) {
   assert.equal(witness.outbound_posts,6,
     "the sixth POST must be exactly the signed reduce-only Close, not an entry retry");
   assert.equal(settlement.outbound_posts,6);
-  assert.equal(settlement.reserved_usd,"0");
+  assert.equal(settlement.reserved_usd,"4");
   assert.equal(settlement.consumed_usd,"4.002");
   const dir=resolve(artifactsDir,caseId);
   await mkdir(dir,{recursive:true});
@@ -163,8 +170,10 @@ export async function run({caseId,root,signal,artifactsDir}) {
     ["durable_incident_cleared","true",String(
       recovery.native_sql.original_incident===null&&!recovery.native_sql.risk_stop_latched)],
     ["central_entry_released","false",String(recovery.native_sql.central_still_held)],
-    ["original_worker_reserve_after_flat","0",
+    ["independent_worker_reserve_preserved","4",
       recovery.worker_after.entry_budget.reserved_usd],
+    ["original_worker_reservation_released","RELEASED",
+      recovery.worker_original_reservation_state],
     ["immutable_campaign_entry_consumed_usd","4.002",
       recovery.worker_after.entry_budget.consumed_usd],
     ["exact_venue_post_count","6",String(recovery.outbound_posts_after)],
