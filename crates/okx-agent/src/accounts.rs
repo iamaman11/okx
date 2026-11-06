@@ -1315,16 +1315,21 @@ pub(crate) mod recorded_support {
                 })
                 .expect("TRANSCRIPT_IMMUTABLE_RETIRE_PHASE_MISSING");
             let retired = phases.remove(index);
-            assert!(
-                !phases.iter().any(|item| {
-                    item.source.access_key == access_key && item.source.path == path
-                }),
-                "TRANSCRIPT_IMMUTABLE_RETIRE_ROUTE_STILL_ACTIVE"
-            );
-            self.strict_read_routes
-                .lock()
-                .unwrap()
-                .remove(&(access_key.to_owned(), path.to_owned()));
+            // The strict route remains guarded while another client's order
+            // phase OR finite queued readback is present on this endpoint.
+            let route_still_owned = phases.iter().any(|item| {
+                item.source.access_key == access_key && item.source.path == path
+            }) || self.reads.lock().unwrap().iter().any(|item| {
+                item.access_key == access_key && item.path == path
+            }) || self.optional_reads.lock().unwrap().iter().any(|item| {
+                item.access_key == access_key && item.path == path
+            });
+            if !route_still_owned {
+                self.strict_read_routes
+                    .lock()
+                    .unwrap()
+                    .remove(&(access_key.to_owned(), path.to_owned()));
+            }
             self.immutable_phase_trace.lock().unwrap().push(format!(
                 "event=SIGNED_PHASE_RETIRED phase={phase_id} actor={access_key} route={path} observed_reads={}",
                 retired.deliveries
@@ -1380,17 +1385,44 @@ pub(crate) mod recorded_support {
             query.sort();
             let mut phases = self.immutable_signed_phases.lock().unwrap();
             assert!(
-                !phases
-                    .iter()
-                    .any(|p| p.source.access_key == actor && p.source.path == path),
+                !phases.iter().any(|p| {
+                    let mut existing = p.source.required_query.clone();
+                    existing.sort();
+                    p.source.access_key == actor && p.source.path == path && existing == query
+                }),
                 "TRANSCRIPT_SOURCE_EVENT_ALREADY_IMMUTABLE"
             );
             let mut required = self.reads.lock().unwrap();
             let mut optional = self.optional_reads.lock().unwrap();
+            // Exact non-order query scope; order pages are initially recorded
+            // with instId only, so scope them by the actual signed POST ACK's
+            // (account, clOrdId, ordId) rather than by the shared endpoint.
+            let acknowledged = self.acknowledged_creates.lock().unwrap();
+            let client = query
+                .iter()
+                .find(|(name, _)| name == "clOrdId")
+                .map(|(_, value)| value.as_str());
+            let in_scope = |p: &RecordedGet| {
+                if p.access_key != actor || p.path != path {
+                    return false;
+                }
+                let mut old_query = p.required_query.clone();
+                old_query.sort();
+                if path == "/api/v5/trade/order" {
+                    client.is_some_and(|id| {
+                        old_query.iter().all(|pair| query.contains(pair))
+                            && recorded_order_source_matches(
+                                &acknowledged, &actor, id, &p.raw_response
+                            )
+                    })
+                } else {
+                    old_query == query
+                }
+            };
             let retired = required
                 .iter()
                 .chain(optional.iter())
-                .filter(|p| p.access_key == actor && p.path == path)
+                .filter(|p| in_scope(p))
                 .collect::<Vec<_>>();
             assert!(
                 !retired.is_empty(),
@@ -1419,7 +1451,7 @@ pub(crate) mod recorded_support {
                     .expect("TRANSCRIPT_ORDER_PHASE_CLIENT_ID_MISSING");
                 assert!(
                     recorded_order_source_matches(
-                        &self.acknowledged_creates.lock().unwrap(),
+                        &acknowledged,
                         &actor,
                         client,
                         &page.raw_response,
@@ -1428,7 +1460,7 @@ pub(crate) mod recorded_support {
                 );
                 assert!(
                     retired.iter().all(|p| recorded_order_source_matches(
-                        &self.acknowledged_creates.lock().unwrap(),
+                        &acknowledged,
                         &actor,
                         client,
                         &p.raw_response
@@ -1448,8 +1480,8 @@ pub(crate) mod recorded_support {
             let old_digest = format!("{:x}", sha2::Sha256::digest(old_raw));
             let removed = retired.len();
             drop(retired);
-            required.retain(|p| p.access_key != actor || p.path != path);
-            optional.retain(|p| p.access_key != actor || p.path != path);
+            required.retain(|p| !in_scope(p));
+            optional.retain(|p| !in_scope(p));
             self.strict_read_routes
                 .lock()
                 .unwrap()
@@ -1477,7 +1509,9 @@ pub(crate) mod recorded_support {
                     .unwrap()
                     .iter()
                     .any(|item| item.source.access_key == page.access_key
-                        && item.source.path == page.path),
+                        && item.source.path == page.path
+                        && (page.path != "/api/v5/trade/order"
+                            || item.source.raw_response == page.raw_response)),
                 "TRANSCRIPT_IMMUTABLE_MIXED_WITH_QUEUED_SOURCE"
             );
             self.strict_read_routes
@@ -1495,7 +1529,9 @@ pub(crate) mod recorded_support {
                     .unwrap()
                     .iter()
                     .any(|item| item.source.access_key == page.access_key
-                        && item.source.path == page.path),
+                        && item.source.path == page.path
+                        && (page.path != "/api/v5/trade/order"
+                            || item.source.raw_response == page.raw_response)),
                 "TRANSCRIPT_IMMUTABLE_MIXED_WITH_OPTIONAL_SOURCE"
             );
             self.strict_read_routes
@@ -3207,6 +3243,30 @@ pub(crate) mod recorded_support {
                 } else {
                     None
                 };
+                // A queued readback for a second ACKed order may coexist with
+                // another order's immutable phase. Only exact query AND signed
+                // ACK binding may select that queued page; a foreign ID still
+                // fails closed and cannot borrow the first order's snapshot.
+                let queued_matches_request = {
+                    let matches_page = |page: &RecordedGet| {
+                        page.access_key == key
+                            && page.path == path
+                            && page.required_query.iter().all(|(name, expected)| {
+                                request.url().query_pairs().any(|(k, v)| {
+                                    k.as_ref() == name.as_str()
+                                        && v.as_ref() == expected.as_str()
+                                })
+                            })
+                            && requested_client.as_ref().is_none_or(|client| {
+                                recorded_order_source_matches(
+                                    &self.acknowledged_creates.lock().unwrap(),
+                                    key, client, &page.raw_response,
+                                )
+                            })
+                    };
+                    self.reads.lock().unwrap().iter().any(&matches_page)
+                        || self.optional_reads.lock().unwrap().iter().any(&matches_page)
+                };
                 // Read-only authenticated snapshots are immutable WITHIN
                 // a named phase, even if financial capture races Preview.
                 // A different signer, route or query must fail closed.
@@ -3257,7 +3317,11 @@ pub(crate) mod recorded_support {
                         .iter()
                         .any(|item| item.source.access_key == key && item.source.path == path)
                     {
-                        Some(Err("TRANSCRIPT_IMMUTABLE_QUERY_MISMATCH"))
+                        if queued_matches_request {
+                            None
+                        } else {
+                            Some(Err("TRANSCRIPT_IMMUTABLE_QUERY_MISMATCH"))
+                        }
                     } else {
                         None
                     }
@@ -4228,6 +4292,111 @@ pub(crate) mod recorded_support {
                 "foreign read must not consume or mutate the signed source"
             );
             assert_eq!(feed.outbound_posts.lock().unwrap().len(), 1);
+        }
+
+        // Reproducer: two signed orders on the SAME executor/route, with
+        // different ACK-bound client IDs. Route-wide supersession used to
+        // retire B's page when A changed phase.
+        #[tokio::test]
+        async fn immutable_acked_orders_keep_independent_sources_on_one_route() {
+            let feed = RecordedAccountHttp::default();
+            let client_a = "scopeclienta0001";
+            let client_b = "scopeclientb0001";
+            let raw = |order: &str, state: &str| serde_json::to_vec(&serde_json::json!({
+                "code":"0","msg":"","data":[{
+                    "instId":"BTC-USDT-SWAP","ordId":order,
+                    "clOrdId":"__REQUEST_CL_ORD_ID__",
+                    "state":state,"accFillSz":"0","sz":"0.3","uTime":"100"
+                }]
+            })).unwrap();
+            let page = |order: &str| RecordedGet {
+                access_key: "fixture-executor-a".into(),
+                path: "/api/v5/trade/order".into(),
+                required_query: vec![("instId".into(), "BTC-USDT-SWAP".into())],
+                raw_response: raw(order, "live"),
+            };
+            feed.expect_get(page("signed-ack-a"));
+            feed.expect_get(page("signed-ack-b"));
+            for (client, order) in [(client_a, "signed-ack-a"), (client_b, "signed-ack-b")] {
+                feed.expect_post(RecordedPost {
+                    access_key: "fixture-executor-a".into(),
+                    path: "/api/v5/trade/order".into(),
+                    expected_body: serde_json::json!({"clOrdId":client}),
+                    raw_response: serde_json::to_vec(&serde_json::json!({
+                        "code":"0","data":[{"ordId":order,"clOrdId":client,"sCode":"0"}]
+                    })).unwrap(),
+                });
+            }
+            let post = |client: &str| {
+                let mut r = reqwest::Request::new(
+                    reqwest::Method::POST,
+                    reqwest::Url::parse("https://www.okx.com/api/v5/trade/order").unwrap(),
+                );
+                r.headers_mut().insert("OK-ACCESS-KEY",
+                    reqwest::header::HeaderValue::from_static("fixture-executor-a"));
+                *r.body_mut() = Some(reqwest::Body::from(
+                    serde_json::json!({"clOrdId":client}).to_string()
+                ));
+                r
+            };
+            let get = |client: &str| {
+                let mut r = reqwest::Request::new(
+                    reqwest::Method::GET,
+                    reqwest::Url::parse(&format!(
+                        "https://www.okx.com/api/v5/trade/order?instId=BTC-USDT-SWAP&clOrdId={client}"
+                    )).unwrap(),
+                );
+                r.headers_mut().insert("OK-ACCESS-KEY",
+                    reqwest::header::HeaderValue::from_static("fixture-executor-a"));
+                r
+            };
+            assert_eq!(deliver_causal(&feed, post(client_a)).await.unwrap()["data"][0]["ordId"],
+                "signed-ack-a");
+            assert_eq!(deliver_causal(&feed, post(client_b)).await.unwrap()["data"][0]["ordId"],
+                "signed-ack-b");
+            let phase = |client: &str, order: &str, state: &str| RecordedGet {
+                access_key: "fixture-executor-a".into(),
+                path: "/api/v5/trade/order".into(),
+                required_query: vec![
+                    ("instId".into(), "BTC-USDT-SWAP".into()),
+                    ("clOrdId".into(), client.into()),
+                ],
+                raw_response: raw(order, state),
+            };
+            assert_eq!(feed.supersede_queued_signed_source_at_event(
+                "ack-a", "phase-a", phase(client_a, "signed-ack-a", "live")
+            ), 1);
+            // A GET delivered before the B event remains externally sourced.
+            let before_b = deliver_causal(&feed, get(client_a)).await.unwrap();
+            assert_eq!(before_b["data"][0]["ordId"], "signed-ack-a");
+            assert_eq!(feed.unconsumed_reads(), 1, "B must retain its own finite source");
+            assert_eq!(feed.supersede_queued_signed_source_at_event(
+                "ack-b", "phase-b", phase(client_b, "signed-ack-b", "live")
+            ), 1);
+            // A response begun in the older source phase is still A's
+            // authenticated bytes when observed after B's source event.
+            assert_eq!(before_b["data"][0]["clOrdId"], client_a);
+            assert_eq!(deliver_causal(&feed, get(client_a)).await.unwrap()["data"][0]["ordId"],
+                "signed-ack-a");
+            let b_before = deliver_causal(&feed, get(client_b)).await.unwrap();
+            assert_eq!(b_before["data"][0]["ordId"], "signed-ack-b");
+            let b_reads = feed.immutable_signed_phase_reads(
+                "fixture-executor-a", "/api/v5/trade/order", "phase-b");
+            feed.advance_immutable_signed_phase(
+                "phase-a", "phase-a-new", phase(client_a, "signed-ack-a", "partially_filled")
+            );
+            assert_eq!(feed.immutable_signed_phase_reads(
+                "fixture-executor-a", "/api/v5/trade/order", "phase-b"), b_reads);
+            assert_eq!(deliver_causal(&feed, get(client_b)).await.unwrap(), b_before);
+            feed.retire_immutable_signed_phase(
+                "phase-a-new", "fixture-executor-a", "/api/v5/trade/order");
+            assert_eq!(deliver_causal(&feed, get(client_b)).await.unwrap(), b_before);
+            let foreign = deliver_causal(&feed, get("unacknowledgedclient"))
+                .await.expect_err("foreign clOrdId cannot inherit B");
+            assert!(foreign.to_string().contains("TRANSCRIPT_IMMUTABLE_QUERY_MISMATCH"));
+            assert_eq!(feed.outbound_posts.lock().unwrap().len(), 2);
+            assert_eq!(feed.immutable_signed_phase_reads(
+                "fixture-executor-a", "/api/v5/trade/order", "phase-b"), b_reads + 2);
         }
 
         #[tokio::test]

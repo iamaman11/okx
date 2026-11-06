@@ -156,12 +156,9 @@ async fn t10_05_create_outcome(
     if lost_ack {
         feed.arm_lost_next_create_ack();
     }
-    // The authenticated local config limiter is a real 5/2s user budget.
-    // A LOCAL, durable NOT_STARTED result cannot exercise an ACK-loss fault.
-    // Re-enter with a NEW key only after independently proving SQL no-send,
-    // no active central receipt and the original Worker reservation released.
-    // This is bounded by the original 18s public deadline, not a new TTL,
-    // GET page, POST retry, or exemption from the concurrent A capture owner.
+    // The positive lost-ACK and explicit venue-reject subcases each own ONE
+    // fixed key. A local no-send is a failed setup, not permission to pick a
+    // new client ID and refresh financial sources until a POST happens.
     let make=|key:&str|TradeRequest::Execute {
         idempotency_key:key.into(),operation:TradeOperation::Open,
         strategy_instance:"manual".into(),instrument:"BTC-USDT-SWAP".into(),
@@ -173,125 +170,28 @@ async fn t10_05_create_outcome(
         protection:Some(Protection::Price{stop_price:"900".into()}),
         expires_in_ms:30_000,
     };
+    let request=make(key);
+    assert!(request.valid());
     let owner=accounts.resolve("fixture-b").await.expect("T10-05 B SQL");
-    let admission_deadline=std::time::Instant::now()+Duration::from_secs(18);
-    let mut local_nosend_attempts=0usize;
-    let mut fee_phase = "t10-05-b-fee-at-execute".to_owned();
-    let (key,request,first)=loop {
-        let attempt_key=if local_nosend_attempts==0 {
-            key.to_owned()
-        }else{
-            format!("{key}_after_proven_local_nosend_{local_nosend_attempts}")
-        };
-        let request=make(&attempt_key);
-        assert!(request.valid());
-        let first=tokio::time::timeout_at(admission_deadline.into(),
-            trade.trade("fixture-b",&request,None)
-        ).await.expect("T10-05 original 18s public request deadline")
-          .expect("T10-05 public Execute must produce a typed outcome");
-        let posts=feed.outbound_posts.lock().unwrap().len();
-        if posts==before_posts+1 {
-            break (attempt_key,request,first);
-        }
-        assert_eq!(posts,before_posts,
-            "T10-05 unexpected POST count before expected first create");
-        assert_eq!(first["data"]["state"],"REJECTED",
-            "only a final locally rejected no-send key may be replaced: {first}");
-        assert_eq!(first["data"]["rejection_origin"],"LOCAL");
-        assert_eq!(first["data"]["send_state"],"NOT_STARTED");
-        let release=first["data"]["risk_release_state"].as_str()
-            .expect("T10-05 explicit no-send release state");
-        assert!(matches!(release,"RELEASED"|"NOT_RESERVED"),
-            "no retry of unreleased or possibly submitted risk: {first}");
-        let checked_key=attempt_key.clone();
-        let (state,active,unsent_receipt,never_reserved,exchange_id)=
-            owner.execution.store.call(
-                std::time::Instant::now()+Duration::from_secs(3),
-                move |sql| {
-                    let i=sql.by_idempotency(&checked_key)?.ok_or(
-                        okx_execution::StoreError::Invalid(
-                            "T10_05_LOCAL_NOSEND_SQL_INTENT_MISSING"
-                        )
-                    )?;
-                    Ok((i.state.as_str().to_owned(),
-                        sql.active_central_receipt(&i.intent_id)?.is_some(),
-                        sql.unsent_release_receipt(&i.intent_id)?.is_some(),
-                        sql.unsent_before_reserve(&i.intent_id)?,
-                        i.exchange_order_id))
-                }
-            ).await.expect("T10-05 durable no-send proof before new key");
-        assert_eq!(state,"REJECTED");
-        assert!(!active,"T10-05 cannot re-enter with active risk");
-        assert!(exchange_id.is_none(),"T10-05 cannot replace an ACKed order");
-        if release=="RELEASED" {
-            assert!(unsent_receipt,"T10-05 real Worker RELEASE_UNSENT proof missing");
-        }else{
-            assert!(never_reserved,"T10-05 no-reserve proof missing");
-        }
-        let mut probe=summary("risk_t10_05_after_local_nosend");
-        probe.installation_id="installation_test".into();
-        let unchanged=risk.request(probe).await.expect("T10-05 actual Worker no-send budget");
-        assert_eq!(unchanged.budget.as_ref().unwrap()
-            .entry_budget.as_ref().unwrap().reserved_usd,"7.0015");
-        let remaining=admission_deadline.saturating_duration_since(
-            std::time::Instant::now()
+    let denials_before=feed.denied_routes.lock().unwrap().len();
+    let first=tokio::time::timeout(
+        Duration::from_secs(18), trade.trade("fixture-b",&request,None)
+    ).await.expect("T10-05 fixed-key Execute deadline")
+      .expect("T10-05 public Execute must produce a typed outcome");
+    let posts_after_execute=feed.outbound_posts.lock().unwrap().len();
+    if posts_after_execute!=before_posts+1 {
+        let denied=feed.denied_routes.lock().unwrap();
+        let new_denials=denied.iter().skip(denials_before).cloned().collect::<Vec<_>>();
+        let first_denial=new_denials.first().cloned();
+        let recent=feed.requests.lock().unwrap().iter().rev()
+            .filter(|get| get.contains("fixture-observer-b:")
+                || get.contains("fixture-executor-b:"))
+            .take(8).cloned().collect::<Vec<_>>();
+        panic!(
+            "T10_05_FIXED_KEY_SETUP_OR_SOURCE_FAILURE:first_denial={first_denial:?} new_denials={new_denials:?} recent={recent:?} public={first} posts_before={before_posts} posts_after={posts_after_execute} rate={:?}",
+            rate_budget.snapshot().last_throttle
         );
-        let reason=first["data"]["primary_reason"].as_str().unwrap_or("");
-        let delay=recorded_preview_local_defer(reason,&rate_budget,remaining)
-            .unwrap_or_else(||{
-                // Preserve the FIRST strict transcript denial independently
-                // of the public error's redacted reason and rate-budget state.
-                // This is a read-only failure report, not a new fixture page.
-                let denials=feed.denied_routes.lock().unwrap()
-                    .iter().rev().take(6).cloned().collect::<Vec<_>>();
-                let recent=feed.requests.lock().unwrap().iter().rev()
-                    .filter(|get| get.contains("fixture-observer-b:")
-                        || get.contains("fixture-executor-b:"))
-                    .take(8).cloned().collect::<Vec<_>>();
-                eprintln!("T10_05_FIRST_RECORDED_SOURCE_DENIAL_V1:{}",serde_json::json!({
-                    "denied_routes":denials,
-                    "recent_signed_requests":recent,
-                    "public_reason":reason,
-                    "no_send":first["data"]["send_state"]=="NOT_STARTED",
-                    "release":first["data"]["risk_release_state"],
-                }));
-                panic!(
-                    "T10-05 first source denial={denials:?} recent={recent:?} public={first:?} rate={:?}",
-                    rate_budget.snapshot().last_throttle,
-                )
-            });
-        local_nosend_attempts+=1;
-        assert!(local_nosend_attempts<=2,
-            "T10-05 stopped after two independently proved LOCAL no-send keys");
-        tokio::time::timeout_at(admission_deadline.into(),
-            tokio::time::sleep(delay)
-        ).await.expect("T10-05 original deadline for local no-send admission");
-        // A completed, durably unsent intent is a causal boundary for the
-        // next NEW key. A second authenticated fee observation has its own
-        // exchange timestamp; repeating the first signed source would be
-        // stale after real 5/2s local admission waits. Do not generate bytes
-        // inside the GET handler or change the production freshness gate.
-        let next_stamp=chrono::Utc::now().timestamp_millis().to_string();
-        let next_fee=wrap(json!([{
-            "instType":"SWAP","level":"Lv1","ts":next_stamp,
-            "feeGroup":[{"groupId":"4","maker":"0.0005","taker":"0.0005"}]
-        }]));
-        let next_phase=format!("t10-05-b-fee-after-local-nosend-{local_nosend_attempts}");
-        feed.advance_immutable_signed_phase(
-            &fee_phase, &next_phase,
-            RecordedGet {
-                access_key:"fixture-observer-b".into(),
-                path:"/api/v5/account/trade-fee".into(),
-                required_query:vec![
-                    ("instType".into(),"SWAP".into()),
-                    ("instFamily".into(),"BTC-USDT".into()),
-                ],
-                raw_response:next_fee,
-            }
-        );
-        fee_phase=next_phase;
-        feed.advance_recorded_public_clock(wrap(json!([{"ts":next_stamp}])));
-    };
+    }
     let first_status=first["status"].as_str().unwrap_or("MISSING_STATUS").to_owned();
     let read=|| {
         let owner=owner.clone();
@@ -383,6 +283,6 @@ async fn t10_05_create_outcome(
         "outbound_posts_after_replay":feed.outbound_posts.lock().unwrap().len(),
         "worker_budget_after":worker.budget,
         "worker_sequence":worker.risk_book_sequence,
-        "locally_rejected_nosend_keys":local_nosend_attempts,
+        "locally_rejected_nosend_keys":0,
     })
 }
