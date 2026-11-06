@@ -3849,12 +3849,9 @@ mod tests {
             Err("COHORT_CENTRAL_RESERVATION_MISMATCH".into())
         );
         intent.state = IntentState::Posting;
-        let posting = verify_local_intent_coverage(
-            &[(intent.clone(), Some(receipt.clone()))],
-            &[],
-            &account,
-        )
-        .unwrap_err();
+        let posting =
+            verify_local_intent_coverage(&[(intent.clone(), Some(receipt.clone()))], &[], &account)
+                .unwrap_err();
         assert_eq!(posting, "COHORT_UNRESOLVED_POST_OUTCOME");
         assert_eq!(
             classify_managed_protection_census_error(posting),
