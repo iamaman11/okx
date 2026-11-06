@@ -33,9 +33,9 @@ export async function run({caseId,root,signal,artifactsDir}) {
   assert.equal(failed.protected_action.retry_create,false);
   assert.equal(failed.protected_action.phase,"before_financial_capture");
   assert.equal(failed.protected_action.reason_code,
-    "SAFETY_CANCEL_NOT_CONFIRMED_NO_RESUBMIT");
+    "SAFETY_CANCEL_OUTCOME_UNKNOWN_NO_RESUBMIT");
   assert.ok(failed.protected_action.elapsed_ms<=2000,
-    "protective cancellation rejection must be visible within 2 seconds");
+    "ambiguous protective cancel outcome must be blocked within 2 seconds");
   assert.equal(failed.sql_after.intent_id,witness.intent_id);
   assert.equal(failed.sql_after.risk_stop_latched,true);
   assert.equal(failed.sql_after.central_held,true);

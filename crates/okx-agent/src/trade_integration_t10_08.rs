@@ -1,7 +1,7 @@
 // T10-08 negative leg: the EXACT T09.3 SQL intent is already partially filled
 // and has one signed USDT bill. A distinct signed venue stop response then
 // reports FAILED. The native protective owner sends one bounded Cancel,
-// receives an explicit venue rejection, and returns a durable blocker without
+// receives a negative venue response classified as UNKNOWN, and returns a blocker without
 // resending a trading mutation or releasing the Worker reservation.
 // Another signed fill+bill phase must occur AFTER this event.
 async fn t10_08_failed_stop_before_late_fill(
@@ -126,8 +126,9 @@ async fn t10_08_failed_stop_before_late_fill(
             required_query:vec![],raw_response:balance.clone(),
         }).collect()
     );
-    // An actual venue negative cancel response is distinct from an
-    // unobserved ACK: one signed request is permitted, NEVER a retry.
+    // A signed negative sCode after a real POST is not treated as a safe
+    // un-sent result by production. The possible send is SQL-claimed,
+    // and the outcome is UNKNOWN/no-resubmit; no second request follows.
     feed.expect_post(RecordedPost {
         access_key:"fixture-executor-a".into(),
         path:"/api/v5/trade/cancel-order".into(),
@@ -170,7 +171,7 @@ async fn t10_08_failed_stop_before_late_fill(
     assert_eq!(protective["state"],"blocked");
     assert_eq!(protective["retry_create"],false);
     assert_eq!(protective["phase"],"before_financial_capture");
-    assert_eq!(protective["reason_code"],"SAFETY_CANCEL_NOT_CONFIRMED_NO_RESUBMIT");
+    assert_eq!(protective["reason_code"],"SAFETY_CANCEL_OUTCOME_UNKNOWN_NO_RESUBMIT");
     let elapsed=protective["elapsed_ms"].as_u64().expect("T10-08 bounded timestamp");
     assert!(elapsed<=2000,"T10-08 emergency blocker exceeded SLO: {elapsed} ms");
     assert!(started.elapsed()>=Duration::from_millis(0));
