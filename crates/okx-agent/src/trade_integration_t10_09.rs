@@ -306,3 +306,149 @@ async fn t10_09_b_signed_late_fill_after_cancel(
         "posts_before":posts_before,"posts_after":posts_after,
     })
 }
+
+
+// The separate Cancel ACK does not prove the still-open 0.06 can no longer
+// execute. Verify a NEW, order-ID-bound terminal readback and use the normal
+// public TradeService Reduce with the original B SQL owner and signed ACK.
+// No fill, bill, position or Worker money is injected by this helper.
+async fn t10_09_b_public_partial_reduce(
+    accounts: Arc<AccountRuntimeRegistry>,
+    trade: Arc<TradeService>,
+    feed: Arc<crate::accounts::recorded_support::RecordedAccountHttp>,
+    original_intent_id: String,
+) -> serde_json::Value {
+    use crate::accounts::recorded_support::{RecordedGet, RecordedPost};
+    use okx_protocol::trading::{
+        OrderConstraints, PositionSide, Sizing, TradeOperation, TradeRequest,
+    };
+    use serde_json::json;
+    let raw = |v| {
+        serde_json::to_vec(&json!({"code":"0","msg":"","data":v}))
+            .expect("T10-09 immutable OKX wire")
+    };
+    let before = feed.outbound_posts.lock().unwrap().len();
+    assert_eq!(before, 6, "public Reduce must follow B Cancel ACK and late fill");
+    let at = chrono::Utc::now().timestamp_millis().to_string();
+    let canceled = raw(json!([{
+        "instId":"BTC-USDT-SWAP","ordId":"recorded-b1-b-001",
+        "clOrdId":"__REQUEST_CL_ORD_ID__","side":"buy",
+        "posSide":"long","tdMode":"cross","ordType":"limit",
+        "px":"1000","sz":"0.1","accFillSz":"0.04",
+        "avgPx":"1000","state":"canceled","cTime":at,"uTime":at
+    }]));
+    feed.advance_recorded_route(
+        "fixture-executor-b", "/api/v5/trade/order",
+        (0..12).map(|_| RecordedGet {
+            access_key:"fixture-executor-b".into(),
+            path:"/api/v5/trade/order".into(),
+            required_query:vec![("instId".into(),"BTC-USDT-SWAP".into())],
+            raw_response:canceled.clone(),
+        }).collect(),
+    );
+    feed.advance_recorded_public_clock(raw(json!([{"ts":at}])));
+    let terminal = trade.trade(
+        "fixture-b",
+        &TradeRequest::Status { reference:original_intent_id.clone() },
+        None,
+    ).await.expect("T10-09 authenticated terminal B order readback");
+    assert_eq!(terminal["data"]["intent"]["intent_id"], original_intent_id);
+    assert_ne!(terminal["data"]["central_release"]["state"], "verified",
+        "a canceled order with 0.04 signed execution cannot release live exposure");
+    assert_eq!(feed.outbound_posts.lock().unwrap().len(), before,
+        "terminal B order readback must not create a venue POST");
+    let key = "t10_09_public_reduce_020_0001".to_owned();
+    let at = chrono::Utc::now().timestamp_millis().to_string();
+    feed.advance_recorded_public_clock(raw(json!([{"ts":at}])));
+    feed.expect_public_clock(raw(json!([{
+        "ts":chrono::Utc::now().timestamp_millis().to_string()
+    }])));
+    feed.expect_post(RecordedPost {
+        access_key:"fixture-executor-b".into(),
+        path:"/api/v5/trade/order".into(),
+        expected_body:json!({
+            "instId":"BTC-USDT-SWAP","tdMode":"cross",
+            "clOrdId":"__REQUEST_CL_ORD_ID__","side":"sell",
+            "posSide":"long","ordType":"ioc","sz":"0.02","px":"999"
+        }),
+        raw_response:raw(json!([{
+            "ordId":"recorded-t10-09-b-reduce-020",
+            "clOrdId":"__REQUEST_CL_ORD_ID__","sCode":"0"
+        }])),
+    });
+    feed.expect_get(RecordedGet {
+        access_key:"fixture-executor-b".into(),
+        path:"/api/v5/trade/order".into(),
+        required_query:vec![("instId".into(),"BTC-USDT-SWAP".into())],
+        raw_response:raw(json!([{
+            "instId":"BTC-USDT-SWAP",
+            "ordId":"recorded-t10-09-b-reduce-020",
+            "clOrdId":"__REQUEST_CL_ORD_ID__","side":"sell",
+            "posSide":"long","tdMode":"cross","ordType":"ioc",
+            "px":"999","sz":"0.02","accFillSz":"0",
+            "avgPx":"","state":"live","cTime":at,"uTime":at
+        }])),
+    });
+    let response = trade.trade(
+        "fixture-b",
+        &TradeRequest::Execute {
+            idempotency_key:key.clone(),
+            operation:TradeOperation::Reduce,
+            strategy_instance:"manual".into(),
+            instrument:"BTC-USDT-SWAP".into(),
+            side:PositionSide::Long,
+            sizing:Sizing::Contracts { contracts:"0.02".into() },
+            order:OrderConstraints {
+                order_type:"ioc".into(),
+                limit_price:Some("999".into()),
+                reference:Some(original_intent_id.clone()),
+                max_entry_usd:None,
+                max_slippage_bps:50,
+            },
+            protection:None,
+            expires_in_ms:30_000,
+        },
+        None,
+    ).await.unwrap_or_else(|reason| {
+        panic!("T10_09_REAL_PUBLIC_REDUCE_DENIED:{reason}")
+    });
+    let after = feed.outbound_posts.lock().unwrap().len();
+    assert_eq!(after, before + 1,
+        "T10-09 exactly one source-bound public Reduce POST, no reentry");
+    assert_eq!(feed.unconsumed_posts(), 0,
+        "T10-09 must consume signed venue ACK, not infer execution");
+    let owner = accounts.resolve("fixture-b").await
+        .expect("T10-09 original B Native SQL owner");
+    let saved = owner.execution.store.call(
+        std::time::Instant::now()+Duration::from_secs(3),
+        move |sql| {
+            let i = sql.by_idempotency(&key)?.ok_or(
+                okx_execution::StoreError::Invalid("T10_09_REDUCE_SQL_MISSING")
+            )?;
+            Ok(json!({
+                "intent_id":i.intent_id,
+                "state":i.state.as_str(),
+                "exchange_order_id":i.exchange_order_id,
+                "quantity":i.plan.quantity.normalize().to_string(),
+                "operation":i.plan.operation,
+                "risk_increase":i.risk_increase,
+                "revision":i.revision,
+            }))
+        },
+    ).await.expect("T10-09 original B SQL Reduce readback");
+    assert_eq!(saved["exchange_order_id"], "recorded-t10-09-b-reduce-020");
+    assert_eq!(saved["quantity"], "0.02");
+    assert_eq!(saved["operation"], "reduce");
+    assert_eq!(saved["risk_increase"], false);
+    json!({
+        "schema":"okx.t10-09-source-bound-partial-reduce/v1",
+        "original_intent_id":original_intent_id,
+        "original_terminal_order_state":terminal["data"]["intent"]["state"],
+        "original_central_release":terminal["data"]["central_release"],
+        "reduce":saved,
+        "execute_status":response["status"],
+        "outbound_posts_before":before,
+        "outbound_posts_after":after,
+        "close_fill_and_remnant_protection_pending":true,
+    })
+}

@@ -5996,6 +5996,12 @@ mod raw_native_session_tests {
                                         intent_b.clone(), client_b,
                                     ).await;
                                     println!("T10_09_NATIVE_LATE_B_FILL_V1:{late}");
+                                    refresh_recorded_market();
+                                    let reduce=t10_09_b_public_partial_reduce(
+                                        accounts.clone(),trade.clone(),feed.clone(),
+                                        intent_b.clone(),
+                                    ).await;
+                                    println!("T10_09_NATIVE_PARTIAL_REDUCE_V1:{reduce}");
                                 }
                             }
                         }
