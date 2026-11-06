@@ -6095,6 +6095,16 @@ mod raw_native_session_tests {
                             new_intent_id.clone(),persisted.client_order_id.clone(),Some(ts),
                         )).await.expect("T09.3 terminal native task");
                         captured_signed_times=Some((first["raw_history_event_at_ms"].as_i64().unwrap(),terminal["raw_history_event_at_ms"].as_i64().unwrap()));
+                        let t10_08_recovery = if t10_08_failure.is_some() {
+                            let recovered=t10_08_recover_signed_flat_after_late_fill(
+                                accounts.clone(),trade.clone(),risk.clone(),feed.clone(),
+                                rate_budget.clone(),new_intent_id.clone(),
+                                persisted.client_order_id.clone(),
+                                first["raw_history_event_at_ms"].as_i64().unwrap(),&terminal
+                            ).await;
+                            println!("T10_08_NATIVE_FLAT_RECOVERY_V1:{recovered}");
+                            Some(recovered)
+                        } else {None};
                         // The terminal signed fill+bill may reach SQL before
                         // a fresh account-wide financial capture can commit
                         // its central SETTLE_ENTRY. Earlier checks incorrectly
@@ -6112,7 +6122,7 @@ mod raw_native_session_tests {
                             let observed = risk.request(summary_cmd).await.unwrap();
                             let entry = observed.budget.as_ref().unwrap().entry_budget.as_ref().unwrap();
                             if entry.consumed_usd == "4.002"
-                                && entry.reserved_usd == if add_mode { "0" } else { "4" }
+                                && entry.reserved_usd == if add_mode || t10_08_recovery.is_some() { "0" } else { "4" }
                             {
                                 break observed;
                             }
@@ -6124,7 +6134,7 @@ mod raw_native_session_tests {
                             );
                             assert_eq!(
                                 feed.outbound_posts.lock().unwrap().len(),
-                                if t10_08_failure.is_some() { 5 } else { 4 },
+                                if t10_08_recovery.is_some() { 6 } else { 4 },
                                 "T09.3/T10-08 monetary catch-up must never resubmit a venue create"
                             );
                             final_settlement_attempts += 1;
