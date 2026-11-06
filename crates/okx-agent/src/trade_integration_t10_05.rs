@@ -238,14 +238,28 @@ async fn t10_05_create_outcome(
         );
         let reason=first["data"]["primary_reason"].as_str().unwrap_or("");
         let delay=recorded_preview_local_defer(reason,&rate_budget,remaining)
-            .unwrap_or_else(||panic!(
-                "T10-05 no-send reason is not an authenticated LOCAL private GET defer: {first:?} rate={:?} denied={:?} last_requests={:?}",
-                rate_budget.snapshot().last_throttle,
-                feed.denied_routes.lock().unwrap().iter().rev().take(6).cloned().collect::<Vec<_>>(),
-                feed.requests.lock().unwrap().iter().rev().filter(|get|
-                    get.contains("fixture-observer-b:") || get.contains("fixture-executor-b:")
-                ).take(8).cloned().collect::<Vec<_>>()
-            ));
+            .unwrap_or_else(||{
+                // Preserve the FIRST strict transcript denial independently
+                // of the public error's redacted reason and rate-budget state.
+                // This is a read-only failure report, not a new fixture page.
+                let denials=feed.denied_routes.lock().unwrap()
+                    .iter().rev().take(6).cloned().collect::<Vec<_>>();
+                let recent=feed.requests.lock().unwrap().iter().rev()
+                    .filter(|get| get.contains("fixture-observer-b:")
+                        || get.contains("fixture-executor-b:"))
+                    .take(8).cloned().collect::<Vec<_>>();
+                eprintln!("T10_05_FIRST_RECORDED_SOURCE_DENIAL_V1:{}",serde_json::json!({
+                    "denied_routes":denials,
+                    "recent_signed_requests":recent,
+                    "public_reason":reason,
+                    "no_send":first["data"]["send_state"]=="NOT_STARTED",
+                    "release":first["data"]["risk_release_state"],
+                }));
+                panic!(
+                    "T10-05 first source denial={denials:?} recent={recent:?} public={first:?} rate={:?}",
+                    rate_budget.snapshot().last_throttle,
+                )
+            });
         local_nosend_attempts+=1;
         assert!(local_nosend_attempts<=2,
             "T10-05 stopped after two independently proved LOCAL no-send keys");
