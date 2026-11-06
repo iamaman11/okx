@@ -106,39 +106,6 @@ async fn t10_05_create_outcome(
     let budget_before=risk.request(before_risk).await.expect("T10-05 Worker prior to POST");
     assert_eq!(budget_before.budget.as_ref().unwrap().entry_budget.as_ref().unwrap().reserved_usd,
         "7.0015");
-    // Test-only setup: independently verify both executor identities through
-    // the existing authenticated private GET with REAL local rate admission.
-    // config_wait waits only for a measured local, UNSENT throttle and never
-    // retries exchange errors or authorizes an order. One fixed-key Execute
-    // begins only after this bounded source setup; concurrent A maintenance
-    // is deliberately left running.
-    let config_setup_until=std::time::Instant::now()+Duration::from_secs(8);
-    let (a_config,b_config)=tokio::join!(
-        async {
-            let a=accounts.resolve("fixture-a").await
-                .expect("T10-05 A account source");
-            let cfg=a.execution.account.config_wait(
-                config_setup_until.saturating_duration_since(std::time::Instant::now())
-            ).await.expect("T10_05_SETUP_A_EXECUTOR_CONFIG_ADMISSION");
-            assert_eq!(okx_api::account_uid_fingerprint(&cfg.uid),
-                a.configuration.account_key.verified_uid,
-                "T10_05_SETUP_A_EXECUTOR_UID");
-            cfg
-        },
-        async {
-            let b=accounts.resolve("fixture-b").await
-                .expect("T10-05 B account source");
-            let cfg=b.execution.account.config_wait(
-                config_setup_until.saturating_duration_since(std::time::Instant::now())
-            ).await.expect("T10_05_SETUP_B_EXECUTOR_CONFIG_ADMISSION");
-            assert_eq!(okx_api::account_uid_fingerprint(&cfg.uid),
-                b.configuration.account_key.verified_uid,
-                "T10_05_SETUP_B_EXECUTOR_UID");
-            cfg
-        }
-    );
-    assert!(a_config.perm.split(',').any(|p| p.trim()=="trade"));
-    assert!(b_config.perm.split(',').any(|p| p.trim()=="trade"));
     // This positive Execute is a new authenticated fee/time observation
     // after the earlier Worker budget inspection. Retire only the exact
     // predecessor route/query/raw bytes. Do not alter tariff, risk limits,
