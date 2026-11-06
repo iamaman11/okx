@@ -37,8 +37,8 @@ where
 // protection incident: the same algoId may be stale, reappear after an ACK,
 // or no longer cover the late fill. Only a separately proven remediation or
 // a signed flat-position outcome can resolve exposure. No guessed success.
-fn protection_incident_still_unresolved(reason: Option<&str>, venue_flat: bool) -> bool {
-    !venue_flat
+fn protection_incident_still_unresolved(reason: Option<&str>, remediation_committed: bool) -> bool {
+    !remediation_committed
         && matches!(
             reason,
             Some("PROTECTION_PENDING_OR_FAILED" | "MANAGED_AGGREGATE_PROTECTION_UNVERIFIED")
@@ -62,7 +62,7 @@ fn verified_emergency_owned_exposure<'a>(
     if !matches!(
         (side, intent.plan.position_side.as_str()),
         (PositionSide::Long, "long") | (PositionSide::Short, "short")
-    ) || owned > venue_filled
+    ) || owned != venue_filled
         || owned > venue_position
     {
         return Err("EMERGENCY_EXPOSURE_SQL_VENUE_MISMATCH".into());
@@ -536,6 +536,10 @@ impl TradeService {
         } else {
             json!(null)
         };
+        // Persisted incidents remain safety-active even when a later algo GET
+        // reports live. An observed flat venue position is not an SQL resolution.
+        let prior_protection_incident =
+            protection_incident_still_unresolved(i.incident.as_deref(), false);
         let mut protection_failed = false;
         let mut protection_failure_observed_at = None;
         let mut protection_source_pending = false;
@@ -753,7 +757,11 @@ impl TradeService {
             // is not yet an active stop against the old lots. Never
             // emergency-cancel an unrelated managed position because a
             // new limit order has not filled.
-            if i.risk_increase && exposed && filled > Decimal::ZERO {
+            if i.risk_increase
+                && exposed
+                && filled > Decimal::ZERO
+                && !prior_protection_incident
+            {
                 let algo_client = i
                     .client_order_id
                     .get(..31)
@@ -872,10 +880,12 @@ impl TradeService {
         // incident already blocks new risk. The only pre-finance venue mutation
         // allowed is a single ACK-bound cancel of this exact entry order.
         // A reduce/Close needs independently captured signed fills and SQL lots.
-        let protective = if protection_failed {
+        let previously_unprotected_exposure = prior_protection_incident
+            && signed_position_qty.is_some_and(|quantity| quantity > Decimal::ZERO);
+        let protective = if protection_failed || previously_unprotected_exposure {
             Some(
                 bounded_protection_before_finance(
-                    protection_failure_observed_at.expect("protection incident has observed time"),
+                    protection_failure_observed_at.unwrap_or_else(Instant::now),
                     Duration::from_secs(2),
                     self.emergency_protection_before_finance(
                         r,
@@ -1067,20 +1077,84 @@ impl TradeService {
             } else {
                 json!({"state":"not_evaluated","all_in_entry_cost_proven":false})
             };
-        let prior_protection_incident_unresolved =
-            protection_incident_still_unresolved(i.incident.as_deref(), venue_flat_verified);
-        let live_protection_incident = protection_failed || prior_protection_incident_unresolved;
         let entry_fill_pending =
             entry_fill_finance_pending(i.risk_increase, verified_zero_cancel, &entry_fill_evidence);
         let settlement_pending = incremental_entry["state"] == "pending"
             || central_release["state"] == "pending"
             || entry_fill_pending;
+        // A verified flat position alone cannot retire the durable SQL risk
+        // stop. Final remediation requires independently complete finance,
+        // Worker release, ZERO native lots and a NEW flat+orphan-free venue
+        // readback, committed together by the SQL owner.
+        let mut remediation_committed = false;
+        let mut protection_remediation = json!({"state":"not_evaluated"});
+        if prior_protection_incident
+            && venue_flat_verified
+            && financial
+            && !settlement_pending
+            && exposure == Decimal::ZERO
+            && central_release["state"] == "verified"
+        {
+            let fresh = r.observer.snapshot_until(deadline()).await;
+            let algos = r.observer.pending_derivative_risk_algos().await;
+            match (fresh, algos) {
+                (Ok(fresh), Ok(algos))
+                    if verify_instrument_is_flat(
+                        &i.instrument_id,
+                        fresh
+                            .positions
+                            .iter()
+                            .map(|p| (p.instrument_id.as_str(), p.position.as_str())),
+                    )
+                    .is_ok()
+                        && algos.complete_within_bound
+                        && !algos
+                            .samples
+                            .iter()
+                            .any(|a| a.instrument_id == i.instrument_id) =>
+                {
+                    let source_digest = digest(&(
+                        "protection-flat-source-proof/v1",
+                        &i.intent_id,
+                        &i.plan_hash,
+                        &order,
+                        &entry_fill_evidence,
+                        &central_release,
+                        now(),
+                    ))?;
+                    let id = i.intent_id.clone();
+                    let proof = source_digest.clone();
+                    let committed = r
+                        .execution
+                        .store
+                        .call(deadline(), move |s| {
+                            s.resolve_protection_incident_after_flat(&id, &proof, now())
+                        })
+                        .await
+                        .map_err(err)?;
+                    if committed {
+                        i = self.find_intent(r, &i.intent_id).await?;
+                        remediation_committed = true;
+                        protection_remediation =
+                            json!({"state":"verified_flat_no_orphans","source_digest":source_digest});
+                    }
+                }
+                _ => {
+                    protection_remediation =
+                        json!({"state":"pending","reason_code":"FLAT_OR_ALGO_SOURCE_UNVERIFIED"});
+                }
+            }
+        }
+        let prior_protection_incident_unresolved =
+            protection_incident_still_unresolved(i.incident.as_deref(), remediation_committed);
+        let live_protection_incident = protection_failed || prior_protection_incident_unresolved;
         let mut result = completed(
             json!({"intent":i,"remaining_exposure":if financial{Some(exact(exposure))}else{None},
                 "entry_costs":entry_costs,
                 "entry_fill_evidence":entry_fill_evidence,
                 "incremental_entry_settlement":incremental_entry,
                 "protection":protection,"central_release":central_release,
+                "protection_remediation":protection_remediation,
                 "financial_error":financial_error,"financial_complete":financial && !settlement_pending,
                 "protection_incident":live_protection_incident,
                 "prior_protection_incident_unresolved":prior_protection_incident_unresolved,
@@ -2414,7 +2488,12 @@ mod entry_cost_status_tests {
         let half = Decimal::new(5, 1);
         assert_eq!(
             verified_emergency_owned_exposure(&i, one, one, [("long", half)]),
-            Ok(half)
+            Err("EMERGENCY_EXPOSURE_SQL_VENUE_MISMATCH".into()),
+            "a late fill must be in the same intent's SQL lots before Close"
+        );
+        assert_eq!(
+            verified_emergency_owned_exposure(&i, one, one, [("long", one)]),
+            Ok(one)
         );
         assert_eq!(
             verified_emergency_owned_exposure(&i, one, one, std::iter::empty()),

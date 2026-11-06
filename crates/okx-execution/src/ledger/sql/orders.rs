@@ -57,6 +57,59 @@ impl AccountStore {
             now,
         )
     }
+    /// Resolve a durable protection stop only after the caller has independently
+    /// verified fresh flat venue state, complete finance/central settlement and
+    /// zero pending algos on this instrument. Reject remaining SQL lots in the
+    /// SAME SQLite transaction that clears both stop and intent incident.
+    pub fn resolve_protection_incident_after_flat(
+        &mut self,
+        id: &str,
+        source_digest: &str,
+        now: i64,
+    ) -> StoreResult<bool> {
+        if source_digest.len() != 64
+            || !source_digest.bytes().all(|c| c.is_ascii_hexdigit())
+        {
+            return Err(StoreError::Invalid("PROTECTION_FLAT_SOURCE_DIGEST_INVALID"));
+        }
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let (instrument, incident): (String, Option<String>) = tx.query_row(
+            "SELECT instrument_id, incident FROM intents WHERE intent_id=?1",
+            [id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        if !matches!(
+            incident.as_deref(),
+            Some("PROTECTION_PENDING_OR_FAILED" | "MANAGED_AGGREGATE_PROTECTION_UNVERIFIED")
+        ) {
+            return Ok(false);
+        }
+        let active: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM position_lots WHERE instrument_id=?1 AND remaining_qty<>'0'",
+            [&instrument],
+            |row| row.get(0),
+        )?;
+        if active != 0 {
+            return Err(StoreError::Invalid("PROTECTION_FLAT_SQL_EXPOSURE_REMAINS"));
+        }
+        let changed = tx.execute(
+            "UPDATE risk_stops SET resolution=?2 WHERE stop_id=?1 AND resolution IS NULL",
+            params![format!("protection:{id}"), source_digest],
+        )?;
+        if changed != 1 {
+            return Err(StoreError::Invalid("PROTECTION_RISK_STOP_NOT_ACTIVE"));
+        }
+        tx.execute(
+            "UPDATE intents SET incident=NULL,revision=revision+1,updated_at=?2
+             WHERE intent_id=?1 AND incident IN
+             ('PROTECTION_PENDING_OR_FAILED','MANAGED_AGGREGATE_PROTECTION_UNVERIFIED')",
+            params![id, now],
+        )?;
+        tx.commit()?;
+        Ok(true)
+    }
     pub fn protection_incident(&mut self, id: &str, reason: &str, now: i64) -> StoreResult<()> {
         let tx = self
             .connection
