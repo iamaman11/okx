@@ -298,6 +298,18 @@ struct CaptureTurn {
     until: Instant,
 }
 
+// An account-local permit may span I/O to preserve monotonic cursor
+// ownership. Queue admission consumes the original financial source budget.
+async fn capture_source_permit_until(
+    serial: &tokio::sync::Semaphore,
+    until: Instant,
+) -> AgentResult<tokio::sync::SemaphorePermit<'_>> {
+    tokio::time::timeout_at(until.into(), serial.acquire())
+        .await
+        .map_err(|_| invalid("ACCOUNT_SOURCE_CAPTURE_ADMISSION_DEADLINE"))?
+        .map_err(|_| invalid("ACCOUNT_SOURCE_CAPTURE_OWNER_CLOSED"))
+}
+
 /// Stable account-snapshot contract also used by trade recovery.
 pub async fn capture_account_sources(
     observer: &AccountBootstrapper,
@@ -324,15 +336,14 @@ pub(crate) async fn capture_account_sources_traced(
 ) -> AgentResult<CaptureCompleted> {
     // The periodic financial cycle, TradeService Status and recovery use this
     // same account-local capture admission; only one owns a cursor window.
-    let _capture_owner = execution.source_capture_serial.lock().await;
+    // The original ten-second source window includes owner queue admission.
+    let capture_until = Instant::now() + Duration::from_secs(10);
+    let _capture_owner =
+        capture_source_permit_until(&execution.source_capture_serial, capture_until).await?;
     let initial = private_ws.status().await;
     if !initial.logged_in || initial.connection_generation == 0 {
         return Err(invalid("PRIVATE_SOURCE_NOT_READY"));
     }
-    // One monotonic bound for authenticated snapshot plus six financial
-    // history pages. Waiting admits only LOCAL no-send GET capacity; no
-    // venue retry, incomplete page acceptance or source-time extension.
-    let capture_until = Instant::now() + Duration::from_secs(10);
     let observer_and_cursors_started = Instant::now();
     if let Some((store, id)) = trace.as_ref() {
         store.phase_started(*id, "observer_and_cursors");
@@ -1247,5 +1258,63 @@ mod tests {
         // A transfer or non-funding bill may legitimately omit PnL.
         assert_eq!(bill_pnl("11", "").unwrap(), Decimal::ZERO);
         assert_eq!(bill_pnl("12", "").unwrap(), Decimal::ZERO);
+    }
+}
+
+#[cfg(test)]
+mod bounded_source_owner_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn occupied_a_expires_b_proceeds_and_a_recovers() {
+        let a = tokio::sync::Semaphore::new(1);
+        let b = tokio::sync::Semaphore::new(1);
+        let held = capture_source_permit_until(
+            &a,
+            Instant::now() + Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+        assert!(capture_source_permit_until(
+            &a,
+            Instant::now() + Duration::from_millis(80),
+        )
+        .await
+        .is_err());
+        let b_owner = capture_source_permit_until(
+            &b,
+            Instant::now() + Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+        drop(b_owner);
+        drop(held);
+        let recovered = capture_source_permit_until(
+            &a,
+            Instant::now() + Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+        drop(recovered);
+    }
+
+    #[tokio::test]
+    async fn cancelled_waiter_cannot_hold_capture_permit() {
+        let owner = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
+        let held = owner.acquire().await.unwrap();
+        let waiting = std::sync::Arc::clone(&owner);
+        let task = tokio::spawn(async move {
+            capture_source_permit_until(
+                &waiting,
+                Instant::now() + Duration::from_secs(5),
+            )
+            .await
+            .is_ok()
+        });
+        tokio::task::yield_now().await;
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        drop(held);
+        assert_eq!(owner.available_permits(), 1);
     }
 }

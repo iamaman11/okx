@@ -31,6 +31,10 @@ fn current_executor_identity(
     })
 }
 
+fn identity_source_deadline() -> okx_api::OkxError {
+    okx_api::OkxError::Response("EXECUTOR_IDENTITY_SOURCE_DEADLINE".into())
+}
+
 pub struct ExecutionRuntime {
     pub store: AccountStoreHandle,
     pub trade: TradeApi,
@@ -40,11 +44,12 @@ pub struct ExecutionRuntime {
     pub environment: OkxEnvironment,
     // Serialize finance source windows per account before reading SQL cursors.
     // No second capture may replay an older watermark after another commits.
-    pub(crate) source_capture_serial: tokio::sync::Mutex<()>,
+    pub(crate) source_capture_serial: tokio::sync::Semaphore,
     // An account-local singleflight for overlapping background/Status UID
     // checks. No reuse across verified UIDs, and never across the 2s source
     // age. Actual trade Execute still reads executor config after HELD.
     executor_identity: tokio::sync::Mutex<Option<ExecutorIdentityProof>>,
+    executor_identity_refresh: tokio::sync::Semaphore,
     uid: String,
 }
 impl ExecutionRuntime {
@@ -73,8 +78,9 @@ impl ExecutionRuntime {
             account: AccountApi::new(rest.clone()),
             clock: rest,
             environment,
-            source_capture_serial: tokio::sync::Mutex::new(()),
+            source_capture_serial: tokio::sync::Semaphore::new(1),
             executor_identity: tokio::sync::Mutex::new(None),
+            executor_identity_refresh: tokio::sync::Semaphore::new(1),
             uid,
         }
     }
@@ -87,35 +93,44 @@ impl ExecutionRuntime {
         if self.uid != uid {
             return Ok(false);
         }
-        let mut guard = self.executor_identity.lock().await;
-        if Instant::now() >= until {
-            return Err(
-                okx_api::OkxError::Response("EXECUTOR_IDENTITY_SOURCE_DEADLINE".into()).into(),
-            );
-        }
-        // Source capture can overlap periodic maintenance and public Status.
-        // One authenticated config GET is sufficient for these overlapping
-        // UID-only verifications. Freshness remains anchored to its actual
-        // HTTP completion, never to a cache hit.
+        // Cache-state mutex is never held across authenticated HTTP.
+        let guard = tokio::time::timeout_at(until.into(), self.executor_identity.lock())
+            .await
+            .map_err(|_| identity_source_deadline())?;
         if current_executor_identity(guard.as_ref(), uid, generation, Instant::now()) {
             return Ok(true);
         }
-        *guard = None;
-        // The previous immediate config() could fail LOCAL/NOT_SENT under
-        // the real shared 5/2s private-read quota. Wait only for that exact
-        // local admission within the ORIGINAL source-capture deadline.
-        // No sent request, exchange throttle or venue POST is retried.
-        let config = self
-            .account
-            .config_wait(until.saturating_duration_since(Instant::now()))
-            .await?;
+        drop(guard);
+        // Account-local singleflight; the caller deadline includes queue wait.
+        let _refresh = tokio::time::timeout_at(
+            until.into(), self.executor_identity_refresh.acquire(),
+        )
+        .await
+        .map_err(|_| identity_source_deadline())?
+        .map_err(|_| identity_source_deadline())?;
+        let guard = tokio::time::timeout_at(until.into(), self.executor_identity.lock())
+            .await
+            .map_err(|_| identity_source_deadline())?;
+        if current_executor_identity(guard.as_ref(), uid, generation, Instant::now()) {
+            return Ok(true);
+        }
+        drop(guard);
+        let config = tokio::time::timeout_at(
+            until.into(),
+            self.account.config_wait(until.saturating_duration_since(Instant::now())),
+        )
+        .await
+        .map_err(|_| identity_source_deadline())??;
+        let received_at = Instant::now();
+        let mut guard = tokio::time::timeout_at(until.into(), self.executor_identity.lock())
+            .await
+            .map_err(|_| identity_source_deadline())?;
         if okx_api::account_uid_fingerprint(&config.uid) != uid {
+            *guard = None;
             return Ok(false);
         }
         *guard = Some(ExecutorIdentityProof {
-            verified_uid: uid.to_owned(),
-            generation,
-            received_at: Instant::now(),
+            verified_uid: uid.to_owned(), generation, received_at,
         });
         Ok(true)
     }
@@ -128,6 +143,21 @@ impl ExecutionRuntime {
 #[cfg(test)]
 mod identity_cache_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn uid_waiting_is_bounded_and_other_account_progresses() {
+        let a = tokio::sync::Semaphore::new(1);
+        let b = tokio::sync::Semaphore::new(1);
+        let guard = a.acquire().await.unwrap();
+        assert!(tokio::time::timeout_at(
+            (Instant::now() + Duration::from_millis(80)).into(), a.acquire(),
+        ).await.is_err());
+        assert!(tokio::time::timeout_at(
+            (Instant::now() + Duration::from_secs(1)).into(), b.acquire(),
+        ).await.is_ok());
+        drop(guard);
+        assert_eq!(a.available_permits(), 1);
+    }
 
     #[test]
     fn executor_uid_cache_cannot_cross_account_or_outlive_signed_source() {
