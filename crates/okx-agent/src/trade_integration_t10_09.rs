@@ -359,6 +359,38 @@ async fn t10_09_b_public_partial_reduce(
         "terminal B order readback must not create a venue POST");
     let key = "t10_09_public_reduce_020_0001".to_owned();
     let at = chrono::Utc::now().timestamp_millis().to_string();
+    // The original B balance/position GET pages were consumed by source
+    // capture and the terminal Cancel Status. This is a NEW bounded external
+    // observation at the Reduce boundary, not a demand-driven fallback.
+    // No fee or position mutation is fabricated before the real Reduce fill.
+    let balance = raw(json!([{
+        "totalEq":"100","adjEq":"100","uTime":at,
+        "details":[{"ccy":"USDT","eq":"100","liab":"0",
+            "availEq":"100","availBal":"100","eqUsd":"100","uTime":at}]
+    }]));
+    feed.advance_recorded_route(
+        "fixture-observer-b", "/api/v5/account/balance",
+        (0..48).map(|_| RecordedGet {
+            access_key:"fixture-observer-b".into(),
+            path:"/api/v5/account/balance".into(),
+            required_query:vec![],
+            raw_response:balance.clone(),
+        }).collect(),
+    );
+    let unchanged_position = raw(json!([{
+        "instType":"SWAP","instId":"BTC-USDT-SWAP",
+        "posSide":"long","pos":"0.04","mgnMode":"cross",
+        "avgPx":"1000","markPx":"1000","uTime":at
+    }]));
+    feed.advance_recorded_route(
+        "fixture-observer-b", "/api/v5/account/positions",
+        (0..48).map(|_| RecordedGet {
+            access_key:"fixture-observer-b".into(),
+            path:"/api/v5/account/positions".into(),
+            required_query:vec![],
+            raw_response:unchanged_position.clone(),
+        }).collect(),
+    );
     feed.advance_recorded_public_clock(raw(json!([{"ts":at}])));
     feed.expect_public_clock(raw(json!([{
         "ts":chrono::Utc::now().timestamp_millis().to_string()
