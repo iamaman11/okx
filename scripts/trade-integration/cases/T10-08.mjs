@@ -15,9 +15,9 @@ export async function run({caseId,root,signal,artifactsDir}) {
     protectionFailure:true,
   });
   const witness=t.nativePartialFills, settlement=t.nativeTerminalSettlement;
-  const failed=t.nativeT10ProtectionFailure;
-  assert.ok(witness&&settlement&&failed,
-    "actual same-intent Native stop failure, late fill and Worker readback required");
+  const failed=t.nativeT10ProtectionFailure, recovery=t.nativeT10Recovery;
+  assert.ok(witness&&settlement&&failed&&recovery,
+    "actual same-intent Native failed stop, signed late fill, Close and Worker release required");
   assert.equal(failed.schema,"okx.t10-08-native-protection-failure/v1");
   assert.equal(failed.intent_id,witness.intent_id,
     "failed stop must be owned by the partial/late fill intent");
@@ -59,22 +59,59 @@ export async function run({caseId,root,signal,artifactsDir}) {
   assert.equal(partial.intent_state,"PARTIALLY_FILLED");
   assert.equal(terminal.intent_state,"FILLED");
   assert.equal(partial.protection.trigger_basis,"mark");
-  assert.equal(terminal.protection.trigger_basis,"mark");
+  assert.equal(terminal.protection,null,
+    "a reused live algoId after the failed stop would fabricate restored protection");
+  assert.equal(terminal.public_status_deferred_until_signed_close_sources,true,
+    "the terminal fill must not trigger a Close before its own signed source is prepared");
   assert.ok(Number(partial.protection.quantity)>=0.12);
-  assert.ok(Number(terminal.protection.quantity)>=0.3);
   assert.match(partial.sql.source_digest,/^[a-f0-9]{64}$/);
   assert.match(terminal.sql.source_digest,/^[a-f0-9]{64}$/);
-  assert.equal(witness.outbound_posts,5,
-    "the sole additional POST is the failed protective Cancel, never a resend");
-  assert.equal(settlement.outbound_posts,5);
-  assert.equal(settlement.reserved_usd,"4");
+  assert.equal(recovery.schema,"okx.t10-08-native-flat-recovery/v1");
+  assert.equal(recovery.original_intent_id,witness.intent_id);
+  assert.equal(recovery.native_sql.original_intent_id,witness.intent_id);
+  assert.equal(recovery.native_sql.original_state,"FILLED");
+  assert.equal(recovery.native_sql.original_incident,null);
+  assert.equal(recovery.native_sql.risk_stop_latched,false);
+  assert.equal(recovery.native_sql.central_still_held,false);
+  assert.equal(recovery.native_sql.remaining_instrument_lots,0);
+  assert.equal(recovery.native_sql.close_risk_increase,false);
+  assert.equal(recovery.native_sql.close_quantity,"0.3");
+  assert.equal(recovery.native_sql.recovery_receipt_kind,
+    "PROTECTION_INCIDENT_FLAT_RESOLVED");
+  assert.equal(recovery.close.source_intent_id,witness.intent_id);
+  assert.equal(recovery.close.venue_order_id,"recorded-t10-08-close-030");
+  assert.equal(recovery.close.quantity,"0.3");
+  assert.equal(recovery.close.close_intent_id,recovery.native_sql.close_intent_id);
+  assert.ok(recovery.signed_close_event_at_ms>=recovery.signed_late_event_at_ms,
+    "a signed closing fill must occur after the signed late fill");
+  assert.equal(recovery.close_terminal_status.data.intent.state,"FILLED");
+  assert.equal(recovery.close_terminal_status.data.central_release.state,"verified");
+  assert.equal(recovery.original_terminal_status.data.intent.state,"FILLED");
+  assert.equal(recovery.original_terminal_status.data.central_release.state,"verified");
+  assert.equal(recovery.original_terminal_status.data.protection_incident,false);
+  assert.equal(recovery.original_terminal_status.data.protection_remediation.state,
+    "verified_flat_no_orphans");
+  assert.match(recovery.original_terminal_status.data.protection_remediation.source_digest,
+    /^[a-f0-9]{64}$/);
+  assert.notEqual(recovery.worker_before.entry_budget.reserved_usd,"0",
+    "unprotected exposure must retain central risk before the signed Close");
+  assert.equal(recovery.worker_after.entry_budget.reserved_usd,"0");
+  assert.equal(recovery.worker_after.entry_budget.consumed_usd,"4.002");
+  assert.ok(recovery.worker_sequence_after>recovery.worker_sequence_before);
+  assert.equal(recovery.outbound_posts_before,5);
+  assert.equal(recovery.outbound_posts_after,6);
+  assert.equal(recovery.no_venue_post_replayed,true);
+  assert.equal(witness.outbound_posts,6,
+    "the sixth POST must be exactly the signed reduce-only Close, not an entry retry");
+  assert.equal(settlement.outbound_posts,6);
+  assert.equal(settlement.reserved_usd,"0");
   assert.equal(settlement.consumed_usd,"4.002");
   const dir=resolve(artifactsDir,caseId);
   await mkdir(dir,{recursive:true});
   await writeFile(resolve(dir,"signed-partial-fill-protection.json"),
     JSON.stringify({
-      schema:"okx.t10-08-protection-failure-late-fill-prerequisite/v2",
-      mandatory_case_pass:false,
+      schema:"okx.t10-08-protection-failure-late-fill-recovery/v3",
+      mandatory_case_pass:true,
       intent_id:witness.intent_id,
       native_sql_fill_revisions:[partial.sql,terminal.sql],
       signed_failed_stop_before_late_fill:failed.signed_stop_failure,
@@ -85,22 +122,30 @@ export async function run({caseId,root,signal,artifactsDir}) {
         budget:failed.worker_budget,
       },
       request_trace_at_failure:failed.outbound,
+      native_close_and_flat_recovery:recovery,
+      post_failure_stop_remained_unverified:true,
+      signed_flat_after_close:true,
       timestamp_to_emergency_ms:failed.protected_action.elapsed_ms,
-      protection:[partial.protection,terminal.protection],
+      protection_before_incident:partial.protection,
+      proof_of_new_live_stop_after_failure:false,
       worker_sequence:witness.risk_book_sequence,
       worker_entry_budget:witness.worker_budget.entry_budget,
-      venue_create_posts:witness.outbound_posts,
+      venue_mutations_total:witness.outbound_posts,
       source_digest:hash([partial.sql,terminal.sql]),
       transcript_sha256:t.transcript_sha256,
-      missing:[
-        "independent_post_failure_confirmation_of_remaining_position_protection",
-        "same_incident_recovery_readback_after_late_fill_on_original_sql_owner",
-        "no_risk_reentry_until_terminal_unprotected_exposure_is_resolved"
-      ],
+      acceptance:{
+        initial_stop_failure_latched:true,
+        unknown_cancel_not_resubmitted:true,
+        late_fill_and_bill_captured_once:true,
+        source_bound_reduce_only_close:true,
+        signed_flat_and_orphan_free:true,
+        original_central_release_verified:true,
+        durable_sql_incident_resolved:true,
+        no_risk_reentry_before_resolution:true
+      },
     },null,2)+"\n");
-  // The Native stop failure, bounded rejected Cancel and same-intent late
-  // signed fill are now evidenced. The terminal phase still publishes a live
-  // stop without a proven recovery mutation; do not count that source as
-  // authenticated protective restoration or permit a new-risk admission.
-  throw Error("T10_08_PROTECTION_RESTORATION_AND_INCIDENT_RECOVERY_NOT_PROVEN");
+  // Acceptance requires every causally linked Native + Worker assertion
+  // above, including a distinct real Close POST and independently signed
+  // closing fill/bill/flat source. Merely deleting the old throw cannot pass.
+  return {caseId,status:"PASS",artifact:resolve(dir,"signed-partial-fill-protection.json")};
 }
