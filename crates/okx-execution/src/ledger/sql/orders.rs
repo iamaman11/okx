@@ -67,9 +67,7 @@ impl AccountStore {
         source_digest: &str,
         now: i64,
     ) -> StoreResult<bool> {
-        if source_digest.len() != 64
-            || !source_digest.bytes().all(|c| c.is_ascii_hexdigit())
-        {
+        if source_digest.len() != 64 || !source_digest.bytes().all(|c| c.is_ascii_hexdigit()) {
             return Err(StoreError::Invalid("PROTECTION_FLAT_SOURCE_DIGEST_INVALID"));
         }
         let tx = self

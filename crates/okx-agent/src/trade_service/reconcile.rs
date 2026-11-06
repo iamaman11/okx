@@ -758,11 +758,7 @@ impl TradeService {
             // is not yet an active stop against the old lots. Never
             // emergency-cancel an unrelated managed position because a
             // new limit order has not filled.
-            if i.risk_increase
-                && exposed
-                && filled > Decimal::ZERO
-                && !prior_protection_incident
-            {
+            if i.risk_increase && exposed && filled > Decimal::ZERO && !prior_protection_incident {
                 let algo_client = i
                     .client_order_id
                     .get(..31)
@@ -1112,8 +1108,7 @@ impl TradeService {
                             .same_values_ignoring_update_times(&last.balance)
                         && verify_instrument_is_flat(
                             &i.instrument_id,
-                            last
-                                .positions
+                            last.positions
                                 .iter()
                                 .map(|p| (p.instrument_id.as_str(), p.position.as_str())),
                         )
@@ -1149,8 +1144,7 @@ impl TradeService {
                     if committed {
                         i = self.find_intent(r, &i.intent_id).await?;
                         remediation_committed = true;
-                        protection_remediation =
-                            json!({"state":"verified_flat_no_orphans","source_digest":source_digest});
+                        protection_remediation = json!({"state":"verified_flat_no_orphans","source_digest":source_digest});
                     }
                 }
                 _ => {
@@ -1187,10 +1181,7 @@ impl TradeService {
                 "evaluated"
             }
         });
-        if !financial
-            || settlement_pending
-            || protection_source_pending
-            || live_protection_incident
+        if !financial || settlement_pending || protection_source_pending || live_protection_incident
         {
             result["status"] = json!("partial");
             result["warnings"] = json!([if live_protection_incident {

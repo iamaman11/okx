@@ -9,10 +9,12 @@ fn t10_08_flat_protection_stop_resolution_is_atomic_and_idempotent() {
         s.resolve_protection_incident_after_flat("intent", "not-a-digest", 5),
         Err(StoreError::Invalid("PROTECTION_FLAT_SOURCE_DIGEST_INVALID"))
     ));
-    s.connection.execute(
-        "INSERT INTO position_lots VALUES(?1,NULL,?2,NULL,?3,'long','0.12','1000',4)",
-        rusqlite::params!["t10-08-unclosed", "intent", "BTC-USDT-SWAP"],
-    ).unwrap();
+    s.connection
+        .execute(
+            "INSERT INTO position_lots VALUES(?1,NULL,?2,NULL,?3,'long','0.12','1000',4)",
+            rusqlite::params!["t10-08-unclosed", "intent", "BTC-USDT-SWAP"],
+        )
+        .unwrap();
     let digest = "a".repeat(64);
     assert!(matches!(
         s.resolve_protection_incident_after_flat("intent", &digest, 5),
@@ -23,18 +25,22 @@ fn t10_08_flat_protection_stop_resolution_is_atomic_and_idempotent() {
         Some("PROTECTION_PENDING_OR_FAILED")
     );
     assert_eq!(s.stops().unwrap().len(), 1);
-    s.connection.execute(
-        "UPDATE position_lots SET remaining_qty='0' WHERE lot_id='t10-08-unclosed'",
-        [],
-    ).unwrap();
-    assert!(s
-        .resolve_protection_incident_after_flat("intent", &digest, 6)
-        .unwrap());
+    s.connection
+        .execute(
+            "UPDATE position_lots SET remaining_qty='0' WHERE lot_id='t10-08-unclosed'",
+            [],
+        )
+        .unwrap();
+    assert!(
+        s.resolve_protection_incident_after_flat("intent", &digest, 6)
+            .unwrap()
+    );
     assert_eq!(s.intent("intent").unwrap().unwrap().incident, None);
     assert!(s.stops().unwrap().is_empty());
-    assert!(!s
-        .resolve_protection_incident_after_flat("intent", &digest, 7)
-        .unwrap());
+    assert!(
+        !s.resolve_protection_incident_after_flat("intent", &digest, 7)
+            .unwrap()
+    );
 }
 
 #[test]
