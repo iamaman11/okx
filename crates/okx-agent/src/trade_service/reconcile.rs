@@ -1,6 +1,38 @@
 use super::*;
 use okx_api::CancelOrderRequest;
 
+// Source-backed protective policy has a hard wall-clock SLO independent of
+// fee/fill capture. A timeout can cancel the I/O future after a durable BEGIN:
+// this is an UNKNOWN operation, never permission to repeat the signed POST.
+async fn bounded_protection_before_finance<F>(
+    observed_at: Instant,
+    bound: Duration,
+    action: F,
+) -> Value
+where
+    F: std::future::Future<Output = Result<(), String>>,
+{
+    let until = observed_at + bound;
+    let outcome = tokio::time::timeout_at(until.into(), action).await;
+    let elapsed_ms = observed_at.elapsed().as_millis() as u64;
+    match outcome {
+        Ok(Ok(())) => json!({
+            "state":"terminal_order_verified","phase":"before_financial_capture",
+            "elapsed_ms":elapsed_ms,"next_action":"verify_finance_then_close"
+        }),
+        Ok(Err(reason)) => json!({
+            "state":"blocked","phase":"before_financial_capture",
+            "elapsed_ms":elapsed_ms,"reason_code":reason,
+            "next_action":"trade.status","retry_create":false
+        }),
+        Err(_) => json!({
+            "state":"blocked","phase":"before_financial_capture",
+            "elapsed_ms":elapsed_ms,"reason_code":"EMERGENCY_ACTION_DEADLINE_OR_OUTCOME_UNKNOWN",
+            "next_action":"trade.status","retry_create":false
+        }),
+    }
+}
+
 /// A successful source capture only proves that the API replied. It cannot
 /// complete the financial lifecycle when no identity-bound fill+bill evidence
 /// has been captured. A terminal verified zero-fill cancellation is separate:
@@ -468,6 +500,7 @@ impl TradeService {
             json!(null)
         };
         let mut protection_failed = false;
+        let mut protection_failure_observed_at = None;
         let mut protection_source_pending = false;
         let mut venue_flat_verified = false;
         if matches!(i.state, IntentState::Prepared | IntentState::Reserved) {
@@ -763,6 +796,7 @@ impl TradeService {
                                 Err(super::execute::ManagedProtectionCensusError::Denied(reason)) => {
                                     eprintln!("MANAGED_AGGREGATE_CENSUS_DENIAL_V1:{reason}");
                                     protection_failed = true;
+                                    protection_failure_observed_at = Some(Instant::now());
                                     let id = i.intent_id.clone();
                                     r.execution
                                         .store
@@ -781,6 +815,7 @@ impl TradeService {
                     }
                     _ => {
                         protection_failed = true;
+                        protection_failure_observed_at = Some(Instant::now());
                         let id = i.intent_id.clone();
                         r.execution
                             .store
@@ -793,6 +828,23 @@ impl TradeService {
                 }
             }
         }
+        // A confirmed failure of the attached stop must start the protective
+        // policy BEFORE any possibly slow/failed finance capture. The durable
+        // incident already blocks new risk. The only pre-finance venue mutation
+        // allowed is a single ACK-bound cancel of this exact entry order.
+        // A reduce/Close needs independently captured signed fills and SQL lots.
+        let protective = if protection_failed {
+            Some(
+                bounded_protection_before_finance(
+                    protection_failure_observed_at.expect("protection incident has observed time"),
+                    Duration::from_secs(2),
+                    self.emergency_cancel_before_finance(r, &i),
+                )
+                .await,
+            )
+        } else {
+            None
+        };
         // Capture money before releasing capacity; incomplete source pages never become zero costs.
         let financial_capture = crate::source_capture::capture_account_sources(
             &r.observer,
@@ -802,8 +854,31 @@ impl TradeService {
         .await;
         let financial_error = financial_capture.as_ref().err().map(ToString::to_string);
         let financial = financial_capture.is_ok();
-        let compensation = if protection_failed && financial {
-            Some(Box::pin(self.emergency_exit(r, &i)).await?)
+        let compensation = if let Some(prepared) = protective {
+            if prepared["state"] != "terminal_order_verified" {
+                Some(prepared)
+            } else if !financial {
+                // A protective cancel/terminal readback occurred on time, but
+                // source failure never authorizes an unproven reduce quantity.
+                Some(json!({
+                    "state":"blocked",
+                    "phase":"awaiting_financial_proof",
+                    "protective_action":prepared,
+                    "reason_code":"EMERGENCY_CLOSE_FINANCIAL_SOURCE_UNAVAILABLE",
+                    "next_action":"trade.status","retry_create":false,
+                }))
+            } else {
+                // The same public Close path is idempotent and obtains the
+                // exact owned SQL-lot quantity. It never guesses a venue size.
+                let key = format!("safety_close_{}", &i.client_order_id);
+                Some(match Box::pin(self.close(r, &key, &i.intent_id, 10000, None)).await {
+                    Ok(result) => json!({"state":"close_attempted",
+                        "protective_action":prepared,"outcome":result}),
+                    Err(reason) => json!({"state":"blocked","phase":"close_after_finance",
+                        "protective_action":prepared,"reason_code":reason,
+                        "next_action":"trade.status","retry_create":false}),
+                })
+            }
         } else {
             None
         };
@@ -960,7 +1035,7 @@ impl TradeService {
                 "evaluated"
             }
         });
-        if !financial || settlement_pending || protection_source_pending {
+        if !financial || settlement_pending || protection_source_pending || protection_failed {
             result["status"] = json!("partial");
             result["warnings"] = json!([if protection_source_pending {
                 "PROTECTION_SOURCE_BEFORE_SQL_FILL"
@@ -1685,92 +1760,96 @@ impl TradeService {
             .map_err(err)?;
         Ok(())
     }
-    async fn emergency_exit(
+    /// Stage one: protect the same authenticated entry without any finance
+    /// dependency. The first signed cancel is protected by one durable SQL
+    /// operation claim; any unknown outcome blocks replay. A terminal order
+    /// is read-only and allows stage two only after source-backed finance.
+    async fn emergency_cancel_before_finance(
         &self,
         r: &Arc<AccountResources>,
         i: &StoredIntent,
-    ) -> Result<Value, String> {
+    ) -> Result<(), String> {
         let current = r
             .execution
             .trade
             .order_by_client_id(&i.instrument_id, &i.client_order_id)
             .await
             .map_err(err)?;
-        if !matches!(
-            current.state.as_str(),
-            "filled" | "canceled" | "mmp_canceled"
-        ) {
-            let key = format!("safety_cancel_{}", &i.client_order_id);
-            let hash = digest(&(i.intent_id.clone(), "unprotected_entry_cancel"))?;
-            let k = key.clone();
-            let h = hash.clone();
-            let permit = r
-                .mutation_capacity
-                .try_acquire()
-                .map_err(|_| "ACCOUNT_MUTATION_BUSY")?;
-            let fresh = r
-                .execution
-                .store
-                .call(deadline(), move |s| {
-                    s.begin_operation(&k, &h, "safety_cancel", now())
-                })
-                .await
-                .map_err(err)?;
-            if !fresh {
-                return Ok(uncertain(&i.intent_id, "SAFETY_CANCEL_OUTCOME_UNKNOWN"));
-            }
-            let request = CancelOrderRequest {
-                instrument_id: i.instrument_id.clone(),
-                client_order_id: i.client_order_id.clone(),
-            };
-            let timing = r
-                .execution
-                .clock
-                .clock_evidence()
-                .await
-                .map_err(err)?
-                .mutation_timing(5000)
-                .map_err(err)?;
-            let rate = r
-                .execution
-                .trade
-                .admit_cancel_order(&request)
-                .map_err(err)?;
-            let response = r
-                .execution
-                .trade
-                .cancel_order_after_admission(&request, &timing, &rate)
-                .await
-                .map_err(|_| "SAFETY_CANCEL_OUTCOME_UNKNOWN")?;
-            if !response.top_level_success()
-                || response.data.len() != 1
-                || !response.data[0].accepted()
-            {
-                return Ok(uncertain(&i.intent_id, "SAFETY_CANCEL_NOT_CONFIRMED"));
-            }
-            let read = r
-                .execution
-                .trade
-                .order_by_client_id(&i.instrument_id, &i.client_order_id)
-                .await
-                .map_err(err)?;
-            if !matches!(read.state.as_str(), "filled" | "canceled" | "mmp_canceled") {
-                return Ok(uncertain(&i.intent_id, "SAFETY_CANCEL_READBACK_PENDING"));
-            }
-            r.execution
-                .store
-                .call(deadline(), move |s| {
-                    s.operation_receipt(&key, &hash, "safety_cancel", "CANCELED_VERIFIED", now())
-                })
-                .await
-                .map_err(err)?;
-            drop(permit);
+        // A different order, instrument, side, amount or venue ID cannot
+        // authorize this intent's emergency cancellation or later Close.
+        verified_order_readback(i, &current)?;
+        if matches!(current.state.as_str(), "filled" | "canceled" | "mmp_canceled") {
+            return Ok(());
         }
-        crate::source_capture::capture_account_sources(&r.observer, &r.private_ws, &r.execution)
+        if !matches!(current.state.as_str(), "live" | "partially_filled") {
+            return Err("SAFETY_CANCEL_ORDER_STATE_UNVERIFIED".into());
+        }
+        let _permit = r
+            .mutation_capacity
+            .try_acquire()
+            .map_err(|_| "ACCOUNT_MUTATION_BUSY")?;
+        let request = CancelOrderRequest {
+            instrument_id: i.instrument_id.clone(),
+            client_order_id: i.client_order_id.clone(),
+        };
+        // LOCAL no-send source/rate denials cannot leave a fabricated SQL
+        // possible-send claim. Do the admission checks before BEGIN.
+        let timing = r
+            .execution
+            .clock
+            .clock_evidence()
+            .await
+            .map_err(err)?
+            .mutation_timing(5000)
+            .map_err(err)?;
+        let rate = r
+            .execution
+            .trade
+            .admit_cancel_order(&request)
+            .map_err(err)?;
+        let key = format!("safety_cancel_{}", &i.client_order_id);
+        let hash = digest(&(i.intent_id.clone(), "unprotected_entry_cancel"))?;
+        let k = key.clone();
+        let h = hash.clone();
+        let fresh = r
+            .execution
+            .store
+            .call(deadline(), move |s| s.begin_operation(&k, &h, "safety_cancel", now()))
             .await
             .map_err(err)?;
-        let key = format!("safety_close_{}", &i.client_order_id);
-        self.close(r, &key, &i.intent_id, 10000, None).await
+        if !fresh {
+            return Err("SAFETY_CANCEL_OUTCOME_UNKNOWN_NO_RESUBMIT".into());
+        }
+        let response = r
+            .execution
+            .trade
+            .cancel_order_after_admission(&request, &timing, &rate)
+            .await
+            .map_err(|_| "SAFETY_CANCEL_OUTCOME_UNKNOWN_NO_RESUBMIT")?;
+        if !response.top_level_success()
+            || response.data.len() != 1
+            || !response.data[0].accepted()
+        {
+            return Err("SAFETY_CANCEL_NOT_CONFIRMED_NO_RESUBMIT".into());
+        }
+        let read = r
+            .execution
+            .trade
+            .order_by_client_id(&i.instrument_id, &i.client_order_id)
+            .await
+            .map_err(err)?;
+        verified_order_readback(i, &read)?;
+        if !matches!(read.state.as_str(), "filled" | "canceled" | "mmp_canceled") {
+            return Err("SAFETY_CANCEL_READBACK_PENDING_NO_RESUBMIT".into());
+        }
+        r.execution
+            .store
+            .call(deadline(), move |s| {
+                s.operation_receipt(&key, &hash, "safety_cancel", "TERMINAL_VERIFIED", now())
+            })
+            .await
+            .map_err(err)?;
+        Ok(())
     }
     async fn cleanup_flat_protection(
         &self,
@@ -2142,6 +2221,48 @@ impl TradeService {
 #[cfg(test)]
 mod entry_cost_status_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn t10_08_emergency_policy_is_bounded_before_financial_capture() {
+        let first = bounded_protection_before_finance(
+            Instant::now(),
+            Duration::from_millis(50),
+            async { Ok(()) },
+        )
+        .await;
+        assert_eq!(first["state"], "terminal_order_verified");
+        assert_eq!(first["phase"], "before_financial_capture");
+
+        // A deferred source/operation cannot consume the whole finance
+        // deadline before we report a fail-closed protective blocker.
+        let began = Instant::now();
+        let blocked = bounded_protection_before_finance(
+            began,
+            Duration::from_millis(25),
+            async {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                Ok(())
+            },
+        )
+        .await;
+        assert_eq!(blocked["state"], "blocked");
+        assert_eq!(
+            blocked["reason_code"],
+            "EMERGENCY_ACTION_DEADLINE_OR_OUTCOME_UNKNOWN"
+        );
+        assert_eq!(blocked["retry_create"], false);
+        assert!(began.elapsed() < Duration::from_millis(200));
+
+        let local = bounded_protection_before_finance(
+            Instant::now(),
+            Duration::from_millis(50),
+            async { Err("ACCOUNT_MUTATION_BUSY".to_owned()) },
+        )
+        .await;
+        assert_eq!(local["state"], "blocked");
+        assert_eq!(local["reason_code"], "ACCOUNT_MUTATION_BUSY");
+        assert_eq!(local["retry_create"], false);
+    }
 
     #[test]
     fn t09_public_ack_without_fill_bill_evidence_cannot_complete_finance() {
