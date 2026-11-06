@@ -239,8 +239,12 @@ async fn t10_05_create_outcome(
         let reason=first["data"]["primary_reason"].as_str().unwrap_or("");
         let delay=recorded_preview_local_defer(reason,&rate_budget,remaining)
             .unwrap_or_else(||panic!(
-                "T10-05 no-send reason is not an authenticated LOCAL private GET defer: {first:?} rate={:?}",
-                rate_budget.snapshot().last_throttle
+                "T10-05 no-send reason is not an authenticated LOCAL private GET defer: {first:?} rate={:?} denied={:?} last_requests={:?}",
+                rate_budget.snapshot().last_throttle,
+                feed.denied_routes.lock().unwrap().iter().rev().take(6).cloned().collect::<Vec<_>>(),
+                feed.requests.lock().unwrap().iter().rev().filter(|get|
+                    get.contains("fixture-observer-b:") || get.contains("fixture-executor-b:")
+                ).take(8).cloned().collect::<Vec<_>>()
             ));
         local_nosend_attempts+=1;
         assert!(local_nosend_attempts<=2,

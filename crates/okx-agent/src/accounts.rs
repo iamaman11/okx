@@ -4018,23 +4018,24 @@ pub(crate) mod recorded_support {
 
         #[tokio::test]
         async fn signed_fee_phase_advances_only_on_explicit_event_and_keeps_prior_source_time() {
-            let feed=RecordedAccountHttp::default();
-            let page=|stamp:&str|RecordedGet {
-                access_key:"fixture-observer-b".into(),
-                path:"/api/v5/account/trade-fee".into(),
-                required_query:vec![
-                    ("instType".into(),"SWAP".into()),
-                    ("instFamily".into(),"BTC-USDT".into()),
+            let feed = RecordedAccountHttp::default();
+            let page = |stamp: &str| RecordedGet {
+                access_key: "fixture-observer-b".into(),
+                path: "/api/v5/account/trade-fee".into(),
+                required_query: vec![
+                    ("instType".into(), "SWAP".into()),
+                    ("instFamily".into(), "BTC-USDT".into()),
                 ],
-                raw_response:serde_json::to_vec(&serde_json::json!({
+                raw_response: serde_json::to_vec(&serde_json::json!({
                     "code":"0","msg":"","data":[{
                         "instType":"SWAP","ts":stamp,"feeGroup":[{
                             "groupId":"4","maker":"0.0005","taker":"0.0005"
                         }]
                     }]
-                })).unwrap(),
+                }))
+                .unwrap(),
             };
-            let get=||{
+            let get = || {
                 let mut request=reqwest::Request::new(
                     reqwest::Method::GET,
                     reqwest::Url::parse(
@@ -4047,24 +4048,38 @@ pub(crate) mod recorded_support {
                 );
                 request
             };
-            feed.expect_immutable_signed_phase("initial",page("100"));
+            feed.expect_immutable_signed_phase("initial", page("100"));
             for _ in 0..2 {
-                let response=deliver_causal(&feed,get()).await.unwrap();
-                assert_eq!(response["data"][0]["ts"],"100");
+                let response = deliver_causal(&feed, get()).await.unwrap();
+                assert_eq!(response["data"][0]["ts"], "100");
             }
-            assert_eq!(feed.advance_immutable_signed_phase(
-                "initial","after-proven-local-nosend",page("200")
-            ),2);
+            assert_eq!(
+                feed.advance_immutable_signed_phase(
+                    "initial",
+                    "after-proven-local-nosend",
+                    page("200")
+                ),
+                2
+            );
             for _ in 0..2 {
-                let response=deliver_causal(&feed,get()).await.unwrap();
-                assert_eq!(response["data"][0]["ts"],"200");
+                let response = deliver_causal(&feed, get()).await.unwrap();
+                assert_eq!(response["data"][0]["ts"], "200");
             }
-            assert_eq!(feed.immutable_signed_phase_reads(
-                "fixture-observer-b","/api/v5/account/trade-fee","after-proven-local-nosend"
-            ),2);
-            assert_eq!(feed.outbound_posts.lock().unwrap().len(),0);
-            let trace=feed.immutable_phase_trace.lock().unwrap().join("\n");
-            assert!(trace.contains("event=SIGNED_PHASE_ADVANCED from=initial to=after-proven-local-nosend"));
+            assert_eq!(
+                feed.immutable_signed_phase_reads(
+                    "fixture-observer-b",
+                    "/api/v5/account/trade-fee",
+                    "after-proven-local-nosend"
+                ),
+                2
+            );
+            assert_eq!(feed.outbound_posts.lock().unwrap().len(), 0);
+            let trace = feed.immutable_phase_trace.lock().unwrap().join("\n");
+            assert!(
+                trace.contains(
+                    "event=SIGNED_PHASE_ADVANCED from=initial to=after-proven-local-nosend"
+                )
+            );
         }
 
         #[tokio::test]
