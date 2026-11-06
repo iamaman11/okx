@@ -43,6 +43,7 @@
                 =="verified_or_no_change"
             && status["data"]["financial_error"].is_null()
             && status["data"]["protection_incident"]!=true
+            && status["data"]["protection_source_pending"]!=true
     }
 
     #[test]
@@ -68,6 +69,10 @@
         status["data"]["financial_error"]=serde_json::Value::Null;
         status["data"]["protection_incident"]=serde_json::json!(true);
         assert!(!t09_4_incremental_entry_proven(&status));
+        status["data"]["protection_incident"]=serde_json::json!(false);
+        status["data"]["protection_source_pending"]=serde_json::json!(true);
+        assert!(!t09_4_incremental_entry_proven(&status),
+            "stale position source is not a proven managed protection census");
     }
 
     // The only injected material is the venue's raw signed GET history,
@@ -465,6 +470,9 @@
                                         Ok(serde_json::json!({
                                             "client_id":client,
                                             "intent_id":linked.as_ref().map(|i|i.intent_id.as_str()),
+                                            "operation_key":linked.as_ref()
+                                                .map(|i|i.idempotency_key.as_str()),
+                                            "risk_increase":linked.as_ref().map(|i|i.risk_increase),
                                             "state":linked.as_ref().map(|i|i.state.as_str()),
                                             "incident":linked.as_ref()
                                                 .and_then(|i|i.incident.as_deref()),

@@ -457,6 +457,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'EXECUTOR_UID_ASYNC_ADMISSION_FAILED' }
           cargo test --locked -p okx-agent --lib bounded_source_owner_tests -- --nocapture
           if ($LASTEXITCODE -ne 0) { throw 'FINANCE_SOURCE_OWNER_ASYNC_ADMISSION_FAILED' }
+          cargo test --locked -p okx-agent --lib managed_census_stale_position_source_requires_fresh_event -- --nocapture
+          if ($LASTEXITCODE -ne 0) { throw 'MANAGED_CENSUS_EVENT_ORDER_REGRESSION' }
           cargo test --locked -p okx-agent --lib immutable_signed_leverage_handoff_preserves_exact_source_without_extra_pages -- --nocapture
           if ($LASTEXITCODE -ne 0) { throw 'SIGNED_LEVERAGE_SOURCE_UNIT_FAILED' }
           cargo test --locked -p okx-agent --lib signed_fee_phase_advances_only_on_explicit_event_and_keeps_prior_source_time -- --nocapture

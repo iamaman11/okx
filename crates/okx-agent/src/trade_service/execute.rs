@@ -98,6 +98,61 @@ struct PostHeldSelected {
     completed_after_held_ms: u64,
 }
 
+// A more recent SQL fill cannot be judged against an older signed
+// venue-position observation. This is only SOURCE PENDING, never proof of
+// attribution or permission to increase risk.
+const POSITION_SOURCE_BEFORE_SQL_FILL: &str = "COHORT_POSITION_SOURCE_BEFORE_SQL_FILL";
+
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum ManagedProtectionCensusError {
+    SourceBeforeLedgerFill,
+    Denied(String),
+}
+
+fn position_mismatch_reason(
+    venue_update_ms: Option<&str>,
+    newest_sql_lot_opened_ms: Option<i64>,
+) -> &'static str {
+    let venue_time = venue_update_ms
+        .and_then(|timestamp| timestamp.parse::<i64>().ok())
+        .filter(|timestamp| *timestamp > 0);
+    if venue_time
+        .zip(newest_sql_lot_opened_ms)
+        .is_some_and(|(venue, sql)| sql > venue)
+    {
+        POSITION_SOURCE_BEFORE_SQL_FILL
+    } else {
+        "UNATTRIBUTED_EXCHANGE_POSITION"
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn managed_census_stale_position_source_requires_fresh_event() {
+    // Signed 0.30 position predates an independently committed 0.20 Add
+    // fill. No emergency POST is justified by the old position snapshot.
+    assert_eq!(
+        position_mismatch_reason(Some("1000"), Some(2000)),
+        POSITION_SOURCE_BEFORE_SQL_FILL
+    );
+    // An independently newer 0.70 foreign venue observation is a true
+    // unowned-risk denial, not permission to wait for a matching SQL lot.
+    assert_eq!(
+        position_mismatch_reason(Some("3000"), Some(2000)),
+        "UNATTRIBUTED_EXCHANGE_POSITION"
+    );
+    for missing in [None, Some(""), Some("0"), Some("invalid")] {
+        assert_eq!(
+            position_mismatch_reason(missing, Some(2000)),
+            "UNATTRIBUTED_EXCHANGE_POSITION"
+        );
+    }
+    assert_eq!(
+        position_mismatch_reason(Some("1000"), None),
+        "UNATTRIBUTED_EXCHANGE_POSITION"
+    );
+}
+
 fn verify_post_held_selected(
     witness: &PostHeldSelected,
     account_key: &str,
@@ -1899,14 +1954,23 @@ impl TradeService {
         &self,
         state: &CentralGovernanceSnapshot,
         until: Instant,
-    ) -> Result<NativeRiskCensus, String> {
-        tokio::time::timeout_at(
+    ) -> Result<NativeRiskCensus, ManagedProtectionCensusError> {
+        let result = tokio::time::timeout_at(
             until.into(),
             self.census_with_reads(state, None, None, Some(until), None, None),
         )
         .await
-        .map_err(|_| "MANAGED_CENSUS_SOURCE_DEADLINE".to_owned())?
-        .map(|v| v.0)
+        .map_err(|_| {
+            ManagedProtectionCensusError::Denied("MANAGED_CENSUS_SOURCE_DEADLINE".into())
+        })?
+        .map(|v| v.0);
+        result.map_err(|reason| {
+            if reason == POSITION_SOURCE_BEFORE_SQL_FILL {
+                ManagedProtectionCensusError::SourceBeforeLedgerFill
+            } else {
+                ManagedProtectionCensusError::Denied(reason)
+            }
+        })
     }
 
     /// Only the settlement-confirmed terminal-release path may supply this
@@ -2146,7 +2210,15 @@ impl TradeService {
                                 .ok_or_else(|| "COHORT_POSITION_QUANTITY_OVERFLOW".to_owned())
                         })?;
                     if covered != actual_qty {
-                        return Err("UNATTRIBUTED_EXCHANGE_POSITION".to_owned());
+                        let newest_lot = lots
+                            .iter()
+                            .filter(|lot| lot.side == position_direction)
+                            .map(|lot| lot.opened_at)
+                            .max();
+                        return Err(
+                            position_mismatch_reason(p.update_time_ms.as_deref(), newest_lot)
+                                .to_owned(),
+                        );
                     }
                     for (owner_id, protection, receipt) in owned_proofs {
                         let protection = protection.ok_or("PROTECTION_UNVERIFIED")?;

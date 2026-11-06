@@ -468,6 +468,7 @@ impl TradeService {
             json!(null)
         };
         let mut protection_failed = false;
+        let mut protection_source_pending = false;
         let mut venue_flat_verified = false;
         if matches!(i.state, IntentState::Prepared | IntentState::Reserved) {
             if now() >= i.deadline {
@@ -729,24 +730,40 @@ impl TradeService {
                                     .census_for_managed_protection_until(&state, deadline())
                                     .await
                                     .map(|_| ()),
-                                None => Err("AUTHORITY_UNAVAILABLE".into()),
+                                None => Err(super::execute::ManagedProtectionCensusError::Denied(
+                                    "AUTHORITY_UNAVAILABLE".into(),
+                                )),
                             };
-                            if let Err(reason) = aggregate_result {
-                                eprintln!("MANAGED_AGGREGATE_CENSUS_DENIAL_V1:{reason}");
-
-                                protection_failed = true;
-                                let id = i.intent_id.clone();
-                                r.execution
-                                    .store
-                                    .call(deadline(), move |s| {
-                                        s.protection_incident(
-                                            &id,
-                                            "MANAGED_AGGREGATE_PROTECTION_UNVERIFIED",
-                                            now(),
-                                        )
-                                    })
-                                    .await
-                                    .map_err(err)?;
+                            match aggregate_result {
+                                Ok(()) => {}
+                                Err(
+                                    super::execute::ManagedProtectionCensusError::SourceBeforeLedgerFill,
+                                ) => {
+                                    // A signed venue position older than an already
+                                    // committed SQL fill cannot prove a missing stop
+                                    // or authorize an emergency Close. New-risk
+                                    // census still fails closed until fresh source.
+                                    protection_source_pending = true;
+                                    eprintln!(
+                                        "MANAGED_AGGREGATE_SOURCE_PENDING_V1:POSITION_BEFORE_SQL_FILL"
+                                    );
+                                }
+                                Err(super::execute::ManagedProtectionCensusError::Denied(reason)) => {
+                                    eprintln!("MANAGED_AGGREGATE_CENSUS_DENIAL_V1:{reason}");
+                                    protection_failed = true;
+                                    let id = i.intent_id.clone();
+                                    r.execution
+                                        .store
+                                        .call(deadline(), move |s| {
+                                            s.protection_incident(
+                                                &id,
+                                                "MANAGED_AGGREGATE_PROTECTION_UNVERIFIED",
+                                                now(),
+                                            )
+                                        })
+                                        .await
+                                        .map_err(err)?;
+                                }
                             }
                         }
                     }
@@ -915,17 +932,27 @@ impl TradeService {
                 "incremental_entry_settlement":incremental_entry,
                 "protection":protection,"central_release":central_release,
                 "financial_error":financial_error,"financial_complete":financial && !settlement_pending,
-                "protection_incident":protection_failed,"compensation":compensation}),
+                "protection_incident":protection_failed,
+                "protection_source_pending":protection_source_pending,
+                "compensation":compensation}),
         );
         result["quality"] = json!({
             "execution":"authenticated_readback",
             "financial":if financial && !settlement_pending {"complete"}else{"incomplete"},
             "entry_settlement":if settlement_pending {"pending"} else {"evaluated"},
-            "protection":if protection_failed{"incident"}else{"evaluated"}
+            "protection":if protection_failed {
+                "incident"
+            } else if protection_source_pending {
+                "pending_source_coherence"
+            } else {
+                "evaluated"
+            }
         });
-        if !financial || settlement_pending {
+        if !financial || settlement_pending || protection_source_pending {
             result["status"] = json!("partial");
-            result["warnings"] = json!([if !financial || entry_fill_pending {
+            result["warnings"] = json!([if protection_source_pending {
+                "PROTECTION_SOURCE_BEFORE_SQL_FILL"
+            } else if !financial || entry_fill_pending {
                 "FINANCIAL_BACKFILL_PENDING"
             } else {
                 "ENTRY_SETTLEMENT_PENDING"
