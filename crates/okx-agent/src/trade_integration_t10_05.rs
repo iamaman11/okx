@@ -187,8 +187,19 @@ async fn t10_05_create_outcome(
             .filter(|get| get.contains("fixture-observer-b:")
                 || get.contains("fixture-executor-b:"))
             .take(8).cloned().collect::<Vec<_>>();
+        // Lead with the actual public outcome; child stdout capture is
+        // bounded, so a recent-request tail must not hide the first cause.
+        let classification=serde_json::json!({
+            "status":first["status"],
+            "state":first["data"]["state"],
+            "origin":first["data"]["rejection_origin"],
+            "send_state":first["data"]["send_state"],
+            "reason":first["data"]["primary_reason"],
+            "risk_release":first["data"]["risk_release_state"],
+            "intent_id":first["data"]["intent_id"],
+        });
         panic!(
-            "T10_05_FIXED_KEY_SETUP_OR_SOURCE_FAILURE:first_denial={first_denial:?} new_denials={new_denials:?} recent={recent:?} public={first} posts_before={before_posts} posts_after={posts_after_execute} rate={:?}",
+            "T10_05_FIXED_KEY_SETUP_OR_SOURCE_FAILURE:classification={classification} first_denial={first_denial:?} posts_before={before_posts} posts_after={posts_after_execute} rate={:?} new_denials={new_denials:?} recent={recent:?}",
             rate_budget.snapshot().last_throttle
         );
     }
