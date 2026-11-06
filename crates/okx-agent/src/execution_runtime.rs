@@ -102,12 +102,11 @@ impl ExecutionRuntime {
         }
         drop(guard);
         // Account-local singleflight; the caller deadline includes queue wait.
-        let _refresh = tokio::time::timeout_at(
-            until.into(), self.executor_identity_refresh.acquire(),
-        )
-        .await
-        .map_err(|_| identity_source_deadline())?
-        .map_err(|_| identity_source_deadline())?;
+        let _refresh =
+            tokio::time::timeout_at(until.into(), self.executor_identity_refresh.acquire())
+                .await
+                .map_err(|_| identity_source_deadline())?
+                .map_err(|_| identity_source_deadline())?;
         let guard = tokio::time::timeout_at(until.into(), self.executor_identity.lock())
             .await
             .map_err(|_| identity_source_deadline())?;
@@ -117,7 +116,8 @@ impl ExecutionRuntime {
         drop(guard);
         let config = tokio::time::timeout_at(
             until.into(),
-            self.account.config_wait(until.saturating_duration_since(Instant::now())),
+            self.account
+                .config_wait(until.saturating_duration_since(Instant::now())),
         )
         .await
         .map_err(|_| identity_source_deadline())??;
@@ -130,7 +130,9 @@ impl ExecutionRuntime {
             return Ok(false);
         }
         *guard = Some(ExecutorIdentityProof {
-            verified_uid: uid.to_owned(), generation, received_at,
+            verified_uid: uid.to_owned(),
+            generation,
+            received_at,
         });
         Ok(true)
     }
@@ -149,12 +151,22 @@ mod identity_cache_tests {
         let a = tokio::sync::Semaphore::new(1);
         let b = tokio::sync::Semaphore::new(1);
         let guard = a.acquire().await.unwrap();
-        assert!(tokio::time::timeout_at(
-            (Instant::now() + Duration::from_millis(80)).into(), a.acquire(),
-        ).await.is_err());
-        assert!(tokio::time::timeout_at(
-            (Instant::now() + Duration::from_secs(1)).into(), b.acquire(),
-        ).await.is_ok());
+        assert!(
+            tokio::time::timeout_at(
+                (Instant::now() + Duration::from_millis(80)).into(),
+                a.acquire(),
+            )
+            .await
+            .is_err()
+        );
+        assert!(
+            tokio::time::timeout_at(
+                (Instant::now() + Duration::from_secs(1)).into(),
+                b.acquire(),
+            )
+            .await
+            .is_ok()
+        );
         drop(guard);
         assert_eq!(a.available_permits(), 1);
     }

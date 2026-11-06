@@ -1269,32 +1269,22 @@ mod bounded_source_owner_tests {
     async fn occupied_a_expires_b_proceeds_and_a_recovers() {
         let a = tokio::sync::Semaphore::new(1);
         let b = tokio::sync::Semaphore::new(1);
-        let held = capture_source_permit_until(
-            &a,
-            Instant::now() + Duration::from_secs(1),
-        )
-        .await
-        .unwrap();
-        assert!(capture_source_permit_until(
-            &a,
-            Instant::now() + Duration::from_millis(80),
-        )
-        .await
-        .is_err());
-        let b_owner = capture_source_permit_until(
-            &b,
-            Instant::now() + Duration::from_secs(1),
-        )
-        .await
-        .unwrap();
+        let held = capture_source_permit_until(&a, Instant::now() + Duration::from_secs(1))
+            .await
+            .unwrap();
+        assert!(
+            capture_source_permit_until(&a, Instant::now() + Duration::from_millis(80),)
+                .await
+                .is_err()
+        );
+        let b_owner = capture_source_permit_until(&b, Instant::now() + Duration::from_secs(1))
+            .await
+            .unwrap();
         drop(b_owner);
         drop(held);
-        let recovered = capture_source_permit_until(
-            &a,
-            Instant::now() + Duration::from_secs(1),
-        )
-        .await
-        .unwrap();
+        let recovered = capture_source_permit_until(&a, Instant::now() + Duration::from_secs(1))
+            .await
+            .unwrap();
         drop(recovered);
     }
 
@@ -1304,12 +1294,9 @@ mod bounded_source_owner_tests {
         let held = owner.acquire().await.unwrap();
         let waiting = std::sync::Arc::clone(&owner);
         let task = tokio::spawn(async move {
-            capture_source_permit_until(
-                &waiting,
-                Instant::now() + Duration::from_secs(5),
-            )
-            .await
-            .is_ok()
+            capture_source_permit_until(&waiting, Instant::now() + Duration::from_secs(5))
+                .await
+                .is_ok()
         });
         tokio::task::yield_now().await;
         task.abort();
