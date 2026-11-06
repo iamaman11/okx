@@ -3762,6 +3762,10 @@ mod raw_native_session_tests {
                 "open + close must issue exactly one venue create each"
             );
             assert_eq!(close_ack, "recorded-t09-close-001");
+            assert_eq!(
+                close["data"]["intent"]["state"], "ACKNOWLEDGED",
+                "T09_1_CLOSE_ACK_NOT_DURABLY_ADMITTED: {close}"
+            );
             assert_ne!(close["data"]["intent"]["intent_id"], idempotent_intent_id);
             println!(
                 "T09_1_NATIVE_CLOSE_ACK_V1:{}",
@@ -4150,6 +4154,10 @@ mod raw_native_session_tests {
                 // Closing terminal readback must discharge its own local SQL
                 // marker. Otherwise opening RELEASE is permanently blocked
                 // by an unrelated local: terminal receipt in cohort census.
+                assert_eq!(
+                    close_verified["data"]["intent"]["state"], "FILLED",
+                    "T09_1_CLOSE_TERMINAL_READBACK_NOT_FILLED: {close_verified}"
+                );
                 let close_pending_probe = closing_intent_id.clone();
                 let local_receipt_probe = close_receipt_id.clone();
                 let (close_still_pending, local_receipt_written) = resource
