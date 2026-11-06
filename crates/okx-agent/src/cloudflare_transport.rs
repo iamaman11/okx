@@ -6212,6 +6212,7 @@ mod raw_native_session_tests {
                             ] {
                                 refresh_recorded_market();
                                 closes.push(t09_6_close_owned_lot(T09_6CloseContext {
+                                    accounts:accounts.clone(),
                                     trade:trade.clone(),rate_budget:rate_budget.clone(),
                                     feed:feed.clone(),opening_intent_id,
                                     operation_key:operation_key.into(),quantity,

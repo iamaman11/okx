@@ -2,6 +2,7 @@
 // closed through the one public TradeService, never by writing SQL positions
 // or creating a private synthetic close engine.
 struct T09_6CloseContext {
+    accounts: Arc<AccountRuntimeRegistry>,
     trade: Arc<TradeService>,
     rate_budget: RateBudget,
     feed: Arc<crate::accounts::recorded_support::RecordedAccountHttp>,
@@ -16,7 +17,7 @@ async fn t09_6_close_owned_lot(input: T09_6CloseContext) -> serde_json::Value {
     use crate::accounts::recorded_support::{RecordedGet, RecordedPost};
     use okx_protocol::trading::TradeRequest;
     let T09_6CloseContext {
-        trade, rate_budget, feed, opening_intent_id, operation_key, quantity,
+        accounts, trade, rate_budget, feed, opening_intent_id, operation_key, quantity,
         venue_order_id, expected_post_count,
     } = input;
     let at=chrono::Utc::now().timestamp_millis().to_string();
@@ -183,6 +184,59 @@ async fn t09_6_close_owned_lot(input: T09_6CloseContext) -> serde_json::Value {
     assert_eq!(intent["plan"]["quantity"],quantity,
         "T09.6 must reduce only the original own lot quantity");
     let sends=feed.outbound_posts.lock().unwrap().len();
+    if sends!=expected_post_count {
+        // Read-only provenance at the FIRST observed mismatch. Do not send,
+        // retry, remove a reservation, or infer safety from a POST count.
+        let outbound=feed.outbound_posts.lock().unwrap().iter().enumerate()
+            .map(|(index,(actor,route,body))|(index,actor.clone(),route.clone(),body.clone()))
+            .collect::<Vec<_>>();
+        let clients=outbound.iter().filter_map(|(_,_,route,body)|
+            (route=="/api/v5/trade/order")
+                .then(||body.get("clOrdId").and_then(serde_json::Value::as_str))
+                .flatten().map(str::to_owned)
+        ).collect::<Vec<_>>();
+        let account=accounts.resolve("fixture-a").await.expect("T09.6 SQL owner");
+        let sql_owners=account.execution.store.call(
+            std::time::Instant::now()+Duration::from_secs(2),
+            move |sql| {
+                let owners=clients.iter().map(|client|{
+                    let i=sql.by_client_order_id(client)?;
+                    Ok(serde_json::json!({
+                        "client_id":client,
+                        "intent_id":i.as_ref().map(|v|v.intent_id.as_str()),
+                        "operation_key":i.as_ref().map(|v|v.idempotency_key.as_str()),
+                        "state":i.as_ref().map(|v|v.state.as_str()),
+                        "revision":i.as_ref().map(|v|v.revision),
+                        "incident":i.as_ref().and_then(|v|v.incident.as_deref()),
+                        "risk_increase":i.as_ref().map(|v|v.risk_increase),
+                    }))
+                }).collect::<okx_execution::StoreResult<Vec<_>>>()?;
+                Ok(owners)
+            }
+        ).await;
+        eprintln!("T09_6_FIRST_UNEXPECTED_POST_OWNER_V1:{}",serde_json::json!({
+            "schema":"okx.t09-6-first-extra-post-owner/v1",
+            "expected_total":expected_post_count,
+            "actual_total":sends,
+            "opening_intent_id":opening_intent_id,
+            "public_close_key":operation_key,
+            "venue_order_id":venue_order_id,
+            "outbound":outbound.iter().map(|(index,actor,route,body)|
+                serde_json::json!({
+                    "index":index,
+                    "actor":actor,
+                    "route":route,
+                    "clOrdId":body.get("clOrdId"),
+                    "side":body.get("side"),
+                    "posSide":body.get("posSide"),
+                    "sz":body.get("sz"),
+                    "ordType":body.get("ordType"),
+                    "reduceOnly":body.get("reduceOnly"),
+                })
+            ).collect::<Vec<_>>(),
+            "sql_owners":format!("{sql_owners:?}"),
+        }));
+    }
     assert_eq!(sends,expected_post_count,
         "T09.6 public Close must send exactly one create per separately owned lot");
     assert_eq!(feed.unconsumed_posts(),0,
