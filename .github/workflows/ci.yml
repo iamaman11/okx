@@ -465,6 +465,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'COHORT_PEER_POSTING_SQL_BOUNDARY_FAILED' }
           cargo test --locked -p okx-agent --lib t10_08_emergency_policy_is_bounded_before_financial_capture -- --nocapture
           if ($LASTEXITCODE -ne 0) { throw 'T10_08_PROTECTIVE_ACTION_MUST_PRECEDE_FINANCE' }
+          cargo test --locked -p okx-agent --lib t10_08_emergency_close_requires_same_intent_signed_sql_lots -- --nocapture
+          if ($LASTEXITCODE -ne 0) { throw 'T10_08_EMERGENCY_UNOWNED_REDUCE_MUST_NOT_POST' }
           cargo test --locked -p okx-agent --lib immutable_signed_leverage_handoff_preserves_exact_source_without_extra_pages -- --nocapture
           if ($LASTEXITCODE -ne 0) { throw 'SIGNED_LEVERAGE_SOURCE_UNIT_FAILED' }
           cargo test --locked -p okx-agent --lib signed_fee_phase_advances_only_on_explicit_event_and_keeps_prior_source_time -- --nocapture
