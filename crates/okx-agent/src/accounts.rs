@@ -1585,8 +1585,8 @@ pub(crate) mod recorded_support {
             // whole executor + endpoint. Actual GET delivery still requires
             // the separate authenticated (actor, clOrdId, ordId) POST ACK.
             let order_id = |raw: &[u8]| -> String {
-                let body: serde_json::Value = serde_json::from_slice(raw)
-                    .expect("TRANSCRIPT_ORDER_PHASE_INVALID_JSON");
+                let body: serde_json::Value =
+                    serde_json::from_slice(raw).expect("TRANSCRIPT_ORDER_PHASE_INVALID_JSON");
                 let rows = body["data"]
                     .as_array()
                     .expect("TRANSCRIPT_ORDER_PHASE_DATA_MISSING");
@@ -1611,9 +1611,9 @@ pub(crate) mod recorded_support {
                 if page.access_key != access_key || page.path != path {
                     return false;
                 }
-                order_ids.as_ref().is_none_or(|ids| {
-                    ids.contains(&order_id(&page.raw_response))
-                })
+                order_ids
+                    .as_ref()
+                    .is_none_or(|ids| ids.contains(&order_id(&page.raw_response)))
             };
             assert!(
                 !self
@@ -1625,7 +1625,10 @@ pub(crate) mod recorded_support {
                 "TRANSCRIPT_IMMUTABLE_MIXED_WITH_QUEUE_ADVANCE"
             );
             let mut required = self.reads.lock().unwrap();
-            let retired = required.iter().filter(|page| same_source_scope(page)).count();
+            let retired = required
+                .iter()
+                .filter(|page| same_source_scope(page))
+                .count();
             required.retain(|page| !same_source_scope(page));
             let mut optional = self.optional_reads.lock().unwrap();
             optional.retain(|page| !same_source_scope(page));
@@ -4533,11 +4536,15 @@ pub(crate) mod recorded_support {
             let remaining = queued.reads.lock().unwrap();
             assert_eq!(remaining.len(), 2, "B order page must be retained");
             assert!(
-                remaining.iter().any(|p| p.raw_response == raw("signed-ack-b", "live")),
+                remaining
+                    .iter()
+                    .any(|p| p.raw_response == raw("signed-ack-b", "live")),
                 "B's signed order bytes changed"
             );
             assert!(
-                remaining.iter().any(|p| p.raw_response == raw("signed-ack-a", "partially_filled")),
+                remaining
+                    .iter()
+                    .any(|p| p.raw_response == raw("signed-ack-a", "partially_filled")),
                 "A's new order-state event was lost"
             );
         }

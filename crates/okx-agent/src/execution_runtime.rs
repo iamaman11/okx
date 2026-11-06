@@ -1,11 +1,11 @@
 //! Account-local native adapters. AccountStoreHandle is the sole SQL owner;
 //! this object owns no parallel ledger, access grant or financial epoch.
 use crate::AgentResult;
-use std::time::{Duration, Instant};
 use okx_api::{
     AccountApi, AccountHistoryApi, Credentials, OkxEnvironment, OkxRestClient, RateBudget, TradeApi,
 };
 use okx_execution::AccountStoreHandle;
+use std::time::{Duration, Instant};
 
 // This cache retains ONLY the authenticated executor UID proof, not a
 // financial/account snapshot or permission to trade. A new source generation
@@ -89,10 +89,9 @@ impl ExecutionRuntime {
         }
         let mut guard = self.executor_identity.lock().await;
         if Instant::now() >= until {
-            return Err(okx_api::OkxError::Response(
-                "EXECUTOR_IDENTITY_SOURCE_DEADLINE".into(),
-            )
-            .into());
+            return Err(
+                okx_api::OkxError::Response("EXECUTOR_IDENTITY_SOURCE_DEADLINE".into()).into(),
+            );
         }
         // Source capture can overlap periodic maintenance and public Status.
         // One authenticated config GET is sufficient for these overlapping
