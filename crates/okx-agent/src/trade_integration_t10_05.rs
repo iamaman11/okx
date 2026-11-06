@@ -232,7 +232,7 @@ async fn t10_05_create_outcome(
             owner.execution.store.call(
                 std::time::Instant::now()+Duration::from_secs(3),
                 move |sql|{
-                    let i=sql.by_idempotency(key)?.ok_or(
+                    let i=sql.by_idempotency(&key)?.ok_or(
                         okx_execution::StoreError::Invalid("T10_05_INTENT_ABSENT")
                     )?;
                     Ok((i.intent_id,i.state.as_str().to_owned(),i.revision,
