@@ -59,8 +59,9 @@ impl AccountStore {
     }
     /// Resolve a durable protection stop only after the caller has independently
     /// verified fresh flat venue state, complete finance/central settlement and
-    /// zero pending algos on this instrument. Reject remaining SQL lots in the
-    /// SAME SQLite transaction that clears both stop and intent incident.
+    /// zero pending algos on this instrument. Require the SAME original central
+    /// release receipt and zero SQL lots in the transaction that clears stop,
+    /// intent incident and seals immutable recovery evidence.
     pub fn resolve_protection_incident_after_flat(
         &mut self,
         id: &str,
@@ -92,6 +93,31 @@ impl AccountStore {
         if active != 0 {
             return Err(StoreError::Invalid("PROTECTION_FLAT_SQL_EXPOSURE_REMAINS"));
         }
+        // A venue-flat GET and an arbitrary 64-char digest cannot release a
+        // still-held Worker grant. Verify the ORIGINAL risk receipt and its
+        // persisted central-release acknowledgement inside this transaction,
+        // binding account, intent, reservation and immutable receipt hash.
+        let released: Option<String> = tx
+            .query_row(
+                "SELECT rr.receipt_hash FROM risk_receipts rr
+                 WHERE rr.intent_id=?1 AND rr.account_key=?2
+                   AND rr.state='RELEASED' AND rr.reservation_key NOT LIKE 'local:%'
+                   AND EXISTS (
+                       SELECT 1 FROM operation_receipts op
+                       WHERE op.operation_id='central-release:'||rr.reservation_key
+                         AND op.kind='CENTRAL_RELEASE'
+                         AND op.request_hash=rr.receipt_hash
+                         AND LENGTH(op.result_ref)>0
+                   )",
+                params![id, &self.meta.account_key],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let release_receipt = released
+            .filter(|receipt_hash| !receipt_hash.is_empty())
+            .ok_or(StoreError::Invalid(
+                "PROTECTION_FLAT_CENTRAL_RELEASE_NOT_PROVEN",
+            ))?;
         let changed = tx.execute(
             "UPDATE risk_stops SET resolution=?2 WHERE stop_id=?1 AND resolution IS NULL",
             params![format!("protection:{id}"), source_digest],
@@ -99,11 +125,27 @@ impl AccountStore {
         if changed != 1 {
             return Err(StoreError::Invalid("PROTECTION_RISK_STOP_NOT_ACTIVE"));
         }
-        tx.execute(
+        let cleared = tx.execute(
             "UPDATE intents SET incident=NULL,revision=revision+1,updated_at=?2
              WHERE intent_id=?1 AND incident IN
              ('PROTECTION_PENDING_OR_FAILED','MANAGED_AGGREGATE_PROTECTION_UNVERIFIED')",
             params![id, now],
+        )?;
+        if cleared != 1 {
+            return Err(StoreError::Invalid("PROTECTION_INCIDENT_CHANGED_DURING_RESOLUTION"));
+        }
+        // The original worker receipt and verified source digest are
+        // durable together with the incident/stop transition. Replaying
+        // status cannot generate a second resolution.
+        tx.execute(
+            "INSERT INTO operation_receipts VALUES
+             (?1,'PROTECTION_INCIDENT_FLAT_RESOLVED',?2,?3,?4)",
+            params![
+                format!("protection-recovered:{id}"),
+                release_receipt,
+                source_digest,
+                now
+            ],
         )?;
         tx.commit()?;
         Ok(true)

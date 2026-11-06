@@ -2,6 +2,7 @@
 fn t10_08_flat_protection_stop_resolution_is_atomic_and_idempotent() {
     let mut s = store();
     intent(&mut s);
+    reserve(&mut s);
     s.protection_incident("intent", "PROTECTION_PENDING_OR_FAILED", 4)
         .unwrap();
     assert_eq!(s.stops().unwrap().len(), 1);
@@ -31,12 +32,34 @@ fn t10_08_flat_protection_stop_resolution_is_atomic_and_idempotent() {
             [],
         )
         .unwrap();
+    assert!(matches!(
+        s.resolve_protection_incident_after_flat("intent", &digest, 6),
+        Err(StoreError::Invalid("PROTECTION_FLAT_CENTRAL_RELEASE_NOT_PROVEN"))
+    ));
+    assert_eq!(s.stops().unwrap().len(), 1);
+    assert_eq!(
+        s.intent("intent").unwrap().unwrap().incident.as_deref(),
+        Some("PROTECTION_PENDING_OR_FAILED")
+    );
+    s.acknowledge_central_release("central-key", "signed-worker-release")
+        .unwrap();
     assert!(
         s.resolve_protection_incident_after_flat("intent", &digest, 6)
             .unwrap()
     );
     assert_eq!(s.intent("intent").unwrap().unwrap().incident, None);
     assert!(s.stops().unwrap().is_empty());
+    let sealed: (String, String) = s
+        .connection
+        .query_row(
+            "SELECT kind,result_ref FROM operation_receipts
+             WHERE operation_id='protection-recovered:intent'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(sealed.0, "PROTECTION_INCIDENT_FLAT_RESOLVED");
+    assert_eq!(sealed.1, digest);
     assert!(
         !s.resolve_protection_incident_after_flat("intent", &digest, 7)
             .unwrap()
