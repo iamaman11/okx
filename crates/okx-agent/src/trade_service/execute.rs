@@ -2350,9 +2350,13 @@ impl TradeService {
                     || !r.source_identity_ready().await
                     || !r
                         .execution
-                        .verified_uid_matches(&c.uid_fingerprint)
+                        .verified_uid_matches_until(
+                            &c.uid_fingerprint,
+                            generation,
+                            until.unwrap_or_else(deadline),
+                        )
                         .await
-                        .map_err(err)?
+                        .map_err(|e| report("COHORT_EXECUTOR_IDENTITY", err(e)))?
                 {
                     return Err("COHORT_SOURCE_GENERATION_CHANGED".into());
                 }
