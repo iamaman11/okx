@@ -35,8 +35,8 @@ where
 
 // An authenticated later `live` algo GET cannot silently undo a durable
 // protection incident: the same algoId may be stale, reappear after an ACK,
-// or no longer cover the late fill. Only a separately proven remediation or
-// a signed flat-position outcome can resolve exposure. No guessed success.
+// or no longer cover the late fill. Only committed remediation may resolve it;
+// a signed flat-position GET alone is insufficient. No guessed success.
 fn protection_incident_still_unresolved(reason: Option<&str>, remediation_committed: bool) -> bool {
     !remediation_committed
         && matches!(
@@ -45,10 +45,11 @@ fn protection_incident_still_unresolved(reason: Option<&str>, remediation_commit
         )
 }
 
-/// A previously persisted, signed fill lot belongs to this exact SQL intent
-/// only when its side and quantity agree with the fresh signed venue order
-/// AND the signed account position. A missing or out-of-sync lot does not
-/// authorize any speculative reduce order; background finance may catch up.
+/// The exact remaining SQL lot quantity must equal this entry's cumulative
+/// authenticated venue fill before an emergency Close (unless a separate
+/// independently proven reduction has already changed the remaining lot).
+/// This conservative path blocks partial coverage after late fills; a missing
+/// or out-of-sync lot never authorizes a speculative reduce.
 fn verified_emergency_owned_exposure<'a>(
     intent: &StoredIntent,
     venue_filled: Decimal,
@@ -1095,18 +1096,28 @@ impl TradeService {
             && exposure == Decimal::ZERO
             && central_release["state"] == "verified"
         {
-            let fresh = r.observer.snapshot_until(deadline()).await;
+            // Bracket the signed risk-algo census with two account snapshots.
+            // A changing position/order during this I/O interval cannot prove
+            // stable flat state; a mismatched UID or incomplete algo page denies.
+            let first = r.observer.snapshot_until(deadline()).await;
             let algos = r.observer.pending_derivative_risk_algos().await;
-            match (fresh, algos) {
-                (Ok(fresh), Ok(algos))
-                    if verify_instrument_is_flat(
-                        &i.instrument_id,
-                        fresh
-                            .positions
-                            .iter()
-                            .map(|p| (p.instrument_id.as_str(), p.position.as_str())),
-                    )
-                    .is_ok()
+            let last = r.observer.snapshot_until(deadline()).await;
+            match (first, algos, last) {
+                (Ok(first), Ok(algos), Ok(last))
+                    if first.account_uid_fingerprint == last.account_uid_fingerprint
+                        && first.positions == last.positions
+                        && first.pending_orders == last.pending_orders
+                        && first
+                            .balance
+                            .same_values_ignoring_update_times(&last.balance)
+                        && verify_instrument_is_flat(
+                            &i.instrument_id,
+                            last
+                                .positions
+                                .iter()
+                                .map(|p| (p.instrument_id.as_str(), p.position.as_str())),
+                        )
+                        .is_ok()
                         && algos.complete_within_bound
                         && !algos
                             .samples
@@ -1117,6 +1128,9 @@ impl TradeService {
                         "protection-flat-source-proof/v1",
                         &i.intent_id,
                         &i.plan_hash,
+                        &first.account_uid_fingerprint,
+                        &last.account_uid_fingerprint,
+                        &algos.samples,
                         &order,
                         &entry_fill_evidence,
                         &central_release,
@@ -1173,7 +1187,11 @@ impl TradeService {
                 "evaluated"
             }
         });
-        if !financial || settlement_pending || protection_source_pending || live_protection_incident {
+        if !financial
+            || settlement_pending
+            || protection_source_pending
+            || live_protection_incident
+        {
             result["status"] = json!("partial");
             result["warnings"] = json!([if live_protection_incident {
                 "PROTECTION_INCIDENT_REMEDIATION_UNVERIFIED"
