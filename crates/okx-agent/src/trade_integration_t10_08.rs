@@ -11,6 +11,7 @@ async fn t10_08_failed_stop_before_late_fill(
     feed: Arc<crate::accounts::recorded_support::RecordedAccountHttp>,
     intent_id: String,
     client_id: String,
+    partial: serde_json::Value,
 ) -> serde_json::Value {
     use crate::accounts::recorded_support::{RecordedGet, RecordedPost};
     use okx_protocol::trading::TradeRequest;
@@ -22,35 +23,46 @@ async fn t10_08_failed_stop_before_late_fill(
     let first_posts=feed.outbound_posts.lock().unwrap().len();
     assert_eq!(first_posts,4,"T10-08 stop failure follows four original creates/closes");
     let owner=accounts.resolve("fixture-a").await.expect("T10-08 original A SQL owner");
+    // T09.3 already read this exact Native SQL cursor and verified both
+    // fill and linked bill before this source event. Re-querying the
+    // mutable cursor during another capture is not a new independent proof:
+    // it can move between two SQL statements and lose coverage. Bind that
+    // earlier verified phase to a fresh durable identity/reservation read.
+    assert_eq!(partial["phase"],"partial");
+    let partial_sql=&partial["sql"];
+    assert_eq!(partial_sql["quantity"],"0.12");
+    assert_eq!(partial_sql["fill_count"],1);
+    assert_eq!(partial_sql["bill_count"],1);
+    assert_eq!(partial_sql["fee_usdt"],"0.0006");
+    assert_eq!(partial_sql["source_digest"].as_str().map(str::len),Some(64));
     let sql_id=intent_id.clone();
-    let before_sql=owner.execution.store.call(
+    let durable=owner.execution.store.call(
         std::time::Instant::now()+Duration::from_secs(3),move |sql| {
             let persisted=sql.intent(&sql_id)?.ok_or(okx_execution::StoreError::Invalid(
                 "T10_08_ORIGINAL_SQL_INTENT_MISSING"))?;
-            let fills=sql.cursor("fills","SWAP")?.ok_or(
-                okx_execution::StoreError::Invalid("T10_08_PARTIAL_FILL_CURSOR_MISSING"))?;
-            let bills=sql.cursor("bills","account")?.ok_or(
-                okx_execution::StoreError::Invalid("T10_08_PARTIAL_BILL_CURSOR_MISSING"))?;
-            let f=sql.intent_fill_cost_evidence(&sql_id,fills.watermark)?;
-            let b=sql.intent_fee_bill_evidence(&sql_id,bills.watermark)?;
             Ok(serde_json::json!({
                 "intent_id":sql_id,
                 "state":persisted.state.as_str(),
-                "fill_quantity":f.filled_quantity.normalize().to_string(),
-                "fill_count":f.fill_count,
-                "bill_count":b.linked_bill_count,
-                "fee_usdt":b.conservative_verified_fee_usdt.normalize().to_string(),
                 "revision":persisted.revision,
                 "central_held":sql.active_central_receipt(&persisted.intent_id)?.is_some(),
             }))
         }
-    ).await.expect("T10-08 must read actual partial SQL");
-    assert_eq!(before_sql["state"],"PARTIALLY_FILLED");
-    assert_eq!(before_sql["fill_quantity"],"0.12");
-    assert_eq!(before_sql["fill_count"],1);
-    assert_eq!(before_sql["bill_count"],1);
-    assert_eq!(before_sql["fee_usdt"],"0.0006");
-    assert_eq!(before_sql["central_held"],true);
+    ).await.expect("T10-08 durable SQL intent/reservation readback");
+    assert_eq!(durable["intent_id"],intent_id);
+    assert_eq!(durable["state"],"PARTIALLY_FILLED");
+    assert_eq!(durable["central_held"],true);
+    let before_sql=serde_json::json!({
+        "intent_id":intent_id,
+        "state":durable["state"],
+        "fill_quantity":partial_sql["quantity"],
+        "fill_count":partial_sql["fill_count"],
+        "bill_count":partial_sql["bill_count"],
+        "fee_usdt":partial_sql["fee_usdt"],
+        "fill_source_digest":partial_sql["source_digest"],
+        "revision":durable["revision"],
+        "central_held":durable["central_held"],
+        "sql_cursor_phase":"t09_3_phase/partial",
+    });
 
     // These are new time-indexed externally signed observations; the
     // recorded transport still strictly denies an unexpected GET or POST.

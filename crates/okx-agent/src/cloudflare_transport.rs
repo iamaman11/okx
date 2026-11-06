@@ -6085,6 +6085,7 @@ mod raw_native_session_tests {
                             let failed=t10_08_failed_stop_before_late_fill(
                                 accounts.clone(),trade.clone(),risk.clone(),feed.clone(),
                                 new_intent_id.clone(),persisted.client_order_id.clone(),
+                                first.clone(),
                             ).await;
                             println!("T10_08_NATIVE_PROTECTION_FAILURE_V1:{failed}");
                             Some(failed)
