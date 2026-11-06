@@ -95,12 +95,9 @@ async fn t10_05_create_outcome(
     });
     // The A order has already been authenticated and acknowledged. The
     // next event belongs to B, not another periodic A finance/source cycle.
-    // Hold only A's existing test-only capture lease so it cannot exhaust
-    // the old finite executor-A order source while B proves the independent
-    // Worker/SQL outcome. No production GET, SQL or risk guard is weakened.
-    let a_owner=accounts.resolve("fixture-a").await
-        .expect("independent A finance owner before B fault");
-    let _a_capture_lease=a_owner.recorded_capture_gate.write().await;
+    // A's real capture/Status owner continues during B's first create.
+    // It reads the authenticated ACK-bound immutable order snapshot;
+    // serializing A out of this test would hide the original race.
     let before_posts=feed.outbound_posts.lock().unwrap().len();
     assert_eq!(before_posts,4);
     let mut before_risk=summary("risk_t10_05_before_b_create");

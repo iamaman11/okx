@@ -1290,7 +1290,8 @@ pub(crate) mod recorded_support {
             assert!(!event_id.is_empty() && !phase_id.is_empty(),
                 "TRANSCRIPT_SOURCE_EVENT_ID_MISSING");
             assert!(matches!(page.path.as_str(),
-                "/api/v5/account/trade-fee" | "/api/v5/account/leverage-info"),
+                "/api/v5/account/trade-fee" | "/api/v5/account/leverage-info"
+                    | "/api/v5/trade/order"),
                 "TRANSCRIPT_SOURCE_EVENT_ROUTE_NOT_ALLOWED");
             let actor=page.access_key.clone();
             let path=page.path.clone();
@@ -1309,8 +1310,31 @@ pub(crate) mod recorded_support {
             assert!(retired.iter().all(|p|{
                 let mut old_query=p.required_query.clone();
                 old_query.sort();
-                old_query==query
+                old_query==query || (path=="/api/v5/trade/order"
+                    && old_query.iter().all(|pair|query.contains(pair)))
             }),"TRANSCRIPT_SOURCE_EVENT_OLD_QUERY_CONFLICT");
+            if path=="/api/v5/trade/order" {
+                // Repeated signed reads of a still-LIVE order are one
+                // external snapshot, NOT one new economic event per GET.
+                // Only the exact already acknowledged order may enter this
+                // immutable phase. Changing an order state needs a separate
+                // authenticated source event, never a read-count transition.
+                let client=query.iter().find(|(name,_)|name=="clOrdId")
+                    .map(|(_,value)|value.as_str())
+                    .expect("TRANSCRIPT_ORDER_PHASE_CLIENT_ID_MISSING");
+                assert!(recorded_order_source_matches(
+                    &self.acknowledged_creates.lock().unwrap(),
+                    &actor,client,&page.raw_response,
+                ),"TRANSCRIPT_ORDER_PHASE_ACK_UNBOUND");
+                assert!(retired.iter().all(|p|
+                    recorded_order_source_matches(
+                        &self.acknowledged_creates.lock().unwrap(),
+                        &actor,client,&p.raw_response
+                    )
+                ),"TRANSCRIPT_ORDER_PHASE_OLD_ACK_UNBOUND");
+                assert!(retired.iter().all(|p|p.raw_response==page.raw_response),
+                    "TRANSCRIPT_ORDER_PHASE_UNPROVEN_STATE_CHANGE");
+            }
             let old_raw=&retired[0].raw_response;
             assert!(retired.iter().all(|p|p.raw_response==*old_raw),
                 "TRANSCRIPT_SOURCE_EVENT_OLD_RAW_CONFLICT");
@@ -2701,6 +2725,15 @@ pub(crate) mod recorded_support {
                             Some(Err("TRANSCRIPT_IMMUTABLE_PHASE_EXPIRED"))
                         } else if phase.deliveries>=phase.max_deliveries {
                             Some(Err("TRANSCRIPT_IMMUTABLE_PHASE_READ_BUDGET_EXCEEDED"))
+                        } else if path=="/api/v5/trade/order"
+                            && !requested_client.as_ref().is_some_and(|client|
+                                recorded_order_source_matches(
+                                    &self.acknowledged_creates.lock().unwrap(),
+                                    key,client,&phase.source.raw_response
+                                )
+                            )
+                        {
+                            Some(Err("TRANSCRIPT_IMMUTABLE_ORDER_ACK_UNBOUND"))
                         } else {
                             phase.deliveries+=1;
                             Some(Ok(phase.source.raw_response.clone()))
@@ -2716,6 +2749,14 @@ pub(crate) mod recorded_support {
                         self.denied_routes.lock().unwrap().push(format!("{reason}:{key}:{path}"));
                         OkxError::Response(format!("{reason}:{key}:{path}"))
                     })?;
+                    let body=if path=="/api/v5/trade/order" {
+                        let client=requested_client.as_deref().ok_or_else(||
+                            OkxError::Response("TRANSCRIPT_ORDER_READBACK_ID_MISSING".into())
+                        )?;
+                        String::from_utf8(body)
+                            .map_err(|_|OkxError::Response("TRANSCRIPT_ORDER_READBACK_UTF8".into()))?
+                            .replace("__REQUEST_CL_ORD_ID__",client).into_bytes()
+                    } else {body};
                     self.requests.lock().unwrap().push(format!(
                         "{key}:{path}?{}",request.url().query().unwrap_or_default()
                     ));
@@ -2890,7 +2931,9 @@ pub(crate) mod recorded_support {
                         let mut optional = self.optional_reads.lock().unwrap();
                         let index = optional.iter().position(&matches_page).ok_or_else(|| {
                             let missing = format!(
-                                "TRANSCRIPT_SOURCE_PAGE_UNEXPECTED_OR_EXHAUSTED:{key}:{path}"
+                                "TRANSCRIPT_SOURCE_PAGE_UNEXPECTED_OR_EXHAUSTED:{key}:{path}?{}:method={}:task={:?}:clOrdId={:?}",
+                                request.url().query().unwrap_or_default(),
+                                request.method(),tokio::task::try_id(),requested_client
                             );
                             self.denied_routes.lock().unwrap().push(missing.clone());
                             OkxError::Response(missing)
@@ -3432,6 +3475,73 @@ pub(crate) mod recorded_support {
                 .send(request, Instant::now() + std::time::Duration::from_secs(3))
                 .await?;
             serde_json::from_slice(&reply.body).map_err(Into::into)
+        }
+
+        #[tokio::test]
+        async fn immutable_acked_order_readback_is_bound_to_one_signed_post_and_query() {
+            let feed=RecordedAccountHttp::default();
+            let client="ackboundclient0001";
+            let raw=serde_json::to_vec(&serde_json::json!({
+                "code":"0","msg":"","data":[{
+                    "instId":"BTC-USDT-SWAP","ordId":"signed-ack-001",
+                    "clOrdId":"__REQUEST_CL_ORD_ID__",
+                    "state":"live","accFillSz":"0","sz":"0.3"
+                }]
+            })).unwrap();
+            feed.expect_get(RecordedGet {
+                access_key:"fixture-executor-a".into(),
+                path:"/api/v5/trade/order".into(),
+                required_query:vec![("instId".into(),"BTC-USDT-SWAP".into())],
+                raw_response:raw.clone(),
+            });
+            feed.expect_post(RecordedPost{
+                access_key:"fixture-executor-a".into(),
+                path:"/api/v5/trade/order".into(),
+                expected_body:serde_json::json!({"clOrdId":client}),
+                raw_response:br#"{"code":"0","data":[{"ordId":"signed-ack-001","clOrdId":"__REQUEST_CL_ORD_ID__","sCode":"0"}]}"#.to_vec(),
+            });
+            let mut create=reqwest::Request::new(reqwest::Method::POST,
+                reqwest::Url::parse("https://www.okx.com/api/v5/trade/order").unwrap());
+            create.headers_mut().insert("OK-ACCESS-KEY",
+                reqwest::header::HeaderValue::from_static("fixture-executor-a"));
+            *create.body_mut()=Some(reqwest::Body::from(
+                format!(r#"{{"clOrdId":"{client}"}}"#)));
+            let ack=deliver_causal(&feed,create).await.unwrap();
+            assert_eq!(ack["data"][0]["ordId"],"signed-ack-001");
+            let retired=feed.supersede_queued_signed_source_at_event(
+                "genuine-ack","same-live-order",RecordedGet{
+                    access_key:"fixture-executor-a".into(),
+                    path:"/api/v5/trade/order".into(),
+                    required_query:vec![
+                        ("instId".into(),"BTC-USDT-SWAP".into()),
+                        ("clOrdId".into(),client.into())
+                    ],
+                    raw_response:raw,
+                }
+            );
+            assert_eq!(retired,1);
+            let order_get=|id:&str|{
+                let mut r=reqwest::Request::new(reqwest::Method::GET,
+                    reqwest::Url::parse(&format!(
+                        "https://www.okx.com/api/v5/trade/order?instId=BTC-USDT-SWAP&clOrdId={id}"
+                    )).unwrap());
+                r.headers_mut().insert("OK-ACCESS-KEY",
+                    reqwest::header::HeaderValue::from_static("fixture-executor-a"));
+                r
+            };
+            for _ in 0..2 {
+                let observed=deliver_causal(&feed,order_get(client)).await.unwrap();
+                assert_eq!(observed["data"][0]["ordId"],"signed-ack-001");
+                assert_eq!(observed["data"][0]["clOrdId"],client);
+                assert_eq!(observed["data"][0]["state"],"live");
+            }
+            let wrong=deliver_causal(&feed,order_get("unacknowledged-client")).await
+                .expect_err("foreign order must never use another ACK");
+            assert!(wrong.to_string().contains("TRANSCRIPT_IMMUTABLE_QUERY_MISMATCH"));
+            assert_eq!(feed.immutable_signed_phase_reads(
+                "fixture-executor-a","/api/v5/trade/order","same-live-order"
+            ),2,"foreign read must not consume or mutate the signed source");
+            assert_eq!(feed.outbound_posts.lock().unwrap().len(),1);
         }
 
         #[tokio::test]

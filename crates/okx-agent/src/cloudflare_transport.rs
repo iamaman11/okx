@@ -4959,14 +4959,21 @@ mod raw_native_session_tests {
                         // Make only that existing A order source available
                         // at the post-ACK B1 phase, not a guessed venue order,
                         // fabricated fill, new POST, or global replay increase.
-                        for _ in 0..8 {
-                            feed.expect_optional_get(RecordedGet {
-                                access_key: "fixture-executor-a".into(),
-                                path: "/api/v5/trade/order".into(),
-                                required_query: vec![(
-                                    "instId".into(), "BTC-USDT-SWAP".into()
-                                )],
-                                raw_response: envelope(json!([{
+                        // A's authenticated second create ACK and first signed
+                        // live-order read already exist. Additional maintenance
+                        // and public Status consumers see the SAME snapshot
+                        // until an explicit later venue order-state event.
+                        // No new order, fill, timestamp or risk state is minted.
+                        let prior_a_order_pages=feed.supersede_queued_signed_source_at_event(
+                            "b1-a-second-create-ack","b1-a-second-live-order",
+                            RecordedGet {
+                                access_key:"fixture-executor-a".into(),
+                                path:"/api/v5/trade/order".into(),
+                                required_query:vec![
+                                    ("instId".into(),"BTC-USDT-SWAP".into()),
+                                    ("clOrdId".into(),persisted.client_order_id.clone()),
+                                ],
+                                raw_response:envelope(json!([{
                                     "instId":"BTC-USDT-SWAP",
                                     "ordId":"recorded-t09-second-001",
                                     "clOrdId":"__REQUEST_CL_ORD_ID__",
@@ -4977,8 +4984,10 @@ mod raw_native_session_tests {
                                     "state":"live","cTime":new_clock,
                                     "uTime":new_clock
                                 }])),
-                            });
-                        }
+                            }
+                        );
+                        assert!(prior_a_order_pages>0,
+                            "B1 requires the authenticated A order predecessor");
                         // Post-ACK campaign census may reread the signed A
                         // pending-order inventory while B tries admission.
                         // Reflect exactly the already ACK-bound A second order
