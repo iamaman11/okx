@@ -423,7 +423,7 @@ const cli = args(process.argv.slice(2));
 if (cli.selfTest) { selfTest(); process.exit(0); }
 if (cli.list) {
   process.stdout.write(JSON.stringify({
-    schema: "okx.trade-integration-manifest/v1", spec_revision: "#449-r8.3",
+    schema: "okx.trade-integration-manifest/v1", spec_revision: "#449-r9",
     required, mandatory_stages: mandatoryStages
   }, null, 2) + "\n");
   process.exit(0);
@@ -512,7 +512,7 @@ for (const caseId of cli.selected) {
 }
 const successful = caseResults.every(c => c.status === "PASS");
 const summary = {
-  schema: "okx.trade-integration-summary/v1", spec_revision: "#449-r8.3",
+  schema: "okx.trade-integration-summary/v1", spec_revision: "#449-r9",
   exact_commit: git("rev-parse", "HEAD"), exact_tree: git("rev-parse", "HEAD^{tree}"),
   driver_sha256: hashFile(fileURLToPath(import.meta.url)),
   cargo_lock_sha256: hashFile(resolve(root, "Cargo.lock")),

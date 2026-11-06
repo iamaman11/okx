@@ -6,6 +6,8 @@ on:
   push:
     branches:
       - main
+      # Existing A1 work branch: targeted Windows only, no premature full gate.
+      - work/t10-07-one-campaign-native-20261105
   workflow_dispatch:
     inputs:
       target_case:
@@ -19,6 +21,10 @@ on:
           - B1
           - S2-05
           - T10-14
+          - T10-03
+          - T10-05
+          - T10-06
+          - T10-15
           - T09.3
           - T09.4
           - T09.6
@@ -37,7 +43,7 @@ permissions:
 jobs:
   classify:
     name: classify
-    if: github.event_name != 'workflow_dispatch'
+    if: github.event_name != 'workflow_dispatch' && github.ref != 'refs/heads/work/t10-07-one-campaign-native-20261105'
     runs-on: ubuntu-latest
     outputs:
       build_required: ${{ steps.classify.outputs.build_required }}
@@ -257,7 +263,7 @@ jobs:
   linux:
     name: linux-core
     needs: [classify, architecture, linux-rust, cloudflare-mcp]
-    if: always() && github.event_name != 'workflow_dispatch'
+    if: always() && github.event_name != 'workflow_dispatch' && github.ref != 'refs/heads/work/t10-07-one-campaign-native-20261105'
     runs-on: ubuntu-latest
     steps:
       - name: Aggregate required Linux, architecture and Cloudflare gates
@@ -400,7 +406,7 @@ jobs:
   # mandatory 26-case pull_request gate.
   windows-t09-preflight:
     name: windows-t09-b1-s2-targeted
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/work/t10-07-one-campaign-native-20261105')
     runs-on: windows-latest
     timeout-minutes: 35
     permissions:
@@ -413,11 +419,11 @@ jobs:
       - name: Bind exact source SHA and restrict target scenario
         shell: pwsh
         env:
-          OKX_TARGET_CASE: ${{ inputs.target_case || 'T09.6' }}
+          OKX_TARGET_CASE: ${{ inputs.target_case || (github.event_name == 'push' && 'T10-03') || 'T09.6' }}
         run: |
           $head = (git rev-parse HEAD).Trim()
           if ($head -ne $env:GITHUB_SHA) { throw "PREFLIGHT_HEAD_MISMATCH" }
-          if ($env:OKX_TARGET_CASE -notin @('T09.1','T09.3','T09.4','T09.5','T09.6','T09.7','T09.8','B1','S2-05','T10-14')) {
+          if ($env:OKX_TARGET_CASE -notin @('T09.1','T09.3','T09.4','T09.5','T09.6','T09.7','T09.8','B1','S2-05','T10-14','T10-03','T10-05','T10-06','T10-15')) {
             throw "PREFLIGHT_CASE_NOT_ALLOWED"
           }
           Write-Host "PREFLIGHT_HEAD=$head"
@@ -433,8 +439,11 @@ jobs:
         with:
           cache-on-failure: true
 
-      - name: Check Rust format without changing source
-        run: cargo fmt --all -- --check
+      - name: Prove ACK-bound immutable order source before Native acceptance
+        shell: pwsh
+        run: |
+          cargo test --locked -p okx-agent --lib immutable_acked_order_readback_is_bound_to_one_signed_post_and_query -- --nocapture
+          if ($LASTEXITCODE -ne 0) { throw 'ACK_BOUND_ORDER_SOURCE_UNIT_FAILED' }
 
       - name: Install locked workerd test dependencies
         shell: pwsh
@@ -445,9 +454,9 @@ jobs:
       - name: Execute one Native/Worker scenario or B1/S2-05 prerequisite
         shell: pwsh
         env:
-          OKX_TARGET_CASE: ${{ inputs.target_case || 'T09.6' }}
+          OKX_TARGET_CASE: ${{ inputs.target_case || (github.event_name == 'push' && 'T10-03') || 'T09.6' }}
         run: |
-          if ($env:OKX_TARGET_CASE -notin @('T09.1','T09.3','T09.4','T09.5','T09.6','T09.7','T09.8','B1','S2-05','T10-14')) {
+          if ($env:OKX_TARGET_CASE -notin @('T09.1','T09.3','T09.4','T09.5','T09.6','T09.7','T09.8','B1','S2-05','T10-14','T10-03','T10-05','T10-06','T10-15')) {
             throw "PREFLIGHT_CASE_NOT_ALLOWED"
           }
           $artifacts = Join-Path $env:RUNNER_TEMP "trade-integration"
@@ -462,11 +471,15 @@ jobs:
           }
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      - name: Check Rust format without changing source
+        if: always()
+        run: cargo fmt --all -- --check
+
       - name: Preserve targeted evidence even on failure
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: native-targeted-${{ inputs.target_case || 'T09.6' }}-${{ github.sha }}
+          name: native-targeted-${{ inputs.target_case || (github.event_name == 'push' && 'T10-03') || 'T09.6' }}-${{ github.sha }}
           path: ${{ runner.temp }}\trade-integration
           if-no-files-found: warn
           retention-days: 14

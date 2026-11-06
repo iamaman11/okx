@@ -1,8 +1,8 @@
-# Trade acceptance evidence map — #449 r8.3 (A0)
+# Trade acceptance evidence map — #449 r9.1 (A0, active A1)
 
-**Canonical:** [product #448](https://github.com/iamaman11/okx/issues/448), [execution #449 r8.3](https://github.com/iamaman11/okx/issues/449). This is an evidence map, **not** a new suite, an authorization to trade, or a PASS certificate.
+**Canonical:** [product #448](https://github.com/iamaman11/okx/issues/448), [execution #449 r9.1](https://github.com/iamaman11/okx/issues/449). This is an evidence map, **not** a new suite, an authorization to trade, or a PASS certificate.
 
-**Source snapshot:** working branch `work/all26-one-slice-20261104`, commit `f06383e6b60c21c5afaa0607ba21b4e1fade0217`, tree `64dfc751865d902a47c3ff187835177c058661ee`. This branch is **72 commits ahead of PR #493 HEAD** `b93be8e682f35fa25540cd5662f89c4028bb8090`, and has **no exact-HEAD CI** at the time of this map. Historical Windows [run 41765456564](https://github.com/iamaman11/okx/actions/runs/41765456564) on **b93be8e**: T09.0–T09.7 and T10-14 PASS (9/26), T09.8 executed FAIL, 16 MISSING_REQUIRED_CASE; these are NOT work-branch PASS. Logs/artifacts remain attached to that run.
+**Current A1 working checkout:** `work/t10-07-one-campaign-native-20261105`. Starting Windows evidence: [18/26 on 82497aec](https://github.com/iamaman11/okx/actions/runs/42124898454), T09 core9/9 and T10-06 PASS; T10-03/05/15 executed FAIL; T10-08–12 NOT_PROVEN. Code fixes are WIP, not PASS until tests run on the exact new SHA. Current PR #493 remains on `b93be8e`, not this branch. The row-level table below is the **historical r8.3 evidence map**, not a new result on the active branch; row statuses and SHA must be replaced only when their actual receipts exist.
 
 The 26 authoritative IDs are owned by `scripts/run-trade-integration.mjs --list`; all 26 `cases/<ID>.mjs` files were found on the work-branch snapshot. **File presence proves neither feature completeness nor scenario PASS.** All component/integration results below are **NOT_RUN on this exact branch SHA**; individual partial witnesses and deliberate fail-closed cases are documented rather than promoted. No production behavior was classified `NOT_FOUND` solely because it lacks a test.
 
