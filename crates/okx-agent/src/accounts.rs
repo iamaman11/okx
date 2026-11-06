@@ -1081,6 +1081,10 @@ pub(crate) mod recorded_support {
         pub(crate) delivered_fees: Mutex<Vec<(String, String, i64)>>,
         /// Strict test transcript GET denial paths only: no headers or secrets.
         pub(crate) denied_routes: Mutex<Vec<String>>,
+        // One last actually DELIVERED, ACK-bound order GET per (actor, clOrdId).
+        // Exact raw-response digest proves a predecessor even if competing
+        // readers consumed every queued copy before a signed phase event.
+        delivered_order_digests: Mutex<Vec<(String, String, String)>>,
         /// (signed account key, exact sent clOrdId, acknowledged ordId).
         acknowledged_creates: Mutex<Vec<(String, String, String)>>,
         // Test-only lost network ACK AFTER exactly one signed venue create.
@@ -1439,8 +1443,32 @@ pub(crate) mod recorded_support {
                 .chain(optional.iter())
                 .filter(|p| in_scope(p))
                 .collect::<Vec<_>>();
+            // For an order phase, exhaustion of FINITE queued copies must
+            // not invalidate an already delivered, authenticated venue GET.
+            // Promote only the identical previously delivered raw response,
+            // scoped to the same ACK-bound account and exact clOrdId.
+            // A new state, a foreign order, or a missing prior GET still fails.
+            let prior_delivered_order = if retired.is_empty() && path == "/api/v5/trade/order" {
+                let exact_client = client.expect("TRANSCRIPT_ORDER_PHASE_CLIENT_ID_MISSING");
+                let expanded = String::from_utf8(page.raw_response.clone())
+                    .expect("TRANSCRIPT_ORDER_PHASE_SOURCE_UTF8")
+                    .replace("__REQUEST_CL_ORD_ID__", exact_client);
+                let digest = format!("{:x}", sha2::Sha256::digest(expanded.as_bytes()));
+                self.delivered_order_digests
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|(source_actor, source_client, source_digest)| {
+                        source_actor == &actor
+                            && source_client == exact_client
+                            && source_digest == &digest
+                    })
+                    .then_some(digest)
+            } else {
+                None
+            };
             assert!(
-                !retired.is_empty(),
+                !retired.is_empty() || prior_delivered_order.is_some(),
                 "TRANSCRIPT_SOURCE_EVENT_OLD_SOURCE_MISSING:event={event_id}:phase={phase_id}:actor={actor}:path={path}:query={query:?}"
             );
             assert!(
@@ -1487,12 +1515,18 @@ pub(crate) mod recorded_support {
                     "TRANSCRIPT_ORDER_PHASE_UNPROVEN_STATE_CHANGE"
                 );
             }
-            let old_raw = &retired[0].raw_response;
-            assert!(
-                retired.iter().all(|p| p.raw_response == *old_raw),
-                "TRANSCRIPT_SOURCE_EVENT_OLD_RAW_CONFLICT"
-            );
-            let old_digest = format!("{:x}", sha2::Sha256::digest(old_raw));
+            let old_digest = if let Some(first) = retired.first() {
+                assert!(
+                    retired.iter().all(|p| p.raw_response == first.raw_response),
+                    "TRANSCRIPT_SOURCE_EVENT_OLD_RAW_CONFLICT"
+                );
+                format!("{:x}", sha2::Sha256::digest(&first.raw_response))
+            } else {
+                prior_delivered_order
+                    .as_ref()
+                    .expect("TRANSCRIPT_SOURCE_EVENT_DELIVERED_PROOF_MISSING")
+                    .clone()
+            };
             let removed = retired.len();
             drop(retired);
             required.retain(|p| !in_scope(p));
@@ -1513,7 +1547,9 @@ pub(crate) mod recorded_support {
                 "event=SIGNED_SOURCE_SUPERSEDED cause={event_id} phase={phase_id} actor={actor} route={path} query={query:?} old_pages={removed} old_sha256={old_digest} new_sha256={:x}",
                 sha2::Sha256::digest(&phases.last().unwrap().source.raw_response)
             ));
-            removed
+            // Count the one already authenticated predecessor if its queued
+            // copies were consumed. old_pages in the trace stays truthful (0).
+            removed + usize::from(prior_delivered_order.is_some())
         }
 
         pub(crate) fn expect_get(&self, page: RecordedGet) {
@@ -3677,6 +3713,21 @@ pub(crate) mod recorded_support {
                                 "time_ms":chrono::Utc::now().timestamp_millis(),
                             })
                         );
+                    }
+                    if path == "/api/v5/trade/order" {
+                        let client = requested_client
+                            .as_deref()
+                            .expect("TRANSCRIPT_DELIVERED_ORDER_CLIENT_MISSING");
+                        let proof = format!("{:x}", sha2::Sha256::digest(&body));
+                        let mut delivered = self.delivered_order_digests.lock().unwrap();
+                        if let Some((_, _, previous)) = delivered
+                            .iter_mut()
+                            .find(|(actor, id, _)| actor == key && id == client)
+                        {
+                            *previous = proof;
+                        } else {
+                            delivered.push((key.to_owned(), client.to_owned(), proof));
+                        }
                     }
                     self.requests.lock().unwrap().push(format!(
                         "{key}:{path}?{}",
