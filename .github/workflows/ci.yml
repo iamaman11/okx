@@ -444,6 +444,8 @@ jobs:
         run: |
           cargo test --locked -p okx-agent --lib immutable_acked_order_readback_is_bound_to_one_signed_post_and_query -- --nocapture
           if ($LASTEXITCODE -ne 0) { throw 'ACK_BOUND_ORDER_SOURCE_UNIT_FAILED' }
+          cargo test --locked -p okx-agent --lib immutable_signed_leverage_handoff_preserves_exact_source_without_extra_pages -- --nocapture
+          if ($LASTEXITCODE -ne 0) { throw 'SIGNED_LEVERAGE_SOURCE_UNIT_FAILED' }
 
       - name: Install locked workerd test dependencies
         shell: pwsh

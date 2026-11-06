@@ -4017,6 +4017,67 @@ pub(crate) mod recorded_support {
         }
 
         #[tokio::test]
+        async fn immutable_signed_leverage_handoff_preserves_exact_source_without_extra_pages() {
+            let feed = RecordedAccountHttp::default();
+            let raw = serde_json::to_vec(&serde_json::json!({
+                "code":"0","msg":"","data":[
+                    {"instId":"BTC-USDT-SWAP","mgnMode":"cross","posSide":"long","lever":"2"},
+                    {"instId":"BTC-USDT-SWAP","mgnMode":"cross","posSide":"short","lever":"2"}
+                ]
+            }))
+            .unwrap();
+            let page = || RecordedGet {
+                access_key: "fixture-observer-b".into(),
+                path: "/api/v5/account/leverage-info".into(),
+                required_query: vec![
+                    ("instId".into(), "BTC-USDT-SWAP".into()),
+                    ("mgnMode".into(), "cross".into()),
+                ],
+                raw_response: raw.clone(),
+            };
+            feed.expect_get(page());
+            let retired = feed.supersede_queued_signed_source_at_event(
+                "observed-prior-b-leverage",
+                "unchanged-b-leverage",
+                page(),
+            );
+            assert_eq!(retired, 1);
+            let get = |mode: &str| {
+                let url = reqwest::Url::parse(&format!(
+                    "https://www.okx.com/api/v5/account/leverage-info?instId=BTC-USDT-SWAP&mgnMode={mode}"
+                ))
+                .unwrap();
+                let mut request = reqwest::Request::new(reqwest::Method::GET, url);
+                request.headers_mut().insert(
+                    "OK-ACCESS-KEY",
+                    reqwest::header::HeaderValue::from_static("fixture-observer-b"),
+                );
+                request
+            };
+            for _ in 0..3 {
+                let observed = deliver_causal(&feed, get("cross")).await.unwrap();
+                assert_eq!(observed["data"][0]["lever"], "2");
+                assert_eq!(observed["data"][1]["lever"], "2");
+            }
+            let invalid = deliver_causal(&feed, get("isolated")).await.unwrap_err();
+            assert!(
+                invalid
+                    .to_string()
+                    .contains("TRANSCRIPT_IMMUTABLE_QUERY_MISMATCH")
+            );
+            assert_eq!(
+                feed.immutable_signed_phase_reads(
+                    "fixture-observer-b",
+                    "/api/v5/account/leverage-info",
+                    "unchanged-b-leverage"
+                ),
+                3,
+                "a wrong query cannot consume a valid immutable source"
+            );
+            assert_eq!(feed.outbound_posts.lock().unwrap().len(), 0);
+        }
+
+        #[tokio::test]
         async fn immutable_acked_order_readback_is_bound_to_one_signed_post_and_query() {
             let feed = RecordedAccountHttp::default();
             let client = "ackboundclient0001";

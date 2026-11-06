@@ -129,6 +129,30 @@ async fn t10_05_create_outcome(
     );
     assert!(retired>0,"T10-05 needs prior signed B fee source");
     feed.advance_recorded_public_clock(wrap(json!([{"ts":execute_stamp}])));
+    // T10-05 enters after the authenticated B leverage observation. Repeated
+    // risk-plan reads of the same unchanged signed leverage are observations
+    // of one source phase, not new leverage events or additional GET pages.
+    // Retire only identical old actor/route/query/raw bytes at this boundary.
+    let retired_leverage = feed.supersede_queued_signed_source_at_event(
+        "t10-05-after-existing-b-source",
+        "t10-05-b-unchanged-leverage",
+        RecordedGet {
+            access_key: "fixture-observer-b".into(),
+            path: "/api/v5/account/leverage-info".into(),
+            required_query: vec![
+                ("instId".into(), "BTC-USDT-SWAP".into()),
+                ("mgnMode".into(), "cross".into()),
+            ],
+            raw_response: wrap(json!([
+                {"instId":"BTC-USDT-SWAP","mgnMode":"cross","posSide":"long","lever":"2"},
+                {"instId":"BTC-USDT-SWAP","mgnMode":"cross","posSide":"short","lever":"2"}
+            ])),
+        },
+    );
+    assert!(
+        retired_leverage > 0,
+        "T10-05 must have an authentic prior B leverage source to hand off"
+    );
     if lost_ack {
         feed.arm_lost_next_create_ack();
     }
