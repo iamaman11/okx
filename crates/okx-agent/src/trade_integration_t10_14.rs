@@ -93,7 +93,18 @@ async fn t10_14_b_public_cancel_while_a_sql_held(
         .expect("T10-14 A SQL result");
     let observed_status=status.expect("T10-14 B Status cannot wait for A")
         .expect("T10-14 B Status production read");
-    assert_eq!(observed_status["data"]["intent"]["intent_id"],b_intent);
+    // Status may be identity-bound UNKNOWN when its own signed GET is locally
+    // deferred; an UNKNOWN envelope carries intent_id at the top level.
+    // A completed/partial status must still carry the actual SQL intent.
+    let observed_status_id=if observed_status["status"]=="unknown" {
+        assert_eq!(observed_status["retryable"],false,
+            "T10-14 UNKNOWN must not authorize a new mutation");
+        observed_status["intent_id"].as_str()
+    } else {
+        observed_status["data"]["intent"]["intent_id"].as_str()
+    };
+    assert_eq!(observed_status_id,Some(b_intent.as_str()),
+        "T10-14 B Status must be bound to exact B intent: {observed_status}");
     assert_eq!(read_posts,posts_before,"T10-14 B read cannot send a POST");
     let observed_cancel=cancel.expect("T10-14 B Cancel cannot wait for A")
         .expect("T10-14 B Cancel production operation");
@@ -116,7 +127,7 @@ async fn t10_14_b_public_cancel_while_a_sql_held(
         "schema":"okx.t10-14-native-worker-isolation/v1",
         "account_a":a_key,"account_b":b_key,
         "b_intent_id":b_intent,
-        "b_status_intent_id":observed_status["data"]["intent"]["intent_id"],
+        "b_status_intent_id":observed_status_id,
         "a_sql_held_during_b_cancel":true,
         "b_status_while_a_held":true,
         "b_cancel_status":observed_cancel["status"],

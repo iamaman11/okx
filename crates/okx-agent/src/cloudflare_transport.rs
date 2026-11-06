@@ -2742,11 +2742,20 @@ mod raw_native_session_tests {
                 let local_reason = reason.strip_prefix("OKX API error: ").unwrap_or(reason);
                 let remaining =
                     admission_deadline.saturating_duration_since(std::time::Instant::now());
-                let delay = recorded_preview_local_defer(local_reason, &rate_budget, remaining)
-                    .unwrap_or_else(|| {
-                        panic!("T09.1 non-private-GET/nonlocal denial cannot retry: {admission}; rate={:?}",
-                            rate_budget.snapshot().last_throttle)
-                    });
+                let delay = if local_reason == "ENTRY_FEE_EXCHANGE_TIME_STALE" {
+                    // The signed fee source has expired while another owner
+                    // consumed this account's rate budget. The guards above
+                    // prove NOT_STARTED, RELEASED and zero venue POSTs.
+                    // Publish the next independently timed signed fee event
+                    // below; never reuse or treat the stale fee as current.
+                    Duration::ZERO
+                } else {
+                    recorded_preview_local_defer(local_reason, &rate_budget, remaining)
+                        .unwrap_or_else(|| {
+                            panic!("T09.1 non-private-GET/nonlocal denial cannot retry: {admission}; rate={:?}",
+                                rate_budget.snapshot().last_throttle)
+                        })
+                };
                 assert!(attempt < 3, "T09.1 bounded local no-send recovery exhausted");
                 let mut audit = summary(&format!("risk_t09_1_local_no_send_{attempt}"));
                 audit.installation_id = "installation_test".into();
