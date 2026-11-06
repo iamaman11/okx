@@ -837,6 +837,7 @@ fn start_sources(
                 if snapshot.account_uid_fingerprint!=account.configuration.account_key.verified_uid
                     ||!account.execution.verified_uid_matches_until(
                         &snapshot.account_uid_fingerprint,
+                        generation,
                         capture_started + std::time::Duration::from_secs(10),
                     ).await.unwrap_or(false) {
                     account.record_source_failure("ACCOUNT_IDENTITY_MISMATCH", capture_started, generation, cycle_id).await;
