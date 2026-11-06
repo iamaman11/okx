@@ -6694,30 +6694,34 @@ mod raw_native_session_tests {
                 assert_eq!(add["entry_total_usdt"], "2.001");
                 assert_eq!(readback["second_intent_state"], "FILLED");
                 assert_eq!(readback["second_active_central_receipt"], !close_mode);
-            } else if std::env::var(
-                "OKX_T10_08_PROTECTION_FAILURE_PROBE"
-            ).as_deref() == Ok("1") {
+            } else if std::env::var("OKX_T10_08_PROTECTION_FAILURE_PROBE").as_deref() == Ok("1") {
                 // This is not the standalone T09.3 exposure! Its two lots
                 // were actually reduced to zero by the one public Close,
                 // and the exact original central grant was released.
-                assert_eq!(readback["remaining_lot_count"], 0,
-                    "T10-08 restarted SQL must have no unprotected lots");
+                assert_eq!(
+                    readback["remaining_lot_count"], 0,
+                    "T10-08 restarted SQL must have no unprotected lots"
+                );
                 assert_eq!(readback["remaining_lot_quantity"], "0");
                 assert_eq!(readback["second_intent_state"], "FILLED");
                 assert_eq!(readback["second_active_central_receipt"], false);
-                let proof=&readback["t10_08_recovery"];
-                assert_eq!(proof["schema"],"okx.t10-08-native-sql-restart-recovery/v1");
-                assert_eq!(proof["original_state"],"FILLED");
-                assert_eq!(proof["original_incident"],serde_json::Value::Null);
-                assert_eq!(proof["original_central_held"],false);
-                assert_eq!(proof["close_state"],"FILLED");
-                assert_eq!(proof["close_quantity"],"0.3");
-                assert_eq!(proof["close_risk_increase"],false);
-                assert_eq!(proof["risk_stop_latched"],false);
-                assert_eq!(proof["recovery_receipt_kind"],
-                    "PROTECTION_INCIDENT_FLAT_RESOLVED");
-                assert_eq!(proof["recovery_source_digest"].as_str().map(str::len),
-                    Some(64));
+                let proof = &readback["t10_08_recovery"];
+                assert_eq!(proof["schema"], "okx.t10-08-native-sql-restart-recovery/v1");
+                assert_eq!(proof["original_state"], "FILLED");
+                assert_eq!(proof["original_incident"], serde_json::Value::Null);
+                assert_eq!(proof["original_central_held"], false);
+                assert_eq!(proof["close_state"], "FILLED");
+                assert_eq!(proof["close_quantity"], "0.3");
+                assert_eq!(proof["close_risk_increase"], false);
+                assert_eq!(proof["risk_stop_latched"], false);
+                assert_eq!(
+                    proof["recovery_receipt_kind"],
+                    "PROTECTION_INCIDENT_FLAT_RESOLVED"
+                );
+                assert_eq!(
+                    proof["recovery_source_digest"].as_str().map(str::len),
+                    Some(64)
+                );
                 println!("T10_08_NATIVE_RESTART_RECOVERY_V1:{proof}");
             } else if std::env::var("OKX_T09_3_PARTIAL_PROBE").as_deref() == Ok("1") {
                 assert_eq!(readback["remaining_lot_count"], 2);
