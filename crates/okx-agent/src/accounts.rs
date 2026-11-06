@@ -1441,7 +1441,7 @@ pub(crate) mod recorded_support {
                 .collect::<Vec<_>>();
             assert!(
                 !retired.is_empty(),
-                "TRANSCRIPT_SOURCE_EVENT_OLD_SOURCE_MISSING"
+                "TRANSCRIPT_SOURCE_EVENT_OLD_SOURCE_MISSING:event={event_id}:phase={phase_id}:actor={actor}:path={path}:query={query:?}"
             );
             assert!(
                 retired.iter().all(|p| {
