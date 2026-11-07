@@ -320,7 +320,16 @@ async fn pc_05_restart_recovers_the_same_sql_begin_without_new_send() {
     let begin = operation(&f.store, "pc-05").await;
     let db = f.db.clone();
     let account_key = f.account_key.clone();
+    let mut terminated = f.store.termination_signal();
     drop(f);
+    // Do not race a second account owner against the first SQL writer.
+    // The worker signals termination only AFTER closing SQLite and releasing
+    // its exclusive writer lease; restart must wait for that real boundary.
+    tokio::time::timeout(std::time::Duration::from_secs(5), terminated.changed())
+        .await
+        .expect("PC-05 previous SQL writer did not terminate")
+        .expect("PC-05 SQL termination witness dropped");
+    assert!(*terminated.borrow(), "PC-05 SQL owner still alive");
     let reopened = AccountStoreHandle::open_existing(db, account_key, "installation_test".into())
         .await
         .unwrap();
