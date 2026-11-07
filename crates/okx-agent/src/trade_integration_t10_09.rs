@@ -1125,6 +1125,58 @@ async fn t10_09_b_terminal_after_partial(
             }
         }
     }
+    // Wait on the independent SQL owner, not repeated public Status GETs,
+    // until the third authenticated fill/bill has made B flat. The final
+    // signed orders-pending phase is published AFTER this causal finance
+    // boundary so maintenance cannot exhaust it while capture is pending.
+    // No source bytes, financial values or risk state are created here.
+    let until=std::time::Instant::now()+Duration::from_secs(24);
+    let mut last_finance=json!({"state":"WAITING_FOR_SIGNED_FLAT"});
+    loop {
+        assert!(std::time::Instant::now()<until,
+            "T10_09_FINAL_SIGNED_FLAT_NOT_CAPTURED:{last_finance}");
+        let id=close_id.clone();
+        let observed=owner.execution.store.call(
+            std::time::Instant::now()+Duration::from_secs(3),
+            move |s| {
+                let fills=s.cursor("fills","SWAP")?;
+                let bills=s.cursor("bills","account")?;
+                let lots=s.active_lots("BTC-USDT-SWAP")?;
+                let (qty,fill_count)=if let Some(cursor)=fills.as_ref() {
+                    let evidence=s.intent_fill_cost_evidence(&id,cursor.watermark)?;
+                    (evidence.filled_quantity.normalize().to_string(),evidence.fill_count)
+                } else {("0".to_owned(),0)};
+                let bill_count=if let Some(cursor)=bills.as_ref() {
+                    s.intent_fee_bill_evidence(&id,cursor.watermark)?.linked_bill_count
+                } else {0};
+                Ok(json!({
+                    "close_qty":qty,
+                    "close_fill_count":fill_count,
+                    "close_bill_count":bill_count,
+                    "remaining_lots":lots.len(),
+                    "fill_watermark":fills.as_ref().map(|v|v.watermark),
+                    "bill_watermark":bills.as_ref().map(|v|v.watermark),
+                    "fills_complete":fills.as_ref().is_some_and(|v|
+                        v.generation>0&&v.coverage_gaps.is_empty()&&v.cursor.is_empty()),
+                    "bills_complete":bills.as_ref().is_some_and(|v|
+                        v.generation>0&&v.coverage_gaps.is_empty()&&v.cursor.is_empty()),
+                }))
+            },
+        ).await;
+        match observed {
+            Ok(value) if value["close_qty"]=="0.02"
+                && value["close_fill_count"]==1
+                && value["close_bill_count"]==1
+                && value["remaining_lots"]==0
+                && value["fills_complete"]==true
+                && value["bills_complete"]==true
+                && value["fill_watermark"].as_i64().unwrap_or(0)>=at
+                && value["bill_watermark"].as_i64().unwrap_or(0)>=at => break,
+            Ok(value)=>last_finance=value,
+            Err(reason)=>last_finance=json!({"sql_error":format!("{reason:?}")}),
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
     feed.advance_immutable_signed_phase_bounded(
         "t10-09-b-reduce-filled-pending-inventory",
         "t10-09-b-final-flat-pending-inventory",
@@ -1137,7 +1189,6 @@ async fn t10_09_b_terminal_after_partial(
         24,Duration::from_secs(20),
     );
 
-    let until=std::time::Instant::now()+Duration::from_secs(24);
     let mut last=json!(null);
     let mut original_status=json!(null);
     let mut close_status=json!(null);
