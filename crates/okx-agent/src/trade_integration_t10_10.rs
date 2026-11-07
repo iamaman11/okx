@@ -143,6 +143,18 @@ async fn t10_10_late_released_fee(
             }])),
         }).collect());
     let event_at=chrono::Utc::now().timestamp_millis();
+    // Independent account inventory at the late-bill event: both recorded
+    // entries have already filled, so neither is an outstanding venue order.
+    // Declare this new scenario's source once, with fixed bytes and a finite
+    // lifetime/read budget; never reset the earlier implicit 64-read source.
+    feed.expect_immutable_signed_phase_bounded(
+        "t10-10-late-bill-no-pending-orders",
+        RecordedGet {access_key:"fixture-observer-a".into(),
+            path:"/api/v5/trade/orders-pending".into(),
+            required_query:vec![("limit".into(),"100".into())],
+            raw_response:raw(serde_json::json!([]))},
+        12,Duration::from_secs(12),
+    );
     let bill=raw(serde_json::json!([{
         "billId":"t10-10-independent-late-fee-001","instType":"SWAP",
         "instId":"BTC-USDT-SWAP","ordId":"recorded-t09-opening-001",
@@ -156,22 +168,24 @@ async fn t10_10_late_released_fee(
             access_key:"fixture-executor-a".into(),path:"/api/v5/account/bills-archive".into(),
             required_query:vec![],raw_response:bill.clone(),
         }).collect());
-    let mut last=serde_json::Value::Null;
-    let (after,worker)=tokio::time::timeout(Duration::from_secs(12),async {
+    // Await the SQL ingestion boundary before one public reconciliation.
+    // Polling Status would repeatedly capture the same account/network state.
+    tokio::time::timeout(Duration::from_secs(9),async {
         loop {
-            last=trade.trade("fixture-a",&okx_protocol::trading::TradeRequest::Status {
-                reference:intent_id.clone(),
-            },None).await.unwrap();
             let sql=read(intent_id.clone()).await;
-            let mut cmd=summary("risk_t10_10_late_fee_observed");
-            cmd.installation_id="installation_test".into();
-            let worker=risk.request(cmd).await.unwrap();
-            let entry=worker.budget.as_ref().unwrap().entry_budget.as_ref().unwrap();
-            if sql["late"].is_object() && sql["pending"]==false
-                && entry.consumed_usd=="4.0021" {break (sql,worker);}
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            if sql["pending"]==true {break;}
+            tokio::time::sleep(Duration::from_millis(50)).await;
         }
-    }).await.unwrap_or_else(|_|panic!("T10_10_LATE_FEE_SETTLEMENT_NOT_OBSERVED:{last}"));
+    }).await.expect("T10_10_LATE_BILL_NOT_INGESTED");
+    let status=trade.trade("fixture-a",&okx_protocol::trading::TradeRequest::Status {
+        reference:intent_id.clone(),
+    },None).await.unwrap();
+    let after=read(intent_id.clone()).await;
+    assert_eq!(after["pending"],false,"late settlement remains pending: {status}");
+    let mut cmd=summary("risk_t10_10_late_fee_observed");
+    cmd.installation_id="installation_test".into();
+    let worker=risk.request(cmd).await.unwrap();
+    assert_eq!(worker.budget.as_ref().unwrap().entry_budget.as_ref().unwrap().consumed_usd,"4.0021");
     assert_eq!(amount(&after["late"]["cumulative_entry_usd"]),Decimal::new(10006,4));
     assert!(after["late"]["settlement_revision"].as_u64().unwrap()>
         before["terminal"]["settlement_revision"].as_u64().unwrap());
