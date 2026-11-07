@@ -15,6 +15,7 @@ import { build } from "esbuild";
 import { Miniflare } from "miniflare";
 import { assertBudgetEconomicsUnchanged } from "../../../scripts/trade-integration/budget-evidence.mjs";
 import { settleBeforeWorkerCrash, recoverWorkerCrash } from "./t10-12-worker-crash.mjs";
+import { nativeWorkerCrashHost } from "./t10-12-native-worker.mjs";
 
 const crashChild=process.env.OKX_T10_12_WORKER_CRASH_CHILD==="1";
 const crashRecovery=process.env.OKX_T10_12_WORKER_CRASH_RECOVERY==="1";
@@ -248,7 +249,7 @@ function fixtureOpening(campaignStartedAt, asOf, accountKeys) {
   source.source_digest = createHash("sha256").update(canonical).digest("hex");
   return source;
 }
-let first, second;
+let first, second, nativeCrashHost;
 async function runRuntimeFixture(){
 try {
   await build({
@@ -835,7 +836,12 @@ try {
     // The already-running Native process opened both real SQL accounts
     // BEFORE this Worker campaign was created. Supply only the actual
     // workerd connection metadata, never a synthetic SQL source.
-    const url = await second.ready;
+    let url = await second.ready;
+    if(process.env.OKX_T10_12_NATIVE_WORKER_CRASH==="1") {
+      await second.dispose();second=null;
+      nativeCrashHost=await nativeWorkerCrashHost({opts,root,handoffPath});
+      url=new URL(nativeCrashHost.ws_url);
+    }
     assert.equal(url.hostname,"127.0.0.1","CI worker must be loopback-only");
     const wsUrl = new URL("/runtime",url);
     wsUrl.protocol = "ws:";
@@ -1203,6 +1209,14 @@ try {
       "real Rust client must prove Worker SQL summary and reservation");
     process.stdout.write(stdout);
     if (stderr) process.stderr.write(stderr);
+    if(nativeCrashHost) {
+      const recovered=await nativeCrashHost.completion;
+      console.log("T10_12_WORKER_NATIVE_CRASH_V1:"+JSON.stringify(recovered));
+      await nativeCrashHost.close();nativeCrashHost=null;
+      second=new Miniflare(opts);
+      const initialized=await request(second,"/installation/initialize","POST",installation);
+      assert.equal(initialized.status,200);
+    }
     const afterNativeSocket = await session(second);
     const afterNative = await summary(afterNativeSocket, "risk_after_native_real_wss_0001");
     if(t10SevenOneCampaign) {
@@ -1685,6 +1699,7 @@ try {
     risk_monetary_post_count:0,
   }));
 } finally {
+  if(nativeCrashHost)await nativeCrashHost.close();
   if (first) await first.dispose();
   if (second) await second.dispose();
   await rm(root, {recursive: true, force: true});

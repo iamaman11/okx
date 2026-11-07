@@ -7,6 +7,7 @@ import {promisify} from "node:util";
 import {cp,mkdir,mkdtemp,readFile,writeFile,rm} from "node:fs/promises";
 import {join,resolve} from "node:path";
 import {tmpdir} from "node:os";
+import {actualNativeWorker} from "../native-workerd.mjs";
 const exec=promisify(execFile);
 // stdout is a byte stream. A durable-commit JSON marker can be split across
 // arbitrary chunks. Parse only complete lines before killing the process.
@@ -195,7 +196,41 @@ export async function run({caseId,root,signal,artifactsDir}){
       missing:[
         "same_native_sql_account_and_no_double_financial_mutation",
         "old_worker_reply_binding_rejected_by_native"]},null,2)+"\n");
-  throw Error("T10_12_SAME_NATIVE_SQL_AND_NATIVE_OLD_REPLY_NOT_PROVEN");
+  process.env.OKX_T10_12_NATIVE_WORKER_CRASH="1";
+  let native;
+  try {
+    native=await actualNativeWorker(root,signal,{statusProbe:true});
+  } finally {
+    delete process.env.OKX_T10_12_NATIVE_WORKER_CRASH;
+  }
+  const recovery=native.nativeOldReplyRecovery;
+  const local=native.nativeLocalRecovery;
+  const crash=native.nativeWorkerCrash;
+  assert.equal(crash.worker_os_kills,1);
+  assert.equal(crash.native_process_survived,true);
+  assert.equal(crash.original_do_storage_reopened,true);
+  assert.equal(recovery.old_reply_rejected,true);
+  assert.equal(recovery.reason,"SESSION_GENERATION_MISMATCH");
+  assert.deepEqual(recovery.sql_before,recovery.sql_after_old_reply);
+  assert.deepEqual(recovery.sql_before,recovery.sql_after_worker_replay);
+  assert.deepEqual(recovery.worker_before,recovery.worker_after);
+  assert.equal(recovery.sql_before.local_settlement_ack,false);
+  assert.equal(local.local_settlement_ack,true);
+  assert.equal(local.intent_id,recovery.sql_before.intent_id);
+  assert.deepEqual(local.proof,recovery.sql_before.proof);
+  assert.equal(local.fill_count,recovery.sql_before.fill_count);
+  assert.equal(local.bill_count,recovery.sql_before.bill_count);
+  assert.equal(native.nativeTerminal.created_posts,3);
+  assert.equal(native.nativeTerminal.opening_status.data.central_release.state,"verified");
+  assert.equal(native.nativeRestart.active_central_receipt,false);
+  await writeFile(resolve(dir,"native-worker-settlement-crash.json"),JSON.stringify({
+    schema:"okx.t10-12-native-worker-settlement-crash/v1",
+    mandatory_case_pass:false,crash,recovery,local,
+    terminal:native.nativeTerminal,reopened:native.nativeRestart,
+    transcript_sha256:native.transcript_sha256,
+    missing:["reserve_crash_same_native_sql_recovery"],
+  },null,2)+"\n");
+  throw Error("T10_12_RESERVE_CRASH_SAME_NATIVE_SQL_NOT_PROVEN");
 }
 
 // Standalone parser regression. Real OS process kill remains mandatory.

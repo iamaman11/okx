@@ -318,7 +318,10 @@ where
         },
         Some((id,result))=flights.next(),if !flights.is_empty()=>{active.remove(&id);send(&mut sink,F::Response{schema:SCHEMA.into(),session_id:session_id.clone(),connection_generation,response:result}).await?;},
         message=source.next()=>{
-        let f=frame(message.ok_or_else(||transport("WS_CLOSED"))?.map_err(|_|transport("WS_READ_FAILED"))?)?;
+        let incoming=message.ok_or_else(||transport("WS_CLOSED"))?.map_err(|_|transport("WS_READ_FAILED"))?;
+        #[cfg(test)]
+        let original_bytes=incoming.clone();
+        let f=frame(incoming)?;
         let(s,g)=match &f{F::Ping{session_id,connection_generation,..}|F::Pong{session_id,connection_generation,..}|F::Request{session_id,connection_generation,..}|F::RiskControlResult{session_id,connection_generation,..}|F::PolicySnapshot{session_id,connection_generation,..}=>(session_id,*connection_generation),_=>return Err(transport("UNEXPECTED_FRAME"))};
         if s!=&session_id||g!=connection_generation{return Err(transport("SESSION_GENERATION_MISMATCH"));}last_seen=Instant::now();
         match f{
@@ -326,6 +329,11 @@ where
         F::Pong{..}=>{},
         F::PolicySnapshot{snapshot,..}=>{ctx.trade.update_governance(&snapshot).await.map_err(|_|transport("INVALID_POLICY_SNAPSHOT"))?;},
         F::RiskControlResult{mut result,..}=>{
+            #[cfg(test)]
+            raw_native_session_tests::t10_12_hold_settlement_reply(
+                &original_bytes,&result,pending.get(&result.command_id).map(|(cmd,_)|cmd),
+                &ctx,&session_id,connection_generation
+            ).await?;
             #[cfg(test)]
             if result.status==okx_protocol::risk_authority::RiskDecisionStatus::PostAuthorized
                 && T10_03_DROP_NEXT_POST_AUTH.swap(
@@ -728,6 +736,7 @@ mod raw_native_session_tests {
     include!("trade_integration_t10_08.rs");
     include!("trade_integration_t10_09.rs");
     include!("trade_integration_t10_10.rs");
+    include!("trade_integration_t10_12.rs");
     include!("trade_integration_t10_07.rs");
 
     /// Retry permission is test-only and limited to an explicitly read-only
@@ -1840,8 +1849,24 @@ mod raw_native_session_tests {
             *installation_id = "installation_test".into();
         }
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let recovery_risk = risk.clone();
+        let recovery_handoff = handoff_path.clone();
         let session = tokio::spawn(async move {
-            let result = run_connected_session(socket, hello, ctx, &mut risk_rx, shutdown_rx).await;
+            let result = if t10_12_enabled() {
+                t10_12_supervise(
+                    socket,
+                    hello,
+                    ctx,
+                    &mut risk_rx,
+                    shutdown_rx,
+                    recovery_risk,
+                    token.to_string(),
+                    recovery_handoff,
+                )
+                .await
+            } else {
+                run_connected_session(socket, hello, ctx, &mut risk_rx, shutdown_rx).await
+            };
             if let Err(ref reason) = result {
                 // Record the *real* Native WSS first failure. A later
                 // RISK_TRANSPORT_LOST is only the requester's secondary
@@ -3536,7 +3561,10 @@ mod raw_native_session_tests {
                     "slTriggerPx":"900","slTriggerPxType":"mark","slOrdPx":"-1"
                 }])),
             });
-            let actual = trade
+            if t10_12_enabled() {
+                T10_12_ARM_SETTLEMENT.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+            let mut actual = trade
                 .trade(
                     "fixture-a",
                     &okx_protocol::trading::TradeRequest::Status {
@@ -3546,6 +3574,30 @@ mod raw_native_session_tests {
                 )
                 .await
                 .expect("production trade.status must return its real evidence");
+            if t10_12_enabled() {
+                let recovered =
+                    t10_12_barrier(&format!("{handoff_path}.t12-native-recovered")).await;
+                assert_eq!(recovered["old_reply_rejected"], true);
+                actual = trade
+                    .trade(
+                        "fixture-a",
+                        &okx_protocol::trading::TradeRequest::Status {
+                            reference: idempotent_intent_id.clone(),
+                        },
+                        None,
+                    )
+                    .await
+                    .expect("T10-12 same original Status recovery");
+                let after = t10_12_sql_snapshot(&accounts).await;
+                assert_eq!(
+                    after["local_settlement_ack"], true,
+                    "production Status must durably acknowledge the original settlement"
+                );
+                assert_eq!(after["proof"], recovered["sql_before"]["proof"]);
+                assert_eq!(after["fill_count"], recovered["sql_before"]["fill_count"]);
+                assert_eq!(after["bill_count"], recovered["sql_before"]["bill_count"]);
+                println!("T10_12_NATIVE_LOCAL_RECOVERY_V1:{after}");
+            }
             assert_eq!(
                 feed.outbound_posts.lock().unwrap().len(),
                 1,

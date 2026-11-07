@@ -57,6 +57,7 @@ export async function actualNativeWorker(root, signal, { statusProbe = false, se
     process.env.OKX_T10_01_PARTIAL_SOURCE_RECOVERY_PROBE === "1" ? "t10-01" : "no-t10-01",
     process.env.OKX_T10_13_STOP_PROBE === "1" ? "t10-13" : "no-t10-13",
     process.env.OKX_T10_10_FINANCE_REPLAY_PROBE === "1" ? "t10-10" : "no-t10-10",
+    process.env.OKX_T10_12_NATIVE_WORKER_CRASH === "1" ? "t10-12" : "no-t10-12",
   ].join(":");
   const reused = memo.has(key);
   if (!reused) {
@@ -233,6 +234,11 @@ export async function actualNativeWorker(root, signal, { statusProbe = false, se
           nativeClose: receipt(stdout, "T09_1_NATIVE_CLOSE_ACK_V1"),
           nativeTerminal: receipt(stdout, "T09_1_NATIVE_TERMINAL_CLOSE_V1"),
           nativeRestart: receipt(stdout, "T09_1_NATIVE_SQL_RESTART_V1"),
+          ...(process.env.OKX_T10_12_NATIVE_WORKER_CRASH === "1" ? {
+            nativeWorkerCrash:receipt(stdout,"T10_12_WORKER_NATIVE_CRASH_V1"),
+            nativeOldReplyRecovery:receipt(stdout,"T10_12_NATIVE_SAME_SQL_RECOVERY_V1"),
+            nativeLocalRecovery:receipt(stdout,"T10_12_NATIVE_LOCAL_RECOVERY_V1"),
+          } : {}),
           ...(process.env.OKX_T10_13_STOP_PROBE === "1" ? {
             nativeT10Stop: receipt(stdout, "T10_13_NATIVE_STOP_AFTER_FILL_V1"),
             workerT10Stop: receipt(stdout, "T10_13_WORKER_STOP_V1"),
