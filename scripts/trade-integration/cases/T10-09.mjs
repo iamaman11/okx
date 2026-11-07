@@ -179,12 +179,14 @@ export async function run({caseId,root,signal,artifactsDir}) {
       actual:String(terminal.outbound_posts_after)},
   ];
   const events=[
-    ["b_cancel_ack","TradeService+RecordedOKXHTTP",cancel],
-    ["b_late_signed_fill_bill","NativeAccountSQL",late.sql],
+    ["cancel_ack_observed","TradeService+RecordedOKXHTTP",cancel],
+    ["risk_not_released_on_ack","NativeAccountSQL+RuntimeSessionSQLiteDO",
+      [cancel.b_sql_state,cancel.b_risk_held,cancel.worker_budget]],
+    ["late_fill_ingested","NativeAccountSQL",late.sql],
     ["public_partial_reduce","TradeService",partialReduce],
-    ["b_partial_signed_fill_bill","NativeAccountSQL",reduceFinance.sql],
-    ["remaining_stop_independent_readback","RecordedOKXHTTP",
-      reduceFinance.protection_resized],
+    ["partial_close_recorded","NativeAccountSQL",reduceFinance.sql],
+    ["remaining_position_and_protection_verified","RecordedOKXHTTP+NativeAccountSQL",
+      [reduceFinance.sql.remaining_lot_qty,reduceFinance.protection_resized]],
     ["final_public_close_ack","TradeService",terminal.close],
     ["third_signed_fill_bill_and_flat","NativeAccountSQL",terminal.native_sql],
     ["full_signed_orphan_inventory","RecordedOKXHTTP",{
