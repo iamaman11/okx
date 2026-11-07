@@ -530,6 +530,9 @@ async fn t09_6_status_after_local_read_defer(
     assert!(allowed_new_cancel_posts <= 1, "one protective cancel per Status");
     let until = std::time::Instant::now() + Duration::from_secs(15);
     let posts_before = feed.outbound_posts.lock().unwrap().len();
+    // At most one source-driven follow-up after an already-sent cancel.
+    // An old inventory may finish after ACK; it cannot prove the outcome.
+    let mut after_ack_readback_used = false;
     loop {
         let result = tokio::time::timeout_at(
             until.into(),
@@ -614,8 +617,49 @@ async fn t09_6_status_after_local_read_defer(
             );
             continue;
         }
+        if local_reason == Some("PROTECTION_CANCEL_READBACK_PENDING")
+            && allowed_new_cancel_posts == 1
+            && !after_ack_readback_used
+        {
+            // Only this independently witnessed transition authorizes ONE new
+            // read-only Status. No sleep, new fixture page, operation key or
+            // second potentially accepted cancel POST.
+            assert_eq!(
+                posts_now, posts_before + 1,
+                "T09.6 pending outcome requires exactly one prior venue cancel"
+            );
+            let trace = feed.causal_algo_trace.lock().unwrap().clone();
+            let arm = trace
+                .iter()
+                .rposition(|event| event.contains("event=INVENTORY_ARMED"))
+                .expect("T09.6 current inventory source was never armed");
+            let ack = trace
+                .iter()
+                .rposition(|event| event.contains("event=CANCEL_ACK"))
+                .expect("T09.6 pending cannot be retried without recorded ACK");
+            assert!(ack > arm, "T09.6 ACK precedes its own inventory source");
+            assert!(
+                trace[arm..ack]
+                    .iter()
+                    .any(|event| event.contains("event=GET_STARTED")
+                        && event.contains("stage=BEFORE_ACK")),
+                "T09.6 pending outcome lacks a pre-ACK source witness"
+            );
+            eprintln!(
+                "T09_6_POST_ACK_SOURCE_RECHECK_V1:phase={phase} intent={intent} posts={} events={}",
+                posts_now - posts_before,
+                trace[arm..].join(" | "),
+            );
+            after_ack_readback_used = true;
+            continue;
+        }
         let status = result.unwrap_or_else(|reason| {
-            panic!("T09_6_STATUS_NONLOCAL_ERROR:{intent}:{reason}")
+            let trace = feed.causal_algo_trace.lock().unwrap().clone();
+            panic!(
+                "T09_6_STATUS_NONLOCAL_ERROR:{intent}:{reason}:phase={phase}:posts={} trace={}",
+                posts_now - posts_before,
+                trace.iter().rev().take(16).cloned().collect::<Vec<_>>().join(" | ")
+            )
         });
         assert_eq!(posts_now, posts_before + allowed_new_cancel_posts,
             "T09.6 confirmed exactly one cancel POST when cleanup is due, or zero for close readback");
