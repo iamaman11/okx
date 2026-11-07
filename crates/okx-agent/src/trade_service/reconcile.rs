@@ -766,6 +766,9 @@ impl TradeService {
                 // smaller live stop is always rejected.
                 let original_id = i.intent_id.clone();
                 let original_inst = i.instrument_id.clone();
+                let original_terminal = i.state.terminal();
+                let original_plan_hash = i.plan_hash.clone();
+                let original_order_id = i.exchange_order_id.clone();
                 let effective_protected = r
                     .execution
                     .store
@@ -775,13 +778,58 @@ impl TradeService {
                             .iter()
                             .filter(|lot| lot.intent_id.as_deref() == Some(original_id.as_str()))
                             .fold(Decimal::ZERO, |sum, lot| sum + lot.remaining_qty);
+                        // A later position on the same instrument does not
+                        // belong to an already closed/released entry. Its late
+                        // fees still need the ordinary financial reconciliation
+                        // below, without resurrecting its former venue stop.
+                        if own == Decimal::ZERO
+                            && original_terminal
+                            && s.active_central_receipt(&original_id)?.is_none()
+                        {
+                            if let (Some(receipt), Some(terminal)) = (
+                                s.central_receipt(&original_id)?,
+                                s.operation(&format!("entry-settlement:{original_id}"))?,
+                            ) {
+                                let proof = serde_json::from_str::<
+                                    okx_execution::EntrySettlementEvidence,
+                                >(&terminal.result_ref)
+                                .map_err(|_| {
+                                    okx_execution::StoreError::Invalid(
+                                        "TERMINAL_ENTRY_PROOF_CORRUPT",
+                                    )
+                                })?;
+                                let release = s.operation(&format!(
+                                    "central-release:{}",
+                                    receipt.reservation_key
+                                ))?;
+                                if terminal.kind == "ENTRY_SETTLEMENT_PROVEN"
+                                    && proof.schema == "okx.entry-terminal-settlement/v1"
+                                    && proof.intent_id == original_id
+                                    && receipt.intent_id == original_id
+                                    && original_order_id.as_deref()
+                                        == Some(proof.venue_order_id.as_str())
+                                    && proof.plan_hash == original_plan_hash
+                                    && receipt.plan_hash == original_plan_hash
+                                    && proof.account_key == receipt.account_key
+                                    && proof.reservation_key == receipt.reservation_key
+                                    && proof.venue_filled_quantity == filled
+                                    && release.is_some_and(|ack| {
+                                        ack.kind == "CENTRAL_RELEASE"
+                                            && ack.request_hash == receipt.receipt_hash
+                                            && !ack.result_ref.is_empty()
+                                    })
+                                {
+                                    return Ok(None);
+                                }
+                            }
+                        }
                         if own <= Decimal::ZERO || own > filled {
                             return Err(okx_execution::StoreError::Invalid(
                                 "PROTECTION_ORIGINAL_SQL_LOT_MISMATCH",
                             ));
                         }
                         if own == filled {
-                            return Ok(own);
+                            return Ok(Some(own));
                         }
                         let receipt = s.protection(&original_id)?.ok_or(
                             okx_execution::StoreError::Invalid(
@@ -802,63 +850,66 @@ impl TradeService {
                                 "PROTECTION_REDUCE_SOURCE_MISMATCH",
                             ));
                         }
-                        Ok(own)
+                        Ok(Some(own))
                     })
                     .await
                     .map_err(err)?;
-                let algo_client = i
-                    .client_order_id
-                    .get(..31)
-                    .map(|client| format!("s{client}"))
-                    .ok_or("PROTECTION_CLIENT_ID_INVALID")?;
-                let p = r
-                    .execution
-                    .trade
-                    .algo_order_by_client_id(&algo_client)
-                    .await;
-                match p {
-                    Ok(p)
-                        if verified_live_protection(&i, effective_protected, &p).is_ok()
-                            && protection_covers_managed_increment(
-                                &i.plan.side,
-                                &p.side,
-                                effective_protected,
-                                position_qty,
-                                &p.size,
-                            ) =>
-                    {
-                        let source_digest = digest(&p)?;
-                        let protection = okx_execution::ProtectionReceipt {
-                            intent_id: i.intent_id.clone(),
-                            algo_id: p.algo_order_id,
-                            side: p.side,
-                            quantity: effective_protected,
-                            trigger_price: i.plan.stop_price.ok_or("STOP_PRICE_MISSING")?,
-                            trigger_basis: "mark".into(),
-                            verified_at: now(),
-                            source_digest,
-                        };
-                        r.execution
-                            .store
-                            .call(deadline(), move |s| s.verify_protection(&protection))
-                            .await
-                            .map_err(err)?;
-                        // If the live venue quantity exceeds this intent's
-                        // fill, the previous position MUST still be covered by
-                        // its own SQL lots, distinct venue stop(s) and active
-                        // RiskBook reservation. Reuse the sole full-cohort
-                        // signed census, never simply subtract the old qty.
-                        if position_qty > effective_protected {
-                            let aggregate_result = match self.governance.read().await.clone() {
-                                Some(state) => self
-                                    .census_for_managed_protection_until(&state, deadline())
-                                    .await
-                                    .map(|_| ()),
-                                None => Err(super::execute::ManagedProtectionCensusError::Denied(
-                                    "AUTHORITY_UNAVAILABLE".into(),
-                                )),
+                if let Some(effective_protected) = effective_protected {
+                    let algo_client = i
+                        .client_order_id
+                        .get(..31)
+                        .map(|client| format!("s{client}"))
+                        .ok_or("PROTECTION_CLIENT_ID_INVALID")?;
+                    let p = r
+                        .execution
+                        .trade
+                        .algo_order_by_client_id(&algo_client)
+                        .await;
+                    match p {
+                        Ok(p)
+                            if verified_live_protection(&i, effective_protected, &p).is_ok()
+                                && protection_covers_managed_increment(
+                                    &i.plan.side,
+                                    &p.side,
+                                    effective_protected,
+                                    position_qty,
+                                    &p.size,
+                                ) =>
+                        {
+                            let source_digest = digest(&p)?;
+                            let protection = okx_execution::ProtectionReceipt {
+                                intent_id: i.intent_id.clone(),
+                                algo_id: p.algo_order_id,
+                                side: p.side,
+                                quantity: effective_protected,
+                                trigger_price: i.plan.stop_price.ok_or("STOP_PRICE_MISSING")?,
+                                trigger_basis: "mark".into(),
+                                verified_at: now(),
+                                source_digest,
                             };
-                            match aggregate_result {
+                            r.execution
+                                .store
+                                .call(deadline(), move |s| s.verify_protection(&protection))
+                                .await
+                                .map_err(err)?;
+                            // If the live venue quantity exceeds this intent's
+                            // fill, the previous position MUST still be covered by
+                            // its own SQL lots, distinct venue stop(s) and active
+                            // RiskBook reservation. Reuse the sole full-cohort
+                            // signed census, never simply subtract the old qty.
+                            if position_qty > effective_protected {
+                                let aggregate_result = match self.governance.read().await.clone() {
+                                    Some(state) => self
+                                        .census_for_managed_protection_until(&state, deadline())
+                                        .await
+                                        .map(|_| ()),
+                                    None => {
+                                        Err(super::execute::ManagedProtectionCensusError::Denied(
+                                            "AUTHORITY_UNAVAILABLE".into(),
+                                        ))
+                                    }
+                                };
+                                match aggregate_result {
                                 Ok(()) => {}
                                 Err(
                                     super::execute::ManagedProtectionCensusError::SourceBeforeLedgerFill,
@@ -902,19 +953,24 @@ impl TradeService {
                                         .map_err(err)?;
                                 }
                             }
+                            }
                         }
-                    }
-                    _ => {
-                        protection_failed = true;
-                        protection_failure_observed_at = Some(Instant::now());
-                        let id = i.intent_id.clone();
-                        r.execution
-                            .store
-                            .call(deadline(), move |s| {
-                                s.protection_incident(&id, "PROTECTION_PENDING_OR_FAILED", now())
-                            })
-                            .await
-                            .map_err(err)?;
+                        _ => {
+                            protection_failed = true;
+                            protection_failure_observed_at = Some(Instant::now());
+                            let id = i.intent_id.clone();
+                            r.execution
+                                .store
+                                .call(deadline(), move |s| {
+                                    s.protection_incident(
+                                        &id,
+                                        "PROTECTION_PENDING_OR_FAILED",
+                                        now(),
+                                    )
+                                })
+                                .await
+                                .map_err(err)?;
+                        }
                     }
                 }
             }
