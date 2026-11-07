@@ -347,6 +347,51 @@ async fn t10_09_b_public_partial_reduce(
             raw_response:canceled.clone(),
         }).collect(),
     );
+    // At the independently observed terminal Cancel readback, the earlier
+    // signed 0.04 stop remains LIVE. Publish its new authenticated GET event
+    // BEFORE Status can re-verify the opening intent; without this source
+    // production must retain a durable PROTECTION_PENDING_OR_FAILED incident.
+    // Neither this response nor the event mutates Native SQL or RiskBook.
+    let owner = accounts.resolve("fixture-b").await
+        .expect("T10-09 original B Native SQL owner");
+    let original = original_intent_id.clone();
+    let (opening_client,preexisting_incident,central_held)=owner.execution.store.call(
+        std::time::Instant::now()+Duration::from_secs(3),
+        move |sql| {
+            let opening=sql.intent(&original)?.ok_or(
+                okx_execution::StoreError::Invalid(
+                    "T10_09_ORIGINAL_OPENING_INTENT_MISSING"
+                )
+            )?;
+            Ok((
+                opening.client_order_id,
+                opening.incident,
+                sql.active_central_receipt(&original)?.is_some(),
+            ))
+        },
+    ).await.expect("T10-09 original B source and risk identity");
+    assert_eq!(preexisting_incident,None,
+        "T10_09_PROTECTION_INCIDENT_BEFORE_TERMINAL_SOURCE");
+    assert!(central_held,"T10-09 original B reservation must remain active");
+    let stop_client=format!("s{}",opening_client.get(..31)
+        .expect("T10-09 original B stop client identity"));
+    let signed_live_stop=raw(json!([{
+        "instId":"BTC-USDT-SWAP","algoId":"900000004",
+        "algoClOrdId":stop_client,"state":"live","sz":"0.04",
+        "side":"sell","posSide":"long","tdMode":"cross",
+        "ordType":"conditional",
+        "slTriggerPx":"900","slTriggerPxType":"mark","slOrdPx":"-1",
+        "uTime":at
+    }]));
+    feed.advance_recorded_route(
+        "fixture-executor-b","/api/v5/trade/order-algo",
+        (0..8).map(|_|RecordedGet {
+            access_key:"fixture-executor-b".into(),
+            path:"/api/v5/trade/order-algo".into(),
+            required_query:vec![("algoClOrdId".into(),stop_client.clone())],
+            raw_response:signed_live_stop.clone(),
+        }).collect(),
+    );
     feed.advance_recorded_public_clock(raw(json!([{"ts":at}])));
     let terminal = trade.trade(
         "fixture-b",
@@ -354,6 +399,10 @@ async fn t10_09_b_public_partial_reduce(
         None,
     ).await.expect("T10-09 authenticated terminal B order readback");
     assert_eq!(terminal["data"]["intent"]["intent_id"], original_intent_id);
+    assert_eq!(terminal["data"]["protection_incident"],false,
+        "T10-09 B Cancel readback must not create an incident with a signed live stop");
+    assert_eq!(terminal["data"]["protection"]["algo_id"],"900000004",
+        "the still-live 0.04 stop must remain bound to the original");
     assert_ne!(terminal["data"]["central_release"]["state"], "verified",
         "a canceled order with 0.04 signed execution cannot release live exposure");
     assert_eq!(feed.outbound_posts.lock().unwrap().len(), before,
@@ -450,8 +499,6 @@ async fn t10_09_b_public_partial_reduce(
         "T10-09 exactly one source-bound public Reduce POST, no reentry");
     assert_eq!(feed.unconsumed_posts(), 0,
         "T10-09 must consume signed venue ACK, not infer execution");
-    let owner = accounts.resolve("fixture-b").await
-        .expect("T10-09 original B Native SQL owner");
     let saved = owner.execution.store.call(
         std::time::Instant::now()+Duration::from_secs(3),
         move |sql| {
