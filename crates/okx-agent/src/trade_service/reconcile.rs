@@ -551,6 +551,29 @@ async fn protection_cleanup_step(
         .map_err(err)
 }
 
+// The exact same authenticated cancellation and ACK verdict are exercised
+// by the direct recorded-HTTP regression and by the live Status owner.
+// An ambiguous response is UNKNOWN, never authorization to resend.
+async fn send_protection_cleanup_after_admission(
+    trade: &okx_api::TradeApi,
+    request: &okx_api::CancelAlgoOrderRequest,
+    timing: &okx_api::MutationTiming,
+    rate: &okx_api::RateRequestPlan,
+) -> Result<(), String> {
+    let response = trade
+        .cancel_algo_order_after_admission(request, timing, rate)
+        .await
+        .map_err(|_| "PROTECTION_CANCEL_OUTCOME_UNKNOWN")?;
+    if !response.top_level_success()
+        || response.data.len() != 1
+        || response.data[0].status_code != "0"
+        || response.data[0].algo_order_id != request.algo_order_id
+    {
+        return Err("PROTECTION_CANCEL_NOT_CONFIRMED".into());
+    }
+    Ok(())
+}
+
 // This is the same production SQL/observation decision used after the first
 // ACK and after restart/lost ACK. The transport cannot assert its own outcome:
 // it supplies an independently normalized, complete signed inventory and
@@ -2216,19 +2239,8 @@ impl TradeService {
             }
             ProtectionCleanupStep::SendOnce => {}
         }
-        let response = r
-            .execution
-            .trade
-            .cancel_algo_order_after_admission(&request, &timing, &rate)
-            .await
-            .map_err(|_| "PROTECTION_CANCEL_OUTCOME_UNKNOWN")?;
-        if !response.top_level_success()
-            || response.data.len() != 1
-            || response.data[0].status_code != "0"
-            || response.data[0].algo_order_id != saved.algo_id
-        {
-            return Err("PROTECTION_CANCEL_NOT_CONFIRMED".into());
-        }
+        send_protection_cleanup_after_admission(&r.execution.trade, &request, &timing, &rate)
+            .await?;
         observe_protection_cleanup(r, target).await
     }
     pub(super) async fn cancel(
