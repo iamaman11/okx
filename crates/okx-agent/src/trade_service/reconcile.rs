@@ -45,10 +45,7 @@ fn flat_entry_protection_cleanup_allowed(
 ) -> bool {
     risk_increase
         && !signed_exposed
-        && matches!(
-            venue_order_state,
-            "filled" | "canceled" | "mmp_canceled"
-        )
+        && matches!(venue_order_state, "filled" | "canceled" | "mmp_canceled")
 }
 
 // An authenticated later `live` algo GET cannot silently undo a durable
@@ -2520,7 +2517,9 @@ mod entry_cost_status_tests {
             assert!(!flat_entry_protection_cleanup_allowed(true, true, state));
             assert!(!flat_entry_protection_cleanup_allowed(false, false, state));
         }
-        assert!(!flat_entry_protection_cleanup_allowed(true, false, "unknown"));
+        assert!(!flat_entry_protection_cleanup_allowed(
+            true, false, "unknown"
+        ));
     }
 
     #[test]
