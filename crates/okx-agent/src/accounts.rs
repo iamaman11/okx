@@ -4406,8 +4406,14 @@ pub(crate) mod recorded_support {
                 },
             );
             assert_eq!(retired, 1, "exact prior GET digest is a source proof");
-            assert!(feed.immutable_phase_trace.lock().unwrap()
-                .last().unwrap().contains("old_pages=0"));
+            assert!(
+                feed.immutable_phase_trace
+                    .lock()
+                    .unwrap()
+                    .last()
+                    .unwrap()
+                    .contains("old_pages=0")
+            );
             let order_get =
                 |id: &str| {
                     let mut r=reqwest::Request::new(reqwest::Method::GET,
