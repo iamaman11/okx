@@ -1064,6 +1064,14 @@ pub(crate) mod recorded_support {
     const CAUSAL_ALGO_READS_PER_SCOPE_AND_PHASE: usize = 12;
     const STATIC_ALGO_READS_PER_SCOPE: usize = 32;
 
+    // Latest actually delivered queued response for each exact signed scope.
+    // This is an audit of transport facts, never an additional GET source.
+    struct SignedAlgoDelivery {
+        received_at: Instant,
+        digest: String,
+        empty_complete_page: bool,
+    }
+
     #[derive(Default)]
     pub(crate) struct RecordedAccountHttp {
         pub(crate) requests: Mutex<Vec<String>>,
@@ -1085,6 +1093,8 @@ pub(crate) mod recorded_support {
         // Exact raw-response digest proves a predecessor even if competing
         // readers consumed every queued copy before a signed phase event.
         delivered_order_digests: Mutex<Vec<(String, String, String)>>,
+        delivered_algo_scopes:
+            Mutex<std::collections::BTreeMap<(String, String, String), SignedAlgoDelivery>>,
         /// (signed account key, exact sent clOrdId, acknowledged ordId).
         acknowledged_creates: Mutex<Vec<(String, String, String)>>,
         // Test-only lost network ACK AFTER exactly one signed venue create.
@@ -1570,6 +1580,86 @@ pub(crate) mod recorded_support {
                 .unwrap()
                 .insert((page.access_key.clone(), page.path.clone()));
             self.reads.lock().unwrap().push(page);
+        }
+
+        fn record_signed_algo_delivery(&self, actor: &str, request: &HttpRequest, body: &[u8]) {
+            let query: std::collections::BTreeMap<_, _> = request
+                .url()
+                .query_pairs()
+                .map(|(k, v)| (k.into_owned(), v.into_owned()))
+                .collect();
+            let Some(inst) = query.get("instType") else {
+                return;
+            };
+            let Some(kind) = query.get("ordType") else {
+                return;
+            };
+            if verified_fixture_uid(actor).is_none()
+                || !["SWAP", "FUTURES"].contains(&inst.as_str())
+                || ![
+                    "conditional",
+                    "oco",
+                    "trigger",
+                    "move_order_stop",
+                    "chase",
+                    "iceberg",
+                    "twap",
+                    "smart_iceberg",
+                ]
+                .contains(&kind.as_str())
+            {
+                return;
+            }
+            let parsed = serde_json::from_slice::<serde_json::Value>(body).ok();
+            let empty_complete_page = query.len() == 3
+                && query.get("limit").map(String::as_str) == Some("100")
+                && parsed.as_ref().is_some_and(|v| {
+                    v["code"] == "0" && v["data"].as_array().is_some_and(Vec::is_empty)
+                });
+            self.delivered_algo_scopes.lock().unwrap().insert(
+                (actor.to_owned(), inst.clone(), kind.clone()),
+                SignedAlgoDelivery {
+                    received_at: Instant::now(),
+                    digest: format!("{:x}", sha2::Sha256::digest(body)),
+                    empty_complete_page,
+                },
+            );
+        }
+
+        /// Independently audit the raw responses already consumed by the real
+        /// account/census readers since an external event. Registering fixture
+        /// pages, a production success flag or a request attempt is NOT proof.
+        pub(crate) fn delivered_flat_algo_inventory_since(
+            &self,
+            actor: &str,
+            since: Instant,
+        ) -> Result<Vec<(String, String, String)>, &'static str> {
+            let delivered = self.delivered_algo_scopes.lock().unwrap();
+            let mut proof = Vec::with_capacity(16);
+            for inst in ["SWAP", "FUTURES"] {
+                for kind in [
+                    "conditional",
+                    "oco",
+                    "trigger",
+                    "move_order_stop",
+                    "chase",
+                    "iceberg",
+                    "twap",
+                    "smart_iceberg",
+                ] {
+                    let row = delivered
+                        .get(&(actor.to_owned(), inst.to_owned(), kind.to_owned()))
+                        .ok_or("SIGNED_ALGO_SCOPE_NOT_DELIVERED")?;
+                    if row.received_at < since {
+                        return Err("SIGNED_ALGO_SCOPE_BEFORE_EVENT");
+                    }
+                    if !row.empty_complete_page {
+                        return Err("SIGNED_ALGO_SCOPE_NOT_PROVEN_EMPTY");
+                    }
+                    proof.push((inst.to_owned(), kind.to_owned(), row.digest.clone()));
+                }
+            }
+            Ok(proof)
         }
 
         pub(crate) fn expect_optional_get(&self, page: RecordedGet) {
@@ -3060,6 +3150,106 @@ pub(crate) mod recorded_support {
         );
     }
 
+    #[tokio::test]
+    async fn recorded_terminal_algo_witness_requires_delivered_complete_account_scopes() {
+        let feed = RecordedAccountHttp::default();
+        let since = Instant::now();
+        assert!(
+            feed.delivered_flat_algo_inventory_since("fixture-observer-b", since)
+                .is_err()
+        );
+        for inst in ["SWAP", "FUTURES"] {
+            for kind in [
+                "conditional",
+                "oco",
+                "trigger",
+                "move_order_stop",
+                "chase",
+                "iceberg",
+                "twap",
+                "smart_iceberg",
+            ] {
+                feed.expect_get(RecordedGet {
+                    access_key: "fixture-observer-b".into(),
+                    path: "/api/v5/trade/orders-algo-pending".into(),
+                    required_query: vec![
+                        ("instType".into(), inst.into()),
+                        ("ordType".into(), kind.into()),
+                        ("limit".into(), "100".into()),
+                    ],
+                    raw_response: br#"{"code":"0","msg":"","data":[]}"#.to_vec(),
+                });
+            }
+        }
+        // Fixture registration is not evidence that any source was read.
+        assert!(
+            feed.delivered_flat_algo_inventory_since("fixture-observer-b", since)
+                .is_err()
+        );
+        let client = reqwest::Client::new();
+        for inst in ["SWAP", "FUTURES"] {
+            for kind in [
+                "conditional",
+                "oco",
+                "trigger",
+                "move_order_stop",
+                "chase",
+                "iceberg",
+                "twap",
+                "smart_iceberg",
+            ] {
+                let request=client.get(format!(
+                    "https://www.okx.com/api/v5/trade/orders-algo-pending?instType={inst}&ordType={kind}&limit=100"))
+                    .header("OK-ACCESS-KEY","fixture-observer-b").build().unwrap();
+                feed.send(request, Instant::now() + std::time::Duration::from_secs(1))
+                    .await
+                    .unwrap();
+            }
+        }
+        let before = feed.requests.lock().unwrap().len();
+        let proof = feed
+            .delivered_flat_algo_inventory_since("fixture-observer-b", since)
+            .unwrap();
+        assert_eq!(proof.len(), 16);
+        assert_eq!(
+            feed.requests.lock().unwrap().len(),
+            before,
+            "audit never sends an extra GET"
+        );
+        assert!(
+            feed.delivered_flat_algo_inventory_since("fixture-observer-a", since)
+                .is_err()
+        );
+        assert!(
+            feed.delivered_flat_algo_inventory_since(
+                "fixture-observer-b",
+                Instant::now() + std::time::Duration::from_secs(1)
+            )
+            .is_err()
+        );
+        // A later real nonempty response invalidates the earlier empty proof.
+        feed.expect_get(RecordedGet {
+            access_key: "fixture-observer-b".into(),
+            path: "/api/v5/trade/orders-algo-pending".into(),
+            required_query: vec![
+                ("instType".into(), "SWAP".into()),
+                ("ordType".into(), "conditional".into()),
+                ("limit".into(), "100".into()),
+            ],
+            raw_response: br#"{"code":"0","msg":"","data":[{"algoId":"unexpected"}]}"#.to_vec(),
+        });
+        let request=client.get("https://www.okx.com/api/v5/trade/orders-algo-pending?instType=SWAP&ordType=conditional&limit=100")
+            .header("OK-ACCESS-KEY","fixture-observer-b").build().unwrap();
+        feed.send(request, Instant::now() + std::time::Duration::from_secs(1))
+            .await
+            .unwrap();
+        assert_eq!(
+            feed.delivered_flat_algo_inventory_since("fixture-observer-b", since),
+            Err("SIGNED_ALGO_SCOPE_NOT_PROVEN_EMPTY")
+        );
+        assert!(feed.outbound_posts.lock().unwrap().is_empty());
+    }
+
     impl HttpTransport for RecordedAccountHttp {
         fn send(&self, request: HttpRequest, deadline: Instant) -> HttpSend<'_> {
             Box::pin(async move {
@@ -3686,6 +3876,9 @@ pub(crate) mod recorded_support {
                             exchange_ts.to_owned(),
                             chrono::Utc::now().timestamp_millis(),
                         ));
+                    }
+                    if path == "/api/v5/trade/orders-algo-pending" {
+                        self.record_signed_algo_delivery(key, &request, &body);
                     }
                     #[cfg(test)]
                     if path == "/api/v5/trade/orders-algo-pending"

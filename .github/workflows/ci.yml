@@ -456,6 +456,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'ACK_BOUND_ORDER_SOURCE_UNIT_FAILED' }
           cargo test --locked -p okx-agent --lib immutable_acked_orders_keep_independent_sources_on_one_route -- --nocapture
           if ($LASTEXITCODE -ne 0) { throw 'TWO_ORDER_SOURCE_SCOPE_UNIT_FAILED' }
+          cargo test --locked -p okx-agent --lib recorded_terminal_algo_witness_requires_delivered_complete_account_scopes -- --nocapture
+          if ($LASTEXITCODE -ne 0) { throw 'TERMINAL_ALGO_DELIVERY_WITNESS_FAILED' }
           cargo test --locked -p okx-agent --lib executor_uid_cache_cannot_cross_account_or_outlive_signed_source -- --nocapture
           if ($LASTEXITCODE -ne 0) { throw 'EXECUTOR_IDENTITY_UID_GENERATION_TTL_UNIT_FAILED' }
           cargo test --locked -p okx-agent --lib uid_waiting_is_bounded_and_other_account_progresses -- --nocapture

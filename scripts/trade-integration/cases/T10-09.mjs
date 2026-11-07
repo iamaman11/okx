@@ -109,6 +109,13 @@ export async function run({caseId,root,signal,artifactsDir}) {
     "independent signed venue inventory must cover all required algo kinds");
   assert.equal(terminal.signed_flat_orphan_count,0,
     "flat cannot retain venue stop/orphan exposure");
+  const scopes=terminal.signed_flat_orphan_source_scopes;
+  assert.equal(scopes.length,16,"all authenticated inventory scopes need actual delivery");
+  const expectedScopes=["SWAP","FUTURES"].flatMap(inst=>
+    ["conditional","oco","trigger","move_order_stop","chase","iceberg","twap","smart_iceberg"]
+      .map(kind=>`${inst}:${kind}`));
+  assert.deepEqual(scopes.map(([inst,kind])=>`${inst}:${kind}`).sort(),expectedScopes.sort());
+  for(const [, , digest] of scopes) assert.match(digest,/^[a-f0-9]{64}$/);
   assert.equal(terminal.close_status.data.intent.state,"FILLED");
   assert.equal(terminal.worker_original_reservation_state,"RELEASED");
   assert.equal(terminal.worker_after.entry_budget.consumed_usd,"1.4007");
@@ -184,6 +191,7 @@ export async function run({caseId,root,signal,artifactsDir}) {
     ["full_signed_orphan_inventory","RecordedOKXHTTP",{
       complete:terminal.signed_flat_orphan_inventory_complete,
       orphan_count:terminal.signed_flat_orphan_count,
+      delivered_scopes:scopes,
     }],
     ["original_b_release","RuntimeSessionSQLiteDO",
       [terminal.worker_original_reservation_key,terminal.worker_after]],

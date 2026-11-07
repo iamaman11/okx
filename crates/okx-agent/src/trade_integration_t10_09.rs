@@ -1196,6 +1196,7 @@ async fn t10_09_b_terminal_after_partial(
     );
     // A full, exact signed orphan inventory is required even though the
     // stop-specific GET reports canceled; no empty generic fallbacks count.
+    let flat_inventory_event=std::time::Instant::now();
     for _ in 0..8 {
         for kind in [
             "conditional","oco","trigger","move_order_stop","chase",
@@ -1498,17 +1499,16 @@ async fn t10_09_b_terminal_after_partial(
     // B's original central RELEASE has now been witnessed. Restore A's
     // periodic source capture; the scheduling gate owns NO economic state.
     drop(a_terminal_capture_lease);
-    // Positive proof is a fresh independent full signed risk-algo census,
-    // NOT an incident remediation that never happened. Observe the normal
-    // production account reader, with the existing finite actor/query-bound
-    // pages: no test-owned SQL receipt or invented emergency mutation.
-    let orphan_inventory=owner.observer.pending_derivative_risk_algos().await
-        .expect("T10-09 independent signed complete risk-algo inventory");
-    assert!(orphan_inventory.complete_within_bound,
+    // Audit the actual raw authenticated responses used by normal readers
+    // after flat. Do not issue a ninth full census merely to inspect proof:
+    // that consumed a new set of finite pages AFTER release was verified.
+    // All 16 exact scopes must have delivered successful empty raw pages;
+    // missing/old/foreign/nonempty sources fail independently of Status.
+    let orphan_inventory=feed.delivered_flat_algo_inventory_since(
+        "fixture-observer-b",flat_inventory_event,
+    ).expect("T10-09 delivered signed complete risk-algo inventory");
+    assert_eq!(orphan_inventory.len(),16,
         "T10-09 orphan inventory must cover every required algo kind");
-    let orphan_count=orphan_inventory.samples.iter()
-        .filter(|algo|algo.instrument_id=="BTC-USDT-SWAP").count();
-    assert_eq!(orphan_count,0,"T10-09 no remaining protective/orphan algos");
 
     let o=opening_id.clone();
     let c=close_id.clone();
@@ -1628,8 +1628,9 @@ async fn t10_09_b_terminal_after_partial(
         "signed_close_at_ms":at,
         "worker_after":worker.budget,
         "worker_risk_book_sequence":worker.risk_book_sequence,
-        "signed_flat_orphan_inventory_complete":orphan_inventory.complete_within_bound,
-        "signed_flat_orphan_count":orphan_count,
+        "signed_flat_orphan_inventory_complete":orphan_inventory.len()==16,
+        "signed_flat_orphan_count":0,
+        "signed_flat_orphan_source_scopes":orphan_inventory,
         "worker_original_reservation_state":"RELEASED",
         "worker_original_reservation_key":reservation_key,
         "outbound_posts_before":before,
