@@ -528,6 +528,28 @@ async fn t09_6_status_after_local_read_defer(
 ) -> serde_json::Value {
     use okx_protocol::trading::TradeRequest;
     assert!(allowed_new_cancel_posts <= 1, "one protective cancel per Status");
+    if allowed_new_cancel_posts == 1 {
+        // The first signed cancel inventory is armed BEFORE terminal-flat
+        // capture. Its initial finite public clock page can legitimately be
+        // consumed by production maintenance during that capture. A public
+        // Status is a distinct witnessed source boundary: publish exactly
+        // one new raw OKX time observation before asking production to admit
+        // this cancellation. Never mint a response on GET demand or change
+        // the five-second production mutation timing rule.
+        let observed_at = chrono::Utc::now().timestamp_millis();
+        let raw = serde_json::to_vec(&serde_json::json!({
+            "code":"0", "msg":"", "data":[{"ts":observed_at.to_string()}]
+        })).expect("T09.6 external venue time bytes");
+        let retired = feed.advance_recorded_public_clock(raw);
+        assert!(
+            retired <= 1,
+            "T09.6 explicit cancel Status can retire at most one unused clock source"
+        );
+        eprintln!(
+            "T09_6_CLOCK_AT_CANCEL_STATUS_BOUNDARY_V1:phase={phase} retired={retired} clock_deliveries={}",
+            feed.public_clock_deliveries()
+        );
+    }
     let until = std::time::Instant::now() + Duration::from_secs(15);
     let posts_before = feed.outbound_posts.lock().unwrap().len();
     // At most one source-driven follow-up after an already-sent cancel.
