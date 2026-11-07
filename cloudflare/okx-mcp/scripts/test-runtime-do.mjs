@@ -14,9 +14,13 @@ import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
 import { Miniflare } from "miniflare";
 import { assertBudgetEconomicsUnchanged } from "../../../scripts/trade-integration/budget-evidence.mjs";
+import { settleBeforeWorkerCrash, recoverWorkerCrash } from "./t10-12-worker-crash.mjs";
 
 const crashChild=process.env.OKX_T10_12_WORKER_CRASH_CHILD==="1";
 const crashRecovery=process.env.OKX_T10_12_WORKER_CRASH_RECOVERY==="1";
+const crashBoundary=process.env.OKX_T10_12_CRASH_BOUNDARY??"reserve";
+if((crashChild||crashRecovery)&&!["reserve","settlement"].includes(crashBoundary))
+  throw Error("T10_12_UNKNOWN_CRASH_BOUNDARY");
 if(crashChild&&crashRecovery)throw Error("T10_12_CONFLICTING_TEST_MODES");
 const recoveryRoot=process.env.OKX_T10_12_PERSISTED_ROOT;
 if(crashRecovery&&(!recoveryRoot||
@@ -138,6 +142,7 @@ function frames(ws) {
   ws.accept();
   return {
     send(frame) { ws.send(JSON.stringify(frame)); },
+    has(match) { return received.some(match); },
     next(match) {
       const idx = received.findIndex(match);
       if (idx >= 0) return Promise.resolve(received.splice(idx, 1)[0]);
@@ -247,7 +252,9 @@ let first, second;
 async function runRuntimeFixture(){
 try {
   await build({
-    entryPoints: [fileURLToPath(new URL("../src/integration/runtime_entry.ts", import.meta.url))],
+    entryPoints: [fileURLToPath(new URL(crashChild
+      ? "../src/integration/runtime_crash_entry.ts"
+      : "../src/integration/runtime_entry.ts", import.meta.url))],
     outfile, bundle: true, write: true, format: "esm",
     platform: "browser", target: "es2022", logLevel: "warning",
   });
@@ -304,61 +311,10 @@ try {
   first = new Miniflare(opts);
   if(crashRecovery){
     const proof=JSON.parse(await readFile(join(root,"t10-12-handoff.json"),"utf8"));
-    assert.equal(proof.schema,"okx.t10-12-worker-pre-kill/v1");
-    const installed=await request(first,"/installation/initialize","POST",installation);
-    assert.equal(installed.status,200);
-    const recovered=await session(first);
-    assert.ok(recovered.hello.connection_generation>proof.connection_generation,
-      "independent new process must advance persisted Durable Object generation");
-    const before=await summary(recovered,"t10_12_recovered_risk");
-    assert.ok(before.risk_book_sequence>=proof.risk_book_sequence);
-    for(const [field,value] of Object.entries({
-      limit_usd:"10",reserved_usd:"8",remaining_usd:"2",consumed_usd:"0"
-    })){
-      assert.equal(before.budget.entry_budget[field],value,
-        "no financial reset after Worker process kill: "+field);
-    }
-    const original=await risk(recovered,"t10_12_original_held_inspect",{
-      action:"INSPECT",reservation_key:proof.reservation_key,
-      plan_sha256:proof.plan_sha256,
-    });
-    assert.equal(original.status,"OBSERVED");
-    assert.equal(original.reservation_state,"HELD");
-    const closed=recovered.ws.closed();
-    recovered.ws.send({
-      type:"risk_control",schema:FRAME_SCHEMA,
-      session_id:proof.session_id,
-      connection_generation:proof.connection_generation,
-      command:{
-        schema:"okx.risk-command/v1",
-        command_id:"t10_12_old_session_summary_rejected",
-        installation_id:configuration.installation_id,
-        action:{action:"SUMMARY"},
-      },
-    });
-    const staleCloseCode=await closed;
-    assert.equal(staleCloseCode,1008,
-      "old generation may not send a risk command on new session");
-    const current=await session(first);
-    const after=await summary(current,"t10_12_after_stale_session_denial");
-    assert.equal(after.risk_book_sequence,before.risk_book_sequence);
-    assert.deepEqual(after.budget.entry_budget,before.budget.entry_budget);
-    console.log("T10_12_ACTUAL_WORKER_PROCESS_RECOVERY_V1:"+JSON.stringify({
-      schema:"okx.t10-12-worker-process-recovery/v1",
-      persisted_do_reopened:true,
-      generation_before:proof.connection_generation,
-      generation_after:current.hello.connection_generation,
-      sequence_before:proof.risk_book_sequence,
-      sequence_after:after.risk_book_sequence,
-      consumed_usd:after.budget.entry_budget.consumed_usd,
-      reserved_usd:after.budget.entry_budget.reserved_usd,
-      remaining_usd:after.budget.entry_budget.remaining_usd,
-      original_state:original.reservation_state,
-      original_reply_unread:true,
-      stale_frame_close_code:staleCloseCode,
-      native_sql_and_settlement_crash_proven:false,
-    }));
-    current.ws.close();
+    assert.equal(proof.boundary,crashBoundary);
+    const result=await recoverWorkerCrash({mf:first,proof,request,installation,
+      session,summary,risk,frameSchema:FRAME_SCHEMA,configuration});
+    console.log("T10_12_ACTUAL_WORKER_PROCESS_RECOVERY_V2:"+JSON.stringify(result));
     return;
   }
   const install = await request(first, "/installation/initialize", "POST", installation);
@@ -648,17 +604,28 @@ try {
     assert.deepEqual(afterInvalidRelease.budget.entry_budget,
       budgetBeforeRestart.budget.entry_budget);
     if(crashChild){
+      const settlement=crashBoundary==="settlement"
+        ? await settleBeforeWorkerCrash({socket:socket1,risk,summary,
+            reservation:firstReserve,request:firstRequest,census,accountKeys,
+            policyRevision:sharedStrategyGovernance.revision})
+        : null;
+      const committed=settlement?.summary??budgetBeforeRestart;
       const handoff={
-        schema:"okx.t10-12-worker-pre-kill/v1",
+        schema:"okx.t10-12-worker-pre-kill/v2",boundary:crashBoundary,
         session_id:socket1.hello.session_id,
         connection_generation:socket1.hello.connection_generation,
-        risk_book_sequence:budgetBeforeRestart.risk_book_sequence,
+        risk_book_sequence:committed.risk_book_sequence,
         reservation_key:firstReserve.reservation_key,
         plan_sha256:firstRequest.plan_sha256,
-        entry_reserved_usd:budgetBeforeRestart.budget.entry_budget.reserved_usd,
-        original_reply_unread:true,
+        entry_budget:committed.budget.entry_budget,
+        reservation_state:settlement?.reservation_state??"HELD",
+        settlement_action:settlement?.settlement_action??null,
+        fenced_command_id:settlement?.fenced_command_id??"reserve_lost_reply_a_0001",
+        original_reply_not_emitted:true,
       };
       assert.equal(reserveReplyLossMode,true);
+      assert.equal(socket1.ws.has(frame=>
+        frame.result?.command_id===handoff.fenced_command_id),false);
       await writeFile(join(root,"t10-12-handoff.json"),JSON.stringify(handoff)+"\n");
       process.stdout.write("T10_12_WORKER_COMMIT_READY_V1:"+
         JSON.stringify({root,...handoff})+"\n");

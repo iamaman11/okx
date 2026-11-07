@@ -1,11 +1,12 @@
-// One genuine Worker process tree kill at a durable RESERVE boundary.
-// Mandatory T10-12 remains blocked until settlement crash and Native SQL
-// binding are proved. The same SQLite DO files are reopened in another OS process.
+// Genuine Worker process-tree kills after RESERVE and SETTLE_ENTRY commits,
+// before the selected original replies are emitted. Mandatory T10-12 remains
+// blocked until the SAME Native SQL and Native old-reply witnesses are proved.
 import assert from "node:assert/strict";
 import {spawn,execFile} from "node:child_process";
 import {promisify} from "node:util";
-import {mkdir,writeFile,rm} from "node:fs/promises";
-import {resolve} from "node:path";
+import {cp,mkdir,mkdtemp,readFile,writeFile,rm} from "node:fs/promises";
+import {join,resolve} from "node:path";
+import {tmpdir} from "node:os";
 const exec=promisify(execFile);
 // stdout is a byte stream. A durable-commit JSON marker can be split across
 // arbitrary chunks. Parse only complete lines before killing the process.
@@ -28,10 +29,40 @@ async function terminateTree(child){
     process.kill(-child.pid,"SIGKILL");
   }
 }
-async function killAndRecover(root,signal){
+async function rejectMissingSettlement({file,cwd,common,witness,signal}){
+  // Reopen a copy of the ACTUAL reserve-only crash store while claiming a
+  // settlement receipt. The recovery oracle must reject the absent durable
+  // debit; a marker/JSON handoff alone cannot manufacture financial proof.
+  const copiedRoot=await mkdtemp(join(tmpdir(),"okx-workerd-risk-negative-"));
+  try{
+    await cp(witness.root,copiedRoot,{recursive:true});
+    const path=join(copiedRoot,"t10-12-handoff.json");
+    const proof=JSON.parse(await readFile(path,"utf8"));
+    proof.entry_budget={...proof.entry_budget,
+      consumed_usd:"1.0005",reserved_usd:"6.9995"};
+    await writeFile(path,JSON.stringify(proof)+"\n");
+    await assert.rejects(exec(process.execPath,[file],{
+      cwd,env:{...common,OKX_T10_03_LOST_RESERVE_REPLY_PROBE:"0",
+        OKX_T10_12_WORKER_CRASH_CHILD:"0",
+        OKX_T10_12_WORKER_CRASH_RECOVERY:"1",
+        OKX_T10_12_PERSISTED_ROOT:copiedRoot},
+      timeout:120000,signal,maxBuffer:4*1024*1024,windowsHide:true,
+    }),error=>{
+      assert.notEqual(error.code,0);
+      assert.match(String(error.stderr),
+        /Worker OS kill must preserve every persisted entry-budget field/);
+      return true;
+    },"a reserve-only SQLite store cannot prove a settlement");
+    return true;
+  }finally{
+    await rm(copiedRoot,{recursive:true,force:true});
+  }
+}
+async function killAndRecover(root,signal,boundary){
   const file=resolve(root,"cloudflare/okx-mcp/scripts/test-runtime-do.mjs");
   const cwd=resolve(root,"cloudflare/okx-mcp");
   const common={...process.env,OKX_T10_7_SHARED_CAP_PROBE:"1",
+    OKX_T10_12_CRASH_BOUNDARY:boundary,
     OKX_T10_7_CONCURRENT_CAP_PROBE:"0",
     OKX_NATIVE_WORKER_INTEGRATION:"0",OKX_T09_4_MANAGED_ADD_PROBE:"0"};
   const child=spawn(process.execPath,[file],{
@@ -42,10 +73,18 @@ async function killAndRecover(root,signal){
     stdio:["ignore","pipe","pipe"],windowsHide:true,
   });
   let ready=null,exited=null,stderr="",wasKilled=false;
+  const withheldReplies=new Map();
   const awaiting=new Promise((done,fail)=>{
     const timer=setTimeout(()=>fail(Error("T10_12_WORKER_DURABLE_READY_TIMEOUT")),120000);
     child.stdout.setEncoding("utf8");
     const consume=lineFramer(line=>{
+      const fenced="T10_12_WORKER_REPLY_FENCED_V1:";
+      const position=line.indexOf(fenced);
+      if(position>=0){
+        const frame=JSON.parse(line.slice(position+fenced.length));
+        assert.equal(frame.schema,"okx.t10-12-fenced-response/v1");
+        withheldReplies.set(frame.command_id,frame);
+      }
       const marker="T10_12_WORKER_COMMIT_READY_V1:";
       if(line.startsWith(marker)&&!ready){
         ready=JSON.parse(line.slice(marker.length));
@@ -72,8 +111,16 @@ async function killAndRecover(root,signal){
         signal?.addEventListener("abort",()=>fail(Error("T10_12_ABORTED")),{once:true});
       }),
     ]);
-    assert.equal(witness.original_reply_unread,true);
-    assert.equal(witness.entry_reserved_usd,"8");
+    assert.equal(witness.boundary,boundary);
+    assert.equal(witness.original_reply_not_emitted,true);
+    const withheld=withheldReplies.get(witness.fenced_command_id);
+    assert.ok(withheld,"actual Worker must witness interception before ws.send");
+    assert.equal(withheld.session_id,witness.session_id);
+    assert.equal(withheld.connection_generation,witness.connection_generation);
+    assert.equal(withheld.status,boundary==="reserve"?"HELD":"UPDATED");
+    assert.equal(withheld.reservation_key,witness.reservation_key);
+    assert.equal(witness.entry_budget.reserved_usd,
+      boundary==="reserve"?"8":"6.9995");
     assert.match(witness.root,/okx-workerd-risk-/);
     await terminateTree(child);
     wasKilled=true;
@@ -86,6 +133,9 @@ async function killAndRecover(root,signal){
     });
     assert.ok(terminated.signal!==null||terminated.code!==0,
       "OS child must not exit normally");
+    const absentSettlementRejected=boundary==="reserve"
+      ? await rejectMissingSettlement({file,cwd,common,witness,signal})
+      : null;
     const recovered=await exec(process.execPath,[file],{
       cwd,env:{...common,OKX_T10_03_LOST_RESERVE_REPLY_PROBE:"0",
         OKX_T10_12_WORKER_CRASH_CHILD:"0",
@@ -93,19 +143,29 @@ async function killAndRecover(root,signal){
         OKX_T10_12_PERSISTED_ROOT:witness.root},
       timeout:120000,signal,maxBuffer:4*1024*1024,windowsHide:true,
     });
-    const prefix="T10_12_ACTUAL_WORKER_PROCESS_RECOVERY_V1:";
+    const prefix="T10_12_ACTUAL_WORKER_PROCESS_RECOVERY_V2:";
     const markers=recovered.stdout.split(/\r?\n/).filter(x=>x.startsWith(prefix));
     assert.equal(markers.length,1);
     const result=JSON.parse(markers[0].slice(prefix.length));
     assert.equal(result.persisted_do_reopened,true);
     assert.ok(result.generation_after>result.generation_before);
-    assert.equal(result.reserved_usd,"8");
+    assert.equal(result.boundary,boundary);
+    assert.equal(result.reserved_usd,boundary==="reserve"?"8":"6.9995");
     assert.equal(result.remaining_usd,"2");
-    assert.equal(result.consumed_usd,"0");
-    assert.equal(result.original_state,"HELD");
-    assert.equal(result.original_reply_unread,true);
+    assert.equal(result.consumed_usd,boundary==="reserve"?"0":"1.0005");
+    assert.equal(result.original_state,boundary==="reserve"?"HELD":"POSTED");
+    assert.equal(result.original_reply_not_emitted,true);
     assert.equal(result.stale_frame_close_code,1008);
-    return {os_process_killed:true,recovery:result};
+    if(boundary==="settlement"){
+      assert.equal(result.settlement_replay.status,"UPDATED");
+      assert.equal(result.settlement_replay.sequence_before,
+        result.settlement_replay.sequence_after);
+      assert.deepEqual(result.settlement_replay.budget_before,
+        result.settlement_replay.budget_after);
+    }
+    return {boundary,os_process_killed:true,
+      absent_settlement_rejected:absentSettlementRejected,
+      original_reply_fenced:withheld,recovery:result};
   }finally{
     if(!wasKilled&&child.exitCode===null){
       try{await terminateTree(child)}catch{child.kill("SIGKILL")}
@@ -118,16 +178,24 @@ async function killAndRecover(root,signal){
 export async function run({caseId,root,signal,artifactsDir}){
   assert.equal(caseId,"T10-12");
   assert.ok(artifactsDir,"crash artifacts required");
-  const observed=await killAndRecover(root,signal);
   const dir=resolve(artifactsDir,"T10-12");
   await mkdir(dir,{recursive:true});
+  const observed=[];
+  for(const boundary of ["reserve","settlement"]){
+    const result=await killAndRecover(root,signal,boundary);
+    observed.push(result);
+    // Preserve each completed kill even if the following boundary fails.
+    await writeFile(resolve(dir,"worker-"+boundary+"-process-crash.json"),
+      JSON.stringify(result,null,2)+"\n");
+  }
   await writeFile(resolve(dir,"worker-process-crash.json"),
-    JSON.stringify({schema:"okx.t10-12-worker-crash-component/v1",
-      mandatory_case_pass:false,...observed,
-      missing:["real_worker_settlement_commit_before_reply",
+    JSON.stringify({schema:"okx.t10-12-worker-crash-component/v2",
+      mandatory_case_pass:false,worker_os_kills:observed.length,
+      authenticated_wss_source:"scripted_component_inputs",observed,
+      missing:[
         "same_native_sql_account_and_no_double_financial_mutation",
         "old_worker_reply_binding_rejected_by_native"]},null,2)+"\n");
-  throw Error("T10_12_SETTLEMENT_CRASH_AND_NATIVE_REPLY_NOT_PROVEN");
+  throw Error("T10_12_SAME_NATIVE_SQL_AND_NATIVE_OLD_REPLY_NOT_PROVEN");
 }
 
 // Standalone parser regression. Real OS process kill remains mandatory.
