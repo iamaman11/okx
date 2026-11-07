@@ -382,6 +382,7 @@ enum ReplyMode {
     Accepted,
     LostSettle,
     AlwaysStale,
+    Released,
 }
 
 fn risk_client(mode: ReplyMode) -> (NativeRiskClient, tokio::task::JoinHandle<Vec<RiskCommand>>) {
@@ -415,7 +416,11 @@ fn risk_client(mode: ReplyMode) -> (NativeRiskClient, tokio::task::JoinHandle<Ve
                 reservation_state: if is_settle {
                     None
                 } else {
-                    Some(RiskReservationState::Held)
+                    Some(if matches!(mode, ReplyMode::Released) {
+                    RiskReservationState::Released
+                } else {
+                    RiskReservationState::Held
+                })
                 },
                 budget: None,
                 account_budget: None,
@@ -610,4 +615,206 @@ async fn r00_demo_and_unverified_order_block_without_sql_or_risk_mutation() {
     );
     drop(risk);
     assert!(worker.await.unwrap().is_empty());
+}
+
+async fn terminalize(f: &mut Fixture) {
+    let id = f.intent.intent_id.clone();
+    let order_at = f.order.update_time_ms.parse::<i64>().unwrap();
+    f.store
+        .call(deadline(), move |s| {
+            s.record_order_readback(
+                &id,
+                "fixture_exchange_order",
+                IntentState::Cancelled,
+                Decimal::new(5, 1),
+                order_at,
+            )
+        })
+        .await
+        .unwrap();
+    f.intent = f
+        .store
+        .call(deadline(), |s| s.intent("intent_fixture"))
+        .await
+        .unwrap()
+        .unwrap();
+    f.order.state = "canceled".into();
+}
+
+#[tokio::test]
+async fn r02_terminal_replay_reads_immutable_receipt_without_second_settle() {
+    let mut f = fixture("r02_terminal", true).await;
+    terminalize(&mut f).await;
+    let at = f.order.update_time_ms.parse::<i64>().unwrap();
+    let id = f.intent.intent_id.clone();
+    let terminal = f
+        .store
+        .call(deadline(), move |s| {
+            s.bind_terminal_entry_settlement(&id, at, Decimal::new(5, 1), at)
+        })
+        .await
+        .expect("real SQL terminal source proof");
+    assert_eq!(terminal.schema, "okx.entry-terminal-settlement/v1");
+    let (risk, worker) = risk_client(ReplyMode::Accepted);
+    assert_eq!(
+        settle(&f, &risk).await.unwrap(),
+        EntrySettlementOutcome::TerminalReplayConfirmed
+    );
+    assert!(!has_ack(&f).await, "terminal replay cannot manufacture partial ACK");
+    drop(risk);
+    let commands = worker.await.unwrap();
+    assert_eq!(commands.len(), 1, "read-only terminal replay inspects only");
+    assert!(matches!(commands[0].action, RiskCommandAction::Inspect { .. }));
+    let durable = f
+        .store
+        .call(deadline(), |s| s.operation("entry-settlement:intent_fixture"))
+        .await
+        .unwrap()
+        .unwrap();
+    let stored: okx_execution::EntrySettlementEvidence =
+        serde_json::from_str(&durable.result_ref).unwrap();
+    assert_eq!(stored, terminal, "terminal source witness stays immutable");
+}
+
+#[tokio::test]
+async fn r03_released_late_bill_requires_same_reservation_new_revision_and_ack() {
+    let mut f = fixture("r03_late", true).await;
+    terminalize(&mut f).await;
+    let at = f.order.update_time_ms.parse::<i64>().unwrap();
+    let id = f.intent.intent_id.clone();
+    let terminal = f
+        .store
+        .call(deadline(), move |s| {
+            s.bind_terminal_entry_settlement(&id, at, Decimal::new(5, 1), at)
+        })
+        .await
+        .expect("real terminal evidence");
+    // The programmable RiskAuthority seam confirms the original terminal
+    // release, then the existing SQL owner records its durable receipt.
+    // No fake table row or test-only settlement shortcut is used.
+    let reservation = terminal.reservation_key.clone();
+    f.store
+        .call(deadline(), move |s| {
+            s.acknowledge_central_release(&reservation, "programmed-worker-released")
+        })
+        .await
+        .unwrap();
+    let late = Decimal::new(-1, 2);
+    let bill_id = "new-venue-fee".to_owned();
+    let bill_key = format!("bill:{bill_id}");
+    let late_at = at + 2;
+    let intent_id = f.intent.intent_id.clone();
+    f.store
+        .call(deadline(), move |s| {
+            s.ingest_page(&IngestPage {
+                bills: vec![Bill {
+                    bill_id: bill_id.clone(),
+                    kind: "2:trade".into(),
+                    time: late_at,
+                    amount: late,
+                    currency: "USDT".into(),
+                    economic_event_key: bill_key.clone(),
+                }],
+                finance: vec![FinanceEntry {
+                    entry_id: format!("{bill_key}:FEE"),
+                    economic_event_key: bill_key,
+                    component: "FEE".into(),
+                    allocation_leg: "account".into(),
+                    amount: late,
+                    currency: "USDT".into(),
+                    instance_id: None,
+                    source_ref: format!("bill:{bill_id}"),
+                    time: late_at,
+                    reverses_entry_id: None,
+                }],
+                entry_order_fee_links: vec![okx_execution::EntryOrderFeeLink {
+                    bill_id,
+                    intent_id,
+                    exchange_order_id: "fixture_exchange_order".into(),
+                    instrument_id: "BTC-USDT-SWAP".into(),
+                    bill_at: late_at,
+                    fee_usdt: late,
+                }],
+                cursor: Some(SourceCursor {
+                    source: "bills".into(),
+                    stream_partition: "account".into(),
+                    cursor: String::new(),
+                    watermark: late_at + 1,
+                    generation: 1,
+                    coverage_gaps: String::new(),
+                }),
+                ..Default::default()
+            })?;
+            s.ingest_page(&IngestPage {
+                cursor: Some(SourceCursor {
+                    source: "fills".into(),
+                    stream_partition: "SWAP".into(),
+                    cursor: String::new(),
+                    watermark: late_at + 1,
+                    generation: 1,
+                    coverage_gaps: String::new(),
+                }),
+                ..Default::default()
+            })
+        })
+        .await
+        .unwrap();
+    assert!(
+        f.store
+            .call(deadline(), |s| s.entry_late_pending("intent_fixture"))
+            .await
+            .unwrap(),
+        "actual bill ingest must generate SQL late-pending state"
+    );
+    let (risk, worker) = risk_client(ReplyMode::Released);
+    assert_eq!(
+        settle(&f, &risk).await.unwrap(),
+        EntrySettlementOutcome::LateRevisionAcknowledged
+    );
+    assert!(
+        !f.store
+            .call(deadline(), |s| s.entry_late_pending("intent_fixture"))
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        settle(&f, &risk).await.unwrap(),
+        EntrySettlementOutcome::AlreadyConfirmed,
+        "repeat must not debit late fee twice"
+    );
+    drop(risk);
+    let commands = worker.await.unwrap();
+    assert_eq!(commands.len(), 4, "initial + late CAS + replay inspection");
+    let settlements = commands
+        .iter()
+        .filter_map(|c| match &c.action {
+            RiskCommandAction::SettleEntry {
+                reservation_key,
+                settlement_revision,
+                cumulative_entry_usd,
+                ..
+            } => Some((reservation_key, settlement_revision, cumulative_entry_usd)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(settlements.len(), 1);
+    assert_eq!(settlements[0].0, &terminal.reservation_key);
+    assert_eq!(*settlements[0].1, terminal.settlement_revision + 1);
+    assert_eq!(
+        settlements[0].2,
+        &(terminal.cumulative_entry_usd + Decimal::new(1, 2))
+            .normalize()
+            .to_string()
+    );
+    let key = format!(
+        "entry-late-settled:intent_fixture:r{}",
+        terminal.settlement_revision + 1
+    );
+    assert!(
+        f.store
+            .call(deadline(), move |s| Ok(s.operation(&key)?.is_some()))
+            .await
+            .unwrap(),
+        "late SQL ACK must follow accepted Worker SETTLE_ENTRY"
+    );
 }
