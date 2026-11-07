@@ -1238,7 +1238,8 @@ async fn t10_09_b_terminal_after_partial(
         "T10-09 terminal B release cannot erase cumulative campaign entry spend");
     assert_eq!(budget.reserved_usd,"7.0015",
         "T10-09 exact B remainder grant must be released, preserving other grants");
-    assert_eq!(budget.remaining_usd,"0.9975");
+    assert_eq!(budget.remaining_usd,"1.5978",
+        "release of B unused 0.6003 must restore campaign available capacity");
     assert_eq!(feed.outbound_posts.lock().unwrap().len(),9,
         "T10-09 no re-entry, duplicate reduce, amend, or extra cancel POST");
     assert_eq!(feed.unconsumed_posts(),0);

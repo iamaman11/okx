@@ -106,7 +106,7 @@ export async function run({caseId,root,signal,artifactsDir}) {
   assert.equal(terminal.worker_original_reservation_state,"RELEASED");
   assert.equal(terminal.worker_after.entry_budget.consumed_usd,"1.4007");
   assert.equal(terminal.worker_after.entry_budget.reserved_usd,"7.0015");
-  assert.equal(terminal.worker_after.entry_budget.remaining_usd,"0.9975");
+  assert.equal(terminal.worker_after.entry_budget.remaining_usd,"1.5978");
   assert.equal(terminal.outbound_posts_before,8);
   assert.equal(terminal.outbound_posts_after,9);
   assert.ok(Number.isSafeInteger(late.sql.sql_revision)&&late.sql.sql_revision>0);
