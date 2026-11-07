@@ -6,11 +6,9 @@ use okx_execution::{
     EntryQuoteEvidence, Fill, FinanceEntry, IngestPage, IntentPlan, IntentState, NewIntent,
     OpeningSnapshot, SourceCursor,
 };
-use okx_protocol::risk_authority::{
-    RiskCommand, RiskResult, RISK_RESULT_SCHEMA_V1,
-};
-use serde_json::json;
 use okx_protocol::accounts::Environment;
+use okx_protocol::risk_authority::{RISK_RESULT_SCHEMA_V1, RiskCommand, RiskResult};
+use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
@@ -146,12 +144,20 @@ async fn fixture(label: &str, finance: bool) -> Fixture {
         fee_usdt: fee,
         total_usdt: total,
         total_usd: total,
-        fee_generation: format!("sha256:{:x}", Sha256::digest(
-            serde_json::to_vec(&(
-                "BTC-USDT-SWAP", "reference_fixture", "Lv1",
-                "-0.0002", "0.0005", true
-            )).unwrap()
-        )),
+        fee_generation: format!(
+            "sha256:{:x}",
+            Sha256::digest(
+                serde_json::to_vec(&(
+                    "BTC-USDT-SWAP",
+                    "reference_fixture",
+                    "Lv1",
+                    "-0.0002",
+                    "0.0005",
+                    true
+                ))
+                .unwrap()
+            )
+        ),
         reference_generation: "reference_fixture".into(),
         fee_received_at: observed,
         conversion_digest: "b".repeat(64),
@@ -183,22 +189,33 @@ async fn fixture(label: &str, finance: bool) -> Fixture {
         requested_loss_usd: Decimal::ONE,
         conversion_digest: "e".repeat(64),
     };
-    store.call(deadline(), move |s| {
-        s.bind_entry_quote(&quote)?;
-        s.bind_entry_admission(&admission)?;
-        s.reserve(&receipt, now())
-    }).await.unwrap();
-    let posted = super::super::execute::post_once(
-        &store, &saved, deadline(), || async { Ok::<_, String>(()) }
-    ).await.unwrap();
+    store
+        .call(deadline(), move |s| {
+            s.bind_entry_quote(&quote)?;
+            s.bind_entry_admission(&admission)?;
+            s.reserve(&receipt, now())
+        })
+        .await
+        .unwrap();
+    let posted = super::super::execute::post_once(&store, &saved, deadline(), || async {
+        Ok::<_, String>(())
+    })
+    .await
+    .unwrap();
     assert_eq!(posted, Some(()));
     let id = saved.intent_id.clone();
-    store.call(deadline(), move |s| {
-        s.record_outcome(
-            &id, IntentState::Acknowledged, Some("fixture_exchange_order"),
-            "authenticated-fixture-venue-ack", now(),
-        )
-    }).await.unwrap();
+    store
+        .call(deadline(), move |s| {
+            s.record_outcome(
+                &id,
+                IntentState::Acknowledged,
+                Some("fixture_exchange_order"),
+                "authenticated-fixture-venue-ack",
+                now(),
+            )
+        })
+        .await
+        .unwrap();
     let at = now() + 1000;
     let filled = Decimal::new(5, 1);
     let fee = Decimal::new(-125, 5);
@@ -220,79 +237,98 @@ async fn fixture(label: &str, finance: bool) -> Fixture {
         };
         let id = saved.intent_id.clone();
         let source_fill_id = fill_id.clone();
-        store.call(deadline(), move |s| {
-            s.ingest_page(&IngestPage {
-                fills: vec![Fill {
-                    fill_id: source_fill_id.clone(),
-                    instrument_id: "BTC-USDT-SWAP".into(),
-                    trade_id: format!("venue-{source_fill_id}"),
-                    exchange_order_id: "fixture_exchange_order".into(),
-                    intent_id: Some(id),
-                    time: at,
-                    qty: filled,
-                    price: Decimal::from(5),
-                    fee,
-                    currency: "USDT".into(),
-                    side: "buy".into(),
-                }],
-                finance: vec![fill_entry],
-                cursor: Some(SourceCursor {
-                    source: "fills".into(),
-                    stream_partition: "SWAP".into(),
-                    cursor: String::new(),
-                    watermark: at + 1,
-                    generation: 1,
-                    coverage_gaps: String::new(),
-                }),
-                ..Default::default()
+        store
+            .call(deadline(), move |s| {
+                s.ingest_page(&IngestPage {
+                    fills: vec![Fill {
+                        fill_id: source_fill_id.clone(),
+                        instrument_id: "BTC-USDT-SWAP".into(),
+                        trade_id: format!("venue-{source_fill_id}"),
+                        exchange_order_id: "fixture_exchange_order".into(),
+                        intent_id: Some(id),
+                        time: at,
+                        qty: filled,
+                        price: Decimal::from(5),
+                        fee,
+                        currency: "USDT".into(),
+                        side: "buy".into(),
+                    }],
+                    finance: vec![fill_entry],
+                    cursor: Some(SourceCursor {
+                        source: "fills".into(),
+                        stream_partition: "SWAP".into(),
+                        cursor: String::new(),
+                        watermark: at + 1,
+                        generation: 1,
+                        coverage_gaps: String::new(),
+                    }),
+                    ..Default::default()
+                })
             })
-        }).await.unwrap();
+            .await
+            .unwrap();
         let source_bill_id = bill_id.clone();
-        store.call(deadline(), move |s| {
-            s.ingest_page(&IngestPage {
-                bills: vec![Bill {
-                    bill_id: source_bill_id.clone(),
-                    kind: "2:trade".into(),
-                    time: at + 1,
-                    amount: fee,
-                    currency: "USDT".into(),
-                    economic_event_key: bill_key.clone(),
-                }],
-                finance: vec![FinanceEntry {
-                    entry_id: format!("{bill_key}:FEE"),
-                    economic_event_key: bill_key,
-                    component: "FEE".into(),
-                    allocation_leg: "account".into(),
-                    amount: fee,
-                    currency: "USDT".into(),
-                    instance_id: None,
-                    source_ref: format!("bill:{source_bill_id}"),
-                    time: at + 1,
-                    reverses_entry_id: None,
-                }],
-                bill_order_sources: vec![BillOrderSource {
-                    bill_id: source_bill_id,
-                    instrument_id: "BTC-USDT-SWAP".into(),
-                    exchange_order_id: "fixture_exchange_order".into(),
-                    trade_id: format!("venue-{fill_id}"),
-                }],
-                cursor: Some(SourceCursor {
-                    source: "bills".into(),
-                    stream_partition: "account".into(),
-                    cursor: String::new(),
-                    watermark: at + 1,
-                    generation: 1,
-                    coverage_gaps: String::new(),
-                }),
-                ..Default::default()
+        store
+            .call(deadline(), move |s| {
+                s.ingest_page(&IngestPage {
+                    bills: vec![Bill {
+                        bill_id: source_bill_id.clone(),
+                        kind: "2:trade".into(),
+                        time: at + 1,
+                        amount: fee,
+                        currency: "USDT".into(),
+                        economic_event_key: bill_key.clone(),
+                    }],
+                    finance: vec![FinanceEntry {
+                        entry_id: format!("{bill_key}:FEE"),
+                        economic_event_key: bill_key,
+                        component: "FEE".into(),
+                        allocation_leg: "account".into(),
+                        amount: fee,
+                        currency: "USDT".into(),
+                        instance_id: None,
+                        source_ref: format!("bill:{source_bill_id}"),
+                        time: at + 1,
+                        reverses_entry_id: None,
+                    }],
+                    bill_order_sources: vec![BillOrderSource {
+                        bill_id: source_bill_id,
+                        instrument_id: "BTC-USDT-SWAP".into(),
+                        exchange_order_id: "fixture_exchange_order".into(),
+                        trade_id: format!("venue-{fill_id}"),
+                    }],
+                    cursor: Some(SourceCursor {
+                        source: "bills".into(),
+                        stream_partition: "account".into(),
+                        cursor: String::new(),
+                        watermark: at + 1,
+                        generation: 1,
+                        coverage_gaps: String::new(),
+                    }),
+                    ..Default::default()
+                })
             })
-        }).await.unwrap();
+            .await
+            .unwrap();
     }
     let target = saved.intent_id.clone();
-    store.call(deadline(), move |s| s.record_order_readback(
-        &target, "fixture_exchange_order", IntentState::PartiallyFilled, filled, at + 1,
-    )).await.unwrap();
-    let intent = store.call(deadline(), |s| s.intent("intent_fixture")).await.unwrap().unwrap();
+    store
+        .call(deadline(), move |s| {
+            s.record_order_readback(
+                &target,
+                "fixture_exchange_order",
+                IntentState::PartiallyFilled,
+                filled,
+                at + 1,
+            )
+        })
+        .await
+        .unwrap();
+    let intent = store
+        .call(deadline(), |s| s.intent("intent_fixture"))
+        .await
+        .unwrap()
+        .unwrap();
     let order = TradeOrderDetails {
         instrument_id: intent.instrument_id.clone(),
         order_id: "fixture_exchange_order".into(),
@@ -330,8 +366,15 @@ async fn fixture(label: &str, finance: bool) -> Fixture {
                 }, "strategies": []
             }]
         }, "issued_at_ms": 1792910000000_u64, "session_generation": 673_u64
-    })).unwrap();
-    Fixture { store, account, intent, order, governance: RwLock::new(Some(governance)) }
+    }))
+    .unwrap();
+    Fixture {
+        store,
+        account,
+        intent,
+        order,
+        governance: RwLock::new(Some(governance)),
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -390,34 +433,59 @@ fn risk_client(mode: ReplyMode) -> (NativeRiskClient, tokio::task::JoinHandle<Ve
     (NativeRiskClient::new(tx), worker)
 }
 
-async fn settle(f: &Fixture, risk: &NativeRiskClient) -> Result<EntrySettlementOutcome, EntrySettlementError> {
+async fn settle(
+    f: &Fixture,
+    risk: &NativeRiskClient,
+) -> Result<EntrySettlementOutcome, EntrySettlementError> {
     settle_incremental_entry(
-        &f.account, &f.intent, Some(&f.order), &f.store,
-        risk, &f.governance, deadline,
-    ).await
+        &f.account,
+        &f.intent,
+        Some(&f.order),
+        &f.store,
+        risk,
+        &f.governance,
+        deadline,
+    )
+    .await
 }
 
 async fn has_ack(f: &Fixture) -> bool {
-    f.store.call(deadline(), |s| {
-        Ok(s.operation("entry-partial-settled:intent_fixture:r1")?.is_some())
-    }).await.unwrap()
+    f.store
+        .call(deadline(), |s| {
+            Ok(s.operation("entry-partial-settled:intent_fixture:r1")?
+                .is_some())
+        })
+        .await
+        .unwrap()
 }
 
 #[tokio::test]
 async fn r01_r02_partial_settlement_and_same_revision_repeat_use_one_sql_ack() {
     let f = fixture("r01", true).await;
     let (risk, worker) = risk_client(ReplyMode::Accepted);
-    assert_eq!(settle(&f, &risk).await.unwrap(), EntrySettlementOutcome::RevisionAcknowledged);
+    assert_eq!(
+        settle(&f, &risk).await.unwrap(),
+        EntrySettlementOutcome::RevisionAcknowledged
+    );
     assert!(has_ack(&f).await);
-    assert_eq!(settle(&f, &risk).await.unwrap(), EntrySettlementOutcome::RevisionAcknowledged);
+    assert_eq!(
+        settle(&f, &risk).await.unwrap(),
+        EntrySettlementOutcome::RevisionAcknowledged
+    );
     drop(risk);
     let commands = worker.await.unwrap();
     assert_eq!(commands.len(), 6);
     for batch in commands.chunks_exact(3) {
         assert!(matches!(batch[0].action, RiskCommandAction::Inspect { .. }));
         assert!(matches!(batch[1].action, RiskCommandAction::Inspect { .. }));
-        let RiskCommandAction::SettleEntry { settlement_revision, cumulative_entry_usd, .. } =
-            &batch[2].action else { panic!("expected SETTLE_ENTRY") };
+        let RiskCommandAction::SettleEntry {
+            settlement_revision,
+            cumulative_entry_usd,
+            ..
+        } = &batch[2].action
+        else {
+            panic!("expected SETTLE_ENTRY")
+        };
         assert_eq!(*settlement_revision, 1);
         assert_eq!(cumulative_entry_usd, "2.50125");
     }
@@ -434,14 +502,25 @@ async fn r04_missing_source_cannot_ack_and_identity_mismatch_preserves_first_rea
     let mut alien = f.order.clone();
     alien.client_order_id = "other-client".into();
     let identity = settle_incremental_entry(
-        &f.account, &f.intent, Some(&alien), &f.store, &risk, &f.governance, deadline
-    ).await.unwrap_err();
+        &f.account,
+        &f.intent,
+        Some(&alien),
+        &f.store,
+        &risk,
+        &f.governance,
+        deadline,
+    )
+    .await
+    .unwrap_err();
     assert_eq!(identity.reason_code, "ORDER_READBACK_IDENTITY_MISMATCH");
     assert!(!has_ack(&f).await);
     drop(risk);
     let commands = worker.await.unwrap();
     assert_eq!(commands.len(), 1, "identity denial never reaches Worker");
-    assert!(matches!(commands[0].action, RiskCommandAction::Inspect { .. }));
+    assert!(matches!(
+        commands[0].action,
+        RiskCommandAction::Inspect { .. }
+    ));
 }
 
 #[tokio::test]
@@ -456,12 +535,18 @@ async fn r05_lost_settlement_reply_keeps_unacked_revision_and_replays_same_proof
     let before = worker.await.unwrap();
     assert_eq!(before.len(), 3);
     let (risk, worker) = risk_client(ReplyMode::Accepted);
-    assert_eq!(settle(&f, &risk).await.unwrap(), EntrySettlementOutcome::RevisionAcknowledged);
+    assert_eq!(
+        settle(&f, &risk).await.unwrap(),
+        EntrySettlementOutcome::RevisionAcknowledged
+    );
     assert!(has_ack(&f).await);
     drop(risk);
     let after = worker.await.unwrap();
     assert_eq!(after.len(), 3);
-    assert_eq!(before[2].action, after[2].action, "immutable revision replay");
+    assert_eq!(
+        before[2].action, after[2].action,
+        "immutable revision replay"
+    );
 }
 
 #[tokio::test]
@@ -474,8 +559,18 @@ async fn r06_three_cas_conflicts_never_ack_unaccepted_settlement() {
     assert!(!has_ack(&f).await);
     drop(risk);
     let commands = worker.await.unwrap();
-    assert_eq!(commands.len(), 7, "initial INSPECT plus three bounded CAS pairs");
-    assert_eq!(commands.iter().filter(|c| matches!(&c.action, RiskCommandAction::SettleEntry { .. })).count(), 3);
+    assert_eq!(
+        commands.len(),
+        7,
+        "initial INSPECT plus three bounded CAS pairs"
+    );
+    assert_eq!(
+        commands
+            .iter()
+            .filter(|c| matches!(&c.action, RiskCommandAction::SettleEntry { .. }))
+            .count(),
+        3
+    );
 }
 
 #[tokio::test]
@@ -486,14 +581,33 @@ async fn r00_demo_and_unverified_order_block_without_sql_or_risk_mutation() {
     demo.environment = Environment::Demo;
     assert_eq!(
         settle_incremental_entry(
-            &demo, &f.intent, Some(&f.order), &f.store, &risk, &f.governance, deadline
-        ).await.unwrap(),
+            &demo,
+            &f.intent,
+            Some(&f.order),
+            &f.store,
+            &risk,
+            &f.governance,
+            deadline
+        )
+        .await
+        .unwrap(),
         EntrySettlementOutcome::NotApplicable
     );
     let error = settle_incremental_entry(
-        &f.account, &f.intent, None, &f.store, &risk, &f.governance, deadline
-    ).await.unwrap_err();
-    assert_eq!(error.reason_code, "PARTIAL_ENTRY_ORDER_READBACK_UNAVAILABLE");
+        &f.account,
+        &f.intent,
+        None,
+        &f.store,
+        &risk,
+        &f.governance,
+        deadline,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        error.reason_code,
+        "PARTIAL_ENTRY_ORDER_READBACK_UNAVAILABLE"
+    );
     drop(risk);
     assert!(worker.await.unwrap().is_empty());
 }
