@@ -513,6 +513,102 @@ fn entry_cost_status(
     }))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProtectionCleanupStep {
+    SendOnce,
+    Inspect,
+    Confirmed,
+}
+
+// BEGIN and its receipt are the only authority to send. A repeated BEGIN is
+// never permission to repeat a possibly accepted exchange cancellation.
+async fn protection_cleanup_step(
+    store: &AccountStoreHandle,
+    key: &str,
+    hash: &str,
+) -> Result<ProtectionCleanupStep, String> {
+    let key = key.to_owned();
+    let hash = hash.to_owned();
+    store.call(deadline(), move |s| {
+        if s.begin_operation(&key, &hash, "protection_cleanup", now())? {
+            return Ok(ProtectionCleanupStep::SendOnce);
+        }
+        let old = s.operation(&key)?.ok_or(okx_execution::StoreError::Invalid(
+            "PROTECTION_CLEANUP_BEGIN_MISSING",
+        ))?;
+        match old.result_ref.as_str() {
+            "POSTING" => Ok(ProtectionCleanupStep::Inspect),
+            "VERIFIED_CANCELED" => Ok(ProtectionCleanupStep::Confirmed),
+            _ => Err(okx_execution::StoreError::Invalid(
+                "PROTECTION_CLEANUP_RECEIPT_CONFLICT",
+            )),
+        }
+    }).await.map_err(err)
+}
+
+// This is the same production SQL/observation decision used after the first
+// ACK and after restart/lost ACK. The transport cannot assert its own outcome:
+// it supplies an independently normalized, complete signed inventory and
+// raw position readings. Only SQL may durably commit the verified transition.
+async fn protection_cleanup_readback(
+    store: &AccountStoreHandle,
+    key: &str,
+    hash: &str,
+    instrument_id: &str,
+    algo_id: &str,
+    expected_uid: &str,
+    inventory: &okx_api::PendingDerivativeAlgoRiskInventory,
+    observed_uid: &str,
+    position_received_at_ms: i64,
+    positions: &[(String, String)],
+) -> Result<(), String> {
+    let op_key = key.to_owned();
+    let operation = store.call(deadline(), move |s| s.operation(&op_key))
+        .await.map_err(err)?
+        .ok_or("PROTECTION_CLEANUP_BEGIN_MISSING")?;
+    if operation.request_hash != hash || operation.kind != "protection_cleanup" {
+        return Err("PROTECTION_CLEANUP_IDENTITY_MISMATCH".into());
+    }
+    if operation.result_ref == "VERIFIED_CANCELED" {
+        return Ok(());
+    }
+    if operation.result_ref != "POSTING" {
+        return Err("PROTECTION_CLEANUP_RECEIPT_CONFLICT".into());
+    }
+    if observed_uid != expected_uid {
+        return Err("PROTECTION_CLEANUP_ACCOUNT_MISMATCH".into());
+    }
+    if !inventory.complete_within_bound || inventory.scopes_checked != 16 {
+        return Err("PROTECTION_CANCEL_READBACK_INCOMPLETE".into());
+    }
+    // The earliest of all 16 signed GET receipts and the position source
+    // must both postdate durable BEGIN. A pre-ACK/old inventory is not proof.
+    if inventory.received_at_ms == 0
+        || inventory.received_at_ms < operation.committed_at.max(0) as u64
+        || position_received_at_ms < operation.committed_at
+    {
+        return Err("PROTECTION_CANCEL_READBACK_STALE".into());
+    }
+    verify_instrument_is_flat(
+        instrument_id,
+        positions.iter().map(|(inst, qty)| (inst.as_str(), qty.as_str())),
+    )?;
+    if let Some(algo) = inventory.samples.iter().find(|a| a.algo_order_id == algo_id) {
+        if algo.instrument_id != instrument_id {
+            return Err("PROTECTION_CLEANUP_ALGO_INSTRUMENT_MISMATCH".into());
+        }
+        return Err("PROTECTION_CANCEL_READBACK_PENDING".into());
+    }
+    let key = key.to_owned();
+    let hash = hash.to_owned();
+    store.call(deadline(), move |s| {
+        s.operation_receipt(
+            &key, &hash, "protection_cleanup", "VERIFIED_CANCELED", now()
+        )
+    }).await.map_err(err)?;
+    Ok(())
+}
+
 impl TradeService {
     async fn find_intent(
         &self,
@@ -1931,102 +2027,6 @@ impl TradeService {
             "outcome":outcome,
         }))
     }
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ProtectionCleanupStep {
-    SendOnce,
-    Inspect,
-    Confirmed,
-}
-
-// BEGIN and its receipt are the only authority to send. A repeated BEGIN is
-// never permission to repeat a possibly accepted exchange cancellation.
-async fn protection_cleanup_step(
-    store: &AccountStoreHandle,
-    key: &str,
-    hash: &str,
-) -> Result<ProtectionCleanupStep, String> {
-    let key = key.to_owned();
-    let hash = hash.to_owned();
-    store.call(deadline(), move |s| {
-        if s.begin_operation(&key, &hash, "protection_cleanup", now())? {
-            return Ok(ProtectionCleanupStep::SendOnce);
-        }
-        let old = s.operation(&key)?.ok_or(okx_execution::StoreError::Invalid(
-            "PROTECTION_CLEANUP_BEGIN_MISSING",
-        ))?;
-        match old.result_ref.as_str() {
-            "POSTING" => Ok(ProtectionCleanupStep::Inspect),
-            "VERIFIED_CANCELED" => Ok(ProtectionCleanupStep::Confirmed),
-            _ => Err(okx_execution::StoreError::Invalid(
-                "PROTECTION_CLEANUP_RECEIPT_CONFLICT",
-            )),
-        }
-    }).await.map_err(err)
-}
-
-// This is the same production SQL/observation decision used after the first
-// ACK and after restart/lost ACK. The transport cannot assert its own outcome:
-// it supplies an independently normalized, complete signed inventory and
-// raw position readings. Only SQL may durably commit the verified transition.
-async fn protection_cleanup_readback(
-    store: &AccountStoreHandle,
-    key: &str,
-    hash: &str,
-    instrument_id: &str,
-    algo_id: &str,
-    expected_uid: &str,
-    inventory: &okx_api::PendingDerivativeAlgoRiskInventory,
-    observed_uid: &str,
-    position_received_at_ms: i64,
-    positions: &[(String, String)],
-) -> Result<(), String> {
-    let op_key = key.to_owned();
-    let operation = store.call(deadline(), move |s| s.operation(&op_key))
-        .await.map_err(err)?
-        .ok_or("PROTECTION_CLEANUP_BEGIN_MISSING")?;
-    if operation.request_hash != hash || operation.kind != "protection_cleanup" {
-        return Err("PROTECTION_CLEANUP_IDENTITY_MISMATCH".into());
-    }
-    if operation.result_ref == "VERIFIED_CANCELED" {
-        return Ok(());
-    }
-    if operation.result_ref != "POSTING" {
-        return Err("PROTECTION_CLEANUP_RECEIPT_CONFLICT".into());
-    }
-    if observed_uid != expected_uid {
-        return Err("PROTECTION_CLEANUP_ACCOUNT_MISMATCH".into());
-    }
-    if !inventory.complete_within_bound || inventory.scopes_checked != 16 {
-        return Err("PROTECTION_CANCEL_READBACK_INCOMPLETE".into());
-    }
-    // The earliest of all 16 signed GET receipts and the position source
-    // must both postdate durable BEGIN. A pre-ACK/old inventory is not proof.
-    if inventory.received_at_ms == 0
-        || inventory.received_at_ms < operation.committed_at.max(0) as u64
-        || position_received_at_ms < operation.committed_at
-    {
-        return Err("PROTECTION_CANCEL_READBACK_STALE".into());
-    }
-    verify_instrument_is_flat(
-        instrument_id,
-        positions.iter().map(|(inst, qty)| (inst.as_str(), qty.as_str())),
-    )?;
-    if let Some(algo) = inventory.samples.iter().find(|a| a.algo_order_id == algo_id) {
-        if algo.instrument_id != instrument_id {
-            return Err("PROTECTION_CLEANUP_ALGO_INSTRUMENT_MISMATCH".into());
-        }
-        return Err("PROTECTION_CANCEL_READBACK_PENDING".into());
-    }
-    let key = key.to_owned();
-    let hash = hash.to_owned();
-    store.call(deadline(), move |s| {
-        s.operation_receipt(
-            &key, &hash, "protection_cleanup", "VERIFIED_CANCELED", now()
-        )
-    }).await.map_err(err)?;
-    Ok(())
-}
 
     async fn cleanup_flat_protection(
         &self,
