@@ -519,10 +519,14 @@ async fn pc_07_recorded_signed_http_cancel_ack_readback_and_sql_receipt() {
     let expected_uid = okx_api::account_uid_fingerprint(WIRE_UID);
     // Persist the actual intent and attached protection before cleanup.
     // A test-provided receipt cannot substitute for SQL ownership.
-    let definition = f.store.call(deadline(), |s| {
-        s.apply_authority_policy(1, false, "pc07", Decimal::from(20))?;
-        s.ensure_manual_instance(now())
-    }).await.unwrap();
+    let definition = f
+        .store
+        .call(deadline(), |s| {
+            s.apply_authority_policy(1, false, "pc07", Decimal::from(20))?;
+            s.ensure_manual_instance(now())
+        })
+        .await
+        .unwrap();
     let plan = IntentPlan {
         strategy_definition_id: definition.definition_id,
         strategy_definition_version: definition.version,
@@ -561,25 +565,32 @@ async fn pc_07_recorded_signed_http_cancel_ack_readback_and_sql_receipt() {
         risk_increase: true,
         instrument_id: INST.into(),
     };
-    let stored = f.store.call(deadline(), move |s| {
-        let intent = s.prepare(&decision, &candidate)?;
-        s.verify_protection(&okx_execution::ProtectionReceipt {
-            intent_id: intent.intent_id.clone(),
-            algo_id: WIRE_ALGO.into(),
-            side: "sell".into(),
-            quantity: Decimal::new(3, 1),
-            trigger_price: Decimal::from(900),
-            trigger_basis: "mark".into(),
-            verified_at: now(),
-            source_digest: "pc07-signed-algo-source".into(),
-        })?;
-        Ok(intent)
-    }).await.unwrap();
+    let stored = f
+        .store
+        .call(deadline(), move |s| {
+            let intent = s.prepare(&decision, &candidate)?;
+            s.verify_protection(&okx_execution::ProtectionReceipt {
+                intent_id: intent.intent_id.clone(),
+                algo_id: WIRE_ALGO.into(),
+                side: "sell".into(),
+                quantity: Decimal::new(3, 1),
+                trigger_price: Decimal::from(900),
+                trigger_basis: "mark".into(),
+                verified_at: now(),
+                source_digest: "pc07-signed-algo-source".into(),
+            })?;
+            Ok(intent)
+        })
+        .await
+        .unwrap();
 
     let capacity = tokio::sync::Semaphore::new(1);
     let dependencies = CleanupDependencies {
-        store: &f.store, observer: &observer, trade: &trade,
-        clock: &executor, mutation_capacity: &capacity,
+        store: &f.store,
+        observer: &observer,
+        trade: &trade,
+        clock: &executor,
+        mutation_capacity: &capacity,
         verified_uid: &expected_uid,
     };
     let order = CleanupOrderFacts {
@@ -591,34 +602,60 @@ async fn pc_07_recorded_signed_http_cancel_ack_readback_and_sql_receipt() {
         venue_order_state: "filled", // signed terminal order state supplied to public Status
     };
     let not_terminal = CleanupOrderFacts {
-        venue_order_state: "live", ..order
+        venue_order_state: "live",
+        ..order
     };
-    cleanup_flat_protection(CleanupDependencies {
-        store: &f.store, observer: &observer, trade: &trade,
-        clock: &executor, mutation_capacity: &capacity, verified_uid: &expected_uid,
-    }, not_terminal).await.unwrap();
+    cleanup_flat_protection(
+        CleanupDependencies {
+            store: &f.store,
+            observer: &observer,
+            trade: &trade,
+            clock: &executor,
+            mutation_capacity: &capacity,
+            verified_uid: &expected_uid,
+        },
+        not_terminal,
+    )
+    .await
+    .unwrap();
     assert!(feed.outbound_posts.lock().unwrap().is_empty());
     let sql_key = format!("cleanup_{}", stored.client_order_id);
-    let sql_none = f.store.call(deadline(), {
-        let sql_key = sql_key.clone();
-        move |s| s.operation(&sql_key)
-    }).await.unwrap();
+    let sql_none = f
+        .store
+        .call(deadline(), {
+            let sql_key = sql_key.clone();
+            move |s| s.operation(&sql_key)
+        })
+        .await
+        .unwrap();
     assert!(sql_none.is_none(), "live order cannot begin cancel SQL");
 
     feed.expect_public_clock(raw(serde_json::json!([{
         "ts": chrono::Utc::now().timestamp_millis().to_string()
     }])));
     cleanup_flat_protection(dependencies, order).await.unwrap();
-    assert_eq!(operation(&f.store, &sql_key).await.result_ref, "VERIFIED_CANCELED");
+    assert_eq!(
+        operation(&f.store, &sql_key).await.result_ref,
+        "VERIFIED_CANCELED"
+    );
     assert_eq!(feed.outbound_posts.lock().unwrap().len(), 1);
     let trace = feed.causal_algo_trace.lock().unwrap().clone();
     assert!(trace.iter().any(|event| {
         event.contains("event=CANCEL_ACK") && event.contains("cancel_id=900000002")
     }));
-    cleanup_flat_protection(CleanupDependencies {
-        store: &f.store, observer: &observer, trade: &trade,
-        clock: &executor, mutation_capacity: &capacity, verified_uid: &expected_uid,
-    }, order).await.unwrap();
+    cleanup_flat_protection(
+        CleanupDependencies {
+            store: &f.store,
+            observer: &observer,
+            trade: &trade,
+            clock: &executor,
+            mutation_capacity: &capacity,
+            verified_uid: &expected_uid,
+        },
+        order,
+    )
+    .await
+    .unwrap();
     let sends = feed.outbound_posts.lock().unwrap();
     assert_eq!(sends.len(), 1, "repeated public cleanup cannot repost");
     assert_eq!(sends[0].0, "fixture-executor-a");

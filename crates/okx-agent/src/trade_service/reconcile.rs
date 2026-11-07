@@ -262,7 +262,7 @@ fn verified_intent_position_quantity<'a>(
 /// Protection cleanup must inspect the whole instrument (both hedge
 /// sides), not just the original side. A malformed or overflowing position
 /// is UNKNOWN exposure and may never authorize removing a live stop.
-fn verify_instrument_is_flat<'a>(
+pub(super) fn verify_instrument_is_flat<'a>(
     instrument: &str,
     positions: impl IntoIterator<Item = (&'a str, &'a str)>,
 ) -> Result<(), String> {
@@ -3014,4 +3014,3 @@ mod entry_cost_status_tests {
         );
     }
 }
-

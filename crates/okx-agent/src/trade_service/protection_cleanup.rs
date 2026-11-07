@@ -2,6 +2,7 @@
 //! Public Status and direct wire regressions enter through this same function.
 use super::*;
 use crate::account_bootstrap::AccountBootstrapper;
+use super::reconcile::verify_instrument_is_flat;
 use tokio::sync::Semaphore;
 
 // A signed flat position is NOT permission to remove a stop while the
@@ -18,7 +19,6 @@ fn flat_entry_protection_cleanup_allowed(
         && !signed_exposed
         && matches!(venue_order_state, "filled" | "canceled" | "mmp_canceled")
 }
-
 
 #[derive(Clone, Copy)]
 pub(super) struct CleanupOrderFacts<'a> {
@@ -219,10 +219,18 @@ fn evaluate_cleanup_readback(
     }
     verify_instrument_is_flat(
         target.instrument_id,
-        observed.positions.iter().map(|(inst, qty)| (inst.as_str(), qty.as_str())),
+        observed
+            .positions
+            .iter()
+            .map(|(inst, qty)| (inst.as_str(), qty.as_str())),
     )
     .map_err(CleanupBlocker::NonFlat)?;
-    if let Some(algo) = observed.inventory.samples.iter().find(|a| a.algo_order_id == target.algo_id) {
+    if let Some(algo) = observed
+        .inventory
+        .samples
+        .iter()
+        .find(|a| a.algo_order_id == target.algo_id)
+    {
         if algo.instrument_id != target.instrument_id {
             return Err(CleanupBlocker::WrongAlgoInstrument);
         }
@@ -284,7 +292,10 @@ async fn observe_protection_cleanup_sources(
         .pending_derivative_risk_algos()
         .await
         .map_err(err)?;
-    let snapshot = observer.snapshot_after_held_until(deadline()).await.map_err(err)?;
+    let snapshot = observer
+        .snapshot_after_held_until(deadline())
+        .await
+        .map_err(err)?;
     let source_at = chrono::DateTime::parse_from_rfc3339(&snapshot.source_received_at)
         .map_err(|_| "PROTECTION_CLEANUP_POSITION_TIME_INVALID")?
         .timestamp_millis();
@@ -306,124 +317,125 @@ async fn observe_protection_cleanup_sources(
     .await
 }
 
-
 pub(super) async fn cleanup_flat_protection(
     deps: CleanupDependencies<'_>,
     facts: CleanupOrderFacts<'_>,
 ) -> Result<(), String> {
-        if !flat_entry_protection_cleanup_allowed(
-            facts.risk_increase, facts.signed_exposed, facts.venue_order_state,
-        ) {
-            return Ok(());
-        }
-        let _capacity = deps
-            .mutation_capacity
-            .try_acquire()
-            .map_err(|_| "ACCOUNT_MUTATION_BUSY")?;
-        let id = facts.intent_id.to_owned();
-        let saved = deps
-            .store
-            .call(deadline(), move |s| s.protection(&id))
-            .await
-            .map_err(err)?;
-        let Some(saved) = saved else {
-            return Ok(());
-        };
-        if saved.intent_id != facts.intent_id {
-            return Err("PROTECTION_CLEANUP_IDENTITY_MISMATCH".into());
-        }
-        let key = format!("cleanup_{}", facts.client_order_id);
-        let hash = digest(&(
-            facts.intent_id.to_owned(),
-            saved.algo_id.clone(),
-            "flat_protection_cleanup",
-        ))?;
-        let expected_uid = deps.verified_uid;
-        let target = ProtectionCleanupIdentity {
-            key: &key,
-            hash: &hash,
-            instrument_id: facts.instrument_id,
-            algo_id: &saved.algo_id,
-            expected_uid,
-        };
-
-        // Inspect a previous durable BEGIN before examining the live stop or
-        // obtaining a new send permit. The former path returned UNKNOWN here
-        // forever even when the signed post-cancel inventory became complete.
-        let op_key = key.clone();
-        let prior = deps
-            .store
-            .call(deadline(), move |s| s.operation(&op_key))
-            .await
-            .map_err(err)?;
-        match decide_cleanup(facts, prior.as_ref(), &hash)
-            .map_err(|blocked| blocked.reason().to_owned())?
-        {
-            CleanupDecision::Blocked | CleanupDecision::Confirmed => return Ok(()),
-            CleanupDecision::Inspect => {
-                return observe_protection_cleanup_sources(deps.store, deps.observer, target).await;
-            }
-            CleanupDecision::Start => {}
-        }
-
-        let inventory = deps
-            .observer
-            .pending_derivative_risk_algos()
-            .await
-            .map_err(err)?;
-        if !inventory.complete_within_bound || inventory.scopes_checked != 16 {
-            return Err("ALGO_INVENTORY_INCOMPLETE".into());
-        }
-        let live = inventory
-            .samples
-            .iter()
-            .find(|a| a.algo_order_id == saved.algo_id);
-        let Some(live) = live else {
-            return Ok(());
-        };
-        if live.instrument_id != facts.instrument_id {
-            return Err("PROTECTION_CLEANUP_ALGO_INSTRUMENT_MISMATCH".into());
-        }
-        let snapshot = deps.observer.snapshot_until(deadline()).await.map_err(err)?;
-        if snapshot.account_uid_fingerprint != expected_uid {
-            return Err("PROTECTION_CLEANUP_ACCOUNT_MISMATCH".into());
-        }
-        verify_instrument_is_flat(
-            facts.instrument_id,
-            snapshot
-                .positions
-                .iter()
-                .map(|p| (p.instrument_id.as_str(), p.position.as_str())),
-        )?;
-        // Preserve all existing pre-BEGIN clock/rate admission policies.
-        let request = okx_api::CancelAlgoOrderRequest {
-            instrument_id: facts.instrument_id.to_owned(),
-            algo_order_id: saved.algo_id.clone(),
-        };
-        let timing = deps
-            .clock
-            .clock_evidence()
-            .await
-            .map_err(err)?
-            .mutation_timing(5000)
-            .map_err(err)?;
-        let rate = deps
-            .trade
-            .admit_cancel_algo_order(&request)
-            .map_err(err)?;
-        match protection_cleanup_step(deps.store, &key, &hash).await? {
-            ProtectionCleanupStep::Confirmed => return Ok(()),
-            ProtectionCleanupStep::Inspect => {
-                // A concurrent caller committed BEGIN after our first read.
-                // Do not consume a second send; take a NEW authenticated read.
-                return observe_protection_cleanup_sources(deps.store, deps.observer, target).await;
-            }
-            ProtectionCleanupStep::SendOnce => {}
-        }
-        send_protection_cleanup_after_admission(deps.trade, &request, &timing, &rate)
-            .await?;
-        observe_protection_cleanup_sources(deps.store, deps.observer, target).await
+    if !flat_entry_protection_cleanup_allowed(
+        facts.risk_increase,
+        facts.signed_exposed,
+        facts.venue_order_state,
+    ) {
+        return Ok(());
     }
+    let _capacity = deps
+        .mutation_capacity
+        .try_acquire()
+        .map_err(|_| "ACCOUNT_MUTATION_BUSY")?;
+    let id = facts.intent_id.to_owned();
+    let saved = deps
+        .store
+        .call(deadline(), move |s| s.protection(&id))
+        .await
+        .map_err(err)?;
+    let Some(saved) = saved else {
+        return Ok(());
+    };
+    if saved.intent_id != facts.intent_id {
+        return Err("PROTECTION_CLEANUP_IDENTITY_MISMATCH".into());
+    }
+    let key = format!("cleanup_{}", facts.client_order_id);
+    let hash = digest(&(
+        facts.intent_id.to_owned(),
+        saved.algo_id.clone(),
+        "flat_protection_cleanup",
+    ))?;
+    let expected_uid = deps.verified_uid;
+    let target = ProtectionCleanupIdentity {
+        key: &key,
+        hash: &hash,
+        instrument_id: facts.instrument_id,
+        algo_id: &saved.algo_id,
+        expected_uid,
+    };
+
+    // Inspect a previous durable BEGIN before examining the live stop or
+    // obtaining a new send permit. The former path returned UNKNOWN here
+    // forever even when the signed post-cancel inventory became complete.
+    let op_key = key.clone();
+    let prior = deps
+        .store
+        .call(deadline(), move |s| s.operation(&op_key))
+        .await
+        .map_err(err)?;
+    match decide_cleanup(facts, prior.as_ref(), &hash)
+        .map_err(|blocked| blocked.reason().to_owned())?
+    {
+        CleanupDecision::Blocked | CleanupDecision::Confirmed => return Ok(()),
+        CleanupDecision::Inspect => {
+            return observe_protection_cleanup_sources(deps.store, deps.observer, target).await;
+        }
+        CleanupDecision::Start => {}
+    }
+
+    let inventory = deps
+        .observer
+        .pending_derivative_risk_algos()
+        .await
+        .map_err(err)?;
+    if !inventory.complete_within_bound || inventory.scopes_checked != 16 {
+        return Err("ALGO_INVENTORY_INCOMPLETE".into());
+    }
+    let live = inventory
+        .samples
+        .iter()
+        .find(|a| a.algo_order_id == saved.algo_id);
+    let Some(live) = live else {
+        return Ok(());
+    };
+    if live.instrument_id != facts.instrument_id {
+        return Err("PROTECTION_CLEANUP_ALGO_INSTRUMENT_MISMATCH".into());
+    }
+    let snapshot = deps
+        .observer
+        .snapshot_until(deadline())
+        .await
+        .map_err(err)?;
+    if snapshot.account_uid_fingerprint != expected_uid {
+        return Err("PROTECTION_CLEANUP_ACCOUNT_MISMATCH".into());
+    }
+    verify_instrument_is_flat(
+        facts.instrument_id,
+        snapshot
+            .positions
+            .iter()
+            .map(|p| (p.instrument_id.as_str(), p.position.as_str())),
+    )?;
+    // Preserve all existing pre-BEGIN clock/rate admission policies.
+    let request = okx_api::CancelAlgoOrderRequest {
+        instrument_id: facts.instrument_id.to_owned(),
+        algo_order_id: saved.algo_id.clone(),
+    };
+    let timing = deps
+        .clock
+        .clock_evidence()
+        .await
+        .map_err(err)?
+        .mutation_timing(5000)
+        .map_err(err)?;
+    let rate = deps.trade.admit_cancel_algo_order(&request).map_err(err)?;
+    match protection_cleanup_step(deps.store, &key, &hash).await? {
+        ProtectionCleanupStep::Confirmed => return Ok(()),
+        ProtectionCleanupStep::Inspect => {
+            // A concurrent caller committed BEGIN after our first read.
+            // Do not consume a second send; take a NEW authenticated read.
+            return observe_protection_cleanup_sources(deps.store, deps.observer, target).await;
+        }
+        ProtectionCleanupStep::SendOnce => {}
+    }
+    send_protection_cleanup_after_admission(deps.trade, &request, &timing, &rate).await?;
+    observe_protection_cleanup_sources(deps.store, deps.observer, target).await
+}
 
 #[cfg(test)]
 mod decision_tests {
@@ -446,7 +458,6 @@ mod decision_tests {
         ));
     }
 
-
     #[test]
     fn pure_readback_rejects_foreign_stale_or_nonflat_facts() {
         let operation = okx_execution::OperationReceipt {
@@ -457,8 +468,11 @@ mod decision_tests {
             committed_at: 10_000,
         };
         let target = ProtectionCleanupIdentity {
-            key: "pc-test", hash: "h", instrument_id: "BTC-USDT-SWAP",
-            algo_id: "stop-a", expected_uid: "uid-a",
+            key: "pc-test",
+            hash: "h",
+            instrument_id: "BTC-USDT-SWAP",
+            algo_id: "stop-a",
+            expected_uid: "uid-a",
         };
         let inventory = okx_api::PendingDerivativeAlgoRiskInventory {
             schema: "okx.pending-derivative-risk-algos/v1",
@@ -472,36 +486,60 @@ mod decision_tests {
         };
         let flat = vec![("BTC-USDT-SWAP".into(), "0".into())];
         let verified = evaluate_cleanup_readback(
-            &operation, target,
+            &operation,
+            target,
             ProtectionCleanupObservation {
-                inventory: &inventory, uid: "uid-a",
-                position_received_at_ms: 10_001, positions: &flat,
+                inventory: &inventory,
+                uid: "uid-a",
+                position_received_at_ms: 10_001,
+                positions: &flat,
             },
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(verified.operation_key, "pc-test");
         assert_eq!(verified.request_hash, "h");
-        assert_eq!(evaluate_cleanup_readback(
-            &operation, target,
-            ProtectionCleanupObservation {
-                inventory: &inventory, uid: "uid-b",
-                position_received_at_ms: 10_001, positions: &flat,
-            },
-        ).unwrap_err(), CleanupBlocker::WrongAccount);
-        assert_eq!(evaluate_cleanup_readback(
-            &operation, target,
-            ProtectionCleanupObservation {
-                inventory: &inventory, uid: "uid-a",
-                position_received_at_ms: 9_999, positions: &flat,
-            },
-        ).unwrap_err(), CleanupBlocker::StaleSource);
+        assert_eq!(
+            evaluate_cleanup_readback(
+                &operation,
+                target,
+                ProtectionCleanupObservation {
+                    inventory: &inventory,
+                    uid: "uid-b",
+                    position_received_at_ms: 10_001,
+                    positions: &flat,
+                },
+            )
+            .unwrap_err(),
+            CleanupBlocker::WrongAccount
+        );
+        assert_eq!(
+            evaluate_cleanup_readback(
+                &operation,
+                target,
+                ProtectionCleanupObservation {
+                    inventory: &inventory,
+                    uid: "uid-a",
+                    position_received_at_ms: 9_999,
+                    positions: &flat,
+                },
+            )
+            .unwrap_err(),
+            CleanupBlocker::StaleSource
+        );
         let nonflat = vec![("BTC-USDT-SWAP".into(), "0.1".into())];
-        assert!(matches!(evaluate_cleanup_readback(
-            &operation, target,
-            ProtectionCleanupObservation {
-                inventory: &inventory, uid: "uid-a",
-                position_received_at_ms: 10_001, positions: &nonflat,
-            },
-        ), Err(CleanupBlocker::NonFlat(_))));
+        assert!(matches!(
+            evaluate_cleanup_readback(
+                &operation,
+                target,
+                ProtectionCleanupObservation {
+                    inventory: &inventory,
+                    uid: "uid-a",
+                    position_received_at_ms: 10_001,
+                    positions: &nonflat,
+                },
+            ),
+            Err(CleanupBlocker::NonFlat(_))
+        ));
     }
 }
 #[cfg(test)]
