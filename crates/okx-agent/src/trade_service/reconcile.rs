@@ -33,21 +33,6 @@ where
     }
 }
 
-// A signed flat position is NOT permission to remove a stop while the
-// original opening order is still live/partially filled: a late execution
-// could create new exposure after cleanup. Require the independently signed
-// terminal venue order state as well as flat exposure. Canceled orders may
-// have partial fills, so they still need the flat-position witness.
-fn flat_entry_protection_cleanup_allowed(
-    risk_increase: bool,
-    signed_exposed: bool,
-    venue_order_state: &str,
-) -> bool {
-    risk_increase
-        && !signed_exposed
-        && matches!(venue_order_state, "filled" | "canceled" | "mmp_canceled")
-}
-
 // An authenticated later `live` algo GET cannot silently undo a durable
 // protection incident: the same algoId may be stale, reappear after an ACK,
 // or no longer cover the late fill. Only committed remediation may resolve it;
@@ -528,197 +513,6 @@ fn entry_cost_status(
     }))
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ProtectionCleanupStep {
-    SendOnce,
-    Inspect,
-    Confirmed,
-}
-
-// BEGIN and its receipt are the only authority to send. A repeated BEGIN is
-// never permission to repeat a possibly accepted exchange cancellation.
-async fn protection_cleanup_step(
-    store: &AccountStoreHandle,
-    key: &str,
-    hash: &str,
-) -> Result<ProtectionCleanupStep, String> {
-    let key = key.to_owned();
-    let hash = hash.to_owned();
-    store
-        .call(deadline(), move |s| {
-            if s.begin_operation(&key, &hash, "protection_cleanup", now())? {
-                return Ok(ProtectionCleanupStep::SendOnce);
-            }
-            let old = s
-                .operation(&key)?
-                .ok_or(okx_execution::StoreError::Invalid(
-                    "PROTECTION_CLEANUP_BEGIN_MISSING",
-                ))?;
-            match old.result_ref.as_str() {
-                "POSTING" => Ok(ProtectionCleanupStep::Inspect),
-                "VERIFIED_CANCELED" => Ok(ProtectionCleanupStep::Confirmed),
-                _ => Err(okx_execution::StoreError::Invalid(
-                    "PROTECTION_CLEANUP_RECEIPT_CONFLICT",
-                )),
-            }
-        })
-        .await
-        .map_err(err)
-}
-
-// The exact same authenticated cancellation and ACK verdict are exercised
-// by the direct recorded-HTTP regression and by the live Status owner.
-// An ambiguous response is UNKNOWN, never authorization to resend.
-async fn send_protection_cleanup_after_admission(
-    trade: &okx_api::TradeApi,
-    request: &okx_api::CancelAlgoOrderRequest,
-    timing: &okx_api::MutationTiming,
-    rate: &okx_api::RateRequestPlan,
-) -> Result<(), String> {
-    let response = trade
-        .cancel_algo_order_after_admission(request, timing, rate)
-        .await
-        .map_err(|_| "PROTECTION_CANCEL_OUTCOME_UNKNOWN")?;
-    if !response.top_level_success()
-        || response.data.len() != 1
-        || response.data[0].status_code != "0"
-        || response.data[0].algo_order_id != request.algo_order_id
-    {
-        return Err("PROTECTION_CANCEL_NOT_CONFIRMED".into());
-    }
-    Ok(())
-}
-
-// This is the same production SQL/observation decision used after the first
-// ACK and after restart/lost ACK. The transport cannot assert its own outcome:
-// it supplies an independently normalized, complete signed inventory and
-// raw position readings. Only SQL may durably commit the verified transition.
-// Only facts needed for this one cancellation's SQL receipt. The observer
-// and exchange adapter remain the owners of authenticated I/O.
-#[derive(Clone, Copy)]
-struct ProtectionCleanupIdentity<'a> {
-    key: &'a str,
-    hash: &'a str,
-    instrument_id: &'a str,
-    algo_id: &'a str,
-    expected_uid: &'a str,
-}
-struct ProtectionCleanupObservation<'a> {
-    inventory: &'a okx_api::PendingDerivativeAlgoRiskInventory,
-    uid: &'a str,
-    position_received_at_ms: i64,
-    positions: &'a [(String, String)],
-}
-async fn protection_cleanup_readback(
-    store: &AccountStoreHandle,
-    target: ProtectionCleanupIdentity<'_>,
-    observed: ProtectionCleanupObservation<'_>,
-) -> Result<(), String> {
-    let op_key = target.key.to_owned();
-    let operation = store
-        .call(deadline(), move |s| s.operation(&op_key))
-        .await
-        .map_err(err)?
-        .ok_or("PROTECTION_CLEANUP_BEGIN_MISSING")?;
-    if operation.request_hash != target.hash || operation.kind != "protection_cleanup" {
-        return Err("PROTECTION_CLEANUP_IDENTITY_MISMATCH".into());
-    }
-    if operation.result_ref == "VERIFIED_CANCELED" {
-        return Ok(());
-    }
-    if operation.result_ref != "POSTING" {
-        return Err("PROTECTION_CLEANUP_RECEIPT_CONFLICT".into());
-    }
-    if observed.uid != target.expected_uid {
-        return Err("PROTECTION_CLEANUP_ACCOUNT_MISMATCH".into());
-    }
-    if !observed.inventory.complete_within_bound || observed.inventory.scopes_checked != 16 {
-        return Err("PROTECTION_CANCEL_READBACK_INCOMPLETE".into());
-    }
-    // The earliest of all 16 signed GET receipts and the position source
-    // must both postdate durable BEGIN. A pre-ACK/old inventory is not proof.
-    if observed.inventory.received_at_ms == 0
-        || observed.inventory.received_at_ms < operation.committed_at.max(0) as u64
-        || observed.position_received_at_ms < operation.committed_at
-    {
-        return Err("PROTECTION_CANCEL_READBACK_STALE".into());
-    }
-    verify_instrument_is_flat(
-        target.instrument_id,
-        observed
-            .positions
-            .iter()
-            .map(|(inst, qty)| (inst.as_str(), qty.as_str())),
-    )?;
-    if let Some(algo) = observed
-        .inventory
-        .samples
-        .iter()
-        .find(|a| a.algo_order_id == target.algo_id)
-    {
-        if algo.instrument_id != target.instrument_id {
-            return Err("PROTECTION_CLEANUP_ALGO_INSTRUMENT_MISMATCH".into());
-        }
-        return Err("PROTECTION_CANCEL_READBACK_PENDING".into());
-    }
-    let key = target.key.to_owned();
-    let hash = target.hash.to_owned();
-    store
-        .call(deadline(), move |s| {
-            s.operation_receipt(
-                &key,
-                &hash,
-                "protection_cleanup",
-                "VERIFIED_CANCELED",
-                now(),
-            )
-        })
-        .await
-        .map_err(err)?;
-    Ok(())
-}
-
-// The same authenticated observer/SQL path is used by Status, after restart,
-// and by the direct recorded-wire regression. The test supplies only venue
-// bytes; neither the readback nor its durable decision is mocked.
-async fn observe_protection_cleanup_sources(
-    store: &AccountStoreHandle,
-    observer: &crate::account_bootstrap::AccountBootstrapper,
-    target: ProtectionCleanupIdentity<'_>,
-) -> Result<(), String> {
-    let inventory = observer
-        .pending_derivative_risk_algos()
-        .await
-        .map_err(err)?;
-    let snapshot = observer.snapshot_until(deadline()).await.map_err(err)?;
-    let source_at = chrono::DateTime::parse_from_rfc3339(&snapshot.source_received_at)
-        .map_err(|_| "PROTECTION_CLEANUP_POSITION_TIME_INVALID")?
-        .timestamp_millis();
-    let positions = snapshot
-        .positions
-        .iter()
-        .map(|p| (p.instrument_id.clone(), p.position.clone()))
-        .collect::<Vec<_>>();
-    protection_cleanup_readback(
-        store,
-        target,
-        ProtectionCleanupObservation {
-            inventory: &inventory,
-            uid: &snapshot.account_uid_fingerprint,
-            position_received_at_ms: source_at,
-            positions: &positions,
-        },
-    )
-    .await
-}
-
-async fn observe_protection_cleanup(
-    r: &AccountResources,
-    target: ProtectionCleanupIdentity<'_>,
-) -> Result<(), String> {
-    observe_protection_cleanup_sources(&r.execution.store, &r.observer, target).await
-}
-
 impl TradeService {
     async fn find_intent(
         &self,
@@ -971,9 +765,25 @@ impl TradeService {
                     .map(|p| (p.instrument_id.as_str(), p.position.as_str())),
             )
             .is_ok();
-            if flat_entry_protection_cleanup_allowed(i.risk_increase, exposed, &o.state) {
-                self.cleanup_flat_protection(r, &i).await?;
-            }
+            protection_cleanup::cleanup_flat_protection(
+                protection_cleanup::CleanupDependencies {
+                    store: &r.execution.store,
+                    observer: &r.observer,
+                    trade: &r.execution.trade,
+                    clock: &r.execution.clock,
+                    mutation_capacity: &r.mutation_capacity,
+                    verified_uid: &r.configuration.account_key.verified_uid,
+                },
+                protection_cleanup::CleanupOrderFacts {
+                    intent_id: &i.intent_id,
+                    client_order_id: &i.client_order_id,
+                    instrument_id: &i.instrument_id,
+                    risk_increase: i.risk_increase,
+                    signed_exposed: exposed,
+                    venue_order_state: &o.state,
+                },
+            )
+            .await?;
             // An Add ACK with zero executed contracts does NOT own the
             // previously protected position observed on this net-mode
             // instrument. The pre-POST signed full-cohort census verified
@@ -2138,126 +1948,6 @@ impl TradeService {
         }))
     }
 
-    async fn cleanup_flat_protection(
-        &self,
-        r: &AccountResources,
-        i: &StoredIntent,
-    ) -> Result<(), String> {
-        let _capacity = r
-            .mutation_capacity
-            .try_acquire()
-            .map_err(|_| "ACCOUNT_MUTATION_BUSY")?;
-        let id = i.intent_id.clone();
-        let saved = r
-            .execution
-            .store
-            .call(deadline(), move |s| s.protection(&id))
-            .await
-            .map_err(err)?;
-        let Some(saved) = saved else {
-            return Ok(());
-        };
-        if saved.intent_id != i.intent_id {
-            return Err("PROTECTION_CLEANUP_IDENTITY_MISMATCH".into());
-        }
-        let key = format!("cleanup_{}", &i.client_order_id);
-        let hash = digest(&(
-            i.intent_id.clone(),
-            saved.algo_id.clone(),
-            "flat_protection_cleanup",
-        ))?;
-        let expected_uid = r.configuration.account_key.verified_uid.as_str();
-        let target = ProtectionCleanupIdentity {
-            key: &key,
-            hash: &hash,
-            instrument_id: &i.instrument_id,
-            algo_id: &saved.algo_id,
-            expected_uid,
-        };
-
-        // Inspect a previous durable BEGIN before examining the live stop or
-        // obtaining a new send permit. The former path returned UNKNOWN here
-        // forever even when the signed post-cancel inventory became complete.
-        let op_key = key.clone();
-        let prior = r
-            .execution
-            .store
-            .call(deadline(), move |s| s.operation(&op_key))
-            .await
-            .map_err(err)?;
-        if let Some(prior) = prior {
-            if prior.request_hash != hash || prior.kind != "protection_cleanup" {
-                return Err("PROTECTION_CLEANUP_IDENTITY_MISMATCH".into());
-            }
-            if prior.result_ref == "VERIFIED_CANCELED" {
-                return Ok(());
-            }
-            if prior.result_ref != "POSTING" {
-                return Err("PROTECTION_CLEANUP_RECEIPT_CONFLICT".into());
-            }
-            return observe_protection_cleanup(r, target).await;
-        }
-
-        let inventory = r
-            .observer
-            .pending_derivative_risk_algos()
-            .await
-            .map_err(err)?;
-        if !inventory.complete_within_bound || inventory.scopes_checked != 16 {
-            return Err("ALGO_INVENTORY_INCOMPLETE".into());
-        }
-        let live = inventory
-            .samples
-            .iter()
-            .find(|a| a.algo_order_id == saved.algo_id);
-        let Some(live) = live else {
-            return Ok(());
-        };
-        if live.instrument_id != i.instrument_id {
-            return Err("PROTECTION_CLEANUP_ALGO_INSTRUMENT_MISMATCH".into());
-        }
-        let snapshot = r.observer.snapshot_until(deadline()).await.map_err(err)?;
-        if snapshot.account_uid_fingerprint != expected_uid {
-            return Err("PROTECTION_CLEANUP_ACCOUNT_MISMATCH".into());
-        }
-        verify_instrument_is_flat(
-            &i.instrument_id,
-            snapshot
-                .positions
-                .iter()
-                .map(|p| (p.instrument_id.as_str(), p.position.as_str())),
-        )?;
-        // Preserve all existing pre-BEGIN clock/rate admission policies.
-        let request = okx_api::CancelAlgoOrderRequest {
-            instrument_id: i.instrument_id.clone(),
-            algo_order_id: saved.algo_id.clone(),
-        };
-        let timing = r
-            .execution
-            .clock
-            .clock_evidence()
-            .await
-            .map_err(err)?
-            .mutation_timing(5000)
-            .map_err(err)?;
-        let rate = r
-            .execution
-            .trade
-            .admit_cancel_algo_order(&request)
-            .map_err(err)?;
-        match protection_cleanup_step(&r.execution.store, &key, &hash).await? {
-            ProtectionCleanupStep::Confirmed => return Ok(()),
-            ProtectionCleanupStep::Inspect => {
-                // A concurrent caller committed BEGIN after our first read.
-                // Do not consume a second send; take a NEW authenticated read.
-                return observe_protection_cleanup(r, target).await;
-            }
-            ProtectionCleanupStep::SendOnce => {}
-        }
-        send_protection_cleanup_after_admission(&r.execution.trade, &request, &timing, &rate)
-            .await?;
-        observe_protection_cleanup(r, target).await
-    }
     pub(super) async fn cancel(
         &self,
         r: &Arc<AccountResources>,
@@ -2503,24 +2193,6 @@ impl TradeService {
 #[cfg(test)]
 mod entry_cost_status_tests {
     use super::*;
-
-    #[test]
-    fn t09_6_live_or_partially_filled_entry_cannot_cancel_its_own_stop() {
-        for state in ["live", "partially_filled"] {
-            assert!(
-                !flat_entry_protection_cleanup_allowed(true, false, state),
-                "the opening order can still fill after a flat observation"
-            );
-        }
-        for state in ["filled", "canceled", "mmp_canceled"] {
-            assert!(flat_entry_protection_cleanup_allowed(true, false, state));
-            assert!(!flat_entry_protection_cleanup_allowed(true, true, state));
-            assert!(!flat_entry_protection_cleanup_allowed(false, false, state));
-        }
-        assert!(!flat_entry_protection_cleanup_allowed(
-            true, false, "unknown"
-        ));
-    }
 
     #[test]
     fn t10_08_later_live_stop_get_cannot_clear_durable_protection_incident() {
@@ -3343,6 +3015,3 @@ mod entry_cost_status_tests {
     }
 }
 
-#[cfg(test)]
-#[path = "protection_cleanup_direct_tests.rs"]
-mod protection_cleanup_direct_tests;

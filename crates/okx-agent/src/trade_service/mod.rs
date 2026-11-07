@@ -29,6 +29,7 @@ mod entry_settlement;
 mod execute;
 mod plan;
 mod protection_resize;
+mod protection_cleanup;
 mod reconcile;
 mod recovery;
 mod strategies;

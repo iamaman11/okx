@@ -325,7 +325,7 @@ jobs:
       - name: Fast protection cleanup SQL tests (#500)
         shell: pwsh
         run: |
-          $output = & cargo test --locked -p okx-agent --lib trade_service::reconcile::protection_cleanup_direct_tests:: -- --nocapture 2>&1
+          $output = & cargo test --locked -p okx-agent --lib trade_service::protection_cleanup::protection_cleanup_direct_tests:: -- --nocapture 2>&1
           $code = $LASTEXITCODE
           $output | Out-Host
           if ($code -ne 0) { exit $code }

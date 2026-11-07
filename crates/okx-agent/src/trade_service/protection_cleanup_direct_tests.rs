@@ -422,10 +422,8 @@ async fn pc_06_two_callers_share_one_begin_and_old_read_never_confirms() {
 async fn pc_07_recorded_signed_http_cancel_ack_readback_and_sql_receipt() {
     use crate::account_bootstrap::AccountBootstrapper;
     use crate::accounts::recorded_support::{RecordedAccountHttp, RecordedGet, RecordedPost};
-    use okx_api::{
-        CancelAlgoOrderRequest, Credentials, OkxEnvironment, OkxRestClient, RateBudget, Region,
-        TradeApi,
-    };
+    use okx_api::{Credentials, OkxEnvironment, OkxRestClient, RateBudget, Region, TradeApi};
+    use okx_execution::{Decision, IntentPlan, NewIntent};
     use std::sync::Arc;
 
     const WIRE_ALGO: &str = "900000002";
@@ -519,76 +517,112 @@ async fn pc_07_recorded_signed_http_cancel_ack_readback_and_sql_receipt() {
     .unwrap();
     let trade = TradeApi::new(executor.clone());
     let expected_uid = okx_api::account_uid_fingerprint(WIRE_UID);
-    let target = ProtectionCleanupIdentity {
-        key: "pc-07-wire",
-        hash: "pc-07-wire-hash",
-        instrument_id: INST,
-        algo_id: WIRE_ALGO,
-        expected_uid: &expected_uid,
+    // Persist the actual intent and attached protection before cleanup.
+    // A test-provided receipt cannot substitute for SQL ownership.
+    let definition = f.store.call(deadline(), |s| {
+        s.apply_authority_policy(1, false, "pc07", Decimal::from(20))?;
+        s.ensure_manual_instance(now())
+    }).await.unwrap();
+    let plan = IntentPlan {
+        strategy_definition_id: definition.definition_id,
+        strategy_definition_version: definition.version,
+        strategy_parameters_digest: definition.parameters_digest,
+        operation: "open".into(),
+        side: "buy".into(),
+        position_side: "long".into(),
+        quantity: Decimal::new(3, 1),
+        limit_price: Decimal::from(1000),
+        stop_price: Some(Decimal::from(900)),
+        strategy_instance: "manual".into(),
+        planned_loss_usd: Decimal::from(1),
+        source_generation: 1,
+        private_source_generation: 1,
+        contract_value: Decimal::ONE,
+        inverse: false,
+        settlement_currency: "USDT".into(),
     };
-    assert_eq!(
-        protection_cleanup_step(&f.store, target.key, target.hash)
-            .await
-            .unwrap(),
-        ProtectionCleanupStep::SendOnce
-    );
-    let begin = operation(&f.store, target.key).await;
-    assert_eq!(begin.result_ref, "POSTING");
+    let decision = Decision {
+        decision_id: "pc07-decision".into(),
+        instance_id: None,
+        decision_at: now() - 100,
+        input_digest: "a".repeat(64),
+        policy_revision: 1,
+        code_version: "pc07".into(),
+    };
+    let candidate = NewIntent {
+        plan,
+        intent_id: "pc07-owned-intent".into(),
+        idempotency_key: "pc07-command".into(),
+        request_hash: "a".repeat(64),
+        client_order_id: "12345678901234567890123456789012".into(),
+        deadline: now() + 30_000,
+        plan_hash: "b".repeat(64),
+        policy_revision: 1,
+        risk_increase: true,
+        instrument_id: INST.into(),
+    };
+    let stored = f.store.call(deadline(), move |s| {
+        let intent = s.prepare(&decision, &candidate)?;
+        s.verify_protection(&okx_execution::ProtectionReceipt {
+            intent_id: intent.intent_id.clone(),
+            algo_id: WIRE_ALGO.into(),
+            side: "sell".into(),
+            quantity: Decimal::new(3, 1),
+            trigger_price: Decimal::from(900),
+            trigger_basis: "mark".into(),
+            verified_at: now(),
+            source_digest: "pc07-signed-algo-source".into(),
+        })?;
+        Ok(intent)
+    }).await.unwrap();
 
-    // Before the only permitted POST, an authenticated *live* stop cannot
-    // authorize a receipt. This assertion uses real REST parsing and SQLite.
-    assert_eq!(
-        observe_protection_cleanup_sources(&f.store, &observer, target)
-            .await
-            .unwrap_err(),
-        "PROTECTION_CANCEL_READBACK_PENDING"
-    );
+    let capacity = tokio::sync::Semaphore::new(1);
+    let dependencies = CleanupDependencies {
+        store: &f.store, observer: &observer, trade: &trade,
+        clock: &executor, mutation_capacity: &capacity,
+        verified_uid: &expected_uid,
+    };
+    let order = CleanupOrderFacts {
+        intent_id: &stored.intent_id,
+        client_order_id: &stored.client_order_id,
+        instrument_id: &stored.instrument_id,
+        risk_increase: stored.risk_increase,
+        signed_exposed: false,
+        venue_order_state: "filled", // signed terminal order state supplied to public Status
+    };
+    let not_terminal = CleanupOrderFacts {
+        venue_order_state: "live", ..order
+    };
+    cleanup_flat_protection(CleanupDependencies {
+        store: &f.store, observer: &observer, trade: &trade,
+        clock: &executor, mutation_capacity: &capacity, verified_uid: &expected_uid,
+    }, not_terminal).await.unwrap();
     assert!(feed.outbound_posts.lock().unwrap().is_empty());
-    assert_eq!(
-        protection_cleanup_step(&f.store, target.key, target.hash)
-            .await
-            .unwrap(),
-        ProtectionCleanupStep::Inspect
-    );
+    let sql_key = format!("cleanup_{}", stored.client_order_id);
+    let sql_none = f.store.call(deadline(), {
+        let sql_key = sql_key.clone();
+        move |s| s.operation(&sql_key)
+    }).await.unwrap();
+    assert!(sql_none.is_none(), "live order cannot begin cancel SQL");
 
-    // Match the production clock, admission, signer and exact-ID cancel
-    // adapter. The transport only supplies the one pre-recorded ACK.
     feed.expect_public_clock(raw(serde_json::json!([{
         "ts": chrono::Utc::now().timestamp_millis().to_string()
     }])));
-    let timing = executor
-        .clock_evidence()
-        .await
-        .unwrap()
-        .mutation_timing(5_000)
-        .unwrap();
-    let request = CancelAlgoOrderRequest {
-        instrument_id: INST.into(),
-        algo_order_id: WIRE_ALGO.into(),
-    };
-    let admitted = trade.admit_cancel_algo_order(&request).unwrap();
-    send_protection_cleanup_after_admission(&trade, &request, &timing, &admitted)
-        .await
-        .unwrap();
+    cleanup_flat_protection(dependencies, order).await.unwrap();
+    assert_eq!(operation(&f.store, &sql_key).await.result_ref, "VERIFIED_CANCELED");
     assert_eq!(feed.outbound_posts.lock().unwrap().len(), 1);
-
-    // The complete signed AFTER_ACK census and a flat position are observed
-    // by the exact production helper; only SQLite can commit the receipt.
-    observe_protection_cleanup_sources(&f.store, &observer, target)
-        .await
-        .unwrap();
-    let final_op = operation(&f.store, target.key).await;
-    assert_eq!(final_op.result_ref, "VERIFIED_CANCELED");
-    assert_eq!(
-        protection_cleanup_step(&f.store, target.key, target.hash)
-            .await
-            .unwrap(),
-        ProtectionCleanupStep::Confirmed
-    );
-    let sent = feed.outbound_posts.lock().unwrap();
-    assert_eq!(sent.len(), 1);
-    assert_eq!(sent[0].0, "fixture-executor-a");
-    assert_eq!(sent[0].1, "/api/v5/trade/cancel-algos");
-    assert_eq!(sent[0].2[0]["algoId"], WIRE_ALGO);
+    let trace = feed.causal_algo_trace.lock().unwrap().clone();
+    assert!(trace.iter().any(|event| {
+        event.contains("event=CANCEL_ACK") && event.contains("cancel_id=900000002")
+    }));
+    cleanup_flat_protection(CleanupDependencies {
+        store: &f.store, observer: &observer, trade: &trade,
+        clock: &executor, mutation_capacity: &capacity, verified_uid: &expected_uid,
+    }, order).await.unwrap();
+    let sends = feed.outbound_posts.lock().unwrap();
+    assert_eq!(sends.len(), 1, "repeated public cleanup cannot repost");
+    assert_eq!(sends[0].0, "fixture-executor-a");
+    assert_eq!(sends[0].1, "/api/v5/trade/cancel-algos");
+    assert_eq!(sends[0].2[0]["algoId"], WIRE_ALGO);
     assert!(feed.denied_routes.lock().unwrap().is_empty());
 }
