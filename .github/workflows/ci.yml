@@ -318,7 +318,7 @@ jobs:
           $output | Out-Host
           if ($code -ne 0) { exit $code }
           $proof = [regex]::Match(($output -join "`n"), 'test result: ok\.\s+(\d+) passed;')
-          if (-not $proof.Success -or [int]$proof.Groups[1].Value -lt 6) {
+          if (-not $proof.Success -or [int]$proof.Groups[1].Value -lt 8) {
             throw 'ENTRY_SETTLEMENT_DIRECT_TEST_COUNT_INVALID'
           }
 

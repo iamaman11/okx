@@ -502,6 +502,8 @@ async fn r04_missing_source_cannot_ack_and_identity_mismatch_preserves_first_rea
     let (risk, worker) = risk_client(ReplyMode::Accepted);
     let error = settle(&f, &risk).await.unwrap_err();
     assert_eq!(error.stage, "source_coverage");
+    assert_eq!(error.intent_id, f.intent.intent_id);
+    assert_eq!(error.intent_revision, f.intent.revision);
     assert_eq!(error.reason_code, "PARTIAL_ENTRY_FILLS_UNCOVERED");
     assert!(!has_ack(&f).await);
     let mut alien = f.order.clone();
@@ -517,6 +519,7 @@ async fn r04_missing_source_cannot_ack_and_identity_mismatch_preserves_first_rea
     )
     .await
     .unwrap_err();
+    assert_eq!(identity.stage, "identity");
     assert_eq!(identity.reason_code, "ORDER_READBACK_IDENTITY_MISMATCH");
     assert!(!has_ack(&f).await);
     drop(risk);
@@ -535,6 +538,8 @@ async fn r05_lost_settlement_reply_keeps_unacked_revision_and_replays_same_proof
     let error = settle(&f, &risk).await.unwrap_err();
     assert_eq!(error.reason_code, "RISK_TRANSPORT_LOST_DO_NOT_REPLAY");
     assert_eq!(error.stage, "risk_response");
+    assert_eq!(error.intent_id, f.intent.intent_id);
+    assert_eq!(error.intent_revision, f.intent.revision);
     assert!(!has_ack(&f).await);
     drop(risk);
     let before = worker.await.unwrap();
