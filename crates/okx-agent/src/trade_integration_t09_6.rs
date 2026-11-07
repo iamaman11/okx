@@ -624,10 +624,10 @@ async fn t09_6_status_after_local_read_defer(
             // Only this independently witnessed transition authorizes ONE new
             // read-only Status. No sleep, new fixture page, operation key or
             // second potentially accepted cancel POST.
-            assert_eq!(
-                posts_now, posts_before + 1,
-                "T09.6 pending outcome requires exactly one prior venue cancel"
-            );
+            // The status caller may enter after a concurrent production
+            // Status has already sent the one permitted cancellation. The
+            // absolute signed POST/ACK belongs to the armed algo, not to
+            // this caller's relative send counter.
             let trace = feed.causal_algo_trace.lock().unwrap().clone();
             let arm = trace
                 .iter()
@@ -638,6 +638,28 @@ async fn t09_6_status_after_local_read_defer(
                 .rposition(|event| event.contains("event=CANCEL_ACK"))
                 .expect("T09.6 pending cannot be retried without recorded ACK");
             assert!(ack > arm, "T09.6 ACK precedes its own inventory source");
+            let armed_id = trace[arm]
+                .split(" cancel_id=")
+                .nth(1)
+                .and_then(|id| id.split_whitespace().next())
+                .expect("T09.6 armed inventory must bind a venue algo");
+            assert!(
+                trace[ack].contains(&format!(" cancel_id={armed_id} ")),
+                "T09.6 ACK must belong to this exact protection, not an older or foreign cancel"
+            );
+            let authorized_posts = feed.outbound_posts.lock().unwrap().iter()
+                .filter(|(actor, route, body)| {
+                    actor == "fixture-executor-a"
+                        && route == "/api/v5/trade/cancel-algos"
+                        && body.get(0).and_then(|v| v.get("algoId"))
+                            .and_then(serde_json::Value::as_str) == Some(armed_id)
+                }).count();
+            assert_eq!(authorized_posts, 1,
+                "T09.6 the exact current algo has one authorized actual POST");
+            assert!(
+                posts_now == posts_before || posts_now == posts_before + 1,
+                "T09.6 another unrelated venue POST occurred during cleanup"
+            );
             assert!(
                 trace[arm..ack]
                     .iter()
@@ -661,8 +683,37 @@ async fn t09_6_status_after_local_read_defer(
                 trace.iter().rev().take(16).cloned().collect::<Vec<_>>().join(" | ")
             )
         });
-        assert_eq!(posts_now, posts_before + allowed_new_cancel_posts,
-            "T09.6 confirmed exactly one cancel POST when cleanup is due, or zero for close readback");
+        if allowed_new_cancel_posts == 0 {
+            assert_eq!(posts_now, posts_before,
+                "T09.6 close readback must not send any additional venue POST");
+        } else {
+            // A prior Status may have started this exact SQL cleanup before
+            // this helper entered. Count the actual target-specific venue
+            // sends across the whole recorded phase, never assume the send
+            // occurred after this caller sampled its before counter.
+            let trace = feed.causal_algo_trace.lock().unwrap().clone();
+            let arm = trace.iter().rposition(|event| event.contains("event=INVENTORY_ARMED"))
+                .expect("T09.6 verified cleanup lacks its source arm");
+            let armed_id = trace[arm].split(" cancel_id=").nth(1)
+                .and_then(|id| id.split_whitespace().next())
+                .expect("T09.6 arm lacks target algo ID");
+            assert!(
+                trace[arm + 1..].iter().any(|event| {
+                    event.contains("event=CANCEL_ACK")
+                        && event.contains(&format!(" cancel_id={armed_id} "))
+                }),
+                "T09.6 verified cleanup requires the own signed cancel ACK"
+            );
+            let count = feed.outbound_posts.lock().unwrap().iter()
+                .filter(|(actor, route, body)| {
+                    actor == "fixture-executor-a"
+                        && route == "/api/v5/trade/cancel-algos"
+                        && body.get(0).and_then(|v| v.get("algoId"))
+                            .and_then(serde_json::Value::as_str) == Some(armed_id)
+                }).count();
+            assert_eq!(count, 1,
+                "T09.6 verified cleanup requires exactly one outbound target cancel");
+        }
         return status;
     }
 }
