@@ -593,7 +593,7 @@ async fn pc_07_recorded_signed_http_cancel_ack_readback_and_sql_receipt() {
         clock: &executor,
         mutation_capacity: &capacity,
         verified_uid: &expected_uid,
-            trace: &trace,
+        trace: &trace,
     };
     let order = CleanupOrderFacts {
         intent_id: &stored.intent_id,
@@ -642,12 +642,19 @@ async fn pc_07_recorded_signed_http_cancel_ack_readback_and_sql_receipt() {
         "VERIFIED_CANCELED"
     );
     let explanation = trace.read(&sql_key).unwrap().unwrap();
-    assert_eq!(explanation["snapshot"]["durable_state"], "VERIFIED_CANCELED");
+    assert_eq!(
+        explanation["snapshot"]["durable_state"],
+        "VERIFIED_CANCELED"
+    );
     assert_eq!(explanation["snapshot"]["venue_ack"], "OBSERVED");
-    assert!(explanation["snapshot"]["inventory_received_at_ms"].as_u64().is_some());
+    assert!(
+        explanation["snapshot"]["inventory_received_at_ms"]
+            .as_u64()
+            .is_some()
+    );
     assert_eq!(feed.outbound_posts.lock().unwrap().len(), 1);
-    let trace = feed.causal_algo_trace.lock().unwrap().clone();
-    assert!(trace.iter().any(|event| {
+    let causal_events = feed.causal_algo_trace.lock().unwrap().clone();
+    assert!(causal_events.iter().any(|event| {
         event.contains("event=CANCEL_ACK") && event.contains("cancel_id=900000002")
     }));
     cleanup_flat_protection(

@@ -1,10 +1,10 @@
 //! One source-backed, single-send protective cancellation owner.
 //! Public Status and direct wire regressions enter through this same function.
+use super::reconcile::verify_instrument_is_flat;
 use super::*;
 use crate::account_bootstrap::AccountBootstrapper;
-use super::reconcile::verify_instrument_is_flat;
-use tokio::sync::Semaphore;
 use crate::diagnostics::{ProtectionOperationTrace, ProtectionTraceEvent};
+use tokio::sync::Semaphore;
 
 // A signed flat position is NOT permission to remove a stop while the
 // original opening order is still live/partially filled: a late execution
@@ -304,7 +304,9 @@ async fn observe_protection_cleanup_sources(
         .timestamp_millis();
     if let Some((trace, facts)) = trace {
         trace.record(
-            target.key, facts.intent_id, facts.client_order_id,
+            target.key,
+            facts.intent_id,
+            facts.client_order_id,
             ProtectionTraceEvent::Sources {
                 inventory_at_ms: inventory.received_at_ms,
                 position_at_ms: source_at,
@@ -329,7 +331,6 @@ async fn observe_protection_cleanup_sources(
     .await
 }
 
-
 fn trace_cleanup(
     deps: &CleanupDependencies<'_>,
     facts: CleanupOrderFacts<'_>,
@@ -337,7 +338,9 @@ fn trace_cleanup(
 ) {
     deps.trace.record(
         &format!("cleanup_{}", facts.client_order_id),
-        facts.intent_id, facts.client_order_id, event,
+        facts.intent_id,
+        facts.client_order_id,
+        event,
     );
 }
 
@@ -347,13 +350,15 @@ async fn inspect_cleanup(
     target: ProtectionCleanupIdentity<'_>,
 ) -> Result<(), String> {
     let result = observe_protection_cleanup_sources(
-        deps.store, deps.observer, target, Some((deps.trace, facts)),
-    ).await;
+        deps.store,
+        deps.observer,
+        target,
+        Some((deps.trace, facts)),
+    )
+    .await;
     match &result {
         Ok(()) => trace_cleanup(deps, facts, ProtectionTraceEvent::Verified),
-        Err(reason) => trace_cleanup(
-            deps, facts, ProtectionTraceEvent::Unproven(reason.clone()),
-        ),
+        Err(reason) => trace_cleanup(deps, facts, ProtectionTraceEvent::Unproven(reason.clone())),
     }
     result
 }
@@ -492,7 +497,8 @@ pub(super) async fn cleanup_flat_protection(
         }
     }
     trace_cleanup(&deps, facts, ProtectionTraceEvent::AdapterInvoked);
-    let outcome = send_protection_cleanup_after_admission(deps.trade, &request, &timing, &rate).await;
+    let outcome =
+        send_protection_cleanup_after_admission(deps.trade, &request, &timing, &rate).await;
     if let Err(reason) = &outcome {
         trace_cleanup(&deps, facts, ProtectionTraceEvent::Unproven(reason.clone()));
     }
