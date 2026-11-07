@@ -1367,7 +1367,7 @@ try {
         assert.equal(admitted.state, "ACKNOWLEDGED");
         assert.equal(admitted.post_ack_financial_complete, false);
         assert.equal(admitted.create_posts_total,
-          process.env.OKX_T10_09_LATE_FILL_PROBE === "1" ? 8 :
+          process.env.OKX_T10_09_LATE_FILL_PROBE === "1" ? 9 :
           process.env.OKX_T10_14_NATIVE_PROBE === "1" ? 6
           : process.env.OKX_B1_SECOND_POSITIVE_PROBE === "1" ? 5 : 4);
         assert.equal(admitted.quote_entry_usd, "3.0015");
@@ -1384,7 +1384,7 @@ try {
             "T10-09 must source B's accepted Native SQL intent");
         }
         const expectedReserved=managedAdd?"0":partialFills?"4":
-          t10LateFillMode?"7.6018":
+          t10LateFillMode?"7.0015":
           process.env.OKX_T10_04_FOREIGN_WORKER_REPLY_PROBE === "1"?"8.002":
           t10PostReplyLostMode?"8.002":
           t10SourceRecoveryMode?"8.002":
@@ -1468,7 +1468,7 @@ try {
               assert.equal(late.posts_before,6);
               assert.equal(late.posts_after,6);
               const before=acceptedB.after_budget.entry_budget;
-              const after=afterNative.budget.entry_budget;
+              const after=late.worker_budget.entry_budget;
               assert.equal(before.consumed_usd,"1.0005");
               assert.equal(before.reserved_usd,"8.002");
               assert.equal(after.consumed_usd,"1.4007");
@@ -1476,8 +1476,17 @@ try {
               assert.equal(after.remaining_usd,before.remaining_usd,
                 "Cancel ACK plus late fill cannot replenish campaign capacity");
               assert.equal(after.limit_usd,before.limit_usd);
-              assertBudgetEconomicsUnchanged(late.worker_budget,afterNative.budget,
-                "T10-09 signed B fill must match persisted Worker money");
+              const terminal=receipt(stdout,"T10_09_NATIVE_TERMINAL_V1");
+              assert.equal(terminal.opening_intent_id,acceptedB.b_intent_id);
+              assert.equal(terminal.worker_original_reservation_state,"RELEASED");
+              assert.equal(terminal.worker_after.entry_budget.consumed_usd,"1.4007");
+              assert.equal(terminal.worker_after.entry_budget.reserved_usd,"7.0015");
+              assert.equal(terminal.worker_after.entry_budget.remaining_usd,"1.5978");
+              assert.equal(terminal.outbound_posts_after,9);
+              assertBudgetEconomicsUnchanged(terminal.worker_after,afterNative.budget,
+                "T10-09 persisted Worker must match final source-proven B release");
+              assert.ok(afterNative.risk_book_sequence>=terminal.worker_risk_book_sequence,
+                "Worker restart cannot roll back final B release");
             } else {
               assertBudgetEconomicsUnchanged(acceptedB.after_budget,afterNative.budget,
                 "B1 A+B public accepted Native money equals persisted Worker");

@@ -125,10 +125,9 @@ export async function run({caseId,root,signal,artifactsDir}) {
   assert.equal(terminal.outbound_posts_after,9);
   assert.ok(Number.isSafeInteger(late.sql.sql_revision)&&late.sql.sql_revision>0);
   assert.match(late.sql.bill_digest,/^[a-f0-9]{64}$/);
-  assert.deepEqual(late.worker_budget,worker.budget,
-    "final Worker readback must match Native post-cancel finance");
-  assert.notEqual(worker.budget.entry_budget.reserved_usd,"0",
-    "late fill cannot release B exposure while a position remains");
+  assert.deepEqual(terminal.worker_after.entry_budget,worker.budget.entry_budget,
+    "reopened Worker must preserve final consumed, remaining and unrelated grants");
+  assert.equal(worker.budget.reserved_loss_usd,terminal.worker_after.reserved_loss_usd);
   assert.ok(Number.isSafeInteger(cancel.b_sql_revision));
   assert.ok(Number.isSafeInteger(cancel.worker_sequence));
   assert.match(t.transcript_sha256,/^[0-9a-f]{64}$/);
