@@ -1378,40 +1378,6 @@ async fn t10_09_b_terminal_after_partial(
         24,Duration::from_secs(20),
     );
 
-    // A venue-flat proof does not by itself make the account-wide NAV
-    // complete. Terminal release checks the SAME normal financial_risk()
-    // predicate on both A and B. If a prior NAV is PARTIAL/stale, run the
-    // existing authenticated source capture once on that account under its
-    // source-cycle owner; never insert a test NAV or bypass the census.
-    for (label,account) in [("A",&a_owner),("B",&owner)] {
-        let prior=account.execution.store.call(
-            std::time::Instant::now()+Duration::from_secs(3),
-            |sql| sql.financial_risk(chrono::Utc::now().timestamp_millis(),None),
-        ).await.expect("T10-09 original financial risk SQL owner");
-        if !prior.nav_complete {
-            let captured=tokio::time::timeout(
-                until.saturating_duration_since(std::time::Instant::now()),
-                crate::source_capture::capture_account_sources(
-                    &account.observer,&account.private_ws,&account.execution
-                ),
-            ).await.unwrap_or_else(|_|panic!(
-                "T10_09_TERMINAL_NAV_CAPTURE_DEADLINE:account={label} prior_complete={} prior_as_of={}",
-                prior.nav_complete,prior.source_as_of
-            ));
-            captured.unwrap_or_else(|reason|panic!(
-                "T10_09_TERMINAL_NAV_CAPTURE_FAILED:account={label} reason={reason} prior_complete={} prior_as_of={}",
-                prior.nav_complete,prior.source_as_of
-            ));
-        }
-        let final_risk=account.execution.store.call(
-            std::time::Instant::now()+Duration::from_secs(3),
-            |sql| sql.financial_risk(chrono::Utc::now().timestamp_millis(),None),
-        ).await.expect("T10-09 independently captured financial risk");
-        assert!(final_risk.nav_complete,
-            "T10_09_TERMINAL_NAV_NOT_COMPLETE:account={label} prior_complete={} prior_as_of={} final_as_of={}",
-            prior.nav_complete,prior.source_as_of,final_risk.source_as_of);
-    }
-
     let mut last=json!(null);
     let mut first_release_blocker=json!(null);
     let mut original_status=json!(null);
@@ -1419,6 +1385,39 @@ async fn t10_09_b_terminal_after_partial(
     let mut attempts=0_u32;
     while attempts<8 && std::time::Instant::now()<until {
         attempts+=1;
+        // A venue-flat proof does not by itself make the account-wide NAV
+        // complete. Terminal release checks the SAME normal financial_risk()
+        // predicate on both A and B. If a prior NAV is PARTIAL/stale, run the
+        // existing authenticated source capture once on that account under its
+        // source-cycle owner; never insert a test NAV or bypass the census.
+        for (label,account) in [("A",&a_owner),("B",&owner)] {
+            let prior=account.execution.store.call(
+                std::time::Instant::now()+Duration::from_secs(3),
+                |sql| sql.financial_risk(chrono::Utc::now().timestamp_millis(),None),
+            ).await.expect("T10-09 original financial risk SQL owner");
+            if !prior.nav_complete {
+                let captured=tokio::time::timeout(
+                    until.saturating_duration_since(std::time::Instant::now()),
+                    crate::source_capture::capture_account_sources(
+                        &account.observer,&account.private_ws,&account.execution
+                    ),
+                ).await.unwrap_or_else(|_|panic!(
+                    "T10_09_TERMINAL_NAV_CAPTURE_DEADLINE:account={label} prior_complete={} prior_as_of={}",
+                    prior.nav_complete,prior.source_as_of
+                ));
+                captured.unwrap_or_else(|reason|panic!(
+                    "T10_09_TERMINAL_NAV_CAPTURE_FAILED:account={label} reason={reason} prior_complete={} prior_as_of={}",
+                    prior.nav_complete,prior.source_as_of
+                ));
+            }
+            let final_risk=account.execution.store.call(
+                std::time::Instant::now()+Duration::from_secs(3),
+                |sql| sql.financial_risk(chrono::Utc::now().timestamp_millis(),None),
+            ).await.expect("T10-09 independently captured financial risk");
+            assert!(final_risk.nav_complete,
+                "T10_09_TERMINAL_NAV_NOT_COMPLETE:account={label} prior_complete={} prior_as_of={} final_as_of={}",
+                prior.nav_complete,prior.source_as_of,final_risk.source_as_of);
+        }
         let mut deferred=false;
         for (reference,opening) in [(close_id.as_str(),false),(opening_id.as_str(),true)] {
             let result=trade.trade(
