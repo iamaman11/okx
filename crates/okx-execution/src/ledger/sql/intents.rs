@@ -1372,13 +1372,16 @@ impl AccountStore {
     /// The caller additionally proves a fresh flat venue position and
     /// absence of remaining attributed lots; this method validates the
     /// immutable native finance sources under the sole AccountStore owner.
-    pub fn acknowledge_local_terminal_close(
-        &mut self,
+    /// Read-only exact source witness shared with the real terminal Close
+    /// settlement. Signed fill and fee bill linkage are checked under the
+    /// one SQLite owner; this method cannot acknowledge or release capital.
+    pub fn local_terminal_close_evidence(
+        &self,
         id: &str,
         order_id: &str,
         venue_filled: Decimal,
         venue_updated_at: i64,
-    ) -> StoreResult<()> {
+    ) -> StoreResult<(Decimal, u64, u64, Decimal, String)> {
         let intent = self
             .intent(id)?
             .ok_or(StoreError::Invalid("LOCAL_CLOSE_INTENT_MISSING"))?;
@@ -1485,6 +1488,18 @@ impl AccountStore {
         if proof_rows.is_empty() || total != venue_filled {
             return Err(StoreError::Invalid("LOCAL_CLOSE_FILL_SUM_MISMATCH"));
         }
+        let fill_count = proof_rows.len() as u64;
+        let mut fee_usdt = Decimal::ZERO;
+        let mut linked_bills = std::collections::BTreeSet::new();
+        for row in &proof_rows {
+            fee_usdt = fee_usdt
+                .checked_add(decimal(row.4.clone())?)
+                .ok_or(StoreError::Invalid("LOCAL_CLOSE_FEE_OVERFLOW"))?;
+            if !linked_bills.insert(row.2.clone()) {
+                return Err(StoreError::Invalid("LOCAL_CLOSE_DUPLICATE_BILL"));
+            }
+        }
+        let bill_count = linked_bills.len() as u64;
         let proof = format!(
             "{:x}",
             Sha256::digest(
@@ -1501,6 +1516,24 @@ impl AccountStore {
                 .map_err(|_| StoreError::Invalid("LOCAL_CLOSE_PROOF_SERIALIZATION"))?
             )
         );
+        Ok((total, fill_count, bill_count, fee_usdt, proof))
+    }
+
+    /// The single production mutation uses the SAME read-only local Close
+    /// witness as scenario diagnostics. No test can manufacture a release.
+    pub fn acknowledge_local_terminal_close(
+        &mut self,
+        id: &str,
+        order_id: &str,
+        venue_filled: Decimal,
+        venue_updated_at: i64,
+    ) -> StoreResult<()> {
+        let (_, _, _, _, proof) =
+            self.local_terminal_close_evidence(id, order_id, venue_filled, venue_updated_at)?;
+        let intent = self
+            .intent(id)?
+            .ok_or(StoreError::Invalid("LOCAL_CLOSE_INTENT_MISSING"))?;
+        let local_key = format!("local:{id}");
         let key = format!("local-terminal-release:{id}");
         let tx = self
             .connection
