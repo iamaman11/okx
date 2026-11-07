@@ -89,8 +89,10 @@ at `6628b2acfb31d2f3bcdc8b4841760d5f366a2016` and
 at `6de0455f6930feced26a518df304945dfce657d1` both confirmed
 **8 PASS, 0 FAIL** direct tests; the first timed **1.34s** after compilation.
 Rust format/compile, architecture, Cloudflare and B1 prerequisites succeeded.
-The required global Windows Clippy gate still fails on inherited warnings in
-unrelated code, and is not disabled or declared PASS.
+Later #499 run [#42403496577](https://github.com/iamaman11/okx/actions/runs/42403496577)
+at `034f549cc9290e23479a8207dd2395ff1d2dbdc6` passed 8/8 direct
+settlement and required Windows Clippy, but full trading acceptance was 20/26.
+This does not establish release acceptance.
 
 **Exact-parent address comparison**, original `3a892c4993e4a62a270197c52cd9d3c1afd00663`
 against `6de0455f6930feced26a518df304945dfce657d1`:
@@ -118,3 +120,23 @@ after preserving the two independent runs and artifacts. Only fast direct
 production-boundary tests remain in the existing `windows-native` job.
 Source-fixture stability and protection failures belong to #449; #495 cannot
 be used to claim T10-09 PASS or bypass full26/required release gates.
+
+**#500 protection cleanup — direct SQL boundary (same existing Windows job).**
+The existing `reconcile.rs::cleanup_flat_protection` is the sole production
+caller of the recorded protective cancel; its SQL decision/readback helpers
+are exercised by `protection_cleanup_direct_tests.rs`. Direct command:
+
+```text
+cargo test --locked -p okx-agent --lib trade_service::reconcile::protection_cleanup_direct_tests:: -- --nocapture
+```
+
+PC-01 first BEGIN/confirmed/repeat; PC-02 lost ACK/pending then authenticated
+absence without second send decision; PC-03 incomplete/stale/live pending;
+PC-04 wrong account/algo instrument and late position exposure; PC-05 reopen
+the SAME SQLite file and inspect the existing BEGIN; PC-06 two simultaneous
+callers and stale followed by fresh readback. Real SQLite owns all receipt
+transitions. These fast tests prove the SQL/observation decision, not actual
+wire POST count. Actual cancel send count and cross-component outcomes remain
+required in recorded T09.6–T09.8 on the SAME final SHA, with T10-08/09 and
+the eight #495 settlement regressions. The #500 gate remains unaccepted until
+Windows compilation, Clippy, formatting, and those cases are observed green.
