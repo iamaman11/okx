@@ -121,22 +121,24 @@ production-boundary tests remain in the existing `windows-native` job.
 Source-fixture stability and protection failures belong to #449; #495 cannot
 be used to claim T10-09 PASS or bypass full26/required release gates.
 
-**#500 protection cleanup — direct SQL boundary (same existing Windows job).**
-The existing `reconcile.rs::cleanup_flat_protection` is the sole production
-caller of the recorded protective cancel; its SQL decision/readback helpers
-are exercised by `protection_cleanup_direct_tests.rs`. Direct command:
+**#500 protection cleanup — single production entry and fast explanation.**
+Both public `Status` and direct PC-07 use
+`trade_service/protection_cleanup.rs::cleanup_flat_protection`; the direct
+test no longer assembles a different SQL/REST cancellation algorithm. It
+persists its own native intent and protection, then verifies one signed
+cancel-algo POST, matching ACK, full signed readback, durable SQL receipt
+and no replay. PC-01–PC-06 keep the negative SQL/restart/freshness proofs.
 
 ```text
-cargo test --locked -p okx-agent --lib trade_service::reconcile::protection_cleanup_direct_tests:: -- --nocapture
+cargo test --locked -p okx-agent --lib trade_service::protection_cleanup::protection_cleanup_direct_tests:: -- --nocapture
 ```
 
-PC-01 first BEGIN/confirmed/repeat; PC-02 lost ACK/pending then authenticated
-absence without second send decision; PC-03 incomplete/stale/live pending;
-PC-04 wrong account/algo instrument and late position exposure; PC-05 reopen
-the SAME SQLite file and inspect the existing BEGIN; PC-06 two simultaneous
-callers and stale followed by fresh readback. Real SQLite owns all receipt
-transitions. These fast tests prove the SQL/observation decision, not actual
-wire POST count. Actual cancel send count and cross-component outcomes remain
-required in recorded T09.6–T09.8 on the SAME final SHA, with T10-08/09 and
-the eight #495 settlement regressions. The #500 gate remains unaccepted until
-Windows compilation, Clippy, formatting, and those cases are observed green.
+`diagnostics` `view=operation` requires account + operation/intent reference
+and reads a bounded per-account, non-authoritative projection without SQL,
+HTTP, RiskBook or trading side effects. It separates SQL BEGIN, adapter
+invocation, venue ACK, signed inventory/position timestamps, receipt and
+missing proof. Missing after restart/eviction means UNKNOWN history, never
+a fabricated no-send/ACK. The P95 <=100ms (1,000 warm local reads) is a
+test target; it is NOT an external venue response SLO. Full T09.6–.8 and
+T10 acceptance on one final SHA remain required before closing #500.
+

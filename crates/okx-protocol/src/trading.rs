@@ -221,6 +221,7 @@ pub struct DiagnosticsRequest {
 #[serde(rename_all = "snake_case")]
 pub enum DiagnosticsView {
     Finance,
+    Operation,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

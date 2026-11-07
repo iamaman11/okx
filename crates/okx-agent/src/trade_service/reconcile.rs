@@ -773,6 +773,7 @@ impl TradeService {
                     clock: &r.execution.clock,
                     mutation_capacity: &r.mutation_capacity,
                     verified_uid: &r.configuration.account_key.verified_uid,
+                    trace: &r.protection_operation_trace,
                 },
                 protection_cleanup::CleanupOrderFacts {
                     intent_id: &i.intent_id,

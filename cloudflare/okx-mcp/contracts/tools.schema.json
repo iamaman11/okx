@@ -1567,7 +1567,8 @@
               },
               "view": {
                 "enum": [
-                  "finance"
+                  "finance",
+                  "operation"
                 ]
               },
               "cycle_id": {

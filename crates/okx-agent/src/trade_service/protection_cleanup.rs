@@ -4,6 +4,7 @@ use super::*;
 use crate::account_bootstrap::AccountBootstrapper;
 use super::reconcile::verify_instrument_is_flat;
 use tokio::sync::Semaphore;
+use crate::diagnostics::{ProtectionOperationTrace, ProtectionTraceEvent};
 
 // A signed flat position is NOT permission to remove a stop while the
 // original opening order is still live/partially filled: a late execution
@@ -37,6 +38,7 @@ pub(super) struct CleanupDependencies<'a> {
     pub clock: &'a okx_api::OkxRestClient,
     pub mutation_capacity: &'a Semaphore,
     pub verified_uid: &'a str,
+    pub trace: &'a ProtectionOperationTrace,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -287,6 +289,7 @@ async fn observe_protection_cleanup_sources(
     store: &AccountStoreHandle,
     observer: &crate::account_bootstrap::AccountBootstrapper,
     target: ProtectionCleanupIdentity<'_>,
+    trace: Option<(&ProtectionOperationTrace, CleanupOrderFacts<'_>)>,
 ) -> Result<(), String> {
     let inventory = observer
         .pending_derivative_risk_algos()
@@ -299,6 +302,15 @@ async fn observe_protection_cleanup_sources(
     let source_at = chrono::DateTime::parse_from_rfc3339(&snapshot.source_received_at)
         .map_err(|_| "PROTECTION_CLEANUP_POSITION_TIME_INVALID")?
         .timestamp_millis();
+    if let Some((trace, facts)) = trace {
+        trace.record(
+            target.key, facts.intent_id, facts.client_order_id,
+            ProtectionTraceEvent::Sources {
+                inventory_at_ms: inventory.received_at_ms,
+                position_at_ms: source_at,
+            },
+        );
+    }
     let positions = snapshot
         .positions
         .iter()
@@ -317,6 +329,35 @@ async fn observe_protection_cleanup_sources(
     .await
 }
 
+
+fn trace_cleanup(
+    deps: &CleanupDependencies<'_>,
+    facts: CleanupOrderFacts<'_>,
+    event: ProtectionTraceEvent,
+) {
+    deps.trace.record(
+        &format!("cleanup_{}", facts.client_order_id),
+        facts.intent_id, facts.client_order_id, event,
+    );
+}
+
+async fn inspect_cleanup(
+    deps: &CleanupDependencies<'_>,
+    facts: CleanupOrderFacts<'_>,
+    target: ProtectionCleanupIdentity<'_>,
+) -> Result<(), String> {
+    let result = observe_protection_cleanup_sources(
+        deps.store, deps.observer, target, Some((deps.trace, facts)),
+    ).await;
+    match &result {
+        Ok(()) => trace_cleanup(deps, facts, ProtectionTraceEvent::Verified),
+        Err(reason) => trace_cleanup(
+            deps, facts, ProtectionTraceEvent::Unproven(reason.clone()),
+        ),
+    }
+    result
+}
+
 pub(super) async fn cleanup_flat_protection(
     deps: CleanupDependencies<'_>,
     facts: CleanupOrderFacts<'_>,
@@ -326,6 +367,7 @@ pub(super) async fn cleanup_flat_protection(
         facts.signed_exposed,
         facts.venue_order_state,
     ) {
+        trace_cleanup(&deps, facts, ProtectionTraceEvent::Blocked);
         return Ok(());
     }
     let _capacity = deps
@@ -339,6 +381,7 @@ pub(super) async fn cleanup_flat_protection(
         .await
         .map_err(err)?;
     let Some(saved) = saved else {
+        trace_cleanup(&deps, facts, ProtectionTraceEvent::NoProtection);
         return Ok(());
     };
     if saved.intent_id != facts.intent_id {
@@ -371,9 +414,17 @@ pub(super) async fn cleanup_flat_protection(
     match decide_cleanup(facts, prior.as_ref(), &hash)
         .map_err(|blocked| blocked.reason().to_owned())?
     {
-        CleanupDecision::Blocked | CleanupDecision::Confirmed => return Ok(()),
+        CleanupDecision::Blocked => {
+            trace_cleanup(&deps, facts, ProtectionTraceEvent::Blocked);
+            return Ok(());
+        }
+        CleanupDecision::Confirmed => {
+            trace_cleanup(&deps, facts, ProtectionTraceEvent::Verified);
+            return Ok(());
+        }
         CleanupDecision::Inspect => {
-            return observe_protection_cleanup_sources(deps.store, deps.observer, target).await;
+            trace_cleanup(&deps, facts, ProtectionTraceEvent::Inspect);
+            return inspect_cleanup(&deps, facts, target).await;
         }
         CleanupDecision::Start => {}
     }
@@ -391,6 +442,7 @@ pub(super) async fn cleanup_flat_protection(
         .iter()
         .find(|a| a.algo_order_id == saved.algo_id);
     let Some(live) = live else {
+        trace_cleanup(&deps, facts, ProtectionTraceEvent::NoLiveStop);
         return Ok(());
     };
     if live.instrument_id != facts.instrument_id {
@@ -425,16 +477,28 @@ pub(super) async fn cleanup_flat_protection(
         .map_err(err)?;
     let rate = deps.trade.admit_cancel_algo_order(&request).map_err(err)?;
     match protection_cleanup_step(deps.store, &key, &hash).await? {
-        ProtectionCleanupStep::Confirmed => return Ok(()),
+        ProtectionCleanupStep::Confirmed => {
+            trace_cleanup(&deps, facts, ProtectionTraceEvent::Verified);
+            return Ok(());
+        }
         ProtectionCleanupStep::Inspect => {
             // A concurrent caller committed BEGIN after our first read.
             // Do not consume a second send; take a NEW authenticated read.
-            return observe_protection_cleanup_sources(deps.store, deps.observer, target).await;
+            trace_cleanup(&deps, facts, ProtectionTraceEvent::Inspect);
+            return inspect_cleanup(&deps, facts, target).await;
         }
-        ProtectionCleanupStep::SendOnce => {}
+        ProtectionCleanupStep::SendOnce => {
+            trace_cleanup(&deps, facts, ProtectionTraceEvent::Begin);
+        }
     }
-    send_protection_cleanup_after_admission(deps.trade, &request, &timing, &rate).await?;
-    observe_protection_cleanup_sources(deps.store, deps.observer, target).await
+    trace_cleanup(&deps, facts, ProtectionTraceEvent::AdapterInvoked);
+    let outcome = send_protection_cleanup_after_admission(deps.trade, &request, &timing, &rate).await;
+    if let Err(reason) = &outcome {
+        trace_cleanup(&deps, facts, ProtectionTraceEvent::Unproven(reason.clone()));
+    }
+    outcome?;
+    trace_cleanup(&deps, facts, ProtectionTraceEvent::Ack);
+    inspect_cleanup(&deps, facts, target).await
 }
 
 #[cfg(test)]

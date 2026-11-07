@@ -12,6 +12,190 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
+
+const PROTECTION_TRACE_CAP: usize = 128;
+
+#[derive(Clone, serde::Serialize)]
+struct ProtectionTraceRow {
+    operation_id: String,
+    intent_id: String,
+    client_order_id: String,
+    parent_invocation: Option<String>,
+    stage: &'static str,
+    decision: &'static str,
+    durable_state: &'static str,
+    adapter_attempt: &'static str,
+    venue_ack: &'static str,
+    inventory_received_at_ms: Option<u64>,
+    position_received_at_ms: Option<i64>,
+    reason_code: Option<String>,
+    first_unproven_boundary: Option<&'static str>,
+    missing_evidence: Option<&'static str>,
+    next_action: &'static str,
+    recorded_at_ms: i64,
+}
+
+pub(crate) enum ProtectionTraceEvent {
+    Blocked,
+    NoProtection,
+    NoLiveStop,
+    Inspect,
+    Begin,
+    AdapterInvoked,
+    Ack,
+    Sources { inventory_at_ms: u64, position_at_ms: i64 },
+    Unproven(String),
+    Verified,
+}
+
+/// Non-authoritative, bounded per-account projection: never used to permit
+/// a trade, to decide SQL state, or to prove a venue acknowledgement.
+#[derive(Default)]
+pub(crate) struct ProtectionOperationTrace {
+    recent: std::sync::RwLock<std::collections::BTreeMap<String, ProtectionTraceRow>>,
+}
+impl ProtectionOperationTrace {
+    pub(crate) fn record(
+        &self,
+        operation: &str,
+        intent: &str,
+        client: &str,
+        event: ProtectionTraceEvent,
+    ) {
+        // Do not ever block a trading task on diagnostics.
+        let Ok(mut rows) = self.recent.try_write() else { return };
+        if !rows.contains_key(operation) && rows.len() >= PROTECTION_TRACE_CAP {
+            let oldest = rows.iter().min_by_key(|(_, v)| v.recorded_at_ms)
+                .map(|(key, _)| key.clone());
+            if let Some(oldest) = oldest { rows.remove(&oldest); }
+        }
+        let entry = rows.entry(operation.to_owned()).or_insert_with(|| ProtectionTraceRow {
+            operation_id: operation.to_owned(),
+            intent_id: intent.to_owned(),
+            client_order_id: client.to_owned(),
+            parent_invocation: None,
+            stage: "NOT_STARTED", decision: "NOT_EVALUATED",
+            durable_state: "NOT_EVALUATED", adapter_attempt: "NOT_ATTEMPTED",
+            venue_ack: "NOT_OBSERVED",
+            inventory_received_at_ms: None, position_received_at_ms: None,
+            reason_code: None, first_unproven_boundary: Some("ADMISSION"),
+            missing_evidence: Some("SIGNED_TERMINAL_ORDER_AND_FLAT_POSITION"),
+            next_action: "trade.status", recorded_at_ms: Utc::now().timestamp_millis(),
+        });
+        match event {
+            ProtectionTraceEvent::Blocked => {
+                entry.stage = "BLOCKED"; entry.decision = "NO_SEND";
+                entry.first_unproven_boundary = Some("ADMISSION");
+                entry.missing_evidence = Some("TERMINAL_ORDER_AND_FLAT_POSITION");
+            }
+            ProtectionTraceEvent::NoProtection => {
+                entry.stage = "NO_ATTACHED_PROTECTION"; entry.decision = "NO_ACTION";
+                entry.first_unproven_boundary = None; entry.missing_evidence = None;
+            }
+            ProtectionTraceEvent::NoLiveStop => {
+                entry.stage = "SIGNED_STOP_NOT_LIVE"; entry.decision = "NO_POST";
+                entry.first_unproven_boundary = None; entry.missing_evidence = None;
+            }
+            ProtectionTraceEvent::Inspect => {
+                entry.stage = "INSPECT_PRIOR_BEGIN"; entry.decision = "INSPECT_ONLY";
+                entry.durable_state = "POSTING"; entry.adapter_attempt = "UNKNOWN_PRIOR_CALL";
+                entry.venue_ack = "UNKNOWN_PRIOR_CALL";
+                entry.first_unproven_boundary = Some("POST_BEGIN_READBACK");
+                entry.missing_evidence = Some("SIGNED_EMPTY_ALGO_AND_FLAT_POSITION");
+            }
+            ProtectionTraceEvent::Begin => {
+                entry.stage = "SQL_BEGIN"; entry.decision = "SEND_ONCE";
+                entry.durable_state = "POSTING";
+                entry.first_unproven_boundary = Some("VENUE_EFFECT");
+                entry.missing_evidence = Some("VENUE_ACK_OR_SIGNED_READBACK");
+            }
+            ProtectionTraceEvent::AdapterInvoked => {
+                entry.stage = "ADAPTER_INVOKED";
+                entry.adapter_attempt = "INVOKED_OUTBOUND_UNPROVEN";
+                entry.first_unproven_boundary = Some("VENUE_EFFECT");
+            }
+            ProtectionTraceEvent::Ack => {
+                entry.stage = "ACK_OBSERVED"; entry.venue_ack = "OBSERVED";
+                entry.first_unproven_boundary = Some("POST_ACK_READBACK");
+                entry.missing_evidence = Some("SIGNED_EMPTY_ALGO_AND_FLAT_POSITION");
+            }
+            ProtectionTraceEvent::Sources { inventory_at_ms, position_at_ms } => {
+                entry.stage = "SIGNED_SOURCES_OBSERVED";
+                entry.inventory_received_at_ms = Some(inventory_at_ms);
+                entry.position_received_at_ms = Some(position_at_ms);
+            }
+            ProtectionTraceEvent::Unproven(code) => {
+                entry.stage = "OUTCOME_OR_READBACK_UNPROVEN";
+                entry.reason_code = Some(safe_code(&code, "PROTECTION_CLEANUP_UNPROVEN"));
+                entry.first_unproven_boundary = Some("VENUE_OUTCOME_OR_SIGNED_READBACK");
+                entry.missing_evidence = Some("COMPLETE_FRESH_POST_BEGIN_VENUE_PROOF");
+            }
+            ProtectionTraceEvent::Verified => {
+                entry.stage = "VERIFIED_CANCELED"; entry.decision = "CONFIRMED";
+                entry.durable_state = "VERIFIED_CANCELED";
+                entry.reason_code = None; entry.first_unproven_boundary = None;
+                entry.missing_evidence = None;
+                entry.next_action = "inspect_separate_risk_release";
+            }
+        }
+        entry.recorded_at_ms = Utc::now().timestamp_millis();
+    }
+    pub(crate) fn read(&self, reference: &str) -> Result<Option<Value>, &'static str> {
+        let rows = self.recent.try_read().map_err(|_| "PROTECTION_TRACE_BUSY")?;
+        Ok(rows.get(reference).or_else(|| rows.values().find(|r|
+            r.intent_id == reference || r.client_order_id == reference
+        )).map(|entry| json!({
+            "snapshot": entry,
+            "snapshot_age_ms": Utc::now().timestamp_millis().saturating_sub(entry.recorded_at_ms),
+            "quality": "partial_non_authoritative_projection",
+            "risk_release": "NOT_EVALUATED",
+            "trading_side_effects": false
+        })))
+    }
+}
+
+async fn operation_diagnostics(
+    ctx: &DispatchContext,
+    request: &DiagnosticsRequest,
+    route: Option<&str>,
+) -> Result<Value, String> {
+    if request.limit.is_some() || request.cycle_id.is_some() {
+        return Err("INVALID_DIAGNOSTICS_VIEW".into());
+    }
+    let reference = request.reference.as_deref().ok_or("OPERATION_REFERENCE_REQUIRED")?;
+    let requested = request.account.as_deref().or(route).ok_or("ACCOUNT_REQUIRED")?;
+    let account = ctx.accounts.resolve(requested).await.ok_or("ACCOUNT_UNAVAILABLE")?;
+    if let Some(route) = route {
+        let selected = ctx.accounts.resolve(route).await.ok_or("ACCOUNT_UNAVAILABLE")?;
+        if selected.configuration.account_key != account.configuration.account_key {
+            return Err("ACCOUNT_ROUTE_MISMATCH".into());
+        }
+    }
+    match account.protection_operation_trace.read(reference) {
+        Ok(Some(state)) => Ok(json!({
+            "schema":"okx.operation-diagnostics/v1",
+            "account":account.configuration.account_key.wire(),
+            "reference":reference,"state":"OBSERVED","operation":state,
+            "read_only":true,"central_budget":{"state":"NOT_EVALUATED","reason_code":"DIAGNOSTICS_ONLY"}
+        })),
+        Ok(None) => Ok(json!({
+            "schema":"okx.operation-diagnostics/v1",
+            "account":account.configuration.account_key.wire(),
+            "reference":reference,"state":"NOT_OBSERVED",
+            "durable_state":"NOT_EVALUATED",
+            "reason_code":"VOLATILE_PROJECTION_UNAVAILABLE",
+            "send_and_ack_history":"UNKNOWN_AFTER_RESTART_OR_EVICTION",
+            "next_action":"trade.status","read_only":true
+        })),
+        Err(code) => Ok(json!({
+            "schema":"okx.operation-diagnostics/v1",
+            "account":account.configuration.account_key.wire(),
+            "reference":reference,"state":"NOT_EVALUATED",
+            "reason_code":code,"next_action":"retry_read_only_diagnostic","read_only":true
+        })),
+    }
+}
+
 fn report(
     stage: &str,
     reason: &str,
@@ -65,6 +249,19 @@ pub async fn diagnostics(
     request: &DiagnosticsRequest,
     account: Option<&str>,
 ) -> Result<Value, String> {
+    if request.view == Some(DiagnosticsView::Operation) {
+        return Ok(operation_diagnostics(ctx, request, account)
+            .await
+            .unwrap_or_else(|reason| {
+                report(
+                    "operation",
+                    &safe_code(&reason, "DIAGNOSTICS_UNAVAILABLE"),
+                    request.account.as_deref().or(account).unwrap_or("engine"),
+                    vec![safe_code(&reason, "DIAGNOSTICS_UNAVAILABLE")],
+                    false, "supply an authorized account and operation reference",
+                )
+            }));
+    }
     // Finance evidence must be readable without SQL-owner or central RiskBook.
     if request.view == Some(DiagnosticsView::Finance) {
         return Ok(finance_diagnostics(ctx, request, account)
@@ -551,6 +748,44 @@ async fn account_diagnostics(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn operation_projection_reads_are_local_bounded_and_isolated() {
+        let a = ProtectionOperationTrace::default();
+        let b = ProtectionOperationTrace::default();
+        a.record("cleanup_a", "intent-a", "client-a", ProtectionTraceEvent::Begin);
+        a.record("cleanup_a", "intent-a", "client-a", ProtectionTraceEvent::AdapterInvoked);
+        a.record("cleanup_a", "intent-a", "client-a",
+            ProtectionTraceEvent::Unproven("PROTECTION_CANCEL_OUTCOME_UNKNOWN".into()));
+        let unproven = a.read("intent-a").unwrap().unwrap();
+        assert_eq!(unproven["snapshot"]["durable_state"], "POSTING");
+        assert_eq!(unproven["snapshot"]["adapter_attempt"], "INVOKED_OUTBOUND_UNPROVEN");
+        assert_eq!(unproven["snapshot"]["venue_ack"], "NOT_OBSERVED");
+        assert!(b.read("intent-a").unwrap().is_none());
+        a.record("cleanup_a", "intent-a", "client-a", ProtectionTraceEvent::Verified);
+        let verified = a.read("cleanup_a").unwrap().unwrap();
+        assert_eq!(verified["snapshot"]["durable_state"], "VERIFIED_CANCELED");
+        assert!(verified["snapshot"]["missing_evidence"].is_null());
+        let mut samples = Vec::new();
+        for _ in 0..1_000 {
+            let start = Instant::now();
+            assert!(a.read("intent-a").unwrap().is_some());
+            samples.push(start.elapsed());
+        }
+        samples.sort();
+        assert!(samples[949] <= Duration::from_millis(100),
+            "1,000 warm local reads must have P95 <=100ms");
+        for n in 0..130 {
+            a.record(&format!("cleanup_{n}"), "other", "other", ProtectionTraceEvent::Blocked);
+        }
+        assert!(a.recent.try_read().unwrap().len() <= PROTECTION_TRACE_CAP);
+    }
+    #[test]
+    fn diagnostics_operation_variant_roundtrip() {
+        let v: DiagnosticsView = serde_json::from_str(r#""operation""#).unwrap();
+        assert_eq!(v, DiagnosticsView::Operation);
+        assert_eq!(serde_json::to_string(&v).unwrap(), r#""operation""#);
+    }
+
     #[test]
     fn diagnostic_freshness_is_evaluated_at_response_not_before_sql_wait() {
         let sampled_at = 1_000_000_i64;

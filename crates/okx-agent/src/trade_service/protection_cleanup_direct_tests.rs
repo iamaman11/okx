@@ -585,6 +585,7 @@ async fn pc_07_recorded_signed_http_cancel_ack_readback_and_sql_receipt() {
         .unwrap();
 
     let capacity = tokio::sync::Semaphore::new(1);
+    let trace = crate::diagnostics::ProtectionOperationTrace::default();
     let dependencies = CleanupDependencies {
         store: &f.store,
         observer: &observer,
@@ -592,6 +593,7 @@ async fn pc_07_recorded_signed_http_cancel_ack_readback_and_sql_receipt() {
         clock: &executor,
         mutation_capacity: &capacity,
         verified_uid: &expected_uid,
+            trace: &trace,
     };
     let order = CleanupOrderFacts {
         intent_id: &stored.intent_id,
@@ -613,6 +615,7 @@ async fn pc_07_recorded_signed_http_cancel_ack_readback_and_sql_receipt() {
             clock: &executor,
             mutation_capacity: &capacity,
             verified_uid: &expected_uid,
+            trace: &trace,
         },
         not_terminal,
     )
@@ -638,6 +641,10 @@ async fn pc_07_recorded_signed_http_cancel_ack_readback_and_sql_receipt() {
         operation(&f.store, &sql_key).await.result_ref,
         "VERIFIED_CANCELED"
     );
+    let explanation = trace.read(&sql_key).unwrap().unwrap();
+    assert_eq!(explanation["snapshot"]["durable_state"], "VERIFIED_CANCELED");
+    assert_eq!(explanation["snapshot"]["venue_ack"], "OBSERVED");
+    assert!(explanation["snapshot"]["inventory_received_at_ms"].as_u64().is_some());
     assert_eq!(feed.outbound_posts.lock().unwrap().len(), 1);
     let trace = feed.causal_algo_trace.lock().unwrap().clone();
     assert!(trace.iter().any(|event| {
@@ -651,6 +658,7 @@ async fn pc_07_recorded_signed_http_cancel_ack_readback_and_sql_receipt() {
             clock: &executor,
             mutation_capacity: &capacity,
             verified_uid: &expected_uid,
+            trace: &trace,
         },
         order,
     )
