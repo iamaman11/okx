@@ -2980,36 +2980,58 @@ mod entry_cost_status_tests {
         let sql_lot = dec("0.04").unwrap();
         let newer_venue_position = dec("0.02").unwrap();
         assert!(signed_position_below_sql_lot_with_live_old_stop(
-            &intent, sql_lot, newer_venue_position, &original
+            &intent,
+            sql_lot,
+            newer_venue_position,
+            &original
         ));
         assert!(!protection_covers_managed_increment(
-            "buy", "sell", sql_lot, newer_venue_position, &original.size
+            "buy",
+            "sell",
+            sql_lot,
+            newer_venue_position,
+            &original.size
         ));
         for bad_size in ["0.02", "0.05", "invalid"] {
             let mut invalid = original.clone();
             invalid.size = bad_size.into();
             assert!(!signed_position_below_sql_lot_with_live_old_stop(
-                &intent, sql_lot, newer_venue_position, &invalid
+                &intent,
+                sql_lot,
+                newer_venue_position,
+                &invalid
             ));
         }
         let mut missing = original.clone();
         missing.state = "canceled".into();
         assert!(!signed_position_below_sql_lot_with_live_old_stop(
-            &intent, sql_lot, newer_venue_position, &missing
+            &intent,
+            sql_lot,
+            newer_venue_position,
+            &missing
         ));
         let mut alien = original.clone();
         alien.client_order_id = "other-account-stop".into();
         assert!(!signed_position_below_sql_lot_with_live_old_stop(
-            &intent, sql_lot, newer_venue_position, &alien
+            &intent,
+            sql_lot,
+            newer_venue_position,
+            &alien
         ));
         assert!(!signed_position_below_sql_lot_with_live_old_stop(
-            &intent, sql_lot, Decimal::ZERO, &original
+            &intent,
+            sql_lot,
+            Decimal::ZERO,
+            &original
         ));
         assert!(!signed_position_below_sql_lot_with_live_old_stop(
             &intent, sql_lot, sql_lot, &original
         ));
         assert!(!signed_position_below_sql_lot_with_live_old_stop(
-            &intent, sql_lot, dec("0.05").unwrap(), &original
+            &intent,
+            sql_lot,
+            dec("0.05").unwrap(),
+            &original
         ));
     }
 
