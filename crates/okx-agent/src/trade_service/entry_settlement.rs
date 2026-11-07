@@ -1,9 +1,9 @@
 //! Cumulative entry settlement: one coordinator over existing SQL and Worker owners.
 //! Terminal release remains independent in reconcile::release_terminal.
 use super::{
+    AccountStoreHandle, CentralGovernanceSnapshot, NativeRiskClient, StoredIntent,
     build_risk_command, err, exact,
     reconcile::{terminal_order_update_time, verified_order_readback},
-    AccountStoreHandle, CentralGovernanceSnapshot, NativeRiskClient, StoredIntent,
 };
 use okx_api::TradeOrderDetails;
 use okx_protocol::{
@@ -78,7 +78,11 @@ impl EntrySettlementError {
             | "TERMINAL_ENTRY_REPLAY_IDENTITY_MISMATCH" => SettlementFailureKind::Conflict,
             _ => SettlementFailureKind::Failed,
         };
-        Self { stage, kind, reason_code }
+        Self {
+            stage,
+            kind,
+            reason_code,
+        }
     }
 }
 
@@ -109,9 +113,7 @@ async fn settle_inner(
     governance: &RwLock<Option<CentralGovernanceSnapshot>>,
     sql_deadline: fn() -> Instant,
 ) -> Result<EntrySettlementOutcome, String> {
-    if account.environment != okx_protocol::accounts::Environment::Real
-        || !i.risk_increase
-    {
+    if account.environment != okx_protocol::accounts::Environment::Real || !i.risk_increase {
         return Ok(EntrySettlementOutcome::NotApplicable);
     }
     let venue = order.ok_or("PARTIAL_ENTRY_ORDER_READBACK_UNAVAILABLE")?;
@@ -125,7 +127,8 @@ async fn settle_inner(
     if filled <= Decimal::ZERO {
         return Err("PARTIAL_ENTRY_ZERO_FILL_SOURCE_UNPROVEN".into());
     }
-    let state = governance.read()
+    let state = governance
+        .read()
         .await
         .clone()
         .ok_or("AUTHORITY_UNAVAILABLE")?;
@@ -151,7 +154,8 @@ async fn settle_inner(
         terminal_order_update_time(Some(venue))?.ok_or("PARTIAL_ENTRY_UPDATE_TIME_MISSING")?;
     // Inspect before any native money mutation. Existing central RELEASE
     // remains terminal even when a late fee requires a new debit.
-    let inspection = risk.request(build_risk_command(
+    let inspection = risk
+        .request(build_risk_command(
             &state,
             format!("inspect_partial_pre_{}", i.client_order_id),
             RiskCommandAction::Inspect {
@@ -211,7 +215,8 @@ async fn settle_inner(
             return Err("LATE_ENTRY_ACCOUNT_PROOF_MISSING".into());
         }
         for _ in 0..3 {
-            let checked = risk.request(build_risk_command(
+            let checked = risk
+                .request(build_risk_command(
                     &state,
                     format!("inspect_late_{}", i.client_order_id),
                     RiskCommandAction::Inspect {
@@ -227,7 +232,8 @@ async fn settle_inner(
             let sequence = checked
                 .risk_book_sequence
                 .ok_or("LATE_ENTRY_RISK_SEQUENCE_MISSING")?;
-            let done = risk.request(build_risk_command(
+            let done = risk
+                .request(build_risk_command(
                     &state,
                     format!(
                         "settle_late_{}_r{}",
@@ -256,8 +262,7 @@ async fn settle_inner(
             if !matches!(
                 done.reason.as_deref(),
                 Some(
-                    "STALE_SESSION_OR_BOOK_SEQUENCE"
-                        | "ENTRY_SETTLEMENT_SOURCE_OR_STATE_UNPROVEN"
+                    "STALE_SESSION_OR_BOOK_SEQUENCE" | "ENTRY_SETTLEMENT_SOURCE_OR_STATE_UNPROVEN"
                 )
             ) {
                 return Err(done.reason.unwrap_or("LATE_ENTRY_SETTLEMENT_DENIED".into()));
@@ -313,7 +318,8 @@ async fn settle_inner(
         return Err("PARTIAL_ENTRY_SOURCE_IDENTITY_MISMATCH".into());
     }
     for _ in 0..3 {
-        let observed = risk.request(build_risk_command(
+        let observed = risk
+            .request(build_risk_command(
                 &state,
                 format!("inspect_partial_{}", i.client_order_id),
                 RiskCommandAction::Inspect {
@@ -329,7 +335,8 @@ async fn settle_inner(
         let sequence = observed
             .risk_book_sequence
             .ok_or("PARTIAL_ENTRY_RISK_SEQUENCE_MISSING")?;
-        let result = risk.request(build_risk_command(
+        let result = risk
+            .request(build_risk_command(
                 &state,
                 format!(
                     "settle_partial_{}_{}",
@@ -358,9 +365,7 @@ async fn settle_inner(
         }
         if !matches!(
             result.reason.as_deref(),
-            Some(
-                "STALE_SESSION_OR_BOOK_SEQUENCE" | "ENTRY_SETTLEMENT_SOURCE_OR_STATE_UNPROVEN"
-            )
+            Some("STALE_SESSION_OR_BOOK_SEQUENCE" | "ENTRY_SETTLEMENT_SOURCE_OR_STATE_UNPROVEN")
         ) {
             return Err(result
                 .reason
@@ -368,7 +373,6 @@ async fn settle_inner(
         }
     }
     Err("PARTIAL_ENTRY_SETTLEMENT_CAS_BUSY".into())
-
 }
 
 #[cfg(test)]
@@ -378,12 +382,36 @@ mod tests {
     #[test]
     fn r04_r05_failure_metadata_preserves_reason_codes() {
         for (reason, stage, kind) in [
-            ("PARTIAL_ENTRY_FILLS_UNCOVERED", "source_coverage", SettlementFailureKind::AwaitingEvidence),
-            ("PARTIAL_ENTRY_FINANCIAL_COVERAGE_PENDING", "source_coverage", SettlementFailureKind::AwaitingEvidence),
-            ("PARTIAL_ENTRY_ORDER_IDENTITY_MISMATCH", "identity", SettlementFailureKind::Conflict),
-            ("RISK_OUTCOME_UNKNOWN_DO_NOT_REPLAY", "risk_response", SettlementFailureKind::AwaitingEvidence),
-            ("LATE_ENTRY_SETTLEMENT_CAS_BUSY", "risk_cas", SettlementFailureKind::AwaitingEvidence),
-            ("SQL_FAILURE_UNKNOWN", "settlement", SettlementFailureKind::Failed),
+            (
+                "PARTIAL_ENTRY_FILLS_UNCOVERED",
+                "source_coverage",
+                SettlementFailureKind::AwaitingEvidence,
+            ),
+            (
+                "PARTIAL_ENTRY_FINANCIAL_COVERAGE_PENDING",
+                "source_coverage",
+                SettlementFailureKind::AwaitingEvidence,
+            ),
+            (
+                "PARTIAL_ENTRY_ORDER_IDENTITY_MISMATCH",
+                "identity",
+                SettlementFailureKind::Conflict,
+            ),
+            (
+                "RISK_OUTCOME_UNKNOWN_DO_NOT_REPLAY",
+                "risk_response",
+                SettlementFailureKind::AwaitingEvidence,
+            ),
+            (
+                "LATE_ENTRY_SETTLEMENT_CAS_BUSY",
+                "risk_cas",
+                SettlementFailureKind::AwaitingEvidence,
+            ),
+            (
+                "SQL_FAILURE_UNKNOWN",
+                "settlement",
+                SettlementFailureKind::Failed,
+            ),
         ] {
             let result = EntrySettlementError::from_reason(reason.into());
             assert_eq!(result.stage, stage);
