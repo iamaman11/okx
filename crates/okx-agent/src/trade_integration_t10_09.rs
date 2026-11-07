@@ -1264,6 +1264,34 @@ async fn t10_09_b_terminal_after_partial(
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+    // Terminal Worker RELEASE runs a full A+B cohort census, not merely
+    // the closing B account. A's original signed equity is still 100 USDT:
+    // B's independent Close cannot mint or debit account A. The finite A
+    // bootstrap pages have been consumed by earlier real cohort reads.
+    // Publish ONE new actor-A authenticated balance observation at the
+    // verified B-flat / terminal-census boundary, preserving those literal
+    // A economics. Do not copy B's 99.9996 balance into A or substitute a
+    // cached, undated account snapshot for fresh source admission.
+    let a_balance_at=chrono::Utc::now().timestamp_millis().to_string();
+    let a_balance=raw(json!([{
+        "totalEq":"100","adjEq":"100","uTime":a_balance_at,
+        "details":[{"ccy":"USDT","eq":"100","liab":"0",
+            "availEq":"100","availBal":"100","eqUsd":"100",
+            "uTime":a_balance_at}]
+    }]));
+    let retired_a_balance=feed.advance_recorded_route(
+        "fixture-observer-a","/api/v5/account/balance",
+        (0..8).map(|_|RecordedGet {
+            access_key:"fixture-observer-a".into(),
+            path:"/api/v5/account/balance".into(),
+            required_query:vec![],
+            raw_response:a_balance.clone(),
+        }).collect(),
+    );
+    eprintln!(
+        "T10_09_A_TERMINAL_COHORT_BALANCE_SOURCE_V1:account=A observed_at={} retired_prior={}",
+        a_balance_at,retired_a_balance
+    );
     feed.advance_immutable_signed_phase_bounded(
         "t10-09-b-reduce-filled-pending-inventory",
         "t10-09-b-final-flat-pending-inventory",
