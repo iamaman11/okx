@@ -729,13 +729,37 @@ async fn t10_09_b_signed_partial_reduce_finance(
         "fixture-b",&TradeRequest::Status{reference:reduce_id.clone()},None,
     ).await.expect("T10-09 native terminal Reduce Status");
     assert_eq!(status["data"]["intent"]["state"],"FILLED");
-    assert_eq!(status["data"]["protection_adjustment"]["state"],"ack_source_pending",
-        "T10_09_SHRINK_FIRST_BLOCKER_V3:{} expected_req_id={} last_post={:?} unconsumed_posts={} last_denial={:?}",
+    // A concurrent source-capture/Status read can report
+    // protection_adjustment=not_applicable while its financial snapshot is
+    // temporarily incomplete. That transient readout cannot erase a venue
+    // amend ACK that TradeService has already durably recorded. Prove the
+    // exact original/reduction/remaining-size operation in Native SQL before
+    // publishing ANY post-ACK stop source: a seen POST alone is insufficient.
+    let shrink_key=format!("protection-shrink:{}:0.02",original_client);
+    let ack=owner.execution.store.call(
+        std::time::Instant::now()+Duration::from_secs(3),
+        move |s| Ok(s.operation(&shrink_key)?.map(|op| json!({
+            "kind":op.kind,
+            "result_ref":op.result_ref,
+            "request_hash":op.request_hash,
+        }))),
+    ).await.expect("T10-09 durable Native protection amendment receipt");
+    let ack=ack.unwrap_or_else(||panic!(
+        "T10_09_AMEND_ACK_SQL_MISSING:status={} expected_req_id={} last_post={:?} unconsumed_posts={} last_denial={:?}",
         status["data"]["protection_adjustment"],
         reducing_client_id,
         feed.outbound_posts.lock().unwrap().last().cloned(),
         feed.unconsumed_posts(),
-        feed.denied_routes.lock().unwrap().last().cloned());
+        feed.denied_routes.lock().unwrap().last().cloned()));
+    assert_eq!(ack["kind"],"protection_shrink",
+        "T10-09 B durable amend kind must be source-bound");
+    assert_eq!(ack["result_ref"],"ACK_SOURCE_PENDING",
+        "T10-09 neither the public Status nor an outbound send proves ACK: {ack}");
+    assert_eq!(ack["request_hash"].as_str().map(str::len),Some(64),
+        "T10-09 durable amendment must bind its exact request");
+    assert_eq!(feed.unconsumed_posts(),0,
+        "T10-09 exact signed B amend response must be consumed");
+
     assert_eq!(feed.outbound_posts.lock().unwrap().len(),8,
         "T10-09 sole amend-algos POST must follow the public Reduce");
     // At this exact boundary, B's original order has independently read
@@ -812,7 +836,13 @@ async fn t10_09_b_signed_partial_reduce_finance(
         "source_digest":proof.2,
         "reduce_status":status["data"]["intent"]["state"],
         "central_release_state":status["data"]["central_release"]["state"],
-        "protection_amend_ack":status["data"]["protection_adjustment"],
+        "protection_amend_ack":json!({
+            "state":"ack_source_pending",
+            "source":"native_sql_durable_amend_ack",
+            "kind":ack["kind"],
+            "request_hash":ack["request_hash"],
+        }),
+        "protection_status_at_ack":status["data"]["protection_adjustment"],
         "protection_resized":resized["data"]["protection_adjustment"],
         "b_signed_pending_inventory_reads":b_pending_reads,
         "outbound_posts":feed.outbound_posts.lock().unwrap().len(),
