@@ -57,3 +57,40 @@ Known deliberate non-PASS cases on `f06383e`: `T10-07`, `T10-08`, `T10-09`, `T10
 | Trader / INSTALLED / PHYSICAL / REAL | Existing P0 runtime, governance, release and backup owners | Only after CODE and applicable release/operational gates; REAL requires separate explicit authorization | NOT_RUN / NO-GO |
 
 **Update rule:** refresh row evidence from the next exact SHA + CI/artifact; do not copy historical PASS across commits or turn a deliberate negative into a green gate. Required mandatory milestones remain 16→24→26 PASS with 0 executed failures. No full CI was triggered for this documentation/metadata update.
+
+## #495 — direct entry settlement tests (structural, not CODE acceptance)
+
+The one production entry coordinator is in `crates/okx-agent/src/trade_service/entry_settlement.rs`,
+called from `reconcile.rs::status_intent`. The original method was deleted; terminal
+release remains independent. SQL maintains financial evidence and ack; Worker owns CAS.
+
+Direct command from the repository root (verify nonzero test count):
+
+```text
+cargo test --locked -p okx-agent --lib trade_service::entry_settlement:: -- --nocapture
+```
+
+R-01/R-02: `r01_r02_partial_settlement_and_same_revision_repeat_use_one_sql_ack`,
+`r02_terminal_replay_reads_immutable_receipt_without_second_settle`.
+R-03: `r03_released_late_bill_requires_same_reservation_new_revision_and_ack`.
+R-04: `r04_missing_source_cannot_ack_and_identity_mismatch_preserves_first_reason`.
+R-05: `r05_lost_settlement_reply_keeps_unacked_revision_and_replays_same_proof`.
+R-06: `r06_three_cas_conflicts_never_ack_unaccepted_settlement`.
+Early-denial and typed error-identity guard tests run through the same filter.
+
+Each direct scenario uses a real AccountStore/SQLite and typed venue readback;
+programmed `NativeRiskClient` replies prove request/ack orchestration but not Worker money.
+Test setup never directly writes success/ack table rows or invents a RiskBook.
+
+On `07747172f1688a8ce7f068e5b0b25254eb363fb5`,
+[Windows run 42391650565](https://github.com/iamaman11/okx/actions/runs/42391650565)
+proved **6 passed, 0 failed, 292 filtered, 0.93s** (excluding compilation).
+New terminal and late-fee tests were added later and must be confirmed on exact final SHA;
+do not copy this PASS to newer commits. Windows CI checks at least eight PASS first;
+existing mandatory Clippy/full gates remain unchanged.
+
+The dedicated `entry-settlement-regression` Windows matrix compares T09.3, T09.8
+and T10-09 separately on exact parent `3a892c4993e4a62a270197c52cd9d3c1afd00663`
+and the candidate SHA, with independent artifacts including baseline failures.
+No merged/released/26-of-26/REAL acceptance is implied. The recorded-source
+baseline may fail before the affected transition; compare first cause and stage.
