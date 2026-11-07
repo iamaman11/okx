@@ -550,23 +550,31 @@ async fn protection_cleanup_step(
 // ACK and after restart/lost ACK. The transport cannot assert its own outcome:
 // it supplies an independently normalized, complete signed inventory and
 // raw position readings. Only SQL may durably commit the verified transition.
+// Only facts needed for this one cancellation's SQL receipt. The observer
+// and exchange adapter remain the owners of authenticated I/O.
+struct ProtectionCleanupIdentity<'a> {
+    key: &'a str,
+    hash: &'a str,
+    instrument_id: &'a str,
+    algo_id: &'a str,
+    expected_uid: &'a str,
+}
+struct ProtectionCleanupObservation<'a> {
+    inventory: &'a okx_api::PendingDerivativeAlgoRiskInventory,
+    uid: &'a str,
+    position_received_at_ms: i64,
+    positions: &'a [(String, String)],
+}
 async fn protection_cleanup_readback(
     store: &AccountStoreHandle,
-    key: &str,
-    hash: &str,
-    instrument_id: &str,
-    algo_id: &str,
-    expected_uid: &str,
-    inventory: &okx_api::PendingDerivativeAlgoRiskInventory,
-    observed_uid: &str,
-    position_received_at_ms: i64,
-    positions: &[(String, String)],
+    target: ProtectionCleanupIdentity<'_>,
+    observed: ProtectionCleanupObservation<'_>,
 ) -> Result<(), String> {
-    let op_key = key.to_owned();
+    let op_key = target.key.to_owned();
     let operation = store.call(deadline(), move |s| s.operation(&op_key))
         .await.map_err(err)?
         .ok_or("PROTECTION_CLEANUP_BEGIN_MISSING")?;
-    if operation.request_hash != hash || operation.kind != "protection_cleanup" {
+    if operation.request_hash != target.hash || operation.kind != "protection_cleanup" {
         return Err("PROTECTION_CLEANUP_IDENTITY_MISMATCH".into());
     }
     if operation.result_ref == "VERIFIED_CANCELED" {
@@ -575,32 +583,32 @@ async fn protection_cleanup_readback(
     if operation.result_ref != "POSTING" {
         return Err("PROTECTION_CLEANUP_RECEIPT_CONFLICT".into());
     }
-    if observed_uid != expected_uid {
+    if observed.uid != target.expected_uid {
         return Err("PROTECTION_CLEANUP_ACCOUNT_MISMATCH".into());
     }
-    if !inventory.complete_within_bound || inventory.scopes_checked != 16 {
+    if !observed.inventory.complete_within_bound || observed.inventory.scopes_checked != 16 {
         return Err("PROTECTION_CANCEL_READBACK_INCOMPLETE".into());
     }
     // The earliest of all 16 signed GET receipts and the position source
     // must both postdate durable BEGIN. A pre-ACK/old inventory is not proof.
-    if inventory.received_at_ms == 0
-        || inventory.received_at_ms < operation.committed_at.max(0) as u64
-        || position_received_at_ms < operation.committed_at
+    if observed.inventory.received_at_ms == 0
+        || observed.inventory.received_at_ms < operation.committed_at.max(0) as u64
+        || observed.position_received_at_ms < operation.committed_at
     {
         return Err("PROTECTION_CANCEL_READBACK_STALE".into());
     }
     verify_instrument_is_flat(
-        instrument_id,
-        positions.iter().map(|(inst, qty)| (inst.as_str(), qty.as_str())),
+        target.instrument_id,
+        observed.positions.iter().map(|(inst, qty)| (inst.as_str(), qty.as_str())),
     )?;
-    if let Some(algo) = inventory.samples.iter().find(|a| a.algo_order_id == algo_id) {
-        if algo.instrument_id != instrument_id {
+    if let Some(algo) = observed.inventory.samples.iter().find(|a| a.algo_order_id == target.algo_id) {
+        if algo.instrument_id != target.instrument_id {
             return Err("PROTECTION_CLEANUP_ALGO_INSTRUMENT_MISMATCH".into());
         }
         return Err("PROTECTION_CANCEL_READBACK_PENDING".into());
     }
-    let key = key.to_owned();
-    let hash = hash.to_owned();
+    let key = target.key.to_owned();
+    let hash = target.hash.to_owned();
     store.call(deadline(), move |s| {
         s.operation_receipt(
             &key, &hash, "protection_cleanup", "VERIFIED_CANCELED", now()
@@ -2071,9 +2079,15 @@ impl TradeService {
                 .map(|p| (p.instrument_id.clone(), p.position.clone()))
                 .collect::<Vec<_>>();
             return protection_cleanup_readback(
-                &r.execution.store, &key, &hash, &i.instrument_id, &saved.algo_id,
-                expected_uid, &inventory, &snapshot.account_uid_fingerprint,
-                source_at, &positions,
+                &r.execution.store,
+                ProtectionCleanupIdentity {
+                    key: &key, hash: &hash, instrument_id: &i.instrument_id,
+                    algo_id: &saved.algo_id, expected_uid,
+                },
+                ProtectionCleanupObservation {
+                    inventory: &inventory, uid: &snapshot.account_uid_fingerprint,
+                    position_received_at_ms: source_at, positions: &positions,
+                },
             ).await;
         }
 
@@ -2116,9 +2130,15 @@ impl TradeService {
                     .map(|p| (p.instrument_id.clone(), p.position.clone()))
                     .collect::<Vec<_>>();
                 return protection_cleanup_readback(
-                    &r.execution.store, &key, &hash, &i.instrument_id, &saved.algo_id,
-                    expected_uid, &inventory, &snapshot.account_uid_fingerprint,
-                    source_at, &positions,
+                    &r.execution.store,
+                    ProtectionCleanupIdentity {
+                        key: &key, hash: &hash, instrument_id: &i.instrument_id,
+                        algo_id: &saved.algo_id, expected_uid,
+                    },
+                    ProtectionCleanupObservation {
+                        inventory: &inventory, uid: &snapshot.account_uid_fingerprint,
+                        position_received_at_ms: source_at, positions: &positions,
+                    },
                 ).await;
             }
             ProtectionCleanupStep::SendOnce => {}
@@ -2142,9 +2162,15 @@ impl TradeService {
             .map(|p| (p.instrument_id.clone(), p.position.clone()))
             .collect::<Vec<_>>();
         protection_cleanup_readback(
-            &r.execution.store, &key, &hash, &i.instrument_id, &saved.algo_id,
-            expected_uid, &inventory, &snapshot.account_uid_fingerprint,
-            source_at, &positions,
+            &r.execution.store,
+            ProtectionCleanupIdentity {
+                key: &key, hash: &hash, instrument_id: &i.instrument_id,
+                algo_id: &saved.algo_id, expected_uid,
+            },
+            ProtectionCleanupObservation {
+                inventory: &inventory, uid: &snapshot.account_uid_fingerprint,
+                position_received_at_ms: source_at, positions: &positions,
+            },
         ).await
     }
     pub(super) async fn cancel(
