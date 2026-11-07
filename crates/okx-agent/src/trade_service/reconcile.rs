@@ -552,6 +552,7 @@ async fn protection_cleanup_step(
 // raw position readings. Only SQL may durably commit the verified transition.
 // Only facts needed for this one cancellation's SQL receipt. The observer
 // and exchange adapter remain the owners of authenticated I/O.
+#[derive(Clone, Copy)]
 struct ProtectionCleanupIdentity<'a> {
     key: &'a str,
     hash: &'a str,
@@ -615,6 +616,30 @@ async fn protection_cleanup_readback(
         )
     }).await.map_err(err)?;
     Ok(())
+}
+
+async fn observe_protection_cleanup(
+    r: &AccountResources,
+    target: ProtectionCleanupIdentity<'_>,
+) -> Result<(), String> {
+    let inventory = r.observer.pending_derivative_risk_algos().await.map_err(err)?;
+    let snapshot = r.observer.snapshot_until(deadline()).await.map_err(err)?;
+    let source_at = chrono::DateTime::parse_from_rfc3339(&snapshot.source_received_at)
+        .map_err(|_| "PROTECTION_CLEANUP_POSITION_TIME_INVALID")?
+        .timestamp_millis();
+    let positions = snapshot.positions.iter()
+        .map(|p| (p.instrument_id.clone(), p.position.clone()))
+        .collect::<Vec<_>>();
+    protection_cleanup_readback(
+        &r.execution.store,
+        target,
+        ProtectionCleanupObservation {
+            inventory: &inventory,
+            uid: &snapshot.account_uid_fingerprint,
+            position_received_at_ms: source_at,
+            positions: &positions,
+        },
+    ).await
 }
 
 impl TradeService {
@@ -2053,6 +2078,13 @@ impl TradeService {
         let key = format!("cleanup_{}", &i.client_order_id);
         let hash = digest(&(i.intent_id.clone(), saved.algo_id.clone(), "flat_protection_cleanup"))?;
         let expected_uid = r.configuration.account_key.verified_uid.as_str();
+        let target = ProtectionCleanupIdentity {
+            key: &key,
+            hash: &hash,
+            instrument_id: &i.instrument_id,
+            algo_id: &saved.algo_id,
+            expected_uid,
+        };
 
         // Inspect a previous durable BEGIN before examining the live stop or
         // obtaining a new send permit. The former path returned UNKNOWN here
@@ -2070,25 +2102,7 @@ impl TradeService {
             if prior.result_ref != "POSTING" {
                 return Err("PROTECTION_CLEANUP_RECEIPT_CONFLICT".into());
             }
-            let inventory = r.observer.pending_derivative_risk_algos().await.map_err(err)?;
-            let snapshot = r.observer.snapshot_until(deadline()).await.map_err(err)?;
-            let source_at = chrono::DateTime::parse_from_rfc3339(&snapshot.source_received_at)
-                .map_err(|_| "PROTECTION_CLEANUP_POSITION_TIME_INVALID")?
-                .timestamp_millis();
-            let positions = snapshot.positions.iter()
-                .map(|p| (p.instrument_id.clone(), p.position.clone()))
-                .collect::<Vec<_>>();
-            return protection_cleanup_readback(
-                &r.execution.store,
-                ProtectionCleanupIdentity {
-                    key: &key, hash: &hash, instrument_id: &i.instrument_id,
-                    algo_id: &saved.algo_id, expected_uid,
-                },
-                ProtectionCleanupObservation {
-                    inventory: &inventory, uid: &snapshot.account_uid_fingerprint,
-                    position_received_at_ms: source_at, positions: &positions,
-                },
-            ).await;
+return observe_protection_cleanup(r, target).await;
         }
 
         let inventory = r.observer.pending_derivative_risk_algos().await.map_err(err)?;
@@ -2121,25 +2135,7 @@ impl TradeService {
             ProtectionCleanupStep::Inspect => {
                 // A concurrent caller committed BEGIN after our first read.
                 // Do not consume a second send; take a NEW authenticated read.
-                let inventory = r.observer.pending_derivative_risk_algos().await.map_err(err)?;
-                let snapshot = r.observer.snapshot_until(deadline()).await.map_err(err)?;
-                let source_at = chrono::DateTime::parse_from_rfc3339(&snapshot.source_received_at)
-                    .map_err(|_| "PROTECTION_CLEANUP_POSITION_TIME_INVALID")?
-                    .timestamp_millis();
-                let positions = snapshot.positions.iter()
-                    .map(|p| (p.instrument_id.clone(), p.position.clone()))
-                    .collect::<Vec<_>>();
-                return protection_cleanup_readback(
-                    &r.execution.store,
-                    ProtectionCleanupIdentity {
-                        key: &key, hash: &hash, instrument_id: &i.instrument_id,
-                        algo_id: &saved.algo_id, expected_uid,
-                    },
-                    ProtectionCleanupObservation {
-                        inventory: &inventory, uid: &snapshot.account_uid_fingerprint,
-                        position_received_at_ms: source_at, positions: &positions,
-                    },
-                ).await;
+return observe_protection_cleanup(r, target).await;
             }
             ProtectionCleanupStep::SendOnce => {}
         }
@@ -2153,25 +2149,7 @@ impl TradeService {
         {
             return Err("PROTECTION_CANCEL_NOT_CONFIRMED".into());
         }
-        let inventory = r.observer.pending_derivative_risk_algos().await.map_err(err)?;
-        let snapshot = r.observer.snapshot_until(deadline()).await.map_err(err)?;
-        let source_at = chrono::DateTime::parse_from_rfc3339(&snapshot.source_received_at)
-            .map_err(|_| "PROTECTION_CLEANUP_POSITION_TIME_INVALID")?
-            .timestamp_millis();
-        let positions = snapshot.positions.iter()
-            .map(|p| (p.instrument_id.clone(), p.position.clone()))
-            .collect::<Vec<_>>();
-        protection_cleanup_readback(
-            &r.execution.store,
-            ProtectionCleanupIdentity {
-                key: &key, hash: &hash, instrument_id: &i.instrument_id,
-                algo_id: &saved.algo_id, expected_uid,
-            },
-            ProtectionCleanupObservation {
-                inventory: &inventory, uid: &snapshot.account_uid_fingerprint,
-                position_received_at_ms: source_at, positions: &positions,
-            },
-        ).await
+observe_protection_cleanup(r, target).await
     }
     pub(super) async fn cancel(
         &self,
