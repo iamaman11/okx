@@ -957,10 +957,8 @@ async fn t10_09_b_signed_partial_reduce_finance(
 // the exact Close POST/ACK, then let ordinary Native capture and TradeService
 // settle the original B reservation through the persisted Worker.
 async fn t10_09_b_terminal_after_partial(
-    accounts: Arc<AccountRuntimeRegistry>,
-    trade: Arc<TradeService>,
-    risk: NativeRiskClient,
-    rate_budget: RateBudget,
+    dependencies: (Arc<AccountRuntimeRegistry>, Arc<TradeService>, NativeRiskClient,
+        RateBudget),
     feed: Arc<crate::accounts::recorded_support::RecordedAccountHttp>,
     opening_id: String,
     late_at: i64,
@@ -968,6 +966,7 @@ async fn t10_09_b_terminal_after_partial(
     a_order_venue_at: i64,
     a_finance_source_at_flat: &(impl Fn(&str) + Sync),
 ) -> serde_json::Value {
+    let (accounts,trade,risk,rate_budget)=dependencies;
     use crate::accounts::recorded_support::{RecordedGet, RecordedPost};
     use okx_protocol::trading::TradeRequest;
     use serde_json::json;

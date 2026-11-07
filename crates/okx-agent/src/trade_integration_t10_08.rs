@@ -150,14 +150,16 @@ async fn t10_08_failed_stop_before_late_fill(
         },None)
     ).await.expect("T10-08 stop failure Status deadline")
       .expect("T10-08 must return a public status blocker");
-    let posts=feed.outbound_posts.lock().unwrap();
-    let delta=posts.len()-first_posts;
-    let new_posts=posts.iter().skip(first_posts)
-        .map(|(actor,path,body)|serde_json::json!({
-            "actor":actor,"path":path,
-            "client_order_id":body.get("clOrdId")
-        })).collect::<Vec<_>>();
-    drop(posts);
+    let (delta,new_posts)={
+        let posts=feed.outbound_posts.lock().unwrap();
+        let delta=posts.len()-first_posts;
+        let new_posts=posts.iter().skip(first_posts)
+            .map(|(actor,path,body)|serde_json::json!({
+                "actor":actor,"path":path,
+                "client_order_id":body.get("clOrdId")
+            })).collect::<Vec<_>>();
+        (delta,new_posts)
+    };
     assert_eq!(delta,1,
         "T10-08 one exact cancel attempt, not a second create: {observed}; posts={new_posts:?}");
     assert_eq!(new_posts[0]["actor"],"fixture-executor-a");
@@ -374,10 +376,8 @@ fn t10_08_publish_signed_flat_after_close(
 }
 
 async fn t10_08_recover_signed_flat_after_late_fill(
-    accounts: Arc<AccountRuntimeRegistry>,
-    trade: Arc<TradeService>,
-    risk: NativeRiskClient,
-    feed: Arc<crate::accounts::recorded_support::RecordedAccountHttp>,
+    dependencies: (Arc<AccountRuntimeRegistry>, Arc<TradeService>, NativeRiskClient,
+        Arc<crate::accounts::recorded_support::RecordedAccountHttp>),
     rate_budget: RateBudget,
     original_intent: String,
     client_id: String,
@@ -385,6 +385,7 @@ async fn t10_08_recover_signed_flat_after_late_fill(
     original_unrelated_worker_reserve: &str,
     terminal: &serde_json::Value,
 ) -> serde_json::Value {
+    let (accounts,trade,risk,feed)=dependencies;
     let sql=&terminal["sql"];
     assert_eq!(sql["quantity"],"0.3");
     assert_eq!(sql["fill_count"],2);

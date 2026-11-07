@@ -657,7 +657,7 @@ impl TradeService {
                 .await
             {
                 Ok(o) => Some(o),
-                Err(error) => {
+                Err(_error) => {
                     // Test-only causal classification at the exact failure
                     // boundary: a local admission defer, missing signed raw
                     // GET, protocol response or deadline must never collapse
@@ -666,7 +666,7 @@ impl TradeService {
                     // fail-closed with the same UNKNOWN/no-resubmit result.
                     #[cfg(test)]
                     if std::env::var("OKX_T09_8_DENIAL_PROBE").as_deref() == Ok("1") {
-                        let (class, request_sent, local_defer_ms) = match &error {
+                        let (class, request_sent, local_defer_ms) = match &_error {
                             okx_api::OkxError::RateLimited { evidence } => (
                                 "RATE_LIMITED",
                                 Some(evidence.request_sent),
@@ -804,10 +804,11 @@ impl TradeService {
                             && original_terminal
                             && s.active_central_receipt(&original_id)?.is_none()
                         {
-                            if let (Some(receipt), Some(terminal)) = (
+                            let terminal_evidence = (
                                 s.central_receipt(&original_id)?,
                                 s.operation(&format!("entry-settlement:{original_id}"))?,
-                            ) {
+                            );
+                            if let (Some(receipt), Some(terminal)) = terminal_evidence {
                                 let proof = serde_json::from_str::<
                                     okx_execution::EntrySettlementEvidence,
                                 >(&terminal.result_ref)

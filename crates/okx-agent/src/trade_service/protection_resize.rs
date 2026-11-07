@@ -264,9 +264,9 @@ impl TradeService {
             .trade
             .amend_algo_order_after_admission(&request, &timing, &rate)
             .await
-            .map_err(|source| {
+            .map_err(|_source| {
                 #[cfg(test)]
-                eprintln!("PROTECTION_SHRINK_SOURCE_SEND_FAILED_V1:{source}");
+                eprintln!("PROTECTION_SHRINK_SOURCE_SEND_FAILED_V1:{_source}");
                 "PROTECTION_SHRINK_OUTCOME_UNKNOWN_NO_RESUBMIT"
             })?;
         if !ack.top_level_success()

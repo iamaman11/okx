@@ -236,13 +236,13 @@ async fn t09_spec_second_linear_product(
                 INST,chrono::Utc::now().timestamp_millis() as u64,
                 5000,5000,chrono::Utc::now().to_rfc3339()
             ).await {
-                if source.market.ticker.exchange_timestamp_ms==refreshed_at
+                let all_signed_sources_match = source.market.ticker.exchange_timestamp_ms==refreshed_at
                     && source.market.mark_price.exchange_timestamp_ms==refreshed_at
                     && source.market.index_price.exchange_timestamp_ms==refreshed_at
                     && source.market.open_interest.exchange_timestamp_ms==refreshed_at
                     && source.market.funding.as_ref().is_some_and(|f|
-                        f.exchange_timestamp_ms==refreshed_at)
-                {
+                        f.exchange_timestamp_ms==refreshed_at);
+                if all_signed_sources_match {
                     break source;
                 }
             }

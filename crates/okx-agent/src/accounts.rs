@@ -15,6 +15,8 @@ use okx_protocol::{
 use okx_runtime::{LiveWsConnector, PrivateWsCoordinator, PrivateWsHandle, WsConnector};
 use rust_decimal::Decimal;
 use sha2::{Digest, Sha256};
+#[cfg(test)]
+use std::sync::atomic::AtomicBool;
 use std::{
     collections::BTreeMap,
     fs::{self, File, OpenOptions},
@@ -22,7 +24,7 @@ use std::{
     str::FromStr,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicU64, Ordering},
     },
     time::Instant,
 };

@@ -21,7 +21,8 @@ async fn t10_10_unknown_fee_hold(
                         s.intent_fee_bill_evidence(&id,b.watermark),f.watermark,b.watermark))
                 }).await.unwrap();
             if let (Ok(fill),Err(okx_execution::StoreError::Invalid(reason)),fw,bw)=row {
-                if fill.fill_count==1 && fw>=event_at && bw>=event_at {
+                let source_complete = fill.fill_count==1 && fw>=event_at && bw>=event_at;
+                if source_complete {
                     // The archive cursor is complete, but the mandatory
                     // fill-linked bill itself is absent from that archive.
                     assert_eq!(reason,"ENTRY_FEE_BILL_SOURCE_MISMATCH");

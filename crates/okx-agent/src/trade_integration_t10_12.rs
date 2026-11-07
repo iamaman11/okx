@@ -112,8 +112,8 @@ impl<S> Stream for T10_12OldReply<S>
 where S:Stream<Item=Result<Message,tokio_tungstenite::tungstenite::Error>>+Unpin {
     type Item=Result<Message,tokio_tungstenite::tungstenite::Error>;
     fn poll_next(mut self:Pin<&mut Self>,cx:&mut Context<'_>)->Poll<Option<Self::Item>> {
-        if self.after_outbound {
-            if let Some(old)=self.old.take(){return Poll::Ready(Some(Ok(old)));}
+        if self.after_outbound && let Some(old)=self.old.take(){
+            return Poll::Ready(Some(Ok(old)));
         }
         Pin::new(&mut self.socket).poll_next(cx)
     }
@@ -148,9 +148,10 @@ async fn t10_12_connect(url:&str,token:&str) ->
 
 async fn t10_12_supervise<S>(socket:S,hello:F,ctx:DispatchContext,
     risk_rx:&mut mpsc::Receiver<OutboundRiskCommand>,shutdown:watch::Receiver<bool>,
-    risk:NativeRiskClient,token:String,handoff:String) -> AgentResult<()>
+    risk:NativeRiskClient,authentication: (String,String)) -> AgentResult<()>
 where S:Stream<Item=Result<Message,tokio_tungstenite::tungstenite::Error>>+
     Sink<Message,Error=tokio_tungstenite::tungstenite::Error>+Unpin+Send {
+    let (token,handoff)=authentication;
     let first=run_connected_session(socket,hello.clone(),ctx.clone(),risk_rx,shutdown.clone()).await;
     assert!(first.unwrap_err().to_string().contains(
         "T10_12_WORKER_OS_KILLED_AFTER_SETTLEMENT_COMMIT"));
