@@ -422,7 +422,9 @@ async fn pc_06_two_callers_share_one_begin_and_old_read_never_confirms() {
 async fn pc_07_recorded_signed_http_cancel_ack_readback_and_sql_receipt() {
     use crate::account_bootstrap::AccountBootstrapper;
     use crate::accounts::recorded_support::{RecordedAccountHttp, RecordedGet, RecordedPost};
-    use okx_api::{Credentials, HttpTransport, OkxEnvironment, OkxRestClient, RateBudget, Region, TradeApi};
+    use okx_api::{
+        Credentials, HttpTransport, OkxEnvironment, OkxRestClient, RateBudget, Region, TradeApi,
+    };
     use okx_execution::{Decision, IntentPlan, NewIntent};
     use std::sync::Arc;
 
@@ -678,7 +680,10 @@ async fn pc_07_recorded_signed_http_cancel_ack_readback_and_sql_receipt() {
     assert_eq!(
         results
             .iter()
-            .filter(|r| r.as_ref().err().is_some_and(|reason| reason == "ACCOUNT_MUTATION_BUSY"))
+            .filter(|r| r
+                .as_ref()
+                .err()
+                .is_some_and(|reason| reason == "ACCOUNT_MUTATION_BUSY"))
             .count(),
         1,
         "two cleanup callers must share the same account mutation permit"
