@@ -790,6 +790,9 @@ jobs:
           $status = $LASTEXITCODE
           "case=$env:CASE_ID sha=$actual exit=$status" | Set-Content -Path (Join-Path $dir "result.txt")
           Write-Host "ENTRY_SETTLEMENT_BASELINE_CASE=$env:CASE_ID SHA=$actual EXIT=$status"
+          # Baseline failure is recorded evidence, not a reason to skip the
+          # candidate. GitHub pwsh otherwise propagates native LASTEXITCODE.
+          exit 0
 
       - name: Checkout exact refactor SHA without deleting installed dependencies
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
