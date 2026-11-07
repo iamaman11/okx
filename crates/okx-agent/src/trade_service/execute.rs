@@ -1551,12 +1551,7 @@ impl TradeService {
         id: String,
         action: RiskCommandAction,
     ) -> RiskCommand {
-        RiskCommand {
-            schema: RISK_COMMAND_SCHEMA_V1.into(),
-            command_id: id,
-            installation_id: state.state.installation_id.clone(),
-            action,
-        }
+        build_risk_command(state, id, action)
     }
     pub(super) fn local_receipt(
         &self,

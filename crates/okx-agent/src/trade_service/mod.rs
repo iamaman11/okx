@@ -25,6 +25,7 @@ use std::{
 };
 use tokio::sync::{Mutex, RwLock};
 mod entry_budget;
+mod entry_settlement;
 mod execute;
 mod plan;
 mod protection_resize;
@@ -186,6 +187,19 @@ fn dec(v: &str) -> Result<Decimal, String> {
 }
 fn exact(v: Decimal) -> String {
     v.normalize().to_string()
+}
+/// Shared RiskCommand construction; never clone authentication/fencing rules.
+pub(super) fn build_risk_command(
+    state: &CentralGovernanceSnapshot,
+    id: String,
+    action: RiskCommandAction,
+) -> RiskCommand {
+    RiskCommand {
+        schema: RISK_COMMAND_SCHEMA_V1.into(),
+        command_id: id,
+        installation_id: state.state.installation_id.clone(),
+        action,
+    }
 }
 fn deadline() -> Instant {
     Instant::now() + Duration::from_secs(10)
