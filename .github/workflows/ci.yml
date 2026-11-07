@@ -322,6 +322,18 @@ jobs:
             throw 'ENTRY_SETTLEMENT_DIRECT_TEST_COUNT_INVALID'
           }
 
+      - name: Fast protection cleanup SQL tests (#500)
+        shell: pwsh
+        run: |
+          $output = & cargo test --locked -p okx-agent --lib trade_service::reconcile::protection_cleanup_direct_tests:: -- --nocapture 2>&1
+          $code = $LASTEXITCODE
+          $output | Out-Host
+          if ($code -ne 0) { exit $code }
+          $proof = [regex]::Match(($output -join "`n"), 'test result: ok\.\s+(\d+) passed;')
+          if (-not $proof.Success -or [int]$proof.Groups[1].Value -lt 6) {
+            throw 'PROTECTION_CLEANUP_DIRECT_TEST_COUNT_INVALID'
+          }
+
       - name: Clippy native Windows crates
         run: cargo clippy --locked -p okx-agent -p okx-host-control -p okx-host-launcher -p okx-execution --all-targets -- -D warnings
 
