@@ -1138,6 +1138,25 @@ try {
             }
           } catch { bTimeout={error:"INVALID_BOUNDED_CAPTURE_DIAGNOSTIC"}; }
         }
+        // Project only the pre-existing fail-closed amend source error
+        // classification from Rust's stderr. Never expose HTTP bytes,
+        // signatures, credentials, IDs, or a full transport exception.
+        const shrinkSource = lines.findLast(line =>
+          line.startsWith("PROTECTION_SHRINK_SOURCE_SEND_FAILED_V1:"));
+        const shrinkDetail = shrinkSource
+          ? shrinkSource.slice("PROTECTION_SHRINK_SOURCE_SEND_FAILED_V1:".length)
+          : "";
+        const shrinkCodes = [...shrinkDetail.matchAll(/\b(?:TRANSCRIPT|LOCAL|ACCOUNT|OKX|RATE)_[A-Z0-9_]{3,90}\b/g)]
+          .map(match => match[0]).slice(0,3);
+        const shrinkError = shrinkSource ? {
+          codes:shrinkCodes,
+          kind:/rate.?limit/i.test(shrinkDetail) ? "RATE_LIMIT"
+            : /timeout|deadline|elapsed/i.test(shrinkDetail) ? "DEADLINE"
+            : /response error/i.test(shrinkDetail) ? "RESPONSE"
+            : /transport|connect|network/i.test(shrinkDetail) ? "TRANSPORT"
+            : "OTHER",
+          observed:true,
+        } : null;
         process.stderr.write("T09_1_NATIVE_CHILD_FAILURE_V2:" + JSON.stringify({
           schema:"okx.t09-native-child-failure/v2",
           exit_code:exitCode,
@@ -1167,6 +1186,7 @@ try {
             }),
           rust_assertion:cause.slice(0, 1900) || "RUST_CHILD_EXIT_WITHOUT_ASSERTION",
           t10_09_capture:bTimeout,
+          t10_09_shrink_source_failure:shrinkError,
           maintenance_errors:lines.filter(line => line.includes("OKX_ENTRY_BASELINE_V1")).slice(-12).map(line => line.slice(0, 240)),
           managed_census_denials:lines.filter(line =>
             line.includes("MANAGED_AGGREGATE_CENSUS_DENIAL_V1:")).slice(-5).map(line => line.slice(0, 500)),
