@@ -6008,6 +6008,13 @@ mod raw_native_session_tests {
                                         late["signed_late_at_ms"].as_i64().unwrap(),
                                     ).await;
                                     println!("T10_09_NATIVE_REDUCE_FINANCE_V1:{reduction}");
+                                    let terminal=t10_09_b_terminal_after_partial(
+                                        accounts.clone(),trade.clone(),risk.clone(),
+                                        rate_budget.clone(),feed.clone(),intent_b.clone(),
+                                        late["signed_late_at_ms"].as_i64().unwrap(),
+                                        reduction["signed_reduce_at_ms"].as_i64().unwrap(),
+                                    ).await;
+                                    println!("T10_09_NATIVE_TERMINAL_V1:{terminal}");
                                 }
                             }
                         }

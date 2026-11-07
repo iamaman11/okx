@@ -258,6 +258,7 @@ export async function actualNativeWorker(root, signal, { statusProbe = false, se
               nativeT10LateFill: receipt(stdout, "T10_09_NATIVE_LATE_B_FILL_V1"),
               nativeT10PartialReduce: receipt(stdout, "T10_09_NATIVE_PARTIAL_REDUCE_V1"),
               nativeT10ReduceFinance: receipt(stdout, "T10_09_NATIVE_REDUCE_FINANCE_V1"),
+              nativeT10Terminal: receipt(stdout, "T10_09_NATIVE_TERMINAL_V1"),
             } : {}),
             ...(partialFills ? {
               nativePartialFills: receipt(stdout, "T09_3_NATIVE_PARTIAL_TERMINAL_V1"),

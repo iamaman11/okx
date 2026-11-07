@@ -19,7 +19,7 @@ export async function run({caseId,root,signal,artifactsDir}) {
   });
   const cancel=t.nativeT10Isolation, b=t.nativeB1Positive;
   const late=t.nativeT10LateFill, partialReduce=t.nativeT10PartialReduce;
-  const reduceFinance=t.nativeT10ReduceFinance;
+  const reduceFinance=t.nativeT10ReduceFinance, terminal=t.nativeT10Terminal;
   const a=t.nativeSecondAdmission, worker=t.workerSecondAdmission;
   assert.ok(cancel&&b&&a&&worker&&late&&partialReduce&&reduceFinance,
     "Native A/B Worker, signed late fill and real public partial Reduce ACK required");
@@ -83,6 +83,32 @@ export async function run({caseId,root,signal,artifactsDir}) {
     "B's signed post-Reduce inventory must be independently consumed");
   assert.equal(reduceFinance.outbound_posts,8);
   assert.notEqual(partialReduce.original_central_release.state,"verified");
+  assert.ok(terminal,"Native must prove B final signed Close/flat/central release");
+  assert.equal(terminal.schema,"okx.t10-09-native-terminal-flat/v1");
+  assert.equal(terminal.opening_intent_id,b.b_intent_id);
+  assert.equal(terminal.close.quantity,"0.02");
+  assert.equal(terminal.close.exchange_order_id,"recorded-t10-09-b-final-close-020");
+  assert.equal(terminal.native_sql.close_quantity,"0.02");
+  assert.equal(terminal.native_sql.close_risk_increase,false);
+  assert.equal(terminal.native_sql.close_signed_fill_quantity,"0.02");
+  assert.equal(terminal.native_sql.close_signed_fill_count,1);
+  assert.equal(terminal.native_sql.close_signed_bill_count,1);
+  assert.equal(terminal.native_sql.close_signed_fee_usdt,"0.0001");
+  assert.equal(terminal.native_sql.remaining_lots,0);
+  assert.equal(terminal.native_sql.original_central_still_held,false);
+  assert.equal(terminal.native_sql.fill_complete,true);
+  assert.equal(terminal.native_sql.bill_complete,true);
+  assert.equal(terminal.original_status.data.central_release.state,"verified");
+  assert.equal(terminal.original_status.data.protection_incident,false);
+  assert.equal(terminal.original_status.data.protection_remediation.state,
+    "verified_flat_no_orphans");
+  assert.equal(terminal.close_status.data.intent.state,"FILLED");
+  assert.equal(terminal.worker_original_reservation_state,"RELEASED");
+  assert.equal(terminal.worker_after.entry_budget.consumed_usd,"1.4007");
+  assert.equal(terminal.worker_after.entry_budget.reserved_usd,"7.0015");
+  assert.equal(terminal.worker_after.entry_budget.remaining_usd,"0.9975");
+  assert.equal(terminal.outbound_posts_before,8);
+  assert.equal(terminal.outbound_posts_after,9);
   assert.ok(Number.isSafeInteger(late.sql.sql_revision)&&late.sql.sql_revision>0);
   assert.match(late.sql.bill_digest,/^[a-f0-9]{64}$/);
   assert.deepEqual(late.worker_budget,worker.budget,
@@ -97,7 +123,7 @@ export async function run({caseId,root,signal,artifactsDir}) {
   await writeFile(resolve(dir,"cancel-ack-no-release.json"),
     JSON.stringify({
       schema:"okx.t10-09-cancel-first-causal-leg/v1",
-      mandatory_case_pass:false,
+      mandatory_case_pass:true,
       native_b_intent_id:b.b_intent_id,
       owner_b:cancel.account_b,
       cancel_ack_source:"RecordedAuthenticatedHTTP",
@@ -115,9 +141,66 @@ export async function run({caseId,root,signal,artifactsDir}) {
       signed_partial_reduce_finance:reduceFinance,
       worker_after_late_fill:late.worker_budget,
       public_status_after_late_fill:late.public_status_state,
-      missing:["terminal_source_backed_risk_release"],
+      terminal_signed_flat_release:terminal,
+      missing:[],
     },null,2)+"\n");
-  // The late fill and bill are genuine B owner facts, but a partial close,
-  // remaining protection and final terminal release are still mandatory.
-  throw Error("T10_09_PARTIAL_CLOSE_PROTECTION_AND_TERMINAL_NOT_PROVEN");
+  const assertions=[
+    {id:"b_original_late_fill",expected:"0.04",actual:late.sql.quantity},
+    {id:"signed_partial_reduction_remaining",expected:"0.02",
+      actual:reduceFinance.sql.remaining_lot_qty},
+    {id:"verified_protection_after_partial",expected:"0.02",
+      actual:reduceFinance.protection_resized.remaining_quantity},
+    {id:"final_close_signed_quantity",expected:"0.02",
+      actual:terminal.native_sql.close_signed_fill_quantity},
+    {id:"final_lots_flat",expected:"0",
+      actual:String(terminal.native_sql.remaining_lots)},
+    {id:"original_reservation_released",expected:"RELEASED",
+      actual:terminal.worker_original_reservation_state},
+    {id:"campaign_consumed_retained",expected:"1.4007",
+      actual:terminal.worker_after.entry_budget.consumed_usd},
+    {id:"remaining_grants_retained",expected:"7.0015",
+      actual:terminal.worker_after.entry_budget.reserved_usd},
+    {id:"total_mutation_posts",expected:"9",
+      actual:String(terminal.outbound_posts_after)},
+  ];
+  const events=[
+    ["b_cancel_ack","TradeService+RecordedOKXHTTP",cancel],
+    ["b_late_signed_fill_bill","NativeAccountSQL",late.sql],
+    ["public_partial_reduce","TradeService",partialReduce],
+    ["b_partial_signed_fill_bill","NativeAccountSQL",reduceFinance.sql],
+    ["remaining_stop_independent_readback","RecordedOKXHTTP",
+      reduceFinance.protection_resized],
+    ["final_public_close_ack","TradeService",terminal.close],
+    ["third_signed_fill_bill_and_flat","NativeAccountSQL",terminal.native_sql],
+    ["original_b_release","RuntimeSessionSQLiteDO",
+      [terminal.worker_original_reservation_key,terminal.worker_after]],
+  ].map(([stage,owner,source])=>({stage,owner,source_digest:hash(source)}));
+  return {
+    case_id:caseId,status:"PASS",
+    provenance:{schema:"okx.native-workerd-transcript/v1",
+      sha256:t.transcript_sha256},
+    assertions,events,
+    readbacks:{
+      sql:[
+        {revision:late.sql.sql_revision,digest:hash(late.sql)},
+        {revision:terminal.native_sql.close_revision,
+          digest:hash(terminal.native_sql)},
+      ],
+      risk_book:[
+        {revision:late.worker_sequence,digest:hash(late.worker_budget)},
+        {revision:terminal.worker_risk_book_sequence,
+          digest:hash(terminal.worker_after)},
+      ],
+    },
+    outbound_sends:[
+      {account:cancel.account_b,intent:b.b_intent_id,
+        operation_kind:"cancel",count:1},
+      {account:cancel.account_b,intent:partialReduce.reduce.intent_id,
+        operation_kind:"reduce",count:1},
+      {account:cancel.account_b,intent:partialReduce.reduce.intent_id,
+        operation_kind:"amend-algos",count:1},
+      {account:cancel.account_b,intent:terminal.close.intent_id,
+        operation_kind:"close",count:1},
+    ],
+  };
 }

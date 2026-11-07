@@ -818,3 +818,444 @@ async fn t10_09_b_signed_partial_reduce_finance(
         "outbound_posts":feed.outbound_posts.lock().unwrap().len(),
     })
 }
+
+
+// The public B Close uses only the source-backed remaining SQL lot. A posted
+// Close ACK is not a fill and does not authorize releasing the opening grant.
+// Publish the third independent fill/bill and venue-flat snapshots only after
+// the exact Close POST/ACK, then let ordinary Native capture and TradeService
+// settle the original B reservation through the persisted Worker.
+async fn t10_09_b_terminal_after_partial(
+    accounts: Arc<AccountRuntimeRegistry>,
+    trade: Arc<TradeService>,
+    risk: NativeRiskClient,
+    rate_budget: RateBudget,
+    feed: Arc<crate::accounts::recorded_support::RecordedAccountHttp>,
+    opening_id: String,
+    late_at: i64,
+    partial_at: i64,
+) -> serde_json::Value {
+    use crate::accounts::recorded_support::{RecordedGet, RecordedPost};
+    use okx_protocol::trading::TradeRequest;
+    use serde_json::json;
+
+    assert!(partial_at >= late_at, "T10-09 finance events must be ordered");
+    let raw = |v:serde_json::Value| serde_json::to_vec(
+        &json!({"code":"0","msg":"","data":v})
+    ).expect("T10-09 independent signed close source");
+    let before=feed.outbound_posts.lock().unwrap().len();
+    assert_eq!(before,8,"B final Close follows exactly one Reduce and one stop amend");
+    let clock=chrono::Utc::now().timestamp_millis().to_string();
+    feed.advance_recorded_public_clock(raw(json!([{"ts":clock}])));
+    feed.expect_public_clock(raw(json!([{
+        "ts":chrono::Utc::now().timestamp_millis().to_string()
+    }])));
+    feed.advance_recorded_route(
+        "fixture-observer-b","/api/v5/account/balance",
+        (0..24).map(|_| RecordedGet {
+            access_key:"fixture-observer-b".into(),
+            path:"/api/v5/account/balance".into(),
+            required_query:vec![],
+            raw_response:raw(json!([{
+                "totalEq":"99.9997","adjEq":"99.9997","uTime":clock,
+                "details":[{"ccy":"USDT","eq":"99.9997","liab":"0",
+                    "availEq":"99.9997","availBal":"99.9997",
+                    "eqUsd":"99.9997","uTime":clock}]
+            }])),
+        }).collect()
+    );
+    feed.expect_post(RecordedPost {
+        access_key:"fixture-executor-b".into(),
+        path:"/api/v5/trade/order".into(),
+        expected_body:json!({
+            "instId":"BTC-USDT-SWAP","tdMode":"cross",
+            "clOrdId":"__REQUEST_CL_ORD_ID__",
+            "side":"sell","posSide":"long",
+            "ordType":"ioc","sz":"0.02","px":"999"
+        }),
+        raw_response:raw(json!([{
+            "ordId":"recorded-t10-09-b-final-close-020",
+            "clOrdId":"__REQUEST_CL_ORD_ID__","sCode":"0"
+        }])),
+    });
+    feed.expect_get(RecordedGet {
+        access_key:"fixture-executor-b".into(),
+        path:"/api/v5/trade/order".into(),
+        required_query:vec![("instId".into(),"BTC-USDT-SWAP".into())],
+        raw_response:raw(json!([{
+            "instId":"BTC-USDT-SWAP",
+            "ordId":"recorded-t10-09-b-final-close-020",
+            "clOrdId":"__REQUEST_CL_ORD_ID__",
+            "side":"sell","posSide":"long","tdMode":"cross",
+            "ordType":"ioc","px":"999","sz":"0.02","accFillSz":"0",
+            "avgPx":"","state":"live","cTime":clock,"uTime":clock
+        }])),
+    });
+    let operation_key="t10_09_public_final_close_020_0001".to_owned();
+    let attempted=trade.trade(
+        "fixture-b",
+        &TradeRequest::Close {
+            idempotency_key:operation_key.clone(),
+            reference:opening_id.clone(),
+            expires_in_ms:30_000,
+        },None,
+    ).await;
+    assert_eq!(feed.outbound_posts.lock().unwrap().len(),9,
+        "T10-09 must send exactly one public source-backed 0.02 Close POST: {attempted:?}");
+    assert_eq!(feed.unconsumed_posts(),0,
+        "T10-09 Close must consume its exact authenticated venue ACK");
+    let owner=accounts.resolve("fixture-b").await.expect("B persisted Native owner");
+    let key=operation_key.clone();
+    let close=owner.execution.store.call(
+        std::time::Instant::now()+Duration::from_secs(3),
+        move |s| {
+            let i=s.by_idempotency(&key)?.ok_or(
+                okx_execution::StoreError::Invalid("T10_09_CLOSE_SQL_NOT_PERSISTED")
+            )?;
+            Ok(json!({
+                "intent_id":i.intent_id,
+                "exchange_order_id":i.exchange_order_id,
+                "client_order_id":i.client_order_id,
+                "state":i.state.as_str(),
+                "quantity":i.plan.quantity.normalize().to_string(),
+                "risk_increase":i.risk_increase,
+                "operation":i.plan.operation,
+                "revision":i.revision,
+            }))
+        }
+    ).await.expect("T10-09 persisted Close intent after single ACK");
+    assert_eq!(close["quantity"],"0.02","the ordinary public Close must own the SQL remainder");
+    assert_eq!(close["risk_increase"],false);
+    assert_eq!(close["operation"],"close");
+    assert_eq!(close["exchange_order_id"],"recorded-t10-09-b-final-close-020",
+        "the single venue ACK must be durably bound to B Close");
+    let close_id=close["intent_id"].as_str()
+        .expect("T10-09 durable B Close intent").to_owned();
+
+    // This THIRD B signed economic event occurs only after the persisted
+    // Close ACK. Replaying the first two immutable events does not create
+    // new economics; the last event is one exact 0.02 sell + -0.0001 fee.
+    let at=chrono::Utc::now().timestamp_millis().max(partial_at+1);
+    let mut fills=Vec::new();
+    let mut bills=Vec::new();
+    for (trade_id,bill_id,ord_id,side,sub_type,quantity,fee,when) in [
+        ("t10-09-b-late-trade-001","t10-09-b-late-bill-001",
+            "recorded-b1-b-001","buy","3","0.04","-0.0002",late_at),
+        ("t10-09-b-reduce-trade-001","t10-09-b-reduce-bill-001",
+            "recorded-t10-09-b-reduce-020","sell","5","0.02","-0.0001",partial_at),
+        ("t10-09-b-final-trade-001","t10-09-b-final-bill-001",
+            "recorded-t10-09-b-final-close-020","sell","5","0.02","-0.0001",at),
+    ] {
+        fills.push(json!({
+            "instType":"SWAP","instId":"BTC-USDT-SWAP",
+            "tradeId":trade_id,"billId":bill_id,"ordId":ord_id,
+            "clOrdId":"__REQUEST_CL_ORD_ID__",
+            "subType":sub_type,"side":side,"posSide":"long",
+            "fillPx":"1000","fillSz":quantity,"fillPnl":"0",
+            "fee":fee,"feeCcy":"USDT",
+            "ts":when.to_string(),"fillTime":when.to_string()
+        }));
+        bills.push(json!({
+            "billId":bill_id,"instType":"SWAP","instId":"BTC-USDT-SWAP",
+            "ordId":ord_id,"tradeId":trade_id,
+            "clOrdId":"__REQUEST_CL_ORD_ID__","ccy":"USDT",
+            "type":"2","subType":sub_type,
+            "balChg":fee,"fee":fee,"pnl":"0","ts":when.to_string()
+        }));
+    }
+    let mut history=Vec::new();
+    for _ in 0..32 {
+        for part in ["SPOT","MARGIN","SWAP","FUTURES","OPTION"] {
+            history.push(RecordedGet {
+                access_key:"fixture-executor-b".into(),
+                path:"/api/v5/trade/fills-history".into(),
+                required_query:vec![("instType".into(),part.into())],
+                raw_response:if part=="SWAP" {raw(json!(fills))}
+                    else {raw(json!([]))},
+            });
+        }
+    }
+    feed.advance_recorded_route(
+        "fixture-executor-b","/api/v5/trade/fills-history",history
+    );
+    feed.advance_recorded_route(
+        "fixture-executor-b","/api/v5/account/bills-archive",
+        (0..32).map(|_| RecordedGet {
+            access_key:"fixture-executor-b".into(),
+            path:"/api/v5/account/bills-archive".into(),
+            required_query:vec![],
+            raw_response:raw(json!(bills)),
+        }).collect(),
+    );
+    feed.advance_recorded_route(
+        "fixture-observer-b","/api/v5/account/positions",
+        (0..80).map(|_| RecordedGet {
+            access_key:"fixture-observer-b".into(),
+            path:"/api/v5/account/positions".into(),
+            required_query:vec![],
+            raw_response:raw(json!([])),
+        }).collect(),
+    );
+    feed.advance_recorded_route(
+        "fixture-observer-b","/api/v5/account/balance",
+        (0..48).map(|_| RecordedGet {
+            access_key:"fixture-observer-b".into(),
+            path:"/api/v5/account/balance".into(),
+            required_query:vec![],
+            raw_response:raw(json!([{
+                "totalEq":"99.9996","adjEq":"99.9996","uTime":at.to_string(),
+                "details":[{"ccy":"USDT","eq":"99.9996","liab":"0",
+                    "availEq":"99.9996","availBal":"99.9996",
+                    "eqUsd":"99.9996","uTime":at.to_string()}]
+            }])),
+        }).collect(),
+    );
+    let mut order_reads=Vec::new();
+    for _ in 0..32 {
+        for (id,side,kind,qty,filled,when) in [
+            ("recorded-b1-b-001","buy","limit","0.1","0.04",late_at),
+            ("recorded-t10-09-b-reduce-020","sell","ioc","0.02","0.02",partial_at),
+            ("recorded-t10-09-b-final-close-020","sell","ioc","0.02","0.02",at),
+        ] {
+            order_reads.push(RecordedGet {
+                access_key:"fixture-executor-b".into(),
+                path:"/api/v5/trade/order".into(),
+                required_query:vec![("instId".into(),"BTC-USDT-SWAP".into())],
+                raw_response:raw(json!([{
+                    "instId":"BTC-USDT-SWAP","ordId":id,
+                    "clOrdId":"__REQUEST_CL_ORD_ID__",
+                    "side":side,"posSide":"long","tdMode":"cross",
+                    "ordType":kind,"sz":qty,"accFillSz":filled,"avgPx":"1000",
+                    "px":if kind=="ioc" {"999"}else{"1000"},
+                    "state":if kind=="ioc" {"filled"}else{"canceled"},
+                    "cTime":when.to_string(),"uTime":when.to_string()
+                }])),
+            });
+        }
+    }
+    feed.advance_recorded_route("fixture-executor-b","/api/v5/trade/order",order_reads);
+    // The exchange separately reports its attached stop canceled after flat.
+    // This is a NEW independent venue GET event, not a test-owned cancel
+    // mutation and not a synthetic protection receipt made by TradeService.
+    let original=opening_id.clone();
+    let opening_client=owner.execution.store.call(
+        std::time::Instant::now()+Duration::from_secs(3),
+        move |s| Ok(s.intent(&original)?.ok_or(
+            okx_execution::StoreError::Invalid("T10_09_OPENING_ID_MISSING")
+        )?.client_order_id),
+    ).await.expect("B original client identity for signed stop");
+    let stop_client=format!("s{}",opening_client.get(..31)
+        .expect("B stop must bind exact opening client"));
+    feed.advance_recorded_route(
+        "fixture-executor-b","/api/v5/trade/order-algo",
+        (0..24).map(|_| RecordedGet {
+            access_key:"fixture-executor-b".into(),
+            path:"/api/v5/trade/order-algo".into(),
+            required_query:vec![("algoClOrdId".into(),stop_client.clone())],
+            raw_response:raw(json!([{
+                "instId":"BTC-USDT-SWAP","algoId":"900000004",
+                "algoClOrdId":stop_client,"state":"canceled",
+                "sz":"0.02","side":"sell","posSide":"long",
+                "tdMode":"cross","ordType":"conditional",
+                "slTriggerPx":"900","slTriggerPxType":"mark","slOrdPx":"-1"
+            }])),
+        }).collect(),
+    );
+    // A full, exact signed orphan inventory is required even though the
+    // stop-specific GET reports canceled; no empty generic fallbacks count.
+    for _ in 0..8 {
+        for kind in [
+            "conditional","oco","trigger","move_order_stop","chase",
+            "iceberg","twap","smart_iceberg",
+        ] {
+            for inst_type in ["SWAP","FUTURES"] {
+                feed.expect_get(RecordedGet {
+                    access_key:"fixture-observer-b".into(),
+                    path:"/api/v5/trade/orders-algo-pending".into(),
+                    required_query:vec![
+                        ("instType".into(),inst_type.into()),
+                        ("ordType".into(),kind.into()),
+                        ("limit".into(),"100".into()),
+                    ],
+                    raw_response:raw(json!([])),
+                });
+            }
+        }
+    }
+    feed.advance_immutable_signed_phase_bounded(
+        "t10-09-b-reduce-filled-pending-inventory",
+        "t10-09-b-final-flat-pending-inventory",
+        RecordedGet {
+            access_key:"fixture-observer-b".into(),
+            path:"/api/v5/trade/orders-pending".into(),
+            required_query:vec![("limit".into(),"100".into())],
+            raw_response:raw(json!([])),
+        },
+        24,Duration::from_secs(20),
+    );
+
+    let until=std::time::Instant::now()+Duration::from_secs(24);
+    let mut last=json!(null);
+    let mut original_status=json!(null);
+    let mut close_status=json!(null);
+    let mut attempts=0_u32;
+    while attempts<8 && std::time::Instant::now()<until {
+        attempts+=1;
+        let mut deferred=false;
+        for (reference,opening) in [(close_id.as_str(),false),(opening_id.as_str(),true)] {
+            let result=trade.trade(
+                "fixture-b",&TradeRequest::Status{reference:reference.to_owned()},None
+            ).await;
+            let observed=match result {
+                Ok(value)=>value,
+                Err(reason)=>{
+                    let remaining=until.saturating_duration_since(std::time::Instant::now());
+                    let delay=recorded_preview_local_defer(
+                        &reason,&rate_budget,remaining
+                    ).unwrap_or_else(||panic!(
+                        "T10_09_FINAL_STATUS_NONLOCAL_SOURCE:{reference}:{reason}"
+                    ));
+                    tokio::time::sleep(delay).await;
+                    feed.advance_recorded_public_clock(raw(json!([{
+                        "ts":chrono::Utc::now().timestamp_millis().to_string()
+                    }])));
+                    deferred=true;
+                    break;
+                }
+            };
+            assert_eq!(feed.outbound_posts.lock().unwrap().len(),9,
+                "T10-09 final status cannot replay Close or issue unseen cancels");
+            if opening {original_status=observed} else {close_status=observed}
+        }
+        if deferred {continue}
+        let complete=close_status["data"]["intent"]["state"]=="FILLED"
+            && original_status["data"]["central_release"]["state"]=="verified"
+            && original_status["data"]["protection_incident"]==false
+            && original_status["data"]["protection_remediation"]["state"]
+                =="verified_flat_no_orphans";
+        last=json!({
+            "attempt":attempts,
+            "close_intent":close_status["data"]["intent"]["state"],
+            "original_release":original_status["data"]["central_release"],
+            "protection":original_status["data"]["protection_remediation"],
+            "financial_error":original_status["data"]["financial_error"],
+        });
+        if complete {break}
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    assert_eq!(close_status["data"]["intent"]["state"],"FILLED",
+        "T10-09 signed B Close fill/bill not settled: {last}");
+    assert_eq!(original_status["data"]["central_release"]["state"],"verified",
+        "T10-09 original B Worker grant not released: {last}");
+    assert_eq!(original_status["data"]["protection_incident"],false,
+        "T10-09 independent flat must not leave protective incident");
+    assert_eq!(original_status["data"]["protection_remediation"]["state"],
+        "verified_flat_no_orphans",
+        "T10-09 canceled B stop and signed orphan0 inventory are mandatory");
+
+    let o=opening_id.clone();
+    let c=close_id.clone();
+    let sql=owner.execution.store.call(
+        std::time::Instant::now()+Duration::from_secs(3),
+        move |s| {
+            let opening=s.intent(&o)?.ok_or(
+                okx_execution::StoreError::Invalid("T10_09_TERMINAL_ORIGINAL_MISSING")
+            )?;
+            let closing=s.intent(&c)?.ok_or(
+                okx_execution::StoreError::Invalid("T10_09_TERMINAL_CLOSE_MISSING")
+            )?;
+            let fills=s.cursor("fills","SWAP")?.ok_or(
+                okx_execution::StoreError::Invalid("T10_09_FINAL_FILL_CURSOR_MISSING")
+            )?;
+            let bills=s.cursor("bills","account")?.ok_or(
+                okx_execution::StoreError::Invalid("T10_09_FINAL_BILL_CURSOR_MISSING")
+            )?;
+            let f=s.intent_fill_cost_evidence(&c,fills.watermark)?;
+            let b=s.intent_fee_bill_evidence(&c,bills.watermark)?;
+            let lots=s.active_lots("BTC-USDT-SWAP")?;
+            let receipt=s.central_receipt(&o)?.ok_or(
+                okx_execution::StoreError::Invalid("T10_09_ORIGINAL_CENTRAL_RECEIPT_MISSING")
+            )?;
+            Ok(json!({
+                "original_intent_id":opening.intent_id,
+                "original_revision":opening.revision,
+                "close_intent_id":closing.intent_id,
+                "close_revision":closing.revision,
+                "close_state":closing.state.as_str(),
+                "close_quantity":closing.plan.quantity.normalize().to_string(),
+                "close_risk_increase":closing.risk_increase,
+                "close_signed_fill_quantity":f.filled_quantity.normalize().to_string(),
+                "close_signed_fill_count":f.fill_count,
+                "close_signed_bill_count":b.linked_bill_count,
+                "close_signed_fee_usdt":
+                    b.conservative_verified_fee_usdt.normalize().to_string(),
+                "remaining_lots":lots.len(),
+                "fill_watermark":fills.watermark,
+                "bill_watermark":bills.watermark,
+                "fill_complete":fills.coverage_gaps.is_empty()&&fills.cursor.is_empty(),
+                "bill_complete":bills.coverage_gaps.is_empty()&&bills.cursor.is_empty(),
+                "original_central_still_held":
+                    s.active_central_receipt(&o)?.is_some(),
+                "reservation_key":receipt.reservation_key,
+                "plan_hash":receipt.plan_hash,
+                "account_key":receipt.account_key,
+            }))
+        }
+    ).await.expect("T10-09 immutable B SQL final receipt");
+    assert_eq!(sql["remaining_lots"],0,"T10-09 no position flip or hidden remnant");
+    assert_eq!(sql["close_signed_fill_quantity"],"0.02");
+    assert_eq!(sql["close_signed_fill_count"],1);
+    assert_eq!(sql["close_signed_bill_count"],1);
+    assert_eq!(sql["close_signed_fee_usdt"],"0.0001");
+    assert_eq!(sql["close_risk_increase"],false);
+    assert_eq!(sql["original_central_still_held"],false);
+    assert_eq!(sql["fill_complete"],true);
+    assert_eq!(sql["bill_complete"],true);
+    assert!(sql["fill_watermark"].as_i64().unwrap_or_default()>=at);
+    assert!(sql["bill_watermark"].as_i64().unwrap_or_default()>=at);
+    let reservation_key=sql["reservation_key"].as_str()
+        .expect("B original reservation key").to_owned();
+    assert_eq!(sql["account_key"],owner.configuration.account_key.wire());
+    let inspected=risk.request(RiskCommand {
+        schema:RISK_COMMAND_SCHEMA_V1.into(),
+        command_id:"risk_t10_09_inspect_original_released".into(),
+        installation_id:"installation_test".into(),
+        action:RiskCommandAction::Inspect {
+            reservation_key:reservation_key.clone(),
+            plan_sha256:sql["plan_hash"].as_str().expect("B original plan hash").to_owned(),
+        },
+    }).await.expect("T10-09 persisted Worker original reservation INSPECT");
+    assert_eq!(inspected.status,RiskDecisionStatus::Observed);
+    assert_eq!(inspected.reservation_key.as_deref(),Some(reservation_key.as_str()));
+    assert_eq!(inspected.reservation_state,
+        Some(okx_protocol::risk_authority::RiskReservationState::Released),
+        "T10-09 may not infer Worker release from SQL alone");
+    let mut cmd=summary("risk_t10_09_after_b_final_flat");
+    cmd.installation_id="installation_test".into();
+    let worker=risk.request(cmd).await.expect("T10-09 same persisted Worker");
+    let budget=worker.budget.as_ref().unwrap().entry_budget.as_ref().unwrap();
+    assert_eq!(budget.consumed_usd,"1.4007",
+        "T10-09 terminal B release cannot erase cumulative campaign entry spend");
+    assert_eq!(budget.reserved_usd,"7.0015",
+        "T10-09 exact B remainder grant must be released, preserving other grants");
+    assert_eq!(budget.remaining_usd,"0.9975");
+    assert_eq!(feed.outbound_posts.lock().unwrap().len(),9,
+        "T10-09 no re-entry, duplicate reduce, amend, or extra cancel POST");
+    assert_eq!(feed.unconsumed_posts(),0);
+    json!({
+        "schema":"okx.t10-09-native-terminal-flat/v1",
+        "opening_intent_id":opening_id,
+        "close":close,
+        "original_status":original_status,
+        "close_status":close_status,
+        "native_sql":sql,
+        "signed_close_at_ms":at,
+        "worker_after":worker.budget,
+        "worker_risk_book_sequence":worker.risk_book_sequence,
+        "worker_original_reservation_state":"RELEASED",
+        "worker_original_reservation_key":reservation_key,
+        "outbound_posts_before":before,
+        "outbound_posts_after":feed.outbound_posts.lock().unwrap().len(),
+        "status_attempts":attempts,
+    })
+}
