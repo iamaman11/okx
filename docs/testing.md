@@ -57,40 +57,64 @@ Known deliberate non-PASS cases on `f06383e`: `T10-07`, `T10-08`, `T10-09`, `T10
 | Trader / INSTALLED / PHYSICAL / REAL | Existing P0 runtime, governance, release and backup owners | Only after CODE and applicable release/operational gates; REAL requires separate explicit authorization | NOT_RUN / NO-GO |
 
 **Update rule:** refresh row evidence from the next exact SHA + CI/artifact; do not copy historical PASS across commits or turn a deliberate negative into a green gate. Required mandatory milestones remain 16→24→26 PASS with 0 executed failures. No full CI was triggered for this documentation/metadata update.
+## #495 — entry settlement (bounded structural refactor only)
 
-## #495 — direct entry settlement tests (structural, not CODE acceptance)
+The coordinator now lives at `trade_service/entry_settlement.rs::settle_incremental_entry`,
+with one production caller in `reconcile.rs::status_intent`. The old method
+is removed; `release_terminal` remains the independent terminal owner. The
+SQL owner still controls source-backed finance/bind/ack and NativeRiskClient
+still carries authenticated Worker CAS. No changed FX, fees, risk limits,
+network GET budgets, release ordering, or wire results.
 
-The one production entry coordinator is in `crates/okx-agent/src/trade_service/entry_settlement.rs`,
-called from `reconcile.rs::status_intent`. The original method was deleted; terminal
-release remains independent. SQL maintains financial evidence and ack; Worker owns CAS.
-
-Direct command from the repository root (verify nonzero test count):
+**Direct Windows command** (run on final source SHA, require nonzero tests):
 
 ```text
 cargo test --locked -p okx-agent --lib trade_service::entry_settlement:: -- --nocapture
 ```
 
-R-01/R-02: `r01_r02_partial_settlement_and_same_revision_repeat_use_one_sql_ack`,
+R-01/R-02: `r01_r02_partial_settlement_and_same_revision_repeat_use_one_sql_ack`;
 `r02_terminal_replay_reads_immutable_receipt_without_second_settle`.
 R-03: `r03_released_late_bill_requires_same_reservation_new_revision_and_ack`.
 R-04: `r04_missing_source_cannot_ack_and_identity_mismatch_preserves_first_reason`.
 R-05: `r05_lost_settlement_reply_keeps_unacked_revision_and_replays_same_proof`.
 R-06: `r06_three_cas_conflicts_never_ack_unaccepted_settlement`.
-Early-denial and typed error-identity guard tests run through the same filter.
+Additional tests prove demo/no-order fail-closed and typed error metadata.
+All use real SQLite; programmable NativeRiskClient replies prove orchestration,
+not Worker monetary arithmetic. No setup stamps successful settlement ACK
+into a table.
 
-Each direct scenario uses a real AccountStore/SQLite and typed venue readback;
-programmed `NativeRiskClient` replies prove request/ack orchestration but not Worker money.
-Test setup never directly writes success/ack table rows or invents a RiskBook.
+[Windows run #42392615185](https://github.com/iamaman11/okx/actions/runs/42392615185)
+at `6628b2acfb31d2f3bcdc8b4841760d5f366a2016` and
+[run #42393552274](https://github.com/iamaman11/okx/actions/runs/42393552274)
+at `6de0455f6930feced26a518df304945dfce657d1` both confirmed
+**8 PASS, 0 FAIL** direct tests; the first timed **1.34s** after compilation.
+Rust format/compile, architecture, Cloudflare and B1 prerequisites succeeded.
+The required global Windows Clippy gate still fails on inherited warnings in
+unrelated code, and is not disabled or declared PASS.
 
-On `07747172f1688a8ce7f068e5b0b25254eb363fb5`,
-[Windows run 42391650565](https://github.com/iamaman11/okx/actions/runs/42391650565)
-proved **6 passed, 0 failed, 292 filtered, 0.93s** (excluding compilation).
-New terminal and late-fee tests were added later and must be confirmed on exact final SHA;
-do not copy this PASS to newer commits. Windows CI checks at least eight PASS first;
-existing mandatory Clippy/full gates remain unchanged.
+**Exact-parent address comparison**, original `3a892c4993e4a62a270197c52cd9d3c1afd00663`
+against `6de0455f6930feced26a518df304945dfce657d1`:
+- T09.3 PASS/PASS (run #42393552274, artifact 13582019224).
+- T09.8 FAIL/FAIL at identical first
+  `PROTECTION_CANCEL_OUTCOME_UNKNOWN_INSPECT` in `trade_integration_t09_6.rs:618`
+  (artifact 13583265306).
+- T10-09: first pair baseline PASS/candidate FAIL at recorded fixture
+  `TRANSCRIPT_SOURCE_PAGE_UNEXPECTED_OR_EXHAUSTED` on
+  `orders-algo-pending` (artifact 13583030900). On same SHA, one targeted job
+  retry reproduced baseline FAIL/candidate FAIL with identical first
+  `T10_09_AMEND_ACK_SQL_MISSING` and
+  `PROTECTION_SHRINK_ORIGINAL_RISK_UNVERIFIED` in
+  `trade_integration_t10_09.rs:846` (artifact 13582866530).
+  Therefore the recorded integration path is **nondeterministic** even on
+  the original SHA; it is **not** proven PASS or financial-complete.
+- The operation bodies were compared with normalized whitespace after only
+  replacing `self` dependencies, deadline provider, and successful typed
+  outcomes; the transformed original and extracted source were identical.
+  Counts before/after: 8 SQL calls, 5 risk action uses, 2 bounded retry loops,
+  3 bind calls, 2 SQL ACK calls.
 
-The dedicated `entry-settlement-regression` Windows matrix compares T09.3, T09.8
-and T10-09 separately on exact parent `3a892c4993e4a62a270197c52cd9d3c1afd00663`
-and the candidate SHA, with independent artifacts including baseline failures.
-No merged/released/26-of-26/REAL acceptance is implied. The recorded-source
-baseline may fail before the affected transition; compare first cause and stage.
+The temporary three-case Windows comparison matrix was intentionally removed
+after preserving the two independent runs and artifacts. Only fast direct
+production-boundary tests remain in the existing `windows-native` job.
+Source-fixture stability and protection failures belong to #449; #495 cannot
+be used to claim T10-09 PASS or bypass full26/required release gates.
