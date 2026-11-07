@@ -965,6 +965,7 @@ async fn t10_09_b_terminal_after_partial(
     opening_id: String,
     late_at: i64,
     partial_at: i64,
+    a_order_venue_at: i64,
 ) -> serde_json::Value {
     use crate::accounts::recorded_support::{RecordedGet, RecordedPost};
     use okx_protocol::trading::TradeRequest;
@@ -1303,6 +1304,51 @@ async fn t10_09_b_terminal_after_partial(
     eprintln!(
         "T10_09_A_TERMINAL_COHORT_BALANCE_SOURCE_V1:account=A observed_at={} retired_prior={}",
         a_balance_at,retired_a_balance
+    );
+    // The same complete terminal census also reads A's STILL-LIVE
+    // unrelated Open order. Its signed create ACK and earlier independent
+    // order GET already established this 0.30 pending obligation; B's
+    // independent Close did not fill, cancel or resize it. A new A-owned
+    // pending-orders GET event reports the UNCHANGED original venue cTime
+    // and uTime, not a synthetic time derived from B's release request.
+    assert!(a_order_venue_at>0 && a_order_venue_at<=late_at,
+        "T10-09 A signed pending order must predate B's late fill");
+    let (a_client,a_state,a_qty,a_open)=a_owner.execution.store.call(
+        std::time::Instant::now()+Duration::from_secs(3),
+        move |sql| {
+            let i=sql.by_exchange_order_id("recorded-t09-second-001")?
+                .ok_or(okx_execution::StoreError::Invalid(
+                    "T10_09_A_PENDING_SOURCE_INTENT_NOT_FOUND"
+                ))?;
+            Ok((i.client_order_id,i.state.as_str().to_owned(),
+                i.plan.quantity,i.risk_increase))
+        },
+    ).await.expect("T10-09 A persisted independent pending order identity");
+    assert_eq!(a_state,"ACKNOWLEDGED",
+        "T10-09 A unrelated pending order must not turn terminal");
+    assert_eq!(a_qty,Decimal::new(3,1));
+    assert!(a_open,"T10-09 A remains an independent risk-increasing intent");
+    let a_order_at=a_order_venue_at.to_string();
+    let a_pending=raw(json!([{
+        "instType":"SWAP","instId":"BTC-USDT-SWAP",
+        "ordId":"recorded-t09-second-001","clOrdId":a_client,
+        "side":"buy","posSide":"long","tdMode":"cross",
+        "ordType":"limit","px":"1000","sz":"0.3",
+        "accFillSz":"0","avgPx":"","state":"live",
+        "cTime":a_order_at,"uTime":a_order_at
+    }]));
+    let retired_a_pending=feed.advance_recorded_route(
+        "fixture-observer-a","/api/v5/trade/orders-pending",
+        (0..8).map(|_|RecordedGet {
+            access_key:"fixture-observer-a".into(),
+            path:"/api/v5/trade/orders-pending".into(),
+            required_query:vec![("limit".into(),"100".into())],
+            raw_response:a_pending.clone(),
+        }).collect(),
+    );
+    eprintln!(
+        "T10_09_A_TERMINAL_COHORT_PENDING_SOURCE_V1:account=A ord_id=recorded-t09-second-001 original_venue_at={} retired_prior={}",
+        a_order_venue_at,retired_a_pending
     );
     feed.advance_immutable_signed_phase_bounded(
         "t10-09-b-reduce-filled-pending-inventory",
