@@ -3213,3 +3213,7 @@ mod entry_cost_status_tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "protection_cleanup_direct_tests.rs"]
+mod protection_cleanup_direct_tests;
