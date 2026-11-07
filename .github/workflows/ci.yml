@@ -16,7 +16,7 @@ on:
         required: false
         default: false
       target_case:
-        description: 'Targeted Windows T09, B1 prerequisite or S2-05 CAS (not 26/26)'
+        description: 'One targeted Windows integration case, B1 or S2-05 (not 26/26)'
         type: choice
         required: false
         default: T09.6
@@ -29,6 +29,11 @@ on:
           - T10-03
           - T10-05
           - T10-06
+          - T10-08
+          - T10-09
+          - T10-10
+          - T10-11
+          - T10-12
           - T10-15
           - T09.3
           - T09.4
@@ -428,7 +433,7 @@ jobs:
         run: |
           $head = (git rev-parse HEAD).Trim()
           if ($head -ne $env:GITHUB_SHA) { throw "PREFLIGHT_HEAD_MISMATCH" }
-          if ($env:OKX_TARGET_CASE -notin @('T09.1','T09.3','T09.4','T09.5','T09.6','T09.7','T09.8','B1','S2-05','T10-14','T10-03','T10-05','T10-06','T10-08','T10-09','T10-15')) {
+          if ($env:OKX_TARGET_CASE -notin @('T09.1','T09.3','T09.4','T09.5','T09.6','T09.7','T09.8','B1','S2-05','T10-14','T10-03','T10-05','T10-06','T10-08','T10-09','T10-10','T10-11','T10-12','T10-15')) {
             throw "PREFLIGHT_CASE_NOT_ALLOWED"
           }
           Write-Host "PREFLIGHT_HEAD=$head"
@@ -491,7 +496,7 @@ jobs:
         env:
           OKX_TARGET_CASE: ${{ inputs.target_case || ((github.event_name == 'push' && contains(github.event.head_commit.message, '[T10-09]') && 'T10-09') || (github.event_name == 'push' && contains(github.event.head_commit.message, '[T10-08]') && 'T10-08') || (github.event_name == 'push' && contains(github.event.head_commit.message, '[T10-05]') && 'T10-05') || (github.event_name == 'push' && 'T09.8')) || 'T09.6' }}
         run: |
-          if ($env:OKX_TARGET_CASE -notin @('T09.1','T09.3','T09.4','T09.5','T09.6','T09.7','T09.8','B1','S2-05','T10-14','T10-03','T10-05','T10-06','T10-08','T10-09','T10-15')) {
+          if ($env:OKX_TARGET_CASE -notin @('T09.1','T09.3','T09.4','T09.5','T09.6','T09.7','T09.8','B1','S2-05','T10-14','T10-03','T10-05','T10-06','T10-08','T10-09','T10-10','T10-11','T10-12','T10-15')) {
             throw "PREFLIGHT_CASE_NOT_ALLOWED"
           }
           $artifacts = Join-Path $env:RUNNER_TEMP "trade-integration"

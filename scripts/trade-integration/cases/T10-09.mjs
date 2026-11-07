@@ -77,6 +77,10 @@ export async function run({caseId,root,signal,artifactsDir}) {
   assert.equal(reduceFinance.protection_amend_ack.state,"ack_source_pending");
   assert.equal(reduceFinance.protection_resized.state,"verified");
   assert.equal(reduceFinance.protection_resized.remaining_quantity,"0.02");
+  assert.ok(Number.isSafeInteger(reduceFinance.b_signed_pending_inventory_reads)
+    && reduceFinance.b_signed_pending_inventory_reads>=1
+    && reduceFinance.b_signed_pending_inventory_reads<=24,
+    "B's signed post-Reduce inventory must be independently consumed");
   assert.equal(reduceFinance.outbound_posts,8);
   assert.notEqual(partialReduce.original_central_release.state,"verified");
   assert.ok(Number.isSafeInteger(late.sql.sql_revision)&&late.sql.sql_revision>0);

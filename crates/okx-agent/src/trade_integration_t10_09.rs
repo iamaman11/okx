@@ -738,6 +738,23 @@ async fn t10_09_b_signed_partial_reduce_finance(
         feed.denied_routes.lock().unwrap().last().cloned());
     assert_eq!(feed.outbound_posts.lock().unwrap().len(),8,
         "T10-09 sole amend-algos POST must follow the public Reduce");
+    // At this exact boundary, B's original order has independently read
+    // back CANCELED and the Reduce has a signed FILLED readback plus a
+    // reconciled 0.02 lot. The next authenticated B orders-pending GET is
+    // therefore a separate finite venue sample, not the transcript's
+    // generic empty fallback. Only B's exact signer, route and query can
+    // consume it; repeated polling never publishes a fresher phase.
+    feed.expect_immutable_signed_phase_bounded(
+        "t10-09-b-reduce-filled-pending-inventory",
+        RecordedGet {
+            access_key:"fixture-observer-b".into(),
+            path:"/api/v5/trade/orders-pending".into(),
+            required_query:vec![("limit".into(),"100".into())],
+            raw_response:raw(json!([])),
+        },
+        24,
+        Duration::from_secs(12),
+    );
     // The next venue GET is independent of the amend ACK: the old source
     // remains 0.04 until the explicit post-ACK source handoff.
     let after_live=raw(json!([{
@@ -765,6 +782,13 @@ async fn t10_09_b_signed_partial_reduce_finance(
     assert_eq!(resized["data"]["protection_adjustment"]["state"],"verified",
         "a matching amend ACK alone cannot verify remaining protection");
     assert_eq!(resized["data"]["protection_adjustment"]["remaining_quantity"],"0.02");
+    let b_pending_reads=feed.immutable_signed_phase_reads(
+        "fixture-observer-b",
+        "/api/v5/trade/orders-pending",
+        "t10-09-b-reduce-filled-pending-inventory",
+    );
+    assert!(b_pending_reads > 0 && b_pending_reads <= 24,
+        "T10-09 must consume the exact signed B orders-pending phase");
     assert_eq!(feed.outbound_posts.lock().unwrap().len(),8,
         "T10-09 verified stop readback must not amend twice");
     let proof=owner.execution.store.call(
@@ -790,6 +814,7 @@ async fn t10_09_b_signed_partial_reduce_finance(
         "central_release_state":status["data"]["central_release"]["state"],
         "protection_amend_ack":status["data"]["protection_adjustment"],
         "protection_resized":resized["data"]["protection_adjustment"],
+        "b_signed_pending_inventory_reads":b_pending_reads,
         "outbound_posts":feed.outbound_posts.lock().unwrap().len(),
     })
 }
