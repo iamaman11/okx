@@ -38,10 +38,12 @@ pub(super) enum SettlementFailureKind {
 pub(super) struct EntrySettlementError {
     pub(super) stage: &'static str,
     pub(super) kind: SettlementFailureKind,
+    pub(super) intent_id: String,
+    pub(super) intent_revision: i64,
     pub(super) reason_code: String,
 }
 impl EntrySettlementError {
-    fn from_reason(reason_code: String) -> Self {
+    fn from_reason(reason_code: String, intent_id: &str, intent_revision: i64) -> Self {
         let reason = reason_code.as_str();
         let stage = match reason {
             "PARTIAL_ENTRY_FILLS_UNCOVERED"
@@ -56,7 +58,8 @@ impl EntrySettlementError {
             | "LATE_ENTRY_SETTLEMENT_CAS_BUSY"
             | "PARTIAL_ENTRY_RISK_SEQUENCE_MISSING"
             | "LATE_ENTRY_RISK_SEQUENCE_MISSING" => "risk_cas",
-            "PARTIAL_ENTRY_ORDER_IDENTITY_MISMATCH"
+            "ORDER_READBACK_IDENTITY_MISMATCH"
+            | "PARTIAL_ENTRY_ORDER_IDENTITY_MISMATCH"
             | "PARTIAL_ENTRY_SOURCE_IDENTITY_MISMATCH"
             | "TERMINAL_ENTRY_REPLAY_IDENTITY_MISMATCH" => "identity",
             "PARTIAL_ENTRY_ORDER_READBACK_UNAVAILABLE"
@@ -73,7 +76,8 @@ impl EntrySettlementError {
             | "RISK_TRANSPORT_LOST_DO_NOT_REPLAY"
             | "PARTIAL_ENTRY_SETTLEMENT_CAS_BUSY"
             | "LATE_ENTRY_SETTLEMENT_CAS_BUSY" => SettlementFailureKind::AwaitingEvidence,
-            "PARTIAL_ENTRY_ORDER_IDENTITY_MISMATCH"
+            "ORDER_READBACK_IDENTITY_MISMATCH"
+            | "PARTIAL_ENTRY_ORDER_IDENTITY_MISMATCH"
             | "PARTIAL_ENTRY_SOURCE_IDENTITY_MISMATCH"
             | "TERMINAL_ENTRY_REPLAY_IDENTITY_MISMATCH" => SettlementFailureKind::Conflict,
             _ => SettlementFailureKind::Failed,
@@ -81,6 +85,8 @@ impl EntrySettlementError {
         Self {
             stage,
             kind,
+            intent_id: intent_id.to_owned(),
+            intent_revision,
             reason_code,
         }
     }
@@ -101,7 +107,7 @@ pub(super) async fn settle_incremental_entry(
 ) -> Result<EntrySettlementOutcome, EntrySettlementError> {
     settle_inner(account, i, order, store, risk, governance, sql_deadline)
         .await
-        .map_err(EntrySettlementError::from_reason)
+        .map_err(|reason| EntrySettlementError::from_reason(reason, &i.intent_id, i.revision))
 }
 
 async fn settle_inner(
@@ -413,9 +419,11 @@ mod tests {
                 SettlementFailureKind::Failed,
             ),
         ] {
-            let result = EntrySettlementError::from_reason(reason.into());
+            let result = EntrySettlementError::from_reason(reason.into(), "fixture_intent", 7);
             assert_eq!(result.stage, stage);
             assert_eq!(result.kind, kind);
+            assert_eq!(result.intent_id, "fixture_intent");
+            assert_eq!(result.intent_revision, 7);
             assert_eq!(result.reason_code, reason);
         }
     }
