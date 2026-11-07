@@ -636,7 +636,20 @@ async fn t09_6_status_after_local_read_defer(
             let ack = trace
                 .iter()
                 .rposition(|event| event.contains("event=CANCEL_ACK"))
-                .expect("T09.6 pending cannot be retried without recorded ACK");
+                .unwrap_or_else(|| {
+                    // Failed-boundary evidence only. Never send, retry or
+                    // generate an OKX response from this diagnostic.
+                    let posts = feed.outbound_posts.lock().unwrap().iter()
+                        .filter(|(_,route,_)| route == "/api/v5/trade/cancel-algos")
+                        .map(|(actor,route,body)| format!("{actor}:{route}:{}",body[0]["algoId"]))
+                        .collect::<Vec<_>>();
+                    let denied = feed.denied_routes.lock().unwrap().iter()
+                        .rev().take(8).cloned().collect::<Vec<_>>();
+                    panic!(
+                        "T09_6_CANCEL_ACK_UNOBSERVED:phase={phase}:intent={intent}:posts={posts:?}:trace={trace:?}:denied={denied:?}:unconsumed_posts={}",
+                        feed.unconsumed_posts(),
+                    )
+                });
             assert!(ack > arm, "T09.6 ACK precedes its own inventory source");
             let armed_id = trace[arm]
                 .split(" cancel_id=")
@@ -768,6 +781,37 @@ async fn t09_6_source_backed_close_release(
             Ok((second.client_order_id,add.client_order_id))
         }
     ).await.expect("T09.6 stop attribution from persisted account owner");
+    // An exact venue cancel cannot precede its recorded signed source phase.
+    // Capture the FIRST ownership boundary before arming either inventory:
+    // SQL POSTING without a bound signed cancel ACK is durable UNKNOWN, not
+    // permission for another Status to create a second cancellation.
+    let cleanup_keys = [
+        format!("cleanup_{second_client_id}"),
+        format!("cleanup_{add_client_id}"),
+    ];
+    let prior_cleanup = owner.execution.store.call(
+        std::time::Instant::now() + Duration::from_secs(3),
+        move |s| {
+            let mut operations = Vec::new();
+            for key in cleanup_keys {
+                if let Some(operation) = s.operation(&key)? {
+                    operations.push((key, operation.kind, operation.result_ref));
+                }
+            }
+            Ok(operations)
+        }
+    ).await.expect("T09.6 signed source phase must inspect its prior SQL owner");
+    let prior_target_posts = feed.outbound_posts.lock().unwrap().iter()
+        .filter(|(_,route,body)| route == "/api/v5/trade/cancel-algos"
+            && body.get(0).and_then(|v|v.get("algoId"))
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|id|id=="900000002" || id=="900000003"))
+        .map(|(actor,route,body)|format!("{actor}:{route}:{}",body[0]["algoId"]))
+        .collect::<Vec<_>>();
+    assert!(
+        prior_cleanup.is_empty() && prior_target_posts.is_empty(),
+        "T09_6_CANCEL_ALREADY_STARTED_BEFORE_SIGNED_PHASE:SQL={prior_cleanup:?}:POST={prior_target_posts:?}"
+    );
     let mut entry_results=Vec::new();
     for (intent,cancel_algo,other_stop_live) in [
         (second_entry_id,"900000002",true),
