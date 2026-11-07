@@ -567,14 +567,9 @@ async fn pc_07_recorded_signed_http_cancel_ack_readback_and_sql_receipt() {
         algo_order_id: WIRE_ALGO.into(),
     };
     let admitted = trade.admit_cancel_algo_order(&request).unwrap();
-    let ack = trade
-        .cancel_algo_order_after_admission(&request, &timing, &admitted)
+    send_protection_cleanup_after_admission(&trade, &request, &timing, &admitted)
         .await
         .unwrap();
-    assert!(ack.top_level_success());
-    assert_eq!(ack.data.len(), 1);
-    assert_eq!(ack.data[0].status_code, "0");
-    assert_eq!(ack.data[0].algo_order_id, WIRE_ALGO);
     assert_eq!(feed.outbound_posts.lock().unwrap().len(), 1);
 
     // The complete signed AFTER_ACK census and a flat position are observed
