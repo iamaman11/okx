@@ -422,7 +422,7 @@ async fn pc_06_two_callers_share_one_begin_and_old_read_never_confirms() {
 async fn pc_07_recorded_signed_http_cancel_ack_readback_and_sql_receipt() {
     use crate::account_bootstrap::AccountBootstrapper;
     use crate::accounts::recorded_support::{RecordedAccountHttp, RecordedGet, RecordedPost};
-    use okx_api::{Credentials, OkxEnvironment, OkxRestClient, RateBudget, Region, TradeApi};
+    use okx_api::{Credentials, HttpTransport, OkxEnvironment, OkxRestClient, RateBudget, Region, TradeApi};
     use okx_execution::{Decision, IntentPlan, NewIntent};
     use std::sync::Arc;
 
@@ -636,7 +636,64 @@ async fn pc_07_recorded_signed_http_cancel_ack_readback_and_sql_receipt() {
     feed.expect_public_clock(raw(serde_json::json!([{
         "ts": chrono::Utc::now().timestamp_millis().to_string()
     }])));
-    cleanup_flat_protection(dependencies, order).await.unwrap();
+    // A signed GET which started before ACK must retain its old bytes
+    // even when the actual transport finishes delivering them after ACK.
+    // This is a fixed event barrier, not a page-count retry/sleep.
+    let (entered, resume) = feed.hold_next_causal_algo_get();
+    let old_feed = feed.clone();
+    let delayed_get = tokio::spawn(async move {
+        let request = reqwest::Client::new()
+            .get("https://www.okx.com/api/v5/trade/orders-algo-pending?instType=SWAP&ordType=conditional&limit=100")
+            .header("OK-ACCESS-KEY", "fixture-observer-a")
+            .build()
+            .unwrap();
+        old_feed
+            .send(request, Instant::now() + Duration::from_secs(20))
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(3), entered.notified())
+        .await
+        .expect("the signed pre-ACK GET must reach its I/O boundary");
+
+    // Background maintenance and explicit public Status enter the SAME
+    // production operation. Account mutation capacity allows only one
+    // active owner; the loser cannot create a second potential venue POST.
+    let (background, explicit) = tokio::join!(
+        cleanup_flat_protection(dependencies, order),
+        cleanup_flat_protection(
+            CleanupDependencies {
+                store: &f.store,
+                observer: &observer,
+                trade: &trade,
+                clock: &executor,
+                mutation_capacity: &capacity,
+                verified_uid: &expected_uid,
+                trace: &trace,
+            },
+            order,
+        )
+    );
+    let results = [background, explicit];
+    assert_eq!(results.iter().filter(|r| r.is_ok()).count(), 1);
+    assert_eq!(
+        results
+            .iter()
+            .filter(|r| r.as_ref().err().is_some_and(|reason| reason == "ACCOUNT_MUTATION_BUSY"))
+            .count(),
+        1,
+        "two cleanup callers must share the same account mutation permit"
+    );
+    // Only after the one real ACK, release the earlier immutable GET:
+    // it still contains the live stop and cannot constitute fresh proof.
+    resume.notify_one();
+    let stale = tokio::time::timeout(Duration::from_secs(3), delayed_get)
+        .await
+        .expect("pre-ACK signed GET must complete")
+        .expect("pre-ACK task must not panic")
+        .expect("pre-ACK transport was registered");
+    let old_bytes: serde_json::Value = serde_json::from_slice(&stale.body).unwrap();
+    assert_eq!(old_bytes["data"][0]["algoId"], WIRE_ALGO);
+
     assert_eq!(
         operation(&f.store, &sql_key).await.result_ref,
         "VERIFIED_CANCELED"

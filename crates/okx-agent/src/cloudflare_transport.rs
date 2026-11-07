@@ -6319,6 +6319,42 @@ mod raw_native_session_tests {
                                     venue_order_id:order_id,expected_post_count:post_count,
                                 }).await);
                             }
+                            // Capture the owned SQL identity and arm the exact finite
+                            // signed cancel source before the first terminal-flat
+                            // observation can wake a concurrent production Status.
+                            let owner=accounts.resolve("fixture-a").await.unwrap();
+                            let second_sql_id=new_intent_id.clone();
+                            let add_sql_id=add["intent_id"].as_str()
+                                .expect("T09.6 Add intent for cancel source").to_owned();
+                            let (second_client_id,add_client_id)=owner.execution.store.call(
+                                std::time::Instant::now()+Duration::from_secs(3),
+                                move |s| {
+                                    let second=s.intent(&second_sql_id)?
+                                        .ok_or(okx_execution::StoreError::Invalid("T09_6_SECOND_INTENT_MISSING"))?;
+                                    let add=s.intent(&add_sql_id)?
+                                        .ok_or(okx_execution::StoreError::Invalid("T09_6_ADD_INTENT_MISSING"))?;
+                                    Ok((second.client_order_id,add.client_order_id))
+                                }
+                            ).await.expect("T09.6 persisted protection owners");
+                            let first_key=format!("cleanup_{second_client_id}");
+                            let second_key=format!("cleanup_{add_client_id}");
+                            let prior=owner.execution.store.call(
+                                std::time::Instant::now()+Duration::from_secs(3),
+                                move |s| Ok((s.operation(&first_key)?,s.operation(&second_key)?))
+                            ).await.expect("T09.6 source phase SQL boundary");
+                            let prior_posts=feed.outbound_posts.lock().unwrap().iter()
+                                .filter(|(_,route,body)| route=="/api/v5/trade/cancel-algos"
+                                    && body.get(0).and_then(|row|row.get("algoId"))
+                                        .and_then(serde_json::Value::as_str)
+                                        .is_some_and(|id|id=="900000002"||id=="900000003"))
+                                .count();
+                            assert!(
+                                prior.0.is_none() && prior.1.is_none() && prior_posts==0,
+                                "T09_6_CANCEL_BEFORE_SIGNED_SOURCE:SQL={prior:?}:posts={prior_posts}"
+                            );
+                            t09_6_cleanup_recorded_transport(
+                                &feed,"900000002",true,&second_client_id,&add_client_id
+                            );
                             let close_frontier=t09_6_publish_terminal_sources(T09_6TerminalSources {
                                 feed:feed.clone(),
                                 first_open_at_ms:financial_time.clone(),
@@ -6330,7 +6366,6 @@ mod raw_native_session_tests {
                                     .expect("T09.6 immutable Add fill timestamp"),
                                 closes:closes.clone(),
                             });
-                            let owner=accounts.resolve("fixture-a").await.unwrap();
                             let mut witness=serde_json::json!(null);
                             tokio::time::timeout(Duration::from_secs(20),async {
                                 loop {
@@ -6369,6 +6404,8 @@ mod raw_native_session_tests {
                                     second_entry_id: &new_intent_id,
                                     add_entry_id: add["intent_id"].as_str()
                                         .expect("T09.6 Add source"),
+                                    second_client_id: &second_client_id,
+                                    add_client_id: &add_client_id,
                                     closes: &closes,
                                 },
                             ).await;

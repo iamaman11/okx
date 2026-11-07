@@ -741,6 +741,8 @@ struct T09_6FinalizeContext<'a> {
     feed: &'a Arc<crate::accounts::recorded_support::RecordedAccountHttp>,
     second_entry_id: &'a str,
     add_entry_id: &'a str,
+    second_client_id: &'a str,
+    add_client_id: &'a str,
     closes: &'a [serde_json::Value],
 }
 async fn t09_6_source_backed_close_release(
@@ -748,7 +750,7 @@ async fn t09_6_source_backed_close_release(
 ) -> serde_json::Value {
     let T09_6FinalizeContext {
         accounts, trade, risk, rate_budget, feed, second_entry_id,
-        add_entry_id, closes,
+        add_entry_id, second_client_id, add_client_id, closes,
     } = ctx;
     let mut close_results=Vec::new();    for close in closes {
         let intent=close["close_intent_id"].as_str()
@@ -768,58 +770,29 @@ async fn t09_6_source_backed_close_release(
             "financial_complete":status["data"]["financial_complete"],
         }));
     }
-    let owner=accounts.resolve("fixture-a").await.expect("T09.6 Native SQL owner");
-    let second_sql_id = second_entry_id.to_owned();
-    let add_sql_id = add_entry_id.to_owned();
-    let (second_client_id,add_client_id)=owner.execution.store.call(
-        std::time::Instant::now()+Duration::from_secs(3),
-        move |s| {
-            let second=s.intent(&second_sql_id)?
-                .ok_or(okx_execution::StoreError::Invalid("T09_6_SECOND_INTENT_MISSING"))?;
-            let add=s.intent(&add_sql_id)?
-                .ok_or(okx_execution::StoreError::Invalid("T09_6_ADD_INTENT_MISSING"))?;
-            Ok((second.client_order_id,add.client_order_id))
-        }
-    ).await.expect("T09.6 stop attribution from persisted account owner");
-    // An exact venue cancel cannot precede its recorded signed source phase.
-    // Capture the FIRST ownership boundary before arming either inventory:
-    // SQL POSTING without a bound signed cancel ACK is durable UNKNOWN, not
-    // permission for another Status to create a second cancellation.
-    let cleanup_keys = [
-        format!("cleanup_{second_client_id}"),
-        format!("cleanup_{add_client_id}"),
-    ];
-    let prior_cleanup = owner.execution.store.call(
-        std::time::Instant::now() + Duration::from_secs(3),
-        move |s| {
-            let mut operations = Vec::new();
-            for key in cleanup_keys {
-                if let Some(operation) = s.operation(&key)? {
-                    operations.push((key, operation.kind, operation.result_ref));
-                }
-            }
-            Ok(operations)
-        }
-    ).await.expect("T09.6 signed source phase must inspect its prior SQL owner");
-    let prior_target_posts = feed.outbound_posts.lock().unwrap().iter()
-        .filter(|(_,route,body)| route == "/api/v5/trade/cancel-algos"
-            && body.get(0).and_then(|v|v.get("algoId"))
-                .and_then(serde_json::Value::as_str)
-                .is_some_and(|id|id=="900000002" || id=="900000003"))
-        .map(|(actor,route,body)|format!("{actor}:{route}:{}",body[0]["algoId"]))
-        .collect::<Vec<_>>();
+    // The first signed cancel source was armed before the terminal-flat
+    // position could reach the native observer. A prior Status/maintenance
+    // may legitimately have sent it already; do not arm again or re-POST.
+    let first_phase = feed.causal_algo_trace.lock().unwrap().clone();
     assert!(
-        prior_cleanup.is_empty() && prior_target_posts.is_empty(),
-        "T09_6_CANCEL_ALREADY_STARTED_BEFORE_SIGNED_PHASE:SQL={prior_cleanup:?}:POST={prior_target_posts:?}"
+        first_phase.iter().any(|event| {
+            event.contains("event=INVENTORY_ARMED")
+                && event.contains("cancel_id=900000002")
+        }),
+        "T09_6_FIRST_SIGNED_CANCEL_SOURCE_WAS_NOT_ARMED"
     );
     let mut entry_results=Vec::new();
     for (intent,cancel_algo,other_stop_live) in [
         (second_entry_id,"900000002",true),
         (add_entry_id,"900000003",false),
     ] {
-        t09_6_cleanup_recorded_transport(
-            feed,cancel_algo,other_stop_live,&second_client_id,&add_client_id
-        );
+        if cancel_algo == "900000003" {
+            // The second independent venue event becomes eligible only
+            // after the first source-bound cleanup has been reconciled.
+            t09_6_cleanup_recorded_transport(
+                feed,cancel_algo,other_stop_live,second_client_id,add_client_id
+            );
+        }
         let status=t09_6_status_after_local_read_defer(
             trade,rate_budget,feed,intent,1,"ENTRY_CANCEL_STOP_STATUS"
         ).await;
