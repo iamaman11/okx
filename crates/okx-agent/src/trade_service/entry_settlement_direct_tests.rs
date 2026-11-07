@@ -417,10 +417,10 @@ fn risk_client(mode: ReplyMode) -> (NativeRiskClient, tokio::task::JoinHandle<Ve
                     None
                 } else {
                     Some(if matches!(mode, ReplyMode::Released) {
-                    RiskReservationState::Released
-                } else {
-                    RiskReservationState::Held
-                })
+                        RiskReservationState::Released
+                    } else {
+                        RiskReservationState::Held
+                    })
                 },
                 budget: None,
                 account_budget: None,
@@ -660,14 +660,22 @@ async fn r02_terminal_replay_reads_immutable_receipt_without_second_settle() {
         settle(&f, &risk).await.unwrap(),
         EntrySettlementOutcome::TerminalReplayConfirmed
     );
-    assert!(!has_ack(&f).await, "terminal replay cannot manufacture partial ACK");
+    assert!(
+        !has_ack(&f).await,
+        "terminal replay cannot manufacture partial ACK"
+    );
     drop(risk);
     let commands = worker.await.unwrap();
     assert_eq!(commands.len(), 1, "read-only terminal replay inspects only");
-    assert!(matches!(commands[0].action, RiskCommandAction::Inspect { .. }));
+    assert!(matches!(
+        commands[0].action,
+        RiskCommandAction::Inspect { .. }
+    ));
     let durable = f
         .store
-        .call(deadline(), |s| s.operation("entry-settlement:intent_fixture"))
+        .call(deadline(), |s| {
+            s.operation("entry-settlement:intent_fixture")
+        })
         .await
         .unwrap()
         .unwrap();
