@@ -33,6 +33,24 @@ where
     }
 }
 
+// A signed flat position is NOT permission to remove a stop while the
+// original opening order is still live/partially filled: a late execution
+// could create new exposure after cleanup. Require the independently signed
+// terminal venue order state as well as flat exposure. Canceled orders may
+// have partial fills, so they still need the flat-position witness.
+fn flat_entry_protection_cleanup_allowed(
+    risk_increase: bool,
+    signed_exposed: bool,
+    venue_order_state: &str,
+) -> bool {
+    risk_increase
+        && !signed_exposed
+        && matches!(
+            venue_order_state,
+            "filled" | "canceled" | "mmp_canceled"
+        )
+}
+
 // An authenticated later `live` algo GET cannot silently undo a durable
 // protection incident: the same algoId may be stale, reappear after an ACK,
 // or no longer cover the late fill. Only committed remediation may resolve it;
@@ -956,7 +974,7 @@ impl TradeService {
                     .map(|p| (p.instrument_id.as_str(), p.position.as_str())),
             )
             .is_ok();
-            if !exposed && i.risk_increase {
+            if flat_entry_protection_cleanup_allowed(i.risk_increase, exposed, &o.state) {
                 self.cleanup_flat_protection(r, &i).await?;
             }
             // An Add ACK with zero executed contracts does NOT own the
@@ -2488,6 +2506,22 @@ impl TradeService {
 #[cfg(test)]
 mod entry_cost_status_tests {
     use super::*;
+
+    #[test]
+    fn t09_6_live_or_partially_filled_entry_cannot_cancel_its_own_stop() {
+        for state in ["live", "partially_filled"] {
+            assert!(
+                !flat_entry_protection_cleanup_allowed(true, false, state),
+                "the opening order can still fill after a flat observation"
+            );
+        }
+        for state in ["filled", "canceled", "mmp_canceled"] {
+            assert!(flat_entry_protection_cleanup_allowed(true, false, state));
+            assert!(!flat_entry_protection_cleanup_allowed(true, true, state));
+            assert!(!flat_entry_protection_cleanup_allowed(false, false, state));
+        }
+        assert!(!flat_entry_protection_cleanup_allowed(true, false, "unknown"));
+    }
 
     #[test]
     fn t10_08_later_live_stop_get_cannot_clear_durable_protection_incident() {
