@@ -445,8 +445,14 @@ async fn pc_07_recorded_signed_http_cancel_ack_readback_and_sql_receipt() {
     let mut after = Vec::new();
     for inst_type in ["SWAP", "FUTURES"] {
         for kind in [
-            "conditional", "oco", "trigger", "move_order_stop",
-            "chase", "iceberg", "twap", "smart_iceberg",
+            "conditional",
+            "oco",
+            "trigger",
+            "move_order_stop",
+            "chase",
+            "iceberg",
+            "twap",
+            "smart_iceberg",
         ] {
             let query = vec![
                 ("instType".to_owned(), inst_type.to_owned()),
@@ -497,12 +503,18 @@ async fn pc_07_recorded_signed_http_cancel_ack_readback_and_sql_receipt() {
     };
     let observer = AccountBootstrapper::new(
         OkxRestClient::with_http_transport(
-            environment, signer("fixture-observer-a"), rate.clone(), feed.clone(),
+            environment,
+            signer("fixture-observer-a"),
+            rate.clone(),
+            feed.clone(),
         )
         .unwrap(),
     );
     let executor = OkxRestClient::with_http_transport(
-        environment, signer("fixture-executor-a"), rate, feed.clone(),
+        environment,
+        signer("fixture-executor-a"),
+        rate,
+        feed.clone(),
     )
     .unwrap();
     let trade = TradeApi::new(executor.clone());
@@ -516,7 +528,8 @@ async fn pc_07_recorded_signed_http_cancel_ack_readback_and_sql_receipt() {
     };
     assert_eq!(
         protection_cleanup_step(&f.store, target.key, target.hash)
-            .await.unwrap(),
+            .await
+            .unwrap(),
         ProtectionCleanupStep::SendOnce
     );
     let begin = operation(&f.store, target.key).await;
@@ -526,13 +539,15 @@ async fn pc_07_recorded_signed_http_cancel_ack_readback_and_sql_receipt() {
     // authorize a receipt. This assertion uses real REST parsing and SQLite.
     assert_eq!(
         observe_protection_cleanup_sources(&f.store, &observer, target)
-            .await.unwrap_err(),
+            .await
+            .unwrap_err(),
         "PROTECTION_CANCEL_READBACK_PENDING"
     );
     assert!(feed.outbound_posts.lock().unwrap().is_empty());
     assert_eq!(
         protection_cleanup_step(&f.store, target.key, target.hash)
-            .await.unwrap(),
+            .await
+            .unwrap(),
         ProtectionCleanupStep::Inspect
     );
 
@@ -541,15 +556,21 @@ async fn pc_07_recorded_signed_http_cancel_ack_readback_and_sql_receipt() {
     feed.expect_public_clock(raw(serde_json::json!([{
         "ts": chrono::Utc::now().timestamp_millis().to_string()
     }])));
-    let timing = executor.clock_evidence().await.unwrap()
-        .mutation_timing(5_000).unwrap();
+    let timing = executor
+        .clock_evidence()
+        .await
+        .unwrap()
+        .mutation_timing(5_000)
+        .unwrap();
     let request = CancelAlgoOrderRequest {
         instrument_id: INST.into(),
         algo_order_id: WIRE_ALGO.into(),
     };
     let admitted = trade.admit_cancel_algo_order(&request).unwrap();
-    let ack = trade.cancel_algo_order_after_admission(&request, &timing, &admitted)
-        .await.unwrap();
+    let ack = trade
+        .cancel_algo_order_after_admission(&request, &timing, &admitted)
+        .await
+        .unwrap();
     assert!(ack.top_level_success());
     assert_eq!(ack.data.len(), 1);
     assert_eq!(ack.data[0].status_code, "0");
@@ -559,12 +580,14 @@ async fn pc_07_recorded_signed_http_cancel_ack_readback_and_sql_receipt() {
     // The complete signed AFTER_ACK census and a flat position are observed
     // by the exact production helper; only SQLite can commit the receipt.
     observe_protection_cleanup_sources(&f.store, &observer, target)
-        .await.unwrap();
+        .await
+        .unwrap();
     let final_op = operation(&f.store, target.key).await;
     assert_eq!(final_op.result_ref, "VERIFIED_CANCELED");
     assert_eq!(
         protection_cleanup_step(&f.store, target.key, target.hash)
-            .await.unwrap(),
+            .await
+            .unwrap(),
         ProtectionCleanupStep::Confirmed
     );
     let sent = feed.outbound_posts.lock().unwrap();
