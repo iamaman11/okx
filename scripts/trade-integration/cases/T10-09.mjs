@@ -101,7 +101,14 @@ export async function run({caseId,root,signal,artifactsDir}) {
   assert.equal(terminal.original_status.data.central_release.state,"verified");
   assert.equal(terminal.original_status.data.protection_incident,false);
   assert.equal(terminal.original_status.data.protection_remediation.state,
-    "verified_flat_no_orphans");
+    "not_evaluated",
+    "normal incident-free flat must not masquerade as incident remediation");
+  assert.equal(terminal.original_status.data.remaining_exposure,"0");
+  assert.equal(terminal.original_status.data.financial_complete,true);
+  assert.equal(terminal.signed_flat_orphan_inventory_complete,true,
+    "independent signed venue inventory must cover all required algo kinds");
+  assert.equal(terminal.signed_flat_orphan_count,0,
+    "flat cannot retain venue stop/orphan exposure");
   assert.equal(terminal.close_status.data.intent.state,"FILLED");
   assert.equal(terminal.worker_original_reservation_state,"RELEASED");
   assert.equal(terminal.worker_after.entry_budget.consumed_usd,"1.4007");
@@ -154,6 +161,8 @@ export async function run({caseId,root,signal,artifactsDir}) {
       actual:terminal.native_sql.close_signed_fill_quantity},
     {id:"final_lots_flat",expected:"0",
       actual:String(terminal.native_sql.remaining_lots)},
+    {id:"signed_venue_orphan_count",expected:"0",
+      actual:String(terminal.signed_flat_orphan_count)},
     {id:"original_reservation_released",expected:"RELEASED",
       actual:terminal.worker_original_reservation_state},
     {id:"campaign_consumed_retained",expected:"1.4007",
@@ -172,6 +181,10 @@ export async function run({caseId,root,signal,artifactsDir}) {
       reduceFinance.protection_resized],
     ["final_public_close_ack","TradeService",terminal.close],
     ["third_signed_fill_bill_and_flat","NativeAccountSQL",terminal.native_sql],
+    ["full_signed_orphan_inventory","RecordedOKXHTTP",{
+      complete:terminal.signed_flat_orphan_inventory_complete,
+      orphan_count:terminal.signed_flat_orphan_count,
+    }],
     ["original_b_release","RuntimeSessionSQLiteDO",
       [terminal.worker_original_reservation_key,terminal.worker_after]],
   ].map(([stage,owner,source])=>({stage,owner,source_digest:hash(source)}));
