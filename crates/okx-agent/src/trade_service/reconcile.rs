@@ -1931,95 +1931,200 @@ impl TradeService {
             "outcome":outcome,
         }))
     }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProtectionCleanupStep {
+    SendOnce,
+    Inspect,
+    Confirmed,
+}
+
+// BEGIN and its receipt are the only authority to send. A repeated BEGIN is
+// never permission to repeat a possibly accepted exchange cancellation.
+async fn protection_cleanup_step(
+    store: &AccountStoreHandle,
+    key: &str,
+    hash: &str,
+) -> Result<ProtectionCleanupStep, String> {
+    let key = key.to_owned();
+    let hash = hash.to_owned();
+    store.call(deadline(), move |s| {
+        if s.begin_operation(&key, &hash, "protection_cleanup", now())? {
+            return Ok(ProtectionCleanupStep::SendOnce);
+        }
+        let old = s.operation(&key)?.ok_or(okx_execution::StoreError::Invalid(
+            "PROTECTION_CLEANUP_BEGIN_MISSING",
+        ))?;
+        match old.result_ref.as_str() {
+            "POSTING" => Ok(ProtectionCleanupStep::Inspect),
+            "VERIFIED_CANCELED" => Ok(ProtectionCleanupStep::Confirmed),
+            _ => Err(okx_execution::StoreError::Invalid(
+                "PROTECTION_CLEANUP_RECEIPT_CONFLICT",
+            )),
+        }
+    }).await.map_err(err)
+}
+
+// This is the same production SQL/observation decision used after the first
+// ACK and after restart/lost ACK. The transport cannot assert its own outcome:
+// it supplies an independently normalized, complete signed inventory and
+// raw position readings. Only SQL may durably commit the verified transition.
+async fn protection_cleanup_readback(
+    store: &AccountStoreHandle,
+    key: &str,
+    hash: &str,
+    instrument_id: &str,
+    algo_id: &str,
+    expected_uid: &str,
+    inventory: &okx_api::PendingDerivativeAlgoRiskInventory,
+    observed_uid: &str,
+    position_received_at_ms: i64,
+    positions: &[(String, String)],
+) -> Result<(), String> {
+    let op_key = key.to_owned();
+    let operation = store.call(deadline(), move |s| s.operation(&op_key))
+        .await.map_err(err)?
+        .ok_or("PROTECTION_CLEANUP_BEGIN_MISSING")?;
+    if operation.request_hash != hash || operation.kind != "protection_cleanup" {
+        return Err("PROTECTION_CLEANUP_IDENTITY_MISMATCH".into());
+    }
+    if operation.result_ref == "VERIFIED_CANCELED" {
+        return Ok(());
+    }
+    if operation.result_ref != "POSTING" {
+        return Err("PROTECTION_CLEANUP_RECEIPT_CONFLICT".into());
+    }
+    if observed_uid != expected_uid {
+        return Err("PROTECTION_CLEANUP_ACCOUNT_MISMATCH".into());
+    }
+    if !inventory.complete_within_bound || inventory.scopes_checked != 16 {
+        return Err("PROTECTION_CANCEL_READBACK_INCOMPLETE".into());
+    }
+    // The earliest of all 16 signed GET receipts and the position source
+    // must both postdate durable BEGIN. A pre-ACK/old inventory is not proof.
+    if inventory.received_at_ms == 0
+        || inventory.received_at_ms < operation.committed_at.max(0) as u64
+        || position_received_at_ms < operation.committed_at
+    {
+        return Err("PROTECTION_CANCEL_READBACK_STALE".into());
+    }
+    verify_instrument_is_flat(
+        instrument_id,
+        positions.iter().map(|(inst, qty)| (inst.as_str(), qty.as_str())),
+    )?;
+    if let Some(algo) = inventory.samples.iter().find(|a| a.algo_order_id == algo_id) {
+        if algo.instrument_id != instrument_id {
+            return Err("PROTECTION_CLEANUP_ALGO_INSTRUMENT_MISMATCH".into());
+        }
+        return Err("PROTECTION_CANCEL_READBACK_PENDING".into());
+    }
+    let key = key.to_owned();
+    let hash = hash.to_owned();
+    store.call(deadline(), move |s| {
+        s.operation_receipt(
+            &key, &hash, "protection_cleanup", "VERIFIED_CANCELED", now()
+        )
+    }).await.map_err(err)?;
+    Ok(())
+}
+
     async fn cleanup_flat_protection(
         &self,
         r: &AccountResources,
         i: &StoredIntent,
     ) -> Result<(), String> {
-        let _capacity = r
-            .mutation_capacity
-            .try_acquire()
+        let _capacity = r.mutation_capacity.try_acquire()
             .map_err(|_| "ACCOUNT_MUTATION_BUSY")?;
         let id = i.intent_id.clone();
-        let saved = r
-            .execution
-            .store
-            .call(deadline(), move |s| s.protection(&id))
-            .await
-            .map_err(err)?;
-        let Some(saved) = saved else {
-            return Ok(());
-        };
-        let inventory = r
-            .observer
-            .pending_derivative_risk_algos()
-            .await
-            .map_err(err)?;
-        if !inventory.complete_within_bound {
+        let saved = r.execution.store.call(deadline(), move |s| s.protection(&id))
+            .await.map_err(err)?;
+        let Some(saved) = saved else { return Ok(()); };
+        if saved.intent_id != i.intent_id {
+            return Err("PROTECTION_CLEANUP_IDENTITY_MISMATCH".into());
+        }
+        let key = format!("cleanup_{}", &i.client_order_id);
+        let hash = digest(&(i.intent_id.clone(), saved.algo_id.clone(), "flat_protection_cleanup"))?;
+        let expected_uid = r.configuration.account_key.verified_uid.as_str();
+
+        // Inspect a previous durable BEGIN before examining the live stop or
+        // obtaining a new send permit. The former path returned UNKNOWN here
+        // forever even when the signed post-cancel inventory became complete.
+        let op_key = key.clone();
+        let prior = r.execution.store.call(deadline(), move |s| s.operation(&op_key))
+            .await.map_err(err)?;
+        if let Some(prior) = prior {
+            if prior.request_hash != hash || prior.kind != "protection_cleanup" {
+                return Err("PROTECTION_CLEANUP_IDENTITY_MISMATCH".into());
+            }
+            if prior.result_ref == "VERIFIED_CANCELED" {
+                return Ok(());
+            }
+            if prior.result_ref != "POSTING" {
+                return Err("PROTECTION_CLEANUP_RECEIPT_CONFLICT".into());
+            }
+            let inventory = r.observer.pending_derivative_risk_algos().await.map_err(err)?;
+            let snapshot = r.observer.snapshot_until(deadline()).await.map_err(err)?;
+            let source_at = chrono::DateTime::parse_from_rfc3339(&snapshot.source_received_at)
+                .map_err(|_| "PROTECTION_CLEANUP_POSITION_TIME_INVALID")?
+                .timestamp_millis();
+            let positions = snapshot.positions.iter()
+                .map(|p| (p.instrument_id.clone(), p.position.clone()))
+                .collect::<Vec<_>>();
+            return protection_cleanup_readback(
+                &r.execution.store, &key, &hash, &i.instrument_id, &saved.algo_id,
+                expected_uid, &inventory, &snapshot.account_uid_fingerprint,
+                source_at, &positions,
+            ).await;
+        }
+
+        let inventory = r.observer.pending_derivative_risk_algos().await.map_err(err)?;
+        if !inventory.complete_within_bound || inventory.scopes_checked != 16 {
             return Err("ALGO_INVENTORY_INCOMPLETE".into());
         }
-        if !inventory
-            .samples
-            .iter()
-            .any(|a| a.algo_order_id == saved.algo_id)
-        {
-            return Ok(());
+        let live = inventory.samples.iter().find(|a| a.algo_order_id == saved.algo_id);
+        let Some(live) = live else { return Ok(()); };
+        if live.instrument_id != i.instrument_id {
+            return Err("PROTECTION_CLEANUP_ALGO_INSTRUMENT_MISMATCH".into());
         }
-        // A local no-send read throttle must not strand an already-flat
-        // position with a live protective order. This fresh authenticated
-        // snapshot is still required before cancel-algos; only read admission
-        // may wait, bounded by the existing command deadline.
         let snapshot = r.observer.snapshot_until(deadline()).await.map_err(err)?;
+        if snapshot.account_uid_fingerprint != expected_uid {
+            return Err("PROTECTION_CLEANUP_ACCOUNT_MISMATCH".into());
+        }
         verify_instrument_is_flat(
             &i.instrument_id,
-            snapshot
-                .positions
-                .iter()
-                .map(|position| (position.instrument_id.as_str(), position.position.as_str())),
+            snapshot.positions.iter().map(|p| (p.instrument_id.as_str(), p.position.as_str())),
         )?;
-        // Local no-send admission precedes durable BEGIN. Once BEGIN is
-        // persisted, an unknown cancel outcome must never be re-posted.
+        // Preserve all existing pre-BEGIN clock/rate admission policies.
         let request = okx_api::CancelAlgoOrderRequest {
             instrument_id: i.instrument_id.clone(),
             algo_order_id: saved.algo_id.clone(),
         };
-        let timing = r
-            .execution
-            .clock
-            .clock_evidence()
-            .await
-            .map_err(err)?
-            .mutation_timing(5000)
-            .map_err(err)?;
-        let rate = r
-            .execution
-            .trade
-            .admit_cancel_algo_order(&request)
-            .map_err(err)?;
-        let key = format!("cleanup_{}", &i.client_order_id);
-        let hash = digest(&(
-            i.intent_id.clone(),
-            saved.algo_id.clone(),
-            "flat_protection_cleanup",
-        ))?;
-        let k = key.clone();
-        let h = hash.clone();
-        let fresh = r
-            .execution
-            .store
-            .call(deadline(), move |s| {
-                s.begin_operation(&k, &h, "protection_cleanup", now())
-            })
-            .await
-            .map_err(err)?;
-        if !fresh {
-            return Err("PROTECTION_CANCEL_OUTCOME_UNKNOWN_INSPECT".into());
+        let timing = r.execution.clock.clock_evidence().await.map_err(err)?
+            .mutation_timing(5000).map_err(err)?;
+        let rate = r.execution.trade.admit_cancel_algo_order(&request).map_err(err)?;
+        match protection_cleanup_step(&r.execution.store, &key, &hash).await? {
+            ProtectionCleanupStep::Confirmed => return Ok(()),
+            ProtectionCleanupStep::Inspect => {
+                // A concurrent caller committed BEGIN after our first read.
+                // Do not consume a second send; take a NEW authenticated read.
+                let inventory = r.observer.pending_derivative_risk_algos().await.map_err(err)?;
+                let snapshot = r.observer.snapshot_until(deadline()).await.map_err(err)?;
+                let source_at = chrono::DateTime::parse_from_rfc3339(&snapshot.source_received_at)
+                    .map_err(|_| "PROTECTION_CLEANUP_POSITION_TIME_INVALID")?
+                    .timestamp_millis();
+                let positions = snapshot.positions.iter()
+                    .map(|p| (p.instrument_id.clone(), p.position.clone()))
+                    .collect::<Vec<_>>();
+                return protection_cleanup_readback(
+                    &r.execution.store, &key, &hash, &i.instrument_id, &saved.algo_id,
+                    expected_uid, &inventory, &snapshot.account_uid_fingerprint,
+                    source_at, &positions,
+                ).await;
+            }
+            ProtectionCleanupStep::SendOnce => {}
         }
-        let response = r
-            .execution
-            .trade
-            .cancel_algo_order_after_admission(&request, &timing, &rate)
-            .await
+        let response = r.execution.trade
+            .cancel_algo_order_after_admission(&request, &timing, &rate).await
             .map_err(|_| "PROTECTION_CANCEL_OUTCOME_UNKNOWN")?;
         if !response.top_level_success()
             || response.data.len() != 1
@@ -2028,33 +2133,19 @@ impl TradeService {
         {
             return Err("PROTECTION_CANCEL_NOT_CONFIRMED".into());
         }
-        let verified = r
-            .observer
-            .pending_derivative_risk_algos()
-            .await
-            .map_err(err)?;
-        if !verified.complete_within_bound
-            || verified
-                .samples
-                .iter()
-                .any(|a| a.algo_order_id == saved.algo_id)
-        {
-            return Err("PROTECTION_CANCEL_READBACK_PENDING".into());
-        }
-        r.execution
-            .store
-            .call(deadline(), move |s| {
-                s.operation_receipt(
-                    &key,
-                    &hash,
-                    "protection_cleanup",
-                    "VERIFIED_CANCELED",
-                    now(),
-                )
-            })
-            .await
-            .map_err(err)?;
-        Ok(())
+        let inventory = r.observer.pending_derivative_risk_algos().await.map_err(err)?;
+        let snapshot = r.observer.snapshot_until(deadline()).await.map_err(err)?;
+        let source_at = chrono::DateTime::parse_from_rfc3339(&snapshot.source_received_at)
+            .map_err(|_| "PROTECTION_CLEANUP_POSITION_TIME_INVALID")?
+            .timestamp_millis();
+        let positions = snapshot.positions.iter()
+            .map(|p| (p.instrument_id.clone(), p.position.clone()))
+            .collect::<Vec<_>>();
+        protection_cleanup_readback(
+            &r.execution.store, &key, &hash, &i.instrument_id, &saved.algo_id,
+            expected_uid, &inventory, &snapshot.account_uid_fingerprint,
+            source_at, &positions,
+        ).await
     }
     pub(super) async fn cancel(
         &self,
