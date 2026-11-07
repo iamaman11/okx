@@ -1272,6 +1272,18 @@ async fn t10_09_b_terminal_after_partial(
     // verified B-flat / terminal-census boundary, preserving those literal
     // A economics. Do not copy B's 99.9996 balance into A or substitute a
     // cached, undated account snapshot for fresh source admission.
+    // The FULL A+B terminal census must consume A's newly signed balance.
+    // The test's real periodic finance source task can otherwise exhaust
+    // those finite A observations between publication and B's Status.
+    // Hold the EXISTING test-only A source-cycle gate for this single public
+    // release boundary. No engine/risk/census path or production concurrency
+    // is disabled, and no missing source is substituted.
+    let a_owner=accounts.resolve("fixture-a").await
+        .expect("T10-09 A signed cohort source owner");
+    let a_terminal_capture_lease=tokio::time::timeout(
+        until.saturating_duration_since(std::time::Instant::now()),
+        a_owner.recorded_capture_gate.write()
+    ).await.expect("T10_09_A_SOURCE_GATE_DEADLINE");
     let a_balance_at=chrono::Utc::now().timestamp_millis().to_string();
     let a_balance=raw(json!([{
         "totalEq":"100","adjEq":"100","uTime":a_balance_at,
@@ -1322,11 +1334,12 @@ async fn t10_09_b_terminal_after_partial(
                     let delay=recorded_preview_local_defer(
                         &reason,&rate_budget,remaining
                     ).unwrap_or_else(||panic!(
-                        "T10_09_FINAL_STATUS_NONLOCAL_SOURCE:{reference}:{reason}:attempt={attempts}:previous_status={last}:signed_pending_reads={}",
+                        "T10_09_FINAL_STATUS_NONLOCAL_SOURCE:{reference}:{reason}:attempt={attempts}:previous_status={last}:signed_pending_reads={}:balance_reads={}",
                         feed.immutable_signed_phase_reads(
                             "fixture-observer-b","/api/v5/trade/orders-pending",
                             "t10-09-b-final-flat-pending-inventory"
-                        )
+                        ),
+                        feed.balance_read_probe()
                     ));
                     tokio::time::sleep(delay).await;
                     feed.advance_recorded_public_clock(raw(json!([{
@@ -1374,6 +1387,9 @@ async fn t10_09_b_terminal_after_partial(
         "T10-09 normal flat requires zero owned original exposure");
     assert_eq!(original_status["data"]["financial_complete"],true,
         "T10-09 flat release requires complete signed finance");
+    // B's original central RELEASE has now been witnessed. Restore A's
+    // periodic source capture; the scheduling gate owns NO economic state.
+    drop(a_terminal_capture_lease);
     // Positive proof is a fresh independent full signed risk-algo census,
     // NOT an incident remediation that never happened. Observe the normal
     // production account reader, with the existing finite actor/query-bound
