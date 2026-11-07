@@ -642,13 +642,16 @@ async fn protection_cleanup_readback(
 
 // The same authenticated observer/SQL path is used by Status, after restart,
 // and by the direct recorded-wire regression. The test supplies only venue
- // bytes; neither the readback nor its durable decision is mocked.
+// bytes; neither the readback nor its durable decision is mocked.
 async fn observe_protection_cleanup_sources(
     store: &AccountStoreHandle,
     observer: &crate::account_bootstrap::AccountBootstrapper,
     target: ProtectionCleanupIdentity<'_>,
 ) -> Result<(), String> {
-    let inventory = observer.pending_derivative_risk_algos().await.map_err(err)?;
+    let inventory = observer
+        .pending_derivative_risk_algos()
+        .await
+        .map_err(err)?;
     let snapshot = observer.snapshot_until(deadline()).await.map_err(err)?;
     let source_at = chrono::DateTime::parse_from_rfc3339(&snapshot.source_received_at)
         .map_err(|_| "PROTECTION_CLEANUP_POSITION_TIME_INVALID")?
