@@ -1,7 +1,54 @@
-// T10-10, first causal leg only: genuine repeated signed fills-history and
-// bills-archive are ingested by the EXISTING account finance owner. No fake
-// finance entry, SQL mutation, Worker settlement or terminal state is built
-// here. Late independent fee/rebate and bound breach remain separate gates.
+// T10-10 uses only signed HTTP input and public reconciliation. All monetary
+// witnesses are read back from the existing Native SQL and Worker owners.
+async fn t10_10_unknown_fee_hold(
+    accounts: Arc<AccountRuntimeRegistry>, trade: Arc<TradeService>,
+    risk: NativeRiskClient,
+    feed: Arc<crate::accounts::recorded_support::RecordedAccountHttp>,
+    intent_id: String, event_at: i64,
+) -> serde_json::Value {
+    let owner=accounts.resolve("fixture-a").await.unwrap();
+    let mut cmd=summary("risk_t10_10_unknown_fee_before");
+    cmd.installation_id="installation_test".into();
+    let before=risk.request(cmd).await.unwrap();
+    let observed=tokio::time::timeout(Duration::from_secs(9),async {
+        loop {
+            let id=intent_id.clone();
+            let row=owner.execution.store.call(
+                std::time::Instant::now()+Duration::from_secs(3),move |s| {
+                    let f=s.cursor("fills","SWAP")?.unwrap();
+                    let b=s.cursor("bills","account")?.unwrap();
+                    Ok((s.intent_fill_cost_evidence(&id,f.watermark),
+                        s.intent_fee_bill_evidence(&id,b.watermark),f.watermark,b.watermark))
+                }).await.unwrap();
+            if let (Ok(fill),Err(okx_execution::StoreError::Invalid(reason)),fw,bw)=row {
+                if fill.fill_count==1 && fw>=event_at && bw>=event_at {
+                    // The archive cursor is complete, but the mandatory
+                    // fill-linked bill itself is absent from that archive.
+                    assert_eq!(reason,"ENTRY_FEE_BILL_SOURCE_MISMATCH");
+                    break serde_json::json!({"reason":reason,"fill_count":fill.fill_count,
+                        "quantity":fill.filled_quantity.normalize().to_string(),
+                        "fill_watermark":fw,"bill_watermark":bw});
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }).await.expect("T10_10_UNKNOWN_FEE_SOURCE_NOT_OBSERVED");
+    let status=trade.trade("fixture-a",&okx_protocol::trading::TradeRequest::Status {
+        reference:intent_id.clone(),
+    },None).await.unwrap();
+    assert_eq!(status["data"]["financial_complete"],false);
+    let mut cmd=summary("risk_t10_10_unknown_fee_after");
+    cmd.installation_id="installation_test".into();
+    let after=risk.request(cmd).await.unwrap();
+    let a=before.budget.as_ref().unwrap().entry_budget.as_ref().unwrap();
+    let b=after.budget.as_ref().unwrap().entry_budget.as_ref().unwrap();
+    assert_eq!(a.consumed_usd,b.consumed_usd);
+    assert_eq!(a.reserved_usd,b.reserved_usd);
+    assert_eq!(feed.outbound_posts.lock().unwrap().len(),4);
+    serde_json::json!({"intent_id":intent_id,"source_event_at_ms":event_at,
+        "sql":observed,"worker_before":before.budget,"worker_after":after.budget,
+        "venue_posts":4,"financial_complete":false})
+}
 async fn t10_10_native_sql_economics(
     accounts: &Arc<AccountRuntimeRegistry>,
     intent_id: &str,
@@ -50,12 +97,139 @@ async fn t10_10_native_sql_economics(
     ).await.expect("T10-10 real persisted Native SQL finance readback")
 }
 
+async fn t10_10_late_released_fee(
+    accounts: Arc<AccountRuntimeRegistry>, trade: Arc<TradeService>,
+    risk: NativeRiskClient,
+    feed: Arc<crate::accounts::recorded_support::RecordedAccountHttp>,
+    intent_id: String, original_source_time: String,
+) -> serde_json::Value {
+    use crate::accounts::recorded_support::RecordedGet;
+    let owner=accounts.resolve("fixture-a").await.unwrap();
+    let read=|id:String| {
+        let store=owner.execution.store.clone();
+        async move { store.call(std::time::Instant::now()+Duration::from_secs(3),move |s| {
+            let terminal=s.operation(&format!("entry-settlement:{id}"))?.unwrap();
+            let proof:okx_execution::EntrySettlementEvidence=
+                serde_json::from_str(&terminal.result_ref).unwrap();
+            let late=s.operation(&format!("entry-late-head:{id}"))?;
+            let admission=s.entry_admission(&id)?.unwrap();
+            Ok(serde_json::json!({"terminal":proof,"late":late.map(|r|
+                serde_json::from_str::<serde_json::Value>(&r.result_ref).unwrap()),
+                "reservation_active":s.active_central_receipt(&id)?.is_some(),"entry_upper_usd":admission.entry_upper_usd,
+                "pending":s.entry_late_pending(&id)?,"finance_revision":s.finance_revision()?}))
+        }).await.unwrap() }
+    };
+    let before=read(intent_id.clone()).await;
+    assert_eq!(before["reservation_active"],false);
+    assert_eq!(before["terminal"]["cumulative_entry_usd"],"1.0005");
+    assert_eq!(before["entry_upper_usd"],"1.0005");
+    let raw=|rows:serde_json::Value|serde_json::to_vec(
+        &serde_json::json!({"code":"0","msg":"","data":rows})).unwrap();
+    // Replay the original signed terminal venue fact; neither timestamp nor
+    // amount is obtained from the monetary proof under test.
+    feed.advance_recorded_route("fixture-executor-a","/api/v5/trade/order",
+        (0..5).map(|_| RecordedGet {
+            access_key:"fixture-executor-a".into(),path:"/api/v5/trade/order".into(),
+            required_query:vec![("instId".into(),"BTC-USDT-SWAP".into())],
+            raw_response:raw(serde_json::json!([{
+                "instId":"BTC-USDT-SWAP","ordId":"recorded-t09-opening-001",
+                "clOrdId":"__REQUEST_CL_ORD_ID__","side":"buy","posSide":"long",
+                "tdMode":"cross","ordType":"limit","px":"1000","sz":"0.1",
+                "accFillSz":"0.1","avgPx":"1000","state":"filled",
+                "cTime":original_source_time,"uTime":original_source_time
+            }])),
+        }).collect());
+    let event_at=chrono::Utc::now().timestamp_millis();
+    let bill=raw(serde_json::json!([{
+        "billId":"t10-10-independent-late-fee-001","instType":"SWAP",
+        "instId":"BTC-USDT-SWAP","ordId":"recorded-t09-opening-001",
+        "tradeId":"","clOrdId":"__REQUEST_CL_ORD_ID__",
+        "ccy":"USDT","type":"2","subType":"0","balChg":"-0.0001",
+        "fee":"-0.0001","pnl":"0","ts":event_at.to_string()
+    }]));
+    let source_sha256=format!("{:x}",sha2::Sha256::digest(&bill));
+    feed.advance_recorded_route("fixture-executor-a","/api/v5/account/bills-archive",
+        (0..12).map(|_| RecordedGet {
+            access_key:"fixture-executor-a".into(),path:"/api/v5/account/bills-archive".into(),
+            required_query:vec![],raw_response:bill.clone(),
+        }).collect());
+    let mut last=serde_json::Value::Null;
+    let (after,worker)=tokio::time::timeout(Duration::from_secs(12),async {
+        loop {
+            last=trade.trade("fixture-a",&okx_protocol::trading::TradeRequest::Status {
+                reference:intent_id.clone(),
+            },None).await.unwrap();
+            let sql=read(intent_id.clone()).await;
+            let mut cmd=summary("risk_t10_10_late_fee_observed");
+            cmd.installation_id="installation_test".into();
+            let worker=risk.request(cmd).await.unwrap();
+            let entry=worker.budget.as_ref().unwrap().entry_budget.as_ref().unwrap();
+            if sql["late"].is_object() && sql["pending"]==false
+                && entry.consumed_usd=="4.0021" {break (sql,worker);}
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }).await.unwrap_or_else(|_|panic!("T10_10_LATE_FEE_SETTLEMENT_NOT_OBSERVED:{last}"));
+    assert_eq!(after["late"]["cumulative_entry_usd"],"1.0006");
+    assert!(after["late"]["settlement_revision"].as_u64().unwrap()>
+        before["terminal"]["settlement_revision"].as_u64().unwrap());
+    assert_eq!(after["late"]["reservation_key"],before["terminal"]["reservation_key"]);
+    let entry=worker.budget.as_ref().unwrap().entry_budget.as_ref().unwrap();
+    assert_eq!(entry.reserved_usd,"4");
+    assert_eq!(entry.bound_breach_usd,"0.0001");
+    // The same source is still queued: public replay must neither debit the
+    // late revision again nor release another intent's reserved four dollars.
+    trade.trade("fixture-a",&okx_protocol::trading::TradeRequest::Status {
+        reference:intent_id.clone(),
+    },None).await.unwrap();
+    let replay=read(intent_id.clone()).await;
+    assert_eq!(replay["late"],after["late"]);
+    let mut cmd=summary("risk_t10_10_late_revision_replay");
+    cmd.installation_id="installation_test".into();
+    let replay_worker=risk.request(cmd).await.unwrap();
+    let replay_entry=replay_worker.budget.as_ref().unwrap().entry_budget.as_ref().unwrap();
+    assert_eq!(replay_entry.consumed_usd,"4.0021");
+    assert_eq!(replay_entry.reserved_usd,"4");
+    assert_eq!(replay_entry.bound_breach_usd,"0.0001");
+    use okx_protocol::trading::{TradeRequest,TradeOperation,Sizing,OrderConstraints,
+        PositionSide,Protection};
+    let denied=trade.trade("fixture-a",&TradeRequest::Execute {
+        idempotency_key:"t10_10_after_actual_bound_breach_0001".into(),
+        operation:TradeOperation::Open,strategy_instance:"manual".into(),
+        instrument:"BTC-USDT-SWAP".into(),side:PositionSide::Long,
+        sizing:Sizing::Contracts {contracts:"0.1".into()},
+        order:OrderConstraints {order_type:"limit".into(),limit_price:Some("1000".into()),
+            reference:None,max_entry_usd:Some("10".into()),max_slippage_bps:0},
+        protection:Some(Protection::Price {stop_price:"900".into()}),expires_in_ms:30_000,
+    },None).await.expect("T10-10 post-breach public Execute outcome");
+    assert_eq!(denied["data"]["state"],"REJECTED","{denied}");
+    assert_eq!(denied["data"]["send_state"],"NOT_STARTED","{denied}");
+    assert_eq!(denied["data"]["primary_reason"],"BUDGET_BOUND_BREACH","{denied}");
+    let mut cmd=summary("risk_t10_10_after_bound_denial");
+    cmd.installation_id="installation_test".into();
+    let denied_worker=risk.request(cmd).await.unwrap();
+    let denied_entry=denied_worker.budget.as_ref().unwrap().entry_budget.as_ref().unwrap();
+    assert_eq!(denied_entry.consumed_usd,"4.0021");
+    assert_eq!(denied_entry.reserved_usd,"4");
+    assert_eq!(denied_entry.bound_breach_usd,"0.0001");
+    assert_eq!(feed.outbound_posts.lock().unwrap().len(),4);
+    serde_json::json!({"intent_id":intent_id,"source_bill_id":"t10-10-independent-late-fee-001",
+        "source_event_at_ms":event_at,"source_sha256":source_sha256,
+        "before":before,"after":after,"replay":replay,
+        "worker_after":worker.budget,"worker_replay":replay_worker.budget,
+        "worker_sequence_after":worker.risk_book_sequence,
+        "worker_sequence_replay":replay_worker.risk_book_sequence,
+        "worker_sequence_after_denial":denied_worker.risk_book_sequence,
+        "new_risk_denial":denied,"worker_after_denial":denied_worker.budget,"venue_posts":4})
+}
+
 async fn t10_10_signed_duplicate_ingestion(
     accounts: Arc<AccountRuntimeRegistry>,
     trade: Arc<TradeService>,
     risk: NativeRiskClient,
     feed: Arc<crate::accounts::recorded_support::RecordedAccountHttp>,
     intent_id: String,
+    released_intent_id: String,
+    original_source_time: String,
 ) -> serde_json::Value {
     let before = t10_10_native_sql_economics(&accounts, &intent_id, None).await;
     assert_eq!(before["fill_count"], 2);
@@ -118,6 +292,9 @@ async fn t10_10_signed_duplicate_ingestion(
     assert_eq!(entry.reserved_usd, "4");
     assert_eq!(feed.outbound_posts.lock().unwrap().len(), 4,
         "duplicate signed fill/bill must not create a second order POST");
+    let late=t10_10_late_released_fee(
+        accounts,trade,risk,feed.clone(),released_intent_id,original_source_time
+    ).await;
     serde_json::json!({
         "schema":"okx.t10-10-signed-finance-duplicate/v1",
         "same_native_sql_owner":true,
@@ -132,7 +309,6 @@ async fn t10_10_signed_duplicate_ingestion(
         "worker_budget":worker.budget,
         "risk_book_sequence":worker.risk_book_sequence,
         "venue_posts":feed.outbound_posts.lock().unwrap().len(),
-        "late_fee_rebate_source_proven":false,
-        "upper_bound_breach_proven":false,
+        "late_released_fee":late,
     })
 }

@@ -1395,7 +1395,8 @@ try {
           ):
           t10SourceChangedMode?(afterNative.budget?.entry_budget?.reserved_usd):
           process.env.OKX_B1_SECOND_POSITIVE_PROBE === "1"?"8.002":"7.0015";
-        const expectedSpent=t10LateFillMode?"1.4007":
+        const t10FinanceRevisionMode=process.env.OKX_T10_10_FINANCE_REPLAY_PROBE === "1";
+        const expectedSpent=t10FinanceRevisionMode?"4.0021":t10LateFillMode?"1.4007":
           managedAdd?"6.003":partialFills?"4.002":"1.0005";
         if(afterNative.budget?.entry_budget?.reserved_usd!==expectedReserved
           ||afterNative.budget?.entry_budget?.consumed_usd!==expectedSpent){
@@ -1432,7 +1433,8 @@ try {
         // the two managed Close releases have happened. A follow-up T09.8
         // can advance source time, but every economic field must match.
         const latestNativeBudget =
-          managedClose ? receipt(stdout,"T09_6_NATIVE_TERMINAL_V1").worker_budget
+          t10FinanceRevisionMode ? receipt(stdout,"T10_10_NATIVE_SIGNED_REPLAY_V1").late_released_fee.worker_after_denial
+          : managedClose ? receipt(stdout,"T09_6_NATIVE_TERMINAL_V1").worker_budget
           : managedAdd ? receipt(stdout,"T09_4_NATIVE_MANAGED_ADD_V1").worker_budget
           : partialFills ? receipt(stdout,"T09_3_NATIVE_PARTIAL_TERMINAL_V1").worker_budget
           : admitted.after_worker_budget;

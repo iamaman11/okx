@@ -5,6 +5,7 @@
         accounts: Arc<AccountRuntimeRegistry>,
         trade: Arc<TradeService>,
         feed: Arc<crate::accounts::recorded_support::RecordedAccountHttp>,
+        risk: NativeRiskClient,
         id: String,
         cl_id: String,
         first_ts: Option<i64>,
@@ -13,6 +14,7 @@
         let raw = |v| serde_json::to_vec(&serde_json::json!({"code":"0","msg":"","data":v})).unwrap();
         let now_ms=chrono::Utc::now().timestamp_millis();
         let terminal=first_ts.is_some();
+        let unknown_fee = !terminal && std::env::var("OKX_T10_10_FINANCE_REPLAY_PROBE").as_deref()==Ok("1");
         // Recorded finite *external* balance observations for each financial
         // frontier. The baseline implicit GET boundary remains capped at
         // exactly 64: never raise it or rewind its consumed count. A newly
@@ -113,7 +115,7 @@
             (0..12).map(|_| RecordedGet{
                 access_key:"fixture-executor-a".into(),
                 path:"/api/v5/account/bills-archive".into(),
-                required_query:vec![],raw_response:raw(serde_json::json!(bills)),
+                required_query:vec![],raw_response:raw(if unknown_fee {serde_json::json!([])} else {serde_json::json!(bills)}),
             }).collect());
         let positions=raw(serde_json::json!([{
             "instType":"SWAP","instId":"BTC-USDT-SWAP",
@@ -180,6 +182,20 @@
             }).collect());
         }
         let owner=accounts.resolve("fixture-a").await.unwrap();
+        let unknown_fee_hold = if unknown_fee {
+            let held=t10_10_unknown_fee_hold(
+                accounts.clone(),trade.clone(),risk,feed.clone(),id.clone(),now_ms
+            ).await;
+            // The missing independently signed bill now arrives. The original
+            // literal source is restored, never inferred from SQL or Worker money.
+            feed.advance_recorded_route("fixture-executor-a","/api/v5/account/bills-archive",
+                (0..12).map(|_| RecordedGet{
+                    access_key:"fixture-executor-a".into(),
+                    path:"/api/v5/account/bills-archive".into(),required_query:vec![],
+                    raw_response:raw(serde_json::json!(bills)),
+                }).collect());
+            Some(held)
+        } else {None};
         let mut last=String::new();
         let sql=tokio::time::timeout(Duration::from_secs(16),async {
             loop {
@@ -290,6 +306,7 @@
             "entry_fill_evidence_state":status["data"]["entry_fill_evidence"]["state"],
             "financial_complete":status["data"]["financial_complete"],
             "protection":status["data"]["protection"],
+            "unknown_fee_hold":unknown_fee_hold,
         }),first)
     }
 

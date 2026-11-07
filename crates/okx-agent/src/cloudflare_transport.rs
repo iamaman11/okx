@@ -6098,7 +6098,7 @@ mod raw_native_session_tests {
                     let mut captured_signed_times=None;
                     if std::env::var("OKX_T09_3_PARTIAL_PROBE").as_deref() == Ok("1") {
                         let (first, ts) = tokio::spawn(t09_3_phase(
-                            accounts.clone(),trade.clone(),feed.clone(),
+                            accounts.clone(),trade.clone(),feed.clone(),risk.clone(),
                             new_intent_id.clone(),persisted.client_order_id.clone(),None,
                         )).await.expect("T09.3 partial native task");
                         let t10_08_failure = if std::env::var(
@@ -6113,7 +6113,7 @@ mod raw_native_session_tests {
                             Some(failed)
                         } else {None};
                         let (terminal, _) = tokio::spawn(t09_3_phase(
-                            accounts.clone(),trade.clone(),feed.clone(),
+                            accounts.clone(),trade.clone(),feed.clone(),risk.clone(),
                             new_intent_id.clone(),persisted.client_order_id.clone(),Some(ts),
                         )).await.expect("T09.3 terminal native task");
                         captured_signed_times=Some((first["raw_history_event_at_ms"].as_i64().unwrap(),terminal["raw_history_event_at_ms"].as_i64().unwrap()));
@@ -6194,7 +6194,7 @@ mod raw_native_session_tests {
                         if std::env::var("OKX_T10_10_FINANCE_REPLAY_PROBE").as_deref()==Ok("1") {
                             let repeated=t10_10_signed_duplicate_ingestion(
                                 accounts.clone(),trade.clone(),risk.clone(),feed.clone(),
-                                new_intent_id.clone(),
+                                new_intent_id.clone(),idempotent_intent_id.clone(),financial_time.clone(),
                             ).await;
                             println!("T10_10_NATIVE_SIGNED_REPLAY_V1:{repeated}");
                         }
