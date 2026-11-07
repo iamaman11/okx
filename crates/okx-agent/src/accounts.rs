@@ -15,6 +15,8 @@ use okx_protocol::{
 use okx_runtime::{LiveWsConnector, PrivateWsCoordinator, PrivateWsHandle, WsConnector};
 use rust_decimal::Decimal;
 use sha2::{Digest, Sha256};
+#[cfg(test)]
+use std::sync::atomic::AtomicBool;
 use std::{
     collections::BTreeMap,
     fs::{self, File, OpenOptions},
@@ -26,8 +28,6 @@ use std::{
     },
     time::Instant,
 };
-#[cfg(test)]
-use std::sync::atomic::AtomicBool;
 use tokio::{
     sync::{RwLock, Semaphore, watch},
     task::JoinHandle,

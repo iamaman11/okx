@@ -1862,8 +1862,7 @@ mod raw_native_session_tests {
                     &mut risk_rx,
                     shutdown_rx,
                     recovery_risk,
-                    token.to_string(),
-                    recovery_handoff,
+                    (token.to_string(), recovery_handoff),
                 )
                 .await
             } else {
@@ -6063,8 +6062,8 @@ mod raw_native_session_tests {
                                     ).await;
                                     println!("T10_09_NATIVE_REDUCE_FINANCE_V1:{reduction}");
                                     let terminal=t10_09_b_terminal_after_partial(
-                                        accounts.clone(),trade.clone(),risk.clone(),
-                                        rate_budget.clone(),feed.clone(),intent_b.clone(),
+                                        (accounts.clone(),trade.clone(),risk.clone(),
+                                         rate_budget.clone()),feed.clone(),intent_b.clone(),
                                         late["signed_late_at_ms"].as_i64().unwrap(),
                                         reduction["signed_reduce_at_ms"].as_i64().unwrap(),
                                         new_clock.parse::<i64>()
@@ -6173,7 +6172,7 @@ mod raw_native_session_tests {
                         captured_signed_times=Some((first["raw_history_event_at_ms"].as_i64().unwrap(),terminal["raw_history_event_at_ms"].as_i64().unwrap()));
                         let t10_08_recovery = if t10_08_failure.is_some() {
                             let recovered=t10_08_recover_signed_flat_after_late_fill(
-                                accounts.clone(),trade.clone(),risk.clone(),feed.clone(),
+                                (accounts.clone(),trade.clone(),risk.clone(),feed.clone()),
                                 rate_budget.clone(),new_intent_id.clone(),
                                 persisted.client_order_id.clone(),
                                 first["raw_history_event_at_ms"].as_i64().unwrap(),
