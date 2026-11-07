@@ -735,7 +735,11 @@ async fn t10_09_b_signed_partial_reduce_finance(
     // amend ACK that TradeService has already durably recorded. Prove the
     // exact original/reduction/remaining-size operation in Native SQL before
     // publishing ANY post-ACK stop source: a seen POST alone is insufficient.
-    let shrink_key=format!("protection-shrink:{}:0.02",original_client);
+    let shrink_key=format!(
+        "protection-shrink:{}:0.02",
+        reduce["original_intent_id"].as_str()
+            .expect("T10-09 original persisted intent for durable amend")
+    );
     let ack=owner.execution.store.call(
         std::time::Instant::now()+Duration::from_secs(3),
         move |s| Ok(s.operation(&shrink_key)?.map(|op| json!({
