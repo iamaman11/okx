@@ -757,13 +757,54 @@ async fn t10_09_b_signed_partial_reduce_finance(
             "request_hash":op.request_hash,
         }))),
     ).await.expect("T10-09 durable Native protection amendment receipt");
-    let ack=ack.unwrap_or_else(||panic!(
-        "T10_09_AMEND_ACK_SQL_MISSING:status={} expected_req_id={} last_post={:?} unconsumed_posts={} last_denial={:?}",
-        status["data"]["protection_adjustment"],
-        reducing_client_id,
-        feed.outbound_posts.lock().unwrap().last().cloned(),
-        feed.unconsumed_posts(),
-        feed.denied_routes.lock().unwrap().last().cloned()));
+    let ack=if let Some(receipt)=ack {receipt} else {
+        // The first failed SQL prerequisite, not a later transport denial,
+        // identifies whether this is an original-risk incident, owner
+        // mismatch, missing central hold or a pending local operation.
+        // Inspect only the existing persisted B owner; do not alter it.
+        let opening_id=reduce["original_intent_id"].as_str()
+            .expect("T10-09 opening SQL identity").to_owned();
+        let reducing_id=reduce_id.clone();
+        let sql_risk=owner.execution.store.call(
+            std::time::Instant::now()+Duration::from_secs(3),
+            move |s| {
+                let opening=s.intent(&opening_id)?;
+                let reduction=s.intent(&reducing_id)?;
+                let held=s.active_central_receipt(&opening_id)?.is_some();
+                let stop=s.protection(&opening_id)?;
+                let lots=s.active_lots("BTC-USDT-SWAP")?;
+                Ok(json!({
+                    "opening_state":opening.as_ref().map(|i|i.state.as_str()),
+                    "opening_risk_increase":opening.as_ref().map(|i|i.risk_increase),
+                    "opening_incident":opening.as_ref().and_then(|i|i.incident.clone()),
+                    "central_hold_active":held,
+                    "original_stop_qty":stop.as_ref().map(|p|p.quantity.normalize().to_string()),
+                    "opening_instrument":opening.as_ref().map(|i|i.instrument_id.clone()),
+                    "reduce_instrument":reduction.as_ref().map(|i|i.instrument_id.clone()),
+                    "opening_strategy":opening.as_ref().map(|i|i.plan.strategy_instance.clone()),
+                    "reduce_strategy":reduction.as_ref().map(|i|i.plan.strategy_instance.clone()),
+                    "opening_side":opening.as_ref().map(|i|i.plan.position_side.clone()),
+                    "reduce_side":reduction.as_ref().map(|i|i.plan.position_side.clone()),
+                    "reduce_state":reduction.as_ref().map(|i|i.state.as_str()),
+                    "reduce_operation":reduction.as_ref().map(|i|i.plan.operation.clone()),
+                    "lots":lots.iter().map(|lot| json!({
+                        "remaining_qty":lot.remaining_qty.normalize().to_string(),
+                        "original_lot":lot.intent_id.as_deref()==Some(opening_id.as_str()),
+                        "instance_id":lot.instance_id,
+                        "side":lot.side,
+                    })).collect::<Vec<_>>(),
+                }))
+            }
+        ).await;
+        panic!(
+            "T10_09_AMEND_ACK_SQL_MISSING:status={} sql_risk={:?} expected_req_id={} last_post={:?} unconsumed_posts={} last_denial={:?}",
+            status["data"]["protection_adjustment"],sql_risk,
+            reducing_client_id,
+            feed.outbound_posts.lock().unwrap().last().cloned(),
+            feed.unconsumed_posts(),
+            feed.denied_routes.lock().unwrap().last().cloned()
+        );
+    };
     assert_eq!(ack["kind"],"protection_shrink",
         "T10-09 B durable amend kind must be source-bound");
     assert_eq!(ack["result_ref"],"ACK_SOURCE_PENDING",
