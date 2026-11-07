@@ -6013,6 +6013,8 @@ mod raw_native_session_tests {
                                         rate_budget.clone(),feed.clone(),intent_b.clone(),
                                         late["signed_late_at_ms"].as_i64().unwrap(),
                                         reduction["signed_reduce_at_ms"].as_i64().unwrap(),
+                                        new_clock.parse::<i64>()
+                                            .expect("T10-09 original signed A create time"),
                                     ).await;
                                     println!("T10_09_NATIVE_TERMINAL_V1:{terminal}");
                                 }
