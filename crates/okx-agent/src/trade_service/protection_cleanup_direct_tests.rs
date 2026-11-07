@@ -417,3 +417,160 @@ async fn pc_06_two_callers_share_one_begin_and_old_read_never_confirms() {
         "VERIFIED_CANCELED"
     );
 }
+
+#[tokio::test]
+async fn pc_07_recorded_signed_http_cancel_ack_readback_and_sql_receipt() {
+    use crate::account_bootstrap::AccountBootstrapper;
+    use crate::accounts::recorded_support::{RecordedAccountHttp, RecordedGet, RecordedPost};
+    use okx_api::{
+        CancelAlgoOrderRequest, Credentials, OkxEnvironment, OkxRestClient, RateBudget, Region,
+        TradeApi,
+    };
+    use std::sync::Arc;
+
+    const WIRE_ALGO: &str = "900000002";
+    const WIRE_UID: &str = "account-001";
+    let f = fixture().await;
+    let feed = Arc::new(RecordedAccountHttp::default());
+    let raw = |data: serde_json::Value| {
+        serde_json::to_vec(&serde_json::json!({
+            "code": "0", "msg": "", "data": data
+        }))
+        .unwrap()
+    };
+
+    // Each signed inventory scope is recorded before the test begins.
+    // Exactly one conditional stop exists before ACK, and none after it.
+    let mut before = Vec::new();
+    let mut after = Vec::new();
+    for inst_type in ["SWAP", "FUTURES"] {
+        for kind in [
+            "conditional", "oco", "trigger", "move_order_stop",
+            "chase", "iceberg", "twap", "smart_iceberg",
+        ] {
+            let query = vec![
+                ("instType".to_owned(), inst_type.to_owned()),
+                ("ordType".to_owned(), kind.to_owned()),
+                ("limit".to_owned(), "100".to_owned()),
+            ];
+            let live = if inst_type == "SWAP" && kind == "conditional" {
+                serde_json::json!([{
+                    "instType": "SWAP", "instId": INST, "ordType": "conditional",
+                    "algoId": WIRE_ALGO, "algoClOrdId": "s1234567890123456789012345678901",
+                    "state": "live", "side": "sell", "posSide": "long",
+                    "sz": "0.3", "tdMode": "cross",
+                    "slTriggerPx": "900", "slTriggerPxType": "mark", "slOrdPx": "-1"
+                }])
+            } else {
+                serde_json::json!([])
+            };
+            before.push(RecordedGet {
+                access_key: "fixture-observer-a".into(),
+                path: "/api/v5/trade/orders-algo-pending".into(),
+                required_query: query.clone(),
+                raw_response: raw(live),
+            });
+            after.push(RecordedGet {
+                access_key: "fixture-observer-a".into(),
+                path: "/api/v5/trade/orders-algo-pending".into(),
+                required_query: query,
+                raw_response: raw(serde_json::json!([])),
+            });
+        }
+    }
+    feed.expect_causal_algo_inventory(WIRE_ALGO, before, after);
+    feed.expect_post(RecordedPost {
+        access_key: "fixture-executor-a".into(),
+        path: "/api/v5/trade/cancel-algos".into(),
+        expected_body: serde_json::json!([{
+            "instId": INST, "algoId": WIRE_ALGO
+        }]),
+        raw_response: raw(serde_json::json!([{
+            "algoId": WIRE_ALGO, "sCode": "0"
+        }])),
+    });
+
+    let rate = RateBudget::new().for_authenticated_user(WIRE_UID);
+    let environment = OkxEnvironment::new(Region::Global, true);
+    let signer = |key: &str| {
+        Credentials::new(key.to_owned(), "test-secret".into(), "test-pass".into()).unwrap()
+    };
+    let observer = AccountBootstrapper::new(
+        OkxRestClient::with_http_transport(
+            environment, signer("fixture-observer-a"), rate.clone(), feed.clone(),
+        )
+        .unwrap(),
+    );
+    let executor = OkxRestClient::with_http_transport(
+        environment, signer("fixture-executor-a"), rate, feed.clone(),
+    )
+    .unwrap();
+    let trade = TradeApi::new(executor.clone());
+    let expected_uid = okx_api::account_uid_fingerprint(WIRE_UID);
+    let target = ProtectionCleanupIdentity {
+        key: "pc-07-wire",
+        hash: "pc-07-wire-hash",
+        instrument_id: INST,
+        algo_id: WIRE_ALGO,
+        expected_uid: &expected_uid,
+    };
+    assert_eq!(
+        protection_cleanup_step(&f.store, target.key, target.hash)
+            .await.unwrap(),
+        ProtectionCleanupStep::SendOnce
+    );
+    let begin = operation(&f.store, target.key).await;
+    assert_eq!(begin.result_ref, "POSTING");
+
+    // Before the only permitted POST, an authenticated *live* stop cannot
+    // authorize a receipt. This assertion uses real REST parsing and SQLite.
+    assert_eq!(
+        observe_protection_cleanup_sources(&f.store, &observer, target)
+            .await.unwrap_err(),
+        "PROTECTION_CANCEL_READBACK_PENDING"
+    );
+    assert!(feed.outbound_posts.lock().unwrap().is_empty());
+    assert_eq!(
+        protection_cleanup_step(&f.store, target.key, target.hash)
+            .await.unwrap(),
+        ProtectionCleanupStep::Inspect
+    );
+
+    // Match the production clock, admission, signer and exact-ID cancel
+    // adapter. The transport only supplies the one pre-recorded ACK.
+    feed.expect_public_clock(raw(serde_json::json!([{
+        "ts": chrono::Utc::now().timestamp_millis().to_string()
+    }])));
+    let timing = executor.clock_evidence().await.unwrap()
+        .mutation_timing(5_000).unwrap();
+    let request = CancelAlgoOrderRequest {
+        instrument_id: INST.into(),
+        algo_order_id: WIRE_ALGO.into(),
+    };
+    let admitted = trade.admit_cancel_algo_order(&request).unwrap();
+    let ack = trade.cancel_algo_order_after_admission(&request, &timing, &admitted)
+        .await.unwrap();
+    assert!(ack.top_level_success());
+    assert_eq!(ack.data.len(), 1);
+    assert_eq!(ack.data[0].status_code, "0");
+    assert_eq!(ack.data[0].algo_order_id, WIRE_ALGO);
+    assert_eq!(feed.outbound_posts.lock().unwrap().len(), 1);
+
+    // The complete signed AFTER_ACK census and a flat position are observed
+    // by the exact production helper; only SQLite can commit the receipt.
+    observe_protection_cleanup_sources(&f.store, &observer, target)
+        .await.unwrap();
+    let final_op = operation(&f.store, target.key).await;
+    assert_eq!(final_op.result_ref, "VERIFIED_CANCELED");
+    assert_eq!(
+        protection_cleanup_step(&f.store, target.key, target.hash)
+            .await.unwrap(),
+        ProtectionCleanupStep::Confirmed
+    );
+    let sent = feed.outbound_posts.lock().unwrap();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].0, "fixture-executor-a");
+    assert_eq!(sent[0].1, "/api/v5/trade/cancel-algos");
+    assert_eq!(sent[0].2[0]["algoId"], WIRE_ALGO);
+    assert!(feed.denied_routes.lock().unwrap().is_empty());
+}
