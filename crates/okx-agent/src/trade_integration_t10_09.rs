@@ -730,8 +730,9 @@ async fn t10_09_b_signed_partial_reduce_finance(
     ).await.expect("T10-09 native terminal Reduce Status");
     assert_eq!(status["data"]["intent"]["state"],"FILLED");
     assert_eq!(status["data"]["protection_adjustment"]["state"],"ack_source_pending",
-        "T10_09_SHRINK_FIRST_BLOCKER_V2:{} last_post={:?} unconsumed_posts={} last_denial={:?}",
+        "T10_09_SHRINK_FIRST_BLOCKER_V3:{} expected_req_id={} last_post={:?} unconsumed_posts={} last_denial={:?}",
         status["data"]["protection_adjustment"],
+        reducing_client_id,
         feed.outbound_posts.lock().unwrap().last().cloned(),
         feed.unconsumed_posts(),
         feed.denied_routes.lock().unwrap().last().cloned());
