@@ -1166,11 +1166,13 @@ async fn t10_09_b_terminal_after_partial(
             }
         }
     }
-    // Wait on the independent SQL owner, not repeated public Status GETs,
-    // until the third authenticated fill/bill has made B flat. The final
-    // signed orders-pending phase is published AFTER this causal finance
-    // boundary so maintenance cannot exhaust it while capture is pending.
-    // No source bytes, financial values or risk state are created here.
+    // This is a scheduling barrier, not a terminal settlement claim:
+    // wait for captured flat lots and complete signed source cursors before
+    // publishing the finite final pending-inventory phase. A Close ACK/plan
+    // cannot prove fills. Below, production Status must settle the Close,
+    // then the SAME SQL local-close finance proof checks fill, linked bill,
+    // unique fee and its durable terminal receipt. Never use the Entry-only
+    // intent_fill_cost_evidence for a risk-decreasing Close.
     let until=std::time::Instant::now()+Duration::from_secs(24);
     let mut last_finance=json!({"state":"WAITING_FOR_SIGNED_FLAT"});
     loop {
@@ -1183,17 +1185,15 @@ async fn t10_09_b_terminal_after_partial(
                 let fills=s.cursor("fills","SWAP")?;
                 let bills=s.cursor("bills","account")?;
                 let lots=s.active_lots("BTC-USDT-SWAP")?;
-                let (qty,fill_count)=if let Some(cursor)=fills.as_ref() {
-                    let evidence=s.intent_fill_cost_evidence(&id,cursor.watermark)?;
-                    (evidence.filled_quantity.normalize().to_string(),evidence.fill_count)
-                } else {("0".to_owned(),0)};
-                let bill_count=if let Some(cursor)=bills.as_ref() {
-                    s.intent_fee_bill_evidence(&id,cursor.watermark)?.linked_bill_count
-                } else {0};
+                let closing=s.intent(&id)?.ok_or(
+                    okx_execution::StoreError::Invalid(
+                        "T10_09_FINAL_CLOSE_INTENT_MISSING"
+                    )
+                )?;
                 Ok(json!({
-                    "close_qty":qty,
-                    "close_fill_count":fill_count,
-                    "close_bill_count":bill_count,
+                    "close_plan_qty":closing.plan.quantity.normalize().to_string(),
+                    "close_venue_ack":closing.exchange_order_id.as_deref()
+                        ==Some("recorded-t10-09-b-final-close-020"),
                     "remaining_lots":lots.len(),
                     "fill_watermark":fills.as_ref().map(|v|v.watermark),
                     "bill_watermark":bills.as_ref().map(|v|v.watermark),
@@ -1205,9 +1205,8 @@ async fn t10_09_b_terminal_after_partial(
             },
         ).await;
         match observed {
-            Ok(value) if value["close_qty"]=="0.02"
-                && value["close_fill_count"]==1
-                && value["close_bill_count"]==1
+            Ok(value) if value["close_plan_qty"]=="0.02"
+                && value["close_venue_ack"]==true
                 && value["remaining_lots"]==0
                 && value["fills_complete"]==true
                 && value["bills_complete"]==true
@@ -1305,8 +1304,25 @@ async fn t10_09_b_terminal_after_partial(
             let bills=s.cursor("bills","account")?.ok_or(
                 okx_execution::StoreError::Invalid("T10_09_FINAL_BILL_CURSOR_MISSING")
             )?;
-            let f=s.intent_fill_cost_evidence(&c,fills.watermark)?;
-            let b=s.intent_fee_bill_evidence(&c,bills.watermark)?;
+            // Local Close has a different signed finance contract than
+            // risk-increasing Entry. This read-only witness is the exact
+            // same validation called by production local terminal release.
+            let (close_qty,close_fills,close_bills,close_fee,close_proof)=
+                s.local_terminal_close_evidence(
+                    &c,"recorded-t10-09-b-final-close-020",
+                    Decimal::new(2,2),at
+                )?;
+            let released=s.operation(&format!("local-terminal-release:{c}"))?
+                .ok_or(okx_execution::StoreError::Invalid(
+                    "T10_09_LOCAL_CLOSE_PROOF_NOT_ACKED"
+                ))?;
+            if released.kind!="LOCAL_TERMINAL_RELEASE"
+                || released.result_ref!=close_proof
+                || released.request_hash!=closing.request_hash {
+                return Err(okx_execution::StoreError::Invalid(
+                    "T10_09_LOCAL_CLOSE_PROOF_MISMATCH"
+                ));
+            }
             let lots=s.active_lots("BTC-USDT-SWAP")?;
             let receipt=s.central_receipt(&o)?.ok_or(
                 okx_execution::StoreError::Invalid("T10_09_ORIGINAL_CENTRAL_RECEIPT_MISSING")
@@ -1319,11 +1335,12 @@ async fn t10_09_b_terminal_after_partial(
                 "close_state":closing.state.as_str(),
                 "close_quantity":closing.plan.quantity.normalize().to_string(),
                 "close_risk_increase":closing.risk_increase,
-                "close_signed_fill_quantity":f.filled_quantity.normalize().to_string(),
-                "close_signed_fill_count":f.fill_count,
-                "close_signed_bill_count":b.linked_bill_count,
-                "close_signed_fee_usdt":
-                    b.conservative_verified_fee_usdt.normalize().to_string(),
+                "close_signed_fill_quantity":close_qty.normalize().to_string(),
+                "close_signed_fill_count":close_fills,
+                "close_signed_bill_count":close_bills,
+                "close_signed_fee_usdt":close_fee.abs().normalize().to_string(),
+                "close_proof_digest":close_proof,
+                "close_terminal_receipt_kind":released.kind,
                 "remaining_lots":lots.len(),
                 "fill_watermark":fills.watermark,
                 "bill_watermark":bills.watermark,
