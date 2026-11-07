@@ -6015,6 +6015,7 @@ mod raw_native_session_tests {
                                         reduction["signed_reduce_at_ms"].as_i64().unwrap(),
                                         new_clock.parse::<i64>()
                                             .expect("T10-09 original signed A create time"),
+                                        &rearm_a_finance,
                                     ).await;
                                     println!("T10_09_NATIVE_TERMINAL_V1:{terminal}");
                                 }
