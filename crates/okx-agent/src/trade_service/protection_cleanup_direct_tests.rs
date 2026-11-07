@@ -82,9 +82,16 @@ async fn readback(
     source_at: i64,
     qty: &str,
 ) -> Result<(), String> {
+    let positions = positions(qty);
     protection_cleanup_readback(
-        store, key, hash, INST, ALGO, UID,
-        inventory, uid, source_at, &positions(qty),
+        store,
+        ProtectionCleanupIdentity {
+            key, hash, instrument_id: INST, algo_id: ALGO, expected_uid: UID,
+        },
+        ProtectionCleanupObservation {
+            inventory, uid, position_received_at_ms: source_at,
+            positions: &positions,
+        },
     ).await
 }
 
