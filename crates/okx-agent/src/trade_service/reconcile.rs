@@ -321,6 +321,24 @@ fn protection_covers_managed_increment(
         )
 }
 
+/// A signed venue position smaller than the still-durable SQL lot is an
+/// ordering disagreement, not by itself evidence that the attached stop is
+/// missing. Only a separately authenticated, *exact* still-live old stop
+/// permits a pending-source classification; anything else remains a
+/// protection failure. This never proves a Reduce, changes a lot, confirms
+/// current protection sizing, or permits a new RiskBook grant.
+fn signed_position_below_sql_lot_with_live_old_stop(
+    intent: &StoredIntent,
+    sql_owned: Decimal,
+    signed_position: Decimal,
+    source: &okx_api::TradeAlgoOrderDetails,
+) -> bool {
+    sql_owned > Decimal::ZERO
+        && signed_position > Decimal::ZERO
+        && signed_position < sql_owned
+        && verified_live_protection(intent, sql_owned, source).is_ok()
+}
+
 /// Every venue readback must refer to this durable intent before it can
 /// change local state, protection requirements, or exchange-order identity.
 /// An exchange lookup by client ID alone is a lookup, not an identity proof.
@@ -866,6 +884,24 @@ impl TradeService {
                         .algo_order_by_client_id(&algo_client)
                         .await;
                     match p {
+                        Ok(p)
+                            if signed_position_below_sql_lot_with_live_old_stop(
+                                &i,
+                                effective_protected,
+                                position_qty,
+                                &p,
+                            ) =>
+                        {
+                            // Position GET has moved ahead of the SQL lot
+                            // projection (for example, after signed Reduce
+                            // execution but before its native finance ingest).
+                            // The exact original stop is still live. Remain
+                            // fail-closed and retry after source convergence;
+                            // do NOT create an irreversible incident merely
+                            // because these independently owned observations
+                            // have different timestamps.
+                            protection_source_pending = true;
+                        }
                         Ok(p)
                             if verified_live_protection(&i, effective_protected, &p).is_ok()
                                 && protection_covers_managed_increment(
@@ -2898,6 +2934,82 @@ mod entry_cost_status_tests {
             dec("0.6").unwrap(),
             net,
             "0.6"
+        ));
+    }
+
+    #[test]
+    fn t10_09_position_ahead_of_sql_lot_requires_signed_old_stop_and_stays_pending() {
+        // A causal partial Reduce can appear in venue positions before its
+        // immutable fill/bill updates the SQL lot. No new protection defect
+        // is proved by the difference alone; a missing or wrong stop still
+        // fails closed and the existing durable incident is never cleared.
+        let intent = StoredIntent {
+            intent_id: "original".into(),
+            client_order_id: "c".repeat(32),
+            instrument_id: "BTC-USDT-SWAP".into(),
+            plan_hash: "a".repeat(64),
+            idempotency_key: "original-key".into(),
+            request_hash: "original-request".into(),
+            state: IntentState::Cancelled,
+            revision: 3,
+            deadline: 100,
+            policy_revision: 1,
+            risk_increase: true,
+            exchange_order_id: Some("original-order".into()),
+            incident: None,
+            plan: okx_execution::IntentPlan {
+                side: "buy".into(),
+                position_side: "long".into(),
+                quantity: dec("0.1").unwrap(),
+                stop_price: Some(dec("900").unwrap()),
+                ..Default::default()
+            },
+        };
+        let original = okx_api::TradeAlgoOrderDetails {
+            instrument_id: intent.instrument_id.clone(),
+            algo_order_id: "900000004".into(),
+            client_order_id: format!("s{}", "c".repeat(31)),
+            state: "live".into(),
+            stop_loss_trigger_price_type: "mark".into(),
+            stop_loss_trigger_price: "900".into(),
+            size: "0.04".into(),
+            side: "sell".into(),
+            position_side: "long".into(),
+            ..serde_json::from_value::<okx_api::TradeAlgoOrderDetails>(json!({})).unwrap()
+        };
+        let sql_lot = dec("0.04").unwrap();
+        let newer_venue_position = dec("0.02").unwrap();
+        assert!(signed_position_below_sql_lot_with_live_old_stop(
+            &intent, sql_lot, newer_venue_position, &original
+        ));
+        assert!(!protection_covers_managed_increment(
+            "buy", "sell", sql_lot, newer_venue_position, &original.size
+        ));
+        for bad_size in ["0.02", "0.05", "invalid"] {
+            let mut invalid = original.clone();
+            invalid.size = bad_size.into();
+            assert!(!signed_position_below_sql_lot_with_live_old_stop(
+                &intent, sql_lot, newer_venue_position, &invalid
+            ));
+        }
+        let mut missing = original.clone();
+        missing.state = "canceled".into();
+        assert!(!signed_position_below_sql_lot_with_live_old_stop(
+            &intent, sql_lot, newer_venue_position, &missing
+        ));
+        let mut alien = original.clone();
+        alien.client_order_id = "other-account-stop".into();
+        assert!(!signed_position_below_sql_lot_with_live_old_stop(
+            &intent, sql_lot, newer_venue_position, &alien
+        ));
+        assert!(!signed_position_below_sql_lot_with_live_old_stop(
+            &intent, sql_lot, Decimal::ZERO, &original
+        ));
+        assert!(!signed_position_below_sql_lot_with_live_old_stop(
+            &intent, sql_lot, sql_lot, &original
+        ));
+        assert!(!signed_position_below_sql_lot_with_live_old_stop(
+            &intent, sql_lot, dec("0.05").unwrap(), &original
         ));
     }
 
