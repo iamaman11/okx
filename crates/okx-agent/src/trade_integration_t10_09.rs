@@ -966,6 +966,7 @@ async fn t10_09_b_terminal_after_partial(
     late_at: i64,
     partial_at: i64,
     a_order_venue_at: i64,
+    a_finance_source_at_flat: &(impl Fn(&str) + Sync),
 ) -> serde_json::Value {
     use crate::accounts::recorded_support::{RecordedGet, RecordedPost};
     use okx_protocol::trading::TradeRequest;
@@ -1294,6 +1295,11 @@ async fn t10_09_b_terminal_after_partial(
         until.saturating_duration_since(std::time::Instant::now()),
         a_owner.recorded_capture_gate.write()
     ).await.expect("T10_09_A_SOURCE_GATE_DEADLINE");
+    // The A order remained unfilled while B closed, so its authenticated
+    // historical fill/bill bytes do not change. The EXISTING B1 transcript
+    // owner publishes a new finite observation of those same A sources at
+    // this verified B-flat event; not a synthetic finance/NAV mutation.
+    a_finance_source_at_flat("T10_09_B_SIGNED_FLAT_TERMINAL_CENSUS");
     let a_balance_at=chrono::Utc::now().timestamp_millis().to_string();
     let a_balance=raw(json!([{
         "totalEq":"100","adjEq":"100","uTime":a_balance_at,
@@ -1370,6 +1376,40 @@ async fn t10_09_b_terminal_after_partial(
         },
         24,Duration::from_secs(20),
     );
+
+    // A venue-flat proof does not by itself make the account-wide NAV
+    // complete. Terminal release checks the SAME normal financial_risk()
+    // predicate on both A and B. If a prior NAV is PARTIAL/stale, run the
+    // existing authenticated source capture once on that account under its
+    // source-cycle owner; never insert a test NAV or bypass the census.
+    for (label,account) in [("A",&a_owner),("B",&owner)] {
+        let prior=account.execution.store.call(
+            std::time::Instant::now()+Duration::from_secs(3),
+            |sql| sql.financial_risk(chrono::Utc::now().timestamp_millis(),None),
+        ).await.expect("T10-09 original financial risk SQL owner");
+        if !prior.nav_complete {
+            let captured=tokio::time::timeout(
+                until.saturating_duration_since(std::time::Instant::now()),
+                crate::source_capture::capture_account_sources(
+                    &account.observer,&account.private_ws,&account.execution
+                ),
+            ).await.unwrap_or_else(|_|panic!(
+                "T10_09_TERMINAL_NAV_CAPTURE_DEADLINE:account={label} prior_complete={} prior_as_of={}",
+                prior.nav_complete,prior.source_as_of
+            ));
+            captured.unwrap_or_else(|reason|panic!(
+                "T10_09_TERMINAL_NAV_CAPTURE_FAILED:account={label} reason={reason} prior_complete={} prior_as_of={}",
+                prior.nav_complete,prior.source_as_of
+            ));
+        }
+        let final_risk=account.execution.store.call(
+            std::time::Instant::now()+Duration::from_secs(3),
+            |sql| sql.financial_risk(chrono::Utc::now().timestamp_millis(),None),
+        ).await.expect("T10-09 independently captured financial risk");
+        assert!(final_risk.nav_complete,
+            "T10_09_TERMINAL_NAV_NOT_COMPLETE:account={label} prior_complete={} prior_as_of={} final_as_of={}",
+            prior.nav_complete,prior.source_as_of,final_risk.source_as_of);
+    }
 
     let mut last=json!(null);
     let mut first_release_blocker=json!(null);
