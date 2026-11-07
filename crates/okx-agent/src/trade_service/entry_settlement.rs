@@ -420,3 +420,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "entry_settlement_direct_tests.rs"]
+mod direct_tests;
