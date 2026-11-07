@@ -2102,7 +2102,7 @@ impl TradeService {
             if prior.result_ref != "POSTING" {
                 return Err("PROTECTION_CLEANUP_RECEIPT_CONFLICT".into());
             }
-return observe_protection_cleanup(r, target).await;
+            return observe_protection_cleanup(r, target).await;
         }
 
         let inventory = r.observer.pending_derivative_risk_algos().await.map_err(err)?;
@@ -2135,7 +2135,7 @@ return observe_protection_cleanup(r, target).await;
             ProtectionCleanupStep::Inspect => {
                 // A concurrent caller committed BEGIN after our first read.
                 // Do not consume a second send; take a NEW authenticated read.
-return observe_protection_cleanup(r, target).await;
+                return observe_protection_cleanup(r, target).await;
             }
             ProtectionCleanupStep::SendOnce => {}
         }
@@ -2149,7 +2149,7 @@ return observe_protection_cleanup(r, target).await;
         {
             return Err("PROTECTION_CANCEL_NOT_CONFIRMED".into());
         }
-observe_protection_cleanup(r, target).await
+        observe_protection_cleanup(r, target).await
     }
     pub(super) async fn cancel(
         &self,
