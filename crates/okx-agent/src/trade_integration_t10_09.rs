@@ -1280,7 +1280,6 @@ async fn t10_09_b_terminal_after_partial(
     let mut original_status=json!(null);
     let mut close_status=json!(null);
     let mut attempts=0_u32;
-    let mut final_after_close_source_published=false;
     while attempts<8 && std::time::Instant::now()<until {
         attempts+=1;
         let mut deferred=false;
@@ -1295,14 +1294,10 @@ async fn t10_09_b_terminal_after_partial(
                     let delay=recorded_preview_local_defer(
                         &reason,&rate_budget,remaining
                     ).unwrap_or_else(||panic!(
-                        "T10_09_FINAL_STATUS_NONLOCAL_SOURCE:{reference}:{reason}:attempt={attempts}:close_state={}:post_close_phase_published={final_after_close_source_published}:signed_pending_reads={}",
-                        close_status["data"]["intent"]["state"],
+                        "T10_09_FINAL_STATUS_NONLOCAL_SOURCE:{reference}:{reason}:attempt={attempts}:previous_status={last}:signed_pending_reads={}",
                         feed.immutable_signed_phase_reads(
-                            "fixture-observer-b",
-                            "/api/v5/trade/orders-pending",
-                            if final_after_close_source_published {
-                                "t10-09-b-post-close-status-pending-inventory"
-                            } else {"t10-09-b-final-flat-pending-inventory"}
+                            "fixture-observer-b","/api/v5/trade/orders-pending",
+                            "t10-09-b-final-flat-pending-inventory"
                         )
                     ));
                     tokio::time::sleep(delay).await;
@@ -1315,44 +1310,19 @@ async fn t10_09_b_terminal_after_partial(
             };
             assert_eq!(feed.outbound_posts.lock().unwrap().len(),9,
                 "T10-09 final status cannot replay Close or issue unseen cancels");
-            if opening {
-                original_status=observed
-            } else {
-                close_status=observed;
-                // The first terminal Close Status has independently read
-                // back the venue order and reconciled its signed finance.
-                // A subsequent original opening Status requires a SECOND,
-                // separately published venue observation of empty pending
-                // inventory. One phase cannot silently stand in for both
-                // causal readback events while background census is polling.
-                // This is not an extra budget for an old source: a new
-                // exactly-scoped signed observation exists only AFTER the
-                // first confirmed terminal Close status. No SQL, financial
-                // values or risk budget are mutated by this handoff.
-                if !final_after_close_source_published
-                    && close_status["data"]["intent"]["state"]=="FILLED"
-                {
-                    feed.advance_immutable_signed_phase_bounded(
-                        "t10-09-b-final-flat-pending-inventory",
-                        "t10-09-b-post-close-status-pending-inventory",
-                        RecordedGet {
-                            access_key:"fixture-observer-b".into(),
-                            path:"/api/v5/trade/orders-pending".into(),
-                            required_query:vec![("limit".into(),"100".into())],
-                            raw_response:raw(json!([])),
-                        },
-                        24,Duration::from_secs(20),
-                    );
-                    final_after_close_source_published=true;
-                }
-            }
+            if opening {original_status=observed} else {close_status=observed}
         }
         if deferred {continue}
+        // No protection incident occurred in this normal Cancel→Reduce→
+        // Close chain. Production reports remediation=not_evaluated in
+        // that case: verified_flat_no_orphans is ONLY for recovering a
+        // PREVIOUSLY persisted incident. Requiring it here caused endless
+        // Status polling and exhaustion of a correct finite signed source.
         let complete=close_status["data"]["intent"]["state"]=="FILLED"
             && original_status["data"]["central_release"]["state"]=="verified"
             && original_status["data"]["protection_incident"]==false
-            && original_status["data"]["protection_remediation"]["state"]
-                =="verified_flat_no_orphans";
+            && original_status["data"]["remaining_exposure"]=="0"
+            && original_status["data"]["financial_complete"]==true;
         last=json!({
             "attempt":attempts,
             "close_intent":close_status["data"]["intent"]["state"],
@@ -1370,16 +1340,23 @@ async fn t10_09_b_terminal_after_partial(
     assert_eq!(original_status["data"]["protection_incident"],false,
         "T10-09 independent flat must not leave protective incident");
     assert_eq!(original_status["data"]["protection_remediation"]["state"],
-        "verified_flat_no_orphans",
-        "T10-09 canceled B stop and signed orphan0 inventory are mandatory");
-    assert!(final_after_close_source_published,
-        "T10-09 terminal original status must follow independent post-Close pending source");
-    let final_inventory_reads=feed.immutable_signed_phase_reads(
-        "fixture-observer-b","/api/v5/trade/orders-pending",
-        "t10-09-b-post-close-status-pending-inventory",
-    );
-    assert!(final_inventory_reads>0 && final_inventory_reads<=24,
-        "T10-09 final original release must consume bounded post-Close inventory");
+        "not_evaluated",
+        "T10-09 ordinary flat with no incident must NOT claim incident remediation");
+    assert_eq!(original_status["data"]["remaining_exposure"],"0",
+        "T10-09 normal flat requires zero owned original exposure");
+    assert_eq!(original_status["data"]["financial_complete"],true,
+        "T10-09 flat release requires complete signed finance");
+    // Positive proof is a fresh independent full signed risk-algo census,
+    // NOT an incident remediation that never happened. Observe the normal
+    // production account reader, with the existing finite actor/query-bound
+    // pages: no test-owned SQL receipt or invented emergency mutation.
+    let orphan_inventory=owner.observer.pending_derivative_risk_algos().await
+        .expect("T10-09 independent signed complete risk-algo inventory");
+    assert!(orphan_inventory.complete_within_bound,
+        "T10-09 orphan inventory must cover every required algo kind");
+    let orphan_count=orphan_inventory.samples.iter()
+        .filter(|algo|algo.instrument_id=="BTC-USDT-SWAP").count();
+    assert_eq!(orphan_count,0,"T10-09 no remaining protective/orphan algos");
 
     let o=opening_id.clone();
     let c=close_id.clone();
@@ -1499,6 +1476,8 @@ async fn t10_09_b_terminal_after_partial(
         "signed_close_at_ms":at,
         "worker_after":worker.budget,
         "worker_risk_book_sequence":worker.risk_book_sequence,
+        "signed_flat_orphan_inventory_complete":orphan_inventory.complete_within_bound,
+        "signed_flat_orphan_count":orphan_count,
         "worker_original_reservation_state":"RELEASED",
         "worker_original_reservation_key":reservation_key,
         "outbound_posts_before":before,
