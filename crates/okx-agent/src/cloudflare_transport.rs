@@ -328,9 +328,7 @@ where
         F::Ping{nonce,..}=>{challenges.retain(|_,t|t.elapsed()<Duration::from_secs(15));if challenges.len()<64{challenges.insert(nonce.clone(),Instant::now());}send(&mut sink,F::Pong{schema:SCHEMA.into(),session_id:session_id.clone(),connection_generation,nonce}).await?;},
         F::Pong{..}=>{},
         F::PolicySnapshot{snapshot,..}=>{ctx.trade.update_governance(&snapshot).await.map_err(|_|transport("INVALID_POLICY_SNAPSHOT"))?;},
-        F::RiskControlResult{result,..}=>{
-            #[cfg(test)]
-            let mut result=result;
+        F::RiskControlResult{mut result,..}=>{
             #[cfg(test)]
             raw_native_session_tests::t10_12_hold_settlement_reply(
                 &original_bytes,&result,pending.get(&result.command_id).map(|(cmd,_)|cmd),
