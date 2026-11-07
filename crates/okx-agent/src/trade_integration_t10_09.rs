@@ -1279,6 +1279,15 @@ async fn t10_09_b_terminal_after_partial(
     // Hold the EXISTING test-only A source-cycle gate for this single public
     // release boundary. No engine/risk/census path or production concurrency
     // is disabled, and no missing source is substituted.
+    // SQL has independently captured B's final 0.02 fill+bill and zero
+    // lots. Preserve the finite signed final pending inventory for the
+    // public B Close/Entry Status and full-cohort release only: a timer-
+    // driven B source cycle must not consume it in between. The ordinary
+    // TradeService and census still execute their own authenticated GETs.
+    let _b_terminal_capture_lease=tokio::time::timeout(
+        until.saturating_duration_since(std::time::Instant::now()),
+        owner.recorded_capture_gate.write()
+    ).await.expect("T10_09_B_SOURCE_GATE_DEADLINE");
     let a_owner=accounts.resolve("fixture-a").await
         .expect("T10-09 A signed cohort source owner");
     let a_terminal_capture_lease=tokio::time::timeout(
@@ -1363,6 +1372,7 @@ async fn t10_09_b_terminal_after_partial(
     );
 
     let mut last=json!(null);
+    let mut first_release_blocker=json!(null);
     let mut original_status=json!(null);
     let mut close_status=json!(null);
     let mut attempts=0_u32;
@@ -1410,7 +1420,19 @@ async fn t10_09_b_terminal_after_partial(
             && original_status["data"]["protection_incident"]==false
             && original_status["data"]["remaining_exposure"]=="0"
             && original_status["data"]["financial_complete"]==true;
+        if first_release_blocker.is_null()
+            && original_status["data"]["central_release"]["state"]!="verified" {
+            first_release_blocker=json!({
+                "attempt":attempts,
+                "release":original_status["data"]["central_release"],
+                "b_signed_pending_reads":feed.immutable_signed_phase_reads(
+                    "fixture-observer-b","/api/v5/trade/orders-pending",
+                    "t10-09-b-final-flat-pending-inventory"
+                ),
+            });
+        }
         last=json!({
+            "first_release_blocker":first_release_blocker,
             "attempt":attempts,
             "close_intent":close_status["data"]["intent"]["state"],
             "original_release":original_status["data"]["central_release"],
