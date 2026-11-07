@@ -2087,9 +2087,9 @@ impl TradeService {
                     return Err("COHORT_SOURCE_GENERATION_UNVERIFIED".into());
                 }
                 let generation = r.private_ws.status().await.connection_generation;
-                let report=|phase: &str, reason: String| {
+                let report=|_phase: &str, reason: String| {
                     #[cfg(test)]
-                    Self::b_census_probe_failure(phase,&c.account_key,&reason,until);
+                    Self::b_census_probe_failure(_phase,&c.account_key,&reason,until);
                     reason
                 };
                 // Inventory can span several bounded REST scopes. Read the

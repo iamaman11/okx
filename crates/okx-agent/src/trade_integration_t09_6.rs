@@ -167,7 +167,7 @@ async fn t09_6_close_owned_lot(input: T09_6CloseContext) -> serde_json::Value {
         }
     }
     let close_clock_deliveries=feed.public_clock_deliveries().saturating_sub(clock_before);
-    assert!(close_clock_deliveries>=1 && close_clock_deliveries<=2,
+    assert!((1..=2).contains(&close_clock_deliveries),
         "T09.6 public Close must use only finite pre-registered clock sources");
     let intent=&close["data"]["intent"];
     // The recorded fill/bill event is observed AFTER the production Close

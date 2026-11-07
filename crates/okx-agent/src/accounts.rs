@@ -22,10 +22,12 @@ use std::{
     str::FromStr,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicU64, Ordering},
     },
     time::Instant,
 };
+#[cfg(test)]
+use std::sync::atomic::AtomicBool;
 use tokio::{
     sync::{RwLock, Semaphore, watch},
     task::JoinHandle,
