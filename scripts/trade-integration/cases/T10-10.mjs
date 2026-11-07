@@ -49,9 +49,11 @@ export async function run({ caseId, root, signal, artifactsDir }) {
   assert.match(late.source_sha256,/^[0-9a-f]{64}$/);
   assert.equal(late.source_bill_id,"t10-10-independent-late-fee-001");
   assert.equal(late.before.reservation_active,false);
-  assert.equal(late.before.entry_upper_usd,"1.0005");
-  assert.equal(late.before.terminal.cumulative_entry_usd,"1.0005");
-  assert.equal(late.after.late.cumulative_entry_usd,"1.0006");
+  // SQL Decimal scale is not economic identity. Preserve the raw receipts,
+  // accept only exactly equal decimal text (no float conversion or tolerance).
+  assert.match(late.before.entry_upper_usd,/^1\.00050*$/);
+  assert.match(late.before.terminal.cumulative_entry_usd,/^1\.00050*$/);
+  assert.match(late.after.late.cumulative_entry_usd,/^1\.00060*$/);
   assert.equal(late.after.late.intent_id,late.intent_id);
   assert.equal(late.after.late.reservation_key,late.before.terminal.reservation_key);
   assert.equal(late.after.late.plan_hash,late.before.terminal.plan_hash);
@@ -87,7 +89,7 @@ export async function run({ caseId, root, signal, artifactsDir }) {
     ["unknown_fee_retains_reserved_usd",unknown.worker_before.entry_budget.reserved_usd,
       unknown.worker_after.entry_budget.reserved_usd],
     ["restored_signed_fee_usdt","0.0006",original.phases[0].sql.fee_usdt],
-    ["late_cumulative_entry_usd","1.0006",late.after.late.cumulative_entry_usd],
+    ["late_cumulative_entry_usd","1.0006",late.after.late.cumulative_entry_usd.replace(/0+$/,"")],
     ["late_campaign_consumed_usd","4.0021",late.worker_after_denial.entry_budget.consumed_usd],
     ["other_reservation_retained_usd","4",late.worker_after_denial.entry_budget.reserved_usd],
     ["actual_above_upper_recorded_usd","0.0001",late.worker_after_denial.entry_budget.bound_breach_usd],

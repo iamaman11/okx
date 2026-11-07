@@ -121,8 +121,11 @@ async fn t10_10_late_released_fee(
     };
     let before=read(intent_id.clone()).await;
     assert_eq!(before["reservation_active"],false);
-    assert_eq!(before["terminal"]["cumulative_entry_usd"],"1.0005");
-    assert_eq!(before["entry_upper_usd"],"1.0005");
+    // SQL receipts preserve Decimal scale; compare exact amounts, not rendering.
+    let amount=|value:&serde_json::Value| value.as_str().unwrap()
+        .parse::<rust_decimal::Decimal>().expect("exact SQL decimal");
+    assert_eq!(amount(&before["terminal"]["cumulative_entry_usd"]),Decimal::new(10005,4));
+    assert_eq!(amount(&before["entry_upper_usd"]),Decimal::new(10005,4));
     let raw=|rows:serde_json::Value|serde_json::to_vec(
         &serde_json::json!({"code":"0","msg":"","data":rows})).unwrap();
     // Replay the original signed terminal venue fact; neither timestamp nor
@@ -169,7 +172,7 @@ async fn t10_10_late_released_fee(
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
     }).await.unwrap_or_else(|_|panic!("T10_10_LATE_FEE_SETTLEMENT_NOT_OBSERVED:{last}"));
-    assert_eq!(after["late"]["cumulative_entry_usd"],"1.0006");
+    assert_eq!(amount(&after["late"]["cumulative_entry_usd"]),Decimal::new(10006,4));
     assert!(after["late"]["settlement_revision"].as_u64().unwrap()>
         before["terminal"]["settlement_revision"].as_u64().unwrap());
     assert_eq!(after["late"]["reservation_key"],before["terminal"]["reservation_key"]);
