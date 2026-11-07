@@ -10,6 +10,7 @@ use okx_protocol::risk_authority::{
     RiskCommand, RiskResult, RISK_RESULT_SCHEMA_V1,
 };
 use serde_json::json;
+use okx_protocol::accounts::Environment;
 use sha2::{Digest, Sha256};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;

@@ -1084,7 +1084,7 @@ impl TradeService {
             )
             .await
             {
-                Ok(()) => json!({"state":"verified_or_no_change"}),
+                Ok(_) => json!({"state":"verified_or_no_change"}),
                 Err(reason) => json!({"state":"pending","reason_code":reason.reason_code}),
             }
         } else {

@@ -7,7 +7,7 @@ use super::{
 };
 use okx_api::TradeOrderDetails;
 use okx_protocol::{
-    accounts::{AccountKey, Environment},
+    accounts::AccountKey,
     risk_authority::{RiskCommandAction, RiskDecisionStatus, RiskReservationState},
 };
 use rust_decimal::Decimal;
