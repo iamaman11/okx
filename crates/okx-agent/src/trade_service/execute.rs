@@ -4321,6 +4321,17 @@ mod tests {
         expired: bool,
         limit_price: Decimal,
     ) -> (AccountStoreHandle, StoredIntent, std::path::PathBuf) {
+        native_fixture_at_phase(label, increase, paused, expired, limit_price, "reserved").await
+    }
+
+    async fn native_fixture_at_phase(
+        label: &str,
+        increase: bool,
+        paused: bool,
+        expired: bool,
+        limit_price: Decimal,
+        phase: &str,
+    ) -> (AccountStoreHandle, StoredIntent, std::path::PathBuf) {
         let root = std::env::temp_dir().join(format!(
             "okx-native-orchestration-{label}-{}-{}",
             std::process::id(),
@@ -4407,6 +4418,20 @@ mod tests {
             risk_increase: increase,
             instrument_id: "BTC-USDT-SWAP".into(),
         };
+        if phase == "f0" {
+            // An actual before-prepare barrier: the owner is live, but has
+            // not invoked prepare. Retain the original command for replay
+            // against this same database after the parent kills the owner.
+            let mut command = std::fs::File::create(root.join("original-command.json")).unwrap();
+            use std::io::Write as _;
+            command
+                .write_all(&serde_json::to_vec(&(&decision, &intent)).unwrap())
+                .unwrap();
+            command.sync_all().unwrap();
+            println!("OKX_K5_READY={}", root.display());
+            std::io::stdout().flush().unwrap();
+            std::future::pending::<()>().await;
+        }
         let saved = store
             .call(deadline(), move |s| {
                 s.apply_authority_policy(1, paused, "campaign_fixture", Decimal::from(20))?;
@@ -4414,6 +4439,9 @@ mod tests {
             })
             .await
             .unwrap();
+        if phase == "f1" {
+            return (store, saved, root);
+        }
         let receipt = CentralReceipt {
             reservation_key: "fixture_reservation".into(),
             account_key: account,
@@ -4754,7 +4782,8 @@ mod tests {
 
     // Genuine OS-level termination on the Windows CI runner. The child keeps
     // the original SQLite writer lease open until TerminateProcess kills it.
-    // This is not a Cloudflare/venue failpoint; the gateway is a file fixture.
+    // This is component evidence: Cloudflare is not connected, and the
+    // gateway is a file fixture. No phase is counted as full T10-11 proof.
     #[cfg(windows)]
     #[test]
     #[ignore = "called only as an isolated crash-test subprocess"]
@@ -4766,8 +4795,23 @@ mod tests {
             .build()
             .unwrap();
         runtime.block_on(async {
-            let (store, intent, root) = reserved(&format!("kill_{role}"), true, false, false).await;
+            let (store, intent, root) = native_fixture_at_phase(
+                &format!("kill_{role}"),
+                true,
+                false,
+                role == "f1",
+                Decimal::from(100),
+                &role,
+            )
+            .await;
             match role.as_str() {
+                "f1" | "f3" => {
+                    // F1 has no local receipt or reserve attempt; F3 has a
+                    // committed local HELD receipt and no BEGIN_POST claim.
+                    println!("OKX_K5_READY={}", root.display());
+                    std::io::stdout().flush().unwrap();
+                    std::future::pending::<()>().await;
+                }
                 "f5" => {
                     assert!(
                         store
@@ -4801,6 +4845,43 @@ mod tests {
                     .await;
                     panic!("unresolved F6 gateway returned instead of being killed");
                 }
+                "f7" => {
+                    store
+                        .call(deadline(), |s| {
+                            assert!(s.begin_post("intent_fixture", 1, now())?);
+                            s.record_order_readback(
+                                "intent_fixture",
+                                "fixture-f7-order",
+                                IntentState::Filled,
+                                Decimal::ONE,
+                                now(),
+                            )?;
+                            // The production source-ingestion transaction
+                            // commits both the raw fill and pending marker.
+                            // Do not run its later projection before the kill.
+                            s.ingest_page(&okx_execution::IngestPage {
+                                fills: vec![okx_execution::Fill {
+                                    fill_id: "fixture-f7-fill".into(),
+                                    instrument_id: "BTC-USDT-SWAP".into(),
+                                    trade_id: "fixture-f7-trade".into(),
+                                    exchange_order_id: "fixture-f7-order".into(),
+                                    intent_id: Some("intent_fixture".into()),
+                                    time: now(),
+                                    qty: Decimal::ONE,
+                                    price: Decimal::from(100),
+                                    fee: Decimal::new(-1, 1),
+                                    currency: "USDT".into(),
+                                    side: "buy".into(),
+                                }],
+                                ..Default::default()
+                            })
+                        })
+                        .await
+                        .unwrap();
+                    println!("OKX_K5_READY={}", root.display());
+                    std::io::stdout().flush().unwrap();
+                    std::future::pending::<()>().await;
+                }
                 _ => panic!("unrecognized crash fixture role: {role}"),
             }
         });
@@ -4808,14 +4889,17 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn k5_windows_actual_process_kill_f5_f6_ten_times_each() {
+    fn k5_windows_actual_process_kill_native_component_phases_ten_times_each() {
         use std::io::BufRead as _;
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .unwrap();
-        for role in ["f5", "f6"] {
+        let mut repetitions = Vec::new();
+        let matrix_started = Instant::now();
+        for role in ["f0", "f1", "f3", "f5", "f6", "f7"] {
             for run in 0..10 {
+                let started = Instant::now();
                 let mut child = std::process::Command::new(std::env::current_exe().unwrap())
                     .args([
                         "--ignored",
@@ -4855,16 +4939,20 @@ mod tests {
                     child.try_wait().unwrap().is_none(),
                     "child exited without actual OS termination"
                 );
+                let setup_ms = started.elapsed().as_millis();
+                let kill_started = Instant::now();
                 child.kill().unwrap();
                 let exit = child.wait().unwrap();
                 reader.join().unwrap();
                 assert!(!exit.success(), "forced-kill child exited successfully");
+                let kill_ms = kill_started.elapsed().as_millis();
+                let reconcile_started = Instant::now();
 
                 let venue_witness = root.join("venue-accepted.marker");
                 if role == "f6" {
                     assert_eq!(std::fs::read(&venue_witness).unwrap(), b"accepted_once");
                 } else {
-                    assert!(!venue_witness.exists(), "F5 must have zero sends");
+                    assert!(!venue_witness.exists(), "only F6 sends through the fixture");
                 }
 
                 // Reopen the actual crash-surviving WAL database, NOT an
@@ -4877,6 +4965,81 @@ mod tests {
                     )
                     .await
                     .unwrap();
+                    if role == "f0" {
+                        assert!(store.call(deadline(), |s| s.intent("intent_fixture")).await.unwrap().is_none());
+                        assert!(store.call(deadline(), |s| s.central_receipt("intent_fixture")).await.unwrap().is_none());
+                        let (decision, original): (Decision, NewIntent) = serde_json::from_slice(
+                            &std::fs::read(root.join("original-command.json")).unwrap(),
+                        ).unwrap();
+                        let expected = original.clone();
+                        store.call(deadline(), move |s| {
+                            let first = s.prepare(&decision, &original)?;
+                            let duplicate = s.prepare(&decision, &original)?;
+                            assert_eq!(first.intent_id, duplicate.intent_id);
+                            assert_eq!(first.client_order_id, expected.client_order_id);
+                            assert_eq!(s.active_intents(10)?.len(), 1);
+                            assert_eq!(first.state, IntentState::Prepared);
+                            Ok(())
+                        }).await.unwrap();
+                        return;
+                    }
+                    if matches!(role, "f1" | "f3") {
+                        store.call(deadline(), move |s| {
+                            let prior = s.intent("intent_fixture")?.unwrap();
+                            assert_eq!(prior.state, if role == "f1" { IntentState::Prepared } else { IntentState::Reserved });
+                            if role == "f1" {
+                                assert!(now() >= prior.deadline);
+                                assert!(s.central_receipt("intent_fixture")?.is_none());
+                                assert!(s.operation("risk-reserve:intent_fixture")?.is_none());
+                            } else {
+                                assert_eq!(s.central_receipt("intent_fixture")?.unwrap().requested_loss_usd, Decimal::ONE);
+                            }
+                            assert!(s.reject_unsent("intent_fixture", if role == "f1" { "COMMAND_EXPIRED" } else { "RECOVERY_PROOF_INVALIDATED" }, now())?);
+                            assert!(!s.reject_unsent("intent_fixture", "DUPLICATE_RECOVERY", now())?);
+                            assert!(!s.begin_post("intent_fixture", 1, now())?);
+                            assert_eq!(s.intent("intent_fixture")?.unwrap().state, IntentState::Rejected);
+                            if role == "f1" {
+                                assert!(s.unsent_before_reserve("intent_fixture")?);
+                                assert!(s.unsent_release_receipt("intent_fixture")?.is_none());
+                            } else {
+                                let proof = s.unsent_release_receipt("intent_fixture")?.unwrap();
+                                assert_eq!(proof.reservation_key, "fixture_reservation");
+                                assert_eq!(proof.reason, "RECOVERY_PROOF_INVALIDATED");
+                                assert_eq!(s.reconcilable_intents(10)?.len(), 1, "central release is still pending; this component cannot fabricate its ACK");
+                                assert!(s.operation("central-release:fixture_reservation")?.is_none());
+                            }
+                            Ok(())
+                        }).await.unwrap();
+                        return;
+                    }
+                    if role == "f7" {
+                        // Inspect the original database through a read-only
+                        // connection, without bypassing its mutation owner.
+                        let reader = rusqlite::Connection::open_with_flags(
+                            root.join("account.db"), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+                        ).unwrap();
+                        let before: (i64, i64, i64, i64) = reader.query_row(
+                            "SELECT (SELECT count(*) FROM fills), (SELECT count(*) FROM fill_projection_pending), (SELECT count(*) FROM position_lots), (SELECT count(*) FROM finance_entries WHERE component='FEE')", [],
+                            |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)),
+                        ).unwrap();
+                        assert_eq!(before, (1, 1, 0, 0), "fact and pending marker survived before projection");
+                        store.call(deadline(), |s| {
+                            assert_eq!(s.project_pending_fills(10)?, 1);
+                            assert_eq!(s.project_pending_fills(10)?, 0);
+                            let lots = s.active_lots("BTC-USDT-SWAP")?;
+                            assert_eq!(lots.len(), 1);
+                            assert_eq!(lots[0].remaining_qty, Decimal::ONE);
+                            assert_eq!(s.finance_totals(0, i64::MAX, None)?.get(&("USDT".into(), "FEE".into())).copied(), Some(Decimal::new(-1, 1)));
+                            assert!(!s.begin_post("intent_fixture", 1, now())?);
+                            Ok(())
+                        }).await.unwrap();
+                        let after: (i64, i64, i64, i64) = reader.query_row(
+                            "SELECT (SELECT count(*) FROM fills), (SELECT count(*) FROM fill_projection_pending), (SELECT count(*) FROM position_lots), (SELECT count(*) FROM finance_entries WHERE component='FEE')", [],
+                            |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)),
+                        ).unwrap();
+                        assert_eq!(after, (1, 0, 1, 1), "one projection, one fee, no pending loss");
+                        return;
+                    }
                     let changed = store
                         .call(deadline(), |s| s.recover_posting(now()))
                         .await
@@ -4950,24 +5113,56 @@ mod tests {
                         );
                     }
                 });
+                let record = serde_json::json!({
+                    "phase":role.to_ascii_uppercase(),
+                    "repetition":run + 1,
+                    "process_id":child.id(),
+                    "os_killed":true,
+                    "original_store":root.join("account.db"),
+                    "setup_ms":setup_ms,
+                    "kill_ms":kill_ms,
+                    "reopen_reconcile_ms":reconcile_started.elapsed().as_millis(),
+                    "total_ms":started.elapsed().as_millis(),
+                    "venue_fixture_acceptances":if role == "f6" { 1 } else { 0 },
+                    "central_worker_connected":false,
+                    "local_outcome":match role {
+                        "f0" => "ONE_PREPARED_AFTER_IDEMPOTENT_REPLAY",
+                        "f1" => "REJECTED_UNSENT_NO_RESERVE",
+                        "f3" => "REJECTED_UNSENT_CENTRAL_RELEASE_PENDING",
+                        "f5" => "UNKNOWN_NO_RESUBMIT",
+                        "f6" => "FILLED_AFTER_FILE_FIXTURE_READBACK",
+                        "f7" => "FACT_PROJECTED_ONCE_ONE_LOT_ONE_FEE",
+                        _ => unreachable!(),
+                    },
+                });
+                println!("T10_11_NATIVE_WINDOWS_OS_KILL_RECORD_V2:{record}");
+                repetitions.push(record);
             }
         }
-        // Emitted only after 20 real OS kills, reopening each original WAL
-        // database and checking unknown/no-repost/readback outcomes.
-        // This is NOT full T10-11: the remaining F0-F4/F7/F8 phases need
-        // their own process-level proof and native/Worker causal binding.
+        // These are 60 genuine kills at six distinct native barriers. F0
+        // stops before invoking prepare (not inside its transaction). F3
+        // proves the SQL no-send obligation, not a Worker release. F7 uses
+        // production ingest/projection APIs. Full T10-11 remains unproven.
         println!(
-            "T10_11_NATIVE_WINDOWS_OS_KILLS_V1:{}",
+            "T10_11_NATIVE_WINDOWS_OS_KILLS_V2:{}",
             serde_json::json!({
-                "schema":"okx.t10-11-native-windows-os-kills/v1",
+                "schema":"okx.t10-11-native-windows-os-kills/v2",
+                "f0_os_kills":10,
+                "f1_os_kills":10,
+                "f3_os_kills":10,
                 "f5_os_kills":10,
                 "f6_os_kills":10,
-                "total_os_kills":20,
+                "f7_os_kills":10,
+                "total_os_kills":60,
                 "original_wal_reopened":true,
                 "unknown_never_resubmitted":true,
                 "f6_independent_venue_readback":true,
-                "f0_f4_f7_f8_proven":false,
+                "f7_exactly_once_projection":true,
+                "f3_central_release_proven":false,
+                "f2_f4_f8_proven":false,
                 "native_worker_same_campaign_proven":false,
+                "total_ms":matrix_started.elapsed().as_millis(),
+                "repetitions":repetitions,
             })
         );
     }
