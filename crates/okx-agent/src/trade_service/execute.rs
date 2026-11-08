@@ -12,6 +12,52 @@ fn existing_request_hash_matches(stored: &str, semantic: &str, historical_raw: &
     stored == semantic || stored == historical_raw
 }
 
+// A positive *persisted Worker* bound breach is already proof that the
+// campaign cannot accept new entry risk. It can refuse a new command before
+// the slower Native source-readiness check; it never authorizes entry, skips
+// the Worker summary, or treats a missing/malformed balance as zero.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CampaignOpeningDecision {
+    VerifyNativeReadiness,
+    RefuseBoundBreach,
+}
+
+fn campaign_opening_bound_breach_decision(
+    cumulative_breach_usd: &str,
+) -> Result<CampaignOpeningDecision, String> {
+    let breach = dec(cumulative_breach_usd)?;
+    if breach < Decimal::ZERO {
+        return Err("ENTRY_BUDGET_BOUND_BREACH_INVALID".into());
+    }
+    Ok(if breach > Decimal::ZERO {
+        CampaignOpeningDecision::RefuseBoundBreach
+    } else {
+        CampaignOpeningDecision::VerifyNativeReadiness
+    })
+}
+
+#[cfg(test)]
+#[test]
+fn t10_10_worker_bound_breach_precedes_native_readiness_only_for_refusal() {
+    assert_eq!(
+        campaign_opening_bound_breach_decision("0").unwrap(),
+        CampaignOpeningDecision::VerifyNativeReadiness
+    );
+    assert_eq!(
+        campaign_opening_bound_breach_decision("0.0001").unwrap(),
+        CampaignOpeningDecision::RefuseBoundBreach
+    );
+    assert_eq!(
+        campaign_opening_bound_breach_decision("4.0021").unwrap(),
+        CampaignOpeningDecision::RefuseBoundBreach
+    );
+    assert_eq!(
+        campaign_opening_bound_breach_decision("-0.0001").unwrap_err(),
+        "ENTRY_BUDGET_BOUND_BREACH_INVALID"
+    );
+    assert!(campaign_opening_bound_breach_decision("unknown").is_err());
+}
+
 // A syntactically valid Worker response does not by itself grant authority
 // for this intent. Bind the actual receipt to this reservation and policy.
 fn risk_receipt_bound(
@@ -393,7 +439,7 @@ impl TradeService {
         &self,
         state: &CentralGovernanceSnapshot,
         until: Instant,
-    ) -> Result<(), String> {
+    ) -> Result<CampaignOpeningDecision, String> {
         let summary = self
             .risk
             .request(self.risk_command(
@@ -421,6 +467,14 @@ impl TradeService {
             || origin.started_at_ms > entry.opening_as_of_ms
         {
             return Err("ENTRY_CAMPAIGN_ORIGIN_MISMATCH".into());
+        }
+        // Validate provenance FIRST. This is a one-way fail-closed denial
+        // from authenticated Worker state, not permission to bypass SQL
+        // freshness on any campaign that can still admit new risk.
+        if campaign_opening_bound_breach_decision(&entry.bound_breach_usd)?
+            == CampaignOpeningDecision::RefuseBoundBreach
+        {
+            return Ok(CampaignOpeningDecision::RefuseBoundBreach);
         }
         let from =
             i64::try_from(origin.started_at_ms).map_err(|_| "ENTRY_OPENING_CUTOFF_INVALID")?;
@@ -451,7 +505,7 @@ impl TradeService {
                 .await
                 .map_err(err)?;
         }
-        Ok(())
+        Ok(CampaignOpeningDecision::VerifyNativeReadiness)
     }
 
     /// The existing maintenance owner installs one complete cohort opening,
@@ -796,7 +850,21 @@ impl TradeService {
         if increase
             && r.configuration.account_key.environment == okx_protocol::accounts::Environment::Real
         {
-            self.ensure_campaign_opening(&state, until).await?;
+            if self.ensure_campaign_opening(&state, until).await?
+                == CampaignOpeningDecision::RefuseBoundBreach
+            {
+                // The authenticated Worker has already committed a positive
+                // cumulative campaign overrun. There is no SQL PREPARE,
+                // central RESERVE or venue POST for this new intent.
+                // A stale Native capture cannot make that overrun safe.
+                return Ok(completed(json!({
+                    "state":"REJECTED",
+                    "rejection_origin":"CENTRAL",
+                    "send_state":"NOT_STARTED",
+                    "primary_reason":"BUDGET_BOUND_BREACH",
+                    "risk_release_state":"NOT_RESERVED",
+                })));
+            }
         }
         let plan = loop {
             match self
