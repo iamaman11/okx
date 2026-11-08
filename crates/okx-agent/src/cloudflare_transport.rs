@@ -3590,9 +3590,32 @@ mod raw_native_session_tests {
                     .await
                     .expect("T10-12 same original Status recovery");
                 let after = t10_12_sql_snapshot(&accounts).await;
+                // Read-only failure witness on the ORIGINAL account/SQL
+                // owner. A missing local ACK could mean source capture never
+                // completed, a Worker CAS response was denied, or an existing
+                // terminal receipt skipped an unacknowledged partial revision.
+                // Do not alter the status decision or seed any test source.
+                let terminal_receipt = accounts.resolve("fixture-a").await.unwrap();
+                let key = idempotent_intent_id.clone();
+                let terminal_receipt = terminal_receipt
+                    .execution
+                    .store
+                    .call(
+                        std::time::Instant::now() + Duration::from_secs(3),
+                        move |s| s.operation(&format!("entry-settlement:{key}")),
+                    )
+                    .await
+                    .expect("T10-12 terminal receipt read-only diagnostic");
                 assert_eq!(
                     after["local_settlement_ack"], true,
-                    "production Status must durably acknowledge the original settlement"
+                    "production Status must durably acknowledge original settlement; status={}; incremental={}; release={}; financial_error={}; financial_complete={}; terminal_receipt={}; sql_ack={}",
+                    actual["status"],
+                    actual["data"]["incremental_entry_settlement"],
+                    actual["data"]["central_release"],
+                    actual["data"]["financial_error"],
+                    actual["data"]["financial_complete"],
+                    terminal_receipt.is_some(),
+                    after["local_settlement_ack"]
                 );
                 assert_eq!(after["proof"], recovered["sql_before"]["proof"]);
                 assert_eq!(after["fill_count"], recovered["sql_before"]["fill_count"]);
