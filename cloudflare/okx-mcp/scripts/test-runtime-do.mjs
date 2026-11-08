@@ -67,6 +67,9 @@ const t10SourceChangedMode=process.env.OKX_T10_15_POST_HELD_SOURCE_PROBE==="1";
 const t10PostReplyLostMode=process.env.OKX_T10_03_POST_AUTH_REPLY_LOST_PROBE==="1";
 const t10SourceRecoveryMode=process.env.OKX_T10_01_PARTIAL_SOURCE_RECOVERY_PROBE==="1";
 const t10StopMode=process.env.OKX_T10_13_STOP_PROBE==="1";
+const nativeReserveCrashMode=process.env.OKX_T10_12_NATIVE_RESERVE_CRASH==="1";
+if(nativeReserveCrashMode&&process.env.OKX_T10_12_NATIVE_WORKER_CRASH==="1")
+  throw Error("T10_12_NATIVE_CRASH_BOUNDARY_MUST_BE_INDEPENDENT");
 if ((crashChild||crashRecovery)&&!sharedCapMode)
   throw Error("T10_12_REQUIRES_EXISTING_WORKER_SHARED_CAP_FIXTURE");
 if(crashChild&&!reserveReplyLossMode)
@@ -837,9 +840,10 @@ try {
     // BEFORE this Worker campaign was created. Supply only the actual
     // workerd connection metadata, never a synthetic SQL source.
     let url = await second.ready;
-    if(process.env.OKX_T10_12_NATIVE_WORKER_CRASH==="1") {
+    if(process.env.OKX_T10_12_NATIVE_WORKER_CRASH==="1"||nativeReserveCrashMode) {
       await second.dispose();second=null;
-      nativeCrashHost=await nativeWorkerCrashHost({opts,root,handoffPath});
+      nativeCrashHost=await nativeWorkerCrashHost({opts,root,handoffPath,
+        action:nativeReserveCrashMode?"RESERVE":"SETTLE_ENTRY"});
       url=new URL(nativeCrashHost.ws_url);
     }
     assert.equal(url.hostname,"127.0.0.1","CI worker must be loopback-only");
@@ -1205,8 +1209,12 @@ try {
       }
       throw error;
     }
-    assert.match(stdout,/native_to_persisted_workerd_riskbook PASS/,
-      "real Rust client must prove Worker SQL summary and reservation");
+    if(nativeReserveCrashMode) {
+      receipt(stdout,"T10_12_NATIVE_RESERVE_SAME_SQL_RECOVERY_V1");
+    } else {
+      assert.match(stdout,/native_to_persisted_workerd_riskbook PASS/,
+        "real Rust client must prove Worker SQL summary and reservation");
+    }
     process.stdout.write(stdout);
     if (stderr) process.stderr.write(stderr);
     if(nativeCrashHost) {
@@ -1219,6 +1227,43 @@ try {
     }
     const afterNativeSocket = await session(second);
     const afterNative = await summary(afterNativeSocket, "risk_after_native_real_wss_0001");
+    if(nativeReserveCrashMode) {
+      const original=receipt(stdout,"T10_12_NATIVE_RESERVE_SAME_SQL_RECOVERY_V1");
+      assert.equal(original.schema,"okx.t10-12-native-reserve-sql-release/v1");
+      assert.equal(original.outbound_create_posts,0);
+      assert.equal(original.worker_reservation_state,"RELEASED");
+      assert.equal(original.before_status.reservation_key,
+        original.after_status.reservation_key);
+      assert.equal(original.after_status.central_release.kind,"CENTRAL_RELEASE");
+      assert.deepEqual(original.worker_budget,afterNative.budget,
+        "Worker restart must retain the same Native-released RiskBook totals");
+      assert.equal(afterNative.budget.entry_budget.consumed_usd,"0");
+      const crash=receipt(stdout,"T10_12_WORKER_NATIVE_CRASH_V1");
+      assert.equal(crash.worker_os_kills,1);
+      assert.equal(crash.committed.action,"RESERVE");
+      assert.equal(crash.committed.status,"HELD");
+      assert.equal(crash.committed.reservation_key,
+        original.before_status.reservation_key);
+      console.log("T10_12_WORKER_NATIVE_RESERVE_RECONCILED_V1:"+JSON.stringify({
+        schema:"okx.t10-12-native-worker-reserve-reconciled/v1",
+        original_command_id:crash.committed.command_id,
+        reservation_key:crash.committed.reservation_key,
+        budget:afterNative.budget,
+        native_account_sql:original.after_status,
+        persisted_worker_generation:true,
+        original_native_sql_release:true,
+        no_new_venue_post:true,
+      }));
+      afterNativeSocket.ws.close();
+      console.log(JSON.stringify({
+        suite:"runtime-session-sqlite-do",status:"PASS",
+        real_durable_object:true,persisted_generation:true,
+        authentic_reserve:true,authentic_begin_post:false,
+        native_reserve_crash:true,
+        risk_monetary_post_count:0,
+      }));
+      return;
+    }
     if(t10SevenOneCampaign) {
       const native=receipt(stdout,"T10_07_NATIVE_ONE_CAMPAIGN_V1");
       assert.equal(native.schema,"okx.t10-07-native-one-campaign/v1");
