@@ -121,24 +121,76 @@ production-boundary tests remain in the existing `windows-native` job.
 Source-fixture stability and protection failures belong to #449; #495 cannot
 be used to claim T10-09 PASS or bypass full26/required release gates.
 
-**#500 protection cleanup — single production entry and fast explanation.**
-Both public `Status` and direct PC-07 use
-`trade_service/protection_cleanup.rs::cleanup_flat_protection`; the direct
-test no longer assembles a different SQL/REST cancellation algorithm. It
-persists its own native intent and protection, then verifies one signed
-cancel-algo POST, matching ACK, full signed readback, durable SQL receipt
-and no replay. PC-01–PC-06 keep the negative SQL/restart/freshness proofs.
+**#500 protection cleanup — accepted bounded production operation.**
+
+Acceptance proof is the completed Windows [run #42479784285](https://github.com/iamaman11/okx/actions/runs/42479784285)
+on **source SHA `8cbcd554361455e80d51e69f564edc5c28820a89`**;
+[26-case artifacts](https://github.com/iamaman11/okx/actions/runs/42479784285/artifacts/13617249020).
+Exactly **23/26** are PASS on that SHA, including **T09.6, T09.7,
+T09.8, T10-08 and T10-09**. Only T10-10, T10-11 and T10-12 FAIL;
+these are subsequent #449 stages and are NOT acceptance criteria for #500.
+Windows cargo tests, Clippy, Linux Rust/Core, Architecture, Cloudflare,
+Windows B1 and both fast operation suites passed on the same source SHA.
+Neither general CODE 26/26 nor REAL/installed release is accepted.
+
+**One production operation, no shadow test algorithm.** Public `Status` and
+PC-07 both invoke `trade_service/protection_cleanup.rs::cleanup_flat_protection`
+with explicit SQL owner, authenticated observer, real REST adapter, semaphore,
+UID and verified order facts. The old Status-local cancellation/ACK/readback
+branch no longer acts as a second decision path; the duplicated ACK verdict
+was consolidated in `send_protection_cleanup_after_admission`, and the same
+SQL/observed readback/receipt path is called by the direct test. The existing
+AccountStore remains the sole durable BEGIN/single-send/receipt owner;
+release/census and money remain separate owners. A flat position with a
+still-live original entry order is NOT cleanup permission. A lost ACK cannot
+cause another POST; incomplete/stale, wrong-account or still-live algo reads
+remain pending/blocked, not falsely confirmed. No financial formulas,
+RiskBook authorization, TTL, wire/SQL schema or POST retry policy were relaxed.
+
+**Causal RED → GREEN:** earlier [run #42417714196](https://github.com/iamaman11/okx/actions/runs/42417714196)
+recorded `cleanup_<client-id>` SQL `POSTING` and an actual cancel attempt
+for `900000002` **before the signed T09.6 cancel observation phase**. This
+explained the later missing target ACK without granting resend permission.
+The bounded fix aligned source/operation boundaries while preserving
+independent signed pre-ACK and post-ACK observations, exact-algo POST/ACK
+identity and the original durable operation. A production+fixture cause
+must not be collapsed into permission to manufacture a successful readback.
+The final T09.6/.7/.8 PASS plus PC-01–07 proves this bounded flow;
+intermittent unrelated managed-Add readiness on other SHAs is not evidence
+of an ACK or a financial regression in cleanup.
+
+**Direct reproduction on the code SHA** (after building Rust on Windows):
 
 ```text
 cargo test --locked -p okx-agent --lib trade_service::protection_cleanup::protection_cleanup_direct_tests:: -- --nocapture
+cargo test --locked -p okx-agent --lib trade_service::entry_settlement:: -- --nocapture
+node scripts/run-trade-integration.mjs --case T09.6 --artifacts <existing-artifact-dir>
+node scripts/run-trade-integration.mjs --case T09.7 --artifacts <existing-artifact-dir>
+node scripts/run-trade-integration.mjs --case T09.8 --artifacts <existing-artifact-dir>
+node scripts/run-trade-integration.mjs --case T10-08 --artifacts <existing-artifact-dir>
+node scripts/run-trade-integration.mjs --case T10-09 --artifacts <existing-artifact-dir>
 ```
 
-`diagnostics` `view=operation` requires account + operation/intent reference
-and reads a bounded per-account, non-authoritative projection without SQL,
-HTTP, RiskBook or trading side effects. It separates SQL BEGIN, adapter
-invocation, venue ACK, signed inventory/position timestamps, receipt and
-missing proof. Missing after restart/eviction means UNKNOWN history, never
-a fabricated no-send/ACK. The P95 <=100ms (1,000 warm local reads) is a
-test target; it is NOT an external venue response SLO. Full T09.6–.8 and
-T10 acceptance on one final SHA remain required before closing #500.
+In the exact CI run the direct protection tests **PC-01–07 = 7 PASS/0 FAIL
+in 3.06s** *after compilation*. PC-01 covers one exact send/receipt and
+replay; PC-02 lost ACK and no second send; PC-03 stale/incomplete sources;
+PC-04 foreign identity/late exposure; PC-05 original SQL after restart;
+PC-06 two callers and pre-ACK stale read; PC-07 full signed HTTP
+cancel/ACK, independently read-back complete 16-scope inventory and same
+production SQL receipt. Entry settlement **8 PASS/0 FAIL in 2.68s** after
+compilation. The direct tests are registered in the existing Windows
+`windows-native` CI job; no second harness or long campaign is required
+to explain the cleanup operation.
 
+Read-only `diagnostics view=operation` exposes a bounded account/operation
+trace with operation identity, local BEGIN, attempted send, ACK/readback,
+source timestamps, SQL receipt and specific blockers; the P95 <=100ms
+warm-local test is a diagnostic target, not a venue SLO. This volatile
+projection does NOT fabricate durable history after restart/eviction;
+SQL remains the authority and an absent projection never proves no-send.
+
+**Scope boundary:** #500 accepts only this operation and its directly
+associated transitions; PR #499 remains Draft and **must not merge** until
+full #449 CODE 26/26, S1/S2, required checks and branch integration evidence.
+A documentation-only commit following the proven SHA does not change tested
+Rust/JS behavior; it must not be represented as a new full-CODE PASS.
