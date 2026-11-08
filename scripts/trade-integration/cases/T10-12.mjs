@@ -2,6 +2,7 @@
 // before the selected original replies are emitted. Mandatory T10-12 remains
 // blocked until the SAME Native SQL and Native old-reply witnesses are proved.
 import assert from "node:assert/strict";
+import {createHash} from "node:crypto";
 import {spawn,execFile} from "node:child_process";
 import {promisify} from "node:util";
 import {cp,mkdir,mkdtemp,readFile,writeFile,rm} from "node:fs/promises";
@@ -9,6 +10,74 @@ import {join,resolve} from "node:path";
 import {tmpdir} from "node:os";
 import {actualNativeWorker} from "../native-workerd.mjs";
 const exec=promisify(execFile);
+const digest=value=>createHash("sha256").update(JSON.stringify(value)).digest("hex");
+
+// Adapt already verified owner receipts to the sole runner's evidence contract.
+// Exported so captured crash artifacts can exercise this boundary without kills.
+export function buildT10_12Evidence(observed,settlement,reservePacket){
+  const {crash,recovery,local,terminal}=settlement;
+  const {reserve,worker,reserveCrash}=reservePacket;
+  assert.equal(observed.length,2);
+  assert.deepEqual(observed.map(x=>x.boundary),["reserve","settlement"]);
+  for(const x of observed){
+    assert.equal(x.os_process_killed,true);
+    assert.equal(x.recovery.persisted_do_reopened,true);
+    assert.ok(x.recovery.generation_after>x.recovery.generation_before);
+  }
+  for(const x of [crash,reserveCrash]){
+    assert.equal(x.worker_os_kills,1);
+    assert.equal(x.native_process_survived,true);
+    assert.equal(x.original_do_storage_reopened,true);
+    assert.equal(x.native_recovery.old_reply_rejected,true);
+  }
+  assert.equal(recovery.old_reply_rejected,true);
+  assert.equal(reserve.old_reply_rejected,true);
+  assert.equal(local.local_settlement_ack,true);
+  assert.equal(local.intent_id,recovery.sql_before.intent_id);
+  assert.deepEqual(local.proof,recovery.sql_before.proof);
+  assert.deepEqual(recovery.worker_before,recovery.worker_after);
+  assert.equal(reserve.after_status.central_release.kind,"CENTRAL_RELEASE");
+  assert.equal(reserve.before_status.reservation_key,reserve.after_status.reservation_key);
+  assert.equal(reserve.after_status.reservation_key,reserveCrash.committed.reservation_key);
+  assert.deepEqual(worker.budget,reserve.worker_budget);
+  const assertions=[
+    ["actual_worker_os_kills","4",observed.length+crash.worker_os_kills+reserveCrash.worker_os_kills],
+    ["original_sql_settlement_ack","true",local.local_settlement_ack],
+    ["original_sql_reserve_release","CENTRAL_RELEASE",reserve.after_status.central_release.kind],
+    ["settlement_cumulative_entry_usd","1.0005",local.proof.cumulative_entry_usd],
+    ["settlement_fill_count","1",local.fill_count],
+    ["settlement_bill_count","1",local.bill_count],
+    ["reserve_crash_venue_posts","0",reserve.outbound_create_posts],
+    ["reserve_crash_consumed_usd","0",worker.budget.entry_budget.consumed_usd],
+    ["unrelated_entry_reservations_usd","4",worker.budget.entry_budget.reserved_usd],
+    ["reserve_crash_remaining_usd","6",worker.budget.entry_budget.remaining_usd],
+  ].map(([id,expected,actual])=>({id,expected,actual:String(actual)}));
+  for(const a of assertions)assert.equal(a.actual,a.expected,a.id);
+  const events=[
+    ["worker_committed_before_kill","RuntimeSessionSQLiteDO",[crash.committed,reserveCrash.committed]],
+    ["worker_process_terminated","OSProcess",[observed,crash,reserveCrash]],
+    ["worker_new_generation_recovered","RuntimeSessionSQLiteDO",[recovery,reserveCrash.native_recovery]],
+    ["stale_reply_denied","NativeRiskClient",[recovery,reserve.old_reply_rejected,reserveCrash.native_recovery]],
+    ["single_risk_mutation_verified","NativeAccountSQL+RuntimeSessionSQLiteDO",[local,reserve,worker]],
+  ].map(([stage,owner,source])=>({stage,owner,source_digest:digest(source)}));
+  for(const revision of [local.intent_revision,recovery.sql_before.intent_revision,
+    recovery.worker_sequence,terminal.worker_risk_book_sequence])
+    assert.ok(Number.isSafeInteger(revision)&&revision>0,"actual owner revision required");
+  for(const hash of [settlement.transcript_sha256,reservePacket.transcript_sha256])
+    assert.match(hash,/^[a-f0-9]{64}$/);
+  return {case_id:"T10-12",status:"PASS",assertions,events,
+    provenance:{schema:"okx.native-workerd-crash-transcripts/v1",
+      settlement_sha256:settlement.transcript_sha256,reserve_sha256:reservePacket.transcript_sha256},
+    readbacks:{
+      sql:[{revision:recovery.sql_before.intent_revision,digest:digest(recovery.sql_before)},
+        {revision:local.intent_revision,digest:digest(local)}],
+      risk_book:[{revision:recovery.worker_sequence,digest:digest(recovery.worker_after)},
+        {revision:terminal.worker_risk_book_sequence,digest:digest(terminal.worker_budget)}],
+    },
+    outbound_sends:[{account:"fixture-a",intent:reserve.after_status.intent_id,
+      operation_kind:"create_after_reserve_crash",count:reserve.outbound_create_posts}],
+  };
+}
 // stdout is a byte stream. A durable-commit JSON marker can be split across
 // arbitrary chunks. Parse only complete lines before killing the process.
 function lineFramer(onLine) {
@@ -278,18 +347,9 @@ export async function run({caseId,root,signal,artifactsDir}){
       reserve,worker,reserveCrash,
       transcript_sha256:reserveNative.transcript_sha256,
       mandatory_case_pass:true},null,2)+"\n");
-  return {
-    schema:"okx.t10-12-native-worker-crash-acceptance/v1",
-    worker_os_kills:observed.length+crash.worker_os_kills+reserveCrash.worker_os_kills,
-    original_sql_settlement_ack:local.local_settlement_ack,
-    original_sql_reserve_release:true,
-    original_worker_replies_rejected:true,
-    worker_budget_preserved:true,
-    new_venue_post_after_reserve_crash:reserve.outbound_create_posts,
-    settlement:local,
-    reserve:reserve.after_status,
-    mandatory_case_pass:true,
-  };
+  return buildT10_12Evidence(observed,
+    {crash,recovery,local,terminal:native.nativeTerminal,transcript_sha256:native.transcript_sha256},
+    {reserve,worker,reserveCrash,transcript_sha256:reserveNative.transcript_sha256});
 }
 
 // Standalone parser regression. Real OS process kill remains mandatory.

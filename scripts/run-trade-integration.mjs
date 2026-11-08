@@ -164,11 +164,13 @@ const terminalGolden = new Map([
   ])],
 ]);
 function usage() {
-  throw Error("USAGE: --list | --suite t09,t10 --artifacts DIR | --case T10-05 --artifacts DIR");
+  throw Error("USAGE: --list | --suite t09,t10 --artifacts DIR | --case T10-05 --artifacts DIR | --verify-case-artifact FILE");
 }
 function args(input) {
   if (input.length === 1 && input[0] === "--list") return { list: true };
   if (input.length === 1 && input[0] === "--self-test") return { selfTest: true };
+  if (input.length === 2 && input[0] === "--verify-case-artifact")
+    return { verifyArtifact: input[1] };
   const config = {};
   for (let i = 0; i < input.length; i += 2) {
     const key = input[i], value = input[i + 1];
@@ -420,6 +422,14 @@ function selfTest() {
   process.stdout.write(`TRADE_INTEGRATION_RUNNER_SELF_TEST_PASS negatives=${negatives + 13}\n`);
 }
 const cli = args(process.argv.slice(2));
+if (cli.verifyArtifact) {
+  const artifact=JSON.parse(readFileSync(resolve(cli.verifyArtifact),"utf8"));
+  if(!required.includes(artifact.case_id))throw Error(failures.invalid);
+  verified(artifact,artifact.case_id);
+  console.log(JSON.stringify({schema:"okx.offline-case-evidence-check/v1",
+    case_id:artifact.case_id,evidence_contract:"VALID",new_execution:false}));
+  process.exit(0);
+}
 if (cli.selfTest) { selfTest(); process.exit(0); }
 if (cli.list) {
   process.stdout.write(JSON.stringify({
