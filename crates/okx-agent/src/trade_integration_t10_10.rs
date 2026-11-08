@@ -198,8 +198,32 @@ async fn t10_10_late_released_fee(
     let entry=worker.budget.as_ref().unwrap().entry_budget.as_ref().unwrap();
     assert_eq!(entry.reserved_usd,"4");
     assert_eq!(entry.bound_breach_usd,"0.0001");
-    // The same source is still queued: public replay must neither debit the
-    // late revision again nor release another intent's reserved four dollars.
+    // The original balance transcript was consumed by earlier financial
+    // capture. After the independently confirmed late Worker revision, a
+    // separately recorded signed balance observation is available to the
+    // same production Status/replay and subsequent no-send denial. Register
+    // it ONCE, with fixed raw bytes, finite lifetime and bounded deliveries:
+    // never fabricate a balance in a GET handler or infer its value from SQL.
+    let balance_at=chrono::Utc::now().timestamp_millis().to_string();
+    feed.expect_immutable_signed_phase_bounded(
+        "t10-10-post-late-revision-balance",
+        RecordedGet {
+            access_key:"fixture-observer-a".into(),
+            path:"/api/v5/account/balance".into(),
+            required_query:vec![],
+            raw_response:raw(serde_json::json!([{
+                "totalEq":"100","adjEq":"100","uTime":balance_at,
+                "details":[{
+                    "ccy":"USDT","eq":"100","liab":"0",
+                    "availEq":"100","availBal":"100","eqUsd":"100",
+                    "uTime":balance_at
+                }]
+            }])),
+        },
+        12,Duration::from_secs(20),
+    );
+    // Replaying an already acknowledged late revision must neither debit it
+    // twice nor release another intent's reserved four dollars.
     trade.trade("fixture-a",&okx_protocol::trading::TradeRequest::Status {
         reference:intent_id.clone(),
     },None).await.unwrap();
@@ -233,6 +257,13 @@ async fn t10_10_late_released_fee(
     assert_eq!(denied_entry.consumed_usd,"4.0021");
     assert_eq!(denied_entry.reserved_usd,"4");
     assert_eq!(denied_entry.bound_breach_usd,"0.0001");
+    let delivered_balance=feed.immutable_signed_phase_reads(
+        "fixture-observer-a",
+        "/api/v5/account/balance",
+        "t10-10-post-late-revision-balance",
+    );
+    assert!(delivered_balance>0 && delivered_balance<=12,
+        "T10-10 repeated production Status must consume its bounded late balance source");
     assert_eq!(feed.outbound_posts.lock().unwrap().len(),4);
     serde_json::json!({"intent_id":intent_id,"source_bill_id":"t10-10-independent-late-fee-001",
         "source_event_at_ms":event_at,"source_sha256":source_sha256,

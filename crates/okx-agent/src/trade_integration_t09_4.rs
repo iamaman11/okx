@@ -914,6 +914,24 @@
                         Ok(rows)
                     }
                 ).await;
+                // Read only the SAME SQL owner's campaign readiness
+                // breakdown on definitive local no-send rejection. Distinguish
+                // age, source-generation and economic-epoch conflicts instead
+                // of inferring a cause from a later successful Status.
+                #[cfg(debug_assertions)]
+                let readiness={
+                    let campaign=campaign_id.clone();
+                    let through=chrono::Utc::now().timestamp_millis()-2_000;
+                    owner.execution.store.call(
+                        std::time::Instant::now()+Duration::from_secs(2),
+                        move |s|s.campaign_readiness_diagnostic(&campaign,native_origin,through),
+                    ).await.map_or_else(
+                        |error|format!("SQL_DIAGNOSTIC_UNAVAILABLE:{error}"),
+                        |value|value,
+                    )
+                };
+                #[cfg(not(debug_assertions))]
+                let readiness=String::from("SQL_DIAGNOSTIC_DISABLED");
                 let capture=owner.source_capture_health.read().await;
                 let last_success_ms=capture.last_success_ms;
                 let source_failure=capture.reason_code.clone();
@@ -933,6 +951,7 @@
                         "posts":posts,
                         "last_source_ms":last_success_ms,
                         "source_failure":source_failure,
+                        "campaign_readiness":readiness,
                     })
                 );
             }
