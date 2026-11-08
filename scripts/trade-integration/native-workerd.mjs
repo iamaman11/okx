@@ -59,6 +59,7 @@ export async function actualNativeWorker(root, signal, { statusProbe = false, se
     process.env.OKX_T10_10_FINANCE_REPLAY_PROBE === "1" ? "t10-10" : "no-t10-10",
     process.env.OKX_T10_12_NATIVE_WORKER_CRASH === "1" ? "t10-12" : "no-t10-12",
     process.env.OKX_T10_12_NATIVE_RESERVE_CRASH === "1" ? "t10-12-reserve" : "no-t10-12-reserve",
+    process.env.OKX_T10_11_NATIVE_CRASH === "F2" ? "t10-11-f2" : "no-t10-11-f2",
   ].join(":");
   const reused = memo.has(key);
   if (!reused) {
@@ -196,15 +197,21 @@ export async function actualNativeWorker(root, signal, { statusProbe = false, se
         ":" + evidence.phase + ":" + evidence.first_visible_error.slice(0, 70));
     });
     const reserveCrash = process.env.OKX_T10_12_NATIVE_RESERVE_CRASH === "1";
-    if(!singleCampaignT10&&!reserveCrash)
+    const nativeF2Crash = process.env.OKX_T10_11_NATIVE_CRASH === "F2";
+    if(!singleCampaignT10&&!reserveCrash&&!nativeF2Crash)
       assert.match(stdout, /t09_public_trade_execute_open_ack_and_idempotency PASS: posts=1/);
-    if(!reserveCrash)
+    if(!reserveCrash&&!nativeF2Crash)
       assert.match(stdout, /native_to_persisted_workerd_riskbook PASS/);
     const terminal = [...stdout.matchAll(/\{"suite":"runtime-session-sqlite-do","status":"PASS"[^\r\n]*\}/g)];
     assert.equal(terminal.length, 1, "production Durable Object test terminal PASS missing");
     const done = JSON.parse(terminal[0][0]);
     assert.equal(done.real_durable_object, true);
     assert.equal(done.persisted_generation, true);
+    if(nativeF2Crash){
+      assert.equal(done.native_crash_f2,true);
+      return {nativeF2:receipt(stdout,"T10_11_NATIVE_F2_PROCESS_CRASH_V1"),
+        transcript_sha256:createHash("sha256").update(stdout+stderr).digest("hex")};
+    }
     if(reserveCrash) {
       assert.equal(done.native_reserve_crash,true);
       const nativeReserveRecovery=receipt(stdout,"T10_12_NATIVE_RESERVE_SAME_SQL_RECOVERY_V1");

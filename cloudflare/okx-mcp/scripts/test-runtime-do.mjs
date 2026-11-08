@@ -16,6 +16,7 @@ import { Miniflare } from "miniflare";
 import { assertBudgetEconomicsUnchanged } from "../../../scripts/trade-integration/budget-evidence.mjs";
 import { settleBeforeWorkerCrash, recoverWorkerCrash } from "./t10-12-worker-crash.mjs";
 import { nativeWorkerCrashHost } from "./t10-12-native-worker.mjs";
+import { killAndRecoverNativeF2 } from "./t10-11-native-crash.mjs";
 import { summarizeRustPanics } from "../../../scripts/trade-integration/native-failure.mjs";
 
 const crashChild=process.env.OKX_T10_12_WORKER_CRASH_CHILD==="1";
@@ -69,6 +70,7 @@ const t10PostReplyLostMode=process.env.OKX_T10_03_POST_AUTH_REPLY_LOST_PROBE==="
 const t10SourceRecoveryMode=process.env.OKX_T10_01_PARTIAL_SOURCE_RECOVERY_PROBE==="1";
 const t10StopMode=process.env.OKX_T10_13_STOP_PROBE==="1";
 const nativeReserveCrashMode=process.env.OKX_T10_12_NATIVE_RESERVE_CRASH==="1";
+const nativeF2CrashMode=process.env.OKX_T10_11_NATIVE_CRASH==="F2";
 if(nativeReserveCrashMode&&process.env.OKX_T10_12_NATIVE_WORKER_CRASH==="1")
   throw Error("T10_12_NATIVE_CRASH_BOUNDARY_MUST_BE_INDEPENDENT");
 if ((crashChild||crashRecovery)&&!sharedCapMode)
@@ -273,7 +275,10 @@ try {
       "cargo",
       [
         "test", "--locked", "-p", "okx-agent", "--lib",
-        "native_to_workerd_risk_summary_over_actual_websocket", "--", "--nocapture",
+        ...(nativeF2CrashMode
+          ? ["cloudflare_transport::raw_native_session_tests::native_crash_f2_boundary",
+            "--","--ignored","--exact","--nocapture"]
+          : ["native_to_workerd_risk_summary_over_actual_websocket","--","--nocapture"]),
       ],
       {
         cwd: fileURLToPath(new URL("../../../", import.meta.url)),
@@ -861,6 +866,29 @@ try {
       reservation_key:(addMode||t10SevenOneCampaign) ? null : held.reservation_key,
     }), {mode:0o600});
     await rename(stagedHandoff, handoffPath);
+    if(nativeF2CrashMode){
+      const proof=await killAndRecoverNativeF2({nativeProcess,handoffPath,
+        cwd:fileURLToPath(new URL("../../../",import.meta.url))});
+      // Reopen the same physical Worker storage after the Native recovery.
+      await second.dispose();second=new Miniflare(opts);
+      assert.equal((await request(second,"/installation/initialize","POST",installation)).status,200);
+      const reader=await session(second);
+      assert.ok(reader.hello.connection_generation>proof.boundary.generation);
+      const inspected=await risk(reader,"inspect_t11_f2_persisted",{
+        action:"INSPECT",reservation_key:proof.boundary.sql.reservation_key,
+        plan_sha256:proof.boundary.sql.plan_hash});
+      assert.equal(inspected.status,"OBSERVED");
+      assert.equal(inspected.reservation_state,"RELEASED");
+      const saved=await summary(reader,"summary_t11_f2_persisted");
+      assert.deepEqual(saved.budget,proof.native.worker_after.budget);
+      assert.equal(saved.risk_book_sequence,proof.native.worker_after.risk_book_sequence);
+      reader.ws.close();
+      console.log("T10_11_NATIVE_F2_PROCESS_CRASH_V1:"+JSON.stringify({...proof,
+        persisted_worker:{generation:reader.hello.connection_generation,inspected,summary:saved}}));
+      console.log(JSON.stringify({suite:"runtime-session-sqlite-do",status:"PASS",
+        real_durable_object:true,persisted_generation:true,native_crash_f2:true}));
+      return;
+    }
     // S2-05: alter REAL persisted Worker governance only after Native has
     // committed and replayed an immutable public order. The authenticated
     // RuntimeSession broadcasts the new PolicySnapshot on its existing WSS.

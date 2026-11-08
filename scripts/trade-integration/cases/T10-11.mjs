@@ -5,6 +5,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { mkdir, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
+import {actualNativeWorker} from "../native-workerd.mjs";
 const exec = promisify(execFile);
 const marker = "T10_11_NATIVE_WINDOWS_OS_KILLS_V2:";
 const recordMarker = "T10_11_NATIVE_WINDOWS_OS_KILL_RECORD_V2:";
@@ -18,6 +19,18 @@ export async function run({caseId,root,signal,artifactsDir}) {
     throw Error("T10_11_REQUIRES_WINDOWS_OS_PROCESS_KILL");
   const dir=resolve(artifactsDir,caseId);
   await mkdir(dir,{recursive:true});
+  // First connected Native/Worker crash boundary. Do not count the following
+  // 60 isolated component kills as 90 complete cross-owner proofs.
+  process.env.OKX_T10_11_NATIVE_CRASH="F2";
+  try {
+    const connected=await actualNativeWorker(root,signal,{});
+    assert.equal(connected.nativeF2.native_os_kills,1);
+    assert.equal(connected.nativeF2.persisted_worker.inspected.reservation_state,"RELEASED");
+    await writeFile(resolve(dir,"native-worker-f2-process-crash.json"),
+      JSON.stringify(connected,null,2)+"\n");
+  } finally {
+    delete process.env.OKX_T10_11_NATIVE_CRASH;
+  }
   // The invoked Rust test spawns and forcibly terminates its own genuine
   // child processes. CI precompiles before entering this case timer.
   let stdout;
@@ -94,5 +107,5 @@ export async function run({caseId,root,signal,artifactsDir}) {
         "zero_duplicate_finance_and_order_on_all_phases",
         "90_actual_os_process_kills_on_one_exact_sha"],
     },null,2)+"\n");
-  throw Error("T10_11_F2_F4_F8_AND_NATIVE_WORKER_CAUSAL_PROOF_MISSING");
+  throw Error("T10_11_ALL_NINE_NATIVE_WORKER_PHASES_TEN_TIMES_NOT_YET_PROVEN");
 }

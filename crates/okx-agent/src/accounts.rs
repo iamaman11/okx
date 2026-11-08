@@ -643,6 +643,21 @@ impl AccountRuntimeRegistry {
         self.publish(resources).await
     }
 
+    #[cfg(test)]
+    pub(crate) async fn reconnect_prepared(
+        &self,
+        configuration: VerifiedAccountConfig,
+        clients: PreparedAccountClients,
+    ) -> AgentResult<()> {
+        // Crash tests must reopen the original database through the normal
+        // existing-store path, never initialize a replacement financial owner.
+        let leases = self.root.join("account-leases");
+        let resources = self
+            .open_resources_with_clients(configuration, clients, false, &leases)
+            .await?;
+        self.publish(resources).await
+    }
+
     pub async fn shutdown(&self) {
         let resources: Vec<_> = self.routes.read().await.values().cloned().collect();
         for account in &resources {

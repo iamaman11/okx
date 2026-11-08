@@ -539,7 +539,7 @@ jobs:
         if: inputs.target_case != 'UnsentRelease'
         shell: pwsh
         run: |
-          node --test scripts/trade-integration/native-failure.test.mjs
+          node --test scripts/trade-integration/native-failure.test.mjs cloudflare/okx-mcp/scripts/t10-11-native-crash.test.mjs
           if ($LASTEXITCODE -ne 0) { throw 'NATIVE_FAILURE_PROJECTION_FAILED' }
           $output = & cargo test --locked -p okx-agent --lib cloudflare_transport::raw_native_session_tests::recovery_ -- --nocapture 2>&1
           $code = $LASTEXITCODE

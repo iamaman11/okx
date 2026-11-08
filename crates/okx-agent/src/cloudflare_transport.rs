@@ -330,6 +330,11 @@ where
         F::PolicySnapshot{snapshot,..}=>{ctx.trade.update_governance(&snapshot).await.map_err(|_|transport("INVALID_POLICY_SNAPSHOT"))?;},
         F::RiskControlResult{result,..}=>{
             #[cfg(test)]
+            raw_native_session_tests::t10_11_hold_reserve_reply(
+                &result,pending.get(&result.command_id).map(|(cmd,_)|cmd),&ctx,
+                connection_generation
+            ).await;
+            #[cfg(test)]
             let mut result=result;
             #[cfg(test)]
             raw_native_session_tests::t10_12_hold_settlement_reply(
@@ -537,13 +542,37 @@ mod raw_native_session_tests {
         Option<Arc<crate::accounts::recorded_support::RecordedAccountHttp>>,
         RateBudget,
     ) {
+        test_dispatch_with_root(installation, None).await
+    }
+
+    async fn test_dispatch_with_root(
+        installation: &str,
+        existing: Option<std::path::PathBuf>,
+    ) -> (
+        DispatchContext,
+        std::path::PathBuf,
+        NativeRiskClient,
+        mpsc::Receiver<OutboundRiskCommand>,
+        Option<Arc<crate::accounts::recorded_support::RecordedAccountHttp>>,
+        RateBudget,
+    ) {
+        let reopen = existing.is_some();
         let mut bytes = [0u8; 16];
         getrandom::fill(&mut bytes).unwrap();
-        let root = std::env::temp_dir().join(format!(
-            "okx-raw-native-session-{:032x}",
-            u128::from_le_bytes(bytes)
-        ));
-        initialize_installation(&root, installation).unwrap();
+        let root = existing.unwrap_or_else(|| {
+            std::env::temp_dir().join(format!(
+                "okx-raw-native-session-{:032x}",
+                u128::from_le_bytes(bytes)
+            ))
+        });
+        if !reopen {
+            initialize_installation(&root, installation).unwrap();
+        } else {
+            assert!(
+                root.join("accounts").is_dir(),
+                "original crash SQL root required"
+            );
+        }
         let budget = RateBudget::new();
         let accounts = Arc::new(
             AccountRuntimeRegistry::open(&root, budget.clone())
@@ -572,7 +601,11 @@ mod raw_native_session_tests {
                     socket,
                     budget.clone(),
                 );
-                accounts.connect_prepared(config, clients).await.unwrap();
+                if reopen {
+                    accounts.reconnect_prepared(config, clients).await.unwrap();
+                } else {
+                    accounts.connect_prepared(config, clients).await.unwrap();
+                }
             }
         }
         let env = OkxEnvironment::new(Region::Global, false);
@@ -739,6 +772,7 @@ mod raw_native_session_tests {
     include!("trade_integration_t10_09.rs");
     include!("trade_integration_t10_10.rs");
     include!("trade_integration_t10_12.rs");
+    include!("trade_integration_t10_11.rs");
     include!("trade_integration_t10_07.rs");
 
     /// Retry permission is test-only and limited to an explicitly read-only
