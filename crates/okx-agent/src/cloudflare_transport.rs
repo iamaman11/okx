@@ -2900,7 +2900,11 @@ mod raw_native_session_tests {
             // the ORIGINAL read/reconcile operation, never Execute/RESERVE
             // or a second exchange POST. Keep the bound below the child and
             // case timeouts; unexpected reasons fail at the first boundary.
-            let status = tokio::time::timeout(Duration::from_secs(55), async {
+            // Keep the large nested TradeService Status/reconcile future
+            // off the default Windows Rust test thread's 2 MiB stack. The
+            // same production call, finite timeout and assertions remain.
+            // Only this opt-in T10-12 crash-test future is boxed.
+            let status = Box::pin(tokio::time::timeout(Duration::from_secs(55), async {
                 loop {
                     let observed = trade
                         .trade(
@@ -2934,7 +2938,7 @@ mod raw_native_session_tests {
                     );
                     tokio::time::sleep(Duration::from_millis(100)).await;
                 }
-            })
+            }))
             .await
             .expect("T10-12 original public Status never reconciled after Worker reconnect");
             // A successful Status alone is not proof of the OS-kill, old
