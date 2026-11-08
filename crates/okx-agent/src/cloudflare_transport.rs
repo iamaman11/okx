@@ -1854,7 +1854,18 @@ mod raw_native_session_tests {
         let recovery_risk = risk.clone();
         let recovery_handoff = handoff_path.clone();
         let session = tokio::spawn(async move {
-            let result = if t10_12_enabled() {
+            let result = if t10_12_reserve_enabled() {
+                t10_12_reserve_supervise(
+                    socket,
+                    hello,
+                    ctx,
+                    &mut risk_rx,
+                    shutdown_rx,
+                    recovery_risk,
+                    (token.to_string(), recovery_handoff),
+                )
+                .await
+            } else if t10_12_enabled() {
                 t10_12_supervise(
                     socket,
                     hello,
@@ -2585,6 +2596,9 @@ mod raw_native_session_tests {
         // subsequent request is a new explicit intent; an UNKNOWN/potentially
         // sent mutation must NEVER be retried.
         let mut execute = execute;
+        if t10_12_reserve_enabled() {
+            T10_12_ARM_RESERVE.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
         let opened = Box::pin(async {
             let admission_deadline = std::time::Instant::now() + Duration::from_secs(16);
             for attempt in 0..4 {
@@ -2735,6 +2749,14 @@ mod raw_native_session_tests {
                     trade.trade("fixture-a", &execute, None).await
                         .expect("T09.1 public Execute must return its typed admission")
                 };
+                if t10_12_reserve_enabled()
+                    && T10_12_RESERVE_WAS_HELD.load(std::sync::atomic::Ordering::SeqCst)
+                {
+                    // Do not convert a lost Worker HELD response into another
+                    // Execute or a possibly sent exchange order. The same
+                    // original Native SQL rejection is reconciled below.
+                    return admission;
+                }
                 if admission["status"] == "partial" {
                     return admission;
                 }
@@ -2851,6 +2873,80 @@ mod raw_native_session_tests {
             }
             panic!("T09.1 exhausted definitive local no-send admission attempts");
         }).await;
+        if t10_12_reserve_enabled() {
+            assert_eq!(opened["status"], "completed",
+                "lost HELD must resolve to a durable local no-send result: {opened}");
+            assert_eq!(opened["data"]["state"], "REJECTED");
+            assert_eq!(opened["data"]["rejection_origin"], "LOCAL");
+            assert_eq!(opened["data"]["send_state"], "NOT_STARTED");
+            assert_eq!(feed.outbound_posts.lock().unwrap().len(), 0);
+            let intent_id = opened["data"]["intent_id"].as_str()
+                .expect("original Native SQL intent identity").to_string();
+            let original = t10_12_reserve_sql_snapshot(&accounts, &intent_id).await;
+            assert_eq!(original["state"], "REJECTED");
+            assert_eq!(original["attempt_kind"], "RISK_RESERVE_ATTEMPT");
+            assert_eq!(original["central_receipt"], serde_json::Value::Null);
+            assert_eq!(original["exchange_order_id"], serde_json::Value::Null);
+            assert_eq!(original["terminal_receipt"]["kind"], "REJECTED_UNSENT");
+            let status = trade.trade(
+                "fixture-a",
+                &okx_protocol::trading::TradeRequest::Status {
+                    reference: intent_id.clone(),
+                },
+                None,
+            ).await.expect("public Status must reconcile original lost RESERVE");
+            assert_eq!(status["data"]["central_release"]["state"], "verified",
+                "original Native SQL no-send must release one committed Worker HELD: {status}");
+            assert_eq!(feed.outbound_posts.lock().unwrap().len(), 0);
+            let after = t10_12_reserve_sql_snapshot(&accounts, &intent_id).await;
+            assert_eq!(after["state"], "REJECTED");
+            assert_eq!(after["central_receipt"], serde_json::Value::Null);
+            assert_eq!(after["exchange_order_id"], serde_json::Value::Null);
+            assert_eq!(after["central_release"]["kind"], "CENTRAL_RELEASE");
+            assert_eq!(after["reservation_key"], original["reservation_key"]);
+            let key = original["reservation_key"].as_str().unwrap().to_string();
+            let plan = original["plan_hash"].as_str().unwrap().to_string();
+            let inspect = risk.request(RiskCommand {
+                schema: RISK_COMMAND_SCHEMA_V1.into(),
+                command_id: "inspect_t10_12_native_reserve_after_public_status".into(),
+                installation_id: "installation_test".into(),
+                action: RiskCommandAction::Inspect {
+                    reservation_key: key,
+                    plan_sha256: plan,
+                },
+            }).await.unwrap();
+            assert_eq!(inspect.status, RiskDecisionStatus::Observed);
+            assert_eq!(inspect.reservation_state, Some(RiskReservationState::Released));
+            let mut risk_after = summary("risk_t10_12_reserve_final_no_leak");
+            risk_after.installation_id = "installation_test".into();
+            let final_budget = risk.request(risk_after).await.unwrap().budget.unwrap();
+            assert_eq!(final_budget.entry_budget.as_ref().unwrap().consumed_usd, "0",
+                "lost RESERVE may not spend entry money");
+            let verified = serde_json::json!({
+                "schema":"okx.t10-12-native-reserve-sql-release/v1",
+                "intent_id":intent_id,
+                "before_status":original,
+                "after_status":after,
+                "public_status":status["status"],
+                "public_central_release":status["data"]["central_release"],
+                "worker_reservation_state":"RELEASED",
+                "worker_budget":final_budget,
+                "outbound_create_posts":0,
+                "no_second_grant":true,
+            });
+            println!("T10_12_NATIVE_RESERVE_SAME_SQL_RECOVERY_V1:{verified}");
+            feed_shutdown.send(true).unwrap();
+            maintenance_shutdown.send(true).unwrap();
+            public_shutdown.send(true).unwrap();
+            shutdown_tx.send(true).unwrap();
+            let _ = tokio::time::timeout(Duration::from_secs(10), maintenance_task).await
+                .expect("reserve crash maintenance owner must stop");
+            let _ = tokio::time::timeout(Duration::from_secs(10), public_feed).await
+                .expect("reserve crash recorded market publisher must stop");
+            let _ = tokio::time::timeout(Duration::from_secs(10), session).await
+                .expect("reserve crash recovered WSS session must stop");
+            return;
+        }
         let clock_samples = tokio::time::timeout(Duration::from_secs(2), first_clock_publisher)
             .await
             .expect("first external clock publisher did not terminate")
