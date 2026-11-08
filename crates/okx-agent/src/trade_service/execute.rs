@@ -849,22 +849,20 @@ impl TradeService {
         }
         if increase
             && r.configuration.account_key.environment == okx_protocol::accounts::Environment::Real
-        {
-            if self.ensure_campaign_opening(&state, until).await?
+            && self.ensure_campaign_opening(&state, until).await?
                 == CampaignOpeningDecision::RefuseBoundBreach
-            {
-                // The authenticated Worker has already committed a positive
-                // cumulative campaign overrun. There is no SQL PREPARE,
-                // central RESERVE or venue POST for this new intent.
-                // A stale Native capture cannot make that overrun safe.
-                return Ok(completed(json!({
-                    "state":"REJECTED",
-                    "rejection_origin":"CENTRAL",
-                    "send_state":"NOT_STARTED",
-                    "primary_reason":"BUDGET_BOUND_BREACH",
-                    "risk_release_state":"NOT_RESERVED",
-                })));
-            }
+        {
+            // The authenticated Worker has already committed a positive
+            // cumulative campaign overrun. There is no SQL PREPARE,
+            // central RESERVE or venue POST for this new intent.
+            // A stale Native capture cannot make that overrun safe.
+            return Ok(completed(json!({
+                "state":"REJECTED",
+                "rejection_origin":"CENTRAL",
+                "send_state":"NOT_STARTED",
+                "primary_reason":"BUDGET_BOUND_BREACH",
+                "risk_release_state":"NOT_RESERVED",
+            })));
         }
         let plan = loop {
             match self
