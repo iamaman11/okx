@@ -3558,19 +3558,30 @@ mod raw_native_session_tests {
                 .get(..31)
                 .expect("native client ID is at least 31 bytes");
             let stop_client = format!("s{client}");
-            feed.expect_get(RecordedGet {
-                access_key: "fixture-executor-a".into(),
-                path: "/api/v5/trade/order-algo".into(),
-                required_query: vec![("algoClOrdId".into(), stop_client.clone())],
-                raw_response: envelope(json!([{
-                    "instId":"BTC-USDT-SWAP",
-                    "algoId":"900000001",
-                    "algoClOrdId":stop_client,
-                    "state":"live","sz":"0.1","side":"sell",
-                    "posSide":"long","tdMode":"cross","ordType":"conditional",
-                    "slTriggerPx":"900","slTriggerPxType":"mark","slOrdPx":"-1"
-                }])),
-            });
+            let signed_stop_readback = envelope(json!([{
+                "instId":"BTC-USDT-SWAP",
+                "algoId":"900000001",
+                "algoClOrdId":stop_client,
+                "state":"live","sz":"0.1","side":"sell",
+                "posSide":"long","tdMode":"cross","ordType":"conditional",
+                "slTriggerPx":"900","slTriggerPxType":"mark","slOrdPx":"-1"
+            }]));
+            // Just as the order, the attached stop is independently read on
+            // EACH public Status. The recovery Status must not treat an
+            // exhausted test transcript as a verified protection incident.
+            // Both reads still run through the original signed Executor GET
+            // and production identity/coverage checks. A differing actual
+            // second reply remains free to fail closed; the test records an
+            // unchanged venue state, not a cached or assumed protection.
+            let recorded_protection_reads = if t10_12_enabled() { 2 } else { 1 };
+            for _ in 0..recorded_protection_reads {
+                feed.expect_get(RecordedGet {
+                    access_key: "fixture-executor-a".into(),
+                    path: "/api/v5/trade/order-algo".into(),
+                    required_query: vec![("algoClOrdId".into(), stop_client.clone())],
+                    raw_response: signed_stop_readback.clone(),
+                });
+            }
             if t10_12_enabled() {
                 T10_12_ARM_SETTLEMENT.store(true, std::sync::atomic::Ordering::SeqCst);
             }
