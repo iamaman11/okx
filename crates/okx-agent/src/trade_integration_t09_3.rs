@@ -151,13 +151,27 @@
         let standalone=std::env::var("OKX_T09_4_MANAGED_ADD_PROBE").as_deref()!=Ok("1")
             && std::env::var("OKX_T09_6_CLOSE_PROBE").as_deref()!=Ok("1");
         if terminal && standalone {
-            for _ in 0..8 {
-                feed.expect_get(RecordedGet {
-                    access_key:"fixture-observer-a".into(),
-                    path:"/api/v5/trade/orders-pending".into(),
-                    required_query:vec![("limit".into(),"100".into())],
-                    raw_response:raw(serde_json::json!([])),
-                });
+            let pending_source = || RecordedGet {
+                access_key:"fixture-observer-a".into(),
+                path:"/api/v5/trade/orders-pending".into(),
+                required_query:vec![("limit".into(),"100".into())],
+                raw_response:raw(serde_json::json!([])),
+            };
+            if std::env::var("OKX_T10_10_FINANCE_REPLAY_PROBE").as_deref()==Ok("1") {
+                // T10-10 later observes a separate late-bill event on this
+                // SAME account/route/query. Start with the original eight
+                // signed reads as an immutable phase so the subsequent event
+                // can advance it without mixing queued and phase sources.
+                feed.expect_immutable_signed_phase_bounded(
+                    "t09-3-terminal-pending-orders",
+                    pending_source(),
+                    8,
+                    std::time::Duration::from_secs(60),
+                );
+            } else {
+                for _ in 0..8 {
+                    feed.expect_get(pending_source());
+                }
             }
             eprintln!("T09_3_TERMINAL_PENDING_ORDERS_SOURCE_V1 phase=terminal new_pages=8 signed_order=FILLED");
         }

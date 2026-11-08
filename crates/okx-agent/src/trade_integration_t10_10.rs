@@ -144,11 +144,13 @@ async fn t10_10_late_released_fee(
             }])),
         }).collect());
     let event_at=chrono::Utc::now().timestamp_millis();
-    // Independent account inventory at the late-bill event: both recorded
-    // entries have already filled, so neither is an outstanding venue order.
-    // Declare this new scenario's source once, with fixed bytes and a finite
-    // lifetime/read budget; never reset the earlier implicit 64-read source.
-    feed.expect_immutable_signed_phase_bounded(
+    // Both orders were already terminal in the original independently signed
+    // T09.3 inventory. The new late-bill event does not invent an order-state
+    // change: advance the SAME account/route/query from the earlier bounded
+    // phase, retaining its actual delivery count instead of mixing queued
+    // pages with a new immutable source.
+    let prior_pending_reads = feed.advance_immutable_signed_phase_bounded(
+        "t09-3-terminal-pending-orders",
         "t10-10-late-bill-no-pending-orders",
         RecordedGet {access_key:"fixture-observer-a".into(),
             path:"/api/v5/trade/orders-pending".into(),
@@ -156,6 +158,8 @@ async fn t10_10_late_released_fee(
             raw_response:raw(serde_json::json!([]))},
         12,Duration::from_secs(12),
     );
+    assert!(prior_pending_reads<=8,
+        "T10-10 must transition from the finite eight-read terminal source");
     let bill=raw(serde_json::json!([{
         "billId":"t10-10-independent-late-fee-001","instType":"SWAP",
         "instId":"BTC-USDT-SWAP","ordId":"recorded-t09-opening-001",
