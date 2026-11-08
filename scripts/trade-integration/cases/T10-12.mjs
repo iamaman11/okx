@@ -230,7 +230,56 @@ export async function run({caseId,root,signal,artifactsDir}){
     transcript_sha256:native.transcript_sha256,
     missing:["reserve_crash_same_native_sql_recovery"],
   },null,2)+"\n");
-  throw Error("T10_12_RESERVE_CRASH_SAME_NATIVE_SQL_NOT_PROVEN");
+
+  // Independent production public Execute, but Native and its original SQL
+  // owner remain alive while the ACTUAL Worker commits RESERVE then dies.
+  // The same Native process must reject the stale generation, preserve the
+  // durable RISK_RESERVE_ATTEMPT, and reconcile that one HELD to RELEASED
+  // with zero POST. Worker-only crash evidence above is not counted here.
+  process.env.OKX_T10_12_NATIVE_RESERVE_CRASH="1";
+  let reserveNative;
+  try {
+    reserveNative=await actualNativeWorker(root,signal,{});
+  } finally {
+    delete process.env.OKX_T10_12_NATIVE_RESERVE_CRASH;
+  }
+  const reserve=reserveNative.nativeReserveRecovery;
+  const worker=reserveNative.workerReserveRecovery;
+  const reserveCrash=reserveNative.workerCrash;
+  assert.equal(reserveCrash.worker_os_kills,1);
+  assert.equal(reserveCrash.native_process_survived,true);
+  assert.equal(reserveCrash.original_do_storage_reopened,true);
+  assert.equal(reserveCrash.committed.action,"RESERVE");
+  assert.equal(reserveCrash.committed.status,"HELD");
+  assert.equal(reserve.old_reply_rejected,true);
+  assert.equal(reserve.before_status.intent_id,reserve.after_status.intent_id);
+  assert.equal(reserve.before_status.reservation_key,
+    reserve.after_status.reservation_key);
+  assert.equal(reserve.before_status.attempt_kind,"RISK_RESERVE_ATTEMPT");
+  assert.equal(reserve.after_status.central_release.kind,"CENTRAL_RELEASE");
+  assert.equal(reserve.outbound_create_posts,0);
+  assert.equal(reserve.worker_reservation_state,"RELEASED");
+  assert.equal(worker.original_native_sql_release,true);
+  assert.equal(worker.no_new_venue_post,true);
+  assert.equal(worker.reservation_key,reserve.before_status.reservation_key);
+  assert.deepEqual(worker.budget,reserve.worker_budget);
+  await writeFile(resolve(dir,"native-worker-reserve-crash.json"),
+    JSON.stringify({schema:"okx.t10-12-native-worker-reserve-crash/v1",
+      reserve,worker,reserveCrash,
+      transcript_sha256:reserveNative.transcript_sha256,
+      mandatory_case_pass:true},null,2)+"\n");
+  return {
+    schema:"okx.t10-12-native-worker-crash-acceptance/v1",
+    worker_os_kills:observed.length+crash.worker_os_kills+reserveCrash.worker_os_kills,
+    original_sql_settlement_ack:local.local_settlement_ack,
+    original_sql_reserve_release:true,
+    original_worker_replies_rejected:true,
+    worker_budget_preserved:true,
+    new_venue_post_after_reserve_crash:reserve.outbound_create_posts,
+    settlement:local,
+    reserve:reserve.after_status,
+    mandatory_case_pass:true,
+  };
 }
 
 // Standalone parser regression. Real OS process kill remains mandatory.
