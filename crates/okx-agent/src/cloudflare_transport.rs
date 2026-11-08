@@ -3525,12 +3525,21 @@ mod raw_native_session_tests {
                 "state":"filled",
                 "cTime":financial_time,"uTime":financial_time
             }]));
-            feed.expect_get(RecordedGet {
-                access_key: "fixture-executor-a".into(),
-                path: "/api/v5/trade/order".into(),
-                required_query: vec![("instId".into(), "BTC-USDT-SWAP".into())],
-                raw_response: after_fill_order,
-            });
+            // T10-12 explicitly invokes two public Status calls on the
+            // same original intent: before Worker OS-kill and after the
+            // authenticated reconnect. Each performs its own signed order
+            // GET; one recording cannot cover both. Replay only the EXACT
+            // immutable recorded venue bytes, never a made-up order or new
+            // economic event. All other cases still get one order page.
+            let recorded_status_reads = if t10_12_enabled() { 2 } else { 1 };
+            for _ in 0..recorded_status_reads {
+                feed.expect_get(RecordedGet {
+                    access_key: "fixture-executor-a".into(),
+                    path: "/api/v5/trade/order".into(),
+                    required_query: vec![("instId".into(), "BTC-USDT-SWAP".into())],
+                    raw_response: after_fill_order.clone(),
+                });
+            }
             let position = envelope(json!([{
                 "instType":"SWAP","instId":"BTC-USDT-SWAP",
                 "posSide":"long","pos":"0.1","mgnMode":"cross",
