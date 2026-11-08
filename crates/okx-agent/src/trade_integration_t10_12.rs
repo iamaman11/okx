@@ -254,7 +254,17 @@ pub(super) async fn t10_12_hold_settlement_reply(
 
 // Delays the ORIGINAL immutable Worker response across the real OS restart.
 // The next connection uses an actual socket/HelloAck, not a fabricated session.
-struct T10_12OldReply<S> {socket:S,old:Option<Message>,after_outbound:bool}
+struct T10_12OldReply<S> {
+    socket:S,
+    old:Option<Message>,
+    after_command_id:String,
+    after_outbound:bool,
+}
+impl<S> T10_12OldReply<S> {
+    fn after_command(socket:S, old:Message, command_id:&str) -> Self {
+        Self {socket, old:Some(old), after_command_id:command_id.into(), after_outbound:false}
+    }
+}
 impl<S> Stream for T10_12OldReply<S>
 where S:Stream<Item=Result<Message,tokio_tungstenite::tungstenite::Error>>+Unpin {
     type Item=Result<Message,tokio_tungstenite::tungstenite::Error>;
@@ -272,8 +282,13 @@ where S:Sink<Message,Error=tokio_tungstenite::tungstenite::Error>+Unpin {
         Pin::new(&mut self.socket).poll_ready(cx)
     }
     fn start_send(mut self:Pin<&mut Self>,message:Message)->Result<(),Self::Error> {
-        if matches!(frame(message.clone()),Ok(F::RiskControl{..})) {self.after_outbound=true;}
-        Pin::new(&mut self.socket).start_send(message)
+        let named = matches!(frame(message.clone()),Ok(F::RiskControl{command,..})
+            if command.command_id == self.after_command_id);
+        Pin::new(&mut self.socket).start_send(message)?;
+        // Maintenance and public Status share this socket. They cannot arm
+        // the fault intended for the probe's own pending response waiter.
+        self.after_outbound |= named;
+        Ok(())
     }
     fn poll_flush(mut self:Pin<&mut Self>,cx:&mut Context<'_>)->Poll<Result<(),Self::Error>> {
         Pin::new(&mut self.socket).poll_flush(cx)
@@ -293,6 +308,60 @@ async fn t10_12_connect(url:&str,token:&str) ->
         .await.unwrap().unwrap().0
 }
 
+#[tokio::test]
+async fn recovery_old_reply_waits_for_its_command_not_background_traffic() {
+    let (ctx, root, client, mut risk_rx) = test_dispatch().await;
+    let (input_tx, input_rx) = mpsc::unbounded_channel();
+    let (output_tx, mut output_rx) = mpsc::unbounded_channel();
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let session_id = "session_recovery_boundary".to_owned();
+    let probe = summary("risk_named_recovery_probe");
+    let old = wire(F::RiskControlResult {
+        schema:SCHEMA.into(), session_id:session_id.clone(), connection_generation:11,
+        result:denied("risk_original_prior_generation"),
+    });
+    let socket = T10_12OldReply::after_command(
+        RawFrames {inbound:input_rx, outbound:output_tx}, old, &probe.command_id,
+    );
+    let session = tokio::spawn(async move {
+        run_connected_session(socket,test_hello(),ctx,&mut risk_rx,shutdown_rx).await
+    });
+    let exercise = async {
+        assert!(matches!(parse(output_rx.recv().await.unwrap()), F::Hello{..}));
+        input_tx.send(Ok(wire(F::HelloAck {
+            schema:SCHEMA.into(), session_id:session_id.clone(), connection_generation:12,
+        }))).unwrap();
+        // Force the competing request before the probe, without sleeps.
+        let background = tokio::spawn({let client=client.clone(); async move {
+            client.request(summary("risk_background_before_probe")).await
+        }});
+        let observed = loop {
+            if let F::RiskControl{command,..}=parse(output_rx.recv().await.unwrap()) {
+                break command;
+            }
+        };
+        assert_eq!(observed.command_id,"risk_background_before_probe");
+        input_tx.send(Ok(wire(F::RiskControlResult {
+            schema:SCHEMA.into(), session_id, connection_generation:12,
+            result:denied(&observed.command_id),
+        }))).unwrap();
+        // With the previous any-outbound trigger this fails: the background
+        // command receives the disconnect and the probe never owned it.
+        assert_eq!(background.await.unwrap().unwrap().command_id,observed.command_id);
+        let unresolved = client.request(probe).await;
+        assert_eq!(unresolved.unwrap_err(),"RISK_TRANSPORT_LOST_DO_NOT_REPLAY");
+        let error = session.await.unwrap().unwrap_err();
+        assert!(error.to_string().contains("SESSION_GENERATION_MISMATCH"));
+    };
+    tokio::time::timeout(Duration::from_secs(3),exercise).await
+        .expect("direct receive-boundary test must finish without a campaign");
+    drop(client);
+    drop(input_tx);
+    drop(output_rx);
+    drop(shutdown_tx);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 async fn t10_12_supervise<S>(socket:S,hello:F,ctx:DispatchContext,
     risk_rx:&mut mpsc::Receiver<OutboundRiskCommand>,shutdown:watch::Receiver<bool>,
     risk:NativeRiskClient,authentication: (String,String)) -> AgentResult<()>
@@ -306,9 +375,9 @@ where S:Stream<Item=Result<Message,tokio_tungstenite::tungstenite::Error>>+
     let restarted=t10_12_barrier(&format!("{handoff}.t12-worker-restarted")).await;
     let url=restarted["ws_url"].as_str().unwrap();
     let socket=t10_12_connect(url,&token).await;
-    let old=T10_12OldReply {socket,old:Some(held.raw.clone()),after_outbound:false};
     let mut probe=summary("risk_t10_12_new_generation_pending");
     probe.installation_id="installation_test".into();
+    let old=T10_12OldReply::after_command(socket,held.raw.clone(),&probe.command_id);
     let (rejected,pending)=tokio::join!(
         run_connected_session(old,hello.clone(),ctx.clone(),risk_rx,shutdown.clone()),
         risk.request(probe));
@@ -416,9 +485,9 @@ where
     eprintln!("T10_12_RESERVE_RECOVERY_STAGE_V1:WORKER_RESTART_REPORTED");
     let url = restarted["ws_url"].as_str().unwrap();
     let socket = t10_12_connect(url, &token).await;
-    let old = T10_12OldReply {socket,old:Some(held.raw.clone()),after_outbound:false};
     let mut probe = summary("risk_t10_12_reserve_old_reply");
     probe.installation_id = "installation_test".into();
+    let old = T10_12OldReply::after_command(socket,held.raw.clone(),&probe.command_id);
     eprintln!("T10_12_RESERVE_RECOVERY_STAGE_V1:STALE_REPLY_PROBE_STARTED");
     let (rejected_frame, pending) = tokio::join!(
         run_connected_session(old, hello.clone(), ctx.clone(), risk_rx, shutdown.clone()),

@@ -518,12 +518,12 @@ jobs:
         run: |
           node --test scripts/trade-integration/native-failure.test.mjs
           if ($LASTEXITCODE -ne 0) { throw 'NATIVE_FAILURE_PROJECTION_FAILED' }
-          $output = & cargo test --locked -p okx-agent --lib recovery_wait_ -- --nocapture 2>&1
+          $output = & cargo test --locked -p okx-agent --lib cloudflare_transport::raw_native_session_tests::recovery_ -- --nocapture 2>&1
           $code = $LASTEXITCODE
           $output | Out-Host
           if ($code -ne 0) { exit $code }
           $proof = [regex]::Match(($output -join "`n"), 'test result: ok\.\s+(\d+) passed;')
-          if (-not $proof.Success -or [int]$proof.Groups[1].Value -ne 3) {
+          if (-not $proof.Success -or [int]$proof.Groups[1].Value -ne 4) {
             throw 'RECOVERY_WAIT_TEST_COUNT_INVALID'
           }
 
