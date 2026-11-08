@@ -252,7 +252,7 @@ function fixtureOpening(campaignStartedAt, asOf, accountKeys) {
   source.source_digest = createHash("sha256").update(canonical).digest("hex");
   return source;
 }
-let first, second, nativeCrashHost;
+let first, second, nativeCrashHost, nativeCrashWitness;
 async function runRuntimeFixture(){
 try {
   await build({
@@ -1219,6 +1219,7 @@ try {
     if (stderr) process.stderr.write(stderr);
     if(nativeCrashHost) {
       const recovered=await nativeCrashHost.completion;
+      nativeCrashWitness=recovered;
       console.log("T10_12_WORKER_NATIVE_CRASH_V1:"+JSON.stringify(recovered));
       await nativeCrashHost.close();nativeCrashHost=null;
       second=new Miniflare(opts);
@@ -1238,7 +1239,8 @@ try {
       assert.deepEqual(original.worker_budget,afterNative.budget,
         "Worker restart must retain the same Native-released RiskBook totals");
       assert.equal(afterNative.budget.entry_budget.consumed_usd,"0");
-      const crash=receipt(stdout,"T10_12_WORKER_NATIVE_CRASH_V1");
+      const crash=nativeCrashWitness;
+      assert.ok(crash,"actual Worker OS-kill witness required");
       assert.equal(crash.worker_os_kills,1);
       assert.equal(crash.committed.action,"RESERVE");
       assert.equal(crash.committed.status,"HELD");
