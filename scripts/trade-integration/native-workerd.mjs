@@ -58,6 +58,7 @@ export async function actualNativeWorker(root, signal, { statusProbe = false, se
     process.env.OKX_T10_13_STOP_PROBE === "1" ? "t10-13" : "no-t10-13",
     process.env.OKX_T10_10_FINANCE_REPLAY_PROBE === "1" ? "t10-10" : "no-t10-10",
     process.env.OKX_T10_12_NATIVE_WORKER_CRASH === "1" ? "t10-12" : "no-t10-12",
+    process.env.OKX_T10_12_NATIVE_RESERVE_CRASH === "1" ? "t10-12-reserve" : "no-t10-12-reserve",
   ].join(":");
   const reused = memo.has(key);
   if (!reused) {
@@ -194,14 +195,28 @@ export async function actualNativeWorker(root, signal, { statusProbe = false, se
       throw Error("NATIVE_WORKER_CHILD_FAILED:" + evidence.error_class +
         ":" + evidence.phase + ":" + evidence.first_visible_error.slice(0, 70));
     });
-    if (!singleCampaignT10)
+    const reserveCrash = process.env.OKX_T10_12_NATIVE_RESERVE_CRASH === "1";
+    if(!singleCampaignT10&&!reserveCrash)
       assert.match(stdout, /t09_public_trade_execute_open_ack_and_idempotency PASS: posts=1/);
-    assert.match(stdout, /native_to_persisted_workerd_riskbook PASS/);
+    if(!reserveCrash)
+      assert.match(stdout, /native_to_persisted_workerd_riskbook PASS/);
     const terminal = [...stdout.matchAll(/\{"suite":"runtime-session-sqlite-do","status":"PASS"[^\r\n]*\}/g)];
     assert.equal(terminal.length, 1, "production Durable Object test terminal PASS missing");
     const done = JSON.parse(terminal[0][0]);
     assert.equal(done.real_durable_object, true);
     assert.equal(done.persisted_generation, true);
+    if(reserveCrash) {
+      assert.equal(done.native_reserve_crash,true);
+      const nativeReserveRecovery=receipt(stdout,"T10_12_NATIVE_RESERVE_SAME_SQL_RECOVERY_V1");
+      const workerReserveRecovery=receipt(stdout,"T10_12_WORKER_NATIVE_RESERVE_RECONCILED_V1");
+      const workerCrash=receipt(stdout,"T10_12_WORKER_NATIVE_CRASH_V1");
+      return {
+        nativeReserveRecovery,workerReserveRecovery,workerCrash,
+        transcript_sha256:createHash("sha256").update(stdout+stderr).digest("hex"),
+        cohort_execution:{key,elapsed_ms:Date.now()-startedAt,
+          source:"actual-native-worker-child"},
+      };
+    }
     if (singleCampaignT10) {
       assert.equal(done.native_one_campaign,true);
       return {
