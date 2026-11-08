@@ -36,6 +36,18 @@ test("separate stdout and stderr failures do not acquire invented causal orderin
   assert.equal(summarizeRustPanics({}).count, 0);
 });
 
+test("redacted source payload retains its fixed diagnostic code, never the route or body", () => {
+  const x=summarizeRustPanics({stderr:
+    "thread 'campaign' panicked at crates/okx-agent/src/trade_integration_t10_09.rs:400:13:\n"+
+    'T10-09 authenticated terminal B order readback: "OKX API error: TRANSCRIPT_EXHAUSTED:fixture-observer-b:/api/v5/account/balance"\n'});
+  assert.equal(x.panics[0].reason,"TRANSCRIPT_EXHAUSTED");
+  assert.ok(!JSON.stringify(x).includes("/api/v5/"));
+  const privateError=summarizeRustPanics({stderr:
+    "thread 'campaign' panicked at crates/a.rs:1:1:\n"+
+    'raw_response={"token":"TRANSCRIPT_EXHAUSTED:PRIVATE_VALUE"}\n'});
+  assert.equal(privateError.panics[0].reason,"DETAIL_REDACTED_OR_MISSING");
+});
+
 test("nested assertion survives generic Command failed envelope", () => {
   const x = summarizeNativeWorkerdFailure({code:1,
     stdout:'T09_1_NATIVE_SQL_RESTART_V1:{"state":"ok"}',

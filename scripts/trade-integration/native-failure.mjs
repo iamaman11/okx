@@ -11,6 +11,16 @@ function sanitized(line) {
       /[A-Za-z0-9+/=_-]{48,}/.test(text)) return null;
   return text.slice(0, 160);
 }
+function panicReason(line) {
+  const safe = sanitized(line);
+  if (safe) return safe;
+  // A wrapped typed fixture error may contain a route, causing whole-line
+  // redaction. Keep only its code at the known error boundary, never values.
+  const text=String(line).replace(ansi, "");
+  if (secretIndicator.test(text)) return "DETAIL_REDACTED_OR_MISSING";
+  const code=text.match(/(?:OKX API error: |: ")((?:TRANSCRIPT|HTTP_TRANSCRIPT|ACCOUNT|RISK|ORDER|ENTRY|PROTECTION|CAMPAIGN|SOURCE|SQL)_[A-Z0-9_]{1,90})(?=[:"])/);
+  return code?.[1] ?? "DETAIL_REDACTED_OR_MISSING";
+}
 const diagnosticLine = line =>
   /^(?:AssertionError(?: \[ERR_[A-Z_]+\])?:|Error \[ERR_[A-Z_]+\]:|Error: (?!Command failed)[A-Z][A-Z0-9_ :.\-]+$|thread '[^']+' panicked at|T09_[A-Z0-9_]+(?:DENIAL|FAILURE|FAILED)_V1:)/.test(line);
 
@@ -27,7 +37,7 @@ export function summarizeRustPanics(error) {
       if (!/thread '.+'(?: \(\d+\))? panicked at/.test(lines[i])) continue;
       const location = lines[i].replaceAll("\\", "/")
         .match(/\b(crates\/[A-Za-z0-9_./-]+\.rs:\d{1,6}:\d{1,6})/);
-      const reason = sanitized(lines[i + 1] ?? "") ?? "DETAIL_REDACTED_OR_MISSING";
+      const reason = panicReason(lines[i + 1] ?? "");
       panics.push({stream, ordinal:ordinal++, location:location?.[1] ?? "RUST_LOCATION_UNKNOWN", reason});
       count++;
     }
