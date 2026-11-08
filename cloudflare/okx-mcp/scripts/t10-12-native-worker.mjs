@@ -68,7 +68,7 @@ async function killHost(child){
   return outcome;
 }
 
-export async function nativeWorkerCrashHost({opts,root,handoffPath}){
+export async function nativeWorkerCrashHost({opts,root,handoffPath,action="SETTLE_ENTRY"}){
   const optionsPath=join(root,"t10-12-worker-host-options.json");
   await writeFile(optionsPath,JSON.stringify(opts),{mode:0o600});
   let host=await startHost(optionsPath);
@@ -77,10 +77,18 @@ export async function nativeWorkerCrashHost({opts,root,handoffPath}){
   const completion=(async()=>{
     const committed=await readBarrier(handoffPath+".t12-worker-kill-ready",abort.signal);
     assert.equal(committed.schema,"okx.t10-12-native-held-worker-response/v1");
-    assert.equal(committed.action,"SETTLE_ENTRY");
-    assert.equal(committed.status,"UPDATED");
+    assert.equal(committed.action,action);
+    assert.equal(committed.status,action==="RESERVE"?"HELD":"UPDATED");
     const killed=await killHost(host.child);
     await publish(handoffPath+".t12-worker-killed",{os_killed:true,...killed});
+    if(action==="RESERVE"){
+      // The Worker must remain OFFLINE until the original public Native
+      // Execute has committed a durable no-send SQL rejection. Reconnecting
+      // early could let a still-running INSPECT resume its pre-POST path.
+      const noSend=await readBarrier(handoffPath+".t12-native-no-send",abort.signal);
+      assert.equal(noSend.native_sql_no_send,true);
+      assert.equal(noSend.original_reservation_key,committed.reservation_key);
+    }
     host=await startHost(optionsPath);
     await publish(handoffPath+".t12-worker-restarted",{ws_url:host.ws_url});
     const recovered=await readBarrier(handoffPath+".t12-native-recovered",abort.signal);
