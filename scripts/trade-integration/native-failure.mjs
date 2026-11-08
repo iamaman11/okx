@@ -18,7 +18,7 @@ function panicReason(line) {
   // redaction. Keep only its code at the known error boundary, never values.
   const text=String(line).replace(ansi, "");
   if (secretIndicator.test(text)) return "DETAIL_REDACTED_OR_MISSING";
-  const code=text.match(/(?:OKX API error: |: ")((?:TRANSCRIPT|HTTP_TRANSCRIPT|ACCOUNT|RISK|ORDER|ENTRY|PROTECTION|CAMPAIGN|SOURCE|SQL)_[A-Z0-9_]{1,90})(?=[:"])/);
+  const code=text.match(/(?:OKX (?:API|response|clock) error: |: ")((?:TRANSCRIPT|HTTP_TRANSCRIPT|ACCOUNT|RISK|ORDER|ENTRY|PROTECTION|CAMPAIGN|SOURCE|SQL)_[A-Z0-9_]{1,90})(?=[:"])/);
   return code?.[1] ?? "DETAIL_REDACTED_OR_MISSING";
 }
 const diagnosticLine = line =>

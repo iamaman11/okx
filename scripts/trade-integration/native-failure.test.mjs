@@ -39,8 +39,10 @@ test("separate stdout and stderr failures do not acquire invented causal orderin
 test("redacted source payload retains its fixed diagnostic code, never the route or body", () => {
   const x=summarizeRustPanics({stderr:
     "thread 'campaign' panicked at crates/okx-agent/src/trade_integration_t10_09.rs:400:13:\n"+
-    'T10-09 authenticated terminal B order readback: "OKX API error: TRANSCRIPT_EXHAUSTED:fixture-observer-b:/api/v5/account/balance"\n'});
-  assert.equal(x.panics[0].reason,"TRANSCRIPT_EXHAUSTED");
+    // OkxError::Response Display in crates/okx-api/src/error.rs and the
+    // RecordedAccountHttp exhausted-source error in accounts.rs.
+    'T10-09 authenticated terminal B order readback: "OKX response error: TRANSCRIPT_SOURCE_PAGE_UNEXPECTED_OR_EXHAUSTED:fixture-observer-b:/api/v5/account/balance?ccy=USDT:method=GET:task=Some(Id(42)):clOrdId=None"\n'});
+  assert.equal(x.panics[0].reason,"TRANSCRIPT_SOURCE_PAGE_UNEXPECTED_OR_EXHAUSTED");
   assert.ok(!JSON.stringify(x).includes("/api/v5/"));
   const privateError=summarizeRustPanics({stderr:
     "thread 'campaign' panicked at crates/a.rs:1:1:\n"+
