@@ -2904,10 +2904,19 @@ mod raw_native_session_tests {
             assert_eq!(ready["old_reply_rejected"], true);
             assert_eq!(ready["no_second_grant"], true);
             assert_eq!(ready["original_sql"]["intent_id"], intent_id);
-            assert_eq!(ready["original_reservation_key"], original["reservation_key"]);
+            assert_eq!(
+                ready["original_reservation_key"],
+                original["reservation_key"]
+            );
             assert_eq!(ready["sql_after_worker_inspect"]["state"], "REJECTED");
-            assert_eq!(ready["sql_after_worker_inspect"]["central_receipt"], serde_json::Value::Null);
-            assert_eq!(ready["sql_after_worker_inspect"]["exchange_order_id"], serde_json::Value::Null);
+            assert_eq!(
+                ready["sql_after_worker_inspect"]["central_receipt"],
+                serde_json::Value::Null
+            );
+            assert_eq!(
+                ready["sql_after_worker_inspect"]["exchange_order_id"],
+                serde_json::Value::Null
+            );
             assert_eq!(feed.outbound_posts.lock().unwrap().len(), 0);
             let status = trade
                 .trade(
