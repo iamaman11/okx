@@ -3607,7 +3607,8 @@ mod raw_native_session_tests {
                     .await
                     .expect("T10-12 terminal receipt read-only diagnostic");
                 assert_eq!(
-                    after["local_settlement_ack"], true,
+                    after["local_settlement_ack"],
+                    true,
                     "production Status must durably acknowledge original settlement; status={}; incremental={}; release={}; financial_error={}; financial_complete={}; terminal_receipt={}; sql_ack={}",
                     actual["status"],
                     actual["data"]["incremental_entry_settlement"],

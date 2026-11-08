@@ -78,9 +78,7 @@ fn verified_emergency_owned_exposure<'a>(
 // Only the partial-settlement coordinator can acknowledge the exact Native
 // SQL revision after Worker acceptance. A terminal release must never race
 // past an unacknowledged revision or make its replay unreachable.
-fn terminal_release_blocked_by_unacknowledged_entry(
-    incremental_entry: &serde_json::Value,
-) -> bool {
+fn terminal_release_blocked_by_unacknowledged_entry(incremental_entry: &serde_json::Value) -> bool {
     incremental_entry["state"] == "pending"
 }
 
