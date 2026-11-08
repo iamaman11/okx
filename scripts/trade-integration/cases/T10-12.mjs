@@ -246,12 +246,22 @@ export async function run({caseId,root,signal,artifactsDir}){
   const reserve=reserveNative.nativeReserveRecovery;
   const worker=reserveNative.workerReserveRecovery;
   const reserveCrash=reserveNative.workerCrash;
+  // Retain genuine producer receipts before consumer assertions. A schema
+  // mismatch can then be reproduced locally without repeating the OS kills.
+  await writeFile(resolve(dir,"native-worker-reserve-receipts.json"),
+    JSON.stringify({mandatory_case_pass:false,reserve,worker,reserveCrash,
+      transcript_sha256:reserveNative.transcript_sha256},null,2)+"\n");
   assert.equal(reserveCrash.worker_os_kills,1);
   assert.equal(reserveCrash.native_process_survived,true);
   assert.equal(reserveCrash.original_do_storage_reopened,true);
   assert.equal(reserveCrash.committed.action,"RESERVE");
   assert.equal(reserveCrash.committed.status,"HELD");
-  assert.equal(reserve.old_reply_rejected,true);
+  assert.equal(reserve.old_reply_rejected,true,
+    "final Native receipt must carry the verified old-generation rejection");
+  assert.equal(reserveCrash.native_recovery.old_reply_rejected,true);
+  assert.equal(reserveCrash.native_recovery.original_reservation_key,
+    reserve.before_status.reservation_key,
+    "old-generation witness must belong to the same original reservation");
   assert.equal(reserve.before_status.intent_id,reserve.after_status.intent_id);
   assert.equal(reserve.before_status.reservation_key,
     reserve.after_status.reservation_key);

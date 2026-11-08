@@ -3018,6 +3018,7 @@ mod raw_native_session_tests {
             let verified = serde_json::json!({
                 "schema":"okx.t10-12-native-reserve-sql-release/v1",
                 "intent_id":intent_id,
+                "old_reply_rejected":ready["old_reply_rejected"],
                 "before_status":original,
                 "after_status":after,
                 "public_status":status["status"],
