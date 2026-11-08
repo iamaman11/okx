@@ -783,6 +783,56 @@ impl AccountStore {
         Ok(settlement)
     }
 
+    /// Read-only check of the latest durable partial settlement. A lost
+    /// Worker reply must not let a terminal release overtake the ORIGINAL
+    /// immutable SQL revision. No head means no partial claim to reconcile.
+    /// A corrupted head/revision/ACK never becomes permission to release.
+    pub fn partial_entry_ack_pending(&self, id: &str) -> StoreResult<bool> {
+        let Some(head) = self.operation(&format!("entry-partial-head:{id}"))? else {
+            return Ok(false);
+        };
+        let proof: EntrySettlementEvidence = serde_json::from_str(&head.result_ref)
+            .map_err(|_| StoreError::Invalid("PARTIAL_ENTRY_HEAD_CORRUPT"))?;
+        if head.kind != "ENTRY_PARTIAL_HEAD"
+            || head.request_hash != proof.plan_hash
+            || proof.schema != "okx.entry-partial-settlement/v1"
+            || proof.account_key != self.meta.account_key
+            || proof.intent_id != id
+            || proof.settlement_revision == 0
+            || proof.source_digest.len() != 64
+            || !proof.source_digest.bytes().all(|c| c.is_ascii_hexdigit())
+        {
+            return Err(StoreError::Invalid("PARTIAL_ENTRY_HEAD_INVALID"));
+        }
+        let immutable = self
+            .operation(&format!(
+                "entry-partial:{id}:r{}",
+                proof.settlement_revision
+            ))?
+            .ok_or(StoreError::Invalid("PARTIAL_ENTRY_REVISION_MISSING"))?;
+        if immutable.kind != "ENTRY_PARTIAL_SETTLEMENT_PROVEN"
+            || immutable.result_ref != head.result_ref
+            || immutable.request_hash != proof.plan_hash
+        {
+            return Err(StoreError::Invalid("PARTIAL_ENTRY_REVISION_MISMATCH"));
+        }
+        let ack = self.operation(&format!(
+            "entry-partial-settled:{id}:r{}",
+            proof.settlement_revision
+        ))?;
+        match ack {
+            None => Ok(true),
+            Some(receipt)
+                if receipt.kind == "ENTRY_PARTIAL_SETTLED"
+                    && receipt.request_hash == proof.plan_hash
+                    && receipt.result_ref == proof.source_digest =>
+            {
+                Ok(false)
+            }
+            _ => Err(StoreError::Invalid("PARTIAL_ENTRY_ACK_CONFLICT")),
+        }
+    }
+
     /// The sole Native SQL owner records the exact cumulative revision only
     /// AFTER the persisted Worker RiskBook has accepted SETTLE_ENTRY.  This
     /// is an ACK of the original immutable venue/bill/FX witness, not a second

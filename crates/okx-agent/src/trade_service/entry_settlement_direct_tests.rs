@@ -464,6 +464,14 @@ async fn has_ack(f: &Fixture) -> bool {
         .unwrap()
 }
 
+async fn partial_ack_pending(f: &Fixture) -> bool {
+    let id = f.intent.intent_id.clone();
+    f.store
+        .call(deadline(), move |s| s.partial_entry_ack_pending(&id))
+        .await
+        .unwrap()
+}
+
 #[tokio::test]
 async fn r01_r02_partial_settlement_and_same_revision_repeat_use_one_sql_ack() {
     let f = fixture("r01", true).await;
@@ -534,6 +542,7 @@ async fn r04_missing_source_cannot_ack_and_identity_mismatch_preserves_first_rea
 #[tokio::test]
 async fn r05_lost_settlement_reply_keeps_unacked_revision_and_replays_same_proof() {
     let f = fixture("r05", true).await;
+    assert!(!partial_ack_pending(&f).await, "no head before first settle");
     let (risk, worker) = risk_client(ReplyMode::LostSettle);
     let error = settle(&f, &risk).await.unwrap_err();
     assert_eq!(error.reason_code, "RISK_TRANSPORT_LOST_DO_NOT_REPLAY");
@@ -541,6 +550,7 @@ async fn r05_lost_settlement_reply_keeps_unacked_revision_and_replays_same_proof
     assert_eq!(error.intent_id, f.intent.intent_id);
     assert_eq!(error.intent_revision, f.intent.revision);
     assert!(!has_ack(&f).await);
+    assert!(partial_ack_pending(&f).await, "original immutable revision is unacked");
     drop(risk);
     let before = worker.await.unwrap();
     assert_eq!(before.len(), 3);
@@ -550,6 +560,7 @@ async fn r05_lost_settlement_reply_keeps_unacked_revision_and_replays_same_proof
         EntrySettlementOutcome::RevisionAcknowledged
     );
     assert!(has_ack(&f).await);
+    assert!(!partial_ack_pending(&f).await, "original revision has one durable ACK");
     drop(risk);
     let after = worker.await.unwrap();
     assert_eq!(after.len(), 3);

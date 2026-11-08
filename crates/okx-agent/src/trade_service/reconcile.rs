@@ -1170,7 +1170,29 @@ impl TradeService {
         } else {
             json!({"state":"not_applicable"})
         };
-        let central_release = if i.state.terminal() && financial {
+        // Only a lost Worker settlement reply with a VERIFIED, still-unacked
+        // immutable SQL revision may defer terminal RELEASE. A generic pending
+        // source/finance state is NOT enough (T09.6/T10-09 regression).
+        // This is one read-only query against the original account SQL owner.
+        let settlement_reply_lost = matches!(
+            incremental_entry["reason_code"].as_str(),
+            Some("RISK_TRANSPORT_LOST_DO_NOT_REPLAY" | "RISK_OUTCOME_UNKNOWN_DO_NOT_REPLAY")
+        );
+        let original_partial_unacked =
+            if i.risk_increase && i.state.terminal() && financial && settlement_reply_lost {
+                let id = i.intent_id.clone();
+                r.execution
+                    .store
+                    .call(deadline(), move |s| s.partial_entry_ack_pending(&id))
+                    .await
+                    .map_err(err)?
+            } else {
+                false
+            };
+        let central_release = if original_partial_unacked {
+            json!({"state":"pending","reason_code":"ENTRY_PARTIAL_SQL_ACK_PENDING",
+                "scope":"intent","next_action":"trade.status"})
+        } else if i.state.terminal() && financial {
             match self
                 .release_terminal(r, &i, order.as_ref(), venue_flat_verified)
                 .await
