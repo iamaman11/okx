@@ -194,3 +194,42 @@ associated transitions; PR #499 remains Draft and **must not merge** until
 full #449 CODE 26/26, S1/S2, required checks and branch integration evidence.
 A documentation-only commit following the proven SHA does not change tested
 Rust/JS behavior; it must not be represented as a new full-CODE PASS.
+
+## #501 — unsent release: one production boundary
+
+`trade_service/unsent_release.rs::release_unsent` owns the existing orchestration
+for a durably rejected, never-sent intent. `TradeService::release_unsent` is a
+thin adapter used by public Status, Execute rejection and maintenance through
+Status. The former implementation in `reconcile.rs` is removed. Terminal
+position release remains a different operation with its existing guards.
+
+Dependencies are the account SQL handle, NativeRiskClient, governance lock and
+per-call SQL deadline. The operation has no venue adapter. AccountStore still
+owns no-send proof and acknowledgement; RiskBook still owns central money.
+`UnsentReleaseStage` identifies `sql_proof`, `authority`, `inspect`, `release`
+or `sql_ack` at the failing call, with the original reason code and known
+intent/reservation identity. Public Status retains `central_release.reason_code`
+and adds `central_release.failure`; Execute retains `risk_release_error` and
+adds `risk_release_failure`. This is a result explanation, not a new persisted
+event history or a claim that a pending operation is safe to resubmit.
+
+```text
+cargo test --locked -p okx-agent --lib trade_service::unsent_release::tests:: -- --nocapture
+```
+
+UR-01/02: missing durable proof/authority, no risk command.
+UR-03: HELD → RELEASE_UNSENT → SQL ACK, repeat retains the first receipt.
+UR-04: lost reply, actual SQL owner shutdown/reopen, INSPECT before acknowledgement.
+UR-05: stale CAS reinspection and the unchanged four-attempt bound.
+UR-06/07: denied, missing/invalid and unresolved replies; existing Posted/absent paths.
+UR-08: real SQLite trigger rejects ACK; no false success, later readback recovers.
+UR-09: local acknowledgement and Demo paths make no Worker call.
+UR-10: two concurrent callers, ordered conflicting replies, one durable acknowledgement.
+
+These tests use real SQLite and NativeRiskClient with scripted response facts.
+They prove orchestration, not Worker economics, a real OS crash, or full CODE.
+The first Windows run on `2c3f780c` passed **10/10 in 2.36s** after compilation
+([CI 42519995459](https://github.com/iamaman11/okx/actions/runs/42519995459)).
+The existing CI workflow supports `target_case=UnsentRelease` for these tests
+without Workerd or the long trading campaign. The mandatory PR matrix and
+full #449 release gates remain unchanged; this mode cannot certify 26/26.

@@ -3,7 +3,7 @@
 use super::*;
 use crate::risk_bridge::OutboundRiskCommand;
 use okx_execution::{
-    AccountMeta, CentralReceipt, Decision, IntentPlan, IntentState, NewIntent, OpeningSnapshot,
+    AccountMeta, CentralReceipt, Decision, IntentPlan, NewIntent, OpeningSnapshot,
 };
 use okx_protocol::risk_authority::{RISK_RESULT_SCHEMA_V1, RiskCommand, RiskResult};
 use rust_decimal::Decimal;
