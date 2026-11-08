@@ -651,11 +651,25 @@ impl AccountRuntimeRegistry {
     ) -> AgentResult<()> {
         // Crash tests must reopen the original database through the normal
         // existing-store path, never initialize a replacement financial owner.
+        let _publication = self.catalog_write.lock().await;
+        let key = configuration.account_key.wire();
+        if self.configurations.read().await.get(&key) != Some(&configuration) {
+            return Err(invalid());
+        }
+        if self.routes.read().await.contains_key(&key) {
+            return Err(AgentError::FinancialCaptureTask(
+                "ACCOUNT_ALREADY_CONNECTED".into(),
+            ));
+        }
         let leases = self.root.join("account-leases");
         let resources = self
             .open_resources_with_clients(configuration, clients, false, &leases)
             .await?;
-        self.publish(resources).await
+        // open() already loaded this catalog entry. Reattach its route just as
+        // startup does; publish() is exclusively for a NEW account.
+        self.routes.write().await.insert(key.clone(), resources);
+        self.failures.write().await.remove(&key);
+        Ok(())
     }
 
     pub async fn shutdown(&self) {
@@ -5194,6 +5208,70 @@ mod tests {
             environment: Environment::Real,
             verified_uid: "a".repeat(64),
         }
+    }
+    #[tokio::test]
+    async fn recovery_prepared_account_reopens_catalog_and_original_sql() {
+        use recorded_support::{RecordedAccountHttp, prepared};
+        let root = root();
+        initialize_installation(&root, "installation-test").unwrap();
+        let budget = RateBudget::new();
+        let feed = Arc::new(RecordedAccountHttp::default());
+        let registry = AccountRuntimeRegistry::open(&root, budget.clone())
+            .await
+            .unwrap();
+        let (config, clients) = prepared("a", feed.clone(), budget.clone());
+        registry
+            .connect_prepared(config.clone(), clients)
+            .await
+            .unwrap();
+        let owner = registry.resolve("fixture-a").await.unwrap();
+        let definition = owner
+            .execution
+            .store
+            .call(
+                std::time::Instant::now() + std::time::Duration::from_secs(3),
+                |s| s.ensure_manual_instance(1234),
+            )
+            .await
+            .unwrap();
+        drop(owner);
+        registry.shutdown().await;
+        drop(registry);
+
+        let reopened = AccountRuntimeRegistry::open(&root, budget.clone())
+            .await
+            .unwrap();
+        let (mut mismatch, clients) = prepared("a", feed.clone(), budget.clone());
+        mismatch.alias = "wrong-alias".into();
+        assert!(
+            reopened
+                .reconnect_prepared(mismatch, clients)
+                .await
+                .is_err()
+        );
+        let (_, clients) = prepared("a", feed.clone(), budget.clone());
+        reopened
+            .reconnect_prepared(config.clone(), clients)
+            .await
+            .unwrap();
+        assert_eq!(reopened.list().await, vec![config.clone()]);
+        let owner = reopened.resolve("fixture-a").await.unwrap();
+        let recovered = owner
+            .execution
+            .store
+            .call(
+                std::time::Instant::now() + std::time::Duration::from_secs(3),
+                |s| s.instance("manual"),
+            )
+            .await
+            .unwrap()
+            .expect("original persisted instance");
+        assert_eq!(recovered.definition_id, definition.definition_id);
+        let (_, clients) = prepared("a", feed.clone(), budget);
+        assert!(reopened.reconnect_prepared(config, clients).await.is_err());
+        assert_eq!(feed.outbound_posts.lock().unwrap().len(), 0);
+        drop(owner);
+        reopened.shutdown().await;
     }
     /// This exercises the same identity/permission bootstrap with an exhausted
     /// raw HTTP transcript. A failed identity proof must never create SQL or

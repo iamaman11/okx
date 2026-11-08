@@ -549,6 +549,13 @@ jobs:
           if (-not $proof.Success -or [int]$proof.Groups[1].Value -ne 4) {
             throw 'RECOVERY_WAIT_TEST_COUNT_INVALID'
           }
+          $output = & cargo test --locked -p okx-agent --lib accounts::tests::recovery_prepared_account_reopens_catalog_and_original_sql -- --exact --nocapture 2>&1
+          $code = $LASTEXITCODE
+          $output | Out-Host
+          if ($code -ne 0) { exit $code }
+          if (($output -join "`n") -notmatch 'test result: ok\.\s+1 passed;') {
+            throw 'ACCOUNT_REOPEN_TEST_NOT_EXECUTED'
+          }
 
       - name: Clippy direct operation before integration
         if: inputs.target_case == 'UnsentRelease'
