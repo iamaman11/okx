@@ -3,7 +3,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {join} from "node:path";
 import {tmpdir} from "node:os";
-import {validateF2KillBoundary,nativeF2Failure} from "./t10-11-native-crash.mjs";
+import {validateF2KillBoundary,nativeF2Failure,awaitF2CommitBoundary} from "./t10-11-native-crash.mjs";
 const boundary=()=>({schema:"okx.t10-11-native-f2-kill-boundary/v1",phase:"F2",
   pid:process.pid+1000,root:join(tmpdir(),"okx-raw-native-session-"+"a".repeat(32)),
   command:{command_id:"reserve_t11_f2",action:{action:"RESERVE",intent_id:"original",plan_sha256:"plan"}},
@@ -30,4 +30,19 @@ test("an early Native failure retains its first Rust boundary before Node wraps 
   assert.equal(failure.rust_assertion,
     "crates/okx-agent/src/trade_integration_t10_11.rs:70:4: F2_STORE_NOT_READY");
   assert.equal(failure.rust_failures.count,1);
+});
+test("intentional kill after the committed boundary is not reported as early failure",async()=>{
+  let killed;const processExit=new Promise((_,reject)=>{killed=reject;});
+  let reports=0;
+  assert.equal(await awaitF2CommitBoundary(Promise.resolve("committed"),processExit,
+    error=>{reports++;throw error;}),"committed");
+  killed(Error("intentional OS kill"));
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(reports,0);
+});
+test("Native failure before the boundary is reported once and stops the wait",async()=>{
+  let reports=0;
+  await assert.rejects(awaitF2CommitBoundary(new Promise(()=>{}),Promise.reject(Error("early")),
+    error=>{reports++;throw error;}),/early/);
+  assert.equal(reports,1);
 });

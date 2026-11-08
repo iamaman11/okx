@@ -21,6 +21,14 @@ function failNative(error){
   throw error;
 }
 
+export function awaitF2CommitBoundary(ready,nativeProcess,onFailure=failNative){
+  // Only the winner may report failure. The losing process promise will reject
+  // later when we intentionally kill Native; that is not an early failure.
+  return Promise.race([ready,nativeProcess.then(()=>{
+    throw Error("T10_11_NATIVE_EXITED_WITHOUT_OS_KILL");
+  })]).catch(onFailure);
+}
+
 export function validateF2KillBoundary(value){
   assert.equal(value.schema,"okx.t10-11-native-f2-kill-boundary/v1");
   assert.equal(value.phase,"F2");
@@ -53,10 +61,8 @@ export async function killAndRecoverNativeF2({nativeProcess,handoffPath,cwd}){
     }
     throw Error("T10_11_F2_COMMIT_BOUNDARY_TIMEOUT");
   })();
-  const boundary=await Promise.race([ready,nativeProcess.then(
-    ()=>{throw Error("T10_11_NATIVE_EXITED_WITHOUT_OS_KILL");},
-    failNative,
-  )]).finally(()=>waiting.abort());
+  const boundary=await awaitF2CommitBoundary(ready,nativeProcess)
+    .finally(()=>waiting.abort());
   if(process.platform==="win32"){
     await exec("taskkill",["/PID",String(boundary.pid),"/F"],{
       windowsHide:true,timeout:15_000,
