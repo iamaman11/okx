@@ -75,30 +75,6 @@ fn verified_emergency_owned_exposure<'a>(
 /// complete the financial lifecycle when no identity-bound fill+bill evidence
 /// has been captured. A terminal verified zero-fill cancellation is separate:
 /// its central release must still be proven by the existing pending gate.
-// Only the partial-settlement coordinator can acknowledge the exact Native
-// SQL revision after Worker acceptance. A terminal release must never race
-// past an unacknowledged revision or make its replay unreachable.
-fn terminal_release_blocked_by_unacknowledged_entry(incremental_entry: &serde_json::Value) -> bool {
-    incremental_entry["state"] == "pending"
-}
-
-#[cfg(test)]
-#[test]
-fn t10_12_terminal_release_waits_for_original_partial_sql_ack() {
-    assert!(terminal_release_blocked_by_unacknowledged_entry(
-        &json!({"state":"pending","reason_code":"RISK_TRANSPORT_LOST_DO_NOT_REPLAY"})
-    ));
-    assert!(terminal_release_blocked_by_unacknowledged_entry(
-        &json!({"state":"pending","reason_code":"PARTIAL_ENTRY_SETTLEMENT_CAS_BUSY"})
-    ));
-    assert!(!terminal_release_blocked_by_unacknowledged_entry(
-        &json!({"state":"verified_or_no_change"})
-    ));
-    assert!(!terminal_release_blocked_by_unacknowledged_entry(
-        &json!({"state":"not_applicable_zero_fill_terminal"})
-    ));
-}
-
 fn entry_fill_finance_pending(
     risk_increase: bool,
     verified_zero_cancel: bool,
@@ -1195,24 +1171,13 @@ impl TradeService {
             json!({"state":"not_applicable"})
         };
         let central_release = if i.state.terminal() && financial {
-            if terminal_release_blocked_by_unacknowledged_entry(&incremental_entry) {
-                // A Worker SETTLE_ENTRY can commit and lose its reply before
-                // Native SQL ACK. Starting the terminal path here would bind a
-                // newer terminal receipt ahead of that unacknowledged partial
-                // revision. Preserve its original immutable SQL witness for
-                // replay on the NEXT public Status and keep risk reserved.
-                // UNKNOWN is not authority to RELEASE, RESERVE or POST again.
-                json!({"state":"pending","reason_code":"ENTRY_SETTLEMENT_ACK_PENDING",
-                    "scope":"intent","next_action":"trade.status"})
-            } else {
-                match self
-                    .release_terminal(r, &i, order.as_ref(), venue_flat_verified)
-                    .await
-                {
-                    Ok(()) => json!({"state":"verified"}),
-                    Err(reason) => {
-                        json!({"state":"pending","reason_code":reason,"scope":"intent","next_action":"trade.status"})
-                    }
+            match self
+                .release_terminal(r, &i, order.as_ref(), venue_flat_verified)
+                .await
+            {
+                Ok(()) => json!({"state":"verified"}),
+                Err(reason) => {
+                    json!({"state":"pending","reason_code":reason,"scope":"intent","next_action":"trade.status"})
                 }
             }
         } else {
