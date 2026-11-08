@@ -34,7 +34,7 @@ pub(super) async fn t10_11_hold_reserve_reply(
     let posts = probe.feed.outbound_posts.lock().unwrap().len();
     assert_eq!(posts, 0);
     let handoff = std::env::var("OKX_INTEGRATION_HANDOFF_PATH").unwrap();
-    t10_12_publish(&format!("{handoff}.t11-native-kill-ready"), &json!({
+    t10_12_publish(&format!("{handoff}.t11-native-kill-ready"), &serde_json::json!({
         "schema":"okx.t10-11-native-f2-kill-boundary/v1",
         "phase":"F2","pid":std::process::id(),"root":probe.root,
         "generation":generation,"sql":sql,"command":command,
@@ -185,7 +185,7 @@ async fn native_crash_f2_recover() {
     stop.send(true).unwrap();
     tokio::time::timeout(Duration::from_secs(5),session).await.unwrap().unwrap().unwrap();
     ctx.accounts.shutdown().await;
-    println!("T10_11_NATIVE_F2_RECOVERY_V1:{}",json!({
+    println!("T10_11_NATIVE_F2_RECOVERY_V1:{}",serde_json::json!({
         "schema":"okx.t10-11-native-f2-recovery/v1","phase":"F2",
         "pid":std::process::id(),"root":root,"account_key":account_key,
         "before":before,"after":after,"worker_after":final_result,
