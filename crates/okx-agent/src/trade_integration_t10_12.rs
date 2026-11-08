@@ -128,11 +128,11 @@ pub(super) async fn t10_12_hold_settlement_reply(
     // The original Native SQL owner has already written the reserve-attempt
     // identity. This hook only WITHHOLDS the authentic committed Worker HELD
     // response and kills the Worker process before any Native reserve receipt.
-    if let RiskCommandAction::Reserve { intent_id, plan_sha256, .. } = &command.action {
-        if t10_12_reserve_enabled()
-            && result.status == RiskDecisionStatus::Held
-            && T10_12_ARM_RESERVE.swap(false, std::sync::atomic::Ordering::SeqCst)
-        {
+    if let RiskCommandAction::Reserve { intent_id, plan_sha256, .. } = &command.action
+        && t10_12_reserve_enabled()
+        && result.status == RiskDecisionStatus::Held
+        && T10_12_ARM_RESERVE.swap(false, std::sync::atomic::Ordering::SeqCst)
+    {
             let sql_before = t10_12_reserve_sql_snapshot(&ctx.accounts, intent_id).await;
             assert_eq!(sql_before["state"], "PREPARED");
             assert_eq!(sql_before["plan_hash"], plan_sha256.as_str());
@@ -168,7 +168,6 @@ pub(super) async fn t10_12_hold_settlement_reply(
             let killed = t10_12_barrier(&format!("{path}.t12-worker-killed")).await;
             assert_eq!(killed["os_killed"], true);
             return Err(transport("T10_12_WORKER_OS_KILLED_AFTER_RESERVE_COMMIT"));
-        }
     }
     if !matches!(command.action,RiskCommandAction::SettleEntry{..}) ||
         result.status!=RiskDecisionStatus::Updated ||
