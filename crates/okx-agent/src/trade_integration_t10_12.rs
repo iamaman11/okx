@@ -512,7 +512,7 @@ where
         let before = risk.request(before_cmd).await.unwrap();
         eprintln!("T10_12_RESERVE_RECOVERY_STAGE_V1:RECOVERY_SUMMARY_RECEIVED");
         let reservation_key = held.result.reservation_key.as_ref().unwrap().clone();
-        let RiskCommandAction::Reserve { plan_sha256, .. } = &held.command.action
+        let RiskCommandAction::Reserve { plan_sha256, census, .. } = &held.command.action
             else { panic!("original RESERVE required") };
         let inspect = risk.request(RiskCommand {
             schema: RISK_COMMAND_SCHEMA_V1.into(),
@@ -547,6 +547,7 @@ where
             "original_session_id":held.session_id,
             "original_generation":held.generation,
             "original_reservation_key":reservation_key,
+            "original_reserve_source_as_of_ms":census.source_read_floor_ms,
             "original_sql":held.sql_before,
             "sql_after_no_send":rejected,
             "sql_after_old_reply":after_old,

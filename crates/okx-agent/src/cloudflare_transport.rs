@@ -3004,15 +3004,17 @@ mod raw_native_session_tests {
             );
             // The two unrelated reservations already present in `checked`
             // must survive. Only this original unsent intent may be released.
-            // Source time can advance during census; every other field,
-            // including all money and the opening proof, must be identical.
+            // RESERVE installs its own census floor (not a monotonic clock).
+            // Restore every monetary field and require that exact source time
+            // to survive the Worker crash and read-only/no-send recovery.
             let mut expected_budget = checked.budget.clone().unwrap();
-            let mut restored_budget = final_budget.clone();
-            assert!(restored_budget.source_as_of_ms >= expected_budget.source_as_of_ms);
-            expected_budget.source_as_of_ms = None;
-            restored_budget.source_as_of_ms = None;
+            let reserve_source = ready["original_reserve_source_as_of_ms"]
+                .as_u64()
+                .expect("original authenticated RESERVE census floor");
+            assert!(reserve_source > 0);
+            expected_budget.source_as_of_ms = Some(reserve_source);
             assert_eq!(
-                restored_budget, expected_budget,
+                final_budget, expected_budget,
                 "no-send recovery must restore the pre-Execute budget without affecting other reservations"
             );
             let verified = serde_json::json!({

@@ -134,6 +134,20 @@ check((await handleNativeRiskCommand(s,session,{schema:"okx.risk-command/v1",com
  const externalHuman=reserve("human","manual","a".repeat(64));
  const externalChat=reserve("chat","manual","b".repeat(64));
  const autonomous=reserve("native","native_alpha","c".repeat(64));
+ // A census floor is the oldest source in that observation, not an operation
+ // watermark. A later valid census may include an older (still fresh) source.
+ const floors=new Store();floors.map=structuredClone(t.map);
+ for(const [command,age] of [[externalHuman,50],[externalChat,100]] as const){
+   const result=await handleNativeRiskCommand(floors,session,{
+     ...command,action:{...command.action,census:{...census,
+       source_read_floor_ms:now-age}}},now);
+   check(result.status==="HELD","both fresh census floors must be admitted");
+   const observed=await handleNativeRiskCommand(floors,session,{
+     schema:"okx.risk-command/v1",command_id:"summary_census_floor",
+     installation_id:initial.installation_id,action:{action:"SUMMARY"}},now);
+   check(observed.budget?.source_as_of_ms===now-age,
+     "summary must preserve the actual census floor, never manufacture a newer timestamp");
+ }
  const admitted=await Promise.all([externalHuman,externalChat,autonomous]
    .map(command=>handleNativeRiskCommand(t,session,command,now)));
  check(admitted.every(r=>r.status==="HELD"&&!!r.reservation_key),

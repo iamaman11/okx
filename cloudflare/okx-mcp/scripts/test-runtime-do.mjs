@@ -1241,8 +1241,6 @@ try {
       assert.equal(original.after_status.central_release.kind,"CENTRAL_RELEASE");
       assert.deepEqual(original.worker_budget,afterNative.budget,
         "Worker restart must retain the same Native-released RiskBook totals");
-      assertBudgetEconomicsUnchanged(original.worker_budget_before_execute,afterNative.budget,
-        "same-SQL no-send release must restore the pre-Execute money, including unrelated reservations");
       assert.equal(afterNative.budget.entry_budget.consumed_usd,"0");
       const crash=nativeCrashWitness;
       assert.ok(crash,"actual Worker OS-kill witness required");
@@ -1251,6 +1249,11 @@ try {
       assert.equal(crash.committed.status,"HELD");
       assert.equal(crash.committed.reservation_key,
         original.before_status.reservation_key);
+      const reserveSource=crash.native_recovery.original_reserve_source_as_of_ms;
+      assert.ok(Number.isSafeInteger(reserveSource)&&reserveSource>0);
+      assert.deepEqual(afterNative.budget,
+        {...original.worker_budget_before_execute,source_as_of_ms:reserveSource},
+        "no-send recovery must restore all pre-Execute money and retain the original RESERVE census floor");
       console.log("T10_12_WORKER_NATIVE_RESERVE_RECONCILED_V1:"+JSON.stringify({
         schema:"okx.t10-12-native-worker-reserve-reconciled/v1",
         original_command_id:crash.committed.command_id,
