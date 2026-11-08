@@ -23,19 +23,24 @@ async fn fixture() -> Fixture {
     std::fs::create_dir_all(&root).unwrap();
     let db = root.join("account.db");
     let account_key = "okx:real:verified-account-a".to_owned();
+    // The same immutable opening observation must initialize metadata and
+    // the balance snapshot. Computing now() twice can cross a millisecond
+    // boundary under parallel Windows tests and fail the real SQL evidence
+    // identity check before this protection test begins.
+    let opening_at = now() - 10_000;
     let store = AccountStoreHandle::initialize_flat(
         db.clone(),
         AccountMeta {
             account_key: account_key.clone(),
             installation_id: "installation_test".into(),
-            initialized_at: now() - 10_000,
+            initialized_at: opening_at,
             opening_source: "opening_observation".into(),
             initialize_operation_id: format!("pc_initialize_{n}"),
             release_id: "a".repeat(40),
         },
         OpeningSnapshot {
             source_ref: "opening_observation".into(),
-            observed_at: now() - 10_000,
+            observed_at: opening_at,
             opening_equity_usd: Decimal::from(100),
             positions: 0,
             orders: 0,
