@@ -2892,14 +2892,61 @@ mod raw_native_session_tests {
             assert_eq!(original["central_receipt"], serde_json::Value::Null);
             assert_eq!(original["exchange_order_id"], serde_json::Value::Null);
             assert_eq!(original["terminal_receipt"]["kind"], "REJECTED_UNSENT");
-            // The original Execute deliberately fails closed while Worker is
-            // offline. This rejection is NOT proof that the new authenticated
-            // WSS generation is ready. Wait for the actual supervisor's
-            // post-reconnect INSPECT and unchanged Native SQL witness before
-            // asking the ORIGINAL public Status to release its one HELD.
-            // No Execute, RESERVE, fabricated response or mutation is retried.
+            // A durably REJECTED_UNSENT Native intent is safe to inspect
+            // while the Worker reconnects. Its first public Status can
+            // legitimately report PENDING/transport lost; waiting for the
+            // supervisor's completed recovery BEFORE the first Status caused
+            // a lifecycle barrier deadlock. Drive recovery only through
+            // the ORIGINAL read/reconcile operation, never Execute/RESERVE
+            // or a second exchange POST. Keep the bound below the child and
+            // case timeouts; unexpected reasons fail at the first boundary.
+            let status = tokio::time::timeout(Duration::from_secs(55), async {
+                loop {
+                    let observed = trade
+                        .trade(
+                            "fixture-a",
+                            &okx_protocol::trading::TradeRequest::Status {
+                                reference: intent_id.clone(),
+                            },
+                            None,
+                        )
+                        .await
+                        .expect("public Status must reconcile original lost RESERVE");
+                    assert_eq!(feed.outbound_posts.lock().unwrap().len(), 0);
+                    if observed["data"]["central_release"]["state"] == "verified" {
+                        break observed;
+                    }
+                    assert_eq!(
+                        observed["data"]["central_release"]["state"],
+                        "pending",
+                        "unexpected nonterminal reserve recovery: {observed}"
+                    );
+                    assert!(
+                        matches!(
+                            observed["data"]["central_release"]["reason_code"].as_str(),
+                            Some(
+                                "RISK_TRANSPORT_LOST_DO_NOT_REPLAY"
+                                    | "RISK_OUTCOME_UNKNOWN_DO_NOT_REPLAY"
+                                    | "RISK_TRANSPORT_UNAVAILABLE"
+                            )
+                        ),
+                        "only a proven transport interruption may keep original no-send pending: {observed}"
+                    );
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+            })
+            .await
+            .expect("T10-12 original public Status never reconciled after Worker reconnect");
+            // A successful Status alone is not proof of the OS-kill, old
+            // generation rejection or persisted Worker restart. Require
+            // that independent same-SQL supervisor witness as well.
             let handoff = std::env::var("OKX_INTEGRATION_HANDOFF_PATH").unwrap();
-            let ready = t10_12_barrier(&format!("{handoff}.t12-native-recovered")).await;
+            let ready = tokio::time::timeout(
+                Duration::from_secs(12),
+                t10_12_barrier(&format!("{handoff}.t12-native-recovered")),
+            )
+            .await
+            .expect("T10-12 authenticated Worker recovery witness missing after Status");
             assert_eq!(ready["schema"], "okx.t10-12-native-reserve-same-sql/v1");
             assert_eq!(ready["old_reply_rejected"], true);
             assert_eq!(ready["no_second_grant"], true);
@@ -2916,21 +2963,6 @@ mod raw_native_session_tests {
             assert_eq!(
                 ready["sql_after_worker_inspect"]["exchange_order_id"],
                 serde_json::Value::Null
-            );
-            assert_eq!(feed.outbound_posts.lock().unwrap().len(), 0);
-            let status = trade
-                .trade(
-                    "fixture-a",
-                    &okx_protocol::trading::TradeRequest::Status {
-                        reference: intent_id.clone(),
-                    },
-                    None,
-                )
-                .await
-                .expect("public Status must reconcile original lost RESERVE");
-            assert_eq!(
-                status["data"]["central_release"]["state"], "verified",
-                "original Native SQL no-send must release one committed Worker HELD: {status}"
             );
             assert_eq!(feed.outbound_posts.lock().unwrap().len(), 0);
             let after = t10_12_reserve_sql_snapshot(&accounts, &intent_id).await;
