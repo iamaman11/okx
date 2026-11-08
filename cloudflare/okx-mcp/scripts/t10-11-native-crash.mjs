@@ -7,7 +7,19 @@ import {readFile} from "node:fs/promises";
 import {setTimeout as delay} from "node:timers/promises";
 import {basename,resolve,relative,isAbsolute} from "node:path";
 import {tmpdir} from "node:os";
+import {summarizeRustPanics} from "../../../scripts/trade-integration/native-failure.mjs";
 const exec=promisify(execFile);
+
+export function nativeF2Failure(error){
+  const rust_failures=summarizeRustPanics(error);
+  const first=rust_failures.panics[0];
+  return {schema:"okx.t09-native-child-failure/v2",rust_failures,
+    rust_assertion:first?`${first.location}: ${first.reason}`:"T10_11_CHILD_EXIT_WITHOUT_RUST_ASSERTION"};
+}
+function failNative(error){
+  process.stderr.write("T09_1_NATIVE_CHILD_FAILURE_V2:"+JSON.stringify(nativeF2Failure(error))+"\n");
+  throw error;
+}
 
 export function validateF2KillBoundary(value){
   assert.equal(value.schema,"okx.t10-11-native-f2-kill-boundary/v1");
@@ -43,7 +55,7 @@ export async function killAndRecoverNativeF2({nativeProcess,handoffPath,cwd}){
   })();
   const boundary=await Promise.race([ready,nativeProcess.then(
     ()=>{throw Error("T10_11_NATIVE_EXITED_WITHOUT_OS_KILL");},
-    error=>{throw error;},
+    failNative,
   )]).finally(()=>waiting.abort());
   if(process.platform==="win32"){
     await exec("taskkill",["/PID",String(boundary.pid),"/F"],{
@@ -61,7 +73,7 @@ export async function killAndRecoverNativeF2({nativeProcess,handoffPath,cwd}){
     "--","--ignored","--exact","--nocapture",
   ],{cwd,env:{...process.env,RUST_MIN_STACK:"16777216",
       OKX_INTEGRATION_HANDOFF_PATH:handoffPath},
-    timeout:90_000,maxBuffer:4*1024*1024,windowsHide:true});
+    timeout:90_000,maxBuffer:4*1024*1024,windowsHide:true}).catch(failNative);
   const prefix="T10_11_NATIVE_F2_RECOVERY_V1:";
   const lines=recovered.stdout.split(/\r?\n/).filter(x=>x.startsWith(prefix));
   assert.equal(lines.length,1,"one genuine Native recovery receipt required");

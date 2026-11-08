@@ -3,7 +3,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {join} from "node:path";
 import {tmpdir} from "node:os";
-import {validateF2KillBoundary} from "./t10-11-native-crash.mjs";
+import {validateF2KillBoundary,nativeF2Failure} from "./t10-11-native-crash.mjs";
 const boundary=()=>({schema:"okx.t10-11-native-f2-kill-boundary/v1",phase:"F2",
   pid:process.pid+1000,root:join(tmpdir(),"okx-raw-native-session-"+"a".repeat(32)),
   command:{command_id:"reserve_t11_f2",action:{action:"RESERVE",intent_id:"original",plan_sha256:"plan"}},
@@ -22,4 +22,12 @@ test("unsafe or already advanced F2 boundaries are rejected before taskkill",()=
     x=>x.sql.reservation_key="other",x=>x.command.action.intent_id="other",
     x=>x.command.action.plan_sha256="other",x=>x.worker_held.status="DENIED",
   ]){const value=boundary();change(value);assert.throws(()=>validateF2KillBoundary(value));}
+});
+test("an early Native failure retains its first Rust boundary before Node wraps it",()=>{
+  const failure=nativeF2Failure({stderr:
+    "thread 'native_crash_f2_boundary' panicked at crates/okx-agent/src/trade_integration_t10_11.rs:70:4:\n"+
+    "F2_STORE_NOT_READY\n"});
+  assert.equal(failure.rust_assertion,
+    "crates/okx-agent/src/trade_integration_t10_11.rs:70:4: F2_STORE_NOT_READY");
+  assert.equal(failure.rust_failures.count,1);
 });
