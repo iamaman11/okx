@@ -872,14 +872,24 @@ mod tests {
     #[test]
     fn repeated_inspect_retains_locally_observed_ack_and_precise_missing_proof() {
         let trace = ProtectionOperationTrace::default();
-        trace.record("cleanup_a", "intent-a", "client-a", ProtectionTraceEvent::Begin);
+        trace.record(
+            "cleanup_a",
+            "intent-a",
+            "client-a",
+            ProtectionTraceEvent::Begin,
+        );
         trace.record(
             "cleanup_a",
             "intent-a",
             "client-a",
             ProtectionTraceEvent::AdapterInvoked,
         );
-        trace.record("cleanup_a", "intent-a", "client-a", ProtectionTraceEvent::Ack);
+        trace.record(
+            "cleanup_a",
+            "intent-a",
+            "client-a",
+            ProtectionTraceEvent::Ack,
+        );
         trace.record(
             "cleanup_a",
             "intent-a",
@@ -888,13 +898,30 @@ mod tests {
         );
         let before = trace.read("cleanup_a").unwrap().unwrap();
         assert_eq!(before["snapshot"]["venue_ack"], "OBSERVED");
-        assert_eq!(before["snapshot"]["first_unproven_boundary"], "POST_ACK_READBACK");
-        trace.record("cleanup_a", "intent-a", "client-a", ProtectionTraceEvent::Inspect);
+        assert_eq!(
+            before["snapshot"]["first_unproven_boundary"],
+            "POST_ACK_READBACK"
+        );
+        trace.record(
+            "cleanup_a",
+            "intent-a",
+            "client-a",
+            ProtectionTraceEvent::Inspect,
+        );
         let after = trace.read("cleanup_a").unwrap().unwrap();
         assert_eq!(after["snapshot"]["venue_ack"], "OBSERVED");
-        assert_eq!(after["snapshot"]["adapter_attempt"], "INVOKED_OUTBOUND_UNPROVEN");
-        assert_eq!(after["snapshot"]["first_unproven_boundary"], "POST_BEGIN_READBACK");
-        assert_eq!(after["snapshot"]["missing_evidence"], "SIGNED_EMPTY_ALGO_AND_FLAT_POSITION");
+        assert_eq!(
+            after["snapshot"]["adapter_attempt"],
+            "INVOKED_OUTBOUND_UNPROVEN"
+        );
+        assert_eq!(
+            after["snapshot"]["first_unproven_boundary"],
+            "POST_BEGIN_READBACK"
+        );
+        assert_eq!(
+            after["snapshot"]["missing_evidence"],
+            "SIGNED_EMPTY_ALGO_AND_FLAT_POSITION"
+        );
         assert_eq!(after["trading_side_effects"], false);
 
         // Without this process' own ACK event, even a persisted BEGIN may
