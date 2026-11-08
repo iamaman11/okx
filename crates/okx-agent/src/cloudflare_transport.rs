@@ -470,7 +470,7 @@ mod raw_native_session_tests {
     use okx_protocol::risk_authority::{
         CausalPostProof, NativeRiskCensus, PostAccountReadProof, RISK_COMMAND_SCHEMA_V1,
         RISK_RESULT_SCHEMA_V1, RiskAccountOccupancy, RiskCommand, RiskCommandAction,
-        RiskDecisionStatus, RiskResult, UsdConversion,
+        RiskDecisionStatus, RiskReservationState, RiskResult, UsdConversion,
     };
     use okx_runtime::PublicWsCoordinator;
     use rust_decimal::Decimal;
