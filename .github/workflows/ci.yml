@@ -21,6 +21,7 @@ on:
         required: false
         default: T09.6
         options:
+          - UnsentRelease
           - T09.1
           - T09.5
           - B1
@@ -340,6 +341,16 @@ jobs:
       - name: Clippy native Windows crates
         run: cargo clippy --locked -p okx-agent -p okx-host-control -p okx-host-launcher -p okx-execution --all-targets -- -D warnings
 
+      - name: Direct unsent release contract (#501)
+        shell: pwsh
+        run: |
+          $output = & cargo test --locked -p okx-agent --lib trade_service::unsent_release::tests:: -- --nocapture 2>&1
+          $code = $LASTEXITCODE
+          $output | Out-Host
+          if ($code -ne 0) { exit $code }
+          $proof = [regex]::Match(($output -join "`n"), 'test result: ok\.\s+(\d+) passed;')
+          if (-not $proof.Success -or [int]$proof.Groups[1].Value -ne 10) { throw 'UNSENT_RELEASE_TEST_COUNT_INVALID' }
+
       - name: Test native Windows crates
         run: cargo test --locked -p okx-agent -p okx-host-control -p okx-host-launcher -p okx-execution
 
@@ -460,7 +471,7 @@ jobs:
         run: |
           $head = (git rev-parse HEAD).Trim()
           if ($head -ne $env:GITHUB_SHA) { throw "PREFLIGHT_HEAD_MISMATCH" }
-          if ($env:OKX_TARGET_CASE -notin @('T09.1','T09.3','T09.4','T09.5','T09.6','T09.7','T09.8','B1','S2-05','T10-14','T10-03','T10-05','T10-06','T10-08','T10-09','T10-10','T10-11','T10-12','T10-15')) {
+          if ($env:OKX_TARGET_CASE -notin @('UnsentRelease','T09.1','T09.3','T09.4','T09.5','T09.6','T09.7','T09.8','B1','S2-05','T10-14','T10-03','T10-05','T10-06','T10-08','T10-09','T10-10','T10-11','T10-12','T10-15')) {
             throw "PREFLIGHT_CASE_NOT_ALLOWED"
           }
           Write-Host "PREFLIGHT_HEAD=$head"
@@ -477,6 +488,7 @@ jobs:
           cache-on-failure: true
 
       - name: Prove ACK-bound immutable order source before Native acceptance
+        if: inputs.target_case != 'UnsentRelease'
         shell: pwsh
         run: |
           cargo test --locked -p okx-agent --lib immutable_acked_order_readback_is_bound_to_one_signed_post_and_query -- --nocapture
@@ -513,7 +525,18 @@ jobs:
       - name: Check Rust format before expensive Native/Worker scenarios
         run: cargo fmt --all -- --check
 
+      - name: Direct unsent release contract (#501)
+        shell: pwsh
+        run: |
+          $output = & cargo test --locked -p okx-agent --lib trade_service::unsent_release::tests:: -- --nocapture 2>&1
+          $code = $LASTEXITCODE
+          $output | Out-Host
+          if ($code -ne 0) { exit $code }
+          $proof = [regex]::Match(($output -join "`n"), 'test result: ok\.\s+(\d+) passed;')
+          if (-not $proof.Success -or [int]$proof.Groups[1].Value -ne 10) { throw 'UNSENT_RELEASE_TEST_COUNT_INVALID' }
+
       - name: Verify recovery owner failures before integration
+        if: inputs.target_case != 'UnsentRelease'
         shell: pwsh
         run: |
           node --test scripts/trade-integration/native-failure.test.mjs
@@ -528,13 +551,14 @@ jobs:
           }
 
       - name: Install locked workerd test dependencies
+        if: inputs.target_case != 'UnsentRelease'
         shell: pwsh
         run: |
           npm ci --prefix cloudflare/okx-mcp --ignore-scripts --no-audit --no-fund
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Execute one Native/Worker scenario or B1/S2-05 prerequisite
-        if: (github.event_name == 'workflow_dispatch' && !inputs.run_a1) || (github.event_name == 'push' && !contains(github.event.head_commit.message, '[A1]'))
+        if: (github.event_name == 'workflow_dispatch' && !inputs.run_a1 && inputs.target_case != 'UnsentRelease') || (github.event_name == 'push' && !contains(github.event.head_commit.message, '[A1]'))
         shell: pwsh
         env:
           OKX_TARGET_CASE: ${{ inputs.target_case || ((github.event_name == 'push' && contains(github.event.head_commit.message, '[T10-12]') && 'T10-12') || (github.event_name == 'push' && contains(github.event.head_commit.message, '[T10-11]') && 'T10-11') || (github.event_name == 'push' && contains(github.event.head_commit.message, '[T10-10]') && 'T10-10') || (github.event_name == 'push' && contains(github.event.head_commit.message, '[T10-09]') && 'T10-09') || (github.event_name == 'push' && contains(github.event.head_commit.message, '[T10-08]') && 'T10-08') || (github.event_name == 'push' && contains(github.event.head_commit.message, '[T10-05]') && 'T10-05') || (github.event_name == 'push' && 'T09.8')) || 'T09.6' }}

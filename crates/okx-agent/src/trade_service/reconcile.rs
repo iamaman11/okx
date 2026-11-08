@@ -631,9 +631,10 @@ impl TradeService {
             // this intent never touched venue. It needs neither a fills
             // backfill nor an account-wide finance snapshot for release.
             let central_release = match self.release_unsent(r, &i).await {
-                Ok(()) => json!({"state":"verified","proof":"SQL_NO_SEND"}),
-                Err(reason) => json!({
-                    "state":"pending","reason_code":reason,
+                Ok(_) => json!({"state":"verified","proof":"SQL_NO_SEND"}),
+                Err(failure) => json!({
+                    "state":"pending","reason_code":failure.reason_code,
+                    "failure":failure,
                     "scope":"intent","next_action":"trade.status"
                 }),
             };
@@ -1419,127 +1420,23 @@ impl TradeService {
         }
         Ok(result)
     }
-    /// Retryable in the existing 1-second maintenance loop. INSPECT resolves
-    /// lost central ACKs; a missing/rejected SQL witness never releases budget.
+    /// Public Status, Execute rejection and maintenance share this operation.
     pub(super) async fn release_unsent(
         &self,
         r: &AccountResources,
         i: &StoredIntent,
-    ) -> Result<(), String> {
-        if r.configuration.account_key.environment != okx_protocol::accounts::Environment::Real {
-            return Ok(());
-        }
-        let id = i.intent_id.clone();
-        let proof = r
-            .execution
-            .store
-            .call(deadline(), move |s| s.unsent_release_receipt(&id))
-            .await
-            .map_err(err)?
-            .ok_or("DURABLE_UNSENT_SQL_PROOF_MISSING")?;
-        let state = self
-            .governance
-            .read()
-            .await
-            .clone()
-            .ok_or("AUTHORITY_UNAVAILABLE")?;
-        let reservation = proof.reservation_key.clone();
-        if reservation.starts_with("local:") {
-            // Real Worker risk was never granted, but the one Native SQL
-            // owner's local no-send lifecycle marker must be discharged.
-            let local_id = i.intent_id.clone();
-            r.execution
-                .store
-                .call(deadline(), move |s| {
-                    s.acknowledge_local_unsent_release(&local_id)
-                })
-                .await
-                .map_err(err)?;
-            return Ok(());
-        }
-        for _ in 0..4 {
-            let observed = self
-                .risk
-                .request(self.risk_command(
-                    &state,
-                    format!("inspect_{}", i.client_order_id),
-                    RiskCommandAction::Inspect {
-                        reservation_key: reservation.clone(),
-                        plan_sha256: proof.plan_hash.clone(),
-                    },
-                ))
-                .await
-                .map_err(str::to_owned)?;
-            let absent = observed.status == RiskDecisionStatus::Denied
-                && observed.reason.as_deref() == Some("RISK_RESERVATION_NOT_FOUND");
-            if observed.status != RiskDecisionStatus::Observed && !absent {
-                return Err(observed
-                    .reason
-                    .unwrap_or("CENTRAL_INSPECTION_FAILED".into()));
-            }
-            if observed.reservation_state == Some(RiskReservationState::Released) {
-                let evidence = digest(&observed)?;
-                let reservation = reservation.clone();
-                r.execution
-                    .store
-                    .call(deadline(), move |s| {
-                        s.acknowledge_central_release(&reservation, &evidence)
-                    })
-                    .await
-                    .map_err(err)?;
-                return Ok(());
-            }
-            if !absent
-                && !matches!(
-                    observed.reservation_state,
-                    Some(RiskReservationState::Held | RiskReservationState::Posted)
-                )
-            {
-                return Err("UNSENT_CENTRAL_STATE_UNRESOLVED".into());
-            }
-            let native_proof = UnsentRiskReleaseProof {
-                reservation_key: proof.reservation_key.clone(),
-                account_key: proof.account_key.clone(),
-                intent_id: proof.intent_id.clone(),
-                plan_hash: proof.plan_hash.clone(),
-                request_hash: proof.request_hash.clone(),
-                reason: proof.reason.clone(),
-                record_digest: digest(&proof)?,
-            };
-            let result = self
-                .risk
-                .request(self.risk_command(
-                    &state,
-                    format!("release_{}", i.client_order_id),
-                    RiskCommandAction::ReleaseUnsent {
-                        reservation_key: reservation.clone(),
-                        plan_sha256: proof.plan_hash.clone(),
-                        expected_risk_book_sequence:
-                            observed.risk_book_sequence.ok_or("RISK_SEQUENCE_MISSING")?,
-                        proof: native_proof,
-                    },
-                ))
-                .await
-                .map_err(str::to_owned)?;
-            if result.status == RiskDecisionStatus::Updated {
-                let evidence = digest(&result)?;
-                let reservation = reservation.clone();
-                r.execution
-                    .store
-                    .call(deadline(), move |s| {
-                        s.acknowledge_central_release(&reservation, &evidence)
-                    })
-                    .await
-                    .map_err(err)?;
-                return Ok(());
-            }
-            if result.reason.as_deref() != Some("STALE_SESSION_OR_BOOK_SEQUENCE") {
-                return Err(result
-                    .reason
-                    .unwrap_or("CENTRAL_UNSENT_RELEASE_DENIED".into()));
-            }
-        }
-        Err("CENTRAL_UNSENT_RELEASE_CAS_BUSY".into())
+    ) -> Result<unsent_release::UnsentReleaseOutcome, unsent_release::UnsentReleaseError> {
+        unsent_release::release_unsent(
+            r.configuration.account_key.environment,
+            i,
+            unsent_release::UnsentReleaseDependencies {
+                store: &r.execution.store,
+                risk: &self.risk,
+                governance: &self.governance,
+                sql_deadline: deadline,
+            },
+        )
+        .await
     }
     async fn release_terminal(
         &self,

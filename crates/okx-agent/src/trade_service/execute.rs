@@ -1275,9 +1275,11 @@ impl TradeService {
                     {
                         Ok(mut result) => {
                             match self.release_unsent(r, &prepared).await {
-                                Ok(()) => result["data"]["risk_release_state"] = json!("RELEASED"),
+                                Ok(_) => result["data"]["risk_release_state"] = json!("RELEASED"),
                                 Err(release) => {
-                                    result["data"]["risk_release_error"] = json!(release);
+                                    result["data"]["risk_release_error"] =
+                                        json!(release.reason_code);
+                                    result["data"]["risk_release_failure"] = json!(release);
                                 }
                             }
                             Ok(result)
@@ -1366,9 +1368,11 @@ impl TradeService {
                     {
                         Ok(mut result) => {
                             match self.release_unsent(r, &prepared).await {
-                                Ok(()) => result["data"]["risk_release_state"] = json!("RELEASED"),
+                                Ok(_) => result["data"]["risk_release_state"] = json!("RELEASED"),
                                 Err(release) => {
-                                    result["data"]["risk_release_error"] = json!(release);
+                                    result["data"]["risk_release_error"] =
+                                        json!(release.reason_code);
+                                    result["data"]["risk_release_failure"] = json!(release);
                                 }
                             }
                             Ok(result)
