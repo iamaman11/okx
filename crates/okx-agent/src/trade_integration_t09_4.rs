@@ -925,9 +925,8 @@
                     owner.execution.store.call(
                         std::time::Instant::now()+Duration::from_secs(2),
                         move |s|s.campaign_readiness_diagnostic(&campaign,native_origin,through),
-                    ).await.map_or_else(
+                    ).await.unwrap_or_else(
                         |error|format!("SQL_DIAGNOSTIC_UNAVAILABLE:{error}"),
-                        |value|value,
                     )
                 };
                 #[cfg(not(debug_assertions))]
