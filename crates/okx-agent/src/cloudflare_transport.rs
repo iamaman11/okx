@@ -2892,6 +2892,23 @@ mod raw_native_session_tests {
             assert_eq!(original["central_receipt"], serde_json::Value::Null);
             assert_eq!(original["exchange_order_id"], serde_json::Value::Null);
             assert_eq!(original["terminal_receipt"]["kind"], "REJECTED_UNSENT");
+            // The original Execute deliberately fails closed while Worker is
+            // offline. This rejection is NOT proof that the new authenticated
+            // WSS generation is ready. Wait for the actual supervisor's
+            // post-reconnect INSPECT and unchanged Native SQL witness before
+            // asking the ORIGINAL public Status to release its one HELD.
+            // No Execute, RESERVE, fabricated response or mutation is retried.
+            let handoff = std::env::var("OKX_INTEGRATION_HANDOFF_PATH").unwrap();
+            let ready = t10_12_barrier(&format!("{handoff}.t12-native-recovered")).await;
+            assert_eq!(ready["schema"], "okx.t10-12-native-reserve-same-sql/v1");
+            assert_eq!(ready["old_reply_rejected"], true);
+            assert_eq!(ready["no_second_grant"], true);
+            assert_eq!(ready["original_sql"]["intent_id"], intent_id);
+            assert_eq!(ready["original_reservation_key"], original["reservation_key"]);
+            assert_eq!(ready["sql_after_worker_inspect"]["state"], "REJECTED");
+            assert_eq!(ready["sql_after_worker_inspect"]["central_receipt"], serde_json::Value::Null);
+            assert_eq!(ready["sql_after_worker_inspect"]["exchange_order_id"], serde_json::Value::Null);
+            assert_eq!(feed.outbound_posts.lock().unwrap().len(), 0);
             let status = trade
                 .trade(
                     "fixture-a",
