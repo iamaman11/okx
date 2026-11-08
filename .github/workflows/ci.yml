@@ -139,6 +139,9 @@ jobs:
       - name: Reject incomplete or fabricated T09/T10 runner evidence
         run: node scripts/run-trade-integration.mjs --self-test
 
+      - name: Preserve bounded primary and secondary Native failures
+        run: node --test scripts/trade-integration/native-failure.test.mjs
+
       - name: Verify clean Engine product contract
         run: |
           python3 scripts/check_product_contract.py --self-test
@@ -509,6 +512,20 @@ jobs:
 
       - name: Check Rust format before expensive Native/Worker scenarios
         run: cargo fmt --all -- --check
+
+      - name: Verify recovery owner failures before integration
+        shell: pwsh
+        run: |
+          node --test scripts/trade-integration/native-failure.test.mjs
+          if ($LASTEXITCODE -ne 0) { throw 'NATIVE_FAILURE_PROJECTION_FAILED' }
+          $output = & cargo test --locked -p okx-agent --lib recovery_wait_ -- --nocapture 2>&1
+          $code = $LASTEXITCODE
+          $output | Out-Host
+          if ($code -ne 0) { exit $code }
+          $proof = [regex]::Match(($output -join "`n"), 'test result: ok\.\s+(\d+) passed;')
+          if (-not $proof.Success -or [int]$proof.Groups[1].Value -ne 3) {
+            throw 'RECOVERY_WAIT_TEST_COUNT_INVALID'
+          }
 
       - name: Install locked workerd test dependencies
         shell: pwsh

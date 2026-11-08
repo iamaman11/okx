@@ -1853,7 +1853,7 @@ mod raw_native_session_tests {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let recovery_risk = risk.clone();
         let recovery_handoff = handoff_path.clone();
-        let session = tokio::spawn(async move {
+        let mut session = tokio::spawn(async move {
             let result = if t10_12_reserve_enabled() {
                 t10_12_reserve_supervise(
                     socket,
@@ -2904,7 +2904,7 @@ mod raw_native_session_tests {
             // off the default Windows Rust test thread's 2 MiB stack. The
             // same production call, finite timeout and assertions remain.
             // Only this opt-in T10-12 crash-test future is boxed.
-            let status = Box::pin(tokio::time::timeout(Duration::from_secs(55), async {
+            let status = t10_12_await_recovery(&mut session, Box::pin(tokio::time::timeout(Duration::from_secs(55), async {
                 loop {
                     let observed = trade
                         .trade(
@@ -2938,8 +2938,9 @@ mod raw_native_session_tests {
                     );
                     tokio::time::sleep(Duration::from_millis(100)).await;
                 }
-            }))
+            })))
             .await
+            .expect("T10-12 recovery owner failed before original public Status completed")
             .expect("T10-12 original public Status never reconciled after Worker reconnect");
             // A successful Status alone is not proof of the OS-kill, old
             // generation rejection or persisted Worker restart. Require

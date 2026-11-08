@@ -16,6 +16,7 @@ import { Miniflare } from "miniflare";
 import { assertBudgetEconomicsUnchanged } from "../../../scripts/trade-integration/budget-evidence.mjs";
 import { settleBeforeWorkerCrash, recoverWorkerCrash } from "./t10-12-worker-crash.mjs";
 import { nativeWorkerCrashHost } from "./t10-12-native-worker.mjs";
+import { summarizeRustPanics } from "../../../scripts/trade-integration/native-failure.mjs";
 
 const crashChild=process.env.OKX_T10_12_WORKER_CRASH_CHILD==="1";
 const crashRecovery=process.env.OKX_T10_12_WORKER_CRASH_RECOVERY==="1";
@@ -1056,12 +1057,11 @@ try {
         const lines = [String(error.stdout ?? ""), String(error.stderr ?? "")]
           .flatMap(channel => channel.split(/\r?\n/))
           .map(line => line.replace(/\x1b\[[0-9;]*m/g, "").trim());
-        const panic = lines.findLastIndex(line =>
-          /thread '.+' panicked at|panicked at .*:[0-9]+:[0-9]+:/.test(line));
-        const detail = panic >= 0
-          ? lines.slice(panic, panic + 7)
-          : lines.filter(line => /assertion|error: test failed|FAILED/.test(line)).slice(-5);
-        const cause = detail.map(line => line.slice(0, 800)).join(" | ");
+        const failures = summarizeRustPanics(error);
+        const first = failures.panics[0];
+        const cause = first
+          ? `${first.location}: ${first.reason}`
+          : "RUST_CHILD_EXIT_WITHOUT_ASSERTION";
         const exitCode = String(error.code ?? "UNKNOWN").slice(0, 40);
         const phases = [...[String(error.stdout ?? ""), String(error.stderr ?? "")]
           .flatMap(channel => [...channel.matchAll(/T09_2_PHASE_V1:([A-Z_]+)/g)])
@@ -1161,7 +1161,10 @@ try {
                 };
               } catch { return {phase:"INVALID_CAUSE_WITNESS"}; }
             }),
-          rust_assertion:cause.slice(0, 1900) || "RUST_CHILD_EXIT_WITHOUT_ASSERTION",
+          rust_assertion:cause.slice(0, 1900),
+          rust_failures:failures,
+          reserve_recovery_stages:lines.filter(line =>
+            /^T10_12_RESERVE_RECOVERY_STAGE_V1:[A-Z_]+$/.test(line)).slice(-12),
           t10_09_capture:bTimeout,
           t10_09_shrink_source_failure:shrinkError,
           maintenance_errors:lines.filter(line => line.includes("OKX_ENTRY_BASELINE_V1")).slice(-12).map(line => line.slice(0, 240)),

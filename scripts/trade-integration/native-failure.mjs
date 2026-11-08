@@ -13,6 +13,28 @@ function sanitized(line) {
 }
 const diagnosticLine = line =>
   /^(?:AssertionError(?: \[ERR_[A-Z_]+\])?:|Error \[ERR_[A-Z_]+\]:|Error: (?!Command failed)[A-Z][A-Z0-9_ :.\-]+$|thread '[^']+' panicked at|T09_[A-Z0-9_]+(?:DENIAL|FAILURE|FAILED)_V1:)/.test(line);
+
+// A task panic may precede the main test's timeout. Retain both boundaries;
+// never call the last assertion the first cause. Pipes preserve order only
+// within one stream, so this projection makes no cross-stream time claim.
+export function summarizeRustPanics(error) {
+  const panics = [];
+  let count = 0;
+  for (const stream of ["stdout", "stderr"]) {
+    const lines = String(error?.[stream] ?? "").replace(ansi, "").split(/\r?\n/);
+    let ordinal = 0;
+    for (let i = 0; i < lines.length; i++) {
+      if (!/thread '.+'(?: \(\d+\))? panicked at/.test(lines[i])) continue;
+      const location = lines[i].replaceAll("\\", "/")
+        .match(/\b(crates\/[A-Za-z0-9_./-]+\.rs:\d{1,6}:\d{1,6})/);
+      const reason = sanitized(lines[i + 1] ?? "") ?? "DETAIL_REDACTED_OR_MISSING";
+      panics.push({stream, ordinal:ordinal++, location:location?.[1] ?? "RUST_LOCATION_UNKNOWN", reason});
+      count++;
+    }
+  }
+  const bounded = panics.length <= 16 ? panics : [...panics.slice(0, 8), ...panics.slice(-8)];
+  return {panics:bounded, count, omitted:count - bounded.length, cross_stream_order:"UNKNOWN"};
+}
 export function summarizeNativeWorkerdFailure(error) {
   const stderr = String(error?.stderr ?? "");
   const stdout = String(error?.stdout ?? "");

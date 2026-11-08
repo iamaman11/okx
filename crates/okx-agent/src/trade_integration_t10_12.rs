@@ -31,6 +31,54 @@ fn t10_12_reserve_enabled() -> bool {
     std::env::var("OKX_T10_12_NATIVE_RESERVE_CRASH").as_deref() == Ok("1")
 }
 
+// Waiting for the public operation must also observe its transport owner.
+// A detached supervisor panic is a failure now, not a Status timeout later.
+// This helper observes lifetimes only; it cannot fabricate a risk/SQL result.
+async fn t10_12_await_recovery<T>(
+    session: &mut tokio::task::JoinHandle<AgentResult<()>>,
+    operation: impl std::future::Future<Output = T>,
+) -> Result<T, String> {
+    tokio::select! {
+        biased;
+        ended = session => Err(match ended {
+            Ok(Ok(())) => "RECOVERY_SESSION_STOPPED_BEFORE_COMPLETION".into(),
+            Ok(Err(error)) => format!("RECOVERY_SESSION_FAILED: {error}"),
+            Err(error) => format!("RECOVERY_SESSION_TASK_FAILED: {error}"),
+        }),
+        value = operation => Ok(value),
+    }
+}
+
+#[tokio::test]
+async fn recovery_wait_reports_owner_failure_without_waiting_for_status_timeout() {
+    let mut session = tokio::spawn(async { Err(transport("TEST_RECEIVE_BOUNDARY_FAILED")) });
+    let result = tokio::time::timeout(Duration::from_secs(1), t10_12_await_recovery(
+        &mut session, std::future::pending::<()>(),
+    )).await.expect("owner failure must not wait for public Status");
+    assert!(result.unwrap_err().contains("TEST_RECEIVE_BOUNDARY_FAILED"));
+}
+
+#[tokio::test]
+async fn recovery_wait_does_not_cancel_live_session_when_operation_finishes() {
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let mut session = tokio::spawn(async { let _ = stopped.await; Ok(()) });
+    assert_eq!(t10_12_await_recovery(&mut session, async { 17 }).await.unwrap(), 17);
+    assert!(!session.is_finished());
+    stop.send(()).unwrap();
+    session.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn recovery_wait_reports_task_panic() {
+    let mut session = tokio::spawn(async {
+        panic!("TEST_RECOVERY_OWNER_PANIC");
+        #[allow(unreachable_code)]
+        Ok(())
+    });
+    let result = t10_12_await_recovery(&mut session, std::future::pending::<()>()).await;
+    assert!(result.unwrap_err().contains("TEST_RECOVERY_OWNER_PANIC"));
+}
+
 async fn t10_12_barrier(path: &str) -> serde_json::Value {
     tokio::time::timeout(Duration::from_secs(90), async {
         loop {
@@ -363,12 +411,15 @@ where
         "intent_id":intent_id,"original_reservation_key":rejected["reservation_key"],
         "native_sql_no_send":true,
     }));
+    eprintln!("T10_12_RESERVE_RECOVERY_STAGE_V1:NO_SEND_RECORDED");
     let restarted = t10_12_barrier(&format!("{handoff}.t12-worker-restarted")).await;
+    eprintln!("T10_12_RESERVE_RECOVERY_STAGE_V1:WORKER_RESTART_REPORTED");
     let url = restarted["ws_url"].as_str().unwrap();
     let socket = t10_12_connect(url, &token).await;
     let old = T10_12OldReply {socket,old:Some(held.raw.clone()),after_outbound:false};
     let mut probe = summary("risk_t10_12_reserve_old_reply");
     probe.installation_id = "installation_test".into();
+    eprintln!("T10_12_RESERVE_RECOVERY_STAGE_V1:STALE_REPLY_PROBE_STARTED");
     let (rejected_frame, pending) = tokio::join!(
         run_connected_session(old, hello.clone(), ctx.clone(), risk_rx, shutdown.clone()),
         risk.request(probe)
@@ -376,18 +427,21 @@ where
     assert!(rejected_frame.unwrap_err().to_string().contains("SESSION_GENERATION_MISMATCH"),
         "old Worker generation must not authorize an SQL reserve receipt");
     assert_eq!(pending.unwrap_err(), "RISK_TRANSPORT_LOST_DO_NOT_REPLAY");
+    eprintln!("T10_12_RESERVE_RECOVERY_STAGE_V1:STALE_REPLY_REJECTED");
     let after_old = t10_12_reserve_sql_snapshot(&ctx.accounts, &intent_id).await;
     assert_eq!(after_old["central_receipt"], serde_json::Value::Null);
     assert_eq!(after_old["exchange_order_id"], serde_json::Value::Null);
     assert_eq!(after_old["attempt_request_hash"], held.sql_before["request_hash"]);
 
     let socket = t10_12_connect(url, &token).await;
+    eprintln!("T10_12_RESERVE_RECOVERY_STAGE_V1:RECOVERY_SOCKET_CONNECTED");
     let active = run_connected_session(socket, hello, ctx.clone(), risk_rx, shutdown);
     tokio::pin!(active);
     let recover = async {
         let mut before_cmd = summary("risk_t10_12_reserve_restart_before");
         before_cmd.installation_id = "installation_test".into();
         let before = risk.request(before_cmd).await.unwrap();
+        eprintln!("T10_12_RESERVE_RECOVERY_STAGE_V1:RECOVERY_SUMMARY_RECEIVED");
         let reservation_key = held.result.reservation_key.as_ref().unwrap().clone();
         let RiskCommandAction::Reserve { plan_sha256, .. } = &held.command.action
             else { panic!("original RESERVE required") };
@@ -400,6 +454,7 @@ where
                 plan_sha256:plan_sha256.clone(),
             },
         }).await.unwrap();
+        eprintln!("T10_12_RESERVE_RECOVERY_STAGE_V1:ORIGINAL_RESERVATION_INSPECTED");
         assert_eq!(inspect.status, RiskDecisionStatus::Observed);
         assert!(matches!(inspect.reservation_state,
             Some(RiskReservationState::Held | RiskReservationState::Released)),
@@ -431,6 +486,7 @@ where
             "no_second_grant":true,
         });
         t10_12_publish(&format!("{handoff}.t12-native-recovered"), &witness);
+        eprintln!("T10_12_RESERVE_RECOVERY_STAGE_V1:RECOVERY_WITNESS_PUBLISHED");
         println!("T10_12_NATIVE_RESERVE_WORKER_RECOVERY_V1:{witness}");
     };
     tokio::select! {
