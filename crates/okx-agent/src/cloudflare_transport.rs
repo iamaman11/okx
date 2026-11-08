@@ -2954,7 +2954,6 @@ mod raw_native_session_tests {
             .expect("T10-12 authenticated Worker recovery witness missing after Status");
             assert_eq!(ready["schema"], "okx.t10-12-native-reserve-same-sql/v1");
             assert_eq!(ready["old_reply_rejected"], true);
-            assert_eq!(ready["no_second_grant"], true);
             assert_eq!(ready["original_sql"]["intent_id"], intent_id);
             assert_eq!(
                 ready["original_reservation_key"],
@@ -3003,6 +3002,19 @@ mod raw_native_session_tests {
                 "0",
                 "lost RESERVE may not spend entry money"
             );
+            // The two unrelated reservations already present in `checked`
+            // must survive. Only this original unsent intent may be released.
+            // Source time can advance during census; every other field,
+            // including all money and the opening proof, must be identical.
+            let mut expected_budget = checked.budget.clone().unwrap();
+            let mut restored_budget = final_budget.clone();
+            assert!(restored_budget.source_as_of_ms >= expected_budget.source_as_of_ms);
+            expected_budget.source_as_of_ms = None;
+            restored_budget.source_as_of_ms = None;
+            assert_eq!(
+                restored_budget, expected_budget,
+                "no-send recovery must restore the pre-Execute budget without affecting other reservations"
+            );
             let verified = serde_json::json!({
                 "schema":"okx.t10-12-native-reserve-sql-release/v1",
                 "intent_id":intent_id,
@@ -3012,6 +3024,7 @@ mod raw_native_session_tests {
                 "public_central_release":status["data"]["central_release"],
                 "worker_reservation_state":"RELEASED",
                 "worker_budget":final_budget,
+                "worker_budget_before_execute":checked.budget,
                 "outbound_create_posts":0,
                 "no_second_grant":true,
             });

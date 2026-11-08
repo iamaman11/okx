@@ -4,8 +4,9 @@ import {initial,account} from "./account_governance.test.js";
 function check(v:boolean,n:string){if(!v)throw Error(n);}
 class Store{
   map=new Map<string,unknown>();
+  writes=0;
   async get(k:string){return this.map.get(k);}
-  async put(k:string,v:unknown){this.map.set(k,v);}
+  async put(k:string,v:unknown){this.writes++;this.map.set(k,v);}
   private tail=Promise.resolve();
   async transaction<T>(fn:(tx:Store)=>Promise<T>):Promise<T>{
     const last=this.tail;let release!:()=>void;
@@ -139,6 +140,21 @@ check((await handleNativeRiskCommand(s,session,{schema:"okx.risk-command/v1",com
    "all three source labels must use the same central RiskBook transaction owner");
  check(new Set(admitted.map(r=>r.reservation_key)).size===3,
    "three different intents require three independent central reservations");
+ // INSPECT owns no financial transition. Compare its actual storage boundary,
+ // not two SUMMARY replies with a concurrent RELEASE_UNSENT between them.
+ const inspectChat={schema:"okx.risk-command/v1",command_id:"inspect_chat_contract",
+   installation_id:initial.installation_id,
+   action:{action:"INSPECT",reservation_key:admitted[1].reservation_key,
+     plan_sha256:"b".repeat(64)}};
+ async function readOnlyInspect(expectedState:string){
+   const before=JSON.stringify([...t.map]),writes=t.writes;
+   const result=await handleNativeRiskCommand(t,session,inspectChat,now+5);
+   check(result.status==="OBSERVED"&&result.reservation_state===expectedState,
+     "INSPECT returns the addressed durable reservation state");
+   check(t.writes===writes&&JSON.stringify([...t.map])===before,
+     "INSPECT must perform zero writes and preserve every stored value");
+ }
+ await readOnlyInspect("HELD");
  const summary=await handleNativeRiskCommand(t,session,{
    schema:"okx.risk-command/v1",command_id:"summary_three_001",
    installation_id:initial.installation_id,action:{action:"SUMMARY"}},now);
@@ -267,6 +283,7 @@ check((await handleNativeRiskCommand(s,session,{schema:"okx.risk-command/v1",com
        reason:"POLICY_CHANGED",record_digest:"f".repeat(64)}}
  },now+4);
  check(unsent.status==="UPDATED","native signed no-send frees held reserve despite governance pause");
+ await readOnlyInspect("RELEASED");
  const inspect=await handleNativeRiskCommand(t,session,{
    schema:"okx.risk-command/v1",command_id:"inspect_chat_0001",
    installation_id:initial.installation_id,

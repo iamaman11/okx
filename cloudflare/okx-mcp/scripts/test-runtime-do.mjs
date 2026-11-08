@@ -1241,6 +1241,8 @@ try {
       assert.equal(original.after_status.central_release.kind,"CENTRAL_RELEASE");
       assert.deepEqual(original.worker_budget,afterNative.budget,
         "Worker restart must retain the same Native-released RiskBook totals");
+      assertBudgetEconomicsUnchanged(original.worker_budget_before_execute,afterNative.budget,
+        "same-SQL no-send release must restore the pre-Execute money, including unrelated reservations");
       assert.equal(afterNative.budget.entry_budget.consumed_usd,"0");
       const crash=nativeCrashWitness;
       assert.ok(crash,"actual Worker OS-kill witness required");
