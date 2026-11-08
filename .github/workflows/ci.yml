@@ -481,7 +481,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master snapshot 2026-09-29
         with:
           toolchain: 1.95.0
-          components: rustfmt
+          components: rustfmt, clippy
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
@@ -549,6 +549,10 @@ jobs:
           if (-not $proof.Success -or [int]$proof.Groups[1].Value -ne 4) {
             throw 'RECOVERY_WAIT_TEST_COUNT_INVALID'
           }
+
+      - name: Clippy direct operation before integration
+        if: inputs.target_case == 'UnsentRelease'
+        run: cargo clippy --locked -p okx-agent --all-targets -- -D warnings
 
       - name: Install locked workerd test dependencies
         if: inputs.target_case != 'UnsentRelease'

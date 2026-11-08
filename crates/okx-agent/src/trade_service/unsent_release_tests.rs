@@ -437,8 +437,7 @@ async fn ur05_stale_cas_reinspects_and_stops_after_four_attempts() {
     assert_eq!(finish_risk(risk, task).await.len(), 4);
     f.finish().await;
     let f = Fixture::new(true, false).await;
-    let (risk, task) =
-        scripted(vec![("inspect", Reply::Held), ("release", Reply::Stale)].repeat(4));
+    let (risk, task) = scripted([("inspect", Reply::Held), ("release", Reply::Stale)].repeat(4));
     let error = f.release(&risk).await.unwrap_err();
     assert_eq!(error.stage, UnsentReleaseStage::Release);
     assert_eq!(error.reason_code, "CENTRAL_UNSENT_RELEASE_CAS_BUSY");
