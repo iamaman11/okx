@@ -3,20 +3,24 @@
 **Canonical:** [product #448](https://github.com/iamaman11/okx/issues/448), [execution #449](https://github.com/iamaman11/okx/issues/449), [bounded simplification #501](https://github.com/iamaman11/okx/issues/501). This is an evidence map, **not** a new suite, an authorization to trade, or a PASS certificate.
 
 **Current candidate:** `fix/windows-clippy-required-495-20261107`, Draft PR #499.
-**Accepted regression baseline: `32ee438ecdc132ab0058177d6e9fd631cd774be7`,
-tree `174d9561168976a94942caa28ca80ff64b0d32b4`.**
-[Required CI 42581922408](https://github.com/iamaman11/okx/actions/runs/42581922408)
+**Accepted regression baseline: `8b5b0b0ba053bf2a80d57412c0c01811e1191c86`,
+tree `bc7b75dd944b5c13523f1c5a5fe2aa930045af38`.**
+[Required CI 42663259376](https://github.com/iamaman11/okx/actions/runs/42663259376)
 completed SUCCESS, including release build. The
-[matrix artifact](https://github.com/iamaman11/okx/actions/runs/42581922408/artifacts/13658004909)
+[matrix artifact](https://github.com/iamaman11/okx/actions/runs/42663259376/artifacts/13697122711)
 contains all 26 distinct required/selected/executed IDs, 26 PASS, zero failures or
-missing cases, 219 matching expected/actual assertions, 26 readbacks, and 90
+missing cases, 221 matching expected/actual assertions, 26 readbacks, and 90
 connected F0–F8 crash trials reopening the original SQL roots. Some cases share
 a cohort transcript; these are not 26 independent full campaigns.
-The [Windows bundle](https://github.com/iamaman11/okx/actions/runs/42581922408/artifacts/13659351084)
+The matrix completed in 1,169,864 ms; the same-SHA local run passed in 1,213,824 ms.
+T09.6 also retains all nine actual POST attempts and independently verifies
+the eighth/ninth cancellation targets and account executor scope.
+The [Windows bundle](https://github.com/iamaman11/okx/actions/runs/42663259376/artifacts/13695894849)
 was downloaded and its source SHA/tree, Cargo.lock and all three executable hashes
-were independently verified. New changes require their own checks; this baseline
+were independently verified. The Windows Cargo.lock bytes use CRLF; their hash
+matches CI and the normalized content matches the source checkout. New changes require their own checks; this baseline
 does not certify an untested descendant, installed workflow or REAL trading.
-The earlier `0680e90f` baseline remains historical evidence in the sections below.
+The earlier `32ee438e` and `0680e90f` baselines remain historical evidence below.
 
 ## #501 application ownership and refactor pass
 
@@ -194,7 +198,7 @@ Generic Windows process-tree termination cannot prove orphan ownership after
 its leader exits. These direct tests and SQL backup join do not declare the
 whole S1-05 complete. PHYSICAL/REAL remain separate gates.
 
-### #501 revision 6: finite residual acceptance list
+### #501 revision 9: finite residual acceptance list
 
 #### Regression found by combined CI `42594279304`
 
@@ -220,8 +224,9 @@ POSTs or own protection incident. Existing T10-08 protection-loss recovery and
 T09.8 exact budget-denial scenarios also passed locally without changing inputs,
 GET budgets, TTL, command/case deadlines or monetary assertions. Two additional
 assertions retain the protection/blocker outcomes in the final case artifact.
-This does not establish the root cause of the earlier T09.6/.7 or price failure;
-the next combined required CI is still necessary for the accepted candidate.
+This historical fix did not establish the cause of the earlier T09.6/.7 or
+price failure. The accepted 8b5b0b0 baseline includes the later source-bound
+cancel chronology/POST evidence and finite-source readiness corrections.
 
 Checked against the baseline source: Cargo.toml has 15 workspace members, and
 AgentOperation has 14 variants, all listed in the public index above. The crate
@@ -252,6 +257,56 @@ repository-wide audit or silently grow it with unrelated improvements.
 | R9 / E4/E6: installed CONTROL | host-control/launcher/release/install owners; reuse/test | Correct or wrong hash/schema/action/instance and interrupted stop/start → actual installed matching bundle → exact health/version/ack, original financial SQL preserved | `cargo test --locked -p okx-host-control` and `cargo test --locked -p okx-host-launcher` are component commands. **Planned:** installed bundle smoke; NOT_RUN. Verified downloadable bundle is prerequisite evidence, not installed proof. |
 | R10 / E5: performance and change cost | public native Diagnostics, existing CPU/SQL/source/CI owners; measure then fix measured bottleneck | Release reference host, prescribed warm/cold workloads and blocked owners → public requests → useful bounded diagnostics, K9 latency/memory/control/queue correctness | Local projection P95 0.0758ms is baseline microbench only. **Planned:** public per-family 1000-sample explain benchmark, normative K9 workloads, raw samples and CI timing breakdown; NOT_RUN. Three completed changes need measured direct-loop evidence; unavailable historical timings stay unmeasured. |
 | R11 / E6: final acceptance and integration | coordinator, existing guards/required CI/PR chain/docs; reuse/test | Collected row evidence + integrated code → final required checks/bundle/installed verticals → all mandatory #501 criteria on actual accepted source/build | Baseline required CI/full26/219/90/bundle accepted only at header SHA. New slice local checks then one final required CI, artifact/hash verification and ancestry/full-diff review **planned**; NOT_RUN. #499 remains Draft; PHYSICAL/REAL separate. |
+
+#### E0 reconciliation and assigned checks (09.11.2026, source 8b5b0b0)
+
+The inventory above covers the 15 declared workspace members, Worker, 14 public
+variants, nested mutations and background owners. The following are concrete
+subtasks of the existing rows, not another roadmap. Source inspection is not a
+test run. Tests listed as planned have not yet been implemented or accepted.
+Good existing boundaries are reused; no production defect was demonstrated in
+the terminal release or diagnostic work packets below.
+
+| Packet / parent row | Allowed files and owner | Given / When / required Then | Check / dependencies |
+|---|---|---|---|
+| D1 / E1 TEST | `diagnostics.rs` test module only; existing projection and `query::dispatch` | Known cleanup event plus held real SQL/source owners → public operation Diagnostics → retained identity/stage/facts, explicit missing history, correct account scope; zero SQL/HTTP/risk effects caused by explain. Restart has only actual durable/unknown facts. | Planned public-dispatch contract. Reuse finance/storage and research public contention tests; no protocol or runtime framework changes. |
+| T1 / E2 TEST | `trade_service/terminal_release/tests.rs`; actual `TradeService::release_terminal` | Real SQL reservation and terminal order, zero exposure, stale fill frontier → release then repeat → FillCoverage/FILL_COVERAGE_INCOMPLETE with exact identity, unchanged receipt, no settlement/risk/venue effects. | Planned `stale_fill_coverage_blocks_release_before_worker`; existing terminal test filter. No fabricated complete census. |
+| R6 / E3 FEATURE | Existing Research protocol/Worker contract, `analytics::{mod,jobs,result}`, bounded decision module | Completed immutable result → record accepted/rejected/deferred decision → read/reopen revision with exact result/experiment refs; changed hypothesis makes new immutable revision; stale expected head/cross-job/corrupt/expired input reject. | Planned research decision tests and typed record/read actions. One existing Jobs SQLite owner and artifact store; preserve original result, retention/pin graph and zero trading effects. Shared protocol files exclusively owned by this packet. |
+
+Other finite gaps in the parent rows remain: terminal positive/stale-bills/
+lost-reply/reopen/peer-pending cases through the real census; uncovered public
+Trade/Strategies actions; operation families beyond cleanup causal publication;
+public Market/ConnectAccount and fresh/degraded overview; R-UX experiment-card
+metadata/field errors, candidate progress, complete64-candidate MCP transcript
+and complete-file export; C20 rolling mean/composition/source extension proof;
+outer S1-05 child/store teardown; installed bundle smoke; public per-family
+Diagnostics and K9 workloads; three independent navigation/change exercises;
+and final integration/ancestry checks. These are the existing E1–E6 criteria,
+not permission to add venues, controllers, registries or arbitrary strategies.
+
+S1-04 reuses the nine T09 results in the verified baseline. S1-01..03 map to
+`causal_phase_transition_tests`, `immutable_signed_phase_` and the `s1_0` filters;
+actual observer/operation negatives remain distinct from fixture-unit evidence.
+The helper named `s1_05_other_uid_has_its_own_immutable_signed_inventory` proves
+account isolation, not normative S1-05 teardown. S2-01/02/03/06 reuse
+`okx-protocol` `s2_` tests, the agent decimal/legacy-reopen `s2_` tests and shared
+`contracts/trade-semantic-golden.json` Worker assertions. S2-04/07 are the exact
+decimal/conflict/account assertions in T09.5; S2-08 is original SQL identity/
+deadline/plan/client-order/policy preservation in T09.7. S2-05 is a separate
+existing CI step with `OKX_S2_05_POLICY_CAS_PROBE=1`, not implied by ordinary
+T09.5: its artifact must be read separately before asserting receipt-level
+acceptance. No missing S2 implementation was established by this inventory.
+
+Current direct command corrections: unsent release is
+`cargo test --locked -p okx-agent --lib trade_service::unsent_release::tests:: -- --nocapture`.
+Public query tests already exist under `query::public_dispatch_tests::`:
+capabilities/mailbox, instrument filtering, account-summary source/identity and
+missing-overview source. Public finance/storage contention is in
+`finance_trace::tests::public_finance_diagnostic_does_not_queue_behind_sql_or_trace`;
+public research contention is in
+`analytics::jobs::job_diagnostics::tests::public_job_diagnostic_completes_with_known_state_while_catalog_sql_is_locked`.
+These retained assertions supersede the earlier broad NOT_PROVEN descriptions
+for those specific paths; they do not accept every diagnostic family or K9.
 
 Completion uses the #501 §7 checklist: R0 inventory; R1 explanations/context;
 R2/R3 trading; R4 SQL/risk; R5 facts; R6 routing/auth; R7 research; R8 account/
