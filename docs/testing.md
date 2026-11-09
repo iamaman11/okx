@@ -3,8 +3,8 @@
 **Canonical:** [product #448](https://github.com/iamaman11/okx/issues/448), [execution #449](https://github.com/iamaman11/okx/issues/449), [bounded simplification #501](https://github.com/iamaman11/okx/issues/501). This is an evidence map, **not** a new suite, an authorization to trade, or a PASS certificate.
 
 **Current candidate:** `fix/windows-clippy-required-495-20261107`, Draft PR #499.
-The T10-11 checkpoint below records **80 connected crashes on code SHA `49a4b715`**;
-F7 and full 26-case acceptance remain incomplete. Last reviewed full matrix:
+**T10-11 PASS: 90 connected F0–F8 crashes on code SHA `a8afc8dd`**.
+Full 26-case acceptance remains unconfirmed. Last reviewed full matrix:
 23/26 on `31ca2fd9`, failures T10-09/T10-11/T10-12. Later targeted T10-09/T10-12
 PASS on `77cf2f94` ([checkpoint](https://github.com/iamaman11/okx/issues/501#issuecomment-6728210030))
 does not create a combined 25/26 or prove this newer candidate. Do not merge
@@ -41,7 +41,7 @@ The 26 authoritative IDs are owned by `scripts/run-trade-integration.mjs --list`
 | `T10-08` | `crates/okx-agent/src/trade_service/reconcile.rs::emergency_exit; crates/okx-agent/src/trade_service/reconcile.rs::verified_live_protection` | [`cases/T10-08.mjs`](../scripts/trade-integration/cases/T10-08.mjs), `--case T10-08` | FOUND: signed partial fill and protection first leg | NOT_RUN | NOT_RUN | Case intentionally FAIL: same-intent failed protection, late fill and bounded protective attempt | EXTEND | `f06383e` / no CI artifact |
 | `T10-09` | `crates/okx-agent/src/trade_service/reconcile.rs::cancel; crates/okx-agent/src/trade_service/reconcile.rs::close` | [`cases/T10-09.mjs`](../scripts/trade-integration/cases/T10-09.mjs), `--case T10-09` | FOUND: B public Cancel ACK and persisted worker first leg | NOT_RUN | NOT_RUN | Case intentionally FAIL: same-intent post-ACK late fill, partial close and remaining protection | EXTEND | `f06383e` / no CI artifact |
 | `T10-10` | `crates/okx-execution/src/ledger/sql/intents.rs::bind_late_entry_settlement; cloudflare/okx-mcp/src/risk_book.ts::settleEntrySpend` | [`cases/T10-10.mjs`](../scripts/trade-integration/cases/T10-10.mjs), `--case T10-10` | FOUND: duplicate fills/bills initial causal leg | NOT_RUN | NOT_RUN | Case intentionally FAIL: same-campaign late fee/rebate, replay revision and upper breach | EXTEND | `f06383e` / no CI artifact |
-| `T10-11` | `crates/okx-execution/src/ledger/sql/intents.rs::recover_posting; crates/okx-agent/src/trade_service/submission.rs::post_once; crates/okx-agent/src/trade_service/reconcile.rs::observe_intent_order; crates/okx-agent/src/source_capture.rs::capture_account_sources` | [`cases/T10-11.mjs`](../scripts/trade-integration/cases/T10-11.mjs), `--case T10-11` | 80 connected F0/F1/F2/F3/F4/F5/F6/F8 kills; separate component evidence retained | PARTIAL | FAIL / NOT_YET_PROVEN | Complete connected F7, then F0..F8×10 on one SHA; no duplicated facts | EXTEND | `49a4b715` / CI `42558849617`; scope below |
+| `T10-11` | `crates/okx-execution/src/ledger/sql/intents.rs::recover_posting; crates/okx-agent/src/trade_service/submission.rs::post_once; crates/okx-agent/src/trade_service/reconcile.rs::observe_intent_order; crates/okx-agent/src/source_capture.rs::capture_account_sources` | [`cases/T10-11.mjs`](../scripts/trade-integration/cases/T10-11.mjs), `--case T10-11` | 90 connected F0–F8 kills; separate component evidence excluded from that count | COMPLETE FOR T10-11 | targeted PASS; full26 pending | Preserve exact owner/crash proofs in final required gate | REGRESSION | `a8afc8dd` / CI `42564173457`; scope below |
 | `T10-12` | `cloudflare/okx-mcp/src/risk_book.ts::reserveRisk; cloudflare/okx-mcp/src/runtime_session.ts::dispatch` | [`cases/T10-12.mjs`](../scripts/trade-integration/cases/T10-12.mjs), `--case T10-12` | FOUND: Worker kill/reopen persisted DO after reserve | NOT_RUN | NOT_RUN | Case intentionally FAIL: after-settlement kill, fresh generation, Native binding/no double debit | EXTEND | `f06383e` / no CI artifact |
 | `T10-13` | `crates/okx-agent/src/trade_service/reconcile.rs::close; cloudflare/okx-mcp/src/risk_authority.ts::handleNativeRiskCommand` | [`cases/T10-13.mjs`](../scripts/trade-integration/cases/T10-13.mjs), `--case T10-13` | FOUND: Worker STOP and protective close probe | NOT_RUN | NOT_RUN | Assert before-claim and post-fill pause ordering, stale reduce blocker and safe reduction | EXTEND | `f06383e` / no CI artifact |
 | `T10-14` | `crates/okx-agent/src/trade_service/mod.rs::TradeService::trade; crates/okx-agent/src/trade_service/reconcile.rs::cancel` | [`cases/T10-14.mjs`](../scripts/trade-integration/cases/T10-14.mjs), `--case T10-14` | FOUND: A held SQL; B public Status/Cancel | NOT_RUN | NOT_RUN | Independent B progress under held A, then join A, 1 B cancel POST | CONNECT | `f06383e` / no CI artifact |
@@ -244,7 +244,47 @@ The existing CI workflow supports `target_case=UnsentRelease` for these tests
 without Workerd or the long trading campaign. The mandatory PR matrix and
 full #449 release gates remain unchanged; this mode cannot certify 26/26.
 
-## T10-11 — connected F0/F1/F2/F3/F4/F5/F6/F8 checkpoint, 2026-11-09
+## T10-11 — 90 connected crashes PASS, 2026-11-09
+
+Code SHA `a8afc8dde375584e38e762a019bb1181f238be02`,
+[Windows CI 42564173457](https://github.com/iamaman11/okx/actions/runs/42564173457),
+[artifacts 13651265984](https://github.com/iamaman11/okx/actions/runs/42564173457/artifacts/13651265984),
+[reviewed checkpoint](https://github.com/iamaman11/okx/issues/501#issuecomment-6732653618).
+
+The targeted case passed in 273.158 seconds. Independently checked all 90
+individual records: F0–F8 ten times each, 90 distinct original SQL roots,
+actual OS kills, new recovery PIDs, original SQL and physical Worker readbacks.
+Separate component kills do not contribute to 90.
+
+F7 completes the missing boundary using production source capture. One signed
+fill/bill is durable and pending, with zero lots. A task-local test barrier
+pauses this capture before projection; no global scheduler or source padding.
+The parent kills Native. A new AccountStoreHandle opens the original database
+and invokes the production pending-fill projector before consumers reconnect:
+one projection, then zero. One 0.1-contract lot, one fee entry, unchanged raw
+facts and all financial totals: FEE=-0.0005 USDT, CAMPAIGN_LOSS_USD=0.0005.
+Replay retains finance revision 2. No second Create; Worker remains POSTED
+with the same budget after physical storage reopening.
+
+The direct boundary uses explicit prepare/reserve/census inputs and recorded
+venue responses. F7 does not certify automatic recovery scheduling, a fresh
+NAV, public admission, central release or live trading. All nine phases retain
+their individual scope documented below. This targeted PASS is not 26/26.
+
+The first F7 run exposed a test observation bug: an unarmed ACK-loss flag was
+incorrectly reported as consumed. RecordedAccountHttp now records consumption
+at the actual loss boundary. Existing direct HTTP tests reject false loss
+before send/while merely armed/after delivered ACK. The child wrapper also
+retains bounded non-Rust exit codes and Node assertion locations; it no longer
+replaces those with an uninformative missing-panic message. No production
+money, risk limit or source budget changed. The case envelope is 420 seconds
+for nine phases; production TTLs remain unchanged.
+
+Next: required full26 PR CI and Rust/Clippy/architecture/Cloudflare/B1/S1/S2 on
+one final candidate. No merge or whole-application acceptance yet. Historical
+full23 and targeted PASS on other SHAs cannot be combined into full26.
+
+## Historical T10-11 — 80 connected crashes, superseded by the checkpoint above
 
 Code SHA `49a4b715aa4b9cfbbc7c6a7ee527ef9d6ca8762c`,
 [Windows CI 42558849617](https://github.com/iamaman11/okx/actions/runs/42558849617),
