@@ -669,3 +669,14 @@ and expose bounded cursor lag/gap state. T09.8 publishes its existing twelve
 balance replies before waiting for readiness; its fee and public-time sources
 remain at the later pre-Execute boundary. No read budget, TTL or money assertion
 is relaxed. These direct tests do not replace full acceptance on one commit.
+
+The Status observation checks an append-only POST prefix and the exact
+prearmed account/instrument/target cancellation across concurrent callers.
+It does not attribute every account POST to the observing Status invocation.
+An unarmed observation permits no mutation. Create, another actor/target,
+changed body/source and a second attempt at the same cancel are failures,
+including attempts rejected by the recorded transport. The global nine-POST
+oracle remains mandatory. T09.6 saves `T09.6/recorded-post-effects.json` with
+bounded routes, actor scopes and identity hashes; JS independently verifies
+the actual eighth/ninth targets. Failure projection retains the same safe
+POST delta instead of only its count.

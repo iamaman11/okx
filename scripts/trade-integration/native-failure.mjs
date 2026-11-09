@@ -11,13 +11,14 @@ const fixedState = value => typeof value === "string" &&
 function fixedCode(value) {
   if (typeof value !== "string" || secretIndicator.test(value)) return null;
   if (value.startsWith("OKX rate/backpressure defer:")) return "OKX_RATE_BACKPRESSURE_DEFER";
-  return /^(?:BUDGET|CENTRAL|LOCAL|ENTRY|STRATEGY|ACCOUNT|CAMPAIGN|INTENT|PROTECTION|SOURCE|SQL|ORDER|RISK|POLICY|FEE|LEVERAGE|NAV|UNATTRIBUTED|COHORT)_[A-Z0-9_]{1,80}$/.test(value)
+  return /^(?:BUDGET|CENTRAL|LOCAL|ENTRY|STRATEGY|ACCOUNT|CAMPAIGN|INTENT|PROTECTION|SOURCE|SQL|ORDER|RISK|POLICY|FEE|LEVERAGE|NAV|UNATTRIBUTED|COHORT|TRANSCRIPT)_[A-Z0-9_]{1,80}$/.test(value)
     ? value : null;
 }
 function unexpectedPostsDetail(line) {
-  const marker="T10_02_UNEXPECTED_POSTS_V1";
   const text=String(line).replace(ansi, "").trim();
-  if (!text.startsWith(marker+":")) return null;
+  const marker=["T10_02_UNEXPECTED_POSTS_V1","T09_6_STATUS_POSTS_V1"]
+    .find(marker=>text.startsWith(marker+":"));
+  if (!marker) return null;
   const payload=text.slice(marker.length+1);
   if (payload.length>64*1024) return {marker,parse_state:"OVERSIZE"};
   let value;
@@ -29,11 +30,14 @@ function unexpectedPostsDetail(line) {
     "/api/v5/trade/order-algo","/api/v5/trade/cancel-algos","/api/v5/trade/amend-algos"]);
   const posts=Array.isArray(value?.posts)?value.posts:[];
   return {marker,parse_state:"PARSED",posts_before:count(value?.posts_before),posts_after:count(value?.posts_after),
+    phase:["CLOSE_TERMINAL_STATUS","ENTRY_CANCEL_STOP_STATUS","POST_CANCEL_RELEASE_STATUS","POST_PEER_RELEASE_STATUS","T10_08_CLOSE_TERMINAL","T10_08_ORIGINAL_FLAT"].includes(value?.phase)?value.phase:null,
+    boundary_verdict:["EXPECTED_CANCEL","FORBIDDEN_EFFECT"].includes(value?.boundary_verdict)?value.boundary_verdict:null,
     state:fixedState(value?.state),reason_code:fixedCode(value?.reason_code),
     origin:["LOCAL","CENTRAL","VENUE","NATIVE","SQL"].includes(value?.origin)?value.origin:null,
     send_state:["NOT_STARTED","POSTING","UNKNOWN","ACKED","SENT","NOT_SENT"].includes(value?.send_state)?value.send_state:null,
     posts:posts.slice(0,12).map(post=>({
       ordinal:count(post?.ordinal),route:routes.has(post?.route)?post.route:null,
+      actor_scope:["ACCOUNT_A_EXECUTOR","ACCOUNT_A_OBSERVER","ACCOUNT_B_EXECUTOR","ACCOUNT_B_OBSERVER","UNKNOWN"].includes(post?.actor_scope)?post.actor_scope:null,
       client_id_sha256:hash(post?.client_id_sha256),algo_id_sha256:hash(post?.algo_id_sha256),
       reduce_only:typeof post?.reduce_only==="boolean"?post.reduce_only:null,
       side:["buy","sell"].includes(post?.side)?post.side:null,

@@ -157,3 +157,28 @@ test("unexpected post diagnostics reject free text and bound arrays and repeated
   assert.equal(detail.posts[0].reduce_only,null);assert.equal(detail.posts[0].size,null);
   assert.ok(!JSON.stringify(result).includes(sentinel));
 });
+
+test("T09.6 reports the exact bounded POST delta and causal boundary verdict", () => {
+  const marker="T09_6_STATUS_POSTS_V1:";
+  const record={posts_before:7,posts_after:8,phase:"CLOSE_TERMINAL_STATUS",
+    boundary_verdict:"EXPECTED_CANCEL",reason_code:"TRANSCRIPT_STATUS_POST_EXPECTED_CANCEL",
+    posts:[{ordinal:8,actor_scope:"ACCOUNT_A_EXECUTOR",route:"/api/v5/trade/cancel-algos",
+      algo_id_sha256:"b".repeat(64),client_id_sha256:null,
+      raw_body:{credential:"SECRET_SENTINEL"}}]};
+  const result=summarizeRustPanics({stderr:marker+JSON.stringify(record)});
+  const detail=result.diagnostics[0].detail;
+  assert.equal(detail.phase,"CLOSE_TERMINAL_STATUS");
+  assert.equal(detail.boundary_verdict,"EXPECTED_CANCEL");
+  assert.equal(detail.posts[0].actor_scope,"ACCOUNT_A_EXECUTOR");
+  assert.equal(detail.posts[0].algo_id_sha256,"b".repeat(64));
+  assert.equal(detail.posts[0].route,"/api/v5/trade/cancel-algos");
+  assert.equal(detail.reason_code,"TRANSCRIPT_STATUS_POST_EXPECTED_CANCEL");
+  assert.ok(!JSON.stringify(result).includes("SECRET_SENTINEL"));
+  const hostile=summarizeRustPanics({stderr:marker+JSON.stringify({...record,
+    phase:"SECRET_SENTINEL",boundary_verdict:"SECRET_SENTINEL",
+    posts:[{actor_scope:"SECRET_SENTINEL"}]})});
+  assert.equal(hostile.diagnostics[0].detail.phase,null);
+  assert.equal(hostile.diagnostics[0].detail.boundary_verdict,null);
+  assert.equal(hostile.diagnostics[0].detail.posts[0].actor_scope,null);
+  assert.ok(!JSON.stringify(hostile).includes("SECRET_SENTINEL"));
+});

@@ -1429,6 +1429,16 @@ pub(crate) mod recorded_support {
         pub(crate) arm_event: usize,
     }
 
+    // Read-only observation of the shared transport is not ownership of every
+    // POST made by another task. Only one exact, prearmed cancel may appear;
+    // the captured prefix and every other mutation remain protected.
+    pub(crate) struct RecordedStatusPostBoundary {
+        pub(crate) posts_before: Vec<(String, String, serde_json::Value)>,
+        cancel: Option<RecordedCancelFrontier>,
+        executor: String,
+        expected_body: Option<serde_json::Value>,
+    }
+
     // The two signed API identities are different actors of the same verified
     // OKX UID. A scripted venue inventory belongs to the UID, never the key.
     fn verified_fixture_uid(actor: &str) -> Option<&'static str> {
@@ -1529,6 +1539,96 @@ pub(crate) mod recorded_support {
         }
     }
     impl RecordedAccountHttp {
+        pub(crate) fn status_post_boundary(
+            &self,
+            account: &str,
+            instrument: &str,
+        ) -> RecordedStatusPostBoundary {
+            let label = account
+                .strip_prefix("fixture-observer-")
+                .expect("TRANSCRIPT_STATUS_BOUNDARY_OBSERVER");
+            let executor = format!("fixture-executor-{label}");
+            assert!(
+                verified_fixture_uid(account).is_some(),
+                "TRANSCRIPT_STATUS_BOUNDARY_UID"
+            );
+            assert_eq!(
+                verified_fixture_uid(account),
+                verified_fixture_uid(&executor)
+            );
+            assert!(
+                !instrument.is_empty(),
+                "TRANSCRIPT_STATUS_BOUNDARY_INSTRUMENT"
+            );
+            let phase = self.causal_algos.lock().unwrap();
+            let cancel = phase.as_ref().map(|phase| {
+                assert_eq!(phase.account, account, "TRANSCRIPT_STATUS_BOUNDARY_ACCOUNT");
+                RecordedCancelFrontier {
+                    account: account.into(),
+                    cancel_id: phase.cancel_id.clone(),
+                    arm_event: phase.arm_event,
+                }
+            });
+            let expected_body = cancel.as_ref().map(|frontier| {
+                serde_json::json!([{
+                    "instId": instrument, "algoId": frontier.cancel_id
+                }])
+            });
+            let posts_before = self.outbound_posts.lock().unwrap().clone();
+            RecordedStatusPostBoundary {
+                posts_before,
+                cancel,
+                executor,
+                expected_body,
+            }
+        }
+
+        pub(crate) fn verify_status_post_boundary(
+            &self,
+            boundary: &RecordedStatusPostBoundary,
+        ) -> Result<usize, &'static str> {
+            let phase = self.causal_algos.lock().unwrap();
+            if let Some(frontier) = boundary.cancel.as_ref() {
+                let current = phase.as_ref().ok_or("TRANSCRIPT_STATUS_SOURCE_RETIRED")?;
+                if current.account != frontier.account
+                    || current.cancel_id != frontier.cancel_id
+                    || current.arm_event != frontier.arm_event
+                {
+                    return Err("TRANSCRIPT_STATUS_SOURCE_REPLACED");
+                }
+            }
+            let posts = self.outbound_posts.lock().unwrap();
+            if !posts.starts_with(&boundary.posts_before) {
+                return Err("TRANSCRIPT_STATUS_POST_HISTORY_CHANGED");
+            }
+            let delta = &posts[boundary.posts_before.len()..];
+            if delta.iter().any(|(actor, route, body)| {
+                actor != &boundary.executor
+                    || route != "/api/v5/trade/cancel-algos"
+                    || boundary.expected_body.as_ref() != Some(body)
+            }) {
+                return Err("TRANSCRIPT_STATUS_UNRELATED_POST");
+            }
+            if let Some(frontier) = boundary.cancel.as_ref() {
+                let attempts = posts
+                    .iter()
+                    .filter(|(actor, route, body)| {
+                        actor == &boundary.executor
+                            && route == "/api/v5/trade/cancel-algos"
+                            && body.as_array().is_some_and(|items| {
+                                items.iter().any(|item| {
+                                    item["algoId"].as_str() == Some(frontier.cancel_id.as_str())
+                                })
+                            })
+                    })
+                    .count();
+                if attempts > 1 {
+                    return Err("TRANSCRIPT_STATUS_DUPLICATE_CANCEL_POST");
+                }
+            }
+            Ok(delta.len())
+        }
+
         pub(crate) fn causal_cancel_frontier(
             &self,
             account: &str,
@@ -2748,6 +2848,193 @@ pub(crate) mod recorded_support {
 
         fn raw_items(response: RawHttpResponse) -> serde_json::Value {
             serde_json::from_slice::<serde_json::Value>(&response.body).unwrap()["data"].clone()
+        }
+
+        #[tokio::test]
+        async fn status_post_boundary_observes_one_prearmed_cancel_during_a_read() {
+            let feed = Arc::new(RecordedAccountHttp::default());
+            causal_fixture(&feed);
+            let boundary = feed.status_post_boundary("fixture-observer-a", "BTC-USDT-SWAP");
+            let (entered, resume) = feed.hold_next_causal_algo_get();
+            let observer = feed.clone();
+            let reading = tokio::spawn(async move {
+                observer
+                    .send(
+                        signed_inventory_request("fixture-observer-a", "conditional"),
+                        Instant::now() + std::time::Duration::from_secs(3),
+                    )
+                    .await
+            });
+            tokio::time::timeout(std::time::Duration::from_secs(2), entered.notified())
+                .await
+                .expect("read-only observation reaches its pre-ACK barrier");
+            let executor = feed.clone();
+            tokio::spawn(async move {
+                executor
+                    .send(
+                        signed_cancel_request(),
+                        Instant::now() + std::time::Duration::from_secs(3),
+                    )
+                    .await
+            })
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(feed.verify_status_post_boundary(&boundary), Ok(1));
+            resume.notify_one();
+            let observed = tokio::time::timeout(std::time::Duration::from_secs(2), reading)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                raw_items(observed).as_array().unwrap().len(),
+                2,
+                "the read keeps its actual pre-ACK snapshot despite a concurrent cancel"
+            );
+            assert_eq!(feed.verify_status_post_boundary(&boundary), Ok(1));
+            assert_eq!(feed.outbound_posts.lock().unwrap().len(), 1);
+        }
+
+        #[tokio::test]
+        async fn status_post_boundary_rejects_unrelated_attempts_even_when_transport_denies_them() {
+            let cancel = serde_json::json!([{"instId":"BTC-USDT-SWAP","algoId":"900000002"}]);
+            for (actor, route, body) in [
+                (
+                    "fixture-executor-a",
+                    "/api/v5/trade/order",
+                    serde_json::json!({"clOrdId":"unexpectedCreate"}),
+                ),
+                (
+                    "fixture-executor-b",
+                    "/api/v5/trade/cancel-algos",
+                    cancel.clone(),
+                ),
+                (
+                    "fixture-observer-a",
+                    "/api/v5/trade/cancel-algos",
+                    cancel.clone(),
+                ),
+                (
+                    "fixture-executor-a",
+                    "/api/v5/trade/cancel-algos",
+                    serde_json::json!([{"instId":"BTC-USDT-SWAP","algoId":"900000003"}]),
+                ),
+                (
+                    "fixture-executor-a",
+                    "/api/v5/trade/cancel-algos",
+                    serde_json::json!([{"instId":"ETH-USDT-SWAP","algoId":"900000002"}]),
+                ),
+                (
+                    "fixture-executor-a",
+                    "/api/v5/trade/cancel-algos",
+                    serde_json::json!([{"instId":"BTC-USDT-SWAP","algoId":"900000002","extra":true}]),
+                ),
+                (
+                    "fixture-executor-a",
+                    "/api/v5/trade/cancel-algos",
+                    serde_json::json!([{"instId":"BTC-USDT-SWAP","algoId":"900000002"},{"instId":"BTC-USDT-SWAP","algoId":"900000003"}]),
+                ),
+            ] {
+                let feed = RecordedAccountHttp::default();
+                causal_fixture(&feed);
+                let boundary = feed.status_post_boundary("fixture-observer-a", "BTC-USDT-SWAP");
+                let request = reqwest::Client::new()
+                    .post(format!("https://www.okx.com{route}"))
+                    .header("OK-ACCESS-KEY", actor)
+                    .json(&body)
+                    .build()
+                    .unwrap();
+                assert!(
+                    feed.send(request, Instant::now() + std::time::Duration::from_secs(3))
+                        .await
+                        .is_err()
+                );
+                assert_eq!(
+                    feed.outbound_posts.lock().unwrap().len(),
+                    1,
+                    "a rejected transport attempt is still a potentially sent POST"
+                );
+                assert_eq!(
+                    feed.verify_status_post_boundary(&boundary),
+                    Err("TRANSCRIPT_STATUS_UNRELATED_POST"),
+                    "actor={actor} route={route} body={body}"
+                );
+            }
+            let unarmed = RecordedAccountHttp::default();
+            let boundary = unarmed.status_post_boundary("fixture-observer-a", "BTC-USDT-SWAP");
+            assert_eq!(unarmed.verify_status_post_boundary(&boundary), Ok(0));
+            assert!(
+                unarmed
+                    .send(
+                        signed_cancel_request(),
+                        Instant::now() + std::time::Duration::from_secs(3)
+                    )
+                    .await
+                    .is_err()
+            );
+            assert_eq!(
+                unarmed.verify_status_post_boundary(&boundary),
+                Err("TRANSCRIPT_STATUS_UNRELATED_POST")
+            );
+        }
+
+        #[tokio::test]
+        async fn status_post_boundary_keeps_cumulative_cancel_and_history_integrity() {
+            let feed = RecordedAccountHttp::default();
+            causal_fixture(&feed);
+            feed.send(
+                signed_cancel_request(),
+                Instant::now() + std::time::Duration::from_secs(3),
+            )
+            .await
+            .unwrap();
+            let boundary = feed.status_post_boundary("fixture-observer-a", "BTC-USDT-SWAP");
+            assert_eq!(feed.verify_status_post_boundary(&boundary), Ok(0));
+            assert!(
+                feed.send(
+                    signed_cancel_request(),
+                    Instant::now() + std::time::Duration::from_secs(3)
+                )
+                .await
+                .is_err()
+            );
+            assert_eq!(feed.outbound_posts.lock().unwrap().len(), 2);
+            assert_eq!(
+                feed.verify_status_post_boundary(&boundary),
+                Err("TRANSCRIPT_STATUS_DUPLICATE_CANCEL_POST")
+            );
+            let original = feed.outbound_posts.lock().unwrap().clone();
+            feed.outbound_posts.lock().unwrap().clear();
+            assert_eq!(
+                feed.verify_status_post_boundary(&boundary),
+                Err("TRANSCRIPT_STATUS_POST_HISTORY_CHANGED")
+            );
+            *feed.outbound_posts.lock().unwrap() = original;
+            feed.outbound_posts.lock().unwrap()[0].2[0]["instId"] = "ETH-USDT-SWAP".into();
+            assert_eq!(
+                feed.verify_status_post_boundary(&boundary),
+                Err("TRANSCRIPT_STATUS_POST_HISTORY_CHANGED")
+            );
+        }
+
+        #[tokio::test]
+        async fn status_post_boundary_rejects_replaced_source() {
+            let feed = RecordedAccountHttp::default();
+            causal_fixture(&feed);
+            let boundary = feed.status_post_boundary("fixture-observer-a", "BTC-USDT-SWAP");
+            feed.send(
+                signed_cancel_request(),
+                Instant::now() + std::time::Duration::from_secs(3),
+            )
+            .await
+            .unwrap();
+            feed.retire_acked_causal_algo_inventory("fixture-observer-a");
+            causal_fixture_for(&feed, "900000003");
+            assert_eq!(
+                feed.verify_status_post_boundary(&boundary),
+                Err("TRANSCRIPT_STATUS_SOURCE_REPLACED")
+            );
         }
 
         #[tokio::test]

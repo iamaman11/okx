@@ -2,9 +2,12 @@
 // terminal signed fills/bills, two canceled real protective algos,
 // persisted Native SQL zero exposure and RELEASE in the production RiskBook.
 import assert from "node:assert/strict";
+import {createHash} from "node:crypto";
+import {mkdir,writeFile} from "node:fs/promises";
+import {join} from "node:path";
 import {actualNativeWorker,hash} from "../native-workerd.mjs";
 
-export async function run({root,signal}) {
+export async function run({root,signal,artifactsDir}) {
   const transcript=await actualNativeWorker(root,signal,{
     statusProbe:true,secondAdmission:true,partialFills:true,managedAdd:true,closeMode:true,
   });
@@ -70,6 +73,22 @@ export async function run({root,signal}) {
   assert.equal(terminal.worker_budget.reserved_loss_usd,"0");
   assert.equal(terminal.outbound_posts,9,
     "five earlier POSTs, two closes and two cancel-algos");
+  const effects=terminal.outbound_post_effects;
+  assert.equal(effects.length,9,"actual ordered transport attempts must be retained");
+  assert.deepEqual(effects.map(p=>p.ordinal),[1,2,3,4,5,6,7,8,9]);
+  for (const [offset,target] of [[7,"900000002"],[8,"900000003"]]) {
+    assert.equal(effects[offset].route,"/api/v5/trade/cancel-algos");
+    assert.equal(effects[offset].actor_scope,"ACCOUNT_A_EXECUTOR");
+    assert.equal(effects[offset].algo_id_sha256,
+      createHash("sha256").update(target).digest("hex"),
+      "each actual cancel must bind its independently specified source target");
+  }
+  const proofDir=join(artifactsDir,"T09.6");
+  await mkdir(proofDir,{recursive:true});
+  await writeFile(join(proofDir,"recorded-post-effects.json"),JSON.stringify({
+    schema:"okx.recorded-post-effects/v1",transcript_sha256:transcript.transcript_sha256,
+    posts:effects,
+  },null,2)+"\n");
   assert.deepEqual(worker.worker_budget,terminal.worker_budget,
     "native termination must retain exact persisted Worker budget");
   const uid=transcript.nativeManagedAdd.account_uid;

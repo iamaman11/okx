@@ -515,9 +515,59 @@ fn t09_6_cleanup_recorded_transport(
     });
 }
 
-// Repeat a public read-only Status only when the shared production
-// RateBudget proves a LOCAL, NO-SEND private GET defer. The same captured
-// financial sources and the same release owner remain authoritative.
+fn t09_6_post_effects(
+    feed: &crate::accounts::recorded_support::RecordedAccountHttp,
+    posts_before: usize,
+    posts_after: usize,
+) -> Vec<serde_json::Value> {
+    let recorded=feed.outbound_posts.lock().unwrap();
+    let identity_hash=|value:Option<&serde_json::Value>|value
+        .and_then(serde_json::Value::as_str)
+        .map(|id|format!("{:x}",sha2::Sha256::digest(id.as_bytes())));
+    recorded.iter().enumerate().skip(posts_before)
+        .take(posts_after.saturating_sub(posts_before).min(12))
+        .map(|(ordinal,(actor,route,body))| {
+            let item=body.as_array().and_then(|rows|rows.first()).unwrap_or(body);
+            serde_json::json!({
+                "ordinal":ordinal+1,
+                "actor_scope":match actor.as_str() {
+                    "fixture-executor-a"=>"ACCOUNT_A_EXECUTOR",
+                    "fixture-observer-a"=>"ACCOUNT_A_OBSERVER",
+                    "fixture-executor-b"=>"ACCOUNT_B_EXECUTOR",
+                    "fixture-observer-b"=>"ACCOUNT_B_OBSERVER",
+                    _=>"UNKNOWN",
+                },
+                "route":match route.as_str() {
+                    "/api/v5/trade/order"|"/api/v5/trade/cancel-order"
+                    |"/api/v5/trade/amend-order"|"/api/v5/trade/order-algo"
+                    |"/api/v5/trade/cancel-algos"|"/api/v5/trade/amend-algos"=>Some(route.as_str()),
+                    _=>None,
+                },
+                "client_id_sha256":identity_hash(item.get("clOrdId")),
+                "algo_id_sha256":identity_hash(item.get("algoId")),
+            })
+        }).collect()
+}
+
+fn t09_6_record_status_posts(
+    feed: &crate::accounts::recorded_support::RecordedAccountHttp,
+    posts_before: usize,
+    posts_after: usize,
+    phase: &str,
+    violation: Option<&str>,
+) {
+    let posts=t09_6_post_effects(feed,posts_before,posts_after);
+    eprintln!("T09_6_STATUS_POSTS_V1:{}",serde_json::json!({
+        "phase":phase,"posts_before":posts_before,"posts_after":posts_after,
+        "boundary_verdict":if violation.is_some(){"FORBIDDEN_EFFECT"}else{"EXPECTED_CANCEL"},
+        "reason_code":violation.unwrap_or("TRANSCRIPT_STATUS_POST_EXPECTED_CANCEL"),
+        "posts":posts,
+    }));
+}
+
+// Repeat Status only for a proven local no-send GET defer or the existing
+// post-ACK readback. A concurrent owner may cancel the exact prearmed stop;
+// no caller may create, cancel a different target, or repeat that cancel.
 async fn t09_6_status_after_local_read_defer(
     trade: &Arc<TradeService>,
     rate_budget: &RateBudget,
@@ -527,10 +577,10 @@ async fn t09_6_status_after_local_read_defer(
     phase: &str,
 ) -> serde_json::Value {
     use okx_protocol::trading::TradeRequest;
-    let allowed_new_cancel_posts = usize::from(expected_cancel_id.is_some());
+    let expects_cancel_readback = expected_cancel_id.is_some();
     let cancel_frontier = expected_cancel_id
         .map(|cancel_id| feed.causal_cancel_frontier("fixture-observer-a", cancel_id));
-    if allowed_new_cancel_posts == 1 {
+    if expects_cancel_readback {
         // The first signed cancel inventory is armed BEFORE terminal-flat
         // capture. Its initial finite public clock page can legitimately be
         // consumed by production maintenance during that capture. A public
@@ -553,7 +603,24 @@ async fn t09_6_status_after_local_read_defer(
         );
     }
     let until = std::time::Instant::now() + Duration::from_secs(15);
-    let posts_before = feed.outbound_posts.lock().unwrap().len();
+    let post_boundary=feed.status_post_boundary("fixture-observer-a","BTC-USDT-SWAP");
+    let posts_before=post_boundary.posts_before.len();
+    let verify_posts=|| {
+        match feed.verify_status_post_boundary(&post_boundary) {
+            Ok(delta)=>{
+                let through=posts_before+delta;
+                if delta>0 {
+                    t09_6_record_status_posts(feed,posts_before,through,phase,None);
+                }
+                through
+            },
+            Err(reason)=>{
+                let through=feed.outbound_posts.lock().unwrap().len();
+                t09_6_record_status_posts(feed,posts_before,through,phase,Some(reason));
+                panic!("T09_6_STATUS_POST_BOUNDARY:{phase}:{reason}");
+            }
+        }
+    };
     // At most one source-driven follow-up after an already-sent cancel.
     // An old inventory may finish after ACK; it cannot prove the outcome.
     let mut after_ack_readback_used = false;
@@ -585,7 +652,7 @@ async fn t09_6_status_after_local_read_defer(
                 "schema":"okx.t09-6-status-timeout/v1",
                 "phase":phase,
                 "intent":intent,
-                "allowed_new_cancel_posts":allowed_new_cancel_posts,
+                "expects_cancel_readback":expects_cancel_readback,
                 "outbound_posts_before":posts_before,
                 "outbound_posts_now":posts_now,
                 "recent_recorded_gets":recent_gets,
@@ -596,11 +663,7 @@ async fn t09_6_status_after_local_read_defer(
             });
             panic!("T09_6_STATUS_TIMEOUT_V1:{phase}:{diagnostic}");
         });
-        let posts_now = feed.outbound_posts.lock().unwrap().len();
-        assert!(
-            posts_now >= posts_before && posts_now <= posts_before + allowed_new_cancel_posts,
-            "T09.6 Status must not create or repeat an unrelated venue POST: before={posts_before} now={posts_now} allowed_cancel={allowed_new_cancel_posts}"
-        );
+        let posts_now=verify_posts();
         let local_reason = match &result {
             Ok(status) => status["data"]["financial_error"]
                 .as_str()
@@ -642,7 +705,7 @@ async fn t09_6_status_after_local_read_defer(
             continue;
         }
         if local_reason == Some("PROTECTION_CANCEL_READBACK_PENDING")
-            && allowed_new_cancel_posts == 1
+            && expects_cancel_readback
             && !after_ack_readback_used
         {
             // A concurrent production Status may still be sending this exact
@@ -712,10 +775,7 @@ async fn t09_6_status_after_local_read_defer(
                 trace.iter().rev().take(16).cloned().collect::<Vec<_>>().join(" | ")
             )
         });
-        if allowed_new_cancel_posts == 0 {
-            assert_eq!(posts_now, posts_before,
-                "T09.6 close readback must not send any additional venue POST");
-        } else {
+        if expects_cancel_readback {
             // A prior Status may have started this exact SQL cleanup before
             // this helper entered. Count the actual target-specific venue
             // sends across the whole recorded phase, never assume the send
@@ -738,6 +798,8 @@ async fn t09_6_status_after_local_read_defer(
             assert_eq!(count, 1,
                 "T09.6 verified cleanup requires exactly one outbound target cancel");
         }
+        // Recheck after any ACK wait, before returning to the next phase.
+        verify_posts();
         return status;
     }
 }
@@ -1173,6 +1235,7 @@ async fn t09_6_source_backed_close_release(
         "T09.6 requires two create and two protection cancel POSTs in addition to prior five");
     serde_json::json!({
         "closes":close_results,"entries":entry_results,
+        "outbound_post_effects":t09_6_post_effects(feed,0,9),
         "remaining_lots":lots.iter().filter(|lot|!lot.remaining_qty.is_zero()).count(),
         "unresolved_census":risk_census.len(),
         "orphan_algos":final_algos.samples.len(),
