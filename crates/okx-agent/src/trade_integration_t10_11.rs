@@ -96,6 +96,7 @@ fn t10_11_projection_snapshot(path: &std::path::Path) -> serde_json::Value {
         "fills":facts("SELECT fill_id||':'||trade_id||':'||exchange_order_id||':'||qty||':'||fee||':'||intent_id FROM fills ORDER BY fill_id"),
         "bills":facts("SELECT bill_id||':'||amount||':'||currency||':'||economic_event_key FROM bills ORDER BY bill_id"),
         "fees":facts("SELECT entry_id||':'||economic_event_key||':'||amount FROM finance_entries WHERE component='FEE' ORDER BY entry_id"),
+        "totals":facts("SELECT currency||':'||component||':'||amount FROM finance_totals ORDER BY currency,component"),
         "lots":facts("SELECT lot_id||':'||fill_id||':'||remaining_qty FROM position_lots ORDER BY lot_id")})
 }
 
@@ -201,7 +202,7 @@ async fn t10_11_f7_project_original(
     }
     let after = t10_11_projection_snapshot(&path);
     assert_eq!(after["counts"], serde_json::json!([1, 0, 1, 1]));
-    for field in ["fills", "bills", "fees", "fee"] {
+    for field in ["fills", "bills", "fees", "fee", "totals"] {
         assert_eq!(before[field], after[field]);
     }
     assert_eq!(before["bills"].as_array().unwrap().len(), 1);
@@ -418,7 +419,7 @@ fn t10_11_publish_fill_sources(
     let balance = raw(json!([{"totalEq":"99.9995","adjEq":"99.9995","uTime":at,
         "details":[{"ccy":"USDT","eq":"99.9995","liab":"0",
             "availEq":"98.9995","availBal":"98.9995","eqUsd":"99.9995","uTime":at}]}]));
-    // Exactly two consumers of each source: initial recovery and replay.
+    // One consumer per declared capture turn; only the first contains a fill.
     // Literal venue identities remain independent of the dead process ACK map.
     for turn in 0..turns {
         feed.expect_get(RecordedGet {

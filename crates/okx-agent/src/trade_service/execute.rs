@@ -4619,6 +4619,10 @@ mod tests {
             raw_response: br#"{"code":"0","msg":"","data":[{"ordId":"123456","clOrdId":"__REQUEST_CL_ORD_ID__","sCode":"0"}]}"#.to_vec(),
         });
         feed.arm_lost_next_create_ack();
+        assert!(
+            !feed.lost_create_ack_was_consumed(),
+            "arming is not evidence of a lost response"
+        );
         let timing = MutationTiming::from_exchange_time_ms(now() as u64, 2000).unwrap();
         let outcome = post_once(&store, &intent, deadline(), || async {
             trade.place_order(&request, &timing).await.map_err(err)

@@ -229,7 +229,8 @@ export async function killAndRecoverUnsentNative({nativeProcess,handoffPath,cwd}
     const p=native.recovered;
     assert.deepEqual(p.before,boundary.projection_boundary);
     assert.deepEqual(p.after.counts,[1,0,1,1]);
-    for(const key of ["fills","bills","fees","fee"])assert.deepEqual(p.before[key],p.after[key]);
+    for(const key of ["fills","bills","fees","fee","totals"])assert.deepEqual(p.before[key],p.after[key]);
+    assert.ok(Array.isArray(p.after.totals)&&p.after.totals.length>0);
     assert.deepEqual(p.projections.map(x=>x.projected),[1,0]);
     assert.ok(p.projections.every(x=>x.lot_quantity==="0.1"));
     assert.equal(p.projections[0].finance_revision,p.projections[1].finance_revision);

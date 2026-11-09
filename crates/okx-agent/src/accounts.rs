@@ -1363,6 +1363,7 @@ pub(crate) mod recorded_support {
         // The real HTTP request is counted and its authenticated venue
         // order identity remains available for independent GET reconciliation.
         lose_next_created_ack: AtomicBool,
+        lost_created_ack_consumed: AtomicBool,
         posts: Mutex<Vec<RecordedPost>>,
         reads: Mutex<Vec<RecordedGet>>,
         // Bounded extra recorded GET bytes for read-only Preview retries
@@ -2308,6 +2309,8 @@ pub(crate) mod recorded_support {
         }
 
         pub(crate) fn arm_lost_next_create_ack(&self) {
+            self.lost_created_ack_consumed
+                .store(false, Ordering::SeqCst);
             assert!(
                 !self.lose_next_created_ack.swap(true, Ordering::SeqCst),
                 "TRANSCRIPT_ACK_LOSS_ALREADY_ARMED"
@@ -2315,7 +2318,7 @@ pub(crate) mod recorded_support {
         }
 
         pub(crate) fn lost_create_ack_was_consumed(&self) -> bool {
-            !self.lose_next_created_ack.load(Ordering::SeqCst)
+            self.lost_created_ack_consumed.load(Ordering::SeqCst)
         }
 
         pub(crate) fn expect_public_clock(&self, raw_response: Vec<u8>) {
@@ -3770,6 +3773,7 @@ pub(crate) mod recorded_support {
                         // lost after the authenticated create was sent. Never
                         // replay this POST to "repair" a test connection.
                         if self.lose_next_created_ack.swap(false, Ordering::SeqCst) {
+                            self.lost_created_ack_consumed.store(true, Ordering::SeqCst);
                             return Err(OkxError::Response(
                                 "TRANSCRIPT_POST_ACK_LOST_AFTER_SEND".into(),
                             ));
@@ -4798,6 +4802,7 @@ pub(crate) mod recorded_support {
         #[tokio::test]
         async fn immutable_acked_order_readback_is_bound_to_one_signed_post_and_query() {
             let feed = RecordedAccountHttp::default();
+            assert!(!feed.lost_create_ack_was_consumed());
             let client = "ackboundclient0001";
             let raw = serde_json::to_vec(&serde_json::json!({
                 "code":"0","msg":"","data":[{
@@ -4830,6 +4835,10 @@ pub(crate) mod recorded_support {
             *create.body_mut() = Some(reqwest::Body::from(format!(r#"{{"clOrdId":"{client}"}}"#)));
             let ack = deliver_causal(&feed, create).await.unwrap();
             assert_eq!(ack["data"][0]["ordId"], "signed-ack-001");
+            assert!(
+                !feed.lost_create_ack_was_consumed(),
+                "delivered ACK is not a lost ACK"
+            );
             // All queued predecessor copies are genuinely consumed. A later
             // immutable handoff must use the digest of this ACK-bound GET,
             // not depend on an unused synthetic read-count cushion.
