@@ -24,7 +24,7 @@ export async function run({caseId,root,signal,artifactsDir}) {
   // 60 isolated component kills as 90 complete cross-owner proofs.
   try {
     const roots=new Set();
-    for(const phase of ["F5","F0","F1","F2","F3","F4","F8"]){
+    for(const phase of ["F6","F5","F0","F1","F2","F3","F4","F8"]){
     process.env.OKX_T10_11_NATIVE_CRASH=phase;
     const repetitions=[];
     for(let repetition=1;repetition<=10;repetition++){
@@ -36,7 +36,7 @@ export async function run({caseId,root,signal,artifactsDir}) {
       if(["F0","F1"].includes(phase)){
         assert.equal(connected.nativeUnsent.persisted_worker.inspected.reason,"RISK_RESERVATION_NOT_FOUND");
       }else{
-        assert.equal(connected.nativeUnsent.persisted_worker.inspected.reservation_state,phase==="F5"?"POSTED":"RELEASED");
+        assert.equal(connected.nativeUnsent.persisted_worker.inspected.reservation_state,["F5","F6"].includes(phase)?"POSTED":"RELEASED");
       }
       const original=connected.nativeUnsent.boundary.root;
       assert.ok(!roots.has(original),"each repetition must create its own original SQL");

@@ -70,7 +70,7 @@ const t10PostReplyLostMode=process.env.OKX_T10_03_POST_AUTH_REPLY_LOST_PROBE==="
 const t10SourceRecoveryMode=process.env.OKX_T10_01_PARTIAL_SOURCE_RECOVERY_PROBE==="1";
 const t10StopMode=process.env.OKX_T10_13_STOP_PROBE==="1";
 const nativeReserveCrashMode=process.env.OKX_T10_12_NATIVE_RESERVE_CRASH==="1";
-const nativeUnsentCrashMode=["F0","F1","F2","F3","F4","F5","F8"].includes(process.env.OKX_T10_11_NATIVE_CRASH);
+const nativeUnsentCrashMode=["F0","F1","F2","F3","F4","F5","F6","F8"].includes(process.env.OKX_T10_11_NATIVE_CRASH);
 if(nativeReserveCrashMode&&process.env.OKX_T10_12_NATIVE_WORKER_CRASH==="1")
   throw Error("T10_12_NATIVE_CRASH_BOUNDARY_MUST_BE_INDEPENDENT");
 if ((crashChild||crashRecovery)&&!sharedCapMode)
@@ -884,7 +884,7 @@ try {
         assert.equal(inspected.reservation_key,null);
       }else{
         assert.equal(inspected.status,"OBSERVED");
-        assert.equal(inspected.reservation_state,proof.phase==="F5"?"POSTED":"RELEASED");
+        assert.equal(inspected.reservation_state,["F5","F6"].includes(proof.phase)?"POSTED":"RELEASED");
       }
       const saved=await summary(reader,"summary_t11_f2_persisted");
       assert.deepEqual(saved.budget,proof.native.worker_after.budget);

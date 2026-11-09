@@ -11,6 +11,7 @@ enum T10_11UnsentPhase {
     F3,
     F4,
     F5,
+    F6,
     F8,
 }
 impl T10_11UnsentPhase {
@@ -22,6 +23,7 @@ impl T10_11UnsentPhase {
             "F3" => Self::F3,
             "F4" => Self::F4,
             "F5" => Self::F5,
+            "F6" => Self::F6,
             "F8" => Self::F8,
             _ => panic!("unsupported unsent crash phase"),
         }
@@ -34,6 +36,7 @@ impl T10_11UnsentPhase {
             Self::F3 => "F3",
             Self::F4 => "F4",
             Self::F5 => "F5",
+            Self::F6 => "F6",
             Self::F8 => "F8",
         }
     }
@@ -201,6 +204,203 @@ async fn original_order_observation_uses_production_sql_and_identity_checks() {
     ctx.accounts.shutdown().await;
 }
 
+fn t10_11_f6_request() -> okx_api::PlaceOrderRequest {
+    okx_api::PlaceOrderRequest {
+        instrument_id: "BTC-USDT-SWAP".into(),
+        trade_mode: okx_api::ApiTradeMode::Cross,
+        client_order_id: "c".repeat(32),
+        side: okx_api::ApiOrderSide::Buy,
+        position_side: okx_api::ApiPositionSide::Long,
+        reduce_only: None,
+        order_type: okx_api::ApiOrderType::Limit,
+        size: "0.1".into(),
+        price: "1000".into(),
+        attached_algo_orders: vec![],
+    }
+}
+
+// F6 uses the same production operations as Execute/Status. SQL writes below
+// only belong to those operations and source capture, never to this fixture.
+async fn t10_11_f6_observe_and_capture(
+    ctx: &DispatchContext,
+    owner: &Arc<crate::accounts::AccountResources>,
+    feed: &Arc<crate::accounts::recorded_support::RecordedAccountHttp>,
+    original: &serde_json::Value,
+) -> serde_json::Value {
+    use crate::accounts::recorded_support::RecordedGet;
+    use rust_decimal::Decimal;
+    use serde_json::json;
+    let id = original["sql"]["intent_id"].as_str().unwrap().to_owned();
+    let identity = id.clone();
+    let mut intent = owner
+        .execution
+        .store
+        .call(
+            std::time::Instant::now() + Duration::from_secs(3),
+            move |s| {
+                assert!(s.unsent_release_receipt(&identity)?.is_none());
+                Ok(s.intent(&identity)?.unwrap())
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(intent.state, okx_execution::IntentState::Unknown);
+    // The venue accepted the order before the crash; this explicit later fill
+    // arrives after reconnect. Publish its timestamp once, while capture is
+    // serialized. Never replay an old row outside the next cursor window.
+    let at = chrono::Utc::now().timestamp_millis().to_string();
+    let raw = |data: serde_json::Value| {
+        serde_json::to_vec(&json!({"code":"0","msg":"","data":data})).unwrap()
+    };
+    let order = raw(json!([{"instId":"BTC-USDT-SWAP","ordId":"123456",
+        "clOrdId":"c".repeat(32),"side":"buy","posSide":"long","tdMode":"cross",
+        "ordType":"limit","px":"1000","sz":"0.1","accFillSz":"0.1",
+        "avgPx":"1000","state":"filled","cTime":at,"uTime":at}]));
+    let fill = raw(json!([{"instType":"SWAP","instId":"BTC-USDT-SWAP",
+        "tradeId":"t11-f6-fill","ordId":"123456","clOrdId":"c".repeat(32),
+        "billId":"t11-f6-bill","subType":"3","side":"buy","posSide":"long",
+        "fillPx":"1000","fillSz":"0.1","fillPnl":"0","fee":"-0.0005",
+        "feeCcy":"USDT","ts":at,"fillTime":at}]));
+    let bill = raw(
+        json!([{"billId":"t11-f6-bill","instType":"SWAP","instId":"BTC-USDT-SWAP",
+        "ordId":"123456","tradeId":"t11-f6-fill","clOrdId":"c".repeat(32),
+        "ccy":"USDT","type":"2","subType":"3","balChg":"-0.0005",
+        "fee":"-0.0005","pnl":"0","ts":at}]),
+    );
+    let position = raw(json!([{"instId":"BTC-USDT-SWAP","instType":"SWAP",
+        "pos":"0.1","posSide":"long","mgnMode":"cross","avgPx":"1000",
+        "markPx":"1000","upl":"0","lever":"1","liqPx":"","margin":"1",
+        "ccy":"USDT","uTime":at}]));
+    let balance = raw(json!([{"totalEq":"99.9995","adjEq":"99.9995","uTime":at,
+        "details":[{"ccy":"USDT","eq":"99.9995","liab":"0",
+            "availEq":"98.9995","availBal":"98.9995","eqUsd":"99.9995","uTime":at}]}]));
+    // Exactly two consumers of each source: initial recovery and replay.
+    // Literal venue identities remain independent of the dead process ACK map.
+    for turn in 0..2 {
+        feed.expect_get(RecordedGet {
+            access_key: "fixture-executor-a".into(),
+            path: "/api/v5/trade/order".into(),
+            required_query: vec![
+                ("instId".into(), "BTC-USDT-SWAP".into()),
+                ("clOrdId".into(), "c".repeat(32)),
+            ],
+            raw_response: order.clone(),
+        });
+        for part in ["SPOT", "MARGIN", "SWAP", "FUTURES", "OPTION"] {
+            feed.expect_get(RecordedGet {
+                access_key: "fixture-executor-a".into(),
+                path: "/api/v5/trade/fills-history".into(),
+                required_query: vec![("instType".into(), part.into())],
+                raw_response: if part == "SWAP" && turn == 0 {
+                    fill.clone()
+                } else {
+                    raw(json!([]))
+                },
+            });
+        }
+        for (actor, path, bytes) in [
+            (
+                "fixture-executor-a",
+                "/api/v5/account/bills-archive",
+                &if turn == 0 {
+                    bill.clone()
+                } else {
+                    raw(json!([]))
+                },
+            ),
+            ("fixture-observer-a", "/api/v5/account/positions", &position),
+            ("fixture-observer-a", "/api/v5/account/balance", &balance),
+        ] {
+            feed.expect_get(RecordedGet {
+                access_key: actor.into(),
+                path: path.into(),
+                required_query: vec![],
+                raw_response: bytes.clone(),
+            });
+        }
+    }
+    let mut economics = Vec::new();
+    for _ in 0..2 {
+        let request = t10_11_f6_request();
+        let timing = okx_api::MutationTiming::from_exchange_time_ms(
+            chrono::Utc::now().timestamp_millis() as u64,
+            2000,
+        )
+        .unwrap();
+        let resend = crate::trade_service::post_once(
+            &owner.execution.store,
+            &intent,
+            std::time::Instant::now() + Duration::from_secs(3),
+            || async {
+                owner
+                    .execution
+                    .trade
+                    .place_order(&request, &timing)
+                    .await
+                    .map_err(|e| e.to_string())
+            },
+        )
+        .await
+        .unwrap();
+        assert!(
+            resend.is_none(),
+            "recovery cannot submit an already claimed intent"
+        );
+        (intent, _) = ctx.trade.observe_intent_order(owner, intent).await.unwrap();
+        assert_eq!(intent.state, okx_execution::IntentState::Filled);
+        assert_eq!(intent.exchange_order_id.as_deref(), Some("123456"));
+        crate::source_capture::capture_account_sources(
+            &owner.observer,
+            &owner.private_ws,
+            &owner.execution,
+        )
+        .await
+        .expect("F6 production financial capture failed");
+        let identity = id.clone();
+        let proof = owner.execution.store.call(
+            std::time::Instant::now()+Duration::from_secs(3), move |s| {
+                let fills = s.cursor("fills","SWAP")?.unwrap();
+                let bills = s.cursor("bills","account")?.unwrap();
+                assert!(fills.coverage_gaps.is_empty() && fills.cursor.is_empty());
+                assert!(bills.coverage_gaps.is_empty() && bills.cursor.is_empty());
+                let through = fills.watermark.min(bills.watermark);
+                let f = s.intent_fill_cost_evidence(&identity, through)?;
+                let b = s.intent_fee_bill_evidence(&identity, through)?;
+                let lots = s.active_lots("BTC-USDT-SWAP")?;
+                assert_eq!(f.fill_count, 1);
+                assert_eq!(f.filled_quantity, Decimal::new(1,1));
+                assert_eq!(f.gross_notional_usdt, Decimal::ONE);
+                assert_eq!(b.linked_bill_count, 1);
+                assert_eq!(b.conservative_verified_fee_usdt, Decimal::new(5,4));
+                assert_eq!(lots.len(), 1);
+                assert_eq!(lots[0].intent_id.as_deref(), Some(identity.as_str()));
+                assert_eq!(lots[0].remaining_qty, Decimal::new(1,1));
+                let totals = s.finance_totals(0, i64::MAX, None)?;
+                assert_eq!(totals.get(&("USDT".into(),"FEE".into())), Some(&-Decimal::new(5,4)));
+                Ok(json!({"fill_count":f.fill_count,"bill_count":b.linked_bill_count,
+                    "quantity":f.filled_quantity.normalize().to_string(),
+                    "verified_fee":b.conservative_verified_fee_usdt.normalize().to_string(),
+                    "lot_count":lots.len(),"lot_quantity":lots[0].remaining_qty.normalize().to_string(),
+                    "totals":totals.iter().map(|((currency, component), value)|json!({
+                        "currency":currency,"component":component,"amount":value.normalize().to_string()
+                    })).collect::<Vec<_>>() }))
+            }).await.unwrap();
+        economics.push(proof);
+    }
+    assert_eq!(
+        economics[0], economics[1],
+        "source replay must not duplicate fills, fees or lots"
+    );
+    assert!(feed.outbound_posts.lock().unwrap().is_empty());
+    assert_eq!(
+        feed.unconsumed_reads(),
+        0,
+        "all finite recovery sources must be consumed"
+    );
+    json!({"order_id":"123456","fill_observed_at_ms":at,"send_claim_replays":2,"order_readbacks":2,
+        "capture_turns":2,"economics":economics})
+}
+
 // Read actual SQL even before any reserve attempt exists. Null means absent;
 // it is never converted to a fabricated local/central receipt.
 async fn t10_11_sql_snapshot(
@@ -274,7 +474,7 @@ pub(super) async fn t10_11_hold_unsent_reply(
                     },
                 )
                 | (
-                    T10_11UnsentPhase::F3 | T10_11UnsentPhase::F5,
+                    T10_11UnsentPhase::F3 | T10_11UnsentPhase::F5 | T10_11UnsentPhase::F6,
                     RiskCommandAction::Inspect {
                         reservation_key, ..
                     },
@@ -303,7 +503,9 @@ pub(super) async fn t10_11_hold_unsent_reply(
         T10_11UnsentPhase::F2 => (RiskDecisionStatus::Held, Some("PREPARED")),
         T10_11UnsentPhase::F3 => (RiskDecisionStatus::Observed, Some("RESERVED")),
         T10_11UnsentPhase::F4 => (RiskDecisionStatus::PostAuthorized, Some("RESERVED")),
-        T10_11UnsentPhase::F5 => (RiskDecisionStatus::Observed, Some("POSTING")),
+        T10_11UnsentPhase::F5 | T10_11UnsentPhase::F6 => {
+            (RiskDecisionStatus::Observed, Some("POSTING"))
+        }
         T10_11UnsentPhase::F8 => (RiskDecisionStatus::Updated, Some("REJECTED")),
     };
     assert_eq!(
@@ -319,7 +521,7 @@ pub(super) async fn t10_11_hold_unsent_reply(
             Some(okx_protocol::risk_authority::RiskReservationState::Held)
         );
     }
-    if probe.phase == T10_11UnsentPhase::F5 {
+    if matches!(probe.phase, T10_11UnsentPhase::F5 | T10_11UnsentPhase::F6) {
         assert_eq!(
             result.reservation_state,
             Some(okx_protocol::risk_authority::RiskReservationState::Posted)
@@ -349,7 +551,11 @@ pub(super) async fn t10_11_hold_unsent_reply(
         );
     }
     let posts = probe.feed.outbound_posts.lock().unwrap().len();
-    assert_eq!(posts, 0);
+    assert_eq!(posts, usize::from(probe.phase == T10_11UnsentPhase::F6));
+    if probe.phase == T10_11UnsentPhase::F6 {
+        assert!(probe.feed.lost_create_ack_was_consumed());
+        assert_eq!(probe.feed.unconsumed_posts(), 0);
+    }
     let handoff = std::env::var("OKX_INTEGRATION_HANDOFF_PATH").unwrap();
     t10_12_publish(
         &format!("{handoff}.t11-native-kill-ready"),
@@ -363,6 +569,7 @@ pub(super) async fn t10_11_hold_unsent_reply(
             "candidate_reservation_key":probe.reservation_key,
             "source_floor_ms":probe.source_floor_ms,
             "venue_posts":posts,
+            "venue_ack_lost":probe.feed.lost_create_ack_was_consumed(),
         }),
     );
     // No timeout/Err/drop substitutes for the parent's actual OS termination.
@@ -637,7 +844,10 @@ async fn native_crash_unsent_boundary() {
         let result = t10_12_await_recovery(&mut session, risk.request(inspect)).await;
         panic!("F3 child must be OS-killed after local RESERVED and before fence: {result:?}");
     }
-    if matches!(phase, T10_11UnsentPhase::F4 | T10_11UnsentPhase::F5) {
+    if matches!(
+        phase,
+        T10_11UnsentPhase::F4 | T10_11UnsentPhase::F5 | T10_11UnsentPhase::F6
+    ) {
         // Explicit boundary inputs, not a claim that the fixture performed a
         // full observer/final-quote admission. Worker validates the real CAS.
         let mut after_held = census;
@@ -688,18 +898,24 @@ async fn native_crash_unsent_boundary() {
             .unwrap()
             .unwrap();
         assert_eq!(authorized.status, RiskDecisionStatus::PostAuthorized);
-        owner
-            .execution
-            .store
-            .call(
-                std::time::Instant::now() + Duration::from_secs(3),
-                move |s| {
-                    assert!(s.begin_post(intent_id, 2, chrono::Utc::now().timestamp_millis())?);
-                    Ok(())
-                },
-            )
-            .await
-            .unwrap();
+        if phase == T10_11UnsentPhase::F5 {
+            owner
+                .execution
+                .store
+                .call(
+                    std::time::Instant::now() + Duration::from_secs(3),
+                    move |s| {
+                        assert!(s.begin_post(
+                            intent_id,
+                            2,
+                            chrono::Utc::now().timestamp_millis()
+                        )?);
+                        Ok(())
+                    },
+                )
+                .await
+                .unwrap();
+        }
         // The actual SQL owner has claimed the only possible send. No transport
         // is invoked. INSPECT proves the original Worker remains POSTED; it
         // cannot stand in for a venue ACK or a no-send release receipt.
@@ -729,6 +945,7 @@ async fn native_crash_unsent_boundary() {
             "original and candidate reserves must both remain held"
         );
         probe.claimed_budget = Some(actual_budget);
+        let sent_feed = Arc::clone(&probe.feed);
         *T10_11_UNSENT_PROBE.lock().unwrap() = Some(probe);
         let inspect = RiskCommand {
             schema: RISK_COMMAND_SCHEMA_V1.into(),
@@ -736,9 +953,49 @@ async fn native_crash_unsent_boundary() {
             installation_id: "installation_test".into(),
             action: RiskCommandAction::Inspect {
                 reservation_key: key,
-                plan_sha256: saved.plan_hash,
+                plan_sha256: saved.plan_hash.clone(),
             },
         };
+        if phase == T10_11UnsentPhase::F6 {
+            use crate::accounts::recorded_support::RecordedPost;
+            let request = t10_11_f6_request();
+            sent_feed.expect_post(RecordedPost {
+                access_key: "fixture-executor-a".into(),
+                path: "/api/v5/trade/order".into(),
+                expected_body: serde_json::to_value(&request).unwrap(),
+                raw_response: serde_json::to_vec(&serde_json::json!({"code":"0","msg":"","data":[{
+                    "ordId":"123456","clOrdId":"c".repeat(32),"sCode":"0"
+                }]}))
+                .unwrap(),
+            });
+            sent_feed.arm_lost_next_create_ack();
+            let timing = okx_api::MutationTiming::from_exchange_time_ms(
+                chrono::Utc::now().timestamp_millis() as u64,
+                2000,
+            )
+            .unwrap();
+            let result = crate::trade_service::post_once(
+                &owner.execution.store,
+                &saved,
+                std::time::Instant::now() + Duration::from_secs(5),
+                || async {
+                    let response = owner.execution.trade.place_order(&request, &timing).await;
+                    assert!(
+                        response.is_err(),
+                        "F6 requires the lost ACK, not delivered success"
+                    );
+                    assert!(sent_feed.lost_create_ack_was_consumed());
+                    // The genuine transport has sent once. Kill before its
+                    // unknown result can return to the durable submission owner.
+                    let result = t10_12_await_recovery(&mut session, risk.request(inspect)).await;
+                    Err::<(), String>(format!(
+                        "F6 kill boundary returned unexpectedly: {result:?}"
+                    ))
+                },
+            )
+            .await;
+            panic!("F6 must never return from the killed submission: {result:?}");
+        }
         let result = t10_12_await_recovery(&mut session, risk.request(inspect)).await;
         panic!("F5 child must be OS-killed after SQL claim before transport: {result:?}");
     }
@@ -775,7 +1032,7 @@ async fn native_crash_unsent_recover() {
     let id = original["sql"]["intent_id"].as_str().unwrap();
     let before = t10_11_sql_snapshot(&ctx.accounts, id).await;
     let mut expected_reopened = original["sql"].clone();
-    if phase == T10_11UnsentPhase::F5 {
+    if matches!(phase, T10_11UnsentPhase::F5 | T10_11UnsentPhase::F6) {
         // Production account open invokes recover_posting. No test calls it.
         expected_reopened["state"] = serde_json::json!("UNKNOWN");
         // post_fence_evidence only authorizes coherent POSTING/ACKNOWLEDGED,
@@ -791,6 +1048,70 @@ async fn native_crash_unsent_recover() {
     let mut read = summary("summary_t11_f2_reopened");
     read.installation_id = "installation_test".into();
     let worker_before = risk.request(read).await.unwrap();
+    if phase == T10_11UnsentPhase::F6 {
+        let owner = ctx.accounts.resolve("fixture-a").await.unwrap();
+        let feed = feed.unwrap();
+        tokio::time::timeout(Duration::from_secs(12), async {
+            loop {
+                let status = owner.private_ws.status().await;
+                if status.logged_in
+                    && status.subscriptions_complete
+                    && status.account_data_seen
+                    && status.positions_data_seen
+                    && owner.source_identity_ready().await
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("F6 original account source identity must reconnect");
+        // Publish finite observations and consume them through two explicit
+        // production capture turns. The periodic consumer must not race those
+        // exact turns. This lease does not bypass freshness or release risk.
+        let _capture = owner.recorded_capture_gate.write().await;
+        let recovered = t10_11_f6_observe_and_capture(&ctx, &owner, &feed, &original).await;
+        let after = t10_11_sql_snapshot(&ctx.accounts, id).await;
+        assert_eq!(after["state"], "FILLED");
+        assert_eq!(after["exchange_order_id"], "123456");
+        assert_eq!(after["central_receipt"], original["sql"]["central_receipt"]);
+        assert!(after["central_release"].is_null());
+        assert!(after["terminal_receipt"].is_null());
+        let mut read = summary("summary_t11_f6_recovered");
+        read.installation_id = "installation_test".into();
+        let worker_after = risk.request(read).await.unwrap();
+        assert_eq!(worker_after.budget, worker_before.budget);
+        assert_eq!(
+            worker_after.risk_book_sequence,
+            worker_before.risk_book_sequence
+        );
+        assert_eq!(
+            serde_json::to_value(&worker_after.budget).unwrap(),
+            original["claimed_budget"]
+        );
+        assert!(feed.outbound_posts.lock().unwrap().is_empty());
+        stop.send(true).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), session)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        ctx.accounts.shutdown().await;
+        println!(
+            "T10_11_NATIVE_UNSENT_RECOVERY_V1:{}",
+            serde_json::json!({
+                "schema":"okx.t10-11-native-unsent-recovery/v1","phase":"F6",
+                "pid":std::process::id(),"root":root,
+                "account_key":owner.configuration.account_key.wire(),
+                "before":before,"after":after,"worker_before":worker_before,"worker_after":worker_after,
+                "venue_posts":0,"original_sql_reopened":true,
+                "production_recovery_replayed":true,"recovered":recovered,
+                "scope":"production submission, original-order observation and source capture; risk remains held"
+            })
+        );
+        return;
+    }
     let mut old_fence_denial = None;
     if phase == T10_11UnsentPhase::F4 {
         let mut old_fence: RiskCommand =

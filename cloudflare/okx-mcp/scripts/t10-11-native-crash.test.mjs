@@ -89,6 +89,25 @@ test("F3 requires HELD rather than an already authorized or released reservation
     assert.throws(()=>validateUnsentKillBoundary(value));
   }
 });
+
+test("F6 requires one actual send with lost ACK and an unreleased SQL claim",()=>{
+  function sent(){
+    const value=laterBoundary("F3");value.phase="F6";
+    value.sql.state="POSTING";value.sql.post_fence=[123,"POSTED"];
+    value.sql.terminal_receipt=null;value.worker_result.reservation_state="POSTED";
+    value.claimed_budget={entry_budget:{reserved_usd:"3.0005"}};
+    value.venue_posts=1;value.venue_ack_lost=true;
+    return value;
+  }
+  const value=sent();assert.equal(validateUnsentKillBoundary(value),value);
+  for(const change of [x=>x.venue_posts=0,x=>x.venue_posts=2,
+    x=>x.venue_ack_lost=false,x=>delete x.venue_ack_lost,
+    x=>x.sql.state="RESERVED",x=>x.sql.state="FILLED",x=>x.sql.exchange_order_id="123456",
+    x=>x.sql.central_release={},x=>x.sql.terminal_receipt={},
+    x=>x.worker_result.reservation_state="RELEASED",x=>x.sql.post_fence=[0,"POSTED"]]){
+    const invalid=sent();change(invalid);assert.throws(()=>validateUnsentKillBoundary(invalid));
+  }
+});
 test("F8 cannot replace durable no-send with a terminal or foreign proof",()=>{
   for(const change of [x=>x.sql.terminal_receipt.kind="FILLED",
     x=>x.command.action.proof.intent_id="other",x=>x.command.action.proof.plan_hash="other"]){
