@@ -1,5 +1,16 @@
 use super::super::*;
 use sha2::{Digest, Sha256};
+
+/// Older manual SQL commands persist NULL as the decision/receipt owner while
+/// their plan is explicitly manual. Preserve that representation and its replay;
+/// NULL is never an implicit owner for a named strategy's new intent or grant.
+fn strategy_owner_matches_plan(owner: Option<&str>, plan_owner: &str) -> bool {
+    match owner {
+        Some(owner) => owner == plan_owner,
+        None => plan_owner == "manual",
+    }
+}
+
 impl AccountStore {
     /// No second ledger/table: one immutable, idempotent record in the existing
     /// operation_receipts journal, bound to the original saved intent/plan.
@@ -1787,11 +1798,10 @@ impl AccountStore {
         {
             return Err(StoreError::Invalid("STRATEGY_VERSION_CHANGED"));
         }
-        if decision
-            .instance_id
-            .as_ref()
-            .is_some_and(|id| id != &intent.plan.strategy_instance)
-        {
+        if !strategy_owner_matches_plan(
+            decision.instance_id.as_deref(),
+            &intent.plan.strategy_instance,
+        ) {
             return Err(StoreError::Invalid("STRATEGY_OWNER_MISMATCH"));
         }
         let tx = self
@@ -2040,7 +2050,9 @@ impl AccountStore {
             [&i.intent_id],
             |r| r.get(0),
         )?;
-        if owner != receipt.instance_id {
+        if owner != receipt.instance_id
+            || !strategy_owner_matches_plan(owner.as_deref(), &i.plan.strategy_instance)
+        {
             return Err(StoreError::Invalid("CENTRAL_INSTANCE_MISMATCH"));
         }
         let tx = self

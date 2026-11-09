@@ -1,3 +1,6 @@
+#[path = "account_store_attribution_tests.rs"]
+mod attribution;
+
 #[test]
 fn t10_09_partial_reduce_proof_cannot_accept_an_opening_intent() {
     let mut s = store();

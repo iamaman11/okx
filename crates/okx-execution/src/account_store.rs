@@ -679,6 +679,12 @@ pub struct AccountStore {
         std::cell::RefCell<Option<std::collections::BTreeMap<(String, String), Decimal>>>,
     latest_capital_assignment_time: std::cell::RefCell<Option<Option<i64>>>,
 }
+#[path = "account_storage_snapshot.rs"]
+mod storage_snapshot;
+pub use storage_snapshot::{
+    AccountStorageCoverage, AccountStoragePolicy, AccountStorageSnapshot, AccountStorageStop,
+};
+
 impl AccountStore {
     pub(crate) fn run_before_deadline<T>(
         &mut self,
