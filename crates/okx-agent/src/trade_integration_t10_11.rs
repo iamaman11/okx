@@ -341,7 +341,9 @@ async fn native_crash_unsent_boundary() {
             phase,
             intent_id: intent_id.into(),
             reservation_key: key,
-            source_floor_ms: before.source_as_of_ms,
+            source_floor_ms: before
+                .source_as_of_ms
+                .expect("original Worker source watermark required"),
             root,
             feed: feed.unwrap(),
             before_budget: before,
