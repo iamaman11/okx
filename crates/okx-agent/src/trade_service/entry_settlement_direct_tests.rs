@@ -197,7 +197,7 @@ async fn fixture(label: &str, finance: bool) -> Fixture {
         })
         .await
         .unwrap();
-    let posted = super::super::execute::post_once(&store, &saved, deadline(), || async {
+    let posted = crate::trade_service::post_once(&store, &saved, deadline(), || async {
         Ok::<_, String>(())
     })
     .await

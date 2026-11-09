@@ -761,6 +761,7 @@ impl TradeService {
         };
         i = observed_intent;
         if let Some(o) = &order {
+            let filled = verified_order_readback(&i, o)?;
             // Both entry and reduction status must reconcile against fresh
             // authenticated account facts. A private GET may be deferred by
             // the existing per-user RateBudget without ever reaching OKX.
