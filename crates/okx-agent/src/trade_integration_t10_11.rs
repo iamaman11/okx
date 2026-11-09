@@ -61,6 +61,146 @@ struct T10_11UnsentProbe {
 static T10_11_UNSENT_PROBE: std::sync::Mutex<Option<T10_11UnsentProbe>> =
     std::sync::Mutex::new(None);
 
+#[tokio::test]
+async fn original_order_observation_uses_production_sql_and_identity_checks() {
+    use crate::accounts::recorded_support::{RecordedAccountHttp, RecordedGet, prepared};
+    use okx_execution::{CentralReceipt, Decision, IntentPlan, IntentState, NewIntent};
+    use rust_decimal::Decimal;
+    let (ctx, _, _, _, _, budget) = test_dispatch_for("order-observation-direct").await;
+    let feed = Arc::new(RecordedAccountHttp::default());
+    let (config, clients) = prepared("a", feed.clone(), budget);
+    ctx.accounts
+        .connect_prepared(config, clients)
+        .await
+        .unwrap();
+    let owner = ctx.accounts.resolve("fixture-a").await.unwrap();
+    let original = owner
+        .execution
+        .store
+        .call(std::time::Instant::now() + Duration::from_secs(3), |s| {
+            let now = chrono::Utc::now().timestamp_millis();
+            s.apply_authority_policy(1, false, "observation_direct", Decimal::from(20))?;
+            let d = s.ensure_manual_instance(now)?;
+            let intent = s.prepare(
+                &Decision {
+                    decision_id: "observe_decision".into(),
+                    instance_id: None,
+                    decision_at: now,
+                    input_digest: "a".repeat(64),
+                    policy_revision: 1,
+                    code_version: "fixture".into(),
+                },
+                &NewIntent {
+                    intent_id: "observe_intent".into(),
+                    idempotency_key: "observe_command".into(),
+                    request_hash: "b".repeat(64),
+                    client_order_id: "c".repeat(32),
+                    deadline: now + 30000,
+                    plan_hash: "d".repeat(64),
+                    policy_revision: 1,
+                    risk_increase: true,
+                    instrument_id: "BTC-USDT-SWAP".into(),
+                    plan: IntentPlan {
+                        strategy_definition_id: d.definition_id,
+                        strategy_definition_version: d.version,
+                        strategy_parameters_digest: d.parameters_digest,
+                        operation: "open".into(),
+                        side: "buy".into(),
+                        position_side: "long".into(),
+                        quantity: Decimal::ONE,
+                        limit_price: Decimal::from(100),
+                        stop_price: Some(Decimal::from(99)),
+                        strategy_instance: "manual".into(),
+                        planned_loss_usd: Decimal::ONE,
+                        source_generation: 1,
+                        private_source_generation: 1,
+                        contract_value: Decimal::ONE,
+                        inverse: false,
+                        settlement_currency: "USDT".into(),
+                    },
+                },
+            )?;
+            s.reserve(
+                &CentralReceipt {
+                    reservation_key: "observation_reserve".into(),
+                    account_key: s.meta().account_key.clone(),
+                    installation_id: s.meta().installation_id.clone(),
+                    instance_id: None,
+                    intent_id: intent.intent_id.clone(),
+                    plan_hash: intent.plan_hash.clone(),
+                    policy_revision: 1,
+                    receipt_hash: "e".repeat(64),
+                    requested_loss_usd: Decimal::ONE,
+                    conversion_digest: "f".repeat(64),
+                },
+                now,
+            )?;
+            assert!(s.begin_post(&intent.intent_id, 1, now)?);
+            s.recover_posting(now)?;
+            Ok(s.intent(&intent.intent_id)?.unwrap())
+        })
+        .await
+        .unwrap();
+    assert_eq!(original.state, IntentState::Unknown);
+    let source = |code: &str, rows: serde_json::Value| RecordedGet {
+        access_key: "fixture-executor-a".into(),
+        path: "/api/v5/trade/order".into(),
+        required_query: vec![
+            ("instId".into(), "BTC-USDT-SWAP".into()),
+            ("clOrdId".into(), "c".repeat(32)),
+        ],
+        raw_response: serde_json::to_vec(&serde_json::json!({"code":code,"msg":"","data":rows}))
+            .unwrap(),
+    };
+    feed.expect_get(source("51603", serde_json::json!([])));
+    let reason = ctx
+        .trade
+        .observe_intent_order(&owner, original.clone())
+        .await
+        .unwrap_err();
+    assert_eq!(reason, "ORDER_READBACK_INCOMPLETE_NO_RESUBMIT");
+    let row = serde_json::json!({"instId":"BTC-USDT-SWAP","ordId":"123456","clOrdId":"c".repeat(32),
+        "side":"buy","state":"filled","sz":"1","accFillSz":"1"});
+    let mut wrong = row.clone();
+    wrong["sz"] = "2".into();
+    feed.expect_get(source("0", serde_json::json!([wrong])));
+    assert_eq!(
+        ctx.trade
+            .observe_intent_order(&owner, original.clone())
+            .await
+            .unwrap_err(),
+        "ORDER_READBACK_PLAN_MISMATCH"
+    );
+    let before = owner
+        .execution
+        .store
+        .call(std::time::Instant::now() + Duration::from_secs(3), |s| {
+            s.intent("observe_intent")
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(before.revision, original.revision);
+    for _ in 0..2 {
+        feed.expect_get(source("0", serde_json::json!([row.clone()])));
+    }
+    let (filled, _) = ctx
+        .trade
+        .observe_intent_order(&owner, before)
+        .await
+        .unwrap();
+    assert_eq!(filled.state, IntentState::Filled);
+    assert_eq!(filled.exchange_order_id.as_deref(), Some("123456"));
+    let (replayed, _) = ctx
+        .trade
+        .observe_intent_order(&owner, filled.clone())
+        .await
+        .unwrap();
+    assert_eq!(replayed.revision, filled.revision);
+    assert!(feed.outbound_posts.lock().unwrap().is_empty());
+    ctx.accounts.shutdown().await;
+}
+
 // Read actual SQL even before any reserve attempt exists. Null means absent;
 // it is never converted to a fabricated local/central receipt.
 async fn t10_11_sql_snapshot(

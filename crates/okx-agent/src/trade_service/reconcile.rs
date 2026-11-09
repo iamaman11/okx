@@ -532,6 +532,104 @@ impl TradeService {
             .map_err(err)?
             .ok_or("INTENT_NOT_FOUND".into())
     }
+    /// Observe one original order through the real adapter and persist only a
+    /// verified readback. Does not capture finance, release risk or resend.
+    pub(crate) async fn observe_intent_order(
+        &self,
+        r: &Arc<AccountResources>,
+        mut i: StoredIntent,
+    ) -> Result<(StoredIntent, Option<okx_api::TradeOrderDetails>), String> {
+        let order = if matches!(i.state, IntentState::Rejected) && i.exchange_order_id.is_none() {
+            None
+        } else {
+            match r
+                .execution
+                .trade
+                .order_by_client_id_until(&i.instrument_id, &i.client_order_id, deadline())
+                .await
+            {
+                Ok(o) => Some(o),
+                Err(_error) => {
+                    // Test-only causal classification at the exact failure
+                    // boundary: a local admission defer, missing signed raw
+                    // GET, protocol response or deadline must never collapse
+                    // into the same test diagnosis. No public identity, raw
+                    // payload or credential is emitted. Production remains
+                    // fail-closed with the same UNKNOWN/no-resubmit result.
+                    #[cfg(test)]
+                    if std::env::var("OKX_T09_8_DENIAL_PROBE").as_deref() == Ok("1") {
+                        let (class, request_sent, local_defer_ms) = match &_error {
+                            okx_api::OkxError::RateLimited { evidence } => (
+                                "RATE_LIMITED",
+                                Some(evidence.request_sent),
+                                Some(evidence.local_defer_ms),
+                            ),
+                            okx_api::OkxError::Response(reason)
+                                if reason.starts_with(
+                                    "TRANSCRIPT_SOURCE_PAGE_UNEXPECTED_OR_EXHAUSTED",
+                                ) =>
+                            {
+                                ("TRANSCRIPT_SOURCE_EXHAUSTED", None, None)
+                            }
+                            okx_api::OkxError::Response(reason)
+                                if reason == "ORDER_READBACK_DEADLINE_EXCEEDED" =>
+                            {
+                                ("READBACK_DEADLINE", None, None)
+                            }
+                            okx_api::OkxError::Response(reason)
+                                if reason.starts_with("TRANSCRIPT_") =>
+                            {
+                                ("TRANSCRIPT_SOURCE_OTHER", None, None)
+                            }
+                            okx_api::OkxError::Response(_) => {
+                                ("VENUE_RESPONSE_UNVERIFIED", None, None)
+                            }
+                            okx_api::OkxError::Json(_) => ("VENUE_ORDER_DECODE", None, None),
+                            okx_api::OkxError::Api { .. } => ("VENUE_API_DENIAL", None, None),
+                            okx_api::OkxError::Clock(_) => ("CLOCK_SOURCE", None, None),
+                            _ => ("OTHER_READBACK_FAILURE", None, None),
+                        };
+                        eprintln!(
+                            "T09_6_ORDER_READBACK_CAUSE_V1:{}",
+                            json!({
+                                "schema":"okx.t09-6-order-readback-cause/v1",
+                                "class":class,
+                                "request_sent":request_sent,
+                                "local_defer_ms":local_defer_ms,
+                                "sql_state":i.state.as_str(),
+                                "has_exchange_ack":i.exchange_order_id.is_some(),
+                            })
+                        );
+                    }
+                    return Err("ORDER_READBACK_INCOMPLETE_NO_RESUBMIT".into());
+                }
+            }
+        };
+        if let Some(o) = &order {
+            let state = match o.state.as_str() {
+                "live" => IntentState::Acknowledged,
+                "partially_filled" => IntentState::PartiallyFilled,
+                "filled" => IntentState::Filled,
+                "canceled" | "mmp_canceled" => IntentState::Cancelled,
+                _ => return Err("EXCHANGE_ORDER_STATE_UNKNOWN".into()),
+            };
+            let filled = verified_order_readback(&i, o)?;
+            let id = i.intent_id.clone();
+            let order_id = o.order_id.clone();
+            if !i.state.terminal() {
+                r.execution
+                    .store
+                    .call(deadline(), move |s| {
+                        s.record_order_readback(&id, &order_id, state, filled, now())
+                    })
+                    .await
+                    .map_err(err)?;
+            }
+            i = self.find_intent(r, &i.intent_id).await?;
+        }
+        Ok((i, order))
+    }
+
     pub(super) async fn status_intent(
         &self,
         r: &Arc<AccountResources>,
@@ -648,96 +746,21 @@ impl TradeService {
                 "central_release":central_release
             })));
         }
-        let order = if matches!(i.state, IntentState::Rejected) && i.exchange_order_id.is_none() {
-            None
-        } else {
-            match r
-                .execution
-                .trade
-                .order_by_client_id_until(&i.instrument_id, &i.client_order_id, deadline())
-                .await
+        let original_id = i.intent_id.clone();
+        let (observed_intent, order) = match self.observe_intent_order(r, i).await {
+            Ok(observed) => observed,
+            Err(reason)
+                if matches!(
+                    reason.as_str(),
+                    "ORDER_READBACK_INCOMPLETE_NO_RESUBMIT" | "EXCHANGE_ORDER_STATE_UNKNOWN"
+                ) =>
             {
-                Ok(o) => Some(o),
-                Err(_error) => {
-                    // Test-only causal classification at the exact failure
-                    // boundary: a local admission defer, missing signed raw
-                    // GET, protocol response or deadline must never collapse
-                    // into the same test diagnosis. No public identity, raw
-                    // payload or credential is emitted. Production remains
-                    // fail-closed with the same UNKNOWN/no-resubmit result.
-                    #[cfg(test)]
-                    if std::env::var("OKX_T09_8_DENIAL_PROBE").as_deref() == Ok("1") {
-                        let (class, request_sent, local_defer_ms) = match &_error {
-                            okx_api::OkxError::RateLimited { evidence } => (
-                                "RATE_LIMITED",
-                                Some(evidence.request_sent),
-                                Some(evidence.local_defer_ms),
-                            ),
-                            okx_api::OkxError::Response(reason)
-                                if reason.starts_with(
-                                    "TRANSCRIPT_SOURCE_PAGE_UNEXPECTED_OR_EXHAUSTED",
-                                ) =>
-                            {
-                                ("TRANSCRIPT_SOURCE_EXHAUSTED", None, None)
-                            }
-                            okx_api::OkxError::Response(reason)
-                                if reason == "ORDER_READBACK_DEADLINE_EXCEEDED" =>
-                            {
-                                ("READBACK_DEADLINE", None, None)
-                            }
-                            okx_api::OkxError::Response(reason)
-                                if reason.starts_with("TRANSCRIPT_") =>
-                            {
-                                ("TRANSCRIPT_SOURCE_OTHER", None, None)
-                            }
-                            okx_api::OkxError::Response(_) => {
-                                ("VENUE_RESPONSE_UNVERIFIED", None, None)
-                            }
-                            okx_api::OkxError::Json(_) => ("VENUE_ORDER_DECODE", None, None),
-                            okx_api::OkxError::Api { .. } => ("VENUE_API_DENIAL", None, None),
-                            okx_api::OkxError::Clock(_) => ("CLOCK_SOURCE", None, None),
-                            _ => ("OTHER_READBACK_FAILURE", None, None),
-                        };
-                        eprintln!(
-                            "T09_6_ORDER_READBACK_CAUSE_V1:{}",
-                            json!({
-                                "schema":"okx.t09-6-order-readback-cause/v1",
-                                "class":class,
-                                "request_sent":request_sent,
-                                "local_defer_ms":local_defer_ms,
-                                "sql_state":i.state.as_str(),
-                                "has_exchange_ack":i.exchange_order_id.is_some(),
-                            })
-                        );
-                    }
-                    return Ok(uncertain(
-                        &i.intent_id,
-                        "ORDER_READBACK_INCOMPLETE_NO_RESUBMIT",
-                    ));
-                }
+                return Ok(uncertain(&original_id, &reason));
             }
+            Err(reason) => return Err(reason),
         };
+        i = observed_intent;
         if let Some(o) = &order {
-            let state = match o.state.as_str() {
-                "live" => IntentState::Acknowledged,
-                "partially_filled" => IntentState::PartiallyFilled,
-                "filled" => IntentState::Filled,
-                "canceled" | "mmp_canceled" => IntentState::Cancelled,
-                _ => return Ok(uncertain(&i.intent_id, "EXCHANGE_ORDER_STATE_UNKNOWN")),
-            };
-            let filled = verified_order_readback(&i, o)?;
-            let id = i.intent_id.clone();
-            let order_id = o.order_id.clone();
-            if !i.state.terminal() {
-                r.execution
-                    .store
-                    .call(deadline(), move |s| {
-                        s.record_order_readback(&id, &order_id, state, filled, now())
-                    })
-                    .await
-                    .map_err(err)?;
-            }
-            i = self.find_intent(r, &i.intent_id).await?;
             // Both entry and reduction status must reconcile against fresh
             // authenticated account facts. A private GET may be deferred by
             // the existing per-user RateBudget without ever reaching OKX.

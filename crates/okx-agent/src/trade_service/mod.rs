@@ -33,7 +33,9 @@ mod protection_resize;
 mod reconcile;
 mod recovery;
 mod strategies;
+mod submission;
 mod unsent_release;
+pub(crate) use submission::post_once;
 
 // Test-only causal boundary AFTER the genuine Worker HELD receipt has been
 // verified and committed as a central reservation in the original Native SQL
