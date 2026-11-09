@@ -14,6 +14,7 @@ use serde::Serialize;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(super) enum TerminalReleaseStage {
+    DurableSnapshot,
     Authority,
     Reservation,
     Exposure,
@@ -75,12 +76,18 @@ impl TradeService {
         i: &StoredIntent,
         order: Option<&okx_api::TradeOrderDetails>,
         venue_flat_verified: bool,
+        invocation: Option<crate::diagnostics::ProtectionCleanupInvocation<'_>>,
     ) -> Result<(), TerminalReleaseError> {
         let mut stage = TerminalReleaseStage::Authority;
         let mut reservation_key = None;
         let attempt = r.terminal_release_trace.begin();
-        let observe = |stage, reservation: Option<&str>, outcome, reason: Option<&str>| {
-            r.terminal_release_trace.observe(
+        let mut facts = super::terminal_release_trace::ReleaseFacts::default();
+        let observe = |stage,
+                       reservation: Option<&str>,
+                       outcome,
+                       reason: Option<&str>,
+                       facts: &super::terminal_release_trace::ReleaseFacts| {
+            r.terminal_release_trace.observe_facts(
                 &i.intent_id,
                 i.revision,
                 attempt,
@@ -88,9 +95,11 @@ impl TradeService {
                 reservation,
                 outcome,
                 reason,
+                invocation,
+                facts,
             );
         };
-        observe(stage, None, "running", None);
+        observe(stage, None, "running", None, &facts);
         let result: Result<(), String> = async {
             if r.configuration.account_key.environment != okx_protocol::accounts::Environment::Real
             {
@@ -103,7 +112,7 @@ impl TradeService {
                 .clone()
                 .ok_or("AUTHORITY_UNAVAILABLE")?;
             stage = TerminalReleaseStage::Reservation;
-            observe(stage, reservation_key.as_deref(), "running", None);
+            observe(stage, reservation_key.as_deref(), "running", None, &facts);
             let Some(receipt) =
                 terminal_receipt(&r.execution.store, &i.intent_id, i.risk_increase).await?
             else {
@@ -112,7 +121,7 @@ impl TradeService {
             reservation_key = Some(receipt.reservation_key.clone());
             let local_reduction = receipt.reservation_key.starts_with("local:");
             stage = TerminalReleaseStage::Exposure;
-            observe(stage, reservation_key.as_deref(), "running", None);
+            observe(stage, reservation_key.as_deref(), "running", None, &facts);
             let instrument = i.instrument_id.clone();
             let lots = r
                 .execution
@@ -120,14 +129,16 @@ impl TradeService {
                 .call(deadline(), move |s| s.active_lots(&instrument))
                 .await
                 .map_err(err)?;
-            if lots.iter().any(|l| {
+            let remaining_exposure = lots.iter().any(|l| {
                 (l.intent_id.as_deref() == Some(&i.intent_id) || local_reduction)
                     && l.remaining_qty > Decimal::ZERO
-            }) {
+            });
+            facts.remaining_exposure = Some(remaining_exposure);
+            if remaining_exposure {
                 return Err("INTENT_EXPOSURE_REMAINS".into());
             }
             stage = TerminalReleaseStage::FillCoverage;
-            observe(stage, reservation_key.as_deref(), "running", None);
+            observe(stage, reservation_key.as_deref(), "running", None, &facts);
             let partition = if i.instrument_id.ends_with("-SWAP") {
                 "SWAP"
             } else {
@@ -140,17 +151,19 @@ impl TradeService {
                 .await
                 .map_err(err)?
                 .ok_or("FILL_COVERAGE_MISSING")?;
+            facts.fills = Some((&complete).into());
             stage = TerminalReleaseStage::VenueReadback;
-            observe(stage, reservation_key.as_deref(), "running", None);
+            observe(stage, reservation_key.as_deref(), "running", None, &facts);
             let venue_updated_at = verified_terminal_order_update_time(i, order)?;
+            facts.terminal_order_updated_at_ms = Some(venue_updated_at);
             stage = TerminalReleaseStage::FillCoverage;
-            observe(stage, reservation_key.as_deref(), "running", None);
+            observe(stage, reservation_key.as_deref(), "running", None, &facts);
             if !source_covers_terminal(&complete, venue_updated_at) {
                 return Err("FILL_COVERAGE_INCOMPLETE".into());
             }
             if local_reduction {
                 stage = TerminalReleaseStage::BillCoverage;
-                observe(stage, reservation_key.as_deref(), "running", None);
+                observe(stage, reservation_key.as_deref(), "running", None, &facts);
                 let bills = r
                     .execution
                     .store
@@ -158,6 +171,7 @@ impl TradeService {
                     .await
                     .map_err(err)?
                     .ok_or("BILLS_COVERAGE_MISSING")?;
+                facts.bills = Some((&bills).into());
                 if !source_covers_terminal(&bills, venue_updated_at) {
                     return Err("FINANCIAL_COVERAGE_INCOMPLETE".into());
                 }
@@ -167,7 +181,7 @@ impl TradeService {
                 // full cohort census to block the opening intent's legitimate
                 // central RELEASE forever.
                 stage = TerminalReleaseStage::VenueReadback;
-                observe(stage, reservation_key.as_deref(), "running", None);
+                observe(stage, reservation_key.as_deref(), "running", None, &facts);
                 if i.risk_increase || !venue_flat_verified {
                     return Err("LOCAL_CLOSE_FLAT_POSITION_UNPROVEN".into());
                 }
@@ -180,7 +194,7 @@ impl TradeService {
                     return Err("LOCAL_CLOSE_FILL_QUANTITY_UNPROVEN".into());
                 }
                 stage = TerminalReleaseStage::LocalAcknowledgement;
-                observe(stage, reservation_key.as_deref(), "running", None);
+                observe(stage, reservation_key.as_deref(), "running", None, &facts);
                 let id = i.intent_id.clone();
                 let order_id = venue.order_id.clone();
                 r.execution
@@ -193,7 +207,7 @@ impl TradeService {
                 return Ok(());
             }
             stage = TerminalReleaseStage::Inspection;
-            observe(stage, reservation_key.as_deref(), "running", None);
+            observe(stage, reservation_key.as_deref(), "running", None, &facts);
             let observed = self
                 .risk
                 .request(self.risk_command(
@@ -206,12 +220,39 @@ impl TradeService {
                 ))
                 .await
                 .map_err(str::to_owned)?;
+            facts.worker_policy_revision = observed.policy_revision;
+            facts.worker_sequence = observed.risk_book_sequence;
+            facts.worker_released = observed
+                .reservation_state
+                .map(|v| v == RiskReservationState::Released);
+            // INSPECT describes the immutable reservation's policy, not the
+            // installation's latest policy. Rotation must preserve old replay.
+            if observed.status != RiskDecisionStatus::Observed {
+                return Err(observed
+                    .reason
+                    .unwrap_or("TERMINAL_INSPECTION_NOT_OBSERVED".into()));
+            }
+            if observed.reservation_key.as_deref() != Some(receipt.reservation_key.as_str())
+                || u64::try_from(receipt.policy_revision).ok() != observed.policy_revision
+                || observed.policy_revision.is_none()
+                || observed.risk_book_sequence.is_none()
+            {
+                return Err("TERMINAL_INSPECTION_IDENTITY_MISMATCH".into());
+            }
+            // A response already in flight when the authenticated session
+            // changes cannot acknowledge local money in the replacement session.
+            if self.governance.read().await.as_ref().is_none_or(|latest| {
+                latest.session_generation != state.session_generation
+                    || latest.state.installation_id != state.state.installation_id
+            }) {
+                return Err("TERMINAL_INSPECTION_SESSION_CHANGED".into());
+            }
             if observed.reservation_state == Some(RiskReservationState::Released) {
                 // A late bill may already be captured but not yet acknowledged
                 // by central SETTLE_ENTRY. Never overwrite that pending marker
                 // with the original terminal release acknowledgement.
                 stage = TerminalReleaseStage::LateSettlement;
-                observe(stage, reservation_key.as_deref(), "running", None);
+                observe(stage, reservation_key.as_deref(), "running", None, &facts);
                 let id = i.intent_id.clone();
                 if r.execution
                     .store
@@ -222,7 +263,7 @@ impl TradeService {
                     return Err("LATE_ENTRY_SETTLEMENT_PENDING".into());
                 }
                 stage = TerminalReleaseStage::SqlAcknowledgement;
-                observe(stage, reservation_key.as_deref(), "running", None);
+                observe(stage, reservation_key.as_deref(), "running", None, &facts);
                 let k = receipt.reservation_key.clone();
                 let e = digest(&observed)?;
                 r.execution
@@ -233,7 +274,7 @@ impl TradeService {
                 return Ok(());
             }
             stage = TerminalReleaseStage::BillCoverage;
-            observe(stage, reservation_key.as_deref(), "running", None);
+            observe(stage, reservation_key.as_deref(), "running", None, &facts);
             let (through, loss) = r
                 .execution
                 .store
@@ -246,6 +287,7 @@ impl TradeService {
                 })
                 .await
                 .map_err(err)?;
+            facts.bills = Some((&through).into());
             if !source_covers_terminal(&through, venue_updated_at) {
                 return Err("FINANCIAL_COVERAGE_INCOMPLETE".into());
             }
@@ -264,7 +306,7 @@ impl TradeService {
             // SQL owner commits the exact final cumulative proof BEFORE any WSS
             // SETTLE_ENTRY. A lost central reply reuses that same receipt.
             stage = TerminalReleaseStage::VenueReadback;
-            observe(stage, reservation_key.as_deref(), "running", None);
+            observe(stage, reservation_key.as_deref(), "running", None, &facts);
             let venue_order = order.ok_or("TERMINAL_ENTRY_VENUE_ORDER_UNAVAILABLE")?;
             if !matches!(
                 venue_order.state.as_str(),
@@ -280,7 +322,7 @@ impl TradeService {
                 return Err("TERMINAL_ZERO_FILL_STATE_UNVERIFIED".into());
             }
             stage = TerminalReleaseStage::SettlementProof;
-            observe(stage, reservation_key.as_deref(), "running", None);
+            observe(stage, reservation_key.as_deref(), "running", None, &facts);
             let id = i.intent_id.clone();
             let settlement = r
                 .execution
@@ -302,7 +344,7 @@ impl TradeService {
                 return Err("TERMINAL_ENTRY_SETTLEMENT_IDENTITY_MISMATCH".into());
             }
             stage = TerminalReleaseStage::CentralSettlement;
-            observe(stage, reservation_key.as_deref(), "running", None);
+            observe(stage, reservation_key.as_deref(), "running", None, &facts);
             let settled = self
                 .risk
                 .request(self.risk_command(
@@ -334,7 +376,7 @@ impl TradeService {
             // exactly this settled reservation scoped for terminal resolution.
             // Every other terminal-pending / unknown intent still denies release.
             stage = TerminalReleaseStage::Census;
-            observe(stage, reservation_key.as_deref(), "running", None);
+            observe(stage, reservation_key.as_deref(), "running", None, &facts);
             let account_key = r.configuration.account_key.wire();
             let census = self
                 .census_for_terminal_release(
@@ -346,7 +388,7 @@ impl TradeService {
                 )
                 .await?;
             stage = TerminalReleaseStage::Release;
-            observe(stage, reservation_key.as_deref(), "running", None);
+            observe(stage, reservation_key.as_deref(), "running", None, &facts);
             let proof = TerminalRiskLedgerProof {
                 account_uid: r.configuration.account_key.verified_uid.clone(),
                 run_id: "continuous_engine".into(),
@@ -387,7 +429,7 @@ impl TradeService {
                 return Err(result.reason.unwrap_or("CENTRAL_RELEASE_DENIED".into()));
             }
             stage = TerminalReleaseStage::SqlAcknowledgement;
-            observe(stage, reservation_key.as_deref(), "running", None);
+            observe(stage, reservation_key.as_deref(), "running", None, &facts);
             let e = digest(&result)?;
             r.execution
                 .store
@@ -408,6 +450,7 @@ impl TradeService {
                 "blocked"
             },
             result.as_ref().err().map(String::as_str),
+            &facts,
         );
         result.map_err(|reason_code| TerminalReleaseError {
             stage,

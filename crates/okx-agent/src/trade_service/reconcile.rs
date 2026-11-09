@@ -1233,7 +1233,7 @@ impl TradeService {
                 "scope":"intent","next_action":"trade.status"})
         } else if i.state.terminal() && financial {
             match self
-                .release_terminal(r, &i, order.as_ref(), venue_flat_verified)
+                .release_terminal(r, &i, order.as_ref(), venue_flat_verified, invocation)
                 .await
             {
                 Ok(()) => json!({"state":"verified",

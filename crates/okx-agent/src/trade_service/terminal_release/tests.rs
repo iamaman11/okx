@@ -347,7 +347,16 @@ async fn stale_terminal_coverage_blocks_release(stale_bills: bool) {
     assert!(posts_before.is_empty());
     let mut inspections = 0;
     for _ in 0..2 {
-        let release = service.release_terminal(&resources, &intent, Some(&order), true);
+        let release = service.release_terminal(
+            &resources,
+            &intent,
+            Some(&order),
+            true,
+            Some(crate::diagnostics::ProtectionCleanupInvocation {
+                request_id: "terminal-status-source",
+                origin: "agent_request.trade.status",
+            }),
+        );
         let failure = if stale_bills {
             let reply = async {
                 let request =
@@ -523,7 +532,29 @@ async fn stale_terminal_coverage_blocks_release(stale_bills: bool) {
     assert_eq!(operation["diagnostic_reference"], operation_reference);
     assert_eq!(operation["trace_health"]["durable_state"], "NOT_READ");
     assert_eq!(operation["trace_health"]["history_complete"], "UNKNOWN");
-    assert_eq!(operation["trace_health"]["initiator"], "NOT_RECORDED");
+    assert_eq!(operation["trace_health"]["initiator"], "OBSERVED_CALLER");
+    assert_eq!(
+        snapshot["invocation"]["request_id"],
+        "terminal-status-source"
+    );
+    assert_eq!(
+        snapshot["first_observed_blocker"]["invocation"]["request_id"],
+        "terminal-status-source"
+    );
+    assert_eq!(
+        snapshot["facts"]["fills"]["watermark_ms"],
+        if stale_bills { 100 } else { 99 }
+    );
+    assert_eq!(snapshot["facts"]["fills"]["generation"], 1);
+    assert_eq!(snapshot["facts"]["fills"]["has_coverage_gaps"], false);
+    assert_eq!(snapshot["facts"]["terminal_order_updated_at_ms"], 100);
+    if stale_bills {
+        assert_eq!(snapshot["facts"]["bills"]["watermark_ms"], 99);
+        assert_eq!(snapshot["facts"]["worker_sequence"], 7);
+    } else {
+        assert!(snapshot["facts"]["bills"].is_null());
+        assert!(snapshot["facts"]["worker_sequence"].is_null());
+    }
     assert_eq!(operation["trace_health"]["dropped_event_count"], 0);
     assert_eq!(operation["trace_health"]["evicted_operation_count"], 0);
     let mut unknown_request = request.clone();
@@ -607,3 +638,6 @@ async fn terminal_coverage_sql_snapshot(store: &AccountStoreHandle) -> serde_jso
         .await
         .unwrap()
 }
+
+#[path = "recovery_tests.rs"]
+mod recovery_tests;

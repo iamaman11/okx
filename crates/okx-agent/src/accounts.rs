@@ -985,6 +985,7 @@ fn start_diagnostic_restore(
     mut shutdown: watch::Receiver<bool>,
 ) -> JoinHandle<()> {
     resources.protection_operation_trace.mark_restore_pending();
+    resources.terminal_release_trace.mark_restore_pending();
     let weak = Arc::downgrade(resources);
     let store = resources.execution.store.clone();
     tokio::spawn(async move {
@@ -996,9 +997,9 @@ fn start_diagnostic_restore(
                 _ = shutdown.changed() => Err("DIAGNOSTIC_RESTORE_CANCELLED"),
                 result = store.call(
                     Instant::now() + std::time::Duration::from_secs(2),
-                    |sql| sql.recent_cleanup_diagnostics(
+                    |sql| Ok((sql.recent_cleanup_diagnostics(
                         crate::diagnostics::ProtectionOperationTrace::CAPACITY,
-                    ),
+                    )?, sql.recent_terminal_release_diagnostics(128)?)),
                 ) => result.map_err(|error| match error {
                     okx_execution::StoreError::Invalid(code) => code,
                     _ => "DIAGNOSTIC_RESTORE_STORAGE_UNAVAILABLE",
@@ -1007,7 +1008,10 @@ fn start_diagnostic_restore(
         };
         if let Some(account) = weak.upgrade() {
             match restored {
-                Ok(receipts) => {
+                Ok((receipts, terminal_receipts)) => {
+                    account
+                        .terminal_release_trace
+                        .restore_durable(terminal_receipts);
                     if let Err(reason) =
                         account.protection_operation_trace.restore_durable(receipts)
                     {
@@ -1016,9 +1020,12 @@ fn start_diagnostic_restore(
                             .mark_restore_failed(reason);
                     }
                 }
-                Err(reason) => account
-                    .protection_operation_trace
-                    .mark_restore_failed(reason),
+                Err(reason) => {
+                    account
+                        .protection_operation_trace
+                        .mark_restore_failed(reason);
+                    account.terminal_release_trace.mark_restore_failed();
+                }
             }
         }
     })
