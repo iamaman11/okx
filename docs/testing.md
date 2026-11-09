@@ -3,13 +3,20 @@
 **Canonical:** [product #448](https://github.com/iamaman11/okx/issues/448), [execution #449](https://github.com/iamaman11/okx/issues/449), [bounded simplification #501](https://github.com/iamaman11/okx/issues/501). This is an evidence map, **not** a new suite, an authorization to trade, or a PASS certificate.
 
 **Current candidate:** `fix/windows-clippy-required-495-20261107`, Draft PR #499.
-**Accepted regression baseline: `0680e90f9625f6b0c0b32defd8d50d493852411c`.**
-[Required CI 42565208825](https://github.com/iamaman11/okx/actions/runs/42565208825)
-passed the full 26-case matrix, 219 assertions, all 90 connected F0–F8 crash trials,
-and release build. Bundle manifest/source tree and three executable hashes were
-independently verified. This baseline does not certify subsequent refactoring;
-the final refactor candidate requires its own required CI. See the live
-[checkpoint](https://github.com/iamaman11/okx/issues/501#issuecomment-6733268443).
+**Accepted regression baseline: `32ee438ecdc132ab0058177d6e9fd631cd774be7`,
+tree `174d9561168976a94942caa28ca80ff64b0d32b4`.**
+[Required CI 42581922408](https://github.com/iamaman11/okx/actions/runs/42581922408)
+completed SUCCESS, including release build. The
+[matrix artifact](https://github.com/iamaman11/okx/actions/runs/42581922408/artifacts/13658004909)
+contains all 26 distinct required/selected/executed IDs, 26 PASS, zero failures or
+missing cases, 219 matching expected/actual assertions, 26 readbacks, and 90
+connected F0–F8 crash trials reopening the original SQL roots. Some cases share
+a cohort transcript; these are not 26 independent full campaigns.
+The [Windows bundle](https://github.com/iamaman11/okx/actions/runs/42581922408/artifacts/13659351084)
+was downloaded and its source SHA/tree, Cargo.lock and all three executable hashes
+were independently verified. New changes require their own checks; this baseline
+does not certify an untested descendant, installed workflow or REAL trading.
+The earlier `0680e90f` baseline remains historical evidence in the sections below.
 
 ## #501 application ownership and refactor pass
 
@@ -51,7 +58,7 @@ found` means exactly that; it is not a claim that the behavior is absent.
 | `Strategies` | `query::execute` → `TradeService::strategies`; worker loop `strategies::run` → `maintenance_turn` / `strategy_turn` | `strategies::tests::strategy_risk_budget_not_notional`; integration strategy cases under T09/T10 (see case records) | No complete direct per-action acceptance for Create/Update/Start/Stop and no proof that a generated strategy is profitable. |
 | `Portfolio` | `query::execute` → `portfolio::portfolio` → selected account SQL owners | `portfolio::tests::summary_requires_complete_requested_window_and_fresh_account_nav`; `four_accounts_preserve_strategy_and_unattributed_finance_isolation` | Does not prove historical USD expense import for every managed account; incomplete source coverage remains partial. |
 | `PortfolioScenario` | `query::execute` → pure `portfolio::scenario` calculation | `portfolio::tests::virtual_risk_has_no_exchange_side_effects_and_requires_psd` | Scenario inputs are user supplied; this is not a market-data backtest or exchange execution. |
-| `Diagnostics` | `query::execute` → `diagnostics::diagnostics`; operation view reads only the local operation projection; finance view reads the account SQL owner | `diagnostics::tests::default_diagnostics_never_claims_a_remote_risk_summary`; `operation_projection_reads_are_local_bounded_and_isolated`; `distinguish_sql_queue_deadlines_from_real_storage_outages` | Operation projection is bounded/volatile; before restart restoration is implemented, a missing post-restart event is UNKNOWN, not proof that no operation occurred. |
+| `Diagnostics` | `query::execute` → `diagnostics::diagnostics`; operation view reads the local projection; finance view reads the existing cycle trace; default account details still queue the SQL owner | `diagnostics::tests::default_diagnostics_never_claims_a_remote_risk_summary`; `operation_projection_reads_are_local_bounded_and_isolated`; `distinguish_sql_queue_deadlines_from_real_storage_outages` | Cleanup startup reconstruction restores only retained durable facts; ACK/initiator/history remain unknown where unrecorded. Public blocked-owner behavior and other families are not proved by the local getter benchmark. |
 | `FindInstruments` | `query::execute` obtains `PublicWsHandle::reference_snapshot`; `find_instruments_response` maps the protocol enum and delegates filtering to `ReferenceRegistry::find_instruments` before the 50-row response limit | `query::instrument_search_tests::find_instruments_filters_type_currency_and_asset_before_public_limit` directly exercises the production helper with mixed SWAP/FUTURES, currencies, assets and more than 50 leading exclusions | The helper test does not cover asynchronous WS snapshot acquisition through the public dispatcher. |
 | `MarketOverview` | `query::execute` → demand WS instrument → fresh WS snapshot; on warming only, existing REST market snapshot plus explicit degraded quality | `query::microstructure_test::healthy_ws_overview_omits_unbounded_depth_and_fits_mcp_envelope`; `accounts::tests::recorded_public_ws_frames_make_production_market_snapshot_fresh` (partial) | No focused test covers the overview's full fresh-WS and REST-degraded branches together. |
 | `AccountSummary` | `query::execute` resolves one account and reads its latest snapshot with `ACCOUNT_MAX_AGE_MS` freshness check | `accounts::tests::recorded_ws_login_business_ack_and_six_history_pages_capture_both_sql_accounts` (source path, partial) | No focused test covers this query arm's missing/stale snapshot responses. |
@@ -137,8 +144,97 @@ shutdown test proves only the production shutdown helper it actually invokes.
   one populated local projection, not public MCP dispatch, blocked-owner behavior,
   all operation families or complete #501 performance acceptance.
 
-The combined candidate still requires its own final required GitHub CI and
-full26 evidence; the earlier accepted baseline above is not reused as its PASS.
+The combined candidate's required CI and bundle are now accepted on `32ee438e`
+above. The following residual list is open; it is not implied PASS by full26.
+
+### #501 implementation slice after `32ee438e`
+
+The changes below are the current implementation slice, not a certificate that
+the whole issue is complete. Required CI must validate its own final SHA.
+
+| Boundary | Production implementation | Direct verification |
+|---|---|---|
+| Account storage explanation | `AccountStoreHandle::diagnostic_storage_snapshot`; existing SQL loop publishes bounded policy/stops/coverage/storage images; explicit `Diagnostics(view=storage)` reads them without SQL jobs | `account_worker::storage_projection::tests::`; `finance_trace::tests::public_finance_diagnostic_does_not_queue_behind_sql_or_trace` also holds SQL/trace/source locks and exercises public dispatch |
+| Research explanation | `Jobs::diagnostic_readback` publishes committed metadata; explicit `Diagnostics(view=research)` avoids the catalog SQL mutex | `analytics::jobs::job_diagnostics::tests::`, including public dispatch, scope, redaction, contention, poison, restart and bounded indexed subset |
+| Terminal release error context | `TerminalReleaseError` preserves reached stage/account/intent/revision/reservation; public pending keeps the original reason code | `trade_service::terminal_release::tests::`; these SQL/coverage tests do not replace positive full-cohort T09/T10 evidence |
+| Strategy ownership | New prepare/reserve validate decision/plan/receipt ownership; `None/manual` and existing receipt-first replay remain supported | `account_store::tests::attribution::`; two direct failures reproduced before the fix, five PASS after it; immutable historical fixtures are inserted, never rewritten |
+| Public query contracts | Existing `query::dispatch` and actual account/analytics/WS handles | `query::public_dispatch_tests::`: account missing/stale/invalid-time/healthy, instrument filters before limit, capabilities/mailbox and missing market source |
+| Research grid report | Train-only selection; per-candidate OOS/fees×2 summaries; immutable pre-compute input manifest, verified export and reference-aware retention | `okx-research` strategy registry tests, analytics grid/provenance/export/retention tests; legacy artifacts without the new fields remain supported |
+| Scenario timeout | `runScenario` aborts and joins before restoring case environment; unjoined child errors survive native formatting and stop the matrix | `node --test --test-reporter=tap scripts/trade-integration/scenario-lifecycle.test.mjs` (8 Windows tests); mandatory existing Windows job |
+| SQL owner shutdown | `finish_owner` joins its pending backup before closing SQL and publishing termination | `account_worker::shutdown_tests::`: barrier success/error/panic, original writer lease/reopen |
+
+The default detailed diagnostic still reads SQL. Fast views are explicitly
+last-observed projections, never trading authority; gaps, ages and UNKNOWN
+history remain visible. Research diagnostics are installation-scoped and reject
+account routing. Background publishers continue independently of readers.
+
+Local validation of this source slice (09.11.2026): workspace tests **967 PASS,
+0 FAIL, 7 existing ignored**, including the three SQL backup shutdown cases;
+research **16/16**, analytics **63 PASS / 1 ignored**, and Windows process
+lifecycle **8/8**. Runner self-test22, strict K10/negative guard, SQL guard and
+Worker check, workspace Clippy with `-D warnings`, and rustfmt pass. Ignored
+connected fixtures still require their canonical CI.
+The earlier 163 execution tests were before the three shutdown tests; the
+combined execution result is **166 PASS / 2 ignored**.
+
+`finance_trace::tests::public_finance_diagnostic_does_not_queue_behind_sql_or_trace`
+also measures 1,000 native public storage requests, including response
+serialization, while the actual SQL owner and source locks are held: debug
+Windows x86_64, Intel i7-4770 reference local host, **P95 0.5252 ms**. Test stdout
+emits all raw nanosecond samples. Zero additional SQL jobs/HTTP/risk commands
+are asserted and a known policy value remains available. This is one blocked
+storage boundary; it is not release-build K9 or all-family performance proof.
+
+Remaining acceptance includes cross-family causal coverage, all required S1/S2
+assertion mapping, research decision metadata and detailed candidate progress,
+the complete MCP R-UX vertical, prescribed release K9 workloads, installed smoke
+and actual integration. Abandoned pre-result research evidence is not swept by
+a general orphan collector; this slice preserves that existing limitation.
+Generic Windows process-tree termination cannot prove orphan ownership after
+its leader exits. These direct tests and SQL backup join do not declare the
+whole S1-05 complete. PHYSICAL/REAL remain separate gates.
+
+### #501 revision 6: finite residual acceptance list
+
+Checked against the baseline source: Cargo.toml has 15 workspace members, and
+AgentOperation has 14 variants, all listed in the public index above. The crate
+groups above include every member and the Worker; nested Trade/Strategies actions
+and background owners remain separate checks, not additional top-level variants.
+Source declarations and production call sites own the structure, not this table.
+
+`reuse/test` means inspect the existing assertion before adding code. `refactor`
+is justified only by a concrete boundary problem. `feature-if-missing` is an
+existing #449 deliverable, not permission to add new products. Commands below
+are existing component commands unless explicitly marked **planned**; a component
+command does not prove the whole row. Nonzero test count and exact source SHA are
+required. These rows are the remaining work list for E0–E6; do not start another
+repository-wide audit or silently grow it with unrelated improvements.
+
+| Requirement / stage | Owner and change kind | Given → When → required Then | Check and current status / dependency |
+|---|---|---|---|
+| R0 / E0: inventory | `AgentOperation`, `query::execute`, existing owner tables; reuse | Existing enum/crates/actions → compare call sites → no missing public/background effect owner | 14 variants / 15 crates / Worker enumerated; ownership review present. This is not per-action functional acceptance. New gaps must name one row below. |
+| R1 / E1: fast diagnostic contract | `diagnostics::{diagnostics,account_diagnostics,finance_diagnostics}`, `finance_trace::readback`, `protection_trace`; refactor/test | Known facts, held SQL/trace/catalog lock or unavailable Worker → public Diagnostics → bounded scoped response with known facts or explicit gap, no explain-caused SQL/remote/effect | `cargo test --locked -p okx-agent --lib diagnostics:: -- --nocapture` reuses local tests only. **Planned:** public dispatch healthy/blocked-owner/authorization tests; NOT_PROVEN. Needs owner publication and preserved existing fields. |
+| R1/R6 / E1: causal identity and restart | `query::dispatch_with_governance`, trade/source/job/host owners; reuse/refactor/test | Request/background invocation, then restart/eviction/contention → explain → real origin/stage/age and missing history, no invented ACK/parent | `cargo test --locked -p okx-agent --lib diagnostics::protection_trace:: -- --nocapture` covers cleanup only. Cross-family publication/context tests **planned**; NOT_PROVEN. No second ledger. |
+| R2/R4 / E2: terminal release | `terminal_release`, `risk_bridge`, `AccountStore`; test/refactor only if required | Real SQL/census/Worker flow; stale/incomplete evidence or lost reply → production release → stage-specific pending or verified same-identity ack, no duplicate debit/release | `cargo test --locked -p okx-agent --lib trade_service::unsent_release_tests:: -- --nocapture` proves unsent only; terminal cohort composition is in full26. **Planned:** direct terminal orchestration/producer-consumer proof, NOT_PROVEN. Fake complete-census flags forbidden. |
+| R3/R4/R6 / E2: public Trade and Strategies | `trade_service::{mod,plan,execute,reconcile,strategies}`, SQL owner; reuse/test, fix only reproduced defect | Each supported action and applicable replay/conflict/revision/manual-strategy case → same production dispatch → correct account/amount/effect count or rejection before effect | Existing settlement/cleanup/unsent suites and full26 are partial per-action evidence. **Planned:** missing public action and strategy lifecycle tests; NOT_PROVEN. Preserve semantic idempotency and actual owner validation. |
+| R4/R5/R10 / E2: S1/S2 | `accounts::recorded_support`, source observer, semantic DTO/goldens, SQL/Worker; reuse/test | Read before/crossing cancel, fresh follow-up, invalid account/query/TTL; equivalent decimal/replay/conflict → actual consumer → preserved proof ordering, exact money, no extra POST | `cargo test --locked -p okx-agent --lib immutable_signed_snapshot_phases_follow_events_not_background_read_counts -- --nocapture` checks source scheduling, not all S1. Baseline full26 accepted. Exact S1-01..04/S2-01..08 assertion mapping and missing negatives **planned**, NOT_PROVEN. Historical S table below is not current PASS. |
+| R6/R8 / E3: non-trading public routing | `query::execute`, accounts/WS/analytics/portfolio owners; reuse/test | ConnectAccount identity publication; AccountSummary missing/stale; MarketOverview fresh/degraded; search filters before limit → public dispatch → exact response/scope/quality | `cargo test --locked -p okx-agent --lib query:: -- --nocapture` covers helpers only. **Planned:** dispatch contracts also covering Market/Capabilities/Microstructure/Research/Portfolio/Scenario/Mailbox; NOT_PROVEN. No new router framework. |
+| R7 / E3: pure extensions and job/artifact contracts | kernel/analysis/research, `analytics::{jobs,sources,result,executor}`; reuse/test | Existing extension, queue/cancel/restart/corrupt cursor/artifact → production owners → strict dependencies, bounded resources, deterministic output or precise failure | `python scripts/check_architecture.py --self-test` and `python scripts/check_architecture.py --k10-purity` PASS on baseline. `cargo test --locked -p okx-agent --lib analytics:: -- --nocapture` reuses C16/C17 components; `cargo test --locked -p okx-research` reuses pure tests. C13–C20 assertion/extension change-budget mapping remains NOT_PROVEN, not a rewrite request. |
+| R7/R8 / E3: R-UX01..08 and analyst path | analytics registry/jobs/result, portfolio SQL projection, existing MCP; reuse/test/feature-if-missing | Fixed dataset/manifest/64 candidates/train metric/split/costs → validate/backtest/grid/result/decision/export/reopen and finance drilldown → exact provenance/counts/checksums, no research-caused trade/financial mutation | `cargo test --locked -p okx-agent --lib grid_result_includes_selected_train_test_and_equity -- --nocapture` and `cargo test --locked -p okx-agent --lib portfolio:: -- --nocapture` are component evidence only. **Planned:** redacted MCP vertical transcript and required metadata/decision feature audit; NOT_RUN. Historical expense completeness is a blocker only for the named financial gate requiring it. |
+| R5/R9/R10 / E4: S1-05 and production shutdown | scenario driver/child owners, `accounts::shutdown`, research executor, host CONTROL; test/fix only reproduced leak | Success/error/timeout with saved stage receipt → bounded teardown → owned children/tasks joined/stores closed, primary failure retained, next run isolated | `cargo test --locked -p okx-agent --lib source_shutdown_tests:: -- --nocapture` proves one helper. **Planned:** outer success/error/timeout lifecycle tests with real children/Windows handles; S1-05 NOT_PROVEN. No kill of unrelated processes. |
+| R9 / E4/E6: installed CONTROL | host-control/launcher/release/install owners; reuse/test | Correct or wrong hash/schema/action/instance and interrupted stop/start → actual installed matching bundle → exact health/version/ack, original financial SQL preserved | `cargo test --locked -p okx-host-control` and `cargo test --locked -p okx-host-launcher` are component commands. **Planned:** installed bundle smoke; NOT_RUN. Verified downloadable bundle is prerequisite evidence, not installed proof. |
+| R10 / E5: performance and change cost | public native Diagnostics, existing CPU/SQL/source/CI owners; measure then fix measured bottleneck | Release reference host, prescribed warm/cold workloads and blocked owners → public requests → useful bounded diagnostics, K9 latency/memory/control/queue correctness | Local projection P95 0.0758ms is baseline microbench only. **Planned:** public per-family 1000-sample explain benchmark, normative K9 workloads, raw samples and CI timing breakdown; NOT_RUN. Three completed changes need measured direct-loop evidence; unavailable historical timings stay unmeasured. |
+| R11 / E6: final acceptance and integration | coordinator, existing guards/required CI/PR chain/docs; reuse/test | Collected row evidence + integrated code → final required checks/bundle/installed verticals → all mandatory #501 criteria on actual accepted source/build | Baseline required CI/full26/219/90/bundle accepted only at header SHA. New slice local checks then one final required CI, artifact/hash verification and ancestry/full-diff review **planned**; NOT_RUN. #499 remains Draft; PHYSICAL/REAL separate. |
+
+Completion uses the #501 §7 checklist: R0 inventory; R1 explanations/context;
+R2/R3 trading; R4 SQL/risk; R5 facts; R6 routing/auth; R7 research; R8 account/
+portfolio; R9 host; R10 guards/dev-loop/measurements; R11 combined acceptance.
+All have a row above. Existing known good implementations are kept. A missing
+assertion is not evidence of a missing feature; a missing feature is not repaired
+by adding a diagnostic wrapper. Each new row assertion must be linked to the
+implemented test and its exact-SHA result before acceptance.
+
+### Historical full26 implementation index
 
 The table is the **historical r8.3 operation index**, with individually updated
 rows only where receipts are cited. It is not an aggregate current result.
