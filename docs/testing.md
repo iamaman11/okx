@@ -31,7 +31,7 @@ The 26 authoritative IDs are owned by `scripts/run-trade-integration.mjs --list`
 | `T10-08` | `crates/okx-agent/src/trade_service/reconcile.rs::emergency_exit; crates/okx-agent/src/trade_service/reconcile.rs::verified_live_protection` | [`cases/T10-08.mjs`](../scripts/trade-integration/cases/T10-08.mjs), `--case T10-08` | FOUND: signed partial fill and protection first leg | NOT_RUN | NOT_RUN | Case intentionally FAIL: same-intent failed protection, late fill and bounded protective attempt | EXTEND | `f06383e` / no CI artifact |
 | `T10-09` | `crates/okx-agent/src/trade_service/reconcile.rs::cancel; crates/okx-agent/src/trade_service/reconcile.rs::close` | [`cases/T10-09.mjs`](../scripts/trade-integration/cases/T10-09.mjs), `--case T10-09` | FOUND: B public Cancel ACK and persisted worker first leg | NOT_RUN | NOT_RUN | Case intentionally FAIL: same-intent post-ACK late fill, partial close and remaining protection | EXTEND | `f06383e` / no CI artifact |
 | `T10-10` | `crates/okx-execution/src/ledger/sql/intents.rs::bind_late_entry_settlement; cloudflare/okx-mcp/src/risk_book.ts::settleEntrySpend` | [`cases/T10-10.mjs`](../scripts/trade-integration/cases/T10-10.mjs), `--case T10-10` | FOUND: duplicate fills/bills initial causal leg | NOT_RUN | NOT_RUN | Case intentionally FAIL: same-campaign late fee/rebate, replay revision and upper breach | EXTEND | `f06383e` / no CI artifact |
-| `T10-11` | `crates/okx-execution/src/ledger/sql/intents.rs::recover_posting; crates/okx-agent/src/trade_service/recovery.rs::reconcile_restored` | [`cases/T10-11.mjs`](../scripts/trade-integration/cases/T10-11.mjs), `--case T10-11` | 40 connected F2/F3/F4/F8 kills; separate component evidence retained | PARTIAL | NOT_RUN | Case intentionally FAIL: complete F0..F8×10, same Native/Worker stores and no duplicated facts | EXTEND | `c239f8f7` / CI `42542429888`; scope below |
+| `T10-11` | `crates/okx-execution/src/ledger/sql/intents.rs::recover_posting; crates/okx-agent/src/trade_service/recovery.rs::reconcile_restored` | [`cases/T10-11.mjs`](../scripts/trade-integration/cases/T10-11.mjs), `--case T10-11` | 60 connected F0/F1/F2/F3/F4/F8 kills; separate component evidence retained | PARTIAL | NOT_RUN | Case intentionally FAIL: complete F0..F8×10, same Native/Worker stores and no duplicated facts | EXTEND | `67955771` / CI `42545830204`; scope below |
 | `T10-12` | `cloudflare/okx-mcp/src/risk_book.ts::reserveRisk; cloudflare/okx-mcp/src/runtime_session.ts::dispatch` | [`cases/T10-12.mjs`](../scripts/trade-integration/cases/T10-12.mjs), `--case T10-12` | FOUND: Worker kill/reopen persisted DO after reserve | NOT_RUN | NOT_RUN | Case intentionally FAIL: after-settlement kill, fresh generation, Native binding/no double debit | EXTEND | `f06383e` / no CI artifact |
 | `T10-13` | `crates/okx-agent/src/trade_service/reconcile.rs::close; cloudflare/okx-mcp/src/risk_authority.ts::handleNativeRiskCommand` | [`cases/T10-13.mjs`](../scripts/trade-integration/cases/T10-13.mjs), `--case T10-13` | FOUND: Worker STOP and protective close probe | NOT_RUN | NOT_RUN | Assert before-claim and post-fill pause ordering, stale reduce blocker and safe reduction | EXTEND | `f06383e` / no CI artifact |
 | `T10-14` | `crates/okx-agent/src/trade_service/mod.rs::TradeService::trade; crates/okx-agent/src/trade_service/reconcile.rs::cancel` | [`cases/T10-14.mjs`](../scripts/trade-integration/cases/T10-14.mjs), `--case T10-14` | FOUND: A held SQL; B public Status/Cancel | NOT_RUN | NOT_RUN | Independent B progress under held A, then join A, 1 B cancel POST | CONNECT | `f06383e` / no CI artifact |
@@ -234,12 +234,16 @@ The existing CI workflow supports `target_case=UnsentRelease` for these tests
 without Workerd or the long trading campaign. The mandatory PR matrix and
 full #449 release gates remain unchanged; this mode cannot certify 26/26.
 
-## T10-11 — connected F2/F3/F4/F8 checkpoint, 2026-11-09
+## T10-11 — connected F0/F1/F2/F3/F4/F8 checkpoint, 2026-11-09
 
-Code SHA `c239f8f7743b5598b4c0319c4d97fb90f6b0ebe7`,
-[Windows CI 42542429888](https://github.com/iamaman11/okx/actions/runs/42542429888):
-40 independent OS kills passed their assertions, ten per boundary:
+Code SHA `679557716e9cdb75fbd019de5cedd5bb84fbaaf8`,
+[Windows CI 42545830204](https://github.com/iamaman11/okx/actions/runs/42545830204):
+60 independent OS kills passed their assertions, ten per boundary:
 
+- F0: before prepare invocation, no intent or reserve; reopening the original SQL
+  and replaying prepare creates one identity. This is not an in-transaction kill.
+- F1: PREPARED before reserve, expired command fixture; public Status persists
+  COMMAND_EXPIRED without a reserve or venue POST. No production clock is changed.
 - F2: Worker HELD committed, reply lost before local receipt.
 - F3: local RESERVED committed, actual Worker INSPECT proves HELD, no BEGIN_POST.
 - F4: actual Worker POST_AUTHORIZED committed, no local claim; replay of the old
@@ -247,19 +251,22 @@ Code SHA `c239f8f7743b5598b4c0319c4d97fb90f6b0ebe7`,
 - F8: Worker release committed, reply lost before local SQL acknowledgement;
   recovery reads RELEASED and writes one SQL receipt without a second mutation.
 
-Every new Native process opens its original account SQL; public Cancel/Status
-persists CENTRAL_RELEASE. Replay retains the same receipt. Venue POST count is
-zero. Reopening the same Worker storage preserves RELEASED and the original
-budget amounts, including the pre-existing foreign reserve.
+Every new Native process opens its original account SQL. F0/F1 have no reserve
+attempt, central receipt or release; actual Worker INSPECT remains NOT_FOUND and
+its sequence/budget are unchanged. For F2/F3/F4/F8 public Cancel/Status persists
+CENTRAL_RELEASE; replay retains the same receipt and reopening the same Worker
+storage preserves RELEASED. All six preserve original budget amounts, including
+the pre-existing foreign reserve, and have zero venue POSTs.
 
-Artifacts `T10-11/native-worker-fX-process-crashes.json` for X=2,3,4,8 and forty
+Artifacts `T10-11/native-worker-fX-process-crashes.json` for X=0,1,2,3,4,8 and sixty
 individual `native-worker-fX-process-crash-N.json` bind each repetition to its code SHA,
 original SQL root, killed/recovery PIDs and SQL/Worker readbacks. Each repetition
 creates fresh stores, then retains those stores across its restart. Native
-crash executions never reuse memoized evidence. Series durations were F2=49.180s,
-F3=32.627s, F4=32.594s and F8=35.266s. Individual repetitions ranged from 2.794s
-to 10.746s. The whole targeted case took 156.397s after compilation, including
-the retained 60 component kills in 6.196s. These measurements are not a guarantee
+crash executions never reuse memoized evidence. Series durations were F0=31.141s,
+F1=27.654s, F2=27.494s, F3=28.915s, F4=27.919s and F8=28.316s. Individual
+repetitions ranged from 2.646s to 5.073s. The whole targeted case took 179.828s
+after compilation, including the retained 60 component kills in 7.947s.
+These measurements are not a guarantee
 for a different runner. Recalculate bounded child/case/job envelopes when adding
 the remaining phases; do not alter production source TTLs or trading deadlines.
 
@@ -267,11 +274,11 @@ This is a direct boundary test with explicit SQL prepare/reserve and census/caus
 not proof of full public Execute/admission, automatic recovery scheduling or a
 live exchange. The separate component kills still lack connected Worker proofs;
 some overlap the accepted boundaries. **Do not sum them into integrated acceptance.**
-Connected F0/F1/F5/F6/F7 remain incomplete; T10-11 intentionally
+Connected F5/F6/F7 remain incomplete; T10-11 intentionally
 ends `T10_11_ALL_NINE_NATIVE_WORKER_PHASES_TEN_TIMES_NOT_YET_PROVEN`.
 Neither T10-11 nor 26/26 is accepted.
 
-On the same code SHA, [CI 42543265153](https://github.com/iamaman11/okx/actions/runs/42543265153)
+On the same code SHA, [CI 42546694996](https://github.com/iamaman11/okx/actions/runs/42546694996)
 passed Rust formatting, all ten direct unsent-release tests and
 `cargo clippy --locked -p okx-agent --all-targets -- -D warnings`.
 
