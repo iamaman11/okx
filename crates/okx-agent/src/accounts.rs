@@ -5234,9 +5234,14 @@ mod tests {
             )
             .await
             .unwrap();
+        let mut ended = owner.execution.store.termination_signal();
         drop(owner);
         registry.shutdown().await;
         drop(registry);
+        tokio::time::timeout(std::time::Duration::from_secs(3), ended.wait_for(|v| *v))
+            .await
+            .unwrap()
+            .unwrap();
 
         let reopened = AccountRuntimeRegistry::open(&root, budget.clone())
             .await
