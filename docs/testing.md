@@ -246,6 +246,39 @@ use the full module path with `--exact`. For L1, precompile the exact Agent lib
 then `node --test scripts/trade-integration/native-workerd-lifecycle.test.mjs`.
 Set `OKX_LIFECYCLE_ARTIFACTS` to retain both successful and failed stage evidence.
 
+### Combined revision10 packets from checkpoint95
+
+Source baseline `95a9b58aea14dcb57035c1d8f7be91f3b43e1921` is archived by
+`checkpoint/501-local-95a9b58a`. Its independently verified local full26 took
+1,224,259ms and contains221 matching assertions,26readbacks and90 original SQL
+crash roots. That tag is immutable source backup, not GitHub-CI or installed
+acceptance. Current descendant checks and exact source are recorded in the
+existing #501 checkpoint; old full26 does not certify the descendant.
+
+| Packet | Implemented boundary and focused command filter | Proven scope / limits |
+|---|---|---|
+| T2 / E2 | `terminal_release::tests::stale_bill_coverage_blocks_settlement_after_inspect` | Same production release twice with actual SQL reservation, fills100/bills99/uTime100:2 scoped scripted INSPECT,0SETTLE/RELEASE/venue effects, exact BillCoverage identity/reason and unchanged SQL/receipt/cursors. Scripted risk transport is not real Worker/cohort positive proof. |
+| D2 / E1 | `terminal_release_trace`; both stale coverage tests in `terminal_release::tests::` | Actual release owner publishes reached stages. The public operation view reads `terminal_release:<intent>` while actual SQL/source owners are held; known stage/first blocker/identity survive,0 explain-caused SQL/HTTP/risk. FIFO fence checks hidden SQL jobs. Bounded128-intent projection exposes drops/evictions/superseded attempts, unknown history/durable state/initiator. Not durable restart reconstruction or a complete causal history. |
+| R7 / E3 | `analytics::candidate_progress::tests::` | Six tests: actual submitted2×64 grid returns128 candidates/386 replay units; public Status barriers and observed/plain result equality; cancellation/late/Interrupted/reopen; additive legacy migration; unfinished candidate; bounded phase/count/monotonic/fixed-total rejection. CPU callback has only atomic observations; existing job task/catalog publish coalesced progress. Source cache is seeded in submitted-job proof; separate C20 raw-source proof remains distinct. |
+| Q1 / E3 | `query::public_dispatch_tests::portfolio_scenario_` | Public dispatcher uses real virtual portfolio owner with literal2-position variance25/volatility5 and exposure/stress/margin oracles. Three-position non-PSD and invalid parameters reject. Artifact paths/bytes and HTTP/risk attempts unchanged. Caller assumptions do not become market observations or financial account facts. |
+
+Commands use the existing form `cargo test --locked -p okx-agent --lib FILTER`.
+Nonzero execution is required. Native Agent400PASS/4existingignored (9.70s),
+research crate17PASS (0.03s), R7 six direct tests0.75s after build. The initial
+compatible Agent rebuild took1m53s; compilation is reported separately.
+Terminal owner/trace7tests took0.19s; public dispatch6tests took0.22s after build.
+Clippy workspace/all-targets-Dwarnings, fmt, K10 self-test/purity, SQL and product
+guards pass. Worker check11testfiles pass, including preservation
+of native candidate progress for running/interrupted/completed jobs; tools/list
+remains24,567bytes. Worker production routing/schema is unchanged.
+
+These packets add no financial policy/ledger/controller and change no recorded
+GET budgets/TTL/deadlines. T1/D1/R6/C20/L1 remain reuse. Whole S1-05, terminal
+RELEASE lost-reply/reopen, remaining public action coverage, other diagnostic
+families, full MCP R-UX/installed/performance and final integration remain open.
+Historical planned assignments below are superseded by these completed rows
+and #501's current remaining acceptance; do not implement them again.
+
 ### #501 revision 9: finite residual acceptance list
 
 #### Regression found by combined CI `42594279304`
