@@ -568,6 +568,17 @@ jobs:
         if: inputs.target_case == 'UnsentRelease'
         run: cargo clippy --locked -p okx-agent --all-targets -- -D warnings
 
+      - name: Verify independent recovery order source
+        shell: pwsh
+        run: |
+          $output = & cargo test --locked -p okx-agent --lib accounts::recorded_support::independent_order_readback_uses_literal_source_identity_without_ack -- --exact --nocapture 2>&1
+          $code = $LASTEXITCODE
+          $output | Out-Host
+          if ($code -ne 0) { exit $code }
+          if (($output -join "`n") -notmatch 'test result: ok\.\s+1 passed;') {
+            throw 'INDEPENDENT_ORDER_SOURCE_TEST_NOT_EXECUTED'
+          }
+
       - name: Install locked workerd test dependencies
         if: inputs.target_case != 'UnsentRelease'
         shell: pwsh

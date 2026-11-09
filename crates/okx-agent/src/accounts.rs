@@ -991,7 +991,8 @@ pub(crate) mod recorded_support {
     // A negative GET is not a venue order fact and must not require a create
     // ACK: recovery explicitly looks up commands whose send outcome is unknown.
     // Only a one-shot, exact identity-scoped recorded error is eligible here.
-    // Successful order observations keep their existing ACK association.
+    // Literal successful observations can be read after restart without ACK
+    // memory. Placeholder-based legacy pages still require their original ACK.
     fn recorded_order_page_matches(
         acknowledged: &[(String, String, String)],
         access_key: &str,
@@ -1011,13 +1012,116 @@ pub(crate) mod recorded_support {
             && serde_json::from_slice::<serde_json::Value>(&page.raw_response).is_ok_and(|v| {
                 v["code"] == "51603" && v["data"].as_array().is_some_and(Vec::is_empty)
             });
+        let explicit_order = page.access_key == access_key
+            && page.path == "/api/v5/trade/order"
+            && page
+                .required_query
+                .iter()
+                .any(|(k, v)| k == "clOrdId" && v == client_id)
+            && serde_json::from_slice::<serde_json::Value>(&page.raw_response).is_ok_and(|v| {
+                v["code"] == "0"
+                    && v["data"].as_array().is_some_and(|rows| {
+                        rows.len() == 1
+                            && rows[0]["clOrdId"].as_str() == Some(client_id)
+                            && rows[0]["ordId"]
+                                .as_str()
+                                .is_some_and(|id| !id.is_empty() && !id.contains("__"))
+                            && rows[0]["instId"].as_str().is_some_and(|instrument| {
+                                !instrument.is_empty()
+                                    && page
+                                        .required_query
+                                        .iter()
+                                        .any(|(k, v)| k == "instId" && v == instrument)
+                            })
+                    })
+            });
         negative
+            || explicit_order
             || recorded_order_source_matches(
                 acknowledged,
                 access_key,
                 client_id,
                 &page.raw_response,
             )
+    }
+
+    #[tokio::test]
+    async fn independent_order_readback_uses_literal_source_identity_without_ack() {
+        use okx_api::{Credentials, OkxRestClient, TradeApi};
+        let feed = Arc::new(RecordedAccountHttp::default());
+        let raw = serde_json::json!({"code":"0","msg":"","data":[{
+            "instId":"BTC-USDT-SWAP","ordId":"123456","clOrdId":"original",
+            "state":"filled","side":"buy","posSide":"long","tdMode":"cross",
+            "ordType":"limit","sz":"0.1","px":"1000","accFillSz":"0.1",
+            "avgPx":"1000","cTime":"1000","uTime":"2000"
+        }]});
+        let page = |raw: &serde_json::Value| RecordedGet {
+            access_key: "fixture-executor-a".into(),
+            path: "/api/v5/trade/order".into(),
+            required_query: vec![
+                ("instId".into(), "BTC-USDT-SWAP".into()),
+                ("clOrdId".into(), "original".into()),
+            ],
+            raw_response: serde_json::to_vec(raw).unwrap(),
+        };
+        for (field, value) in [
+            ("clOrdId", "foreign"),
+            ("clOrdId", "__REQUEST_CL_ORD_ID__"),
+            ("instId", "ETH-USDT-SWAP"),
+            ("ordId", ""),
+        ] {
+            let mut invalid = raw.clone();
+            invalid["data"][0][field] = value.into();
+            assert!(!recorded_order_page_matches(
+                &[],
+                "fixture-executor-a",
+                "original",
+                &page(&invalid)
+            ));
+        }
+        assert!(!recorded_order_page_matches(
+            &[],
+            "fixture-executor-b",
+            "original",
+            &page(&raw)
+        ));
+        feed.expect_get(page(&raw));
+        let client = OkxRestClient::with_http_transport(
+            OkxEnvironment::new(okx_api::Region::Global, false),
+            Credentials::new(
+                "fixture-executor-a".into(),
+                "executor-secret".into(),
+                "pass".into(),
+            )
+            .unwrap(),
+            RateBudget::new(),
+            feed.clone(),
+        )
+        .unwrap();
+        let trade = TradeApi::new(client);
+        assert!(
+            trade
+                .order_by_client_id("BTC-USDT-SWAP", "foreign")
+                .await
+                .is_err()
+        );
+        assert_eq!(feed.unconsumed_reads(), 1);
+        let observed = trade
+            .order_by_client_id("BTC-USDT-SWAP", "original")
+            .await
+            .unwrap();
+        assert_eq!(observed.order_id, "123456");
+        assert_eq!(observed.client_order_id, "original");
+        assert_eq!(observed.state, "filled");
+        assert_eq!(feed.unconsumed_reads(), 0);
+        assert!(
+            trade
+                .order_by_client_id("BTC-USDT-SWAP", "original")
+                .await
+                .is_err()
+        );
+        assert!(feed.acknowledged_creates.lock().unwrap().is_empty());
+        assert!(feed.outbound_posts.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
