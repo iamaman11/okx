@@ -4,12 +4,10 @@
 // in this file. The child only emits receipts after its own assertions pass.
 import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
+import { execOwnedChild as exec, preserveTeardownFailure } from "./scenario-lifecycle.mjs";
 import { resolve } from "node:path";
 import { summarizeNativeWorkerdFailure } from "./native-failure.mjs";
 
-const exec = promisify(execFile);
 const hash = value => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 const memo = new Map();
 const cohortMetrics = new Map();
@@ -88,6 +86,7 @@ export async function actualNativeWorker(root, signal, { statusProbe = false, se
         windowsHide: true,
       },
     ).catch(error => {
+      preserveTeardownFailure(error);
       // The Rust child prints its exact failing assertion to stderr. The
       // integration runner retains only 200 chars of an error reason, so
       // forwarding "Command failed: node ..." discards the actual blocker.

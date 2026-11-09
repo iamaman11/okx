@@ -10,6 +10,7 @@ import { basename, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import os from "node:os";
 import { nativeCohortSnapshot } from "./trade-integration/native-workerd.mjs";
+import { runScenario } from "./trade-integration/scenario-lifecycle.mjs";
 
 const here = fileURLToPath(new URL(".", import.meta.url));
 const root = resolve(here, "..");
@@ -473,6 +474,7 @@ const scopedProbeKeys = Object.freeze([
 const initialProbes = new Map(scopedProbeKeys.map(k => [k, process.env[k]]));
 
 const started = Date.now();
+let teardownFailed = false;
 for (const caseId of cli.selected) {
   const script = resolve(root, "scripts", "trade-integration", "cases", caseId + ".mjs");
   const runStarted = Date.now();
@@ -481,23 +483,15 @@ for (const caseId of cli.selected) {
     if (!existsSync(script)) throw Error(failures.missing);
     const { run } = await import(pathToFileURL(script).href);
     if (typeof run !== "function") throw Error(failures.invalid);
-    const controller = new AbortController();
     // Managed close + native OS process and persisted DO restart are the
     // same bounded full financial replay, not a short isolated unit case.
     // 80 connected kills measured 274s; include the ninth phase and bounded startup margin.
     const deadline = caseId === "T10-11" ? 420_000 : ["T10-05", "T10-07", "T10-10", "T10-11", "T10-12"].includes(caseId) ? 300_000
       : ["T09.6", "T09.7", "T09.8"].includes(caseId) ? 260_000 : 120_000;
-    let timer;
-    try {
-      const output = await Promise.race([
-        run({ caseId, root, signal: controller.signal, artifactsDir: dir }),
-        new Promise((_, reject) => {
-          timer = setTimeout(() => {
-            controller.abort();
-            reject(Error(failures.timeout));
-          }, deadline);
-        }),
-      ]);
+    {
+      const output = await runScenario(signal =>
+        run({ caseId, root, signal, artifactsDir: dir }),
+      { deadline, timeoutCode: failures.timeout });
       const accepted = verified(output, caseId);
       status = "PASS";
       caseReadbacks.push({
@@ -509,10 +503,15 @@ for (const caseId of cli.selected) {
       });
       for (const a of accepted.assertions) assertions.push({ case_id: caseId, ...a });
       for (const e of accepted.events) events.push({ case_id: caseId, ...e });
-    } finally { clearTimeout(timer); }
+    }
   } catch (error) {
     reason = (error instanceof Error ? error.message : String(error)).slice(0, 200);
     events.push({ case_id: caseId, stage: "case_failed", owner: "integration_runner", reason });
+    if (error.teardownFailure) {
+      teardownFailed = true;
+      events.push({ case_id:caseId, stage:"teardown_failed", owner:"integration_runner",
+        reason:String(error.teardownReason ?? error.errors?.[1]?.message ?? "SCENARIO_TEARDOWN_FAILED") });
+    }
   } finally {
     for (const [key, original] of initialProbes) {
       if (original === undefined) delete process.env[key];
@@ -520,6 +519,7 @@ for (const caseId of cli.selected) {
     }
   }
   caseResults.push({ id: caseId, status, reason, elapsed_ms: Date.now() - runStarted });
+  if (teardownFailed) break; // Never start another case with unresolved owned resources.
 }
 const successful = caseResults.every(c => c.status === "PASS");
 const summary = {
