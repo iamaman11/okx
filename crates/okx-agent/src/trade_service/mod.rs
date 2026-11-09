@@ -35,6 +35,8 @@ mod recovery;
 mod strategies;
 mod submission;
 mod terminal_release;
+mod terminal_release_trace;
+pub(crate) use terminal_release_trace::TerminalReleaseTrace;
 mod unsent_release;
 pub(crate) use submission::post_once;
 

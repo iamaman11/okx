@@ -50,6 +50,16 @@ async fn operation_diagnostics(
             return Err("ACCOUNT_ROUTE_MISMATCH".into());
         }
     }
+    if let Some(intent) = reference.strip_prefix("terminal_release:") {
+        let state = account.terminal_release_trace.read(intent);
+        return Ok(json!({
+            "schema":"okx.operation-diagnostics/v1",
+            "account":account.configuration.account_key.wire(),
+            "reference":reference,"family":"terminal_release",
+            "state":state["state"],"operation":state,"quality":"partial",
+            "read_only":true,"central_budget":{"state":"NOT_EVALUATED","reason_code":"DIAGNOSTICS_ONLY"}
+        }));
+    }
     match account.protection_operation_trace.read(reference) {
         Ok(state) if state["state"] == "NOT_OBSERVED" => Ok(json!({
             "schema":"okx.operation-diagnostics/v1",

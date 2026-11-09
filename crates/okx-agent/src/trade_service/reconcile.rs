@@ -1236,9 +1236,11 @@ impl TradeService {
                 .release_terminal(r, &i, order.as_ref(), venue_flat_verified)
                 .await
             {
-                Ok(()) => json!({"state":"verified"}),
+                Ok(()) => json!({"state":"verified",
+                    "diagnostic_reference":super::TerminalReleaseTrace::reference(&i.intent_id)}),
                 Err(failure) => {
                     json!({"state":"pending","reason_code":failure.reason_code,"scope":"intent","next_action":"trade.status",
+                        "diagnostic_reference":super::TerminalReleaseTrace::reference(&i.intent_id),
                         "diagnostic":failure})
                 }
             }

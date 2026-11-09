@@ -100,6 +100,7 @@ pub struct AccountResources {
     pub source_capture_health: RwLock<SourceCaptureHealth>,
     pub(crate) finance_trace: Arc<crate::finance_trace::FinanceTrace>,
     pub(crate) protection_operation_trace: crate::diagnostics::ProtectionOperationTrace,
+    pub(crate) terminal_release_trace: crate::trade_service::TerminalReleaseTrace,
     next_finance_cycle: AtomicU64,
     /// Bounded account-local mutation capacity. Never held by reads/analytics.
     pub mutation_capacity: Semaphore,
@@ -613,6 +614,7 @@ impl AccountRuntimeRegistry {
             source_capture_health: RwLock::new(SourceCaptureHealth::default()),
             finance_trace: Arc::new(crate::finance_trace::FinanceTrace::default()),
             protection_operation_trace: crate::diagnostics::ProtectionOperationTrace::default(),
+            terminal_release_trace: crate::trade_service::TerminalReleaseTrace::default(),
             next_finance_cycle: AtomicU64::new(0),
             configuration,
             observer,
