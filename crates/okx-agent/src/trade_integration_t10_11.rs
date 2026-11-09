@@ -640,7 +640,10 @@ async fn native_crash_unsent_boundary() {
                 let input = T10_11PrepareInput {
                     decision: Decision {
                         decision_id: "decision_t11_f2".into(),
-                        instance_id: None,
+                        // Execute binds manual decisions to the same owner as
+                        // the plan. Source capture and pending-fill projection
+                        // must agree on that canonical financial owner in F6.
+                        instance_id: (phase == T10_11UnsentPhase::F6).then(|| "manual".into()),
                         decision_at: if phase == T10_11UnsentPhase::F1 {
                             now - 2
                         } else {
@@ -805,7 +808,7 @@ async fn native_crash_unsent_boundary() {
         reservation_key: key.clone(),
         account_key: owner.configuration.account_key.wire(),
         installation_id: "installation_test".into(),
-        instance_id: None,
+        instance_id: (phase == T10_11UnsentPhase::F6).then(|| "manual".into()),
         intent_id: saved.intent_id.clone(),
         plan_hash: saved.plan_hash.clone(),
         policy_revision: 2,
