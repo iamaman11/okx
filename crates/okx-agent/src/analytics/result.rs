@@ -6,7 +6,7 @@ use okx_research::ResearchArtifactStore;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
-fn read_verified_result<T: DeserializeOwned>(
+pub(super) fn read_verified_result<T: DeserializeOwned>(
     store: &ResearchArtifactStore,
     artifact: &str,
 ) -> Result<T, String> {

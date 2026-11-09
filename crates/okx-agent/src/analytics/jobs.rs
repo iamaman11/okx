@@ -57,6 +57,8 @@ pub struct Job {
     pub state: State,
     pub progress: u8,
     pub artifact: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision_artifact: Option<String>,
     pub error: Option<String>,
     pub created_ms: u64,
     pub pinned: bool,
@@ -84,7 +86,7 @@ impl Jobs {
         {
             return Err("RESEARCH_SQLITE_PATH_REQUIRED".into());
         }
-        let connection = Connection::open(path).map_err(|e| e.to_string())?;
+        let mut connection = Connection::open(path).map_err(|e| e.to_string())?;
         connection
             .execute_batch(
                 "PRAGMA journal_mode=WAL;
@@ -123,6 +125,29 @@ impl Jobs {
                     WHERE state IN('queued','running');",
             )
             .map_err(|e| e.to_string())?;
+        // Existing catalogs gain only a metadata reference; immutable result roots stay unchanged.
+        let migration = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|e| e.to_string())?;
+        let has_decision = migration
+            .prepare("PRAGMA table_info(research_jobs)")
+            .map_err(|e| e.to_string())?
+            .query_map([], |row| row.get::<_, String>(1))
+            .map_err(|e| e.to_string())?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|e| e.to_string())?
+            .iter()
+            .any(|column| column == "decision_artifact");
+        if !has_decision {
+            migration
+                .execute(
+                    "ALTER TABLE research_jobs ADD COLUMN decision_artifact TEXT",
+                    [],
+                )
+                .map_err(|e| e.to_string())?;
+        }
+        migration.execute("CREATE INDEX IF NOT EXISTS idx_research_jobs_decision_artifact ON research_jobs(decision_artifact) WHERE decision_artifact IS NOT NULL", []).map_err(|e| e.to_string())?;
+        migration.commit().map_err(|e| e.to_string())?;
         let diagnostic = Arc::new(job_diagnostics::Projection::default());
         diagnostic.restore(&connection);
         Ok(Self {
@@ -153,6 +178,7 @@ impl Jobs {
             state,
             progress: u8::try_from(progress).map_err(|_| rusqlite::Error::InvalidQuery)?,
             artifact,
+            decision_artifact: row.get(9)?,
             error: row.get(6)?,
             created_ms,
             pinned,
@@ -162,7 +188,7 @@ impl Jobs {
     fn read(connection: &Connection, id: &str) -> Result<Option<Job>, String> {
         let mut job = connection
             .query_row(
-                "SELECT id,request_hash,idempotency_key,state,progress,artifact,error,created_ms,pinned
+                "SELECT id,request_hash,idempotency_key,state,progress,artifact,error,created_ms,pinned,decision_artifact
                  FROM research_jobs WHERE id=?1",
                 [id],
                 Self::row,
@@ -263,6 +289,49 @@ impl Jobs {
     }
     /// Persisted per-catalog cursor authenticator. Distinct installations
     /// cannot replay each other's page selectors. Never exported or logged.
+    /// Commit a prepublished immutable reference in a short SQL transaction.
+    /// Artifact verification and file I/O happen before acquiring this owner.
+    pub(super) fn commit_decision(
+        &self,
+        id: &str,
+        result: &str,
+        observed_head: Option<&str>,
+        next: &str,
+    ) -> Result<(), String> {
+        let mut db = self.db.lock().map_err(|_| "CATALOG_LOCK_POISONED")?;
+        let tx = db
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|e| e.to_string())?;
+        let job = Self::read(&tx, id)?.ok_or("JOB_NOT_FOUND")?;
+        Self::require_decision_result(&job)?;
+        if job.artifact.as_deref() != Some(result) {
+            return Err("DECISION_RESULT_MISMATCH".into());
+        }
+        if job.decision_artifact.as_deref() != observed_head {
+            return Err("DECISION_REVISION_CONFLICT".into());
+        }
+        let changed = tx.execute(
+            "UPDATE research_jobs SET decision_artifact=?2 WHERE id=?1 AND artifact=?3 AND decision_artifact IS ?4 AND state='completed'",
+            params![id, next, result, observed_head],
+        ).map_err(|e| e.to_string())?;
+        if changed != 1 {
+            return Err("DECISION_REVISION_CONFLICT".into());
+        }
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(())
+    }
+    pub(super) fn require_decision_result(job: &Job) -> Result<(), String> {
+        let now = chrono::Utc::now().timestamp_millis().max(0) as u64;
+        if job.error.as_deref() == Some("RESULT_EXPIRED_BY_7_DAY_RETENTION")
+            || job.expires_at_ms.is_some_and(|expiry| expiry <= now)
+        {
+            return Err("RESULT_EXPIRED".into());
+        }
+        if job.state != State::Completed || job.artifact.is_none() {
+            return Err("RESULT_NOT_READY".into());
+        }
+        Ok(())
+    }
     pub fn cursor_signing_key(&self) -> Result<Vec<u8>, String> {
         let db = self.db.lock().map_err(|_| "CATALOG_LOCK_POISONED")?;
         db.query_row(
@@ -405,7 +474,7 @@ impl Jobs {
         let db = self.db.lock().map_err(|_| "CATALOG_LOCK_POISONED")?;
         let changed = db
             .execute(
-                "UPDATE research_jobs SET artifact=NULL,error='RESULT_EXPIRED_BY_7_DAY_RETENTION'
+                "UPDATE research_jobs SET artifact=NULL,decision_artifact=NULL,error='RESULT_EXPIRED_BY_7_DAY_RETENTION'
              WHERE id=?1 AND artifact=?2 AND pinned=0
              AND state NOT IN ('queued','running')",
                 params![id, artifact],
@@ -428,8 +497,10 @@ impl Jobs {
         let db = self.db.lock().map_err(|_| "CATALOG_LOCK_POISONED")?;
         let mut stmt = db
             .prepare(
-                "SELECT DISTINCT artifact FROM research_jobs
+                "SELECT artifact FROM research_jobs
              WHERE artifact IS NOT NULL AND (?1 IS NULL OR artifact>?1)
+             UNION SELECT decision_artifact AS artifact FROM research_jobs
+             WHERE decision_artifact IS NOT NULL AND (?1 IS NULL OR decision_artifact>?1)
              ORDER BY artifact LIMIT ?2",
             )
             .map_err(|e| e.to_string())?;
@@ -441,7 +512,7 @@ impl Jobs {
     pub fn artifact_reference_count(&self, artifact: &str) -> Result<u64, String> {
         let db = self.db.lock().map_err(|_| "CATALOG_LOCK_POISONED")?;
         db.query_row(
-            "SELECT COUNT(*) FROM research_jobs WHERE artifact=?1",
+            "SELECT COUNT(*) FROM research_jobs WHERE artifact=?1 OR decision_artifact=?1",
             [artifact],
             |row| row.get::<_, i64>(0),
         )
@@ -965,7 +1036,7 @@ mod tests {
         }
         let connection = s.db.lock().unwrap();
         let mut stmt = connection.prepare(
-            "EXPLAIN QUERY PLAN SELECT id,request_hash,idempotency_key,state,progress,artifact,error,created_ms,pinned
+            "EXPLAIN QUERY PLAN SELECT id,request_hash,idempotency_key,state,progress,artifact,error,created_ms,pinned,decision_artifact
              FROM research_jobs WHERE id=?1",
         ).unwrap();
         let plan = stmt

@@ -2,6 +2,7 @@ mod benchmark;
 mod budget;
 pub mod cache;
 mod cursor;
+mod decision;
 pub mod executor;
 pub mod jobs;
 mod market;
@@ -68,6 +69,15 @@ impl AnalyticsService {
             return Err("INVALID_RESEARCH_REQUEST".into());
         }
         match request {
+            request @ (ResearchRequest::RecordDecision { .. }
+            | ResearchRequest::Decision { .. }) => {
+                let service = self.clone();
+                self.cpu
+                    .run(Default::default(), move |_| {
+                        service.research_decision(request)
+                    })
+                    .await
+            }
             ResearchRequest::Capabilities {} => Ok(research_capabilities()),
             ResearchRequest::Validate {
                 data_mode,
@@ -528,7 +538,11 @@ impl AnalyticsService {
         }
         let expired_roots = expired
             .iter()
-            .filter_map(|j| j.artifact.clone())
+            .flat_map(|j| {
+                [j.artifact.clone(), j.decision_artifact.clone()]
+                    .into_iter()
+                    .flatten()
+            })
             .collect::<std::collections::BTreeSet<_>>();
         // The candidates alone define a bounded garbage set. Scan current
         // reference roots in small indexed pages; never materialize every job
@@ -546,7 +560,10 @@ impl AnalyticsService {
             for root in &roots {
                 let retiring_refs = expired
                     .iter()
-                    .filter(|job| job.artifact.as_deref() == Some(root))
+                    .filter(|job| {
+                        job.artifact.as_deref() == Some(root)
+                            || job.decision_artifact.as_deref() == Some(root)
+                    })
                     .count() as u64;
                 // The same content-addressed artifact can be owned by
                 // multiple jobs. Retiring one must not delete a live twin.
@@ -600,7 +617,12 @@ impl AnalyticsService {
                 }
             }
         }
-        for key in ["dataset_artifact", "result_artifact", "experiment_artifact"] {
+        for key in [
+            "dataset_artifact",
+            "result_artifact",
+            "experiment_artifact",
+            "previous_decision_artifact",
+        ] {
             if let Some(child) = value.get(key).and_then(Value::as_str) {
                 self.artifact_graph(child, seen)?;
             }
@@ -1713,6 +1735,7 @@ fn research_capabilities() -> Value {
         "limits":{"max_instruments":8,"max_bars_total":1000000,"max_grid_variants":64,"research_memory_total_mib":budget::MEMORY_TOTAL_MIB,"memory_admission":"conservative_pre_source_shared",
             "max_result_page_rows":50,"max_heavy_concurrent_jobs":2},
         "result_views":["summary","trades","variants","equity","export"],
+        "decisions":{"statuses":["accepted","rejected","deferred"],"single_experiment_only":true,"max_revisions":256,"max_annotation_json_bytes":6144,"trading_authority":false},
         "oos":{"grid_train_test_split":true,"selected_variant_from_train_only":true},
         "source_evidence":{"closed_candles_only":true,"no_forward_fill":true}
     })

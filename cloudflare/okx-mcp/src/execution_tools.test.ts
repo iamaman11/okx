@@ -2,7 +2,7 @@ import {ACTION_SCHEMAS,PUBLIC_TOOLS,validTool,matches} from './execution_tools.j
 const fail=(v:boolean,n:string)=>{if(!v)throw Error(n);};
 fail(validTool('diagnostics',{action:'explain',view:'research',reference:'a'.repeat(64)}),'research diagnostics uses existing strict tool');
 fail(!validTool('diagnostics',{action:'explain',view:'unknown',reference:'a'.repeat(64)}),'unknown diagnostic view is rejected');
-function sample(s:any):any{if('const'in s)return s.const;if(s.enum)return s.enum[0];if(s.oneOf)return sample(s.oneOf[0]);if(s.anyOf)return sample(s.anyOf[0]);if(s.type==='object')return Object.fromEntries(Object.entries(s.properties).filter(([k])=>s.required.includes(k)).map(([k,x])=>[k,sample(x)]));if(s.type==='array')return [sample(s.items)];if(s.type==='string')return (s.pattern && s.maxLength===29 && new RegExp(s.pattern).test('1'))?'1':(s.pattern?.includes('0-9]{1,9}')||s.pattern?.includes('\\d{1,9}'))?'1':s.minLength===8?'command_0001':'fixture';if(s.type==='integer'||s.type==='number')return s.minimum??1;if(s.type==='boolean')return true;return null;}
+function sample(s:any):any{if('const'in s)return s.const;if(s.enum)return s.enum[0];if(s.oneOf)return sample(s.oneOf[0]);if(s.anyOf)return sample(s.anyOf[0]);if(s.type==='object')return Object.fromEntries(Object.entries(s.properties).filter(([k])=>s.required.includes(k)).map(([k,x])=>[k,sample(x)]));if(s.type==='array')return [sample(s.items)];if(s.type==='string'&&s.pattern==='^sha256:[0-9a-f]{64}$')return 'sha256:'+'a'.repeat(64);if(s.type==='string'&&s.pattern==='^[0-9a-f]{64}$')return 'a'.repeat(64);if(s.type==='string')return (s.pattern && s.maxLength===29 && new RegExp(s.pattern).test('1'))?'1':(s.pattern?.includes('0-9]{1,9}')||s.pattern?.includes('\\d{1,9}'))?'1':s.minLength===8?'command_0001':'fixture';if(s.type==='integer'||s.type==='number')return s.minimum??1;if(s.type==='boolean')return true;return null;}
 export const payloadFixtures:{tool:string;action:string;positive:any;negative:any[]}[]=[];
 for(const [tool,schemas]of Object.entries(ACTION_SCHEMAS))for(const schema of schemas){const good=sample(schema);if('start_ms'in good)good.end_ms=good.start_ms+100000;if(tool==='market'&&good.action==='screen')good.instruments=['BTC-USDT-SWAP'];if(tool==='research'&&good.action==='backtest')good.parameters={fast:9,slow:21};if(tool==='portfolio'&&good.action==='scenario')good.correlations=[];if(tool==='trade'&&['execute','preview'].includes(good.action))good.protection={stop_distance_bps:50};if(tool==='diagnostics'&&good.action==='explain')good.reference='intent_fixture';if(good.order)good.order.type='fok';fail(validTool(tool,good),`positive ${tool}.${good.action}`);const badExtra={...good,raw_rpc:'forbidden'},badRequired={...good};delete badRequired.action;const badType={...good,action:12};for(const bad of [badExtra,badRequired,badType])fail(!validTool(tool,bad),`negative ${tool}.${good.action}`);payloadFixtures.push({tool,action:good.action,positive:good,negative:[badExtra,badRequired,badType]});}
 const screen=payloadFixtures.find(x=>x.tool==='market'&&x.action==='screen')!.positive;
@@ -85,3 +85,35 @@ for(const invalid of [
 const strategiesTool=PUBLIC_TOOLS.find((t:any)=>t.name==='strategies') as any;
 fail(!!strategiesTool?.inputSchema?.$defs?.positiveDecimal,'P0.2 shared public decimal schema missing');
 console.log('strategy_capital_schema_strict_and_tools_factored PASS');
+
+const decisionFixture=payloadFixtures.find(x=>x.tool==='research'&&x.action==='record_decision')!;
+const decision=decisionFixture.positive;
+for(const status of ['accepted','rejected','deferred'])fail(validTool('research',{...decision,status}),`research annotation ${status}`);
+for(const [field,max]of [['name',128],['hypothesis',4096],['reason',2048]]as const){
+ const negative=[{...decision,[field]:' '},{...decision,[field]:'x'.repeat(max+1)},{...decision,[field]:'я'.repeat(max)}];
+ for(const bad of negative)fail(!validTool('research',bad),`research annotation ${field} bounded`);
+ decisionFixture.negative.push(...negative);
+}
+for(const bad of [{...decision,status:'approved_to_trade'},{...decision,result_id:'a'.repeat(64)},{...decision,expected_decision_id:'wrong'},{...decision,account:'a'}]){
+ fail(!validTool('research',bad),'research annotations have strict metadata contract');decisionFixture.negative.push(bad);
+}
+
+for(const text of ['\0'.repeat(2000),'"'.repeat(4096),'\\'.repeat(4096)]){
+ const bad={...decision,hypothesis:text};fail(!validTool('research',bad),'serialized annotation tuple bounded');decisionFixture.negative.push(bad);
+}
+fail(validTool('research',{...decision,hypothesis:'я'.repeat(2048),reason:'r'.repeat(1900)}),'maximum UTF-8 annotation respects serialized budget');
+
+function resolvePublicSchema(node:any,defs:Record<string,any>):any{
+ if(Array.isArray(node))return node.map(x=>resolvePublicSchema(x,defs));
+ if(node&&typeof node==='object'){
+  if(node.$ref){const key=String(node.$ref).replace('#/$defs/','');if(!(key in defs))throw Error('unresolved schema ref');return resolvePublicSchema(defs[key],defs);}
+  return Object.fromEntries(Object.entries(node).filter(([key])=>key!=='$defs').map(([key,value])=>[key,resolvePublicSchema(value,defs)]));
+ }return node;
+}
+for(const tool of PUBLIC_TOOLS as any[]){
+ if(tool.name.startsWith('trade.'))continue;
+ const expanded=resolvePublicSchema(tool.inputSchema,tool.inputSchema.$defs??{});
+ fail(JSON.stringify(expanded)===JSON.stringify({oneOf:ACTION_SCHEMAS[tool.name]}),`exact public schema factoring ${tool.name}`);
+ for(const fixture of payloadFixtures.filter(x=>x.tool===tool.name))for(const input of [fixture.positive,...fixture.negative])
+  fail(matches(expanded,input)===matches({oneOf:ACTION_SCHEMAS[tool.name]},input),`factored positive/negative semantics ${tool.name}.${fixture.action}`);
+}
