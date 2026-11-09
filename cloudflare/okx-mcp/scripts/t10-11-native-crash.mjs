@@ -13,8 +13,18 @@ const exec=promisify(execFile);
 export function nativeCrashFailure(error){
   const rust_failures=summarizeRustPanics(error);
   const first=rust_failures.panics[0];
-  return {schema:"okx.t09-native-child-failure/v2",rust_failures,
-    rust_assertion:first?`${first.location}: ${first.reason}`:"T10_11_CHILD_EXIT_WITHOUT_RUST_ASSERTION"};
+  const code=String(error?.code??"UNKNOWN");
+  const exit_code=/^(?:-?\d{1,12}|ERR_ASSERTION|ENOENT|ETIMEDOUT)$/.test(code)?code:"UNKNOWN";
+  const windows_stack_overflow=code==="3221225725"||code==="-1073741571"
+    || /stack overflow|has overflowed its stack/i.test(String(error?.stderr??""));
+  const frame=String(error?.stack??"").match(/t10-11-native-crash\.mjs:(\d{1,5}):\d{1,5}/);
+  const node_assertion_line=code==="ERR_ASSERTION"&&frame?Number(frame[1]):null;
+  const reason=windows_stack_overflow?"NATIVE_STACK_OVERFLOW"
+    :node_assertion_line?`NATIVE_BOUNDARY_ASSERTION_LINE_${node_assertion_line}`
+    :`NATIVE_EXIT_CODE_${exit_code}`;
+  return {schema:"okx.t09-native-child-failure/v2",rust_failures,exit_code,
+    windows_stack_overflow,node_assertion_line,
+    rust_assertion:first?`${first.location}: ${first.reason}`:reason};
 }
 function failNative(error){
   process.stderr.write("T09_1_NATIVE_CHILD_FAILURE_V2:"+JSON.stringify(nativeCrashFailure(error))+"\n");

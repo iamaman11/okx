@@ -161,6 +161,18 @@ test("an early Native failure retains its first Rust boundary before Node wraps 
     "crates/okx-agent/src/trade_integration_t10_11.rs:70:4: F2_STORE_NOT_READY");
   assert.equal(failure.rust_failures.count,1);
 });
+
+test("non-panic process and Node assertion failures retain a bounded cause",()=>{
+  const stack=nativeCrashFailure({code:3221225725,stderr:"process exited with stack overflow"});
+  assert.equal(stack.windows_stack_overflow,true);
+  assert.equal(stack.exit_code,"3221225725");
+  assert.equal(stack.rust_assertion,"NATIVE_STACK_OVERFLOW");
+  const node=nativeCrashFailure({code:"ERR_ASSERTION",stack:"at validate (file:///private/t10-11-native-crash.mjs:99:3)"});
+  assert.equal(node.node_assertion_line,99);
+  assert.equal(node.rust_assertion,"NATIVE_BOUNDARY_ASSERTION_LINE_99");
+  assert.equal(nativeCrashFailure({code:101}).rust_assertion,"NATIVE_EXIT_CODE_101");
+  assert.ok(!JSON.stringify(nativeCrashFailure({code:"secret-value",stderr:"token=private"})).includes("private"));
+});
 test("intentional kill after the committed boundary is not reported as early failure",async()=>{
   let killed;const processExit=new Promise((_,reject)=>{killed=reject;});
   let reports=0;
