@@ -650,3 +650,22 @@ owner rejection and no POST. It waits for the existing SQL termination signal,
 not an arbitrary delay. The second command remains a partial/FAIL acceptance
 until every required F0–F8 boundary is proved ten times. A subsequent docs-only
 commit does not represent a new tested runtime SHA.
+
+### Recorded cancel ACK and current financial frontier
+
+Run these short boundary tests before the full T09.6–.8 campaign:
+
+```text
+cargo test --locked -p okx-agent --lib causal_phase_transition_tests -- --nocapture
+cargo test --locked -p okx-agent --lib campaign_readiness_requires_capture_of_new_source_frontier -- --nocapture
+```
+
+The cancel observer binds account, target and inventory arm; an older cancel's
+ACK never authorizes its readback. Waiting for the exact ACK makes no request
+and uses the original deadline. The finance test invokes real capture and SQL
+owners: an uncovered frontier remains blocked until the raw source is captured.
+Readiness diagnostics distinguish the saved cutoff from the requested cutoff
+and expose bounded cursor lag/gap state. T09.8 publishes its existing twelve
+balance replies before waiting for readiness; its fee and public-time sources
+remain at the later pre-Execute boundary. No read budget, TTL or money assertion
+is relaxed. These direct tests do not replace full acceptance on one commit.

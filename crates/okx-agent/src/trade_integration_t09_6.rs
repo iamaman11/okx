@@ -523,11 +523,13 @@ async fn t09_6_status_after_local_read_defer(
     rate_budget: &RateBudget,
     feed: &Arc<crate::accounts::recorded_support::RecordedAccountHttp>,
     intent: &str,
-    allowed_new_cancel_posts: usize,
+    expected_cancel_id: Option<&str>,
     phase: &str,
 ) -> serde_json::Value {
     use okx_protocol::trading::TradeRequest;
-    assert!(allowed_new_cancel_posts <= 1, "one protective cancel per Status");
+    let allowed_new_cancel_posts = usize::from(expected_cancel_id.is_some());
+    let cancel_frontier = expected_cancel_id
+        .map(|cancel_id| feed.causal_cancel_frontier("fixture-observer-a", cancel_id));
     if allowed_new_cancel_posts == 1 {
         // The first signed cancel inventory is armed BEFORE terminal-flat
         // capture. Its initial finite public clock page can legitimately be
@@ -643,22 +645,13 @@ async fn t09_6_status_after_local_read_defer(
             && allowed_new_cancel_posts == 1
             && !after_ack_readback_used
         {
-            // Only this independently witnessed transition authorizes ONE new
-            // read-only Status. No sleep, new fixture page, operation key or
-            // second potentially accepted cancel POST.
-            // The status caller may enter after a concurrent production
-            // Status has already sent the one permitted cancellation. The
-            // absolute signed POST/ACK belongs to the armed algo, not to
-            // this caller's relative send counter.
-            let trace = feed.causal_algo_trace.lock().unwrap().clone();
-            let arm = trace
-                .iter()
-                .rposition(|event| event.contains("event=INVENTORY_ARMED"))
-                .expect("T09.6 current inventory source was never armed");
-            let ack = trace
-                .iter()
-                .rposition(|event| event.contains("event=CANCEL_ACK"))
-                .unwrap_or_else(|| {
+            // A concurrent production Status may still be sending this exact
+            // cancel. Wait only for its validated signed ACK, within the same
+            // deadline, without invoking Status or changing any raw source.
+            // The previous operation's ACK cannot authorize this readback.
+            let frontier = cancel_frontier.as_ref().expect("T09.6 own cancel source");
+            let ack = feed.wait_for_causal_cancel_ack(frontier, until).await
+                .unwrap_or_else(|reason| {
                     // Failed-boundary evidence only. Never send, retry or
                     // generate an OKX response from this diagnostic.
                     let posts = feed.outbound_posts.lock().unwrap().iter()
@@ -667,17 +660,17 @@ async fn t09_6_status_after_local_read_defer(
                         .collect::<Vec<_>>();
                     let denied = feed.denied_routes.lock().unwrap().iter()
                         .rev().take(8).cloned().collect::<Vec<_>>();
+                    let trace = feed.causal_algo_trace.lock().unwrap().clone();
                     panic!(
-                        "T09_6_CANCEL_ACK_UNOBSERVED:phase={phase}:intent={intent}:posts={posts:?}:trace={trace:?}:denied={denied:?}:unconsumed_posts={}",
+                        "T09_6_CANCEL_ACK_UNOBSERVED:phase={phase}:intent={intent}:target={}:reason={reason}:posts={posts:?}:trace={trace:?}:denied={denied:?}:unconsumed_posts={}",
+                        frontier.cancel_id,
                         feed.unconsumed_posts(),
                     )
                 });
+            let trace = feed.causal_algo_trace.lock().unwrap().clone();
+            let arm = frontier.arm_event;
+            let armed_id = frontier.cancel_id.as_str();
             assert!(ack > arm, "T09.6 ACK precedes its own inventory source");
-            let armed_id = trace[arm]
-                .split(" cancel_id=")
-                .nth(1)
-                .and_then(|id| id.split_whitespace().next())
-                .expect("T09.6 armed inventory must bind a venue algo");
             assert!(
                 trace[ack].contains(&format!(" cancel_id={armed_id} ")),
                 "T09.6 ACK must belong to this exact protection, not an older or foreign cancel"
@@ -699,7 +692,8 @@ async fn t09_6_status_after_local_read_defer(
                 trace[arm..ack]
                     .iter()
                     .any(|event| event.contains("event=GET_STARTED")
-                        && event.contains("stage=BEFORE_ACK")),
+                        && event.contains("stage=BEFORE_ACK")
+                        && event.split_whitespace().any(|field| field == format!("actor={}",frontier.account))),
                 "T09.6 pending outcome lacks a pre-ACK source witness"
             );
             eprintln!(
@@ -726,17 +720,12 @@ async fn t09_6_status_after_local_read_defer(
             // this helper entered. Count the actual target-specific venue
             // sends across the whole recorded phase, never assume the send
             // occurred after this caller sampled its before counter.
-            let trace = feed.causal_algo_trace.lock().unwrap().clone();
-            let arm = trace.iter().rposition(|event| event.contains("event=INVENTORY_ARMED"))
-                .expect("T09.6 verified cleanup lacks its source arm");
-            let armed_id = trace[arm].split(" cancel_id=").nth(1)
-                .and_then(|id| id.split_whitespace().next())
-                .expect("T09.6 arm lacks target algo ID");
+            let frontier = cancel_frontier.as_ref().expect("T09.6 own verified cancel source");
+            let armed_id = frontier.cancel_id.as_str();
             assert!(
-                trace[arm + 1..].iter().any(|event| {
-                    event.contains("event=CANCEL_ACK")
-                        && event.contains(&format!(" cancel_id={armed_id} "))
-                }),
+                feed.causal_cancel_ack(frontier)
+                    .expect("T09.6 verified cleanup source must remain the same phase")
+                    .is_some(),
                 "T09.6 verified cleanup requires the own signed cancel ACK"
             );
             let count = feed.outbound_posts.lock().unwrap().iter()
@@ -778,7 +767,7 @@ async fn t09_6_source_backed_close_release(
         let intent=close["close_intent_id"].as_str()
             .expect("T09.6 real close intent");
         let status=t09_6_status_after_local_read_defer(
-            trade,rate_budget,feed,intent,0,"CLOSE_TERMINAL_STATUS"
+            trade,rate_budget,feed,intent,None,"CLOSE_TERMINAL_STATUS"
         ).await;
         assert_eq!(status["data"]["intent"]["state"],"FILLED",
             "T09.6 close must be terminal from signed venue GET");
@@ -816,7 +805,7 @@ async fn t09_6_source_backed_close_release(
             );
         }
         let status=t09_6_status_after_local_read_defer(
-            trade,rate_budget,feed,intent,1,"ENTRY_CANCEL_STOP_STATUS"
+            trade,rate_budget,feed,intent,Some(cancel_algo),"ENTRY_CANCEL_STOP_STATUS"
         ).await;
         assert_eq!(status["data"]["intent"]["state"],"FILLED",
             "T09.6 original entry must remain FILLED after close");
@@ -852,7 +841,7 @@ async fn t09_6_source_backed_close_release(
     for (index, entry) in entry_results.iter_mut().enumerate() {
         let intent=entry["intent_id"].as_str().expect("T09.6 persisted entry id");
         let status=t09_6_status_after_local_read_defer(
-            trade,rate_budget,feed,intent,0,"POST_CANCEL_RELEASE_STATUS"
+            trade,rate_budget,feed,intent,None,"POST_CANCEL_RELEASE_STATUS"
         ).await;
         assert_eq!(status["data"]["intent"]["state"],"FILLED",
             "T09.6 the original order remains terminal after both stop cancels");
@@ -943,7 +932,7 @@ async fn t09_6_source_backed_close_release(
         let entry=&mut entry_results[index];
         let intent=entry["intent_id"].as_str().expect("T09.6 pending persisted entry");
         let status=t09_6_status_after_local_read_defer(
-            trade,rate_budget,feed,intent,0,"POST_PEER_RELEASE_STATUS"
+            trade,rate_budget,feed,intent,None,"POST_PEER_RELEASE_STATUS"
         ).await;
         // On a failed terminal peer RELEASE, retain exact *read-only* raw
         // source accounting in the assertion itself. The parent harness
@@ -1225,6 +1214,31 @@ async fn t09_8_excess_entry_denied(
     assert_eq!(available.normalize().to_string(),"3.997");
     let before_posts=feed.outbound_posts.lock().unwrap().len();
     assert_eq!(before_posts,9,"T09.8 starts strictly after two flat closes and cancels");
+    // Publish this scenario's existing account observation BEFORE waiting
+    // for production capture/readiness. Waiting first creates a dependency
+    // cycle if the preceding phase has consumed its finite balance source.
+    // This is the same twelve replies, not an increased read budget.
+    let balance_at=chrono::Utc::now().timestamp_millis().to_string();
+    let balance=serde_json::to_vec(&serde_json::json!({
+        "code":"0","msg":"","data":[{
+            "totalEq":"99.994","adjEq":"99.994","uTime":balance_at.clone(),
+            "details":[{
+                "ccy":"USDT","eq":"99.994","liab":"0",
+                "availEq":"99.994","availBal":"99.994","eqUsd":"99.994",
+                "uTime":balance_at
+            }]
+        }]
+    })).expect("T09.8 recorded balance envelope");
+    let retired=feed.advance_recorded_route(
+        "fixture-observer-a","/api/v5/account/balance",
+        (0..12).map(|_|RecordedGet {
+            access_key:"fixture-observer-a".into(),
+            path:"/api/v5/account/balance".into(),
+            required_query:vec![],
+            raw_response:balance.clone(),
+        }).collect()
+    );
+    eprintln!("T09_8_BALANCE_FRONTIER_V1 retired={retired} new_pages=12 equity=99.994");
     // T09.6 has just added real source-backed fills, bills and terminal
     // settlement receipts to the existing Native SQL owners. The original
     // production maintenance loop must review that changed campaign epoch
@@ -1272,12 +1286,17 @@ async fn t09_8_excess_entry_denied(
         for alias in ["fixture-a","fixture-b"] {
             let owner=accounts.resolve(alias).await
                 .expect("T09.8 diagnostic account owner");
+            let health=owner.source_capture_health.read().await;
+            let capture=format!("capture_reason={:?},success_age_ms={:?}",
+                health.reason_code,
+                health.last_success_ms.map(|at|chrono::Utc::now().timestamp_millis().saturating_sub(at)));
+            drop(health);
             let id=campaign.clone();
             let source=owner.execution.store.call(
                 std::time::Instant::now()+Duration::from_secs(2),
                 move |s|s.campaign_readiness_diagnostic(&id,from,through)
             ).await;
-            diagnostics.push(format!("{alias}:{source:?}"));
+            diagnostics.push(format!("{alias}:{capture}:{source:?}"));
         }
         panic!(
             "T09_8_SOURCE_READINESS_NOT_RECONCILED:{last_readiness}:{}",
@@ -1291,29 +1310,6 @@ async fn t09_8_excess_entry_denied(
     let raw=|v|serde_json::to_vec(&serde_json::json!({
         "code":"0","msg":"","data":v
     })).expect("T09.8 recorded signed HTTP envelope");
-    // T09.8 is a separate pre-Execute signed account observation AFTER
-    // verified terminal sources. The earlier T09.6 balance pages may have
-    // been consumed by independent SQL maintenance; neither stale bytes nor
-    // an unbounded default may authorize new risk. Equity is unchanged:
-    // opening 100 minus the seven independently proven fees = 99.994.
-    let balance=raw(serde_json::json!([{
-        "totalEq":"99.994","adjEq":"99.994","uTime":at.clone(),
-        "details":[{
-            "ccy":"USDT","eq":"99.994","liab":"0",
-            "availEq":"99.994","availBal":"99.994","eqUsd":"99.994",
-            "uTime":at.clone()
-        }]
-    }]));
-    let retired=feed.advance_recorded_route(
-        "fixture-observer-a","/api/v5/account/balance",
-        (0..12).map(|_|RecordedGet {
-            access_key:"fixture-observer-a".into(),
-            path:"/api/v5/account/balance".into(),
-            required_query:vec![],
-            raw_response:balance.clone(),
-        }).collect()
-    );
-    eprintln!("T09_8_BALANCE_FRONTIER_V1 retired={retired} new_pages=12 equity=99.994");
     feed.advance_recorded_route(
         "fixture-observer-a","/api/v5/account/trade-fee",
         (0..12).map(|_|RecordedGet {

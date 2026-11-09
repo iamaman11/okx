@@ -451,7 +451,7 @@ async fn t10_08_recover_signed_flat_after_late_fill(
     let close_id=close["close_intent_id"].as_str()
         .expect("T10-08 durable public Close owner").to_owned();
     let close_status=t09_6_status_after_local_read_defer(
-        &trade,&rate_budget,&feed,&close_id,0,"T10_08_CLOSE_TERMINAL"
+        &trade,&rate_budget,&feed,&close_id,None,"T10_08_CLOSE_TERMINAL"
     ).await;
     let until=std::time::Instant::now()+Duration::from_secs(20);
     let mut last=serde_json::Value::Null;
@@ -459,7 +459,7 @@ async fn t10_08_recover_signed_flat_after_late_fill(
     while std::time::Instant::now()<until && attempts<8 {
         attempts+=1;
         let status=t09_6_status_after_local_read_defer(
-            &trade,&rate_budget,&feed,&original_intent,0,"T10_08_ORIGINAL_FLAT"
+            &trade,&rate_budget,&feed,&original_intent,None,"T10_08_ORIGINAL_FLAT"
         ).await;
         let complete=status["data"]["central_release"]["state"]=="verified"
             && status["data"]["protection_incident"]==false

@@ -1410,6 +1410,7 @@ pub(crate) mod recorded_support {
     struct CausalAlgoScenario {
         account: String,
         cancel_id: String,
+        arm_event: usize,
         acked: bool,
         scopes: Vec<CausalAlgoScope>,
         held_read: Option<CausalAlgoReadGate>,
@@ -1417,6 +1418,15 @@ pub(crate) mod recorded_support {
         // cancellation. Taking the one-shot gate must not mark it completed.
         inflight_held_reads: usize,
         source_received_at_ms: i64,
+    }
+
+    // A caller binds its readback to one already armed signed source. An ACK
+    // from the previous cancel is not evidence for this source transition.
+    #[derive(Debug)]
+    pub(crate) struct RecordedCancelFrontier {
+        pub(crate) account: String,
+        pub(crate) cancel_id: String,
+        pub(crate) arm_event: usize,
     }
 
     // The two signed API identities are different actors of the same verified
@@ -1497,6 +1507,7 @@ pub(crate) mod recorded_support {
         public_clock_deliveries: AtomicU64,
         strict_read_routes: Mutex<std::collections::BTreeSet<(String, String)>>,
         causal_algos: Mutex<Option<CausalAlgoScenario>>,
+        causal_cancel_ack_changed: tokio::sync::Notify,
         static_algos: Mutex<Option<StaticAlgoInventory>>,
         pub(crate) causal_algo_trace: Mutex<Vec<String>>,
     }
@@ -1518,6 +1529,84 @@ pub(crate) mod recorded_support {
         }
     }
     impl RecordedAccountHttp {
+        pub(crate) fn causal_cancel_frontier(
+            &self,
+            account: &str,
+            cancel_id: &str,
+        ) -> RecordedCancelFrontier {
+            let phase = self.causal_algos.lock().unwrap();
+            let phase = phase.as_ref().expect("TRANSCRIPT_CANCEL_SOURCE_NOT_ARMED");
+            assert_eq!(phase.account, account, "TRANSCRIPT_CANCEL_SOURCE_ACCOUNT");
+            assert_eq!(
+                phase.cancel_id, cancel_id,
+                "TRANSCRIPT_CANCEL_SOURCE_TARGET"
+            );
+            RecordedCancelFrontier {
+                account: account.into(),
+                cancel_id: cancel_id.into(),
+                arm_event: phase.arm_event,
+            }
+        }
+
+        pub(crate) fn causal_cancel_ack(
+            &self,
+            frontier: &RecordedCancelFrontier,
+        ) -> Result<Option<usize>, &'static str> {
+            let phase = self.causal_algos.lock().unwrap();
+            let phase = phase.as_ref().ok_or("TRANSCRIPT_CANCEL_SOURCE_RETIRED")?;
+            if phase.account != frontier.account
+                || phase.cancel_id != frontier.cancel_id
+                || phase.arm_event != frontier.arm_event
+            {
+                return Err("TRANSCRIPT_CANCEL_SOURCE_REPLACED");
+            }
+            if !phase.acked {
+                return Ok(None);
+            }
+            let uid = verified_fixture_uid(&frontier.account)
+                .ok_or("TRANSCRIPT_CANCEL_SOURCE_UID_UNKNOWN")?;
+            let trace = self.causal_algo_trace.lock().unwrap();
+            let ack = trace
+                .iter()
+                .enumerate()
+                .skip(frontier.arm_event + 1)
+                .find_map(|(index, event)| {
+                    let matches = event
+                        .split_whitespace()
+                        .any(|field| field == "event=CANCEL_ACK")
+                        && event
+                            .split_whitespace()
+                            .any(|field| field == format!("uid={uid}"))
+                        && event
+                            .split_whitespace()
+                            .any(|field| field == format!("cancel_id={}", frontier.cancel_id));
+                    matches.then_some(index)
+                });
+            ack.map(Some).ok_or("TRANSCRIPT_CANCEL_ACK_EVENT_MISSING")
+        }
+
+        /// Observe the real signed POST ACK without making a request, advancing
+        /// a source, or granting a readback on the strength of an older ACK.
+        pub(crate) async fn wait_for_causal_cancel_ack(
+            &self,
+            frontier: &RecordedCancelFrontier,
+            until: Instant,
+        ) -> Result<usize, &'static str> {
+            loop {
+                let changed = self.causal_cancel_ack_changed.notified();
+                tokio::pin!(changed);
+                // Register before inspecting the frontier, so an ACK committed
+                // between inspection and await cannot be lost.
+                changed.as_mut().enable();
+                if let Some(ack) = self.causal_cancel_ack(frontier)? {
+                    return Ok(ack);
+                }
+                tokio::time::timeout_at(until.into(), changed)
+                    .await
+                    .map_err(|_| "TRANSCRIPT_CANCEL_ACK_DEADLINE")?;
+            }
+        }
+
         pub(crate) fn balance_read_probe(&self) -> serde_json::Value {
             let events = self.signed_balance_reads.lock().unwrap();
             let mut by_task = std::collections::BTreeMap::<String, usize>::new();
@@ -2232,16 +2321,18 @@ pub(crate) mod recorded_support {
                 .lock()
                 .unwrap()
                 .retain(|page| page.access_key != account || page.path != path);
+            let mut trace = self.causal_algo_trace.lock().unwrap();
             *phase = Some(CausalAlgoScenario {
                 account: account.into(),
                 cancel_id: cancel_id.into(),
+                arm_event: trace.len(),
                 acked: false,
                 scopes,
                 held_read: None,
                 inflight_held_reads: 0,
                 source_received_at_ms: chrono::Utc::now().timestamp_millis(),
             });
-            self.causal_algo_trace.lock().unwrap().push(format!(
+            trace.push(format!(
                 "event=INVENTORY_ARMED uid=account-001 actor={account} cancel_id={cancel_id} scopes=16"
             ));
         }
@@ -2489,6 +2580,7 @@ pub(crate) mod recorded_support {
             *feed.causal_algos.lock().unwrap() = Some(CausalAlgoScenario {
                 account: "fixture-observer-a".into(),
                 cancel_id: "recorded-stop-cancel-001".into(),
+                arm_event: 0,
                 acked,
                 scopes: vec![],
                 held_read: None,
@@ -2571,6 +2663,10 @@ pub(crate) mod recorded_support {
         }
 
         fn causal_fixture(feed: &RecordedAccountHttp) {
+            causal_fixture_for(feed, "900000002");
+        }
+
+        fn causal_fixture_for(feed: &RecordedAccountHttp, cancel_id: &str) {
             let mut before = Vec::new();
             let mut after = Vec::new();
             for inst in ["SWAP", "FUTURES"] {
@@ -2590,7 +2686,11 @@ pub(crate) mod recorded_support {
                         serde_json::json!([])
                     };
                     let remaining = if inst == "SWAP" && kind == "conditional" {
-                        serde_json::json!([{"algoId": "900000003"}])
+                        serde_json::json!([{"algoId": if cancel_id == "900000002" {
+                            "900000003"
+                        } else {
+                            "900000002"
+                        }}])
                     } else {
                         serde_json::json!([])
                     };
@@ -2608,15 +2708,15 @@ pub(crate) mod recorded_support {
                     });
                 }
             }
-            feed.expect_causal_algo_inventory("900000002", before, after);
+            feed.expect_causal_algo_inventory(cancel_id, before, after);
             feed.expect_post(RecordedPost {
                 access_key: "fixture-executor-a".into(),
                 path: "/api/v5/trade/cancel-algos".into(),
                 expected_body: serde_json::json!([{
-                    "instId": "BTC-USDT-SWAP", "algoId": "900000002"
+                    "instId": "BTC-USDT-SWAP", "algoId": cancel_id
                 }]),
                 raw_response: recorded_envelope(serde_json::json!([{
-                    "algoId": "900000002", "sCode": "0"
+                    "algoId": cancel_id, "sCode": "0"
                 }])),
             });
         }
@@ -2632,16 +2732,133 @@ pub(crate) mod recorded_support {
         }
 
         fn signed_cancel_request() -> HttpRequest {
+            signed_cancel_request_for("900000002")
+        }
+
+        fn signed_cancel_request_for(cancel_id: &str) -> HttpRequest {
             reqwest::Client::new()
                 .post("https://www.okx.com/api/v5/trade/cancel-algos")
                 .header("OK-ACCESS-KEY", "fixture-executor-a")
-                .body(r#"[{"instId":"BTC-USDT-SWAP","algoId":"900000002"}]"#)
+                .json(&serde_json::json!([{
+                    "instId": "BTC-USDT-SWAP", "algoId": cancel_id
+                }]))
                 .build()
                 .unwrap()
         }
 
         fn raw_items(response: RawHttpResponse) -> serde_json::Value {
             serde_json::from_slice::<serde_json::Value>(&response.body).unwrap()["data"].clone()
+        }
+
+        #[tokio::test]
+        async fn current_cancel_ack_frontier_waits_past_previous_phase_ack() {
+            let feed = RecordedAccountHttp::default();
+            let deadline = || Instant::now() + std::time::Duration::from_secs(3);
+            // A real prior signed ACK is retained in the transport history.
+            causal_fixture_for(&feed, "900000003");
+            feed.send(signed_cancel_request_for("900000003"), deadline())
+                .await
+                .unwrap();
+            feed.retire_acked_causal_algo_inventory("fixture-observer-a");
+            causal_fixture(&feed);
+            let frontier = feed.causal_cancel_frontier("fixture-observer-a", "900000002");
+            feed.send(
+                signed_inventory_request("fixture-observer-a", "conditional"),
+                deadline(),
+            )
+            .await
+            .unwrap();
+            {
+                let trace = feed.causal_algo_trace.lock().unwrap();
+                let old_ack = trace
+                    .iter()
+                    .rposition(|event| event.contains("event=CANCEL_ACK"))
+                    .unwrap();
+                assert!(
+                    old_ack < frontier.arm_event,
+                    "this exact history makes the old global last-ACK assertion fail"
+                );
+            }
+            let reads_before = feed.requests.lock().unwrap().len();
+            let posts_before = feed.outbound_posts.lock().unwrap().len();
+            let mut waiting = Box::pin(feed.wait_for_causal_cancel_ack(&frontier, deadline()));
+            assert!(
+                std::future::poll_fn(|cx| {
+                    std::task::Poll::Ready(
+                        std::future::Future::poll(waiting.as_mut(), cx).is_pending(),
+                    )
+                })
+                .await,
+                "the previous cancel ACK cannot grant a current readback"
+            );
+            assert_eq!(feed.causal_cancel_ack(&frontier), Ok(None));
+            assert_eq!(
+                feed.wait_for_causal_cancel_ack(&frontier, Instant::now())
+                    .await,
+                Err("TRANSCRIPT_CANCEL_ACK_DEADLINE"),
+                "waiting shares the caller's deadline, without additional attempts"
+            );
+            assert_eq!(feed.requests.lock().unwrap().len(), reads_before);
+            assert_eq!(feed.outbound_posts.lock().unwrap().len(), posts_before);
+
+            feed.send(signed_cancel_request(), deadline())
+                .await
+                .unwrap();
+            let ack = waiting
+                .await
+                .expect("the exact current signed ACK wakes its observer");
+            assert!(ack > frontier.arm_event);
+            assert_eq!(feed.causal_cancel_ack(&frontier), Ok(Some(ack)));
+            let post_ack = feed
+                .send(
+                    signed_inventory_request("fixture-observer-a", "conditional"),
+                    deadline(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                raw_items(post_ack),
+                serde_json::json!([{"algoId":"900000003"}])
+            );
+            assert_eq!(
+                feed.requests.lock().unwrap().len(),
+                reads_before + 1,
+                "only the explicit post-ACK read adds a GET"
+            );
+            let own_posts = feed
+                .outbound_posts
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(actor, route, body)| {
+                    actor == "fixture-executor-a"
+                        && route == "/api/v5/trade/cancel-algos"
+                        && body[0]["algoId"] == "900000002"
+                })
+                .count();
+            assert_eq!(own_posts, 1);
+        }
+
+        #[tokio::test]
+        async fn cancel_ack_frontier_rejects_rearmed_same_target_phase() {
+            let feed = RecordedAccountHttp::default();
+            causal_fixture(&feed);
+            let previous = feed.causal_cancel_frontier("fixture-observer-a", "900000002");
+            feed.send(
+                signed_cancel_request(),
+                Instant::now() + std::time::Duration::from_secs(3),
+            )
+            .await
+            .unwrap();
+            feed.retire_acked_causal_algo_inventory("fixture-observer-a");
+            causal_fixture(&feed);
+            assert_eq!(
+                feed.causal_cancel_ack(&previous),
+                Err("TRANSCRIPT_CANCEL_SOURCE_REPLACED")
+            );
+            let current = feed.causal_cancel_frontier("fixture-observer-a", "900000002");
+            assert_ne!(previous.arm_event, current.arm_event);
+            assert_eq!(feed.causal_cancel_ack(&current), Ok(None));
         }
 
         #[tokio::test]
@@ -3827,6 +4044,7 @@ pub(crate) mod recorded_support {
                                 "event=CANCEL_ACK uid=account-001 actor={key} route={path} cancel_id={observed_id} at_ms={}",
                                 chrono::Utc::now().timestamp_millis()
                             ));
+                            self.causal_cancel_ack_changed.notify_waiters();
                         }
                     }
                     if path == "/api/v5/trade/cancel-order" {
@@ -6270,6 +6488,164 @@ mod tests {
             .await
             .expect("SQL owner did not terminate");
         }
+        std::fs::remove_dir_all(temp).unwrap();
+    }
+
+    /// Source publication precedes the real capture owner, which precedes
+    /// readiness. This is a boundary regression, not a claim that the long
+    /// T09.8 run exhausted this particular source.
+    #[tokio::test]
+    async fn campaign_readiness_requires_capture_of_new_source_frontier() {
+        use super::recorded_support::{
+            RecordedAccountHttp, RecordedGet, RecordedWsConnector, prepared_with_socket,
+        };
+        let temp = root();
+        initialize_installation(&temp, "installation-test").unwrap();
+        let budget = RateBudget::new();
+        let registry = AccountRuntimeRegistry::open(&temp, budget.clone())
+            .await
+            .unwrap();
+        let http = Arc::new(RecordedAccountHttp::default());
+        let (config, clients) = prepared_with_socket(
+            "a",
+            http.clone(),
+            Arc::new(RecordedWsConnector::default()),
+            budget,
+        );
+        registry.connect_prepared(config, clients).await.unwrap();
+        let account = registry.resolve("fixture-a").await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(12), async {
+            loop {
+                if account
+                    .source_capture_health
+                    .read()
+                    .await
+                    .last_success_ms
+                    .is_some()
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("initial production capture");
+        // Pause only the timer so this test can invoke the SAME capture
+        // function at the source boundary; SQL and capture ownership stay real.
+        let timer_lease = account.recorded_capture_gate.write().await;
+        let campaign = format!("sha256:{}", "c".repeat(64));
+        let id = campaign.clone();
+        let (from, covered) = account
+            .execution
+            .store
+            .call(
+                Instant::now() + std::time::Duration::from_secs(3),
+                move |s| {
+                    let from = s.meta().initialized_at;
+                    let mut covered = i64::MAX;
+                    for (name, partition) in [
+                        ("fills", "SPOT"),
+                        ("fills", "MARGIN"),
+                        ("fills", "SWAP"),
+                        ("fills", "FUTURES"),
+                        ("fills", "OPTION"),
+                        ("bills", "account"),
+                    ] {
+                        covered = covered.min(s.cursor(name, partition)?.unwrap().watermark);
+                    }
+                    s.seal_captured_campaign_baseline(&id, from, covered)?;
+                    Ok((from, covered))
+                },
+            )
+            .await
+            .unwrap();
+        let through = covered + 1;
+        let id = campaign.clone();
+        let diagnostic = account
+            .execution
+            .store
+            .call(
+                Instant::now() + std::time::Duration::from_secs(3),
+                move |s| {
+                    assert!(matches!(
+                        s.refresh_campaign_entry_readiness(&id, from, through),
+                        Err(okx_execution::StoreError::Invalid(
+                            "ENTRY_BASELINE_CAPTURE_PENDING"
+                        ))
+                    ));
+                    s.campaign_readiness_diagnostic(&id, from, through)
+                },
+            )
+            .await
+            .unwrap();
+        assert!(diagnostic.contains("requested_frontiers=ENTRY_BASELINE_CAPTURE_PENDING"));
+        assert!(diagnostic.contains("frontiers=COMPLETE"));
+        assert!(diagnostic.contains("fills/SWAP:lag_ms=1"));
+        let wrap = |data| {
+            serde_json::to_vec(&serde_json::json!({
+                "code":"0", "msg":"", "data":data,
+            }))
+            .unwrap()
+        };
+        // One finite, unchanged-balance observation and exactly six history
+        // pages. No extra retry, fallback, readiness stamp or GET allowance.
+        http.expect_get(RecordedGet {
+            access_key: "fixture-observer-a".into(),
+            path: "/api/v5/account/balance".into(),
+            required_query: vec![],
+            raw_response: wrap(serde_json::json!([{
+                "totalEq":"100", "adjEq":"100", "uTime":through.to_string(),
+                "details":[{"ccy":"USDT", "eq":"100", "liab":"0",
+                    "availEq":"100", "availBal":"100", "eqUsd":"100",
+                    "uTime":through.to_string()}]
+            }])),
+        });
+        for partition in ["SPOT", "MARGIN", "SWAP", "FUTURES", "OPTION"] {
+            http.expect_get(RecordedGet {
+                access_key: "fixture-executor-a".into(),
+                path: "/api/v5/trade/fills-history".into(),
+                required_query: vec![("instType".into(), partition.into())],
+                raw_response: wrap(serde_json::json!([])),
+            });
+        }
+        http.expect_get(RecordedGet {
+            access_key: "fixture-executor-a".into(),
+            path: "/api/v5/account/bills-archive".into(),
+            required_query: vec![],
+            raw_response: wrap(serde_json::json!([])),
+        });
+        crate::source_capture::capture_account_sources_measured(
+            &account.observer,
+            &account.private_ws,
+            &account.execution,
+        )
+        .await
+        .expect("real source capture after source publication");
+        account
+            .execution
+            .store
+            .call(
+                Instant::now() + std::time::Duration::from_secs(3),
+                move |s| {
+                    s.refresh_campaign_entry_readiness(&campaign, from, through)?;
+                    s.verify_campaign_entry_readiness(&campaign, from, through)
+                },
+            )
+            .await
+            .expect("captured source frontier can be reconciled");
+        assert!(http.outbound_posts.lock().unwrap().is_empty());
+        let mut terminated = account.execution.store.termination_signal();
+        drop(timer_lease);
+        registry.shutdown().await;
+        drop(account);
+        drop(registry);
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while !*terminated.borrow_and_update() {
+                terminated.changed().await.unwrap();
+            }
+        })
+        .await
+        .unwrap();
         std::fs::remove_dir_all(temp).unwrap();
     }
 

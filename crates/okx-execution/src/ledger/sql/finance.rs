@@ -799,13 +799,43 @@ impl AccountStore {
             ),
             Err(reason) => format!("frontiers={reason}"),
         };
+        // The saved witness can still have complete old cursors while the
+        // requested admission frontier has no capture. Report that separate
+        // obligation instead of explaining only the already reviewed cutoff.
+        let requested = self.captured_complete_frontiers(from_ms, through_ms);
+        let requested_status = match requested {
+            Ok(_) => "COMPLETE".to_owned(),
+            Err(reason) => reason.to_string(),
+        };
+        let mut cursors = Vec::new();
+        for (name, partition) in [
+            ("fills", "SPOT"),
+            ("fills", "MARGIN"),
+            ("fills", "SWAP"),
+            ("fills", "FUTURES"),
+            ("fills", "OPTION"),
+            ("bills", "account"),
+        ] {
+            cursors.push(match self.cursor(name, partition)? {
+                Some(cursor) => format!(
+                    "{name}/{partition}:lag_ms={},generation={},page_pending={},gaps={}",
+                    through_ms.saturating_sub(cursor.watermark),
+                    cursor.generation,
+                    !cursor.cursor.is_empty(),
+                    !cursor.coverage_gaps.is_empty()
+                ),
+                None => format!("{name}/{partition}:MISSING"),
+            });
+        }
         Ok(format!(
-            "origin_match={},age_ms={},covered_ahead={},epoch_match={},{}",
+            "origin_match={},age_ms={},covered_ahead={},epoch_match={},requested_frontiers={},{},cursors=[{}]",
             origin == from_ms,
             through_ms.saturating_sub(covered),
             covered > through_ms,
             revision == epoch,
-            source
+            requested_status,
+            source,
+            cursors.join(";")
         ))
     }
 
