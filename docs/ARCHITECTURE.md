@@ -23,7 +23,7 @@ The existing `diagnostics.explain` tool has explicit views:
 | View | Reference / owner | Evidence and limits |
 |---|---|---|
 | `operation` | account + cleanup operation/intent; protection operation trace | Local observed transitions and bounded startup SQL receipts; lost ACK/origin remain unknown |
-| `operation` | account + `terminal_release:<intent>`; terminal-release owner | Actual reached stage, last outcome and first observed blocker for that revision; volatile and never a fresh SQL/Worker read |
+| `operation` | account + `terminal_release:<intent>`; terminal-release owner | Actual stage, source frontiers/time, caller and first blocker; bounded startup SQL subset restores only persisted receipt facts |
 | `finance` | account + optional cycle ID; finance trace | Capture phases, SQL timing and source errors; busy trace is unevaluated, not a missing cycle |
 | `storage` | account; account SQL owner's published snapshot | Last policy/stops/coverage/storage facts, publication age and refresh state; no query is queued by the reader |
 | `research` | job ID; installation's research catalog | Bounded committed metadata projection, progress/state/result reference and safe reason; no catalog lock wait |
@@ -43,7 +43,26 @@ or release. Each account retains at most128 terminal intents with bounded keys;
 drop, eviction and superseded-attempt counters are visible. After restart an
 unretained attempt is unknown. A successful function return is recorded as
 `returned_ok`, not reconstructed as an exchange ACK or independent SQL proof.
-Initiator is explicitly unrecorded; this does not close cross-family causal history.
+Public Status passes its actual request ID/origin to the release owner. Other
+unrecorded callers stay unknown. The first blocker keeps its own facts/caller
+while a later observation updates the current snapshot. Fills/bills watermarks,
+generation, coverage flags and terminal order time explain the source boundary;
+Worker sequence and frozen reservation policy identify the observed response.
+
+The existing account startup task also reads a bounded terminal receipt subset
+from the same SQL owner. An existing state/intent index bounds at most128
+candidates before identity joins. Restoration reports a startup SQL fact, not
+a current read or reconstructed network ACK; source facts and initiator remain
+unknown until actually observed. A delayed restore cannot overwrite a live
+attempt. Busy/failure/subset history are explicit. No diagnostic read enqueues
+the SQL work or creates a replacement ledger. Other families still require
+their own causal evidence; this is not a complete application history.
+
+Terminal recovery validates an INSPECT's status, reservation key, frozen receipt
+policy and sequence before acknowledging SQL. It also rejects a response crossing
+an authenticated session-generation change. Current policy rotation alone does
+not invalidate a saved reservation. Late settlement keeps its pending marker;
+repeated/concurrent recovery preserves the first durable release receipt.
 
 The account SQL loop refreshes its diagnostic copy at most once per second
 when dirty, using a separate short diagnostic query budget. Readers never

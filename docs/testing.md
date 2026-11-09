@@ -279,6 +279,35 @@ families, full MCP R-UX/installed/performance and final integration remain open.
 Historical planned assignments below are superseded by these completed rows
 and #501's current remaining acceptance; do not implement them again.
 
+### Combined diagnostics / trade contract packet after checkpoint08c
+
+This packet continues the accepted08c source; its exact committed SHA and
+full26/CI/bundle acceptance are maintained in #501's current checkpoint.
+The older08c PASS does not certify a descendant. Changes are scoped as follows:
+
+| Boundary | Actual production test / filter | Proof and remaining limits |
+|---|---|---|
+| Terminal INSPECT recovery | `terminal_release_reopen` (3tests) | Original catalog/SQL is closed and reopened with a real immutable zero-fill settlement. Scripted INSPECT verifies native orchestration: wrong/missing reservation/policy/sequence, denied/wrong-command/lost reply never acknowledge SQL; old session rejected; frozen old policy remains valid after current policy rotation. Repeated/concurrent Released inspection preserves the first SQL ACK and money; a real late fee stays pending. This is not the full Native+WSS+Worker lost-terminal-RELEASE bridge. |
+| Observed release diagnosis | Existing stale fills/bills tests under `terminal_release` | Actual owner→public Diagnostics while SQL/source locks held; exact observed frontiers/generation/order time/Worker sequence and caller ID, first-blocker context, no explain-caused effects. No reconstruction of an unobserved caller or historical venue ACK. |
+| Restart diagnostic seed | `terminal_diagnostics` in Execution (3tests) and `terminal_release_trace` | Existing indexed SQL query caps candidates before scope/plan/policy joins; pending/released/late facts and matching local ACK timestamp survive reopen. Agent startup restores bounded facts; live attempts win. Unknown fields stay null. SQL state seeding in execution corruption tests is test-only; no production migration/writer/financial rule changed. |
+| Worker committed RELEASE inspection | `risk_authority.test.ts`, `terminal_released_inspect_reopen_read_only` | Real Worker handler/storage settles and releases, serializes and reopens the store, rotates governance, then INSPECTs frozen policy without mutation; independent consumed0.5/reserved4/sequence7 and wrong-plan/missing-key denials. Native source claims are explicit fixtures; not a live Native handoff or physical exchange proof. |
+| Public Strategies | `strategy_contract_tests` (3tests) | Actual dispatcher/registry/SQL for Create/Update/Start/Stop/List/Status/CapitalAssign, replay/conflict/stale CAS/paused authority and immutable versions. Public old-key replay after Update preserves a SQL-prepared original modern semantic intent/hash/plan/deadline; no extra venue/risk effects. It does not claim an originally accepted exchange POST or complete public new-key admission after strategy edit; unknown-account rejection is not connected-account isolation. |
+
+The wrong-reservation defect was reproduced at the actual release owner:
+`terminal_release_reopen_rejects_unbound_inspection_without_sql_ack` returned
+success for a foreign key (RED0.25s). Native binding checks fix that boundary;
+the receipt's frozen policy is compared, not the latest governance revision.
+An earlier failed fixture (`ZERO_ENTRY_ADMISSION_MISSING`) was repaired through
+the existing quote/admission owner and is not counted as that production RED.
+
+Local Agent407PASS/0FAIL/4existingignored10.38s; Execution169PASS/2existingignored
+5.33s; Worker11files PASS, including
+the real Worker terminal-inspection test; tools/list24,567bytes unchanged.
+SQL diagnostic3tests PASS0.31s; workspace/all-targets Clippy-Dwarnings, fmt,
+K10 self-test/purity, SQL schema and product guards PASS. Compiler time is
+reported separately; direct runtime does not claim an instant rebuild.
+Remaining #501 criteria and full-chain lost reply acceptance stay explicit.
+
 ### #501 revision 9: finite residual acceptance list
 
 #### Regression found by combined CI `42594279304`
