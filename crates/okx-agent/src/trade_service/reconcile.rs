@@ -661,6 +661,7 @@ impl TradeService {
         let mut protection_failed = false;
         let mut protection_failure_observed_at = None;
         let mut protection_source_pending = false;
+        let mut aggregate_protection_blocker: Option<String> = None;
         let mut venue_flat_verified = false;
         let mut signed_position_qty = None;
         if matches!(i.state, IntentState::Prepared | IntentState::Reserved) {
@@ -1016,6 +1017,16 @@ impl TradeService {
                                         "MANAGED_AGGREGATE_SOURCE_PENDING_V1:COHORT_UNRESOLVED_POST_OUTCOME"
                                     );
                                 }
+                                Err(super::execute::ManagedProtectionCensusError::Denied(reason))
+                                    if reason == "UNATTRIBUTED_EXCHANGE_POSITION" => {
+                                    // This branch already verified this intent's exact
+                                    // live stop and committed its protection receipt.
+                                    // Additional, unowned venue exposure still denies
+                                    // the complete new-risk census. It is not evidence
+                                    // that this particular stop disappeared, and cannot
+                                    // authorize a safety close of these owned lots.
+                                    aggregate_protection_blocker = Some(reason);
+                                }
                                 Err(super::execute::ManagedProtectionCensusError::Denied(reason)) => {
                                     eprintln!("MANAGED_AGGREGATE_CENSUS_DENIAL_V1:{reason}");
                                     protection_failed = true;
@@ -1105,6 +1116,7 @@ impl TradeService {
                     "all_in_entry_cost_proven":false},
                 "protection_incident":true,
                 "protection_source_pending":protection_source_pending,
+                "aggregate_protection_blocker":aggregate_protection_blocker,
                 "compensation":action,
                 "financial_complete":false,
                 "central_release":{"state":"blocked","reason_code":
@@ -1411,6 +1423,7 @@ impl TradeService {
                 "protection_incident":live_protection_incident,
                 "prior_protection_incident_unresolved":prior_protection_incident_unresolved,
                 "protection_source_pending":protection_source_pending,
+                "aggregate_protection_blocker":aggregate_protection_blocker,
                 "compensation":compensation}),
         );
         result["quality"] = json!({
@@ -1421,6 +1434,8 @@ impl TradeService {
                 "incident"
             } else if protection_source_pending {
                 "pending_source_coherence"
+            } else if aggregate_protection_blocker.is_some() {
+                "own_verified_cohort_blocked"
             } else {
                 "evaluated"
             }
@@ -1428,6 +1443,7 @@ impl TradeService {
         if !financial
             || settlement_pending
             || protection_source_pending
+            || aggregate_protection_blocker.is_some()
             || live_protection_incident
             || matches!(
                 protection_adjustment["state"].as_str(),
@@ -1439,6 +1455,8 @@ impl TradeService {
                 "PROTECTION_INCIDENT_REMEDIATION_UNVERIFIED"
             } else if protection_source_pending {
                 "PROTECTION_SOURCE_BEFORE_SQL_FILL"
+            } else if aggregate_protection_blocker.is_some() {
+                "UNATTRIBUTED_EXCHANGE_POSITION"
             } else if !financial || entry_fill_pending {
                 "FINANCIAL_BACKFILL_PENDING"
             } else {

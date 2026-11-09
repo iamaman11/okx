@@ -121,6 +121,14 @@ async fn t10_02_unowned_exposure_denied(
     let before=risk.request(before_cmd).await.expect("T10-02 persisted Worker before");
     let posts_before=feed.outbound_posts.lock().unwrap().len();
     assert_eq!(posts_before,5,"T10-02 follows one real managed Add");
+    // Exercise the production observer explicitly after the external position
+    // is published. Otherwise maintenance may or may not reconcile this owned
+    // intent inside the measured window, hiding a schedule-dependent mutation.
+    let protection_observation = trade.trade("fixture-a", &TradeRequest::Status {
+        reference: managed_intent.clone(),
+    }, None).await;
+    assert!(protection_observation.is_ok(), "T10-02 owned protection observation must return a typed result");
+    let protection_observation = protection_observation.unwrap();
     let request=TradeRequest::Execute {
         idempotency_key:"t10_02_external_unowned_add_0001".into(),
         operation:TradeOperation::Add,strategy_instance:"manual".into(),
@@ -165,8 +173,59 @@ async fn t10_02_unowned_exposure_denied(
     assert_eq!(before_entry.consumed_usd,after_entry.consumed_usd);
     assert_eq!(before_entry.reserved_usd,after_entry.reserved_usd);
     assert_eq!(before_entry.remaining_usd,after_entry.remaining_usd);
+    if posts_after != posts_before {
+        // The counter includes every attempted POST by any production actor.
+        // Preserve identity hashes and typed fields before the assertion so a
+        // concurrent protective action cannot be mistaken for this denied Add.
+        let identity_hash = |value: Option<&serde_json::Value>| value
+            .and_then(serde_json::Value::as_str)
+            .map(|id| format!("{:x}", sha2::Sha256::digest(id.as_bytes())));
+        let safe_decimal = |value: Option<&serde_json::Value>| value
+            .and_then(serde_json::Value::as_str)
+            .filter(|text| text.len() <= 64)
+            .and_then(|text| text.parse::<Decimal>().ok())
+            .filter(|number| *number >= Decimal::ZERO)
+            .map(|number| number.normalize().to_string());
+        let safe_code = |value: &str| {
+            let code = value.split(':').next().unwrap_or("");
+            if !code.is_empty() && code.len() <= 96 && code.bytes()
+                .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_') {
+                Some(code.to_owned())
+            } else { None }
+        };
+        let posts = feed.outbound_posts.lock().unwrap().iter()
+            .skip(posts_before).take(12).map(|(_, route, body)| {
+                let item = body.as_array().and_then(|rows| rows.first()).unwrap_or(body);
+                let route = match route.as_str() {
+                    "/api/v5/trade/order" | "/api/v5/trade/cancel-order"
+                    | "/api/v5/trade/amend-order" | "/api/v5/trade/order-algo"
+                    | "/api/v5/trade/cancel-algos" | "/api/v5/trade/amend-algos" => Some(route.as_str()),
+                    _ => None,
+                };
+                serde_json::json!({
+                    "route": route,
+                    "client_id_sha256": identity_hash(item.get("clOrdId")),
+                    "algo_id_sha256": identity_hash(item.get("algoId")),
+                    "reduce_only": item.get("reduceOnly").and_then(serde_json::Value::as_bool),
+                    "side": item.get("side").and_then(serde_json::Value::as_str)
+                        .filter(|side| matches!(*side, "buy" | "sell")),
+                    "size": safe_decimal(item.get("sz")),
+                })
+            }).collect::<Vec<_>>();
+        eprintln!("T10_02_UNEXPECTED_POSTS_V1:{}", serde_json::json!({
+            "posts_before": posts_before, "posts_after": posts_after,
+            "reason_code": safe_code(&reason),
+            "state": if matches!(state.as_str(), "complete" | "completed" | "accepted" | "rejected" | "pending" | "unknown" | "ERROR") { Some(state.as_str()) } else { None },
+            "origin": if matches!(origin.as_str(), "LOCAL" | "CENTRAL" | "VENUE" | "NATIVE") { Some(origin.as_str()) } else { None },
+            "send_state": safe_code(&send_state), "posts": posts,
+        }));
+    }
     assert_eq!(posts_after,posts_before,
         "unowned external position cannot lead to any venue POST");
+    assert_eq!(protection_observation["data"]["protection_incident"], false,
+        "a denied aggregate census is not proof that this independently verified stop failed");
+    assert_eq!(protection_observation["data"]["aggregate_protection_blocker"], "UNATTRIBUTED_EXCHANGE_POSITION");
+    assert_eq!(protection_observation["status"], "partial");
     assert!(
         reason.contains("UNATTRIBUTED_EXCHANGE_POSITION")
             || reason.contains("COHORT_UNMANAGED_EXTERNAL_EXPOSURE"),
@@ -186,6 +245,9 @@ async fn t10_02_unowned_exposure_denied(
         "venue_signed_position":"0.7",
         "source_digest":source_digest,
         "denial_reason":reason,"public_state":state,
+        "owned_protection_observed":true,
+        "owned_protection_incident":protection_observation["data"]["protection_incident"],
+        "aggregate_protection_blocker":protection_observation["data"]["aggregate_protection_blocker"],
         "rejection_origin":origin,"send_state":send_state,
         "posts_before":posts_before,"posts_after":posts_after,
         "worker_before":before_budget,"worker_after":after_budget,

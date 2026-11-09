@@ -23,6 +23,9 @@ export async function run({caseId,root,signal}) {
     /UNATTRIBUTED_EXCHANGE_POSITION|COHORT_UNMANAGED_EXTERNAL_EXPOSURE/);
   assert.equal(v.posts_before,5);
   assert.equal(v.posts_after,5);
+  assert.equal(v.owned_protection_observed,true);
+  assert.equal(v.owned_protection_incident,false);
+  assert.equal(v.aggregate_protection_blocker,"UNATTRIBUTED_EXCHANGE_POSITION");
   // Read-only source timestamps may advance while the same financial
   // values remain unchanged; test the money oracle, not JSON metadata.
   for (const field of ["campaign_limit_usd","consumed_loss_usd",
@@ -52,6 +55,8 @@ export async function run({caseId,root,signal}) {
       {id:"positive_managed_lots",expected:"0.5",actual:v.sql_owned_lots},
       {id:"observed_unowned_position",expected:"0.7",actual:v.venue_signed_position},
       {id:"no_post_for_unowned_risk",expected:"5",actual:String(v.posts_after)},
+      {id:"owned_stop_not_failed_by_external_position",expected:"false",actual:String(v.owned_protection_incident)},
+      {id:"external_position_still_blocks_cohort",expected:"UNATTRIBUTED_EXCHANGE_POSITION",actual:v.aggregate_protection_blocker},
       {id:"central_entry_spend_unchanged",expected:"6.003",
         actual:v.worker_after.entry_budget.consumed_usd},
       {id:"central_unspent_reserve_unchanged",expected:"0",

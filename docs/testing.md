@@ -196,6 +196,33 @@ whole S1-05 complete. PHYSICAL/REAL remain separate gates.
 
 ### #501 revision 6: finite residual acceptance list
 
+#### Regression found by combined CI `42594279304`
+
+`e19e6651` failed 22/26: T09.6/.7 shared Add response lacked the expected intent,
+T09.8 hit PRICE_FRESHNESS_DEADLINE, and T10-02 observed an additional venue POST.
+The first two locally passed on the same code; that is not a fix or proof of
+stability. New sanitizer tests retain only safe typed Add refusal fields and
+integer comparisons, without raw responses or credentials.
+
+T10-02 now explicitly invokes the actual public Status after publishing the
+signed external 0.70 position while SQLite owns 0.50. Before the production fix
+this reproduced **6 POSTs versus expected 5**: an extra `order` sell0.20, while
+the new Add was locally denied as UNATTRIBUTED_EXCHANGE_POSITION/NOT_STARTED.
+Status had already verified its own stop, then treated the aggregate denial
+as that intent's protection failure and entered emergency policy.
+
+The corrected branch retains a separate aggregate blocker and partial status
+only for this external-exposure reason after independently verifying the own
+stop. Global new-risk census remains Denied. Missing/invalid own protection,
+previous durable incidents, other denial reasons and release proof are unchanged.
+The strengthened raw-observer→Status→SQL/Worker scenario passed with no extra
+POSTs or own protection incident. Existing T10-08 protection-loss recovery and
+T09.8 exact budget-denial scenarios also passed locally without changing inputs,
+GET budgets, TTL, command/case deadlines or monetary assertions. Two additional
+assertions retain the protection/blocker outcomes in the final case artifact.
+This does not establish the root cause of the earlier T09.6/.7 or price failure;
+the next combined required CI is still necessary for the accepted candidate.
+
 Checked against the baseline source: Cargo.toml has 15 workspace members, and
 AgentOperation has 14 variants, all listed in the public index above. The crate
 groups above include every member and the Worker; nested Trade/Strategies actions

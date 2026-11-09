@@ -82,3 +82,78 @@ test("a wrapper-only exit is not mistaken for a Rust failure", () => {
   assert.equal(x.outer_exit_code,"UNKNOWN");
   assert.equal(x.phase,"T09_2_PHASE_V1");
 });
+
+test("managed Add missing intent retains the exact safe refusal without response payload", () => {
+  const response = {status:"completed", data:{state:"REJECTED", primary_reason:"BUDGET_BOUND_BREACH",
+    rejection_origin:"CENTRAL",send_state:"NOT_STARTED",intent_id:"a".repeat(64)},
+    raw_response:{api_key:"PRIVATE_SENTINEL_87654321"}};
+  const result=summarizeRustPanics({stderr:
+    "thread 'campaign' panicked at crates/okx-agent/src/trade_integration_t09_4.rs:959:13:\n"+
+    "T09_4_MANAGED_ADD_MISSING_INTENT_V1:"+JSON.stringify(response)+"\n"});
+  assert.match(result.panics[0].reason,/REJECTED:BUDGET_BOUND_BREACH:CENTRAL:NOT_STARTED/);
+  assert.deepEqual(result.panics[0].detail,{marker:"T09_4_MANAGED_ADD_MISSING_INTENT_V1",parse_state:"PARSED",
+    status:"completed",state:"REJECTED",reason_code:"BUDGET_BOUND_BREACH",origin:"CENTRAL",send_state:"NOT_STARTED",
+    intent_id_present:true,intent_id_length:64,intent_id_format:"HEX_64"});
+  assert.ok(!JSON.stringify(result).includes("PRIVATE_SENTINEL"));
+  assert.ok(!JSON.stringify(result).includes("a".repeat(64)));
+});
+
+test("managed Add diagnostic rejects arbitrary values even in selected fields", () => {
+  const sentinel="PRIVATE_SENTINEL_87654321";
+  const result=summarizeRustPanics({stderr:
+    "thread 'campaign' panicked at crates/a.rs:1:2:\nT09_4_MANAGED_ADD_MISSING_INTENT_V1:"+
+    JSON.stringify({status:sentinel,data:{state:sentinel,reason_code:sentinel,origin:sentinel,send_state:sentinel,
+      intent_id:sentinel,request:{credential:sentinel}}})+"\n"});
+  const detail=result.panics[0].detail;
+  assert.equal(detail.status,null);assert.equal(detail.state,null);assert.equal(detail.reason_code,null);
+  assert.equal(detail.origin,null);assert.equal(detail.send_state,null);
+  assert.equal(detail.intent_id_format,"OTHER");assert.equal(detail.intent_id_length,sentinel.length);
+  assert.ok(!JSON.stringify(result).includes(sentinel));
+  const malformed=summarizeRustPanics({stderr:
+    "thread 'campaign' panicked at crates/a.rs:1:2:\nT09_4_MANAGED_ADD_MISSING_INTENT_V1:{raw_response="+sentinel+"\n"});
+  assert.equal(malformed.panics[0].detail.parse_state,"INVALID_JSON");
+  assert.ok(!JSON.stringify(malformed).includes(sentinel));
+});
+
+test("Rust count assertion preserves integers but never string assertion payloads", () => {
+  const header="thread 'campaign' panicked at crates/okx-agent/src/trade_integration_t10_02.rs:123:5:\n";
+  const numeric=summarizeRustPanics({stderr:header+
+    "assertion `left == right` failed: T10-02 follows one real managed Add\n  left: 6\n right: 5\n"});
+  assert.deepEqual(numeric.panics[0].integer_comparison,{left:6,right:5});
+  const privateValues=summarizeRustPanics({stderr:header+
+    'assertion `left == right` failed\n left: "SECRET_SENTINEL"\n right: "5"\n'});
+  assert.equal(privateValues.panics[0].integer_comparison,undefined);
+  assert.ok(!JSON.stringify(privateValues).includes("SECRET_SENTINEL"));
+});
+
+test("unexpected T10-02 posts preserve only bounded typed identities before the panic", () => {
+  const record={posts_before:5,posts_after:6,reason_code:"UNATTRIBUTED_EXCHANGE_POSITION",state:"REJECTED",origin:"LOCAL",send_state:"NOT_STARTED",
+    posts:[{ordinal:6,route:"/api/v5/trade/cancel-order",client_id_sha256:"a".repeat(64),algo_id_sha256:null,
+      reduce_only:true,side:"sell",size:"0.20",raw_body:{api_key:"SECRET_SENTINEL"}}]};
+  const result=summarizeRustPanics({stderr:"T10_02_UNEXPECTED_POSTS_V1:"+JSON.stringify(record)+"\n"+
+    "thread 'campaign' panicked at crates/okx-agent/src/trade_integration_t10_02.rs:168:5:\n"+
+    "assertion `left == right` failed\n left: 6\n right: 5\n"});
+  const detail=result.diagnostics[0].detail;
+  assert.equal(detail.posts_before,5);assert.equal(detail.posts_after,6);
+  assert.equal(detail.posts[0].route,"/api/v5/trade/cancel-order");
+  assert.equal(detail.posts[0].client_id_sha256,"a".repeat(64));
+  assert.equal(detail.posts[0].reduce_only,true);assert.equal(detail.posts[0].size,"0.20");
+  assert.equal(detail.reason_code,"UNATTRIBUTED_EXCHANGE_POSITION");
+  assert.ok(!JSON.stringify(result).includes("SECRET_SENTINEL"));
+  assert.ok(!JSON.stringify(result).includes("raw_body"));
+});
+
+test("unexpected post diagnostics reject free text and bound arrays and repeated markers", () => {
+  const sentinel="SECRET_SENTINEL";
+  const record={posts_before:-1,posts_after:Infinity,reason_code:sentinel,state:sentinel,origin:sentinel,send_state:sentinel,
+    posts:Array.from({length:20},()=>({route:"https://private.invalid/"+sentinel,client_id_sha256:sentinel,
+      algo_id_sha256:sentinel,reduce_only:sentinel,side:sentinel,size:sentinel}))};
+  const result=summarizeRustPanics({stdout:("T10_02_UNEXPECTED_POSTS_V1:"+JSON.stringify(record)+"\n").repeat(10)});
+  assert.equal(result.diagnostics.length,8);assert.equal(result.diagnostics_omitted,2);
+  const detail=result.diagnostics[0].detail;
+  assert.equal(detail.posts.length,12);assert.equal(detail.posts_omitted,8);
+  assert.equal(detail.posts_before,null);assert.equal(detail.posts_after,null);
+  assert.equal(detail.posts[0].route,null);assert.equal(detail.posts[0].client_id_sha256,null);
+  assert.equal(detail.posts[0].reduce_only,null);assert.equal(detail.posts[0].size,null);
+  assert.ok(!JSON.stringify(result).includes(sentinel));
+});
