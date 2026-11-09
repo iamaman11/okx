@@ -3,7 +3,7 @@
 // test. No exchange service, risk authority or monetary truth is implemented
 // in this file. The child only emits receipts after its own assertions pass.
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { resolve } from "node:path";
@@ -59,7 +59,9 @@ export async function actualNativeWorker(root, signal, { statusProbe = false, se
     process.env.OKX_T10_10_FINANCE_REPLAY_PROBE === "1" ? "t10-10" : "no-t10-10",
     process.env.OKX_T10_12_NATIVE_WORKER_CRASH === "1" ? "t10-12" : "no-t10-12",
     process.env.OKX_T10_12_NATIVE_RESERVE_CRASH === "1" ? "t10-12-reserve" : "no-t10-12-reserve",
-    process.env.OKX_T10_11_NATIVE_CRASH === "F2" ? "t10-11-f2" : "no-t10-11-f2",
+    // Every crash repetition must start new OS processes and independent
+    // stores. A cached transcript is not another process termination.
+    process.env.OKX_T10_11_NATIVE_CRASH === "F2" ? `t10-11-f2:${randomUUID()}` : "no-t10-11-f2",
   ].join(":");
   const reused = memo.has(key);
   if (!reused) {

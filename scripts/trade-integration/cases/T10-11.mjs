@@ -19,15 +19,32 @@ export async function run({caseId,root,signal,artifactsDir}) {
     throw Error("T10_11_REQUIRES_WINDOWS_OS_PROCESS_KILL");
   const dir=resolve(artifactsDir,caseId);
   await mkdir(dir,{recursive:true});
+  const {stdout:sha}=await exec("git",["rev-parse","HEAD"],{cwd:root,signal,windowsHide:true});
   // First connected Native/Worker crash boundary. Do not count the following
   // 60 isolated component kills as 90 complete cross-owner proofs.
   process.env.OKX_T10_11_NATIVE_CRASH="F2";
   try {
-    const connected=await actualNativeWorker(root,signal,{});
-    assert.equal(connected.nativeF2.native_os_kills,1);
-    assert.equal(connected.nativeF2.persisted_worker.inspected.reservation_state,"RELEASED");
-    await writeFile(resolve(dir,"native-worker-f2-process-crash.json"),
-      JSON.stringify(connected,null,2)+"\n");
+    const roots=new Set(), repetitions=[];
+    for(let repetition=1;repetition<=10;repetition++){
+      const started=performance.now();
+      const connected=await actualNativeWorker(root,signal,{});
+      assert.equal(connected.cohort_execution.reused,false,"an OS kill cannot be memoized");
+      assert.equal(connected.nativeF2.native_os_kills,1);
+      assert.equal(connected.nativeF2.persisted_worker.inspected.reservation_state,"RELEASED");
+      const original=connected.nativeF2.boundary.root;
+      assert.ok(!roots.has(original),"each repetition must create its own original SQL");
+      roots.add(original);
+      const record={source_sha:sha.trim(),phase:"F2",repetition,
+        elapsed_ms:performance.now()-started,...connected};
+      repetitions.push(record);
+      // Preserve each completed real crash even if a later repetition fails.
+      await writeFile(resolve(dir,`native-worker-f2-process-crash-${repetition}.json`),
+        JSON.stringify(record,null,2)+"\n");
+    }
+    await writeFile(resolve(dir,"native-worker-f2-process-crashes.json"),
+      JSON.stringify({schema:"okx.t10-11-native-f2-repetitions/v1",
+        source_sha:sha.trim(),native_os_kills:10,full_t10_11_pass:false,
+        repetitions},null,2)+"\n");
   } finally {
     delete process.env.OKX_T10_11_NATIVE_CRASH;
   }
@@ -89,7 +106,6 @@ export async function run({caseId,root,signal,artifactsDir}) {
       assert.ok(Number.isFinite(row[key])&&row[key]>=0,`${identity} missing ${key}`);
     assert.ok(row.total_ms>=row.setup_ms+row.kill_ms);
   }
-  const {stdout:sha}=await exec("git",["rev-parse","HEAD"],{cwd:root,signal,windowsHide:true});
   await writeFile(resolve(dir,"native-component-process-kills.json"),
     JSON.stringify({schema:"okx.t10-11-partial-crash-evidence/v2",
       mandatory_case_pass:false,
