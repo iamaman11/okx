@@ -263,7 +263,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: b1-worker-only-${{ github.sha }}
+          name: b1-worker-only-${{ github.event.pull_request.head.sha || github.sha }}
           path: ${{ runner.temp }}/b1-worker-cap
           retention-days: 7
           if-no-files-found: warn
@@ -403,7 +403,7 @@ jobs:
       - name: Upload K9 native latency evidence
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: k9-native-two-heavy-${{ github.sha }}
+          name: k9-native-two-heavy-${{ github.event.pull_request.head.sha || github.sha }}
           path: ${{ runner.temp }}\k9-native-evidence.json
           if-no-files-found: error
           retention-days: 14

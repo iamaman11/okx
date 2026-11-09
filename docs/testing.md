@@ -22,6 +22,32 @@ matches CI and the normalized content matches the source checkout. New changes r
 does not certify an untested descendant, installed workflow or REAL trading.
 The earlier `32ee438e` and `0680e90f` baselines remain historical evidence below.
 
+### Measured CI cost at the accepted baseline
+
+Source: Windows job 129320134917 in run 42663259376 (attempt1). These are
+observed step intervals, including the work performed by that step; they are
+not isolated compiler or kernel benchmarks. Windows job wall time was29m47s.
+
+| Step | Observed duration | Meaning for the development loop |
+|---|---|---|
+| Toolchain / Rust cache restore | 14s / 32s | Setup for this runner/cache state |
+| First entry-settlement direct suite | 91s | Includes first build; not direct-test execution time alone |
+| Cleanup / unsent direct suites | 4s / 3s | Warm subsequent checks |
+| Native Clippy | 32s | Required static checks |
+| Scenario lifecycle | 5s | Existing eight Windows boundary tests |
+| Native crate tests | 177s | Includes test-target build and execution |
+| Locked workerd dependency install | 8s | Existing production test assembly |
+| Full26 | 19m30s | Dominant acceptance cost, including90 independent OS-kill trials |
+| K9 two-heavy boundary | 2s | One scoped boundary; not full public K9 acceptance |
+| Release binaries | 226s | Deployable build after acceptance |
+| Evidence / bundle upload | 2s / 4s | Publication after each completed result |
+
+The direct defect loop uses the appropriate owner filter after one compatible
+build. Repeated full26 is not used for hypothesis discovery. These intervals
+do not prove removable duplicate work or justify weakening any release gate.
+Artifact names must use the checked-out PR head (falling back to github.sha on
+non-PR events); a merge-ref suffix is not the source identity of these binaries.
+
 ## #501 application ownership and refactor pass
 
 The Rust types and actual call graph own the architecture. This table is a review
