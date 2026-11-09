@@ -31,7 +31,7 @@ The 26 authoritative IDs are owned by `scripts/run-trade-integration.mjs --list`
 | `T10-08` | `crates/okx-agent/src/trade_service/reconcile.rs::emergency_exit; crates/okx-agent/src/trade_service/reconcile.rs::verified_live_protection` | [`cases/T10-08.mjs`](../scripts/trade-integration/cases/T10-08.mjs), `--case T10-08` | FOUND: signed partial fill and protection first leg | NOT_RUN | NOT_RUN | Case intentionally FAIL: same-intent failed protection, late fill and bounded protective attempt | EXTEND | `f06383e` / no CI artifact |
 | `T10-09` | `crates/okx-agent/src/trade_service/reconcile.rs::cancel; crates/okx-agent/src/trade_service/reconcile.rs::close` | [`cases/T10-09.mjs`](../scripts/trade-integration/cases/T10-09.mjs), `--case T10-09` | FOUND: B public Cancel ACK and persisted worker first leg | NOT_RUN | NOT_RUN | Case intentionally FAIL: same-intent post-ACK late fill, partial close and remaining protection | EXTEND | `f06383e` / no CI artifact |
 | `T10-10` | `crates/okx-execution/src/ledger/sql/intents.rs::bind_late_entry_settlement; cloudflare/okx-mcp/src/risk_book.ts::settleEntrySpend` | [`cases/T10-10.mjs`](../scripts/trade-integration/cases/T10-10.mjs), `--case T10-10` | FOUND: duplicate fills/bills initial causal leg | NOT_RUN | NOT_RUN | Case intentionally FAIL: same-campaign late fee/rebate, replay revision and upper breach | EXTEND | `f06383e` / no CI artifact |
-| `T10-11` | `crates/okx-execution/src/ledger/sql/intents.rs::recover_posting; crates/okx-agent/src/trade_service/recovery.rs::reconcile_restored` | [`cases/T10-11.mjs`](../scripts/trade-integration/cases/T10-11.mjs), `--case T10-11` | FOUND: F5/F6 genuine Windows OS kills (20) | NOT_RUN | NOT_RUN | Case intentionally FAIL: complete F0..F8×10, same Native/Worker stores and no duplicated facts | EXTEND | `f06383e` / no CI artifact |
+| `T10-11` | `crates/okx-execution/src/ledger/sql/intents.rs::recover_posting; crates/okx-agent/src/trade_service/recovery.rs::reconcile_restored` | [`cases/T10-11.mjs`](../scripts/trade-integration/cases/T10-11.mjs), `--case T10-11` | 10 connected F2 kills; 60 separate component kills | PARTIAL | NOT_RUN | Case intentionally FAIL: complete F0..F8×10, same Native/Worker stores and no duplicated facts | EXTEND | `d52dd557` / CI `42539269866`; scope below |
 | `T10-12` | `cloudflare/okx-mcp/src/risk_book.ts::reserveRisk; cloudflare/okx-mcp/src/runtime_session.ts::dispatch` | [`cases/T10-12.mjs`](../scripts/trade-integration/cases/T10-12.mjs), `--case T10-12` | FOUND: Worker kill/reopen persisted DO after reserve | NOT_RUN | NOT_RUN | Case intentionally FAIL: after-settlement kill, fresh generation, Native binding/no double debit | EXTEND | `f06383e` / no CI artifact |
 | `T10-13` | `crates/okx-agent/src/trade_service/reconcile.rs::close; cloudflare/okx-mcp/src/risk_authority.ts::handleNativeRiskCommand` | [`cases/T10-13.mjs`](../scripts/trade-integration/cases/T10-13.mjs), `--case T10-13` | FOUND: Worker STOP and protective close probe | NOT_RUN | NOT_RUN | Assert before-claim and post-fill pause ordering, stale reduce blocker and safe reduction | EXTEND | `f06383e` / no CI artifact |
 | `T10-14` | `crates/okx-agent/src/trade_service/mod.rs::TradeService::trade; crates/okx-agent/src/trade_service/reconcile.rs::cancel` | [`cases/T10-14.mjs`](../scripts/trade-integration/cases/T10-14.mjs), `--case T10-14` | FOUND: A held SQL; B public Status/Cancel | NOT_RUN | NOT_RUN | Independent B progress under held A, then join A, 1 B cancel POST | CONNECT | `f06383e` / no CI artifact |
@@ -233,3 +233,43 @@ The first Windows run on `2c3f780c` passed **10/10 in 2.36s** after compilation
 The existing CI workflow supports `target_case=UnsentRelease` for these tests
 without Workerd or the long trading campaign. The mandatory PR matrix and
 full #449 release gates remain unchanged; this mode cannot certify 26/26.
+
+## T10-11 — connected F2 checkpoint, 2026-11-09
+
+Code SHA `d52dd557e7b0c4456ad05c1d1a3bbf47e7c0080e`,
+[Windows CI 42539269866](https://github.com/iamaman11/okx/actions/runs/42539269866):
+10 independent F2 OS kills passed their assertions. Actual Worker HELD is
+committed before Native is killed without receiving the reply. A new Native
+process opens the original account SQL; public Cancel/Status releases the
+original reservation and persists CENTRAL_RELEASE. Replay retains that receipt.
+Venue POST count is zero. Reopening the same Worker storage preserves RELEASED
+and all original budget amounts, including the pre-existing foreign reserve.
+
+Artifacts `T10-11/native-worker-f2-process-crashes.json` and ten individual
+`native-worker-f2-process-crash-N.json` bind each repetition to its code SHA,
+original SQL root, killed/recovery PIDs and SQL/Worker readbacks. Each repetition
+creates fresh stores, then retains those stores across its restart. Native
+crash executions never reuse memoized evidence. The 10 F2 repetitions took
+29.234s (2.495–3.743s each); the whole targeted case took 38.011s after compilation,
+including 60 existing component kills in 8.469s.
+
+This is a direct boundary test with explicit SQL prepare/census fixture inputs,
+not proof of full public Execute/admission, automatic recovery scheduling or a
+live exchange. The separate 60 component kills still lack connected Worker
+proofs. **Do not add these counts into 70/90 accepted integrated kills.**
+F4/F8 and connected F0/F1/F3/F5/F6/F7 remain incomplete; T10-11 intentionally
+ends `T10_11_ALL_NINE_NATIVE_WORKER_PHASES_TEN_TIMES_NOT_YET_PROVEN`.
+Neither T10-11 nor 26/26 is accepted.
+
+Direct account-reopen regression, before the actual crash scenario:
+
+```text
+cargo test --locked -p okx-agent --lib accounts::tests::recovery_prepared_account_reopens_catalog_and_original_sql -- --exact --nocapture
+node scripts/run-trade-integration.mjs --case T10-11 --artifacts <artifact-dir>
+```
+
+The first command checks original persisted SQL, catalog identity, duplicate
+owner rejection and no POST. It waits for the existing SQL termination signal,
+not an arbitrary delay. The second command remains a partial/FAIL acceptance
+until every required F0–F8 boundary is proved ten times. A subsequent docs-only
+commit does not represent a new tested runtime SHA.
