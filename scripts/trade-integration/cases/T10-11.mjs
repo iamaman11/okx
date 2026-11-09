@@ -20,31 +20,35 @@ export async function run({caseId,root,signal,artifactsDir}) {
   const dir=resolve(artifactsDir,caseId);
   await mkdir(dir,{recursive:true});
   const {stdout:sha}=await exec("git",["rev-parse","HEAD"],{cwd:root,signal,windowsHide:true});
-  // First connected Native/Worker crash boundary. Do not count the following
+  // Connected Native/Worker no-send boundaries. Do not count the following
   // 60 isolated component kills as 90 complete cross-owner proofs.
-  process.env.OKX_T10_11_NATIVE_CRASH="F2";
   try {
-    const roots=new Set(), repetitions=[];
+    const roots=new Set();
+    for(const phase of ["F2","F4","F8"]){
+    process.env.OKX_T10_11_NATIVE_CRASH=phase;
+    const repetitions=[];
     for(let repetition=1;repetition<=10;repetition++){
       const started=performance.now();
       const connected=await actualNativeWorker(root,signal,{});
       assert.equal(connected.cohort_execution.reused,false,"an OS kill cannot be memoized");
-      assert.equal(connected.nativeF2.native_os_kills,1);
-      assert.equal(connected.nativeF2.persisted_worker.inspected.reservation_state,"RELEASED");
-      const original=connected.nativeF2.boundary.root;
+      assert.equal(connected.nativeUnsent.phase,phase);
+      assert.equal(connected.nativeUnsent.native_os_kills,1);
+      assert.equal(connected.nativeUnsent.persisted_worker.inspected.reservation_state,"RELEASED");
+      const original=connected.nativeUnsent.boundary.root;
       assert.ok(!roots.has(original),"each repetition must create its own original SQL");
       roots.add(original);
-      const record={source_sha:sha.trim(),phase:"F2",repetition,
+      const record={source_sha:sha.trim(),phase,repetition,
         elapsed_ms:performance.now()-started,...connected};
       repetitions.push(record);
       // Preserve each completed real crash even if a later repetition fails.
-      await writeFile(resolve(dir,`native-worker-f2-process-crash-${repetition}.json`),
+      await writeFile(resolve(dir,`native-worker-${phase.toLowerCase()}-process-crash-${repetition}.json`),
         JSON.stringify(record,null,2)+"\n");
     }
-    await writeFile(resolve(dir,"native-worker-f2-process-crashes.json"),
-      JSON.stringify({schema:"okx.t10-11-native-f2-repetitions/v1",
+    await writeFile(resolve(dir,`native-worker-${phase.toLowerCase()}-process-crashes.json`),
+      JSON.stringify({schema:"okx.t10-11-native-unsent-repetitions/v1",phase,
         source_sha:sha.trim(),native_os_kills:10,full_t10_11_pass:false,
         repetitions},null,2)+"\n");
+    }
   } finally {
     delete process.env.OKX_T10_11_NATIVE_CRASH;
   }

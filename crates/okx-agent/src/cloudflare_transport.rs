@@ -330,7 +330,7 @@ where
         F::PolicySnapshot{snapshot,..}=>{ctx.trade.update_governance(&snapshot).await.map_err(|_|transport("INVALID_POLICY_SNAPSHOT"))?;},
         F::RiskControlResult{result,..}=>{
             #[cfg(test)]
-            raw_native_session_tests::t10_11_hold_reserve_reply(
+            raw_native_session_tests::t10_11_hold_unsent_reply(
                 &result,pending.get(&result.command_id).map(|(cmd,_)|cmd),&ctx,
                 connection_generation
             ).await;
