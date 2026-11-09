@@ -173,11 +173,13 @@ Run public read-only diagnostics with the authenticated `diagnostics` MCP tool
 or the existing typed `status` request to Windows CONTROL issue #12; follow
 the returned request ID and source reason, not a manual SQL inspection.
 
-**Known architectural gap, NOT_ACCEPTED:** the current architecture guard
-checks direct local-crate dependencies, not transitive purity. In particular
-`okx-analysis → okx-observation → okx-api` still couples analytics to API
-types. #448 K10/C20 explicitly requires closing this gap and exercising
-extension paths; a passing CI architecture job does not yet prove that target.
+**Architecture guard:** canonical normalized models and deterministic fee math
+live in `okx-kernel`; venue-dependent constructors stay in `okx-observation`.
+`okx-analysis` and `okx-research` no longer depend on observation/API adapters.
+The default guard checks the complete resolved production dependency graph for
+all three pure crates; negative fixtures reject transitive I/O dependencies.
+The [operation/test index](docs/testing.md) records the remaining #501 scope:
+this dependency check alone does not certify every runtime boundary or workflow.
 
 **Release evidence:** `main` merge and CI PASS are code proof only.
 Physical acceptance additionally requires the *same* installed Agent/Worker

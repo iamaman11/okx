@@ -609,9 +609,17 @@ async fn pc_07_recorded_signed_http_cancel_ack_readback_and_sql_receipt() {
         risk_increase: stored.risk_increase,
         signed_exposed: false,
         venue_order_state: "filled", // signed terminal order state supplied to public Status
+        invocation: None,
     };
     let not_terminal = CleanupOrderFacts {
         venue_order_state: "live",
+        ..order
+    };
+    let reobserve_order = CleanupOrderFacts {
+        invocation: Some(crate::diagnostics::ProtectionCleanupInvocation {
+            request_id: "req_0123456789abcdef",
+            origin: "agent_request.trade.status",
+        }),
         ..order
     };
     cleanup_flat_protection(
@@ -708,7 +716,7 @@ async fn pc_07_recorded_signed_http_cancel_ack_readback_and_sql_receipt() {
         operation(&f.store, &sql_key).await.result_ref,
         "VERIFIED_CANCELED"
     );
-    let explanation = trace.read(&sql_key).unwrap().unwrap();
+    let explanation = trace.read(&sql_key).unwrap();
     assert_eq!(
         explanation["snapshot"]["durable_state"],
         "VERIFIED_CANCELED"
@@ -734,7 +742,7 @@ async fn pc_07_recorded_signed_http_cancel_ack_readback_and_sql_receipt() {
             verified_uid: &expected_uid,
             trace: &trace,
         },
-        order,
+        reobserve_order,
     )
     .await
     .unwrap();
@@ -744,4 +752,14 @@ async fn pc_07_recorded_signed_http_cancel_ack_readback_and_sql_receipt() {
     assert_eq!(sends[0].1, "/api/v5/trade/cancel-algos");
     assert_eq!(sends[0].2[0]["algoId"], WIRE_ALGO);
     assert!(feed.denied_routes.lock().unwrap().is_empty());
+    let explanation = trace.read(&sql_key).unwrap();
+    assert!(explanation["snapshot"]["parent_invocation"].is_null());
+    assert_eq!(
+        explanation["snapshot"]["last_observed_invocation"],
+        "req_0123456789abcdef"
+    );
+    assert_eq!(
+        explanation["snapshot"]["last_observed_origin"],
+        "agent_request.trade.status"
+    );
 }

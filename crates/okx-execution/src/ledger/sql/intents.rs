@@ -1884,6 +1884,44 @@ impl AccountStore {
     pub fn operation(&self, id: &str) -> StoreResult<Option<OperationReceipt>> {
         Ok(self.connection.query_row("SELECT kind,request_hash,result_ref,committed_at FROM operation_receipts WHERE operation_id=?1",[id],|r|Ok(OperationReceipt{operation_id:id.into(),kind:r.get(0)?,request_hash:r.get(1)?,result_ref:r.get(2)?,committed_at:r.get(3)?})).optional()?)
     }
+    /// Return a bounded, read-only projection of this account's existing
+    /// protection-cleanup receipts. The kind/time/id index keeps the scan
+    /// within the cleanup receipt range; the LEFT JOIN preserves orphaned
+    /// receipts instead of hiding an identity mismatch.
+    pub fn recent_cleanup_diagnostics(
+        &self,
+        limit: usize,
+    ) -> StoreResult<Vec<ProtectionCleanupOperationReceipt>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let mut statement = self.connection.prepare(
+            "SELECT o.operation_id,i.intent_id,
+                    CASE WHEN substr(o.operation_id,1,8)='cleanup_'
+                         THEN substr(o.operation_id,9) END,
+                    o.kind,o.request_hash,o.result_ref,o.committed_at
+             FROM operation_receipts AS o
+             LEFT JOIN intents AS i ON i.client_order_id=
+               CASE WHEN substr(o.operation_id,1,8)='cleanup_'
+                    THEN substr(o.operation_id,9) END
+             WHERE o.kind='protection_cleanup'
+             ORDER BY o.committed_at DESC,o.operation_id DESC
+             LIMIT ?1",
+        )?;
+        Ok(statement
+            .query_map([limit.min(128) as i64], |row| {
+                Ok(ProtectionCleanupOperationReceipt {
+                    operation_id: row.get(0)?,
+                    intent_id: row.get(1)?,
+                    client_order_id: row.get(2)?,
+                    kind: row.get(3)?,
+                    request_hash: row.get(4)?,
+                    result_ref: row.get(5)?,
+                    committed_at: row.get(6)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?)
+    }
     // Durable marker is committed before any cancel/amend exchange mutation.
     pub fn begin_operation(
         &mut self,

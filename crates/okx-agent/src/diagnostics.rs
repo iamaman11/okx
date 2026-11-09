@@ -1,4 +1,9 @@
 //! Read-only diagnostics project actual owners; they never change access or replay an intent.
+mod protection_trace;
+pub(crate) use protection_trace::{
+    ProtectionCleanupInvocation, ProtectionOperationTrace, ProtectionTraceEvent,
+};
+
 use crate::{accounts::AccountResources, query::DispatchContext};
 use chrono::Utc;
 use futures_util::{StreamExt, stream};
@@ -12,192 +17,6 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
-
-const PROTECTION_TRACE_CAP: usize = 128;
-
-#[derive(Clone, serde::Serialize)]
-struct ProtectionTraceRow {
-    operation_id: String,
-    intent_id: String,
-    client_order_id: String,
-    parent_invocation: Option<String>,
-    stage: &'static str,
-    decision: &'static str,
-    durable_state: &'static str,
-    adapter_attempt: &'static str,
-    venue_ack: &'static str,
-    inventory_received_at_ms: Option<u64>,
-    position_received_at_ms: Option<i64>,
-    reason_code: Option<String>,
-    first_unproven_boundary: Option<&'static str>,
-    missing_evidence: Option<&'static str>,
-    next_action: &'static str,
-    recorded_at_ms: i64,
-}
-
-pub(crate) enum ProtectionTraceEvent {
-    Blocked,
-    NoProtection,
-    NoLiveStop,
-    Inspect,
-    Begin,
-    AdapterInvoked,
-    Ack,
-    Sources {
-        inventory_at_ms: u64,
-        position_at_ms: i64,
-    },
-    Unproven(String),
-    Verified,
-}
-
-/// Non-authoritative, bounded per-account projection: never used to permit
-/// a trade, to decide SQL state, or to prove a venue acknowledgement.
-#[derive(Default)]
-pub(crate) struct ProtectionOperationTrace {
-    recent: std::sync::RwLock<std::collections::BTreeMap<String, ProtectionTraceRow>>,
-}
-impl ProtectionOperationTrace {
-    pub(crate) fn record(
-        &self,
-        operation: &str,
-        intent: &str,
-        client: &str,
-        event: ProtectionTraceEvent,
-    ) {
-        // Do not ever block a trading task on diagnostics.
-        let Ok(mut rows) = self.recent.try_write() else {
-            return;
-        };
-        if !rows.contains_key(operation) && rows.len() >= PROTECTION_TRACE_CAP {
-            let oldest = rows
-                .iter()
-                .min_by_key(|(_, v)| v.recorded_at_ms)
-                .map(|(key, _)| key.clone());
-            if let Some(oldest) = oldest {
-                rows.remove(&oldest);
-            }
-        }
-        let entry = rows
-            .entry(operation.to_owned())
-            .or_insert_with(|| ProtectionTraceRow {
-                operation_id: operation.to_owned(),
-                intent_id: intent.to_owned(),
-                client_order_id: client.to_owned(),
-                parent_invocation: None,
-                stage: "NOT_STARTED",
-                decision: "NOT_EVALUATED",
-                durable_state: "NOT_EVALUATED",
-                adapter_attempt: "NOT_ATTEMPTED",
-                venue_ack: "NOT_OBSERVED",
-                inventory_received_at_ms: None,
-                position_received_at_ms: None,
-                reason_code: None,
-                first_unproven_boundary: Some("ADMISSION"),
-                missing_evidence: Some("SIGNED_TERMINAL_ORDER_AND_FLAT_POSITION"),
-                next_action: "trade.status",
-                recorded_at_ms: Utc::now().timestamp_millis(),
-            });
-        match event {
-            ProtectionTraceEvent::Blocked => {
-                entry.stage = "BLOCKED";
-                entry.decision = "NO_SEND";
-                entry.first_unproven_boundary = Some("ADMISSION");
-                entry.missing_evidence = Some("TERMINAL_ORDER_AND_FLAT_POSITION");
-            }
-            ProtectionTraceEvent::NoProtection => {
-                entry.stage = "NO_ATTACHED_PROTECTION";
-                entry.decision = "NO_ACTION";
-                entry.first_unproven_boundary = None;
-                entry.missing_evidence = None;
-            }
-            ProtectionTraceEvent::NoLiveStop => {
-                entry.stage = "SIGNED_STOP_NOT_LIVE";
-                entry.decision = "NO_POST";
-                entry.first_unproven_boundary = None;
-                entry.missing_evidence = None;
-            }
-            ProtectionTraceEvent::Inspect => {
-                entry.stage = "INSPECT_PRIOR_BEGIN";
-                entry.decision = "INSPECT_ONLY";
-                entry.durable_state = "POSTING";
-                // A re-entered Status cannot erase an ACK already observed
-                // by this process. After restart there is no trace row, so
-                // an earlier send/ACK still correctly remains UNKNOWN.
-                if entry.adapter_attempt != "INVOKED_OUTBOUND_UNPROVEN" {
-                    entry.adapter_attempt = "UNKNOWN_PRIOR_CALL";
-                }
-                if entry.venue_ack != "OBSERVED" {
-                    entry.venue_ack = "UNKNOWN_PRIOR_CALL";
-                }
-                entry.first_unproven_boundary = Some("POST_BEGIN_READBACK");
-                entry.missing_evidence = Some("SIGNED_EMPTY_ALGO_AND_FLAT_POSITION");
-            }
-            ProtectionTraceEvent::Begin => {
-                entry.stage = "SQL_BEGIN";
-                entry.decision = "SEND_ONCE";
-                entry.durable_state = "POSTING";
-                entry.first_unproven_boundary = Some("VENUE_EFFECT");
-                entry.missing_evidence = Some("VENUE_ACK_OR_SIGNED_READBACK");
-            }
-            ProtectionTraceEvent::AdapterInvoked => {
-                entry.stage = "ADAPTER_INVOKED";
-                entry.adapter_attempt = "INVOKED_OUTBOUND_UNPROVEN";
-                entry.first_unproven_boundary = Some("VENUE_EFFECT");
-            }
-            ProtectionTraceEvent::Ack => {
-                entry.stage = "ACK_OBSERVED";
-                entry.venue_ack = "OBSERVED";
-                entry.first_unproven_boundary = Some("POST_ACK_READBACK");
-                entry.missing_evidence = Some("SIGNED_EMPTY_ALGO_AND_FLAT_POSITION");
-            }
-            ProtectionTraceEvent::Sources {
-                inventory_at_ms,
-                position_at_ms,
-            } => {
-                entry.stage = "SIGNED_SOURCES_OBSERVED";
-                entry.inventory_received_at_ms = Some(inventory_at_ms);
-                entry.position_received_at_ms = Some(position_at_ms);
-            }
-            ProtectionTraceEvent::Unproven(code) => {
-                entry.stage = "OUTCOME_OR_READBACK_UNPROVEN";
-                entry.reason_code = Some(safe_code(&code, "PROTECTION_CLEANUP_UNPROVEN"));
-                if entry.venue_ack == "OBSERVED" {
-                    entry.first_unproven_boundary = Some("POST_ACK_READBACK");
-                    entry.missing_evidence = Some("SIGNED_EMPTY_ALGO_AND_FLAT_POSITION");
-                } else {
-                    entry.first_unproven_boundary = Some("VENUE_OUTCOME_OR_SIGNED_READBACK");
-                    entry.missing_evidence = Some("COMPLETE_FRESH_POST_BEGIN_VENUE_PROOF");
-                }
-            }
-            ProtectionTraceEvent::Verified => {
-                entry.stage = "VERIFIED_CANCELED";
-                entry.decision = "CONFIRMED";
-                entry.durable_state = "VERIFIED_CANCELED";
-                entry.reason_code = None;
-                entry.first_unproven_boundary = None;
-                entry.missing_evidence = None;
-                entry.next_action = "inspect_separate_risk_release";
-            }
-        }
-        entry.recorded_at_ms = Utc::now().timestamp_millis();
-    }
-    pub(crate) fn read(&self, reference: &str) -> Result<Option<Value>, &'static str> {
-        let rows = self
-            .recent
-            .try_read()
-            .map_err(|_| "PROTECTION_TRACE_BUSY")?;
-        Ok(rows.get(reference).or_else(|| rows.values().find(|r|
-            r.intent_id == reference || r.client_order_id == reference
-        )).map(|entry| json!({
-            "snapshot": entry,
-            "snapshot_age_ms": Utc::now().timestamp_millis().saturating_sub(entry.recorded_at_ms),
-            "quality": "partial_non_authoritative_projection",
-            "risk_release": "NOT_EVALUATED",
-            "trading_side_effects": false
-        })))
-    }
-}
 
 async fn operation_diagnostics(
     ctx: &DispatchContext,
@@ -232,26 +51,30 @@ async fn operation_diagnostics(
         }
     }
     match account.protection_operation_trace.read(reference) {
-        Ok(Some(state)) => Ok(json!({
-            "schema":"okx.operation-diagnostics/v1",
-            "account":account.configuration.account_key.wire(),
-            "reference":reference,"state":"OBSERVED","operation":state,
-            "read_only":true,"central_budget":{"state":"NOT_EVALUATED","reason_code":"DIAGNOSTICS_ONLY"}
-        })),
-        Ok(None) => Ok(json!({
+        Ok(state) if state["state"] == "NOT_OBSERVED" => Ok(json!({
             "schema":"okx.operation-diagnostics/v1",
             "account":account.configuration.account_key.wire(),
             "reference":reference,"state":"NOT_OBSERVED",
-            "durable_state":"NOT_EVALUATED",
             "reason_code":"VOLATILE_PROJECTION_UNAVAILABLE",
+            "quality":"partial",
             "send_and_ack_history":"UNKNOWN_AFTER_RESTART_OR_EVICTION",
+            "trace_health":state["trace_health"],
             "next_action":"trade.status","read_only":true
+        })),
+        Ok(state) => Ok(json!({
+            "schema":"okx.operation-diagnostics/v1",
+            "account":account.configuration.account_key.wire(),
+            "reference":reference,"state":"OBSERVED","operation":state,
+            "quality":"partial",
+            "read_only":true,"central_budget":{"state":"NOT_EVALUATED","reason_code":"DIAGNOSTICS_ONLY"}
         })),
         Err(code) => Ok(json!({
             "schema":"okx.operation-diagnostics/v1",
             "account":account.configuration.account_key.wire(),
             "reference":reference,"state":"NOT_EVALUATED",
-            "reason_code":code,"next_action":"retry_read_only_diagnostic","read_only":true
+            "reason_code":code,"next_action":"retry_read_only_diagnostic","read_only":true,
+            "trace_health":account.protection_operation_trace.health_report(),
+            "quality":"partial"
         })),
     }
 }
@@ -295,14 +118,14 @@ fn lookup(store: &AccountStore, reference: &str) -> StoreResult<Option<StoredInt
     }
     store.by_exchange_order_id(reference)
 }
-async fn budget(ctx: &DispatchContext) -> Value {
-    match tokio::time::timeout(Duration::from_secs(3), ctx.trade.risk_summary()).await {
-        Ok(Ok(v)) => json!({"state":"observed","value":v}),
-        Ok(Err(e)) => {
-            json!({"state":"unavailable","reason_code":safe_code(&e,"CENTRAL_BUDGET_UNAVAILABLE")})
-        }
-        Err(_) => json!({"state":"unavailable","reason_code":"CENTRAL_BUDGET_DEADLINE"}),
-    }
+fn central_budget_not_evaluated() -> Value {
+    json!({
+        "state":"NOT_EVALUATED",
+        "reason_code":"NO_LOCAL_RISKBOOK_SNAPSHOT",
+        "quality":"partial",
+        "source":"none",
+        "external_calls":false
+    })
 }
 pub async fn diagnostics(
     ctx: &DispatchContext,
@@ -348,8 +171,10 @@ pub async fn diagnostics(
             "use view=finance",
         ));
     }
-    let (result, central) = tokio::join!(diagnostics_inner(ctx, request, account), budget(ctx));
-    let mut out = match result {
+    // Diagnostics are read-only and bounded. In particular, do not send a
+    // RiskCommandAction::Summary over WSS here: the Engine has no local cached
+    // RiskBook projection, so central risk remains explicitly unevaluated.
+    let mut out = match diagnostics_inner(ctx, request, account).await {
         Ok(value) => value,
         Err(code) => report(
             "routing",
@@ -360,7 +185,7 @@ pub async fn diagnostics(
             "supply an explicit valid account and reference",
         ),
     };
-    out["central_budget"] = central;
+    out["central_budget"] = central_budget_not_evaluated();
     Ok(out)
 }
 async fn finance_diagnostics(
@@ -810,6 +635,20 @@ async fn account_diagnostics(
 mod tests {
     use super::*;
     #[test]
+    fn default_diagnostics_never_claims_a_remote_risk_summary() {
+        let budget = central_budget_not_evaluated();
+        assert_eq!(budget["state"], "NOT_EVALUATED");
+        assert_eq!(budget["reason_code"], "NO_LOCAL_RISKBOOK_SNAPSHOT");
+        assert_eq!(budget["source"], "none");
+        assert_eq!(budget["external_calls"], false);
+        let response = crate::query::response(
+            "local-diagnostic",
+            Ok(json!({"quality":"complete", "central_budget":budget})),
+        );
+        assert_eq!(response.quality, okx_protocol::DataQuality::Degraded);
+    }
+
+    #[test]
     fn operation_projection_reads_are_local_bounded_and_isolated() {
         let a = ProtectionOperationTrace::default();
         let b = ProtectionOperationTrace::default();
@@ -831,43 +670,53 @@ mod tests {
             "client-a",
             ProtectionTraceEvent::Unproven("PROTECTION_CANCEL_OUTCOME_UNKNOWN".into()),
         );
-        let unproven = a.read("intent-a").unwrap().unwrap();
+        let unproven = a.read("intent-a").unwrap();
         assert_eq!(unproven["snapshot"]["durable_state"], "POSTING");
         assert_eq!(
             unproven["snapshot"]["adapter_attempt"],
             "INVOKED_OUTBOUND_UNPROVEN"
         );
         assert_eq!(unproven["snapshot"]["venue_ack"], "NOT_OBSERVED");
-        assert!(b.read("intent-a").unwrap().is_none());
+        let absent = b.read("intent-a").unwrap();
+        assert_eq!(absent["state"], "NOT_OBSERVED");
+        assert_eq!(absent["trace_health"]["history_complete"], "UNKNOWN");
         a.record(
             "cleanup_a",
             "intent-a",
             "client-a",
             ProtectionTraceEvent::Verified,
         );
-        let verified = a.read("cleanup_a").unwrap().unwrap();
+        let verified = a.read("cleanup_a").unwrap();
         assert_eq!(verified["snapshot"]["durable_state"], "VERIFIED_CANCELED");
         assert!(verified["snapshot"]["missing_evidence"].is_null());
         let mut samples = Vec::new();
         for _ in 0..1_000 {
             let start = Instant::now();
-            assert!(a.read("intent-a").unwrap().is_some());
+            assert_eq!(a.read("intent-a").unwrap()["state"], "OBSERVED");
             samples.push(start.elapsed());
         }
+        let raw_sample_ns = samples
+            .iter()
+            .map(|sample| sample.as_nanos())
+            .collect::<Vec<_>>();
         samples.sort();
+        println!(
+            "PROTECTION_PROJECTION_BENCHMARK={}",
+            json!({
+                "scope": "local_projection_read_only_not_public_dispatch",
+                "samples_ns": raw_sample_ns,
+                "p95_ns": samples[949].as_nanos(),
+                "build": if cfg!(debug_assertions) { "debug" } else { "release" },
+                "arch": std::env::consts::ARCH,
+                "os": std::env::consts::OS,
+                "external_calls": 0,
+                "mutations": 0
+            })
+        );
         assert!(
             samples[949] <= Duration::from_millis(100),
             "1,000 warm local reads must have P95 <=100ms"
         );
-        for n in 0..130 {
-            a.record(
-                &format!("cleanup_{n}"),
-                "other",
-                "other",
-                ProtectionTraceEvent::Blocked,
-            );
-        }
-        assert!(a.recent.try_read().unwrap().len() <= PROTECTION_TRACE_CAP);
     }
     #[test]
     fn repeated_inspect_retains_locally_observed_ack_and_precise_missing_proof() {
@@ -896,7 +745,7 @@ mod tests {
             "client-a",
             ProtectionTraceEvent::Unproven("PROTECTION_CANCEL_READBACK_STALE".into()),
         );
-        let before = trace.read("cleanup_a").unwrap().unwrap();
+        let before = trace.read("cleanup_a").unwrap();
         assert_eq!(before["snapshot"]["venue_ack"], "OBSERVED");
         assert_eq!(
             before["snapshot"]["first_unproven_boundary"],
@@ -908,7 +757,7 @@ mod tests {
             "client-a",
             ProtectionTraceEvent::Inspect,
         );
-        let after = trace.read("cleanup_a").unwrap().unwrap();
+        let after = trace.read("cleanup_a").unwrap();
         assert_eq!(after["snapshot"]["venue_ack"], "OBSERVED");
         assert_eq!(
             after["snapshot"]["adapter_attempt"],
@@ -933,7 +782,7 @@ mod tests {
             "client-a",
             ProtectionTraceEvent::Inspect,
         );
-        let unknown = restarted.read("cleanup_a").unwrap().unwrap();
+        let unknown = restarted.read("cleanup_a").unwrap();
         assert_eq!(unknown["snapshot"]["venue_ack"], "UNKNOWN_PRIOR_CALL");
         assert_eq!(unknown["snapshot"]["adapter_attempt"], "UNKNOWN_PRIOR_CALL");
     }

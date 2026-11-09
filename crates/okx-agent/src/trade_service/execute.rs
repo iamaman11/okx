@@ -809,7 +809,7 @@ impl TradeService {
                     ));
                 }
             };
-            return self.status_intent(r, &i.intent_id).await;
+            return self.status_intent(r, &i.intent_id, None).await;
         }
         // If this key is NEW, an unavailable semaphore remains a strict
         // no-send rejection. A concurrent task that created the intent
@@ -1573,7 +1573,7 @@ impl TradeService {
                         })
                         .await
                         .map_err(err)?;
-                    self.status_intent(r, &id).await
+                    self.status_intent(r, &id, None).await
                 }
                 PlaceAckVerdict::ExplicitRejected => {
                     let i = id.clone();

@@ -485,8 +485,10 @@ impl AccountRuntimeRegistry {
                         "INITIAL_SNAPSHOT_UNSTABLE".into(),
                     ));
                 }
-                let first = observer.snapshot().await.map_err(|_| {
-                    AgentError::FinancialCaptureTask("ACCOUNT_SOURCE_UNAVAILABLE".into())
+                let first = observer.snapshot().await.map_err(|error| {
+                    AgentError::FinancialCaptureTask(
+                        crate::source_capture::snapshot_failure_code(&error).into(),
+                    )
                 })?;
                 let algos = observer
                     .pending_derivative_risk_algos()
@@ -494,8 +496,10 @@ impl AccountRuntimeRegistry {
                     .map_err(|_| {
                         AgentError::FinancialCaptureTask("ACCOUNT_ALGO_SOURCE_UNAVAILABLE".into())
                     })?;
-                let last = observer.snapshot().await.map_err(|_| {
-                    AgentError::FinancialCaptureTask("ACCOUNT_SOURCE_UNAVAILABLE".into())
+                let last = observer.snapshot().await.map_err(|error| {
+                    AgentError::FinancialCaptureTask(
+                        crate::source_capture::snapshot_failure_code(&error).into(),
+                    )
                 })?;
                 if first.account_uid_fingerprint != uid || last.account_uid_fingerprint != uid {
                     return Err(AgentError::FinancialCaptureTask(
@@ -684,15 +688,62 @@ impl AccountRuntimeRegistry {
                     .lock()
                     .unwrap_or_else(|e| e.into_inner()),
             );
-            for mut task in tasks {
-                if tokio::time::timeout(std::time::Duration::from_secs(10), &mut task)
-                    .await
-                    .is_err()
-                {
-                    task.abort();
-                }
+            for task in tasks {
+                stop_source_task(task, std::time::Duration::from_secs(10)).await;
             }
         }
+    }
+}
+
+async fn stop_source_task(mut task: JoinHandle<()>, grace: std::time::Duration) {
+    if tokio::time::timeout(grace, &mut task).await.is_err() {
+        task.abort();
+        // Do not detach a source task after the bounded graceful shutdown
+        // deadline. Awaiting the aborted handle proves cancellation completed
+        // before registry shutdown returns.
+        let _ = task.await;
+    }
+}
+
+#[cfg(test)]
+mod source_shutdown_tests {
+    use super::stop_source_task;
+    use std::{
+        future::pending,
+        sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        },
+        time::Duration,
+    };
+    use tokio::task::JoinHandle;
+
+    struct CancellationWitness(Arc<AtomicBool>);
+
+    impl Drop for CancellationWitness {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    #[tokio::test]
+    async fn shutdown_timeout_aborts_and_joins_source_task() {
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let witness = Arc::clone(&cancelled);
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let task: JoinHandle<()> = tokio::spawn(async move {
+            let _witness = CancellationWitness(witness);
+            let _ = started_tx.send(());
+            pending::<()>().await;
+        });
+        started_rx.await.expect("source task started");
+
+        stop_source_task(task, Duration::from_millis(1)).await;
+
+        assert!(
+            cancelled.load(Ordering::SeqCst),
+            "shutdown must await cancellation before returning"
+        );
     }
 }
 
@@ -832,6 +883,7 @@ fn start_sources(
     coordinator: PrivateWsCoordinator,
     mut shutdown: watch::Receiver<bool>,
 ) {
+    let diagnostic_restore = start_diagnostic_restore(resources, shutdown.clone());
     let ws_shutdown = shutdown.clone();
     let ws = tokio::spawn(async move {
         if coordinator.run(ws_shutdown).await.is_err() {
@@ -866,8 +918,8 @@ fn start_sources(
              if account.verified_source_generation.load(Ordering::Acquire)!=generation {
                 let snapshot=match account.observer.snapshot().await {
                     Ok(snapshot)=>snapshot,
-                    Err(_)=>{
-                        account.record_source_failure("ACCOUNT_SOURCE_UNAVAILABLE", capture_started, generation, cycle_id).await;
+                    Err(error)=>{
+                        account.record_source_failure(crate::source_capture::snapshot_failure_code(&error), capture_started, generation, cycle_id).await;
                         continue;
                     }
                 };
@@ -907,7 +959,54 @@ fn start_sources(
         .source_tasks
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .extend([ws, finance]);
+        .extend([ws, finance, diagnostic_restore]);
+}
+
+/// Rehydrate only durable facts through the existing account SQL owner. Route
+/// publication and diagnostic reads never wait for this task. It shares source
+/// shutdown ownership and cannot keep AccountResources alive by itself.
+fn start_diagnostic_restore(
+    resources: &Arc<AccountResources>,
+    mut shutdown: watch::Receiver<bool>,
+) -> JoinHandle<()> {
+    resources.protection_operation_trace.mark_restore_pending();
+    let weak = Arc::downgrade(resources);
+    let store = resources.execution.store.clone();
+    tokio::spawn(async move {
+        let restored = if *shutdown.borrow() {
+            Err("DIAGNOSTIC_RESTORE_CANCELLED")
+        } else {
+            tokio::select! {
+                biased;
+                _ = shutdown.changed() => Err("DIAGNOSTIC_RESTORE_CANCELLED"),
+                result = store.call(
+                    Instant::now() + std::time::Duration::from_secs(2),
+                    |sql| sql.recent_cleanup_diagnostics(
+                        crate::diagnostics::ProtectionOperationTrace::CAPACITY,
+                    ),
+                ) => result.map_err(|error| match error {
+                    okx_execution::StoreError::Invalid(code) => code,
+                    _ => "DIAGNOSTIC_RESTORE_STORAGE_UNAVAILABLE",
+                }),
+            }
+        };
+        if let Some(account) = weak.upgrade() {
+            match restored {
+                Ok(receipts) => {
+                    if let Err(reason) =
+                        account.protection_operation_trace.restore_durable(receipts)
+                    {
+                        account
+                            .protection_operation_trace
+                            .mark_restore_failed(reason);
+                    }
+                }
+                Err(reason) => account
+                    .protection_operation_trace
+                    .mark_restore_failed(reason),
+            }
+        }
+    })
 }
 
 pub fn build_release() -> &'static str {
@@ -5468,7 +5567,17 @@ mod tests {
             .store
             .call(
                 std::time::Instant::now() + std::time::Duration::from_secs(3),
-                |s| s.ensure_manual_instance(1234),
+                |s| {
+                    // A durable BEGIN alone cannot reconstruct send or ACK.
+                    // No matching intent is fabricated for this orphan receipt.
+                    s.begin_operation(
+                        "cleanup_restart_diagnostic",
+                        "restart-diagnostic-hash",
+                        "protection_cleanup",
+                        1234,
+                    )?;
+                    s.ensure_manual_instance(1234)
+                },
             )
             .await
             .unwrap();
@@ -5510,6 +5619,27 @@ mod tests {
             .unwrap()
             .expect("original persisted instance");
         assert_eq!(recovered.definition_id, definition.definition_id);
+        let projection = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            loop {
+                if let Ok(report) = owner
+                    .protection_operation_trace
+                    .read("cleanup_restart_diagnostic")
+                    && report["state"] == "OBSERVED"
+                {
+                    break report;
+                }
+                // Observe completion of the actual startup task, not a new
+                // Status/capture or a hand-published diagnostic event.
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("startup must restore the bounded durable diagnostic projection");
+        assert_eq!(projection["snapshot"]["durable_state"], "POSTING");
+        assert_eq!(projection["snapshot"]["venue_ack"], "UNKNOWN_PRIOR_CALL");
+        assert!(projection["snapshot"]["parent_invocation"].is_null());
+        assert!(projection["snapshot"]["intent_id"].is_null());
+        assert_eq!(projection["trace_health"]["history_complete"], "UNKNOWN");
         let (_, clients) = prepared("a", feed.clone(), budget);
         assert!(reopened.reconnect_prepared(config, clients).await.is_err());
         assert_eq!(feed.outbound_posts.lock().unwrap().len(), 0);

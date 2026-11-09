@@ -1,6 +1,7 @@
 //! Incremental post-T0 exchange facts. The account worker commits each page with its cursor.
 use crate::{
-    AgentError, AgentResult, account_bootstrap::AccountBootstrapper,
+    AgentError, AgentResult,
+    account_bootstrap::{AccountBootstrapError, AccountBootstrapper},
     execution_runtime::ExecutionRuntime,
 };
 use okx_api::{AccountBill, FillHistory};
@@ -28,6 +29,15 @@ tokio::task_local! {
 
 fn invalid(reason: &str) -> AgentError {
     AgentError::FinancialCaptureTask(reason.into())
+}
+
+pub(crate) fn snapshot_failure_code(error: &AccountBootstrapError) -> &'static str {
+    match error {
+        AccountBootstrapError::PermissionRejected => "ACCOUNT_PERMISSION_REJECTED",
+        AccountBootstrapError::Api(_) => "ACCOUNT_API_UNAVAILABLE",
+        AccountBootstrapError::Normalize(_) => "ACCOUNT_SNAPSHOT_NORMALIZATION_FAILED",
+        AccountBootstrapError::SourceDeadline => "ACCOUNT_SOURCE_DEADLINE_EXCEEDED",
+    }
 }
 fn d(s: &str) -> StoreResult<Decimal> {
     Decimal::from_str(s).map_err(|_| StoreError::Invalid("SOURCE_DECIMAL_INVALID"))
@@ -369,7 +379,7 @@ pub(crate) async fn capture_account_sources_traced(
             observer
                 .snapshot_until(capture_until)
                 .await
-                .map_err(|_| invalid("ACCOUNT_SOURCE_UNAVAILABLE"))
+                .map_err(|error| invalid(snapshot_failure_code(&error)))
         },
         async {
             execution
@@ -1079,6 +1089,18 @@ async fn capture_bills(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn account_snapshot_failures_keep_their_stage_code_at_capture_boundary() {
+        assert_eq!(
+            snapshot_failure_code(&AccountBootstrapError::SourceDeadline),
+            "ACCOUNT_SOURCE_DEADLINE_EXCEEDED"
+        );
+        assert_eq!(
+            snapshot_failure_code(&AccountBootstrapError::PermissionRejected),
+            "ACCOUNT_PERMISSION_REJECTED"
+        );
+    }
     #[test]
     fn source_window_retry_preserves_range_and_overlap() {
         let w = Window {

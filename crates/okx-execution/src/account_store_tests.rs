@@ -7673,6 +7673,195 @@ fn duplicate_cancel_never_posts_twice() {
         .unwrap();
     assert!(!s.begin_operation("cancel", "request", "CANCEL", 4).unwrap());
 }
+
+#[test]
+fn recent_cleanup_diagnostics_are_capped_joined_and_use_the_kind_index() {
+    let mut s = store();
+    let saved = intent(&mut s);
+    for index in 0..140 {
+        let key = format!("cleanup_fixture_{index:03}");
+        let hash = format!("hash_{index:03}");
+        s.operation_receipt(&key, &hash, "protection_cleanup", "POSTING", index)
+            .unwrap();
+    }
+    s.operation_receipt(
+        &format!("cleanup_{}", saved.client_order_id),
+        "verified_hash",
+        "protection_cleanup",
+        "VERIFIED_CANCELED",
+        1000,
+    )
+    .unwrap();
+    s.operation_receipt(
+        "cleanup_orphan_client",
+        "orphan_hash",
+        "protection_cleanup",
+        "POSTING",
+        2000,
+    )
+    .unwrap();
+    s.operation_receipt(
+        "not_cleanup_but_same_kind",
+        "wrong_prefix_hash",
+        "protection_cleanup",
+        "POSTING",
+        3000,
+    )
+    .unwrap();
+    s.operation_receipt(
+        "cleanup_other_kind",
+        "wrong_kind_hash",
+        "OTHER_OPERATION",
+        "POSTING",
+        4000,
+    )
+    .unwrap();
+
+    let rows = s.recent_cleanup_diagnostics(usize::MAX).unwrap();
+    assert_eq!(rows.len(), 128, "the SQL reader must cap caller input");
+    assert_eq!(rows[0].operation_id, "not_cleanup_but_same_kind");
+    assert_eq!(rows[0].intent_id, None);
+    assert_eq!(
+        rows[0].client_order_id, None,
+        "malformed identity stays visible"
+    );
+    let orphan = rows
+        .iter()
+        .find(|row| row.operation_id == "cleanup_orphan_client")
+        .expect("orphan receipt remains visible");
+    assert_eq!(orphan.intent_id, None);
+    assert_eq!(orphan.client_order_id.as_deref(), Some("orphan_client"));
+    assert_eq!(orphan.result_ref, "POSTING");
+    let verified = rows
+        .iter()
+        .find(|row| row.operation_id == format!("cleanup_{}", saved.client_order_id))
+        .expect("associated cleanup receipt is in the bounded page");
+    assert_eq!(
+        verified.intent_id.as_deref(),
+        Some(saved.intent_id.as_str())
+    );
+    assert_eq!(
+        verified.client_order_id.as_deref(),
+        Some(saved.client_order_id.as_str())
+    );
+    assert_eq!(verified.kind, "protection_cleanup");
+    assert_eq!(verified.result_ref, "VERIFIED_CANCELED");
+    assert!(
+        rows.iter()
+            .all(|row| row.operation_id != "cleanup_other_kind")
+    );
+    assert!(s.recent_cleanup_diagnostics(0).unwrap().is_empty());
+
+    let mut other_account = store_with_account("okx:real:other-cleanup-owner");
+    let other_intent = intent(&mut other_account);
+    other_account
+        .operation_receipt(
+            &format!("cleanup_{}", other_intent.client_order_id),
+            "other_account_hash",
+            "protection_cleanup",
+            "POSTING",
+            5000,
+        )
+        .unwrap();
+    let other_rows = other_account.recent_cleanup_diagnostics(128).unwrap();
+    assert_eq!(other_rows.len(), 1);
+    assert_eq!(other_rows[0].request_hash, "other_account_hash");
+    assert_eq!(verified.request_hash, "verified_hash");
+
+    let plan = s
+        .connection
+        .prepare(
+            "EXPLAIN QUERY PLAN
+             SELECT o.operation_id,i.intent_id,
+                    CASE WHEN substr(o.operation_id,1,8)='cleanup_'
+                         THEN substr(o.operation_id,9) END,
+                    o.kind,o.request_hash,o.result_ref,o.committed_at
+             FROM operation_receipts AS o
+             LEFT JOIN intents AS i ON i.client_order_id=
+               CASE WHEN substr(o.operation_id,1,8)='cleanup_'
+                    THEN substr(o.operation_id,9) END
+             WHERE o.kind='protection_cleanup'
+             ORDER BY o.committed_at DESC,o.operation_id DESC
+             LIMIT ?1",
+        )
+        .unwrap()
+        .query_map([128], |row| row.get::<_, String>(3))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap()
+        .join(" ");
+    assert!(
+        plan.contains("idx_campaign_native_receipt_scan"),
+        "receipt scan must use the existing kind/time/id index; plan={plan}"
+    );
+    assert!(
+        !plan.contains("TEMP B-TREE"),
+        "receipt ordering must be supplied by the existing index; plan={plan}"
+    );
+}
+
+#[tokio::test]
+async fn recent_cleanup_diagnostics_reopens_the_original_sql_owner() {
+    let mut original = store();
+    let saved = intent(&mut original);
+    let operation_id = format!("cleanup_{}", saved.client_order_id);
+    original
+        .operation_receipt(
+            &operation_id,
+            "restart_hash",
+            "protection_cleanup",
+            "POSTING",
+            123,
+        )
+        .unwrap();
+    let path = original.path.clone();
+    let meta = original.meta.clone();
+    drop(original);
+
+    let owner = crate::AccountStoreHandle::open_existing(
+        path.clone(),
+        meta.account_key.clone(),
+        meta.installation_id.clone(),
+    )
+    .await
+    .unwrap();
+    let rows = owner
+        .call(
+            std::time::Instant::now() + Duration::from_secs(3),
+            |store| store.recent_cleanup_diagnostics(128),
+        )
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].intent_id.as_deref(), Some("intent"));
+    assert_eq!(
+        rows[0].client_order_id.as_deref(),
+        Some(saved.client_order_id.as_str())
+    );
+    assert_eq!(rows[0].result_ref, "POSTING");
+
+    let mut terminated = owner.termination_signal();
+    drop(owner);
+    tokio::time::timeout(Duration::from_secs(3), terminated.wait_for(|value| *value))
+        .await
+        .unwrap()
+        .unwrap();
+    let reopened =
+        crate::AccountStoreHandle::open_existing(path, meta.account_key, meta.installation_id)
+            .await
+            .unwrap();
+    let rows = reopened
+        .call(
+            std::time::Instant::now() + Duration::from_secs(3),
+            |store| store.recent_cleanup_diagnostics(128),
+        )
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].operation_id, operation_id);
+    assert_eq!(rows[0].result_ref, "POSTING");
+}
+
 #[tokio::test]
 async fn writer_queue_backpressure_and_account_isolation() {
     let s = store();

@@ -3,7 +3,9 @@
 use super::reconcile::verify_instrument_is_flat;
 use super::*;
 use crate::account_bootstrap::AccountBootstrapper;
-use crate::diagnostics::{ProtectionOperationTrace, ProtectionTraceEvent};
+use crate::diagnostics::{
+    ProtectionCleanupInvocation, ProtectionOperationTrace, ProtectionTraceEvent,
+};
 use tokio::sync::Semaphore;
 
 // A signed flat position is NOT permission to remove a stop while the
@@ -29,6 +31,7 @@ pub(super) struct CleanupOrderFacts<'a> {
     pub risk_increase: bool,
     pub signed_exposed: bool,
     pub venue_order_state: &'a str,
+    pub invocation: Option<ProtectionCleanupInvocation<'a>>,
 }
 
 pub(super) struct CleanupDependencies<'a> {
@@ -336,10 +339,11 @@ fn trace_cleanup(
     facts: CleanupOrderFacts<'_>,
     event: ProtectionTraceEvent,
 ) {
-    deps.trace.record(
+    deps.trace.record_with_invocation(
         &format!("cleanup_{}", facts.client_order_id),
         facts.intent_id,
         facts.client_order_id,
+        facts.invocation,
         event,
     );
 }

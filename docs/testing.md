@@ -3,12 +3,142 @@
 **Canonical:** [product #448](https://github.com/iamaman11/okx/issues/448), [execution #449](https://github.com/iamaman11/okx/issues/449), [bounded simplification #501](https://github.com/iamaman11/okx/issues/501). This is an evidence map, **not** a new suite, an authorization to trade, or a PASS certificate.
 
 **Current candidate:** `fix/windows-clippy-required-495-20261107`, Draft PR #499.
-**T10-11 PASS: 90 connected F0–F8 crashes on code SHA `a8afc8dd`**.
-Full 26-case acceptance remains unconfirmed. Last reviewed full matrix:
-23/26 on `31ca2fd9`, failures T10-09/T10-11/T10-12. Later targeted T10-09/T10-12
-PASS on `77cf2f94` ([checkpoint](https://github.com/iamaman11/okx/issues/501#issuecomment-6728210030))
-does not create a combined 25/26 or prove this newer candidate. Do not merge
-based on these partial results. Subsequent docs-only commits are not new runtime evidence.
+**Accepted regression baseline: `0680e90f9625f6b0c0b32defd8d50d493852411c`.**
+[Required CI 42565208825](https://github.com/iamaman11/okx/actions/runs/42565208825)
+passed the full 26-case matrix, 219 assertions, all 90 connected F0–F8 crash trials,
+and release build. Bundle manifest/source tree and three executable hashes were
+independently verified. This baseline does not certify subsequent refactoring;
+the final refactor candidate requires its own required CI. See the live
+[checkpoint](https://github.com/iamaman11/okx/issues/501#issuecomment-6733268443).
+
+## #501 application ownership and refactor pass
+
+The Rust types and actual call graph own the architecture. This table is a review
+index, not an additional operation registry or runtime framework. All 14 public
+`AgentOperation` variants have arms in `query::execute`; detailed action variants
+remain exhaustively matched in their existing services.
+
+| Area / crates | Owner and dependency boundary | Refactor decision |
+|---|---|---|
+| kernel, analysis, research | Canonical normalized facts and deterministic calculations; complete resolved production dependency graph | Move 34 shared model declarations and deterministic fee code into kernel. Observation reexports the same types; API-dependent constructors remain adapter functions. Enforce K10 for all three crates, including external transitive edges. |
+| api, observation, ws, runtime | API signs/executes HTTP; observation normalizes venue inputs; WS/runtime own subscription state and freshness | Preserve these owners. API InstrumentType reexports the canonical model. Adapters depend inward on pure types; pure analysis no longer depends on observation/API. |
+| protocol, agent query | Typed public request validation and exhaustive command routing | Narrow market handler dependencies to PublicWsHandle/AnalyticsService; separate pure microstructure response calculation from snapshot acquisition. |
+| agent trading, execution | TradeService operations; AccountStoreHandle owns each account SQLite connection and atomic claims | Keep existing settlement/cleanup/unsent-release/submission owners. Locate terminal release in its own module with explicit imports; its cohort census still requires integrated evidence. No fake census test replaces that evidence. |
+| agent accounts and sources | Registry verifies UID and owns source task shutdown; capture owns source normalization | Await aborted source JoinHandle before shutdown returns. Preserve safe typed failure category instead of flattening every account snapshot failure. |
+| agent diagnostics | Bounded local account projections and SQL readers | Separate protection trace; expose event gaps/eviction and first observed blocker separately from current boundary. Remove the default diagnostic's remote RiskBook request; report no local risk snapshot honestly. |
+| agent research jobs/artifacts | Jobs is the sole SQLite job catalog, Sources owns data access, CpuExecutor owns bounded compute | Keep existing owners and direct queue/idempotency/crash/result tests. No replacement job framework. |
+| github, bridge-mcp, cli | Mailbox/MCP/CLI adapters call existing native commands | Keep transport adaptation; no second trading executor found in reviewed entry paths. |
+| host-control, host-launcher | HostExecutor/Windows Job owns child lifecycle; launcher owns active controller | Consolidate three copied durable CONTROL ACK predicates into one private function; keep distinct operation modes, network polling and durable transitions. |
+| Cloudflare RuntimeSession/RiskBook | Authenticated current-generation risk commands mutate one DO transaction owner | Keep current session/auth/transaction owners and composed tests. Synthetic native fixtures remain explicitly distinct from physical Native/WSS evidence. |
+
+### Executable operation and background owner index
+
+The public surface is the exhaustive `AgentOperation` enum in
+`crates/okx-protocol/src/lib.rs`; `query::execute` has one arm per variant.
+This index names that production owner and a real code-level test target. A
+test listed as `partial` covers only the named boundary; it does not prove the
+entire public operation or installed workflow. `No focused query-arm test
+found` means exactly that; it is not a claim that the behavior is absent.
+
+| Public variant | Production owner / next boundary | Existing named evidence | Known gap at this boundary |
+|---|---|---|---|
+| `ConnectAccount` | `query::execute` → `AccountRuntimeRegistry::connect` → `AccountBootstrapper` | `accounts::tests::prepared_account_rejects_unverified_identity_before_sql`; `recorded_two_account_bootstrap_opens_independent_sql_owners` (bootstrap/SQL, partial) | No focused test drives the public query arm through credential resolution and publication. |
+| `Market` | `query::execute_market` → `AnalyticsService::market` → `MarketBootstrap` / existing research job owner | `analytics::market::tests::prepared_screen_8x100_latency_and_response_budget`; `market_source_scope_is_bound_to_native_public_client_environment` (partial) | No focused public-dispatch test covers the whole request-to-response route. |
+| `MarketCapabilities` | `query::execute` → `AnalyticsService::market_capabilities` | `analytics::tests::market_capabilities_discloses_supported_operator_names_and_units` | No separate public-dispatch test. |
+| `MarketMicrostructure` | `query::execute_market_microstructure` obtains admitted fresh WS snapshot; `microstructure_summary` is pure projection | `query::microstructure_test::microstructure_projects_exact_spread_and_sweep_without_io`; `microstructure_rejects_crossed_book_before_sizing`; `bounded_book_sweep_rejects_insufficient_depth` | Query helper tests do not prove live WS transport freshness; that remains owned by `PublicWsHandle` tests. |
+| `Research` | `query::execute` → `AnalyticsService::research` → job catalog, source adapters, `CpuExecutor` | `analytics::tests::immutable_result_pages_and_restart_catalog`; `c17_verified_export_reads_all_page_checksums_and_exact_rows` | These prove job/artifact contracts, not an exchange research result being profitable or a trading signal being approved. |
+| `Trade` | `query::execute` → `TradeService::trade_with_invocation`; the existing public `trade` entry forwards to the same implementation; action dispatch in `trade_service/mod.rs`, `execute.rs`, `reconcile.rs`, `protection_cleanup.rs`, `entry_settlement.rs` | Direct suites: `entry_settlement_direct_tests`, `protection_cleanup_direct_tests`, `unsent_release_tests`; integration cases T09/T10 | Terminal release still has no honest isolated orchestrator test; full cohort census proof stays in integrated cases. No direct test substitutes a fake census. |
+| `Strategies` | `query::execute` → `TradeService::strategies`; worker loop `strategies::run` → `maintenance_turn` / `strategy_turn` | `strategies::tests::strategy_risk_budget_not_notional`; integration strategy cases under T09/T10 (see case records) | No complete direct per-action acceptance for Create/Update/Start/Stop and no proof that a generated strategy is profitable. |
+| `Portfolio` | `query::execute` → `portfolio::portfolio` → selected account SQL owners | `portfolio::tests::summary_requires_complete_requested_window_and_fresh_account_nav`; `four_accounts_preserve_strategy_and_unattributed_finance_isolation` | Does not prove historical USD expense import for every managed account; incomplete source coverage remains partial. |
+| `PortfolioScenario` | `query::execute` → pure `portfolio::scenario` calculation | `portfolio::tests::virtual_risk_has_no_exchange_side_effects_and_requires_psd` | Scenario inputs are user supplied; this is not a market-data backtest or exchange execution. |
+| `Diagnostics` | `query::execute` → `diagnostics::diagnostics`; operation view reads only the local operation projection; finance view reads the account SQL owner | `diagnostics::tests::default_diagnostics_never_claims_a_remote_risk_summary`; `operation_projection_reads_are_local_bounded_and_isolated`; `distinguish_sql_queue_deadlines_from_real_storage_outages` | Operation projection is bounded/volatile; before restart restoration is implemented, a missing post-restart event is UNKNOWN, not proof that no operation occurred. |
+| `FindInstruments` | `query::execute` obtains `PublicWsHandle::reference_snapshot`; `find_instruments_response` maps the protocol enum and delegates filtering to `ReferenceRegistry::find_instruments` before the 50-row response limit | `query::instrument_search_tests::find_instruments_filters_type_currency_and_asset_before_public_limit` directly exercises the production helper with mixed SWAP/FUTURES, currencies, assets and more than 50 leading exclusions | The helper test does not cover asynchronous WS snapshot acquisition through the public dispatcher. |
+| `MarketOverview` | `query::execute` → demand WS instrument → fresh WS snapshot; on warming only, existing REST market snapshot plus explicit degraded quality | `query::microstructure_test::healthy_ws_overview_omits_unbounded_depth_and_fits_mcp_envelope`; `accounts::tests::recorded_public_ws_frames_make_production_market_snapshot_fresh` (partial) | No focused test covers the overview's full fresh-WS and REST-degraded branches together. |
+| `AccountSummary` | `query::execute` resolves one account and reads its latest snapshot with `ACCOUNT_MAX_AGE_MS` freshness check | `accounts::tests::recorded_ws_login_business_ack_and_six_history_pages_capture_both_sql_accounts` (source path, partial) | No focused test covers this query arm's missing/stale snapshot responses. |
+| `MailboxTelemetry` | `query::execute` returns installation identity from `AccountRuntimeRegistry` | No focused query-arm test found | Read-only response has no independent delivery/telemetry persistence proof. |
+
+#### Mutating subcommands below the public variants
+
+`Trade` has `TradeRequest::{Capabilities, Preflight, Preview, Execute, Status,
+Cancel, Close}`. `Execute` carries `TradeOperation::{Open, Add, Reduce,
+Close, Replace}`; only the service dispatch determines the exact transition.
+Direct entry settlement, protection cleanup, unsent release, SQL idempotency,
+and single-send tests are named above. T09/T10 integration records remain the
+proof for composed order, finance, source-census and RiskBook behavior.
+
+`Strategies` has read-only `List`/`Status` and mutating `CapitalAssign`,
+`Create`, `Update`, `Start`, and `Stop`. Every mutation stays inside
+`TradeService::strategies` and account SQL; `CapitalAssign` also checks the
+current governance revision. Direct complete per-variant lifecycle acceptance
+is not established by the one pure risk-budget unit test.
+
+Cloudflare's public `trade.*` tools are separately validated in
+`mcp.ts::mcpApi.fetch` and are dispatched to the same native `TradeService`;
+they are not a second executor. `accounts` governance changes are owned by the
+single `RuntimeSession` Durable Object and `account_governance_store.ts`
+transactions; `risk_control` frames reach the sole `risk_authority.ts` /
+`risk_book.ts` mutation path only after current-generation engine hello.
+`auth.test.ts`, `runtime_session.test.ts`, `risk_authority.test.ts`, and
+`acceptance_composed.test.ts` prove those Worker boundaries with test storage
+and fixtures. They do **not** establish a physical Native SQL + WSS + Worker
+production deployment by themselves.
+
+#### Background and recovery owners
+
+| Background path | Sole owner / actual caller | Existing named evidence | Exact limit |
+|---|---|---|---|
+| Account source capture shutdown | `AccountRuntimeRegistry::shutdown` signals each `source_shutdown`; `stop_source_task` awaits graceful finish or abort-and-join | `accounts::source_shutdown_tests::shutdown_timeout_aborts_and_joins_source_task`; T10-11 cooperative capture shutdown | Direct test proves the helper cancellation/join boundary, not every source task's external-client teardown. |
+| Trade maintenance/recovery | `TradeService::strategies::run` → `maintenance_turn` → `reconcile_restored` / bounded per-intent `status_intent` | T09.7 and T10-11 recovery case records; `accounts::tests::recovery_prepared_account_reopens_catalog_and_original_sql` | These are scoped recovery paths; they do not establish an installed application's real account restart/recovery acceptance. |
+| Native↔Worker session | `RuntimeSession` is the DO/session owner; `webSocketMessage` authenticates generation and dispatches risk control; `webSocketClose/Error` reject pending work | `runtime_session.test.ts`; `risk_authority.test.ts`; `cloudflare_transport.rs::stale_native_risk_reply_cannot_grant_a_different_generation` | Worker unit/composed fixtures are not physical WSS/network proof. |
+| Account SQLite | `AccountStoreHandle::start` owns one SQL thread/connection per account; accepted FIFO jobs execute through `call` | `writer_queue_backpressure_and_account_isolation`; `blocked_a_sql_owner_does_not_delay_b_cancel_receipt`; `two_account_100_parallel_sql_readonly_isolation` | Backup is a temporary read-only copy, not a second writer; these tests do not assert every application query is short. |
+| Strategy research jobs | `AnalyticsService` submits to the existing catalog/source/CPU owners | `market_artifact_publication_and_cached_result_roundtrip`; `c17_cursor_survives_catalog_restart_and_is_not_transferable` | Result determinism/complete data evidence is bounded by each source's declared coverage. |
+
+This index records observed owners and existing tests; it does not promise that
+every listed public action is complete. Missing focused tests are explicit
+gaps. Full-case rows below remain SHA-scoped integration evidence and cannot
+be inferred from these unit/component tests.
+
+Direct checks added or retained for this pass include microstructure exact
+spread/sweep, trace contention/eviction/unknown lookup/first blocker, source
+failure category, abort-and-join Drop witness, CONTROL ACK identity/schema/action
+negatives, and the existing model normalization/analysis/research suites.
+
+This pass does **not** close all #501 acceptance: causal invocation threading and
+bounded startup reconstruction now cover protection cleanup, not every operation
+family. Cross-family diagnostic coverage, performance measurements and installed
+user workflows still need explicit evidence. Startup reconstruction reads existing
+SQL receipts asynchronously; it does not reconstruct a lost ACK or initiator.
+The volatile trace must never be described as a complete durable history.
+S1-05 remains a separate whole-harness lifecycle criterion; the source-task
+shutdown test proves only the production shutdown helper it actually invokes.
+
+### Local validation of the combined #501 pass (09.11.2026)
+
+- Windows MSVC/SDK: actual Rust compile, link and execution verified; the final
+  `cargo test --workspace --locked -- --test-threads=4` passed **932 tests**, with
+  7 existing special-purpose ignored tests. These include child-process/paired
+  Worker fixtures; ordinary workspace success does not replace their CI gates.
+- `cargo clippy --workspace --all-targets --locked -- -D warnings`, rustfmt,
+  strict K10 with negative self-test, SQL schema guard and runner self-test pass.
+  Worker `npm run check` passed; Worker source was not changed in this pass.
+- New real-registry restart coverage loads an existing orphan `POSTING` receipt
+  through the startup task and original SQL owner, preserves unknown ACK/parent,
+  and observes zero exchange POSTs. Direct SQL tests check the existing index,
+  bounded scan, identity join, malformed/orphan rows and original DB reopening.
+- Local validation caught a Windows stack overflow while constructing the large
+  Native/Worker test future. Returning the async future directly was insufficient.
+  The trade command now pins its state on the heap at the existing entry boundary;
+  callers store a handle, checked by `command_future_layout_tests`. The unchanged
+  standard-stack test and whole workspace pass. This entry test without a Worker
+  handoff does not replace the full connected CI campaign.
+- `diagnostics::tests::operation_projection_reads_are_local_bounded_and_isolated`:
+  1,000 warm local projection reads, debug Windows x86_64, Intel i7-4770,
+  **P95 0.0758 ms**. Test stdout emits all raw nanosecond samples. This measures
+  one populated local projection, not public MCP dispatch, blocked-owner behavior,
+  all operation families or complete #501 performance acceptance.
+
+The combined candidate still requires its own final required GitHub CI and
+full26 evidence; the earlier accepted baseline above is not reused as its PASS.
 
 The table is the **historical r8.3 operation index**, with individually updated
 rows only where receipts are cited. It is not an aggregate current result.

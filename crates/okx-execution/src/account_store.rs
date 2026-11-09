@@ -304,6 +304,19 @@ pub struct OperationReceipt {
     pub result_ref: String,
     pub committed_at: i64,
 }
+/// Read-only identity projection of an existing protection-cleanup receipt.
+/// A receipt records SQL state only; it does not establish a venue ACK or
+/// signed readback after process restart.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProtectionCleanupOperationReceipt {
+    pub operation_id: String,
+    pub intent_id: Option<String>,
+    pub client_order_id: Option<String>,
+    pub kind: String,
+    pub request_hash: String,
+    pub result_ref: String,
+    pub committed_at: i64,
+}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum FillEffect {
     Open { side: String },

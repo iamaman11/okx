@@ -425,7 +425,7 @@ impl TradeService {
                                         if std::env::var("OKX_T10_01_MAINT_SHUTDOWN_PROBE").as_deref()==Ok("1") {
                                             eprintln!("T10_01_OWNER_SHUTDOWN_V1:phase=STATUS_START");
                                         }
-                                        let result = self.status_intent(r, &intent.intent_id).await;
+                                        let result = self.status_intent(r, &intent.intent_id, None).await;
                                         #[cfg(test)]
                                         if std::env::var("OKX_T10_01_MAINT_SHUTDOWN_PROBE").as_deref()==Ok("1") {
                                             eprintln!("T10_01_OWNER_SHUTDOWN_V1:phase=STATUS_DONE ok={}",result.is_ok());
