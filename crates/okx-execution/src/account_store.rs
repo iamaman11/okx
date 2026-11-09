@@ -317,6 +317,19 @@ pub struct ProtectionCleanupOperationReceipt {
     pub result_ref: String,
     pub committed_at: i64,
 }
+/// Bounded read-only projection of existing terminal reservation SQL facts.
+/// A central-release commit is a local SQL fact, never a reconstructed
+/// network acknowledgment or proof of a restarted process's source readback.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TerminalReleaseDiagnosticReceipt {
+    pub intent_id: String,
+    pub intent_revision: i64,
+    pub intent_state: IntentState,
+    pub reservation_key: String,
+    pub policy_revision: i64,
+    pub receipt_state: String,
+    pub central_release_committed_at: Option<i64>,
+}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum FillEffect {
     Open { side: String },

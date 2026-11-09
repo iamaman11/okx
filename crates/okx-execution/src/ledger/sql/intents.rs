@@ -11,7 +11,68 @@ fn strategy_owner_matches_plan(owner: Option<&str>, plan_owner: &str) -> bool {
     }
 }
 
+// The existing state/intent index bounds candidates BEFORE identity joins.
+// This is an ordered subset, not a latest-history or completeness claim.
+const TERMINAL_RELEASE_DIAGNOSTIC_SQL: &str = "
+WITH candidates AS MATERIALIZED (
+    SELECT * FROM risk_receipts INDEXED BY idx_risk_receipts_active
+    WHERE state IN ('TERMINAL_PENDING_CENTRAL','RELEASED','LATE_SETTLEMENT_PENDING')
+    ORDER BY state,intent_id
+    LIMIT ?1
+)
+SELECT i.intent_id,i.revision,i.state,r.reservation_key,r.policy_revision,r.state,
+       ack.committed_at
+FROM candidates AS r
+JOIN intents AS i ON i.intent_id=r.intent_id
+    AND i.plan_hash=r.plan_hash AND i.policy_revision=r.policy_revision
+LEFT JOIN operation_receipts AS ack ON ack.operation_id='central-release:'||r.reservation_key
+    AND ack.kind='CENTRAL_RELEASE' AND ack.request_hash=r.receipt_hash
+    AND length(ack.result_ref)>0 AND ack.committed_at>0
+WHERE r.account_key=?2 AND r.installation_id=?3
+    AND length(r.reservation_key)>0 AND length(r.receipt_hash)>0
+    AND i.state IN ('FILLED','CANCELLED','REJECTED')";
+
 impl AccountStore {
+    /// Return at most 128 validated terminal reservation facts from a bounded
+    /// state/intent ordered subset of the original ledger. Invalid scopes are
+    /// skipped within that candidate budget, so fewer rows do not imply that
+    /// all history has been inspected. No financial receipt is changed.
+    pub fn recent_terminal_release_diagnostics(
+        &self,
+        limit: usize,
+    ) -> StoreResult<Vec<TerminalReleaseDiagnosticReceipt>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let mut statement = self.connection.prepare(TERMINAL_RELEASE_DIAGNOSTIC_SQL)?;
+        let rows = statement.query_map(
+            params![
+                limit.min(128) as i64,
+                self.meta.account_key,
+                self.meta.installation_id
+            ],
+            |row| {
+                Ok((
+                    TerminalReleaseDiagnosticReceipt {
+                        intent_id: row.get(0)?,
+                        intent_revision: row.get(1)?,
+                        intent_state: IntentState::Prepared,
+                        reservation_key: row.get(3)?,
+                        policy_revision: row.get(4)?,
+                        receipt_state: row.get(5)?,
+                        central_release_committed_at: row.get(6)?,
+                    },
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )?;
+        rows.map(|row| {
+            let (mut receipt, state) = row?;
+            receipt.intent_state = IntentState::parse(&state)?;
+            Ok(receipt)
+        })
+        .collect()
+    }
     /// No second ledger/table: one immutable, idempotent record in the existing
     /// operation_receipts journal, bound to the original saved intent/plan.
     /// Its kind explicitly denies any claim of ALL-IN cost authorization.
@@ -2321,6 +2382,33 @@ fn risk_receipt_covers_exposure(state: &str) -> bool {
 #[cfg(test)]
 mod active_receipt_tests {
     use super::*;
+
+    #[test]
+    fn terminal_diagnostics_query_plan_bounds_original_index_before_joins() {
+        let connection = rusqlite::Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(include_str!("../../../schema/account-v2.sql"))
+            .unwrap();
+        let mut statement = connection
+            .prepare(&format!(
+                "EXPLAIN QUERY PLAN {TERMINAL_RELEASE_DIAGNOSTIC_SQL}"
+            ))
+            .unwrap();
+        let plan = statement
+            .query_map(params![128, "account", "installation"], |row| {
+                row.get::<_, String>(3)
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+            .join(" ");
+        assert!(plan.contains("MATERIALIZE candidates"), "{plan}");
+        assert!(plan.contains("idx_risk_receipts_active"), "{plan}");
+        assert!(plan.contains("SEARCH i USING INDEX"), "{plan}");
+        assert!(plan.contains("SEARCH ack USING INDEX"), "{plan}");
+        assert!(!plan.contains("SCAN intents"), "{plan}");
+        assert!(!plan.contains("TEMP B-TREE"), "{plan}");
+    }
 
     #[test]
     fn post_fence_proof_requires_durable_timestamp_and_coherent_ack_transition() {

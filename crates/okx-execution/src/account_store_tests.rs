@@ -1,5 +1,7 @@
 #[path = "account_store_attribution_tests.rs"]
 mod attribution;
+#[path = "account_store_terminal_diagnostic_tests.rs"]
+mod terminal_diagnostics;
 
 #[test]
 fn t10_09_partial_reduce_proof_cannot_accept_an_opening_intent() {
