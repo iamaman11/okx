@@ -132,6 +132,31 @@ pub async fn diagnostics(
     request: &DiagnosticsRequest,
     account: Option<&str>,
 ) -> Result<Value, String> {
+    if request.view == Some(DiagnosticsView::Storage) {
+        return storage_diagnostics(ctx, request, account).await;
+    }
+    if request.view == Some(DiagnosticsView::Research) {
+        if request.cycle_id.is_some() || request.limit.is_some() {
+            return Err("INVALID_DIAGNOSTICS_VIEW".into());
+        }
+        let id = request
+            .reference
+            .as_deref()
+            .ok_or("JOB_REFERENCE_REQUIRED")?;
+        if id.len() != 64
+            || !id
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
+            return Err("INVALID_JOB_REFERENCE".into());
+        }
+        // Research jobs belong to the authenticated installation, not a
+        // financial account. Explicit account routing is inapplicable here.
+        if request.account.is_some() || account.is_some() {
+            return Err("RESEARCH_DIAGNOSTICS_ACCOUNT_NOT_APPLICABLE".into());
+        }
+        return Ok(ctx.analytics.diagnostic_job(id));
+    }
     if request.view == Some(DiagnosticsView::Operation) {
         return Ok(operation_diagnostics(ctx, request, account)
             .await
@@ -188,6 +213,74 @@ pub async fn diagnostics(
     out["central_budget"] = central_budget_not_evaluated();
     Ok(out)
 }
+/// Explicit snapshot semantics preserve the existing default detailed SQL view.
+/// The snapshot is never used as authority for an operation or account access.
+async fn storage_diagnostics(
+    ctx: &DispatchContext,
+    request: &DiagnosticsRequest,
+    route: Option<&str>,
+) -> Result<Value, String> {
+    if request.reference.is_some() || request.cycle_id.is_some() || request.limit.is_some() {
+        return Err("INVALID_DIAGNOSTICS_VIEW".into());
+    }
+    let requested = request
+        .account
+        .as_deref()
+        .or(route)
+        .ok_or("ACCOUNT_REQUIRED")?;
+    // Registry locks only: no credential lookup, SQL job or source refresh.
+    let resources =
+        tokio::time::timeout(Duration::from_millis(20), ctx.accounts.resolve(requested))
+            .await
+            .map_err(|_| "ACCOUNT_ROUTING_BUSY")?
+            .ok_or("ACCOUNT_UNAVAILABLE")?;
+    if let Some(route) = route {
+        let selected = tokio::time::timeout(Duration::from_millis(20), ctx.accounts.resolve(route))
+            .await
+            .map_err(|_| "ACCOUNT_ROUTING_BUSY")?
+            .ok_or("ACCOUNT_UNAVAILABLE")?;
+        if selected.configuration.account_key != resources.configuration.account_key {
+            return Err("ACCOUNT_ROUTE_MISMATCH".into());
+        }
+    }
+    let observed = resources.execution.store.diagnostic_storage_snapshot();
+    let now = Utc::now().timestamp_millis();
+    let state = resources.private_ws.state();
+    let private = state.try_read().ok().map(|s| {
+        let status = s.status();
+        json!({"connection_state":status.connection_state,"connection_generation":status.connection_generation,
+            "logged_in":status.logged_in,"subscriptions_complete":status.subscriptions_complete,
+            "last_inbound_ms":status.last_inbound_ms,"last_error_present":status.last_error.is_some()})
+    });
+    let source = resources.latest_snapshot.try_read().ok().map(|s| {
+        let time = s
+            .as_ref()
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(&s.source_received_at).ok())
+            .map(|t| t.timestamp_millis());
+        json!({"account_as_of_ms":time,"account_fresh":account_snapshot_fresh_at(time,now)})
+    });
+    let health = resources
+        .source_capture_health
+        .try_read()
+        .ok()
+        .map(|h| json!(&*h));
+    let age = observed
+        .snapshot
+        .as_ref()
+        .map(|s| now.saturating_sub(s.observed_at_ms).max(0));
+    Ok(
+        json!({"schema":"okx.storage-diagnostics/v1","owner":"account_sql","account":resources.configuration.account_key.wire(),
+        "state":observed.state,"quality":"partial","read_only":true,"history":"UNKNOWN",
+        "storage":observed,"snapshot_age_ms":age,"snapshot_semantics":"last_owner_publication_not_current_sql_read",
+        "source_identity_verified":resources.diagnostic_source_identity(),
+        "private_ws":private.unwrap_or_else(||json!({"state":"NOT_EVALUATED","reason_code":"PRIVATE_STATE_BUSY"})),
+        "sources":source.unwrap_or_else(||json!({"state":"NOT_EVALUATED","reason_code":"SOURCE_SNAPSHOT_BUSY"})),
+        "source_capture":health.unwrap_or_else(||json!({"state":"NOT_EVALUATED","reason_code":"HEALTH_BUSY"})),
+        "access":ctx.trade.diagnostic_access_now(&resources.configuration.account_key.wire()),
+        "central_budget":central_budget_not_evaluated(),"next_action":"inspect_snapshot_age_and_refresh_pending"}),
+    )
+}
+
 async fn finance_diagnostics(
     ctx: &DispatchContext,
     request: &DiagnosticsRequest,
@@ -223,7 +316,9 @@ async fn finance_diagnostics(
     let trace = resources
         .finance_trace
         .readback(request.cycle_id, usize::from(limit));
-    let state = if trace.selected_not_found || (trace.active.is_none() && trace.recent.is_empty()) {
+    let state = if trace.state == "NOT_EVALUATED" {
+        "NOT_EVALUATED"
+    } else if trace.selected_not_found || (trace.active.is_none() && trace.recent.is_empty()) {
         "NOT_PROVEN"
     } else {
         "OBSERVED"
@@ -255,8 +350,14 @@ async fn finance_diagnostics(
         .unwrap_or_default();
     // Correlate across full bounded 10-minute history, then serialize only four events.
     maintenance.events.truncate(4);
+    let partial = trace.state != "OBSERVED"
+        || trace.selected_not_found
+        || trace.selected_details_unavailable
+        || window.is_none()
+        || maintenance.state != "OBSERVED";
     Ok(json!({
         "schema": "okx.finance-diagnostics/v1",
+        "quality": if partial { "partial" } else { "complete" },
         "account": resources.configuration.account_key.wire(),
         "state": state,
         "trace": trace,
@@ -282,8 +383,12 @@ async fn finance_diagnostics(
         },
         "current_readiness": {"state":"NOT_EVALUATED","reason_code":"DIAGNOSTICS_ONLY"},
         "central_budget": {"state":"NOT_EVALUATED","reason_code":"DIAGNOSTICS_ONLY"},
-        "next_action": if trace.selected_not_found {
-            "cycle expired; reproduce with retained trace"
+        "next_action": if trace.state == "NOT_EVALUATED" {
+            "retry read-only diagnostic; finance trace is busy"
+        } else if trace.selected_not_found {
+            "cycle not observed; prior process or evicted history remains unknown"
+        } else if trace.selected_details_unavailable {
+            "inspect retained cycle summary; detailed phases are unavailable"
         } else {
             "inspect measured cycle and failing phase"
         }

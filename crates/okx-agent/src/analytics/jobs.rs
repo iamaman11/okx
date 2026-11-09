@@ -1,4 +1,6 @@
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+#[path = "job_diagnostics.rs"]
+mod job_diagnostics;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -64,11 +66,13 @@ pub struct Job {
 }
 
 /// The SQLite connection is the sole metadata owner. The in-memory map contains
-/// only cancellers for currently running requests, never historical jobs.
+/// only cancellers for currently running requests. The diagnostic projection
+/// retains bounded, non-authoritative observations, never the complete catalog.
 #[derive(Clone)]
 pub struct Jobs {
     db: Arc<Mutex<Connection>>,
     cancel: Arc<Mutex<BTreeMap<String, Arc<AtomicBool>>>>,
+    diagnostic: Arc<job_diagnostics::Projection>,
 }
 impl Jobs {
     pub fn open(path: PathBuf) -> Result<Self, String> {
@@ -119,9 +123,12 @@ impl Jobs {
                     WHERE state IN('queued','running');",
             )
             .map_err(|e| e.to_string())?;
+        let diagnostic = Arc::new(job_diagnostics::Projection::default());
+        diagnostic.restore(&connection);
         Ok(Self {
             db: Arc::new(Mutex::new(connection)),
             cancel: Default::default(),
+            diagnostic,
         })
     }
     fn row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Job> {
@@ -242,6 +249,7 @@ impl Jobs {
         };
         tx.commit().map_err(|e| e.to_string())?;
         let job = Self::read(&db, &hash)?.ok_or("JOB_NOT_FOUND")?;
+        self.diagnostic.publish_id(&db, &hash);
         drop(db);
         let mut running = self.cancel.lock().map_err(|_| "CATALOG_LOCK_POISONED")?;
         let token = if is_new {
@@ -268,6 +276,10 @@ impl Jobs {
     pub fn get(&self, id: &str) -> Result<Job, String> {
         let db = self.db.lock().map_err(|_| "CATALOG_LOCK_POISONED")?;
         Self::read(&db, id)?.ok_or("JOB_NOT_FOUND".into())
+    }
+    /// Bounded read-only observation; does not acquire the catalog/SQL mutex.
+    pub fn diagnostic_readback(&self, id: &str) -> serde_json::Value {
+        self.diagnostic.read(id)
     }
     pub fn update(
         &self,
@@ -296,6 +308,7 @@ impl Jobs {
                 _ => return Err("RESEARCH_TERMINAL_IMMUTABLE".into()),
             }
         }
+        self.diagnostic.publish_id(&db, id);
         drop(db);
         if !matches!(state, State::Queued | State::Running) {
             self.cancel
@@ -338,6 +351,7 @@ impl Jobs {
         .map_err(|e| e.to_string())?;
         tx.commit().map_err(|e| e.to_string())?;
         let job = Self::read(&db, id)?.ok_or("JOB_NOT_FOUND")?;
+        self.diagnostic.publish_id(&db, id);
         drop(db);
         if job.state == State::Cancelled
             && let Some(token) = self
@@ -400,6 +414,7 @@ impl Jobs {
         if changed != 1 {
             return Err("RESEARCH_RETENTION_CONFLICT".into());
         }
+        self.diagnostic.publish_id(&db, id);
         Ok(())
     }
     pub fn artifact_roots_page(
@@ -456,6 +471,7 @@ impl Jobs {
         {
             return Err("JOB_NOT_FOUND".into());
         }
+        self.diagnostic.publish_id(&db, id);
         Ok(())
     }
 }

@@ -1568,7 +1568,9 @@
               "view": {
                 "enum": [
                   "finance",
-                  "operation"
+                  "operation",
+                  "research",
+                  "storage"
                 ]
               },
               "cycle_id": {

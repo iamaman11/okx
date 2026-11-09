@@ -38,6 +38,10 @@ pub struct AnalyticsService {
     research_memory: Arc<tokio::sync::Semaphore>,
 }
 impl AnalyticsService {
+    /// Local metadata projection only: never enters the catalog SQL owner.
+    pub(crate) fn diagnostic_job(&self, id: &str) -> Value {
+        self.jobs.diagnostic_readback(id)
+    }
     pub fn new(
         root: PathBuf,
         bootstrapper: crate::market_bootstrap::MarketBootstrapper,
@@ -460,8 +464,22 @@ impl AnalyticsService {
                     let cancelled=||c.load(Ordering::Acquire);
                     let mut chunks=Vec::new();for chunk in bars.chunks(4096){if cancelled(){return Err("CANCELLED".into())}chunks.push(store.publish_evidence(&chunk).map_err(|e|e.to_string())?.0);}
                     let dataset=store.publish_evidence(&json!({"schema":"okx.research.dataset/398.1","instrument":instruments[0],"timeframe_ms":ms,"start_ms":start,"end_ms":end,"chunks":chunks})).map_err(|e|e.to_string())?.0;
+                    // Persist the exact inputs and selection policy before any
+                    // replay. This is immutable artifact metadata, not another
+                    // job catalog, and its ID comes from the existing store.
+                    let policy = if is_grid { Some(replay::grid_policy(bars.len(), &variants)?) } else { None };
+                    let experiment = store.publish_evidence(&json!({
+                        "schema":"okx.research.experiment-inputs/v1",
+                        "dataset_artifact":dataset,"instrument":instruments[0],
+                        "requested_range":{"start_ms":start,"end_ms":end},
+                        "effective_range":{"start_ms":bars.first().map(|b|b.time),"end_ms":bars.last().map(|b|b.time+ms)},
+                        "bar_count":bars.len(),"timeframe_ms":ms,
+                        "code_version":replay::CAUSAL_REPLAY_VERSION,"spec":spec,
+                        "variants":variants,"selection_policy":policy,
+                        "result_role":"counterfactual_research_only"
+                    })).map_err(|e|e.to_string())?.0;
                     let(result,grid)=if is_grid{let g=replay::grid(&bars,&spec,&variants,&cancelled)?;(g.test,Some(json!({"selected":g.selected,"split_index":g.split_index,"train_dataset_hash":g.train_dataset_hash,"train_range":{"start_ms":bars[g.train_score_start_index].time,"end_ms":bars[g.split_index].time},"warmup_bars":g.train_score_start_index,"seed":spec.seed,"strategy_id":spec.strategy_id,"test_range":{"start_ms":bars[g.split_index].time,"end_ms":end},"train":g.train,"variants":g.variants,"selection_warning":g.selection_warning})))}else{(replay::replay(&bars,&spec,first.slow,bars.len(),&cancelled)?,None)};
-                    publish_replay(&store,&result,&dataset,grid,&cancelled)
+                    publish_replay(&store,&result,&dataset,grid,Some(&experiment),&cancelled)
                 }).await?;
         Ok::<_, String>(artifact)
     }
@@ -472,6 +490,7 @@ fn publish_replay(
     result: &replay::ReplayResult,
     dataset: &str,
     grid: Option<Value>,
+    experiment: Option<&str>,
     cancel: &impl Fn() -> bool,
 ) -> Result<String, String> {
     let mut trade_pages = Vec::new();
@@ -488,7 +507,7 @@ fn publish_replay(
         }
         curve_pages.push(store.publish_evidence(&chunk).map_err(|e| e.to_string())?.0);
     }
-    let manifest = json!({"summary":result.summary,"dataset_hash":result.dataset_hash,"hash":result.hash,"code_version":result.code_version,"dataset_artifact":dataset,"grid":grid,"trade_pages":trade_pages,"equity_curve_pages":curve_pages,"total_equity_points":result.equity.len(),"total_trades":result.trades.len()});
+    let manifest = json!({"summary":result.summary,"dataset_hash":result.dataset_hash,"hash":result.hash,"code_version":result.code_version,"dataset_artifact":dataset,"experiment_artifact":experiment,"grid":grid,"trade_pages":trade_pages,"equity_curve_pages":curve_pages,"total_equity_points":result.equity.len(),"total_trades":result.trades.len()});
     Ok(store
         .publish_evidence(&manifest)
         .map_err(|e| e.to_string())?
@@ -581,7 +600,7 @@ impl AnalyticsService {
                 }
             }
         }
-        for key in ["dataset_artifact", "result_artifact"] {
+        for key in ["dataset_artifact", "result_artifact", "experiment_artifact"] {
             if let Some(child) = value.get(key).and_then(Value::as_str) {
                 self.artifact_graph(child, seen)?;
             }
@@ -678,8 +697,15 @@ mod tests {
         let grid = json!({"selected":{"fast":3,"slow":8},"train":summary,
             "split_index":70,"selection_warning":"Counterfactual only",
             "variants":[{"parameters":{"fast":3,"slow":8},"train":summary}]});
-        let manifest =
-            publish_replay(&service.artifacts, &result, &dataset, Some(grid), &|| false).unwrap();
+        let manifest = publish_replay(
+            &service.artifacts,
+            &result,
+            &dataset,
+            Some(grid),
+            None,
+            &|| false,
+        )
+        .unwrap();
         let id = "c".repeat(64);
         service
             .jobs
@@ -1009,6 +1035,25 @@ mod artifact_job_fixtures {
             .await
             .unwrap();
         assert_eq!(trades["returned_rows"], 1);
+        let experiment_id = trades["metadata"]["experiment_artifact"].as_str().unwrap();
+        let experiment: Value = s.artifacts.read_evidence_json(experiment_id).unwrap();
+        assert_eq!(experiment["schema"], "okx.research.experiment-inputs/v1");
+        assert_eq!(experiment["code_version"], replay::CAUSAL_REPLAY_VERSION);
+        assert_eq!(experiment["spec"]["seed"], 7);
+        assert_eq!(experiment["spec"]["costs"]["taker_fee_bps"], 1.0);
+        assert_eq!(
+            experiment["variants"],
+            json!([{"fast":2,"slow":5},{"fast":3,"slow":8}])
+        );
+        assert_eq!(
+            experiment["selection_policy"]["selection_metric"],
+            "train_sharpe_descending"
+        );
+        let artifact = s.jobs.get(&id).unwrap().artifact.unwrap();
+        let mut graph = std::collections::BTreeSet::new();
+        s.artifact_graph(&artifact, &mut graph).unwrap();
+        assert!(graph.contains(experiment_id));
+        assert!(graph.contains(experiment["dataset_artifact"].as_str().unwrap()));
         assert!(
             s.research(ResearchRequest::Result {
                 job_id: id,
@@ -1082,6 +1127,46 @@ mod artifact_job_fixtures {
     }
 
     #[test]
+    fn c17_export_rejects_corrupt_or_mismatched_experiment_provenance() {
+        let (root, service) = service();
+        let input = json!({
+            "schema":"okx.research.experiment-inputs/v1",
+            "dataset_artifact":"a".repeat(64),
+            "code_version":replay::CAUSAL_REPLAY_VERSION
+        });
+        let experiment = service.artifacts.publish_evidence(&input).unwrap().0;
+        let mut manifest = json!({
+            "trade_pages":[],"total_trades":0,
+            "dataset_artifact":"a".repeat(64),
+            "code_version":replay::CAUSAL_REPLAY_VERSION,
+            "experiment_artifact":experiment
+        });
+        let export = verify_export_manifest(&service.artifacts, &manifest).unwrap();
+        assert_eq!(export["experiment"]["checksum_verified"], true);
+        assert_eq!(export["experiment"]["references_match"], true);
+        manifest["dataset_artifact"] = json!("b".repeat(64));
+        assert_eq!(
+            verify_export_manifest(&service.artifacts, &manifest).unwrap_err(),
+            "EXPERIMENT_PROVENANCE_MISMATCH"
+        );
+        manifest["dataset_artifact"] = json!("a".repeat(64));
+        service.artifacts.remove_evidence(&experiment).unwrap();
+        assert_eq!(
+            verify_export_manifest(&service.artifacts, &manifest).unwrap_err(),
+            "ARTIFACT_CORRUPT"
+        );
+        manifest
+            .as_object_mut()
+            .unwrap()
+            .remove("experiment_artifact");
+        assert!(
+            verify_export_manifest(&service.artifacts, &manifest).unwrap()["experiment"].is_null()
+        );
+        drop(service);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn c17_export_does_not_claim_complete_on_count_mismatch() {
         let (root, service) = super::artifact_job_fixtures::service();
         let page = service
@@ -1106,10 +1191,18 @@ mod artifact_job_fixtures {
             .publish_evidence(&vec![json!({"row":1})])
             .unwrap()
             .0;
+        let experiment = service
+            .artifacts
+            .publish_evidence(&json!({
+                "schema":"okx.research.experiment-inputs/v1",
+                "selection_policy":{"selection_metric":"train_sharpe_descending"}
+            }))
+            .unwrap()
+            .0;
         let manifest = service
             .artifacts
             .publish_evidence(&json!({
-                "trade_pages":[page.clone()],"total_trades":1
+                "trade_pages":[page.clone()],"total_trades":1,"experiment_artifact":experiment
             }))
             .unwrap()
             .0;
@@ -1136,10 +1229,12 @@ mod artifact_job_fixtures {
             .unwrap();
         assert_eq!(still_live["rows"][0]["row"], 1);
         assert!(service.artifacts.read_evidence(&page).is_ok());
+        assert!(service.artifacts.read_evidence(&experiment).is_ok());
         service.pin_job(&second, false).unwrap();
         assert_eq!(service.apply_retention(future).unwrap(), 1);
         assert!(service.artifacts.read_evidence(&page).is_err());
         assert!(service.artifacts.read_evidence(&manifest).is_err());
+        assert!(service.artifacts.read_evidence(&experiment).is_err());
         drop(service);
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -1314,7 +1409,7 @@ mod artifact_job_fixtures {
                 })
                 .collect(),
         };
-        let artifact = publish_replay(&s.artifacts, &result, &data, None, &|| false).unwrap();
+        let artifact = publish_replay(&s.artifacts, &result, &data, None, None, &|| false).unwrap();
         let id = "a".repeat(64);
         s.jobs
             .enqueue("fixture-request".into(), id.clone())

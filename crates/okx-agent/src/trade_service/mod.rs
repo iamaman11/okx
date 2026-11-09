@@ -284,7 +284,18 @@ impl TradeService {
     }
     pub async fn diagnostic_access(&self, key: &str) -> Value {
         let latest = self.governance.read().await;
-        let Some(snapshot) = latest.as_ref() else {
+        Self::diagnostic_access_snapshot(latest.as_ref(), key)
+    }
+    pub(crate) fn diagnostic_access_now(&self, key: &str) -> Value {
+        match self.governance.try_read() {
+            Ok(latest) => Self::diagnostic_access_snapshot(latest.as_ref(), key),
+            Err(_) => {
+                json!({"state":"not_evaluated","reason_code":"AUTHORITY_SNAPSHOT_BUSY","quality":"partial"})
+            }
+        }
+    }
+    fn diagnostic_access_snapshot(latest: Option<&CentralGovernanceSnapshot>, key: &str) -> Value {
+        let Some(snapshot) = latest else {
             return json!({"state":"not_evaluated","reason_code":"AUTHORITY_UNAVAILABLE"});
         };
         match snapshot

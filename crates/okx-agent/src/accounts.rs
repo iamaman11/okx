@@ -804,6 +804,19 @@ pub(crate) fn acquire_identity_lease(root: &Path, key: &AccountKey) -> AgentResu
 }
 
 impl AccountResources {
+    /// A diagnostic observation only, never an admission or freshness proof.
+    pub(crate) fn diagnostic_source_identity(&self) -> Option<bool> {
+        let state = self.private_ws.state();
+        let state = state.try_read().ok()?;
+        let status = state.status();
+        Some(
+            status.connection_generation > 0
+                && status.logged_in
+                && self.verified_source_generation.load(Ordering::Acquire)
+                    == status.connection_generation,
+        )
+    }
+
     pub async fn source_identity_ready(&self) -> bool {
         let status = self.private_ws.status().await;
         status.connection_generation > 0

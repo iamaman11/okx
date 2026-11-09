@@ -75,6 +75,25 @@ pub(super) fn verify_export_manifest(
     store: &ResearchArtifactStore,
     manifest: &Value,
 ) -> Result<Value, String> {
+    let experiment = match manifest
+        .get("experiment_artifact")
+        .filter(|value| !value.is_null())
+    {
+        Some(reference) => {
+            let id = reference.as_str().ok_or("EXPORT_MANIFEST_INVALID")?;
+            let inputs: Value = read_verified_result(store, id)?;
+            if inputs["schema"] != "okx.research.experiment-inputs/v1"
+                || inputs["dataset_artifact"].as_str().is_none()
+                || inputs["dataset_artifact"] != manifest["dataset_artifact"]
+                || inputs["code_version"].as_str().is_none()
+                || inputs["code_version"] != manifest["code_version"]
+            {
+                return Err("EXPERIMENT_PROVENANCE_MISMATCH".into());
+            }
+            Some(json!({"artifact":id,"checksum_verified":true,"references_match":true}))
+        }
+        None => None,
+    };
     let trades = verify_export_pages(store, manifest, "trade_pages", "total_trades", 50)?;
     let rows = verify_export_pages(store, manifest, "row_pages", "total_rows", 50)?;
     let equity = verify_export_pages(
@@ -91,7 +110,7 @@ pub(super) fn verify_export_manifest(
         "quality":"complete",
         "counts_verified":true,
         "checksums_verified":true,
-        "trades":trades,"rows":rows,"equity":equity
+        "trades":trades,"rows":rows,"equity":equity,"experiment":experiment
     }))
 }
 
@@ -166,6 +185,7 @@ impl AnalyticsService {
                 "dataset_hash":value.get("dataset_hash"),
                 "result_hash":value.get("hash"),
                 "code_version":value.get("code_version"),
+                "experiment_artifact":value.get("experiment_artifact"),
                 "read_data_via":["trades","equity"],"side_effects":"none"
             }));
         }
@@ -183,7 +203,8 @@ impl AnalyticsService {
             })),
             "dataset_hash":value.get("dataset_hash"),
             "code_version":value.get("code_version"),
-            "result_hash":value.get("hash")
+            "result_hash":value.get("hash"),
+            "experiment_artifact":value.get("experiment_artifact")
         });
         // A batch summary is a compact overview, NOT a trade-page of bulky
         // per-instrument grid payloads. Drill down via an instrument cursor.

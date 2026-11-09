@@ -18,6 +18,9 @@ pub struct DispatchContext {
     pub trade: Arc<TradeService>,
     pub market: crate::market_bootstrap::MarketBootstrapper,
 }
+#[cfg(test)]
+#[path = "query_dispatch_tests.rs"]
+mod public_dispatch_tests;
 pub async fn dispatch(ctx: &DispatchContext, r: &AgentRequest) -> AgentResponse {
     dispatch_with_governance(ctx, r, None).await
 }
