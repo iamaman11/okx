@@ -5,14 +5,15 @@ use std::{
     process::Stdio,
 };
 
-use okx_github::{GitHubClient, OWNER_USER_ID, REPOSITORY_ID};
-use okx_protocol::{
-    HostControlOperation, HostControlResult as ProtocolControlResult, HostControlStatus,
-};
+use okx_github::{GitHubClient, REPOSITORY_ID};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::{HostControlError, HostControlResult, autostart, background_process::hidden_command};
+use crate::{
+    HostControlError, HostControlResult, autostart,
+    background_process::hidden_command,
+    control_ack::{AckOperation, matches_durable_ack},
+};
 
 const ROOT_MIGRATION_PATH: &str = r"C:\okx-control\root-migration.json";
 const ROOT_MIGRATION_SCHEMA_V1: &str = "okx.host-control.root-migration/v1";
@@ -126,10 +127,14 @@ pub async fn recover_terminal_ack(github: &GitHubClient) -> HostControlResult<bo
     }
 
     let comments = github.issue_comments(12).await?;
-    if comments
-        .iter()
-        .any(|comment| durable_ack_body(comment.user_id, &comment.body, &migration.request_id))
-    {
+    if comments.iter().any(|comment| {
+        matches_durable_ack(
+            comment.user_id,
+            &comment.body,
+            &migration.request_id,
+            AckOperation::InstallLauncherRoot,
+        )
+    }) {
         mark_terminal_ack(&migration.request_id)?;
         return Ok(true);
     }
@@ -216,22 +221,6 @@ pub fn pending_value() -> Value {
         Ok(None) => json!({"state":"NONE"}),
         Err(error) => json!({"state":"INVALID","error":error.to_string()}),
     }
-}
-
-fn durable_ack_body(user_id: u64, body: &str, request_id: &str) -> bool {
-    if user_id != OWNER_USER_ID {
-        return false;
-    }
-    let Ok(result) = serde_json::from_str::<ProtocolControlResult>(body) else {
-        return false;
-    };
-    result.request_id == request_id
-        && result.status == HostControlStatus::Pass
-        && matches!(
-            result.operation,
-            HostControlOperation::InstallLauncherRoot { .. }
-        )
-        && result.validate().is_ok()
 }
 
 fn load() -> HostControlResult<Option<RootMigration>> {
@@ -439,6 +428,10 @@ impl RootMigrationGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use okx_github::OWNER_USER_ID;
+    use okx_protocol::{
+        HostControlOperation, HostControlResult as ProtocolControlResult, HostControlStatus,
+    };
 
     #[test]
     fn migration_never_mutates_scheduler_definition() {
@@ -473,11 +466,21 @@ mod tests {
             failure: None,
         };
         let body = serde_json::to_string(&pass).expect("serialize");
-        assert!(durable_ack_body(OWNER_USER_ID, &body, request_id));
+        assert!(matches_durable_ack(
+            OWNER_USER_ID,
+            &body,
+            request_id,
+            AckOperation::InstallLauncherRoot
+        ));
 
         let mut wrong = pass;
         wrong.operation = HostControlOperation::HandoffControllerUpdate;
         let body = serde_json::to_string(&wrong).expect("serialize");
-        assert!(!durable_ack_body(OWNER_USER_ID, &body, request_id));
+        assert!(!matches_durable_ack(
+            OWNER_USER_ID,
+            &body,
+            request_id,
+            AckOperation::InstallLauncherRoot
+        ));
     }
 }

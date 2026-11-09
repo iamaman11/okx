@@ -4,15 +4,16 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use okx_github::{GitHubClient, OWNER_USER_ID, REPOSITORY_ID};
-use okx_protocol::{
-    HostControlOperation, HostControlResult as ProtocolControlResult, HostControlStatus,
-};
+use okx_github::{GitHubClient, REPOSITORY_ID};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
-use crate::{HostControlError, HostControlResult, autostart, single_instance::SingleInstanceGuard};
+use crate::{
+    HostControlError, HostControlResult, autostart,
+    control_ack::{AckOperation, matches_durable_ack},
+    single_instance::SingleInstanceGuard,
+};
 
 const CONTROLLER_PATH: &str = r"C:\okx-control\okx-host-control.exe";
 const STAGED_CONTROLLER_PATH: &str = r"C:\okx-control\update\okx-host-control.exe.staged";
@@ -146,16 +147,12 @@ fn verify_pending(value: &LegacyPending) -> HostControlResult<()> {
 async fn durable_handoff_ack(github: &GitHubClient, request_id: &str) -> HostControlResult<bool> {
     let comments = github.issue_comments(12).await?;
     Ok(comments.iter().any(|comment| {
-        if comment.user_id != OWNER_USER_ID {
-            return false;
-        }
-        let Ok(result) = serde_json::from_str::<ProtocolControlResult>(&comment.body) else {
-            return false;
-        };
-        result.request_id == request_id
-            && result.status == HostControlStatus::Pass
-            && result.operation == HostControlOperation::HandoffControllerUpdate
-            && result.validate().is_ok()
+        matches_durable_ack(
+            comment.user_id,
+            &comment.body,
+            request_id,
+            AckOperation::HandoffControllerUpdate,
+        )
     }))
 }
 
