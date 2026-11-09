@@ -357,7 +357,7 @@ impl MarketStreamState {
         if self
             .bootstrap_if_complete(reference, instrument.funding_requirement)
             .and_then(|bootstrap| {
-                MarketSnapshot::from_bootstrap(
+                crate::market::market_snapshot_from_bootstrap(
                     reference,
                     &self.instrument_id,
                     "stream-readiness",
@@ -400,7 +400,7 @@ impl MarketStreamState {
         }
 
         let bootstrap = self.bootstrap_if_complete(reference, instrument.funding_requirement)?;
-        let market = MarketSnapshot::from_bootstrap(
+        let market = crate::market::market_snapshot_from_bootstrap(
             reference,
             &self.instrument_id,
             source_received_at,

@@ -1,9 +1,14 @@
+pub use okx_kernel::observation_model::{
+    InstrumentRulesSnapshot, InstrumentSpec, UpcomingRuleChange,
+};
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use okx_api::{
     Instrument as AccountInstrument, InstrumentType, MaxOrderSize, PublicInstrument,
     PublicPriceLimit, SystemStatus,
 };
+pub use okx_kernel::observation_model::FundingRequirement;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -21,53 +26,6 @@ impl ReferenceGeneration {
     pub fn as_str(&self) -> &str {
         &self.0
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
-pub enum FundingRequirement {
-    Required,
-    NotApplicable,
-    Unknown,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct UpcomingRuleChange {
-    pub param: String,
-    pub new_value: String,
-    pub effective_time_ms: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct InstrumentSpec {
-    pub instrument_id: String,
-    pub instrument_type: InstrumentType,
-    pub instrument_family: Option<String>,
-    pub underlying: Option<String>,
-    pub state: String,
-    pub rule_type: Option<String>,
-    pub funding_requirement: FundingRequirement,
-    pub base_currency: Option<String>,
-    pub quote_currency: Option<String>,
-    pub settle_currency: Option<String>,
-    pub tick_size: String,
-    pub lot_size: String,
-    pub min_size: String,
-    pub max_limit_size: Option<String>,
-    pub max_market_size: Option<String>,
-    pub max_limit_amount: Option<String>,
-    pub max_market_amount: Option<String>,
-    pub contract_type: Option<String>,
-    pub contract_value: Option<String>,
-    pub contract_value_currency: Option<String>,
-    pub fee_group_id: Option<String>,
-    pub max_leverage: Option<String>,
-    pub list_time_ms: Option<String>,
-    pub expiry_time_ms: Option<String>,
-    pub initial_price_limit_pct: Option<String>,
-    pub floating_price_limit_pct: Option<String>,
-    pub maximum_price_limit_pct: Option<String>,
-    pub upcoming_rule_changes: Vec<UpcomingRuleChange>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -137,7 +95,7 @@ impl VenueExecutionEvidence {
         Ok(Self {
             schema: VENUE_EXECUTION_EVIDENCE_SCHEMA_V1,
             source_received_at,
-            public_instrument: InstrumentSpec::try_from(public_instrument)?,
+            public_instrument: instrument_spec_from_public(public_instrument)?,
             account_instrument: AccountInstrumentExecutionLimits {
                 state: account_instrument.state,
                 max_limit_size: optional(account_instrument.max_limit_size),
@@ -193,13 +151,6 @@ pub struct InstrumentSearchSnapshot {
     pub settle_currency: Option<String>,
     pub instrument_type: Option<InstrumentType>,
     pub instruments: Vec<InstrumentSpec>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct InstrumentRulesSnapshot {
-    pub reference_generation: String,
-    pub source_received_at: String,
-    pub instrument: InstrumentSpec,
 }
 
 #[derive(Debug, Clone)]
@@ -271,7 +222,7 @@ impl ReferenceRegistry {
                 continue;
             }
 
-            let spec = InstrumentSpec::try_from(instrument)?;
+            let spec = instrument_spec_from_public(instrument)?;
             normalized.insert(instrument_id, spec);
         }
 
@@ -311,7 +262,7 @@ impl ReferenceRegistry {
                 continue;
             }
 
-            let spec = InstrumentSpec::try_from(update)?;
+            let spec = instrument_spec_from_public(update)?;
             normalized_updates.insert(instrument_id, spec);
         }
 
@@ -400,53 +351,51 @@ impl ReferenceRegistry {
     }
 }
 
-impl TryFrom<PublicInstrument> for InstrumentSpec {
-    type Error = ReferenceError;
+pub fn instrument_spec_from_public(
+    value: PublicInstrument,
+) -> Result<InstrumentSpec, ReferenceError> {
+    let instrument_id = require(&value.instrument_id, &value.instrument_id, "instId")?;
+    let instrument_type = match value.instrument_type.as_str() {
+        "SWAP" => InstrumentType::Swap,
+        "FUTURES" => InstrumentType::Futures,
+        other => return Err(ReferenceError::UnsupportedInstrumentType(other.to_owned())),
+    };
 
-    fn try_from(value: PublicInstrument) -> Result<Self, Self::Error> {
-        let instrument_id = require(&value.instrument_id, &value.instrument_id, "instId")?;
-        let instrument_type = match value.instrument_type.as_str() {
-            "SWAP" => InstrumentType::Swap,
-            "FUTURES" => InstrumentType::Futures,
-            other => return Err(ReferenceError::UnsupportedInstrumentType(other.to_owned())),
-        };
+    let rule_type = optional(value.rule_type);
+    let funding_requirement = funding_requirement(instrument_type, rule_type.as_deref());
+    let upcoming_rule_changes =
+        normalize_upcoming_changes(instrument_id, value.upcoming_parameter_changes)?;
 
-        let rule_type = optional(value.rule_type);
-        let funding_requirement = funding_requirement(instrument_type, rule_type.as_deref());
-        let upcoming_rule_changes =
-            normalize_upcoming_changes(instrument_id, value.upcoming_parameter_changes)?;
-
-        Ok(Self {
-            instrument_id: instrument_id.to_owned(),
-            instrument_type,
-            instrument_family: optional(value.instrument_family),
-            underlying: optional(value.underlying),
-            state: require(&value.instrument_id, &value.state, "state")?.to_owned(),
-            rule_type,
-            funding_requirement,
-            base_currency: optional(value.base_currency),
-            quote_currency: optional(value.quote_currency),
-            settle_currency: optional(value.settle_currency),
-            tick_size: require(&value.instrument_id, &value.tick_size, "tickSz")?.to_owned(),
-            lot_size: require(&value.instrument_id, &value.lot_size, "lotSz")?.to_owned(),
-            min_size: require(&value.instrument_id, &value.min_size, "minSz")?.to_owned(),
-            max_limit_size: optional(value.max_limit_size),
-            max_market_size: optional(value.max_market_size),
-            max_limit_amount: optional(value.max_limit_amount),
-            max_market_amount: optional(value.max_market_amount),
-            contract_type: optional(value.contract_type),
-            contract_value: optional(value.contract_value),
-            contract_value_currency: optional(value.contract_value_currency),
-            fee_group_id: optional(value.fee_group_id),
-            max_leverage: optional(value.lever),
-            list_time_ms: optional(value.list_time),
-            expiry_time_ms: optional(value.expiry_time),
-            initial_price_limit_pct: optional(value.initial_price_limit_pct),
-            floating_price_limit_pct: optional(value.floating_price_limit_pct),
-            maximum_price_limit_pct: optional(value.maximum_price_limit_pct),
-            upcoming_rule_changes,
-        })
-    }
+    Ok(InstrumentSpec {
+        instrument_id: instrument_id.to_owned(),
+        instrument_type,
+        instrument_family: optional(value.instrument_family),
+        underlying: optional(value.underlying),
+        state: require(&value.instrument_id, &value.state, "state")?.to_owned(),
+        rule_type,
+        funding_requirement,
+        base_currency: optional(value.base_currency),
+        quote_currency: optional(value.quote_currency),
+        settle_currency: optional(value.settle_currency),
+        tick_size: require(&value.instrument_id, &value.tick_size, "tickSz")?.to_owned(),
+        lot_size: require(&value.instrument_id, &value.lot_size, "lotSz")?.to_owned(),
+        min_size: require(&value.instrument_id, &value.min_size, "minSz")?.to_owned(),
+        max_limit_size: optional(value.max_limit_size),
+        max_market_size: optional(value.max_market_size),
+        max_limit_amount: optional(value.max_limit_amount),
+        max_market_amount: optional(value.max_market_amount),
+        contract_type: optional(value.contract_type),
+        contract_value: optional(value.contract_value),
+        contract_value_currency: optional(value.contract_value_currency),
+        fee_group_id: optional(value.fee_group_id),
+        max_leverage: optional(value.lever),
+        list_time_ms: optional(value.list_time),
+        expiry_time_ms: optional(value.expiry_time),
+        initial_price_limit_pct: optional(value.initial_price_limit_pct),
+        floating_price_limit_pct: optional(value.floating_price_limit_pct),
+        maximum_price_limit_pct: optional(value.maximum_price_limit_pct),
+        upcoming_rule_changes,
+    })
 }
 
 fn normalize_upcoming_changes(

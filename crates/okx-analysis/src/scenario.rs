@@ -1,4 +1,6 @@
-use okx_observation::{FeeScheduleSnapshot, InstrumentRulesSnapshot, MarketHistorySnapshot};
+use okx_kernel::observation_model::{
+    FeeScheduleSnapshot, InstrumentRulesSnapshot, MarketHistorySnapshot,
+};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
@@ -451,7 +453,7 @@ fn decimal_sqrt(value: Decimal) -> Decimal {
 
 #[cfg(test)]
 mod tests {
-    use okx_observation::{HistoryCandle, MarketHistorySnapshot};
+    use okx_kernel::observation_model::{HistoryCandle, MarketHistorySnapshot};
 
     use super::*;
 

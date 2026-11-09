@@ -1,3 +1,8 @@
+pub use okx_kernel::observation_model::{
+    AccountAuthorityEvidence, AccountHistoryCoverage, AccountLedgerSummary, CurrencyAggregate,
+    ExchangeFillIdentity, FundingBalanceEvidence,
+};
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     str::FromStr,
@@ -8,7 +13,6 @@ use okx_api::{
     PositionHistory, account_uid_fingerprint,
 };
 use rust_decimal::Decimal;
-use serde::Serialize;
 use thiserror::Error;
 
 use crate::AccountSnapshot;
@@ -18,75 +22,6 @@ pub const ACCOUNT_LEDGER_HISTORY_WINDOW: &str = "last_3_months";
 const FUNDING_EXPENSE_SUBTYPE: &str = "173";
 const FUNDING_INCOME_SUBTYPE: &str = "174";
 const MAX_HISTORY_INSTRUMENT_SAMPLES: usize = 8;
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct AccountAuthorityEvidence {
-    pub scope: &'static str,
-    pub account_type: String,
-    pub is_subaccount: bool,
-    pub account_uid_fingerprint: String,
-    pub main_account_uid_fingerprint: Option<String>,
-    pub api_key_permissions: Vec<String>,
-    pub multi_account_inventory_complete: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct AccountHistoryCoverage {
-    pub resource: String,
-    pub documented_window: &'static str,
-    pub instrument_count: usize,
-    pub sample_instruments: Vec<String>,
-    pub rows: usize,
-    pub pages: usize,
-    pub complete_within_bound: bool,
-    pub newest_event_time_ms: Option<String>,
-    pub oldest_event_time_ms: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct FundingBalanceEvidence {
-    pub currency: String,
-    pub balance: String,
-    pub available_balance: String,
-    pub frozen_balance: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct CurrencyAggregate {
-    pub currency: String,
-    pub amount: String,
-    pub events: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct AccountLedgerSummary {
-    pub schema: &'static str,
-    pub source_received_at: String,
-    pub current_account_as_of_ms: Option<String>,
-    pub account_generation: String,
-    pub authority: AccountAuthorityEvidence,
-    pub total_equity_usd: String,
-    pub trading_equity_detail_usd_sum: String,
-    pub trading_equity_residual_usd: String,
-    pub funding_balances: Vec<FundingBalanceEvidence>,
-    pub open_positions: usize,
-    pub pending_orders: usize,
-    pub current_unrealized_pnl: Vec<CurrencyAggregate>,
-    pub history_coverage: Vec<AccountHistoryCoverage>,
-    pub realized_pnl_basis: &'static str,
-    pub realized_pnl: Vec<CurrencyAggregate>,
-    pub daily_realized_pnl_utc_basis: &'static str,
-    pub daily_realized_pnl_utc_day_start_ms: Option<String>,
-    pub daily_realized_pnl_utc_day_end_ms: Option<String>,
-    pub daily_realized_pnl_utc: Vec<CurrencyAggregate>,
-    pub trade_fee_basis: &'static str,
-    pub trade_fees: Vec<CurrencyAggregate>,
-    pub funding_basis: &'static str,
-    pub funding: Vec<CurrencyAggregate>,
-    pub position_pnl_identity_rows_checked: usize,
-    pub fill_order_links_checked: usize,
-    pub fill_order_links_unresolved_due_to_truncation: usize,
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExchangeOrderIdentity {
@@ -105,27 +40,6 @@ pub struct ExecutionFillEvidence {
     pub fills: Vec<ExchangeFillIdentity>,
     pub pages: usize,
     pub complete_within_bound: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ExchangeFillIdentity {
-    pub instrument_type: String,
-    pub instrument_id: String,
-    pub order_id: Option<String>,
-    pub client_order_id: String,
-    pub trade_id: String,
-    /// Venue-native exact link to the corresponding account bill.
-    pub bill_id: Option<String>,
-    /// Venue-reported realized PnL of this fill, not the account's net PnL.
-    pub fill_pnl: Option<String>,
-    pub side: String,
-    pub position_side: String,
-    pub fill_price: String,
-    pub fill_size: String,
-    pub fee: Option<String>,
-    pub fee_currency: Option<String>,
-    pub execution_type: Option<String>,
-    pub fill_time_ms: u64,
 }
 
 /// Immutable exact bill identifiers retained alongside the account aggregates.

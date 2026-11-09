@@ -1,4 +1,4 @@
-use okx_observation::MarketHistorySnapshot;
+use okx_kernel::observation_model::MarketHistorySnapshot;
 use rust_decimal::Decimal;
 use serde::Serialize;
 
@@ -526,17 +526,19 @@ mod tests {
             candles: closes
                 .iter()
                 .enumerate()
-                .map(|(index, close)| okx_observation::HistoryCandle {
-                    open_time_ms: ((index as u64 + 1) * 3_600_000).to_string(),
-                    open: (*close).to_owned(),
-                    high: (*close).to_owned(),
-                    low: (*close).to_owned(),
-                    close: (*close).to_owned(),
-                    volume: "1".to_owned(),
-                    volume_currency: "1".to_owned(),
-                    volume_quote: None,
-                    confirmed: true,
-                })
+                .map(
+                    |(index, close)| okx_kernel::observation_model::HistoryCandle {
+                        open_time_ms: ((index as u64 + 1) * 3_600_000).to_string(),
+                        open: (*close).to_owned(),
+                        high: (*close).to_owned(),
+                        low: (*close).to_owned(),
+                        close: (*close).to_owned(),
+                        volume: "1".to_owned(),
+                        volume_currency: "1".to_owned(),
+                        volume_quote: None,
+                        confirmed: true,
+                    },
+                )
                 .collect(),
         }
     }

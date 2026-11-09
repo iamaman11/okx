@@ -1,3 +1,7 @@
+pub use okx_kernel::observation_model::{
+    FundingState, IndexPriceState, MarkPriceState, MarketSnapshot, OpenInterestState, TickerState,
+};
+
 use okx_api::{
     InstrumentType, PublicFundingRate, PublicIndexTicker, PublicMarkPrice, PublicOpenInterest,
     PublicTicker,
@@ -29,22 +33,6 @@ impl MarketGeneration {
     pub fn as_str(&self) -> &str {
         &self.0
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct TickerState {
-    pub last: String,
-    pub last_size: String,
-    pub best_ask: String,
-    pub best_ask_size: String,
-    pub best_bid: String,
-    pub best_bid_size: String,
-    pub open_24h: Option<String>,
-    pub high_24h: Option<String>,
-    pub low_24h: Option<String>,
-    pub volume_currency_24h: Option<String>,
-    pub volume_24h: Option<String>,
-    pub exchange_timestamp_ms: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -82,54 +70,6 @@ impl TryFrom<PublicTicker> for MarketUniverseTicker {
             exchange_timestamp_ms: required("bulk ticker", "ts", value.ts)?,
         })
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct MarkPriceState {
-    pub price: String,
-    pub exchange_timestamp_ms: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct IndexPriceState {
-    pub index_id: String,
-    pub price: String,
-    pub exchange_timestamp_ms: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct FundingState {
-    pub rate: String,
-    pub funding_time_ms: String,
-    pub next_funding_time_ms: String,
-    pub premium: Option<String>,
-    pub min_rate: Option<String>,
-    pub max_rate: Option<String>,
-    pub exchange_timestamp_ms: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct OpenInterestState {
-    pub contracts: String,
-    pub currency: Option<String>,
-    pub usd: Option<String>,
-    pub exchange_timestamp_ms: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct MarketSnapshot {
-    pub schema: String,
-    pub instrument_id: String,
-    pub instrument_type: InstrumentType,
-    pub underlying: String,
-    pub reference_generation: String,
-    pub market_generation: String,
-    pub source_received_at: String,
-    pub ticker: TickerState,
-    pub mark_price: MarkPriceState,
-    pub index_price: IndexPriceState,
-    pub funding: Option<FundingState>,
-    pub open_interest: OpenInterestState,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -217,136 +157,134 @@ pub enum MarketError {
     Serialization(#[from] serde_json::Error),
 }
 
-impl MarketSnapshot {
-    pub fn from_bootstrap(
-        reference: &ReferenceRegistry,
-        instrument_id: &str,
-        source_received_at: impl Into<String>,
-        bootstrap: MarketBootstrap,
-    ) -> Result<Self, MarketError> {
-        let source_received_at = source_received_at.into();
-        if source_received_at.trim().is_empty() {
-            return Err(MarketError::EmptySourceTimestamp);
+pub fn market_snapshot_from_bootstrap(
+    reference: &ReferenceRegistry,
+    instrument_id: &str,
+    source_received_at: impl Into<String>,
+    bootstrap: MarketBootstrap,
+) -> Result<MarketSnapshot, MarketError> {
+    let source_received_at = source_received_at.into();
+    if source_received_at.trim().is_empty() {
+        return Err(MarketError::EmptySourceTimestamp);
+    }
+
+    let instrument = reference
+        .get(instrument_id)
+        .ok_or_else(|| MarketError::InstrumentNotFound(instrument_id.to_owned()))?;
+    if instrument.state != "live" {
+        return Err(MarketError::InstrumentNotLive(instrument_id.to_owned()));
+    }
+
+    let underlying = instrument
+        .underlying
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| MarketError::MissingUnderlying(instrument_id.to_owned()))?
+        .to_owned();
+
+    require_instrument("ticker", instrument_id, &bootstrap.ticker.instrument_id)?;
+    require_instrument(
+        "mark price",
+        instrument_id,
+        &bootstrap.mark_price.instrument_id,
+    )?;
+    require_instrument(
+        "open interest",
+        instrument_id,
+        &bootstrap.open_interest.instrument_id,
+    )?;
+
+    if bootstrap.index_ticker.instrument_id != underlying {
+        return Err(MarketError::IndexMismatch {
+            expected: underlying,
+            actual: bootstrap.index_ticker.instrument_id,
+        });
+    }
+
+    let ticker = TickerState {
+        last: required("ticker", "last", bootstrap.ticker.last)?,
+        last_size: required("ticker", "lastSz", bootstrap.ticker.last_size)?,
+        best_ask: required("ticker", "askPx", bootstrap.ticker.ask_price)?,
+        best_ask_size: required("ticker", "askSz", bootstrap.ticker.ask_size)?,
+        best_bid: required("ticker", "bidPx", bootstrap.ticker.bid_price)?,
+        best_bid_size: required("ticker", "bidSz", bootstrap.ticker.bid_size)?,
+        open_24h: optional(bootstrap.ticker.open_24h),
+        high_24h: optional(bootstrap.ticker.high_24h),
+        low_24h: optional(bootstrap.ticker.low_24h),
+        volume_currency_24h: optional(bootstrap.ticker.volume_currency_24h),
+        volume_24h: optional(bootstrap.ticker.volume_24h),
+        exchange_timestamp_ms: required("ticker", "ts", bootstrap.ticker.ts)?,
+    };
+
+    let mark_price = MarkPriceState {
+        price: required("mark price", "markPx", bootstrap.mark_price.mark_price)?,
+        exchange_timestamp_ms: required("mark price", "ts", bootstrap.mark_price.ts)?,
+    };
+
+    let index_price = IndexPriceState {
+        index_id: underlying.clone(),
+        price: required("index ticker", "idxPx", bootstrap.index_ticker.index_price)?,
+        exchange_timestamp_ms: required("index ticker", "ts", bootstrap.index_ticker.ts)?,
+    };
+
+    let funding = match instrument.funding_requirement {
+        FundingRequirement::Required => {
+            let funding = bootstrap.funding_rate.ok_or(MarketError::FundingRequired)?;
+            require_instrument("funding rate", instrument_id, &funding.instrument_id)?;
+            Some(FundingState {
+                rate: required("funding rate", "fundingRate", funding.funding_rate)?,
+                funding_time_ms: required("funding rate", "fundingTime", funding.funding_time)?,
+                next_funding_time_ms: required(
+                    "funding rate",
+                    "nextFundingTime",
+                    funding.next_funding_time,
+                )?,
+                premium: optional(funding.premium),
+                min_rate: optional(funding.min_funding_rate),
+                max_rate: optional(funding.max_funding_rate),
+                exchange_timestamp_ms: required("funding rate", "ts", funding.ts)?,
+            })
         }
-
-        let instrument = reference
-            .get(instrument_id)
-            .ok_or_else(|| MarketError::InstrumentNotFound(instrument_id.to_owned()))?;
-        if instrument.state != "live" {
-            return Err(MarketError::InstrumentNotLive(instrument_id.to_owned()));
+        FundingRequirement::NotApplicable => {
+            if bootstrap.funding_rate.is_some() {
+                return Err(MarketError::UnexpectedFunding);
+            }
+            None
         }
-
-        let underlying = instrument
-            .underlying
-            .as_deref()
-            .filter(|value| !value.trim().is_empty())
-            .ok_or_else(|| MarketError::MissingUnderlying(instrument_id.to_owned()))?
-            .to_owned();
-
-        require_instrument("ticker", instrument_id, &bootstrap.ticker.instrument_id)?;
-        require_instrument(
-            "mark price",
-            instrument_id,
-            &bootstrap.mark_price.instrument_id,
-        )?;
-        require_instrument(
-            "open interest",
-            instrument_id,
-            &bootstrap.open_interest.instrument_id,
-        )?;
-
-        if bootstrap.index_ticker.instrument_id != underlying {
-            return Err(MarketError::IndexMismatch {
-                expected: underlying,
-                actual: bootstrap.index_ticker.instrument_id,
+        FundingRequirement::Unknown => {
+            return Err(MarketError::UnknownFundingRequirement {
+                instrument_id: instrument_id.to_owned(),
+                rule_type: instrument
+                    .rule_type
+                    .clone()
+                    .unwrap_or_else(|| "<missing>".to_owned()),
             });
         }
+    };
 
-        let ticker = TickerState {
-            last: required("ticker", "last", bootstrap.ticker.last)?,
-            last_size: required("ticker", "lastSz", bootstrap.ticker.last_size)?,
-            best_ask: required("ticker", "askPx", bootstrap.ticker.ask_price)?,
-            best_ask_size: required("ticker", "askSz", bootstrap.ticker.ask_size)?,
-            best_bid: required("ticker", "bidPx", bootstrap.ticker.bid_price)?,
-            best_bid_size: required("ticker", "bidSz", bootstrap.ticker.bid_size)?,
-            open_24h: optional(bootstrap.ticker.open_24h),
-            high_24h: optional(bootstrap.ticker.high_24h),
-            low_24h: optional(bootstrap.ticker.low_24h),
-            volume_currency_24h: optional(bootstrap.ticker.volume_currency_24h),
-            volume_24h: optional(bootstrap.ticker.volume_24h),
-            exchange_timestamp_ms: required("ticker", "ts", bootstrap.ticker.ts)?,
-        };
+    let open_interest = OpenInterestState {
+        contracts: required("open interest", "oi", bootstrap.open_interest.oi)?,
+        currency: optional(bootstrap.open_interest.oi_currency),
+        usd: optional(bootstrap.open_interest.oi_usd),
+        exchange_timestamp_ms: required("open interest", "ts", bootstrap.open_interest.ts)?,
+    };
 
-        let mark_price = MarkPriceState {
-            price: required("mark price", "markPx", bootstrap.mark_price.mark_price)?,
-            exchange_timestamp_ms: required("mark price", "ts", bootstrap.mark_price.ts)?,
-        };
-
-        let index_price = IndexPriceState {
-            index_id: underlying.clone(),
-            price: required("index ticker", "idxPx", bootstrap.index_ticker.index_price)?,
-            exchange_timestamp_ms: required("index ticker", "ts", bootstrap.index_ticker.ts)?,
-        };
-
-        let funding = match instrument.funding_requirement {
-            FundingRequirement::Required => {
-                let funding = bootstrap.funding_rate.ok_or(MarketError::FundingRequired)?;
-                require_instrument("funding rate", instrument_id, &funding.instrument_id)?;
-                Some(FundingState {
-                    rate: required("funding rate", "fundingRate", funding.funding_rate)?,
-                    funding_time_ms: required("funding rate", "fundingTime", funding.funding_time)?,
-                    next_funding_time_ms: required(
-                        "funding rate",
-                        "nextFundingTime",
-                        funding.next_funding_time,
-                    )?,
-                    premium: optional(funding.premium),
-                    min_rate: optional(funding.min_funding_rate),
-                    max_rate: optional(funding.max_funding_rate),
-                    exchange_timestamp_ms: required("funding rate", "ts", funding.ts)?,
-                })
-            }
-            FundingRequirement::NotApplicable => {
-                if bootstrap.funding_rate.is_some() {
-                    return Err(MarketError::UnexpectedFunding);
-                }
-                None
-            }
-            FundingRequirement::Unknown => {
-                return Err(MarketError::UnknownFundingRequirement {
-                    instrument_id: instrument_id.to_owned(),
-                    rule_type: instrument
-                        .rule_type
-                        .clone()
-                        .unwrap_or_else(|| "<missing>".to_owned()),
-                });
-            }
-        };
-
-        let open_interest = OpenInterestState {
-            contracts: required("open interest", "oi", bootstrap.open_interest.oi)?,
-            currency: optional(bootstrap.open_interest.oi_currency),
-            usd: optional(bootstrap.open_interest.oi_usd),
-            exchange_timestamp_ms: required("open interest", "ts", bootstrap.open_interest.ts)?,
-        };
-
-        let mut snapshot = Self {
-            schema: MARKET_SNAPSHOT_SCHEMA_V1.to_owned(),
-            instrument_id: instrument_id.to_owned(),
-            instrument_type: instrument.instrument_type,
-            underlying,
-            reference_generation: reference.generation().as_str().to_owned(),
-            market_generation: String::new(),
-            source_received_at,
-            ticker,
-            mark_price,
-            index_price,
-            funding,
-            open_interest,
-        };
-        snapshot.market_generation = generation_for(&snapshot)?;
-        Ok(snapshot)
-    }
+    let mut snapshot = MarketSnapshot {
+        schema: MARKET_SNAPSHOT_SCHEMA_V1.to_owned(),
+        instrument_id: instrument_id.to_owned(),
+        instrument_type: instrument.instrument_type,
+        underlying,
+        reference_generation: reference.generation().as_str().to_owned(),
+        market_generation: String::new(),
+        source_received_at,
+        ticker,
+        mark_price,
+        index_price,
+        funding,
+        open_interest,
+    };
+    snapshot.market_generation = generation_for(&snapshot)?;
+    Ok(snapshot)
 }
 
 fn require_instrument(
@@ -520,7 +458,7 @@ mod tests {
     #[test]
     fn snapshot_uses_reference_underlying_and_preserves_exact_values() {
         let reference = reference();
-        let snapshot = MarketSnapshot::from_bootstrap(
+        let snapshot = market_snapshot_from_bootstrap(
             &reference,
             "DOGE-USDT-SWAP",
             "2026-09-27T00:00:01.000Z",
@@ -543,14 +481,14 @@ mod tests {
     #[test]
     fn generation_is_content_based_not_receive_time_based() {
         let reference = reference();
-        let first = MarketSnapshot::from_bootstrap(
+        let first = market_snapshot_from_bootstrap(
             &reference,
             "DOGE-USDT-SWAP",
             "2026-09-27T00:00:01.000Z",
             bootstrap(),
         )
         .expect("first");
-        let second = MarketSnapshot::from_bootstrap(
+        let second = market_snapshot_from_bootstrap(
             &reference,
             "DOGE-USDT-SWAP",
             "2026-09-27T00:00:02.000Z",
@@ -568,7 +506,7 @@ mod tests {
         let mut data = bootstrap();
         data.index_ticker.instrument_id = "BTC-USDT".to_owned();
 
-        let error = MarketSnapshot::from_bootstrap(
+        let error = market_snapshot_from_bootstrap(
             &reference,
             "DOGE-USDT-SWAP",
             "2026-09-27T00:00:01.000Z",
@@ -597,7 +535,7 @@ mod tests {
         let mut data = bootstrap();
         data.funding_rate = None;
 
-        let error = MarketSnapshot::from_bootstrap(
+        let error = market_snapshot_from_bootstrap(
             &reference,
             "DOGE-USDT-SWAP",
             "2026-09-27T00:00:01.000Z",

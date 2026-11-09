@@ -1509,7 +1509,6 @@ name = "okx-analysis"
 version = "0.1.0"
 dependencies = [
  "okx-kernel",
- "okx-observation",
  "rust_decimal",
  "serde",
  "thiserror",
@@ -1523,6 +1522,7 @@ dependencies = [
  "chrono",
  "futures-util",
  "hmac 0.12.1",
+ "okx-kernel",
  "reqwest",
  "rust_decimal",
  "serde",
@@ -1626,6 +1626,9 @@ name = "okx-kernel"
 version = "0.1.0"
 dependencies = [
  "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror",
 ]
 
 [[package]]
@@ -1633,6 +1636,7 @@ name = "okx-observation"
 version = "0.1.0"
 dependencies = [
  "okx-api",
+ "okx-kernel",
  "rust_decimal",
  "serde",
  "serde_json",
@@ -1660,7 +1664,6 @@ name = "okx-research"
 version = "0.1.0"
 dependencies = [
  "okx-analysis",
- "okx-observation",
  "rust_decimal",
  "serde",
  "serde_json",

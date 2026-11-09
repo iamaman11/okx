@@ -1,6 +1,6 @@
 use std::{cmp::Ordering, str::FromStr};
 
-use okx_observation::{MarketSnapshot, OrderBookSnapshot, OrderBookStatus};
+use okx_kernel::observation_model::{MarketSnapshot, OrderBookSnapshot, OrderBookStatus};
 use rust_decimal::Decimal;
 use serde::Serialize;
 
@@ -196,7 +196,7 @@ pub fn analyze_market_intelligence(
 }
 
 fn normalized_side(
-    levels: &[okx_observation::BookLevel],
+    levels: &[okx_kernel::observation_model::BookLevel],
     depth_levels: u16,
     ascending: bool,
 ) -> Result<Vec<(Decimal, Decimal)>, AnalysisError> {
@@ -316,7 +316,7 @@ fn positive_decimal(field: &'static str, value: &str) -> Result<Decimal, Analysi
 #[cfg(test)]
 mod tests {
     use super::*;
-    use okx_observation::{
+    use okx_kernel::observation_model::{
         BookLevel, FundingState, IndexPriceState, InstrumentType, MarkPriceState,
         OpenInterestState, TickerState,
     };

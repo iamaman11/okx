@@ -1,7 +1,12 @@
+pub use okx_kernel::observation_model::{
+    AccountBalanceDetail, AccountBalanceState, AccountPositionState, AccountSnapshot,
+    PendingOrderState,
+};
+
 use std::collections::BTreeSet;
 
 use okx_api::{AccountConfig, BalanceSnapshot, PendingOrder, Position};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
@@ -17,126 +22,6 @@ pub enum AccountWsEvent {
     Account(Vec<BalanceSnapshot>),
     Positions(Vec<Position>),
     Orders(Vec<PendingOrder>),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct AccountBalanceDetail {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub liabilities: Option<String>,
-    pub currency: String,
-    pub equity: String,
-    pub cash_balance: Option<String>,
-    pub available_equity: Option<String>,
-    pub available_balance: Option<String>,
-    pub frozen_balance: Option<String>,
-    pub equity_usd: Option<String>,
-    pub unrealized_pnl: Option<String>,
-    pub update_time_ms: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct AccountBalanceState {
-    pub total_equity_usd: String,
-    pub adjusted_equity_usd: Option<String>,
-    pub isolated_equity_usd: Option<String>,
-    pub initial_margin_requirement_usd: Option<String>,
-    pub maintenance_margin_requirement_usd: Option<String>,
-    pub margin_ratio: Option<String>,
-    pub notional_usd: Option<String>,
-    pub update_time_ms: Option<String>,
-    pub details: Vec<AccountBalanceDetail>,
-}
-
-impl AccountBalanceState {
-    /// Compare the full balance evidence while ignoring provider receipt timestamps.
-    /// Currency identities, row order, and every financial field remain significant.
-    pub fn same_values_ignoring_update_times(&self, other: &Self) -> bool {
-        let mut left = self.clone();
-        let mut right = other.clone();
-        left.update_time_ms = None;
-        right.update_time_ms = None;
-        for detail in &mut left.details {
-            detail.update_time_ms = None;
-        }
-        for detail in &mut right.details {
-            detail.update_time_ms = None;
-        }
-        left == right
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct AccountPositionState {
-    pub instrument_type: String,
-    pub instrument_id: String,
-    pub position: String,
-    pub position_side: String,
-    pub margin_mode: String,
-    pub average_price: Option<String>,
-    pub mark_price: Option<String>,
-    pub liquidation_price: Option<String>,
-    pub unrealized_pnl: Option<String>,
-    pub unrealized_pnl_ratio: Option<String>,
-    pub leverage: Option<String>,
-    pub margin: Option<String>,
-    pub initial_margin_requirement: Option<String>,
-    pub maintenance_margin_requirement: Option<String>,
-    pub margin_ratio: Option<String>,
-    pub notional_usd: Option<String>,
-    pub margin_currency: Option<String>,
-    pub creation_time_ms: Option<String>,
-    pub update_time_ms: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PendingOrderState {
-    pub order_id: String,
-    pub client_order_id: Option<String>,
-    pub instrument_type: String,
-    pub instrument_id: String,
-    pub side: String,
-    pub position_side: Option<String>,
-    pub trade_mode: String,
-    pub order_type: String,
-    pub price: Option<String>,
-    pub size: String,
-    pub accumulated_fill_size: String,
-    pub average_fill_price: Option<String>,
-    pub state: String,
-    pub reduce_only: Option<bool>,
-    pub creation_time_ms: String,
-    pub update_time_ms: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct AccountSnapshot {
-    pub schema: String,
-    pub source: String,
-    pub source_received_at: String,
-    pub account_generation: String,
-    pub quality_reason: String,
-    pub private_ws_connected: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub private_ws_generation: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub private_ws_connection_fingerprint: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub private_ws_last_inbound_ms: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub private_ws_events_applied: Option<u64>,
-    pub account_level: String,
-    pub position_mode: String,
-    pub account_type: String,
-    pub account_uid_fingerprint: String,
-    pub api_key_permissions: Vec<String>,
-    pub balance: AccountBalanceState,
-    pub positions: Vec<AccountPositionState>,
-    pub pending_orders: Vec<PendingOrderState>,
 }
 
 #[derive(Debug, Error)]
@@ -181,203 +66,212 @@ pub enum AccountError {
     Serialization(#[from] serde_json::Error),
 }
 
-impl AccountSnapshot {
-    pub fn from_rest_bootstrap(
-        source_received_at: impl Into<String>,
-        config: AccountConfig,
-        balance: BalanceSnapshot,
-        positions: Vec<Position>,
-        pending_orders: Vec<PendingOrder>,
-        api_key_permissions: Vec<String>,
-    ) -> Result<Self, AccountError> {
-        let source_received_at = source_received_at.into();
-        if source_received_at.trim().is_empty() {
-            return Err(AccountError::EmptySourceTimestamp);
+pub fn account_snapshot_from_rest_bootstrap(
+    source_received_at: impl Into<String>,
+    config: AccountConfig,
+    balance: BalanceSnapshot,
+    positions: Vec<Position>,
+    pending_orders: Vec<PendingOrder>,
+    api_key_permissions: Vec<String>,
+) -> Result<AccountSnapshot, AccountError> {
+    let source_received_at = source_received_at.into();
+    if source_received_at.trim().is_empty() {
+        return Err(AccountError::EmptySourceTimestamp);
+    }
+
+    let account_level = required_config("acctLv", config.account_level)?;
+    let position_mode = required_config("posMode", config.position_mode)?;
+    let account_type = required_config("type", config.account_type)?;
+    let uid = required_config("uid", config.uid)?;
+    let account_uid_fingerprint = format!("{:x}", Sha256::digest(uid.as_bytes()));
+
+    let balance = normalize_balance(balance)?;
+
+    let normalized_positions = normalize_positions(positions)?;
+
+    let normalized_orders = normalize_orders(pending_orders)?;
+
+    let mut permissions = api_key_permissions;
+    permissions.sort();
+    permissions.dedup();
+
+    let mut snapshot = AccountSnapshot {
+        schema: ACCOUNT_SNAPSHOT_SCHEMA_V1.to_owned(),
+        source: ACCOUNT_REST_SOURCE_V1.to_owned(),
+        source_received_at,
+        account_generation: String::new(),
+        quality_reason: M4_REST_BOOTSTRAP_REASON.to_owned(),
+        private_ws_connected: false,
+        private_ws_generation: None,
+        private_ws_connection_fingerprint: None,
+        private_ws_last_inbound_ms: None,
+        private_ws_events_applied: None,
+        account_level,
+        position_mode,
+        account_type,
+        account_uid_fingerprint,
+        api_key_permissions: permissions,
+        balance,
+        positions: normalized_positions,
+        pending_orders: normalized_orders,
+    };
+    snapshot.account_generation = generation_for(&snapshot)?;
+    Ok(snapshot)
+}
+
+pub fn converge_account_private_ws(
+    mut snapshot: AccountSnapshot,
+    private_ws_generation: u64,
+    private_ws_connection_fingerprint: impl Into<String>,
+    private_ws_last_inbound_ms: u64,
+    events: &[AccountWsEvent],
+) -> Result<AccountSnapshot, AccountError> {
+    for event in events {
+        match event {
+            AccountWsEvent::Account(updates) => {
+                for update in updates {
+                    apply_balance_update(&mut snapshot, update.clone())?;
+                }
+            }
+            AccountWsEvent::Positions(updates) => {
+                for update in updates {
+                    apply_position_update(&mut snapshot, update.clone())?;
+                }
+            }
+            AccountWsEvent::Orders(updates) => {
+                for update in updates {
+                    apply_order_update(&mut snapshot, update.clone())?;
+                }
+            }
         }
+    }
 
-        let account_level = required_config("acctLv", config.account_level)?;
-        let position_mode = required_config("posMode", config.position_mode)?;
-        let account_type = required_config("type", config.account_type)?;
-        let uid = required_config("uid", config.uid)?;
-        let account_uid_fingerprint = format!("{:x}", Sha256::digest(uid.as_bytes()));
+    snapshot.schema = ACCOUNT_SNAPSHOT_SCHEMA_V2.to_owned();
+    snapshot.source = ACCOUNT_CONVERGED_SOURCE_V2.to_owned();
+    snapshot.quality_reason = M4_REST_WS_CONVERGED_REASON.to_owned();
+    let private_ws_connection_fingerprint = private_ws_connection_fingerprint.into();
+    if private_ws_connection_fingerprint.trim().is_empty() {
+        return Err(AccountError::MissingPrivateConnectionFingerprint);
+    }
 
-        let balance = normalize_balance(balance)?;
+    snapshot.private_ws_connected = true;
+    snapshot.private_ws_generation = Some(private_ws_generation);
+    snapshot.private_ws_connection_fingerprint = Some(private_ws_connection_fingerprint);
+    snapshot.private_ws_last_inbound_ms = Some(private_ws_last_inbound_ms);
+    snapshot.private_ws_events_applied = Some(events.len() as u64);
+    snapshot.positions.sort_by(position_sort);
+    snapshot
+        .pending_orders
+        .sort_by(|a, b| a.order_id.cmp(&b.order_id));
+    snapshot
+        .balance
+        .details
+        .sort_by(|a, b| a.currency.cmp(&b.currency));
+    snapshot.account_generation = generation_for(&snapshot)?;
+    Ok(snapshot)
+}
 
-        let normalized_positions = normalize_positions(positions)?;
-
-        let normalized_orders = normalize_orders(pending_orders)?;
-
-        let mut permissions = api_key_permissions;
-        permissions.sort();
-        permissions.dedup();
-
-        let mut snapshot = Self {
-            schema: ACCOUNT_SNAPSHOT_SCHEMA_V1.to_owned(),
-            source: ACCOUNT_REST_SOURCE_V1.to_owned(),
-            source_received_at,
-            account_generation: String::new(),
-            quality_reason: M4_REST_BOOTSTRAP_REASON.to_owned(),
-            private_ws_connected: false,
-            private_ws_generation: None,
-            private_ws_connection_fingerprint: None,
-            private_ws_last_inbound_ms: None,
-            private_ws_events_applied: None,
-            account_level,
-            position_mode,
-            account_type,
-            account_uid_fingerprint,
-            api_key_permissions: permissions,
-            balance,
-            positions: normalized_positions,
-            pending_orders: normalized_orders,
+fn apply_balance_update(
+    snapshot: &mut AccountSnapshot,
+    update: BalanceSnapshot,
+) -> Result<(), AccountError> {
+    let incoming = normalize_balance(update)?;
+    if timestamp_is_newer_or_equal(
+        incoming.update_time_ms.as_deref(),
+        snapshot.balance.update_time_ms.as_deref(),
+        "balance.uTime",
+    )? {
+        let existing_details = std::mem::take(&mut snapshot.balance.details);
+        snapshot.balance = AccountBalanceState {
+            details: existing_details,
+            ..incoming.clone()
         };
-        snapshot.account_generation = generation_for(&snapshot)?;
-        Ok(snapshot)
     }
 
-    pub fn converge_private_ws(
-        mut self,
-        private_ws_generation: u64,
-        private_ws_connection_fingerprint: impl Into<String>,
-        private_ws_last_inbound_ms: u64,
-        events: &[AccountWsEvent],
-    ) -> Result<Self, AccountError> {
-        for event in events {
-            match event {
-                AccountWsEvent::Account(updates) => {
-                    for update in updates {
-                        self.apply_balance_update(update.clone())?;
-                    }
-                }
-                AccountWsEvent::Positions(updates) => {
-                    for update in updates {
-                        self.apply_position_update(update.clone())?;
-                    }
-                }
-                AccountWsEvent::Orders(updates) => {
-                    for update in updates {
-                        self.apply_order_update(update.clone())?;
-                    }
-                }
-            }
-        }
-
-        self.schema = ACCOUNT_SNAPSHOT_SCHEMA_V2.to_owned();
-        self.source = ACCOUNT_CONVERGED_SOURCE_V2.to_owned();
-        self.quality_reason = M4_REST_WS_CONVERGED_REASON.to_owned();
-        let private_ws_connection_fingerprint = private_ws_connection_fingerprint.into();
-        if private_ws_connection_fingerprint.trim().is_empty() {
-            return Err(AccountError::MissingPrivateConnectionFingerprint);
-        }
-
-        self.private_ws_connected = true;
-        self.private_ws_generation = Some(private_ws_generation);
-        self.private_ws_connection_fingerprint = Some(private_ws_connection_fingerprint);
-        self.private_ws_last_inbound_ms = Some(private_ws_last_inbound_ms);
-        self.private_ws_events_applied = Some(events.len() as u64);
-        self.positions.sort_by(position_sort);
-        self.pending_orders
-            .sort_by(|a, b| a.order_id.cmp(&b.order_id));
-        self.balance
+    for detail in incoming.details {
+        match snapshot
+            .balance
             .details
-            .sort_by(|a, b| a.currency.cmp(&b.currency));
-        self.account_generation = generation_for(&self)?;
-        Ok(self)
-    }
-
-    fn apply_balance_update(&mut self, update: BalanceSnapshot) -> Result<(), AccountError> {
-        let incoming = normalize_balance(update)?;
-        if timestamp_is_newer_or_equal(
-            incoming.update_time_ms.as_deref(),
-            self.balance.update_time_ms.as_deref(),
-            "balance.uTime",
-        )? {
-            let existing_details = std::mem::take(&mut self.balance.details);
-            self.balance = AccountBalanceState {
-                details: existing_details,
-                ..incoming.clone()
-            };
-        }
-
-        for detail in incoming.details {
-            match self
-                .balance
-                .details
-                .iter()
-                .position(|current| current.currency == detail.currency)
+            .iter()
+            .position(|current| current.currency == detail.currency)
+        {
+            Some(index)
+                if timestamp_is_newer_or_equal(
+                    detail.update_time_ms.as_deref(),
+                    snapshot.balance.details[index].update_time_ms.as_deref(),
+                    "balance.details.uTime",
+                )? =>
             {
-                Some(index)
-                    if timestamp_is_newer_or_equal(
-                        detail.update_time_ms.as_deref(),
-                        self.balance.details[index].update_time_ms.as_deref(),
-                        "balance.details.uTime",
-                    )? =>
-                {
-                    self.balance.details[index] = detail;
-                }
-                Some(_) => {}
-                None => self.balance.details.push(detail),
+                snapshot.balance.details[index] = detail;
             }
+            Some(_) => {}
+            None => snapshot.balance.details.push(detail),
         }
-        Ok(())
     }
+    Ok(())
+}
 
-    fn apply_position_update(&mut self, update: Position) -> Result<(), AccountError> {
-        let incoming = normalize_position(update)?;
-        required_event_timestamp(incoming.update_time_ms.as_deref(), "position.uTime")?;
-        let identity = position_identity(&incoming);
+fn apply_position_update(
+    snapshot: &mut AccountSnapshot,
+    update: Position,
+) -> Result<(), AccountError> {
+    let incoming = normalize_position(update)?;
+    required_event_timestamp(incoming.update_time_ms.as_deref(), "position.uTime")?;
+    let identity = position_identity(&incoming);
 
-        let existing = self
-            .positions
-            .iter()
-            .position(|current| position_identity(current) == identity);
+    let existing = snapshot
+        .positions
+        .iter()
+        .position(|current| position_identity(current) == identity);
 
-        if let Some(index) = existing {
-            if !timestamp_is_newer_or_equal(
-                incoming.update_time_ms.as_deref(),
-                self.positions[index].update_time_ms.as_deref(),
-                "position.uTime",
-            )? {
-                return Ok(());
-            }
-            if is_zero_decimal_text(&incoming.position) {
-                self.positions.remove(index);
-            } else {
-                self.positions[index] = incoming;
-            }
-        } else if !is_zero_decimal_text(&incoming.position) {
-            self.positions.push(incoming);
+    if let Some(index) = existing {
+        if !timestamp_is_newer_or_equal(
+            incoming.update_time_ms.as_deref(),
+            snapshot.positions[index].update_time_ms.as_deref(),
+            "position.uTime",
+        )? {
+            return Ok(());
         }
-        Ok(())
-    }
-
-    fn apply_order_update(&mut self, update: PendingOrder) -> Result<(), AccountError> {
-        let incoming = normalize_order(update)?;
-        required_event_timestamp(Some(incoming.update_time_ms.as_str()), "order.uTime")?;
-
-        let existing = self
-            .pending_orders
-            .iter()
-            .position(|current| current.order_id == incoming.order_id);
-
-        if let Some(index) = existing {
-            if !timestamp_is_newer_or_equal(
-                Some(incoming.update_time_ms.as_str()),
-                Some(self.pending_orders[index].update_time_ms.as_str()),
-                "order.uTime",
-            )? {
-                return Ok(());
-            }
-            if is_terminal_order_state(&incoming.state) {
-                self.pending_orders.remove(index);
-            } else {
-                self.pending_orders[index] = incoming;
-            }
-        } else if !is_terminal_order_state(&incoming.state) {
-            self.pending_orders.push(incoming);
+        if is_zero_decimal_text(&incoming.position) {
+            snapshot.positions.remove(index);
+        } else {
+            snapshot.positions[index] = incoming;
         }
-        Ok(())
+    } else if !is_zero_decimal_text(&incoming.position) {
+        snapshot.positions.push(incoming);
     }
+    Ok(())
+}
+
+fn apply_order_update(
+    snapshot: &mut AccountSnapshot,
+    update: PendingOrder,
+) -> Result<(), AccountError> {
+    let incoming = normalize_order(update)?;
+    required_event_timestamp(Some(incoming.update_time_ms.as_str()), "order.uTime")?;
+
+    let existing = snapshot
+        .pending_orders
+        .iter()
+        .position(|current| current.order_id == incoming.order_id);
+
+    if let Some(index) = existing {
+        if !timestamp_is_newer_or_equal(
+            Some(incoming.update_time_ms.as_str()),
+            Some(snapshot.pending_orders[index].update_time_ms.as_str()),
+            "order.uTime",
+        )? {
+            return Ok(());
+        }
+        if is_terminal_order_state(&incoming.state) {
+            snapshot.pending_orders.remove(index);
+        } else {
+            snapshot.pending_orders[index] = incoming;
+        }
+    } else if !is_terminal_order_state(&incoming.state) {
+        snapshot.pending_orders.push(incoming);
+    }
+    Ok(())
 }
 
 fn normalize_balance(balance: BalanceSnapshot) -> Result<AccountBalanceState, AccountError> {
@@ -778,7 +672,7 @@ mod tests {
 
     #[test]
     fn rest_bootstrap_is_deterministic_and_never_emits_raw_uid() {
-        let first = AccountSnapshot::from_rest_bootstrap(
+        let first = account_snapshot_from_rest_bootstrap(
             "2026-09-27T15:00:00.000Z",
             config(),
             balance(),
@@ -787,7 +681,7 @@ mod tests {
             vec!["read_only".to_owned()],
         )
         .expect("snapshot");
-        let second = AccountSnapshot::from_rest_bootstrap(
+        let second = account_snapshot_from_rest_bootstrap(
             "2026-09-27T15:00:01.000Z",
             config(),
             balance(),
@@ -812,7 +706,7 @@ mod tests {
         second_balance.update_time = "1790520009999".to_owned();
         second_balance.details[0].update_time = "1790520009999".to_owned();
 
-        let first = AccountSnapshot::from_rest_bootstrap(
+        let first = account_snapshot_from_rest_bootstrap(
             "2026-09-27T15:00:00.000Z",
             config(),
             first_balance,
@@ -824,7 +718,7 @@ mod tests {
 
         let mut second_order = pending_order("123", "live", "1790520009999");
         second_order.creation_time = "1790519999999".to_owned();
-        let second = AccountSnapshot::from_rest_bootstrap(
+        let second = account_snapshot_from_rest_bootstrap(
             "2026-09-27T15:00:01.000Z",
             config(),
             second_balance,
@@ -844,7 +738,7 @@ mod tests {
 
     #[test]
     fn converged_snapshot_ignores_older_balance_event() {
-        let rest = AccountSnapshot::from_rest_bootstrap(
+        let rest = account_snapshot_from_rest_bootstrap(
             "2026-09-27T15:00:00.000Z",
             config(),
             balance(),
@@ -860,14 +754,14 @@ mod tests {
         stale.details[0].equity = "1".to_owned();
         stale.details[0].update_time = "1790519999999".to_owned();
 
-        let converged = rest
-            .converge_private_ws(
-                7,
-                "conn-fingerprint-a",
-                1790520000100,
-                &[AccountWsEvent::Account(vec![stale])],
-            )
-            .expect("converged");
+        let converged = converge_account_private_ws(
+            rest,
+            7,
+            "conn-fingerprint-a",
+            1790520000100,
+            &[AccountWsEvent::Account(vec![stale])],
+        )
+        .expect("converged");
 
         assert_eq!(converged.schema, ACCOUNT_SNAPSHOT_SCHEMA_V2);
         assert_eq!(converged.balance.total_equity_usd, "1000.125");
@@ -879,7 +773,7 @@ mod tests {
     #[test]
     fn terminal_order_delta_removes_rest_pending_order() {
         let live = pending_order("123", "live", "1790520000000");
-        let rest = AccountSnapshot::from_rest_bootstrap(
+        let rest = account_snapshot_from_rest_bootstrap(
             "2026-09-27T15:00:00.000Z",
             config(),
             balance(),
@@ -890,42 +784,52 @@ mod tests {
         .expect("rest");
 
         let canceled = pending_order("123", "canceled", "1790520000100");
-        let converged = rest
-            .converge_private_ws(
-                8,
-                "conn-fingerprint-b",
-                1790520000200,
-                &[AccountWsEvent::Orders(vec![canceled])],
-            )
-            .expect("converged");
+        let converged = converge_account_private_ws(
+            rest,
+            8,
+            "conn-fingerprint-b",
+            1790520000200,
+            &[AccountWsEvent::Orders(vec![canceled])],
+        )
+        .expect("converged");
 
         assert!(converged.pending_orders.is_empty());
     }
 
     #[test]
     fn private_last_inbound_time_does_not_change_content_generation() {
-        let first = AccountSnapshot::from_rest_bootstrap(
-            "2026-09-27T15:00:00.000Z",
-            config(),
-            balance(),
-            Vec::new(),
-            Vec::new(),
-            vec!["read_only".to_owned()],
+        let first = converge_account_private_ws(
+            account_snapshot_from_rest_bootstrap(
+                "2026-09-27T15:00:00.000Z",
+                config(),
+                balance(),
+                Vec::new(),
+                Vec::new(),
+                vec!["read_only".to_owned()],
+            )
+            .expect("rest"),
+            1,
+            "conn-fingerprint-a",
+            1790520000100,
+            &[],
         )
-        .expect("rest")
-        .converge_private_ws(1, "conn-fingerprint-a", 1790520000100, &[])
         .expect("first");
 
-        let second = AccountSnapshot::from_rest_bootstrap(
-            "2026-09-27T15:00:01.000Z",
-            config(),
-            balance(),
-            Vec::new(),
-            Vec::new(),
-            vec!["read_only".to_owned()],
+        let second = converge_account_private_ws(
+            account_snapshot_from_rest_bootstrap(
+                "2026-09-27T15:00:01.000Z",
+                config(),
+                balance(),
+                Vec::new(),
+                Vec::new(),
+                vec!["read_only".to_owned()],
+            )
+            .expect("rest"),
+            1,
+            "conn-fingerprint-a",
+            1790520009999,
+            &[],
         )
-        .expect("rest")
-        .converge_private_ws(1, "conn-fingerprint-a", 1790520009999, &[])
         .expect("second");
 
         assert_eq!(first.account_generation, second.account_generation);
@@ -937,28 +841,38 @@ mod tests {
 
     #[test]
     fn private_connection_fingerprint_changes_content_generation() {
-        let first = AccountSnapshot::from_rest_bootstrap(
-            "2026-09-27T15:00:00.000Z",
-            config(),
-            balance(),
-            Vec::new(),
-            Vec::new(),
-            vec!["read_only".to_owned()],
+        let first = converge_account_private_ws(
+            account_snapshot_from_rest_bootstrap(
+                "2026-09-27T15:00:00.000Z",
+                config(),
+                balance(),
+                Vec::new(),
+                Vec::new(),
+                vec!["read_only".to_owned()],
+            )
+            .expect("rest"),
+            1,
+            "conn-fingerprint-a",
+            1790520000100,
+            &[],
         )
-        .expect("rest")
-        .converge_private_ws(1, "conn-fingerprint-a", 1790520000100, &[])
         .expect("first");
 
-        let second = AccountSnapshot::from_rest_bootstrap(
-            "2026-09-27T15:00:00.000Z",
-            config(),
-            balance(),
-            Vec::new(),
-            Vec::new(),
-            vec!["read_only".to_owned()],
+        let second = converge_account_private_ws(
+            account_snapshot_from_rest_bootstrap(
+                "2026-09-27T15:00:00.000Z",
+                config(),
+                balance(),
+                Vec::new(),
+                Vec::new(),
+                vec!["read_only".to_owned()],
+            )
+            .expect("rest"),
+            1,
+            "conn-fingerprint-b",
+            1790520000100,
+            &[],
         )
-        .expect("rest")
-        .converge_private_ws(1, "conn-fingerprint-b", 1790520000100, &[])
         .expect("second");
 
         assert_ne!(first.account_generation, second.account_generation);
@@ -970,28 +884,38 @@ mod tests {
 
     #[test]
     fn private_generation_changes_content_generation() {
-        let first = AccountSnapshot::from_rest_bootstrap(
-            "2026-09-27T15:00:00.000Z",
-            config(),
-            balance(),
-            Vec::new(),
-            Vec::new(),
-            vec!["read_only".to_owned()],
+        let first = converge_account_private_ws(
+            account_snapshot_from_rest_bootstrap(
+                "2026-09-27T15:00:00.000Z",
+                config(),
+                balance(),
+                Vec::new(),
+                Vec::new(),
+                vec!["read_only".to_owned()],
+            )
+            .expect("rest"),
+            1,
+            "conn-fingerprint-a",
+            1790520000100,
+            &[],
         )
-        .expect("rest")
-        .converge_private_ws(1, "conn-fingerprint-a", 1790520000100, &[])
         .expect("first");
 
-        let second = AccountSnapshot::from_rest_bootstrap(
-            "2026-09-27T15:00:00.000Z",
-            config(),
-            balance(),
-            Vec::new(),
-            Vec::new(),
-            vec!["read_only".to_owned()],
+        let second = converge_account_private_ws(
+            account_snapshot_from_rest_bootstrap(
+                "2026-09-27T15:00:00.000Z",
+                config(),
+                balance(),
+                Vec::new(),
+                Vec::new(),
+                vec!["read_only".to_owned()],
+            )
+            .expect("rest"),
+            2,
+            "conn-fingerprint-b",
+            1790520000100,
+            &[],
         )
-        .expect("rest")
-        .converge_private_ws(2, "conn-fingerprint-b", 1790520000100, &[])
         .expect("second");
 
         assert_ne!(first.account_generation, second.account_generation);
@@ -1017,7 +941,7 @@ mod tests {
             creation_time: "1790520000000".to_owned(),
             update_time: "1790520000000".to_owned(),
         };
-        let error = AccountSnapshot::from_rest_bootstrap(
+        let error = account_snapshot_from_rest_bootstrap(
             "2026-09-27T15:00:00.000Z",
             config(),
             balance(),

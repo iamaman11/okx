@@ -1,7 +1,12 @@
+pub use okx_kernel::observation_model::{
+    FundingHistoryEvent, FundingHistorySnapshot, HistoryCandle, MarketHistorySnapshot, MarketTrade,
+    MarketTradeSide, MarketTradesSnapshot, OpenInterestHistoryPoint, OpenInterestHistorySnapshot,
+};
+
 use std::collections::BTreeSet;
 
 use okx_api::{PublicCandle, PublicFundingHistory, PublicOpenInterestHistory, PublicTrade};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
@@ -15,119 +20,6 @@ pub const FUNDING_HISTORY_SCHEMA_V1: &str = "okx.funding-history/v1";
 pub const FUNDING_HISTORY_SOURCE_V1: &str = "okx_public_rest_funding_history";
 pub const OPEN_INTEREST_HISTORY_SCHEMA_V1: &str = "okx.open-interest-history/v1";
 pub const OPEN_INTEREST_HISTORY_SOURCE_V1: &str = "okx_public_rest_contract_oi_history";
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct HistoryCandle {
-    pub open_time_ms: String,
-    pub open: String,
-    pub high: String,
-    pub low: String,
-    pub close: String,
-    pub volume: String,
-    pub volume_currency: String,
-    pub volume_quote: Option<String>,
-    pub confirmed: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct MarketHistorySnapshot {
-    pub schema: String,
-    pub instrument_id: String,
-    pub bar: String,
-    pub requested_limit: u16,
-    pub reference_generation: String,
-    pub source: String,
-    pub source_received_at: String,
-    pub history_generation: String,
-    pub all_confirmed: bool,
-    pub oldest_open_time_ms: String,
-    pub newest_open_time_ms: String,
-    pub candles: Vec<HistoryCandle>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum MarketTradeSide {
-    Buy,
-    Sell,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct MarketTrade {
-    pub trade_id: String,
-    pub price: String,
-    pub size_contracts: String,
-    pub side: MarketTradeSide,
-    pub source: Option<String>,
-    pub exchange_timestamp_ms: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct MarketTradesSnapshot {
-    pub schema: String,
-    pub instrument_id: String,
-    pub requested_limit: u16,
-    pub reference_generation: String,
-    pub source: String,
-    pub source_received_at: String,
-    pub trades_generation: String,
-    pub oldest_exchange_timestamp_ms: Option<String>,
-    pub newest_exchange_timestamp_ms: Option<String>,
-    pub trades: Vec<MarketTrade>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct FundingHistoryEvent {
-    pub funding_time_ms: String,
-    pub funding_rate: String,
-    pub realized_rate: Option<String>,
-    pub formula_type: Option<String>,
-    pub method: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct FundingHistorySnapshot {
-    pub schema: String,
-    pub instrument_id: String,
-    pub requested_limit: u16,
-    pub reference_generation: String,
-    pub source: String,
-    pub source_received_at: String,
-    pub funding_generation: String,
-    pub oldest_funding_time_ms: Option<String>,
-    pub newest_funding_time_ms: Option<String>,
-    pub events: Vec<FundingHistoryEvent>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct OpenInterestHistoryPoint {
-    pub timestamp_ms: String,
-    pub open_interest_contracts: String,
-    pub open_interest_currency: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct OpenInterestHistorySnapshot {
-    pub schema: String,
-    pub instrument_id: String,
-    pub period: String,
-    pub requested_limit: u16,
-    pub reference_generation: String,
-    pub source: String,
-    pub source_received_at: String,
-    pub open_interest_generation: String,
-    pub oldest_timestamp_ms: Option<String>,
-    pub newest_timestamp_ms: Option<String>,
-    pub points: Vec<OpenInterestHistoryPoint>,
-}
 
 pub fn normalize_research_candles(
     rows: Vec<PublicCandle>,
@@ -319,209 +211,201 @@ pub enum MarketHistoryError {
     Serialization(#[from] serde_json::Error),
 }
 
-impl MarketHistorySnapshot {
-    pub fn from_public(
-        reference: &ReferenceRegistry,
-        instrument_id: &str,
-        bar: &str,
-        requested_limit: u16,
-        source_received_at: impl Into<String>,
-        rows: Vec<PublicCandle>,
-    ) -> Result<Self, MarketHistoryError> {
-        if !(1..=100).contains(&requested_limit) {
-            return Err(MarketHistoryError::InvalidLimit);
-        }
+pub fn market_history_from_public(
+    reference: &ReferenceRegistry,
+    instrument_id: &str,
+    bar: &str,
+    requested_limit: u16,
+    source_received_at: impl Into<String>,
+    rows: Vec<PublicCandle>,
+) -> Result<MarketHistorySnapshot, MarketHistoryError> {
+    if !(1..=100).contains(&requested_limit) {
+        return Err(MarketHistoryError::InvalidLimit);
+    }
 
-        let source_received_at = source_received_at.into();
-        if source_received_at.trim().is_empty() {
-            return Err(MarketHistoryError::EmptySourceTimestamp);
-        }
+    let source_received_at = source_received_at.into();
+    if source_received_at.trim().is_empty() {
+        return Err(MarketHistoryError::EmptySourceTimestamp);
+    }
 
-        let instrument = reference
-            .get(instrument_id)
-            .ok_or_else(|| MarketHistoryError::InstrumentNotFound(instrument_id.to_owned()))?;
-        if instrument.state != "live" {
-            return Err(MarketHistoryError::InstrumentNotLive(
-                instrument_id.to_owned(),
-            ));
-        }
+    let instrument = reference
+        .get(instrument_id)
+        .ok_or_else(|| MarketHistoryError::InstrumentNotFound(instrument_id.to_owned()))?;
+    if instrument.state != "live" {
+        return Err(MarketHistoryError::InstrumentNotLive(
+            instrument_id.to_owned(),
+        ));
+    }
 
-        if rows.is_empty() {
-            return Err(MarketHistoryError::EmptyHistory);
-        }
-        if rows.len() > requested_limit as usize {
-            return Err(MarketHistoryError::TooManyRows);
-        }
+    if rows.is_empty() {
+        return Err(MarketHistoryError::EmptyHistory);
+    }
+    if rows.len() > requested_limit as usize {
+        return Err(MarketHistoryError::TooManyRows);
+    }
 
-        let candles = normalize_research_candles(rows, requested_limit as usize)?;
-        if candles.is_empty() {
-            return Err(MarketHistoryError::EmptyHistory);
+    let candles = normalize_research_candles(rows, requested_limit as usize)?;
+    if candles.is_empty() {
+        return Err(MarketHistoryError::EmptyHistory);
+    }
+    let oldest_open_time_ms = candles
+        .first()
+        .expect("history is non-empty")
+        .open_time_ms
+        .clone();
+    let newest_open_time_ms = candles
+        .last()
+        .expect("history is non-empty")
+        .open_time_ms
+        .clone();
+    let all_confirmed = candles.iter().all(|candle| candle.confirmed);
+
+    let mut snapshot = MarketHistorySnapshot {
+        schema: MARKET_HISTORY_SCHEMA_V1.to_owned(),
+        instrument_id: instrument_id.to_owned(),
+        bar: bar.to_owned(),
+        requested_limit,
+        reference_generation: reference.generation().as_str().to_owned(),
+        source: MARKET_HISTORY_SOURCE_V1.to_owned(),
+        source_received_at,
+        history_generation: String::new(),
+        all_confirmed,
+        oldest_open_time_ms,
+        newest_open_time_ms,
+        candles,
+    };
+    snapshot.history_generation = generation_for(&snapshot)?;
+    Ok(snapshot)
+}
+
+pub fn open_interest_history_from_public(
+    reference: &ReferenceRegistry,
+    instrument_id: &str,
+    period: &str,
+    requested_limit: u16,
+    source_received_at: impl Into<String>,
+    rows: Vec<PublicOpenInterestHistory>,
+) -> Result<OpenInterestHistorySnapshot, MarketHistoryError> {
+    validate_history_request(reference, instrument_id, requested_limit)?;
+    let source_received_at = validate_source_timestamp(source_received_at.into())?;
+    if rows.len() > requested_limit as usize {
+        return Err(MarketHistoryError::TooManyRows);
+    }
+
+    let mut timestamps = BTreeSet::new();
+    let mut normalized = Vec::with_capacity(rows.len());
+    for row in rows {
+        let timestamp = row
+            .ts
+            .parse::<u64>()
+            .map_err(|_| MarketHistoryError::InvalidTimestamp(row.ts.clone()))?;
+        if !timestamps.insert(timestamp) {
+            return Err(MarketHistoryError::DuplicateOpenInterestTimestamp(row.ts));
         }
-        let oldest_open_time_ms = candles
+        normalized.push((
+            timestamp,
+            OpenInterestHistoryPoint {
+                timestamp_ms: required("ts", row.ts)?,
+                open_interest_contracts: required("oi", row.oi)?,
+                open_interest_currency: required("oiCcy", row.oi_currency)?,
+            },
+        ));
+    }
+    normalized.sort_by_key(|(timestamp, _)| *timestamp);
+    let points = normalized
+        .into_iter()
+        .map(|(_, point)| point)
+        .collect::<Vec<_>>();
+
+    let mut snapshot = OpenInterestHistorySnapshot {
+        schema: OPEN_INTEREST_HISTORY_SCHEMA_V1.to_owned(),
+        instrument_id: instrument_id.to_owned(),
+        period: period.to_owned(),
+        requested_limit,
+        reference_generation: reference.generation().as_str().to_owned(),
+        source: OPEN_INTEREST_HISTORY_SOURCE_V1.to_owned(),
+        source_received_at,
+        open_interest_generation: String::new(),
+        oldest_timestamp_ms: points.first().map(|point| point.timestamp_ms.clone()),
+        newest_timestamp_ms: points.last().map(|point| point.timestamp_ms.clone()),
+        points,
+    };
+    snapshot.open_interest_generation = open_interest_generation_for(&snapshot)?;
+    Ok(snapshot)
+}
+
+pub fn market_trades_from_public(
+    reference: &ReferenceRegistry,
+    instrument_id: &str,
+    requested_limit: u16,
+    source_received_at: impl Into<String>,
+    rows: Vec<PublicTrade>,
+) -> Result<MarketTradesSnapshot, MarketHistoryError> {
+    validate_history_request(reference, instrument_id, requested_limit)?;
+    let source_received_at = validate_source_timestamp(source_received_at.into())?;
+    if rows.len() > requested_limit as usize {
+        return Err(MarketHistoryError::TooManyRows);
+    }
+
+    let trades = normalize_research_trades(instrument_id, rows, requested_limit as usize)?;
+
+    let mut snapshot = MarketTradesSnapshot {
+        schema: MARKET_TRADES_SCHEMA_V1.to_owned(),
+        instrument_id: instrument_id.to_owned(),
+        requested_limit,
+        reference_generation: reference.generation().as_str().to_owned(),
+        source: MARKET_TRADES_SOURCE_V1.to_owned(),
+        source_received_at,
+        trades_generation: String::new(),
+        oldest_exchange_timestamp_ms: trades
             .first()
-            .expect("history is non-empty")
-            .open_time_ms
-            .clone();
-        let newest_open_time_ms = candles
+            .map(|trade| trade.exchange_timestamp_ms.clone()),
+        newest_exchange_timestamp_ms: trades
             .last()
-            .expect("history is non-empty")
-            .open_time_ms
-            .clone();
-        let all_confirmed = candles.iter().all(|candle| candle.confirmed);
-
-        let mut snapshot = Self {
-            schema: MARKET_HISTORY_SCHEMA_V1.to_owned(),
-            instrument_id: instrument_id.to_owned(),
-            bar: bar.to_owned(),
-            requested_limit,
-            reference_generation: reference.generation().as_str().to_owned(),
-            source: MARKET_HISTORY_SOURCE_V1.to_owned(),
-            source_received_at,
-            history_generation: String::new(),
-            all_confirmed,
-            oldest_open_time_ms,
-            newest_open_time_ms,
-            candles,
-        };
-        snapshot.history_generation = generation_for(&snapshot)?;
-        Ok(snapshot)
-    }
+            .map(|trade| trade.exchange_timestamp_ms.clone()),
+        trades,
+    };
+    snapshot.trades_generation = trades_generation_for(&snapshot)?;
+    Ok(snapshot)
 }
 
-impl OpenInterestHistorySnapshot {
-    pub fn from_public(
-        reference: &ReferenceRegistry,
-        instrument_id: &str,
-        period: &str,
-        requested_limit: u16,
-        source_received_at: impl Into<String>,
-        rows: Vec<PublicOpenInterestHistory>,
-    ) -> Result<Self, MarketHistoryError> {
-        validate_history_request(reference, instrument_id, requested_limit)?;
-        let source_received_at = validate_source_timestamp(source_received_at.into())?;
-        if rows.len() > requested_limit as usize {
-            return Err(MarketHistoryError::TooManyRows);
-        }
-
-        let mut timestamps = BTreeSet::new();
-        let mut normalized = Vec::with_capacity(rows.len());
-        for row in rows {
-            let timestamp = row
-                .ts
-                .parse::<u64>()
-                .map_err(|_| MarketHistoryError::InvalidTimestamp(row.ts.clone()))?;
-            if !timestamps.insert(timestamp) {
-                return Err(MarketHistoryError::DuplicateOpenInterestTimestamp(row.ts));
-            }
-            normalized.push((
-                timestamp,
-                OpenInterestHistoryPoint {
-                    timestamp_ms: required("ts", row.ts)?,
-                    open_interest_contracts: required("oi", row.oi)?,
-                    open_interest_currency: required("oiCcy", row.oi_currency)?,
-                },
-            ));
-        }
-        normalized.sort_by_key(|(timestamp, _)| *timestamp);
-        let points = normalized
-            .into_iter()
-            .map(|(_, point)| point)
-            .collect::<Vec<_>>();
-
-        let mut snapshot = Self {
-            schema: OPEN_INTEREST_HISTORY_SCHEMA_V1.to_owned(),
-            instrument_id: instrument_id.to_owned(),
-            period: period.to_owned(),
-            requested_limit,
-            reference_generation: reference.generation().as_str().to_owned(),
-            source: OPEN_INTEREST_HISTORY_SOURCE_V1.to_owned(),
-            source_received_at,
-            open_interest_generation: String::new(),
-            oldest_timestamp_ms: points.first().map(|point| point.timestamp_ms.clone()),
-            newest_timestamp_ms: points.last().map(|point| point.timestamp_ms.clone()),
-            points,
-        };
-        snapshot.open_interest_generation = open_interest_generation_for(&snapshot)?;
-        Ok(snapshot)
+pub fn funding_history_from_public(
+    reference: &ReferenceRegistry,
+    instrument_id: &str,
+    requested_limit: u16,
+    source_received_at: impl Into<String>,
+    rows: Vec<PublicFundingHistory>,
+) -> Result<FundingHistorySnapshot, MarketHistoryError> {
+    validate_history_request(reference, instrument_id, requested_limit)?;
+    let instrument = reference
+        .get(instrument_id)
+        .ok_or_else(|| MarketHistoryError::InstrumentNotFound(instrument_id.to_owned()))?;
+    if instrument.funding_requirement != FundingRequirement::Required {
+        return Err(MarketHistoryError::FundingNotApplicable(
+            instrument_id.to_owned(),
+        ));
     }
-}
-
-impl MarketTradesSnapshot {
-    pub fn from_public(
-        reference: &ReferenceRegistry,
-        instrument_id: &str,
-        requested_limit: u16,
-        source_received_at: impl Into<String>,
-        rows: Vec<PublicTrade>,
-    ) -> Result<Self, MarketHistoryError> {
-        validate_history_request(reference, instrument_id, requested_limit)?;
-        let source_received_at = validate_source_timestamp(source_received_at.into())?;
-        if rows.len() > requested_limit as usize {
-            return Err(MarketHistoryError::TooManyRows);
-        }
-
-        let trades = normalize_research_trades(instrument_id, rows, requested_limit as usize)?;
-
-        let mut snapshot = Self {
-            schema: MARKET_TRADES_SCHEMA_V1.to_owned(),
-            instrument_id: instrument_id.to_owned(),
-            requested_limit,
-            reference_generation: reference.generation().as_str().to_owned(),
-            source: MARKET_TRADES_SOURCE_V1.to_owned(),
-            source_received_at,
-            trades_generation: String::new(),
-            oldest_exchange_timestamp_ms: trades
-                .first()
-                .map(|trade| trade.exchange_timestamp_ms.clone()),
-            newest_exchange_timestamp_ms: trades
-                .last()
-                .map(|trade| trade.exchange_timestamp_ms.clone()),
-            trades,
-        };
-        snapshot.trades_generation = trades_generation_for(&snapshot)?;
-        Ok(snapshot)
+    let source_received_at = validate_source_timestamp(source_received_at.into())?;
+    if rows.len() > requested_limit as usize {
+        return Err(MarketHistoryError::TooManyRows);
     }
-}
 
-impl FundingHistorySnapshot {
-    pub fn from_public(
-        reference: &ReferenceRegistry,
-        instrument_id: &str,
-        requested_limit: u16,
-        source_received_at: impl Into<String>,
-        rows: Vec<PublicFundingHistory>,
-    ) -> Result<Self, MarketHistoryError> {
-        validate_history_request(reference, instrument_id, requested_limit)?;
-        let instrument = reference
-            .get(instrument_id)
-            .ok_or_else(|| MarketHistoryError::InstrumentNotFound(instrument_id.to_owned()))?;
-        if instrument.funding_requirement != FundingRequirement::Required {
-            return Err(MarketHistoryError::FundingNotApplicable(
-                instrument_id.to_owned(),
-            ));
-        }
-        let source_received_at = validate_source_timestamp(source_received_at.into())?;
-        if rows.len() > requested_limit as usize {
-            return Err(MarketHistoryError::TooManyRows);
-        }
+    let events = normalize_research_funding(instrument_id, rows, requested_limit as usize)?;
 
-        let events = normalize_research_funding(instrument_id, rows, requested_limit as usize)?;
-
-        let mut snapshot = Self {
-            schema: FUNDING_HISTORY_SCHEMA_V1.to_owned(),
-            instrument_id: instrument_id.to_owned(),
-            requested_limit,
-            reference_generation: reference.generation().as_str().to_owned(),
-            source: FUNDING_HISTORY_SOURCE_V1.to_owned(),
-            source_received_at,
-            funding_generation: String::new(),
-            oldest_funding_time_ms: events.first().map(|event| event.funding_time_ms.clone()),
-            newest_funding_time_ms: events.last().map(|event| event.funding_time_ms.clone()),
-            events,
-        };
-        snapshot.funding_generation = funding_generation_for(&snapshot)?;
-        Ok(snapshot)
-    }
+    let mut snapshot = FundingHistorySnapshot {
+        schema: FUNDING_HISTORY_SCHEMA_V1.to_owned(),
+        instrument_id: instrument_id.to_owned(),
+        requested_limit,
+        reference_generation: reference.generation().as_str().to_owned(),
+        source: FUNDING_HISTORY_SOURCE_V1.to_owned(),
+        source_received_at,
+        funding_generation: String::new(),
+        oldest_funding_time_ms: events.first().map(|event| event.funding_time_ms.clone()),
+        newest_funding_time_ms: events.last().map(|event| event.funding_time_ms.clone()),
+        events,
+    };
+    snapshot.funding_generation = funding_generation_for(&snapshot)?;
+    Ok(snapshot)
 }
 
 fn validate_history_request(
@@ -728,7 +612,7 @@ mod tests {
             },
         ];
 
-        let first = OpenInterestHistorySnapshot::from_public(
+        let first = open_interest_history_from_public(
             &reference(),
             "DOGE-USDT-SWAP",
             "1H",
@@ -737,7 +621,7 @@ mod tests {
             rows.clone(),
         )
         .expect("oi history");
-        let second = OpenInterestHistorySnapshot::from_public(
+        let second = open_interest_history_from_public(
             &reference(),
             "DOGE-USDT-SWAP",
             "1H",
@@ -779,7 +663,7 @@ mod tests {
             },
         ];
 
-        let first = MarketTradesSnapshot::from_public(
+        let first = market_trades_from_public(
             &reference(),
             "DOGE-USDT-SWAP",
             2,
@@ -787,7 +671,7 @@ mod tests {
             rows.clone(),
         )
         .expect("trades");
-        let second = MarketTradesSnapshot::from_public(
+        let second = market_trades_from_public(
             &reference(),
             "DOGE-USDT-SWAP",
             2,
@@ -856,7 +740,7 @@ mod tests {
             },
         ];
 
-        let snapshot = FundingHistorySnapshot::from_public(
+        let snapshot = funding_history_from_public(
             &reference(),
             "DOGE-USDT-SWAP",
             2,
@@ -875,7 +759,7 @@ mod tests {
 
     #[test]
     fn empty_trade_and_funding_windows_are_explicit_evidence() {
-        let trades = MarketTradesSnapshot::from_public(
+        let trades = market_trades_from_public(
             &reference(),
             "DOGE-USDT-SWAP",
             10,
@@ -883,7 +767,7 @@ mod tests {
             Vec::new(),
         )
         .expect("trades");
-        let funding = FundingHistorySnapshot::from_public(
+        let funding = funding_history_from_public(
             &reference(),
             "DOGE-USDT-SWAP",
             10,
@@ -900,7 +784,7 @@ mod tests {
 
     #[test]
     fn history_is_chronological_and_content_addressed() {
-        let first = MarketHistorySnapshot::from_public(
+        let first = market_history_from_public(
             &reference(),
             "DOGE-USDT-SWAP",
             "1H",
@@ -917,7 +801,7 @@ mod tests {
         assert_eq!(first.candles[1].open_time_ms, "1790470800000");
         assert!(first.all_confirmed);
 
-        let second = MarketHistorySnapshot::from_public(
+        let second = market_history_from_public(
             &reference(),
             "DOGE-USDT-SWAP",
             "1H",
@@ -936,7 +820,7 @@ mod tests {
 
     #[test]
     fn history_rejects_duplicate_timestamp() {
-        let error = MarketHistorySnapshot::from_public(
+        let error = market_history_from_public(
             &reference(),
             "DOGE-USDT-SWAP",
             "1H",
@@ -954,7 +838,7 @@ mod tests {
 
     #[test]
     fn history_preserves_unconfirmed_state_explicitly() {
-        let history = MarketHistorySnapshot::from_public(
+        let history = market_history_from_public(
             &reference(),
             "DOGE-USDT-SWAP",
             "1H",

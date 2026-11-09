@@ -613,14 +613,16 @@ impl AccountBootstrapper {
                 self.api.pending_orders(),
             )?
         };
-        Ok(AccountSnapshot::from_rest_bootstrap(
-            source_received_at,
-            config,
-            balance,
-            positions,
-            pending_orders,
-            permissions,
-        )?)
+        Ok(
+            okx_observation::account::account_snapshot_from_rest_bootstrap(
+                source_received_at,
+                config,
+                balance,
+                positions,
+                pending_orders,
+                permissions,
+            )?,
+        )
     }
 }
 
