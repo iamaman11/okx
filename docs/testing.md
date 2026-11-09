@@ -81,18 +81,18 @@ found` means exactly that; it is not a claim that the behavior is absent.
 |---|---|---|---|
 | `ConnectAccount` | `query::execute` → `AccountRuntimeRegistry::connect` → `AccountBootstrapper` | `accounts::tests::prepared_account_rejects_unverified_identity_before_sql`; `recorded_two_account_bootstrap_opens_independent_sql_owners` (bootstrap/SQL, partial) | No focused test drives the public query arm through credential resolution and publication. |
 | `Market` | `query::execute_market` → `AnalyticsService::market` → `MarketBootstrap` / existing research job owner | `analytics::market::tests::prepared_screen_8x100_latency_and_response_budget`; `market_source_scope_is_bound_to_native_public_client_environment` (partial) | No focused public-dispatch test covers the whole request-to-response route. |
-| `MarketCapabilities` | `query::execute` → `AnalyticsService::market_capabilities` | `analytics::tests::market_capabilities_discloses_supported_operator_names_and_units` | No separate public-dispatch test. |
+| `MarketCapabilities` | `query::execute` → `AnalyticsService::market_capabilities` | `analytics::tests::market_capabilities_discloses_supported_operator_names_and_units` | Public dispatch is covered by query::public_dispatch_tests::capabilities_and_mailbox_use_public_dispatch_without_external_effects. |
 | `MarketMicrostructure` | `query::execute_market_microstructure` obtains admitted fresh WS snapshot; `microstructure_summary` is pure projection | `query::microstructure_test::microstructure_projects_exact_spread_and_sweep_without_io`; `microstructure_rejects_crossed_book_before_sizing`; `bounded_book_sweep_rejects_insufficient_depth` | Query helper tests do not prove live WS transport freshness; that remains owned by `PublicWsHandle` tests. |
 | `Research` | `query::execute` → `AnalyticsService::research` → job catalog, source adapters, `CpuExecutor` | `analytics::tests::immutable_result_pages_and_restart_catalog`; `c17_verified_export_reads_all_page_checksums_and_exact_rows` | These prove job/artifact contracts, not an exchange research result being profitable or a trading signal being approved. |
-| `Trade` | `query::execute` → `TradeService::trade_with_invocation`; the existing public `trade` entry forwards to the same implementation; action dispatch in `trade_service/mod.rs`, `execute.rs`, `reconcile.rs`, `protection_cleanup.rs`, `entry_settlement.rs` | Direct suites: `entry_settlement_direct_tests`, `protection_cleanup_direct_tests`, `unsent_release_tests`; integration cases T09/T10 | Terminal release still has no honest isolated orchestrator test; full cohort census proof stays in integrated cases. No direct test substitutes a fake census. |
+| `Trade` | `query::execute` → `TradeService::trade_with_invocation`; the existing public `trade` entry forwards to the same implementation; action dispatch in `trade_service/mod.rs`, `execute.rs`, `reconcile.rs`, `protection_cleanup.rs`, `entry_settlement.rs` | Direct suites: `entry_settlement_direct_tests`, `protection_cleanup_direct_tests`, `unsent_release_tests`; integration cases T09/T10 | Direct terminal owner stale-fill rejection now has T1 proof (see revision9 table); positive full cohort census and lost-reply orchestration remain separate. No fake census substitutes for that proof. |
 | `Strategies` | `query::execute` → `TradeService::strategies`; worker loop `strategies::run` → `maintenance_turn` / `strategy_turn` | `strategies::tests::strategy_risk_budget_not_notional`; integration strategy cases under T09/T10 (see case records) | No complete direct per-action acceptance for Create/Update/Start/Stop and no proof that a generated strategy is profitable. |
 | `Portfolio` | `query::execute` → `portfolio::portfolio` → selected account SQL owners | `portfolio::tests::summary_requires_complete_requested_window_and_fresh_account_nav`; `four_accounts_preserve_strategy_and_unattributed_finance_isolation` | Does not prove historical USD expense import for every managed account; incomplete source coverage remains partial. |
 | `PortfolioScenario` | `query::execute` → pure `portfolio::scenario` calculation | `portfolio::tests::virtual_risk_has_no_exchange_side_effects_and_requires_psd` | Scenario inputs are user supplied; this is not a market-data backtest or exchange execution. |
 | `Diagnostics` | `query::execute` → `diagnostics::diagnostics`; operation view reads the local projection; finance view reads the existing cycle trace; default account details still queue the SQL owner | `diagnostics::tests::default_diagnostics_never_claims_a_remote_risk_summary`; `operation_projection_reads_are_local_bounded_and_isolated`; `distinguish_sql_queue_deadlines_from_real_storage_outages` | Cleanup startup reconstruction restores only retained durable facts; ACK/initiator/history remain unknown where unrecorded. Public blocked-owner behavior and other families are not proved by the local getter benchmark. |
-| `FindInstruments` | `query::execute` obtains `PublicWsHandle::reference_snapshot`; `find_instruments_response` maps the protocol enum and delegates filtering to `ReferenceRegistry::find_instruments` before the 50-row response limit | `query::instrument_search_tests::find_instruments_filters_type_currency_and_asset_before_public_limit` directly exercises the production helper with mixed SWAP/FUTURES, currencies, assets and more than 50 leading exclusions | The helper test does not cover asynchronous WS snapshot acquisition through the public dispatcher. |
+| `FindInstruments` | `query::execute` obtains `PublicWsHandle::reference_snapshot`; `find_instruments_response` maps the protocol enum and delegates filtering to `ReferenceRegistry::find_instruments` before the 50-row response limit | `query::instrument_search_tests::find_instruments_filters_type_currency_and_asset_before_public_limit` directly exercises the production helper with mixed SWAP/FUTURES, currencies, assets and more than 50 leading exclusions | Public dispatch also exercises instrument_search_routes_type_filter_before_public_limit; actual live reference refresh remains owned by PublicWsHandle. |
 | `MarketOverview` | `query::execute` → demand WS instrument → fresh WS snapshot; on warming only, existing REST market snapshot plus explicit degraded quality | `query::microstructure_test::healthy_ws_overview_omits_unbounded_depth_and_fits_mcp_envelope`; `accounts::tests::recorded_public_ws_frames_make_production_market_snapshot_fresh` (partial) | No focused test covers the overview's full fresh-WS and REST-degraded branches together. |
 | `AccountSummary` | `query::execute` resolves one account and reads its latest snapshot with `ACCOUNT_MAX_AGE_MS` freshness check | `accounts::tests::recorded_ws_login_business_ack_and_six_history_pages_capture_both_sql_accounts` (source path, partial) | No focused test covers this query arm's missing/stale snapshot responses. |
-| `MailboxTelemetry` | `query::execute` returns installation identity from `AccountRuntimeRegistry` | No focused query-arm test found | Read-only response has no independent delivery/telemetry persistence proof. |
+| `MailboxTelemetry` | `query::execute` returns installation identity from `AccountRuntimeRegistry` | query::public_dispatch_tests::capabilities_and_mailbox_use_public_dispatch_without_external_effects | Read-only response has no independent delivery/telemetry persistence proof. |
 
 #### Mutating subcommands below the public variants
 
@@ -223,6 +223,28 @@ a general orphan collector; this slice preserves that existing limitation.
 Generic Windows process-tree termination cannot prove orphan ownership after
 its leader exits. These direct tests and SQL backup join do not declare the
 whole S1-05 complete. PHYSICAL/REAL remain separate gates.
+
+### Completed local boundaries in the revision9 candidate
+
+These are scoped local proofs, not a replacement for the final exact-SHA
+full26/required CI/bundle or installed acceptance. The regression baseline in
+the header remains unchanged until those artifacts are accepted.
+
+| Packet | Production owner and real check | Accepted locally / remaining boundary |
+|---|---|---|
+| T1 | `terminal_release::release_terminal`; `trade_service::terminal_release::tests::stale_fill_coverage_blocks_release_before_worker` | Real SQL grant and canceled zero-fill order, venueuTime100/fills99, two invocations: exact typed identity/reason, unchanged SQL/money/receipt and zero risk/venue calls. Positive census, filled-close, lost-reply and reopen orchestration remain separate. |
+| D1 | `query::dispatch` → `diagnostics::operation_diagnostics`; `diagnostics::tests::public_operation_diagnostic_survives_busy_owners_and_unknown_history` | Known cleanup projection survives busy real SQL/source owners. Route mismatch/unknown history and all HTTP attempts are checked; post-release FIFO fence excludes hidden SQL enqueues. Seeded projection→public consumer proof, not real ACK production or process restart. Terminal release is not published in this cleanup trace. |
+| R6 | `AnalyticsService::research` → `analytics::decision`; `analytics::decision::tests::` | Ten tests cover typed decisions, immutable revisions, actual catalog migration/reopen, conflicting/identical concurrency, public query dispatch, corruption/expiry/scope, retention and reply bounds. Existing Jobs/artifacts remain owners. Single-experiment results only; orphan prepublication files and large-result latency remain explicit limits. |
+| C20 | `StrategyKernel::from_id`, existing replay and `Sources::candles`; `c20_` filters in kernel/research/agent plus protocol `composition_contract_tests::` | RollingMean reused; selectable EMA+momentum composition has literal signals/next-open trades/PnL and no-lookahead oracles. Actual decoder/source/cache→market/research tests bind HTTP query, reject duplicates, block an in-window unconfirmed gap and preserve13.5/17 positive oracles. No finance/TradeService/routing changes. |
+| L1 | Existing actual Native/workerd driver and `native-workerd-lifecycle.test.mjs` | Four Windows outcomes PASS141.126s, eight distinct Native processes; saved JSONLs/source hashes independently checked. Success has real WSS/public/source joins and two SQL termination watches. Error/timeout use explicitly labelled forced OS closure; post-dispose cleanup error retains primary+secondary failures and remaining cleanup. This does not prove graceful Rust task joins on forced exits, hard outer kill or every later phase; whole S1-05 remains open. |
+
+Measured navigation without author help: Diagnostics56s, Research decision40s,
+composition34s, and Trade terminal coverage43s (builds excluded). These are
+controlled navigation exercises, not historical defect-localization timings.
+Normal command forms: `cargo test --locked -p okx-agent --lib <filter> -- --nocapture`;
+use the full module path with `--exact`. For L1, precompile the exact Agent lib
+then `node --test scripts/trade-integration/native-workerd-lifecycle.test.mjs`.
+Set `OKX_LIFECYCLE_ARTIFACTS` to retain both successful and failed stage evidence.
 
 ### #501 revision 9: finite residual acceptance list
 
@@ -381,13 +403,13 @@ The 26 authoritative IDs are owned by `scripts/run-trade-integration.mjs --list`
 | `T10-14` | `crates/okx-agent/src/trade_service/mod.rs::TradeService::trade; crates/okx-agent/src/trade_service/reconcile.rs::cancel` | [`cases/T10-14.mjs`](../scripts/trade-integration/cases/T10-14.mjs), `--case T10-14` | FOUND: A held SQL; B public Status/Cancel | NOT_RUN | NOT_RUN | Independent B progress under held A, then join A, 1 B cancel POST | CONNECT | `f06383e` / no CI artifact |
 | `T10-15` | `crates/okx-agent/src/trade_service/execute.rs::revalidate_held_entry_quote; crates/okx-agent/src/trade_service/execute.rs::verify_post_held_entry_sources` | [`cases/T10-15.mjs`](../scripts/trade-integration/cases/T10-15.mjs), `--case T10-15` | FOUND: signed fee mutation after HELD | NOT_RUN | NOT_RUN | Check FX/spec/fee/policy changes and fixed plan binding before POST; 0 send on mismatch | EXTEND | `f06383e` / no CI artifact |
 
-## A1 baseline and evidence boundary
+## Historical A1 baseline and evidence boundary
 
 The b93be8e Windows failure is in the T09.4 Add/Status prefix of T09.8: `INTENT_EXPOSURE_REMAINS`, correlated with `UNATTRIBUTED_CONDITIONAL_ORDER` and `COHORT_UNRESOLVED_POST_OUTCOME`. **Root cause not proven.** For A1 capture account/intent/source generation, route+query, phase ordering, two stop IDs, send/ACK, SQL/Worker revision; separate fixture publication timing from genuine unowned exposure. Use a deterministic I/O barrier; do not relax money checks, source freshness or production deadlines. The targeted positive must end in consumed 6.003, remaining 3.997, denied 4.002 and zero extra create POST. The negative must keep held/denied for incomplete evidence. Preserve baseline artifacts before changing code.
 
 Known deliberate non-PASS cases on `f06383e`: `T10-07`, `T10-08`, `T10-09`, `T10-10`, `T10-11`, `T10-12`. Each writes or requests a partial prerequisite and throws a precise error until the integrated oracle is complete; a component probe cannot be substituted for this step. Remaining adapters also require runner validator/evidence sufficiency review and exact-SHA Windows execution.
 
-## S1/S2 and USER acceptance (separate from 26 cases)
+## Historical S1/S2 and USER checkpoint at f06383e
 
 | Scope | Evidence already located | Exact outstanding / next verification | Status on `f06383e` |
 |---|---|---|---|

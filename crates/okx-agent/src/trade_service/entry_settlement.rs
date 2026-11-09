@@ -1,5 +1,5 @@
 //! Cumulative entry settlement: one coordinator over existing SQL and Worker owners.
-//! Terminal release remains independent in reconcile::release_terminal.
+//! Terminal release remains independent in terminal_release::release_terminal.
 use super::{
     AccountStoreHandle, CentralGovernanceSnapshot, NativeRiskClient, StoredIntent,
     build_risk_command, err, exact,

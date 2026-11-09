@@ -275,13 +275,12 @@ async fn stale_fill_coverage_blocks_release_before_worker() {
     .unwrap();
     assert!(authority.valid());
     let reference = okx_observation::ReferenceRegistry::from_public("fixture", vec![]).unwrap();
-    let (_public_coordinator, public_ws) =
-        okx_runtime::PublicWsCoordinator::new_with_connector(
-            okx_api::OkxEnvironment::new(okx_api::Region::Global, false),
-            reference,
-            budget,
-            Arc::new(recorded_support::OfflineSocket),
-        );
+    let (_public_coordinator, public_ws) = okx_runtime::PublicWsCoordinator::new_with_connector(
+        okx_api::OkxEnvironment::new(okx_api::Region::Global, false),
+        reference,
+        budget,
+        Arc::new(recorded_support::OfflineSocket),
+    );
     let (risk_tx, mut risk_requests) = tokio::sync::mpsc::channel(4);
     let service = TradeService::new(accounts.clone(), public_ws, NativeRiskClient::new(risk_tx));
     *service.governance.write().await = Some(authority);
@@ -326,10 +325,13 @@ async fn stale_fill_coverage_blocks_release_before_worker() {
     drop(service);
     drop(resources);
     drop(accounts);
-    tokio::time::timeout(std::time::Duration::from_secs(3), terminated.wait_for(|v| *v))
-        .await
-        .unwrap()
-        .unwrap();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        terminated.wait_for(|v| *v),
+    )
+    .await
+    .unwrap()
+    .unwrap();
     std::fs::remove_dir_all(root).unwrap();
 }
 
