@@ -200,6 +200,21 @@ async fn original_order_observation_uses_production_sql_and_identity_checks() {
         .await
         .unwrap();
     assert_eq!(replayed.revision, filled.revision);
+    owner
+        .execution
+        .store
+        .call(std::time::Instant::now() + Duration::from_secs(3), |s| {
+            let receipt = s.operation("terminal:observe_intent")?.unwrap();
+            assert_eq!(receipt.kind, "TERMINAL");
+            assert_eq!(receipt.result_ref, "authenticated-order-readback");
+            assert!(
+                s.operation("central-release:observation_reserve")?
+                    .is_none()
+            );
+            Ok(())
+        })
+        .await
+        .unwrap();
     assert!(feed.outbound_posts.lock().unwrap().is_empty());
     ctx.accounts.shutdown().await;
 }
@@ -1080,7 +1095,11 @@ async fn native_crash_unsent_recover() {
         assert_eq!(after["exchange_order_id"], "123456");
         assert_eq!(after["central_receipt"], original["sql"]["central_receipt"]);
         assert!(after["central_release"].is_null());
-        assert!(after["terminal_receipt"].is_null());
+        assert_eq!(after["terminal_receipt"]["kind"], "TERMINAL");
+        assert_eq!(
+            after["terminal_receipt"]["result_ref"],
+            "authenticated-order-readback"
+        );
         let mut read = summary("summary_t11_f6_recovered");
         read.installation_id = "installation_test".into();
         let worker_after = risk.request(read).await.unwrap();

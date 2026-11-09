@@ -178,7 +178,8 @@ export async function killAndRecoverUnsentNative({nativeProcess,handoffPath,cwd}
     assert.equal(native.after.state,"FILLED");
     assert.equal(native.after.exchange_order_id,"123456");
     assert.equal(native.after.central_release,null);
-    assert.equal(native.after.terminal_receipt,null);
+    assert.equal(native.after.terminal_receipt.kind,"TERMINAL");
+    assert.equal(native.after.terminal_receipt.result_ref,"authenticated-order-readback");
     assert.deepEqual(native.after.central_receipt,boundary.sql.central_receipt);
     assert.equal(native.recovered.order_id,"123456");
     assert.equal(native.recovered.send_claim_replays,2);
