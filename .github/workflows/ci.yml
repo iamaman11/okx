@@ -556,6 +556,13 @@ jobs:
           if (($output -join "`n") -notmatch 'test result: ok\.\s+1 passed;') {
             throw 'ACCOUNT_REOPEN_TEST_NOT_EXECUTED'
           }
+          $output = & cargo test --locked -p okx-agent --lib accounts::recorded_support::negative_order_lookup_without_ack_remains_identity_scoped_and_finite -- --exact --nocapture 2>&1
+          $code = $LASTEXITCODE
+          $output | Out-Host
+          if ($code -ne 0) { exit $code }
+          if (($output -join "`n") -notmatch 'test result: ok\.\s+1 passed;') {
+            throw 'NEGATIVE_ORDER_SOURCE_TEST_NOT_EXECUTED'
+          }
 
       - name: Clippy direct operation before integration
         if: inputs.target_case == 'UnsentRelease'

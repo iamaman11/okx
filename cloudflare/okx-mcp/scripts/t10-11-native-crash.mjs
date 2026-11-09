@@ -31,7 +31,7 @@ export function awaitCommitBoundary(ready,nativeProcess,onFailure=failNative){
 
 export function validateUnsentKillBoundary(value){
   assert.equal(value.schema,"okx.t10-11-native-unsent-kill-boundary/v1");
-  assert.ok(["F0","F1","F2","F3","F4","F8"].includes(value.phase));
+  assert.ok(["F0","F1","F2","F3","F4","F5","F8"].includes(value.phase));
   assert.ok(Number.isSafeInteger(value.pid)&&value.pid>0&&value.pid!==process.pid);
   const root=resolve(value.root),within=relative(resolve(tmpdir()),root);
   assert.ok(within&&!within.startsWith("..")&&!isAbsolute(within));
@@ -63,11 +63,19 @@ export function validateUnsentKillBoundary(value){
   const expected={F2:["RESERVE","HELD","PREPARED"],
     F3:["INSPECT","OBSERVED","RESERVED"],
     F4:["BEGIN_POST","POST_AUTHORIZED","RESERVED"],
+    F5:["INSPECT","OBSERVED","POSTING"],
     F8:["RELEASE_UNSENT","UPDATED","REJECTED"]}[value.phase];
   assert.equal(action.action,expected[0]);
   assert.equal(value.worker_result.status,expected[1]);
   assert.equal(value.sql.state,expected[2]);
   if(value.phase==="F3")assert.equal(value.worker_result.reservation_state,"HELD");
+  if(value.phase==="F5"){
+    assert.equal(value.worker_result.reservation_state,"POSTED");
+    assert.ok(Number.isSafeInteger(value.sql.post_fence[0])&&value.sql.post_fence[0]>0);
+    assert.equal(value.sql.post_fence[1],"POSTED");
+    assert.equal(value.sql.terminal_receipt,null);
+    assert.ok(value.claimed_budget?.entry_budget);
+  }
   assert.equal(value.sql.central_release,null,"local release ACK must still be missing");
   if(value.phase==="F2"){
     assert.equal(value.sql.central_receipt,null);
@@ -131,7 +139,8 @@ export async function killAndRecoverUnsentNative({nativeProcess,handoffPath,cwd}
   assert.equal(native.phase,boundary.phase);
   assert.notEqual(native.pid,boundary.pid,"a new OS process must own recovery");
   assert.equal(native.root,boundary.root);
-  assert.deepEqual(native.before,boundary.sql);
+  assert.deepEqual(native.before,boundary.phase==="F5"
+    ?{...boundary.sql,state:"UNKNOWN",post_fence:null}:boundary.sql);
   assert.equal(native.original_sql_reopened,true);
   assert.equal(native.public_recovery_replayed,true);
   assert.equal(native.after.reservation_key,boundary.sql.reservation_key);
@@ -151,12 +160,24 @@ export async function killAndRecoverUnsentNative({nativeProcess,handoffPath,cwd}
       assert.equal(native.recovery_result.data.primary_reason,"COMMAND_EXPIRED");
       assert.equal(native.after.terminal_receipt.result_ref,"COMMAND_EXPIRED");
     }
+  }else if(boundary.phase==="F5"){
+    assert.deepEqual(native.after,native.before,"unresolved Status cannot invent a terminal outcome");
+    assert.equal(native.after.central_release,null);
+    assert.equal(native.after.terminal_receipt,null);
+    assert.equal(native.claim_replay.claimed,false);
+    assert.equal(native.claim_replay.no_send_receipt,false);
+    assert.ok(native.claim_replay.pending_intent_ids.includes(boundary.sql.intent_id));
+    assert.equal(native.recovery_request.action,"status");
+    assert.equal(native.recovery_result.status,"unknown");
+    assert.equal(native.recovery_result.reason_code,"ORDER_READBACK_INCOMPLETE_NO_RESUBMIT");
+    assert.equal(native.order_reads.length,2);
+    assert.ok(native.order_reads.every(r=>r.startsWith("fixture-executor-a:/api/v5/trade/order?")));
   }else assert.equal(native.after.central_release.kind,"CENTRAL_RELEASE");
   assert.equal(native.venue_posts,0);
-  assert.deepEqual(native.worker_after.budget,{...boundary.before_budget,
+  assert.deepEqual(native.worker_after.budget,{...(boundary.phase==="F5"?boundary.claimed_budget:boundary.before_budget),
     source_as_of_ms:boundary.source_floor_ms});
   if(boundary.phase==="F4")assert.equal(native.old_fence_denial.status,"DENIED");
-  if(boundary.phase==="F8"){
+  if(["F5","F8"].includes(boundary.phase)){
     assert.equal(native.worker_after.risk_book_sequence,boundary.worker_result.risk_book_sequence);
     assert.equal(native.worker_before.risk_book_sequence,native.worker_after.risk_book_sequence);
     assert.deepEqual(native.worker_before.budget,native.worker_after.budget);

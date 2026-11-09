@@ -65,6 +65,24 @@ for(const phase of ["F3","F4","F8"]){
     }
   });
 }
+test("F5 requires a committed SQL claim and unreleased actual Worker reserve",()=>{
+  function claimed(){
+    const value=laterBoundary("F3");value.phase="F5";
+    value.sql.state="POSTING";value.sql.post_fence=[123,"POSTED"];
+    value.sql.terminal_receipt=null;value.worker_result.reservation_state="POSTED";
+    value.claimed_budget={entry_budget:{reserved_usd:"3.0005"}};
+    return value;
+  }
+  const value=claimed();assert.equal(validateUnsentKillBoundary(value),value);
+  for(const change of [x=>x.sql.state="RESERVED",x=>x.sql.state="UNKNOWN",
+    x=>x.sql.post_fence=[0,"POSTED"],x=>x.sql.post_fence=[123,"HELD"],
+    x=>x.sql.terminal_receipt={},x=>x.sql.central_release={},x=>x.venue_posts=1,
+    x=>x.worker_result.reservation_state="HELD",x=>x.worker_result.reservation_state="RELEASED",
+    x=>x.sql.central_receipt.intent_id="other",x=>x.command.action.reservation_key="other",
+    x=>x.claimed_budget=null]){
+    const invalid=claimed();change(invalid);assert.throws(()=>validateUnsentKillBoundary(invalid));
+  }
+});
 test("F3 requires HELD rather than an already authorized or released reservation",()=>{
   for(const state of ["POSTED","RELEASED",null]){
     const value=laterBoundary("F3");value.worker_result.reservation_state=state;

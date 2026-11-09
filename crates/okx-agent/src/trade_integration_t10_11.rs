@@ -1,4 +1,4 @@
-// Direct no-send crash boundaries, not another complete T09 campaign. The parent
+// Direct crash boundaries, not another complete T09 campaign. The parent
 // kills Native after a genuine Worker commit and before delivery to its caller.
 // SQL prepare/census inputs are explicit fixture inputs; no Worker reply or
 // recovery receipt is fabricated. Real WSS, account SQL and public Cancel/Status
@@ -10,6 +10,7 @@ enum T10_11UnsentPhase {
     F2,
     F3,
     F4,
+    F5,
     F8,
 }
 impl T10_11UnsentPhase {
@@ -20,6 +21,7 @@ impl T10_11UnsentPhase {
             "F2" => Self::F2,
             "F3" => Self::F3,
             "F4" => Self::F4,
+            "F5" => Self::F5,
             "F8" => Self::F8,
             _ => panic!("unsupported unsent crash phase"),
         }
@@ -31,6 +33,7 @@ impl T10_11UnsentPhase {
             Self::F2 => "F2",
             Self::F3 => "F3",
             Self::F4 => "F4",
+            Self::F5 => "F5",
             Self::F8 => "F8",
         }
     }
@@ -52,6 +55,7 @@ struct T10_11UnsentProbe {
     feed: Arc<crate::accounts::recorded_support::RecordedAccountHttp>,
     before_budget: okx_protocol::risk_authority::RiskBudgetSnapshot,
     before_sequence: u64,
+    claimed_budget: Option<okx_protocol::risk_authority::RiskBudgetSnapshot>,
     prepare_input: Option<T10_11PrepareInput>,
 }
 static T10_11_UNSENT_PROBE: std::sync::Mutex<Option<T10_11UnsentProbe>> =
@@ -82,6 +86,14 @@ async fn t10_11_sql_snapshot(
                     Some(k) => s.operation(&format!("central-release:{k}"))?,
                     None => None,
                 };
+                let post_fence = if intent
+                    .as_ref()
+                    .is_some_and(|i| i.state == okx_execution::IntentState::Posting)
+                {
+                    Some(s.post_fence_evidence(&id)?)
+                } else {
+                    None
+                };
                 Ok(serde_json::json!({
                     "intent_id":id,"intent_present":intent.is_some(),
                     "state":intent.as_ref().map(|i|i.state.as_str()),
@@ -92,6 +104,7 @@ async fn t10_11_sql_snapshot(
                     "reserve_attempt":attempt,"reservation_key":key,"central_receipt":local,
                     "terminal_receipt":s.operation(&format!("terminal:{id}"))?,
                     "central_release":release,
+                    "post_fence":post_fence,
                 }))
             },
         )
@@ -121,7 +134,7 @@ pub(super) async fn t10_11_hold_unsent_reply(
                     },
                 )
                 | (
-                    T10_11UnsentPhase::F3,
+                    T10_11UnsentPhase::F3 | T10_11UnsentPhase::F5,
                     RiskCommandAction::Inspect {
                         reservation_key, ..
                     },
@@ -150,6 +163,7 @@ pub(super) async fn t10_11_hold_unsent_reply(
         T10_11UnsentPhase::F2 => (RiskDecisionStatus::Held, Some("PREPARED")),
         T10_11UnsentPhase::F3 => (RiskDecisionStatus::Observed, Some("RESERVED")),
         T10_11UnsentPhase::F4 => (RiskDecisionStatus::PostAuthorized, Some("RESERVED")),
+        T10_11UnsentPhase::F5 => (RiskDecisionStatus::Observed, Some("POSTING")),
         T10_11UnsentPhase::F8 => (RiskDecisionStatus::Updated, Some("REJECTED")),
     };
     assert_eq!(
@@ -164,6 +178,15 @@ pub(super) async fn t10_11_hold_unsent_reply(
             result.reservation_state,
             Some(okx_protocol::risk_authority::RiskReservationState::Held)
         );
+    }
+    if probe.phase == T10_11UnsentPhase::F5 {
+        assert_eq!(
+            result.reservation_state,
+            Some(okx_protocol::risk_authority::RiskReservationState::Posted)
+        );
+        assert!(sql["post_fence"][0].as_i64().unwrap() > 0);
+        assert_eq!(sql["post_fence"][1], "POSTED");
+        assert!(sql["terminal_receipt"].is_null());
     }
     assert_eq!(
         sql["central_receipt"].is_null(),
@@ -196,6 +219,7 @@ pub(super) async fn t10_11_hold_unsent_reply(
             "generation":generation,"sql":sql,"command":command,
             "worker_result":result,"before_budget":probe.before_budget,
             "before_sequence":probe.before_sequence,"prepare_input":probe.prepare_input,
+            "claimed_budget":probe.claimed_budget,
             "candidate_reservation_key":probe.reservation_key,
             "source_floor_ms":probe.source_floor_ms,
             "venue_posts":posts,
@@ -348,6 +372,7 @@ async fn native_crash_unsent_boundary() {
             feed: feed.unwrap(),
             before_budget: before,
             before_sequence,
+            claimed_budget: None,
             prepare_input: Some(prepare_input),
         });
         let result = t10_12_await_recovery(&mut session, risk.request(inspect)).await;
@@ -389,6 +414,7 @@ async fn native_crash_unsent_boundary() {
         feed: feed.unwrap(),
         before_budget: before,
         before_sequence,
+        claimed_budget: None,
         prepare_input: None,
     };
     let conversion = UsdConversion {
@@ -471,7 +497,7 @@ async fn native_crash_unsent_boundary() {
         let result = t10_12_await_recovery(&mut session, risk.request(inspect)).await;
         panic!("F3 child must be OS-killed after local RESERVED and before fence: {result:?}");
     }
-    if phase == T10_11UnsentPhase::F4 {
+    if matches!(phase, T10_11UnsentPhase::F4 | T10_11UnsentPhase::F5) {
         // Explicit boundary inputs, not a claim that the fixture performed a
         // full observer/final-quote admission. Worker validates the real CAS.
         let mut after_held = census;
@@ -503,8 +529,8 @@ async fn native_crash_unsent_boundary() {
             command_id: "fence_t11_f4".into(),
             installation_id: "installation_test".into(),
             action: RiskCommandAction::BeginPost {
-                reservation_key: key,
-                plan_sha256: saved.plan_hash,
+                reservation_key: key.clone(),
+                plan_sha256: saved.plan_hash.clone(),
                 policy_revision: 2,
                 expected_risk_book_sequence: held.risk_book_sequence.unwrap(),
                 source_proof_sha256: "a".repeat(64),
@@ -512,9 +538,69 @@ async fn native_crash_unsent_boundary() {
                 causal_proof: causal,
             },
         };
+        if phase == T10_11UnsentPhase::F4 {
+            *T10_11_UNSENT_PROBE.lock().unwrap() = Some(probe);
+            let result = t10_12_await_recovery(&mut session, risk.request(fence)).await;
+            panic!("F4 child must be OS-killed before fence delivery: {result:?}");
+        }
+        let authorized = t10_12_await_recovery(&mut session, risk.request(fence))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(authorized.status, RiskDecisionStatus::PostAuthorized);
+        owner
+            .execution
+            .store
+            .call(
+                std::time::Instant::now() + Duration::from_secs(3),
+                move |s| {
+                    assert!(s.begin_post(intent_id, 2, chrono::Utc::now().timestamp_millis())?);
+                    Ok(())
+                },
+            )
+            .await
+            .unwrap();
+        // The actual SQL owner has claimed the only possible send. No transport
+        // is invoked. INSPECT proves the original Worker remains POSTED; it
+        // cannot stand in for a venue ACK or a no-send release receipt.
+        let mut read = summary("summary_t11_f5_claimed");
+        read.installation_id = "installation_test".into();
+        let actual_budget = risk.request(read).await.unwrap().budget.unwrap();
+        let mut expected_budget = probe.before_budget.clone();
+        let add = |value: &str, delta: Decimal| {
+            (value.parse::<Decimal>().unwrap() + delta)
+                .normalize()
+                .to_string()
+        };
+        expected_budget.reserved_loss_usd =
+            add(&expected_budget.reserved_loss_usd, Decimal::new(102, 3));
+        expected_budget.remaining_loss_usd =
+            add(&expected_budget.remaining_loss_usd, -Decimal::new(102, 3));
+        expected_budget.occupied_modelled_loss_usdt = add(
+            &expected_budget.occupied_modelled_loss_usdt,
+            Decimal::new(102, 3),
+        );
+        expected_budget.source_as_of_ms = Some(probe.source_floor_ms);
+        let entry = expected_budget.entry_budget.as_mut().unwrap();
+        entry.reserved_usd = add(&entry.reserved_usd, Decimal::new(10005, 4));
+        entry.remaining_usd = add(&entry.remaining_usd, -Decimal::new(10005, 4));
+        assert_eq!(
+            actual_budget, expected_budget,
+            "original and candidate reserves must both remain held"
+        );
+        probe.claimed_budget = Some(actual_budget);
         *T10_11_UNSENT_PROBE.lock().unwrap() = Some(probe);
-        let result = t10_12_await_recovery(&mut session, risk.request(fence)).await;
-        panic!("F4 child must be OS-killed before fence delivery: {result:?}");
+        let inspect = RiskCommand {
+            schema: RISK_COMMAND_SCHEMA_V1.into(),
+            command_id: "inspect_t11_f5_after_claim".into(),
+            installation_id: "installation_test".into(),
+            action: RiskCommandAction::Inspect {
+                reservation_key: key,
+                plan_sha256: saved.plan_hash,
+            },
+        };
+        let result = t10_12_await_recovery(&mut session, risk.request(inspect)).await;
+        panic!("F5 child must be OS-killed after SQL claim before transport: {result:?}");
     }
     *T10_11_UNSENT_PROBE.lock().unwrap() = Some(probe);
     let cancel = okx_protocol::trading::TradeRequest::Cancel {
@@ -548,8 +634,16 @@ async fn native_crash_unsent_recover() {
     assert_eq!(root, reopened_root);
     let id = original["sql"]["intent_id"].as_str().unwrap();
     let before = t10_11_sql_snapshot(&ctx.accounts, id).await;
+    let mut expected_reopened = original["sql"].clone();
+    if phase == T10_11UnsentPhase::F5 {
+        // Production account open invokes recover_posting. No test calls it.
+        expected_reopened["state"] = serde_json::json!("UNKNOWN");
+        // post_fence_evidence only authorizes coherent POSTING/ACKNOWLEDGED,
+        // not UNKNOWN. Do not turn diagnostic readback into a send permission.
+        expected_reopened["post_fence"] = serde_json::Value::Null;
+    }
     assert_eq!(
-        before, original["sql"],
+        before, expected_reopened,
         "restart must reopen the exact original SQL facts"
     );
     let handoff = t10_12_barrier(&handoff_path).await;
@@ -579,6 +673,47 @@ async fn native_crash_unsent_recover() {
         old_fence_denial = Some(denied);
     }
     let owner = ctx.accounts.resolve("fixture-a").await.unwrap();
+    let feed = feed.unwrap();
+    let claim_replay = if phase == T10_11UnsentPhase::F5 {
+        let identity = id.to_owned();
+        let proof = owner
+            .execution
+            .store
+            .call(
+                std::time::Instant::now() + Duration::from_secs(3),
+                move |s| {
+                    let claimed =
+                        s.begin_post(&identity, 2, chrono::Utc::now().timestamp_millis())?;
+                    assert!(!claimed, "UNKNOWN cannot reclaim the possible send");
+                    assert!(s.unsent_release_receipt(&identity)?.is_none());
+                    let pending = s.reconcilable_intents_page(100, 0)?;
+                    assert!(pending.iter().any(|i| i.intent_id == identity));
+                    Ok(
+                        serde_json::json!({"claimed":claimed,"no_send_receipt":false,
+                    "pending_intent_ids":pending.iter().map(|i|&i.intent_id).collect::<Vec<_>>()}),
+                    )
+                },
+            )
+            .await
+            .unwrap();
+        // Exactly one independent, signed negative lookup for each public
+        // Status call. A negative venue result is insufficient to release risk.
+        for _ in 0..2 {
+            feed.expect_get(crate::accounts::recorded_support::RecordedGet {
+                access_key: "fixture-executor-a".into(),
+                path: "/api/v5/trade/order".into(),
+                required_query: vec![
+                    ("instId".into(), "BTC-USDT-SWAP".into()),
+                    ("clOrdId".into(), "c".repeat(32)),
+                ],
+                raw_response: br#"{"code":"51603","msg":"Order does not exist","data":[]}"#
+                    .to_vec(),
+            });
+        }
+        Some(proof)
+    } else {
+        None
+    };
     let prepare_replay = if phase == T10_11UnsentPhase::F0 {
         let input: T10_11PrepareInput =
             serde_json::from_value(original["prepare_input"].clone()).unwrap();
@@ -619,7 +754,7 @@ async fn native_crash_unsent_recover() {
     } else {
         None
     };
-    let recovery = if phase == T10_11UnsentPhase::F1 {
+    let recovery = if matches!(phase, T10_11UnsentPhase::F1 | T10_11UnsentPhase::F5) {
         okx_protocol::trading::TradeRequest::Status {
             reference: id.into(),
         }
@@ -651,14 +786,58 @@ async fn native_crash_unsent_recover() {
             assert_eq!(result["data"]["primary_reason"], "COMMAND_EXPIRED");
             assert_eq!(after["terminal_receipt"]["result_ref"], "COMMAND_EXPIRED");
         }
+    } else if phase == T10_11UnsentPhase::F5 {
+        assert_eq!(result["status"], "unknown");
+        assert_eq!(
+            result["reason_code"],
+            "ORDER_READBACK_INCOMPLETE_NO_RESUBMIT"
+        );
+        assert_eq!(result["next_action"], "trade.status");
+        assert!(after["central_release"].is_null());
+        assert!(after["terminal_receipt"].is_null());
     } else {
         assert_eq!(result["data"]["central_release"]["state"], "verified");
         assert_eq!(after["central_release"]["kind"], "CENTRAL_RELEASE");
     }
-    assert_eq!(after["state"], "REJECTED");
+    assert_eq!(
+        after["state"],
+        if phase == T10_11UnsentPhase::F5 {
+            "UNKNOWN"
+        } else {
+            "REJECTED"
+        }
+    );
     assert_eq!(after["central_receipt"], original["sql"]["central_receipt"]);
     assert_eq!(after["exchange_order_id"], serde_json::Value::Null);
     let replay = ctx.trade.trade("fixture-a", &recovery, None).await.unwrap();
+    let order_reads = if phase == T10_11UnsentPhase::F5 {
+        assert_eq!(replay["status"], "unknown");
+        assert_eq!(replay["reason_code"], result["reason_code"]);
+        let reads = feed
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|r| r.starts_with("fixture-executor-a:/api/v5/trade/order?"))
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(
+            reads.len(),
+            2,
+            "both public Status calls must reach the signed source"
+        );
+        assert!(
+            !feed
+                .denied_routes
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|r| r.contains("/api/v5/trade/order"))
+        );
+        Some(reads)
+    } else {
+        None
+    };
     assert_eq!(
         replay["data"]["central_release"],
         result["data"]["central_release"]
@@ -667,7 +846,11 @@ async fn native_crash_unsent_recover() {
     let mut final_read = summary("summary_t11_f2_released");
     final_read.installation_id = "installation_test".into();
     let final_result = risk.request(final_read).await.unwrap();
-    let mut expected = original["before_budget"].clone();
+    let mut expected = if phase == T10_11UnsentPhase::F5 {
+        original["claimed_budget"].clone()
+    } else {
+        original["before_budget"].clone()
+    };
     expected["source_as_of_ms"] = original["source_floor_ms"].clone();
     assert_eq!(
         serde_json::to_value(&final_result.budget).unwrap(),
@@ -684,7 +867,7 @@ async fn native_crash_unsent_recover() {
             worker_before.risk_book_sequence
         );
     }
-    if phase == T10_11UnsentPhase::F8 {
+    if matches!(phase, T10_11UnsentPhase::F5 | T10_11UnsentPhase::F8) {
         assert_eq!(
             final_result.risk_book_sequence,
             worker_before.risk_book_sequence
@@ -698,7 +881,7 @@ async fn native_crash_unsent_recover() {
             "INSPECT/SQL ack cannot debit or release twice"
         );
     }
-    let posts = feed.unwrap().outbound_posts.lock().unwrap().len();
+    let posts = feed.outbound_posts.lock().unwrap().len();
     assert_eq!(posts, 0);
     let account_key = owner.configuration.account_key.wire();
     stop.send(true).unwrap();
@@ -718,6 +901,7 @@ async fn native_crash_unsent_recover() {
             "venue_posts":posts,"original_sql_reopened":true,
             "public_recovery_replayed":true,"recovery_request":recovery,"recovery_result":result,
             "prepare_replay":prepare_replay,
+            "claim_replay":claim_replay,"order_reads":order_reads,
         })
     );
 }

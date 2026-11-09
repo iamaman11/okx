@@ -988,6 +988,127 @@ pub(crate) mod recorded_support {
             && data[0]["clOrdId"].as_str() == Some("__REQUEST_CL_ORD_ID__")
     }
 
+    // A negative GET is not a venue order fact and must not require a create
+    // ACK: recovery explicitly looks up commands whose send outcome is unknown.
+    // Only a one-shot, exact identity-scoped recorded error is eligible here.
+    // Successful order observations keep their existing ACK association.
+    fn recorded_order_page_matches(
+        acknowledged: &[(String, String, String)],
+        access_key: &str,
+        client_id: &str,
+        page: &RecordedGet,
+    ) -> bool {
+        let negative = page.access_key == access_key
+            && page.path == "/api/v5/trade/order"
+            && page
+                .required_query
+                .iter()
+                .any(|(k, v)| k == "clOrdId" && v == client_id)
+            && page
+                .required_query
+                .iter()
+                .any(|(k, v)| k == "instId" && !v.is_empty())
+            && serde_json::from_slice::<serde_json::Value>(&page.raw_response).is_ok_and(|v| {
+                v["code"] == "51603" && v["data"].as_array().is_some_and(Vec::is_empty)
+            });
+        negative
+            || recorded_order_source_matches(
+                acknowledged,
+                access_key,
+                client_id,
+                &page.raw_response,
+            )
+    }
+
+    #[tokio::test]
+    async fn negative_order_lookup_without_ack_remains_identity_scoped_and_finite() {
+        let feed = RecordedAccountHttp::default();
+        let response = br#"{"code":"51603","msg":"Order does not exist","data":[]}"#.to_vec();
+        feed.expect_get(RecordedGet {
+            access_key: "fixture-executor-a".into(),
+            path: "/api/v5/trade/order".into(),
+            required_query: vec![
+                ("clOrdId".into(), "unacked".into()),
+                ("instId".into(), "BTC-USDT-SWAP".into()),
+            ],
+            raw_response: response.clone(),
+        });
+        let client = reqwest::Client::new();
+        for (actor, instrument, id) in [
+            ("fixture-executor-a", "BTC-USDT-SWAP", "foreign"),
+            ("fixture-executor-a", "ETH-USDT-SWAP", "unacked"),
+            ("fixture-executor-b", "BTC-USDT-SWAP", "unacked"),
+        ] {
+            let request = client
+                .get(format!(
+                    "https://www.okx.com/api/v5/trade/order?instId={instrument}&clOrdId={id}"
+                ))
+                .header("OK-ACCESS-KEY", actor)
+                .build()
+                .unwrap();
+            assert!(
+                feed.send(request, Instant::now() + std::time::Duration::from_secs(1))
+                    .await
+                    .is_err()
+            );
+            assert_eq!(feed.unconsumed_reads(), 1);
+        }
+        let request = || {
+            client
+                .get("https://www.okx.com/api/v5/trade/order?instId=BTC-USDT-SWAP&clOrdId=unacked")
+                .header("OK-ACCESS-KEY", "fixture-executor-a")
+                .build()
+                .unwrap()
+        };
+        let result = feed
+            .send(
+                request(),
+                Instant::now() + std::time::Duration::from_secs(1),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.body, response);
+        assert_eq!(feed.unconsumed_reads(), 0);
+        assert!(
+            feed.send(
+                request(),
+                Instant::now() + std::time::Duration::from_secs(1)
+            )
+            .await
+            .is_err()
+        );
+        assert!(feed.acknowledged_creates.lock().unwrap().is_empty());
+        assert!(feed.outbound_posts.lock().unwrap().is_empty());
+        // No positive/unscoped/other-code observation may use this exception.
+        for (code, data, scoped) in [
+            ("0", serde_json::json!([]), true),
+            ("51603", serde_json::json!([{"ordId":"invented"}]), true),
+            ("50000", serde_json::json!([]), true),
+            ("51603", serde_json::json!([]), false),
+        ] {
+            let page = RecordedGet {
+                access_key: "fixture-executor-a".into(),
+                path: "/api/v5/trade/order".into(),
+                required_query: if scoped {
+                    vec![
+                        ("clOrdId".into(), "unacked".into()),
+                        ("instId".into(), "BTC-USDT-SWAP".into()),
+                    ]
+                } else {
+                    vec![]
+                },
+                raw_response: serde_json::to_vec(&serde_json::json!({"code":code,"data":data}))
+                    .unwrap(),
+            };
+            assert!(!recorded_order_page_matches(
+                &[],
+                "fixture-executor-a",
+                "unacked",
+                &page
+            ));
+        }
+    }
+
     // Bind history rows only to the already-observed signed POST ACK.
     fn bind_recorded_history_ids(
         acknowledgements: &[(String, String, String)],
@@ -3592,11 +3713,11 @@ pub(crate) mod recorded_support {
                                 })
                             })
                             && requested_client.as_ref().is_none_or(|client| {
-                                recorded_order_source_matches(
+                                recorded_order_page_matches(
                                     &self.acknowledged_creates.lock().unwrap(),
                                     key,
                                     client,
-                                    &page.raw_response,
+                                    page,
                                 )
                             })
                     };
@@ -3848,11 +3969,11 @@ pub(crate) mod recorded_support {
                                 })
                             })
                             && requested_client.as_ref().is_none_or(|client| {
-                                recorded_order_source_matches(
+                                recorded_order_page_matches(
                                     &self.acknowledged_creates.lock().unwrap(),
                                     key,
                                     client,
-                                    &page.raw_response,
+                                    page,
                                 )
                             })
                     };
