@@ -1119,7 +1119,18 @@ async fn native_crash_unsent_recover() {
             .unwrap()
             .unwrap()
             .unwrap();
-        ctx.accounts.shutdown().await;
+        // Begin ordinary shutdown while capture remains serialized, then let
+        // the paused consumer observe cancellation. Holding this lease while
+        // awaiting shutdown needlessly waited for its ten-second abort bound.
+        let shutdown = ctx.accounts.shutdown();
+        tokio::pin!(shutdown);
+        let first_poll = futures_util::poll!(shutdown.as_mut());
+        drop(_capture);
+        if first_poll.is_pending() {
+            shutdown.await;
+        }
+        assert_eq!(feed.unconsumed_reads(), 0);
+        assert!(feed.denied_routes.lock().unwrap().is_empty());
         println!(
             "T10_11_NATIVE_UNSENT_RECOVERY_V1:{}",
             serde_json::json!({

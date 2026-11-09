@@ -850,6 +850,10 @@ fn start_sources(
              // capture remains unchanged and stays enabled on release.
              #[cfg(test)]
              let _recorded_capture_lease=account.recorded_capture_gate.read().await;
+             // A test-held lease may be released after shutdown was signaled.
+             // Do not start a new source turn while draining that paused task.
+             #[cfg(test)]
+             if *shutdown.borrow() { break; }
              // The attempt starts at the tick, including identity recovery.
              let capture_started = Instant::now();
              let generation=account.private_ws.status().await.connection_generation;
