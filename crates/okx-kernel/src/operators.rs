@@ -343,13 +343,35 @@ pub fn scalar(
     };
     Ok(result.filter(|v| v.is_finite()))
 }
+/// Existing close-to-close momentum state, shared by registered compositions.
+#[derive(Debug, Clone, Default)]
+pub struct MomentumKernel {
+    previous: Option<f64>,
+}
+impl MomentumKernel {
+    fn push_closed(&mut self, close: f64) -> Option<i8> {
+        let direction = self.previous.map(|previous| {
+            if close > previous {
+                1
+            } else if close < previous {
+                -1
+            } else {
+                0
+            }
+        });
+        self.previous = Some(close);
+        direction
+    }
+}
 /// One signal kernel for both execution consumers and research. State is per instance.
 #[derive(Debug, Clone)]
 pub enum StrategyKernel {
     Ema(EmaKernel),
     NoTrade,
-    Momentum {
-        previous: Option<f64>,
+    Momentum(MomentumKernel),
+    EmaMomentumConfirm {
+        ema: EmaKernel,
+        momentum: MomentumKernel,
     },
     TwoBar {
         antecedent: Option<f64>,
@@ -361,7 +383,11 @@ impl StrategyKernel {
         match id {
             "ema_cross_v1" => Ok(Self::Ema(EmaKernel::new(p)?)),
             "no_trade" => Ok(Self::NoTrade),
-            "close_momentum" => Ok(Self::Momentum { previous: None }),
+            "close_momentum" => Ok(Self::Momentum(MomentumKernel::default())),
+            "ema_momentum_confirm_v1" => Ok(Self::EmaMomentumConfirm {
+                ema: EmaKernel::new(p)?,
+                momentum: MomentumKernel::default(),
+            }),
             "two_bar_momentum" => Ok(Self::TwoBar {
                 antecedent: None,
                 previous: None,
@@ -376,18 +402,14 @@ impl StrategyKernel {
         Ok(match self {
             Self::Ema(k) => return k.push_closed(close),
             Self::NoTrade => Some(0),
-            Self::Momentum { previous } => {
-                let out = previous.map(|p| {
-                    if close > p {
-                        1
-                    } else if close < p {
-                        -1
-                    } else {
-                        0
+            Self::Momentum(kernel) => kernel.push_closed(close),
+            Self::EmaMomentumConfirm { ema, momentum } => {
+                match (ema.push_closed(close)?, momentum.push_closed(close)) {
+                    (Some(trend), Some(direction)) => {
+                        Some(if trend == direction { trend } else { 0 })
                     }
-                });
-                *previous = Some(close);
-                out
+                    _ => None,
+                }
             }
             Self::TwoBar {
                 antecedent,
@@ -633,47 +655,49 @@ mod c20_rolling_extension {
         );
     }
 
-    // C20 dry-run composition: new operator and existing causal strategy share
-    // the same closed-bar stream. No order port, exchange, finance or Worker.
     #[test]
-    fn c20_strategy_composition_uses_closed_bars_and_fake_source() {
-        fn signals(closes: &[f64]) -> Vec<Option<i8>> {
-            let mut ema = EmaKernel::new(EmaParameters { fast: 2, slow: 5 }).unwrap();
-            let mut out = Vec::new();
-            for end in 1..=closes.len() {
-                let signal = ema.push_closed(closes[end - 1]).unwrap();
-                let rolling = scalar(
-                    Operator::RollingMean,
-                    &closes[..end],
-                    &[],
-                    &[],
-                    &[],
-                    4,
-                    60_000,
-                )
-                .unwrap();
-                let combined = match (signal, rolling) {
-                    (Some(1), Some(mean)) if closes[end - 1] > mean => Some(1),
-                    (Some(-1), Some(mean)) if closes[end - 1] < mean => Some(-1),
-                    (Some(_), Some(_)) => Some(0),
-                    _ => None,
-                };
-                out.push(combined);
-            }
-            out
-        }
-        let synthetic_closed_candles =
-            vec![10., 11., 12., 13., 14., 15., 14., 13., 12., 11., 12., 13.];
-        let first = signals(&synthetic_closed_candles[..8]);
-        let full = signals(&synthetic_closed_candles);
+    fn c20_registered_composition_has_independent_signal_oracle_and_no_lookahead() {
+        let parameters = EmaParameters { fast: 1, slow: 2 };
+        let closes = [100., 102., 101., 101.05, 100., 101.];
+        let signals = |input: &[f64]| {
+            let mut kernel =
+                StrategyKernel::from_id("ema_momentum_confirm_v1", parameters).unwrap();
+            input
+                .iter()
+                .map(|close| kernel.push_closed(*close).unwrap())
+                .collect::<Vec<_>>()
+        };
         assert_eq!(
-            first,
-            full[..8],
-            "later candles must not modify prior signals"
+            signals(&closes),
+            vec![None, Some(1), Some(-1), Some(0), Some(-1), Some(1)]
+        );
+        let mut extended = closes.to_vec();
+        extended.extend([1000., 1., 500.]);
+        assert_eq!(signals(&extended)[..closes.len()], signals(&closes));
+        let mut composition =
+            StrategyKernel::from_id("ema_momentum_confirm_v1", parameters).unwrap();
+        let mut ema = StrategyKernel::from_id("ema_cross_v1", parameters).unwrap();
+        let mut momentum = StrategyKernel::from_id("close_momentum", parameters).unwrap();
+        for close in closes {
+            let expected = match (
+                ema.push_closed(close).unwrap(),
+                momentum.push_closed(close).unwrap(),
+            ) {
+                (Some(trend), Some(direction)) => Some(if trend == direction { trend } else { 0 }),
+                _ => None,
+            };
+            assert_eq!(composition.push_closed(close).unwrap(), expected);
+        }
+        assert_eq!(
+            composition.push_closed(f64::NAN).unwrap_err(),
+            "INVALID_CLOSE"
         );
         assert!(
-            full.iter().any(Option::is_some),
-            "composition must produce typed decisions"
+            StrategyKernel::from_id(
+                "ema_momentum_confirm_v1",
+                EmaParameters { fast: 2, slow: 2 }
+            )
+            .is_err()
         );
     }
 }

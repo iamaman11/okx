@@ -349,7 +349,11 @@ impl ResearchRequest {
                         <= 1_000_000
                     && matches!(
                         strategy_id.as_str(),
-                        "ema_cross_v1" | "no_trade" | "close_momentum" | "two_bar_momentum"
+                        "ema_cross_v1"
+                            | "ema_momentum_confirm_v1"
+                            | "no_trade"
+                            | "close_momentum"
+                            | "two_bar_momentum"
                     )
                     && parameters.valid()
                     && costs.valid()
@@ -380,7 +384,11 @@ impl ResearchRequest {
                         <= 1_000_000
                     && matches!(
                         strategy_id.as_str(),
-                        "ema_cross_v1" | "no_trade" | "close_momentum" | "two_bar_momentum"
+                        "ema_cross_v1"
+                            | "ema_momentum_confirm_v1"
+                            | "no_trade"
+                            | "close_momentum"
+                            | "two_bar_momentum"
                     )
                     && !variants.is_empty()
                     && variants.len() <= 64
@@ -679,5 +687,49 @@ mod research_decision_contract_tests {
         let mut foreign = value;
         foreign["account"] = serde_json::json!("a");
         assert!(serde_json::from_value::<ResearchRequest>(foreign).is_err());
+    }
+}
+
+#[cfg(test)]
+mod composition_contract_tests {
+    use super::*;
+    #[test]
+    fn registered_composition_uses_existing_typed_parameters_without_arbitrary_code() {
+        let wire = serde_json::json!({"action":"backtest","idempotency_key":"composition-contract",
+            "instruments":["BTC-USDT"],"timeframe_ms":60000,"start_ms":0,"end_ms":1200000,
+            "strategy_id":"ema_momentum_confirm_v1","parameters":{"fast":1,"slow":2},
+            "costs":{"maker_fee_bps":0,"taker_fee_bps":0,"slippage_bps":0,"funding_mode":"zero_assumption"},"data_mode":"counterfactual","seed":7});
+        assert!(
+            serde_json::from_value::<ResearchRequest>(wire.clone())
+                .unwrap()
+                .valid()
+        );
+        let mut maximum = wire.clone();
+        maximum["parameters"] = serde_json::json!({"fast":999,"slow":1000});
+        assert!(
+            serde_json::from_value::<ResearchRequest>(maximum.clone())
+                .unwrap()
+                .valid()
+        );
+        maximum["parameters"]["slow"] = serde_json::json!(1001);
+        assert!(
+            !serde_json::from_value::<ResearchRequest>(maximum)
+                .unwrap()
+                .valid()
+        );
+        let mut unknown = wire.clone();
+        unknown["strategy_id"] = serde_json::json!("unregistered_source_code");
+        assert!(
+            !serde_json::from_value::<ResearchRequest>(unknown)
+                .unwrap()
+                .valid()
+        );
+        let mut invalid = wire;
+        invalid["parameters"] = serde_json::json!({"fast":2,"slow":2});
+        assert!(
+            !serde_json::from_value::<ResearchRequest>(invalid)
+                .unwrap()
+                .valid()
+        );
     }
 }

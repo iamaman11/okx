@@ -356,7 +356,11 @@ impl AnalyticsService {
         }
         if !matches!(
             strategy.as_str(),
-            "ema_cross_v1" | "no_trade" | "close_momentum" | "two_bar_momentum"
+            "ema_cross_v1"
+                | "ema_momentum_confirm_v1"
+                | "no_trade"
+                | "close_momentum"
+                | "two_bar_momentum"
         ) {
             return Err("UNSUPPORTED_STRATEGY".into());
         }
@@ -1727,7 +1731,8 @@ fn research_capabilities() -> Value {
     json!({
         "schema":"okx.research.capabilities/v1",
         "quality":"fresh",
-        "strategy_ids":["ema_cross_v1"],
+        "strategy_ids":["ema_cross_v1","ema_momentum_confirm_v1"],
+        "strategy_compositions":{"ema_momentum_confirm_v1":{"version":1,"kernels":["ema_cross_v1","close_momentum"],"parameters":"ema_fast_slow","warmup":"slow_closed_bars","disagreement":"flat","execution":"next_open_counterfactual"}},
         "supported_data_modes":["counterfactual"],
         "unavailable_data_modes":[{"mode":"historical_observed",
             "reason_code":"HISTORICAL_RULES_AND_FEES_UNAVAILABLE"}],

@@ -714,6 +714,78 @@ mod tests {
     }
 
     #[test]
+    fn c20_registered_composition_replays_literal_next_open_money_oracle() {
+        let opens: [f64; 6] = [100., 100., 103., 102., 101., 100.];
+        let closes: [f64; 6] = [100., 102., 101., 101.05, 100., 101.];
+        let bars = (0..6)
+            .map(|index| Bar {
+                time: index as u64 * 60000,
+                open: opens[index],
+                close: closes[index],
+                high: opens[index].max(closes[index]) + 1.,
+                low: opens[index].min(closes[index]) - 1.,
+                volume: 1.,
+                funding_rate: None,
+            })
+            .collect::<Vec<_>>();
+        let mut parameters = spec();
+        parameters.strategy_id = "ema_momentum_confirm_v1".into();
+        parameters.parameters = EmaParameters { fast: 1, slow: 2 };
+        parameters.timeframe_ms = 60000;
+        parameters.mechanics = Mechanics::Linear {
+            contract_multiplier: 1.,
+        };
+        parameters.costs = Costs {
+            maker_fee_bps: 0.,
+            taker_fee_bps: 0.,
+            slippage_bps: 0.,
+            observed_funding: false,
+        };
+        let result = replay(&bars, &parameters, 2, 6, &|| false).unwrap();
+        assert_eq!(
+            result
+                .trades
+                .iter()
+                .map(|trade| (trade.time / 60000, trade.side, trade.quantity, trade.price))
+                .collect::<Vec<_>>(),
+            vec![
+                (2, 1, 1., 103.),
+                (3, -1, 2., 102.),
+                (4, 1, 1., 101.),
+                (5, -1, 1., 100.)
+            ]
+        );
+        assert_eq!(result.summary.pnl_exact, "-1");
+        assert_eq!(result.summary.fees_exact, "0");
+        assert_eq!(result.summary.funding_exact, "0");
+        assert_eq!(result.equity.last().unwrap().1, 9999.);
+        // Last positive signal has no next open; a future bar executes it,
+        // preserving all earlier trades and scored equity.
+        let mut future = bars.clone();
+        future.push(Bar {
+            time: 360000,
+            open: 105.,
+            high: 110.,
+            low: 100.,
+            close: 109.,
+            volume: 1.,
+            funding_rate: None,
+        });
+        let extended = replay(&future, &parameters, 2, 7, &|| false).unwrap();
+        assert_eq!(
+            serde_json::to_value(&extended.trades[..4]).unwrap(),
+            serde_json::to_value(&result.trades).unwrap()
+        );
+        assert_eq!(extended.trades[4].time, 360000);
+        assert_eq!(extended.trades[4].side, 1);
+        assert_eq!(extended.trades[4].quantity, 2.);
+        assert_eq!(extended.trades[4].price, 105.);
+        let rescored = replay(&future, &parameters, 2, 6, &|| false).unwrap();
+        assert_eq!(rescored.equity, result.equity);
+        assert_eq!(rescored.summary.pnl_exact, result.summary.pnl_exact);
+    }
+
+    #[test]
     fn c15_identical_seed_and_inputs_repeat_exact_financial_hashes() {
         let input = bars();
         let parameters = spec();

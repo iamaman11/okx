@@ -117,3 +117,21 @@ for(const tool of PUBLIC_TOOLS as any[]){
  for(const fixture of payloadFixtures.filter(x=>x.tool===tool.name))for(const input of [fixture.positive,...fixture.negative])
   fail(matches(expanded,input)===matches({oneOf:ACTION_SCHEMAS[tool.name]},input),`factored positive/negative semantics ${tool.name}.${fixture.action}`);
 }
+
+for(const action of ['backtest','grid','validate']){
+ const base=payloadFixtures.find(x=>x.tool==='research'&&x.action===action)!.positive;
+ const positive={...base,strategy_id:'ema_momentum_confirm_v1'};
+ const negative={...positive,strategy_id:'unregistered_source_code'};
+ fail(validTool('research',positive),`registered research composition ${action}`);
+ fail(!validTool('research',negative),'unregistered strategy cannot cross research boundary');
+ payloadFixtures.push({tool:'research',action:action+'_composition',positive,negative:[negative]});
+}
+
+for(const action of ['backtest','grid','validate']){
+ const base=payloadFixtures.find(x=>x.tool==='research'&&x.action===action)!.positive;
+ const withPeriods=(fast:number,slow:number)=>action==='grid'?{...base,variants:[{fast,slow}]}:{...base,parameters:{fast,slow}};
+ const positive=withPeriods(999,1000),negative=[withPeriods(999,1001),withPeriods(1000,1000)];
+ fail(validTool('research',positive),`research ${action} maximum supported periods`);
+ for(const bad of negative)fail(!validTool('research',bad),'research EMA periods match Native bounds');
+ payloadFixtures.push({tool:'research',action:action+'_period_bounds',positive,negative});
+}

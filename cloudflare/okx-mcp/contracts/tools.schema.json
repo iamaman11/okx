@@ -993,9 +993,7 @@
                 "$ref": "#/$defs/n"
               },
               "strategy_id": {
-                "enum": [
-                  "ema_cross_v1"
-                ]
+                "$ref": "#/$defs/r"
               },
               "costs": {
                 "type": "object",
@@ -1047,12 +1045,12 @@
                   "fast": {
                     "type": "integer",
                     "minimum": 1,
-                    "maximum": 10000
+                    "maximum": 999
                   },
                   "slow": {
                     "type": "integer",
                     "minimum": 2,
-                    "maximum": 10000
+                    "maximum": 1000
                   }
                 },
                 "required": [
@@ -1069,12 +1067,12 @@
                     "fast": {
                       "type": "integer",
                       "minimum": 1,
-                      "maximum": 10000
+                      "maximum": 999
                     },
                     "slow": {
                       "type": "integer",
                       "minimum": 2,
-                      "maximum": 10000
+                      "maximum": 1000
                     }
                   },
                   "required": [
@@ -1277,9 +1275,7 @@
                 ]
               },
               "strategy_id": {
-                "enum": [
-                  "ema_cross_v1"
-                ]
+                "$ref": "#/$defs/r"
               },
               "parameters": {
                 "type": "object",
@@ -1287,12 +1283,12 @@
                   "fast": {
                     "type": "integer",
                     "minimum": 1,
-                    "maximum": 10000
+                    "maximum": 999
                   },
                   "slow": {
                     "type": "integer",
                     "minimum": 2,
-                    "maximum": 10000
+                    "maximum": 1000
                   }
                 },
                 "required": [
@@ -1384,6 +1380,12 @@
             "type": "integer",
             "minimum": 1,
             "maximum": 9007199254740991
+          },
+          "r": {
+            "enum": [
+              "ema_cross_v1",
+              "ema_momentum_confirm_v1"
+            ]
           }
         }
       },

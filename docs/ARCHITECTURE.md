@@ -48,3 +48,34 @@ existing content-addressed artifact store saves its dataset reference,
 parameters, costs, split, seed and code version. The result links this manifest;
 export validates its identity and retention follows its dataset references.
 This does not establish a profitable strategy or authorize live execution.
+
+## Research decisions and extensions
+
+`AnalyticsService::research` routes `record_decision` and `decision` to
+`analytics/decision.rs`. The existing Jobs SQLite row owns one annotation head;
+the existing artifact store owns immutable revisions bound to the job, result
+and experiment. Updating the hypothesis publishes a new revision. It never
+changes the backtest or calls TradeService. Expected-head CAS detects concurrent
+changes. Artifact verification/publication happens outside the catalog lock;
+the short transaction rechecks the result, expiry and head before committing.
+The existing bounded executor schedules this file I/O.
+
+Decisions currently require one provenance-bearing experiment result. Legacy
+and batch manifests are explicitly unsupported for this action. History is
+limited to256 revisions; expiry/pinning follows the job and reachable graph.
+An interrupted or losing publication can leave an unreachable metadata file;
+the current reachable-root retention does not collect those orphan files.
+
+For a calculation extension, start at `okx-kernel::operators`: ordinary Rust
+types/functions own the rule, while `StrategyKernel::from_id` selects a named
+composition. `ema_momentum_confirm_v1` reuses the EMA and momentum kernels;
+`okx-research::strategy_registry` keeps the same closed-bar/next-open replay.
+Its literal signal and exact-money tests are independent of live account data.
+
+The typed Research contract and capability descriptor expose the supported ID;
+Worker validates/routes that contract and performs no strategy calculation.
+`analytics::sources::Sources` remains the data owner: real OKX normalization
+rejects duplicate timestamps and excludes unconfirmed candles. The C20 test
+delivers fixed raw responses through the existing HTTP boundary and then uses
+the production market/research owners. Adding this composition changed no
+financial schema, TradeService or risk authority.
