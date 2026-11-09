@@ -56,6 +56,8 @@ pub struct Job {
     pub cancel_keys: BTreeSet<String>,
     pub state: State,
     pub progress: u8,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate_progress: Option<super::candidate_progress::CandidateProgress>,
     pub artifact: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decision_artifact: Option<String>,
@@ -147,6 +149,23 @@ impl Jobs {
                 .map_err(|e| e.to_string())?;
         }
         migration.execute("CREATE INDEX IF NOT EXISTS idx_research_jobs_decision_artifact ON research_jobs(decision_artifact) WHERE decision_artifact IS NOT NULL", []).map_err(|e| e.to_string())?;
+        let has_progress = migration
+            .prepare("PRAGMA table_info(research_jobs)")
+            .map_err(|e| e.to_string())?
+            .query_map([], |row| row.get::<_, String>(1))
+            .map_err(|e| e.to_string())?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|e| e.to_string())?
+            .iter()
+            .any(|column| column == "candidate_progress");
+        if !has_progress {
+            migration
+                .execute(
+                    "ALTER TABLE research_jobs ADD COLUMN candidate_progress TEXT",
+                    [],
+                )
+                .map_err(|e| e.to_string())?;
+        }
         migration.commit().map_err(|e| e.to_string())?;
         let diagnostic = Arc::new(job_diagnostics::Projection::default());
         diagnostic.restore(&connection);
@@ -177,6 +196,20 @@ impl Jobs {
             cancel_keys: BTreeSet::new(),
             state,
             progress: u8::try_from(progress).map_err(|_| rusqlite::Error::InvalidQuery)?,
+            candidate_progress: row
+                .get::<_, Option<String>>(10)?
+                .map(|value| {
+                    serde_json::from_str::<super::candidate_progress::CandidateProgress>(&value)
+                        .map_err(|_| rusqlite::Error::InvalidQuery)
+                        .and_then(|value| {
+                            if value.valid() {
+                                Ok(value)
+                            } else {
+                                Err(rusqlite::Error::InvalidQuery)
+                            }
+                        })
+                })
+                .transpose()?,
             artifact,
             decision_artifact: row.get(9)?,
             error: row.get(6)?,
@@ -188,7 +221,7 @@ impl Jobs {
     fn read(connection: &Connection, id: &str) -> Result<Option<Job>, String> {
         let mut job = connection
             .query_row(
-                "SELECT id,request_hash,idempotency_key,state,progress,artifact,error,created_ms,pinned,decision_artifact
+                "SELECT id,request_hash,idempotency_key,state,progress,artifact,error,created_ms,pinned,decision_artifact,candidate_progress
                  FROM research_jobs WHERE id=?1",
                 [id],
                 Self::row,
@@ -255,7 +288,7 @@ impl Jobs {
         let is_new = if let Some(job) = &existing {
             if job.state == State::Failed && is_transient_rate_defer(job.error.as_deref()) {
                 tx.execute(
-                    "UPDATE research_jobs SET state='queued',progress=0,artifact=NULL,error=NULL WHERE id=?1",
+                    "UPDATE research_jobs SET state='queued',progress=0,candidate_progress=NULL,artifact=NULL,error=NULL WHERE id=?1",
                     [&hash],
                 )
                 .map_err(|e| e.to_string())?;
@@ -364,7 +397,7 @@ impl Jobs {
         let updated = db
             .execute(
                 "UPDATE research_jobs SET state=?2,
-                    progress=CASE WHEN ?2='completed' THEN 100 WHEN ?2='running' THEN 10 ELSE progress END,
+                    progress=CASE WHEN ?2='completed' THEN 100 WHEN ?2='running' AND candidate_progress IS NULL THEN 10 ELSE progress END,
                     artifact=?3,error=?4
                  WHERE id=?1 AND state IN ('queued','running')",
                 params![id, state.wire(), artifact, error],
@@ -385,6 +418,50 @@ impl Jobs {
                 .map_err(|_| "CATALOG_LOCK_POISONED")?
                 .remove(id);
         }
+        Ok(())
+    }
+    /// Same catalog owner and terminal fence as job transitions. Late CPU
+    /// observations may never mutate cancellation or terminal snapshots.
+    pub(super) fn update_candidate_progress(
+        &self,
+        id: &str,
+        progress: super::candidate_progress::CandidateProgress,
+    ) -> Result<(), String> {
+        if !progress.valid() {
+            return Err("INVALID_CANDIDATE_PROGRESS".into());
+        }
+        let db = self.db.lock().map_err(|_| "CATALOG_LOCK_POISONED")?;
+        let percent = progress
+            .completed_work_units
+            .saturating_mul(99)
+            .checked_div(progress.total_work_units)
+            .unwrap_or(0)
+            .min(99);
+        let sql_counter = |value| i64::try_from(value).map_err(|_| "INVALID_CANDIDATE_PROGRESS");
+        let percent = sql_counter(percent)?;
+        let total_candidates = sql_counter(progress.total_candidates)?;
+        let total_work_units = sql_counter(progress.total_work_units)?;
+        let completed_candidates = sql_counter(progress.completed_candidates)?;
+        let completed_work_units = sql_counter(progress.completed_work_units)?;
+        db.execute(
+            "UPDATE research_jobs SET candidate_progress=?2,progress=?3
+            WHERE id=?1 AND state IN ('queued','running') AND (candidate_progress IS NULL OR (
+                json_extract(candidate_progress,'$.total_candidates')=?4 AND
+                json_extract(candidate_progress,'$.total_work_units')=?5 AND
+                json_extract(candidate_progress,'$.completed_candidates')<=?6 AND
+                json_extract(candidate_progress,'$.completed_work_units')<=?7))",
+            params![
+                id,
+                serde_json::to_string(&progress).map_err(|e| e.to_string())?,
+                percent,
+                total_candidates,
+                total_work_units,
+                completed_candidates,
+                completed_work_units
+            ],
+        )
+        .map_err(|e| e.to_string())?;
+        self.diagnostic.publish_id(&db, id);
         Ok(())
     }
     pub fn cancel(&self, id: &str, key: &str) -> Result<Job, String> {

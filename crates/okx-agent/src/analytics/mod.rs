@@ -1,6 +1,7 @@
 mod benchmark;
 mod budget;
 pub mod cache;
+pub mod candidate_progress;
 mod cursor;
 mod decision;
 pub mod executor;
@@ -218,6 +219,25 @@ impl AnalyticsService {
         }
         let this = self.clone();
         tokio::spawn(async move {
+            let progress = match &request {
+                ResearchRequest::Grid {
+                    instruments,
+                    variants,
+                    ..
+                } => Some(Arc::new(candidate_progress::Tracker::new(
+                    instruments.len(),
+                    variants.len(),
+                ))),
+                _ => None,
+            };
+            if let Some(progress) = &progress {
+                let _ = candidate_progress::publish(
+                    this.jobs.clone(),
+                    hash.clone(),
+                    progress.snapshot(),
+                )
+                .await;
+            }
             let outcome = async {
                 // Bounded SQL admission happens at submit. Accepted queued
                 // jobs wait for an existing heavy permit instead of becoming
@@ -237,22 +257,65 @@ impl AnalyticsService {
                     _ = executor::cancelled(cancel.clone()) =>
                         return Err("CANCELLED".into()),
                 };
-                this.jobs.update_async(hash.clone(), jobs::State::Running, None, None).await?;
+                this.jobs
+                    .update_async(hash.clone(), jobs::State::Running, None, None)
+                    .await?;
                 if matches!(request, ResearchRequest::Benchmark { .. }) {
-                    return benchmark::run(this.cpu.clone(), this.artifacts.clone(), cancel.clone()).await;
+                    return benchmark::run(
+                        this.cpu.clone(),
+                        this.artifacts.clone(),
+                        cancel.clone(),
+                    )
+                    .await;
                 }
-                let instruments = match &request { ResearchRequest::Backtest{instruments,..}|ResearchRequest::Grid{instruments,..}=>instruments.clone(),_=>unreachable!() };
-                if instruments.len()==1 { return this.execute_one(request,cancel.clone()).await; }
-                let mut work=stream::iter(instruments.into_iter().enumerate().map(|(index,instrument)|{
-                    let service=this.clone();let mut single=request.clone();let token=cancel.clone();
-                    match &mut single {ResearchRequest::Backtest{instruments,..}|ResearchRequest::Grid{instruments,..}=>*instruments=vec![instrument.clone()],_=>unreachable!()};
-                    async move {(index,instrument,service.execute_one(single,token).await)}
-                })).buffer_unordered(4);
-                let mut rows=Vec::new();let mut artifacts=Vec::new();
-                while let Some((index,instrument,outcome))=work.next().await {
-                    if cancel.load(Ordering::Acquire){return Err("CANCELLED".into())}
-                    let store=this.artifacts.clone();
-                    let previous_rows=rows;let previous_artifacts=artifacts;
+                let instruments = match &request {
+                    ResearchRequest::Backtest { instruments, .. }
+                    | ResearchRequest::Grid { instruments, .. } => instruments.clone(),
+                    _ => unreachable!(),
+                };
+                if instruments.len() == 1 {
+                    return this
+                        .execute_one_observed(
+                            request,
+                            cancel.clone(),
+                            progress.clone().map(|p| (p, 0)),
+                        )
+                        .await;
+                }
+                let mut work = stream::iter(instruments.into_iter().enumerate().map(
+                    |(index, instrument)| {
+                        let service = this.clone();
+                        let mut single = request.clone();
+                        let token = cancel.clone();
+                        let observation = progress.clone().map(|p| (p, index));
+                        match &mut single {
+                            ResearchRequest::Backtest { instruments, .. }
+                            | ResearchRequest::Grid { instruments, .. } => {
+                                *instruments = vec![instrument.clone()]
+                            }
+                            _ => unreachable!(),
+                        };
+                        async move {
+                            (
+                                index,
+                                instrument,
+                                service
+                                    .execute_one_observed(single, token, observation)
+                                    .await,
+                            )
+                        }
+                    },
+                ))
+                .buffer_unordered(4);
+                let mut rows = Vec::new();
+                let mut artifacts = Vec::new();
+                while let Some((index, instrument, outcome)) = work.next().await {
+                    if cancel.load(Ordering::Acquire) {
+                        return Err("CANCELLED".into());
+                    }
+                    let store = this.artifacts.clone();
+                    let previous_rows = rows;
+                    let previous_artifacts = artifacts;
                     let (next_rows,next_artifacts,manifest)=this.cpu.run(cancel.clone(),move |_|{
                         let mut rows=previous_rows;let mut artifacts=previous_artifacts;
                     let row=match outcome {Ok(artifact)=>{let result:Value=store.read_evidence_json(&artifact).map_err(|e|e.to_string())?;artifacts.push(artifact.clone());json!({"index":index,"instrument":instrument,"state":"completed","artifact":artifact,"summary":result["summary"],"dataset_hash":result["dataset_hash"],"grid":result["grid"],"trades_cursor":format!("instrument:{index}:0")})},Err(error)=>json!({"index":index,"instrument":instrument,"state":"failed","reason_code":error})};
@@ -262,12 +325,43 @@ impl AnalyticsService {
 
                         Ok((rows,artifacts,manifest))
                     }).await?;
-                    rows=next_rows;artifacts=next_artifacts;
-                    this.jobs.update_async(hash.clone(),jobs::State::Running,Some(manifest),None).await?;
+                    rows = next_rows;
+                    artifacts = next_artifacts;
+                    this.jobs
+                        .update_async(hash.clone(), jobs::State::Running, Some(manifest), None)
+                        .await?;
                 }
-                this.jobs.get_async(hash.clone()).await?.artifact.ok_or_else(||"EMPTY_BATCH".into())
+                this.jobs
+                    .get_async(hash.clone())
+                    .await?
+                    .artifact
+                    .ok_or_else(|| "EMPTY_BATCH".into())
+            };
+            // Poll observations alongside the existing job future. One bounded
+            // snapshot per tick; no detached consumer survives any exit path.
+            tokio::pin!(outcome);
+            let mut tick = tokio::time::interval(std::time::Duration::from_millis(100));
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            let mut committed = None;
+            let outcome = loop {
+                tokio::select! {
+                    result = &mut outcome => break result,
+                    _ = tick.tick(), if progress.is_some() => {
+                        let value = progress.as_ref().unwrap().snapshot();
+                        if committed.as_ref() != Some(&value) && candidate_progress::publish(this.jobs.clone(), hash.clone(), value.clone()).await.is_ok() {
+                            committed = Some(value);
+                        }
+                    }
+                }
+            };
+            if let Some(progress) = &progress {
+                let _ = candidate_progress::publish(
+                    this.jobs.clone(),
+                    hash.clone(),
+                    progress.snapshot(),
+                )
+                .await;
             }
-            .await;
             match outcome {
                 Ok(a) => {
                     let _ = this
@@ -296,10 +390,19 @@ impl AnalyticsService {
         });
         Ok(json!(job))
     }
+    #[cfg(test)]
     async fn execute_one(
         &self,
         request: ResearchRequest,
         cancel: Arc<std::sync::atomic::AtomicBool>,
+    ) -> Result<String, String> {
+        self.execute_one_observed(request, cancel, None).await
+    }
+    async fn execute_one_observed(
+        &self,
+        request: ResearchRequest,
+        cancel: Arc<std::sync::atomic::AtomicBool>,
+        observation: Option<(Arc<candidate_progress::Tracker>, usize)>,
     ) -> Result<String, String> {
         let (instruments, ms, start, end, strategy, variants, costs, mode, seed, is_grid) =
             match request {
@@ -492,7 +595,7 @@ impl AnalyticsService {
                         "variants":variants,"selection_policy":policy,
                         "result_role":"counterfactual_research_only"
                     })).map_err(|e|e.to_string())?.0;
-                    let(result,grid)=if is_grid{let g=replay::grid(&bars,&spec,&variants,&cancelled)?;(g.test,Some(json!({"selected":g.selected,"split_index":g.split_index,"train_dataset_hash":g.train_dataset_hash,"train_range":{"start_ms":bars[g.train_score_start_index].time,"end_ms":bars[g.split_index].time},"warmup_bars":g.train_score_start_index,"seed":spec.seed,"strategy_id":spec.strategy_id,"test_range":{"start_ms":bars[g.split_index].time,"end_ms":end},"train":g.train,"variants":g.variants,"selection_warning":g.selection_warning})))}else{(replay::replay(&bars,&spec,first.slow,bars.len(),&cancelled)?,None)};
+                    let(result,grid)=if is_grid{let g=replay::grid_with_observer(&bars,&spec,&variants,&cancelled,&|value|{if let Some((tracker,index))=&observation {tracker.observe(*index,value)}})?;(g.test,Some(json!({"selected":g.selected,"split_index":g.split_index,"train_dataset_hash":g.train_dataset_hash,"train_range":{"start_ms":bars[g.train_score_start_index].time,"end_ms":bars[g.split_index].time},"warmup_bars":g.train_score_start_index,"seed":spec.seed,"strategy_id":spec.strategy_id,"test_range":{"start_ms":bars[g.split_index].time,"end_ms":end},"train":g.train,"variants":g.variants,"selection_warning":g.selection_warning})))}else{(replay::replay(&bars,&spec,first.slow,bars.len(),&cancelled)?,None)};
                     publish_replay(&store,&result,&dataset,grid,Some(&experiment),&cancelled)
                 }).await?;
         Ok::<_, String>(artifact)

@@ -28,13 +28,16 @@ const COLUMNS: &str = "substr(id,1,129),state,progress,
       WHEN error LIKE 'RESOURCE_BUSY:%' THEN 'RESOURCE_BUSY'
       WHEN error LIKE 'OKX rate/backpressure defer:%'
         OR error LIKE 'public OKX market API error: OKX rate/backpressure defer:%' THEN 'MARKET_SOURCE_RETRYABLE'
-      ELSE 'UNCLASSIFIED_RESEARCH_ERROR' END,pinned";
+      ELSE 'UNCLASSIFIED_RESEARCH_ERROR' END,pinned,
+    CASE WHEN length(candidate_progress)<=512 THEN candidate_progress ELSE NULL END";
 
 #[derive(Clone, Serialize)]
 struct Snapshot {
     id: String,
     state: String,
     progress: u8,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    candidate_progress: Option<super::super::candidate_progress::CandidateProgress>,
     result_ref: Option<String>,
     error_code: Option<String>,
     pinned: bool,
@@ -49,6 +52,20 @@ fn row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Snapshot> {
         id: row.get(0)?,
         state: row.get(1)?,
         progress: row.get(2)?,
+        candidate_progress: row
+            .get::<_, Option<String>>(6)?
+            .map(|value| {
+                serde_json::from_str::<super::super::candidate_progress::CandidateProgress>(&value)
+                    .map_err(|_| rusqlite::Error::InvalidQuery)
+                    .and_then(|value| {
+                        if value.valid() {
+                            Ok(value)
+                        } else {
+                            Err(rusqlite::Error::InvalidQuery)
+                        }
+                    })
+            })
+            .transpose()?,
         result_ref: artifact.filter(|v| v.len() == 64 && v.bytes().all(|b| b.is_ascii_hexdigit())),
         // SQL emits only the fixed whitelist above, never raw failure payloads.
         error_code: error,

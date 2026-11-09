@@ -414,6 +414,29 @@ pub fn grid(
     variants: &[EmaParameters],
     cancel: &impl Fn() -> bool,
 ) -> Result<GridResult, String> {
+    grid_with_observer(bars, spec, variants, cancel, &|_| {})
+}
+
+/// Successful replay units only: N train, N holdout, N fee sensitivity,
+/// then the selected replay. A candidate completes after its sensitivity run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GridProgress {
+    pub completed_work_units: u64,
+    pub completed_candidates: u64,
+}
+
+/// Observation does not participate in identities, selection, or result data.
+pub fn grid_with_observer(
+    bars: &[Bar],
+    spec: &ReplaySpec,
+    variants: &[EmaParameters],
+    cancel: &impl Fn() -> bool,
+    observe: &impl Fn(GridProgress),
+) -> Result<GridResult, String> {
+    let mut progress = GridProgress {
+        completed_work_units: 0,
+        completed_candidates: 0,
+    };
     let policy = grid_policy(bars.len(), variants)?;
     let split = policy.split_index;
     // All candidate scores use the same reporting window. Different EMA
@@ -438,6 +461,8 @@ pub fn grid(
             cancel,
             Some(&train_dataset_hash),
         )?;
+        progress.completed_work_units += 1;
+        observe(progress);
         candidates.push(GridCandidate {
             parameters: *p,
             train: r.summary.clone(),
@@ -476,6 +501,8 @@ pub fn grid(
             Some(&dataset_hash),
         )?
         .summary;
+        progress.completed_work_units += 1;
+        observe(progress);
         candidate.test = Some(CandidateEvaluation::new(report_summary, bars.len() - split));
         report_spec.costs.maker_fee_bps *= 2.0;
         report_spec.costs.taker_fee_bps *= 2.0;
@@ -492,10 +519,15 @@ pub fn grid(
             sensitivity_summary,
             bars.len() - split,
         ));
+        progress.completed_work_units += 1;
+        progress.completed_candidates += 1;
+        observe(progress);
     }
     let mut s = spec.clone();
     s.parameters = p;
     let test = replay_with_hash(bars, &s, split, bars.len(), cancel, Some(&dataset_hash))?;
+    progress.completed_work_units += 1;
+    observe(progress);
     Ok(GridResult {
         variants: candidates,
         selected: p,
