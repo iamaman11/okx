@@ -31,12 +31,35 @@ export function awaitCommitBoundary(ready,nativeProcess,onFailure=failNative){
 
 export function validateUnsentKillBoundary(value){
   assert.equal(value.schema,"okx.t10-11-native-unsent-kill-boundary/v1");
-  assert.ok(["F2","F3","F4","F8"].includes(value.phase));
+  assert.ok(["F0","F1","F2","F3","F4","F8"].includes(value.phase));
   assert.ok(Number.isSafeInteger(value.pid)&&value.pid>0&&value.pid!==process.pid);
   const root=resolve(value.root),within=relative(resolve(tmpdir()),root);
   assert.ok(within&&!within.startsWith("..")&&!isAbsolute(within));
   assert.match(basename(root),/^okx-raw-native-session-[a-f0-9]{32}$/);
   const action=value.command.action;
+  assert.equal(value.venue_posts,0);
+  assert.equal(value.sql.exchange_order_id,null);
+  assert.equal(value.sql.central_release,null);
+  assert.ok(Number.isSafeInteger(value.source_floor_ms)&&value.source_floor_ms>0);
+  if(["F0","F1"].includes(value.phase)){
+    assert.equal(action.action,"INSPECT");
+    assert.equal(value.worker_result.status,"DENIED");
+    assert.equal(value.worker_result.reason,"RISK_RESERVATION_NOT_FOUND");
+    assert.equal(value.worker_result.reservation_key,null);
+    assert.equal(value.sql.intent_present,value.phase==="F1");
+    assert.equal(value.sql.state,value.phase==="F1"?"PREPARED":null);
+    for(const key of ["central_receipt","reserve_attempt","reservation_key","terminal_receipt"])
+      assert.equal(value.sql[key],null,`pre-reserve ${key} must be absent`);
+    const input=value.prepare_input.intent;
+    assert.equal(value.sql.intent_id,input.intent_id);
+    assert.equal(action.plan_sha256,input.plan_hash);
+    assert.equal(action.reservation_key,value.candidate_reservation_key);
+    assert.ok(Number.isSafeInteger(value.before_sequence));
+    assert.equal(value.sql.plan_hash,value.phase==="F1"?input.plan_hash:null);
+    assert.equal(value.sql.request_hash,value.phase==="F1"?input.request_hash:null);
+    return value;
+  }
+  assert.equal(value.sql.intent_present,true);
   const expected={F2:["RESERVE","HELD","PREPARED"],
     F3:["INSPECT","OBSERVED","RESERVED"],
     F4:["BEGIN_POST","POST_AUTHORIZED","RESERVED"],
@@ -110,9 +133,25 @@ export async function killAndRecoverUnsentNative({nativeProcess,handoffPath,cwd}
   assert.equal(native.root,boundary.root);
   assert.deepEqual(native.before,boundary.sql);
   assert.equal(native.original_sql_reopened,true);
-  assert.equal(native.public_cancel_replayed,true);
+  assert.equal(native.public_recovery_replayed,true);
   assert.equal(native.after.reservation_key,boundary.sql.reservation_key);
-  assert.equal(native.after.central_release.kind,"CENTRAL_RELEASE");
+  if(["F0","F1"].includes(boundary.phase)){
+    assert.equal(native.after.central_release,null);
+    assert.equal(native.after.reserve_attempt,null);
+    assert.equal(native.after.terminal_receipt.kind,"REJECTED_UNSENT");
+    assert.deepEqual(native.recovery_result.data.central_release,
+      {state:"not_required",proof:"PRE_RESERVE_SQL"});
+    assert.equal(native.worker_after.risk_book_sequence,boundary.before_sequence);
+    if(boundary.phase==="F0"){
+      assert.deepEqual(native.prepare_replay.first,native.prepare_replay.replay);
+      assert.equal(native.prepare_replay.first.intent_id,boundary.sql.intent_id);
+      assert.equal(native.prepare_replay.first.state,"PREPARED");
+    }else{
+      assert.equal(native.recovery_request.action,"status");
+      assert.equal(native.recovery_result.data.primary_reason,"COMMAND_EXPIRED");
+      assert.equal(native.after.terminal_receipt.result_ref,"COMMAND_EXPIRED");
+    }
+  }else assert.equal(native.after.central_release.kind,"CENTRAL_RELEASE");
   assert.equal(native.venue_posts,0);
   assert.deepEqual(native.worker_after.budget,{...boundary.before_budget,
     source_as_of_ms:boundary.source_floor_ms});

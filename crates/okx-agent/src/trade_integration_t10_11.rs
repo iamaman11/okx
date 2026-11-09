@@ -5,6 +5,8 @@
 // own the cross-process recovery.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum T10_11UnsentPhase {
+    F0,
+    F1,
     F2,
     F3,
     F4,
@@ -13,6 +15,8 @@ enum T10_11UnsentPhase {
 impl T10_11UnsentPhase {
     fn selected() -> Self {
         match std::env::var("OKX_T10_11_NATIVE_CRASH").unwrap().as_str() {
+            "F0" => Self::F0,
+            "F1" => Self::F1,
             "F2" => Self::F2,
             "F3" => Self::F3,
             "F4" => Self::F4,
@@ -22,12 +26,22 @@ impl T10_11UnsentPhase {
     }
     fn name(self) -> &'static str {
         match self {
+            Self::F0 => "F0",
+            Self::F1 => "F1",
             Self::F2 => "F2",
             Self::F3 => "F3",
             Self::F4 => "F4",
             Self::F8 => "F8",
         }
     }
+    fn before_reserve(self) -> bool {
+        matches!(self, Self::F0 | Self::F1)
+    }
+}
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+struct T10_11PrepareInput {
+    decision: okx_execution::Decision,
+    intent: okx_execution::NewIntent,
 }
 struct T10_11UnsentProbe {
     phase: T10_11UnsentPhase,
@@ -37,9 +51,53 @@ struct T10_11UnsentProbe {
     root: std::path::PathBuf,
     feed: Arc<crate::accounts::recorded_support::RecordedAccountHttp>,
     before_budget: okx_protocol::risk_authority::RiskBudgetSnapshot,
+    before_sequence: u64,
+    prepare_input: Option<T10_11PrepareInput>,
 }
 static T10_11_UNSENT_PROBE: std::sync::Mutex<Option<T10_11UnsentProbe>> =
     std::sync::Mutex::new(None);
+
+// Read actual SQL even before any reserve attempt exists. Null means absent;
+// it is never converted to a fabricated local/central receipt.
+async fn t10_11_sql_snapshot(
+    accounts: &Arc<AccountRuntimeRegistry>,
+    id: &str,
+) -> serde_json::Value {
+    let owner = accounts.resolve("fixture-a").await.unwrap();
+    let id = id.to_owned();
+    owner
+        .execution
+        .store
+        .call(
+            std::time::Instant::now() + Duration::from_secs(3),
+            move |s| {
+                let intent = s.intent(&id)?;
+                let attempt = s.operation(&format!("risk-reserve:{id}"))?;
+                let local = s.central_receipt(&id)?;
+                let key = attempt
+                    .as_ref()
+                    .map(|a| a.result_ref.clone())
+                    .or_else(|| local.as_ref().map(|r| r.reservation_key.clone()));
+                let release = match &key {
+                    Some(k) => s.operation(&format!("central-release:{k}"))?,
+                    None => None,
+                };
+                Ok(serde_json::json!({
+                    "intent_id":id,"intent_present":intent.is_some(),
+                    "state":intent.as_ref().map(|i|i.state.as_str()),
+                    "request_hash":intent.as_ref().map(|i|&i.request_hash),
+                    "plan_hash":intent.as_ref().map(|i|&i.plan_hash),
+                    "deadline":intent.as_ref().map(|i|i.deadline),
+                    "exchange_order_id":intent.as_ref().and_then(|i|i.exchange_order_id.as_ref()),
+                    "reserve_attempt":attempt,"reservation_key":key,"central_receipt":local,
+                    "terminal_receipt":s.operation(&format!("terminal:{id}"))?,
+                    "central_release":release,
+                }))
+            },
+        )
+        .await
+        .unwrap()
+}
 
 pub(super) async fn t10_11_hold_unsent_reply(
     result: &RiskResult,
@@ -57,6 +115,12 @@ pub(super) async fn t10_11_hold_unsent_reply(
                     intent_id == &p.intent_id
                 }
                 (
+                    T10_11UnsentPhase::F0 | T10_11UnsentPhase::F1,
+                    RiskCommandAction::Inspect {
+                        reservation_key, ..
+                    },
+                )
+                | (
                     T10_11UnsentPhase::F3,
                     RiskCommandAction::Inspect {
                         reservation_key, ..
@@ -79,19 +143,22 @@ pub(super) async fn t10_11_hold_unsent_reply(
         if matched { slot.take() } else { None }
     };
     let Some(probe) = probe else { return };
-    let sql = t10_12_reserve_sql_snapshot(&ctx.accounts, &probe.intent_id).await;
+    let sql = t10_11_sql_snapshot(&ctx.accounts, &probe.intent_id).await;
     let (status, state) = match probe.phase {
-        T10_11UnsentPhase::F2 => (RiskDecisionStatus::Held, "PREPARED"),
-        T10_11UnsentPhase::F3 => (RiskDecisionStatus::Observed, "RESERVED"),
-        T10_11UnsentPhase::F4 => (RiskDecisionStatus::PostAuthorized, "RESERVED"),
-        T10_11UnsentPhase::F8 => (RiskDecisionStatus::Updated, "REJECTED"),
+        T10_11UnsentPhase::F0 => (RiskDecisionStatus::Denied, None),
+        T10_11UnsentPhase::F1 => (RiskDecisionStatus::Denied, Some("PREPARED")),
+        T10_11UnsentPhase::F2 => (RiskDecisionStatus::Held, Some("PREPARED")),
+        T10_11UnsentPhase::F3 => (RiskDecisionStatus::Observed, Some("RESERVED")),
+        T10_11UnsentPhase::F4 => (RiskDecisionStatus::PostAuthorized, Some("RESERVED")),
+        T10_11UnsentPhase::F8 => (RiskDecisionStatus::Updated, Some("REJECTED")),
     };
     assert_eq!(
         result.status, status,
         "actual Worker commit must precede kill: {:?}",
         result.reason
     );
-    assert_eq!(sql["state"], state);
+    assert_eq!(sql["state"], serde_json::to_value(state).unwrap());
+    assert_eq!(sql["intent_present"], probe.phase != T10_11UnsentPhase::F0);
     if probe.phase == T10_11UnsentPhase::F3 {
         assert_eq!(
             result.reservation_state,
@@ -100,17 +167,24 @@ pub(super) async fn t10_11_hold_unsent_reply(
     }
     assert_eq!(
         sql["central_receipt"].is_null(),
-        probe.phase == T10_11UnsentPhase::F2
+        probe.phase.before_reserve() || probe.phase == T10_11UnsentPhase::F2
     );
     assert_eq!(sql["central_release"], serde_json::Value::Null);
     if probe.phase == T10_11UnsentPhase::F8 {
         assert_eq!(sql["terminal_receipt"]["kind"], "REJECTED_UNSENT");
     }
     assert_eq!(sql["exchange_order_id"], serde_json::Value::Null);
-    assert_eq!(
-        sql["reservation_key"],
-        result.reservation_key.as_deref().unwrap()
-    );
+    if probe.phase.before_reserve() {
+        assert_eq!(result.reason.as_deref(), Some("RISK_RESERVATION_NOT_FOUND"));
+        assert!(result.reservation_key.is_none());
+        assert!(sql["reservation_key"].is_null());
+        assert!(sql["reserve_attempt"].is_null());
+    } else {
+        assert_eq!(
+            sql["reservation_key"],
+            result.reservation_key.as_deref().unwrap()
+        );
+    }
     let posts = probe.feed.outbound_posts.lock().unwrap().len();
     assert_eq!(posts, 0);
     let handoff = std::env::var("OKX_INTEGRATION_HANDOFF_PATH").unwrap();
@@ -121,6 +195,8 @@ pub(super) async fn t10_11_hold_unsent_reply(
             "phase":probe.phase.name(),"pid":std::process::id(),"root":probe.root,
             "generation":generation,"sql":sql,"command":command,
             "worker_result":result,"before_budget":probe.before_budget,
+            "before_sequence":probe.before_sequence,"prepare_input":probe.prepare_input,
+            "candidate_reservation_key":probe.reservation_key,
             "source_floor_ms":probe.source_floor_ms,
             "venue_posts":posts,
         }),
@@ -171,7 +247,9 @@ async fn native_crash_unsent_boundary() {
     let (mut session, _stop) = t10_11_start_session(ctx.clone(), risk_rx, &handoff).await;
     let mut summary_cmd = summary("summary_t11_f2_before");
     summary_cmd.installation_id = "installation_test".into();
-    let before = risk.request(summary_cmd).await.unwrap().budget.unwrap();
+    let baseline = risk.request(summary_cmd).await.unwrap();
+    let before = baseline.budget.clone().unwrap();
+    let before_sequence = baseline.risk_book_sequence.unwrap();
     let owner = ctx.accounts.resolve("fixture-a").await.unwrap();
     let uid = owner.configuration.account_key.verified_uid.clone();
     let intent_id = "intent_t11_f2_0001";
@@ -180,7 +258,7 @@ async fn native_crash_unsent_boundary() {
         .map(|x| format!("{}:{}", x.len(), x))
         .collect::<String>();
     let reservation = key.clone();
-    let saved = owner
+    let (prepare_input, saved) = owner
         .execution
         .store
         .call(
@@ -188,21 +266,29 @@ async fn native_crash_unsent_boundary() {
             move |s| {
                 let now = chrono::Utc::now().timestamp_millis();
                 let definition = s.ensure_manual_instance(now)?;
-                let intent = s.prepare(
-                    &Decision {
+                let input = T10_11PrepareInput {
+                    decision: Decision {
                         decision_id: "decision_t11_f2".into(),
                         instance_id: None,
-                        decision_at: now,
+                        decision_at: if phase == T10_11UnsentPhase::F1 {
+                            now - 2
+                        } else {
+                            now
+                        },
                         input_digest: "b".repeat(64),
                         policy_revision: 2,
                         code_version: "fixture".into(),
                     },
-                    &NewIntent {
+                    intent: NewIntent {
                         intent_id: intent_id.into(),
                         idempotency_key: "command_t11_f2".into(),
                         request_hash: "b".repeat(64),
                         client_order_id: "c".repeat(32),
-                        deadline: now + 30_000,
+                        deadline: if phase == T10_11UnsentPhase::F1 {
+                            now - 1
+                        } else {
+                            now + 30_000
+                        },
                         plan_hash: "d".repeat(64),
                         policy_revision: 2,
                         risk_increase: true,
@@ -226,13 +312,46 @@ async fn native_crash_unsent_boundary() {
                             settlement_currency: "USDT".into(),
                         },
                     },
-                )?;
-                s.mark_reserve_attempt(intent_id, &reservation, now)?;
-                Ok(intent)
+                };
+                let intent = if phase == T10_11UnsentPhase::F0 {
+                    None
+                } else {
+                    Some(s.prepare(&input.decision, &input.intent)?)
+                };
+                if !phase.before_reserve() {
+                    s.mark_reserve_attempt(intent_id, &reservation, now)?;
+                }
+                Ok((input, intent))
             },
         )
         .await
         .unwrap();
+    if phase.before_reserve() {
+        // Read-only Worker evidence. No RESERVE is sent by either F0 or F1.
+        let inspect = RiskCommand {
+            schema: RISK_COMMAND_SCHEMA_V1.into(),
+            command_id: "inspect_t11_before_reserve".into(),
+            installation_id: "installation_test".into(),
+            action: RiskCommandAction::Inspect {
+                reservation_key: key.clone(),
+                plan_sha256: prepare_input.intent.plan_hash.clone(),
+            },
+        };
+        *T10_11_UNSENT_PROBE.lock().unwrap() = Some(T10_11UnsentProbe {
+            phase,
+            intent_id: intent_id.into(),
+            reservation_key: key,
+            source_floor_ms: before.source_as_of_ms,
+            root,
+            feed: feed.unwrap(),
+            before_budget: before,
+            before_sequence,
+            prepare_input: Some(prepare_input),
+        });
+        let result = t10_12_await_recovery(&mut session, risk.request(inspect)).await;
+        panic!("pre-reserve child must be OS-killed at its SQL boundary: {result:?}");
+    }
+    let saved = saved.unwrap();
     let peer = ctx.accounts.resolve("fixture-b").await.unwrap();
     let mut account_keys = vec![
         owner.configuration.account_key.wire(),
@@ -267,6 +386,8 @@ async fn native_crash_unsent_boundary() {
         root,
         feed: feed.unwrap(),
         before_budget: before,
+        before_sequence,
+        prepare_input: None,
     };
     let conversion = UsdConversion {
         usd_per_usdt: "1".into(),
@@ -424,7 +545,7 @@ async fn native_crash_unsent_recover() {
         test_dispatch_with_root("installation_test", Some(root.clone())).await;
     assert_eq!(root, reopened_root);
     let id = original["sql"]["intent_id"].as_str().unwrap();
-    let before = t10_12_reserve_sql_snapshot(&ctx.accounts, id).await;
+    let before = t10_11_sql_snapshot(&ctx.accounts, id).await;
     assert_eq!(
         before, original["sql"],
         "restart must reopen the exact original SQL facts"
@@ -456,26 +577,91 @@ async fn native_crash_unsent_recover() {
         old_fence_denial = Some(denied);
     }
     let owner = ctx.accounts.resolve("fixture-a").await.unwrap();
-    let cancel = okx_protocol::trading::TradeRequest::Cancel {
-        idempotency_key: "cancel_t11_f2".into(),
-        reference: id.into(),
+    let prepare_replay = if phase == T10_11UnsentPhase::F0 {
+        let input: T10_11PrepareInput =
+            serde_json::from_value(original["prepare_input"].clone()).unwrap();
+        let replay = owner
+            .execution
+            .store
+            .call(
+                std::time::Instant::now() + Duration::from_secs(3),
+                move |s| {
+                    let first = s.prepare(&input.decision, &input.intent)?;
+                    let again = s.prepare(&input.decision, &input.intent)?;
+                    assert_eq!(
+                        serde_json::to_value(&first).unwrap(),
+                        serde_json::to_value(&again).unwrap()
+                    );
+                    assert_eq!(
+                        s.by_idempotency(&input.intent.idempotency_key)?
+                            .unwrap()
+                            .intent_id,
+                        first.intent_id
+                    );
+                    assert_eq!(
+                        s.by_client_order_id(&input.intent.client_order_id)?
+                            .unwrap()
+                            .intent_id,
+                        first.intent_id
+                    );
+                    Ok(serde_json::json!({"first":first,"replay":again}))
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            t10_11_sql_snapshot(&ctx.accounts, id).await["state"],
+            "PREPARED"
+        );
+        Some(replay)
+    } else {
+        None
+    };
+    let recovery = if phase == T10_11UnsentPhase::F1 {
+        okx_protocol::trading::TradeRequest::Status {
+            reference: id.into(),
+        }
+    } else {
+        okx_protocol::trading::TradeRequest::Cancel {
+            idempotency_key: "cancel_t11_f2".into(),
+            reference: id.into(),
+        }
     };
     let result = t10_12_await_recovery(
         &mut session,
-        Box::pin(ctx.trade.trade("fixture-a", &cancel, None)),
+        Box::pin(ctx.trade.trade("fixture-a", &recovery, None)),
     )
     .await
     .unwrap()
     .unwrap();
-    assert_eq!(result["data"]["central_release"]["state"], "verified");
-    let after = t10_12_reserve_sql_snapshot(&ctx.accounts, id).await;
+    let after = t10_11_sql_snapshot(&ctx.accounts, id).await;
+    if phase.before_reserve() {
+        assert_eq!(result["data"]["central_release"]["state"], "not_required");
+        assert_eq!(
+            result["data"]["central_release"]["proof"],
+            "PRE_RESERVE_SQL"
+        );
+        assert_eq!(result["data"]["send_state"], "NOT_STARTED");
+        assert!(after["reserve_attempt"].is_null());
+        assert!(after["central_release"].is_null());
+        assert_eq!(after["terminal_receipt"]["kind"], "REJECTED_UNSENT");
+        if phase == T10_11UnsentPhase::F1 {
+            assert_eq!(result["data"]["primary_reason"], "COMMAND_EXPIRED");
+            assert_eq!(after["terminal_receipt"]["result_ref"], "COMMAND_EXPIRED");
+        }
+    } else {
+        assert_eq!(result["data"]["central_release"]["state"], "verified");
+        assert_eq!(after["central_release"]["kind"], "CENTRAL_RELEASE");
+    }
     assert_eq!(after["state"], "REJECTED");
-    assert_eq!(after["central_release"]["kind"], "CENTRAL_RELEASE");
     assert_eq!(after["central_receipt"], original["sql"]["central_receipt"]);
     assert_eq!(after["exchange_order_id"], serde_json::Value::Null);
-    let replay = ctx.trade.trade("fixture-a", &cancel, None).await.unwrap();
-    assert_eq!(replay["data"]["central_release"]["state"], "verified");
-    assert_eq!(t10_12_reserve_sql_snapshot(&ctx.accounts, id).await, after);
+    let replay = ctx.trade.trade("fixture-a", &recovery, None).await.unwrap();
+    assert_eq!(
+        replay["data"]["central_release"],
+        result["data"]["central_release"]
+    );
+    assert_eq!(t10_11_sql_snapshot(&ctx.accounts, id).await, after);
     let mut final_read = summary("summary_t11_f2_released");
     final_read.installation_id = "installation_test".into();
     let final_result = risk.request(final_read).await.unwrap();
@@ -485,6 +671,17 @@ async fn native_crash_unsent_recover() {
         serde_json::to_value(&final_result.budget).unwrap(),
         expected
     );
+    if phase.before_reserve() {
+        assert_eq!(final_result.budget, worker_before.budget);
+        assert_eq!(
+            serde_json::to_value(final_result.risk_book_sequence).unwrap(),
+            original["before_sequence"]
+        );
+        assert_eq!(
+            final_result.risk_book_sequence,
+            worker_before.risk_book_sequence
+        );
+    }
     if phase == T10_11UnsentPhase::F8 {
         assert_eq!(
             final_result.risk_book_sequence,
@@ -517,7 +714,8 @@ async fn native_crash_unsent_recover() {
             "before":before,"after":after,"worker_after":final_result,
             "worker_before":worker_before,"old_fence_denial":old_fence_denial,
             "venue_posts":posts,"original_sql_reopened":true,
-            "public_cancel_replayed":true,
+            "public_recovery_replayed":true,"recovery_request":recovery,"recovery_result":result,
+            "prepare_replay":prepare_replay,
         })
     );
 }

@@ -70,7 +70,7 @@ const t10PostReplyLostMode=process.env.OKX_T10_03_POST_AUTH_REPLY_LOST_PROBE==="
 const t10SourceRecoveryMode=process.env.OKX_T10_01_PARTIAL_SOURCE_RECOVERY_PROBE==="1";
 const t10StopMode=process.env.OKX_T10_13_STOP_PROBE==="1";
 const nativeReserveCrashMode=process.env.OKX_T10_12_NATIVE_RESERVE_CRASH==="1";
-const nativeUnsentCrashMode=["F2","F3","F4","F8"].includes(process.env.OKX_T10_11_NATIVE_CRASH);
+const nativeUnsentCrashMode=["F0","F1","F2","F3","F4","F8"].includes(process.env.OKX_T10_11_NATIVE_CRASH);
 if(nativeReserveCrashMode&&process.env.OKX_T10_12_NATIVE_WORKER_CRASH==="1")
   throw Error("T10_12_NATIVE_CRASH_BOUNDARY_MUST_BE_INDEPENDENT");
 if ((crashChild||crashRecovery)&&!sharedCapMode)
@@ -874,11 +874,18 @@ try {
       assert.equal((await request(second,"/installation/initialize","POST",installation)).status,200);
       const reader=await session(second);
       assert.ok(reader.hello.connection_generation>proof.boundary.generation);
+      const beforeReserve=["F0","F1"].includes(proof.phase);
       const inspected=await risk(reader,"inspect_t11_f2_persisted",{
-        action:"INSPECT",reservation_key:proof.boundary.sql.reservation_key,
-        plan_sha256:proof.boundary.sql.plan_hash});
-      assert.equal(inspected.status,"OBSERVED");
-      assert.equal(inspected.reservation_state,"RELEASED");
+        action:"INSPECT",reservation_key:proof.boundary.candidate_reservation_key,
+        plan_sha256:beforeReserve?proof.boundary.prepare_input.intent.plan_hash:proof.boundary.sql.plan_hash});
+      if(beforeReserve){
+        assert.equal(inspected.status,"DENIED");
+        assert.equal(inspected.reason,"RISK_RESERVATION_NOT_FOUND");
+        assert.equal(inspected.reservation_key,null);
+      }else{
+        assert.equal(inspected.status,"OBSERVED");
+        assert.equal(inspected.reservation_state,"RELEASED");
+      }
       const saved=await summary(reader,"summary_t11_f2_persisted");
       assert.deepEqual(saved.budget,proof.native.worker_after.budget);
       assert.equal(saved.risk_book_sequence,proof.native.worker_after.risk_book_sequence);

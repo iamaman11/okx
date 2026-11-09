@@ -8,8 +8,35 @@ const boundary=()=>({schema:"okx.t10-11-native-unsent-kill-boundary/v1",phase:"F
   pid:process.pid+1000,root:join(tmpdir(),"okx-raw-native-session-"+"a".repeat(32)),
   command:{command_id:"reserve_t11_f2",action:{action:"RESERVE",intent_id:"original",plan_sha256:"plan"}},
   worker_result:{status:"HELD",reservation_key:"original-key"},
-  sql:{state:"PREPARED",central_receipt:null,central_release:null,exchange_order_id:null,
+  sql:{state:"PREPARED",intent_present:true,central_receipt:null,central_release:null,exchange_order_id:null,
     intent_id:"original",plan_hash:"plan",reservation_key:"original-key"},venue_posts:0,source_floor_ms:1});
+
+function beforeReserveBoundary(phase){
+  const value=boundary();value.phase=phase;
+  value.sql={...value.sql,intent_present:phase==="F1",state:phase==="F1"?"PREPARED":null,
+    plan_hash:phase==="F1"?"plan":null,request_hash:phase==="F1"?"request":null,
+    reserve_attempt:null,terminal_receipt:null,reservation_key:null};
+  value.command.action={action:"INSPECT",reservation_key:"candidate-key",plan_sha256:"plan"};
+  value.candidate_reservation_key="candidate-key";
+  value.worker_result={status:"DENIED",reason:"RISK_RESERVATION_NOT_FOUND",reservation_key:null};
+  value.prepare_input={intent:{intent_id:"original",plan_hash:"plan",request_hash:"request"}};
+  value.before_sequence=1;
+  return value;
+}
+for(const phase of ["F0","F1"]){
+  test(`${phase} binds absent reserve to the exact original SQL and candidate identity`,()=>{
+    const value=beforeReserveBoundary(phase);
+    assert.equal(validateUnsentKillBoundary(value),value);
+    for(const change of [x=>x.sql.reserve_attempt={},x=>x.sql.central_receipt={},
+      x=>x.sql.reservation_key="invented",x=>x.sql.intent_present=!x.sql.intent_present,
+      x=>x.sql.terminal_receipt={},x=>x.worker_result.reason="AUTHORITY_UNAVAILABLE",
+      x=>x.command.action.reservation_key="other",x=>x.prepare_input.intent.intent_id="other",
+      x=>x.command.action.plan_sha256="other",x=>x.venue_posts=1]){
+      const invalid=beforeReserveBoundary(phase);change(invalid);
+      assert.throws(()=>validateUnsentKillBoundary(invalid));
+    }
+  });
+}
 
 function laterBoundary(phase){
   const value=boundary();value.phase=phase;
